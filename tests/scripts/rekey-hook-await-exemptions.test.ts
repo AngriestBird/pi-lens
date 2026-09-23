@@ -199,8 +199,8 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 // exposed #3363.
 function nodeHasTypeScriptSupport(): boolean {
 	try {
-		const strip = process.getBuiltinModule?.("node:module")
-			?.stripTypeScriptTypes;
+		const strip =
+			process.getBuiltinModule?.("node:module")?.stripTypeScriptTypes;
 		strip?.("let a: number = 1");
 		return typeof strip === "function";
 	} catch {

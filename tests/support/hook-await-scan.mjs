@@ -18,7 +18,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { jsTsCandidatePaths } from "../../clients/review-graph/import-resolvers.js";
 import { lineContentHash } from "../../clients/read-guard.js";
-import { listSourceFiles, matchingCloseIndex, readWalkedFile, relativePosix, stableOccurrenceKey, stripSource, } from "./sweep-kit.js";
+import {
+	listSourceFiles,
+	matchingCloseIndex,
+	readWalkedFile,
+	relativePosix,
+	stableOccurrenceKey,
+	stripSource,
+} from "./sweep-kit.js";
 /** The one module allowed to spell a timeout race: the canonical implementation. */
 export const DEFINITION_FILE = "clients/deadline-utils.ts";
 /** An `await` token that is a KEYWORD, not a property name or an identifier tail. */
@@ -56,18 +63,17 @@ const BOUNDED_CALL = /^\s*bounded\s*\(/;
  * expression cannot turn this into a whole-file scan.
  */
 function callArguments(stripped, from, maxChars = 4000) {
-    const open = stripped.indexOf("(", from);
-    if (open < 0)
-        return "";
-    const end = Math.min(stripped.length, open + maxChars);
-    // #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`, run
-    // over a `maxChars`-bounded WINDOW (`stripped.slice(open, end)`, not the
-    // whole `stripped` prefix) so the cap this function exists for — "one
-    // pathological expression cannot turn this into a whole-file scan" —
-    // still bounds both the scan and the allocation, not just the scan.
-    const window = stripped.slice(open, end);
-    const close = matchingCloseIndex(window, 0, "(", ")");
-    return close === -1 ? window : window.slice(0, close + 1);
+	const open = stripped.indexOf("(", from);
+	if (open < 0) return "";
+	const end = Math.min(stripped.length, open + maxChars);
+	// #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`, run
+	// over a `maxChars`-bounded WINDOW (`stripped.slice(open, end)`, not the
+	// whole `stripped` prefix) so the cap this function exists for — "one
+	// pathological expression cannot turn this into a whole-file scan" —
+	// still bounds both the scan and the allocation, not just the scan.
+	const window = stripped.slice(open, end);
+	const close = matchingCloseIndex(window, 0, "(", ")");
+	return close === -1 ? window : window.slice(0, close + 1);
 }
 /**
  * Is the expression starting at `at` (just past an `await`) bounded?
@@ -87,12 +93,12 @@ function callArguments(stripped, from, maxChars = 4000) {
  * into.
  */
 function isBoundedAwait(stripped, at) {
-    const head = stripped.slice(at, at + 80);
-    return BOUNDED_CALL.test(head);
+	const head = stripped.slice(at, at + 80);
+	return BOUNDED_CALL.test(head);
 }
 /** 1-based line number of `offset` in `source`. */
 function lineOf(source, offset) {
-    return source.slice(0, offset).split("\n").length;
+	return source.slice(0, offset).split("\n").length;
 }
 /**
  * Every unbounded-await LINE in one already-stripped source, 1-based.
@@ -103,14 +109,13 @@ function lineOf(source, offset) {
  * that quietly stops detecting is defect shape 10 wearing a green check.
  */
 export function findUnboundedAwaitLines(stripped) {
-    const hits = new Set();
-    for (const match of stripped.matchAll(AWAIT_TOKEN)) {
-        const at = match.index + match[0].length;
-        if (isBoundedAwait(stripped, at))
-            continue;
-        hits.add(lineOf(stripped, match.index));
-    }
-    return [...hits].sort((a, b) => a - b);
+	const hits = new Set();
+	for (const match of stripped.matchAll(AWAIT_TOKEN)) {
+		const at = match.index + match[0].length;
+		if (isBoundedAwait(stripped, at)) continue;
+		hits.add(lineOf(stripped, match.index));
+	}
+	return [...hits].sort((a, b) => a - b);
 }
 /**
  * Every hand-rolled timeout race LINE in one already-stripped source,
@@ -118,18 +123,17 @@ export function findUnboundedAwaitLines(stripped) {
  * lines above it, spell a timer.
  */
 export function findHandRolledRaceLines(stripped) {
-    const hits = new Set();
-    const lines = stripped.split("\n");
-    for (const match of stripped.matchAll(RACE_TOKEN)) {
-        const line = lineOf(stripped, match.index);
-        const args = callArguments(stripped, match.index + match[0].length - 1);
-        const above = lines
-            .slice(Math.max(0, line - 1 - RACE_TIMER_WINDOW), line - 1)
-            .join("\n");
-        if (TIMER_ARM.test(args) || TIMER_ARM.test(above))
-            hits.add(line);
-    }
-    return [...hits].sort((a, b) => a - b);
+	const hits = new Set();
+	const lines = stripped.split("\n");
+	for (const match of stripped.matchAll(RACE_TOKEN)) {
+		const line = lineOf(stripped, match.index);
+		const args = callArguments(stripped, match.index + match[0].length - 1);
+		const above = lines
+			.slice(Math.max(0, line - 1 - RACE_TIMER_WINDOW), line - 1)
+			.join("\n");
+		if (TIMER_ARM.test(args) || TIMER_ARM.test(above)) hits.add(line);
+	}
+	return [...hits].sort((a, b) => a - b);
 }
 /**
  * A CALL to {@link DEFINITION_FILE}'s `bounded()`, as opposed to any of the
@@ -178,26 +182,29 @@ const SIGNAL_PROPERTY = /(?:^|[,{(\s])signal\s*(?::|,|\})/;
  * from.
  */
 export function findBoundedCallLines(stripped) {
-    const hits = new Set();
-    for (const match of stripped.matchAll(BOUNDED_CALL_HEAD)) {
-        const head = lineOf(stripped, match.index);
-        const args = callArguments(stripped, match.index + match[0].length - 1);
-        const offset = args.split("\n").findIndex((l) => SIGNAL_PROPERTY.test(l));
-        hits.add(offset < 0 ? head : head + offset);
-    }
-    return [...hits].sort((a, b) => a - b);
+	const hits = new Set();
+	for (const match of stripped.matchAll(BOUNDED_CALL_HEAD)) {
+		const head = lineOf(stripped, match.index);
+		const args = callArguments(stripped, match.index + match[0].length - 1);
+		const offset = args.split("\n").findIndex((l) => SIGNAL_PROPERTY.test(l));
+		hits.add(offset < 0 ? head : head + offset);
+	}
+	return [...hits].sort((a, b) => a - b);
 }
 /**
  * Nearest non-blank RAW line in `direction` from `index`, or `""` at the edge
  * of the file.
  */
 function neighbourLine(rawLines, index, direction) {
-    for (let i = index + direction; i >= 0 && i < rawLines.length; i += direction) {
-        const line = rawLines[i] ?? "";
-        if (line.trim().length > 0)
-            return line;
-    }
-    return "";
+	for (
+		let i = index + direction;
+		i >= 0 && i < rawLines.length;
+		i += direction
+	) {
+		const line = rawLines[i] ?? "";
+		if (line.trim().length > 0) return line;
+	}
+	return "";
 }
 /**
  * `stableOccurrenceKey` over the RAW lines, plus a neighbourhood suffix. See
@@ -205,41 +212,42 @@ function neighbourLine(rawLines, index, direction) {
  * measurements that justify the suffix.
  */
 export function awaitOccurrenceKey(rel, rawLines, index) {
-    const base = stableOccurrenceKey(rel, rawLines, index);
-    // NUL separator: `lineContentHash` strips whitespace, so a newline would
-    // vanish and `a\nb` would hash the same as `ab`.
-    const context = lineContentHash([
-        neighbourLine(rawLines, index, -1),
-        neighbourLine(rawLines, index, 1),
-    ].join("\u0000"));
-    return `${base}~${context}`;
+	const base = stableOccurrenceKey(rel, rawLines, index);
+	// NUL separator: `lineContentHash` strips whitespace, so a newline would
+	// vanish and `a\nb` would hash the same as `ab`.
+	const context = lineContentHash(
+		[
+			neighbourLine(rawLines, index, -1),
+			neighbourLine(rawLines, index, 1),
+		].join("\u0000"),
+	);
+	return `${base}~${context}`;
 }
 /** The four file groups a registered hook handler and its direct deps live in. */
 export function hookPathFiles(repoRoot) {
-    const files = [];
-    // Mechanical, never a hand-kept list: a NEW clients/runtime-*.ts is in
-    // scope the moment it lands, which is the whole point of a governance
-    // registry (a hand-maintained mirror of a directory is the defect).
-    for (const absolute of listSourceFiles(path.join(repoRoot, "clients"), {
-        skipTests: true,
-    })) {
-        const rel = relativePosix(repoRoot, absolute);
-        if (/^clients\/runtime-[^/]+\.ts$/.test(rel))
-            files.push(absolute);
-    }
-    for (const rel of ["index.ts", "mcp/server.ts", "clients/mcp/session.ts"]) {
-        const absolute = path.join(repoRoot, rel);
-        if (fs.existsSync(absolute))
-            files.push(absolute);
-    }
-    return files.sort();
+	const files = [];
+	// Mechanical, never a hand-kept list: a NEW clients/runtime-*.ts is in
+	// scope the moment it lands, which is the whole point of a governance
+	// registry (a hand-maintained mirror of a directory is the defect).
+	for (const absolute of listSourceFiles(path.join(repoRoot, "clients"), {
+		skipTests: true,
+	})) {
+		const rel = relativePosix(repoRoot, absolute);
+		if (/^clients\/runtime-[^/]+\.ts$/.test(rel)) files.push(absolute);
+	}
+	for (const rel of ["index.ts", "mcp/server.ts", "clients/mcp/session.ts"]) {
+		const absolute = path.join(repoRoot, rel);
+		if (fs.existsSync(absolute)) files.push(absolute);
+	}
+	return files.sort();
 }
 /**
  * A relative module specifier in an `import` / `export ... from` /
  * `await import()` / `require()`. Only RELATIVE ones: a bare specifier is an
  * npm package or a builtin and has no file in this repo.
  */
-const LOCAL_SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["'](\.\.?\/[^"']*)["']/g;
+const LOCAL_SPECIFIER =
+	/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["'](\.\.?\/[^"']*)["']/g;
 /**
  * A whole `import type { … } from "…"` / `export type { … } from "…"`
  * DECLARATION — one where the `type` keyword sits immediately after `import`/
@@ -253,7 +261,8 @@ const LOCAL_SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["'](\.
  * non-greedy up to the clause's own `from "…"` — it stops at the first match,
  * so it cannot swallow a later, unrelated `import` on the next line.
  */
-const TYPE_ONLY_IMPORT_CLAUSE = /\b(?:import|export)\s+type\b[^;]*?\bfrom\s*["'](\.\.?\/[^"']*)["']/g;
+const TYPE_ONLY_IMPORT_CLAUSE =
+	/\b(?:import|export)\s+type\b[^;]*?\bfrom\s*["'](\.\.?\/[^"']*)["']/g;
 /**
  * Resolve one relative specifier written the way this repo writes them —
  * `nodenext`, so `./x.js` names the SOURCE `./x.ts` — to an absolute `.ts`
@@ -271,43 +280,48 @@ const TYPE_ONLY_IMPORT_CLAUSE = /\b(?:import|export)\s+type\b[^;]*?\bfrom\s*["']
  * change.
  */
 function resolveLocalSpecifier(fromFile, specifier) {
-    for (const candidate of jsTsCandidatePaths(fromFile, specifier)) {
-        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-            return candidate;
-        }
-    }
-    return undefined;
+	for (const candidate of jsTsCandidatePaths(fromFile, specifier)) {
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+			return candidate;
+		}
+	}
+	return undefined;
 }
 /** Every repo-local `.ts` module `absolute` imports, resolved and deduplicated. */
 export function localImportTargets(absolute) {
-    // `strings: "keep"` — the thing being searched for IS a string literal, so
-    // the default blanking policy (which every other scan in this file wants,
-    // because an identifier inside a string is not a call) would erase every
-    // specifier and return an empty set. It did, on the first cut here.
-    // readWalkedFile: callers pass paths a directory walk produced (the
-    // flake-shape ratchet's import graph walks every tests/**/*.test.ts), and a
-    // path that vanished between the walk and the read imports nothing (#3082).
-    const source = readWalkedFile(absolute);
-    if (source === undefined)
-        return [];
-    const stripped = stripSource(source, {
-        strings: "keep",
-    });
-    // Every `import type …` / `export type …` declaration's span — a type
-    // edge is not a call, so a `from "…"` match landing inside one of these
-    // spans is skipped below (#2557 review friction).
-    const typeOnlySpans = [...stripped.matchAll(TYPE_ONLY_IMPORT_CLAUSE)].map((match) => [match.index, match.index + match[0].length]);
-    const targets = new Set();
-    for (const match of stripped.matchAll(LOCAL_SPECIFIER)) {
-        if (typeOnlySpans.some(([start, end]) => match.index >= start && match.index < end)) {
-            continue;
-        }
-        const resolved = resolveLocalSpecifier(absolute, match[1] ?? "");
-        if (resolved !== undefined && !resolved.endsWith(".d.ts")) {
-            targets.add(resolved);
-        }
-    }
-    return [...targets].sort();
+	// `strings: "keep"` — the thing being searched for IS a string literal, so
+	// the default blanking policy (which every other scan in this file wants,
+	// because an identifier inside a string is not a call) would erase every
+	// specifier and return an empty set. It did, on the first cut here.
+	// readWalkedFile: callers pass paths a directory walk produced (the
+	// flake-shape ratchet's import graph walks every tests/**/*.test.ts), and a
+	// path that vanished between the walk and the read imports nothing (#3082).
+	const source = readWalkedFile(absolute);
+	if (source === undefined) return [];
+	const stripped = stripSource(source, {
+		strings: "keep",
+	});
+	// Every `import type …` / `export type …` declaration's span — a type
+	// edge is not a call, so a `from "…"` match landing inside one of these
+	// spans is skipped below (#2557 review friction).
+	const typeOnlySpans = [...stripped.matchAll(TYPE_ONLY_IMPORT_CLAUSE)].map(
+		(match) => [match.index, match.index + match[0].length],
+	);
+	const targets = new Set();
+	for (const match of stripped.matchAll(LOCAL_SPECIFIER)) {
+		if (
+			typeOnlySpans.some(
+				([start, end]) => match.index >= start && match.index < end,
+			)
+		) {
+			continue;
+		}
+		const resolved = resolveLocalSpecifier(absolute, match[1] ?? "");
+		if (resolved !== undefined && !resolved.endsWith(".d.ts")) {
+			targets.add(resolved);
+		}
+	}
+	return [...targets].sort();
 }
 /**
  * The HELPER modules a registered hook handler reaches in ONE import hop.
@@ -340,32 +354,29 @@ export function localImportTargets(absolute) {
  * and `b` is a real value import, so the module genuinely is called into.
  */
 export function hookHelperModules(repoRoot) {
-    const handlers = hookPathFiles(repoRoot);
-    const handlerSet = new Set(handlers);
-    const helpers = new Set();
-    for (const handler of handlers) {
-        for (const target of localImportTargets(handler)) {
-            if (handlerSet.has(target))
-                continue;
-            if (!target.startsWith(repoRoot))
-                continue;
-            helpers.add(target);
-        }
-    }
-    return [...helpers].sort();
+	const handlers = hookPathFiles(repoRoot);
+	const handlerSet = new Set(handlers);
+	const helpers = new Set();
+	for (const handler of handlers) {
+		for (const target of localImportTargets(handler)) {
+			if (handlerSet.has(target)) continue;
+			if (!target.startsWith(repoRoot)) continue;
+			helpers.add(target);
+		}
+	}
+	return [...helpers].sort();
 }
 /** Every shipped source file the hand-rolled-race scan covers. */
 export function shippedSourceFiles(repoRoot) {
-    const files = ["clients", "mcp", "tools"].flatMap((dir) => {
-        const absolute = path.join(repoRoot, dir);
-        return fs.existsSync(absolute)
-            ? listSourceFiles(absolute, { skipTests: true })
-            : [];
-    });
-    const indexTs = path.join(repoRoot, "index.ts");
-    if (fs.existsSync(indexTs))
-        files.push(indexTs);
-    return files.sort();
+	const files = ["clients", "mcp", "tools"].flatMap((dir) => {
+		const absolute = path.join(repoRoot, dir);
+		return fs.existsSync(absolute)
+			? listSourceFiles(absolute, { skipTests: true })
+			: [];
+	});
+	const indexTs = path.join(repoRoot, "index.ts");
+	if (fs.existsSync(indexTs)) files.push(indexTs);
+	return files.sort();
 }
 /**
  * Run one line detector over one file group and key every hit.
@@ -375,24 +386,23 @@ export function shippedSourceFiles(repoRoot) {
  * another (and `auditRegistry`'s stale check stays exact for both).
  */
 export function scanFiles(repoRoot, files, detect, prefix, skipRel) {
-    const occurrences = [];
-    let scanned = 0;
-    for (const absolute of files) {
-        const rel = relativePosix(repoRoot, absolute);
-        if (skipRel?.(rel))
-            continue;
-        scanned++;
-        const raw = fs.readFileSync(absolute, "utf8");
-        // Layout-preserving, so these line numbers and the hash inputs derived
-        // from them line up with the raw source.
-        const stripped = stripSource(raw);
-        const rawLines = raw.split("\n");
-        for (const line of detect(stripped)) {
-            occurrences.push({
-                key: `${prefix}${awaitOccurrenceKey(rel, rawLines, line - 1)}`,
-                detail: `${rel}:${line}  ${(rawLines[line - 1] ?? "").trim().slice(0, 100)}`,
-            });
-        }
-    }
-    return { occurrences, scanned };
+	const occurrences = [];
+	let scanned = 0;
+	for (const absolute of files) {
+		const rel = relativePosix(repoRoot, absolute);
+		if (skipRel?.(rel)) continue;
+		scanned++;
+		const raw = fs.readFileSync(absolute, "utf8");
+		// Layout-preserving, so these line numbers and the hash inputs derived
+		// from them line up with the raw source.
+		const stripped = stripSource(raw);
+		const rawLines = raw.split("\n");
+		for (const line of detect(stripped)) {
+			occurrences.push({
+				key: `${prefix}${awaitOccurrenceKey(rel, rawLines, line - 1)}`,
+				detail: `${rel}:${line}  ${(rawLines[line - 1] ?? "").trim().slice(0, 100)}`,
+			});
+		}
+	}
+	return { occurrences, scanned };
 }

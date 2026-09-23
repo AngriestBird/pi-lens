@@ -302,7 +302,8 @@ async function main() {
 		scanFiles,
 		shippedSourceFiles,
 	} = await jiti.import(
-		pathToFileURL(path.join(REPO_ROOT, "tests/support/hook-await-scan.mjs")).href,
+		pathToFileURL(path.join(REPO_ROOT, "tests/support/hook-await-scan.mjs"))
+			.href,
 		{ defaultExport: false },
 	);
 
