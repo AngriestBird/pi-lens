@@ -77,6 +77,22 @@ class ScriptedCacheManager extends CacheManager {
 	readonly onlyFirstRead = new Set<string>();
 	private readonly hung: Array<(entry: CacheEntry<unknown> | null) => void> =
 		[];
+	/**
+	 * Settles the instant a wedged read is DISPATCHED (#3326). The timer case
+	 * has to know when the composer is blocked on that read, and the event is
+	 * exposed rather than polled: polling made the length of the wait a function
+	 * of machine load — see {@link turnEndBlockedOn}.
+	 */
+	private readonly wedged = ((): {
+		arrived: Promise<void>;
+		dispatch: () => void;
+	} => {
+		let dispatch!: () => void;
+		const arrived = new Promise<void>((resolve) => {
+			dispatch = resolve;
+		});
+		return { arrived, dispatch };
+	})();
 
 	override readCacheAsync<T>(
 		scanner: string,
@@ -88,6 +104,7 @@ class ScriptedCacheManager extends CacheManager {
 		if (this.hang.has(scanner)) {
 			return new Promise<CacheEntry<T> | null>((resolve) => {
 				this.hung.push(resolve as (e: CacheEntry<unknown> | null) => void);
+				this.wedged.dispatch();
 			});
 		}
 		if (seenBefore && this.onlyFirstRead.has(scanner)) {
@@ -103,8 +120,13 @@ class ScriptedCacheManager extends CacheManager {
 		for (const resolve of this.hung.splice(0)) resolve(entry);
 	}
 
-	hungCount(): number {
-		return this.hung.length;
+	/**
+	 * Resolves once a wedged read is in flight — and, because the resolution
+	 * happens inside `readCacheAsync`'s own synchronous return, once the
+	 * `bounded()` deadline the memo arms around it is armed too.
+	 */
+	whenWedged(): Promise<void> {
+		return this.wedged.arrived;
 	}
 
 	countOf(scanner: string): number {
@@ -245,18 +267,35 @@ afterEach(() => {
 
 /**
  * Run one delivery whose `hangingStore` read never settles, with the clock
- * under test control ONLY while the composer is blocked on that read.
+ * under test control for the whole turn and spent ONLY on the bound under
+ * test.
  *
- * The narrow window matters. Advancing time in coarse steps blows deadlines
- * the handler computed earlier — measured: a 500 ms-per-step pump over a turn
- * with NO wedged read at all produced no delivery record whatsoever, because
- * the freshness pass's own budget had expired by the time it ran. So the turn
- * is walked forward 1 ms at a time (it needs SOME clock to reach the scanner
- * reads at all) until the wedged read is in flight and everything else is
- * waiting on it, and only then does the clock jump past the 3000 ms
- * `HOOK_WALL_BUDGET_MS.turn_end` the memo's `bounded()` carries. The spin has
- * a hard trip count, so a turn that never reaches the read fails loudly
- * instead of hanging.
+ * Recurrence prevented (#3326): this helper used to reach the wedged read by
+ * pumping `advanceTimersByTimeAsync(1)` up to 200 times, which made both the
+ * readiness gate and the fake clock's position depend on MACHINE LOAD — the
+ * case failed three of six master CI runs (35850547437, 35852405937,
+ * 35855588796) and reproduced here at 6/10 parallel runs under 24 CPU hogs
+ * with `expected 0 to be greater than 0` from that gate. Two measured reasons,
+ * both fixed by waiting on the event instead of on a tick count:
+ *
+ * - Everything the composer does before the wedged read — the govulncheck and
+ *   trivy store reads — is a REAL `fs.promises` read on the libuv threadpool,
+ *   so the number of event-loop turns before the wedged read is dispatched
+ *   grows with contention while the turns themselves stay cheap: measured 151
+ *   turns on an idle box against 1_200+ under load, versus a cap of 200.
+ * - Each pumped tick also SPENT fake time. Under load the pump could reach
+ *   3000 ms of it while the trivy read was still in flight, firing that read's
+ *   own `bounded()` deadline too — measured on a loaded run as a
+ *   `stores: "trivy+gitleaks"` row where the case asserts `"gitleaks"`.
+ *
+ * So the clock is installed before the turn starts (the deadline `bounded()`
+ * arms per read must be a FAKE timer) and then frozen: the composer reaches
+ * the wedged read with no clock movement at all — measured at 3-16 real
+ * event-loop turns, idle and loaded, with the three 3000 ms read deadlines the
+ * only timers armed — and the single advance below is the budget under test.
+ * A turn that never reaches the read fails on vitest's own test timeout
+ * (measured with fake timers installed: `Test timed out in 1500ms`), which is
+ * the loud failure the trip count was hand-rolling.
  */
 async function turnEndBlockedOn(hangingStore: string): Promise<string> {
 	cacheManager.hang.add(hangingStore);
@@ -267,10 +306,7 @@ async function turnEndBlockedOn(hangingStore: string): Promise<string> {
 	).then(() => {
 		settled = true;
 	});
-	for (let spin = 0; spin < 200 && cacheManager.hungCount() === 0; spin++) {
-		await vi.advanceTimersByTimeAsync(1);
-	}
-	expect(cacheManager.hungCount()).toBeGreaterThan(0);
+	await cacheManager.whenWedged();
 	await vi.advanceTimersByTimeAsync(3_100);
 	await turn;
 	vi.useRealTimers();
