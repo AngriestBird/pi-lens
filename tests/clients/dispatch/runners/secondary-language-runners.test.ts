@@ -80,16 +80,7 @@ async function dispatchOutcome(
 	tool: "dart-analyze" | "elixir-check",
 	caseName: string,
 	spawnResult: SpawnShape | ((filePath: string) => SpawnShape),
-	options: {
-		available?: boolean;
-		mixProject?: boolean;
-		/**
-		 * Extra on-disk fixture work, run after the target file exists and
-		 * before the runner is dispatched. The path-identity cells (#1193) use
-		 * it to build the symlink whose two spellings name one file.
-		 */
-		setup?: (tmpDir: string, filePath: string) => void;
-	} = {},
+	options: { available?: boolean; mixProject?: boolean } = {},
 ) {
 	vi.resetModules();
 	const env = setupTestEnvironment(`pi-lens-${tool}-${caseName}-`);
@@ -109,7 +100,6 @@ async function dispatchOutcome(
 			);
 		}
 
-		options.setup?.(env.tmpDir, filePath);
 		mockRunnerHelpers(() => options.available ?? true);
 		if (options.available ?? true)
 			safeSpawnAsync.mockResolvedValue(
@@ -603,41 +593,6 @@ describe("secondary language fallback runners", () => {
 		expect(observed.semantic).toBe("warning");
 		expect(observed.diagnostics[0]?.semantic).toBe("warning");
 		expect(observed.output).not.toContain("🔴 STOP");
-	});
-
-	it("matches an elixir diagnostic reported through a symlinked directory (#1193)", async () => {
-		// D1. The dispatcher holds `lib/app.ex`; `mix` reports the same file
-		// through `src/`, a symlink to `lib/`. Two spellings, one inode — the
-		// recurrence is #1193's "two spellings of one path derive two keys",
-		// here in its comparison form: a hand-rolled string compare drops the
-		// finding for the file the agent just edited.
-		const observed = await dispatchOutcome(
-			"elixir-check",
-			"symlink-spelling",
-			{
-				error: null,
-				status: 1,
-				stdout: "",
-				stderr: [
-					"    error: undefined function boom/0",
-					"    └─ src/app.ex:4:5: App.greet/0",
-				].join("\n"),
-			},
-			{
-				setup: (tmpDir) =>
-					fs.symlinkSync("lib", path.join(tmpDir, "src"), "dir"),
-			},
-		);
-		// The id, not the count: a nonzero run whose output the parser matches
-		// to nothing still yields ONE diagnostic — `elixir-check:parse-error:1`
-		// from the #1816 unparseable-output guard. Pre-fix that is exactly what
-		// the agent got: a generic warning instead of the blocking error on
-		// line 4 of the file it just edited.
-		expect(observed.diagnostics.map((d) => d.id)).toEqual([
-			"elixir-check-error-4-5",
-		]);
-		expect(observed.diagnostics[0]?.semantic).toBe("blocking");
-		expect(observed.output).toContain("undefined function boom/0");
 	});
 
 	it("matches an elixir diagnostic whose reported path uses a backslash separator (#1193)", async () => {

@@ -306,16 +306,12 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
 };
 
 /**
- * The path-key case-fold census, file → occurrence count. Three of the four
- * rows carry a written reason, because each is a deliberate decision rather
- * than an unmigrated copy:
+ * The path-key case-fold census, file → occurrence count. Every remaining row
+ * carries a written reason, because each is a deliberate decision rather than
+ * an unmigrated copy (`dispatch/runners/elixir-check.ts@2` was the fourth and
+ * is gone: its comparison now asks `pathsEqual`, #1193's on-disk identity
+ * seam):
  *
- * - `dispatch/runners/elixir-check.ts` — elixirc reports `c:/…` where the
- *   runner holds `C:\…`, so the win32 arm compares two resolved paths
- *   case-insensitively. A genuine path-key fold, found BY this sweep and left
- *   for a later slice: it is a comparison, not a stored key, and folding it
- *   onto `normalizeEphemeralMapKey` would also fold separators, which is a
- *   behaviour change this slice does not carry tests for.
  * - `lsp/launch.ts` — the PATH-entry dedupe key, whose `platform` is an
  *   explicit ARGUMENT (`combinePathValuesForPlatform`); the seam reads
  *   `process.platform`, so it cannot express the simulated arm the ubuntu lane
@@ -333,7 +329,6 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
  *   the fold is the haystack for lowercase MARKER substrings, not a key.
  */
 const CASE_FOLD_PINS: Readonly<Record<string, number>> = {
-	"clients/dispatch/runners/elixir-check.ts": 2,
 	"clients/lsp/launch.ts": 1,
 	"clients/mcp/ipc.ts": 1,
 	"clients/runtime-tool-call.ts": 1,
