@@ -152,11 +152,13 @@ it("formatFile declines before spawning when agreement evidence is unreadable (#
 });
 
 it("retains the bounded formatter traceback tail (#3312)", async () => {
+	const longDiagnostic = "x".repeat(301);
 	const traceback = [
 		"Traceback (most recent call last):",
 		'  File "cmake-format", line 5, in <module>',
 		"    from cmakelang.format.__main__ import main",
 		"ModuleNotFoundError: No module named 'cmakelang'",
+		longDiagnostic,
 	].join("\n");
 
 	// Enter through formatFile: this is the recurrence from #3312, where the
@@ -165,7 +167,7 @@ it("retains the bounded formatter traceback tail (#3312)", async () => {
 		const executable = path.join(tmpDir, "shims", "cmake-format");
 		fs.writeFileSync(
 			executable,
-			`#!/bin/sh\nprintf '%s\\n' 'Traceback (most recent call last):' '  File "cmake-format", line 5, in <module>' '    from cmakelang.format.__main__ import main' "ModuleNotFoundError: No module named 'cmakelang'" >&2\nexit 1\n`,
+			`#!/bin/sh\nprintf '%s\\n' 'Traceback (most recent call last):' '  File "cmake-format", line 5, in <module>' '    from cmakelang.format.__main__ import main' "ModuleNotFoundError: No module named 'cmakelang'" '${longDiagnostic}' >&2\nexit 1\n`,
 		);
 		fs.chmodSync(executable, 0o755);
 		const filePath = fileIn(tmpDir, "CMakeLists.cmake");
@@ -179,7 +181,7 @@ it("retains the bounded formatter traceback tail (#3312)", async () => {
 		expect(result).toMatchObject({
 			success: false,
 			outcome: "failed",
-			error: traceback,
+			error: `${traceback.slice(0, -longDiagnostic.length)}${"x".repeat(300)}`,
 		});
 	});
 
