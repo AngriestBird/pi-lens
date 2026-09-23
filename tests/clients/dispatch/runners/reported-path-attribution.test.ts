@@ -52,10 +52,12 @@ import { describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
-const { safeSpawnAsync, unavailableCommands, cargoPath } = vi.hoisted(() => ({
+const { safeSpawnAsync, unavailableCommands, CARGO_PATH } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
+	/** Commands the availability double reports as absent (cpp-check's MSVC arm). */
 	unavailableCommands: { current: new Set<string>() },
-	cargoPath: { current: "/usr/bin/cargo" as string | null },
+	/** rust-clippy resolves cargo through its own client, not the shared probe. */
+	CARGO_PATH: "/usr/bin/cargo",
 }));
 
 vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
@@ -92,7 +94,7 @@ vi.mock("../../../../clients/rust-client.js", async (importOriginal) => ({
 	>()),
 	rustClient: {
 		async findCargoPathAsync() {
-			return cargoPath.current;
+			return CARGO_PATH;
 		},
 	},
 }));
@@ -177,7 +179,6 @@ async function dispatch(
 	vi.resetModules();
 	safeSpawnAsync.mockReset();
 	unavailableCommands.current = new Set(member.unavailable ?? []);
-	cargoPath.current = "/usr/bin/cargo";
 	const env = setupTestEnvironment(`pi-lens-3278-${member.runnerId}-`);
 	try {
 		// NESTED: the runner cwd is never `process.cwd()`, which is what makes a

@@ -127,7 +127,7 @@ function parseDartMachineOutput(
 		// The `endsWith` outer arm this replaces was inert on the target (a
 		// string ends with itself) and an over-merge risk everywhere else: any
 		// reported path whose TAIL spelled the absolute target attached to it.
-		if (!pathsEqual(path.resolve(cwd, file?.trim() ?? ""), absTarget)) continue;
+		if (!pathsEqual(path.resolve(cwd, file.trim()), absTarget)) continue;
 
 		const severity =
 			severityStr?.trim().toLowerCase() === "error" ? "error" : "warning";
