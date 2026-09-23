@@ -28,7 +28,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { assertNonEmptyScan, stripSource } from "../../../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	matchingCloseIndex,
+	matchingOpenIndex,
+	stripSource,
+} from "../../../support/sweep-kit.js";
 
 const RUNNERS_DIR = fileURLToPath(
 	new URL("../../../../clients/dispatch/runners", import.meta.url),
@@ -181,44 +186,116 @@ function documentationFor(source: string, line: number): string {
 /**
  * Every exit status this test file drives EXECUTABLY.
  *
- * The scan runs over comment- and string-blanked source, so a test TITLE
+ * The whole scan runs over comment- and string-blanked source, so a test TITLE
  * (`it("... status 2 ...")`), a `// status: 2` comment and a bare string
- * literal contribute nothing — `codeMatches` was not enough here, because its
- * `matchIsCode` passes when ANY character of the span lies in code, and an
+ * literal contribute nothing — `codeMatches` was not enough for that, because
+ * its `matchIsCode` passes when ANY character of the span lies in code, and an
  * `it(` prefix supplies one (#3298 verify round 2, MEDIUM-2).
  *
- * Two accepted shapes, both of which the fixtures in this directory use:
+ * Evidence is bound by DATAFLOW into a fixture property, never by proximity.
+ * Round 3 admitted any numeric array within three lines of a `status`
+ * identifier, so `const statuses = "unrelated data"; const lines = [2];`
+ * manufactured a cell for a runner whose only real fixture had been deleted
+ * (#3298 verify round 3, MEDIUM-1). Three shapes, the three the fixtures in
+ * this directory actually use:
  *
- * - a `status:` / `exitCode:` property carrying the numeric status, which is
- *   what a `safeSpawn` double returns; and
- * - a numeric array literal within three lines of a `status`/`statuses`
- *   identifier — the table-driven form, e.g.
- *   `it.each(tool === "ktlint" ? [1, 2, 3] : [1, 255])` whose parameter is
- *   named `status`, and `const statuses = ... [1, 3, 4, 5]`. A property-only
- *   needle misses these, which is how ktlint 3, php-lint 255 and golangci 3-5
- *   read as uncovered while real fixtures drove them.
+ * 1. `status: 2` / `exitCode: 2` — a numeric literal straight into the
+ *    property the `safeSpawn` double returns.
+ * 2. `for (const status of STATUSES)` whose loop variable is itself carried
+ *    into that property (`{ error: null, status, ... }`), where `STATUSES` is
+ *    an array literal or a `const` bound to one.
+ * 3. `it.each(ARRAY)(title, async (status) => ...)` whose callback parameter
+ *    is such a carrier.
  *
- * An index expression (`codes[1]`) is excluded by the preceding-character
- * guard, so it cannot manufacture a cell.
+ * A CARRIER is an identifier this file really uses as the status value, so an
+ * array reachable from no carrier is not evidence however close it sits, and
+ * the `.each` rows that drive a clean exit through `(_name, result)` stay
+ * non-evidence. `.forEach` is deliberately absent: no fixture here uses it,
+ * and an accepted shape nothing exercises is an untested accept-surface.
  */
+function statusCarriers(code: string): Set<string> {
+	const carriers = new Set<string>();
+	for (const match of code.matchAll(
+		/\b(?:status|exitCode)\s*:\s*([A-Za-z_$][\w$]*)\b/g,
+	))
+		carriers.add(match[1]);
+	for (const match of code.matchAll(/[{,]\s*(status|exitCode)\s*[,}]/g))
+		carriers.add(match[1]);
+	return carriers;
+}
+
+/** Numeric array literals in `expression`; an index (`codes[1]`) is not one. */
+function numericArrays(expression: string): number[] {
+	const codes: number[] = [];
+	for (const match of expression.matchAll(
+		/(?<![A-Za-z0-9_$)\]])\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]/g,
+	))
+		for (const value of match[1].split(",")) codes.push(Number(value.trim()));
+	return codes;
+}
+
+/**
+ * Numeric arrays `expression` evaluates to, following `const`/`let` bindings
+ * one identifier at a time so `const statuses = [1, 3]` reached through a
+ * `for ... of` still counts. `seen` keeps a cyclic binding from recursing.
+ */
+function resolveArrays(
+	code: string,
+	expression: string,
+	seen: Set<string>,
+): number[] {
+	const codes = numericArrays(expression);
+	for (const match of expression.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)) {
+		const name = match[1];
+		if (seen.has(name)) continue;
+		seen.add(name);
+		const declaration = new RegExp(
+			`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\s*=\\s*([^;]*);`,
+			"g",
+		);
+		for (const bound of code.matchAll(declaration))
+			codes.push(...resolveArrays(code, bound[1], seen));
+	}
+	return codes;
+}
+
 function executableStatusCells(testSource: string): Set<number> {
-	const lines = stripSource(testSource, { strings: "blank" }).split(/\r?\n/);
+	const code = stripSource(testSource, { strings: "blank" });
+	const carriers = statusCarriers(code);
 	const cells = new Set<number>();
-	for (let index = 0; index < lines.length; index++) {
-		for (const match of lines[index].matchAll(
-			/\b(?:status|exitCode)\s*:\s*(\d+)\b/g,
+	for (const match of code.matchAll(/\b(?:status|exitCode)\s*:\s*(\d+)\b/g))
+		cells.add(Number(match[1]));
+	for (const match of code.matchAll(
+		/\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+/g,
+	)) {
+		if (!carriers.has(match[1])) continue;
+		const open = code.indexOf("(", match.index);
+		const close = matchingCloseIndex(code, open, "(", ")");
+		if (close < 0) continue;
+		const iterable = code.slice(match.index + match[0].length, close);
+		for (const code_ of resolveArrays(code, iterable, new Set()))
+			cells.add(code_);
+	}
+	for (const match of code.matchAll(/\b(?:it|test|describe)\.each\s*\(/g)) {
+		const open = match.index + match[0].length - 1;
+		const close = matchingCloseIndex(code, open, "(", ")");
+		if (close < 0) continue;
+		const arrow = code.indexOf("=>", close);
+		if (arrow < 0) continue;
+		const paramsClose = code.lastIndexOf(")", arrow);
+		const paramsOpen = matchingOpenIndex(code, paramsClose, "(", ")");
+		if (paramsOpen < 0 || paramsOpen < close) continue;
+		const bound = code
+			.slice(paramsOpen + 1, paramsClose)
+			.split(",")
+			.some((parameter) => carriers.has(parameter.trim()));
+		if (!bound) continue;
+		for (const code_ of resolveArrays(
+			code,
+			code.slice(open + 1, close),
+			new Set(),
 		))
-			cells.add(Number(match[1]));
-		const arrays = [
-			...lines[index].matchAll(
-				/(?<![A-Za-z0-9_$)\]])\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]/g,
-			),
-		];
-		if (arrays.length === 0) continue;
-		const window = lines.slice(Math.max(0, index - 3), index + 4).join(" ");
-		if (!/\bstatus(?:es)?\b/i.test(window)) continue;
-		for (const array of arrays)
-			for (const value of array[1].split(",")) cells.add(Number(value.trim()));
+			cells.add(code_);
 	}
 	return cells;
 }
