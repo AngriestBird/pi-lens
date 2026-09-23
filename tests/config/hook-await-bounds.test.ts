@@ -2562,8 +2562,17 @@ const SYNC_HOOK_READ_FILES = [
 /** `.readCache` on any receiver, never `.readCacheAsync`. */
 const SYNC_CACHE_READ = /\.readCache(?![A-Za-z0-9_$])/;
 
-function countSyncCacheReads(stripped: string): number {
-	return codeMatches(stripped, SYNC_CACHE_READ).length;
+/**
+ * `codeMatches` is what makes this a CODE scan: it blanks comments and string
+ * contents and drops every match that lands in them. The population
+ * measurement and the mutation cases below both go through this one function,
+ * so the fixtures prove the property the population actually has. An explicit
+ * `stripSource` here was measured to be redundant — deleting it left every
+ * case green, because `codeMatches` had already done it — and a guard nobody
+ * can red is one more thing to keep true for nothing.
+ */
+function countSyncCacheReads(source: string): number {
+	return codeMatches(source, SYNC_CACHE_READ).length;
 }
 
 /** rel -> synchronous `readCache` calls in it RIGHT NOW. */
@@ -2571,9 +2580,7 @@ function measureSyncHookReads(): Record<string, number> {
 	const out: Record<string, number> = {};
 	for (const absolute of new Set(SYNC_HOOK_READ_FILES)) {
 		const rel = relativePosix(REPO_ROOT, absolute);
-		const count = countSyncCacheReads(
-			stripSource(fs.readFileSync(absolute, "utf8")),
-		);
+		const count = countSyncCacheReads(fs.readFileSync(absolute, "utf8"));
 		if (count > 0) out[rel] = count;
 	}
 	return out;
@@ -3032,40 +3039,26 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		// counts DOWN: a real call the detector stops seeing reads as progress.
 		// So the receiver is not part of the match, and a comment or a string
 		// mentioning the call cannot change the number either way.
-		expect(
-			countSyncCacheReads(stripSource("cacheManager.readCache(a, b);")),
-		).toBe(1);
-		expect(
-			countSyncCacheReads(
-				stripSource("args.cacheManager.readCache<Foo>(a, b);"),
-			),
-		).toBe(1);
-		expect(countSyncCacheReads(stripSource("cm.readCache(a, b);"))).toBe(1);
+		expect(countSyncCacheReads("cacheManager.readCache(a, b);")).toBe(1);
+		expect(countSyncCacheReads("args.cacheManager.readCache<Foo>(a, b);")).toBe(
+			1,
+		);
+		expect(countSyncCacheReads("cm.readCache(a, b);")).toBe(1);
 		// A type argument holding a `;` is the shape the first version of this
 		// detector missed — three of four in `test-runner-delivery.ts` and two in
 		// `runtime-turn.ts` — reading 10 where there were 12.
 		expect(
-			countSyncCacheReads(
-				stripSource("cm.readCache<{\n  gen?: number;\n}>('x', cwd);"),
-			),
+			countSyncCacheReads("cm.readCache<{\n  gen?: number;\n}>('x', cwd);"),
 		).toBe(1);
 		// The async seam is the remedy, never a member of the population.
-		expect(
-			countSyncCacheReads(stripSource("await cm.readCacheAsync(a, b);")),
-		).toBe(0);
+		expect(countSyncCacheReads("await cm.readCacheAsync(a, b);")).toBe(0);
 		// A comment and a string naming the call satisfy nothing (F7).
+		expect(countSyncCacheReads("// cacheManager.readCache(a, b);")).toBe(0);
 		expect(
-			countSyncCacheReads(stripSource("// cacheManager.readCache(a, b);")),
+			countSyncCacheReads('const s = "cacheManager.readCache(a, b)";'),
 		).toBe(0);
 		expect(
-			countSyncCacheReads(
-				stripSource('const s = "cacheManager.readCache(a, b)";'),
-			),
-		).toBe(0);
-		expect(
-			countSyncCacheReads(
-				stripSource("/** cacheManager.readCache(a, b) */ noop();"),
-			),
+			countSyncCacheReads("/** cacheManager.readCache(a, b) */ noop();"),
 		).toBe(0);
 	});
 
