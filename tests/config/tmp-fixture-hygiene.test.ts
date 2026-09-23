@@ -1302,44 +1302,50 @@ describe("tmp-fixture-hygiene", () => {
 			}
 		});
 
-		it("registers a raw mkdtemp prefix from the call site, never from prose", () => {
-			// F6: the index's own extraction, over a planted fixture tree. Three
-			// real shapes in one file — a literal site, a template site, and a
-			// helper-parameter site whose literals are spelled by its callers —
-			// against two decoys that must own nothing: a commented-out call, and
-			// (round 2, M3328-1) an ordinary STRING whose text spells a call.
-			// Laundering a prefix through either is how one file claims another
-			// file's fixture family, and with it a candidate owner that stops the
-			// foreign-run filter from sparing a sibling invocation's live root.
-			const fixture = fs.mkdtempSync(
+		/** A two-file fixture tree: one file whose CALLS create fixture families,
+		 *  one file that only mentions those families in prose — a comment, a string
+		 *  spelling `setupTestEnvironment`, a string spelling `mkdtempSync`, and a
+		 *  string naming the other file's real family. Both cases below drive the
+		 *  real index over it. */
+		function plantOwnerIndexFixture(): { dir: string; index: TmpOwnerIndex } {
+			const dir = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-owner-index-fixture-"),
 			);
+			fs.writeFileSync(
+				path.join(dir, "planted.test.ts"),
+				[
+					'const a = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-lit-"));',
+					"const b = fs.mkdtempSync(",
+					"\tpath.join(os.tmpdir(), `pi-lens-planted-tpl-${reason}-`),",
+					");",
+					"function make(prefix: string) {",
+					"\treturn fs.mkdtempSync(path.join(os.tmpdir(), prefix));",
+					"}",
+					'make("pi-lens-planted-param-");',
+					// The real call of the laundered needle, so the fix cannot be "stop
+					// reading setupTestEnvironment at all".
+					'const real = setupTestEnvironment("pi-lens-planted-setup-");',
+				].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(dir, "decoy.test.ts"),
+				[
+					'// fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-comment-"));',
+					// The reviewer's decoy, verbatim in shape: prose that spells a call,
+					// in a string a real test fixture could plausibly hold.
+					"const decoy = 'setupTestEnvironment(\"pi-lens-planted-string-\")';",
+					"const decoyTmp = \"fs.mkdtempSync(path.join(os.tmpdir(), 'pi-lens-planted-strtmp-'))\";",
+					// ...and a decoy naming the OTHER file's real family, the shape that
+					// costs a sibling invocation its live root.
+					'const note = "pi-lens-planted-lit- belongs to planted.test.ts";',
+				].join("\n"),
+			);
+			return { dir, index: buildTmpOwnerIndex(dir, { prefixes: 3, files: 2 }) };
+		}
+
+		it("registers a raw mkdtemp prefix from the call site, never from prose", () => {
+			const { dir: fixture, index } = plantOwnerIndexFixture();
 			try {
-				fs.writeFileSync(
-					path.join(fixture, "planted.test.ts"),
-					[
-						'const a = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-lit-"));',
-						"const b = fs.mkdtempSync(",
-						"	path.join(os.tmpdir(), `pi-lens-planted-tpl-${reason}-`),",
-						");",
-						"function make(prefix: string) {",
-						"	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));",
-						"}",
-						'make("pi-lens-planted-param-");',
-						'// fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-planted-comment-"));',
-						// The reviewer's decoy, verbatim in shape: prose that spells a
-						// call, in a string a real test fixture could plausibly hold.
-						"const decoy = 'setupTestEnvironment(\"pi-lens-planted-string-\")';",
-						"const decoyTmp = \"fs.mkdtempSync(path.join(os.tmpdir(), 'pi-lens-planted-strtmp-'))\";",
-						// ...and the real call of the same needle, so the fix cannot be
-						// "stop reading setupTestEnvironment at all".
-						'const real = setupTestEnvironment("pi-lens-planted-setup-");',
-					].join("\n"),
-				);
-				const index = buildTmpOwnerIndex(fixture, {
-					prefixes: 3,
-					files: 1,
-				});
 				const owner = (entry: string): string | undefined =>
 					ownerForTmpEntry(entry, index);
 				expect(owner("pi-lens-planted-lit-XyZ")).toBe("planted.test.ts");
@@ -1358,6 +1364,42 @@ describe("tmp-fixture-hygiene", () => {
 					owner("pi-lens-planted-strtmp-XyZ"),
 					"a string that spells mkdtempSync must own nothing (M3328-1)",
 				).toBeUndefined();
+				expect(
+					ownersForTmpEntry("pi-lens-planted-lit-XyZ", index),
+					"a string naming another file's family must not make this file a candidate",
+				).toEqual(["planted.test.ts"]);
+			} finally {
+				fs.rmSync(fixture, { recursive: true, force: true });
+			}
+		});
+
+		it("spares a sibling's root when this run only mentioned its prefix in prose", () => {
+			// M3328-1's impact, end to end: this run loaded `decoy.test.ts`, which
+			// merely MENTIONS `pi-lens-planted-lit-` in a string, while the root
+			// belongs to `planted.test.ts`, which no worker of this run loaded.
+			// Laundering that mention into ownership gives the entry a candidate owner
+			// that ran here, the unanimous filter stops sparing it, and the sweep
+			// deletes a live sibling invocation's fixture — #3314's central failure,
+			// reached through prose.
+			const { dir: fixture, index } = plantOwnerIndexFixture();
+			try {
+				expect(
+					tmpHygieneForeignRunEntries(
+						["pi-lens-planted-lit-XyZ"],
+						(entry) => ownersForTmpEntry(entry, index),
+						new Set(["decoy.test.ts"]),
+					),
+					"an entry whose owner this run never loaded stays another invocation's",
+				).toEqual(["pi-lens-planted-lit-XyZ"]);
+				// ...and the same entry IS this run's business once the file that
+				// really creates it ran here.
+				expect(
+					tmpHygieneForeignRunEntries(
+						["pi-lens-planted-lit-XyZ"],
+						(entry) => ownersForTmpEntry(entry, index),
+						new Set(["decoy.test.ts", "planted.test.ts"]),
+					),
+				).toEqual([]);
 			} finally {
 				fs.rmSync(fixture, { recursive: true, force: true });
 			}
