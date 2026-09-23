@@ -20,7 +20,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Partial mock: every real export stays, `logLatency` becomes a spy so the
 // bounded decision records are assertable.
@@ -102,6 +102,16 @@ function writeFileAt(cwd: string, relative: string, mtimeMs: number): string {
 	return file;
 }
 
+/** Keep the durable fixture envelope on the same epoch as its scannedAt data. */
+function writeFixtureCache<T>(
+	cacheManager: CacheManager,
+	scanner: string,
+	data: T,
+	cwd: string,
+): void {
+	cacheManager.writeCache(scanner, data, cwd, { timestamp: SCAN_AT });
+}
+
 async function turnEndContent(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
@@ -120,7 +130,17 @@ function phaseRecords(phase: string): Array<Record<string, unknown>> {
 		.filter((entry) => entry.type === "phase" && entry.phase === phase);
 }
 
-beforeEach(() => logLatency.mockReset());
+// #3315: the cache TTL is measured from writeCache's envelope timestamp, while
+// the scanner fixtures intentionally remain at SCAN_MS. Pin both clocks to the
+// fixture epoch so this witness cannot age into stale-cache output as the
+// calendar advances; the real-time clock is restored after every case.
+beforeEach(() => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date(SCAN_MS));
+	logLatency.mockReset();
+});
+
+afterEach(() => vi.useRealTimers());
 
 describe("#1892: one shared freshness pass for the turn-end scanner lanes", () => {
 	// The measured pre-fix shape: two stores, one file, TWO demote records and
@@ -131,7 +151,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 		const { env, runtime, cacheManager } = setupTurn("pi-lens-1892-shared-");
 		try {
 			const shared = writeFileAt(env.tmpDir, "src/shared.ts", SCAN_MS + 5_000);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"gitleaks",
 				{
 					success: true,
@@ -147,7 +168,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 				} satisfies GitleaksResult,
 				env.tmpDir,
 			);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"trivy",
 				{
 					success: true,
@@ -187,7 +209,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 		const { env, runtime, cacheManager } = setupTurn("pi-lens-1892-scanat-");
 		try {
 			const shared = writeFileAt(env.tmpDir, "src/shared.ts", SCAN_MS + 30_000);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"gitleaks",
 				{
 					success: true,
@@ -204,7 +227,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 				} satisfies GitleaksResult,
 				env.tmpDir,
 			);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"trivy",
 				{
 					success: true,
@@ -246,7 +270,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 		const { env, runtime, cacheManager } = setupTurn("pi-lens-1892-missing-");
 		try {
 			const gone = writeFileAt(env.tmpDir, "gone/main.go", SCAN_MS - 5_000);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"govulncheck",
 				{
 					success: true,
@@ -262,7 +287,8 @@ describe("#1892: one shared freshness pass for the turn-end scanner lanes", () =
 				} satisfies GovulncheckResult,
 				env.tmpDir,
 			);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"gitleaks",
 				{
 					success: true,
@@ -339,9 +365,9 @@ describe("#1892: scanner cache records written by 4.2.1 still parse and render",
 			const gitleaks = loadFixture<GitleaksResult>("gitleaks", env.tmpDir);
 			const trivy = loadFixture<TrivyResult>("trivy", env.tmpDir);
 			const gov = loadFixture<GovulncheckResult>("govulncheck", env.tmpDir);
-			cacheManager.writeCache("gitleaks", gitleaks, env.tmpDir);
-			cacheManager.writeCache("trivy", trivy, env.tmpDir);
-			cacheManager.writeCache("govulncheck", gov, env.tmpDir);
+			writeFixtureCache(cacheManager, "gitleaks", gitleaks, env.tmpDir);
+			writeFixtureCache(cacheManager, "trivy", trivy, env.tmpDir);
+			writeFixtureCache(cacheManager, "govulncheck", gov, env.tmpDir);
 
 			// The real reader gives back every field the 4.2.1 record carried.
 			expect(
@@ -433,7 +459,8 @@ describe("#1892: one read per scanner store per delivery", () => {
 				env.tmpDir,
 				"onereads-session",
 			);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"gitleaks",
 				{
 					success: true,
@@ -444,7 +471,8 @@ describe("#1892: one read per scanner store per delivery", () => {
 				} satisfies GitleaksResult,
 				env.tmpDir,
 			);
-			cacheManager.writeCache(
+			writeFixtureCache(
+				cacheManager,
 				"trivy",
 				{
 					success: true,
