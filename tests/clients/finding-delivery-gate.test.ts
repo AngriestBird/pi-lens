@@ -648,6 +648,8 @@ function identifierReachesGate(
  * gate (`identifierReachesGate`) — otherwise a distant outer binding certifies
  * an inner shadow, while a nested scope that legitimately re-binds its own gate
  * result under the same name is still accepted (#3264 verify F1-A).
+ * #3266: proximity only selects a call-shaped gate to inspect; it never
+ * certifies an unrelated occurrence before this binding check runs.
  */
 function evidenceReachesGateCall(
 	lines: string[],
@@ -655,15 +657,26 @@ function evidenceReachesGateCall(
 	needle: string,
 	gates: readonly string[],
 ): boolean {
-	const atGate = (idx: number) =>
-		gates.some((gate) =>
-			hasNearbyCallSite(lines, idx, gate, CALLEE_PROXIMITY_LINES),
-		);
-	if (atGate(occurrenceIdx)) return true;
+	const inlineGateResult = (idx: number) =>
+		gates.some((gate) => {
+			const line = lines[idx] ?? "";
+			const callStart = line.indexOf(`${gate}(`);
+			const occurrenceStart = line.indexOf(needle);
+			if (callStart < 0 || occurrenceStart <= callStart) return false;
+			return /\)\s*(?:\?\.|\.)\s*$/.test(
+				line.slice(callStart + gate.length + 1, occurrenceStart),
+			);
+		});
+	if (inlineGateResult(occurrenceIdx)) return true;
 	const ident = rootIdentifier(needle);
-	return (
-		ident !== undefined &&
-		identifierReachesGate(lines, ident, gates, BINDING_CHAIN_HOPS)
+	// #3266: an arm occurrence must use its own binding chain; a nearby gate
+	// cannot certify it. Non-identifier evidence is a call-site label rather
+	// than an arm read, so retain its existing nearby-call proof.
+	if (ident !== undefined) {
+		return identifierReachesGate(lines, ident, gates, BINDING_CHAIN_HOPS);
+	}
+	return gates.some((gate) =>
+		hasNearbyCallSite(lines, occurrenceIdx, gate, CALLEE_PROXIMITY_LINES),
 	);
 }
 
@@ -1093,6 +1106,47 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 		expect(problems[0]).toMatch(/possible identity-stub/);
 	});
 
+	// RED PROOF (#3266): proximity is evidence for which call to inspect, not
+	// certification. A no-spacer hand-built shadow beside an unrelated gate
+	// must not inherit that call's identity.
+	it("RED PROOF (#3266): a no-spacer hand-built arm cannot borrow a nearby gate", () => {
+		const shadowedSource = [
+			"const unrelatedGate = gateFindingsByPathFreshness({ sources: {} });",
+			"const gitleaksGate = { live: rawFindings, stale: [] };",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(shadowedSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(shadowedSource).split("\n"),
+		);
+		expect(problems.length).toBeGreaterThan(0);
+		expect(problems[0]).toMatch(/possible identity-stub/);
+	});
+
+	it("control (#3266): an arm near its own gate call remains accepted", () => {
+		const ownGateSource = [
+			"const gitleaksGate = gateFindingsByPathFreshness({ sources: {} });",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(ownGateSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(ownGateSource).split("\n"),
+		);
+		expect(problems, problems.join("\n")).toEqual([]);
+	});
+
 	// RED PROOF (#3264 review F1): the binding chain must resolve the identifier
 	// the USE SITE means, not the first one in the file. An outer gate-bound name
 	// shadowed by an inner hand-built object used to launder: the detector
@@ -1251,6 +1305,41 @@ let report = \`CRITICAL dependency CVEs (trivy, \${trivyAgeLabel}). Upgrade befo
 			);
 			expect(problems, problems.join("\n")).toEqual([]);
 		}
+	});
+
+	it("RED PROOF (#3266): a cyclic alias terminates and is rejected", () => {
+		const cyclicSource = [
+			"const gitleaksGate = scannerGates;",
+			"const scannerGates = gitleaksGate;",
+			"const keptLive = filterFindingsByDisposition(",
+			"  gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(cyclicSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(cyclicSource).split("\n"),
+		);
+		expect(problems.length).toBeGreaterThan(0);
+	});
+
+	it("control (#3266): an inline gate result on the same line is accepted", () => {
+		const inlineSource = [
+			"const keptLive = filterFindingsByDisposition(gateFindingsByPathFreshness({}).gitleaksGate.live,",
+			");",
+			"// @delivery-surface: runtime-turn:secrets-gitleaks",
+			'advisoryParts.push("finding");',
+		].join("\n");
+		const problems = checkRuntimeTurnSeamEvidenceExclusive(
+			"runtime-turn:secrets-gitleaks",
+			DELIVERY_SURFACES["runtime-turn:secrets-gitleaks"],
+			scanTaggedSeams(inlineSource, RUNTIME_TURN_SEAM_PATTERN),
+			stripCommentsOnly(inlineSource).split("\n"),
+		);
+		expect(problems, problems.join("\n")).toEqual([]);
 	});
 
 	it("control: the real (un-stubbed) call site satisfies both the argument and the callee-proximity check", () => {
