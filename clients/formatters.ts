@@ -2279,6 +2279,28 @@ export function firstDiagnosticLine(
 	return undefined;
 }
 
+const FORMATTER_ERROR_TAIL_LINES = 20;
+
+/**
+ * Preserve a bounded tail of a formatter's diagnostic output.
+ *
+ * A traceback's first line is not actionable on its own (#3312). Keep the
+ * final lines, which include the exception and its message, while bounding
+ * the model-facing error when a formatter emits an unexpectedly large log.
+ */
+export function diagnosticTail(
+	text: string | undefined,
+	maxLines = FORMATTER_ERROR_TAIL_LINES,
+): string | undefined {
+	const lines = (text ?? "")
+		.split("\n")
+		.map((raw) => stripAnsi(raw).trimEnd())
+		.filter((line) => line.trim().length > 0)
+		.map((line) => line.slice(0, 300));
+	if (lines.length === 0) return undefined;
+	return lines.slice(-maxLines).join("\n");
+}
+
 /**
  * Resolve a formatter command without allowing the static command fallback to
  * bypass a resolver's style-preservation refusal (#1345). `null` means the
@@ -2415,11 +2437,11 @@ export async function formatFile(
 				outcome: "failed",
 				error:
 					result.error?.message ||
-					firstDiagnosticLine(result.stderr) ||
+					diagnosticTail(result.stderr) ||
 					// biome, ktlint and `mix format` report on STDOUT; without this
 					// their diagnostic is discarded and the user is told only that
 					// the tool "exited with status 1".
-					firstDiagnosticLine(result.stdout) ||
+					diagnosticTail(result.stdout) ||
 					`${formatter.name} exited with status ${result.status}`,
 			};
 		}

@@ -56,6 +56,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PI_LENS_HOME: /tmp/pi-lens-home
       PILENS_DATA_DIR: /tmp/pi-lens-home
+      # The pip installer puts packages under this private user base. Keep the
+      # Python launched by those console scripts on the same import path.
+      PYTHONUSERBASE: /tmp/pi-lens-home/pip-user
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

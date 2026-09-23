@@ -25,6 +25,7 @@ import {
 	cljfmtFormatter,
 	clearFormatterRuntimeState,
 	formatFile,
+	diagnosticTail,
 	getFormattersForFile,
 	googleJavaFormatFormatter,
 	invalidateFormatterCacheForPath,
@@ -148,6 +149,40 @@ it("formatFile declines before spawning when agreement evidence is unreadable (#
 		changed: false,
 		outcome: "unavailable",
 	});
+});
+
+it("retains the bounded formatter traceback tail (#3312)", async () => {
+	const traceback = [
+		"Traceback (most recent call last):",
+		"  File \"cmake-format\", line 5, in <module>",
+		"    from cmakelang.format.__main__ import main",
+		"ModuleNotFoundError: No module named 'cmakelang'",
+	].join("\n");
+
+	// Enter through formatFile: this is the recurrence from #3312, where the
+	// nightly rendered only the traceback header and hid the import failure.
+	await withPathShim("cmake-format", async () => {
+		const executable = path.join(tmpDir, "shims", "cmake-format");
+		fs.writeFileSync(
+			executable,
+			`#!/bin/sh\nprintf '%s\\n' 'Traceback (most recent call last):' '  File "cmake-format", line 5, in <module>' '    from cmakelang.format.__main__ import main' "ModuleNotFoundError: No module named 'cmakelang'" >&2\nexit 1\n`,
+		);
+		fs.chmodSync(executable, 0o755);
+		const filePath = fileIn(tmpDir, "CMakeLists.cmake");
+		fs.writeFileSync(filePath, "add_library(foo bar.c)\n");
+		fs.writeFileSync(path.join(tmpDir, ".cmake-format.yaml"), "line_width: 80\n");
+
+		const result = await formatFile(filePath, cmakeFormatFormatter);
+		expect(result).toMatchObject({
+			success: false,
+			outcome: "failed",
+			error: traceback,
+		});
+	});
+
+	expect(diagnosticTail(`${"noise\n".repeat(25)}last line`, 20)).toBe(
+		`${"noise\n".repeat(19)}last line`.trimEnd(),
+	);
 });
 
 // ---------------------------------------------------------------------------
