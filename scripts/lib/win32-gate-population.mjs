@@ -21,7 +21,12 @@ export const WINDOWS_LANE_ADMISSIONS = Object.freeze([
 	Object.freeze({
 		file: "tests/clients/dispatch/runners/reported-path-attribution.test.ts",
 		reason:
-			"#3278: the ten members' case-variant cells assert the host filesystem's own case-folding answer, and for the eight argv-echo members that arm is the only lane where restoring the local compare reds; every boundary mocked is a process boundary, so no toolchain is required.",
+			"#3278 (+#3285, gleam-check): the eleven members' case-variant cells assert the host filesystem's own case-folding answer, and for the nine members whose tool echoes our argv that arm is the only lane where the case direction reds; every boundary mocked is a process boundary, so no toolchain is required.",
+	}),
+	Object.freeze({
+		file: "tests/clients/ruff-client-reported-path.test.ts",
+		reason:
+			"#3286: ruff-client's case-variant cell asserts the host filesystem's own case-folding answer, and ruff echoes the absolute argv we hand it, so a real Windows host is the only lane where that direction can attach; safe-spawn is the only mock, so no ruff binary is required.",
 	}),
 ]);
 

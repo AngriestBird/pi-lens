@@ -6,9 +6,10 @@
  * a site with NO fold at all presents nothing to count: measured while fixing
  * #3277, mutating `go-vet.ts` to a hand-rolled `toLowerCase` compare left that
  * sweep GREEN. Eleven members of this family were invisible to it for exactly
- * that reason. This sweep counts the opposite thing — every runner site that
- * still answers "is this reported diagnostic about the dispatched file?" with
- * its OWN predicate instead of the seam — and pins the census shrink-only.
+ * that reason. This sweep counts the opposite thing — every runner or tool-client
+ * site that still answers "is this reported diagnostic about the dispatched
+ * file?" with its OWN predicate instead of the seam — and pins the census
+ * shrink-only.
  *
  * The recurrence it prevents is #209 / #3277 / #3278: a runner compares the
  * tool's spelling of the edited file against the dispatcher's with `===`,
@@ -53,6 +54,30 @@ const REPO_ROOT = path.resolve(
 	"../..",
 );
 const RUNNERS_ROOT = path.resolve(REPO_ROOT, "clients/dispatch/runners");
+
+/**
+ * #3286 widened the population: the family is NOT confined to
+ * `clients/dispatch/runners/**`. A tool's autofix half lives in its
+ * `clients/<tool>-client.ts`, and `ruff-client.ts` held the same bare `!==` over
+ * two `path.resolve` results that nine runners held — invisible to this sweep
+ * and to #3284's grep, both of which stopped at the runners directory, so it
+ * shipped as the #3278 remainder instead of being caught.
+ *
+ * The rule is the GLOB, not a list of names: every `clients/*-client.ts` is in,
+ * so a new tool client joins the population by existing. MEASURED cost of the
+ * widening over the 18 tool clients, rather than the ~15 exemption rows #3286
+ * predicted for all of `clients/`: the census flags TWO sites — the
+ * `ruff-client.ts` member this round folds, and one non-member registered in
+ * `NON_MEMBER_PINS` below. The detector's own policies (`LITERAL_OPERAND`, the
+ * `relative`/`dirname` exclusions) already drop the containment, walk-up and
+ * file-KIND shapes that made the prediction pessimistic.
+ *
+ * Nested directories (`clients/lsp/`, `clients/mcp/`, …) hold no `*-client.ts`
+ * today and are excluded rather than silently in: a client under one of them
+ * would be a new population question, not an automatic member.
+ */
+const CLIENTS_ROOT = path.resolve(REPO_ROOT, "clients");
+const TOOL_CLIENT_SUFFIX = "-client.ts";
 
 /**
  * A string or template-literal operand. Comparing a path against a LITERAL is
@@ -100,7 +125,7 @@ const SUFFIX_COMPARISON = /\.\s*(?:endsWith|startsWith)\s*\(/g;
 
 /**
  * The second family spelling: hand-fold the separators, THEN compare — the shape
- * `gleam-check.ts` still carries and `dart-analyze.ts` carried until #3278.
+ * `dart-analyze.ts` carried until #3278 and `gleam-check.ts` until #3285.
  * Matched on RAW source through `codeMatches` because the needle IS a regex
  * literal, whose body string-blanking erases (the same mechanism
  * `path-key-fold-sweep`'s shape A uses), while `codeMatches` still drops any
@@ -224,7 +249,13 @@ export function countLocalPathIdentityCompares(source: string): number {
 }
 
 function census(): { counts: Record<string, number>; scanned: number } {
-	const files = listSourceFiles(RUNNERS_ROOT, { extensions: [".ts"] });
+	const files = [
+		...listSourceFiles(RUNNERS_ROOT, { extensions: [".ts"] }),
+		...listSourceFiles(CLIENTS_ROOT, {
+			extensions: [TOOL_CLIENT_SUFFIX],
+			exclude: (relative) => relative.includes("/"),
+		}),
+	];
 	const counts: Record<string, number> = {};
 	let scanned = 0;
 	for (const { file, source } of readWalkedFiles(files)) {
@@ -236,27 +267,46 @@ function census(): { counts: Record<string, number>; scanned: number } {
 }
 
 const REMEDIATION =
-	"A runner decides reported-path identity with its own predicate. Route it " +
+	"A runner or tool client decides reported-path identity with its own " +
+	"predicate. Route it " +
 	"through `pathsEqual(path.resolve(<the cwd the tool ran in>, reported), " +
 	"absTarget)` (clients/path-utils.ts) and shrink this pin. Refs #3278.";
 
 /**
  * The remaining local predicates, file → count. Shrink-only: `auditSymbolCounts`
  * fails on movement in EITHER direction, so restoring a member's deleted
- * compare, adding one in a new runner, and removing one without shrinking the
- * pin all red.
+ * compare, adding one in a new runner or tool client, and removing one without
+ * shrinking the pin all red.
  *
- * - `gleam-check.ts` — `!sourcePath.replace(…).endsWith(filePath.replace(…))`.
- *   Found by #3278's own shape sweep, NOT on #3278's member list, and
- *   deliberately left: `gleam` renders through `codespan_reporting::term::emit`
- *   (`compiler-core/src/diagnostic.rs:119` at v1.6.3), whose location line
- *   carries a `┌─` gutter, so the `endsWith` is LOAD-BEARING and a naive fold
- *   drops every gleam diagnostic. The repo has no captured gleam output to
- *   establish the gutter from, so the fold needs its own round. Filed as the
- *   #3278 remainder.
+ * EMPTY since #3285/#3286: the family has no member left that decides
+ * reported-path identity for itself.
+ *
+ * `gleam-check.ts` held the last runner row (`@1`,
+ * `!sourcePath.replace(…).endsWith(filePath.replace(…))`) because its
+ * `endsWith` was LOAD-BEARING for codespan's `┌─` locus gutter and #3284 had no
+ * captured gleam output to establish that gutter from. #3285 established it from
+ * gleam v1.18.1 + codespan-reporting 0.13.1, moved the gutter out of the
+ * location CAPTURE, and folded the compare; `clients/ruff-client.ts` was added
+ * to the population by the widening above and folded in the same round (#3286).
  */
-const LOCAL_COMPARE_PINS: Readonly<Record<string, number>> = {
-	"clients/dispatch/runners/gleam-check.ts": 1,
+const LOCAL_COMPARE_PINS: Readonly<Record<string, number>> = {};
+
+/**
+ * Sites the detector flags that are NOT members of this family: BOTH operands
+ * are directories this process derived from its own `path.resolve`, with no
+ * tool output on either side. Registered, never silenced — the count is pinned
+ * the same shrink-only way, so a real member landing in one of these files
+ * presents a different id and reds.
+ *
+ * - `clients/test-runner-client.ts@1` — `path.resolve(root) !== dispatch`
+ *   (`clients/test-runner-client.ts:832`) asks "is the anchored LANGUAGE root a
+ *   different directory from the dispatch root?" so the runner-detection ladder
+ *   does not probe the same directory twice (#2879 round 2, F1). Neither side is
+ *   a reported path, and a case-variant answer costs one idempotent re-probe,
+ *   not a dropped finding — the whole cost of #3286's population widening.
+ */
+const NON_MEMBER_PINS: Readonly<Record<string, number>> = {
+	"clients/test-runner-client.ts": 1,
 };
 
 function stalePins(
@@ -269,18 +319,23 @@ function stalePins(
 }
 
 describe("runner reported-path attribution single-source-of-truth (#3278)", () => {
-	it("has no unpinned local reported-path compare in any runner", () => {
+	it("has no unpinned local reported-path compare in any runner or tool client", () => {
 		const { counts, scanned } = census();
-		assertNonEmptyScan("clients/dispatch/runners source files", scanned, 60);
+		assertNonEmptyScan(
+			"clients/dispatch/runners + clients/*-client.ts source files",
+			scanned,
+			78,
+		);
+		const pinned = { ...LOCAL_COMPARE_PINS, ...NON_MEMBER_PINS };
 		const audit = auditSymbolCounts({
 			sweepName: "local reported-path compare (#3278)",
 			counts,
-			pinned: LOCAL_COMPARE_PINS,
+			pinned,
 			remediation: REMEDIATION,
 		});
 		expect(audit.problems).toEqual([]);
 		expect(
-			stalePins(counts, LOCAL_COMPARE_PINS),
+			stalePins(counts, pinned),
 			"a pinned local compare is gone — good, now shrink the pin",
 		).toEqual([]);
 	}, 30_000);
@@ -336,7 +391,7 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 			countLocalPathIdentityCompares(
 				'if (!a.replace(/\\\\/g, "/").endsWith(b.replace(/\\\\/g, "/"))) x();',
 			),
-			"hand-fold the separators, then compare (gleam-check's live shape)",
+			"hand-fold the separators, then compare (gleam-check's, until #3285)",
 		).toBe(1);
 	});
 
