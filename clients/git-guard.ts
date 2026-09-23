@@ -888,13 +888,66 @@ export function retireInlineBlockerAndResyncGuard(args: {
 	return true;
 }
 
+/**
+ * Bring the commit-gate LATCH back in line with the turn-end disposition
+ * policy (#3248), at the point where the post-policy survivor set per file is
+ * final.
+ *
+ * The defect this exists for: the agent marks every blocker on a file
+ * `false-positive`, the turn-end composer renders no `Unresolved from this
+ * turn` section and no `🔴 STOP` — and `lens-guard` still blocks the commit,
+ * because `evaluateGitGuard` reads the LATCH first and the latch counted the
+ * still-present map entry. The blocker record stays in the map on purpose: the
+ * policy is content-bound and re-derived every turn end, so retiring the entry
+ * would be silencing rather than filtering (AGENTS.md shape 10). It carries
+ * the verdict instead, and the two gate derivations honor it — this latch, and
+ * `syncGitGuardRecord`'s persisted `blockerContent` below.
+ *
+ * The persisted record needs no third writer here. The composer that calls
+ * this rewrites it later in the SAME turn end from the same survivor set —
+ * `writeGitGuardRecord` with `hasBlockers` derived from the surviving blocker
+ * sections (`clients/runtime-turn.ts:4287`, and the dedupe path at `:4231`),
+ * or `clearCache("turn-end-findings")` when nothing survives
+ * (`clients/runtime-turn.ts:4379`) — and that clear is itself gated on the
+ * latch this call just recomputed. Adding a second durable writer between them
+ * would only race the one that already owns the record.
+ *
+ * Colocated with the gate rather than inlined at the wiring site, for the same
+ * reason `retireInlineBlockerAndResyncGuard` is: the claim is testable without
+ * booting the extension.
+ */
+export function resyncGitGuardAfterInlinePolicy(args: {
+	runtime: RuntimeCoordinator;
+	/** Files whose EVERY inline blocker the turn-end policy suppressed. */
+	suppressedFilePaths: readonly string[];
+}): void {
+	const changed = args.runtime.applyInlineBlockerPolicyVerdicts(
+		args.suppressedFilePaths,
+	);
+	// Nothing left the gate's view of the map and nothing rejoined it. This is
+	// what keeps the recompute off every ordinary turn end: `updateGitGuardStatus`
+	// re-derives the latch from the map, and a turn that changed no verdict has
+	// no business re-deriving anything.
+	if (args.suppressedFilePaths.length === 0 && changed === 0) return;
+	// Exactly as the retire path re-derives it: `false` is this caller's own
+	// contribution, never a blanket clear — a sibling file's surviving blocker
+	// is still in the map and still sets the latch.
+	args.runtime.updateGitGuardStatus(false, "");
+}
+
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
 	editedFilePath?: string,
 ): void {
-	const entries = runtime.getInlineBlockersSnapshot?.() ?? [];
+	// #3248: a record the turn-end policy fully suppressed is not a blocker the
+	// commit gate may persist — the agent was shown nothing for it. The entry
+	// stays in the map so the next turn re-derives the verdict from current
+	// bytes; it just stops speaking for the gate.
+	const entries = (runtime.getInlineBlockersSnapshot?.() ?? []).filter(
+		(entry) => !entry.policySuppressed,
+	);
 	const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
 	const existing = cacheRecord(cacheManager, cwd);
 	if (

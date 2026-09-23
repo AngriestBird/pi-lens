@@ -208,6 +208,17 @@ export interface InlineBlockerRecord {
 	 */
 	staleReason?: "dependency-drift" | "past-eof" | "self-drift";
 	/**
+	 * #3248: the last turn-end disposition-policy verdict for this record —
+	 * `true` when EVERY blocker it carries was suppressed. Set only by
+	 * `applyInlineBlockerPolicyVerdicts`, read only by the two commit-gate
+	 * derivations (`updateGitGuardStatus`'s latch and `syncGitGuardRecord`'s
+	 * persisted record), so the gate agrees with the banner the agent was
+	 * shown instead of blocking a commit on findings pi-lens no longer prints.
+	 * Never persisted: `TurnEndFindingsCache` is unchanged, and a session that
+	 * never ran the policy sees `undefined`, which counts as blocking.
+	 */
+	policySuppressed?: boolean;
+	/**
 	 * #2982: the file's size in bytes when the verdict was recorded, the cheap
 	 * first tier of the content confirmation the self-drift axis applies
 	 * before demoting. mtime moving is not evidence that content changed — a
@@ -485,12 +496,51 @@ export class RuntimeCoordinator {
 		this._cascadeSessionStats.coldSnapshotTouches += coldSnapshotTouches;
 	}
 
+	/**
+	 * Record the turn-end policy verdict on every live inline-blocker record
+	 * (#3248): `true` for a file whose every blocker the policy suppressed,
+	 * `false` for every other record in the map.
+	 *
+	 * ONE writer, rewriting the WHOLE axis each turn end, so the verdict can
+	 * never outlive the pass that made it: a record demoted since, or one whose
+	 * survivors came back because the file's bytes moved under a content-bound
+	 * anchor, is cleared by the same call that sets its sibling. A fresh
+	 * dispatch replaces the record wholesale (`recordInlineBlockers`), so a NEW
+	 * blocker is never born pre-suppressed (#1198 ordering).
+	 *
+	 * @returns how many records this call CHANGED — 0 means the gate's view of
+	 * the map is already what the policy just decided.
+	 */
+	applyInlineBlockerPolicyVerdicts(
+		suppressedFilePaths: readonly string[],
+	): number {
+		const suppressed = new Set(
+			suppressedFilePaths.map((filePath) => path.resolve(filePath)),
+		);
+		let changed = 0;
+		for (const [key, entry] of this._pendingInlineBlockers.entries()) {
+			const policySuppressed = suppressed.has(path.resolve(entry.filePath));
+			if (!!entry.policySuppressed === policySuppressed) continue;
+			this._pendingInlineBlockers.set(key, { ...entry, policySuppressed });
+			changed += 1;
+		}
+		return changed;
+	}
+
 	updateGitGuardStatus(hasBlockers: boolean, output: string): void {
 		// The status is an aggregate over the current per-file map. A clean B
 		// result must not erase an unresolved A result; the pipeline records/clears
 		// the edited file immediately before this method runs.
-		this._gitGuardHasBlockers =
-			hasBlockers || this.getInlineBlockersSnapshot().length > 0;
+		// #3248: every live record except one whose whole blocker set the
+		// turn-end disposition policy suppressed. The record itself stays in the
+		// map — the policy is content-bound and re-derived from the record's
+		// diagnostics at every turn end, so dropping it there would be silencing
+		// rather than filtering (AGENTS.md shape 10); it just stops counting for
+		// the gate the agent was shown nothing for.
+		const blocking = this.getInlineBlockersSnapshot().filter(
+			(entry) => !entry.policySuppressed,
+		);
+		this._gitGuardHasBlockers = hasBlockers || blocking.length > 0;
 		if (!this._gitGuardHasBlockers) {
 			this._gitGuardSummary = "";
 			return;
@@ -499,7 +549,7 @@ export class RuntimeCoordinator {
 			.split("\n")
 			.map((line) => line.trim())
 			.find((line) => line.length > 0);
-		const summaries = this.getInlineBlockersSnapshot()
+		const summaries = blocking
 			.map((entry) => entry.summary.trim())
 			.filter(Boolean);
 		this._gitGuardSummary = (
