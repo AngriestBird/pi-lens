@@ -200,8 +200,8 @@ function scrub(text: string): string {
 async function witnessTurn(
 	name: string,
 	deleteValues: boolean,
-): Promise<{ toolResult: string; turnEnd: string }> {
-	const { template, values } = createChart(name);
+): Promise<{ chartRoot: string; toolResult: string; turnEnd: string }> {
+	const { chartRoot, template, values } = createChart(name);
 	spawnRouter.state.helmLintStdout = HELM_LINT_OUTPUT;
 	if (deleteValues) fs.rmSync(values);
 
@@ -231,6 +231,7 @@ async function witnessTurn(
 	)) as { messages?: Array<{ content: string }> } | undefined;
 
 	return {
+		chartRoot,
 		toolResult:
 			scrub(
 				(returned?.content ?? [])
@@ -263,12 +264,23 @@ describe("#3190 witness: a retracted deleted-path blocker through pi", () => {
 		const retracted = await witnessTurn("retracted", true);
 		const intact = await witnessTurn("intact", false);
 
-		// The real helm-lint runner really ran, twice, through the mocked process
-		// boundary — without this the golden could record silence from a chain
-		// that never dispatched anything.
-		expect(
-			spawnRouter.calls.filter((call) => call.args[0] === "lint"),
-		).toHaveLength(2);
+		// The real helm-lint runner really ran, once per cell, through the mocked
+		// process boundary — without this the golden could record silence from a
+		// chain that never dispatched anything.
+		//
+		// Review round 2 (M3357-2): counting the calls was not enough. The
+		// reviewer mutated the real runner from `["lint", chartRoot]` to
+		// `["lint", cwd]` and this case stayed green, so a dispatch aimed at the
+		// wrong chart could ride behind the golden. Equality on the WHOLE
+		// recorded call — the resolved helm command, the subcommand and the exact
+		// chart root — in dispatch order, so linting the workspace root, the
+		// other cell's chart, or the two charts in the wrong order all red.
+		expect(spawnRouter.calls.filter((call) => call.args[0] === "lint")).toEqual(
+			[
+				{ command: "helm", args: ["lint", retracted.chartRoot] },
+				{ command: "helm", args: ["lint", intact.chartRoot] },
+			],
+		);
 
 		assertGolden(
 			"turn-end-delivery.txt",

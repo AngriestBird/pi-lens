@@ -127,10 +127,6 @@ function lspSyncBudgetMs(): number {
 
 type FileSnapshot = Map<string, { mtimeMs: number; size: number }>;
 
-// Scan one directory's entries into `snapshot`, pushing walkable subdirs onto
-// `stack`. Extracted from the walk loop to keep each function's cognitive
-// complexity low. Excluded/ignored dirs are not descended; ignored/vanished
-// files are skipped.
 // Files stat'd between event-loop yields. The walk stays on the tool_result
 // hot path; yielding every N keeps its longest synchronous stretch well under
 // the <50ms hook-burst budget even at the AUTOFIX_CHANGED_FILE_SCAN_LIMIT cap.
