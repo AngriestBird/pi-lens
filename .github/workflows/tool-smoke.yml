@@ -253,6 +253,7 @@ jobs:
       # own internal try/catch — same "always exit 0, telemetry only" contract
       # as the probe itself).
       - name: Notify on silentOnClean drift (file/update/close tracking issue)
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         continue-on-error: true
         run: node scripts/notify-clean-signal-drift.mjs
 
@@ -264,12 +265,24 @@ jobs:
         continue-on-error: true
         run: node scripts/server-capabilities.mjs --install
 
+      - name: Check LSP docs refresh diff
+        id: docs_diff
+        shell: bash
+        run: |
+          if git diff --quiet -- docs/lsp-capability-matrix.md docs/servercapabilities.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "LSP docs are byte-identical to master; skipping refresh PR."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Commit-back (#390 item 2): the three steps above regenerate the LSP docs
       # in-place. master has required checks the schedule's GITHUB_TOKEN can't
       # bypass, so we open/UPDATE a single auto-PR (fixed branch, force-pushed each
       # run) instead of pushing to master. Docs change rarely (only when a server's
       # caps/tier change), so this is low-noise. No-ops when nothing changed.
       - name: Open/update LSP-docs refresh PR
+        if: steps.docs_diff.outputs.changed == 'true'
         continue-on-error: true
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
@@ -280,7 +293,7 @@ jobs:
             docs/lsp-capability-matrix.md
             docs/servercapabilities.md
           commit-message: 'docs(nightly): refresh LSP capability docs'
-          title: 'docs(nightly): refresh LSP capability docs'
+          title: 'docs(nightly): refresh LSP capability docs (refs #3217)'
           body: |
             Automated refresh of the LSP capability docs from the nightly tool-smoke run.
 
@@ -292,6 +305,10 @@ jobs:
             can't regress a richer run (#390).
 
             Refs #460, #390, #529.
+
+            This PR is created with the repository `GITHUB_TOKEN`, which cannot
+            trigger workflow runs. After the bot opens or updates it, a
+            maintainer must close and reopen the PR to arm CI.
           delete-branch: false
 
       - name: Format layer (select + reformat through formatter pipeline)
@@ -332,7 +349,7 @@ jobs:
       # exits 0) — filing/updating/closing an issue must never change the
       # nightly's own conclusion (acceptance #5).
       - name: Notify on tool-smoke red (file/update/close tracking issue)
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         continue-on-error: true
         env:
           TOOL_LAYER_OUTCOME: ${{ steps.tool_layer.outcome }}
