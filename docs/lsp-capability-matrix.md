@@ -28,6 +28,16 @@ anything). The native TS7 launch variant (`typescript7`/`typescript7-clean`,
 #524/#526) is deliberately excluded from comparison against classic's marker —
 they share a server id but not a verified clean-signal behavior.
 
+What IS gated is the pair of COMMITTED sources:
+`tests/config/lsp-clean-behavior-census.test.ts` (#3347) compares the
+`clean-behavior` column below against the `silentOnClean` markers in both
+directions — every measured push row against its marker, and every marker
+against a push row measured `silent` — so a nightly refresh cannot merge a
+re-measured server until its marker moves with it, and a marker cannot outlive
+the measurement that justified it. Push rows the probe has not classified are
+admitted by name in that file, and an admission reds once its row becomes
+measured.
+
 ## First publish: is the first push an answer? (#3310)
 
 A second, ORTHOGONAL axis to the tiers below, measured from the same probe run
