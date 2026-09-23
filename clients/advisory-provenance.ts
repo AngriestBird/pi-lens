@@ -700,7 +700,9 @@ export function gateFindingsByPathFreshness<
 	// Sorted, not literal order: which source pays for a shared path, and the
 	// order stores appear in the records, must not depend on how the CALLER
 	// happened to write the object (#3264 review F2).
-	const names = Object.keys(args.sources).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	const names = Object.keys(args.sources).sort((a, b) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	);
 	const gates = {} as Record<string, FindingFreshnessGate<unknown>>;
 	const dropped: Record<string, number> = {};
 	const demoted: Record<string, number> = {};
@@ -837,7 +839,9 @@ function emitStaleLineDemoteRecord<T>(
  */
 function emitStatBudgetRecord(cwd: string, memo: PathFactsMemo): void {
 	if (memo.starved.size === 0) return;
-	const stores = [...memo.starved.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	const stores = [...memo.starved.keys()].sort((a, b) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	);
 	logLatency({
 		type: "phase",
 		phase: "finding_path_stat_budget_exhausted",
