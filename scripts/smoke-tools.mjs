@@ -729,7 +729,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "go",
 		lspGate: true,
-		lspGateMarker: 'fmt.Printf("%d\\n", "not a number")',
+		lspGateMarker: 'var gateSeed int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/go",
 		file: "bad.go",
 		serverHint: "gopls",
@@ -756,7 +756,7 @@ const LSP_FIXTURES = [
 	{
 		lang: "fsharp",
 		lspGate: true,
-		lspGateMarker: 'let gateSeed : int = "not a number"',
+		lspGateMarker: "let gateSeed : int = undefined_function()",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
