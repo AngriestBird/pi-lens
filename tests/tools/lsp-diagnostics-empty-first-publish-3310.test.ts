@@ -21,16 +21,33 @@
  * exercised in one file without a process-wide knob.
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	cleanupTestEnvironmentsDrained,
+	setupTestEnvironment,
+} from "../clients/test-utils.js";
 
 const fakeServer = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
 );
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3310-"));
-process.env.PI_LENS_HOME = path.join(root, ".pi-lens-home");
+// The fixture root goes through `setupTestEnvironment` rather than a raw
+// `mkdtempSync`: the tmp-fixture hygiene gate's owner index is built by grepping
+// tests/ for `setupTestEnvironment("<prefix>")`, so a raw root is BOTH
+// unattributed (`owner: tests/unknown`) and un-swept, which is how this file
+// leaked `pi-lens-3310-*` into /tmp on the #3310 round-1 head. The spawned
+// servers hold these workspaces past the last assertion, so the removal is
+// `cleanupTestEnvironmentsDrained` in `afterAll` — it keeps the root tracked
+// while it drains them, then removes it on the last tick.
+//
+// PI_LENS_HOME is deliberately NOT repointed here. `tests/support/vitest-setup.ts`
+// already pins a per-worker home and heartbeats an owner marker inside it, so a
+// module-scope override both sends the LSP service's logs into a directory this
+// file then deletes AND makes the worker read as dead to the hygiene sweep
+// ("live owners: none") — the second half of that same leak.
+const env = setupTestEnvironment("pi-lens-3310-");
+const root = env.tmpDir;
 
 const DIRTY_PHP = `<?php\nfunction greet(string $name): string\n{\n    return "Hello " . $undeclared;\n}\n`;
 
@@ -101,8 +118,14 @@ describe("#3310 empty first publish from an indexing push server", () => {
 	});
 
 	afterAll(async () => {
-		await service?.shutdown();
-		fs.rmSync(root, { recursive: true, force: true });
+		// The spawned servers hold the workspaces (and PI_LENS_HOME's log writers
+		// sit under the same root), so the service teardown is the drain that has
+		// to finish before the root can be removed for good.
+		await cleanupTestEnvironmentsDrained("pi-lens-3310-", {
+			beforeDrain: async () => {
+				await service?.shutdown();
+			},
+		});
 	});
 
 	it("reports the finding the indexing server publishes after its empty first push", async () => {
