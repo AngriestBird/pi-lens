@@ -11,6 +11,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 type CompilerSpec =
 	| { command: string; args: string[]; flavor: "gcc" | "msvc" }
@@ -207,10 +208,6 @@ function parseMsvcOutput(raw: string, filePath: string): Diagnostic[] {
 	return diagnostics;
 }
 
-function firstOutputLine(raw: string): string {
-	return raw.trim().split(/\r?\n/, 1)[0]?.slice(0, 200) ?? "";
-}
-
 const cppCheckRunner: RunnerDefinition = {
 	id: "cpp-check",
 	appliesTo: ["cxx"],
@@ -230,48 +227,27 @@ const cppCheckRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-		const diagnostics =
-			compiler.flavor === "msvc"
-				? parseMsvcOutput(raw, ctx.filePath)
-				: parseGccLikeOutput(raw, ctx.filePath);
-
-		if (diagnostics.length === 0) {
-			if (result.status && result.status !== 0) {
-				return {
-					status: "failed",
-					diagnostics: [
-						{
-							id: "cpp-check-nonzero-no-diagnostics",
-							message:
-								firstOutputLine(raw) ||
-								`${compiler.command} exited non-zero without structured diagnostics`,
-							filePath: ctx.filePath,
-							severity: "warning",
-							semantic: "warning",
-							tool: "cpp-check",
-							rule: compiler.command,
-							fixable: false,
-						},
-					],
-					semantic: "warning",
-					rawOutput: raw,
-				};
-			}
-			return {
-				status: "succeeded",
-				diagnostics: [],
-				semantic: "none",
-				rawOutput: raw,
-			};
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: "warning",
-			rawOutput: raw,
-		};
+		const parsed = parseToolRun(
+			"cpp-check",
+			{ result, output: raw },
+			(output) =>
+				compiler.flavor === "msvc"
+					? parseMsvcOutput(output, ctx.filePath)
+					: parseGccLikeOutput(output, ctx.filePath),
+		);
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "cpp-check",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: (diagnostics) => ({
+				status: diagnostics.some((d) => d.severity === "error")
+					? "failed"
+					: "succeeded",
+				semantic: "warning",
+			}),
+		});
 	},
 };
 

@@ -9,6 +9,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { PRIORITY } from "../priorities.js";
+import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 // zig rejects `--version`; the version subcommand is `zig version`. Using the
 // default probe would make this runner skip on every machine.
@@ -46,13 +47,6 @@ function parseZigOutput(raw: string, filePath: string): Diagnostic[] {
 	return diagnostics;
 }
 
-function firstOutputLine(result: { stdout?: string; stderr?: string }): string {
-	return `${result.stderr || ""}\n${result.stdout || ""}`
-		.trim()
-		.split(/\r?\n/, 1)[0]
-		.slice(0, 200);
-}
-
 const zigCheckRunner: RunnerDefinition = {
 	id: "zig-check",
 	appliesTo: ["zig"],
@@ -77,40 +71,25 @@ const zigCheckRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		const diagnostics = parseZigOutput(
-			`${result.stderr || ""}\n${result.stdout || ""}`,
-			ctx.filePath,
+		const raw = `${result.stdout || ""}\n${result.stderr || ""}`;
+		const parsed = parseToolRun(
+			"zig-check",
+			{ result, output: raw },
+			(output) => parseZigOutput(output, ctx.filePath),
 		);
-		if (diagnostics.length === 0) {
-			if (result.status && result.status !== 0) {
-				return {
-					status: "failed",
-					diagnostics: [
-						{
-							id: "zig-check-nonzero-no-diagnostics",
-							message:
-								firstOutputLine(result) ||
-								"zig build-exe exited non-zero without structured diagnostics",
-							filePath: ctx.filePath,
-							severity: "warning",
-							semantic: "warning",
-							tool: "zig",
-							rule: "zig-check",
-							fixable: false,
-						},
-					],
-					semantic: "warning",
-				};
-			}
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
-		}
-
-		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return {
-			status: hasErrors ? "failed" : "succeeded",
-			diagnostics,
-			semantic: "warning",
-		};
+		if (parsed.skipped) return parsed.skipped;
+		return finishParsedRun({
+			tool: "zig-check",
+			ctx,
+			result,
+			diagnostics: parsed.diagnostics,
+			classify: (diagnostics) => ({
+				status: diagnostics.some((d) => d.severity === "error")
+					? "failed"
+					: "succeeded",
+				semantic: "warning",
+			}),
+		});
 	},
 };
 
