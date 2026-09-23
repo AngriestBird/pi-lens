@@ -153,7 +153,13 @@ async function dispatchEmptyPair(tool: Tool) {
 
 const findings = {
 	actionlint: JSON.stringify([
-		{ message: "bad workflow", line: 2, column: 3, kind: "syntax" },
+		{
+			message: "bad workflow",
+			filepath: ".github/workflows/ci.yml",
+			line: 2,
+			column: 3,
+			kind: "syntax",
+		},
 	]),
 	credo: JSON.stringify({
 		issues: [
