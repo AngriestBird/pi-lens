@@ -373,6 +373,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 5,
 		"clients/config-core/normalize.ts": 2,
 		"clients/config-core/resolve.ts": 2,
+		"clients/config-locations.ts": 5,
 		"clients/config-resolve.ts": 14,
 		"clients/config-warn.ts": 18,
 		"clients/dead-code-client.ts": 4,
