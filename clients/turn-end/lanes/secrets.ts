@@ -130,8 +130,14 @@ async function blockingGitleaksFindings(
  * `onMissing: "drop"`: the finding IS the deleted file's content.
  */
 async function collect(ctx: TurnEndLaneContext): Promise<SecretsLaneSources> {
-	const gitleaksData = ctx.readScannerCache<GitleaksResult>("gitleaks")?.data;
-	const trivyData = ctx.readScannerCache<TrivyResult>("trivy")?.data;
+	// One await for both stores: the two reads are independent, and the memo
+	// hands each of them the same promise the composer's own trivy read shares.
+	const [gitleaksEntry, trivyEntry] = await Promise.all([
+		ctx.readScannerCache<GitleaksResult>("gitleaks"),
+		ctx.readScannerCache<TrivyResult>("trivy"),
+	]);
+	const gitleaksData = gitleaksEntry?.data;
+	const trivyData = trivyEntry?.data;
 	return {
 		gitleaks: {
 			findings: await blockingGitleaksFindings(gitleaksData, ctx),
