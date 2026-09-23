@@ -549,6 +549,70 @@ const MEMBERS: Member[] = [
 		}),
 	},
 	{
+		name: "taplo",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "taplo",
+		modulePath: "../../../../clients/dispatch/runners/taplo.js",
+		file: "src/app.toml",
+		sibling: "src/other.toml",
+		fileContent: "[package\n",
+		output: (reported) => ({
+			status: 1,
+			stderr: `error: invalid TOML ${MARKER}\n  ┌─ ${reported}:4:5\n  │\n4 │ [package\n`,
+		}),
+	},
+	{
+		name: "yamllint",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "yamllint",
+		modulePath: "../../../../clients/dispatch/runners/yamllint.js",
+		file: "src/app.yaml",
+		sibling: "src/other.yaml",
+		fileContent: "name: a\nname: b\n",
+		output: (reported) => ({
+			status: 1,
+			stdout: `${reported}:4:5: [error] ${MARKER} (key-duplicates)\n`,
+		}),
+	},
+	{
+		name: "htmlhint",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "htmlhint",
+		modulePath: "../../../../clients/dispatch/runners/htmlhint.js",
+		file: "src/app.html",
+		sibling: "src/other.html",
+		fileContent: "<div>\n",
+		output: (reported) => ({
+			status: 1,
+			stdout: `${reported}:4:5: ${MARKER} [error/tag-pair]\n`,
+		}),
+	},
+	{
+		name: "oxlint",
+		attached: { status: "failed", semantic: "blocking" },
+		runnerId: "oxlint",
+		modulePath: "../../../../clients/dispatch/runners/oxlint.js",
+		file: "src/app.js",
+		sibling: "src/other.js",
+		fileContent: "debugger;\n",
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify({
+				diagnostics: [{
+					message: MARKER,
+					code: "eslint(no-debugger)",
+					severity: "error",
+					filename: reported,
+					labels: [{ span: { line: 4, column: 5 } }],
+				}],
+				number_of_files: 1,
+				number_of_rules: 1,
+				threads_count: 1,
+				start_time: 0,
+			}),
+		}),
+	},
+	{
 		name: "gleam-check",
 		attached: { status: "failed", semantic: "blocking" },
 		runnerId: "gleam-check",
@@ -595,9 +659,33 @@ const [
 	dotnetBuild,
 	dartAnalyze,
 	cueVet,
+	taplo,
+	yamllint,
+	htmlhint,
+	oxlint,
 	gleamCheck,
 	gleamCheckColoured,
 ] = MEMBERS;
+
+describe("runner reported-path attribution (#3295)", () => {
+	it.each([
+		["taplo", taplo],
+		["yamllint", yamllint],
+		["htmlhint", htmlhint],
+		["oxlint", oxlint],
+	] as const)("%s keeps its own reported location", async (_name, member) => {
+		expectAttached(await dispatch(member, cwdRelative(member)), member);
+	});
+
+	it.each([
+		["taplo", taplo],
+		["yamllint", yamllint],
+		["htmlhint", htmlhint],
+		["oxlint", oxlint],
+	] as const)("%s rejects a sibling reported location", async (_name, member) => {
+		expectDetached(await dispatch(member, echoesSibling));
+	});
+});
 
 /** `cue` prefixes a cwd-relative position with `./` (v0.11.0 errors.go:590-596). */
 const cueRelative =

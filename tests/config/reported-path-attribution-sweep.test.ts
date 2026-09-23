@@ -36,6 +36,7 @@
  */
 
 import * as path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -136,6 +137,23 @@ const SLASH_FOLD_COMPARE =
 
 function stripForScan(source: string): string {
 	return stripSource(source, { strings: "blank" });
+}
+
+/** The no-predicate direction of this census (#3295). */
+const LOCATION_CALL = /\b(?:match|exec)\s*\(/g;
+const LOCATION_SHAPE = /:\(\\d\+\):\(\\d\+\)/;
+
+export function countLocationParsersWithoutPathsEqual(source: string): number {
+	const stripped = stripForScan(source);
+	const hasLocationCapture = codeMatches(source, LOCATION_CALL).some((match) =>
+		LOCATION_SHAPE.test(source.slice(match.index ?? 0, (match.index ?? 0) + 400)),
+	);
+	return (
+		hasLocationCapture &&
+		!/\bpathsEqual\s*\(/.test(stripped)
+	)
+		? 1
+		: 0;
 }
 
 /** Names bound, one hop, to a whole-path call in this file. */
@@ -291,6 +309,9 @@ const REMEDIATION =
  */
 const LOCAL_COMPARE_PINS: Readonly<Record<string, number>> = {};
 
+/** Exact shrink-only pin for parsers that capture locations without a predicate. */
+const NO_PREDICATE_PINS: Readonly<Record<string, number>> = {};
+
 /**
  * Sites the detector flags that are NOT members of this family: BOTH operands
  * are directories this process derived from its own `path.resolve`, with no
@@ -339,6 +360,28 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 			"a pinned local compare is gone — good, now shrink the pin",
 		).toEqual([]);
 	}, 30_000);
+
+	it("has no unpinned location parser without pathsEqual (#3295)", () => {
+		const counts: Record<string, number> = {};
+		const files = [
+			...listSourceFiles(RUNNERS_ROOT, { extensions: [".ts"] }),
+			...listSourceFiles(CLIENTS_ROOT, {
+				extensions: [TOOL_CLIENT_SUFFIX],
+				exclude: (relative) => relative.includes("/"),
+			}),
+		];
+		for (const { file, source } of readWalkedFiles(files)) {
+			const count = countLocationParsersWithoutPathsEqual(source);
+			if (count > 0) counts[relativePosix(REPO_ROOT, file)] = count;
+		}
+		const audit = auditSymbolCounts({
+			sweepName: "location parser without reported-path predicate (#3295)",
+			counts,
+			pinned: NO_PREDICATE_PINS,
+			remediation: REMEDIATION,
+		});
+		expect(audit.problems).toEqual([]);
+	});
 
 	// The detector's own teeth, in both directions, on synthetic source: without
 	// these the sweep could silently stop matching and read as "family clean".
@@ -431,9 +474,33 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toBe(0);
 		expect(
 			countLocalPathIdentityCompares(
-				'const doc = "path.resolve(reported) !== absTarget";',
+			'const doc = "path.resolve(reported) !== absTarget";',
 			),
 			"a string copy of the needle must never create a finding",
+		).toBe(0);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				readFileSync(
+					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/no-predicate.ts"),
+					"utf8",
+				),
+			),
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				readFileSync(
+					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/no-predicate.ts"),
+					"utf8",
+				),
+			),
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				readFileSync(
+					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/sanctioned.ts"),
+					"utf8",
+				),
+			),
 		).toBe(0);
 	});
 });
