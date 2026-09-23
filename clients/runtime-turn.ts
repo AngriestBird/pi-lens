@@ -2056,23 +2056,98 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"govulncheck",
 		cwd,
 	);
-	// #1622: govulncheck renders a call site as `file:line`, and the cache is a
-	// session_start snapshot — the same stale-line shape as gitleaks, one tier
-	// lower. A CVE is pinned by go.mod, NOT by the call site, so neither an edit
-	// nor a deletion may drop it: `onMissing: "demote"` routes a vanished traced
-	// file into the same arm as an edited one. This gate only ever decides
-	// whether the cited LINE is still worth printing. (Review round H1: the first
-	// cut let a deleted trace file drop the CVE, contradicting this comment, and
-	// `citedPath` reads only the FIRST filename frame — so one deleted file in a
-	// long trace silently killed a CVE that go.mod still pins.)
-	const govGate = gateFindingsByPathFreshness({
-		store: "govulncheck",
-		findings: govCacheEntry?.data?.findings ?? [],
+	const trivyCacheEntry = cacheManager.readCache<TrivyResult>("trivy", cwd);
+	const gitleaksData = cacheManager.readCache<GitleaksResult>(
+		"gitleaks",
 		cwd,
-		scannedAt: govCacheEntry?.data?.scannedAt,
-		citedPath: (finding) => finding.trace.find((t) => t.filename)?.filename,
-		onMissing: "demote",
+	)?.data;
+	const trivySecretsData = trivyCacheEntry?.data;
+	// Gitleaks deliberately scans gitignored local files and nested repositories
+	// so an explicit security audit can still inspect them. The adapter is the
+	// source of truth for whether a finding belongs in a blocking delivery lane;
+	// filter here before freshness handling so demoted findings cannot leak into
+	// either the blocker or stale-secret turn context.
+	const boundedClassification = await bounded(
+		classifyAndFilterFindings(gitleaksData?.findings ?? [], cwd),
+		{
+			ms: HOOK_WALL_BUDGET_MS.turn_end,
+			signal: deps.signal,
+			hook: "turn_end",
+			label: "classifyAndFilterFindings",
+		},
+	);
+	const classifiedGitleaksFindings =
+		boundedClassification ?? gitleaksData?.findings ?? [];
+	if (boundedClassification === undefined) {
+		recordDegradationOnce({
+			kind: "gitleaks_classification_timeout",
+			subject: cwd,
+			reason:
+				"gitleaks classification exceeded the turn_end budget; retained raw findings to fail open",
+		});
+	}
+	const blockingGitleaksFindings = classifiedGitleaksFindings.filter(
+		(finding) =>
+			gitleaksFindingToProjectDiagnostic(cwd, finding).semantic === "blocking",
+	);
+	// #1892: ONE freshness pass for the three cached scanner stores that cite a
+	// file. Each store keeps its own `scannedAt` and its own `onMissing` — the
+	// gate carries source identity, so gitleaks' older scan cannot demote a
+	// trivy secret its newer scan covers, and govulncheck's `demote` verdict for
+	// a deleted path cannot reach gitleaks, which must drop it. What IS shared
+	// is the filesystem: one `statSync` per unique cited path per delivery, one
+	// stat budget, and one bounded drop/demote record instead of up to six.
+	//
+	// #1622 on govulncheck: it renders a call site as `file:line`, and the cache
+	// is a session_start snapshot — the same stale-line shape as gitleaks, one
+	// tier lower. A CVE is pinned by go.mod, NOT by the call site, so neither an
+	// edit nor a deletion may drop it: `onMissing: "demote"` routes a vanished
+	// traced file into the same arm as an edited one. (Review round H1: the
+	// first cut let a deleted trace file drop the CVE, and `citedPath` reads
+	// only the FIRST filename frame — so one deleted file in a long trace
+	// silently killed a CVE that go.mod still pins.)
+	//
+	// #1461 slice 1 (#1460) on gitleaks: the cache is TTL-only, so a finding for
+	// a file deleted after the scan was served as a 🔴 blocker for the rest of
+	// the 30-minute window — 119 of 126 findings in pi-lens's own cache. This
+	// read is the single agent-facing consumer of that store (session_start's
+	// read only decides whether to re-scan; the project-diagnostics path
+	// re-scans fresh and reconciles at load), so the drop belongs here, before
+	// the findings enter the shared secret pipeline. #1622 extends the gate from
+	// existence to freshness, and adds trivy secrets — the sibling store with
+	// the identical shape. A cited file edited after the scan keeps its finding
+	// but loses its line number: the credential may still be there, just not
+	// where the snapshot says. Dropping instead would let any edit — malicious
+	// or accidental — mute a real secret.
+	const govCacheFindings = govCacheEntry?.data?.findings ?? [];
+	const trivySecretFindings = trivySecretsData?.secrets ?? [];
+	const scannerGates = gateFindingsByPathFreshness({
+		cwd,
+		sources: {
+			govulncheck: {
+				findings: govCacheFindings,
+				scannedAt: govCacheEntry?.data?.scannedAt,
+				citedPath: (finding: (typeof govCacheFindings)[number]) =>
+					finding.trace.find((frame) => frame.filename)?.filename,
+				onMissing: "demote",
+			},
+			gitleaks: {
+				findings: blockingGitleaksFindings,
+				scannedAt: gitleaksData?.scannedAt,
+				citedPath: (finding: (typeof blockingGitleaksFindings)[number]) =>
+					finding.file,
+			},
+			"trivy-secrets": {
+				findings: trivySecretFindings,
+				scannedAt: trivySecretsData?.scannedAt,
+				citedPath: (finding: (typeof trivySecretFindings)[number]) =>
+					finding.file,
+			},
+		},
 	});
+	const govGate = scannerGates.govulncheck;
+	const gitleaksGate = scannerGates.gitleaks;
+	const trivySecretsGate = scannerGates["trivy-secrets"];
 	const govStale = new Set(govGate.stale);
 	// #1625 review round: the #1622 freshness gate runs FIRST — the disposition
 	// filter's anchor is derived from each finding's post-demotion identity
@@ -2110,72 +2185,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		advisoryParts.push(report);
 	}
 
-	const trivyCacheEntry = cacheManager.readCache<TrivyResult>("trivy", cwd);
-
 	// Secrets — UNIFIED surfacing (#131 Mode 3). gitleaks, trivy secret, and the
 	// ast-grep hardcoded-secret rules can each flag the SAME line with different
 	// rule ids, which the rule-keyed diagnostic dedup can't collapse. Collapse by
 	// location so a committed/hardcoded secret is reported ONCE (with combined
 	// provenance) — a blocker, since credentials need rotation before merge.
-	const gitleaksData = cacheManager.readCache<GitleaksResult>(
-		"gitleaks",
-		cwd,
-	)?.data;
-	const trivySecretsData = trivyCacheEntry?.data;
-	// Gitleaks deliberately scans gitignored local files and nested repositories
-	// so an explicit security audit can still inspect them. The adapter is the
-	// source of truth for whether a finding belongs in a blocking delivery lane;
-	// filter here before freshness handling so demoted findings cannot leak into
-	// either the blocker or stale-secret turn context.
-	const boundedClassification = await bounded(
-		classifyAndFilterFindings(gitleaksData?.findings ?? [], cwd),
-		{
-			ms: HOOK_WALL_BUDGET_MS.turn_end,
-			signal: deps.signal,
-			hook: "turn_end",
-			label: "classifyAndFilterFindings",
-		},
-	);
-	const classifiedGitleaksFindings =
-		boundedClassification ?? gitleaksData?.findings ?? [];
-	if (boundedClassification === undefined) {
-		recordDegradationOnce({
-			kind: "gitleaks_classification_timeout",
-			subject: cwd,
-			reason:
-				"gitleaks classification exceeded the turn_end budget; retained raw findings to fail open",
-		});
-	}
-	const blockingGitleaksFindings = classifiedGitleaksFindings.filter(
-		(finding) =>
-			gitleaksFindingToProjectDiagnostic(cwd, finding).semantic === "blocking",
-	);
-	// #1461 slice 1 (#1460): the gitleaks cache is TTL-only, so a finding for a
-	// file deleted after the scan is still served as a 🔴 blocker for the rest
-	// of the 30-minute window — the live case, and 119 of 126 findings in
-	// pi-lens's own cache. This read is the single agent-facing consumer of that
-	// store (session_start's read only decides whether to re-scan; the
-	// project-diagnostics path re-scans fresh and reconciles at load), so the
-	// drop belongs here, before the findings enter the shared secret pipeline.
-	// #1622 extends that gate from existence to freshness, and adds trivy
-	// secrets — the sibling store with the identical shape. A cited file edited
-	// after the scan keeps its finding but loses its line number: the credential
-	// may still be there, just not where the snapshot says. Dropping instead
-	// would let any edit — malicious or accidental — mute a real secret.
-	const gitleaksGate = gateFindingsByPathFreshness({
-		store: "gitleaks",
-		findings: blockingGitleaksFindings,
-		cwd,
-		scannedAt: gitleaksData?.scannedAt,
-		citedPath: (finding) => finding.file,
-	});
-	const trivySecretsGate = gateFindingsByPathFreshness({
-		store: "trivy-secrets",
-		findings: trivySecretsData?.secrets ?? [],
-		cwd,
-		scannedAt: trivySecretsData?.scannedAt,
-		citedPath: (finding) => finding.file,
-	});
+	//
 	// #1617: THE bug this issue exists for — gitleaks findings never passed
 	// through `applyDispositions`, so an agent-marked false-positive/won't-fix
 	// re-reported as a 🔴 STOP blocker on every turn. Filter through the SAME
@@ -3912,12 +3927,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		const findings = result.diagnostics;
 		if (findings.length === 0) continue;
-		const gate = gateFindingsByPathFreshness({
-			store: "late-runner-findings",
-			findings,
+		const { "late-runner-findings": gate } = gateFindingsByPathFreshness({
 			cwd,
-			scannedAt: pending.markedAtMs,
-			citedPath: (finding) => finding.filePath,
+			sources: {
+				"late-runner-findings": {
+					findings,
+					scannedAt: pending.markedAtMs,
+					citedPath: (finding: (typeof findings)[number]) => finding.filePath,
+				},
+			},
 		});
 		runnerFindingsStale += gate.stale.length;
 		if (gate.stale.length > 0) {
@@ -4242,13 +4260,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// one), so a stale-arm replay would double-report old content.
 					// Both drops are COUNTED here and in the latency record below —
 					// never silent (shape 10).
-					const gate = gateFindingsByPathFreshness({
-						store: "late-auxiliary-findings",
-						findings: retained,
-						cwd,
-						scannedAt: pair.markedAtMs,
-						citedPath: () => lateAuxPath,
-					});
+					const { "late-auxiliary-findings": gate } =
+						gateFindingsByPathFreshness({
+							cwd,
+							sources: {
+								"late-auxiliary-findings": {
+									findings: retained,
+									scannedAt: pair.markedAtMs,
+									citedPath: () => lateAuxPath,
+								},
+							},
+						});
 					lateAuxStale += gate.stale.length;
 					lateAuxMissing +=
 						retained.length - gate.live.length - gate.stale.length;

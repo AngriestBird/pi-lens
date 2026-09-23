@@ -194,6 +194,8 @@ export const UNBOUNDED_FAILURE_PHASE_REASONS: Record<string, string> = {
 		"One record per tier-3 reconcile pass, and the cascade budget already caps those per turn.",
 	cross_process_lsp_budget_degraded:
 		"One record per cross-process budget evaluation, which runs on the LSP spawn path rather than per file.",
+	finding_path_stat_budget_exhausted:
+		"One batched record per delivery-gate call naming every source whose stat allowance ran out, so volume follows deliveries, not findings.",
 	finding_dead_path_drop:
 		"One batched record per delivery-gate call listing every dropped finding, so volume follows scans, not findings.",
 	lsp_client_unavailable:

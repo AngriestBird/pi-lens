@@ -321,19 +321,23 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔴 secrets blocker, gitleaks cache.",
 		["gateFindingsByPathFreshness"],
-		['store: "gitleaks"'],
+		// #1892: the three scanner lanes share ONE gate call, so the evidence is
+		// no longer a per-call `store:` argument. It is this surface's read of
+		// its own store's gated arm — stronger, because it also pins WHICH
+		// partition the blocker tier renders.
+		["gitleaksGate.live,"],
 	),
 	"runtime-turn:secrets-trivy": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔴 secrets blocker, trivy secrets cache.",
 		["gateFindingsByPathFreshness"],
-		['store: "trivy-secrets"'],
+		["trivySecretsGate.live,"],
 	),
 	"runtime-turn:govulncheck-advisory": gated(
 		RUNTIME_TURN_FILE,
 		"Turn-end 🛡️ Go CVE advisory (call-site line only).",
 		["gateFindingsByPathFreshness"],
-		['store: "govulncheck"'],
+		["scannerGates.govulncheck"],
 	),
 	// Two tagged seams (the stale and live render branches below the same
 	// `sweepInlineBlockerFreshness` call) legitimately share one evidence
@@ -355,7 +359,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		RUNTIME_TURN_FILE,
 		"Turn-end 🔑 demoted-secrets tier (drifted since scan).",
 		["gateFindingsByPathFreshness"],
-		['store: "gitleaks"', 'store: "trivy-secrets"'],
+		["gitleaksGate.stale,", "trivySecretsGate.stale,"],
 	),
 	// The evidence below is the literal header FRAGMENT including the
 	// interpolation — proves the label is actually rendered, not merely
@@ -456,10 +460,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		// call, so the gate and the evidence name that call. Same stack, same
 		// identities — only the spelling moved.
 		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
-		[
-			'store: "late-auxiliary-findings"',
-			"applyPushedFindingPolicy(gate.live, {",
-		],
+		['"late-auxiliary-findings": {', "applyPushedFindingPolicy(gate.live, {"],
 	),
 	"runtime-turn:late-runner-findings": gated(
 		RUNTIME_TURN_FILE,
@@ -468,7 +469,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		// it now routes through the same shared policy call as its
 		// late-auxiliary twin, which is what this gate pins.
 		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
-		['store: "late-runner-findings"'],
+		['"late-runner-findings"'],
 		{ evidenceMin: 2 },
 	),
 	"runtime-turn:cascade-blocker": labeled(
@@ -595,9 +596,9 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"the persisted project-diagnostics delta report.",
 		["gateFindingsByPathFreshness"],
 		[
-			'store: "lens-diagnostics-delta"',
+			'"lens-diagnostics-delta": {',
 			"applyDeltaFreshnessGate(",
-			'store: "lens-diagnostics-delta-project"',
+			'"lens-diagnostics-delta-project": {',
 		],
 	),
 	"widget-state:footer": gated(

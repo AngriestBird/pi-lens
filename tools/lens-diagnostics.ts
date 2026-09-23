@@ -780,14 +780,18 @@ function appendProjectDiagnosticsDeltaLines(
 				severity,
 			),
 	);
-	const gated = gateFindingsByPathFreshness({
-		store: "lens-diagnostics-delta-project",
-		findings: scoped,
-		cwd,
-		scannedAt: report?.generatedAt,
-		citedPath: (d) => d.filePath,
-		onMissing: "drop",
-	});
+	const { "lens-diagnostics-delta-project": gated } =
+		gateFindingsByPathFreshness({
+			cwd,
+			sources: {
+				"lens-diagnostics-delta-project": {
+					findings: scoped,
+					scannedAt: report?.generatedAt,
+					citedPath: (d: (typeof scoped)[number]) => d.filePath,
+					onMissing: "drop",
+				},
+			},
+		});
 	const staleSet = new Set(gated.stale);
 	// Concatenating live-then-stale reorders a file's demoted rows to the end
 	// of its bucket below (rather than each diagnostic's original report
@@ -1025,13 +1029,16 @@ function applyDeltaFreshnessGate<W extends DispositionCandidate>(
 			flat.push({ filePath: file.filePath, warning });
 	}
 	if (flat.length === 0) return files;
-	const gated = gateFindingsByPathFreshness({
-		store: "lens-diagnostics-delta",
-		findings: flat,
+	const { "lens-diagnostics-delta": gated } = gateFindingsByPathFreshness({
 		cwd,
-		scannedAt: effectiveAt,
-		citedPath: (f) => f.filePath,
-		onMissing: "drop",
+		sources: {
+			"lens-diagnostics-delta": {
+				findings: flat,
+				scannedAt: effectiveAt,
+				citedPath: (f: (typeof flat)[number]) => f.filePath,
+				onMissing: "drop",
+			},
+		},
 	});
 	// Two passes (live, then stale) reorder a file's demoted rows to the end
 	// of its warnings array rather than the original report order — cosmetic
