@@ -109,11 +109,13 @@ export function lspGatePopulation(fixtures = LSP_FIXTURES) {
  * total: a server-authored source must not make an auxiliary finding look like
  * proof that the configured primary answered.
  */
-export function classifyLspGateResult(result) {
-	if (result?.details?.unavailable) {
+export function classifyLspGateResult(result, fx, unavailable = false) {
+	if (unavailable || result?.details?.unavailable) {
 		return {
 			state: "skip",
-			detail: result.details.unavailable,
+			detail:
+				result?.details?.unavailable ??
+				`${fx.serverHint} unavailable (handshake did not complete)`,
 			diags: 0,
 		};
 	}
@@ -2224,10 +2226,9 @@ async function runLspGate({ langs, install, verbose }) {
 			"installer",
 			"index.js",
 		);
-		({
-			ensureTool,
-			getInstallAttempt,
-		} = await import(pathToFileURL(installerEntry).href));
+		({ ensureTool, getInstallAttempt } = await import(
+			pathToFileURL(installerEntry).href
+		));
 	}
 	const population = lspGatePopulation();
 	const selected = population.gated.filter(
@@ -2238,6 +2239,17 @@ async function runLspGate({ langs, install, verbose }) {
 		return 0;
 	}
 	const rows = [];
+	let handshakeCensus = {};
+	const censusPath = process.env.PI_LENS_HOME
+		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
+		: undefined;
+	if (censusPath && fs.existsSync(censusPath)) {
+		try {
+			handshakeCensus = JSON.parse(fs.readFileSync(censusPath, "utf8"));
+		} catch {
+			// A missing or malformed census cannot admit a gate row.
+		}
+	}
 	for (const fx of selected) {
 		await ensureFixtureTools(
 			fx.tools ?? [],
@@ -2251,6 +2263,17 @@ async function runLspGate({ langs, install, verbose }) {
 					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
 				),
 		);
+		const handshakeUnavailable = handshakeCensus[fx.lang]?.state !== "pass";
+		if (handshakeUnavailable) {
+			rows.push({
+				lang: fx.lang,
+				runner: fx.serverHint,
+				state: "skip",
+				detail: `${fx.serverHint} unavailable (handshake did not complete)`,
+				diags: 0,
+			});
+			continue;
+		}
 		let workspace;
 		let absFile;
 		let cleanup;
@@ -2284,7 +2307,7 @@ async function runLspGate({ langs, install, verbose }) {
 				null,
 				{ cwd: workspace },
 			);
-			const verdict = classifyLspGateResult(result);
+			const verdict = classifyLspGateResult(result, fx);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
 		} catch (err) {
@@ -2733,6 +2756,16 @@ async function runLspHandshake({ langs, install, verbose }) {
 		await lsp.shutdown();
 	} catch {
 		// best-effort teardown
+	}
+	if (process.env.PI_LENS_HOME) {
+		fs.writeFileSync(
+			path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json"),
+			JSON.stringify(
+				Object.fromEntries(rows.map((row) => [row.lang, row])),
+				null,
+				2,
+			),
+		);
 	}
 	return report(rows, "LSP handshake (install → spawn → initialize)");
 }
