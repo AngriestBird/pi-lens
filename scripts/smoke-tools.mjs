@@ -618,13 +618,13 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "terraform",
-		// #3217: terraform-ls advertises no diagnosticProvider and publishes
-		// nothing for an un-initialized module — its validation diagnostics come
-		// from `terraform.validate`, which needs a real `terraform init` (network
-		// + the terraform binary) in the fixture workspace. Measured: no
-		// publishDiagnostics in 10s and no pull provider at initialize.
+		// #3311: terraform-ls advertises no diagnosticProvider and its validation
+		// diagnostics come from `terraform.validate`, which needs initialized
+		// module state. The fixture cannot provision that state because the
+		// terraform CLI is not a managed smoke tool; keep the exemption as this
+		// server capability/property rather than making setup failure a false pass.
 		lspGateExempt:
-			"terraform-ls publishes diagnostics only after `terraform init`; see #3311",
+			"terraform-ls publishes diagnostics only after terraform init; the server requires initialized module state and the smoke registry has no terraform CLI; see #3311",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
 		serverHint: "terraform-ls",
@@ -764,11 +764,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		// Measured on ubuntu-latest: fsautocomplete returned no diagnostic for
-		// the undefined-function seed even with app.fsproj present, because it
-		// did not load the project. This joins #3311's measured exemption list.
-		lspGateExempt:
-			"fsautocomplete does not load the fixture project on the runner, even with app.fsproj; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
+		// #3311: build the copied project before fsautocomplete is touched so the
+		// server sees the project it is expected to load.
+		lspGate: true,
+		lspGateMarker: 'let gateSeed : int = "not a number"',
+		setup: "dotnet build app.fsproj --nologo",
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -887,11 +887,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		// Measured on ubuntu-latest: ElixirLS stays silent because mix.exs is a
-		// declaration, not a compiled Mix project. This joins #3311's measured
-		// exemption list.
-		lspGateExempt:
-			"ElixirLS stays silent because mix.exs is not a compiled Mix project; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
+		// #3311: compile the copied Mix project before ElixirLS is touched so the
+		// server can load the project and report the seeded undefined call.
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
+		setup: "mix compile",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
@@ -900,12 +900,11 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		// Measured on ubuntu-latest, run 35831976090: Expert's managed binary
-		// handshakes but publishes nothing for the fixture — unlike elixir-ls it
-		// needs a compiled mix project, which the bare fixture is not. `elixir`
-		// above covers ElixirLS on the same source.
-		lspGateExempt:
-			"Expert publishes no diagnostics without a compiled mix project; see #3311",
+		// #3311: compile the copied Mix project before Expert is touched so the
+		// server can load the project and report the seeded undefined call.
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
+		setup: "mix compile",
 		lang: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -986,13 +985,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		// #3217: @vue/language-server neither publishes nor answers a pull for the
-		// fixture's TS type error — the fixture has no node_modules, so the
-		// server's own launch warning ("Vue navigation may be limited") applies to
-		// diagnostics too. Making it green needs a real `npm install` in the
-		// fixture workspace, which is the typescript7 `setup` shape.
-		lspGateExempt:
-			"@vue/language-server needs the fixture's node_modules installed; see #3311",
+		// #3311: @vue/language-server needs a workspace-local TypeScript SDK to
+		// resolve the script block's type error. Install it in the copied fixture,
+		// matching the existing typescript7 setup shape.
+		lspGate: true,
+		lspGateMarker: "<template><div></template>",
+		setup: "npm install typescript@5 vue@3 --no-save --no-audit --no-fund",
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -1000,13 +998,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
-		// #3217 F4, the one row where dev box and runner disagree: svelte-language-
-		// server returns 2 primary findings for this fixture on a dev box and 0 on
-		// ubuntu-latest (run 35831976090), where the same run's handshake layer
-		// still reports the server as replying. Gating it on the local result
-		// alone would red the nightly, which is the exact failure F4 names.
-		lspGateExempt:
-			"svelte-language-server serves the finding on a dev box but not on ubuntu-latest (run 35831976090); see #3311",
+		// #3311: provide the TypeScript SDK and Svelte package in the copied
+		// workspace so the server can type-check the script block on the runner.
+		lspGate: true,
+		lspGateMarker: 'let count: number = "not a number";',
+		setup: "npm install typescript@5 svelte@4 --no-save --no-audit --no-fund",
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
