@@ -811,7 +811,7 @@ function expectGleamAttached(observed: Observed, member: Member): void {
 	// F14: the fold must change WHICH lines attach, nothing else. This is the
 	// message today — codespan's own empty border line, because the message
 	// extraction takes the first non-blank line after the locus. Pinned as
-	// CURRENT behaviour, not endorsed: filed separately as #3292.
+	// CURRENT behaviour, not endorsed: filed separately as #3293.
 	expect(attributed[0]?.message).toBe("│");
 	expect(observed.status).toBe(member.attached.status);
 	expect(observed.semantic).toBe(member.attached.semantic);
