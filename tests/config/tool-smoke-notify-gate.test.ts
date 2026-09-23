@@ -4,9 +4,9 @@
 // GitHub SKIPPED it -- and everything after it -- exactly when an earlier
 // step failed, i.e. exactly when a human most needed to hear about it (13
 // consecutive red nights with no automated notice). This file pins the
-// FIX's own shape so the same defect can't recur silently on the new step:
-// the new notify step must carry `if: always()` and must actually read all
-// three gating layers' `outcome`s (not just exist with the right `if:`).
+// FIX's own shape so the same defect can't recur silently on either step:
+// each issue writer must run after failures only for scheduled/default-branch
+// runs, and the job-verdict writer must actually read all gating outcomes.
 //
 // Same technique as tests/config/install-smoke-gates.test.ts /
 // lsp-fixture-home-workflow-pin.test.ts: yaml.load the REAL workflow, assert
@@ -23,6 +23,9 @@ const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW_PATH = ".github/workflows/tool-smoke.yml";
 const JOB_NAME = "tool-smoke";
 const NOTIFY_STEP_NAME = "Notify on tool-smoke red";
+const CLEAN_SIGNAL_NOTIFY_STEP_NAME = "Notify on silentOnClean drift";
+const NOTIFY_IF =
+	"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')";
 
 type Step = {
 	name?: unknown;
@@ -55,13 +58,23 @@ function findStep(workflow: Workflow, nameSubstring: string): Step {
 	return step;
 }
 
-describe("tool-smoke.yml's red-notify step runs on failure too (#2723)", () => {
+describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#3346)", () => {
 	const workflow = loadWorkflow();
 	const notifyStep = findStep(workflow, NOTIFY_STEP_NAME);
+	const cleanSignalNotifyStep = findStep(
+		workflow,
+		CLEAN_SIGNAL_NOTIFY_STEP_NAME,
+	);
 
-	it("carries if: always() -- the exact gate #2723's bug lacked", () => {
-		expect(notifyStep.if).toBe("always()");
-	});
+	it.each([
+		["silentOnClean drift", cleanSignalNotifyStep],
+		["tool-smoke red", notifyStep],
+	])(
+		"pins %s issue side effects to schedule/default-branch runs",
+		(_name, step) => {
+			expect(step.if).toBe(NOTIFY_IF);
+		},
+	);
 
 	it("is the LAST step in the job (must observe every gating layer, including Format layer)", () => {
 		const steps = workflow.jobs?.[JOB_NAME]?.steps as Step[];
@@ -131,7 +144,7 @@ describe("tool-smoke.yml's red-notify step runs on failure too (#2723)", () => {
 		const stepNameIdx = lines.findIndex((l) => l.includes(NOTIFY_STEP_NAME));
 		expect(stepNameIdx).toBeGreaterThanOrEqual(0);
 		const ifLineIdx = lines.findIndex(
-			(l, i) => i > stepNameIdx && /^\s*if:\s*always\(\)\s*$/.test(l),
+			(l, i) => i > stepNameIdx && /^\s*if:\s*always\(\) &&/.test(l),
 		);
 		expect(ifLineIdx).toBeGreaterThanOrEqual(0);
 
@@ -162,7 +175,7 @@ describe("tool-smoke.yml's red-notify step runs on failure too (#2723)", () => {
 		// The actual YAML `if:` key line for this step (not the comment text
 		// above it, which also contains the literal string "if: always()").
 		const ifLineIdx = lines.findIndex(
-			(l, i) => i > stepNameIdx && /^\s*if:\s*always\(\)\s*$/.test(l),
+			(l, i) => i > stepNameIdx && /^\s*if:\s*always\(\) &&/.test(l),
 		);
 		expect(ifLineIdx).toBeGreaterThanOrEqual(0);
 		const mutatedLines = [...lines];
@@ -174,7 +187,14 @@ describe("tool-smoke.yml's red-notify step runs on failure too (#2723)", () => {
 		expect(mutatedSource).not.toBe(source);
 		const mutatedWorkflow = loadWorkflow(mutatedSource);
 		const mutatedStep = findStep(mutatedWorkflow, NOTIFY_STEP_NAME);
-		expect(mutatedStep.if).not.toBe("always()");
+		expect(mutatedStep.if).not.toBe(NOTIFY_IF);
+	});
+
+	it("mutation-proof: dropping the event/ref scope reds the issue-writer contract", () => {
+		for (const step of [cleanSignalNotifyStep, notifyStep]) {
+			expect(step.if).toBe(NOTIFY_IF);
+			expect(step.if).not.toBe("always()");
+		}
 	});
 });
 
