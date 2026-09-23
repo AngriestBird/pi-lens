@@ -215,9 +215,7 @@ function executableStatusCells(testSource: string): Set<number> {
 			),
 		];
 		if (arrays.length === 0) continue;
-		const window = lines
-			.slice(Math.max(0, index - 3), index + 4)
-			.join(" ");
+		const window = lines.slice(Math.max(0, index - 3), index + 4).join(" ");
 		if (!/\bstatus(?:es)?\b/i.test(window)) continue;
 		for (const array of arrays)
 			for (const value of array[1].split(",")) cells.add(Number(value.trim()));
@@ -347,7 +345,9 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 				failures.push(`${name}: stale MATRIX row`);
 		for (const key of Object.keys(UNWITNESSED))
 			if (!pinnedKeys.has(key))
-				failures.push(`${key}: stale UNWITNESSED admission; no such pinned code`);
+				failures.push(
+					`${key}: stale UNWITNESSED admission; no such pinned code`,
+				);
 		expect(failures).toEqual([]);
 	});
 });
