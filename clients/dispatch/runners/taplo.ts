@@ -67,7 +67,11 @@ const LOCATION_PATTERN = /^\s*┌─\s+(.+?):(\d+):(\d+)$/;
  * (#1937 round 2). The exit-code table in the runner is the primary guard;
  * this is the structural one, and each covers a case the other does not.
  */
-export function parseTaploOutput(raw: string, filePath: string, cwd: string): Diagnostic[] {
+export function parseTaploOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const absTarget = path.resolve(cwd, filePath);
 	const lines = stripAnsi(raw ?? "").split(/\r?\n/);
@@ -97,9 +101,10 @@ export function parseTaploOutput(raw: string, filePath: string, cwd: string): Di
 			if (!lines[j].includes(LOCATION_LEAD)) continue;
 			const location = LOCATION_PATTERN.exec(lines[j].trimEnd());
 			if (!location) continue;
-			if (!pathsEqual(path.resolve(cwd, location[1].trim()), absTarget)) continue;
-			line = Number.parseInt(location[2], 10) || 1;
-			column = Number.parseInt(location[3], 10) || 1;
+			if (!pathsEqual(path.resolve(cwd, location[1]!.trim()), absTarget))
+				continue;
+			line = Number.parseInt(location[2]!, 10) || 1;
+			column = Number.parseInt(location[3]!, 10) || 1;
 			break;
 		}
 		if (line === null) continue;

@@ -28,7 +28,11 @@ const HTMLHINT_RULES = {
 	"id-unique": true,
 };
 
-function parseHtmlhintOutput(raw: string, filePath: string, cwd: string): Diagnostic[] {
+function parseHtmlhintOutput(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const absTarget = path.resolve(cwd, filePath);
 	// unix format: "file:line:col: message [severity/rule]"
@@ -37,13 +41,13 @@ function parseHtmlhintOutput(raw: string, filePath: string, cwd: string): Diagno
 	for (const line of raw.split("\n")) {
 		const match = line.match(lineRe);
 		if (!match) continue;
-		if (!pathsEqual(path.resolve(cwd, match[1]), absTarget)) continue;
+		if (!pathsEqual(path.resolve(cwd, match[1]!), absTarget)) continue;
 
-		const lineNum = parseInt(match[2], 10);
-		const col = parseInt(match[3], 10);
-		const message = match[4].trim();
-		const level = match[5];
-		const rule = match[6].trim();
+		const lineNum = parseInt(match[2]!, 10);
+		const col = parseInt(match[3]!, 10);
+		const message = match[4]!.trim();
+		const level = match[5]!;
+		const rule = match[6]!.trim();
 		const severity = level === "error" ? "error" : "warning";
 
 		diagnostics.push({

@@ -598,13 +598,15 @@ const MEMBERS: Member[] = [
 		output: (reported) => ({
 			status: 1,
 			stdout: JSON.stringify({
-				diagnostics: [{
-					message: MARKER,
-					code: "eslint(no-debugger)",
-					severity: "error",
-					filename: reported,
-					labels: [{ span: { line: 4, column: 5 } }],
-				}],
+				diagnostics: [
+					{
+						message: MARKER,
+						code: "eslint(no-debugger)",
+						severity: "error",
+						filename: reported,
+						labels: [{ span: { line: 4, column: 5 } }],
+					},
+				],
 				number_of_files: 1,
 				number_of_rules: 1,
 				threads_count: 1,
@@ -682,9 +684,12 @@ describe("runner reported-path attribution (#3295)", () => {
 		["yamllint", yamllint],
 		["htmlhint", htmlhint],
 		["oxlint", oxlint],
-	] as const)("%s rejects a sibling reported location", async (_name, member) => {
-		expectDetached(await dispatch(member, echoesSibling));
-	});
+	] as const)(
+		"%s rejects a sibling reported location",
+		async (_name, member) => {
+			expectDetached(await dispatch(member, echoesSibling));
+		},
+	);
 });
 
 /** `cue` prefixes a cwd-relative position with `./` (v0.11.0 errors.go:590-596). */
@@ -960,5 +965,82 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		const observed = await dispatch(gleamCheck, caseVariantOfArgv);
 		if (HOST_FOLDS_PATH_CASE) expectGleamAttached(observed, gleamCheck);
 		else expectGleamDetached(observed);
+	});
+});
+
+// Round-2 JSON members stay in their own tail block so the concurrent gleam
+// extraction work in this file has a stable merge boundary. These cells enter
+// through dispatchForFile and prevent the JSON parser from stamping a sibling's
+// finding onto the dispatched file (#3304 M3304-F7).
+describe("JSON runner reported-path attribution (#3304)", () => {
+	const shellcheckMember: Member = {
+		name: "shellcheck",
+		runnerId: "shellcheck",
+		modulePath: "../../../../clients/dispatch/runners/shellcheck.js",
+		file: "src/app.sh",
+		sibling: "src/other.sh",
+		fileContent: "echo ok\n",
+		attached: { status: "succeeded", semantic: "warning" },
+		output: (reported) => ({
+			status: 1,
+			stdout: JSON.stringify([
+				{
+					file: reported,
+					line: 4,
+					column: 5,
+					level: "warning",
+					code: 2154,
+					message: MARKER,
+				},
+			]),
+		}),
+	};
+
+	const trivyMember: Member = {
+		name: "trivy-config",
+		runnerId: "trivy-config",
+		modulePath: "../../../../clients/dispatch/runners/trivy-config.js",
+		file: "src/main.tf",
+		sibling: "src/other.tf",
+		fileContent: 'resource "x" "y" {}\n',
+		attached: { status: "succeeded", semantic: "warning" },
+		prepare(root) {
+			fs.writeFileSync(
+				path.join(root, ".pi-lens.json"),
+				JSON.stringify({ trivy: { enabled: true } }),
+			);
+		},
+		output: (reported) => ({
+			status: 0,
+			stdout: JSON.stringify({
+				Results: [
+					{
+						Target: reported,
+						Misconfigurations: [
+							{
+								ID: "TEST001",
+								Title: MARKER,
+								Severity: "HIGH",
+								CauseMetadata: { StartLine: 4 },
+							},
+						],
+					},
+				],
+			}),
+		}),
+	};
+
+	it.each([
+		["shellcheck", shellcheckMember],
+		["trivy-config", trivyMember],
+	] as const)("%s keeps its own JSON path", async (_name, member) => {
+		expectAttached(await dispatch(member, cwdRelative(member)), member);
+	});
+
+	it.each([
+		["shellcheck", shellcheckMember],
+		["trivy-config", trivyMember],
+	] as const)("%s rejects a sibling JSON path", async (_name, member) => {
+		expectDetached(await dispatch(member, echoesSibling));
 	});
 });

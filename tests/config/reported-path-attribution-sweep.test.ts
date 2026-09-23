@@ -142,16 +142,32 @@ function stripForScan(source: string): string {
 /** The no-predicate direction of this census (#3295). */
 const LOCATION_CALL = /\b(?:match|exec)\s*\(/g;
 const LOCATION_SHAPE = /:\(\\d\+\):\(\\d\+\)/;
+const JSON_PARSE_CALL = /\bJSON\.parse\s*\(/;
+/**
+ * JSON path fields currently covered by this lexical census. The two live
+ * blanket-stamp shapes are `item.file` (shellcheck) and `resultEntry.Target`
+ * (trivy-config); generic `filename`, `path`, and nested `location.file`
+ * parsers are intentionally outside this detector until their output contract
+ * is separately classified. The runner sweep still covers those shapes when
+ * they use a local identity comparison.
+ */
+const JSON_PATH_FIELD = /\b(?:item\.file|resultEntry\.Target)\b/;
+const DISPATCH_PATH_STAMP = /\bfilePath\s*,/;
 
 export function countLocationParsersWithoutPathsEqual(source: string): number {
 	const stripped = stripForScan(source);
 	const hasLocationCapture = codeMatches(source, LOCATION_CALL).some((match) =>
-		LOCATION_SHAPE.test(source.slice(match.index ?? 0, (match.index ?? 0) + 400)),
+		LOCATION_SHAPE.test(
+			source.slice(match.index ?? 0, (match.index ?? 0) + 400),
+		),
 	);
-	return (
-		hasLocationCapture &&
+	const hasJsonPath =
+		JSON_PARSE_CALL.test(stripped) &&
+		JSON_PATH_FIELD.test(stripped) &&
+		DISPATCH_PATH_STAMP.test(stripped) &&
+		/\bdiagnostic\w*\b/i.test(stripped);
+	return (hasLocationCapture || hasJsonPath) &&
 		!/\bpathsEqual\s*\(/.test(stripped)
-	)
 		? 1
 		: 0;
 }
@@ -474,30 +490,43 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toBe(0);
 		expect(
 			countLocalPathIdentityCompares(
-			'const doc = "path.resolve(reported) !== absTarget";',
+				'const doc = "path.resolve(reported) !== absTarget";',
 			),
 			"a string copy of the needle must never create a finding",
 		).toBe(0);
 		expect(
 			countLocationParsersWithoutPathsEqual(
-				readFileSync(
-					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/no-predicate.ts"),
-					"utf8",
-				),
+				"const match = raw.match(/^(.*?):(\\d+):(\\d+)/);",
 			),
+			"bare location parser remains a census member",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"// pathsEqual\nconst match = raw.match(/^(.*?):(\\d+):(\\d+)/);",
+			),
+			"a comment must not self-excuse a parser",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				'const note = "pathsEqual";\nconst match = raw.match(/^(.*?):(\\d+):(\\d+)/);',
+			),
+			"a string literal must not self-excuse a parser",
+		).toBe(1);
+		expect(
+			countLocationParsersWithoutPathsEqual(
+				"const parsed = JSON.parse(raw) as Array<{ file?: string }>;\n" +
+					"const diagnostics = parsed.map((item) => ({ filePath, message: item.file }));\n" +
+					"return diagnostics;",
+			),
+			"JSON file fields are part of the governed population",
 		).toBe(1);
 		expect(
 			countLocationParsersWithoutPathsEqual(
 				readFileSync(
-					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/no-predicate.ts"),
-					"utf8",
-				),
-			),
-		).toBe(1);
-		expect(
-			countLocationParsersWithoutPathsEqual(
-				readFileSync(
-					path.resolve(REPO_ROOT, "tests/fixtures/reported-path-attribution/sanctioned.ts"),
+					path.resolve(
+						REPO_ROOT,
+						"tests/fixtures/reported-path-attribution/sanctioned.ts",
+					),
 					"utf8",
 				),
 			),

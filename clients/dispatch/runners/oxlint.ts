@@ -444,7 +444,11 @@ function extractOxlintRule(code: string | undefined): string {
 	return code.slice(open + 1, close);
 }
 
-function parseOxlintJson(raw: string, filePath: string, cwd: string): Diagnostic[] {
+function parseOxlintJson(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const trimmed = raw.trim();
 	if (!trimmed.startsWith("{")) return [];
 	let parsed: OxlintJsonReport;
@@ -457,7 +461,7 @@ function parseOxlintJson(raw: string, filePath: string, cwd: string): Diagnostic
 	const diagnostics: Diagnostic[] = [];
 	const absTarget = path.resolve(cwd, filePath);
 	for (const d of parsed.diagnostics) {
-		if (!d.filename || !pathsEqual(path.resolve(cwd, d.filename), absTarget)) {
+		if (!d.filename || !pathsEqual(path.resolve(cwd, d.filename!), absTarget)) {
 			continue;
 		}
 		const rule = extractOxlintRule(d.code);
@@ -486,7 +490,11 @@ function parseOxlintJson(raw: string, filePath: string, cwd: string): Diagnostic
 	return diagnostics;
 }
 
-function parseOxlintUnix(raw: string, filePath: string, cwd: string): Diagnostic[] {
+function parseOxlintUnix(
+	raw: string,
+	filePath: string,
+	cwd: string,
+): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const absTarget = path.resolve(cwd, filePath);
 	for (const line of raw.split("\n")) {
@@ -494,6 +502,7 @@ function parseOxlintUnix(raw: string, filePath: string, cwd: string): Diagnostic
 		const match = line.match(/^(.+):(\d+):(\d+):\s*(.+?)\s*\(([^)]+)\)$/);
 		if (match) {
 			const [, reportedPath, lineStr, _col, message, rule] = match;
+			if (!reportedPath || !lineStr || !message || !rule) continue;
 			if (!pathsEqual(path.resolve(cwd, reportedPath), absTarget)) continue;
 			diagnostics.push({
 				id: `oxlint-${rule}-${lineStr}`,
