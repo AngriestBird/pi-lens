@@ -31,7 +31,8 @@ config JSON) and how they interact, see [Settings](settings.md).
 ### `PI_LENS_CONFIG_PATH`
 
 Override the path of the global config file. **Default:** the resolution order
-below. When set, the value is resolved to an absolute path and used verbatim.
+below. When set, the value is resolved to an absolute path and used verbatim;
+it wins over every other location. See the [winning-location table](configuration.md#global-config-location).
 
 **When to set it:** keeping the config under version control or a dotfiles
 manager at a non-default location, or pointing CI at a fixture config.
@@ -52,13 +53,12 @@ The full resolution order for the global config file, highest first:
    and step 2 missed.
 4. `~/.pi-lens/config.json` — the canonical default (unchanged).
 
-Settings editors follow the same resolution with one exception: when NEITHER
-file exists, they create in the agent-dir location ("edit the one that
-exists; prefer the new one if neither does"). `effective_config` shows which
-file supplies the global tier. A path that cannot even be stated (a file
-where a directory belongs, permission errors) is treated as absent, and a
-degraded config read is reported through the ordinary config-read-failure
-notice.
+pi-lens does not write the global config; there is no settings writer in this
+repository. Create or edit the selected file by hand. `effective_config` shows
+which file supplies the global tier. If an existence probe errors (a file where
+a directory belongs, permission errors, or a symlink loop), the errored tier is
+retained and the read failure is reported under `PILENS_CFG_0001`; it is not
+treated as absent. See the [XDG-like recipe](configuration.md#global-config-location).
 
 ## Data directory
 

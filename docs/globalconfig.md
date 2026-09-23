@@ -1,6 +1,11 @@
 # Configuration
 
-pi-lens reads optional user preferences from `~/.pi-lens/config.json` (`%USERPROFILE%\\.pi-lens\\config.json` on Windows). An unrecognized top-level key is logged once (to surface a typo like `lps` for `lsp`) and then ignored; `$schema` is always allowed for editor JSON-schema association. Missing or invalid config falls back to defaults.
+pi-lens reads optional user preferences from the global file selected by the
+[winning-location table](configuration.md#global-config-location) (`~/.pi-lens/config.json`
+by default; `%USERPROFILE%\\.pi-lens\\config.json` on Windows). An unrecognized
+top-level key is logged once (to surface a typo like `lps` for `lsp`) and then
+ignored; `$schema` is always allowed for editor JSON-schema association. Missing
+or invalid config falls back to defaults.
 
 ## Every toggle, both ways
 
