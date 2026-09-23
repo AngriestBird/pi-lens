@@ -23,6 +23,7 @@ import {
 	classifyTmpHygieneOwner,
 	formatTmpHygieneOwnerSummary,
 	realTmpHygieneProcessProbe,
+	touchTmpHygieneOwnerMarker,
 	TMP_HYGIENE_OWNER_STALE_MS,
 	type TmpHygieneProcessProbe,
 } from "../support/vitest-setup.js";
@@ -39,6 +40,17 @@ const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../..",
 );
+
+// #3186 round 3: this worker's own owner marker as the setup wrote it, read at
+// module load — before a single `beforeEach` of this file has run. The last
+// case of the liveness suite compares the live mtime against it to prove the
+// heartbeat hooks are actually registered, not merely defined.
+const OWN_MARKER_PATH = path.join(
+	process.env.PI_LENS_HOME as string,
+	"tmp-hygiene-owners",
+	`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
+);
+const OWN_MARKER_MTIME_AT_LOAD = fs.statSync(OWN_MARKER_PATH).mtimeMs;
 
 // Tmp-fixture hygiene governance (#2912). The setup hook in
 // tests/support/vitest-setup.ts keeps the REAL TMPDIR: it never repoints
@@ -824,22 +836,48 @@ describe("tmp-fixture-hygiene", () => {
 			// the test lifecycle, so a sibling owner reading its REAL mtime right
 			// now classifies it live. No timer is involved, and the assertion is on
 			// the verdict rather than on an elapsed-time delta.
-			const own = path.join(
-				ownerDir(),
-				`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
-			);
 			expect(
 				classifyTmpHygieneOwner({
 					runMatches: true,
 					// pid swapped so this reads as a SIBLING's marker, not "self".
 					marker: { pid: 1, file: OWNER },
-					markerMtimeMs: fs.statSync(own).mtimeMs,
+					markerMtimeMs: fs.statSync(OWN_MARKER_PATH).mtimeMs,
 					nowMs: Date.now(),
 					selfPid: process.pid,
 					probe: noStartTimes,
 					staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
 				}),
 			).toBe("live");
+		});
+
+		it("registers the heartbeat on the test lifecycle, not just defines it", () => {
+			// F6: the hooks in tests/support/vitest-setup.ts are what keep a live
+			// worker's marker fresh. This worker's marker has been beaten by its own
+			// beforeEach/afterEach since this file was loaded, so its mtime has
+			// moved off the value the setup's initial write left. Deleting the
+			// `beforeEach`/`afterEach` registration reds this case.
+			expect(fs.statSync(OWN_MARKER_PATH).mtimeMs).not.toBe(
+				OWN_MARKER_MTIME_AT_LOAD,
+			);
+		});
+		it("beats a stale marker back to live", () => {
+			// F3 producer side, mutation-provable: age this worker's own marker past
+			// the ceiling, force one beat, and the same facts flip from orphaned to
+			// live. Removing the write inside the beat reds this.
+			const aged = (Date.now() - TMP_HYGIENE_OWNER_STALE_MS - 60_000) / 1000;
+			fs.utimesSync(OWN_MARKER_PATH, aged, aged);
+			const facts = (): Parameters<typeof classifyTmpHygieneOwner>[0] => ({
+				runMatches: true,
+				marker: { pid: 1, file: OWNER },
+				markerMtimeMs: fs.statSync(OWN_MARKER_PATH).mtimeMs,
+				nowMs: Date.now(),
+				selfPid: process.pid,
+				probe: noStartTimes,
+				staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
+			});
+			expect(classifyTmpHygieneOwner(facts())).toBe("orphaned");
+			touchTmpHygieneOwnerMarker(0n);
+			expect(classifyTmpHygieneOwner(facts())).toBe("live");
 		});
 	});
 });

@@ -130,10 +130,12 @@ const TMP_HYGIENE_OWNER_HEARTBEAT_MS = 250;
 const TMP_HYGIENE_OWNER_HEARTBEAT_NS =
 	BigInt(TMP_HYGIENE_OWNER_HEARTBEAT_MS) * 1_000_000n;
 let tmpHygieneLastHeartbeatNs = process.hrtime.bigint();
-function touchTmpHygieneOwnerMarker(): void {
+export function touchTmpHygieneOwnerMarker(
+	minIntervalNs = TMP_HYGIENE_OWNER_HEARTBEAT_NS,
+): void {
 	if (tmpHygieneOwnerMarkerDrained) return;
 	const now = process.hrtime.bigint();
-	if (now - tmpHygieneLastHeartbeatNs < TMP_HYGIENE_OWNER_HEARTBEAT_NS) return;
+	if (now - tmpHygieneLastHeartbeatNs < minIntervalNs) return;
 	tmpHygieneLastHeartbeatNs = now;
 	try {
 		fs.writeFileSync(tmpHygieneOwnerMarker, tmpHygieneOwnerMarkerBody);
@@ -142,8 +144,8 @@ function touchTmpHygieneOwnerMarker(): void {
 		// ages this marker toward the orphan bound, which fails safe.
 	}
 }
-beforeEach(touchTmpHygieneOwnerMarker);
-afterEach(touchTmpHygieneOwnerMarker);
+beforeEach(() => touchTmpHygieneOwnerMarker());
+afterEach(() => touchTmpHygieneOwnerMarker());
 
 /** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
  *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
