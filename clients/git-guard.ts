@@ -888,13 +888,66 @@ export function retireInlineBlockerAndResyncGuard(args: {
 	return true;
 }
 
+/**
+ * Bring the commit-gate LATCH back in line with the turn-end disposition
+ * policy (#3248), at the point where the post-policy survivor set per file is
+ * final.
+ *
+ * The defect this exists for: the agent marks every blocker on a file
+ * `false-positive`, the turn-end composer renders no `Unresolved from this
+ * turn` section and no `🔴 STOP` — and `lens-guard` still blocks the commit,
+ * because `evaluateGitGuard` reads the LATCH first and the latch counted the
+ * still-present map entry. The blocker record stays in the map on purpose: the
+ * policy is content-bound and re-derived every turn end, so retiring the entry
+ * would be silencing rather than filtering (AGENTS.md shape 10). It carries
+ * the verdict instead, and the two gate derivations honor it — this latch, and
+ * `syncGitGuardRecord`'s persisted `blockerContent` below.
+ *
+ * The persisted record needs no third writer here. The composer that calls
+ * this rewrites it later in the SAME turn end from the same survivor set —
+ * `writeGitGuardRecord` with `hasBlockers` derived from the surviving blocker
+ * sections (`clients/runtime-turn.ts:4287`, and the dedupe path at `:4231`),
+ * or `clearCache("turn-end-findings")` when nothing survives
+ * (`clients/runtime-turn.ts:4379`) — and that clear is itself gated on the
+ * latch this call just recomputed. Adding a second durable writer between them
+ * would only race the one that already owns the record.
+ *
+ * Colocated with the gate rather than inlined at the wiring site, for the same
+ * reason `retireInlineBlockerAndResyncGuard` is: the claim is testable without
+ * booting the extension.
+ */
+export function resyncGitGuardAfterInlinePolicy(args: {
+	runtime: RuntimeCoordinator;
+	/** Files whose EVERY inline blocker the turn-end policy suppressed. */
+	suppressedFilePaths: readonly string[];
+}): void {
+	const changed = args.runtime.applyInlineBlockerPolicyVerdicts(
+		args.suppressedFilePaths,
+	);
+	// Nothing left the gate's view of the map and nothing rejoined it. This is
+	// what keeps the recompute off every ordinary turn end: `updateGitGuardStatus`
+	// re-derives the latch from the map, and a turn that changed no verdict has
+	// no business re-deriving anything.
+	if (args.suppressedFilePaths.length === 0 && changed === 0) return;
+	// Exactly as the retire path re-derives it: `false` is this caller's own
+	// contribution, never a blanket clear — a sibling file's surviving blocker
+	// is still in the map and still sets the latch.
+	args.runtime.updateGitGuardStatus(false, "");
+}
+
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
 	editedFilePath?: string,
 ): void {
-	const entries = runtime.getInlineBlockersSnapshot?.() ?? [];
+	// #3248: a record the turn-end policy fully suppressed is not a blocker the
+	// commit gate may persist — the agent was shown nothing for it. The entry
+	// stays in the map so the next turn re-derives the verdict from current
+	// bytes; it just stops speaking for the gate.
+	const entries = (runtime.getInlineBlockersSnapshot?.() ?? []).filter(
+		(entry) => !entry.policySuppressed,
+	);
 	const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
 	const existing = cacheRecord(cacheManager, cwd);
 	if (
@@ -1095,6 +1148,51 @@ export function clearGitGuardTestFailure(
 	});
 }
 
+/**
+ * The first suppression verdict in the blocker map that no longer describes the
+ * file it was computed against, if any (#3248 round 2, GG-3283-01).
+ *
+ * `policySuppressed` is a statement about BYTES: the turn-end policy read the
+ * file's current content, re-derived the record's blockers through the
+ * content-bound disposition anchors, and found every one of them suppressed. It
+ * is therefore only true while those bytes are still there. Everything that
+ * changes a file THROUGH pi-lens re-establishes the verdict on its own — a
+ * dispatch replaces the record wholesale, and the turn-end freshness sweep
+ * demotes a self-drifted record before the policy loop can suppress it, which
+ * clears the verdict. Bytes that move OUTSIDE dispatch (an external formatter, a
+ * `git checkout`, an editor write) trigger neither, and the commit gate can be
+ * reached with no turn end in between at all — so the gate, the one reader that
+ * can let a verdict OPEN a commit, confirms it here instead of trusting the
+ * latch memo.
+ *
+ * Unverifiable is not clean: a record whose dispatch could not fingerprint the
+ * file (`inlineBlockerFileContent` absent, `clients/pipeline.ts:1632`) carries
+ * nothing to confirm, so it fails CLOSED — the same rule
+ * `retireInlineBlockerOnConfirmedClean` applies to unknown provenance.
+ *
+ * Cost: nothing at all unless a verdict is live (the common case), then one
+ * read per suppressed record — on commit/push attempts, the path that already
+ * fingerprints every affected file below. A size/mtime fast path was written
+ * first and deleted: `fileFingerprint` decides the same question on its own, so
+ * the tiers were unmutatable branches, not guards. `fileFingerprint` also
+ * returns `"missing"`/`"unreadable:<code>"` rather than throwing, and neither
+ * can equal a recorded hash, so an unreadable file is expired too.
+ */
+function firstExpiredSuppressionVerdict(
+	runtime: RuntimeCoordinator,
+): { filePath: string; tier: string } | undefined {
+	for (const entry of runtime.getInlineBlockersSnapshot?.() ?? []) {
+		if (!entry.policySuppressed) continue;
+		if (entry.recordedHash === undefined) {
+			return { filePath: entry.filePath, tier: "no_baseline" };
+		}
+		if (fileFingerprint(entry.filePath) !== entry.recordedHash) {
+			return { filePath: entry.filePath, tier: "content" };
+		}
+	}
+	return undefined;
+}
+
 export function evaluateGitGuard(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
@@ -1119,6 +1217,17 @@ export function evaluateGitGuard(
 			block: true,
 			reason: `🔴 COMMIT BLOCKED (--lens-guard): unresolved blockers must be fixed before commit/push.${detail}\n${inspectLine}`,
 		};
+	}
+	// #3248 round 2 (GG-3283-01): the latch above is a MEMO of the last policy
+	// pass, and a pass can only speak for the bytes it read. A verdict whose file
+	// has moved since is no answer at all, so it must not be the reason this
+	// commit is allowed.
+	const expired = firstExpiredSuppressionVerdict(runtime);
+	if (expired) {
+		return unknown(cwd, "inline_policy_stale", {
+			file: expired.filePath,
+			tier: expired.tier,
+		});
 	}
 	if (runtime.gitGuardCacheUnknownReason) {
 		return unknown(cwd, runtime.gitGuardCacheUnknownReason);

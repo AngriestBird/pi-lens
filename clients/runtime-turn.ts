@@ -20,6 +20,7 @@ import type { CascadeSkipReason } from "./cascade-types.js";
 import {
 	clearGitGuardTestFailure,
 	mergeGitGuardTestFailure,
+	resyncGitGuardAfterInlinePolicy,
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
 } from "./git-guard.js";
@@ -979,6 +980,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const pendingDependencyDriftDeliveries: Array<() => void> = [];
 	/** #3246: one bounded record per TURN for the policy pass, never per finding. */
 	const inlinePolicyEntries: InlineBlockerPolicyTallyEntry[] = [];
+	/**
+	 * #3248: files whose EVERY blocker this pass suppressed — the post-policy
+	 * survivor set, emptied per file. The commit gate is recomputed from it
+	 * below, once, after the loop.
+	 */
+	const policySuppressedPaths: string[] = [];
 	const inlinePolicyStart = Date.now();
 	for (const record of unresolvedBlockers) {
 		const { filePath: bPath, summary, stale, staleReason } = record;
@@ -1065,6 +1072,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// surface: silence after a mark is the mark working, not a clean
 				// verdict, so the count rides the bounded per-turn record below
 				// instead of announcing the suppression on every later turn.
+				policySuppressedPaths.push(bPath);
 				continue;
 			}
 			// #1616 suppressed-bucket rule: a delivery that still has something to
@@ -1079,6 +1087,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 		}
 	}
+	// #3248: the post-policy survivor set per file is FINAL here. The commit
+	// gate reads a latch (`gitGuardHasBlockers`) before it ever reads the
+	// persisted record, and the policy wrote neither — so a file whose every
+	// blocker was just suppressed kept blocking `git commit` while the banner
+	// above said nothing about it. Recompute the latch from this set; the
+	// persisted record is rewritten or cleared further down by the writer that
+	// already owns it (`:4287` / `:4379`), from the same survivor set, and that
+	// clear is gated on the latch recomputed here.
+	const guardLatchBefore = runtime.gitGuardHasBlockers;
+	resyncGitGuardAfterInlinePolicy({
+		runtime,
+		suppressedFilePaths: policySuppressedPaths,
+	});
 	if (inlinePolicyEntries.length > 0) {
 		logLatency({
 			type: "phase",
@@ -1086,7 +1107,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			filePath: cwd,
 			phase: "inline_blocker_policy",
 			durationMs: Date.now() - inlinePolicyStart,
-			metadata: summarizeInlineBlockerPolicy(inlinePolicyEntries),
+			metadata: {
+				...summarizeInlineBlockerPolicy(inlinePolicyEntries),
+				// #3248: one row per TURN for the gate outcome, never per finding
+				// — the flip is the event a reader needs to explain why a commit
+				// that was blocked is now allowed.
+				guardFilesSuppressed: policySuppressedPaths.length,
+				guardLatchCleared: guardLatchBefore && !runtime.gitGuardHasBlockers,
+			},
 		});
 	}
 

@@ -84,6 +84,7 @@ vi.mock("../../../clients/lsp/index.js", async (importOriginal) => ({
 }));
 
 import { markDisposition } from "../../../clients/diagnostic-dispositions.js";
+import { evaluateGitGuard } from "../../../clients/git-guard.js";
 import type { Diagnostic } from "../../../clients/dispatch/types.js";
 import { formatDiagnostics } from "../../../clients/dispatch/utils/format-utils.js";
 import {
@@ -215,5 +216,66 @@ describe("MCP turn-end adapter honors inline-blocker dispositions (#3246)", () =
 
 		expect(outcome.filesRegistered).toBe(1);
 		expect(outcome.turnEnd).toBeUndefined();
+	});
+
+	it("clears the commit-gate latch on the MCP path too, from the same turn end (#3248)", async () => {
+		// Host parity: the latch and the commit gate live under `clients/`, so an
+		// MCP session that marks every blocker must be able to commit exactly as
+		// a pi session can. The gate is checked through the same
+		// `evaluateGitGuard` the `tool_call` hook calls, on the session context's
+		// OWN runtime and cache manager — the ones `runTurnEnd` just drove.
+		const filePath = path.join(tmpDir, "mcp-gate.ts");
+		fs.writeFileSync(filePath, "alpha();\n");
+
+		const ctx = await getMcpSessionContext();
+		const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+		const bytes = fs.readFileSync(filePath);
+		ctx.runtime.recordInlineBlockers(
+			filePath,
+			formatDiagnostics([diagnostic], "blocking").trim(),
+			ctx.runtime.nextWriteIndex(),
+			["ast-grep"],
+			[1],
+			{
+				size: bytes.byteLength,
+				sha256: createHash("sha256").update(bytes).digest("hex"),
+			},
+			[diagnostic],
+		);
+		ctx.runtime.updateGitGuardStatus(
+			true,
+			"🔴 STOP — 1 issue(s) must be fixed",
+		);
+		expect(evaluateGitGuard(ctx.runtime, ctx.cacheManager, tmpDir).block).toBe(
+			true,
+		);
+
+		markDisposition(
+			tmpDir,
+			{
+				cwd: tmpDir,
+				filePath,
+				tool: "ast-grep",
+				rule: "no-eval",
+				message: "alpha is unsafe",
+				line: 1,
+				content: fs.readFileSync(filePath, "utf8"),
+			},
+			"false-positive",
+		);
+
+		await runTurnEnd(tmpDir, [filePath]);
+
+		expect(ctx.runtime.gitGuardHasBlockers).toBe(false);
+		expect(evaluateGitGuard(ctx.runtime, ctx.cacheManager, tmpDir)).toEqual({
+			block: false,
+		});
+
+		// GG-3283-01 on this host too: bytes that move outside dispatch make the
+		// verdict stale, and the gate must not keep allowing on it.
+		fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+		expect(
+			evaluateGitGuard(ctx.runtime, ctx.cacheManager, tmpDir),
+		).toMatchObject({ block: true, unknown: true });
 	});
 });
