@@ -101,11 +101,11 @@ export type TurnEndLaneGates<S extends TurnEndLaneSources> = {
  * "this lane did not run".
  */
 export interface TurnEndLaneParts {
-	/** 🔴 sections: findings that must be addressed before continuing. */
+	/** Blocker sections: findings that must be addressed before continuing. */
 	blockerParts?: readonly string[];
-	/** 🔑 demoted-finding sections (#1622 review M2's own tier). */
+	/** Demoted-finding sections (#1622 review M2's own tier). */
 	staleSecretParts?: readonly string[];
-	/** ℹ️ sections: informational this turn. */
+	/** Advisory sections: informational this turn. */
 	advisoryParts?: readonly string[];
 	/**
 	 * Store name → findings this lane dropped because of a stored disposition.

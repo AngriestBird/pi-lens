@@ -63,12 +63,8 @@ import {
 	writeProjectDiagnosticsDeltaReport,
 } from "./project-diagnostics/cache.js";
 import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
-import { gitleaksFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/gitleaks.js";
 import { govulncheckFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/govulncheck.js";
-import {
-	trivyFindingToProjectDiagnostic,
-	trivySecretFindingToProjectDiagnostic,
-} from "./project-diagnostics/runner-adapters/trivy.js";
+import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { logLatency } from "./latency-logger.js";

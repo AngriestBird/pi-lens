@@ -11,28 +11,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { stripCommentsAndStrings } from "../support/session-state-scan.js";
+import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const LANE_DIR = path.join(REPO_ROOT, "clients/turn-end");
 
 function laneSources(): Array<{ file: string; stripped: string }> {
-	const out: Array<{ file: string; stripped: string }> = [];
-	const walk = (dir: string): void => {
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				walk(full);
-				continue;
-			}
-			if (!entry.name.endsWith(".ts")) continue;
-			out.push({
-				file: path.relative(REPO_ROOT, full),
-				stripped: stripCommentsAndStrings(fs.readFileSync(full, "utf8")),
-			});
-		}
-	};
-	walk(LANE_DIR);
-	return out;
+	const files = listSourceFiles(LANE_DIR, { skipTests: true });
+	// AGENTS.md shape 10 / the #1718 lesson: an empty sweep must fail rather
+	// than read as clean. The floor is the interface plus one lane module.
+	assertNonEmptyScan("turn-end lane modules", files.length, 2);
+	return files.map((full) => ({
+		file: path.relative(REPO_ROOT, full),
+		stripped: stripCommentsAndStrings(fs.readFileSync(full, "utf8")),
+	}));
 }
 
 /** The lane files, comment-and-string blanked so prose cannot satisfy a rule. */
@@ -44,7 +36,8 @@ const GATE_CALL_RE = /\bgateFindingsByPathFreshness\(/;
 describe("turn-end lane boundaries (#1892)", () => {
 	// The population check: every rule below is vacuous against an empty
 	// directory, so a lane tree that vanished (or moved) reds here first rather
-	// than passing three rules over nothing.
+	// than passing three rules over nothing (`assertNonEmptyScan` above fires
+	// before any of them, at module load).
 	it("finds the lane interface and at least one lane module", () => {
 		const files = LANE_SOURCES.map((s) => s.file);
 		expect(files).toContain("clients/turn-end/lane.ts");

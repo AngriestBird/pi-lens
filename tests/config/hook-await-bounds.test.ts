@@ -1391,6 +1391,24 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"module-compilation cost of exactly this shape.",
 		owner: "#2523 slice 2",
 	},
+	// #1892: the composer awaits the secrets lane's `collect`, which replaced an
+	// inline `await bounded(classifyAndFilterFindings, …)` at this very position.
+	// The bound did not move out of the turn: it moved INTO the lane, where it
+	// is registered as
+	// `call:clients/turn-end/lanes/secrets.ts#blockingGitleaksFindings:…` with
+	// the same `HOOK_WALL_BUDGET_MS.turn_end` and the same signal, threaded
+	// through `TurnEndLaneContext.signal`. Wrapping the composer's await in a
+	// second `bounded()` would double-count the same budget.
+	"clients/runtime-turn.ts#bfc0f48e~360b2af5": {
+		family: "hook-await",
+		site: "turn_end",
+		reason:
+			"The secrets lane's store read plus its gitleaks classification, " +
+			"bounded inside the lane by the registered bounded() call that this " +
+			"await's own predecessor was; no second wrap, or the turn_end budget " +
+			"is spent twice for one pass.",
+		owner: "#1892",
+	},
 	"clients/runtime-turn.ts#dfbc3b71~d09e69a7": {
 		family: "hook-await",
 		site: "turn_end",
@@ -2126,6 +2144,15 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// pin exists to keep visible rather than to bless.
 	"clients/formatters.ts": 115,
 	"clients/gitleaks-client.ts": 4,
+	// #1892: the turn-end secrets LANE, extracted out of `runtime-turn.ts` with
+	// no behaviour change. Its one unbounded await is `collect`'s
+	// `await blockingGitleaksFindings(...)`, whose own inner await IS the
+	// registered `bounded(classifyAndFilterFindings, …)` call below — the outer
+	// await inherits that bound, and there is no second thing to wrap. The
+	// number is the measured count, not a blessing: a NEW await in a lane fails
+	// this pin loudly, which is the point of extracting lanes into their own
+	// files.
+	"clients/turn-end/lanes/secrets.ts": 1,
 	"clients/govulncheck-client.ts": 6,
 	// 192 → 194 (#2722), in two steps, both registered rather than absorbed:
 	//   +1  `verifyNpmPackageEntry` reads the installed package's own
@@ -2363,11 +2390,6 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-result.ts#ensureToolResultClients:2b57f8b9~b4f8a98d":
 		"The tool_result signal is threaded into the fail-open bootstrap demand; " +
 		"the edit budget remains live when a caller has no signal.",
-	"call:clients/runtime-turn.ts#2b57f8b9~67c7ff0d":
-		"`deps.signal` is the live `turn_end` ctx.signal in the pi host; it is " +
-		"optional only for the standalone MCP adapter and unit harnesses. The " +
-		"turn_end wall budget is always live, and timeout falls back to raw findings " +
-		"so security findings remain blockers.",
 	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
 		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
 		"— the turn's registered abort signal, set from the host's `ctx.signal` " +
@@ -2388,6 +2410,15 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"own ambient abort signal before the signal-less outer bound, so aborted " +
 		"work requeues before release (#2939 F6). Its budget is selected from the one hook " +
 		"registry, including the read-only versus edit tool_result split.",
+	"call:clients/turn-end/lanes/secrets.ts#blockingGitleaksFindings:c06d5cf4~67c7ff0d":
+		"#1892 moved this call, unchanged, from `runtime-turn.ts` into the secrets " +
+		"lane (the key it held there was " +
+		"`call:clients/runtime-turn.ts#2b57f8b9~67c7ff0d`). `ctx.signal` is " +
+		"`TurnEndLaneContext.signal`, which the composer fills from `deps.signal` " +
+		"— the live `turn_end` ctx.signal in the pi host, optional only for the " +
+		"standalone MCP adapter and unit harnesses. The turn_end wall budget is " +
+		"always live, and timeout falls back to raw findings so security findings " +
+		"remain blockers.",
 	"call:index.ts#c06d5cf4~b4f8a98d":
 		"The tool_result edit bootstrap receives the live pi ctx.signal and the " +
 		"edit budget; read-only calls use only resident clients.",
