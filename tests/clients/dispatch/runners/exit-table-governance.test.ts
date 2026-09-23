@@ -224,6 +224,79 @@ function statusCarriers(code: string): Set<string> {
 	return carriers;
 }
 
+interface Binding {
+	/** Offset of the declaration keyword. */
+	at: number;
+	/** Offset and text of the initializer. */
+	valueAt: number;
+	value: string;
+	/** The block this declaration is visible in. */
+	scopeStart: number;
+	scopeEnd: number;
+}
+
+/** Every `{ ... }` block in this file as an offset pair. */
+function blockRanges(code: string): [number, number][] {
+	const open: number[] = [];
+	const ranges: [number, number][] = [];
+	for (let index = 0; index < code.length; index++) {
+		if (code[index] === "{") open.push(index);
+		else if (code[index] === "}") {
+			const start = open.pop();
+			if (start !== undefined) ranges.push([start, index]);
+		}
+	}
+	return ranges;
+}
+
+/**
+ * Every `const`/`let`/`var` declaration by bound name, each carrying the block
+ * it is visible in. Round 4 kept only the initializers, so two declarations of
+ * one name merged and an inactive outer array satisfied a use site that its
+ * shadowing inner declaration owns (#3298 verify round 4, MEDIUM-1).
+ */
+function declaredBindings(code: string): Map<string, Binding[]> {
+	const ranges = blockRanges(code);
+	const bindings = new Map<string, Binding[]>();
+	for (const match of code.matchAll(
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*);/dg,
+	)) {
+		const at = match.index;
+		const [valueAt] = match.indices?.[2] ?? [at];
+		let scopeStart = 0;
+		let scopeEnd = code.length;
+		for (const [start, end] of ranges)
+			if (start < at && at < end && start > scopeStart) {
+				scopeStart = start;
+				scopeEnd = end;
+			}
+		const declarations = bindings.get(match[1]) ?? [];
+		declarations.push({ at, valueAt, value: match[2], scopeStart, scopeEnd });
+		bindings.set(match[1], declarations);
+	}
+	return bindings;
+}
+
+/**
+ * The declaration of `name` that DOMINATES the use at `useAt`: visible there
+ * (its block contains the use) and textually nearest before it. Sibling blocks
+ * each resolve to their own declaration, and an inner declaration wins over
+ * the outer one it shadows.
+ */
+function activeBinding(
+	bindings: Map<string, Binding[]>,
+	name: string,
+	useAt: number,
+): Binding | undefined {
+	let active: Binding | undefined;
+	for (const binding of bindings.get(name) ?? []) {
+		if (binding.at >= useAt) continue;
+		if (useAt < binding.scopeStart || useAt > binding.scopeEnd) continue;
+		if (!active || binding.at > active.at) active = binding;
+	}
+	return active;
+}
+
 /** Numeric array literals in `expression`; an index (`codes[1]`) is not one. */
 function numericArrays(expression: string): number[] {
 	const codes: number[] = [];
@@ -234,36 +307,30 @@ function numericArrays(expression: string): number[] {
 	return codes;
 }
 
-/** Every `const`/`let`/`var` initializer in this file, by bound name. */
-function declaredBindings(code: string): Map<string, string[]> {
-	const bindings = new Map<string, string[]>();
-	for (const match of code.matchAll(
-		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*);/g,
-	)) {
-		const initializers = bindings.get(match[1]) ?? [];
-		initializers.push(match[2]);
-		bindings.set(match[1], initializers);
-	}
-	return bindings;
-}
-
 /**
- * Numeric arrays `expression` evaluates to, following the bindings above one
- * identifier at a time so `const statuses = [1, 3]` reached through a
- * `for ... of` still counts. `seen` keeps a cyclic binding from recursing.
+ * Numeric arrays `expression` evaluates to, following each identifier to the
+ * binding active AT THAT IDENTIFIER, so `const statuses = [1, 3]` reached
+ * through a `for ... of` still counts while a shadowed sibling does not.
+ * `seen` keeps a cyclic binding from recursing.
  */
 function resolveArrays(
-	bindings: Map<string, string[]>,
+	bindings: Map<string, Binding[]>,
+	expressionAt: number,
 	expression: string,
-	seen: Set<string>,
+	seen: Set<number>,
 ): number[] {
 	const codes = numericArrays(expression);
 	for (const match of expression.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)) {
-		const name = match[1];
-		if (seen.has(name)) continue;
-		seen.add(name);
-		for (const initializer of bindings.get(name) ?? [])
-			codes.push(...resolveArrays(bindings, initializer, seen));
+		const binding = activeBinding(
+			bindings,
+			match[1],
+			expressionAt + match.index,
+		);
+		if (!binding || seen.has(binding.at)) continue;
+		seen.add(binding.at);
+		codes.push(
+			...resolveArrays(bindings, binding.valueAt, binding.value, seen),
+		);
 	}
 	return codes;
 }
@@ -282,8 +349,13 @@ function executableStatusCells(testSource: string): Set<number> {
 		const open = code.indexOf("(", match.index);
 		const close = matchingCloseIndex(code, open, "(", ")");
 		if (close < 0) continue;
-		const iterable = code.slice(match.index + match[0].length, close);
-		for (const cell of resolveArrays(bindings, iterable, new Set()))
+		const iterableAt = match.index + match[0].length;
+		for (const cell of resolveArrays(
+			bindings,
+			iterableAt,
+			code.slice(iterableAt, close),
+			new Set(),
+		))
 			cells.add(cell);
 	}
 	for (const match of code.matchAll(/\b(?:it|test|describe)\.each\s*\(/g)) {
@@ -302,6 +374,7 @@ function executableStatusCells(testSource: string): Set<number> {
 		if (!bound) continue;
 		for (const cell of resolveArrays(
 			bindings,
+			open + 1,
 			code.slice(open + 1, close),
 			new Set(),
 		))
@@ -383,6 +456,55 @@ describe("documented runner exit-table ratchet (#3292)", () => {
 			}
 		}
 		expect(failures).toEqual([]);
+	});
+
+	// Fixture-level guard for the binding resolver itself (#3298 verify round 4,
+	// MEDIUM-1): the whole-repo assertions below can only show that TODAY's
+	// fixtures resolve, never that a shadowed or not-yet-declared binding is
+	// rejected, because no runner test currently contains one.
+	it("resolves a status binding to the declaration that dominates the use", () => {
+		const shadowed = [
+			"const statuses = [2];",
+			"describe('outer', () => {",
+			"\tit('inner', () => {",
+			"\t\tconst statuses = 'unrelated data';",
+			"\t\tfor (const status of statuses) {",
+			"\t\t\tconst fixture = { status };",
+			"\t\t\tvoid fixture;",
+			"\t\t}",
+			"\t});",
+			"});",
+		].join("\n");
+		expect([...executableStatusCells(shadowed)]).toEqual([]);
+
+		const siblings = [
+			"it('a', () => {",
+			"\tconst statuses = [1, 3];",
+			"\tfor (const status of statuses) {",
+			"\t\tconst fixture = { status };",
+			"\t\tvoid fixture;",
+			"\t}",
+			"});",
+			"it('b', () => {",
+			"\tconst statuses = [4];",
+			"\tfor (const status of statuses) {",
+			"\t\tconst fixture = { status };",
+			"\t\tvoid fixture;",
+			"\t}",
+			"});",
+		].join("\n");
+		expect([...executableStatusCells(siblings)].sort()).toEqual([1, 3, 4]);
+
+		const declaredAfterUse = [
+			"it('a', () => {",
+			"\tfor (const status of statuses) {",
+			"\t\tconst fixture = { status };",
+			"\t\tvoid fixture;",
+			"\t}",
+			"\tconst statuses = [5];",
+			"});",
+		].join("\n");
+		expect([...executableStatusCells(declaredAfterUse)]).toEqual([]);
 	});
 
 	it("witnesses every documented ran code with an executable matrix cell", () => {
