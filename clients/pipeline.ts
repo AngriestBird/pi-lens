@@ -53,6 +53,7 @@ import {
 } from "./dispatch/runners/utils/runner-helpers.js";
 import { findDetektConfig } from "./dispatch/runners/detekt.js";
 import type { Diagnostic, PiAgentAPI } from "./dispatch/types.js";
+import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
 import { detectFileKind, getFileKindLabel } from "./file-kinds.js";
 import {
 	detectFileChangedAfterCommand,
@@ -126,10 +127,6 @@ function lspSyncBudgetMs(): number {
 
 type FileSnapshot = Map<string, { mtimeMs: number; size: number }>;
 
-// Scan one directory's entries into `snapshot`, pushing walkable subdirs onto
-// `stack`. Extracted from the walk loop to keep each function's cognitive
-// complexity low. Excluded/ignored dirs are not descended; ignored/vanished
-// files are skipped.
 // Files stat'd between event-loop yields. The walk stays on the tool_result
 // hot path; yielding every N keeps its longest synchronous stretch well under
 // the <50ms hook-burst budget even at the AUTOFIX_CHANGED_FILE_SCAN_LIMIT cap.
@@ -1755,6 +1752,16 @@ export async function runPipeline(
 				citedPath: (b) => b.filePath || undefined,
 			})
 		: [];
+	// #3190: ONE gate, applied once here, for EVERY surface. The durable record
+	// this function hands `runtime.recordInlineBlockers` (and through it the
+	// turn-end `Unresolved from this turn` re-serve) used to be built from the
+	// UNGATED `dispatchResult.blockerOutput`/`blockers`, so a blocker retracted
+	// from the tool result above was re-delivered at turn end — and the ungated
+	// verdict still latched the commit gate through `updateGitGuardStatus`. It is
+	// exactly `hasBlockers && nothing-survived-the-gate` inverted: the gate
+	// returns `[]` whenever `hasBlockers` is false, so this one expression is the
+	// whole condition.
+	const hasDeliverableBlockers = deliverableBlockers.length > 0;
 	const deliveredOutput =
 		!allowAutonomousWriters && dispatchResult.hasBlockers
 			? dispatchResult.output.slice(dispatchResult.blockerOutput.length)
@@ -1906,30 +1913,46 @@ export async function runPipeline(
 
 	return {
 		output,
-		hasBlockers,
+		// #3190: the verdict every consumer reads — `updateGitGuardStatus`'s commit
+		// latch above all — is what was DELIVERED, not what the dispatch found. The
+		// two disagreed whenever the deleted-path gate retracted every blocker: the
+		// tool result said `✓ clean` while the commit gate stayed latched, its
+		// summary falling back to that very all-clear line. `emitLensAnalysisComplete`
+		// above deliberately keeps the raw dispatch counts — it records what was
+		// observed, not what was served.
+		hasBlockers: hasDeliverableBlockers,
 		cascadePromise,
 		isError: false,
 		fileModified,
 		postWriteStateHash,
 		changedFiles,
-		inlineBlockerSummary: hasBlockers
-			? dispatchResult.blockerOutput.trim() || undefined
+		// #3190: re-rendered from the GATED set with `formatDiagnostics(...,
+		// "blocking")` — the very expression `dispatcher.ts:1409` builds
+		// `blockerOutput` with, over a subset of the very array it rendered. When
+		// the gate drops nothing the two are byte-identical (same renderer, same
+		// array, same display cap), so an unretracted record is unchanged; when it
+		// drops something the stored text can no longer disagree with the tool
+		// result, and `inline-blocker-dispositions.ts`' re-render at turn end still
+		// matches this string exactly.
+		inlineBlockerSummary: hasDeliverableBlockers
+			? formatDiagnostics(deliverableBlockers, "blocking").trim() || undefined
 			: undefined,
 		// #1561 F1: taken from the very diagnostics `blockerOutput` was rendered
 		// from, so the provenance can never disagree with the text it guards. An
 		// untagged diagnostic contributes the literal "unknown", which no verdict
 		// claims coverage for — it pins the entry rather than silently widening
 		// what an LSP check is allowed to clear.
-		inlineBlockerSources: hasBlockers
+		inlineBlockerSources: hasDeliverableBlockers
 			? [
 					...new Set(
-						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
+						deliverableBlockers.map((d) => d.tool?.trim() || "unknown"),
 					),
 				]
 			: undefined,
-		inlineBlockerLines: hasBlockers
-			? dispatchResult.blockers
-					// #1641 review F2: `dispatchResult.blockers` is NOT guaranteed to be
+		inlineBlockerLines: hasDeliverableBlockers
+			? deliverableBlockers
+					// #1641 review F2: the blocker array (#3190: the deliverable subset
+					// of `dispatchResult.blockers`) is NOT guaranteed to be
 					// scoped to THIS file — a chart-wide runner (helm-lint, helm-render)
 					// reports blocking diagnostics against other files in the chart
 					// (e.g. `values.yaml`) alongside `ctx.filePath`. The precedent every
@@ -1988,6 +2011,8 @@ export async function runPipeline(
 		// turn-end policy filter and its re-render can never disagree with the
 		// text they guard — the same provenance argument `inlineBlockerSources`
 		// makes one field up.
-		inlineBlockerDiagnostics: hasBlockers ? dispatchResult.blockers : undefined,
+		inlineBlockerDiagnostics: hasDeliverableBlockers
+			? deliverableBlockers
+			: undefined,
 	};
 }

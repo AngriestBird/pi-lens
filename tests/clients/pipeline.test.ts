@@ -13,6 +13,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BiomeClient } from "../../clients/biome-client.js";
+import type { Diagnostic } from "../../clients/dispatch/types.js";
+import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js";
 import { getFormatService } from "../../clients/format-service.js";
 import { MetricsClient } from "../../clients/metrics-client.js";
 import { resolvePiLensFlag } from "../../clients/lens-config.js";
@@ -1396,7 +1398,16 @@ describe("Pipeline", () => {
 				"templates/deploy.yaml",
 				"a: 1\n",
 			);
-			const otherChartFile = path.join(tmpDir, "values.yaml");
+			// #3190 fixture fidelity: the chart sibling must EXIST on disk. This
+			// case pins the CROSS-FILE line filter, and since #3190 the shared
+			// deleted-path gate retracts a blocker citing a missing file before
+			// the record is built — a never-created fixture would make the case
+			// pass through the gate under test rather than through the filter.
+			const otherChartFile = createTempFile(
+				tmpDir,
+				"values.yaml",
+				`${"replicas: 2\n".repeat(200)}`,
+			);
 			vi.mocked(dispatchLintWithResult).mockResolvedValue({
 				diagnostics: [],
 				blockers: [
@@ -1714,6 +1725,160 @@ describe("Pipeline", () => {
 				expect(result.output).toContain("SURVIVING-BLOCKER-MARKER");
 				expect(result.output).not.toContain("DEAD-PATH-BLOCKER-MARKER");
 			});
+		});
+	});
+
+	// #3190: the DURABLE record the pipeline hands the turn-end surface
+	// (`inlineBlockerSummary` / `Sources` / `Lines` / `Diagnostics`, consumed by
+	// `runtime.recordInlineBlockers`) is built from the SAME `deliverableBlockers`
+	// set the 🔴 STOP block above renders — one gate, applied once here. Before
+	// this, a blocker whose cited file no longer exists was retracted from the
+	// tool result and then re-delivered at turn end, and the ungated
+	// `hasBlockers` still latched the commit gate. The recurrence these cases
+	// prevent is that re-delivery.
+	describe("#3190 inline-blocker record built from the gated set", () => {
+		/** `dispatcher.ts`'s own expression for `blockerOutput` (`:1409`). */
+		function dispatchWith(blockers: Diagnostic[]) {
+			const blockerOutput = formatDiagnostics(blockers, "blocking");
+			return {
+				diagnostics: [...blockers],
+				blockers,
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: blockerOutput,
+				blockerOutput,
+				hasBlockers: blockers.length > 0,
+			};
+		}
+
+		function blocker(
+			filePath: string,
+			line: number,
+			message: string,
+			tool: string,
+		): Diagnostic {
+			return {
+				id: `${tool}:${line}`,
+				message,
+				filePath,
+				line,
+				severity: "error",
+				semantic: "blocking",
+				tool,
+			} as Diagnostic;
+		}
+
+		it("carries no record and no blocker verdict when every blocker cites a deleted path", async () => {
+			const filePath = createTempFile(tmpDir, "live-3190.ts", "const x = 1;");
+			const deletedPath = path.join(tmpDir, "gone-3190.ts");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				dispatchWith([
+					blocker(
+						deletedPath,
+						1,
+						"GHOST-3190-MARKER in removed file",
+						"gitleaks",
+					),
+				]) as never,
+			);
+
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerSummary).toBeUndefined();
+			expect(result.inlineBlockerSources).toBeUndefined();
+			expect(result.inlineBlockerLines).toBeUndefined();
+			expect(result.inlineBlockerDiagnostics).toBeUndefined();
+			// The verdict `runtime.updateGitGuardStatus` latches the commit gate
+			// from (`clients/runtime-tool-result.ts`) must agree with the silence.
+			expect(result.hasBlockers).toBe(false);
+		});
+
+		it("carries only the surviving blocker when some blockers cite a deleted path", async () => {
+			const filePath = createTempFile(
+				tmpDir,
+				"partial-3190.ts",
+				"const x = 1;",
+			);
+			const deletedPath = path.join(tmpDir, "gone-partial-3190.ts");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				dispatchWith([
+					blocker(
+						deletedPath,
+						9,
+						"GHOST-3190-MARKER in removed file",
+						"gitleaks",
+					),
+					blocker(filePath, 1, "SURVIVOR-3190-MARKER unused var", "lsp"),
+				]) as never,
+			);
+
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerSummary).toContain("SURVIVOR-3190-MARKER");
+			expect(result.inlineBlockerSummary).not.toContain("GHOST-3190-MARKER");
+			expect(result.inlineBlockerSummary).toContain("1 issue(s)");
+			expect(result.inlineBlockerSources).toEqual(["lsp"]);
+			expect(result.inlineBlockerLines).toEqual([1]);
+			expect(result.inlineBlockerDiagnostics).toHaveLength(1);
+			expect(result.hasBlockers).toBe(true);
+		});
+
+		it("does not carry a cited line from a retracted blocker on the edited file", async () => {
+			// The one shape where `inlineBlockerLines` differs from the ungated
+			// derivation: the edited file itself is gone (the #3188 bash-write-then-
+			// delete shape), a blocker cites it, and a second blocker cites a live
+			// sibling. The dead line is the only one the cross-file filter would
+			// keep, and the past-EOF gate at turn end would then measure it against
+			// a file that no longer exists.
+			const deletedTarget = path.join(tmpDir, "deleted-target-3190.ts");
+			const liveSibling = createTempFile(
+				tmpDir,
+				"sibling-3190.ts",
+				"const y = 2;\n",
+			);
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				dispatchWith([
+					blocker(deletedTarget, 42, "GHOST-3190-MARKER past the end", "ruff"),
+					blocker(liveSibling, 1, "SURVIVOR-3190-MARKER unused var", "ruff"),
+				]) as never,
+			);
+
+			const result = await runPipeline(
+				createMockContext(deletedTarget),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerLines).toEqual([]);
+			expect(result.inlineBlockerSummary).toContain("SURVIVOR-3190-MARKER");
+			expect(result.inlineBlockerSummary).not.toContain("GHOST-3190-MARKER");
+		});
+
+		it("leaves the record byte-identical to the dispatcher's blockerOutput when nothing is retracted", async () => {
+			const filePath = createTempFile(tmpDir, "intact-3190.ts", "const x = 1;");
+			const dispatch = dispatchWith([
+				blocker(filePath, 1, "SURVIVOR-3190-MARKER unused var", "lsp"),
+				blocker(filePath, 2, "SECOND-3190-MARKER shadowed name", "lsp"),
+			]);
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(dispatch as never);
+
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerSummary).toBe(dispatch.blockerOutput.trim());
+			expect(result.inlineBlockerSources).toEqual(["lsp"]);
+			expect(result.inlineBlockerLines).toEqual([1, 2]);
+			expect(result.inlineBlockerDiagnostics).toHaveLength(2);
+			expect(result.hasBlockers).toBe(true);
 		});
 	});
 });
