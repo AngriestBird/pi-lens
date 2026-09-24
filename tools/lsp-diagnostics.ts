@@ -656,6 +656,12 @@ async function collectDiagnosticsForFile(
 			maxClientWaitMs: waitMs,
 			source: "lsp_diagnostics",
 			clientScope: serverScope,
+			// #3405: the caller asked whether THIS file is clean right now, and the
+			// content above was just read from disk — so it is the file's saved
+			// state. Without the save a save-triggered server answers zero
+			// diagnostics for every file in the query, which this path would report
+			// as clean.
+			saved: true,
 		});
 		timedOut = touched?.inconclusive === true;
 	} catch {

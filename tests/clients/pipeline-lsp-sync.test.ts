@@ -60,6 +60,22 @@ afterEach(() => {
 });
 
 describe("resyncLspFile — bounded pre-dispatch LSP sync", () => {
+	// #3405: this is the ONE touch in the tree that knows pi-lens just wrote the
+	// file, so it is the one that declares a save. Recurrence it prevents: the
+	// client advertised `didSave` for months with no caller emitting one, so a
+	// save-triggered server (Expert recompiles the project on didSave and on
+	// nothing else) published nothing for an edit made through pi-lens.
+	it("declares the post-write touch a save so didSave is sent", async () => {
+		const touch = vi.fn(async () => ({ diags: [] }));
+		mockService(touch);
+		await resyncLspFile("/proj/a.ts", "content", true, false, getFlag, dbg);
+		expect(touch).toHaveBeenCalledWith(
+			"/proj/a.ts",
+			"content",
+			expect.objectContaining({ source: "lsp_sync", saved: true }),
+		);
+	});
+
 	it("abandons a wedged touch after the budget instead of hanging", async () => {
 		// touchFile that never resolves = a server whose didChange write backpressures.
 		// Kit-gated (#1838): the wedge is an explicit gatedPromise, so "the budget

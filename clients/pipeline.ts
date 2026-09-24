@@ -1125,6 +1125,11 @@ export async function resyncLspFile(
 					source: "lsp_sync",
 					clientScope: "primary",
 					maxClientWaitMs: LSP_SPAWN_BUDGET_MS,
+					// #3405: pi-lens just wrote these bytes to disk, so this is the one
+					// touch that is a save. A save-triggered server (Expert recompiles
+					// the project on didSave and on nothing else) publishes for the edit
+					// only because of this flag.
+					saved: true,
 				})
 				.then(() => "done" as const)
 				.catch((err) => {
