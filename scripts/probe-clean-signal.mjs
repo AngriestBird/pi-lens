@@ -51,6 +51,7 @@ import {
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
 	filterPublishTrace,
+	createPublishTraceDrainer,
 	strategyKeyForLang,
 } from "./lib/clean-signal.mjs";
 import {
@@ -155,14 +156,10 @@ const src = process.env.CI ? "ci" : "dev";
 // alive while the instrument was dead (#3310). Read the sink the client
 // actually writes: the log is append-only, so a byte offset taken at each phase
 // boundary attributes every publish to exactly one phase.
-const PUB_MESSAGE_RE =
-	/^server=(\S+) pubVersion=(\S+) docVersion=(\S+) diags=(\d+)/;
 const PUB_LOG_PATH = path.join(
 	process.env.PI_LENS_HOME ?? os.tmpdir(),
 	"extension.log",
 );
-let pubLogOffset = 0;
-
 function pubLogSize() {
 	try {
 		return fs.statSync(PUB_LOG_PATH).size;
@@ -171,62 +168,33 @@ function pubLogSize() {
 	}
 }
 
-/** Start a new phase: everything already in the log belongs to the previous one. */
-function resetPublishTrace() {
-	pubLogOffset = pubLogSize();
-}
-
-/** Drain every publish appended since the last drain into `sink`. */
-function drainPublishTrace(sink, serverId) {
-	const size = pubLogSize();
-	// A rotated/truncated log must not be read from a stale offset.
-	if (size < pubLogOffset) pubLogOffset = 0;
-	if (size === pubLogOffset) return;
-	let chunk = "";
-	try {
-		const fd = fs.openSync(PUB_LOG_PATH, "r");
-		try {
-			const buf = Buffer.alloc(size - pubLogOffset);
-			const read = fs.readSync(fd, buf, 0, buf.length, pubLogOffset);
-			chunk = buf.subarray(0, read).toString("utf8");
-			pubLogOffset += read;
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return;
-	}
-	// A trailing partial line stays unconsumed: rewind to the last newline.
-	const lastNewline = chunk.lastIndexOf("\n");
-	if (lastNewline < 0) {
-		pubLogOffset -= Buffer.byteLength(chunk, "utf8");
-		return;
-	}
-	const consumed = chunk.slice(0, lastNewline + 1);
-	pubLogOffset -= Buffer.byteLength(chunk.slice(lastNewline + 1), "utf8");
-	const publishes = [];
-	for (const line of consumed.split("\n")) {
-		if (!line.trim()) continue;
-		let row;
-		try {
-			row = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (row?.subsystem !== "lsp-pub") continue;
-		const m = PUB_MESSAGE_RE.exec(String(row.message ?? ""));
-		if (!m) continue;
-		if (ECHO_TRACE) console.error(`[lsp-pub] ${row.message}`);
-		const publish = {
-			server: m[1],
-			pubVersion: m[2],
-			diags: Number(m[4]),
-			versioned: m[2] !== "undefined",
+const drainPublishTrace = createPublishTraceDrainer({
+	echoTrace: ECHO_TRACE,
+	readLog(offset) {
+		const size = pubLogSize();
+		if (size === offset) return { size, read: () => null };
+		return {
+			size,
+			read(start) {
+				try {
+					const fd = fs.openSync(PUB_LOG_PATH, "r");
+					try {
+						const buf = Buffer.alloc(size - start);
+						const bytesRead = fs.readSync(fd, buf, 0, buf.length, start);
+						return {
+							chunk: buf.subarray(0, bytesRead).toString("utf8"),
+							bytesRead,
+						};
+					} finally {
+						fs.closeSync(fd);
+					}
+				} catch {
+					return null;
+				}
+			},
 		};
-		publishes.push(publish);
-	}
-	sink.push(...filterPublishTrace(publishes, serverId));
-}
+	},
+});
 
 // A byte-changing, diagnostic-neutral edit: append a trailing comment line in the
 // file's comment syntax (falls back to a blank line). Keeps the diagnostic SET
@@ -351,7 +319,7 @@ async function probeFixture(fx, dst, row) {
 	let dirtyResult;
 	let support;
 	try {
-		resetPublishTrace();
+		drainPublishTrace.reset(pubLogSize());
 		dirtyResult = await touch(dirtyContent, PROVE_LIVE_WAIT_MS);
 		await sleep(SETTLE_MS);
 		support = await lsp.getWorkspaceDiagnosticsSupport(absFile);

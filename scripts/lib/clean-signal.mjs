@@ -123,6 +123,59 @@ export function filterPublishTrace(publishes, serverId) {
 	return (publishes ?? []).filter((publish) => publish?.server === serverId);
 }
 
+const PUB_MESSAGE_RE =
+	/^server=(\S+) pubVersion=(\S+) docVersion=(\S+) diags=(\d+)/;
+
+/**
+ * Build the append-only sink drainer used by probe-clean-signal. The readLog
+ * seam keeps the production offset/parser/filter path testable with a bounded
+ * fixture while the probe still supplies the real extension.log reader.
+ */
+export function createPublishTraceDrainer({ readLog, echoTrace = false }) {
+	let offset = 0;
+	function drainPublishTrace(sink, serverId) {
+		const { size, read } = readLog(offset);
+		if (size < offset) offset = 0;
+		if (size === offset) return;
+		const result = read(offset);
+		if (!result) return;
+		const { chunk, bytesRead } = result;
+		offset += bytesRead;
+		const lastNewline = chunk.lastIndexOf("\n");
+		if (lastNewline < 0) {
+			offset -= Buffer.byteLength(chunk, "utf8");
+			return;
+		}
+		const consumed = chunk.slice(0, lastNewline + 1);
+		offset -= Buffer.byteLength(chunk.slice(lastNewline + 1), "utf8");
+		const publishes = [];
+		for (const line of consumed.split("\n")) {
+			if (!line.trim()) continue;
+			let row;
+			try {
+				row = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (row?.subsystem !== "lsp-pub") continue;
+			const match = PUB_MESSAGE_RE.exec(String(row.message ?? ""));
+			if (!match) continue;
+			if (echoTrace) console.error(`[lsp-pub] ${row.message}`);
+			publishes.push({
+				server: match[1],
+				pubVersion: match[2],
+				diags: Number(match[4]),
+				versioned: match[2] !== "undefined",
+			});
+		}
+		sink.push(...filterPublishTrace(publishes, serverId));
+	}
+	drainPublishTrace.reset = (nextOffset) => {
+		offset = nextOffset;
+	};
+	return drainPublishTrace;
+}
+
 // ---------------------------------------------------------------------------
 // Drift check (#529): compare an OBSERVED clean-behavior classification against
 // the hand-set `silentOnClean` marker in clients/lsp/wait-policy/strategies.ts. The

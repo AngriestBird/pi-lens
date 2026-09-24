@@ -22,6 +22,7 @@ import {
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
 	filterPublishTrace,
+	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
 } from "../../scripts/lib/clean-signal.mjs";
@@ -38,30 +39,27 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 	it("scopes an interleaved extension.log trace to the row's server", () => {
 		// #3390 recurrence: a shared extension.log lets another live server's
 		// publish become this row's first-publish and clean-signal evidence.
-		const lines = fs
-			.readFileSync(
-				path.join(
-					process.cwd(),
-					"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
-				),
-				"utf8",
-			)
-			.trim()
-			.split("\n")
-			.map((line) => {
-				const row = JSON.parse(line) as { message: string };
-				const match =
-					/^server=(\S+) pubVersion=(\S+) docVersion=(\S+) diags=(\d+)/.exec(
-						row.message,
-					);
+		const fixture = fs.readFileSync(
+			path.join(
+				process.cwd(),
+				"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
+			),
+			"utf8",
+		);
+		const bytes = Buffer.from(fixture);
+		const drain = createPublishTraceDrainer({
+			readLog(offset) {
 				return {
-					server: match?.[1],
-					diags: Number(match?.[4]),
-					versioned: match?.[2] !== "undefined",
+					size: bytes.length,
+					read(start) {
+						const chunk = bytes.subarray(start).toString("utf8");
+						return { chunk, bytesRead: bytes.length - start };
+					},
 				};
-			});
-		const own = filterPublishTrace(lines, "server-a");
-		expect(lines).toHaveLength(4);
+			},
+		});
+		const own = [];
+		drain(own, "server-a");
 		expect(own).toHaveLength(2);
 		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);
 		expect(
