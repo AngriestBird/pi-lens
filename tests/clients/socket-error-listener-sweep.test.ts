@@ -85,8 +85,8 @@ interface SocketScan {
 	unresolved: string[];
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: the napi node type is untyped here,
-// exactly as tests/config/bounded-container-guard.test.ts walks it.
+/** The napi node type is untyped, exactly as `parseNodes` walks it. */
+// oxlint-disable-next-line typescript/no-explicit-any
 type SgNode = any;
 
 function walk(node: SgNode, visit: (node: SgNode) => void): void {
@@ -121,10 +121,7 @@ function bindsError(scope: string, socket: string): boolean {
 }
 
 /** Every `node:net` socket site in one source text, with its verdict. */
-export function scanSocketSites(
-	source: string,
-	relPath = "<source>",
-): SocketScan {
+function scanSocketSites(source: string, relPath = "<source>"): SocketScan {
 	const sites: SocketSite[] = [];
 	const unresolved: string[] = [];
 	if (!/createServer|createConnection|connect/.test(source)) {
@@ -330,7 +327,7 @@ describe("node:net socket error-listener sweep (#3389)", () => {
 			"  return socket;",
 			"}",
 			"export function bare() {",
-			"  const socket = net.createConnection('/tmp/b.sock');",
+			"  const socket = net.connect('/tmp/b.sock');",
 			"  return socket;",
 			"}",
 		].join("\n");
@@ -341,7 +338,7 @@ describe("node:net socket error-listener sweep (#3389)", () => {
 			]),
 		).toEqual([
 			["fixture.ts#guarded createConnection", true],
-			["fixture.ts#bare createConnection", false],
+			["fixture.ts#bare connect", false],
 		]);
 	});
 });
