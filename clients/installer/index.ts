@@ -5541,9 +5541,7 @@ const pipPep668LoggedRefusals = createGenerationMap("installer-pep668-log");
  * resolution as before this field existed, which the resolution ladder's PATH
  * verification then judges on its merits rather than on a cached assumption.
  */
-async function pipConstraintEnvFor(
-	toolId: string,
-): Promise<NodeJS.ProcessEnv> {
+async function pipConstraintEnvFor(toolId: string): Promise<NodeJS.ProcessEnv> {
 	const constraints = TOOLS.find((t) => t.id === toolId)?.pipConstraints;
 	if (!constraints || constraints.length === 0) return {};
 	const file = path.join(
@@ -5553,7 +5551,12 @@ async function pipConstraintEnvFor(
 	);
 	try {
 		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(file, `${constraints.join("\n")}\n`, "utf8");
+		// The shared atomic seam (#1609), not a raw write: a second pi-lens process
+		// may be reading this file as pip's `PIP_CONSTRAINT` while this one
+		// rewrites it, and a torn read would silently under-constrain the install.
+		await writeFileAtomicAsync(file, `${constraints.join("\n")}\n`, {
+			bestEffort: false,
+		});
 	} catch (err) {
 		recordDegradationOnce({
 			kind: "pip-constraint-file-unwritable",

@@ -212,6 +212,17 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-tool-layer.log"
 
+      # TEMPORARY (#3311 lane C, removed before this PR's final head): the
+      # measured premise for the rust row. The census said `ensureTool
+      # (rust-analyzer) -> rust-analyzer` and then `no client ready in
+      # 30000ms`; this prints what that PATH entry actually is on the runner.
+      - name: Probe the runner's rust-analyzer (temporary, refs #3311)
+        continue-on-error: true
+        run: |
+          echo "which -a rust-analyzer:"; which -a rust-analyzer || echo "(none)"
+          echo "rust-analyzer --version:"; rust-analyzer --version; echo "exit=$?"
+          echo "rustup components:"; rustup component list | grep -i analyzer || true
+
       - name: LSP handshake layer (install + spawn + initialize each server)
         id: lsp_handshake
         run: |

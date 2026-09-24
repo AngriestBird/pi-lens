@@ -379,6 +379,12 @@ describe("version-pin drift detection (#589)", () => {
 			mockStatSync.mockImplementation(
 				() => ({ isFile: () => true, size: 1 }) as never,
 			);
+			// #3311: the PATH rung probes its candidate, and this double answers
+			// `status: 126, "cannot execute"` for a `--version` with no
+			// `versionOutput` — a command that cannot run, which production now
+			// refuses to resolve. This test is about the CACHE, so its madge has to
+			// be a madge that runs.
+			versionOutput.value = "madge 8.0.0\n";
 
 			const first = await ensureTool("madge");
 			expect(first).toBe("madge");
