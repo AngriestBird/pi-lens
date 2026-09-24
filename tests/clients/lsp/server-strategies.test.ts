@@ -65,9 +65,11 @@ describe("lane B project-loading diagnostic strategies (#3402)", () => {
 	// the budget to the smoke gate's own 8000ms ceiling, and an `lsp_diagnostics`
 	// call that passes no `waitMs` pays that in full on a file the server never
 	// publishes for — so the budget must stay at the MEASURED value, not the
-	// ceiling. Recurrence 3: the r2 entry also flipped `pullRetryBudgetMs` from
-	// the default 250 to 0 for a `mode=pull` server with nothing measuring it;
-	// the equality below is what keeps an unmeasured field from riding along.
+	// ceiling. Run 36064829436 is the confirmation at 6000: same `1 primary
+	// finding`, 4.78s after `Restored …csproj`, census unchanged. Recurrence 3:
+	// the r2 entry also flipped `pullRetryBudgetMs` from the default 250 to 0 for
+	// a `mode=pull` server with nothing measuring it; the equality below is what
+	// keeps an unmeasured field from riding along.
 	it("moves csharp's measured aggregate budget and no other field", () => {
 		expect(getStrategy("csharp")).toEqual({
 			...defaults,
