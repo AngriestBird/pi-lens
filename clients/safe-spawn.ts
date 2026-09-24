@@ -158,6 +158,14 @@ export interface SpawnResult {
 	outputTruncated?: boolean;
 	/** True when the output cap started terminating the child. */
 	killedForOutputCap?: boolean;
+	/**
+	 * #3375 round 2 (H3384-1): every signal available for this spawn's teardown
+	 * was refused by the OS, so the child may STILL BE RUNNING. Present only on
+	 * that path — absent means teardown was never attempted or it succeeded, so
+	 * a 4.2.1 result parses unchanged. `killedForOutputCap` keeps its meaning
+	 * (we STARTED terminating the child); this field says the attempt failed.
+	 */
+	killFailed?: boolean;
 	/** True when the optional streaming matcher saw a matching chunk. */
 	streamingMatch?: boolean;
 	/** Peak/average CPU%+RSS sampled across this spawn's lifetime (#620).
@@ -1864,10 +1872,49 @@ export async function safeSpawnAsync(
 		}
 		const resourceLabel = options?.resourceLabel ?? command;
 
+		// #3375 round 2 (H3384-1). `killTree`'s promise is AWAITED by `finalize`
+		// from a `void finalize(...)` callback, FIRED AND FORGOTTEN by `onAbort`
+		// (`void killTree()`), and its escalation runs in a bare `setTimeout`
+		// callback — three structurally different ways a throwing `kill` escaped
+		// this spawn: as a rejection that left the public promise pending
+		// forever, as an `unhandledRejection`, and (from the timer) as an
+		// uncaught exception, which is the very shape #3375 exists to close.
+		// So no signal is sent except through `trySend`, which cannot throw.
+		type KillPhase = "abort" | "output-cap" | "handler-fault" | "timeout";
+		let killFailed = false;
+		/** Send one signal. Returns false instead of throwing. Records nothing:
+		 *  a refused signal is often ORDINARY (a negative-pid ESRCH means the
+		 *  group already exited), so only a caller that has run out of fallbacks
+		 *  calls `noteKillFailure`. */
+		const trySend = (send: () => void): boolean => {
+			try {
+				send();
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		/** Every signal for this teardown was refused, so the child may still be
+		 *  running. One record per spawn — the reviewer's reproduction refused
+		 *  two kills (the fault's and then the timeout's) and a row per attempt
+		 *  would be a flood. A kind of its own rather than a field on
+		 *  `spawn-output-cap-truncated`: this fires on the abort and timeout
+		 *  teardowns too, which have nothing to do with an output cap. */
+		const noteKillFailure = (phase: KillPhase): void => {
+			if (killFailed) return;
+			killFailed = true;
+			incrementDegradationCount({
+				kind: "spawn-kill-failed",
+				subject: resourceLabel,
+				reason: `every signal available for the ${phase} teardown was refused; the child may still be running`,
+				metadata: { phase, pid: child.pid },
+			});
+		};
+
 		// On Windows, shell:true means child.pid is cmd.exe — child.kill() only
 		// kills the wrapper, leaving the actual subprocess (e.g. knip/npx) alive
 		// as an orphan. Use taskkill /F /T to kill the full process tree instead.
-		const killTree = async (): Promise<void> => {
+		const killTree = async (phase: KillPhase): Promise<void> => {
 			if (isWindows && child.pid && child.pid > 0) {
 				const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
 				try {
@@ -1883,22 +1930,28 @@ export async function safeSpawnAsync(
 						);
 						killer.once("close", () => done());
 						killer.once("error", () => {
-							child.kill("SIGKILL");
+							// E4: a throw HERE would leave the EventEmitter as an
+							// uncaught exception, not a rejection.
+							if (!trySend(() => child.kill("SIGKILL"))) noteKillFailure(phase);
 							done();
 						});
 					});
 				} catch {
-					child.kill("SIGKILL");
+					if (!trySend(() => child.kill("SIGKILL"))) noteKillFailure(phase);
 				}
 			} else if (posixProcessGroup && ownsChildPid) {
 				// #2026: signal the whole process group. Grandchildren spawned
 				// by the tool share its group, so one signal reaches the whole
 				// tree; a negative-pid ESRCH means it already exited.
 				const pgid = -(child.pid as number);
-				try {
-					process.kill(pgid, "SIGTERM");
-				} catch {
-					child.kill("SIGTERM");
+				// A negative-pid ESRCH means the group already exited, so the
+				// direct-child fallback is the ordinary path and records nothing.
+				// Only losing BOTH is a failed teardown.
+				if (
+					!trySend(() => process.kill(pgid, "SIGTERM")) &&
+					!trySend(() => child.kill("SIGTERM"))
+				) {
+					noteKillFailure(phase);
 				}
 				// #2027 round-1: gate the SIGKILL escalation on GROUP liveness,
 				// not direct-child death - a tool can exit instantly on SIGTERM
@@ -1907,34 +1960,41 @@ export async function safeSpawnAsync(
 				// it is the only backstop for this group once finalize deletes
 				// the pid from lifetimeState.
 				escalationTimer = setTimeout(() => {
-					let groupAlive = true;
-					try {
-						process.kill(pgid, 0);
-					} catch {
-						groupAlive = false;
-					}
-					if (!groupAlive) return;
-					teardownEscalated = true;
-					logLatency({
-						type: "phase",
-						phase: "spawn_group_kill_escalation",
-						filePath: "",
-						durationMs: 0,
-						metadata: { pgid: child.pid },
+					// The WHOLE body, not just the signal: this runs in a bare
+					// timer callback, where any throw is an uncaught exception.
+					const escalated = trySend(() => {
+						let groupAlive = true;
+						try {
+							process.kill(pgid, 0);
+						} catch {
+							groupAlive = false;
+						}
+						if (!groupAlive) return;
+						teardownEscalated = true;
+						logLatency({
+							type: "phase",
+							phase: "spawn_group_kill_escalation",
+							filePath: "",
+							durationMs: 0,
+							metadata: { pgid: child.pid },
+						});
+						try {
+							process.kill(pgid, "SIGKILL");
+						} catch {
+							// Raced with group exit.
+						}
 					});
-					try {
-						process.kill(pgid, "SIGKILL");
-					} catch {
-						// Raced with group exit.
-					}
+					if (!escalated) noteKillFailure(phase);
 				}, 1000);
 			} else {
-				child.kill("SIGTERM");
+				// E2/E3. This branch runs whenever `/proc` cannot prove pid
+				// ownership — every macOS host, and any Linux host with an
+				// unreadable `/proc` — so it is not a hypothetical path.
+				if (!trySend(() => child.kill("SIGTERM"))) noteKillFailure(phase);
 				escalationTimer = setTimeout(() => {
-					if (!closed) {
-						teardownEscalated = true;
-						child.kill("SIGKILL");
-					}
+					if (closed) return;
+					teardownEscalated = true;
+					if (!trySend(() => child.kill("SIGKILL"))) noteKillFailure(phase);
 				}, 1000);
 			}
 		};
@@ -1944,7 +2004,7 @@ export async function safeSpawnAsync(
 			aborted = true;
 			if (!killed && !child.killed) {
 				killed = true;
-				void killTree();
+				void killTree("abort");
 			}
 		};
 		abortSignal?.addEventListener("abort", onAbort, { once: true });
@@ -1965,7 +2025,7 @@ export async function safeSpawnAsync(
 			) {
 				killedForOutputCap = true;
 				killed = true;
-				killPromise = killTree();
+				killPromise = killTree("output-cap");
 			}
 		};
 
@@ -2022,7 +2082,7 @@ export async function safeSpawnAsync(
 			if (!killed && !child.killed) {
 				killedForOutputCap = true;
 				killed = true;
-				killPromise = killTree();
+				killPromise = killTree("handler-fault");
 			}
 		};
 
@@ -2088,7 +2148,7 @@ export async function safeSpawnAsync(
 			if (!killed && !child.killed) {
 				killed = true;
 				teardownStartedAtMs = Date.now();
-				killPromise = killTree();
+				killPromise = killTree("timeout");
 			}
 		}, timeout);
 
@@ -2256,6 +2316,7 @@ export async function safeSpawnAsync(
 			const outputInfo = {
 				...(outputTruncated ? { outputTruncated: true } : {}),
 				...(killedForOutputCap ? { killedForOutputCap: true } : {}),
+				...(killFailed ? { killFailed: true } : {}),
 			};
 			const streamingMatchInfo = streamingMatch ? { streamingMatch: true } : {};
 			// #1816: surface the signal name as a field on every path where one
@@ -2396,6 +2457,7 @@ export async function safeSpawnAsync(
 					spawnFailure,
 					...(outputTruncated ? { outputTruncated: true } : {}),
 					...(killedForOutputCap ? { killedForOutputCap: true } : {}),
+					...(killFailed ? { killFailed: true } : {}),
 					...(streamingMatch ? { streamingMatch: true } : {}),
 					resourceUsage,
 				});

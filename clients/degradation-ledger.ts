@@ -942,6 +942,17 @@ export type DegradationKind =
 	 * dispatch and the tally is what identifies the producer - the crash entry
 	 * that motivated the cap carried no command, byte count or cap value.
 	 */
+	/**
+	 * #3375 round 2 (H3384-1): every signal available for one spawn's teardown
+	 * was refused by the OS, so the child may still be running. Its own kind
+	 * rather than a field on `spawn-output-cap-truncated`, because it fires on
+	 * the abort and timeout teardowns too, which have nothing to do with an
+	 * output cap. Subject is the command label; the reason names which teardown
+	 * (`abort` / `output-cap` / `handler-fault` / `timeout`). Recorded at most
+	 * once per spawn — a refused kill is usually refused again on the next
+	 * teardown attempt, and a row per attempt would flood the sink.
+	 */
+	| "spawn-kill-failed"
 	| "spawn-output-cap-truncated"
 	/**
 	 * #3375: a stdout/stderr chunk handler inside `safeSpawnAsync` THREW. Such a
