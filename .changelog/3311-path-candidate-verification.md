@@ -10,5 +10,7 @@ section: Fixed
   removed the symbol it imports — no longer shadows the managed install that
   works, and no longer reports as an available server that then never answers.
   A probe that stalls or cannot be read still resolves as before: a kill is not
-  a verdict. `cmake-language-server` also pins its pygls floor, so the install
-  stops producing a launcher that cannot start (refs #3311).
+  a verdict. `cmake-language-server` also pins its pygls floor, and that pin now
+  reaches whichever resolver pipx picked — pip and uv each read the same
+  constraints file through their own environment variable — so the install stops
+  producing a launcher that cannot start (refs #3311).
