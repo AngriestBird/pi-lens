@@ -295,6 +295,7 @@ export function computeVerdict(
 			status: run.status ?? null,
 			conclusion: run.conclusion ?? null,
 			url: run.html_url ?? run.details_url ?? null,
+			detailsUrl: run.details_url ?? null,
 			gating,
 		};
 	};
@@ -365,7 +366,7 @@ export function computeVerdict(
 	} else if (cancelledLatestRows.length > 0) {
 		exitCode = EXIT_PENDING;
 		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
-			.map((row) => `rerun ${row.id} (gh run rerun ${row.id})`)
+			.map(formatRerunHint)
 			.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
@@ -396,6 +397,25 @@ export function computeVerdict(
 		reason = "every gating check concluded success";
 	}
 	return { exitCode, rows, reason, mergeState };
+}
+
+/**
+ * A check-run id is the Actions job id, not the workflow run id accepted by
+ * `gh run rerun`. GitHub's check-run details URL carries both identities, so
+ * keep the existing check-runs read as the only resolution seam. The job
+ * fallback is admitted only when that same URL proves its job segment matches
+ * the check-run id.
+ */
+export function formatRerunHint(row) {
+	const detailsUrl = typeof row?.detailsUrl === "string" ? row.detailsUrl : "";
+	const runId = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1];
+	if (runId) return `rerun ${runId} (gh run rerun ${runId})`;
+
+	const jobId = detailsUrl.match(/\/job\/(\d+)(?:\/|$)/)?.[1];
+	if (jobId && String(row?.id) === jobId)
+		return `rerun ${jobId} (gh run rerun --job ${jobId})`;
+
+	return `rerun unavailable (check-run ${row?.id ?? "unknown"}; workflow run not present in details_url)`;
 }
 
 /** Fixed-column table: CHECK / STATUS / CONCLUSION / URL. Exported for tests
