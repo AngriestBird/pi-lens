@@ -8,11 +8,16 @@
  * without spawning a real process).
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { ChildProcess } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	safeSpawnAsync,
 	setAmbientAbortSignal,
 } from "../../clients/safe-spawn.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import {
 	DEFAULT_MAX_OUTPUT_BYTES,
 	killedForOutputCap,
@@ -202,5 +207,85 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		expect(result.stdout).not.toContain("\u0000");
 		expect(result.stderr).not.toContain("\u0000");
 	}, 60000);
+});
+
+/**
+ * #3375 round 3 (review finding M3384-2) — the POSIX process-group teardown arm,
+ * proven with a REAL child because nothing else reaches it.
+ *
+ * `killTree` picks its group branch on `posixProcessGroup && ownsChildPid`, and
+ * `ownsChildPid` is `isOwnLiveChild(child.pid, …)`, which reads
+ * `/proc/<pid>/status` and compares `PPid` to this process. A fabricated pid can
+ * never satisfy that, so the mocked-child suites
+ * (`safe-spawn-kill-failure.test.ts`) exercise only the NON-group branch: the
+ * group `SIGTERM` send, its direct-child fallback, and the group escalation are
+ * unreachable there. Measured before this test was written — a real child on
+ * this host takes the group branch and the first send really is
+ * `process.kill(-pid, "SIGTERM")`.
+ *
+ * Both kill seams are spied to refuse, so the child must be one that ENDS ON ITS
+ * OWN: it writes past the cap and exits, and nothing here can leave a process
+ * running even though every signal fails.
+ */
+describe("safeSpawnAsync POSIX group teardown whose signals are refused (#3375 M3384-2)", () => {
+	let processKillSpy: ReturnType<typeof vi.spyOn>;
+	let childKillSpy: ReturnType<typeof vi.spyOn>;
+	let negativePidSends: number[];
+	let leaked: string[];
+	let onLeak: (reason: unknown) => void;
+
+	beforeEach(() => {
+		negativePidSends = [];
+		processKillSpy = vi.spyOn(process, "kill").mockImplementation(((
+			pid: number,
+			signal?: string | number,
+		) => {
+			// The liveness probe must stay answerable; every real signal is refused.
+			if (signal === 0) return true;
+			if (pid < 0) negativePidSends.push(pid);
+			throw new Error("injected group send refusal");
+		}) as typeof process.kill);
+		childKillSpy = vi
+			.spyOn(ChildProcess.prototype, "kill")
+			.mockImplementation(() => {
+				throw new Error("injected child send refusal");
+			});
+		leaked = [];
+		onLeak = (reason) => {
+			leaked.push(String((reason as Error)?.message ?? reason));
+		};
+		process.on("unhandledRejection", onLeak);
+		resetDegradationLedger();
+	});
+
+	afterEach(() => {
+		process.off("unhandledRejection", onLeak);
+		processKillSpy.mockRestore();
+		childKillSpy.mockRestore();
+		resetDegradationLedger();
+	});
+
+	it("reports one failed teardown when the group signal and its child fallback are both refused", async () => {
+		const result = await safeSpawnAsync(
+			NODE,
+			["-e", "process.stdout.write('x'.repeat(4096));"],
+			{ timeout: 5000, maxOutputBytes: 1024, resourceLabel: "group-refusing" },
+		);
+
+		// The branch under test really is the group one: a NEGATIVE pid was
+		// signalled. Without this the case could silently drift onto the
+		// non-group arm the mocked suites already cover.
+		expect(negativePidSends.length).toBeGreaterThan(0);
+		expect(result.outputTruncated).toBe(true);
+		expect(result.killedForOutputCap).toBe(true);
+		expect(result.killFailed).toBe(true);
+		expect(leaked).toEqual([]);
+		const rows = getDegradationSummary().find(
+			(group) => group.kind === "spawn-kill-failed",
+		);
+		expect(rows?.count).toBe(1);
+		expect(rows?.latestReasons[0]?.subject).toBe("group-refusing");
+		expect(rows?.latestReasons[0]?.reason).toContain("output-cap teardown");
+	}, 30000);
 });
 // flake-shape: real-process-spawn — real children receive ambient abort signals through the OS boundary, not an in-process double

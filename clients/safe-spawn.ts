@@ -1882,8 +1882,14 @@ export async function safeSpawnAsync(
 		// So no signal is sent except through `trySend`, which cannot throw.
 		type KillPhase = "abort" | "output-cap" | "handler-fault" | "timeout";
 		let killFailed = false;
-		/** Send one signal. Returns false instead of throwing, and records
-		 *  nothing itself: a refused signal is often ORDINARY (a negative-pid
+		/** Send one signal. INVARIANT (#3375 r3 / M3384-2): every signal SEND in
+		 *  `killTree` goes through this function. Exactly two `try`/`catch`
+		 *  blocks remain in there and neither contains a bare send: the Windows
+		 *  `await` guard around the taskkill child (its `catch` body sends only
+		 *  through `trySend`), and the group LIVENESS PROBE, whose `catch`
+		 *  computes a predicate rather than sending anything — the same shape as
+		 *  the module-level `groupIsGone`. Returns false instead of throwing, and
+		 *  records nothing itself: a refused signal is often ORDINARY (a negative-pid
 		 *  ESRCH means the group already exited and the direct-child fallback
 		 *  takes over), so only a send with no fallback left behind it pairs
 		 *  with `noteKillFailure`. */
@@ -1945,13 +1951,16 @@ export async function safeSpawnAsync(
 				// by the tool share its group, so one signal reaches the whole
 				// tree; a negative-pid ESRCH means it already exited.
 				const pgid = -(child.pid as number);
-				try {
-					process.kill(pgid, "SIGTERM");
-				} catch {
-					// #2026: a negative-pid ESRCH means the group already exited, so
-					// reaching here is ORDINARY control flow, not a failure — the
-					// `catch` stays exactly as it was and records nothing. Only the
-					// last-resort send below can fail the teardown.
+				// #3375 round 3 (M3384-2): through the one sink, like every other
+				// send. A second ad-hoc `try`/`catch` here would be a rival
+				// signal-safety mechanism inside the same teardown — the shape this
+				// change deleted four of — and a later edit to this branch would not
+				// inherit `trySend`'s total send or its failure accounting.
+				// `trySend` returning false here is ORDINARY, not a failure: #2026's
+				// negative-pid ESRCH means the group already exited, so the direct
+				// child below is the normal fallback and nothing is recorded. Only
+				// the last-resort send can fail the teardown.
+				if (!trySend(() => process.kill(pgid, "SIGTERM"))) {
 					if (!trySend(() => child.kill("SIGTERM"))) noteKillFailure(phase);
 				}
 				// #2027 round-1: gate the SIGKILL escalation on GROUP liveness,
@@ -1979,11 +1988,12 @@ export async function safeSpawnAsync(
 							durationMs: 0,
 							metadata: { pgid: child.pid },
 						});
-						try {
-							process.kill(pgid, "SIGKILL");
-						} catch {
-							// Raced with group exit.
-						}
+						// Through the sink too (#3375 r3 / M3384-2): one vocabulary
+						// for every send in this function. A false here is ORDINARY
+						// — the group raced its own exit — so it is deliberately not
+						// escalated to `noteKillFailure`; the enclosing `trySend`
+						// already guarantees nothing escapes this timer callback.
+						trySend(() => process.kill(pgid, "SIGKILL"));
 					});
 					if (!escalated) noteKillFailure(phase);
 				}, 1000);
