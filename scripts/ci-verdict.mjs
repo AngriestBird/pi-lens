@@ -28,10 +28,10 @@
  * #2618 fix-round-2: a gating row's conclusion is judged differently
  * depending on whether it is one of those confirmed-required names or
  * merely discovered. A REQUIRED row must reach a literal "success" --
- * ANYTHING else (skipped, neutral, cancelled, a real failure) is non-zero,
- * because a required check that skipped or was cancelled is stale or
- * interrupted evidence, never proof of a pass (round 1's bug: it exempted
- * skipped/neutral on EVERY gating row, so a required `Unit tests` skipped by
+ * ANYTHING else (skipped, neutral, or a real failure) is non-zero, while a
+ * latest cancellation gets the explicit rerun-pending verdict below, because
+ * a required check that skipped or was cancelled is stale or interrupted
+ * evidence, never proof of a pass (round 1's bug: it exempted skipped/neutral on EVERY gating row, so a required `Unit tests` skipped by
  * a failed `needs:` dependency read as a clean pass). A DISCOVERED row's
  * "skipped"/"neutral" conclusion is a genuine non-failure (a job-level
  * `if:` that evaluated false -- see computeVerdict's own doc comment), and
@@ -49,7 +49,7 @@
  *   1  -- a gating check-run completed with a conclusion that fails it: any
  *         non-"success" conclusion on a REQUIRED row, or (on a discovered
  *         row) a blocking one -- failure/timed_out/action_required/stale/
- *         startup_failure, or cancelled with no uncertainty grace applied
+ *         startup_failure; a latest cancelled row is pending with a rerun hint
  *   2  -- the PR's head is genuinely merge-conflicted (`gh pr view --json
  *         mergeable` reads "CONFLICTING"), regardless of whether the required
  *         checks are present or absent in check-runs (round 3, F1): a
@@ -66,8 +66,7 @@
  *         conflict.
  *   3  -- either required check is still queued/in_progress, OR is absent but
  *         not confirmed merge-conflicted (see exit 2), OR the check-runs
- *         response was paginated and truncated so an "absent" required check
- *         cannot be trusted (F7 -- see "Truncated response" below)
+ *         required checks are absent and the head is not confirmed conflicting
  *   64 -- usage error (no target given) -- sysexits EX_USAGE, never confused
  *         with a verdict code
  *   70 -- transport/unexpected error (gh not on PATH, a `gh` call timed out
@@ -96,22 +95,8 @@
  * "CONFLICTING"` exited 0. `computeVerdict` now checks `mergeable ===
  * "CONFLICTING"` on its own, independent of whether any row is present --
  * the verdict record always carries `mergeState` (`mergeable ?? "n/a"`) and
- * `truncated` alongside `rows`, and `run()` always prints the merge state
- * line so a reviewer never has to infer it from `reason` text. A truncated
- * check-runs response (F7) still takes precedence over DIRTY: `mergeable`
- * itself is never paginated (it comes from the same untruncated `gh pr view`
- * call that resolves the head SHA), but an uncertain check-runs page is
- * still uncertain data and this script's whole premise is not adding a
- * second paginated read to resolve it.
- *
- * Truncated response (F7): the REST payload's own `total_count` is compared
- * against the number of check-runs actually returned. `per_page=100` is not
- * paginated here (100 check-runs on one commit is far outside this repo's
- * steady state), but if GitHub ever reports more than it returned, an
- * "absent" required check cannot be trusted -- it may simply be sitting past
- * the first page -- so that case reads as pending (3), not DIRTY, with a
- * note, rather than either silently claiming absence or adding a second
- * paginated read this script's whole premise is to avoid.
+ * `rows`, and `run()` always prints the merge state line so a reviewer never
+ * has to infer it from `reason` text.
  *
  * #2664: filed against a live `2654` read that printed the exact reason text
  * below and reported exit 0 for it. Reproduced directly against this
@@ -231,14 +216,8 @@ export function isPrNumber(arg) {
  * bare-SHA target and `null !== "CONFLICTING"`, so DIRTY can never fire
  * there.
  *
- * Precedence when a payload matches more than one condition: a truncated
- * response (F7) beats DIRTY beats FAILURE beats PENDING beats SUCCESS.
- * Truncation wins even over a confirmed conflict: `mergeable` itself is
- * never paginated, but this function's job is to report a trustworthy READ,
- * and an unfetched page of check-runs is untrustworthy data regardless of
- * what else is already known. DIRTY, once truncation is ruled out, is the
- * next most severe signal, so it wins over an independently failed or
- * still-running sibling check.
+ * Precedence when a payload matches more than one condition: DIRTY beats
+ * FAILURE beats PENDING beats SUCCESS.
  *
  * #2609: `rows` used to be built ONLY from `requiredChecks` (the fixed
  * `["Unit tests", "Lint & type-check"]` pair), so a red "Production install
@@ -302,6 +281,7 @@ export function computeVerdict(
 			return {
 				name,
 				present: false,
+				id: null,
 				status: null,
 				conclusion: null,
 				url: null,
@@ -311,6 +291,7 @@ export function computeVerdict(
 		return {
 			name,
 			present: true,
+			id: run.id ?? null,
 			status: run.status ?? null,
 			conclusion: run.conclusion ?? null,
 			url: run.html_url ?? run.details_url ?? null,
@@ -327,15 +308,12 @@ export function computeVerdict(
 	// Only the required rows can be legitimately "absent" -- discovered rows
 	// are, by construction, names that DID appear in the payload.
 	const anyAbsent = requiredRows.some((row) => !row.present);
-	const totalCount = checkRunsPayload?.total_count;
-	const truncated =
-		typeof totalCount === "number" && totalCount > checkRuns.length;
 	const mergeState = mergeable ?? "n/a";
 
 	// #2618 fix-round-2, F1: a REQUIRED row gets NO conclusion exemption --
 	// it must reach a literal "success". `isBlockingConclusion`'s skip/neutral
-	// exemption (and F2's cancelled-uncertain exemption below) apply ONLY to
-	// DISCOVERED rows. Applying them to required rows too (round 1's bug) let
+	// exemption applies only to non-cancelled DISCOVERED rows. Applying it to
+	// required rows too (round 1's bug) let
 	// a required `Unit tests` that reported "skipped" (reachable: ci.yml:253's
 	// `test` job has `needs: validate-merge-train-dispatch` with no `if:`, so
 	// a failed dependency skips it outright) read as a clean pass --
@@ -343,16 +321,9 @@ export function computeVerdict(
 	// loop already demands `run.conclusion === PASSING_CONCLUSION` (line
 	// ~262) with no such exemption.
 	//
-	// #2618 fix-round-2, F2: a DISCOVERED row's "cancelled" conclusion is
-	// UNCERTAIN, not a failure -- `isUncertainConclusion` (ci-checks.mjs)
-	// excludes it here and instead routes it into `pendingGatingRows` below,
-	// because `cancel-in-progress: true` (ci.yml:15-16) leaves a stale
-	// cancelled check-run as the ONLY row for its name for several minutes
-	// before a replacement posts (live-probed on PR #2607's
-	// "Record post-merge validation": three check-suites on one commit, the
-	// oldest cancelled). A REQUIRED row's "cancelled" conclusion gets NO such
-	// grace -- it fails the literal-success test above like any other
-	// non-success conclusion, so it stays non-zero.
+	// #3373: a latest cancelled row is actionable uncertainty for every gating
+	// name, including required names. It is reported with its run id below so a
+	// reviewer can rerun the superseded check instead of waiting indefinitely.
 	const infraRerunArmed =
 		classification === "infra-kill" || classification === "infra-net";
 	const infraRerunPending =
@@ -360,33 +331,29 @@ export function computeVerdict(
 		rerunState?.originalFailed === true &&
 		rerunState?.latestAttempt?.run_attempt > 1 &&
 		rerunState.latestAttempt.status !== "completed";
+	const cancelledLatestRows = rows.filter(
+		(row) =>
+			row.gating &&
+			row.present &&
+			row.status === "completed" &&
+			isUncertainConclusion(row.conclusion),
+	);
 	const failingGatingRows = rows.filter((row) => {
 		if (!row.gating || !row.present || row.status !== "completed") return false;
+		if (isUncertainConclusion(row.conclusion)) return false;
 		if (infraRerunPending && row.name === "Unit tests") return false;
 		if (requiredNameSet.has(row.name)) return row.conclusion !== "success";
-		if (isUncertainConclusion(row.conclusion)) return false;
 		return isBlockingConclusion(row.conclusion);
 	});
 	const pendingGatingRows = rows.filter((row) => {
 		if (!row.gating) return false;
 		if (row.status !== "completed") return true;
-		// No `requiredNameSet` check needed here (unlike `failingGatingRows`
-		// above): a required row's "cancelled" conclusion is ALREADY caught by
-		// `failingGatingRows`'s literal-success rule, and `failingGatingRows`
-		// is checked first in the exit-code precedence below, so this branch
-		// never gets a chance to downgrade it to pending regardless of what it
-		// returns here (probed: removing this guard changes no test outcome).
-		// Only a DISCOVERED row's "cancelled" conclusion actually turns on
-		// this rule.
-		return isUncertainConclusion(row.conclusion);
+		return false;
 	});
 
 	let exitCode;
 	let reason;
-	if (truncated) {
-		exitCode = EXIT_PENDING;
-		reason = `the check-runs response was truncated (total_count=${totalCount} > ${checkRuns.length} fetched); a missing required check cannot be trusted as absent -- treating as pending, not DIRTY (F7)`;
-	} else if (mergeable === "CONFLICTING") {
+	if (mergeable === "CONFLICTING") {
 		exitCode = EXIT_DIRTY;
 		reason = anyAbsent
 			? "one or more required checks are absent and the PR is merge-conflicted (mergeable=CONFLICTING): a merge-conflicted PR can't build its merge-ref, so the real gates are skipped, not failed -- AGENTS.md shape 11"
@@ -395,6 +362,11 @@ export function computeVerdict(
 		exitCode = EXIT_PENDING;
 		reason =
 			"infra (rerun armed): Unit tests was classified as infrastructure and is awaiting its one permitted rerun";
+	} else if (cancelledLatestRows.length > 0) {
+		exitCode = EXIT_PENDING;
+		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
+			.map((row) => `rerun ${row.id} (gh run rerun ${row.id})`)
+			.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
 		reason = `gating check(s) completed with a non-success conclusion: ${failingGatingRows.map((row) => `${row.name} (${row.conclusion})`).join(", ")}`;
@@ -406,27 +378,15 @@ export function computeVerdict(
 					? "one or more required checks are absent and there is no PR context (bare-SHA target) to confirm they are not merge-conflicted; treating as pending, not DIRTY -- pass a PR number, or wait for CI to register"
 					: `one or more required checks are absent but the PR is not merge-conflicted (mergeable=${mergeable}); CI likely hasn't registered yet -- treating as pending, not DIRTY -- if the base was retargeted after this PR opened, push a commit or close/reopen to re-arm ci.yml`;
 		} else {
-			// Split by STATUS, not just "pending": an uncertain (cancelled,
-			// discovered) row is already COMPLETED -- reporting it as "still
-			// queued or in progress" alongside the table's own `completed
-			// cancelled` row two lines up would read as a contradiction. It gets
-			// its own clause explaining WHY a completed row still pends (#2618
-			// fix round 3).
+			// Only non-completed rows reach this branch; latest cancellations have
+			// already been reported with an explicit rerun command above.
 			const stillRunning = pendingGatingRows.filter(
 				(row) => row.status !== "completed",
-			);
-			const uncertain = pendingGatingRows.filter(
-				(row) => row.status === "completed",
 			);
 			const parts = [];
 			if (stillRunning.length > 0) {
 				parts.push(
 					`still queued or in progress: ${stillRunning.map((row) => row.name).join(", ")}`,
-				);
-			}
-			if (uncertain.length > 0) {
-				parts.push(
-					`cancelled and not yet re-reported (a superseded run; pends until the replacement posts -- this does not time out on its own): ${uncertain.map((row) => row.name).join(", ")}`,
 				);
 			}
 			reason = `gating check(s) ${parts.join("; ")}`;
@@ -435,7 +395,7 @@ export function computeVerdict(
 		exitCode = EXIT_SUCCESS;
 		reason = "every gating check concluded success";
 	}
-	return { exitCode, rows, reason, mergeState, truncated };
+	return { exitCode, rows, reason, mergeState };
 }
 
 /** Fixed-column table: CHECK / STATUS / CONCLUSION / URL. Exported for tests
@@ -641,12 +601,32 @@ export function fetchCheckRunsPayload(
 	ghExec = gh,
 	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
 ) {
-	return JSON.parse(
-		ghExec(
-			["api", `repos/${repository}/commits/${sha}/check-runs?per_page=100`],
-			{ timeoutMs },
-		),
-	);
+	const checkRuns = [];
+	let totalCount;
+	let page = 1;
+	for (;;) {
+		const payload = JSON.parse(
+			ghExec(
+				[
+					"api",
+					`repos/${repository}/commits/${sha}/check-runs?per_page=100&page=${page}`,
+				],
+				{ timeoutMs },
+			),
+		);
+		if (typeof payload?.total_count === "number")
+			totalCount = payload.total_count;
+		if (Array.isArray(payload?.check_runs))
+			checkRuns.push(...payload.check_runs);
+		if (
+			typeof totalCount !== "number" ||
+			checkRuns.length >= totalCount ||
+			payload?.check_runs?.length === 0
+		)
+			break;
+		page += 1;
+	}
+	return { total_count: totalCount ?? checkRuns.length, check_runs: checkRuns };
 }
 
 /** Read Actions attempts through the existing ghExec seam. Check-runs do not

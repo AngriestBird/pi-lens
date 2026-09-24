@@ -26,6 +26,8 @@ export function mergeSrc(existing: string, measured: string): string;
 
 export function compareStableStrings(a: string, b: string): number;
 
+export function compareGeneratedDocs(a: string, b: string): boolean;
+
 export function sortedStrings(values: readonly unknown[] | undefined): string[];
 
 export interface ServerCapabilityRow {

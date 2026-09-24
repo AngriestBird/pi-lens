@@ -15,6 +15,7 @@ export declare function isPrNumber(arg: unknown): boolean;
 export interface VerdictRow {
 	name: string;
 	present: boolean;
+	id: number | null;
 	status: string | null;
 	conclusion: string | null;
 	url: string | null;
@@ -26,7 +27,6 @@ export interface Verdict {
 	rows: VerdictRow[];
 	reason: string;
 	mergeState: string;
-	truncated: boolean;
 }
 
 export declare function computeVerdict(

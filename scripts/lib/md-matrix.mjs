@@ -56,6 +56,23 @@ export function compareStableStrings(a, b) {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/**
+ * Compare generated docs while ignoring the intentionally volatile date marker.
+ * The marker remains in rendered output; only the no-op refresh decision omits
+ * it so a date-only nightly cannot open a PR (#3380).
+ */
+export function compareGeneratedDocs(a, b) {
+	const withoutGenerationDate = (text) =>
+		text
+			.split("\n")
+			.filter((line) => !/^_Last generated: .*_$/.test(line))
+			.join("\n");
+	return (
+		compareStableStrings(withoutGenerationDate(a), withoutGenerationDate(b)) !==
+		0
+	);
+}
+
 export function sortedStrings(values) {
 	return [...(values ?? [])].map(String).sort(compareStableStrings);
 }
