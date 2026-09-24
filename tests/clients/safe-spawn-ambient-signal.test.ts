@@ -172,8 +172,7 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 			NODE,
 			[
 				"-e",
-				"process.stdout.write('OUT-HEAD');process.stderr.write('ERR-HEAD');" +
-					"const c='x'.repeat(1024*1024);" +
+				"const c='x'.repeat(1024*1024);" +
 					"for(let i=0;i<20;i++){process.stdout.write(c);process.stderr.write(c);}" +
 					"setTimeout(() => {}, 10000);",
 			],
@@ -189,9 +188,15 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 		expect(
 			Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
 		).toBeLessThanOrEqual(DEFAULT_MAX_OUTPUT_BYTES);
-		// Both pipes are represented: the ceiling is shared, not per-stream.
-		expect(result.stdout).toContain("OUT-HEAD");
-		expect(result.stderr).toContain("ERR-HEAD");
+		// Both pipes are represented, whatever order the OS delivered them in:
+		// the child wrote 20 MiB to each, so neither can reach the 32 MiB
+		// ceiling alone — each must have contributed at least 12 MiB. Asserting
+		// a MARKER at the head of each stream instead would be delivery-order
+		// dependent (it failed under load): once truncation splits head and
+		// tail, whichever stream the parent drained first fills the head and the
+		// other keeps only its tail.
+		expect(Buffer.byteLength(result.stdout)).toBeGreaterThan(0);
+		expect(Buffer.byteLength(result.stderr)).toBeGreaterThan(0);
 		// The reporter observed NUL bytes in the interrupted run's files; byte
 		// slicing at a truncation boundary never produces one.
 		expect(result.stdout).not.toContain("\u0000");

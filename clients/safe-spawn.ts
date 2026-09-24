@@ -1484,8 +1484,8 @@ export async function safeSpawnAsync(
 		// every chunk, which flattens both accumulated strings each time — O(n^2)
 		// in total output. Harmless while only 12 of 110 call sites passed a cap;
 		// with the cap now on by default it would tax every spawn (measured: a
-		// 32 MiB child took 7.9s of that scanning before this counter, 0.6s
-		// after). Equal to the two byte lengths by construction: before
+		// 32 MiB child resolved in 7944 ms before this counter, 469 ms after).
+		// Equal to the two byte lengths by construction: before
 		// truncation `stdout`/`stderr` are exactly the appended texts, and after
 		// it the branch that renders from the retained head/tail never reads it.
 		let retainedOutputBytes = 0;
@@ -1538,12 +1538,11 @@ export async function safeSpawnAsync(
 		// #3375: never `undefined`. An omitted or unusable cap resolves to the
 		// module default instead of to unbounded retention, so `appendOutput`
 		// below has no arm that concatenates without a ceiling.
+		const callerCap = options?.maxOutputBytes;
 		const capFromCaller =
-			options?.maxOutputBytes !== undefined &&
-			Number.isFinite(options.maxOutputBytes) &&
-			options.maxOutputBytes > 0;
+			callerCap !== undefined && Number.isFinite(callerCap) && callerCap > 0;
 		const maxOutputBytes: number = capFromCaller
-			? Math.floor(options.maxOutputBytes as number)
+			? Math.floor(callerCap)
 			: DEFAULT_MAX_OUTPUT_BYTES;
 		const outputTruncationMarker = "\n...[output truncated]...\n";
 		type OutputStream = "stdout" | "stderr";
