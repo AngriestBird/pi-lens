@@ -21,9 +21,12 @@ import {
 	classifyCleanBehavior,
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
+	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
 } from "../../scripts/lib/clean-signal.mjs";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	mergeRows,
 	mergeSrc,
@@ -31,7 +34,50 @@ import {
 	replaceTable,
 } from "../../scripts/lib/md-matrix.mjs";
 
+/** One parsed `[lsp-pub]` record as the drainer pushes it into a phase sink. */
+interface DrainedPublish {
+	server: string;
+	pubVersion: string;
+	diags: number;
+	versioned: boolean;
+}
+
 describe("classifyCleanBehavior (phase-aware 4-way)", () => {
+	it("scopes an interleaved extension.log trace to the row's server", () => {
+		// #3390 recurrence: a shared extension.log lets another live server's
+		// publish become this row's first-publish and clean-signal evidence.
+		const fixture = fs.readFileSync(
+			path.join(
+				process.cwd(),
+				"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
+			),
+			"utf8",
+		);
+		const bytes = Buffer.from(fixture);
+		const drain = createPublishTraceDrainer({
+			readLog() {
+				return {
+					size: bytes.length,
+					read(start) {
+						const chunk = bytes.subarray(start).toString("utf8");
+						return { chunk, bytesRead: bytes.length - start };
+					},
+				};
+			},
+		});
+		const own: DrainedPublish[] = [];
+		drain(own, "server-a");
+		expect(own).toHaveLength(2);
+		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);
+		expect(
+			classifyCleanBehavior({
+				dirtyPublishes: own.slice(0, 1).length,
+				dirtyVersioned: 1,
+				cleanTransitionPublishes: own.slice(1).length,
+				cleanTransitionVersioned: 1,
+			}).behavior,
+		).toBe("publishes-versioned");
+	});
 	it("classifies a versioned clean-transition publisher as publishes-versioned (tier 2)", () => {
 		// ast-grep-shaped: re-publishes WITH a version on a clean transition.
 		const v = classifyCleanBehavior({

@@ -107,6 +107,15 @@ nightly steps, **dev** = the dev box (a row measured on both reads `dev+ci`).
 Merges never blank a prior good value, so a CI non-result leaves the dev
 classification standing.
 
+`vue`'s `clean-behavior` was hand-reset to `unknown` (#3390): its
+`publishes-unversioned` cell came from 58/45 publishes that the shared
+`extension.log` window had attributed to vue but that belonged to `tinymist`.
+With the sink scoped per server, nightly 36046209160 measured vue 0/0, and an
+`unknown` result is never written by the merge above — so the refuted value had
+to be cleared by hand. It stays `unknown` until a run observes
+`@vue/language-server` publish; `tests/config/lsp-clean-behavior-census.test.ts`
+carries the named admission until then.
+
 | lang | server | mode | clean-behavior | first-publish | tier | src |
 |---|---|---|---|---|---|---|
 | json | vscode-json-language-server | pull | — | n/a (pull) | 1 | dev+ci |
@@ -130,7 +139,7 @@ classification standing.
 | prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
 | zig | zls | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| vue | @vue/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| vue | @vue/language-server | push-only | unknown | direct | 2/3? | dev+ci |
 | dart | dart language-server | push-only | publishes-unversioned | direct | 2* | ci |
 | gleam | gleam lsp | push-only | publishes-unversioned | direct | 2* | ci |
 | clojure | clojure-lsp | push-only | publishes-unversioned | direct | 2* | ci |
