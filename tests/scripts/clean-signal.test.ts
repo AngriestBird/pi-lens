@@ -21,7 +21,6 @@ import {
 	classifyCleanBehavior,
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
-	filterPublishTrace,
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
@@ -34,6 +33,14 @@ import {
 	parseTable,
 	replaceTable,
 } from "../../scripts/lib/md-matrix.mjs";
+
+/** One parsed `[lsp-pub]` record as the drainer pushes it into a phase sink. */
+interface DrainedPublish {
+	server: string;
+	pubVersion: string;
+	diags: number;
+	versioned: boolean;
+}
 
 describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 	it("scopes an interleaved extension.log trace to the row's server", () => {
@@ -48,17 +55,17 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 		);
 		const bytes = Buffer.from(fixture);
 		const drain = createPublishTraceDrainer({
-			readLog(offset) {
+			readLog() {
 				return {
 					size: bytes.length,
-					read(start) {
+					read(start: number) {
 						const chunk = bytes.subarray(start).toString("utf8");
 						return { chunk, bytesRead: bytes.length - start };
 					},
 				};
 			},
 		});
-		const own = [];
+		const own: DrainedPublish[] = [];
 		drain(own, "server-a");
 		expect(own).toHaveLength(2);
 		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);

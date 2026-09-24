@@ -50,7 +50,6 @@ import {
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
-	filterPublishTrace,
 	createPublishTraceDrainer,
 	strategyKeyForLang,
 } from "./lib/clean-signal.mjs";

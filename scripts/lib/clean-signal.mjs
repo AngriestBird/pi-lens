@@ -119,7 +119,7 @@ export function classifyCleanBehavior(obs) {
  * Keep a phase trace scoped to the server whose row is being measured. The
  * extension log is shared by every live LSP client in the process.
  */
-export function filterPublishTrace(publishes, serverId) {
+function filterPublishTrace(publishes, serverId) {
 	return (publishes ?? []).filter((publish) => publish?.server === serverId);
 }
 
