@@ -15,11 +15,19 @@
  * newline-free reply grew heap by 929 MiB and ended only when the request's own
  * 20 s timeout fired.
  *
- * The real-socket case below is the production path (a real
+ * The real-socket cases below are the production path (a real
  * `net.createConnection`, a real peer writing real bytes); the unit cases drive
  * the exported reader all five call sites share, because framing state is per
- * reader and the resync case needs chunk boundaries a socket will not
+ * reader and the resync cases need chunk boundaries a socket will not
  * reproduce on demand.
+ *
+ * ROUND 2 (review H3388-1). The first version of the bound checked only the
+ * newline-free REMAINDER of a chunk, so an over-limit frame that arrived with
+ * its newline in the same `data` chunk — one `socket.write`, one TCP segment —
+ * was dispatched whole: measured through this reader at 33,554,433 bytes
+ * delivered, 0 overflow callbacks, 0 records. The three chunk-boundary cases
+ * and the single-write socket case below are that defect's regression set: the
+ * bound belongs to the FRAME, not to whatever a chunk happens to end with.
  */
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -75,9 +83,84 @@ describe("createWarmIpcLineReader bound (#3383)", () => {
 		expect(row?.latestReasons[0]?.reason).toContain(
 			`limit ${MAX_FRAMED_LINE_BYTES}`,
 		);
+		expect(row?.latestReasons[0]?.reason).toContain(
+			"discarded an unterminated line",
+		);
 		// Latched: the peer's remaining bytes reach nothing.
 		read('{"result":{}}\n');
 		expect(lines).toEqual([]);
+	});
+
+	it("discards an over-limit frame delivered whole, newline and all, in one chunk", () => {
+		// H3388-1's exact input: the reviewer's probe as a test.
+		const lines: string[] = [];
+		const overflows: number[] = [];
+		const read = createWarmIpcLineReader((line) => lines.push(line), {
+			label: "warm-analyze-reply",
+			onOverflow: () => overflows.push(1),
+		});
+		read(`${"x".repeat(MAX_FRAMED_LINE_BYTES + 1)}\n`);
+		expect(lines).toEqual([]);
+		expect(overflows).toEqual([1]);
+		const row = overflowRow();
+		expect(row?.count).toBe(1);
+		expect(row?.latestReasons[0]?.reason).toContain(
+			"discarded a complete line",
+		);
+		expect(row?.latestReasons[0]?.reason).toContain(
+			`${MAX_FRAMED_LINE_BYTES + 1} bytes`,
+		);
+	});
+
+	it("discards an over-limit frame whose newline arrives in a later chunk", () => {
+		const lines: string[] = [];
+		const overflows: number[] = [];
+		const read = createWarmIpcLineReader((line) => lines.push(line), {
+			label: "warm-analyze-reply",
+			onOverflow: () => overflows.push(1),
+		});
+		// Exactly at the limit and still unterminated: the remainder check must
+		// NOT fire, so only the per-frame check can catch what comes next.
+		read("x".repeat(MAX_FRAMED_LINE_BYTES));
+		expect(overflows).toEqual([]);
+		read("x\n");
+		expect(lines).toEqual([]);
+		expect(overflows).toEqual([1]);
+		expect(overflowRow()?.count).toBe(1);
+	});
+
+	it("delivers a frame exactly at the limit", () => {
+		const lines: string[] = [];
+		const read = createWarmIpcLineReader((line) => lines.push(line), {
+			label: "warm-analyze-reply",
+			onOverflow: () => lines.push("OVERFLOW"),
+		});
+		read(`${"x".repeat(MAX_FRAMED_LINE_BYTES)}\n`);
+		expect(lines).toHaveLength(1);
+		expect(Buffer.byteLength(lines[0])).toBe(MAX_FRAMED_LINE_BYTES);
+		expect(overflowRow()).toBeUndefined();
+	});
+
+	it("keeps framing the request BEHIND a discarded complete frame", () => {
+		// A complete over-limit line is already past its own newline, so framing
+		// must continue there. Resyncing instead would eat this next request.
+		const lines: string[] = [];
+		const read = createWarmIpcLineReader((line) => lines.push(line), {
+			label: "mcp-stdio",
+			continuous: true,
+		});
+		read(`${"x".repeat(MAX_FRAMED_LINE_BYTES + 1)}\n{"method":"initialize"}\n`);
+		expect(lines).toEqual(['{"method":"initialize"}']);
+		// And in the NEXT chunk, which is where a wrong resync actually bites:
+		// the handler only consults `resyncing` at the top of a chunk, so a
+		// complete frame marked "awaiting a newline" swallows the request behind
+		// it one chunk later.
+		read('{"method":"tools/list"}\n');
+		expect(lines).toEqual([
+			'{"method":"initialize"}',
+			'{"method":"tools/list"}',
+		]);
+		expect(overflowRow()?.count).toBe(1);
 	});
 
 	it("delivers a framed line that fits, so the bound is not a blanket refusal", () => {
@@ -137,6 +220,34 @@ describe("requestWarmAnalyze against an unframed peer (#3383)", () => {
 		} catch {
 			// no socket file on Windows, and an already-removed one is fine
 		}
+	});
+
+	it("discards a single-write over-limit framed reply", async () => {
+		// H3388-1 through the production client over a real socket: ONE write
+		// carrying the whole over-limit frame, newline included.
+		const endpoint = ipcPathForCwd(cwd);
+		try {
+			fs.unlinkSync(endpoint);
+		} catch {
+			// no stale socket
+		}
+		let peer: net.Socket | undefined;
+		const server = net.createServer((socket) => {
+			peer = socket;
+			socket.on("error", () => {});
+			socket.write(`${"x".repeat(MAX_FRAMED_LINE_BYTES + 1)}\n`);
+		});
+		sockets.push(server);
+		await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+		const result = await requestWarmAnalyze(cwd, "/w/a.ts", 600_000);
+		peer?.destroy();
+		expect(result).toBeUndefined();
+		const row = overflowRow();
+		expect(row?.count).toBe(1);
+		expect(row?.latestReasons[0]?.subject).toBe("warm-analyze-reply");
+		expect(row?.latestReasons[0]?.reason).toContain(
+			"discarded a complete line",
+		);
 	});
 
 	it("gives up on the bound rather than on the timeout when the reply never frames", async () => {

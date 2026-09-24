@@ -700,11 +700,23 @@ export interface WarmIpcLineReaderOptions {
  * ceiling, so a peer that never sent a newline grew one JS string until the
  * request's own timeout fired — measured through `requestWarmAnalyze` against a
  * real socket: 64 MiB of newline-free reply, +929 MiB of heap, 20 s of it. Past
- * {@link MAX_FRAMED_LINE_BYTES} the partial line is DISCARDED, the overflow is
- * recorded once,
- * the caller's `onOverflow` decides the ending, and framing RESYNCS at the
- * discarded line's own newline so the next well-formed line is read normally
- * rather than parsed as the tail of the one that was dropped.
+ * {@link MAX_FRAMED_LINE_BYTES} the line is DISCARDED, the overflow is recorded
+ * once, and the caller's `onOverflow` decides the ending.
+ *
+ * The bound is on the FRAME, never on what is left over after a chunk's last
+ * newline (#3388 review H3388-1). The first version checked only the
+ * newline-free remainder, so a peer whose over-limit frame arrived with its
+ * newline in the SAME `data` chunk — which is what a single TCP segment or one
+ * `socket.write` produces — had its whole line dispatched, bound bypassed:
+ * measured at 33,554,433 bytes delivered, 0 overflow callbacks, 0 records. So
+ * each complete line is accounted for BEFORE it is dispatched, retained prefix
+ * included, and the remainder check below is now only the unterminated case.
+ *
+ * RESYNC applies to the unterminated case alone. A discarded UNTERMINATED line
+ * has a newline still to come, so framing skips to it and the next well-formed
+ * line is read normally rather than parsed as the dropped line's tail. A
+ * discarded COMPLETE line is already past its own newline, so framing continues
+ * from there — resyncing would eat the next line instead.
  *
  * Returns the handler to attach to the stream's `data` event.
  */
@@ -717,6 +729,31 @@ export function createWarmIpcLineReader(
 	let bufferedBytes = 0;
 	let dispatched = false;
 	let resyncing = false;
+	/**
+	 * Drop the frame, record it once, and let the caller end the exchange.
+	 * `awaitingNewline` is the difference between the two overflow shapes: an
+	 * unterminated line must be skipped up to the newline that has not arrived
+	 * yet, a complete one must not, because framing is already past its newline.
+	 */
+	const overflow = (frameBytes: number, awaitingNewline: boolean): void => {
+		buffer = "";
+		bufferedBytes = 0;
+		resyncing = awaitingNewline;
+		if (options.continuous !== true) dispatched = true;
+		incrementDegradationCount({
+			kind: "ipc-frame-overflow",
+			subject: options.label,
+			reason: `discarded ${
+				awaitingNewline ? "an unterminated" : "a complete"
+			} line at ${frameBytes} bytes (limit ${MAX_FRAMED_LINE_BYTES})`,
+			metadata: {
+				limitBytes: MAX_FRAMED_LINE_BYTES,
+				overflowBytes: frameBytes,
+				terminated: !awaitingNewline,
+			},
+		});
+		options.onOverflow?.();
+	};
 	return (chunk: string) => {
 		if (dispatched) return;
 		// Every scan below runs over the NEW chunk at an offset, never over the
@@ -737,10 +774,20 @@ export function createWarmIpcLineReader(
 		}
 		let newline = chunk.indexOf("\n", from);
 		while (newline !== -1) {
-			const line = buffer + chunk.slice(from, newline);
+			const segment = chunk.slice(from, newline);
+			from = newline + 1;
+			// H3388-1: the FRAME's length — this chunk's segment plus whatever was
+			// retained for it — decided before the line exists as a string.
+			const frameBytes = bufferedBytes + Buffer.byteLength(segment);
+			if (frameBytes > MAX_FRAMED_LINE_BYTES) {
+				overflow(frameBytes, false);
+				if (dispatched) return;
+				newline = chunk.indexOf("\n", from);
+				continue;
+			}
+			const line = buffer + segment;
 			buffer = "";
 			bufferedBytes = 0;
-			from = newline + 1;
 			if (options.continuous !== true) {
 				dispatched = true;
 				onLine(line);
@@ -755,18 +802,7 @@ export function createWarmIpcLineReader(
 			bufferedBytes += Buffer.byteLength(rest);
 		}
 		if (bufferedBytes <= MAX_FRAMED_LINE_BYTES) return;
-		const overflowBytes = bufferedBytes;
-		buffer = "";
-		bufferedBytes = 0;
-		resyncing = true;
-		if (options.continuous !== true) dispatched = true;
-		incrementDegradationCount({
-			kind: "ipc-frame-overflow",
-			subject: options.label,
-			reason: `discarded an unterminated line at ${overflowBytes} bytes (limit ${MAX_FRAMED_LINE_BYTES})`,
-			metadata: { limitBytes: MAX_FRAMED_LINE_BYTES, overflowBytes },
-		});
-		options.onOverflow?.();
+		overflow(bufferedBytes, true);
 	};
 }
 
