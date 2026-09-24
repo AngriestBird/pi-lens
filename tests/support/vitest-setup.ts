@@ -1006,6 +1006,13 @@ export function writeTmpHygieneLeakNotice(
 	);
 }
 
+let tmpHygieneAfterAllProbeForTests: (() => void) | undefined;
+export function setTmpHygieneAfterAllProbeForTests(
+	probe: (() => void) | undefined,
+): void {
+	tmpHygieneAfterAllProbeForTests = probe;
+}
+
 function checkTmpHygiene(): void {
 	const { testFile, leftovers } = tmpHygieneLeakReport();
 	const after = new Set(
@@ -1060,7 +1067,12 @@ afterAll(() => {
 			emitMemReport,
 		);
 	} finally {
-		removeTmpHygieneOwnerMarker();
+		try {
+			tmpHygieneAfterAllProbeForTests?.();
+		} finally {
+			tmpHygieneAfterAllProbeForTests = undefined;
+			removeTmpHygieneOwnerMarker();
+		}
 	}
 });
 

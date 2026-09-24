@@ -28,7 +28,7 @@ const fakeServerPath = path.resolve(
 	fixtureDir,
 	"../../../fixtures/fake-lsp-server.mjs",
 );
-const serverAvailable =
+export const serverAvailable =
 	fs.existsSync(process.execPath) && fs.existsSync(fakeServerPath);
 const d = serverAvailable ? describe : describe.skip;
 
