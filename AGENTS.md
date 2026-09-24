@@ -345,6 +345,14 @@ ADR: docs/adr/0009-reported-path-attribution.md
     direction from that harm; test unreadable, absent, and thrown lookup states
     where the seam supports both directions.
 
+53. **Unhandled stream or process event is a host-fatal throw:** make every
+    `data`, `error`, `close`, and timer callback on a child process, socket, or
+    stream total — catch, bound, and record rather than throw — and add an
+    `error` listener to every accepted socket; a throw inside a stream callback
+    bypasses the caller's `try/catch` and kills the pi host (#3375, #3383,
+    #3389). Screen: grep `on("data"|on("error"|on("close"` at every new
+    stream site and name the bound and the listener in the PR body.
+
 </important>
 
 <important if="a test double, ratchet or sweep">

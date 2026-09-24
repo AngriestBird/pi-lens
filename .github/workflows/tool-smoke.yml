@@ -252,6 +252,8 @@ jobs:
       # probe already; the drift check can't fail the job either way).
       - name: LSP clean-signal probe (Tier 2 vs 3 among push servers) + silentOnClean drift check
         continue-on-error: true
+        env:
+          PILENS_PUB_DEBUG: "1"
         run: node scripts/probe-clean-signal.mjs --install
 
       # #594: make a genuine #529 drift finding ACTIONABLE instead of it only
