@@ -217,8 +217,15 @@ function startServer(cwd: string): void {
 		// visible in the ledger.
 		socket.on("error", (failure) => {
 			incrementDegradationCount({
+				// Subject is the errno, so one peer's repeated resets stay one row.
+				// No `?? "unknown"` fallback: `normalizeForLedger`
+				// (`clients/ledger-bounds.ts:29`) already maps a missing value to
+				// `"unknown"`, and a second copy of that rule here was a branch no
+				// mutation could red (#3389 review round 1, F3395-01) — an error
+				// emitted with no `code` is pinned end-to-end in
+				// `tests/clients/warm-attach-socket-error.test.ts`.
 				kind: "warm-attach-socket-error",
-				subject: (failure as NodeJS.ErrnoException).code ?? "unknown",
+				subject: (failure as NodeJS.ErrnoException).code,
 				reason: String(failure),
 			});
 		});
