@@ -57,6 +57,13 @@ const BOTH_SUCCESS = {
 	],
 };
 
+const REAL_CHECK_RUNS = JSON.parse(
+	readFileSync(
+		join(process.cwd(), "tests/fixtures/ci-verdict/real-check-runs.json"),
+		"utf8",
+	),
+);
+
 describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", () => {
 	it("reports an armed infrastructure rerun only while its later attempt runs", () => {
 		const verdict = computeVerdict(
@@ -287,37 +294,28 @@ describe("computeVerdict — DIRTY fires on CONFLICTING regardless of check pres
 	});
 });
 
-// #2539 round 2, F7: `per_page=100` is not paginated, but `total_count` in
-// the same response says whether the fetched page was actually complete.
-describe("computeVerdict — truncated check-runs response (#2539 round 2, F7)", () => {
-	it("exits 3 (pending), not DIRTY, when total_count exceeds the fetched check_runs", () => {
-		const payload = {
-			total_count: 150,
-			check_runs: [checkRun({ name: "Unit tests", id: 1 })],
+// #3373: the real PR #3358 response crossed the REST page boundary. The
+// regression is that a complete two-page read must expose all 162 names to
+// the production fetch seam, without a synthetic truncation verdict.
+describe("fetchCheckRunsPayload — complete pagination (#3373)", () => {
+	it("reads every page until total_count is covered", () => {
+		const calls: string[] = [];
+		const ghExec = (args: string[]) => {
+			calls.push(args[1]);
+			const page = Number(
+				new URLSearchParams(args[1].split("?")[1]).get("page"),
+			);
+			return JSON.stringify({
+				total_count: REAL_CHECK_RUNS.source.total_count,
+				check_runs: REAL_CHECK_RUNS.pages[page - 1] ?? [],
+			});
 		};
-		// Even with a confirmed conflict, truncation wins: the missing required
-		// check might simply be sitting past the fetched page.
-		const verdict = computeVerdict(payload, undefined, "CONFLICTING");
-		expect(verdict.exitCode).toBe(EXIT_PENDING);
-		expect(verdict.reason).toMatch(/truncated/);
-	});
-
-	it("total_count equal to the fetched count is NOT truncated", () => {
-		const payload = { total_count: 2, ...BOTH_SUCCESS };
-		expect(computeVerdict(payload).exitCode).toBe(EXIT_SUCCESS);
-	});
-
-	it("a non-numeric total_count is ignored, not treated as truncation", () => {
-		// A malformed real-world payload (the field is present but not a
-		// number) -- deliberately mistyped to exercise computeVerdict's own
-		// `typeof totalCount === "number"` runtime guard.
-		const payload = {
-			total_count: "not-a-number" as unknown as number,
-			check_runs: [checkRun({ name: "Unit tests", id: 1 })],
-		};
-		expect(computeVerdict(payload, undefined, "CONFLICTING").exitCode).toBe(
-			EXIT_DIRTY,
-		);
+		const payload = fetchCheckRunsPayload("apmantza/pi-lens", "head", ghExec);
+		expect(calls).toEqual([
+			"repos/apmantza/pi-lens/commits/head/check-runs?per_page=100&page=1",
+			"repos/apmantza/pi-lens/commits/head/check-runs?per_page=100&page=2",
+		]);
+		expect(payload.check_runs).toHaveLength(REAL_CHECK_RUNS.source.total_count);
 	});
 });
 
@@ -626,7 +624,7 @@ describe("computeVerdict — every check-run gates unless advisory (#2609)", () 
 //  ------------|------------|----------------------|-------------------|--------------------
 //  required    | success    | --                   | 0 (existing)      | 2 (existing)
 //  required    | failure    | --                   | 1 (existing)      | 2 (existing)
-//  required    | cancelled  | --                   | 1  F1             | 2  NEW
+//  required    | cancelled  | latest              | 3  #3373          | 2  NEW
 //  required    | skipped    | --                   | 1  F1             | 2  (covered by table-driven test)
 //  required    | neutral    | --                   | 1  F1             | 2  (covered by table-driven test)
 //  required    | timed_out  | --                   | 1  (sanity)       | 2  (covered by table-driven test)
@@ -640,7 +638,7 @@ describe("computeVerdict — every check-run gates unless advisory (#2609)", () 
 //  discovered  | timed_out  | --                   | 1  (sanity)       | 2 (existing)
 //  discovered  | absent     | --                   | impossible by construction -- a discovered row's name, by definition, appeared in the payload
 //  advisory    | any incl. failure | --            | 0 (existing)      | 2 (existing)
-describe("computeVerdict — required rows demand literal success, no skip/neutral/cancelled grace (#2618 fix-round-2, F1)", () => {
+describe("computeVerdict — required rows reject skip/neutral/failure while latest cancellation reruns (#3373)", () => {
 	// The exact reported shape: ci.yml:253's `test` job (`Unit tests`) has
 	// `needs: validate-merge-train-dispatch` with no `if:` -- a failed/skipped
 	// dependency skips it outright, and the pre-fix-round-2 code (which
@@ -660,13 +658,13 @@ describe("computeVerdict — required rows demand literal success, no skip/neutr
 
 	it.each([
 		["failure", EXIT_FAILURE],
-		["cancelled", EXIT_FAILURE],
+		["cancelled", EXIT_PENDING],
 		["skipped", EXIT_FAILURE],
 		["neutral", EXIT_FAILURE],
 		["timed_out", EXIT_FAILURE],
 		["success", EXIT_SUCCESS],
 	])(
-		"a required row concluding %s exits %i regardless of the skip/neutral/cancelled discovered-row grace",
+		"a required row concluding %s exits %i regardless of the discovered-row grace",
 		(conclusion, expectedExit) => {
 			const payload = {
 				check_runs: [
@@ -722,11 +720,11 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		// cancelled` -- that reads as a contradiction. It gets its own clause.
 		expect(verdict.reason).not.toMatch(/still queued or in progress/);
 		expect(verdict.reason).toContain(
-			"cancelled and not yet re-reported (a superseded run; pends until the replacement posts -- this does not time out on its own): Record post-merge validation",
+			"superseded run cancelled and not replaced: rerun 101527303167 (gh run rerun 101527303167)",
 		);
 	});
 
-	it("a still-running row and an uncertain cancelled row get separate clauses in the same reason", () => {
+	it("a latest cancelled row gets an explicit rerun even beside a still-running row", () => {
 		const payload = {
 			check_runs: [
 				checkRun({ name: "Unit tests", id: 1 }),
@@ -747,10 +745,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		const verdict = computeVerdict(payload, undefined, "MERGEABLE");
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.reason).toContain(
-			"still queued or in progress: Production install build (--omit=dev, from source)",
-		);
-		expect(verdict.reason).toContain(
-			"cancelled and not yet re-reported (a superseded run; pends until the replacement posts -- this does not time out on its own): Record post-merge validation",
+			"superseded run cancelled and not replaced: rerun 3 (gh run rerun 3)",
 		);
 	});
 
@@ -808,6 +803,42 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		};
 		expect(computeVerdict(payload, undefined, "CONFLICTING").exitCode).toBe(
 			EXIT_DIRTY,
+		);
+	});
+
+	it("uses the newer success when an older cancelled lint run is present (#3373)", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs,
+					...REAL_CHECK_RUNS.cancelledReplacement.check_runs,
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_SUCCESS);
+		expect(
+			verdict.rows.find((row) => row.name === "Lint & type-check")?.conclusion,
+		).toBe("success");
+	});
+
+	it("reports the latest cancelled lint run with its rerun command (#3373)", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs.filter(
+						(run) => run.name !== "Lint & type-check",
+					),
+					...REAL_CHECK_RUNS.cancelledLatest.check_runs,
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toBe(
+			"superseded run cancelled and not replaced: rerun 107416999999 (gh run rerun 107416999999)",
 		);
 	});
 
@@ -1492,7 +1523,7 @@ describe("fetchCheckRunsPayload — timeout wiring (#2539 round 2, F4)", () => {
 		expect(calls[0].options).toEqual({ timeoutMs: 12_345 });
 		expect(calls[0].args).toEqual([
 			"api",
-			"repos/acme/repo/commits/deadbeef/check-runs?per_page=100",
+			"repos/acme/repo/commits/deadbeef/check-runs?per_page=100&page=1",
 		]);
 	});
 
