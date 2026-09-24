@@ -32,7 +32,11 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { listSourceFiles, relativePosix } from "../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	listSourceFiles,
+	relativePosix,
+} from "../support/sweep-kit.js";
 
 const spawnMock = vi.fn();
 
@@ -350,9 +354,9 @@ describe("safeSpawnAsync output-cap observability and output integrity (#3375)",
 
 		expect(result.outputTruncated).toBe(true);
 		expect(result.stdout).toContain("[output truncated]");
-		expect(result.stdout).not.toContain(" ");
+		expect(result.stdout).not.toContain("\u0000");
 		// 1025 is odd and U+00E9 is two UTF-8 bytes, so a boundary is split.
-		expect(result.stdout).toContain("�");
+		expect(result.stdout).toContain("\uFFFD");
 	});
 });
 
@@ -402,8 +406,9 @@ describe("DEFAULT_MAX_OUTPUT_BYTES versus the caps the tree already justifies", 
 			}
 		}
 		// A class of size 0 would make this vacuous: the tree's own caps are the
-		// whole evidence base for the number.
-		expect(explicit.length).toBeGreaterThan(5);
+		// whole evidence base for the number. 12 explicit caps on 2026-09-24;
+		// half, rounded down, is the floor.
+		assertNonEmptyScan("explicit maxOutputBytes caps", explicit.length, 6);
 		expect(
 			explicit
 				.filter((entry) => entry.bytes > DEFAULT_MAX_OUTPUT_BYTES)
