@@ -220,9 +220,9 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 				/^\s*if:\s*always\(\) && \(github\.event_name/.test(line),
 		);
 		expect(ifLineIdx).toBeGreaterThan(stepNameIdx);
-		const mutatedWorkflow = loadWorkflow(
-			lines.toSpliced(ifLineIdx, 1).join("\n"),
-		);
+		const mutatedLines = [...lines];
+		mutatedLines.splice(ifLineIdx, 1);
+		const mutatedWorkflow = loadWorkflow(mutatedLines.join("\n"));
 		expect(
 			findStep(mutatedWorkflow, DOCS_REFRESH_STEP_NAME).if,
 		).toBeUndefined();
