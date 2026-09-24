@@ -9,6 +9,32 @@
  */
 
 /**
+ * The cap `safeSpawnAsync` applies when a caller passes no `maxOutputBytes`
+ * (#3375).
+ *
+ * Before this existed, an omitted cap meant NO cap: `appendOutput` fell
+ * through to `current + text` and grew one JS string until V8 refused the next
+ * concatenation with `RangeError: Invalid string length`. That throw is raised
+ * inside a stdout/stderr `data` handler, where the awaiting caller's
+ * `try`/`catch` cannot reach it, so it left the Pi host as an uncaught
+ * exception (field report: Pi 0.86.1, 2026-09-22).
+ *
+ * 32 MiB is chosen against the tree's own deliberate ceilings, not invented:
+ * the most generous explicit cap any caller asks for is 16 MiB
+ * (`MAX_GIT_STATUS_OUTPUT_BYTES` in `clients/shared-checkout-guard.ts` and
+ * `clients/opaque-mutation-scan.ts`, `MAX_LS_FILES_OUTPUT_BYTES` in
+ * `clients/git-tracked-ignore.ts` — a monorepo's whole tracked-file list), and
+ * the rest sit at 8 MiB or 64 KiB. Doubling that ceiling means no consumer
+ * whose legitimate volume is within the most generous allowance a maintainer
+ * has ever justified can be truncated by the DEFAULT, while the retained
+ * string stays 16x below V8's max string length (2^29-24 bytes of ASCII), so
+ * the concatenation that crashed the host is now unreachable rather than
+ * merely less likely. A caller that genuinely needs more passes its own
+ * `maxOutputBytes`; it always wins.
+ */
+export const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+/**
  * True when `outputTruncated` is the OUTPUT CAP's own verdict about this run,
  * and not a detail of some other ending.
  *

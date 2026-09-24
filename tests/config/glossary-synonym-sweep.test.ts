@@ -463,7 +463,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-agent-end.ts": 6,
 		"clients/runtime-tool-call.ts": 7,
 		"clients/runtime-turn.ts": 10,
-		"clients/safe-spawn.ts": 42,
+		"clients/safe-spawn.ts": 48,
 		"clients/security-scan-client.ts": 2,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 1,

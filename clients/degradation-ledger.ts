@@ -933,6 +933,38 @@ export type DegradationKind =
 	 */
 	| "spawn-failure"
 	/**
+	 * #3375: `safeSpawnAsync` truncated a child's retained output at its cap and
+	 * (unless a streaming matcher was still waiting) terminated the child.
+	 * Subject is the command label (`resourceLabel`, else the command), a
+	 * bounded set; the reason names the cap, whether it came from the caller or
+	 * the module default, how many bytes the child had emitted, and whether the
+	 * child was terminated. Counted, because a chatty tool trips it on every
+	 * dispatch and the tally is what identifies the producer - the crash entry
+	 * that motivated the cap carried no command, byte count or cap value.
+	 */
+	/**
+	 * #3375 round 2 (H3384-1): every signal available for one spawn's teardown
+	 * was refused by the OS, so the child may still be running. Its own kind
+	 * rather than a field on `spawn-output-cap-truncated`, because it fires on
+	 * the abort and timeout teardowns too, which have nothing to do with an
+	 * output cap. Subject is the command label; the reason names which teardown
+	 * (`abort` / `output-cap` / `handler-fault` / `timeout`). Recorded at most
+	 * once per spawn — a refused kill is usually refused again on the next
+	 * teardown attempt, and a row per attempt would flood the sink.
+	 */
+	| "spawn-kill-failed"
+	| "spawn-output-cap-truncated"
+	/**
+	 * #3375: a stdout/stderr chunk handler inside `safeSpawnAsync` THREW. Such a
+	 * throw is delivered to the process, not to the awaiting caller, so before
+	 * the handler became total one (`RangeError: Invalid string length` from an
+	 * uncapped output string) terminated the Pi host. Retention stops and the
+	 * child is killed, reported as an ordinary output-cap result; this row is
+	 * the only evidence that the ending was a fault rather than a volume cap.
+	 * Subject is the command label; the reason names the stream and the error.
+	 */
+	| "spawn-output-handler-fault"
+	/**
 	 * The loaded addon exposed no `js` grammar while an HTML file's embedded
 	 * `language: JavaScript` evaluation asked for one (#2347). The embedded
 	 * coverage degrades to nothing for the whole file, silently prior to this

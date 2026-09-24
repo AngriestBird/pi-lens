@@ -258,7 +258,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:clients/safe-spawn-ambient-signal.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"real children receive ambient abort signals through the OS boundary, not an in-process double",
+			"real children receive ambient abort signals through the OS boundary, not an in-process double; #3375 adds two more - the default output cap needs a real pipe delivering tens of megabytes, and killTree's POSIX group arm is selected by /proc verifying that a REAL pid is this process's child, which no fabricated pid can satisfy",
 	},
 	"real-process-spawn:clients/safe-spawn-failure-taxonomy.test.ts": {
 		detector: "real-process-spawn",
