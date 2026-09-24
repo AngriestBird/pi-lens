@@ -26,14 +26,84 @@ import {
 	LSP_FIXTURES,
 	lspGatePopulation,
 } from "../../scripts/smoke-tools.mjs";
+import { LSP_SERVERS } from "../../clients/lsp/server.js";
 
 type Fixture = (typeof LSP_FIXTURES)[number] & {
 	lspGate?: boolean;
 	lspGateMarker?: string;
 	lspGateExempt?: string;
+	serverId?: string;
+	expectServerId?: string;
+	disableServers?: string[];
 	clean?: boolean;
 	auxiliaryServerIds?: string[];
 };
+
+type FallbackAdmission = {
+	serverId: string;
+	reason: string;
+	until: string;
+};
+
+// #3391 review r1: OmniSharp is registered as a fallback but has no committed
+// smoke fixture yet. This is an admission, not a silent gap: lane C (#3311)
+// owns adding the fixture and must remove this row in the same change.
+const FALLBACK_ADMISSIONS: readonly FallbackAdmission[] = [
+	{
+		serverId: "omnisharp",
+		reason: "no smoke fixture yet; lane C (#3311) adds it",
+		until: "#3311 lane C",
+	},
+];
+
+function fallbackPopulationIssues(
+	fixtures: readonly Fixture[],
+	servers: readonly Pick<(typeof LSP_SERVERS)[number], "id" | "fallbackFor">[],
+	admissions: readonly FallbackAdmission[],
+): string[] {
+	const pairs = servers
+		.filter((server) => server.fallbackFor)
+		.map((server) => [server.fallbackFor!, server.id] as const);
+	const familyIds = new Set(pairs.flat());
+	const labeled = fixtures.filter((fixture) =>
+		familyIds.has(fixture.serverId ?? ""),
+	);
+	const labeledIds = new Set(labeled.map((fixture) => fixture.serverId));
+	const admissionIds = new Set(
+		admissions.map((admission) => admission.serverId),
+	);
+	const issues: string[] = [];
+
+	for (const fixture of fixtures) {
+		if (!fixture.serverId && familyIds.has(fixture.expectServerId ?? "")) {
+			issues.push(`${fixture.lang} is an unlabelled fallback-family row`);
+		}
+	}
+	for (const admission of admissions) {
+		if (!familyIds.has(admission.serverId)) {
+			issues.push(`${admission.serverId} admission is not a fallback member`);
+		} else if (labeledIds.has(admission.serverId)) {
+			issues.push(
+				`${admission.serverId} admission is stale; fixture is present`,
+			);
+		}
+		if (admission.reason.trim().length < 20 || !admission.until.trim()) {
+			issues.push(`${admission.serverId} admission lacks reason or expiry`);
+		}
+	}
+	for (const id of familyIds) {
+		if (!labeledIds.has(id) && !admissionIds.has(id)) {
+			issues.push(`${id} is neither pinned by a fixture nor admitted`);
+		}
+	}
+	const expectedLabeledCount = familyIds.size - admissionIds.size;
+	if (labeled.length !== expectedLabeledCount) {
+		issues.push(
+			`fallback fixture count ${labeled.length} !== registry members minus admissions ${expectedLabeledCount}`,
+		);
+	}
+	return issues;
+}
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -149,5 +219,76 @@ describe("LSP clean-gate population (#3217)", () => {
 		expect(gated + handshakeOnly + unavailable).toBe(
 			population.eligible.length,
 		);
+	});
+
+	// #3391 recurrence guard: when a primary server is unavailable, its
+	// fallback can answer the handshake and produce a false green unless every
+	// fixture in a fallback family pins the server identity it intends to test.
+	it("pins the identity of every fixture in a fallback-server family", () => {
+		const fallbackPairs = LSP_SERVERS.filter(
+			(server) => server.fallbackFor,
+		).map((server) => [server.fallbackFor!, server.id] as const);
+		const fallbackIds = new Set(fallbackPairs.flat());
+		const familyFixtures = fixtures.filter((fixture) =>
+			fallbackIds.has(fixture.serverId ?? ""),
+		);
+		expect(
+			fallbackPopulationIssues(fixtures, LSP_SERVERS, FALLBACK_ADMISSIONS),
+		).toEqual([]);
+		expect(familyFixtures).toHaveLength(
+			fallbackIds.size - FALLBACK_ADMISSIONS.length,
+		);
+		for (const fixture of familyFixtures) {
+			expect(fixture.expectServerId, `${fixture.lang} expected server`).toBe(
+				fixture.serverId,
+			);
+			expect(
+				fixture.disableServers,
+				`${fixture.lang} must disable fallback siblings`,
+			).toEqual(
+				fallbackPairs
+					.filter(([primary, fallback]) =>
+						[primary, fallback].includes(fixture.serverId!),
+					)
+					.map(([primary, fallback]) =>
+						fixture.serverId === primary ? fallback : primary,
+					),
+			);
+		}
+	});
+
+	it("rejects an unlabelled fallback-family row", () => {
+		const unlabelled = fixtures.map((fixture) =>
+			fixture.lang === "elixir" ? { ...fixture, serverId: undefined } : fixture,
+		);
+		expect(
+			fallbackPopulationIssues(unlabelled, LSP_SERVERS, FALLBACK_ADMISSIONS),
+		).toEqual([
+			"elixir is an unlabelled fallback-family row",
+			"elixir is neither pinned by a fixture nor admitted",
+			"fallback fixture count 6 !== registry members minus admissions 7",
+		]);
+	});
+
+	it("rejects an admission after its fixture arrives", () => {
+		const withOmnisharp = [
+			...fixtures,
+			{
+				lang: "omnisharp",
+				serverId: "omnisharp",
+				expectServerId: "omnisharp",
+			},
+		] as Fixture[];
+		const stale = [
+			...FALLBACK_ADMISSIONS,
+			{
+				serverId: "omnisharp",
+				reason: "lane C fixture landed",
+				until: "#3311 lane C",
+			},
+		];
+		expect(
+			fallbackPopulationIssues(withOmnisharp, LSP_SERVERS, stale),
+		).toContain("omnisharp admission is stale; fixture is present");
 	});
 });
