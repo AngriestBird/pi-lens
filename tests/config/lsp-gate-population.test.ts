@@ -159,9 +159,9 @@ describe("LSP clean-gate population (#3217)", () => {
 	// fallback can answer the handshake and produce a false green unless every
 	// fixture in a fallback family pins the server identity it intends to test.
 	it("pins the identity of every fixture in a fallback-server family", () => {
-		const fallbackPairs = LSP_SERVERS.filter((server) => server.fallbackFor).map(
-			(server) => [server.fallbackFor!, server.id] as const,
-		);
+		const fallbackPairs = LSP_SERVERS.filter(
+			(server) => server.fallbackFor,
+		).map((server) => [server.fallbackFor!, server.id] as const);
 		const fallbackIds = new Set(fallbackPairs.flat());
 		const familyFixtures = fixtures.filter((fixture) =>
 			fallbackIds.has(fixture.serverId ?? ""),
