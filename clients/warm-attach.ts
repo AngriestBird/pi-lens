@@ -373,6 +373,19 @@ export function _resetWarmAttachForTests(): void {
 	state.servedDiagnosticHashes.clear();
 }
 
+/**
+ * The live diagnostics server, exposed for tests (#3389 review round 1,
+ * F3395-01). The `error` handler on an ACCEPTED socket has exactly one input
+ * channel — an `error` event on that socket — and a test cannot reach the
+ * socket any other way: it is created by `net.createServer` inside the closure
+ * above, and Node's ESM namespace for `node:net` is not configurable, so the
+ * factory cannot be wrapped from a test either. A test observes the server's
+ * own `connection` event through this accessor; nothing in production reads it.
+ */
+export function _warmAttachServerForTests(): net.Server | undefined {
+	return state.server;
+}
+
 export function _setWarmAttachForTests(
 	cwd: string,
 	incumbentPid: number,
