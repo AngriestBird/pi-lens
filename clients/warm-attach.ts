@@ -210,11 +210,13 @@ function startServer(cwd: string): void {
 		// timeout, schema refusal and validation refusal destroys its socket
 		// (`clients/mcp/ipc.ts:312`) — therefore turned a routine
 		// `read ECONNRESET` into an uncaught exception in THIS host, the same
-		// ending #3375 closed for an unbounded `data` handler. The stream has
-		// already destroyed itself by the time this runs (measured: `destroyed` is
-		// true at entry), so there is nothing left to tear down: the handler
-		// exists to keep the event catchable and to leave the peer's behavior
-		// visible in the ledger.
+		// ending #3375 closed for an unbounded `data` handler. The handler does NOT
+		// tear the connection down: a real system failure has already destroyed the
+		// stream before this runs (measured: `destroyed` is true at entry), and an
+		// `error` emitted with no errno leaves a socket that is still answering
+		// (review round 1) — destroying that one would drop a live request. So the
+		// handler exists to keep the event catchable and to leave the peer's
+		// behavior visible in the ledger.
 		socket.on("error", (failure) => {
 			incrementDegradationCount({
 				// Subject is the errno, so one peer's repeated resets stay one row.
