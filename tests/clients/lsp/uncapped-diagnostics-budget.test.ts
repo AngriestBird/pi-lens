@@ -24,11 +24,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
+vi.mock("../../../clients/lsp/config.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/lsp/config.js")>()),
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
-vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
+vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
+	createLSPClient,
+}));
+
+// Module scope, not only `beforeEach`: the client double's wait below is a timer
+// on the FAKE clock (that is what makes the measured budget deterministic), and
+// both vitest and the flake-shape scan's line-ordered fake-timer state have to
+// see the activation before that timer is written.
+vi.useFakeTimers();
 
 const ROOT = "C:/repo";
 
