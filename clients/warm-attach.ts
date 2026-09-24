@@ -25,7 +25,10 @@ import {
 	WARM_CODE_ACTION_LOOKUP_LIMIT,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 } from "./mcp/ipc.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { normalizeFilePath } from "./path-utils.js";
 
 interface AttachState {
@@ -201,6 +204,24 @@ function startServer(cwd: string): void {
 	}
 	const server = net.createServer((socket) => {
 		socket.setEncoding("utf8");
+		// #3389: an ACCEPTED socket with no `error` listener rethrows, and
+		// `server.on("error")` below covers only the listener. A client that walks
+		// away while this incumbent is answering — every `requestWarmDiagnostics`
+		// timeout, schema refusal and validation refusal destroys its socket
+		// (`clients/mcp/ipc.ts:305`) — therefore turned a routine
+		// `read ECONNRESET` into an uncaught exception in THIS host, the same
+		// ending #3375 closed for an unbounded `data` handler. The stream has
+		// already destroyed itself by the time this runs (measured: `destroyed` is
+		// true at entry), so there is nothing left to tear down: the handler
+		// exists to keep the event catchable and to leave the peer's behavior
+		// visible in the ledger.
+		socket.on("error", (failure) => {
+			incrementDegradationCount({
+				kind: "warm-attach-socket-error",
+				subject: (failure as NodeJS.ErrnoException).code ?? "unknown",
+				reason: String(failure),
+			});
+		});
 		// One-shot per connection (#1219 family): the same defect shape as the
 		// MCP warm socket — clients write exactly one request and read one
 		// reply, so a handler that kept re-reading the same buffered line

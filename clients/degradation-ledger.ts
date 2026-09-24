@@ -1118,6 +1118,19 @@ export type DegradationKind =
 	 */
 	| "unclassified-mutating-tool"
 	/**
+	 * #3389: an accepted socket on the warm diagnostics server emitted `error`.
+	 * A `net.Socket` with no `error` listener RETHROWS, so before this kind
+	 * existed the event was an uncaught exception in the pi host: every
+	 * `requestWarmDiagnostics` timeout, schema refusal and validation refusal
+	 * destroys its socket, and a peer that walks away while the incumbent is
+	 * still answering leaves a routine `read ECONNRESET` with nowhere to go.
+	 * Subject is the errno (`ECONNRESET`, `EPIPE`, `unknown` for a non-system
+	 * failure) — a tiny fixed set, so the ledger stays bounded however often a
+	 * peer resets. Counted: a client whose deadline is too short resets EVERY
+	 * request, and the tally is what identifies it.
+	 */
+	| "warm-attach-socket-error"
+	/**
 	 * #3255: nothing is listening on the pid-scoped warm endpoint this session
 	 * derived for its incumbent, while the instance registry still confirms that
 	 * incumbent is alive. Narrowing the workspace-id case fold renamed the
