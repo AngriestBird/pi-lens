@@ -2004,8 +2004,10 @@ export async function safeSpawnAsync(
 			// Retention is over. The bytes already in `stdout`/`stderr` stay as
 			// the bounded output: nothing renders from the retained head/tail
 			// again, because the re-entry guard returns before that can happen.
+			// That is also why `truncationStream` is deliberately NOT set here —
+			// only `renderOutput` reads it, and nothing renders after a fault, so
+			// the assignment was mutation-inert (removing it reds nothing).
 			outputTruncated = true;
-			truncationStream = stream;
 			incrementDegradationCount({
 				kind: "spawn-output-handler-fault",
 				subject: resourceLabel,
