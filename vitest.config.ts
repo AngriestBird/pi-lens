@@ -402,6 +402,10 @@ export const wallClockBudgetInclude = [
 	"tests/clients/safe-spawn-resource-usage.test.ts",
 	"tests/clients/safe-spawn-timeout-teardown.test.ts",
 	"tests/clients/safe-spawn-windows-command.test.ts",
+	// #3403: real scratch-tree rotation performs cold-disk filesystem work;
+	// measured p95 is 3.63s under six workers and eight CPU hogs, so the 10s
+	// assertion/budget leaves bounded CI scheduling headroom.
+	"tests/clients/sgconfig-scratch-bound.test.ts",
 	"tests/clients/shared-checkout-guard.test.ts",
 	"tests/clients/startup-overhead.test.ts",
 	// #2603 (was #2591 review round 2, F1): the workspace-member matcher's
