@@ -294,11 +294,20 @@ describe("safeSpawnAsync output-cap observability and output integrity (#3375)",
 	// it is ONE counted row per command label however many chunks arrive — not
 	// one per chunk, which is the unbounded-observability shape.
 	it("records one counted cap row per command label, naming cap, bytes and kill", async () => {
-		await runChild([{ stream: "stdout", text: "x".repeat(4096) }], {
+		// Three chunks per run, so chunks keep arriving AFTER the cap trips —
+		// which is what a real child does until the kill lands (see "retains
+		// late output in the tail after an output-cap kill" in
+		// safe-spawn-ambient-signal.test.ts). One row per RUN, not per chunk.
+		const noisy = (fill: string) =>
+			Array.from({ length: 3 }, () => ({
+				stream: "stdout" as const,
+				text: fill.repeat(4096),
+			}));
+		await runChild(noisy("x"), {
 			maxOutputBytes: 1024,
 			resourceLabel: "noisy-tool",
 		});
-		await runChild([{ stream: "stdout", text: "y".repeat(4096) }], {
+		await runChild(noisy("y"), {
 			maxOutputBytes: 1024,
 			resourceLabel: "noisy-tool",
 		});
