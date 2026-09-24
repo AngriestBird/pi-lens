@@ -415,7 +415,7 @@ export function formatRerunHint(row) {
 	if (jobId && String(row?.id) === jobId)
 		return `rerun ${jobId} (gh run rerun --job ${jobId})`;
 
-	return `rerun unavailable (check-run ${row?.id ?? "unknown"}; workflow run not present in details_url)`;
+	return `${row?.name ?? "unknown check"} cannot be rerun via gh (not a GitHub Actions job; details: ${detailsUrl || "unavailable"})`;
 }
 
 /** Fixed-column table: CHECK / STATUS / CONCLUSION / URL. Exported for tests

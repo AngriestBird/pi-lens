@@ -7,6 +7,7 @@
 - GitHub's #3382 payload proved check-run `107709801964` is the job id, while `details_url` carries workflow run `36022234159`.
 - The existing check-runs payload is the only resolution seam; no second API client or workflow-run lookup was added.
 - Failure list before coding: print the check-run id again; lose exit code 3; use an unverified `--job` fallback; fail when `details_url` is absent; or silently change a non-cancelled verdict.
+- Round 2 review finding: third-party and mismatched-job details URLs must name the check and tell the operator they cannot be rerun via `gh`.
 
 ## Change outline
 
@@ -19,7 +20,7 @@
 
 ## Summary
 
-`computeVerdict` carries `details_url` from the existing check-runs read into its row and formats the `/actions/runs/<run>/job/<job>` run segment for the cancellation hint. A `--job` command is used only when the same URL proves its job segment equals the check-run id; otherwise the message says the workflow run is unavailable. Exit code 3 is unchanged. Closes #3386.
+`computeVerdict` carries `details_url` from the existing check-runs read into its row and formats the `/actions/runs/<run>/job/<job>` run segment for the cancellation hint. A `--job` command is used only when the same URL proves its job segment equals the check-run id; otherwise the message names the check and says it cannot be rerun via `gh`, including the details URL. Exit code 3 is unchanged. Closes #3386.
 
 ## Type of change
 
@@ -61,12 +62,14 @@
 ## Tests
 
 - `tests/scripts/ci-verdict.test.ts`: the #3382 fixture proves `36022234159` is printed and exit code is `EXIT_PENDING` (3); the verified `--job` fallback is covered independently.
+- `tests/scripts/ci-verdict.test.ts`: third-party and mismatched-job fallback fixtures prove the check name and explicit `gh` limitation are rendered while exit code remains `EXIT_PENDING` (3).
 - `tests/fixtures/ci-verdict/pr-3382-cancelled.json`: scrubbed live check-run payload carrying `check_suite.id`, check-run id, and `details_url`.
 - Pre-fix red on `origin/master`: `Expected: ... rerun 36022234159 (gh run rerun 36022234159); Received: ... rerun 107709801964 (gh run rerun 107709801964)`.
 - Mutation red after replacing `formatRerunHint` with the old check-run-id interpolation: the same #3382 test failed with the received check-run id; all other 101 tests passed.
+- Round 2 mutation red after removing the fallback's check-name interpolation: 2 failed, 102 passed; both new fallback tests received the unnamed line.
 - `npm run build`: passed.
 - `npm run lint`: passed.
-- `tests/scripts/ci-verdict.test.ts`: 102 passed.
+- `tests/scripts/ci-verdict.test.ts`: 104 passed.
 - `tests/config/vi-mock-export-sweep.test.ts`: 57 passed, 1 skipped; 119 pre-existing warning rows.
 - Live `node scripts/ci-verdict.mjs 3382 --wait 1500`: exit 0; all gating checks concluded success on head `becd6dfff71dbaf37539b0dfa56395ab7cd575d0`. No cancelled row remained live, so the cancelled fixture is the live #3382 evidence.
 
