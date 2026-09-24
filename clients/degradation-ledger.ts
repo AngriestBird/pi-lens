@@ -318,6 +318,17 @@ export type DegradationKind =
 	 */
 	| "inline-blocker-unstructured"
 	| "install-retry-exhausted"
+	/**
+	 * #3311: a command the resolution ladder found on PATH failed the registry
+	 * entry's own check (`checkArgs`) with a verdict, so PATH was ignored for that
+	 * tool and the rungs below it (including the managed install) were tried
+	 * instead. The two shipped members: rustup's `rust-analyzer` proxy on a box
+	 * with no `rust-analyzer` component installed, and a pipx-installed
+	 * `cmake-language-server` whose venv resolved pygls 2. Subject is the tool id,
+	 * recorded once per session — the condition is a property of the box, not of
+	 * the call.
+	 */
+	| "installer-path-candidate-unrunnable"
 	| "installer-verification-inconclusive"
 	| "installer-verification-output-truncated"
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
@@ -660,6 +671,23 @@ export type DegradationKind =
 	 * (#1857 class sweep).
 	 */
 	| "path-variant-unresolved"
+	/**
+	 * #3311: a registry entry declares `pipConstraints`, but the constraints file
+	 * the pip ladder hands to `PIP_CONSTRAINT` could not be written. The install
+	 * then proceeds UNCONSTRAINED — the pre-#3311 resolution — so this row is the
+	 * only place that says the declared bound was not in force. Subject is the
+	 * tool id.
+	 */
+	| "pip-constraint-file-unwritable"
+	/**
+	 * #3311 round 2: a registry entry declares `pipConstraints`, but every
+	 * candidate directory for the constraints file has whitespace in its path.
+	 * `PIP_CONSTRAINT`/`UV_CONSTRAINT` both carry a whitespace-separated LIST, so
+	 * such a path is not a path to either resolver — uv fails the install
+	 * outright. The install then proceeds UNCONSTRAINED, and this row is the only
+	 * place that says the declared bound was not in force. Subject is the tool id.
+	 */
+	| "pip-constraint-path-unusable"
 	| "pip-install-strategy-succeeded"
 	| "pip-pep668-strategy-refused"
 	/**
@@ -1144,6 +1172,19 @@ export type DegradationKind =
 	 */
 	| "unclassified-mutating-tool"
 	/**
+	 * #3389: an accepted socket on the warm diagnostics server emitted `error`.
+	 * A `net.Socket` with no `error` listener RETHROWS, so before this kind
+	 * existed the event was an uncaught exception in the pi host: every
+	 * `requestWarmDiagnostics` timeout, schema refusal and validation refusal
+	 * destroys its socket, and a peer that walks away while the incumbent is
+	 * still answering leaves a routine `read ECONNRESET` with nowhere to go.
+	 * Subject is the errno (`ECONNRESET`, `EPIPE`, `unknown` for a non-system
+	 * failure) — a tiny fixed set, so the ledger stays bounded however often a
+	 * peer resets. Counted: a client whose deadline is too short resets EVERY
+	 * request, and the tally is what identifies it.
+	 */
+	| "warm-attach-socket-error"
+	/**
 	 * #3255: nothing is listening on the pid-scoped warm endpoint this session
 	 * derived for its incumbent, while the instance registry still confirms that
 	 * incumbent is alive. Narrowing the workspace-id case fold renamed the
@@ -1288,7 +1329,7 @@ export function _getDegradationLedgerStateForTests(): {
 export function recordDegradation(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
-		const subject = truncateForLedger(record.subject);
+		const subject = subjectForLedger(record.subject);
 		const reason = truncateForLedger(record.reason);
 		let group = groups.get(kind);
 		if (!group) {
@@ -1314,7 +1355,7 @@ export function recordDegradation(record: DegradationRecord): boolean {
 export function recordDegradationOnce(record: DegradationRecord): void {
 	try {
 		const kind = boundedKind(record.kind);
-		const subject = truncateForLedger(record.subject);
+		const subject = subjectForLedger(record.subject);
 		const key = `${kind}\0${subject}`;
 		if (onceKeys.has(key)) return;
 		onceKeys.add(key);
@@ -1342,7 +1383,7 @@ export function recordDegradationOnce(record: DegradationRecord): void {
 export function incrementDegradationCount(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
-		const subject = truncateForLedger(record.subject);
+		const subject = subjectForLedger(record.subject);
 		const reason = truncateForLedger(record.reason);
 		const key = `${kind}\0${subject}`;
 		const count = (tallies.get(key) ?? 0) + 1;
@@ -1428,6 +1469,26 @@ function boundLedgerMetadata(
 
 function isPowerOfTwo(value: number): boolean {
 	return value > 0 && (value & (value - 1)) === 0;
+}
+
+/**
+ * A subject is an IDENTITY: it is the row's discriminator, the `filePath` of
+ * its durable latency row, and the text `renderDegradationLines` prints after
+ * the count. A blank one names nothing — `⚠ kind: 1 — : reason` — so blank and
+ * missing are the same case and both read `unknown` (#3389 verify round 2,
+ * F3395-02: a socket error carrying `code: ""` wrote an empty subject).
+ *
+ * This is deliberately NOT `normalizeForLedger`'s job, though every ledger
+ * field passes through it: that normalizer keeps falsy primitives on purpose
+ * (`tests/clients/ledger-bounds.test.ts` "keeps primitives, including falsy
+ * ones"), because a metadata VALUE of `""` or `0` is data, not absence. Only
+ * the identity fields fold blank into missing, and `0`/`false` still name
+ * something here too — the check reads the NORMALIZED text, never the caller's
+ * truthiness.
+ */
+function subjectForLedger(value: unknown): string {
+	const subject = truncateForLedger(value);
+	return subject.trim() === "" ? "unknown" : subject;
 }
 
 function boundedKind(value: unknown): string {

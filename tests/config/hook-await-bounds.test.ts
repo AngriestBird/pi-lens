@@ -2255,7 +2255,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// probes and is reset at session_start. The helper deliberately ignores the
 	// ambient hook signal, so wrapping here would duplicate the wall bound
 	// without adding cancellation and would misstate the credential contract.
-	"clients/installer/index.ts": 221,
+	// #3311 adds four: the resolution ladder's PATH rung now awaits
+	// verifyToolBinary (itself bounded by getToolVerificationTimeout through
+	// safeSpawnAsync, default 10s) and the pip ladder awaits
+	// pipConstraintEnvFor plus its mkdir/writeFile of one small constraints
+	// file under PI_LENS_HOME. Each is intrinsically bounded or a local write;
+	// none can take the hook's signal until #2523 AC4 threads it, so this
+	// records the measured increase rather than hiding it.
+	"clients/installer/index.ts": 225,
 	"clients/installer/managed-tool-refresh.ts": 29,
 	"clients/instance-reaper.ts": 26,
 	"clients/instance-registry.ts": 23,

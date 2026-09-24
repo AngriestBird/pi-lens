@@ -464,7 +464,9 @@ function startIpcServer(): void {
 				},
 			),
 		);
-		socket.on("error", () => socket.destroy());
+		// The stream is already destroyed when this handler runs; the listener
+		// remains the surviving teardown witness, while destroy() was a no-op.
+		socket.on("error", () => {});
 	});
 
 	ipc.on("error", (err) => {
