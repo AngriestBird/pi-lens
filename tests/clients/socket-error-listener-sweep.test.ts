@@ -17,9 +17,13 @@
  *
  * ## What is scanned, and how
  *
- * `clients/`, `mcp/`, `tools/` and `index.ts` (`scripts/` has no `node:net`
- * site: `grep -rn "node:net" scripts/` is empty, and a script that grew one
- * would be a build-time tool, not a host). Call sites come from the AST
+ * `clients/`, `mcp/`, `tools/`, `tests/support/` and `index.ts` (`scripts/` has
+ * no `node:net` site: `grep -rn "node:net" scripts/` is empty, and a script
+ * that grew one would be a build-time tool, not a host). The broader `tests/`
+ * corpus is an explicit admission (`TESTS_CORPUS_FAULT_INJECTION`): those test
+ * cases intentionally create fault-injection sockets and are not shared host
+ * fixtures; `tests/support/` is the reusable fixture population and is scanned.
+ * Call sites come from the AST
  * (`@ast-grep/napi`), so a factory named in prose is not a call site, and the
  * `error` binding is required as CODE via `codeMatches` — a comment or a
  * string that spells `socket.on("error")` cannot satisfy it (the dangerous
@@ -206,6 +210,9 @@ function scanShippedTrees(): {
 		...listSourceFiles(path.join(REPO_ROOT, "clients"), { skipTests: true }),
 		...listSourceFiles(path.join(REPO_ROOT, "mcp"), { skipTests: true }),
 		...listSourceFiles(path.join(REPO_ROOT, "tools"), { skipTests: true }),
+		...listSourceFiles(path.join(REPO_ROOT, "tests", "support"), {
+			skipTests: true,
+		}),
 		path.join(REPO_ROOT, "index.ts"),
 	];
 	const sites: SocketSite[] = [];
