@@ -26,11 +26,15 @@ import {
 	LSP_FIXTURES,
 	lspGatePopulation,
 } from "../../scripts/smoke-tools.mjs";
+import { LSP_SERVERS } from "../../clients/lsp/server.js";
 
 type Fixture = (typeof LSP_FIXTURES)[number] & {
 	lspGate?: boolean;
 	lspGateMarker?: string;
 	lspGateExempt?: string;
+	serverId?: string;
+	expectServerId?: string;
+	disableServers?: string[];
 	clean?: boolean;
 	auxiliaryServerIds?: string[];
 };
@@ -149,5 +153,50 @@ describe("LSP clean-gate population (#3217)", () => {
 		expect(gated + handshakeOnly + unavailable).toBe(
 			population.eligible.length,
 		);
+	});
+
+	// #3391 recurrence guard: when a primary server is unavailable, its
+	// fallback can answer the handshake and produce a false green unless every
+	// fixture in a fallback family pins the server identity it intends to test.
+	it("pins the identity of every fixture in a fallback-server family", () => {
+		const fallbackPairs = LSP_SERVERS.filter((server) => server.fallbackFor).map(
+			(server) => [server.fallbackFor!, server.id] as const,
+		);
+		const fallbackIds = new Set(fallbackPairs.flat());
+		const familyFixtures = fixtures.filter((fixture) =>
+			fallbackIds.has(fixture.serverId ?? ""),
+		);
+		expect(fallbackPairs).toEqual([
+			["typescript", "deno"],
+			["python", "python-jedi"],
+			["csharp", "omnisharp"],
+			["elixir", "expert"],
+		]);
+		expect(familyFixtures.map((fixture) => fixture.serverId)).toEqual([
+			"typescript",
+			"python",
+			"csharp",
+			"elixir",
+			"expert",
+			"deno",
+			"python-jedi",
+		]);
+		for (const fixture of familyFixtures) {
+			expect(fixture.expectServerId, `${fixture.lang} expected server`).toBe(
+				fixture.serverId,
+			);
+			expect(
+				fixture.disableServers,
+				`${fixture.lang} must disable fallback siblings`,
+			).toEqual(
+				fallbackPairs
+					.filter(([primary, fallback]) =>
+						[primary, fallback].includes(fixture.serverId!),
+					)
+					.map(([primary, fallback]) =>
+						fixture.serverId === primary ? fallback : primary,
+					),
+			);
+		}
 	});
 });

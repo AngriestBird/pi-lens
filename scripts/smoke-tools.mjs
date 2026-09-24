@@ -474,10 +474,13 @@ const FIXTURES = [
 const LSP_FIXTURES = [
 	{
 		lang: "typescript",
+		serverId: "typescript",
 		dir: "tests/fixtures/tool-smoke/typescript",
 		file: "bad.ts",
 		serverHint: "typescript-language-server",
 		tools: ["typescript-language-server"],
+		disableServers: ["deno"],
+		expectServerId: "typescript",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
 	},
@@ -505,12 +508,15 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "python",
+		serverId: "python",
 		lspGate: true,
 		lspGateMarker: 'gate_seed: int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/python",
 		file: "bad.py",
 		serverHint: "pyright",
 		tools: ["pyright"],
+		disableServers: ["python-jedi"],
+		expectServerId: "python",
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -751,6 +757,7 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "csharp",
+		serverId: "csharp",
 		// Measured on ubuntu-latest: the identical fixture produced one primary
 		// finding in run 35897633475 and none in run 35899592839. Keep this row
 		// out of the nightly gate until csharp-ls makes that result stable; this
@@ -761,6 +768,8 @@ const LSP_FIXTURES = [
 		file: "Program.cs",
 		serverHint: "csharp-ls",
 		tools: ["csharp-ls"],
+		disableServers: ["omnisharp"],
+		expectServerId: "csharp",
 	},
 	{
 		lang: "fsharp",
@@ -890,10 +899,13 @@ const LSP_FIXTURES = [
 		// `ensureTool(elixir-ls) → UNAVAILABLE`; no server became ready.
 		lspGateExempt:
 			"availability limit: ensureTool(elixir-ls) → UNAVAILABLE and touched=0 health=undefined; no server became ready (35917565541); see #3311",
+		serverId: "elixir",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "elixir-ls",
 		tools: ["elixir-ls"],
+		disableServers: ["expert"],
+		expectServerId: "elixir",
 	},
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
@@ -903,6 +915,7 @@ const LSP_FIXTURES = [
 		lspGateExempt:
 			"server limit: Expert loaded the fixture (file-servers=expert) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
 		lang: "expert",
+		serverId: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
 		serverHint: "Expert (alternate of ElixirLS)",
@@ -1084,6 +1097,7 @@ const LSP_FIXTURES = [
 	// produced it. Both auto-install via their `tools` ids under --install.
 	{
 		lang: "deno",
+		serverId: "deno",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
 		dir: "tests/fixtures/tool-smoke/deno-alt",
@@ -1096,6 +1110,7 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "jedi",
+		serverId: "python-jedi",
 		lspGate: true,
 		lspGateMarker: "def greet(name)",
 		dir: "tests/fixtures/tool-smoke/jedi-alt",
