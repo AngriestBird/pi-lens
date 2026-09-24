@@ -8,6 +8,7 @@
  */
 
 import * as path from "node:path";
+import { parseInlineSuppressionRuleIds } from "./inline-suppressions.js";
 
 const HASH_COMMENT_EXTENSIONS = new Set([
 	".py",
@@ -66,7 +67,8 @@ export function insertSuppressComment(
 			.split(",")
 			.map((r) => r.trim())
 			.filter(Boolean);
-		if (!rules.includes(rule)) rules.push(rule);
+		const ruleIds = parseInlineSuppressionRuleIds(match[2]);
+		if (!ruleIds.includes(rule)) rules.push(rule);
 		lines[aboveIdx] =
 			existingAbove.slice(0, match.index) + match[1] + rules.join(", ");
 		return lines.join("\n");

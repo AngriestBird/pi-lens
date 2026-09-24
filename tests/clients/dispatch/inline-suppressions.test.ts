@@ -33,6 +33,18 @@ describe("applyInlineSuppressions (#442 — shared by mode=all + mode=full)", ()
 		]);
 	});
 
+	for (const [separator, explanation] of [
+		[" -- ", "an intentional exception"],
+		[" — ", "an intentional exception"],
+		[": ", "an intentional exception"],
+	] as const) {
+		it(`ignores a trailing reason after ${separator.trim()}`, () => {
+			const content = `eval(x); // pi-lens-ignore: no-eval${separator}${explanation}\n`;
+			const diags: D[] = [{ line: 1, rule: "no-eval" }];
+			expect(applyInlineSuppressions(diags, content)).toEqual([]);
+		});
+	}
+
 	it("does NOT suppress a different rule or an out-of-range line", () => {
 		// The comment on line 1 covers line 1 + line 2 (next-line semantics), so the
 		// "different line" case uses line 3 to stay out of range.
@@ -60,6 +72,12 @@ describe("applyInlineSuppressions (#442 — shared by mode=all + mode=full)", ()
 		expect(
 			applyInlineSuppressions([{ line: 1, rule: "no-eval-js" }], content),
 		).toEqual([]);
+	});
+
+	it("preserves a colon inside a namespaced rule id", () => {
+		const content = "eval(x)  # pi-lens-ignore: ast-grep:no-eval\n";
+		const diags: D[] = [{ line: 1, rule: "ast-grep:no-eval" }];
+		expect(applyInlineSuppressions(diags, content)).toEqual([]);
 	});
 
 	// #1087 P3-1: the COMMENT token is now normalized too, not just the

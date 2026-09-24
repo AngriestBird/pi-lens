@@ -19,6 +19,14 @@ export interface SuppressibleDiagnostic {
 }
 
 const SUPPRESS_RE = /(?:\/\/|#)\s*pi-lens-ignore:\s*(.+)/;
+const TRAILING_REASON_RE = /(?:\s+--\s+|\s+—\s+|:\s+).+$/u;
+
+export function parseInlineSuppressionRuleIds(payload: string): string[] {
+	return payload
+		.split(",")
+		.map((rule) => rule.replace(TRAILING_REASON_RE, "").trim())
+		.filter(Boolean);
+}
 
 /**
  * Normalize a rule id to the form a user writes in a `pi-lens-ignore` comment.
@@ -49,10 +57,7 @@ export function applyInlineSuppressions<T extends SuppressibleDiagnostic>(
 	for (let i = 0; i < lines.length; i++) {
 		const m = SUPPRESS_RE.exec(lines[i]);
 		if (!m) continue;
-		const rules = m[1]
-			.split(",")
-			.map((r) => r.trim())
-			.filter(Boolean);
+		const rules = parseInlineSuppressionRuleIds(m[1]);
 		const suppressedLine = i + 1; // same line (1-based)
 		const nextLine = i + 2; // next line (1-based)
 		for (const ruleId of rules) {
