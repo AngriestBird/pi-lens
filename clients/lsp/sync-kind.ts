@@ -81,7 +81,9 @@ export function negotiateSaveOptions(
 	const save = (sync as { save?: unknown }).save;
 	if (save === true) return { includeText: false };
 	if (save && typeof save === "object") {
-		return { includeText: (save as { includeText?: unknown }).includeText === true };
+		return {
+			includeText: (save as { includeText?: unknown }).includeText === true,
+		};
 	}
 	return undefined;
 }

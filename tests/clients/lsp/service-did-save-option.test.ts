@@ -78,7 +78,11 @@ function makeClient(serverId: string, open: ReturnType<typeof vi.fn>) {
 		getDiagnostics: vi.fn(() => []),
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
-		notify: { open, change: vi.fn(async () => {}), close: vi.fn(async () => {}) },
+		notify: {
+			open,
+			change: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		},
 		pingLiveness: vi.fn().mockResolvedValue(true),
 		waitForDiagnostics: vi.fn(async () => {}),
 	};
@@ -99,7 +103,9 @@ async function touchWith(
 	const { LSPService } = await import("../../../clients/lsp/index.js");
 	const service = new LSPService();
 	const open = vi.fn(async () => {});
-	getServersForFileWithConfig.mockReturnValue([makeServer("typescript", ".ts")]);
+	getServersForFileWithConfig.mockReturnValue([
+		makeServer("typescript", ".ts"),
+	]);
 	createLSPClient.mockResolvedValue(makeClient("typescript", open));
 	const file = `${ROOT}/saved.ts`;
 	await service.getClientsForFile(file);

@@ -1177,6 +1177,9 @@ describe("Pipeline", () => {
 					source: "lsp_sync",
 					clientScope: "primary",
 					maxClientWaitMs: 5000,
+					// #3405: the post-write sync is the touch that knows pi-lens wrote
+					// the file, so it is the one that declares a save.
+					saved: true,
 				},
 			);
 			// The old openFile path (which never registered the touch) must not run.

@@ -1110,7 +1110,7 @@ export interface LSPClientState {
 	 *  default (the initial state literal below never sets it), so a server that
 	 *  never advertised `save`, and every hand-written test double, receives no
 	 *  `textDocument/didSave`. Set once at initialize, next to `syncKind`. */
-	saveOptions?: TextDocumentSaveOptions;
+	saveOptions?: TextDocumentSaveOptions | undefined;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
 	/** Live dynamic registrations from client/registerCapability: id → record.
@@ -4335,7 +4335,6 @@ export function handleNotifyChange(
 			coalescedCount,
 		),
 	);
-
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */

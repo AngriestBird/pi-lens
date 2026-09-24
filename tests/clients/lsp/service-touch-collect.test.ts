@@ -210,6 +210,9 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			"python",
 			undefined,
 			true,
+			// #3405: this touch declares no save, so the server is told nothing
+			// about one — see tests/clients/lsp/service-did-save-option.test.ts.
+			false,
 		);
 		expect(client.waitForDiagnostics).toHaveBeenCalledWith(FILE, 25);
 		expect(result?.diags).toEqual([attributedDiagnostic]);

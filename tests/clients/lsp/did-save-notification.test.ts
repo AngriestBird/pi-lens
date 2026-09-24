@@ -67,7 +67,9 @@ function sentParams(state: LSPClientState, method: string): unknown {
 describe("negotiateSaveOptions — the `save` half of textDocumentSync (#3405)", () => {
 	it("reads a bare `save: true` as save-declaring with no text", () => {
 		expect(
-			negotiateSaveOptions({ textDocumentSync: { openClose: true, save: true } }),
+			negotiateSaveOptions({
+				textDocumentSync: { openClose: true, save: true },
+			}),
 		).toEqual({ includeText: false });
 	});
 
@@ -301,6 +303,50 @@ describe("textDocument/didSave on a declared save (#3405)", () => {
 	});
 });
 
+/**
+ * Records every notification the fake server reports receiving, and hands back
+ * a promise that settles when a named one arrives — a deterministic wait on the
+ * event itself, not a polled `vi.waitFor` (flake-shape `ungoverned-wait-for`).
+ */
+function notifyRecorder(client: Awaited<ReturnType<typeof createLSPClient>>) {
+	const methods: string[] = [];
+	const saves: Array<{ uri: string; hasText: boolean }> = [];
+	const waiters = new Map<string, () => void>();
+	let saveWaiter: (() => void) | undefined;
+	client.connection.onNotification("$/test/notifyReceived", ((params: {
+		method: string;
+	}) => {
+		methods.push(params.method);
+		waiters.get(params.method)?.();
+		waiters.delete(params.method);
+	}) as never);
+	client.connection.onNotification("$/test/didSaveReceived", ((params: {
+		uri: string;
+		hasText: boolean;
+	}) => {
+		saves.push(params);
+		saveWaiter?.();
+		saveWaiter = undefined;
+	}) as never);
+	return {
+		methods,
+		saves,
+		until(method: string): Promise<void> {
+			if (methods.includes(method)) return Promise.resolve();
+			return new Promise<void>((resolve) => waiters.set(method, resolve));
+		},
+		/** The echo the fixture sends from its didSave branch, which lands AFTER
+		 *  the generic method echo — so the save's own params need their own
+		 *  event to wait on. */
+		untilSave(): Promise<void> {
+			if (saves.length > 0) return Promise.resolve();
+			return new Promise<void>((resolve) => {
+				saveWaiter = resolve;
+			});
+		},
+	};
+}
+
 describe("didSave through the real createLSPClient init path (#3405)", () => {
 	it("a server advertising save: true receives didSave after didOpen", async () => {
 		const proc = await spawnFakeLspServer({
@@ -318,21 +364,7 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 			root: process.cwd(),
 		});
 		try {
-			const methods: string[] = [];
-			const saves: Array<{ uri: string; hasText: boolean }> = [];
-			client.connection.onNotification(
-				"$/test/notifyReceived",
-				(params: { method: string }) => {
-					methods.push(params.method);
-				},
-			);
-			client.connection.onNotification(
-				"$/test/didSaveReceived",
-				(params: { uri: string; hasText: boolean }) => {
-					saves.push(params);
-				},
-			);
-
+			const recorder = notifyRecorder(client);
 			const filePath = path.join(os.tmpdir(), "pi-lens-did-save-real.ts");
 			await client.notify.open(
 				filePath,
@@ -342,16 +374,14 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 				true,
 				true,
 			);
+			await recorder.untilSave();
 
-			await vi.waitFor(() => {
-				expect(saves.length).toBeGreaterThan(0);
-			});
 			// The real `initialize` reply drove the send: the fixture advertises
-			// `save: true` and nothing else about saving.
-			expect(saves[0].uri).toBe(pathToFileURL(filePath).href);
-			expect(saves[0].hasText).toBe(false);
-			expect(methods.indexOf("textDocument/didSave")).toBeGreaterThan(
-				methods.indexOf("textDocument/didOpen"),
+			// `save: true` and nothing else about saving, so no text rides along.
+			expect(recorder.saves[0]?.uri).toBe(pathToFileURL(filePath).href);
+			expect(recorder.saves[0]?.hasText).toBe(false);
+			expect(recorder.methods.indexOf("textDocument/didSave")).toBeGreaterThan(
+				recorder.methods.indexOf("textDocument/didOpen"),
 			);
 		} finally {
 			await client.shutdown().catch(() => {});
@@ -374,14 +404,7 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 			root: process.cwd(),
 		});
 		try {
-			const methods: string[] = [];
-			client.connection.onNotification(
-				"$/test/notifyReceived",
-				(params: { method: string }) => {
-					methods.push(params.method);
-				},
-			);
-
+			const recorder = notifyRecorder(client);
 			const filePath = path.join(os.tmpdir(), "pi-lens-did-save-none.ts");
 			await client.notify.open(
 				filePath,
@@ -391,13 +414,16 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 				true,
 				true,
 			);
+			await recorder.until("textDocument/didOpen");
+			// A stdio JSON-RPC stream is FIFO, so a reply to a request issued AFTER
+			// the notify proves the server has already drained everything the notify
+			// wrote. That is what makes the absence below evidence and not a race —
+			// and it is a settled round trip, not a polled wait.
+			await client.pingLiveness?.(5000);
 
-			// didOpen proves the round trip happened at all, so the absence below
-			// is evidence rather than a race.
-			await vi.waitFor(() => {
-				expect(methods).toContain("textDocument/didOpen");
-			});
-			expect(methods).not.toContain("textDocument/didSave");
+			expect(recorder.methods).toContain("textDocument/didOpen");
+			expect(recorder.methods).not.toContain("textDocument/didSave");
+			expect(recorder.saves).toEqual([]);
 		} finally {
 			await client.shutdown().catch(() => {});
 			await stopLSP(proc).catch(() => {});
