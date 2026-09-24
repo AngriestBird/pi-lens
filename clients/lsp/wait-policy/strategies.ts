@@ -447,14 +447,14 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// Both windows INCLUDE workspace bootstrap + spawn + initialize, so they
 		// bound the wait from above: the required budget is in (1500, 4860] ms.
 		// 6000 covers the measured gate window with margin and stays under the
-		// tool-smoke gate's own 8000ms ceiling. CONFIRMED at this budget by run
-		// 36064829436: `✓ csharp csharp-ls 1 lsp_diagnostics returned 1 primary
-		// finding`, 4.78s after `Restored …csproj`, census unchanged at gated 31 /
-		// handshake-only 8 / unavailable 6 — so 6000 is measured as sufficient, not
-		// merely inferred from the 8000 runs above. It is pinned by
-		// tests/config/lsp-gate-population.test.ts) so the gate can still witness
-		// it. It is deliberately NOT the ceiling: an `lsp_diagnostics` call that
-		// passes no `waitMs` pays this budget in full on a file the server never
+		// tool-smoke gate's own 8000ms ceiling (that relation is pinned by
+		// tests/config/lsp-gate-population.test.ts), so the gate can still witness
+		// this budget. CONFIRMED at 6000 by run 36064829436: `✓ csharp csharp-ls 1
+		// lsp_diagnostics returned 1 primary finding`, 4.78s after `Restored
+		// …csproj`, census unchanged at gated 31 / handshake-only 8 / unavailable 6
+		// — so 6000 is measured as sufficient, not merely inferred from the 8000
+		// runs above. It is deliberately NOT the ceiling: an `lsp_diagnostics` call
+		// that passes no `waitMs` pays this budget in full on a file the server never
 		// publishes for (`tools/lsp-diagnostics.ts` leaves `maxClientWaitMs`
 		// undefined → `perServerTimeout` has no caller cap), so every 1000ms here
 		// is 1000ms of turn latency on the no-publication path (#3402 review r2).
