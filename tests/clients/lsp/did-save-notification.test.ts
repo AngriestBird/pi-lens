@@ -274,8 +274,20 @@ describe("textDocument/didSave on a declared save (#3405)", () => {
 		});
 	});
 
-	it("sends no didSave once the client is destroyed", async () => {
+	it("sends no didSave when the client dies between the two notifications", async () => {
+		// The one window the caller's own entry guard cannot cover: the client is
+		// alive when the notify starts and destroyed by the time the content
+		// notification has been awaited. A send on a disposed connection throws a
+		// non-stream error, which `safeSendNotification` re-raises out of the
+		// notify queue — so the save re-checks liveness the same way the
+		// reopen-on-resync branch above it does.
 		state.saveOptions = { includeText: false };
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async () => {
+				state.isDestroyed = true;
+				return undefined;
+			},
+		);
 		await handleNotifyOpen(
 			state,
 			TEST_FILE,
@@ -285,18 +297,7 @@ describe("textDocument/didSave on a declared save (#3405)", () => {
 			true,
 			true,
 		);
-		vi.mocked(state.connection.sendNotification).mockClear();
-		state.isDestroyed = true;
-		await handleNotifyOpen(
-			state,
-			TEST_FILE,
-			"const x = 2;\n",
-			"typescript",
-			false,
-			true,
-			true,
-		);
-		expect(sentMethods(state)).toEqual([]);
+		expect(sentMethods(state)).toEqual(["textDocument/didOpen"]);
 	});
 });
 
