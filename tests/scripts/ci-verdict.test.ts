@@ -888,9 +888,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 			"MERGEABLE",
 		);
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
-		expect(verdict.reason).toContain(
-			"rerun 77 (gh run rerun --job 77)",
-		);
+		expect(verdict.reason).toContain("rerun 77 (gh run rerun --job 77)");
 	});
 
 	it("a discovered row's timed_out conclusion still fails (sanity: only cancelled gets the uncertain grace)", () => {
