@@ -691,14 +691,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "rust",
-		// Measured on ubuntu-latest, run 35831976090: rust-analyzer's binary
-		// installs, but the same run's handshake layer reports "no client ready in
-		// 30000ms" and the gate row reads 0 diagnostics — it is still loading the
-		// cargo workspace when the gate's 8s diagnostics wait expires. Raising the
-		// gate's budget for one server is the wrong lever; the row needs a warm
-		// server, not a longer wait.
+		// The lane-C runner measurement found a rustup proxy on PATH; before the
+		// PATH-rung fix it shadowed the managed binary and never completed
+		// initialize. The server is pull-mode tier 1 once the real binary runs,
+		// but this lane does not carry the independent availability fix (#3396).
 		lspGateExempt:
-			"rust-analyzer is still loading the cargo workspace at the gate's wait budget; see #3311",
+			"runner availability limit: the rustup PATH proxy for rust-analyzer does not complete initialize; lane C #3396 verifies the managed binary before this row can gate; see #3311",
 		dir: "tests/fixtures/tool-smoke/rust",
 		file: "src/main.rs",
 		serverHint: "rust-analyzer",
@@ -753,12 +751,9 @@ const LSP_FIXTURES = [
 	{
 		lang: "csharp",
 		serverId: "csharp",
-		// Measured on ubuntu-latest: the identical fixture produced one primary
-		// finding in run 35897633475 and none in run 35899592839. Keep this row
-		// out of the nightly gate until csharp-ls makes that result stable; this
-		// joins #3311's measured exemption list.
-		lspGateExempt:
-			"flaky on the runner: green on 35897633475, red on 35899592839; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
+		setup: "dotnet restore",
+		lspGate: true,
+		lspGateMarker: 'int x = "not a number";',
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
 		serverHint: "csharp-ls",
@@ -768,10 +763,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=fsharp`; the dirty probe observed no diagnostic.
+		setup: "dotnet restore",
 		lspGateExempt:
-			"server limit: fsautocomplete loaded the fixture (file-servers=fsharp) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117), and the SAME zero at the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; the publish-level evidence is separate and consistent: #3311's clean-signal probe recorded dirtyPubs=0 for fsautocomplete on run 35990178129, and mode=push-only has no pull fallback, i.e. the workspace load never completes. Not a proven server property. Next step: load the project the way an editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
+		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -890,10 +885,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		// Nightly run 35917565541: the install rung reported
-		// `ensureTool(elixir-ls) → UNAVAILABLE`; no server became ready.
+		setup: "mix compile",
 		lspGateExempt:
-			"availability limit: ensureTool(elixir-ls) → UNAVAILABLE and touched=0 health=undefined; no server became ready (35917565541); see #3311",
+			"availability limit: elixir-ls has no installer registry entry and remained unavailable on nightly 36053702231; the mix project setup is ready for the installer follow-up; see #3311",
+		lspGateMarker: "undefined_function()",
 		serverId: "elixir",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -905,10 +900,10 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=expert`; the dirty probe observed no diagnostic.
+		setup: "mix compile",
 		lspGateExempt:
-			"server limit: Expert loaded the fixture (file-servers=expert) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `mix compile` on the scaffolded mix project (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; #3311's clean-signal probe separately recorded dirtyPubs=0 for Expert on run 35990178129. Not a proven server property. Next step: establish which notification triggers Expert's diagnose pass against its own source — this harness advertises didSave but never sends one (clients/lsp/client.ts declares the capability; no caller emits textDocument/didSave), so a save-triggered server could never answer here — then re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
+		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
@@ -989,10 +984,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=vue`; the dirty probe observed no diagnostic.
+		setup: "npm i vue typescript --no-audit --no-fund",
 		lspGateExempt:
-			"server limit: @vue/language-server loaded the fixture (file-servers=vue) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `npm i vue typescript` plus the fixture tsconfig (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. NO publish-level measurement exists for this row: this gate records collected diagnostics, not publishes, and vue's only publish figure came from the sink #3390 proved misattributes other servers' publishes. So this is neither an authoritative empty publish nor a proven server property. The tsdk is NOT the gap: `VueServer.spawn` passes `initialization.typescript.tsdk`, and `findTsserverPath` resolves `node_modules/typescript/lib/tsserver.js` from the workspace root's ancestors first (clients/lsp/server.ts), which is exactly what this setup's `npm i typescript` creates in the scratch workspace — so Volar gets the workspace's own TypeScript. The remaining unknown is publish-level: next step is a PILENS_PUB_DEBUG trace showing whether Volar loaded this tsconfig project and what, if anything, it publishes for the seeded script error — not a longer wait; see #3311",
+		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
@@ -1554,7 +1549,15 @@ const AUTOFIX_FIXTURES = [
 // Generous cold-spawn / handshake budgets — the harness is not on the hot path,
 // so give a cold server time to install (when --install), spawn, and initialize.
 const LSP_CLIENT_WAIT_MS = 30000;
-const LSP_DIAGNOSTICS_WAIT_MS = 8000;
+/**
+ * The gate/handshake layers pass this as `waitMs`, which `touchFile` applies as
+ * a CEILING over each server's `aggregateWaitMs` (`clients/lsp/index.ts`
+ * `perServerTimeout`), never as a floor. Exported so
+ * `tests/config/lsp-gate-population.test.ts` can pin the one-directional
+ * relation it creates: a server that declares MORE than this can never have
+ * that budget witnessed here, so the extra is pure production latency (#3402).
+ */
+export const LSP_DIAGNOSTICS_WAIT_MS = 8000;
 
 // Auxiliary scanners (opengrep, ast-grep, zizmor) compile their rules on the
 // FIRST scan of a session and may cache a late result that — by design —

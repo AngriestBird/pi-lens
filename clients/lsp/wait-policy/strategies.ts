@@ -433,6 +433,50 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 4000,
 			expectSemanticSecondPush: false,
 		},
+		// csharp-ls loads (design-time-builds) the restored project AFTER
+		// `initialize` returns, so the publish for a seeded CS0029 lands inside
+		// `waitForDiagnostics`, not inside the client wait. MEASURED A/B over two
+		// nightly Tool-smoke runs of the same fixture with `dotnet restore` already
+		// done — the ONLY difference between them was this budget:
+		//   * `aggregateWaitMs` 1500 (the default): run 36054901266 →
+		//     `[csharp] touched=0`, 4.05s after `Restored …/toolsmoke.csproj`.
+		//     A real compiler error read as clean.
+		//   * 8000: run 36058292424 → `[csharp] touched=1`, 6.49s after the same
+		//     line; gate run 36059988117 → `lsp_diagnostics returned 1 primary
+		//     finding`, 4.86s after it.
+		// Both windows INCLUDE workspace bootstrap + spawn + initialize, so they
+		// bound the wait from above: the required budget is in (1500, 4860] ms.
+		// 6000 covers the measured gate window with margin and stays under the
+		// tool-smoke gate's own 8000ms ceiling (that relation is pinned by
+		// tests/config/lsp-gate-population.test.ts), so the gate can still witness
+		// this budget. CONFIRMED at 6000 by run 36064829436: `✓ csharp csharp-ls 1
+		// lsp_diagnostics returned 1 primary finding`, 4.78s after `Restored
+		// …csproj`, census unchanged at gated 31 / handshake-only 8 / unavailable 6
+		// — so 6000 is measured as sufficient, not merely inferred from the 8000
+		// runs above. It is deliberately NOT the ceiling: an `lsp_diagnostics` call
+		// that passes no `waitMs` pays this budget in full on a file the server never
+		// publishes for (`tools/lsp-diagnostics.ts` leaves `maxClientWaitMs`
+		// undefined → `perServerTimeout` has no caller cap), so every 1000ms here
+		// is 1000ms of turn latency on the no-publication path (#3402 review r2).
+		// Every other field is DEFAULT_STRATEGY's value on purpose: csharp-ls is
+		// `mode=pull`/tier-1 authoritative-clean (#3311 investigator table), and
+		// nothing has measured its pull retry, so this entry moves the one field
+		// that was measured and no other (pinned in
+		// tests/clients/lsp/server-strategies.test.ts).
+		// fsharp/expert/vue deliberately have NO entry: the same two runs show
+		// `touched=0` at BOTH 1500 and 8000, so the budget is not what stops them
+		// publishing and an 8000 entry would buy nothing while costing every
+		// uncapped production call 6.5 extra seconds. Their fixture rows carry the
+		// observed-behavior exemption instead (`scripts/smoke-tools.mjs`), and a
+		// probe that wants a long window sets `PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS`
+		// — a flat harness override that needs no production budget.
+		csharp: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 250,
+			debounceMs: 150,
+			aggregateWaitMs: 6000,
+			expectSemanticSecondPush: false,
+		},
 		cue: {
 			seedFirstPush: true,
 			pullRetryBudgetMs: 0,
