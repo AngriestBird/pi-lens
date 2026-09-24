@@ -1,11 +1,11 @@
-import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { compareGeneratedDocs } from "./lib/md-matrix.mjs";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
 const files = ["docs/lsp-capability-matrix.md", "docs/servercapabilities.md"];
 
 const changed = files.some((file) => {
-	const previous = execFileSync("git", ["show", `HEAD:${file}`], {
+	const previous = gitExecFileSync(["show", `HEAD:${file}`], {
 		encoding: "utf8",
 	});
 	return compareGeneratedDocs(previous, readFileSync(file, "utf8"));
