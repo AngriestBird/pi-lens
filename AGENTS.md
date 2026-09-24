@@ -137,6 +137,8 @@ conflicted PR can silently skip required jobs. Use:
 
 ```text
 node scripts/ci-verdict.mjs <pr-number|sha>
+
+ci-verdict reads every page; a truncation message no longer exists.
 ```
 
 Never merge on absent checks, stale checks, or a green advisory row alone.
