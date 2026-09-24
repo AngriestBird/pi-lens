@@ -571,6 +571,26 @@ describe("a blank subject is the same as a missing one (#3389 verify round 2)", 
 		).toEqual(["0", "false"]);
 	});
 
+	it("still renders an OLD row that was written with an empty subject", () => {
+		// Old-record proof for the write-side change: the fold applies when a row
+		// is WRITTEN, and nothing rewrites stored rows. A summary carried over
+		// from a session that recorded `subject: ""` — the shape this PR stops
+		// producing — must still parse and render exactly as it did before.
+		expect(
+			renderDegradationLines([
+				{
+					kind: "warm-attach-socket-error",
+					count: 1,
+					droppedCount: 0,
+					latestReasons: [{ subject: "", reason: "Error: malformed errno" }],
+				},
+			]),
+		).toEqual([
+			"Degradations:",
+			"  ⚠ warm-attach-socket-error: 1 — : Error: malformed errno",
+		]);
+	});
+
 	it("keys the once-latch and the tally by the normalized subject", () => {
 		// Two blank spellings are ONE row, not two: the key is derived from the
 		// same normalization the row carries, so a peer that reports `""` once
