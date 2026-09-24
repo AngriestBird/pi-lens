@@ -22,6 +22,17 @@ export function classifyCleanBehavior(obs: CleanSignalObservations): {
 	reason: string;
 };
 
+export function createPublishTraceDrainer(options: {
+	readLog: (offset: number) => {
+		size: number;
+		read: (offset: number) => { chunk: string; bytesRead: number } | null;
+	};
+	echoTrace?: boolean;
+}): {
+	(sink: Array<{ server?: string }>, serverId: string): void;
+	reset(offset: number): void;
+};
+
 export interface DriftInput {
 	lang: string;
 	behavior: string;
