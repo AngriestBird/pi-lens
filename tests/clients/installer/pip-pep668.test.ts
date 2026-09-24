@@ -606,7 +606,17 @@ function writeConstraintAwarePipx(binDir: string, root: string): string {
 		`#!/bin/sh
 echo "argv: $*" >> "${log}"
 echo "PIP_CONSTRAINT=\${PIP_CONSTRAINT:-}" >> "${log}"
-if [ -n "\${PIP_CONSTRAINT:-}" ]; then /bin/cat "\$PIP_CONSTRAINT" >> "${log}"; fi
+echo "UV_CONSTRAINT=\${UV_CONSTRAINT:-}" >> "${log}"
+# Which variable this "backend" reads. Real pipx 1.17.6 picks uv whenever uv is
+# on PATH and that backend ignores PIP_CONSTRAINT entirely (measured), so a
+# double that read either one would hide exactly the round-1 defect.
+backend_constraint=""
+case "\${FAKE_BACKEND:-pip}" in
+  uv) backend_constraint="\${UV_CONSTRAINT:-}" ;;
+  pip) backend_constraint="\${PIP_CONSTRAINT:-}" ;;
+  *) backend_constraint="" ;;
+esac
+if [ -n "$backend_constraint" ]; then /bin/cat "$backend_constraint" >> "${log}"; fi
 if [ "$1" = "environment" ]; then echo "$FAKE_PIPX_BIN"; exit 0; fi
 [ "$1" = "install" ] || exit 1
 /bin/mkdir -p "$FAKE_PIPX_BIN"
@@ -614,7 +624,7 @@ broken=no
 if [ -n "\${FAKE_STALE_VENV:-}" ]; then
   broken=yes
 elif [ -n "\${FAKE_REQUIRE_CONSTRAINT:-}" ]; then
-  if [ -z "\${PIP_CONSTRAINT:-}" ] || ! /bin/grep -q "pygls<2" "\$PIP_CONSTRAINT"; then
+  if [ -z "$backend_constraint" ] || ! /bin/grep -q "pygls<2" "$backend_constraint"; then
     broken=yes
   fi
 fi
@@ -689,7 +699,12 @@ describe("pip resolution is bounded by the entry's own constraints (#3311)", () 
 
 		const transcript = fs.readFileSync(log, "utf-8");
 		expect(transcript).toContain("argv: install --force cmake-language-server");
-		expect(transcript).toMatch(/PIP_CONSTRAINT=\S+/);
+		expect(transcript).toMatch(/PIP_CONSTRAINT=(\S+)/);
+		// Both resolvers, one file: pipx picks its own backend, so the constraint
+		// has to be readable by whichever it picked (#3396 round 2).
+		const pipPath = transcript.match(/PIP_CONSTRAINT=(\S+)/)?.[1];
+		const uvPath = transcript.match(/UV_CONSTRAINT=(\S+)/)?.[1];
+		expect(uvPath).toBe(pipPath);
 		expect(transcript).toContain("pygls<2");
 		// The independent effect: the launcher the constrained install produced is
 		// the one the ladder resolved, and it runs.
@@ -718,5 +733,143 @@ describe("pip resolution is bounded by the entry's own constraints (#3311)", () 
 
 		expect(program.result.installed).toBe(true);
 		expect(fs.readFileSync(log, "utf-8")).toContain("PIP_CONSTRAINT=\n");
+	});
+});
+
+/**
+ * The BACKEND axis (#3396 round 2).
+ *
+ * pipx does not have one resolver. pipx 1.17.6's `--backend {pip,uv}` "Defaults
+ * to PIPX_DEFAULT_BACKEND when set, else 'uv' when uv is available (via the
+ * `pipx[uv]` extra or on PATH), else 'pip'" (`pipx install --help`), and the uv
+ * backend never reads `PIP_CONSTRAINT`. Measured with real pipx 1.17.6 + uv
+ * 0.12.10 in isolated `PIPX_HOME`/`PIPX_BIN_DIR`, the full transcripts in the PR
+ * body:
+ *
+ *   PIP_CONSTRAINT=<pygls<2> pipx install --force cmake-language-server
+ *     → pygls-2.1.1.dist-info   → launcher: ImportError (round 1's shape)
+ *   PIP_CONSTRAINT=… UV_CONSTRAINT=… pipx install --force cmake-language-server
+ *     → pygls-1.3.1.dist-info   → launcher: cmake-language-server 0.1.11
+ *   PIP_CONSTRAINT=… pipx install --force --backend pip cmake-language-server
+ *     → pygls-1.3.1.dist-info   → launcher: cmake-language-server 0.1.11
+ *
+ * so `FAKE_BACKEND=uv` below is the production-faithful double for the default
+ * backend on a current box, and a double that read either variable would let the
+ * round-1 mechanism pass.
+ */
+describe("both pip and uv backends are constrained (#3396 round 2)", () => {
+	it("constrains a uv-backend pipx through UV_CONSTRAINT", async () => {
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		const log = writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(root, bin, "cmake-language-server", {
+			FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+			FAKE_APP: "cmake-language-server",
+			FAKE_BACKEND: "uv",
+			FAKE_REQUIRE_CONSTRAINT: "1",
+		});
+
+		expect(program.result.installed).toBe(true);
+		expect(fs.readFileSync(log, "utf-8")).toMatch(/UV_CONSTRAINT=\S+/);
+		expect(program.result.resolved).toBeTruthy();
+		const { stdout } = await execFileAsync(
+			program.result.resolved,
+			["--version"],
+			{ env: { ...process.env, PATH: program.result.path } },
+		);
+		expect(stdout.trim()).toBe("cmake-language-server 0.1.11");
+	});
+
+	it("refuses the launcher a backend that ignored the constraint produced", async () => {
+		// The other half of "either way": whatever the resolver did, a launcher
+		// that cannot run is not a resolution. This is the state round 1 shipped
+		// on a uv box — installed, on PATH, and unusable.
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(root, bin, "cmake-language-server", {
+			FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+			FAKE_APP: "cmake-language-server",
+			// A backend that reads neither variable: the constraint is handed over
+			// and ignored.
+			FAKE_BACKEND: "neither",
+			FAKE_REQUIRE_CONSTRAINT: "1",
+		});
+
+		expect(program.result.installed).toBe(true);
+		expect(program.result.resolved).toBeUndefined();
+		expect(
+			program.result.summary.map((entry: { kind: string }) => entry.kind),
+		).toContain("installer-path-candidate-unrunnable");
+	});
+
+	it("does not hand either resolver a constraints path with whitespace in it", async () => {
+		// Both variables carry a whitespace-SEPARATED LIST, so a spaced path is
+		// not a path: measured on uv 0.12.10, the install dies with
+		// `error: File not found: …/space`. Worse than the bug, so the file moves
+		// to a whitespace-free directory and, with none available, the install
+		// runs unconstrained and says so.
+		const root = scratchDir();
+		const spacedHome = path.join(root, "home with space");
+		const spacedTmp = path.join(root, "tmp with space");
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.mkdirSync(spacedHome, { recursive: true });
+		fs.mkdirSync(spacedTmp, { recursive: true });
+		const log = writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(
+			spacedHome,
+			bin,
+			"cmake-language-server",
+			{
+				FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+				FAKE_APP: "cmake-language-server",
+				FAKE_BACKEND: "uv",
+				TMPDIR: spacedTmp,
+			},
+		);
+
+		const transcript = fs.readFileSync(log, "utf-8");
+		expect(transcript).toContain("PIP_CONSTRAINT=\n");
+		expect(transcript).toContain("UV_CONSTRAINT=\n");
+		expect(
+			program.result.summary.map((entry: { kind: string }) => entry.kind),
+		).toContain("pip-constraint-path-unusable");
+	});
+
+	it("falls back to a whitespace-free directory when the home has a space", async () => {
+		const root = scratchDir();
+		const spacedHome = path.join(root, "home with space");
+		const cleanTmp = path.join(root, "tmp-clean");
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.mkdirSync(spacedHome, { recursive: true });
+		fs.mkdirSync(cleanTmp, { recursive: true });
+		const log = writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(
+			spacedHome,
+			bin,
+			"cmake-language-server",
+			{
+				FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+				FAKE_APP: "cmake-language-server",
+				FAKE_BACKEND: "uv",
+				FAKE_REQUIRE_CONSTRAINT: "1",
+				TMPDIR: cleanTmp,
+			},
+		);
+
+		const transcript = fs.readFileSync(log, "utf-8");
+		expect(transcript).toMatch(
+			new RegExp(`UV_CONSTRAINT=${cleanTmp}\\S*cmake-language-server\\.txt`),
+		);
+		expect(transcript).toContain("pygls<2");
+		expect(program.result.resolved).toBeTruthy();
 	});
 });
