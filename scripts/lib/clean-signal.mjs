@@ -115,6 +115,14 @@ export function classifyCleanBehavior(obs) {
 	};
 }
 
+/**
+ * Keep a phase trace scoped to the server whose row is being measured. The
+ * extension log is shared by every live LSP client in the process.
+ */
+export function filterPublishTrace(publishes, serverId) {
+	return (publishes ?? []).filter((publish) => publish?.server === serverId);
+}
+
 // ---------------------------------------------------------------------------
 // Drift check (#529): compare an OBSERVED clean-behavior classification against
 // the hand-set `silentOnClean` marker in clients/lsp/wait-policy/strategies.ts. The

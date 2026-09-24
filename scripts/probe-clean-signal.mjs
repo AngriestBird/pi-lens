@@ -50,6 +50,7 @@ import {
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
+	filterPublishTrace,
 	strategyKeyForLang,
 } from "./lib/clean-signal.mjs";
 import {
@@ -89,7 +90,9 @@ const { LSP_FIXTURES } = await imp("scripts/smoke-tools.mjs");
 const { getLSPService, resetLSPService } = await imp(
 	"dist/clients/lsp/index.js",
 );
-const { initLSPConfig } = await imp("dist/clients/lsp/config.js");
+const { getServersForFileWithConfig, initLSPConfig } = await imp(
+	"dist/clients/lsp/config.js",
+);
 const { SERVER_DIAGNOSTIC_STRATEGIES } = await imp(
 	"dist/clients/lsp/wait-policy/strategies.js",
 );
@@ -174,7 +177,7 @@ function resetPublishTrace() {
 }
 
 /** Drain every publish appended since the last drain into `sink`. */
-function drainPublishTrace(sink) {
+function drainPublishTrace(sink, serverId) {
 	const size = pubLogSize();
 	// A rotated/truncated log must not be read from a stale offset.
 	if (size < pubLogOffset) pubLogOffset = 0;
@@ -201,6 +204,7 @@ function drainPublishTrace(sink) {
 	}
 	const consumed = chunk.slice(0, lastNewline + 1);
 	pubLogOffset -= Buffer.byteLength(chunk.slice(lastNewline + 1), "utf8");
+	const publishes = [];
 	for (const line of consumed.split("\n")) {
 		if (!line.trim()) continue;
 		let row;
@@ -213,13 +217,15 @@ function drainPublishTrace(sink) {
 		const m = PUB_MESSAGE_RE.exec(String(row.message ?? ""));
 		if (!m) continue;
 		if (ECHO_TRACE) console.error(`[lsp-pub] ${row.message}`);
-		sink.push({
+		const publish = {
 			server: m[1],
 			pubVersion: m[2],
 			diags: Number(m[4]),
 			versioned: m[2] !== "undefined",
-		});
+		};
+		publishes.push(publish);
 	}
+	sink.push(...filterPublishTrace(publishes, serverId));
 }
 
 // A byte-changing, diagnostic-neutral edit: append a trailing comment line in the
@@ -265,6 +271,7 @@ for (const fx of fixtures) {
 	const row = {
 		lang: fx.lang,
 		server: fx.serverHint,
+		serverId: undefined,
 		behavior: "unknown",
 		tier: 0,
 		tierLabel: "",
@@ -301,6 +308,9 @@ async function probeFixture(fx, dst, row) {
 		repoRoot,
 		workspace: dst,
 	});
+	row.serverId = getServersForFileWithConfig(absFile).find(
+		(server) => server.role !== "auxiliary",
+	)?.id;
 	if (install && ensureTool) {
 		for (const t of fx.tools ?? []) await ensureTool(t).catch(() => undefined);
 	}
@@ -347,7 +357,7 @@ async function probeFixture(fx, dst, row) {
 		support = await lsp.getWorkspaceDiagnosticsSupport(absFile);
 		await sleep(SETTLE_MS);
 		// Phase boundary: every publish written so far is the dirty touch's.
-		drainPublishTrace(dirtyPubs);
+		drainPublishTrace(dirtyPubs, row.serverId);
 
 		fs.writeFileSync(
 			absFile,
@@ -357,7 +367,7 @@ async function probeFixture(fx, dst, row) {
 		await touch(fs.readFileSync(absFile, "utf8"), STEP_WAIT_MS);
 		await sleep(SETTLE_MS);
 	} finally {
-		drainPublishTrace(cleanPubs);
+		drainPublishTrace(cleanPubs, row.serverId);
 	}
 
 	row.mode = support?.mode ?? "unknown";

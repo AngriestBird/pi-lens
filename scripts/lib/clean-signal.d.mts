@@ -22,6 +22,11 @@ export function classifyCleanBehavior(obs: CleanSignalObservations): {
 	reason: string;
 };
 
+export function filterPublishTrace<T extends { server?: string }>(
+	publishes: readonly T[] | undefined,
+	serverId: string,
+): T[];
+
 export interface DriftInput {
 	lang: string;
 	behavior: string;

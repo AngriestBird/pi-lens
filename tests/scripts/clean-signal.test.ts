@@ -21,9 +21,12 @@ import {
 	classifyCleanBehavior,
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
+	filterPublishTrace,
 	findCleanSignalDrift,
 	strategyKeyForLang,
 } from "../../scripts/lib/clean-signal.mjs";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	mergeRows,
 	mergeSrc,
@@ -32,6 +35,44 @@ import {
 } from "../../scripts/lib/md-matrix.mjs";
 
 describe("classifyCleanBehavior (phase-aware 4-way)", () => {
+	it("scopes an interleaved extension.log trace to the row's server", () => {
+		// #3390 recurrence: a shared extension.log lets another live server's
+		// publish become this row's first-publish and clean-signal evidence.
+		const lines = fs
+			.readFileSync(
+				path.join(
+					process.cwd(),
+					"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
+				),
+				"utf8",
+			)
+			.trim()
+			.split("\n")
+			.map((line) => {
+				const row = JSON.parse(line) as { message: string };
+				const match =
+					/^server=(\S+) pubVersion=(\S+) docVersion=(\S+) diags=(\d+)/.exec(
+						row.message,
+					);
+				return {
+					server: match?.[1],
+					diags: Number(match?.[4]),
+					versioned: match?.[2] !== "undefined",
+				};
+			});
+		const own = filterPublishTrace(lines, "server-a");
+		expect(lines).toHaveLength(4);
+		expect(own).toHaveLength(2);
+		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);
+		expect(
+			classifyCleanBehavior({
+				dirtyPublishes: own.slice(0, 1).length,
+				dirtyVersioned: 1,
+				cleanTransitionPublishes: own.slice(1).length,
+				cleanTransitionVersioned: 1,
+			}).behavior,
+		).toBe("publishes-versioned");
+	});
 	it("classifies a versioned clean-transition publisher as publishes-versioned (tier 2)", () => {
 		// ast-grep-shaped: re-publishes WITH a version on a clean transition.
 		const v = classifyCleanBehavior({
