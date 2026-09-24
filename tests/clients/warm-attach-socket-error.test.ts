@@ -185,6 +185,47 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 		client.end();
 	});
 
+	it.each([
+		["empty", ""],
+		["whitespace-only", "   "],
+	])(
+		"records an unknown subject for a %s errno on the accepted socket",
+		async (_label, code) => {
+			// Verify round 2, F3395-02: a socket error carrying `code: ""` wrote
+			// `subject: ""` — a row that discriminates nothing and renders as
+			// `⚠ warm-attach-socket-error: 1 — : …`. Blank and missing are one case
+			// for a subject; the rule itself lives in the ledger's write paths
+			// (`tests/clients/degradation-ledger.test.ts`), and this case pins the
+			// INPUT CHANNEL that reached it.
+			const accepted: net.Socket[] = [];
+			await configureWarmAttach(root);
+			_warmAttachServerForTests()?.on("connection", (socket) => {
+				accepted.push(socket);
+			});
+			const client = net.createConnection(
+				diagnosticsIpcPathForCwd(root, process.pid),
+			);
+			client.on("error", () => {});
+			await new Promise<void>((resolve, reject) => {
+				client.once("connect", resolve);
+				client.once("error", reject);
+			});
+			for (let turn = 0; turn < 100 && accepted.length === 0; turn++) {
+				await pump();
+			}
+			accepted[0]?.emit(
+				"error",
+				Object.assign(new Error("malformed errno"), { code }),
+			);
+
+			const group = await waitForGroup("warm-attach-socket-error");
+			expect(uncaught).toEqual([]);
+			expect(group?.count ?? 0).toBe(1);
+			expect(group?.latestReasons[0]?.subject).toBe("unknown");
+			client.end();
+		},
+	);
+
 	it("records nothing when a client closes cleanly after an unterminated line", async () => {
 		// The negative direction of the same discriminator (state table R7): a
 		// client that sends a partial request and closes is ordinary traffic —
