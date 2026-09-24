@@ -22,11 +22,6 @@ export function classifyCleanBehavior(obs: CleanSignalObservations): {
 	reason: string;
 };
 
-export function filterPublishTrace<T extends { server?: string }>(
-	publishes: readonly T[] | undefined,
-	serverId: string,
-): T[];
-
 export function createPublishTraceDrainer(options: {
 	readLog: (offset: number) => {
 		size: number;

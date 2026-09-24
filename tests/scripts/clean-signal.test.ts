@@ -58,7 +58,7 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			readLog() {
 				return {
 					size: bytes.length,
-					read(start: number) {
+					read(start) {
 						const chunk = bytes.subarray(start).toString("utf8");
 						return { chunk, bytesRead: bytes.length - start };
 					},
