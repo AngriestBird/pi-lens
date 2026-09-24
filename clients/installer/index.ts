@@ -85,6 +85,11 @@ import {
 	resetSafeSpawnWindowsCommandCache,
 	safeSpawnAsync,
 } from "../safe-spawn.js";
+import {
+	type BoundedOutputSink,
+	createBoundedOutputSink,
+	DEFAULT_MAX_OUTPUT_BYTES,
+} from "../spawn-output-cap.js";
 import { probeToolAsync } from "../tool-probe.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { resolveGitHubToken } from "../zizmor-config.js";
@@ -3450,6 +3455,44 @@ async function findPipUserToolPath(
 	return undefined;
 }
 
+/**
+ * The verdict of one `<interpreter> -m site --user-base` probe (#3383).
+ *
+ * Both probes accumulate through {@link createBoundedOutputSink} instead of
+ * `stdout += data`: the concatenation ran inside a `data` handler, where V8's
+ * `RangeError: Invalid string length` is an uncaught exception rather than this
+ * promise's value, and nothing bounded an interpreter that decides to write
+ * forever. A TRUNCATED probe resolves EMPTY rather than trimming a prefix,
+ * because the prefix of a path is a different path: `addBinToPath` would put a
+ * plausible-looking wrong directory on PATH. Empty is the value both probes
+ * already resolve when an interpreter is missing, and every caller handles it.
+ *
+ * Exported for `tests/clients/off-seam-output-bounds.test.ts`: both `data`
+ * handlers that feed it sit inside module-private probe loops that only a real
+ * `python3` on PATH can drive, so this is the seam the bound is pinned at.
+ */
+export function userBaseProbeResult(
+	command: string,
+	code: number | null,
+	stdout: BoundedOutputSink,
+): string {
+	if (stdout.truncated) {
+		recordDegradationOnce({
+			kind: "spawn-output-cap-truncated",
+			subject: `user-base-probe:${command}`,
+			reason: `\`${command} -m site --user-base\` reached the ${DEFAULT_MAX_OUTPUT_BYTES}-byte default cap after ${stdout.observedBytes} bytes; the probed user base is unusable`,
+			metadata: {
+				capBytes: DEFAULT_MAX_OUTPUT_BYTES,
+				capSource: "default",
+				observedBytes: stdout.observedBytes,
+				killed: false,
+			},
+		});
+		return "";
+	}
+	return code === 0 ? stdout.text.trim() : "";
+}
+
 async function getPythonUserBaseCandidates(): Promise<string[]> {
 	const candidates: string[] = [];
 	const seen = new Set<string>();
@@ -3498,9 +3541,11 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
 				return;
 			}
 
-			let stdout = "";
-			proc.stdout?.on("data", (data: Buffer | string) => (stdout += data));
-			proc.on("exit", (code) => resolve(code === 0 ? stdout.trim() : ""));
+			const stdout = createBoundedOutputSink();
+			proc.stdout?.on("data", (data: Buffer | string) => stdout.append(data));
+			proc.on("exit", (code) =>
+				resolve(userBaseProbeResult(probe.command, code, stdout)),
+			);
 			proc.on("error", () => resolve(""));
 		});
 		add(userBase);
@@ -5790,9 +5835,11 @@ async function installPipTool(
 						resolve("");
 						return;
 					}
-					let stdout = "";
-					probe.stdout?.on("data", (data) => (stdout += data));
-					probe.on("exit", (code) => resolve(code === 0 ? stdout.trim() : ""));
+					const stdout = createBoundedOutputSink();
+					probe.stdout?.on("data", (data) => stdout.append(data));
+					probe.on("exit", (code) =>
+						resolve(userBaseProbeResult(candidate.command, code, stdout)),
+					);
 					probe.on("error", () => resolve(""));
 				});
 				const binaryPath = base
