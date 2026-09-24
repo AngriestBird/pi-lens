@@ -47,7 +47,7 @@ describe("LSP clean-gate population (#3217)", () => {
 		// A floor, not a pin: if the fixture table or the eligibility filter ever
 		// yields (almost) nothing, every assertion below passes on an empty set
 		// and the guard reads clean while covering nothing. 45 eligible fixtures
-		// on 2026-09-23 (26 gated, 19 exempt); the floor is deliberately well under
+		// on 2026-09-24 (28 gated, 17 exempt); the floor is deliberately well under
 		// that so ordinary fixture churn never touches it.
 		assertNonEmptyScan("LSP gate-eligible fixtures", eligible.length, 30);
 		const undecided = eligible

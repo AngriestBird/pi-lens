@@ -423,6 +423,16 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			expectSemanticSecondPush: false,
 			emptyFirstPublish: "indexing",
 		},
+		// Svelte's pull diagnostics settle after the default 1500ms budget on a
+		// cold server. The tool-smoke gate caps waits at 8000ms, so give this
+		// server enough aggregate budget to return its seeded findings (#3311).
+		svelte: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 4000,
+			expectSemanticSecondPush: false,
+		},
 		cue: {
 			seedFirstPush: true,
 			pullRetryBudgetMs: 0,

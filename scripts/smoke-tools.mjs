@@ -618,13 +618,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "terraform",
-		// #3311: terraform-ls advertises no diagnosticProvider and its validation
-		// diagnostics come from `terraform.validate`, which needs initialized
-		// module state. The fixture cannot provision that state because the
-		// terraform CLI is not a managed smoke tool; keep the exemption as this
-		// server capability/property rather than making setup failure a false pass.
-		lspGateExempt:
-			"terraform-ls publishes diagnostics only after terraform init; the server requires initialized module state and the smoke registry has no terraform CLI; see #3311",
+		lspGate: true,
+		lspGateMarker: "var.does_not_exist_gate_seed",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
 		serverHint: "terraform-ls",
@@ -992,10 +987,8 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "svelte",
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=svelte`; the pull probe observed no diagnostic.
-		lspGateExempt:
-			"server limit: svelte-language-server loaded the fixture (file-servers=svelte) but published no diagnostic for the seeded defect; pull probe observed no diagnostic (35917565541); see #3311",
+		lspGate: true,
+		lspGateMarker: 'let count: number = "not a number"',
 		dir: "tests/fixtures/tool-smoke/svelte",
 		file: "App.svelte",
 		serverHint: "svelte-language-server",
