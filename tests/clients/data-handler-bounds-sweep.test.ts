@@ -62,7 +62,13 @@ interface BoundedHandlers {
 	handlers: number;
 	/** What keeps each accumulation finite — the reviewed verdict. */
 	bound: string;
-	/** Needles that must still be present in the file for `bound` to be true. */
+	/**
+	 * Needles that must still be present in the file for `bound` to be true.
+	 * Each one is an EXPRESSION, never a bare name: an unused `import
+	 * { createBoundedOutputSink }` satisfied the first draft's name-shaped
+	 * needles, so deleting the sink's only call left this sweep green
+	 * (mutation M10c).
+	 */
 	evidence: readonly string[];
 }
 
@@ -76,55 +82,65 @@ const REGISTRY: Readonly<Record<string, BoundedHandlers>> = {
 		handlers: 2,
 		bound:
 			"#3375: `maxOutputBytes`, resolved to DEFAULT_MAX_OUTPUT_BYTES when the caller passes none; the handler is total and the child is killed at the cap.",
-		evidence: ["maxOutputBytes", "DEFAULT_MAX_OUTPUT_BYTES"],
+		evidence: [
+			"retainedOutputBytes + bytes <= maxOutputBytes",
+			": DEFAULT_MAX_OUTPUT_BYTES;",
+		],
 	},
 	"clients/child-unref.ts": {
 		handlers: 1,
 		bound:
 			"#3383: createBoundedOutputSink() at the shared default; a truncated process table is the partial-output ending this collector already documents.",
-		evidence: ["createBoundedOutputSink"],
+		evidence: ["createBoundedOutputSink()", "out.append(chunk)"],
 	},
 	"clients/mcp/review.ts": {
 		handlers: 2,
 		bound:
 			"#3383: createBoundedOutputSink() per pipe; a truncated stdout kills the worker and resolves the cap as the outcome.",
-		evidence: ["createBoundedOutputSink"],
+		evidence: [
+			"createBoundedOutputSink()",
+			"stdout.append(chunk)",
+			"stderr.append(chunk)",
+		],
 	},
 	"clients/mcp/ipc.ts": {
 		handlers: 2,
 		bound:
 			"#3383: both replies are framed by createWarmIpcLineReader, bounded by MAX_FRAMED_LINE_BYTES per line.",
-		evidence: ["createWarmIpcLineReader", "MAX_FRAMED_LINE_BYTES"],
+		evidence: ["?? MAX_FRAMED_LINE_BYTES", "onOverflow: () =>"],
 	},
 	"clients/warm-attach.ts": {
 		handlers: 1,
 		bound:
 			"#3383: createWarmIpcLineReader (one-shot), bounded by MAX_FRAMED_LINE_BYTES per line.",
-		evidence: ["createWarmIpcLineReader"],
+		evidence: ["createWarmIpcLineReader(", "onOverflow: () =>"],
 	},
 	"clients/installer/index.ts": {
 		handlers: 4,
 		bound:
 			"#3383: the two interpreter user-base probes accumulate through createBoundedOutputSink. The two Buffer[] sinks — the HTTPS asset body and the gunzip of it — are deliberately UNBOUNDED: `Buffer.concat` has no reachable length ceiling (buffer.constants.MAX_LENGTH is 9007199254740991 on Node 22), so there is no throw to convert into a bounded result, the failure mode is host OOM, and any byte cap would refuse an asset the user explicitly asked to install (#3383 non-goal).",
-		evidence: ["createBoundedOutputSink", "Buffer.concat(chunks)"],
+		evidence: ["createBoundedOutputSink()", "Buffer.concat(chunks)"],
 	},
 	"clients/lsp/launch.ts": {
 		handlers: 2,
 		bound:
 			"Both stderr previews stop retaining at 4000 characters (`if (… .length >= 4000) return;`).",
-		evidence: [">= 4000"],
+		evidence: ["stderrPreview.length >= 4000", "startupStderr.length >= 4000"],
 	},
 	"clients/lsp/client.ts": {
 		handlers: 1,
 		bound:
 			"The stderr ring shifts past MAX_STDERR_LINES and the startup preview stops at 4096 characters.",
-		evidence: ["MAX_STDERR_LINES", "< 4096"],
+		evidence: [
+			"stderrRing.length > MAX_STDERR_LINES",
+			"startupState.stderr.length < 4096",
+		],
 	},
 	"mcp/server.ts": {
 		handlers: 2,
 		bound:
 			"#3383: both the warm socket reader and the host's stdin loop are framed by createWarmIpcLineReader, bounded by MAX_FRAMED_LINE_BYTES per line.",
-		evidence: ["createWarmIpcLineReader"],
+		evidence: ["createWarmIpcLineReader(", "onOverflow: () =>"],
 	},
 };
 
