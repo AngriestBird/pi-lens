@@ -208,18 +208,29 @@ function startServer(cwd: string): void {
 		// the line and ignores anything after it.
 		socket.on(
 			"data",
-			createWarmIpcLineReader((line) => {
-				void (async () => {
-					try {
-						const req = JSON.parse(line) as
-							| WarmDiagnosticsRequest
-							| WarmCodeActionsRequest;
-						socket.end(`${JSON.stringify(await serveRequest(req))}\n`);
-					} catch (error) {
-						socket.end(`${JSON.stringify({ error: String(error) })}\n`);
-					}
-				})();
-			}),
+			createWarmIpcLineReader(
+				(line) => {
+					void (async () => {
+						try {
+							const req = JSON.parse(line) as
+								| WarmDiagnosticsRequest
+								| WarmCodeActionsRequest;
+							socket.end(`${JSON.stringify(await serveRequest(req))}\n`);
+						} catch (error) {
+							socket.end(`${JSON.stringify({ error: String(error) })}\n`);
+						}
+					})();
+				},
+				{
+					label: "warm-attach-server",
+					// #3383: an unterminated request line is answered like any other
+					// unusable request rather than buffered without a ceiling.
+					onOverflow: () =>
+						socket.end(
+							`${JSON.stringify({ error: "warm request line exceeded the framing limit" })}\n`,
+						),
+				},
+			),
 		);
 	});
 	server.on("error", (error) => {

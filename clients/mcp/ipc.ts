@@ -20,6 +20,8 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { writeFileAtomic } from "../atomic-write.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
+import { DEFAULT_MAX_OUTPUT_BYTES } from "../spawn-output-cap.js";
 import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
 import type { McpAnalyzeResult } from "./analyze.js";
 
@@ -269,7 +271,6 @@ function requestOverWarmIpc<TResponse, TRequest extends object = object>(
 		const deadlineAt = Date.now() + timeoutMs;
 		const socket = net.createConnection(endpoint);
 		socket.setEncoding("utf8");
-		let buffer = "";
 		const timer = setTimeout(
 			() => finish({ available: false, reason: "timeout" }),
 			timeoutMs,
@@ -278,30 +279,36 @@ function requestOverWarmIpc<TResponse, TRequest extends object = object>(
 		socket.on("connect", () => {
 			socket.write(`${JSON.stringify(buildRequest(deadlineAt))}\n`);
 		});
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			try {
-				const message = JSON.parse(buffer.slice(0, newline)) as {
-					result?: TResponse;
-					error?: string;
-				};
-				const result = message.result;
-				if (message.error || !result) {
-					finish({ available: false, reason: "ipc-error" });
-					return;
-				}
-				const reason = validate(result, deadlineAt);
-				if (reason === undefined) {
-					finish({ available: true, response: result });
-				} else {
-					finish({ available: false, reason });
-				}
-			} catch {
-				finish({ available: false, reason: "schema-mismatch" });
-			}
-		});
+		socket.on(
+			"data",
+			createWarmIpcLineReader(
+				(line) => {
+					try {
+						const message = JSON.parse(line) as {
+							result?: TResponse;
+							error?: string;
+						};
+						const result = message.result;
+						if (message.error || !result) {
+							finish({ available: false, reason: "ipc-error" });
+							return;
+						}
+						const reason = validate(result, deadlineAt);
+						if (reason === undefined) {
+							finish({ available: true, response: result });
+						} else {
+							finish({ available: false, reason });
+						}
+					} catch {
+						finish({ available: false, reason: "schema-mismatch" });
+					}
+				},
+				{
+					label: "warm-diagnostics-reply",
+					onOverflow: () => finish({ available: false, reason: "ipc-error" }),
+				},
+			),
+		);
 		socket.on("error", (error) =>
 			finish({
 				available: false,
@@ -606,7 +613,6 @@ export function requestWarmAnalyze(
 
 		const socket = net.createConnection(ipcPathForCwd(cwd));
 		socket.setEncoding("utf8");
-		let buffer = "";
 
 		const timer = setTimeout(() => {
 			socket.destroy();
@@ -618,21 +624,34 @@ export function requestWarmAnalyze(
 			const request: WarmAnalyzeRequest = { file, cwd };
 			socket.write(`${JSON.stringify(request)}\n`);
 		});
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			try {
-				const message = JSON.parse(buffer.slice(0, newline)) as {
-					result?: McpAnalyzeResult;
-					error?: string;
-				};
-				finish(message.error ? undefined : message.result);
-			} catch {
-				finish(undefined);
-			}
-			socket.end();
-		});
+		socket.on(
+			"data",
+			createWarmIpcLineReader(
+				(line) => {
+					try {
+						const message = JSON.parse(line) as {
+							result?: McpAnalyzeResult;
+							error?: string;
+						};
+						finish(message.error ? undefined : message.result);
+					} catch {
+						finish(undefined);
+					}
+					socket.end();
+				},
+				{
+					label: "warm-analyze-reply",
+					// `finish` here only clears the timer and resolves — unlike
+					// `requestOverWarmIpc`'s, which destroys the socket itself — so the
+					// peer that misframed would otherwise keep an open connection and
+					// keep writing into a reader that ignores it.
+					onOverflow: () => {
+						socket.destroy();
+						finish(undefined);
+					},
+				},
+			),
+		);
 		// No server / connection refused / reset → cold fallback.
 		socket.on("error", () => finish(undefined));
 		socket.on("close", () => finish(undefined));
@@ -640,25 +659,115 @@ export function requestWarmAnalyze(
 }
 
 /**
- * One-shot line reader for the warm IPC socket (#1219). The clients write
- * exactly one newline-terminated request per connection and read one reply, so
- * the server must dispatch at most one line and ignore anything after it — a
- * `data` handler that keeps re-reading the same buffered line re-dispatches
- * the request on stray bytes. Returns the handler to attach to the socket's
- * `data` event.
+ * The ceiling on ONE newline-framed line, for every reader below (#3383).
+ *
+ * Deliberately the same number as the spawn output cap rather than a second one
+ * to argue about: the largest legitimate line in this protocol is a
+ * `requestWarmDiagnostics` request carrying a file's whole content, or the
+ * diagnostics reply to it, and 32 MiB is far above anything the read guard lets
+ * through while staying 16x below V8's max string length — so the
+ * concatenation that crashed the host in #3375 is unreachable here rather than
+ * merely unlikely.
+ */
+export const MAX_FRAMED_LINE_BYTES = DEFAULT_MAX_OUTPUT_BYTES;
+
+/** Options for {@link createWarmIpcLineReader}. */
+export interface WarmIpcLineReaderOptions {
+	/**
+	 * Which reader this is, as the ledger subject for an over-long line. A fixed
+	 * small set (see the `ipc-frame-overflow` kind), never peer-supplied.
+	 */
+	label: string;
+	/**
+	 * Keep framing after the first line. Only the MCP host's stdin loop wants
+	 * this — every socket reader here is one request per connection, and the
+	 * default preserves #1219's one-shot latch.
+	 */
+	continuous?: boolean;
+	/** The caller's own ending for an over-long line (the record is automatic). */
+	onOverflow?: () => void;
+	maxLineBytes?: number;
+}
+
+/**
+ * Newline-framed line reader for the warm IPC sockets and the MCP host's stdin.
+ *
+ * One-shot by default (#1219): the clients write exactly one newline-terminated
+ * request per connection and read one reply, so the server must dispatch at
+ * most one line and ignore anything after it — a `data` handler that keeps
+ * re-reading the same buffered line re-dispatches the request on stray bytes.
+ *
+ * BOUNDED since #3383. Every reader used to be `buffer += chunk` with no
+ * ceiling, so a peer that never sent a newline grew one JS string until the
+ * request's own timeout fired — measured through `requestWarmAnalyze` against a
+ * real socket: 64 MiB of newline-free reply, +929 MiB of heap, 20 s of it. Past
+ * `maxLineBytes` the partial line is DISCARDED, the overflow is recorded once,
+ * the caller's `onOverflow` decides the ending, and framing RESYNCS at the
+ * discarded line's own newline so the next well-formed line is read normally
+ * rather than parsed as the tail of the one that was dropped.
+ *
+ * Returns the handler to attach to the stream's `data` event.
  */
 export function createWarmIpcLineReader(
 	onLine: (line: string) => void,
+	options: WarmIpcLineReaderOptions,
 ): (chunk: string) => void {
+	const maxLineBytes = options.maxLineBytes ?? MAX_FRAMED_LINE_BYTES;
+	/** The unterminated head of a line, and its size. */
 	let buffer = "";
+	let bufferedBytes = 0;
 	let dispatched = false;
+	let resyncing = false;
 	return (chunk: string) => {
 		if (dispatched) return;
-		buffer += chunk;
-		const newline = buffer.indexOf("\n");
-		if (newline === -1) return;
-		dispatched = true;
-		onLine(buffer.slice(0, newline));
+		// Every scan below runs over the NEW chunk at an offset, never over the
+		// retained buffer, and the retained bytes are carried rather than
+		// re-measured. Both matter once the buffer is allowed to reach the bound:
+		// `retained.indexOf()` flattens the accumulated rope on every socket read,
+		// and one 36 MiB unframed reply arrives as ~550 reads, so the bound alone
+		// would trade an unbounded string for seconds of CPU. Measured on
+		// `tests/clients/mcp/ipc-frame-bounds.test.ts`, whose real-socket case
+		// sends exactly that: 16.2 s with a rescan per read, 1.2 s with this.
+		let from = 0;
+		if (resyncing) {
+			// Still inside the over-long line: retain nothing until its newline.
+			const end = chunk.indexOf("\n");
+			if (end === -1) return;
+			resyncing = false;
+			from = end + 1;
+		}
+		let newline = chunk.indexOf("\n", from);
+		while (newline !== -1) {
+			const line = buffer + chunk.slice(from, newline);
+			buffer = "";
+			bufferedBytes = 0;
+			from = newline + 1;
+			if (options.continuous !== true) {
+				dispatched = true;
+				onLine(line);
+				return;
+			}
+			onLine(line);
+			newline = chunk.indexOf("\n", from);
+		}
+		if (from < chunk.length) {
+			const rest = from === 0 ? chunk : chunk.slice(from);
+			buffer += rest;
+			bufferedBytes += Buffer.byteLength(rest);
+		}
+		if (bufferedBytes <= maxLineBytes) return;
+		const overflowBytes = bufferedBytes;
+		buffer = "";
+		bufferedBytes = 0;
+		resyncing = true;
+		if (options.continuous !== true) dispatched = true;
+		incrementDegradationCount({
+			kind: "ipc-frame-overflow",
+			subject: options.label,
+			reason: `discarded an unterminated line at ${overflowBytes} bytes (limit ${maxLineBytes})`,
+			metadata: { limitBytes: maxLineBytes, overflowBytes },
+		});
+		options.onOverflow?.();
 	};
 }
 
