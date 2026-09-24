@@ -752,7 +752,8 @@ const LSP_FIXTURES = [
 		lang: "csharp",
 		serverId: "csharp",
 		setup: "dotnet restore",
-		lspGate: true,
+		lspGateExempt:
+			"server property: csharp-ls ran after dotnet restore but returned 0 primary findings for the seeded CS0029 defect (nightly 36053702231); see #3311",
 		lspGateMarker: 'int x = "not a number";',
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
@@ -764,7 +765,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "fsharp",
 		setup: "dotnet restore",
-		lspGate: true,
+		lspGateExempt:
+			"server property: fsautocomplete ran after dotnet restore but returned 0 primary findings for the seeded type mismatch (nightly 36053702231); see #3311",
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
@@ -885,7 +887,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "elixir",
 		setup: "mix compile",
-		lspGate: true,
+		lspGateExempt:
+			"availability limit: elixir-ls has no installer registry entry and remained unavailable on nightly 36053702231; the mix project setup is ready for the installer follow-up; see #3311",
 		lspGateMarker: "undefined_function()",
 		serverId: "elixir",
 		dir: "tests/fixtures/tool-smoke/elixir",
@@ -899,7 +902,8 @@ const LSP_FIXTURES = [
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
 		setup: "mix compile",
-		lspGate: true,
+		lspGateExempt:
+			"server property: Expert ran after mix compile but returned 0 primary findings for the seeded undefined function (nightly 36053702231); see #3311",
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
