@@ -24,10 +24,10 @@ export function removeTempDirSync(dir: string): void {
 			retryDelay: 200,
 		});
 	} catch (err) {
-		console.warn(
+		process.stderr.write(
 			`[test cleanup] could not remove temp dir ${dir}: ${
 				err instanceof Error ? err.message : String(err)
-			}`,
+			}\n`,
 		);
 	}
 }
