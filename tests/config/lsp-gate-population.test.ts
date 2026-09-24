@@ -23,10 +23,12 @@ import { describe, expect, it } from "vitest";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
 	formatGateCensus,
+	LSP_DIAGNOSTICS_WAIT_MS,
 	LSP_FIXTURES,
 	lspGatePopulation,
 } from "../../scripts/smoke-tools.mjs";
 import { LSP_SERVERS } from "../../clients/lsp/server.js";
+import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
 
 type Fixture = (typeof LSP_FIXTURES)[number] & {
 	lspGate?: boolean;
@@ -204,6 +206,29 @@ describe("LSP clean-gate population (#3217)", () => {
 				fixture.lspGateMarker,
 				`${lang} must retain a removable seed`,
 			).toBeTruthy();
+		}
+	});
+
+	// #3402 r2 recurrence: four servers were given `aggregateWaitMs: 8000`
+	// because that is the number this gate passes as `waitMs` — but `waitMs` is a
+	// CEILING over each server's own budget (`clients/lsp/index.ts`
+	// `perServerTimeout`), never a floor, and `lsp_diagnostics` leaves it
+	// undefined by default, so the strategy value is what an ordinary production
+	// call pays in full on a file the server never publishes for. A budget above
+	// this ceiling is therefore unwitnessable here AND unbounded there: the gate
+	// would clip it while every uncapped production call paid it. Keeping the
+	// declared budgets at or under the number this harness actually grants is what
+	// makes "the nightly proved this budget" a true sentence.
+	it("declares no diagnostic budget the gate itself cannot grant (#3402)", () => {
+		const entries = Object.entries(SERVER_DIAGNOSTIC_STRATEGIES);
+		expect(entries.length).toBeGreaterThan(0);
+		for (const [serverId, strategy] of entries) {
+			expect(
+				strategy.aggregateWaitMs,
+				`${serverId}: aggregateWaitMs (${strategy.aggregateWaitMs}) exceeds the ` +
+					`gate's own waitMs ceiling (${LSP_DIAGNOSTICS_WAIT_MS}), so this gate ` +
+					`can never observe that budget while production pays it in full`,
+			).toBeLessThanOrEqual(LSP_DIAGNOSTICS_WAIT_MS);
 		}
 	});
 

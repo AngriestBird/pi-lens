@@ -765,7 +765,7 @@ const LSP_FIXTURES = [
 		lang: "fsharp",
 		setup: "dotnet restore",
 		lspGateExempt:
-			"server property: fsautocomplete completed dotnet restore and the 8000ms strategy budget but returned 0 primary findings for the seeded type mismatch (nightly 36059988117); see #3311",
+			"observed: no publishDiagnostics at all within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117) — and the SAME zero at the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property: fsautocomplete is mode=push-only and #3311's probe recorded dirtyPubs=0, i.e. the workspace load never completes. Next step: load the project the way the editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
@@ -902,7 +902,7 @@ const LSP_FIXTURES = [
 		// fixture exercise Expert's managed GitHub binary through initialize.
 		setup: "mix compile",
 		lspGateExempt:
-			"server property: Expert completed mix compile and the 8000ms strategy budget but returned 0 primary findings for the seeded undefined function (nightly 36059988117); see #3311",
+			"observed: no publishDiagnostics at all within 8000ms after `mix compile` on the scaffolded mix project (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property. Next step: establish which notification triggers Expert's diagnose pass against its own source — this harness advertises didSave but never sends one (clients/lsp/client.ts declares the capability; no caller emits textDocument/didSave), so a save-triggered server can never answer here — then re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
@@ -986,7 +986,7 @@ const LSP_FIXTURES = [
 		lang: "vue",
 		setup: "npm i vue typescript --no-audit --no-fund",
 		lspGateExempt:
-			"server property: @vue/language-server completed the tsconfig/Volar setup and the 8000ms strategy budget but returned 0 primary findings for the seeded script type error (nightly 36059988117); see #3311",
+			"observed: no publishDiagnostics at all within 8000ms after `npm i vue typescript` plus the fixture tsconfig (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property. `VueServer.spawn` does supply `initialization.typescript.tsdk` when it resolves a project typescript, so the next step is to verify from a PILENS_PUB_DEBUG trace that the tsdk it passed is the workspace copy this setup installed and that Volar reports a loaded tsconfig project; see #3311",
 		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
@@ -1549,7 +1549,15 @@ const AUTOFIX_FIXTURES = [
 // Generous cold-spawn / handshake budgets — the harness is not on the hot path,
 // so give a cold server time to install (when --install), spawn, and initialize.
 const LSP_CLIENT_WAIT_MS = 30000;
-const LSP_DIAGNOSTICS_WAIT_MS = 8000;
+/**
+ * The gate/handshake layers pass this as `waitMs`, which `touchFile` applies as
+ * a CEILING over each server's `aggregateWaitMs` (`clients/lsp/index.ts`
+ * `perServerTimeout`), never as a floor. Exported so
+ * `tests/config/lsp-gate-population.test.ts` can pin the one-directional
+ * relation it creates: a server that declares MORE than this can never have
+ * that budget witnessed here, so the extra is pure production latency (#3402).
+ */
+export const LSP_DIAGNOSTICS_WAIT_MS = 8000;
 
 // Auxiliary scanners (opengrep, ast-grep, zizmor) compile their rules on the
 // FIRST scan of a session and may cache a late result that — by design —

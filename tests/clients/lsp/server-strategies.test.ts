@@ -54,11 +54,35 @@ describe("svelte diagnostic strategy (#3311 lane A)", () => {
 });
 
 describe("lane B project-loading diagnostic strategies (#3402)", () => {
-	it("pins the smoke-gate cold-start budget for every setup-backed server", () => {
-		for (const serverId of ["csharp", "fsharp", "expert", "vue"]) {
-			const strategy = getStrategy(serverId);
-			expect(strategy.pullRetryBudgetMs, serverId).toBe(0);
-			expect(strategy.aggregateWaitMs, serverId).toBe(8000);
+	/** DEFAULT_STRATEGY is not exported; this is it, through the real seam. */
+	const defaults = getStrategy("__no_such_server_id__");
+
+	// Recurrence 1 (#3402 r2, measured): at the 1500ms default csharp-ls read a
+	// seeded CS0029 as CLEAN on the nightly (run 36054901266 `[csharp]
+	// touched=0`); at a larger budget it published the finding (run 36058292424
+	// `touched=1`, gate run 36059988117 `1 primary finding` 4.86s after
+	// `Restored …csproj`). Recurrence 2 (#3402 r3, the inverse): the r2 fix set
+	// the budget to the smoke gate's own 8000ms ceiling, and an `lsp_diagnostics`
+	// call that passes no `waitMs` pays that in full on a file the server never
+	// publishes for — so the budget must stay at the MEASURED value, not the
+	// ceiling. Recurrence 3: the r2 entry also flipped `pullRetryBudgetMs` from
+	// the default 250 to 0 for a `mode=pull` server with nothing measuring it;
+	// the equality below is what keeps an unmeasured field from riding along.
+	it("moves csharp's measured aggregate budget and no other field", () => {
+		expect(getStrategy("csharp")).toEqual({
+			...defaults,
+			aggregateWaitMs: 6000,
+		});
+	});
+
+	// The same two runs measured `touched=0` for these three at BOTH 1500 and
+	// 8000, so their budget is not what stops them publishing. An entry here
+	// would cost every uncapped production call the difference for nothing —
+	// which is exactly what r2 shipped. They stay on the default until a run
+	// records a publish.
+	it("gives fsharp/expert/vue no strategy entry at all", () => {
+		for (const serverId of ["fsharp", "expert", "vue"]) {
+			expect(getStrategy(serverId), serverId).toEqual(defaults);
 		}
 	});
 });
