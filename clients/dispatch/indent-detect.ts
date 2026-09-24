@@ -15,7 +15,6 @@ const DEFAULT_INDENTATION: Indentation = { style: "space", width: 2 };
  * alignment rather than nesting; everything else is counted as written.
  */
 export function detectIndentation(content: string): Indentation | undefined {
-	const hasRawIndentation = /^(?:\t+| {1,})\S/m.test(content);
 	const lines = structuralLines(content.split(/\r?\n/));
 	const tabs = lines.filter((line) => /^\t+\S/.test(line)).length;
 	const spaceCounts = lines
@@ -23,12 +22,12 @@ export function detectIndentation(content: string): Indentation | undefined {
 		.filter((count) => count > 0);
 
 	if (tabs === 0 && spaceCounts.length === 0) {
-		// The formatter gate uses the cheap raw scan below. If that scan fired but
-		// structural masking removed every candidate line, there is no style to
-		// pin and the caller must take the #3038 skip valve instead of imposing the
-		// default width. Keep the historical default for content with no raw
-		// indentation, whose callers never enter this path.
-		return hasRawIndentation ? undefined : DEFAULT_INDENTATION;
+		// The formatter gate uses the shared hasDetectableIndentation predicate. If
+		// that predicate fired but structural masking removed every candidate line,
+		// there is no style to pin and the caller must take the #3038 skip valve
+		// instead of imposing the default width. Keep the historical default for
+		// content with no raw indentation, whose callers never enter this path.
+		return hasDetectableIndentation(content) ? undefined : DEFAULT_INDENTATION;
 	}
 	if (tabs > spaceCounts.length) return { style: "tab", width: 1 };
 	if (spaceCounts.length > tabs) {
