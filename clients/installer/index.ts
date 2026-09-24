@@ -5572,29 +5572,55 @@ export function pipScriptsDir(
 const pipPep668LoggedRefusals = createGenerationMap("installer-pep668-log");
 
 /**
- * The `PIP_CONSTRAINT` environment for `toolId`, or `{}` when its registry entry
- * declares no `pipConstraints` (#3311).
+ * The constraints environment for `toolId` — `PIP_CONSTRAINT` **and**
+ * `UV_CONSTRAINT`, both naming the same written file — or `{}` when its registry
+ * entry declares no `pipConstraints` (#3311).
  *
- * pip's own mechanism, not a pi-lens one: every pip command-line option has an
- * environment form, and `-c/--constraint` reads `PIP_CONSTRAINT`. Using it
- * instead of extra argv tokens is what lets ONE value bound all four rungs of
- * `installPipTool`'s ladder including pipx, which drives its own pip in a
- * subprocess whose argv pi-lens never composes.
+ * Each resolver's own mechanism, not a pi-lens one, and BOTH are needed because
+ * `installPipTool`'s first rung is pipx, which chooses its own resolver:
+ * - `PIP_CONSTRAINT` is pip's environment form of `-c/--constraint`, and covers
+ *   pipx's pip backend, the pi-lens venv rung, `pip --user` and the
+ *   private-prefix rung.
+ * - `UV_CONSTRAINT` is uv's ("Equivalent to the `--constraints` command-line
+ *   argument", uv 0.12.10 `crates/uv-static/src/env_vars.rs`, added in uv
+ *   0.1.36) and covers pipx's uv backend — which pipx 1.17.6 makes the DEFAULT
+ *   "when uv is available … else 'pip'" (`pipx install --help`). That backend
+ *   ignores `PIP_CONSTRAINT` entirely, and its `--pip-args` translation covers
+ *   an allowlist (`--index-url`, `--extra-index-url`, `--find-links`,
+ *   `--trusted-host`, `--no-binary`, `--only-binary`, `--pre`, `--upgrade`,
+ *   `--no-cache-dir`) that does not include constraints — so neither the pip env
+ *   var nor a pip argv flag can reach it. Measured on pipx 1.17.6 + uv 0.12.10;
+ *   the transcripts are in the PR body (#3396 round 2).
+ *
+ * Both variables carry a WHITESPACE-SEPARATED LIST of files, so a path with a
+ * space in it is not a path to either resolver: uv fails the install outright
+ * (`error: File not found: …/space`, measured). The file therefore goes to the
+ * first whitespace-free directory, and without one the install proceeds
+ * unconstrained rather than broken — which the ladder's PATH verification then
+ * judges on its merits.
  *
  * The file is (re)written from the registry on every install, so a constraint
  * that is edited or removed in the registry cannot be served from a stale file.
  * A write failure is recorded and the install proceeds unconstrained — the same
- * resolution as before this field existed, which the resolution ladder's PATH
- * verification then judges on its merits rather than on a cached assumption.
+ * resolution as before this field existed.
  */
 async function pipConstraintEnvFor(toolId: string): Promise<NodeJS.ProcessEnv> {
 	const constraints = TOOLS.find((t) => t.id === toolId)?.pipConstraints;
 	if (!constraints || constraints.length === 0) return {};
-	const file = path.join(
-		getGlobalPiLensDir(),
-		"pip-constraints",
-		`${toolId}.txt`,
-	);
+	const directories = [
+		path.join(getGlobalPiLensDir(), "pip-constraints"),
+		path.join(os.tmpdir(), "pi-lens-pip-constraints"),
+	];
+	const directory = directories.find((candidate) => !/\s/.test(candidate));
+	if (!directory) {
+		recordDegradationOnce({
+			kind: "pip-constraint-path-unusable",
+			subject: toolId,
+			reason: `no whitespace-free directory for the constraints file (tried ${directories.join(", ")}); installing unconstrained`,
+		});
+		return {};
+	}
+	const file = path.join(directory, `${toolId}.txt`);
 	try {
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		// The shared atomic seam (#1609), not a raw write: a second pi-lens process
@@ -5612,9 +5638,9 @@ async function pipConstraintEnvFor(toolId: string): Promise<NodeJS.ProcessEnv> {
 		return {};
 	}
 	logSessionStart(
-		`auto-install pip ${toolId}: constraining resolution with ${constraints.join(", ")}`,
+		`auto-install pip ${toolId}: constraining resolution with ${constraints.join(", ")} (${file})`,
 	);
-	return { PIP_CONSTRAINT: file };
+	return { PIP_CONSTRAINT: file, UV_CONSTRAINT: file };
 }
 
 /**

@@ -679,6 +679,15 @@ export type DegradationKind =
 	 * tool id.
 	 */
 	| "pip-constraint-file-unwritable"
+	/**
+	 * #3311 round 2: a registry entry declares `pipConstraints`, but every
+	 * candidate directory for the constraints file has whitespace in its path.
+	 * `PIP_CONSTRAINT`/`UV_CONSTRAINT` both carry a whitespace-separated LIST, so
+	 * such a path is not a path to either resolver — uv fails the install
+	 * outright. The install then proceeds UNCONSTRAINED, and this row is the only
+	 * place that says the declared bound was not in force. Subject is the tool id.
+	 */
+	| "pip-constraint-path-unusable"
 	| "pip-install-strategy-succeeded"
 	| "pip-pep668-strategy-refused"
 	/**
