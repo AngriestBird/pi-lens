@@ -43,6 +43,16 @@ describe("lua diagnostic strategy (#3347)", () => {
 	});
 });
 
+describe("svelte diagnostic strategy (#3311 lane A)", () => {
+	it("keeps the pull collection budget above the cold diagnostic response", () => {
+		// #3311 lane A: the default 1500ms aggregate budget capped Svelte's cold
+		// pull before its seeded diagnostic response arrived.
+		const strategy = getStrategy("svelte");
+		expect(strategy.pullRetryBudgetMs).toBe(0);
+		expect(strategy.aggregateWaitMs).toBe(4000);
+	});
+});
+
 describe("resolveAstGrepNativeExe", () => {
 	it("resolves the real native exe for the CURRENT platform/arch (installed in this repo's node_modules)", () => {
 		// This repo has @ast-grep/cli-win32-x64-msvc (or the platform-appropriate
