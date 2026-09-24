@@ -997,6 +997,22 @@ export function tmpHygieneExcludeLiveOwnerEntries(
 	});
 }
 
+export function writeTmpHygieneLeakNotice(
+	tmpRoot: string,
+	leakedCount: number,
+): void {
+	process.stderr.write(
+		`[tmp-hygiene] observed ${leakedCount} unadmitted entry(s) from ${tmpRoot}; the serialized governance owner cleans them\n`,
+	);
+}
+
+let tmpHygieneAfterAllProbeForTests: (() => void) | undefined;
+export function setTmpHygieneAfterAllProbeForTests(
+	probe: (() => void) | undefined,
+): void {
+	tmpHygieneAfterAllProbeForTests = probe;
+}
+
 function checkTmpHygiene(): void {
 	const { testFile, leftovers } = tmpHygieneLeakReport();
 	const after = new Set(
@@ -1009,9 +1025,7 @@ function checkTmpHygiene(): void {
 		);
 	const leakedCount = leftovers.length;
 	if (leakedCount > 0 && process.env.PI_LENS_TMP_HYGIENE_TRACE !== "1")
-		console.warn(
-			`[tmp-hygiene] observed ${leakedCount} unadmitted entry(s) from ${tmpHygieneRealTmp}; the serialized governance owner cleans them`,
-		);
+		writeTmpHygieneLeakNotice(tmpHygieneRealTmp, leakedCount);
 }
 
 // #2042: fail the FILE that handed a pid it does not own to production kill or
@@ -1053,7 +1067,12 @@ afterAll(() => {
 			emitMemReport,
 		);
 	} finally {
-		removeTmpHygieneOwnerMarker();
+		try {
+			tmpHygieneAfterAllProbeForTests?.();
+		} finally {
+			tmpHygieneAfterAllProbeForTests = undefined;
+			removeTmpHygieneOwnerMarker();
+		}
 	}
 });
 
