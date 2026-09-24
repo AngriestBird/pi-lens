@@ -764,7 +764,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "fsharp",
 		setup: "dotnet restore",
-		lspGate: true,
+		lspGateExempt:
+			"server property: fsautocomplete completed dotnet restore and the 8000ms strategy budget but returned 0 primary findings for the seeded type mismatch (nightly 36059988117); see #3311",
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
@@ -900,7 +901,8 @@ const LSP_FIXTURES = [
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
 		setup: "mix compile",
-		lspGate: true,
+		lspGateExempt:
+			"server property: Expert completed mix compile and the 8000ms strategy budget but returned 0 primary findings for the seeded undefined function (nightly 36059988117); see #3311",
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
@@ -983,7 +985,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "vue",
 		setup: "npm i vue typescript --no-audit --no-fund",
-		lspGate: true,
+		lspGateExempt:
+			"server property: @vue/language-server completed the tsconfig/Volar setup and the 8000ms strategy budget but returned 0 primary findings for the seeded script type error (nightly 36059988117); see #3311",
 		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
