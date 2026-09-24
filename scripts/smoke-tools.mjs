@@ -765,7 +765,7 @@ const LSP_FIXTURES = [
 		lang: "fsharp",
 		setup: "dotnet restore",
 		lspGateExempt:
-			"observed: no publishDiagnostics at all within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117) — and the SAME zero at the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property: fsautocomplete is mode=push-only and #3311's probe recorded dirtyPubs=0, i.e. the workspace load never completes. Next step: load the project the way the editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117), and the SAME zero at the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; the publish-level evidence is separate and consistent: #3311's clean-signal probe recorded dirtyPubs=0 for fsautocomplete on run 35990178129, and mode=push-only has no pull fallback, i.e. the workspace load never completes. Not a proven server property. Next step: load the project the way an editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
@@ -902,7 +902,7 @@ const LSP_FIXTURES = [
 		// fixture exercise Expert's managed GitHub binary through initialize.
 		setup: "mix compile",
 		lspGateExempt:
-			"observed: no publishDiagnostics at all within 8000ms after `mix compile` on the scaffolded mix project (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property. Next step: establish which notification triggers Expert's diagnose pass against its own source — this harness advertises didSave but never sends one (clients/lsp/client.ts declares the capability; no caller emits textDocument/didSave), so a save-triggered server can never answer here — then re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `mix compile` on the scaffolded mix project (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; #3311's clean-signal probe separately recorded dirtyPubs=0 for Expert on run 35990178129. Not a proven server property. Next step: establish which notification triggers Expert's diagnose pass against its own source — this harness advertises didSave but never sends one (clients/lsp/client.ts declares the capability; no caller emits textDocument/didSave), so a save-triggered server could never answer here — then re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
@@ -986,7 +986,7 @@ const LSP_FIXTURES = [
 		lang: "vue",
 		setup: "npm i vue typescript --no-audit --no-fund",
 		lspGateExempt:
-			"observed: no publishDiagnostics at all within 8000ms after `npm i vue typescript` plus the fixture tsconfig (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266), so the wait budget is not the binding constraint. Not an authoritative empty publish and not a proven server property. `VueServer.spawn` does supply `initialization.typescript.tsdk` when it resolves a project typescript, so the next step is to verify from a PILENS_PUB_DEBUG trace that the tsdk it passed is the workspace copy this setup installed and that Volar reports a loaded tsconfig project; see #3311",
+			"observed: 0 diagnostics collected within 8000ms after `npm i vue typescript` plus the fixture tsconfig (runs 36058292424/36059988117), identical to the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. NO publish-level measurement exists for this row: this gate records collected diagnostics, not publishes, and vue's only publish figure came from the sink #3390 proved misattributes other servers' publishes. So this is neither an authoritative empty publish nor a proven server property. `VueServer.spawn` already supplies `initialization.typescript.tsdk` when it resolves a project typescript, so the next step is a PILENS_PUB_DEBUG trace establishing which TypeScript that tsdk points at and whether Volar loaded this tsconfig project — not a longer wait; see #3311",
 		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
