@@ -686,7 +686,6 @@ export interface WarmIpcLineReaderOptions {
 	continuous?: boolean;
 	/** The caller's own ending for an over-long line (the record is automatic). */
 	onOverflow?: () => void;
-	maxLineBytes?: number;
 }
 
 /**
@@ -701,7 +700,8 @@ export interface WarmIpcLineReaderOptions {
  * ceiling, so a peer that never sent a newline grew one JS string until the
  * request's own timeout fired — measured through `requestWarmAnalyze` against a
  * real socket: 64 MiB of newline-free reply, +929 MiB of heap, 20 s of it. Past
- * `maxLineBytes` the partial line is DISCARDED, the overflow is recorded once,
+ * {@link MAX_FRAMED_LINE_BYTES} the partial line is DISCARDED, the overflow is
+ * recorded once,
  * the caller's `onOverflow` decides the ending, and framing RESYNCS at the
  * discarded line's own newline so the next well-formed line is read normally
  * rather than parsed as the tail of the one that was dropped.
@@ -712,7 +712,6 @@ export function createWarmIpcLineReader(
 	onLine: (line: string) => void,
 	options: WarmIpcLineReaderOptions,
 ): (chunk: string) => void {
-	const maxLineBytes = options.maxLineBytes ?? MAX_FRAMED_LINE_BYTES;
 	/** The unterminated head of a line, and its size. */
 	let buffer = "";
 	let bufferedBytes = 0;
@@ -751,11 +750,11 @@ export function createWarmIpcLineReader(
 			newline = chunk.indexOf("\n", from);
 		}
 		if (from < chunk.length) {
-			const rest = from === 0 ? chunk : chunk.slice(from);
+			const rest = chunk.slice(from);
 			buffer += rest;
 			bufferedBytes += Buffer.byteLength(rest);
 		}
-		if (bufferedBytes <= maxLineBytes) return;
+		if (bufferedBytes <= MAX_FRAMED_LINE_BYTES) return;
 		const overflowBytes = bufferedBytes;
 		buffer = "";
 		bufferedBytes = 0;
@@ -764,8 +763,8 @@ export function createWarmIpcLineReader(
 		incrementDegradationCount({
 			kind: "ipc-frame-overflow",
 			subject: options.label,
-			reason: `discarded an unterminated line at ${overflowBytes} bytes (limit ${maxLineBytes})`,
-			metadata: { limitBytes: maxLineBytes, overflowBytes },
+			reason: `discarded an unterminated line at ${overflowBytes} bytes (limit ${MAX_FRAMED_LINE_BYTES})`,
+			metadata: { limitBytes: MAX_FRAMED_LINE_BYTES, overflowBytes },
 		});
 		options.onOverflow?.();
 	};

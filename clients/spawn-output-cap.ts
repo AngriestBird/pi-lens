@@ -76,9 +76,11 @@ export interface BoundedOutputSink {
  * cannot split a multi-byte character.
  *
  * `maxBytes` defaults to {@link DEFAULT_MAX_OUTPUT_BYTES} so every bounded
- * accumulator in the tree answers to ONE reviewed number. There is
- * deliberately no sanitizing of it: every caller passes nothing or that
- * constant, so a `Number.isFinite` arm would be mutation-inert.
+ * accumulator in the tree answers to ONE reviewed number. NO production caller
+ * passes it; it is a parameter so the retention arithmetic can be pinned at a
+ * readable size (`createBoundedOutputSink(10)`) instead of only at 32 MiB.
+ * There is deliberately no sanitizing of it either: nothing passes a value that
+ * would need it, so a `Number.isFinite` arm would be mutation-inert.
  */
 export function createBoundedOutputSink(
 	maxBytes: number = DEFAULT_MAX_OUTPUT_BYTES,

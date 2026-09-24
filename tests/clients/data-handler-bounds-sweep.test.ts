@@ -107,7 +107,7 @@ const REGISTRY: Readonly<Record<string, BoundedHandlers>> = {
 		handlers: 2,
 		bound:
 			"#3383: both replies are framed by createWarmIpcLineReader, bounded by MAX_FRAMED_LINE_BYTES per line.",
-		evidence: ["?? MAX_FRAMED_LINE_BYTES", "onOverflow: () =>"],
+		evidence: ["bufferedBytes <= MAX_FRAMED_LINE_BYTES", "onOverflow: () =>"],
 	},
 	"clients/warm-attach.ts": {
 		handlers: 1,
