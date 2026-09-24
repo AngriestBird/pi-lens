@@ -341,6 +341,20 @@ export type DegradationKind =
 	 */
 	| "instance-registry-registration-missing"
 	/**
+	 * #3383: a newline-framed reader (`createWarmIpcLineReader`) discarded an
+	 * unterminated line that had grown past `MAX_FRAMED_LINE_BYTES`. The peer is
+	 * either broken or hostile: before this bound, one `buffer += chunk` per
+	 * `data` event grew a single JS string with no ceiling — a 64 MiB
+	 * newline-free reply measured +929 MiB of heap and ended only when the
+	 * request's own timeout fired. Subject is the reader's label
+	 * (`mcp-stdio`, `mcp-warm-server`, `warm-attach-server`,
+	 * `warm-diagnostics-reply`, `warm-analyze-reply`) — a fixed set of five, so
+	 * the ledger stays bounded however often a peer misframes. Counted: a peer
+	 * that misframes once usually misframes every request, and the tally is what
+	 * identifies it.
+	 */
+	| "ipc-frame-overflow"
+	/**
 	 * #2042: a kill-by-raw-pid was REFUSED because `/proc/<pid>/status` showed
 	 * the pid alive under a different parent — someone else's process. Subject
 	 * is the call site (`safe-spawn-register`, `lsp-stop-posix-group`,
@@ -856,7 +870,16 @@ export type DegradationKind =
 	 * the per-kind entry bound is reached.
 	 */
 	| "runner-parsed-nothing"
-	/** Windows/libuv cannot self-send SIGHUP after console-close cleanup. */
+	/**
+	 * The self-signal re-raise at the end of `installLifetimeCleanup`'s signal
+	 * handler did not happen, so the host exits without the signal's default
+	 * disposition. Two metadata `reason`s: `unsupported` — declined in advance,
+	 * the measured Windows/libuv case where `process.kill(pid, "SIGHUP")` after
+	 * console-close cleanup throws ENOSYS (#3239) — and `refused` (#3383), the
+	 * attempt itself throwing on any other platform/signal/errno pair. Subject
+	 * is `<platform>:<signal>`, a fixed tiny set. Once per subject: it fires
+	 * while the host is already exiting, so a second row would never be read.
+	 */
 	| "safe-spawn-signal-reraise-unsupported"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
@@ -933,8 +956,11 @@ export type DegradationKind =
 	 */
 	| "spawn-failure"
 	/**
-	 * #3375: `safeSpawnAsync` truncated a child's retained output at its cap and
-	 * (unless a streaming matcher was still waiting) terminated the child.
+	 * #3375: a spawn's retained output was truncated at its cap. Emitted by
+	 * `safeSpawnAsync` (which, unless a streaming matcher was still waiting, then
+	 * terminated the child) and, since #3383, by the two off-seam accumulators
+	 * that report a producer rather than kill it: the forked analyze worker in
+	 * `clients/mcp/review.ts` and the installer's interpreter user-base probes.
 	 * Subject is the command label (`resourceLabel`, else the command), a
 	 * bounded set; the reason names the cap, whether it came from the caller or
 	 * the module default, how many bytes the child had emitted, and whether the

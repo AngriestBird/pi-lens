@@ -684,7 +684,32 @@ function installLifetimeCleanup(): void {
 				});
 				return;
 			}
-			process.kill(process.pid, signal);
+			try {
+				process.kill(process.pid, signal);
+			} catch (error) {
+				// #3383: this runs inside a `process.once(signal)` handler, so a
+				// throw here is an uncaughtException DURING SHUTDOWN, not a
+				// rejection anyone can see. The one failure measured in the field
+				// (Windows SIGHUP ENOSYS) is declined in advance just above; this
+				// covers every other platform/signal/errno pair the OS can refuse —
+				// same ledger kind, `reason: "refused"` instead of "unsupported",
+				// because a reader of either row wants the same fact: the host
+				// exited without the signal's default disposition. The child
+				// cleanup above has already run either way.
+				recordDegradationOnce({
+					kind: "safe-spawn-signal-reraise-unsupported",
+					subject: `${process.platform}:${signal}`,
+					reason: `${process.platform} ${signal}: self signal re-raise was refused (${
+						(error as { code?: string }).code ?? (error as Error).message
+					})`,
+					metadata: {
+						platform: process.platform,
+						signal,
+						reason: "refused",
+						code: (error as { code?: string }).code ?? null,
+					},
+				});
+			}
 		});
 	}
 }
