@@ -119,12 +119,13 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 		client.destroy();
 
 		const group = await waitForGroup("warm-attach-socket-error");
-		// F1: pre-fix this is `[Error: read ECONNRESET]` — in production, the
-		// host's last breath.
+		// F1: pre-fix the socket error escapes — `write EPIPE` in this
+		// in-process run, `read ECONNRESET` in the child-host probe. Either way,
+		// in production it is the host's last breath.
 		expect(uncaught).toEqual([]);
 		// F2: a listener that swallowed silently would leave a peer resetting
 		// every request invisible to `pilens degradation` / `/lens-perf`.
-		expect(group?.count).toBeGreaterThanOrEqual(1);
+		expect(group?.count ?? 0).toBeGreaterThanOrEqual(1);
 		// The subject is the errno the socket reported (ECONNRESET on read, EPIPE
 		// when the reply write loses the race), not a fixed label: a constant
 		// would make every peer failure one indistinguishable row.
