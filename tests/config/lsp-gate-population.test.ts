@@ -32,6 +32,7 @@ type Fixture = (typeof LSP_FIXTURES)[number] & {
 	lspGate?: boolean;
 	lspGateMarker?: string;
 	lspGateExempt?: string;
+	setup?: string | string[];
 	serverId?: string;
 	expectServerId?: string;
 	disableServers?: string[];
@@ -179,6 +180,30 @@ describe("LSP clean-gate population (#3217)", () => {
 				(fixture.lspGateExempt ?? "").trim().length,
 				`${fixture.lang} exemption reason`,
 			).toBeGreaterThanOrEqual(20);
+		}
+	});
+
+	// #3311 lane B recurrence: a fixture-local dependency must be prepared in
+	// the copied scratch workspace before the server is touched. Pin the five
+	// intended lane-B consumers so a future row cannot silently regain a
+	// server-property exemption or add an ad-hoc script. The pre-existing TS7
+	// setup rows are a separate native-server fixture contract.
+	it("keeps lane B setup on exactly the five scaffolded servers", () => {
+		const laneB = ["csharp", "elixir", "expert", "fsharp", "vue"];
+		for (const lang of laneB) {
+			const fixture = fixtures.find((candidate) => candidate.lang === lang)!;
+			expect(
+				fixture.setup,
+				`${lang} must use the shared setup hook`,
+			).toBeTruthy();
+			expect(
+				fixture.lspGate === true || typeof fixture.lspGateExempt === "string",
+				`${lang} must be gated or carry a measured exemption`,
+			).toBe(true);
+			expect(
+				fixture.lspGateMarker,
+				`${lang} must retain a removable seed`,
+			).toBeTruthy();
 		}
 	});
 

@@ -691,14 +691,12 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "rust",
-		// Measured on ubuntu-latest, run 35831976090: rust-analyzer's binary
-		// installs, but the same run's handshake layer reports "no client ready in
-		// 30000ms" and the gate row reads 0 diagnostics — it is still loading the
-		// cargo workspace when the gate's 8s diagnostics wait expires. Raising the
-		// gate's budget for one server is the wrong lever; the row needs a warm
-		// server, not a longer wait.
+		// The lane-C runner measurement found a rustup proxy on PATH; before the
+		// PATH-rung fix it shadowed the managed binary and never completed
+		// initialize. The server is pull-mode tier 1 once the real binary runs,
+		// but this lane does not carry the independent availability fix (#3396).
 		lspGateExempt:
-			"rust-analyzer is still loading the cargo workspace at the gate's wait budget; see #3311",
+			"runner availability limit: the rustup PATH proxy for rust-analyzer does not complete initialize; lane C #3396 verifies the managed binary before this row can gate; see #3311",
 		dir: "tests/fixtures/tool-smoke/rust",
 		file: "src/main.rs",
 		serverHint: "rust-analyzer",
@@ -753,12 +751,9 @@ const LSP_FIXTURES = [
 	{
 		lang: "csharp",
 		serverId: "csharp",
-		// Measured on ubuntu-latest: the identical fixture produced one primary
-		// finding in run 35897633475 and none in run 35899592839. Keep this row
-		// out of the nightly gate until csharp-ls makes that result stable; this
-		// joins #3311's measured exemption list.
-		lspGateExempt:
-			"flaky on the runner: green on 35897633475, red on 35899592839; see https://github.com/apmantza/pi-lens/actions/runs/35899592839 and #3311",
+		setup: "dotnet restore",
+		lspGate: true,
+		lspGateMarker: 'int x = "not a number";',
 		dir: "tests/fixtures/tool-smoke/csharp",
 		file: "Program.cs",
 		serverHint: "csharp-ls",
@@ -768,10 +763,9 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "fsharp",
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=fsharp`; the dirty probe observed no diagnostic.
-		lspGateExempt:
-			"server limit: fsautocomplete loaded the fixture (file-servers=fsharp) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+		setup: "dotnet restore",
+		lspGate: true,
+		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
 		serverHint: "fsautocomplete",
@@ -890,10 +884,9 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		// Nightly run 35917565541: the install rung reported
-		// `ensureTool(elixir-ls) → UNAVAILABLE`; no server became ready.
-		lspGateExempt:
-			"availability limit: ensureTool(elixir-ls) → UNAVAILABLE and touched=0 health=undefined; no server became ready (35917565541); see #3311",
+		setup: "mix compile",
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
 		serverId: "elixir",
 		dir: "tests/fixtures/tool-smoke/elixir",
 		file: "bad.ex",
@@ -905,10 +898,9 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=expert`; the dirty probe observed no diagnostic.
-		lspGateExempt:
-			"server limit: Expert loaded the fixture (file-servers=expert) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+		setup: "mix compile",
+		lspGate: true,
+		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
 		dir: "tests/fixtures/tool-smoke/elixir",
@@ -989,10 +981,10 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "vue",
-		// Nightly run 35917565541: the capability probe captured
-		// `file-servers=vue`; the dirty probe observed no diagnostic.
+		setup: "npm i vue typescript --no-audit --no-fund",
 		lspGateExempt:
-			"server limit: @vue/language-server loaded the fixture (file-servers=vue) but published no diagnostic for the seeded defect; dirty probe observed dirtyDiags=0 (35917565541); see #3311",
+			"server property: @vue/language-server handshook after the real vue/typescript setup but returned 0 primary findings for the seeded script type error; marker removal also returned 0 and exited 1 locally; see #3311",
+		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",
 		serverHint: "@vue/language-server",
