@@ -33,6 +33,32 @@ describe("applyInlineSuppressions (#442 — shared by mode=all + mode=full)", ()
 		]);
 	});
 
+	it("keeps text after a non-final reason separator out of the rule list", () => {
+		// Regression: a separator before a comma used to make the later text a
+		// second rule, so `no-b` was suppressed by this malformed payload.
+		const content = "// pi-lens-ignore: no-a -- reason, no-b\n";
+		const diags: D[] = [
+			{ line: 1, rule: "no-a" },
+			{ line: 1, rule: "no-b" },
+		];
+		expect(applyInlineSuppressions(diags, content).map((d) => d.rule)).toEqual([
+			"no-b",
+		]);
+	});
+
+	it("does not parse commas inside a trailing reason as rule ids", () => {
+		// Regression: a comma in reason prose used to suppress a rule named by the
+		// prose after the comma.
+		const content = "// pi-lens-ignore: no-a -- reason, with comma\n";
+		const diags: D[] = [
+			{ line: 1, rule: "no-a" },
+			{ line: 1, rule: "with comma" },
+		];
+		expect(applyInlineSuppressions(diags, content).map((d) => d.rule)).toEqual([
+			"with comma",
+		]);
+	});
+
 	for (const [separator, explanation] of [
 		[" -- ", "an intentional exception"],
 		[" — ", "an intentional exception"],
