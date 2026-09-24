@@ -32,6 +32,7 @@ import {
 import { logExtension } from "./extension-log.js";
 import { isFullyQualifiedWin32 } from "./path-utils.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
+import { DEFAULT_MAX_OUTPUT_BYTES } from "./spawn-output-cap.js";
 import { compareOrdinal } from "./string-utils.js";
 
 export interface SpawnResourceUsage {
@@ -352,7 +353,12 @@ export interface SafeSpawnOptions {
 	 * affects spawn behavior.
 	 */
 	resourceLabel?: string;
-	/** Maximum bytes retained across stdout and stderr for this child. */
+	/**
+	 * Maximum bytes retained across stdout and stderr for this child.
+	 * Omitted, zero, negative or non-finite falls back to
+	 * `DEFAULT_MAX_OUTPUT_BYTES` (#3375) — there is deliberately no way to opt
+	 * out of a cap, because an absent cap is what crashed the host.
+	 */
 	maxOutputBytes?: number;
 	/** Match output chunks before output-cap truncation can discard them. */
 	matchWhileStreaming?: RegExp;
@@ -1469,6 +1475,24 @@ export async function safeSpawnAsync(
 		let killed = false;
 		let outputTruncated = false;
 		let killedForOutputCap = false;
+		// #3375: bytes the child actually EMITTED (not what survived the cap) —
+		// the one number the field crash report could not supply, so the ledger
+		// row below can name how chatty the offending command really was.
+		let observedOutputBytes = 0;
+		// #3375: bytes RETAINED so far, kept incrementally. The cap check used to
+		// re-measure `Buffer.byteLength(stdout) + Buffer.byteLength(stderr)` on
+		// every chunk, which flattens both accumulated strings each time — O(n^2)
+		// in total output. Harmless while only 12 of 110 call sites passed a cap;
+		// with the cap now on by default it would tax every spawn (measured: a
+		// 32 MiB child took 7.9s of that scanning before this counter, 0.6s
+		// after). Equal to the two byte lengths by construction: before
+		// truncation `stdout`/`stderr` are exactly the appended texts, and after
+		// it the branch that renders from the retained head/tail never reads it.
+		let retainedOutputBytes = 0;
+		// #3375: latched the first time a chunk handler throws. Later chunks
+		// return immediately, so the same fault cannot be re-entered and
+		// `refreshRetainedOutputs` can never overwrite the bytes already kept.
+		let outputHandlerFailed = false;
 		let streamingMatch = false;
 		// #1651 review: a single boolean the close/error handlers both check
 		// AND set, so whichever one decides the outcome first wins outright —
@@ -1511,12 +1535,16 @@ export async function safeSpawnAsync(
 		// re-arm the grace timer on every chunk. `undefined` before exit / after
 		// the wait settles, so the calls below are no-ops outside that window.
 		let rearmIdleGrace: (() => void) | undefined;
-		const maxOutputBytes =
+		// #3375: never `undefined`. An omitted or unusable cap resolves to the
+		// module default instead of to unbounded retention, so `appendOutput`
+		// below has no arm that concatenates without a ceiling.
+		const capFromCaller =
 			options?.maxOutputBytes !== undefined &&
 			Number.isFinite(options.maxOutputBytes) &&
-			options.maxOutputBytes > 0
-				? Math.floor(options.maxOutputBytes)
-				: undefined;
+			options.maxOutputBytes > 0;
+		const maxOutputBytes: number = capFromCaller
+			? Math.floor(options.maxOutputBytes as number)
+			: DEFAULT_MAX_OUTPUT_BYTES;
 		const outputTruncationMarker = "\n...[output truncated]...\n";
 		type OutputStream = "stdout" | "stderr";
 		type OutputPart = { stream: OutputStream; text: string };
@@ -1578,15 +1606,16 @@ export async function safeSpawnAsync(
 			chunk: string | Buffer,
 		): string => {
 			const text = typeof chunk === "string" ? chunk : chunk.toString();
-			if (maxOutputBytes === undefined || outputTruncated) {
-				if (maxOutputBytes === undefined) return current + text;
+			if (outputTruncated) {
 				appendTail({ stream, text }, retainedTailLimit);
 				truncationStream = stream;
 				return renderOutput(stream);
 			}
-			const used = Buffer.byteLength(stdout) + Buffer.byteLength(stderr);
 			const bytes = Buffer.byteLength(text);
-			if (used + bytes <= maxOutputBytes) return current + text;
+			if (retainedOutputBytes + bytes <= maxOutputBytes) {
+				retainedOutputBytes += bytes;
+				return current + text;
+			}
 			outputTruncated = true;
 			truncationStream = stream;
 			const available = Math.max(
@@ -1941,23 +1970,93 @@ export async function safeSpawnAsync(
 			}
 		};
 
+		// #3375: one bounded, counted ledger row per command label the moment the
+		// cap first bites - the crash report named no command, no byte count and
+		// no cap value, so nothing in it could identify the chatty producer.
+		// `incrementDegradationCount` keeps one latest-reason entry per subject
+		// with an exact tally and writes durable rows only at powers of two, so a
+		// tool that trips the cap on every dispatch cannot flood the sink.
+		const recordOutputCapTrip = (): void => {
+			incrementDegradationCount({
+				kind: "spawn-output-cap-truncated",
+				subject: resourceLabel,
+				reason: `retained output reached the ${maxOutputBytes}-byte ${
+					capFromCaller ? "caller" : "default"
+				} cap after ${observedOutputBytes} bytes; child ${
+					killedForOutputCap ? "terminated" : "left running"
+				}`,
+				metadata: {
+					capBytes: maxOutputBytes,
+					capSource: capFromCaller ? "caller" : "default",
+					observedBytes: observedOutputBytes,
+					killed: killedForOutputCap,
+				},
+			});
+		};
+
+		// #3375: the fault path for a chunk handler that threw. Every statement
+		// here is total by construction - plain assignments, a ledger call that
+		// swallows its own failures, and `killTree()`, which is `async` so a
+		// synchronous fault inside it becomes a rejected promise rather than a
+		// throw - because a throw raised HERE would escape the same way the
+		// original RangeError did.
+		const failOutputHandler = (stream: OutputStream, error: Error): void => {
+			outputHandlerFailed = true;
+			// Retention is over. The bytes already in `stdout`/`stderr` stay as
+			// the bounded output: nothing renders from the retained head/tail
+			// again, because the re-entry guard returns before that can happen.
+			outputTruncated = true;
+			truncationStream = stream;
+			incrementDegradationCount({
+				kind: "spawn-output-handler-fault",
+				subject: resourceLabel,
+				reason: `${stream} chunk handling threw ${error.name} after ${observedOutputBytes} bytes; retention stopped and the child was terminated`,
+				metadata: {
+					stream,
+					error: error.name,
+					capBytes: maxOutputBytes,
+					observedBytes: observedOutputBytes,
+				},
+			});
+			if (!killed && !child.killed) {
+				killedForOutputCap = true;
+				killed = true;
+				killPromise = killTree();
+			}
+		};
+
 		// Collect output
 		child.stdout?.setEncoding("utf-8");
 		child.stderr?.setEncoding("utf-8");
-		child.stdout?.on("data", (data) => {
-			matchStreamingChunk("stdout", data);
-			stdout = appendOutput("stdout", stdout, data);
-			if (outputTruncated) refreshRetainedOutputs();
-			stopForOutputLimit();
-			rearmIdleGrace?.();
-		});
-		child.stderr?.on("data", (data) => {
-			matchStreamingChunk("stderr", data);
-			stderr = appendOutput("stderr", stderr, data);
-			if (outputTruncated) refreshRetainedOutputs();
-			stopForOutputLimit();
-			rearmIdleGrace?.();
-		});
+		// #3375: a throw raised inside a stream `data` handler is delivered to
+		// the process, not to the caller awaiting this spawn - no `try`/`catch`
+		// around `await safeSpawnAsync(...)` can contain it, which is why a
+		// `RangeError: Invalid string length` from `appendOutput` terminated the
+		// Pi host on 2026-09-22. Every statement the handler runs lives inside
+		// this `try`, so ANY fault in the retention path (not just that one
+		// RangeError) becomes the bounded output-cap result the caller already
+		// knows how to read.
+		const onOutputChunk = (
+			stream: OutputStream,
+			data: string | Buffer,
+		): void => {
+			if (outputHandlerFailed) return;
+			try {
+				observedOutputBytes += Buffer.byteLength(data);
+				const wasTruncated = outputTruncated;
+				matchStreamingChunk(stream, data);
+				if (stream === "stdout") stdout = appendOutput(stream, stdout, data);
+				else stderr = appendOutput(stream, stderr, data);
+				if (outputTruncated) refreshRetainedOutputs();
+				stopForOutputLimit();
+				if (!wasTruncated && outputTruncated) recordOutputCapTrip();
+				rearmIdleGrace?.();
+			} catch (error) {
+				failOutputHandler(stream, toError(error));
+			}
+		};
+		child.stdout?.on("data", (data) => onOutputChunk("stdout", data));
+		child.stderr?.on("data", (data) => onOutputChunk("stderr", data));
 
 		// #1673 review round 3 (F2): registered HERE, at spawn time, alongside
 		// the other handlers above — not inside `waitForPipeIdle`. Real Node

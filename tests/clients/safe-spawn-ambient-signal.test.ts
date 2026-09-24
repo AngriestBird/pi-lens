@@ -14,6 +14,7 @@ import {
 	setAmbientAbortSignal,
 } from "../../clients/safe-spawn.js";
 import {
+	DEFAULT_MAX_OUTPUT_BYTES,
 	killedForOutputCap,
 	truncatedByOutputCap,
 } from "../../clients/spawn-output-cap.js";
@@ -151,5 +152,50 @@ describe("safeSpawnAsync ambient abort signal (#197)", () => {
 			Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
 		).toBeLessThanOrEqual(1024);
 	});
+
+	// #3375: the acceptance case from the field report, at the real process
+	// boundary. A child that writes past the cap on BOTH pipes with NO
+	// `maxOutputBytes` used to grow one unbounded JS string in `appendOutput`
+	// until V8 threw `RangeError: Invalid string length` inside the `data`
+	// handler, where no caller `try`/`catch` can reach it — it left Pi 0.86.1 as
+	// an uncaught exception and terminated the host (2026-09-22).
+	//
+	// Real spawn, not the mocked child of `safe-spawn-default-output-cap.test.ts`:
+	// what is under test here is that the HOST SURVIVES a real OS pipe
+	// delivering tens of megabytes, which is exactly the part an
+	// `EventEmitter.emit("data", ...)` issued by the test cannot witness —
+	// a synchronous emit raises the throw on the test's own stack, while a real
+	// chunk raises it on Node's stream machinery, which is what made it uncaught.
+	// Reaching any assertion below IS the host-survival proof.
+	it("caps and kills an uncapped noisy child at the module default (#3375)", async () => {
+		const result = await safeSpawnAsync(
+			NODE,
+			[
+				"-e",
+				"process.stdout.write('OUT-HEAD');process.stderr.write('ERR-HEAD');" +
+					"const c='x'.repeat(1024*1024);" +
+					"for(let i=0;i<20;i++){process.stdout.write(c);process.stderr.write(c);}" +
+					"setTimeout(() => {}, 10000);",
+			],
+			{ timeout: 30000 },
+		);
+
+		expect(result.outputTruncated).toBe(true);
+		expect(result.killedForOutputCap).toBe(true);
+		expect(truncatedByOutputCap(result)).toBe(true);
+		expect(killedForOutputCap(result)).toBe(true);
+		expect(result.status).not.toBe(0);
+		// Bounded by the module default, and by nothing the caller supplied.
+		expect(
+			Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
+		).toBeLessThanOrEqual(DEFAULT_MAX_OUTPUT_BYTES);
+		// Both pipes are represented: the ceiling is shared, not per-stream.
+		expect(result.stdout).toContain("OUT-HEAD");
+		expect(result.stderr).toContain("ERR-HEAD");
+		// The reporter observed NUL bytes in the interrupted run's files; byte
+		// slicing at a truncation boundary never produces one.
+		expect(result.stdout).not.toContain("\u0000");
+		expect(result.stderr).not.toContain("\u0000");
+	}, 60000);
 });
 // flake-shape: real-process-spawn — real children receive ambient abort signals through the OS boundary, not an in-process double

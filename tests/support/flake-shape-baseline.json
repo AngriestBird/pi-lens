@@ -31,7 +31,7 @@
 		"clients/persistence-worker-exit.test.ts": 1,
 		"clients/project-data-dir-slug.test.ts": 1,
 		"clients/review-graph.service.test.ts": 7,
-		"clients/safe-spawn-ambient-signal.test.ts": 7,
+		"clients/safe-spawn-ambient-signal.test.ts": 8,
 		"clients/safe-spawn-failure-taxonomy.test.ts": 4,
 		"clients/safe-spawn-input.test.ts": 4,
 		"clients/safe-spawn-resource-usage.test.ts": 8,
