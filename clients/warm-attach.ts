@@ -208,7 +208,7 @@ function startServer(cwd: string): void {
 		// `server.on("error")` below covers only the listener. A client that walks
 		// away while this incumbent is answering — every `requestWarmDiagnostics`
 		// timeout, schema refusal and validation refusal destroys its socket
-		// (`clients/mcp/ipc.ts:305`) — therefore turned a routine
+		// (`clients/mcp/ipc.ts:312`) — therefore turned a routine
 		// `read ECONNRESET` into an uncaught exception in THIS host, the same
 		// ending #3375 closed for an unbounded `data` handler. The stream has
 		// already destroyed itself by the time this runs (measured: `destroyed` is

@@ -188,7 +188,7 @@ function scanSocketSites(source: string, relPath = "<source>"): SocketScan {
  */
 const PINNED_SITES: Readonly<Record<string, string>> = {
 	"clients/mcp/ipc.ts#requestOverWarmIpc createConnection":
-		'connected socket; `socket.on("error", …)` finishes the request as unavailable (clients/mcp/ipc.ts:305) — correct before #3389',
+		'connected socket; `socket.on("error", …)` finishes the request as unavailable (clients/mcp/ipc.ts:312) — correct before #3389',
 	"clients/mcp/ipc.ts#requestWarmAnalyze createConnection":
 		'connected socket; `socket.on("error", () => finish(undefined))` — correct before #3389',
 	"clients/warm-attach.ts#startServer createServer":
