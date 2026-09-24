@@ -1882,10 +1882,11 @@ export async function safeSpawnAsync(
 		// So no signal is sent except through `trySend`, which cannot throw.
 		type KillPhase = "abort" | "output-cap" | "handler-fault" | "timeout";
 		let killFailed = false;
-		/** Send one signal. Returns false instead of throwing. Records nothing:
-		 *  a refused signal is often ORDINARY (a negative-pid ESRCH means the
-		 *  group already exited), so only a caller that has run out of fallbacks
-		 *  calls `noteKillFailure`. */
+		/** Send one signal. Returns false instead of throwing, and records
+		 *  nothing itself: a refused signal is often ORDINARY (a negative-pid
+		 *  ESRCH means the group already exited and the direct-child fallback
+		 *  takes over), so only a send with no fallback left behind it pairs
+		 *  with `noteKillFailure`. */
 		const trySend = (send: () => void): boolean => {
 			try {
 				send();
@@ -1944,14 +1945,14 @@ export async function safeSpawnAsync(
 				// by the tool share its group, so one signal reaches the whole
 				// tree; a negative-pid ESRCH means it already exited.
 				const pgid = -(child.pid as number);
-				// A negative-pid ESRCH means the group already exited, so the
-				// direct-child fallback is the ordinary path and records nothing.
-				// Only losing BOTH is a failed teardown.
-				if (
-					!trySend(() => process.kill(pgid, "SIGTERM")) &&
-					!trySend(() => child.kill("SIGTERM"))
-				) {
-					noteKillFailure(phase);
+				try {
+					process.kill(pgid, "SIGTERM");
+				} catch {
+					// #2026: a negative-pid ESRCH means the group already exited, so
+					// reaching here is ORDINARY control flow, not a failure — the
+					// `catch` stays exactly as it was and records nothing. Only the
+					// last-resort send below can fail the teardown.
+					if (!trySend(() => child.kill("SIGTERM"))) noteKillFailure(phase);
 				}
 				// #2027 round-1: gate the SIGKILL escalation on GROUP liveness,
 				// not direct-child death - a tool can exit instantly on SIGTERM
