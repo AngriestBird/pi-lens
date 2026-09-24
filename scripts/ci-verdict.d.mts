@@ -49,6 +49,11 @@ export declare function computeVerdict(
 
 export declare function formatVerdictTable(rows: VerdictRow[]): string;
 
+export declare function formatRerunHint(row: {
+	name?: string;
+	details_url?: string;
+}): string;
+
 export declare function resolveWaitCapSeconds(
 	waitSecondsArg: number | null,
 ): number;

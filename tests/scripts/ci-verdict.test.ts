@@ -39,6 +39,7 @@ function checkRun({
 	started_at = "2026-09-03T00:00:00Z",
 	id = 1,
 	html_url = `https://github.com/apmantza/pi-lens/actions/runs/${id}`,
+	details_url = `${html_url}/job/${id}`,
 }: {
 	name: string;
 	status?: string;
@@ -46,8 +47,9 @@ function checkRun({
 	started_at?: string;
 	id?: number;
 	html_url?: string;
+	details_url?: string;
 }) {
-	return { name, status, conclusion, started_at, id, html_url };
+	return { name, status, conclusion, started_at, id, html_url, details_url };
 }
 
 const BOTH_SUCCESS = {
@@ -60,6 +62,12 @@ const BOTH_SUCCESS = {
 const REAL_CHECK_RUNS = JSON.parse(
 	readFileSync(
 		join(process.cwd(), "tests/fixtures/ci-verdict/real-check-runs.json"),
+		"utf8",
+	),
+);
+const PR_3382_CANCELLED = JSON.parse(
+	readFileSync(
+		join(process.cwd(), "tests/fixtures/ci-verdict/pr-3382-cancelled.json"),
 		"utf8",
 	),
 );
@@ -810,7 +818,9 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		const verdict = computeVerdict(
 			{
 				check_runs: [
-					...BOTH_SUCCESS.check_runs,
+					...BOTH_SUCCESS.check_runs.filter(
+						(run) => run.name !== "Lint & type-check",
+					),
 					...REAL_CHECK_RUNS.cancelledReplacement.check_runs,
 				],
 			},
@@ -827,9 +837,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		const verdict = computeVerdict(
 			{
 				check_runs: [
-					...BOTH_SUCCESS.check_runs.filter(
-						(run) => run.name !== "Lint & type-check",
-					),
+					...BOTH_SUCCESS.check_runs,
 					...REAL_CHECK_RUNS.cancelledLatest.check_runs,
 				],
 			},
@@ -839,6 +847,95 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.reason).toBe(
 			"superseded run cancelled and not replaced: rerun 107416999999 (gh run rerun 107416999999)",
+		);
+	});
+
+	it("uses the workflow run id from the #3382 check-run details URL (#3386)", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs.filter(
+						(run) => run.name !== "Lint & type-check",
+					),
+					...PR_3382_CANCELLED.check_runs,
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toBe(
+			"superseded run cancelled and not replaced: rerun 36022234159 (gh run rerun 36022234159)",
+		);
+	});
+
+	it("uses --job only when details_url verifies the check-run id is the job id", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs.filter(
+						(run) => run.name !== "Lint & type-check",
+					),
+					checkRun({
+						name: "Lint & type-check",
+						conclusion: "cancelled",
+						id: 77,
+						details_url: "https://github.com/acme/repo/actions/job/77",
+					}),
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toContain("rerun 77 (gh run rerun --job 77)");
+	});
+
+	it("names a third-party check that cannot be rerun via gh", () => {
+		const detailsUrl = "https://sonarcloud.io/project/status/acme";
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs,
+					checkRun({
+						name: "CodeQL",
+						conclusion: "cancelled",
+						id: 88,
+						details_url: detailsUrl,
+					}),
+				],
+			},
+			["Unit tests", "Lint & type-check", "CodeQL"],
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toBe(
+			`superseded run cancelled and not replaced: CodeQL cannot be rerun via gh (not a GitHub Actions job; details: ${detailsUrl})`,
+		);
+	});
+
+	it("names a mismatched Actions job that cannot be rerun via gh", () => {
+		const detailsUrl = "https://github.com/acme/repo/actions/job/88";
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					...BOTH_SUCCESS.check_runs.filter(
+						(run) => run.name !== "Lint & type-check",
+					),
+					checkRun({
+						name: "Lint & type-check",
+						conclusion: "cancelled",
+						id: 77,
+						details_url: detailsUrl,
+					}),
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toBe(
+			`superseded run cancelled and not replaced: Lint & type-check cannot be rerun via gh (not a GitHub Actions job; details: ${detailsUrl})`,
 		);
 	});
 

@@ -1177,7 +1177,8 @@
         "status": "completed",
         "conclusion": "cancelled",
         "started_at": "2026-09-23T22:58:16Z",
-        "id": 107416999999
+        "id": 107416999999,
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/107416999999/job/107416999999"
       }
     ]
   }
