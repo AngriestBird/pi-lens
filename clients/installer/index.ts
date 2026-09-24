@@ -3165,9 +3165,10 @@ async function getToolPathResolved(
 	//     PATH whose venv resolved pygls 2.x, which removed the symbol the 0.1.11
 	//     server imports. This rung returned it ahead of the pip-user rung, whose
 	//     verification would have caught it.
-	// A VERDICT (nonzero exit, spawn-boundary refusal) falls through to the rungs
-	// below and, for an installable strategy, to the managed install. A STALL
-	// (timeout/signal) or an INCONCLUSIVE probe is not a verdict (#1569/#2722
+	// A VERDICT — the binary ran and rejected its own check (nonzero exit) —
+	// falls through to the rungs below and, for an installable strategy, to the
+	// managed install. A STALL (timeout/signal, or a spawn-boundary refusal the
+	// binary never saw) and an INCONCLUSIVE probe are not verdicts (#1569/#2722
 	// semantics), so those keep the pre-#3311 behaviour and resolve to PATH —
 	// dropping a working-but-slow tool on a kill would be a worse lie than the
 	// one this fixes. `recordVersion` is deliberately NOT passed: version-pin
