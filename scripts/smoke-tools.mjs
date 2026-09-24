@@ -987,7 +987,7 @@ const LSP_FIXTURES = [
 		lang: "vue",
 		setup: "npm i vue typescript --no-audit --no-fund",
 		lspGateExempt:
-			"server property: @vue/language-server handshook after the real vue/typescript setup but returned 0 primary findings for the seeded script type error; marker removal also returned 0 and exited 1 locally; see #3311",
+			"server property: @vue/language-server returned 0 primary findings after the tsconfig/Volar project setup and the full 8000ms budget; marker removal also returned 0 and exited 1; see #3311",
 		lspGateMarker: 'const count: number = "not a number";',
 		dir: "tests/fixtures/tool-smoke/vue",
 		file: "App.vue",

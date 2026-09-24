@@ -433,6 +433,39 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 4000,
 			expectSemanticSecondPush: false,
 		},
+		// These project-loading servers need the smoke gate's full cold-start
+		// ceiling after their project is opened. The 1500ms default was measured
+		// before setup/project loading and classified their zero result as a server
+		// property (#3402 review); keep the budget explicit until each runner trace
+		// records a faster settled publish.
+		csharp: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 8000,
+			expectSemanticSecondPush: false,
+		},
+		fsharp: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 8000,
+			expectSemanticSecondPush: false,
+		},
+		expert: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 8000,
+			expectSemanticSecondPush: false,
+		},
+		vue: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 8000,
+			expectSemanticSecondPush: false,
+		},
 		cue: {
 			seedFirstPush: true,
 			pullRetryBudgetMs: 0,

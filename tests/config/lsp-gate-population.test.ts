@@ -207,6 +207,24 @@ describe("LSP clean-gate population (#3217)", () => {
 		}
 	});
 
+	it("keeps the Vue gate fixture project-shaped for Volar", () => {
+		// M-3402-1 recurrence: a ready Volar server with no publish was first
+		// classified as a server property, but the fixture had no tsconfig project.
+		const vue = fixtures.find((fixture) => fixture.lang === "vue")!;
+		const config = JSON.parse(
+			readFileSync(path.join(repoRoot, vue.dir, "tsconfig.json"), "utf8"),
+		) as {
+			include?: string[];
+			compilerOptions?: { plugins?: Array<{ name?: string }> };
+			vueCompilerOptions?: Record<string, unknown>;
+		};
+		expect(config.include).toContain("App.vue");
+		expect(config.compilerOptions?.plugins).toContainEqual({
+			name: "@vue/typescript-plugin",
+		});
+		expect(config.vueCompilerOptions).toBeDefined();
+	});
+
 	// #3217 F7: `java` and `java-lombok` are two fixtures over one server
 	// (jdtls). A duplicated `lang` would let one server be counted twice in the
 	// census line below, or let a fixture be edited while its twin silently

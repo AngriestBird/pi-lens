@@ -53,6 +53,16 @@ describe("svelte diagnostic strategy (#3311 lane A)", () => {
 	});
 });
 
+describe("lane B project-loading diagnostic strategies (#3402)", () => {
+	it("pins the smoke-gate cold-start budget for every setup-backed server", () => {
+		for (const serverId of ["csharp", "fsharp", "expert", "vue"]) {
+			const strategy = getStrategy(serverId);
+			expect(strategy.pullRetryBudgetMs, serverId).toBe(0);
+			expect(strategy.aggregateWaitMs, serverId).toBe(8000);
+		}
+	});
+});
+
 describe("resolveAstGrepNativeExe", () => {
 	it("resolves the real native exe for the CURRENT platform/arch (installed in this repo's node_modules)", () => {
 		// This repo has @ast-grep/cli-win32-x64-msvc (or the platform-appropriate
