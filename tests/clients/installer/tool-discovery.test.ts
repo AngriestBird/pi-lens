@@ -155,8 +155,15 @@ vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
 // #2015: verifyToolBinary probes (and installNpmTool's npm-install spawn)
 // route through `safeSpawnAsync`, so this file mocks that seam directly and
 // records every invocation into the same `spawnCalls` log the raw-spawn mock
-// above feeds. Probes and installs both answer success; tests that need a
-// failure simulate it at their own seams (network, fs access).
+// above feeds. Probes and installs both answer success by default; a test that
+// needs a probe VERDICT sets `spawnVerdict` (#3311 — the PATH rung now verifies
+// its candidate, so the probe's answer decides PATH resolution as well).
+const spawnVerdict = vi.hoisted(() => ({
+	status: 0 as number | null,
+	stdout: "",
+	stderr: "",
+	signal: undefined as string | undefined,
+}));
 vi.mock("../../../clients/safe-spawn.js", () => ({
 	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 0 })),
 	safeSpawnAsync: async (
@@ -169,7 +176,14 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 			args: args ?? [],
 			timeout: options?.timeout,
 		});
-		return { stdout: "", stderr: "", status: 0 };
+		return {
+			stdout: spawnVerdict.stdout,
+			stderr: spawnVerdict.stderr,
+			status: spawnVerdict.status,
+			...(spawnVerdict.signal === undefined
+				? {}
+				: { signal: spawnVerdict.signal }),
+		};
 	},
 	resetSafeSpawnWindowsCommandCache: vi.fn(),
 }));
@@ -215,6 +229,7 @@ vi.mock("../../../clients/dependency-checker.js", () => ({
 	resetMadgeManagedPathMemo: mockResetMadgeManagedPathMemo,
 }));
 
+import * as realFs from "node:fs";
 import * as path from "node:path";
 import {
 	_peekEnsureInFlightForTesting,
@@ -228,6 +243,22 @@ import {
 
 const GITHUB_BIN = path.join(TEST_HOME, ".pi-lens", "bin");
 const EXE = process.platform === "win32" ? ".exe" : "";
+
+/**
+ * A real directory holding a real, non-empty file named `command` — what
+ * `isCommandAvailable` walks PATH for (`statSync().isFile() && size > 0`). It is
+ * never executed here: the spawn boundary is mocked, and `spawnVerdict` decides
+ * what the probe of it answers.
+ */
+const pathDirs: string[] = [];
+function pathDirWith(command: string): string {
+	const dir = realFs.mkdtempSync(path.join(process.cwd(), ".tmp-path-cand-"));
+	pathDirs.push(dir);
+	realFs.writeFileSync(path.join(dir, command), "#!/bin/sh\nexit 1\n", {
+		mode: 0o750,
+	});
+	return dir;
+}
 
 function ghPath(name: string): string {
 	return path.join(GITHUB_BIN, `${name}${EXE}`);
@@ -284,6 +315,10 @@ beforeEach(() => {
 	httpsBlocker.enabled = false;
 	httpsBlocker.errorHandler = undefined;
 	resetProbeCacheStateForTesting();
+	spawnVerdict.status = 0;
+	spawnVerdict.stdout = "";
+	spawnVerdict.stderr = "";
+	spawnVerdict.signal = undefined;
 	mockFsReadFile.mockRejectedValue(new Error("ENOENT"));
 	fakeAccess(/* nothing */);
 });
@@ -313,29 +348,118 @@ describe("getToolPath ordering", () => {
 			expect(result).toBe(managed);
 		});
 
-		it("returns undefined when github-local is empty", async () => {
-			// On CI, rust-analyzer may be on the real PATH — accept either result
-			const result = await getToolPath("rust-analyzer");
-			// github-local empty, PATH may or may not have it
-			expect([undefined, "rust-analyzer"]).toContain(result);
+		// #3311 test assessment: this case and the two below accepted BOTH
+		// outcomes (`expect([undefined, "<tool>"]).toContain(result)`) because
+		// they read the ambient PATH, so no mutation of the ordering they name
+		// could red them. Each now pins its claim against a PATH this test
+		// controls instead.
+		it("returns undefined when github-local is empty and PATH has nothing", async () => {
+			const result = await withEmptyPath(() => getToolPath("rust-analyzer"));
+
+			expect(result).toBeUndefined();
 		});
 	});
 
 	describe("non-github tools are unaffected by reorder", () => {
 		it("npm-strategy tools do not check github-local", async () => {
-			// stylelint is npm-strategy, not github — should not find anything
-			// in github-local, and PATH check depends on real PATH.
-			// Key: the function doesn't crash and returns something reasonable.
-			const result = await getToolPath("stylelint");
-			// Either found on real PATH or undefined — both are valid,
-			// just verify it doesn't throw.
-			expect([undefined, "stylelint"]).toContain(result);
+			// A managed github-local binary EXISTS for this id; an npm-strategy
+			// entry must not resolve to it.
+			fakeAccess(ghPath("stylelint"));
+
+			const result = await withEmptyPath(() => getToolPath("stylelint"));
+
+			expect(result).toBeUndefined();
 		});
 
 		it("pip-strategy tools do not check github-local", async () => {
-			const result = await getToolPath("ruff");
-			expect([undefined, "ruff"]).toContain(result);
+			fakeAccess(ghPath("ruff"));
+
+			const result = await withEmptyPath(() => getToolPath("ruff"));
+
+			expect(result).toBeUndefined();
 		});
+	});
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// #3311: a PATH candidate that cannot RUN is not a resolution
+//
+// Recurrence this guards: the nightly census reported `ensureTool(rust-analyzer)
+// → rust-analyzer` and then `no client ready in 30000ms` on every run, because
+// rustup installs a `rust-analyzer` PROXY into ~/.cargo/bin whether or not the
+// component behind it is installed (rustup 1.29.1 `DUP_TOOLS`, src/lib.rs:32),
+// and the PATH rung of the resolution ladder returned that file unverified —
+// shadowing the github-release install pi-lens would otherwise have downloaded.
+// The same rung returned a pipx-installed `cmake-language-server` whose venv had
+// resolved pygls 2, which cannot import.
+// ═════════════════════════════════════════════════════════════════════════
+
+describe("PATH candidate verification (#3311)", () => {
+	afterEach(() => {
+		for (const dir of pathDirs.splice(0))
+			realFs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("does not resolve a PATH candidate whose own check returns a verdict", async () => {
+		const dir = pathDirWith(`rust-analyzer${EXE}`);
+		spawnVerdict.status = 1;
+		spawnVerdict.stderr =
+			"error: the 'rust-analyzer' component which provides the command 'rust-analyzer' is not available for the 'stable-x86_64-unknown-linux-gnu' toolchain";
+		const restorePath = withEnv({ PATH: dir });
+		try {
+			const result = await getToolPath("rust-analyzer");
+
+			expect(result).toBeUndefined();
+			expect(spawnCalls.map((call) => call.args)).toContainEqual(["--version"]);
+		} finally {
+			restorePath();
+		}
+	});
+
+	it("lets the managed install be attempted for a shadowed github-strategy server", async () => {
+		const dir = pathDirWith(`rust-analyzer${EXE}`);
+		spawnVerdict.status = 1;
+		const restorePath = withEnv({ PATH: dir });
+		try {
+			await ensureTool("rust-analyzer");
+
+			// The github release lookup — the install this PATH file used to
+			// shadow — was reached. (It then fails: node:https is mocked.)
+			expect(httpsGetCalls.join(" ")).toContain("rust-analyzer");
+		} finally {
+			restorePath();
+		}
+	});
+
+	it("keeps a PATH candidate whose probe was killed (a stall is not a verdict)", async () => {
+		const dir = pathDirWith(`rust-analyzer${EXE}`);
+		spawnVerdict.status = null;
+		spawnVerdict.signal = "SIGTERM";
+		const restorePath = withEnv({ PATH: dir });
+		try {
+			const result = await getToolPath("rust-analyzer");
+
+			expect(result).toBe("rust-analyzer");
+		} finally {
+			restorePath();
+		}
+	});
+
+	it("resolves a package-entry entry from PATH without probing it", async () => {
+		// #2722: a `verification: "package-entry"` entry is verified from the
+		// installed tree beside its shim, which a bare PATH name does not have —
+		// so this rung must not manufacture a verdict from that absence.
+		const dir = pathDirWith(`intelephense${EXE}`);
+		spawnVerdict.status = 1;
+		const restorePath = withEnv({ PATH: dir });
+		try {
+			const result = await getToolPath("intelephense");
+
+			expect(result).toBe("intelephense");
+			expect(spawnCalls).toEqual([]);
+		} finally {
+			restorePath();
+		}
 	});
 });
 

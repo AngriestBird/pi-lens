@@ -318,6 +318,17 @@ export type DegradationKind =
 	 */
 	| "inline-blocker-unstructured"
 	| "install-retry-exhausted"
+	/**
+	 * #3311: a command the resolution ladder found on PATH failed the registry
+	 * entry's own check (`checkArgs`) with a verdict, so PATH was ignored for that
+	 * tool and the rungs below it (including the managed install) were tried
+	 * instead. The two shipped members: rustup's `rust-analyzer` proxy on a box
+	 * with no `rust-analyzer` component installed, and a pipx-installed
+	 * `cmake-language-server` whose venv resolved pygls 2. Subject is the tool id,
+	 * recorded once per session — the condition is a property of the box, not of
+	 * the call.
+	 */
+	| "installer-path-candidate-unrunnable"
 	| "installer-verification-inconclusive"
 	| "installer-verification-output-truncated"
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
@@ -646,6 +657,14 @@ export type DegradationKind =
 	 * (#1857 class sweep).
 	 */
 	| "path-variant-unresolved"
+	/**
+	 * #3311: a registry entry declares `pipConstraints`, but the constraints file
+	 * the pip ladder hands to `PIP_CONSTRAINT` could not be written. The install
+	 * then proceeds UNCONSTRAINED — the pre-#3311 resolution — so this row is the
+	 * only place that says the declared bound was not in force. Subject is the
+	 * tool id.
+	 */
+	| "pip-constraint-file-unwritable"
 	| "pip-install-strategy-succeeded"
 	| "pip-pep668-strategy-refused"
 	/**

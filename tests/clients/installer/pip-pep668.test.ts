@@ -570,3 +570,153 @@ exit 1
 		);
 	});
 });
+
+/**
+ * A resolution is a command that RUNS (#3311).
+ *
+ * The nightly census reported `⚠ cmake cmake-language-server 0 no client ready
+ * in 30000ms (server missing/slow; try --install)` on every run while
+ * `ensureTool(cmake-language-server) → cmake-language-server` said the tool was
+ * there. Both statements came from the same rung: `pipx install` exits 0 and
+ * puts a launcher on PATH, the ladder's PATH rung returned that launcher without
+ * probing it, and the launcher could not start — cmake-language-server 0.1.11
+ * declares only `pygls>=1.1.1` and pip resolved pygls 2.1.1, which removed
+ * `pygls.server.LanguageServer`.
+ *
+ * The fake pipx below is production-faithful on the axis under test, measured
+ * against the real packages for the nightly's interpreter:
+ *
+ *   $ pip download --python-version 3.12 --only-binary=:all: cmake-language-server
+ *   cmake_language_server-0.1.11-py3-none-any.whl  pygls-2.1.1-py3-none-any.whl
+ *   $ cmake-language-server --version
+ *   ImportError: cannot import name 'LanguageServer' from 'pygls.server'   (exit 1)
+ *
+ *   $ PIP_CONSTRAINT=<file with pygls<2> pip download --python-version 3.12 …
+ *   cmake_language_server-0.1.11-py3-none-any.whl  pygls-1.3.1-py3-none-any.whl
+ *   $ cmake-language-server --version
+ *   cmake-language-server 0.1.11                                           (exit 0)
+ *
+ * so the double's launcher works exactly when the constraint reached pip, and a
+ * double that ignored `PIP_CONSTRAINT` would turn an inert fix green.
+ */
+function writeConstraintAwarePipx(binDir: string, root: string): string {
+	const log = path.join(root, "pipx.log");
+	writeExecutable(
+		path.join(binDir, "pipx"),
+		`#!/bin/sh
+echo "argv: $*" >> "${log}"
+echo "PIP_CONSTRAINT=\${PIP_CONSTRAINT:-}" >> "${log}"
+if [ -n "\${PIP_CONSTRAINT:-}" ]; then /bin/cat "\$PIP_CONSTRAINT" >> "${log}"; fi
+if [ "$1" = "environment" ]; then echo "$FAKE_PIPX_BIN"; exit 0; fi
+[ "$1" = "install" ] || exit 1
+/bin/mkdir -p "$FAKE_PIPX_BIN"
+broken=no
+if [ -n "\${FAKE_STALE_VENV:-}" ]; then
+  broken=yes
+elif [ -n "\${FAKE_REQUIRE_CONSTRAINT:-}" ]; then
+  if [ -z "\${PIP_CONSTRAINT:-}" ] || ! /bin/grep -q "pygls<2" "\$PIP_CONSTRAINT"; then
+    broken=yes
+  fi
+fi
+if [ "$broken" = yes ]; then
+  printf '#!/bin/sh\\necho "ImportError: cannot import name LanguageServer from pygls.server" >&2\\nexit 1\\n' > "$FAKE_PIPX_BIN/$FAKE_APP"
+else
+  printf '#!/bin/sh\\necho "%s 0.1.11"\\n' "$FAKE_APP" > "$FAKE_PIPX_BIN/$FAKE_APP"
+fi
+/bin/chmod 750 "$FAKE_PIPX_BIN/$FAKE_APP"
+exit 0
+`,
+	);
+	return log;
+}
+
+describe("a PATH candidate that cannot run is not a resolution (#3311)", () => {
+	it("does not resolve a pipx launcher that fails its own check", async () => {
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(root, bin, "cmake-language-server", {
+			FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+			FAKE_APP: "cmake-language-server",
+			// The state a box reaches when the venv predates the constraint — or
+			// when the next pygls major breaks the import again.
+			FAKE_STALE_VENV: "1",
+		});
+
+		// pipx reported success and put the launcher on PATH…
+		expect(program.result.installed).toBe(true);
+		expect(program.result.path).toContain("pipx-bin");
+		// …and the ladder still refuses to call that a resolved tool.
+		expect(program.result.resolved).toBeUndefined();
+		const row = program.result.summary.find(
+			(entry: { kind: string }) =>
+				entry.kind === "installer-path-candidate-unrunnable",
+		);
+		expect(row?.count).toBe(1);
+		expect(row?.latestReasons?.[0]?.subject).toBe("cmake-language-server");
+	});
+
+	it("keeps a PATH candidate whose probe never ran (a stall is not a verdict)", async () => {
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		// A real file on PATH that cannot be spawned at all: the probe fails at
+		// the spawn boundary, which says nothing about the binary (#1569).
+		fs.writeFileSync(path.join(bin, "ruff"), "#!/bin/sh\necho ruff 1.0\n", {
+			mode: 0o600,
+		});
+
+		const program = await runInstaller(root, bin, "ruff");
+
+		expect(program.result.resolved).toBe("ruff");
+	});
+});
+
+describe("pip resolution is bounded by the entry's own constraints (#3311)", () => {
+	it("hands PIP_CONSTRAINT to pipx for an entry that declares pipConstraints", async () => {
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		const log = writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(root, bin, "cmake-language-server", {
+			FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+			FAKE_APP: "cmake-language-server",
+			FAKE_REQUIRE_CONSTRAINT: "1",
+		});
+
+		const transcript = fs.readFileSync(log, "utf-8");
+		expect(transcript).toContain("argv: install --force cmake-language-server");
+		expect(transcript).toMatch(/PIP_CONSTRAINT=\S+/);
+		expect(transcript).toContain("pygls<2");
+		// The independent effect: the launcher the constrained install produced is
+		// the one the ladder resolved, and it runs.
+		expect(program.result.resolved).toBeTruthy();
+		// Through the PATH the installer exported, never the ambient one: this
+		// box has a real pipx-installed cmake-language-server whose venv resolved
+		// pygls 2 — the very defect — and a bare name would find that instead.
+		const { stdout } = await execFileAsync(
+			program.result.resolved,
+			["--version"],
+			{ env: { ...process.env, PATH: program.result.path } },
+		);
+		expect(stdout.trim()).toBe("cmake-language-server 0.1.11");
+	});
+
+	it("leaves PIP_CONSTRAINT unset for an entry that declares none", async () => {
+		const root = scratchDir();
+		const bin = path.join(root, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		const log = writeConstraintAwarePipx(bin, root);
+
+		const program = await runInstaller(root, bin, "ruff", {
+			FAKE_PIPX_BIN: path.join(root, "pipx-bin"),
+			FAKE_APP: "ruff",
+		});
+
+		expect(program.result.installed).toBe(true);
+		expect(fs.readFileSync(log, "utf-8")).toContain("PIP_CONSTRAINT=\n");
+	});
+});

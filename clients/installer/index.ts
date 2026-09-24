@@ -363,6 +363,18 @@ export interface ToolDefinition {
 	 */
 	platformPackage?: PlatformPackageSpec;
 	/**
+	 * Extra requirement specifiers that bound what pip may resolve for a
+	 * `"pip"`-strategy entry, applied through pip's own `PIP_CONSTRAINT` (#3311).
+	 * For a package whose published metadata under-constrains a dependency that
+	 * then breaks it: `cmake-language-server` 0.1.11 declares `pygls>=1.1.1`,
+	 * pip resolves pygls 2.x, and pygls 2 removed `pygls.server.LanguageServer`
+	 * — so every invocation of the installed launcher, `--version` included, dies
+	 * in an ImportError. A constraint, not a `packageName` pin: the app version
+	 * is fine, its dependency floor is what is wrong, and `packageName` is a
+	 * single argv token that cannot say anything about a dependency.
+	 */
+	pipConstraints?: string[];
+	/**
 	 * How the managed binary is verified. Absent (the default) spawns
 	 * `checkArgs`. `"package-entry"` verifies SPAWN-FREE — see
 	 * {@link verifyNpmPackageEntry} — for an npm stdio LSP server that has no
@@ -766,6 +778,15 @@ export const TOOLS: ToolDefinition[] = [
 		installStrategy: "pip",
 		packageName: "cmake-language-server",
 		binaryName: "cmake-language-server",
+		// Upstream 0.1.11 (the latest release) imports `LanguageServer` from
+		// `pygls.server`, a symbol pygls 2 removed, while declaring only
+		// `pygls>=1.1.1` — so an unconstrained install resolves pygls 2.1.1 and
+		// produces a launcher that cannot start. Measured against PyPI for the
+		// nightly's interpreter (#3311): `pip download --python-version 3.12
+		// cmake-language-server` → `pygls-2.1.1`; with this constraint →
+		// `pygls-1.3.1` + `lsprotocol-2023.0.1`, and `cmake-language-server
+		// --version` then prints `cmake-language-server 0.1.11` and exits 0.
+		pipConstraints: ["pygls<2"],
 	},
 	{
 		id: "yaml-language-server",
@@ -3123,9 +3144,65 @@ async function getToolPathResolved(
 		if (githubPath) return githubPath;
 	}
 
-	// Check if global
-	if (await isCommandAvailable(tool.checkCommand, tool.checkArgs)) {
-		return tool.checkCommand;
+	// Check if global. `isCommandAvailable` is a PATH walk plus a stat — it
+	// ignores its `_args` parameter by construction — so it answers "a file with
+	// that name is on PATH", never "that command runs". Every OTHER rung of this
+	// ladder spawn-verifies its candidate with the entry's own `checkArgs` before
+	// resolving to it; this rung did not, and a PATH entry that is a file but
+	// cannot run then SHADOWED the managed install that would have worked
+	// (#3311 lane C):
+	//   - rust-analyzer: rustup's `DUP_TOOLS` proxy (rustup 1.29.1 src/lib.rs:32)
+	//     sits in ~/.cargo/bin on every rustup box whether or not the
+	//     `rust-analyzer` COMPONENT is installed. Where it is not, the proxy
+	//     errors out instead of speaking LSP — and the github-release install
+	//     pi-lens would have downloaded was never attempted.
+	//   - cmake-language-server: `pipx install` exits 0 and drops a launcher on
+	//     PATH whose venv resolved pygls 2.x, which removed the symbol the 0.1.11
+	//     server imports. This rung returned it ahead of the pip-user rung, whose
+	//     verification would have caught it.
+	// A VERDICT (nonzero exit, spawn-boundary refusal) falls through to the rungs
+	// below and, for an installable strategy, to the managed install. A STALL
+	// (timeout/signal) or an INCONCLUSIVE probe is not a verdict (#1569/#2722
+	// semantics), so those keep the pre-#3311 behaviour and resolve to PATH —
+	// dropping a working-but-slow tool on a kill would be a worse lie than the
+	// one this fixes. `recordVersion` is deliberately NOT passed: version-pin
+	// drift (#589) is about pi-lens's own managed installs, and feeding a
+	// system-installed version into it would turn every PATH tool at another
+	// version into a forced reinstall.
+	if (await isCommandAvailable(tool.checkCommand)) {
+		// A `verification: "package-entry"` entry (#2722) is verified from the
+		// installed tree BESIDE its shim — `verifyNpmPackageEntry` derives the
+		// package dir from `<…>/node_modules/.bin/<shim>`. A bare PATH name has no
+		// such tree to read, so that evidence is unavailable here and its absence
+		// says nothing about the command: this rung keeps the pre-#3311 behaviour
+		// for those entries rather than inventing a verdict from a failed lookup.
+		if (packageEntryVerification(tool) !== undefined) return tool.checkCommand;
+		let probeStalled = false;
+		const verified = await verifyToolBinary(
+			tool.checkCommand,
+			undefined,
+			() => {
+				probeStalled = true;
+				onTransient();
+			},
+			getToolVerificationTimeout(tool),
+			tool.checkArgs,
+			undefined,
+			() => {
+				probeStalled = true;
+			},
+		);
+		if (verified || probeStalled) return tool.checkCommand;
+		// One record per tool per session: the rejected candidate and the check
+		// that rejected it. verifyToolBinary already logged the kind/exit code.
+		recordDegradationOnce({
+			kind: "installer-path-candidate-unrunnable",
+			subject: toolId,
+			reason: `${tool.checkCommand} on PATH failed its own check (${tool.checkArgs.join(" ")}); ignoring PATH for this tool`,
+		});
+		logSessionStart(
+			`auto-install ${toolId}: PATH candidate ${tool.checkCommand} failed ${tool.checkArgs.join(" ")} — ignoring PATH, trying managed install`,
+		);
 	}
 
 	if (tool.installStrategy === "npm") {
@@ -5449,6 +5526,49 @@ export function pipScriptsDir(
 const pipPep668LoggedRefusals = createGenerationMap("installer-pep668-log");
 
 /**
+ * The `PIP_CONSTRAINT` environment for `toolId`, or `{}` when its registry entry
+ * declares no `pipConstraints` (#3311).
+ *
+ * pip's own mechanism, not a pi-lens one: every pip command-line option has an
+ * environment form, and `-c/--constraint` reads `PIP_CONSTRAINT`. Using it
+ * instead of extra argv tokens is what lets ONE value bound all four rungs of
+ * `installPipTool`'s ladder including pipx, which drives its own pip in a
+ * subprocess whose argv pi-lens never composes.
+ *
+ * The file is (re)written from the registry on every install, so a constraint
+ * that is edited or removed in the registry cannot be served from a stale file.
+ * A write failure is recorded and the install proceeds unconstrained — the same
+ * resolution as before this field existed, which the resolution ladder's PATH
+ * verification then judges on its merits rather than on a cached assumption.
+ */
+async function pipConstraintEnvFor(
+	toolId: string,
+): Promise<NodeJS.ProcessEnv> {
+	const constraints = TOOLS.find((t) => t.id === toolId)?.pipConstraints;
+	if (!constraints || constraints.length === 0) return {};
+	const file = path.join(
+		getGlobalPiLensDir(),
+		"pip-constraints",
+		`${toolId}.txt`,
+	);
+	try {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.writeFile(file, `${constraints.join("\n")}\n`, "utf8");
+	} catch (err) {
+		recordDegradationOnce({
+			kind: "pip-constraint-file-unwritable",
+			subject: toolId,
+			reason: `${file}: ${err instanceof Error ? err.message : String(err)}`,
+		});
+		return {};
+	}
+	logSessionStart(
+		`auto-install pip ${toolId}: constraining resolution with ${constraints.join(", ")}`,
+	);
+	return { PIP_CONSTRAINT: file };
+}
+
+/**
  * Install a pip package tool
  */
 async function installPipTool(
@@ -5466,6 +5586,10 @@ async function installPipTool(
 	try {
 		const isWindows = installerPlatform() === "win32";
 		const verb = options.upgrade ? ["install", "-U"] : ["install"];
+		// Read from the registry entry rather than added to this function's
+		// signature: every pip rung below, and pipx's OWN internal pip, is bounded
+		// by one env var, so there is nothing per-call to thread through.
+		const pipConstraintEnv = await pipConstraintEnvFor(toolId);
 		// Built from `pipCommandCandidates()` — the single source of truth this
 		// module and any other caller (the tool-smoke lane's toolchain-presence
 		// probe, #2661 review) share, rather than a second, independently
@@ -5503,8 +5627,19 @@ async function installPipTool(
 			});
 			return binaryPath;
 		};
-		const run = (command: string, args: string[], env?: NodeJS.ProcessEnv) =>
-			safeSpawnAsync(command, args, {
+		const run = (command: string, args: string[], env?: NodeJS.ProcessEnv) => {
+			// `pipConstraintEnv` is empty unless the entry declares
+			// `pipConstraints`, and it is applied HERE — the single spawn seam every
+			// rung of the ladder (pipx, venv, --user, private-prefix) goes through —
+			// so no rung can be reached with the constraint missing. pipx forwards
+			// it: its `run_subprocess` starts from `dict(os.environ)` and blocklists
+			// only PYTHONPATH/__PYVENV_LAUNCHER__ (pipx 1.16.7 src/pipx/util.py
+			// `_fix_subprocess_env`), so PIP_CONSTRAINT reaches the pip it drives.
+			const spawnEnv =
+				Object.keys(pipConstraintEnv).length > 0
+					? { ...(env ?? process.env), ...pipConstraintEnv }
+					: env;
+			return safeSpawnAsync(command, args, {
 				timeout: 120_000,
 				ignoreAmbientSignal: true,
 				lifetimeCoupled: true,
@@ -5512,8 +5647,9 @@ async function installPipTool(
 					cwd: getGlobalPiLensDir(),
 					suppressTelemetry: true,
 				}).cwd,
-				...(env ? { env } : {}),
+				...(spawnEnv ? { env: spawnEnv } : {}),
 			});
+		};
 		const addBinToPath = async (
 			binDir: string,
 		): Promise<string | undefined> => {
