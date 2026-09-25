@@ -3,9 +3,13 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import {
 	capMutationFiles,
 	DEFAULT_MAX_FILES,
+	describeStrykerFailure,
 	formatCapNotice,
 	isScriptMutationFile,
 	mapRelatedTests,
+	MUTATION_BUDGET_MINUTES,
+	mutationRangePatterns,
+	parseChangedLineRanges,
 } from "./lib/stryker-diff.mjs";
 
 // The PR-body corpus is deliberately real and its cold scan is slower under
@@ -23,6 +27,10 @@ function argumentValue(name, fallback) {
 
 const base = argumentValue("--base", "origin/master");
 const maxFiles = Number(argumentValue("--max-files", DEFAULT_MAX_FILES));
+const budgetMinutes = Number(
+	argumentValue("--budget-minutes", MUTATION_BUDGET_MINUTES),
+);
+const budgetMs = Math.round(budgetMinutes * 60_000);
 
 function changedScriptFiles() {
 	try {
@@ -38,6 +46,30 @@ function changedScriptFiles() {
 	} catch (error) {
 		console.error(
 			`mutation diff: could not read ${base}...HEAD: ${error.message}`,
+		);
+		process.exit(1);
+	}
+}
+
+function changedLineRanges(files) {
+	try {
+		return parseChangedLineRanges(
+			execFileSync(
+				"git",
+				[
+					"diff",
+					"--unified=0",
+					"--diff-filter=AM",
+					`${base}...HEAD`,
+					"--",
+					...files,
+				],
+				{ encoding: "utf8" },
+			),
+		);
+	} catch (error) {
+		console.error(
+			`mutation diff: could not read changed lines of ${base}...HEAD: ${error.message}`,
 		);
 		process.exit(1);
 	}
@@ -83,20 +115,33 @@ if (covered.length === 0) {
 	process.exit(0);
 }
 
+// Mutate the diff's own lines, not the whole changed file: whole-file
+// instrumentation of scripts/check-pr-body.mjs alone is 2075 mutants, and every
+// mutant reruns the related tests, so advisory run 36098718085 evaluated none of
+// its 2220 before the 90-minute cap cancelled the job.
+const patterns = mutationRangePatterns(covered, changedLineRanges(covered));
+if (patterns.length === 0) {
+	console.log("mutation diff: no changed lines in covered scripts");
+	process.exit(0);
+}
+
 const configFile = writeRunConfig(tests);
-console.log(`mutation diff: mutating ${covered.join(", ")}`);
+console.log(`mutation diff: mutating ${patterns.join(", ")}`);
 console.log(`mutation diff: running related tests ${tests.join(", ")}`);
+console.log(`mutation diff: budget ${budgetMinutes} minute(s)`);
 const result = spawnSync(
 	"node_modules/.bin/stryker",
-	["run", "--mutate", covered.join(","), configFile],
-	{ stdio: "inherit", encoding: "utf8" },
+	["run", "--mutate", patterns.join(","), configFile],
+	{
+		stdio: "inherit",
+		encoding: "utf8",
+		timeout: budgetMs,
+		killSignal: "SIGTERM",
+	},
 );
 
 if (result.error || result.status !== 0) {
-	const exitMsg = result.error ? `: ${result.error.message}` : "";
-	console.error(
-		`mutation diff: no mutants evaluated; dry run or mutation execution failed (Stryker status ${result.status ?? "unknown"}${exitMsg})`,
-	);
+	console.error(describeStrykerFailure(result, budgetMinutes));
 	process.exit(1);
 }
 
