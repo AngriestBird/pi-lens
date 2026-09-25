@@ -53,15 +53,15 @@ describe("JscpdClient report compatibility", () => {
 		expect(result.clones).toEqual([
 			{
 				fileA: "index.ts",
-				startA: 1324,
-				fileB: "index.ts",
-				startB: 1638,
-				lines: 13,
-				tokens: 62,
+				startA: 2,
+				fileB: "second.ts",
+				startB: 3,
+				lines: 80,
+				tokens: 1280,
 			},
 		]);
-		expect(result.duplicatedLines).toBe(49);
-		expect(result.totalLines).toBe(7197);
-		expect(result.percentage).toBe(0.6808392385716271);
+		expect(result.duplicatedLines).toBe(79);
+		expect(result.totalLines).toBe(163);
+		expect(result.percentage).toBe(48.466257668711656);
 	});
 });
