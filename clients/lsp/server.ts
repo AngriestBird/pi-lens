@@ -64,6 +64,11 @@ import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
 import { findLocalTyposConfig } from "../typos-config.js";
 import { resolvePackagePath } from "../package-root.js";
 import { resolveToolCwd } from "../tool-cwd.js";
+import {
+	type DirMtimeRecord,
+	dirMtimeMsAsync,
+	dirMtimesStillFreshAsync,
+} from "../workspace-topology.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import {
 	hasCargoWorkspaceTable,
@@ -1451,6 +1456,23 @@ function isPermissionFsError(err: unknown): boolean {
 	return code === "EACCES" || code === "EPERM";
 }
 
+/**
+ * The directory `markerExists(dir, pattern)` reads to answer for `pattern`:
+ * `dir` itself for a plain basename, and the named subdirectory for a pattern
+ * that carries a path segment (`"prisma/schema.prisma"`). `NearestRoot`'s
+ * freshness records are keyed on these directories, so the derivation lives
+ * HERE, next to the probe it describes — a second copy could drift and silently
+ * stop covering a pattern shape (#3412).
+ */
+function markerProbeDir(dir: string, pattern: string): string {
+	const normalized = pattern.replace(/\\/g, "/");
+	const slash = normalized.lastIndexOf("/");
+	const parentPattern = slash >= 0 ? normalized.slice(0, slash) : "";
+	return parentPattern
+		? path.join(dir, ...parentPattern.split("/").filter(Boolean))
+		: dir;
+}
+
 async function markerExists(dir: string, pattern: string): Promise<boolean> {
 	if (!pattern.includes("*")) {
 		try {
@@ -1468,12 +1490,9 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
 
 	const normalized = pattern.replace(/\\/g, "/");
 	const slash = normalized.lastIndexOf("/");
-	const parentPattern = slash >= 0 ? normalized.slice(0, slash) : "";
 	const basenamePattern = slash >= 0 ? normalized.slice(slash + 1) : normalized;
 	if (!basenamePattern) return false;
-	const targetDir = parentPattern
-		? path.join(dir, ...parentPattern.split("/").filter(Boolean))
-		: dir;
+	const targetDir = markerProbeDir(dir, normalized);
 	try {
 		const entries = await readdir(targetDir, { withFileTypes: true });
 		// Match files/symlinks only — a directory named like the marker (e.g. a
@@ -1509,6 +1528,12 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
  *
  * Equivalent to createRootDetector; exported under both names for clarity.
  */
+/**
+ * A resolved root plus the directories whose contents produced it. The memo is
+ * only as good as those directories' mtimes (#3412).
+ */
+type RootMemoEntry = { root: string; probedDirs: DirMtimeRecord[] };
+
 export function NearestRoot(
 	includePatterns: string[],
 	excludePatterns?: string[],
@@ -1517,23 +1542,48 @@ export function NearestRoot(
 	// Per-instance caches — each NearestRoot(markers) call gets its own Map so
 	// different servers (e.g. TypeScript vs Go) with different marker sets never
 	// share entries. vi.resetModules() in tests resets module state between cases.
-	const cache = new Map<string, string>();
+	const cache = new Map<string, RootMemoEntry>();
 	// Only cache successful hits. Undefined results are NOT cached so that a
 	// newly-created root marker (e.g. package.json or tsconfig.json scaffolded
 	// mid-session by the agent) is detected on the next call — the absent →
 	// present transition must work without a process restart. The uncached
 	// re-walk cost for configless repos is a known trade-off; bounding the
 	// walk with stopDir for in-cwd files is the tracked optimization (#1412).
+	//
+	// A HIT is revalidated instead of trusted for the session: it carries the
+	// mtime of every directory the walk probed, and is served only while all of
+	// them are unchanged. Without that, a nearer marker scaffolded below an
+	// already-resolved root (`swift package init` in a subdirectory) — and a
+	// marker REMOVED at the resolved root — stayed invisible for the whole
+	// session, the other half of the very transition the paragraph above
+	// handles (#3412; same shape as #2922 at the dispatch marker seam).
 	const inFlight = new Map<string, Promise<string | undefined>>();
+	// Directories a walk step probes BESIDE the walked directory itself: a
+	// pattern carrying a path segment (`prisma/schema.prisma`) is answered from a
+	// subdirectory, so creating that marker bumps the SUBDIRECTORY's mtime and
+	// the walked directory's only when the subdirectory had to be created too.
+	// Derived from this detector's own pattern table, so a new pattern shape is
+	// covered without a second list to maintain.
+	const subPathPatterns = [
+		...includePatterns,
+		...(excludePatterns ?? []),
+	].filter((pattern) => markerProbeDir(".", pattern) !== ".");
 
 	return withRootMarkers(async (file: string): Promise<string | undefined> => {
 		// Cache key is the resolved directory — all files in the same dir share a root.
 		const startDir = path.resolve(path.dirname(file));
 		const dirKey = normalizeMapKey(startDir);
 
-		// Fast path: already resolved for this directory.
+		// Fast path: already resolved for this directory, and nothing the walk
+		// looked at has changed since. One stat per probed directory replaces the
+		// whole walk (markers x directories, plus the hit directory's
+		// `isExcludedLspRoot` git-boundary walk), so the memo still pays for itself.
 		const cached = cache.get(dirKey);
-		if (cached !== undefined) return cached;
+		if (
+			cached !== undefined &&
+			(await dirMtimesStillFreshAsync(cached.probedDirs))
+		)
+			return cached.root;
 
 		// In-flight deduplication: if N parallel pipelines edit files in the same
 		// directory simultaneously, only one stat-walk runs; the rest await the same
@@ -1541,6 +1591,7 @@ export function NearestRoot(
 		const flying = inFlight.get(dirKey);
 		if (flying) return flying;
 
+		const probedDirs: DirMtimeRecord[] = [];
 		const promise = (async (): Promise<string | undefined> => {
 			let currentDir = startDir;
 			const fsRoot = path.parse(currentDir).root;
@@ -1553,6 +1604,25 @@ export function NearestRoot(
 					currentDir !== stop
 				) {
 					break;
+				}
+
+				// Record every directory this step is about to read, BEFORE reading
+				// it. Ordering is the invariant: a marker created between the stat
+				// and the probe leaves the record STALE (the next call re-walks and
+				// finds it), whereas recording afterwards would store the mtime that
+				// already includes the creation and hide it for the session. Only
+				// directories up to the hit are recorded — a marker created above a
+				// hit cannot change which root is nearest.
+				for (const probeDir of new Set([
+					currentDir,
+					...subPathPatterns.map((pattern) =>
+						markerProbeDir(currentDir, pattern),
+					),
+				])) {
+					probedDirs.push({
+						dir: probeDir,
+						mtimeMs: await dirMtimeMsAsync(probeDir),
+					});
 				}
 
 				// Check exclude patterns — skip this dir (but keep walking up)
@@ -1595,7 +1665,7 @@ export function NearestRoot(
 		inFlight.set(dirKey, promise);
 		try {
 			const result = await promise;
-			if (result !== undefined) cache.set(dirKey, result);
+			if (result !== undefined) cache.set(dirKey, { root: result, probedDirs });
 			return result;
 		} finally {
 			inFlight.delete(dirKey);

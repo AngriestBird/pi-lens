@@ -283,10 +283,49 @@ function walkCacheKey(startDir: string, markerKey: string): string {
 	return `${path.resolve(startDir)}\0${markerKey}`;
 }
 
-function walkStillFresh(
-	dirMtimes: Array<{ dir: string; mtimeMs: number }>,
-): boolean {
+/**
+ * One directory a cached marker walk probed, with the mtime it carried when the
+ * walk ran — the invalidation key every cached upward marker walk in this repo
+ * shares (an add/remove/rename inside a directory bumps that directory's mtime
+ * on every platform pi-lens supports).
+ */
+export type DirMtimeRecord = { dir: string; mtimeMs: number };
+
+function dirMtimesStillFresh(dirMtimes: readonly DirMtimeRecord[]): boolean {
 	return dirMtimes.every(({ dir, mtimeMs }) => safeDirMtimeMs(dir) === mtimeMs);
+}
+
+/**
+ * Async arm of `dirMtimesStillFresh` — same records, same comparison, stats
+ * issued in parallel. It exists for the async marker walk in
+ * `clients/lsp/server.ts`'s `NearestRoot`, whose own marker probes are
+ * `fs/promises` and which runs on the per-file LSP touch path: a `statSync` per
+ * directory there would block the event loop the walk deliberately keeps free.
+ * Both arms live here so "is this recorded walk still current" has one owner
+ * (#3412).
+ */
+export async function dirMtimesStillFreshAsync(
+	dirMtimes: readonly DirMtimeRecord[],
+): Promise<boolean> {
+	const current = await Promise.all(
+		dirMtimes.map(({ dir }) => dirMtimeMsAsync(dir)),
+	);
+	return dirMtimes.every(({ mtimeMs }, index) => current[index] === mtimeMs);
+}
+
+/**
+ * Current mtime of `dir`, or `-1` when it cannot be stat'ed — the async arm of
+ * `safeDirMtimeMs`. A recorder and `dirMtimesStillFreshAsync` MUST read through
+ * the same function so the absent-directory sentinel is the same value on both
+ * sides: `prisma/` not existing yet is a recordable state, and the record must
+ * compare unequal once it is created (#3412).
+ */
+export async function dirMtimeMsAsync(dir: string): Promise<number> {
+	try {
+		return (await fs.promises.stat(dir)).mtimeMs;
+	} catch {
+		return -1;
+	}
 }
 
 /**
@@ -307,7 +346,7 @@ function walkToNearestMatch(
 ): string | undefined {
 	const key = walkCacheKey(startDir, cacheSuffix);
 	const cached = walkCache.get(key);
-	if (cached && walkStillFresh(cached.dirMtimes)) {
+	if (cached && dirMtimesStillFresh(cached.dirMtimes)) {
 		touchWalk(key, cached);
 		return cached.dir;
 	}

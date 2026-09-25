@@ -436,7 +436,17 @@ describe("lsp server policy", () => {
 		}
 	});
 
-	it("caches successful root resolution — second call skips stat walk", async () => {
+	// Prevents the recurrence of #3412: the positive memo was trusted for the
+	// whole session, so a marker scaffolded below an already-resolved root (and a
+	// marker removed at that root) stayed invisible until a process restart. The
+	// memo now carries the mtime of every directory the walk probed and is served
+	// only while all of them are unchanged — so THIS case proves the memo is
+	// still a memo: with no probed directory changed, the answer comes back
+	// without re-probing the markers. The probed directories are pinned to a
+	// whole-second mtime (the only value `utimes` round-trips exactly) so the
+	// marker can be deleted and the invalidation key restored; a re-walk could
+	// not answer `tmp` after that deletion.
+	it("serves the memo while no probed directory has changed", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-cache-"));
 		dirs.push(tmp);
@@ -449,15 +459,172 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(file1, "");
 		fs.writeFileSync(file2, "");
 
+		const pinned = 1_700_000_000;
+		for (const dir of [src, tmp]) fs.utimesSync(dir, pinned, pinned);
+
 		const resolver = NearestRoot(["package.json"]);
 		const r1 = await resolver(file1);
 		expect(r1).toBe(tmp);
 
-		// Delete the marker — a fresh walk would return undefined, but the cache
-		// should serve the hit without touching the filesystem.
 		fs.unlinkSync(path.join(tmp, "package.json"));
+		// Restore the directory mtime the unlink bumped: nothing the walk recorded
+		// has changed as far as the invalidation key can see, so the memo answers
+		// — a fresh walk would return undefined here.
+		fs.utimesSync(tmp, pinned, pinned);
+		expect(fs.statSync(tmp).mtimeMs).toBe(pinned * 1000);
 		const r2 = await resolver(file2);
 		expect(r2).toBe(tmp);
+	});
+
+	// #3412: `swift package init` inside a subdirectory of a resolved root. The
+	// nearer marker must win on the next call, for the file that triggered the
+	// first resolution AND for every other file in the same directory (the memo
+	// is keyed by directory, so a stale entry poisoned all of them).
+	it("moves the root when a nearer marker is scaffolded below a memoized root", async () => {
+		const { SwiftServer } = await import("../../../clients/lsp/server.js");
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-nearer-"));
+		dirs.push(ws);
+
+		const feature = path.join(ws, "Sources", "Feature");
+		const main = path.join(feature, "main.swift");
+		const other = path.join(feature, "other.swift");
+		fs.mkdirSync(feature, { recursive: true });
+		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
+		fs.writeFileSync(main, "print(1)\n");
+		fs.writeFileSync(other, "print(2)\n");
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+		try {
+			await expect(SwiftServer.root(main)).resolves.toBe(ws);
+
+			fs.writeFileSync(path.join(feature, "Package.swift"), "// nested\n");
+			await expect(SwiftServer.root(main)).resolves.toBe(feature);
+			await expect(SwiftServer.root(other)).resolves.toBe(feature);
+		} finally {
+			cwdSpy.mockRestore();
+		}
+	});
+
+	// #3412, the other direction of the same axis: the marker that made a
+	// directory the root is removed (deleted, renamed, moved) and the next
+	// resolution must fall back to the outer root instead of keeping a root with
+	// no marker in it.
+	it("re-resolves when the marker at a memoized root is removed", async () => {
+		const { SwiftServer } = await import("../../../clients/lsp/server.js");
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-removed-"));
+		dirs.push(ws);
+
+		const feature = path.join(ws, "Sources", "Feature");
+		const main = path.join(feature, "main.swift");
+		fs.mkdirSync(feature, { recursive: true });
+		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
+		fs.writeFileSync(path.join(feature, "Package.swift"), "// nested\n");
+		fs.writeFileSync(main, "print(1)\n");
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+		try {
+			await expect(SwiftServer.root(main)).resolves.toBe(feature);
+			fs.rmSync(path.join(feature, "Package.swift"));
+			await expect(SwiftServer.root(main)).resolves.toBe(ws);
+		} finally {
+			cwdSpy.mockRestore();
+		}
+	});
+
+	// #3412, derived over the detector population instead of per server: every
+	// registered server that advertises root markers must move to a nearer
+	// marker, so a detector added later cannot quietly reintroduce the memo that
+	// never revalidates.
+	it("moves to a nearer marker for every registered rootMarkers detector", async () => {
+		const { LSP_SERVERS } = await import("../../../clients/lsp/server.js");
+		const materialize = (dir: string, pattern: string) => {
+			const target = path.join(
+				dir,
+				...pattern.replace(/\*/g, "probe").replace(/\\/g, "/").split("/"),
+			);
+			fs.mkdirSync(path.dirname(target), { recursive: true });
+			fs.writeFileSync(target, "");
+		};
+
+		const population = LSP_SERVERS.filter(
+			(server) => (server.rootMarkers ?? server.root.rootMarkers ?? []).length,
+		);
+		expect(population.length).toBeGreaterThan(40);
+
+		const stale: string[] = [];
+		for (const server of population) {
+			const pattern = (server.rootMarkers ?? server.root.rootMarkers ?? [])[0];
+			const ws = fs.mkdtempSync(
+				path.join(os.tmpdir(), `pi-lens-root-pop-${server.id}-`),
+			);
+			dirs.push(ws);
+			const nested = path.join(ws, "packages", "app");
+			const file = path.join(nested, "src", `probe${server.extensions[0]}`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "");
+			materialize(ws, pattern);
+
+			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+			try {
+				const first = await server.root(file);
+				materialize(nested, pattern);
+				const second = await server.root(file);
+				if (first !== ws || second !== nested) {
+					stale.push(
+						`${server.id} [${pattern}] first=${first} second=${second}`,
+					);
+				}
+			} finally {
+				cwdSpy.mockRestore();
+			}
+		}
+		expect(stale).toEqual([]);
+	});
+
+	// #3412: a marker that carries a path segment (`prisma/schema.prisma`) is
+	// probed inside a SUBDIRECTORY of the walked directory, so creating it bumps
+	// that subdirectory's mtime and not the walked directory's — unless the
+	// subdirectory had to be created too. The freshness records must cover the
+	// probe subdirectories, or these detectors keep the stale root. Derived from
+	// the registry so a future nested-path marker is covered on arrival.
+	it("re-resolves when a nested-path marker appears in an existing probe subdirectory", async () => {
+		const { LSP_SERVERS } = await import("../../../clients/lsp/server.js");
+		const population = LSP_SERVERS.flatMap((server) => {
+			const nested = (server.rootMarkers ?? server.root.rootMarkers ?? [])
+				.filter((pattern) => /[\\/]/.test(pattern))
+				.map((pattern) => ({ server, pattern }));
+			return nested.length ? [nested[0]] : [];
+		});
+		expect(population.length).toBeGreaterThan(0);
+
+		for (const { server, pattern } of population) {
+			const ws = fs.mkdtempSync(
+				path.join(os.tmpdir(), `pi-lens-root-sub-${server.id}-`),
+			);
+			dirs.push(ws);
+			const nested = path.join(ws, "packages", "app");
+			const file = path.join(nested, "src", `probe${server.extensions[0]}`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "");
+			const relative = pattern.replace(/\\/g, "/").split("/");
+			fs.mkdirSync(path.join(ws, ...relative.slice(0, -1)), {
+				recursive: true,
+			});
+			fs.writeFileSync(path.join(ws, ...relative), "");
+			// The probe subdirectory exists BEFORE the first resolution, so writing
+			// the marker into it later leaves the walked directory's own mtime alone.
+			const subdir = path.join(nested, ...relative.slice(0, -1));
+			fs.mkdirSync(subdir, { recursive: true });
+
+			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+			try {
+				await expect(server.root(file), server.id).resolves.toBe(ws);
+				fs.writeFileSync(path.join(nested, ...relative), "");
+				await expect(server.root(file), server.id).resolves.toBe(nested);
+			} finally {
+				cwdSpy.mockRestore();
+			}
+		}
 	});
 
 	it("attaches fixture files to the outer project instead of fixture manifests (#1325)", async () => {
