@@ -185,6 +185,7 @@ ADR: docs/adr/0004-disposition-policy-seam.md
 ADR: docs/adr/0005-tool-availability-enforcement-seam.md
 ADR: docs/adr/0006-derived-state-benchmark-first.md
 ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
+ADR: docs/adr/0008-turn-end-lane-interface.md
 ADR: docs/adr/0009-reported-path-attribution.md
 
 <!-- markdownlint-disable MD029 -->
@@ -602,6 +603,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
+- Every `parseToolRun` runner documents its nonzero-exit table; the documented
+  `ran` codes are pinned exactly so adding or removing one does not pass
+  silently, and each documented code needs an executable status fixture in the
+  runner's own test matrix (#3292).
 
 </important>
 <important if="touching caches, stores, and project intelligence rules">
@@ -927,3 +932,16 @@ live contract unless it changes a future decision.
 ## Contributing
 
 Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
+
+Every `Bash` call an agent makes under Claude Code runs through the
+`PreToolUse` hook `scripts/hooks/guard-bash.mjs` (`.claude/settings.json`),
+mechanically enforcing six non-negotiables that used to live only as prose:
+no `git stash` in any form; no `git reset --soft`/`--hard`; no hand-typed
+`git worktree remove` with two force flags (use
+`node scripts/prune-agent-worktrees.mjs`); no `git worktree remove` at all on
+a worktree whose `node_modules` is a symlink pointing outside it; no unpinned
+`node` probe loading built runtime code from `clients/`/`dist/` without a
+`PI_LENS_HOME` pin; and no `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's
+own home. See `CONTRIBUTING.md` "Local git hooks" for the human-facing
+version and `docs/pi-lens-subagent.md` for the fuller worktree/probe-hygiene
+contract.
