@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 /** The package this module is about. Also the name its manifest must carry. */
-export const WEB_TREE_SITTER = "web-tree-sitter";
+const WEB_TREE_SITTER = "web-tree-sitter";
 
 /**
  * The wasm the runtime loads, at the package root — where 0.25.10's `exports`

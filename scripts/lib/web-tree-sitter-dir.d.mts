@@ -6,8 +6,6 @@
 // installed-host diagnostic, which is why the implementation lives under
 // scripts/lib and not clients/ — see the module header).
 
-export const WEB_TREE_SITTER: string;
-
 export function isWebTreeSitterPackageDir(dir: string): boolean;
 
 export function resolveWebTreeSitterPackageDir(deps: {
