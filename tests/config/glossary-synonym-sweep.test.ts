@@ -913,7 +913,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/review-graph-logger.ts": 2,
 		"clients/review-graph/builder.ts": 36,
 		"clients/review-graph/format.ts": 4,
-		"clients/review-graph/git-identity.ts": 11,
+		"clients/review-graph/git-identity.ts": 10,
 		"clients/review-graph/import-resolvers.ts": 62,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,

@@ -26,6 +26,11 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { removeTempDirSync } from "./test-utils.js";
 
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, statSync: vi.fn(actual.statSync) };
+});
+
 // Mock out the expensive file system scanning — we only care about persist/
 // stamp behaviour, not real symbol extraction.
 vi.mock("../../clients/scan-utils.js", () => ({
@@ -91,6 +96,22 @@ afterEach(() => {
 });
 
 describe("review-graph snapshot git stamp (#300)", () => {
+	it("resolves git identity once per cwd within one build (#3417)", async () => {
+		const cwd = tmpDir();
+		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+		makeFakeRepo(cwd, "a".repeat(40));
+		const stat = vi.spyOn(fs, "statSync");
+
+		// #3417 recurrence: persistence/checkpoint/revision checks must not turn
+		// one build into repeated upward `.git` walks.
+		await buildOrUpdateGraph(cwd, [], new FactStore());
+
+		const gitEntryChecks = stat.mock.calls.filter(([file]) =>
+			String(file).endsWith(`${path.sep}.git`),
+		);
+		expect(gitEntryChecks).toHaveLength(1);
+	});
+
 	it("persists a stamp in a git repo and reloads warm when HEAD is unchanged", async () => {
 		const cwd = tmpDir();
 		const dataDir = path.join(cwd, "data");
@@ -401,6 +422,24 @@ describe("review-graph snapshot git stamp (#300)", () => {
 
 		clearReviewGraphWorkspaceCache();
 		await expect(buildOrUpdateGraph(cwd, [], facts)).resolves.toBeDefined();
+	});
+
+	it("revalidates git repository lifecycle changes within one process (#3417)", () => {
+		const cwd = tmpDir();
+
+		// Regression for #3417: a negative lookup must not hide a repository
+		// initialized later in the same process.
+		expect(resolveGitIdentity(cwd)).toBeUndefined();
+		makeFakeRepo(cwd, "a".repeat(40));
+		expect(resolveGitIdentity(cwd)).toEqual({
+			headCommit: "a".repeat(40),
+			worktreeRoot: path.resolve(cwd).replace(/\\/g, "/"),
+		});
+
+		// The inverse lifecycle direction is equally important: a positive
+		// lookup must not survive removal of the repository metadata.
+		fs.rmSync(path.join(cwd, ".git"), { recursive: true });
+		expect(resolveGitIdentity(cwd)).toBeUndefined();
 	});
 
 	it("malformed .git file / unreadable HEAD is treated as non-git (no throw)", () => {

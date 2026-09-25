@@ -1405,7 +1405,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"quiet-window.ts": "quiet-window task registration",
 	"recent-touches.ts":
 		"the recent-touch cursor, consumed and advanced per read",
-	"review-graph/git-identity.ts": "git user identity, read once per process",
+	"review-graph/git-identity.ts":
+		"no module state since #3417: the per-cwd git-dir memo was deleted (a cached null hid a mid-session `git init`), the identity is memoized per build inside the builder, and the reset seam is a compatibility no-op",
 	"review-graph/shared-extraction-ir.ts":
 		"extraction IR keyed by cwd and file, invalidated by the graph build that produced it",
 
@@ -1661,9 +1662,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
 	"review-graph/builder.ts": 19,
-	// #2442 review F2: the container regex now recognises BoundedFifoMap /
-	// BoundedLruCache, so this file's module-level bounded cache is counted.
-	"review-graph/git-identity.ts": 1,
+	// #3417: the module-level git-dir memo is gone; the count is pinned at 0 so a
+	// re-hoisted memo (the stale-negative shape) fails this sweep, not just the
+	// lifecycle test.
+	"review-graph/git-identity.ts": 0,
 	"review-graph/shared-extraction-ir.ts": 1,
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
