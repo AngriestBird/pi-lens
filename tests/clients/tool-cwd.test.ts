@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LANGUAGES } from "../../clients/language-registry.js";
+import { rootMarkersForFile } from "../../clients/language-profile.js";
 import {
 	LSP_SERVERS,
 	resolveLspServerCwd,
@@ -396,6 +397,69 @@ describe("resolveToolCwd (#2777)", () => {
 				cwd: project,
 			}).cwd,
 		).toBe(nested);
+	});
+
+	it("re-walks a POSITIVE marker root for every baseline runner when a nearer marker appears (#2922)", () => {
+		// Recurrence: the positive marker memo, keyed by start directory and
+		// revalidated only at the cached root, pinned the first root it resolved
+		// for the whole session — so a marker scaffolded in a nested package was
+		// never seen again. The sibling case above starts from an ABSENT marker
+		// (#2911's half, negative entries are not cached); this is the positive
+		// half, which is the one #2922 reported.
+		//
+		// Derived, not per-tool: the runner population and its markers come from
+		// the historical vocabulary baseline `tests/config/runner-marker-
+		// containment.test.ts` pins, and the file extension for each runner is
+		// PROBED through `rootMarkersForFile` rather than hand-mapped, so a
+		// runner or marker added to the baseline is covered here with no edit and
+		// an unreachable marker throws instead of silently skipping.
+		const baseline = JSON.parse(
+			fs.readFileSync(
+				path.join(
+					import.meta.dirname,
+					"../fixtures/tool-cwd-runner-markers.json",
+				),
+				"utf8",
+			),
+		) as { markers: Record<string, readonly string[]> };
+		const runners = Object.entries(baseline.markers);
+		expect(runners.length, "the baseline runner population").toBe(8);
+
+		const probeExtensions = [".ts", ".py", ".yaml", ".sql", ".rs", ".md"];
+		const observed: Record<string, readonly string[]> = {};
+		const expected: Record<string, readonly string[]> = {};
+
+		for (const [tool, markers] of runners) {
+			const marker = markers[0];
+			const extension = probeExtensions.find((candidate) =>
+				rootMarkersForFile(
+					path.join(home, `marker-probe${candidate}`),
+					tool,
+				).includes(marker),
+			);
+			if (!extension)
+				throw new Error(`no probe extension reaches ${marker} for ${tool}`);
+
+			const workspace = path.join(home, "derived", tool.replace("/", "-"));
+			const nested = path.join(workspace, "packages", "app");
+			const file = path.join(nested, "src", `index${extension}`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "\n");
+			fs.writeFileSync(path.join(workspace, marker), "\n");
+
+			const before = toolCwd.resolveToolCwd("runner", tool, file, {
+				cwd: workspace,
+			}).cwd;
+			fs.writeFileSync(path.join(nested, marker), "\n");
+			const after = toolCwd.resolveToolCwd("runner", tool, file, {
+				cwd: workspace,
+			}).cwd;
+
+			observed[tool] = [before, after];
+			expected[tool] = [workspace, nested];
+		}
+
+		expect(observed).toEqual(expected);
 	});
 
 	it("covers shared language marker fallback and fresh marker creation (#2965)", () => {
