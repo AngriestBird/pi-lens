@@ -239,4 +239,45 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 		expect(result.circular).toEqual([]);
 		expect(result.analyzed).toBe(true);
 	});
+
+	it("treats empty stdout as a completed scan with no cycles", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		writeCapturedWorkspace();
+		// Not red pre-fix: both readers already defaulted empty stdout to a
+		// parseable literal. It pins the `stdout || "[]"` fallback the fold now
+		// owns for BOTH callers — without it `JSON.parse("")` throws and a
+		// completed scan degrades into a cold madge lane.
+		replay({
+			provenance: { version: "8.0.0", argv: [] },
+			exitCode: 0,
+			stdout: "",
+			stderr: "",
+		});
+
+		const result = await new DependencyChecker().scanProject(tmp);
+		expect(result.count).toBe(0);
+		expect(result.analyzed).toBe(true);
+	});
+
+	it("leaves a malformed-JSON scan unanalysed rather than calling it cycle-free", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		writeCapturedWorkspace();
+		// The other direction of the same fallback: bytes that are not JSON must
+		// stay a FAILED scan (#2154 — `analyzed !== true` is a cold lane), so the
+		// shared reader must keep throwing instead of swallowing the parse error.
+		replay({
+			provenance: { version: "8.0.0", argv: [] },
+			exitCode: 0,
+			stdout: "Cannot find module 'madge'\n",
+			stderr: "",
+		});
+
+		const result = await new DependencyChecker().scanProject(tmp);
+		expect(result.count).toBe(0);
+		expect(result.analyzed).toBeUndefined();
+	});
 });
