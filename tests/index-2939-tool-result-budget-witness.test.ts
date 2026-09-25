@@ -27,17 +27,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** `true` makes the real handler's promise never settle (the wedged await). */
-const handlerGate = vi.hoisted(() => ({ hang: false }));
+/**
+ * `hang` makes the real handler's promise never settle (the wedged await).
+ * `ambientAfterYield` records what the ambient abort slot holds once the
+ * handler has yielded — the moment every `safeSpawn` inside the real pipeline
+ * reads it, and the only place the M13 `await` is observable.
+ */
+const handlerGate = vi.hoisted(() => ({
+	hang: false,
+	ambientAfterYield: undefined as AbortSignal | undefined | "unset",
+}));
 vi.mock("../clients/runtime-tool-result.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../clients/runtime-tool-result.js")>();
+	const { getAmbientAbortSignal } = await import("../clients/safe-spawn.js");
 	return {
 		...actual,
-		handleToolResult: (deps: Parameters<typeof actual.handleToolResult>[0]) =>
-			handlerGate.hang
+		handleToolResult: async (
+			deps: Parameters<typeof actual.handleToolResult>[0],
+		) => {
+			await Promise.resolve();
+			handlerGate.ambientAfterYield = getAmbientAbortSignal();
+			return handlerGate.hang
 				? new Promise<never>(() => {})
-				: actual.handleToolResult(deps),
+				: actual.handleToolResult(deps);
+		},
 	};
 });
 
@@ -62,6 +76,7 @@ let filePath: string;
 
 beforeEach(() => {
 	handlerGate.hang = true;
+	handlerGate.ambientAfterYield = "unset";
 	resetDegradationLedger();
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2939-budget-"));
 	filePath = path.join(tmpDir, "witnessed.ts");
@@ -151,5 +166,44 @@ describe("#2939 M8/W4b — the registration's wall budget follows the edit class
 			"tool_result_edit:registered-handler":
 				"exceeded 10000ms budget after 10000ms",
 		});
+	});
+});
+
+/**
+ * #2939 M13 — `return await bounded(handleToolResult(...))`.
+ *
+ * Recurrence prevented: #2897 round 2's V2. `onToolResult` publishes the
+ * turn's abort signal with `setAmbientAbortSignal(ctx.signal)` so the edit
+ * pipeline's linter/type-check children are killed when the agent is
+ * interrupted (#197), and clears it in the handler's own `finally`. Drop the
+ * `await` and that `finally` runs the instant the promise is RETURNED — the
+ * slot is empty for the entire pipeline, and Escape mid-edit kills nothing.
+ * PR #3411 round 1 removed the `await` because the existing suites stayed
+ * green; this case is what makes the removal red.
+ */
+describe("#2939 M13 — the ambient abort slot outlives the handler's first yield", () => {
+	it("still holds the hook's signal once the handler has yielded, and is cleared after", async () => {
+		handlerGate.hang = false;
+		const controller = new AbortController();
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx({ cwd: tmpDir });
+		(ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+		await pi.emit(
+			"tool_result",
+			{
+				toolName: "read",
+				toolCallId: "rd-2",
+				input: { path: filePath },
+				content: [],
+			},
+			ctx,
+		);
+
+		expect(handlerGate.ambientAfterYield).toBe(controller.signal);
+		// And the `finally` did run once the handler settled.
+		const { getAmbientAbortSignal } = await import("../clients/safe-spawn.js");
+		expect(getAmbientAbortSignal()).toBeUndefined();
 	});
 });

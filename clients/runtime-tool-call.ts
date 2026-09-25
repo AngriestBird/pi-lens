@@ -1065,6 +1065,16 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// budgeted families rather than leaving this site to spell its
 				// own axis value (#2557 review F7).
 				hook: "tool_call",
+				// The ambient slot is populated by tool_result, AFTER this hook has
+				// already run, so the live `tool_call` signal is the only one that
+				// can release this await when the user presses Escape (#2523 AC4).
+				// #2939 round 2 restored this after round 2's own measurement: with
+				// the signal absent, an aborted caller waits the demand's whole
+				// `BOOTSTRAP_LOAD_TIMEOUT_MS` out and the cancel then surfaces on the
+				// ledger as a `timeout` degradation — the exact inversion
+				// `requestBootstrapClients`'s `unavailableReason !== "aborted"` guard
+				// exists to prevent.
+				signal: deps.ctx.signal,
 			})
 		)?.complexityClient;
 		const baseline = await complexityClient?.analyzeFile(filePath);
