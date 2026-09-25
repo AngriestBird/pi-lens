@@ -765,7 +765,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dead-code-logger.ts": 3,
 		"clients/debug-handles.ts": 2,
 		"clients/debug-heap.ts": 7,
-		"clients/dependency-checker.ts": 32,
+		// 32 -> 29 (#3428): the two hand-rolled madge cycle parses (three
+		// `path.resolve` calls and two `path:` members between them) folded into
+		// one shared `parseMadgeCycles` reader with one of each. Same senses,
+		// one reader of the contract instead of two.
+		"clients/dependency-checker.ts": 29,
 		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
