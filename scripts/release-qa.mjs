@@ -1560,6 +1560,79 @@ export async function pollToTerminal(attempt, { capMs, intervalMs }) {
 	};
 }
 
+/**
+ * The installed MCP server entrypoint the `mcp-stdio` config rows drive.
+ */
+function installedServerJs(ctx) {
+	return path.join(ctx.installedPkgDir, "dist", "mcp", "server.js");
+}
+
+/**
+ * Write the agent-dir global config fixture (`PI_CODING_AGENT_DIR` resolution,
+ * refs #2457): `<agentDir>/extensions/pi-lens.json` carrying a distinguishable
+ * global setting. Returns the exact path the resolver reads, so a row asserts
+ * that path by name rather than re-deriving its spelling.
+ */
+function writeAgentDirGlobalConfig(agentDir, value) {
+	const extensions = path.join(agentDir, "extensions");
+	fs.mkdirSync(extensions, { recursive: true });
+	const file = path.join(extensions, "pi-lens.json");
+	fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+	return file;
+}
+
+/**
+ * A row-private HOME with every scratch pin re-pointed under it, derived from
+ * the runner's own `ctx.env`.
+ *
+ * The two global-config rows cannot share the fixture MCP session: the global
+ * config choice is memoized for the life of a server process, and one row needs
+ * the agent-dir file to WIN while the other needs BOTH files present. Each row
+ * therefore owns its process and a resolution context it controls.
+ */
+function rowHomeEnv(ctx, name, extra = {}) {
+	const home = path.join(ctx.scratchRoot, `${name}-home`);
+	fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
+	return {
+		home,
+		env: {
+			...ctx.env,
+			HOME: home,
+			USERPROFILE: home,
+			PI_LENS_HOME: path.join(home, ".pi-lens"),
+			PILENS_DATA_DIR: path.join(home, ".pilens-data"),
+			PI_LENS_INSTALL_LOG: path.join(home, ".pi-lens", "install.log"),
+			npm_config_cache: path.join(ctx.scratchRoot, `${name}-npm-cache`),
+			...extra,
+		},
+	};
+}
+
+/**
+ * Open and initialize a throwaway MCP stdio session against the installed
+ * candidate under a row-private environment; the caller closes it. Mirrors the
+ * shared session handshake in `main()`, and the initialize failure is thrown
+ * (never a PASS) so an unreachable server reads FAIL.
+ */
+async function openScopedMcpSession(serverJs, cwd, env) {
+	const session = new McpSession(serverJs, cwd, env);
+	const init = await session.request(
+		"initialize",
+		{
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "release-qa", version: "1" },
+		},
+		60_000,
+	);
+	if (init.error) {
+		await session.close();
+		throw new Error(`MCP initialize failed: ${init.error.message}`);
+	}
+	session.notify("notifications/initialized", {});
+	return session;
+}
+
 // --- Row probes ------------------------------------------------------------
 //
 // One entry per baseline row id. A row id present here but absent from
@@ -1818,6 +1891,108 @@ const ROW_PROBES = {
 			shows,
 			witness: { ext: "txt", content: result.text },
 		};
+	},
+
+	"global-config-location": async (ctx) => {
+		// #2457: with `PI_CODING_AGENT_DIR` set and the agent-dir file present
+		// while the legacy default is absent, the resolution must select
+		// `pi-coding-agent-dir` and load THAT file. The witness is the
+		// provenance document naming the path, which is only there if the file
+		// was collected.
+		const agentDir = path.join(ctx.scratchRoot, "global-config-location-agent");
+		const agentConfigPath = writeAgentDirGlobalConfig(agentDir, {
+			lsp: { enabled: true },
+		});
+		const { env } = rowHomeEnv(ctx, "global-config-location", {
+			PI_CODING_AGENT_DIR: agentDir,
+		});
+		let session;
+		try {
+			session = await openScopedMcpSession(
+				installedServerJs(ctx),
+				ctx.projectDir,
+				env,
+			);
+			const result = await session.callToolText("pilens_effective_config", {
+				file: "a.ts",
+			});
+			const named = result.text.includes(agentConfigPath);
+			const shows = named
+				? `effective config names the agent-dir global file ${agentConfigPath} as contributing`
+				: `agent-dir global file not named in the provenance: ${result.text.slice(0, 200)}`;
+			return {
+				status: result.ok && named ? "pass" : "fail",
+				detail: shows,
+				shows,
+				witness: { ext: "txt", content: result.text },
+			};
+		} finally {
+			if (session) await session.close();
+		}
+	},
+
+	"config-shadow-record": async (ctx) => {
+		// #3299: when BOTH global files exist the legacy default wins and the
+		// shadowed agent-dir file is recorded ONCE per session under
+		// `config-location-shadowed` (code PILENS_CFG_0010, `recordDegradationOnce`).
+		// Each config load re-fires the reporter, so two health reads after
+		// three loads prove the count stayed at 1.
+		const agentDir = path.join(ctx.scratchRoot, "config-shadow-record-agent");
+		const agentConfigPath = writeAgentDirGlobalConfig(agentDir, {
+			lsp: { enabled: true },
+		});
+		// Realpath the shadowed path the record carries: `canonicalPathIdentity`
+		// resolves aliases, so the raw spelling is not the identity to match.
+		const shadowedIdentity = fs.realpathSync(agentConfigPath);
+		const { home, env } = rowHomeEnv(ctx, "config-shadow-record", {
+			PI_CODING_AGENT_DIR: agentDir,
+		});
+		const legacyConfigPath = path.join(home, ".pi-lens", "config.json");
+		fs.writeFileSync(legacyConfigPath, "{}\n");
+		let session;
+		try {
+			session = await openScopedMcpSession(
+				installedServerJs(ctx),
+				ctx.projectDir,
+				env,
+			);
+			// A config query loads the global tier (and so fires the reporter);
+			// health then renders the ledger it recorded.
+			await session.callToolText("pilens_effective_config", { file: "a.ts" });
+			const first = await session.callToolText("pilens_health", {});
+			const second = await session.callToolText("pilens_health", {});
+			const shadowLine = (text) =>
+				text
+					.split(/\r?\n/)
+					.find((candidate) => candidate.includes("config-location-shadowed"));
+			const firstLine = shadowLine(first.text);
+			const secondLine = shadowLine(second.text);
+			const namesShadowed = (line) =>
+				Boolean(line) && line.includes(shadowedIdentity);
+			const single = (line) =>
+				Boolean(line) && /config-location-shadowed: 1\b/.test(line);
+			const witnessed =
+				first.ok &&
+				second.ok &&
+				namesShadowed(firstLine) &&
+				single(firstLine) &&
+				namesShadowed(secondLine) &&
+				single(secondLine);
+			const shows = witnessed
+				? `one config-location-shadowed record naming ${shadowedIdentity}, count 1 on two consecutive health reads`
+				: `shadow record not witnessed once-per-session: first=${(firstLine ?? "none").trim().slice(0, 200)} second=${(secondLine ?? "none").trim().slice(0, 200)}`;
+			return {
+				status: witnessed ? "pass" : "fail",
+				detail: shows,
+				shows,
+				witness: {
+					ext: "txt",
+					content: `--- health #1 ---\n${first.text}\n\n--- health #2 ---\n${second.text}`,
+				},
+			};
+		} finally {
+			if (session) await session.close();
+		}
 	},
 
 	"git-install-loads": async (ctx) => {
