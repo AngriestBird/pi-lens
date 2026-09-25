@@ -29,8 +29,13 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run build
-      # The six-file cap bounds the advisory lane at approximately 65 seconds
-      # per changed file, based on the observed per-file Stryker runtime.
+      # The driver mutates only the diff's changed lines and bounds its Stryker
+      # child at MUTATION_BUDGET_MINUTES (60), which must stay strictly below
+      # this job's timeout-minutes (90): run 36098718085 was cancelled by the
+      # runner at the cap, so the driver never regained control and its
+      # "no mutants evaluated" report never printed. The 30-minute margin covers
+      # npm ci, npm run build, Stryker's in-place sandbox restore on SIGTERM, and
+      # the report upload. tests/scripts/stryker-diff.test.ts pins the relation.
       - run: node scripts/stryker-diff.mjs --base "origin/${{ github.base_ref }}" --max-files 6
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
