@@ -24,6 +24,19 @@ export interface GitIdentity {
 	worktreeRoot: string;
 }
 
+export type GitIdentityResolver = (cwd: string) => GitIdentity | undefined;
+
+/** A build-local memo: it is discarded when the build settles. */
+export function createGitIdentityResolver(): GitIdentityResolver {
+	const memo = new Map<string, GitIdentity | undefined>();
+	return (cwd) => {
+		if (memo.has(cwd)) return memo.get(cwd);
+		const identity = resolveGitIdentity(cwd);
+		memo.set(cwd, identity);
+		return identity;
+	};
+}
+
 interface ResolvedGitDir {
 	/** The worktree-private gitdir — where HEAD lives (== repoGitDir for a normal repo). */
 	gitDir: string;
