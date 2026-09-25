@@ -120,10 +120,6 @@ if (covered.length === 0) {
 // mutant reruns the related tests, so advisory run 36098718085 evaluated none of
 // its 2220 before the 90-minute cap cancelled the job.
 const patterns = mutationRangePatterns(covered, changedLineRanges(covered));
-if (patterns.length === 0) {
-	console.log("mutation diff: no changed lines in covered scripts");
-	process.exit(0);
-}
 
 const configFile = writeRunConfig(tests);
 console.log(`mutation diff: mutating ${patterns.join(", ")}`);
