@@ -205,8 +205,11 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				(file) => !Object.hasOwn(TREE_SCANNER_EXEMPTIONS, file),
 			);
 
-			// Mechanical equality in both directions: an unregistered scanner reds,
-			// and a registry entry that is no longer a scanner reds.
+			// Mechanical equality in both directions: an unregistered scanner spelled
+			// with a registered call name reds, and a registry entry that is no
+			// longer a scanner reds. Named limit (#3448): the census matches call-name
+			// spellings over blanked source, so an import alias (`fg("clients/**")`
+			// for fast-glob) is not seen until the binding is resolved.
 			expect(expectedRegistry).toEqual(
 				[...TREE_SCANNING_GOVERNANCE_TESTS].sort(),
 			);
