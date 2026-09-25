@@ -38,6 +38,47 @@ import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
 
+// Measured on the built tree on 2026-09-25: the ten registry suites took
+// 32.68s. Keep the added population below two minutes so a production-file
+// push remains a bounded local convenience; CI is still authoritative.
+export const TREE_SCANNING_GOVERNANCE_BUDGET_MS = 120_000;
+
+// Suites measured to exceed the documented pre-push budget on their own, so
+// they are excluded from the local pre-push selection and run in CI instead
+// (#3426 H3432-1). Never a blanket skip: each entry carries a reason and a CI
+// row, and `--include-ci-only` admits them in the CI job that owns them. The
+// governance suite pins this table, the exclusion, and the CI invocation.
+export const CI_ONLY_PRE_PUSH_TESTS = {
+	"tests/scripts/guard-bash-hook.test.ts":
+		"spawns ~1,270 real hook child processes: the transcript corpus alone measured 169s and the file measured 211s end to end, over the 120s pre-push budget. Runs in the Targeted tests (advisory) CI job via --include-ci-only and in the gating Unit tests job.",
+};
+
+// Tree scanners do not import the changed module, so path mirroring and
+// import resolution cannot discover them. The governance suite pins this
+// executable population against the scanner shape.
+export const TREE_SCANNING_GOVERNANCE_TESTS = [
+	"tests/clients/session-state-conformance.test.ts",
+	"tests/config/glossary-synonym-sweep.test.ts",
+	"tests/config/strictness-ratchet.test.ts",
+	"tests/config/hook-await-bounds.test.ts",
+	"tests/config/dmts-export-drift.test.ts",
+	"tests/config/vi-mock-export-sweep.test.ts",
+	"tests/config/degradation-kind-coverage.test.ts",
+	"tests/config/degradation-kind-order.test.ts",
+	"tests/config/sweep-floor-coverage.test.ts",
+	"tests/config/tracked-control-bytes.test.ts",
+];
+
+const PRODUCTION_ROOTS = ["clients/", "tools/", "mcp/", "scripts/"];
+
+export function changesProductionFile(file) {
+	const normalized = toPosix(file);
+	return (
+		normalized === "index.ts" ||
+		PRODUCTION_ROOTS.some((root) => normalized.startsWith(root))
+	);
+}
+
 function writeStepSummary(summary) {
 	const file = process.env.GITHUB_STEP_SUMMARY;
 	if (!file) return;
@@ -49,17 +90,20 @@ function writeSelectionSummary({
 	selectedCount,
 	totalBeforeCap,
 	status,
+	excludedCiOnly = [],
 }) {
-	writeStepSummary(
-		[
-			"### Targeted test selection",
-			"",
-			`- Changed TypeScript files: ${changedCount}`,
-			`- Selected test files: ${selectedCount}`,
-			`- Matches before cap: ${totalBeforeCap}`,
-			`- Result: ${status}`,
-		].join("\n"),
-	);
+	const lines = [
+		"### Targeted test selection",
+		"",
+		`- Changed source files: ${changedCount}`,
+		`- Selected test files: ${selectedCount}`,
+		`- Matches before cap: ${totalBeforeCap}`,
+		`- CI-only suites deferred: ${excludedCiOnly.length}`,
+		`- Result: ${status}`,
+	];
+	for (const test of excludedCiOnly)
+		lines.push(`- CI-only: ${test} (runs in CI)`);
+	writeStepSummary(lines.join("\n"));
 }
 
 // Matches `from "…"`, `import("…")`, and `require("…")` — the three ways a
@@ -94,7 +138,7 @@ export function resolveDiffRange() {
 	return "origin/master...HEAD";
 }
 
-export function changedTsFiles(range) {
+export function changedFiles(range) {
 	try {
 		const out = execFileSync("git", ["diff", "--name-only", range], {
 			encoding: "utf8",
@@ -102,7 +146,7 @@ export function changedTsFiles(range) {
 		return out
 			.split("\n")
 			.map((line) => line.trim())
-			.filter((line) => line.endsWith(".ts") && !line.startsWith("dist/"));
+			.filter((line) => line.length > 0 && !line.startsWith("dist/"));
 	} catch (error) {
 		console.warn(
 			`[pre-push] could not compute diff range "${range}", falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
@@ -170,9 +214,12 @@ function buildTestImportIndex(allTests) {
 /**
  * @param {string[]} changed
  * @param {string[]} allTests
- * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number }}
+ * @param {{ includeCiOnly?: boolean }} [options] `includeCiOnly` admits the
+ *   `CI_ONLY_PRE_PUSH_TESTS` tier (the CI job passes it); the local pre-push
+ *   caller leaves it false so a budget-busting suite never runs there.
+ * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number, excludedCiOnly: string[] }}
  */
-export function selectTargetedTests(changed, allTests) {
+export function selectTargetedTests(changed, allTests, options = {}) {
 	const testImportIndex = buildTestImportIndex(allTests);
 	const perFile = new Map();
 
@@ -192,10 +239,32 @@ export function selectTargetedTests(changed, allTests) {
 		perFile.set(file, matches);
 	}
 
+	if (changed.some(changesProductionFile)) {
+		const available = new Set(allTests);
+		for (const test of TREE_SCANNING_GOVERNANCE_TESTS) {
+			if (!available.has(test)) continue;
+			if (!perFile.has(test)) perFile.set(test, new Set([test]));
+			else perFile.get(test).add(test);
+		}
+	}
+
 	const selected = new Set();
 	for (const matches of perFile.values()) {
 		for (const test of matches) selected.add(test);
 	}
+
+	// CI-only tier (#3426 H3432-1): remove the suites measured to exceed the
+	// pre-push budget unless the caller is the CI job that owns them. The
+	// count is disclosed on the summary surface, never silently dropped.
+	const excludedCiOnly = [];
+	if (options.includeCiOnly !== true) {
+		for (const test of selected) {
+			if (Object.hasOwn(CI_ONLY_PRE_PUSH_TESTS, test))
+				excludedCiOnly.push(test);
+		}
+		for (const test of excludedCiOnly) selected.delete(test);
+	}
+	excludedCiOnly.sort();
 
 	const unmatched = changed.filter(
 		(file) => !file.endsWith(".test.ts") && perFile.get(file).size === 0,
@@ -208,6 +277,7 @@ export function selectTargetedTests(changed, allTests) {
 		unmatched,
 		capped,
 		totalBeforeCap,
+		excludedCiOnly,
 	};
 }
 
@@ -264,7 +334,7 @@ function runTargetedTests(selected) {
 
 export async function main() {
 	const range = resolveDiffRange();
-	const changed = changedTsFiles(range);
+	const changed = changedFiles(range);
 	const skipBuild = process.argv.includes("--skip-build");
 
 	if (skipBuild) {
@@ -278,7 +348,7 @@ export async function main() {
 
 	if (changed === null || changed.length === 0) {
 		console.log(
-			"[pre-push] no TypeScript changes to target; build-only pass complete.",
+			"[pre-push] no source changes to target; build-only pass complete.",
 		);
 		writeSelectionSummary({
 			changedCount: changed?.length ?? 0,
@@ -292,14 +362,22 @@ export async function main() {
 		return 0;
 	}
 
+	const includeCiOnly = process.argv.includes("--include-ci-only");
 	const allTests = collectTestFiles("tests");
-	const { selected, unmatched, capped, totalBeforeCap } = selectTargetedTests(
-		changed,
-		allTests,
-	);
+	const { selected, unmatched, capped, totalBeforeCap, excludedCiOnly } =
+		selectTargetedTests(changed, allTests, { includeCiOnly });
 
 	for (const file of unmatched)
 		console.log(`[pre-push] no tests matched ${file}`);
+
+	// Disclosure, not silence (#3426 H3432-1 / defect shape 10): the caller
+	// sees which suites were deferred to CI and why.
+	for (const file of excludedCiOnly)
+		console.log(
+			`[pre-push] CI-only suite deferred to CI (${CI_ONLY_PRE_PUSH_TESTS[file]}): ${file}`,
+		);
+	if (includeCiOnly)
+		console.log("[pre-push] --include-ci-only: admitting the CI-only tier.");
 
 	if (capped) {
 		console.warn(
@@ -310,6 +388,7 @@ export async function main() {
 			selectedCount: 0,
 			totalBeforeCap,
 			status: `cap exceeded (${MAX_SELECTED_TESTS}); build-only`,
+			excludedCiOnly,
 		});
 		return 0;
 	}
@@ -323,6 +402,7 @@ export async function main() {
 			selectedCount: 0,
 			totalBeforeCap,
 			status: "no matches; build-only",
+			excludedCiOnly,
 		});
 		return 0;
 	}
@@ -332,10 +412,11 @@ export async function main() {
 		selectedCount: selected.length,
 		totalBeforeCap,
 		status: "selected",
+		excludedCiOnly,
 	});
 
 	console.log(
-		`[pre-push] running ${selected.length} targeted test file(s) for ${changed.length} changed .ts file(s):`,
+		`[pre-push] running ${selected.length} targeted test file(s) for ${changed.length} changed source file(s):`,
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 

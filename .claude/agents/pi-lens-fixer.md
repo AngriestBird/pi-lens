@@ -113,10 +113,12 @@ the cost of not doing so.
    `sweep-floor-coverage` red). A red is environmental ONLY when the same
    file is red on `origin/master` in the same tree — run it there and quote
    both results, or treat it as yours.
-   Tear the tree down in this order: `rm node_modules` (unlinks the symlink;
-   never `rm -r`), then `git worktree remove`. `git worktree remove --force`
-   follows the symlink and empties the main checkout's install — it did so
-   twice on 2026-09-16 (#2704 class), breaking every other live lane's build.
+   Tear the tree down after `ls -ld node_modules`: unlink a symlink with
+   `rm node_modules`; if it is a directory, confirm the main checkout's
+   `node_modules` is intact, then remove only this worktree's copy with
+   `rm -rf node_modules`. Finally run `git worktree remove`; never use
+   `git worktree remove --force`, which follows symlinks and emptied the main
+   checkout's install twice on 2026-09-16 (#2704 class).
    Commit after every proven step, on your branch, before the next probe. Two
    trees lost uncommitted work the same day: #2358's was removed by a prune
    that saw a branch with no commits, and #2518 r2's edits died under a
@@ -352,14 +354,21 @@ verify brief asked for exactly that judgement).
   claiming it; reviewers diff reports against reality and a false claim costs
   a full extra round.
 
-- **Run the pinned oxfmt on your diff before push.** Agent worktrees usually
-  lack the oxfmt binary, so CI's gating format check is the first time your
-  files meet the formatter — and two fixers in one day shipped unformatted
-  test files while calling the red check "a pre-existing environment gap."
-  Before push: `npm install oxfmt --no-save` at the devDependency-pinned
-  version if absent, `npx oxfmt --check` on every file you touched, format
-  and re-test if it flags. Never attribute a red format check to the
-  environment without reading which files it names.
+- **Run the pinned oxfmt on your diff before push.** Use `npx oxfmt` against
+  the symlinked devDependency and run `npx oxfmt --check` on every file you
+  touched. Never install a replacement with `npm install oxfmt --no-save`:
+  it replaces the worktree's dependency symlink and can leave a large real
+  directory that must be handled by the teardown check above. Format and
+  re-test if it flags; never attribute a red format check to the environment
+  without reading which files it names.
+- **CI-lane acceptance is lane-owned.** A fix to a CI lane or workflow is
+  accepted only when that lane's own run on the PR's exact head completes
+  inside its `timeout-minutes`, with the acceptance surface quoted from its
+  log; any self-bound must sit below the job cap by a stated margin.
+- **Behaviour-preserving refactors use a different red-first proof.** When the
+  PR declares the change behaviour-preserving, provide an old-vs-new probe
+  table through the built seam and mutate the shared seam so a caller-side
+  witness reds. A passing pre-fix run is expected and is not a finding.
 - **Small batches run vitest directly; the shared slot is for big ones.**
   `npm run test:targeted` queues on a machine-wide slot that twelve
   concurrent lanes keep busy; three fixers on 2026-09-03 backgrounded it and

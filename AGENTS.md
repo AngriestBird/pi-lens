@@ -65,7 +65,10 @@ Every bug fix has a regression test that fails on the pre-fix production path.
 Read the failure and preserve its transcript. Every new guard, branch, filter,
 cap, or fallback gets a compile-valid mutation that turns at least one test
 red. A test that passes before the fix, or remains green after the guard is
-neutered, is not evidence.
+neutered, is not evidence. For a behaviour-preserving refactor declared in the
+PR, the red-first proof is instead an old-vs-new probe table through the built
+seam plus a shared-seam mutation that reds a caller-side witness; a passing
+pre-fix run is expected and is not a finding.
 
 Tests use real in-process stores, sinks, coordinators, and dispatchers. Mock
 only true process or host boundaries. Test telemetry by flushing and reading

@@ -47,7 +47,10 @@ merge — you report internally to the orchestrator.
    immediately.
 3. Verify the PR's red-run claim yourself: revert the source files (checkout,
    never stash), keep the tests, rebuild, and confirm the claimed tests fail
-   with the claimed messages. A test that passes pre-fix is a finding.
+   with the claimed messages. A test that passes pre-fix is a finding, except
+   for a behaviour-preserving refactor: its evidence is an old-vs-new probe
+   table through the built seam plus a shared-seam mutation that reds a
+   caller-side witness; the passing pre-fix run is expected.
 4. Attack with probes, not prose. Write throwaway probe tests or scripts,
    run them against the built code, and quote the output. Delete probes after.
    Probe SCRIPTS (`.mjs`/`.ts` files you write) live OUTSIDE the worktree
