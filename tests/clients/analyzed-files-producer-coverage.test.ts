@@ -14,7 +14,7 @@
  * clean drops out of the set and its retained finding is kept forever — where
  * the id-only fallback arm retires it today.
  *
- * A PR-body table cannot notice a tenth client quietly assigning the field. This
+ * A PR-body table cannot notice a SECOND client quietly assigning the field. This
  * test can. If it reds, the change is not necessarily wrong — it means #3416's
  * verdict table must be re-derived for the new producer (the three proofs the
  * issue names: the report field read from the tool's own source at a pinned
@@ -88,7 +88,9 @@ describe("analyzedFiles producer coverage (#3416)", () => {
 	it("pins the recorded set of analyzedFiles producers", () => {
 		const files = shippedSourceFiles();
 		// A walk that loses its population must fail, not read as clean
-		// (AGENTS.md shape 10): this repo ships well over 300 client sources.
+		// (AGENTS.md shape 10). Measured population on this head: 483 files, so a
+		// floor of 300 leaves room for ordinary deletion without ever passing on a
+		// walk that broke.
 		assertNonEmptyScan("analyzedFiles producer sweep", files.length, 300);
 
 		const producers = readWalkedFiles(files)
