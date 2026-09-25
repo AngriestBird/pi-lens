@@ -2048,7 +2048,9 @@ async function runBatchFileDiagnostics(
 		lines.push(
 			"",
 			"Files too large for LSP diagnostics:",
-			...tooLargeFiles.map((result) => `${result.file}: ${result.tooLargeReason}`),
+			...tooLargeFiles.map(
+				(result) => `${result.file}: ${result.tooLargeReason}`,
+			),
 		);
 	}
 	if (lspHealthWarnings.length > 0) {

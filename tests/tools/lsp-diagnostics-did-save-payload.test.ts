@@ -195,7 +195,9 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 		expect(save, "didSave was not sent").toBeUndefined();
 
 		// Bounded, once per file per session — never one row per query.
-		const group = ledger.find((g) => g.kind === "lsp-diagnostics-file-too-large");
+		const group = ledger.find(
+			(g) => g.kind === "lsp-diagnostics-file-too-large",
+		);
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons.at(-1)?.subject).toContain("huge.fs");
 		expect(group?.latestReasons.at(-1)?.reason).toContain("bytes >");
@@ -216,7 +218,11 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 		const { frames, ledger } = await runQuery(OVERSIZED_BYTES, false);
 		const save = frames.find((f) => f.method === "textDocument/didSave");
 		expect(save?.params.text).toBeUndefined();
-		expect(frames.find((f) => f.method === "textDocument/didOpen")).toBeUndefined();
-		expect(ledger.find((g) => g.kind === "lsp-diagnostics-file-too-large")?.count).toBe(1);
+		expect(
+			frames.find((f) => f.method === "textDocument/didOpen"),
+		).toBeUndefined();
+		expect(
+			ledger.find((g) => g.kind === "lsp-diagnostics-file-too-large")?.count,
+		).toBe(1);
 	});
 });
