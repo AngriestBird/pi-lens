@@ -98,6 +98,7 @@ type GrammarDirClient = {
 	grammarDirResolutionDeps: {
 		resolveAsset: (asset: string) => string | undefined;
 		resolvePackage: (specifier: string) => string;
+		packageRoot: () => string;
 		cwd: () => string;
 	};
 };
@@ -113,14 +114,17 @@ function moduleNotFound(id: string): never {
 /**
  * A client whose module resolver behaves like the reporter's host: the bare
  * specifier throws, and `web-tree-sitter/tree-sitter.wasm` resolves into
- * `pkgDir` — a HOISTED sibling install, i.e. NOT under pi-lens's own package
- * root. `cwd` points at a decoy that also holds a `web-tree-sitter/grammars`,
- * so an answer that came from `process.cwd()` is distinguishable from one that
- * came from the package directory.
+ * `pkgDir` — a HOISTED sibling install. pi-lens's own package root is a real
+ * directory with no nested `node_modules`, which is what a hoisted install
+ * looks like (web-tree-sitter is pi-lens's SIBLING there, not its child), and
+ * `cwd` points at a decoy that also holds a `web-tree-sitter/grammars`, so an
+ * answer that came from either fallback rung is distinguishable from one that
+ * came from the resolved package directory.
  */
 async function hoistedHostClient(
 	pkgDir: string,
 	decoyCwd: string,
+	packageRoot: string,
 ): Promise<GrammarDirClient> {
 	const { TreeSitterClient } =
 		await import("../../clients/tree-sitter-client.js");
@@ -134,6 +138,7 @@ async function hoistedHostClient(
 			specifier === "web-tree-sitter/tree-sitter.wasm"
 				? path.join(pkgDir, "tree-sitter.wasm")
 				: moduleNotFound(specifier),
+		packageRoot: () => packageRoot,
 		cwd: () => decoyCwd,
 	}) as unknown as GrammarDirClient;
 	instance = client;
@@ -182,6 +187,7 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		const client = await hoistedHostClient(
 			pkgDir,
 			path.join(env.tmpDir, "decoy"),
+			path.join(env.tmpDir, "pi-lens"),
 		);
 
 		expect(client.grammarsWriteDir()).toBe(path.join(pkgDir, "grammars"));
@@ -196,7 +202,11 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 			path.join(decoyCwd, "node_modules", "web-tree-sitter", "grammars"),
 			{ recursive: true },
 		);
-		const client = await hoistedHostClient(pkgDir, decoyCwd);
+		const client = await hoistedHostClient(
+			pkgDir,
+			decoyCwd,
+			path.join(env.tmpDir, "pi-lens"),
+		);
 
 		expect(client.resolveWebTreeSitterAsset("grammars")).toBe(
 			path.join(pkgDir, "grammars"),
@@ -222,6 +232,7 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		const client = await hoistedHostClient(
 			pkgDir,
 			path.join(env.tmpDir, "decoy"),
+			path.join(env.tmpDir, "pi-lens"),
 		);
 
 		expect(client.resolveGrammarFile("tree-sitter-c_sharp.wasm")).toBe(
@@ -239,6 +250,7 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 			resolveAsset: (asset: string) =>
 				instance?.resolveWebTreeSitterAsset(asset),
 			resolvePackage: (specifier: string) => moduleNotFound(specifier),
+			packageRoot: () => emptyCwd,
 			cwd: () => emptyCwd,
 		}) as unknown as GrammarDirClient;
 		instance = client;
@@ -256,6 +268,7 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 			resolveAsset: (asset: string) =>
 				instance?.resolveWebTreeSitterAsset(asset),
 			resolvePackage: (specifier: string) => moduleNotFound(specifier),
+			packageRoot: () => emptyCwd,
 			cwd: () => emptyCwd,
 		}) as unknown as GrammarDirClient;
 		instance = client;

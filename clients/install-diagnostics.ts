@@ -14,6 +14,13 @@ import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+// package-root.js is itself dependency-free (node:fs/path/url only), so
+// importing it keeps this module's "loads even when the deps that failed are
+// unreachable" property intact.
+import {
+	getPackageRoot,
+	resolveWebTreeSitterPackageDir,
+} from "./package-root.js";
 
 const require = createRequire(import.meta.url);
 const ISSUES_URL = "https://github.com/apmantza/pi-lens/issues";
@@ -126,15 +133,21 @@ export function collectInstallDiagnostics(): InstallDiagnostics {
 	}, false);
 
 	const grammars = safe(() => {
-		let dir = path.dirname(require.resolve("web-tree-sitter"));
-		while (
-			path.basename(dir) !== "web-tree-sitter" &&
-			dir !== path.dirname(dir)
-		) {
-			dir = path.dirname(dir);
-		}
-		return fs.existsSync(
-			path.join(dir, "grammars", "tree-sitter-typescript.wasm"),
+		// #3409 (sweep sibling of the same shape): this probe used to walk up from
+		// the BARE `web-tree-sitter` specifier, so on the host pi ships — a `bun
+		// build --compile` binary, where a bare specifier throws MODULE_NOT_FOUND
+		// — it reported `grammars: false` for an install whose grammars were
+		// present. The one report a user pastes when the long tail of grammars is
+		// dead has to measure the same directory the client does, through the same
+		// ladder.
+		const dir = resolveWebTreeSitterPackageDir({
+			resolve: (specifier) => require.resolve(specifier),
+			packageRoot: () => getPackageRoot(import.meta.url),
+			cwd: () => process.cwd(),
+		});
+		return (
+			!!dir &&
+			fs.existsSync(path.join(dir, "grammars", "tree-sitter-typescript.wasm"))
 		);
 	}, false);
 
