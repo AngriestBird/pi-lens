@@ -558,6 +558,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive.
+- The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
+  warm attachment or `touchFile`; an over-bound file returns a `too_large`
+  result with its byte/line measurement and records
+  `lsp-diagnostics-file-too-large` once per file per session.
 - Every new LSP server has a smoke fixture or a documented alternate/toolchain
   exemption. Real LSP-spawn tests belong in the serialized `lsp-spawn-heavy`
   lane.

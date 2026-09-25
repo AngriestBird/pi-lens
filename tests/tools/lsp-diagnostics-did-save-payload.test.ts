@@ -1,6 +1,6 @@
 /**
- * #3405 round 2 (review finding M3406-1): what the EXPLICIT `lsp_diagnostics`
- * writer puts on the wire for an `includeText: true` server.
+ * #3408: what the EXPLICIT `lsp_diagnostics` writer puts on the wire for an
+ * oversized file.
  *
  * Recurrence this file prevents: the repository's 2 MiB / 5000-line LSP content
  * bound lived twice — a private `exceedsLspSyncLimits` in `clients/pipeline.ts`
@@ -8,8 +8,8 @@
  * could be added with neither. One was: `tools/lsp-diagnostics.ts` reads whole
  * files with `fs.readFileSync` and has no bound of its own, and once its touch
  * could also carry `textDocument/didSave.text`, the same unbounded string was
- * serialized into a SECOND JSON-RPC frame. This drives the real tool entry
- * point on a >2 MiB file and measures the bytes that reach the transport.
+ * serialized into a SECOND JSON-RPC frame. The explicit query now refuses the
+ * file at its read/sync boundary, so neither frame may reach the transport.
  *
  * Production chain under test, doubled only at the two real boundaries: the
  * `lsp_diagnostics` tool -> the REAL `LSPService.touchFile` -> the REAL
@@ -184,28 +184,21 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 		return { frames, ledger: getDegradationSummary() };
 	}
 
-	it("sends didSave without the redundant text once the document is past the bound", async () => {
+	it("does not sync a document past the shared content bound", async () => {
 		const { frames, ledger } = await runQuery(OVERSIZED_BYTES, true);
 		const open = frames.find((f) => f.method === "textDocument/didOpen");
 		const save = frames.find((f) => f.method === "textDocument/didSave");
 
-		// The sync itself is unchanged: the server still receives the document.
-		expect(open, "didOpen was sent").toBeDefined();
-		expect(open!.bytes).toBeGreaterThan(OVERSIZED_BYTES);
+		// #3408 flips the old #3406 pin: the explicit query does not send either
+		// content-bearing frame once the shared bound rejects the file.
+		expect(open, "didOpen was not sent").toBeUndefined();
+		expect(save, "didSave was not sent").toBeUndefined();
 
-		// The save still goes out — dropping it would drop the diagnose trigger —
-		// but it no longer duplicates the file.
-		expect(save, "didSave was sent").toBeDefined();
-		// The size IS the finding, so it is asserted first: the pre-fix transcript
-		// for this line is the measured payload the reviewer asked to see.
-		expect(save!.bytes).toBeLessThan(4096);
-		expect(save!.params.text).toBeUndefined();
-
-		// Bounded, once per server per session — never one row per edit.
-		const group = ledger.find((g) => g.kind === "lsp-did-save-text-omitted");
+		// Bounded, once per file per session — never one row per query.
+		const group = ledger.find((g) => g.kind === "lsp-diagnostics-file-too-large");
 		expect(group?.count).toBe(1);
-		expect(group?.latestReasons.at(-1)?.subject).toBe("fsharp");
-		expect(group?.latestReasons.at(-1)?.reason).toContain("exceeds");
+		expect(group?.latestReasons.at(-1)?.subject).toContain("huge.fs");
+		expect(group?.latestReasons.at(-1)?.reason).toContain("bytes >");
 	});
 
 	it("still carries the text for a document inside the bound", async () => {
@@ -219,16 +212,11 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 		);
 	});
 
-	it("records nothing for an oversized document on a server that never asked for text", async () => {
-		// Expert's shape (`save: true`). Nothing was dropped, so nothing is
-		// recorded — a record here would be one row per big file per session for
-		// a server the bound never applied to.
+	it("records the oversized result once regardless of server save options", async () => {
 		const { frames, ledger } = await runQuery(OVERSIZED_BYTES, false);
 		const save = frames.find((f) => f.method === "textDocument/didSave");
 		expect(save?.params.text).toBeUndefined();
-		expect(save!.bytes).toBeLessThan(4096);
-		expect(ledger.find((g) => g.kind === "lsp-did-save-text-omitted")).toBe(
-			undefined,
-		);
+		expect(frames.find((f) => f.method === "textDocument/didOpen")).toBeUndefined();
+		expect(ledger.find((g) => g.kind === "lsp-diagnostics-file-too-large")?.count).toBe(1);
 	});
 });

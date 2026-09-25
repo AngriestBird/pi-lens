@@ -53,6 +53,8 @@ vi.mock("../../clients/widget-state.js", () => ({
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import { getDegradationSummary, resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
 
 describe("lsp_diagnostics tool", () => {
 	beforeEach(() => {
@@ -169,6 +171,48 @@ describe("lsp_diagnostics tool", () => {
 				"const value = 1;\n",
 				expect.objectContaining({ source: "lsp_diagnostics", saved: true }),
 			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("returns a bounded result instead of syncing an oversized file", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-too-large-"));
+		const file = path.join(tmpDir, "huge.ts");
+		const content = `${"x".repeat(RUNTIME_CONFIG.pipeline.lspMaxFileBytes + 1)}\n`;
+		fs.writeFileSync(file, content);
+		resetDegradationLedger();
+		try {
+			const tool = createLspDiagnosticsTool();
+			const single = (await tool.execute(
+				"diag-too-large",
+				{ path: file, severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(single.content[0].text).toBe(
+				`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+			);
+			expect(
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
+			).not.toHaveBeenCalled();
+
+			const batch = (await tool.execute(
+				"diag-too-large-batch",
+				{ paths: [file], severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(batch.content[0].text).toContain(
+				"Outcomes: clean=0, findings=0, unsupported=0, unavailable=0, failed=0, too_large=1, inconclusive=0",
+			);
+			expect(batch.content[0].text).toContain(
+				`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+			);
+			expect(batch.details.cleanFiles).toBe(0);
+			expect(getDegradationSummary().find((group) => group.kind === "lsp-diagnostics-file-too-large")?.count).toBe(1);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

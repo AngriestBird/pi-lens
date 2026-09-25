@@ -420,6 +420,7 @@ export type DegradationKind =
 	 */
 	/** A retired LSP diagnostics call was redirected to lens_diagnostics. */
 	| "lsp-diagnostics-compatibility"
+	| "lsp-diagnostics-file-too-large"
 	| "lsp-diagnostics-timeout"
 	| "lsp-diagnostics-unsupported"
 	/**
