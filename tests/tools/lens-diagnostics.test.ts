@@ -682,6 +682,28 @@ describe("lens_diagnostics source=lsp compact render", () => {
 			}),
 		).toContain("not confirmed");
 	});
+
+	it("preserves oversized files in the compact LSP summary (#3408)", () => {
+		const line = render({
+			source: "lsp",
+			totalDiagnostics: 0,
+			filesChecked: 1,
+			cleanFiles: 0,
+			outcomeCounts: { too_large: 1 },
+			outcomes: [
+				{
+					file: "/tmp/huge.ts",
+					outcome: "too_large",
+					reason:
+						"file too large for LSP diagnostics (2097153 bytes > 2097152 limit)",
+				},
+			],
+		});
+		expect(line).toContain("too large");
+		expect(line).toContain("huge.ts");
+		expect(line).toContain("2097153 bytes");
+		expect(line).not.toContain("0 diagnostics");
+	});
 });
 
 // ── schema ────────────────────────────────────────────────────────────────────
