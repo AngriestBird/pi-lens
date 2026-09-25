@@ -96,6 +96,11 @@ describe("tree-sitter-client wasm resolution", () => {
 			);
 			const client = new TreeSitterClient(false, undefined, {
 				resolveAsset: () => path.dirname(wasmPath),
+				// findGrammarsDir must not consult pi-lens's package root (#3409 added
+				// that rung to the web-tree-sitter ladder, not to this one).
+				packageRoot: () => {
+					throw new Error("package-root resolver must not run");
+				},
 				resolvePackage: () => {
 					throw new Error("package resolver must not run");
 				},
@@ -129,6 +134,9 @@ describe("tree-sitter-client wasm resolution", () => {
 			);
 			const client = new TreeSitterClient(false, undefined, {
 				resolveAsset: () => undefined,
+				packageRoot: () => {
+					throw new Error("package-root resolver must not run");
+				},
 				resolvePackage: (specifier) => {
 					expect(specifier).toBe("tree-sitter-wasms/package.json");
 					return packageJson;
@@ -153,6 +161,9 @@ describe("tree-sitter-client wasm resolution", () => {
 			fs.mkdirSync(expectedDir, { recursive: true });
 			const client = new TreeSitterClient(false, undefined, {
 				resolveAsset: () => undefined,
+				packageRoot: () => {
+					throw new Error("package-root resolver must not run");
+				},
 				resolvePackage: () => {
 					throw new Error("package resolver must not run");
 				},
@@ -167,6 +178,9 @@ describe("tree-sitter-client wasm resolution", () => {
 	it("findGrammarsDir returns empty when no branch resolves", () => {
 		const client = new TreeSitterClient(false, undefined, {
 			resolveAsset: () => undefined,
+			packageRoot: () => {
+				throw new Error("package-root resolver must not run");
+			},
 			resolvePackage: () => {
 				throw new Error("package unavailable");
 			},

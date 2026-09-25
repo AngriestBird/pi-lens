@@ -38,22 +38,23 @@ const compiledHost = vi.hoisted(() => ({ bareSpecifiersThrow: false }));
 /** `web-tree-sitter` and `@scope/pkg` are bare; `pkg/file.wasm` is not. */
 function isBareSpecifier(id: string): boolean {
 	if (id.startsWith(".") || path.isAbsolute(id)) return false;
-	const withoutScope = id.startsWith("@") ? id.split("/").slice(1).join("/") : id;
+	const withoutScope = id.startsWith("@")
+		? id.split("/").slice(1).join("/")
+		: id;
 	return !withoutScope.includes("/");
 }
 
 vi.mock("node:module", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("node:module")>();
+	const actual = await importOriginal<typeof import("node:module")>();
 	return {
 		...actual,
 		createRequire: (from: string | URL) => {
 			const real = actual.createRequire(from);
 			const resolve = ((id: string, options?: { paths?: string[] }) => {
 				if (compiledHost.bareSpecifiersThrow && isBareSpecifier(id)) {
-					const err = new Error(
-						`Cannot find module '${id}'`,
-					) as Error & { code?: string };
+					const err = new Error(`Cannot find module '${id}'`) as Error & {
+						code?: string;
+					};
 					err.code = "MODULE_NOT_FOUND";
 					throw err;
 				}
@@ -74,9 +75,10 @@ type DiagnosticRecord = {
 
 const logged = vi.hoisted(() => [] as DiagnosticRecord[]);
 vi.mock("../../clients/tree-sitter-logger.js", async (importOriginal) => {
-	const actual = await importOriginal<
-		typeof import("../../clients/tree-sitter-logger.js")
-	>();
+	const actual =
+		await importOriginal<
+			typeof import("../../clients/tree-sitter-logger.js")
+		>();
 	return {
 		...actual,
 		logTreeSitterDiagnostic: (entry: DiagnosticRecord) => {
@@ -267,6 +269,39 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 					? path.join(pkgDir, "lib", "tree-sitter.wasm")
 					: moduleNotFound(specifier),
 			packageRoot: () => path.join(env.tmpDir, "pi-lens"),
+			cwd: () => path.join(env.tmpDir, "decoy"),
+		}) as unknown as GrammarDirClient;
+		instance = client;
+
+		expect(client.grammarsWriteDir()).toBe(path.join(pkgDir, "grammars"));
+	});
+
+	it("prefers the package the runtime will actually load over a nested copy", async () => {
+		// Both rungs can answer, and they disagree: a nested
+		// `<pi-lens>/node_modules/web-tree-sitter` next to a hoisted sibling the
+		// resolver points at. The grammars have to come from the SAME package whose
+		// `tree-sitter.wasm` the runtime loaded — a grammar built for another
+		// web-tree-sitter is the ABI-drift decode failure #1564 is about — so the
+		// resolver's answer outranks the package-root guess.
+		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
+		fs.mkdirSync(pkgDir, { recursive: true });
+		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
+		const nestedRoot = path.join(env.tmpDir, "pi-lens");
+		fs.mkdirSync(
+			path.join(nestedRoot, "node_modules", "web-tree-sitter", "grammars"),
+			{ recursive: true },
+		);
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
+		let instance: GrammarDirClient | undefined;
+		const client = new TreeSitterClient(false, undefined, {
+			resolveAsset: (asset: string) =>
+				instance?.resolveWebTreeSitterAsset(asset),
+			resolvePackage: (specifier: string) =>
+				specifier === "web-tree-sitter/tree-sitter.wasm"
+					? path.join(pkgDir, "tree-sitter.wasm")
+					: moduleNotFound(specifier),
+			packageRoot: () => nestedRoot,
 			cwd: () => path.join(env.tmpDir, "decoy"),
 		}) as unknown as GrammarDirClient;
 		instance = client;

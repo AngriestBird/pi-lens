@@ -20,9 +20,12 @@ vi.mock("node:module", async (importOriginal) => {
 		createRequire: (from: string | URL) => {
 			const real = actual.createRequire(from);
 			const resolve = ((id: string, options?: { paths?: string[] }) => {
-				const bare = !id.startsWith(".") && !path.isAbsolute(id)
-					? !(id.startsWith("@") ? id.split("/").slice(1).join("/") : id).includes("/")
-					: false;
+				const bare =
+					!id.startsWith(".") && !path.isAbsolute(id)
+						? !(
+								id.startsWith("@") ? id.split("/").slice(1).join("/") : id
+							).includes("/")
+						: false;
 				if (compiledHost.bareSpecifiersThrow && bare) {
 					const err = new Error(`Cannot find module '${id}'`) as Error & {
 						code?: string;

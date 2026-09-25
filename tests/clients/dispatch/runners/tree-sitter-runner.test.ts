@@ -88,6 +88,11 @@ async function loadRunnerWithQueries(
 			>()),
 			isTreeSitterWasmAborted: () => true,
 		}));
+	} else {
+		// Explicit, not merely absent: a `doMock` registered by an earlier load in
+		// this file otherwise survives `resetModules` and silently aborts the next
+		// test's runtime.
+		vi.doUnmock("../../../../clients/tree-sitter-shared.js");
 	}
 
 	const recordEntitySnapshotDiff = vi.fn(() => ({
