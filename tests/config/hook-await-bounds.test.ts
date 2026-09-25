@@ -2283,8 +2283,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// went 111 -> 112 for the new
 	// `await server.root` inside resolveLspServerCwd. Neither number is the
 	// old bare probe being removed.
+	// #3412: `NearestRoot` awaits the memo's freshness check and one directory
+	// mtime read per probed directory, taking clients/lsp/server.ts 112 -> 114.
+	// Both awaits replace a full marker re-walk on the same path — measured 4
+	// stat calls per warm touch against 9 for re-walking — so the module's real
+	// unbounded fs work per resolution went DOWN, not up.
 	"clients/lsp/index.ts": 159,
-	"clients/lsp/server.ts": 112,
+	"clients/lsp/server.ts": 114,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	"clients/opaque-mutation-scan.ts": 10,
@@ -2316,6 +2321,16 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/warm-attach.ts": 9,
 	"clients/widget-state.ts": 3,
 	"clients/word-index.ts": 24,
+	// #3412: the LSP root memo is revalidated against the mtime of every
+	// directory its marker walk probed, so `workspace-topology.ts` gains the
+	// async arm of its own freshness predicate (`dirMtimesStillFreshAsync` and
+	// the `dirMtimeMsAsync` it reads through) — this module's first two entries
+	// here. They are directory `stat`s on the walk that has always been the
+	// resolver's cost; the module's existing SYNC statSync walk is unbounded too
+	// and simply invisible to this audit, so the growth is the measurement
+	// catching up with async-ness, not a new hang surface. Bounding them needs
+	// the hook signal that #2523 AC4 threads, same as every other entry here.
+	"clients/workspace-topology.ts": 2,
 	"clients/zizmor-config.ts": 2,
 	"tools/ast-grep-outline.ts": 2,
 	"tools/ast-grep-replace.ts": 3,

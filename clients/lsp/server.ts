@@ -1558,16 +1558,17 @@ export function NearestRoot(
 	// session, the other half of the very transition the paragraph above
 	// handles (#3412; same shape as #2922 at the dispatch marker seam).
 	const inFlight = new Map<string, Promise<string | undefined>>();
-	// Directories a walk step probes BESIDE the walked directory itself: a
-	// pattern carrying a path segment (`prisma/schema.prisma`) is answered from a
-	// subdirectory, so creating that marker bumps the SUBDIRECTORY's mtime and
-	// the walked directory's only when the subdirectory had to be created too.
-	// Derived from this detector's own pattern table, so a new pattern shape is
-	// covered without a second list to maintain.
-	const subPathPatterns = [
-		...includePatterns,
-		...(excludePatterns ?? []),
-	].filter((pattern) => markerProbeDir(".", pattern) !== ".");
+	// The patterns whose probe reads a subdirectory of the walked directory
+	// instead of the walked directory itself: a pattern carrying a path segment
+	// (`prisma/schema.prisma`) is answered from a subdirectory, so creating that
+	// marker bumps the SUBDIRECTORY's mtime and the walked directory's own only
+	// when the subdirectory had to be created too. Derived once from this
+	// detector's pattern table, so a new pattern shape is covered on arrival
+	// without a second list to maintain.
+	const subdirPatterns: string[] = [];
+	for (const pattern of [...includePatterns, ...(excludePatterns ?? [])]) {
+		if (markerProbeDir("", pattern)) subdirPatterns.push(pattern);
+	}
 
 	return withRootMarkers(async (file: string): Promise<string | undefined> => {
 		// Cache key is the resolved directory — all files in the same dir share a root.
@@ -1613,12 +1614,12 @@ export function NearestRoot(
 				// already includes the creation and hide it for the session. Only
 				// directories up to the hit are recorded — a marker created above a
 				// hit cannot change which root is nearest.
-				for (const probeDir of new Set([
+				for (const probeDir of [
 					currentDir,
-					...subPathPatterns.map((pattern) =>
+					...subdirPatterns.map((pattern) =>
 						markerProbeDir(currentDir, pattern),
 					),
-				])) {
+				]) {
 					probedDirs.push({
 						dir: probeDir,
 						mtimeMs: await dirMtimeMsAsync(probeDir),
