@@ -2724,7 +2724,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						label: "tool-result-bootstrap",
 					})
 				: peekBootstrapClients();
-			return await bounded(
+			return bounded(
 				handleToolResult({
 					signal: ctx.signal,
 					event: event as any,

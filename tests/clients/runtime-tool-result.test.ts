@@ -46,6 +46,13 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const logLatency = vi.hoisted(() => vi.fn());
+const requestBootstrapClients = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/bootstrap.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/bootstrap.js")>();
+	requestBootstrapClients.mockImplementation(actual.requestBootstrapClients);
+	return { ...actual, requestBootstrapClients };
+});
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
 	return { ...actual, readdir: vi.fn(actual.readdir) };
@@ -70,8 +77,47 @@ const readdirMock = vi.mocked(fsp.readdir);
 const realReaddir = readdirMock.getMockImplementation()!;
 
 beforeEach(() => {
+	requestBootstrapClients.mockClear();
 	readdirMock.mockImplementation(realReaddir);
 	readdirMock.mockClear();
+});
+
+it("does not dispatch an edit when analyzer bootstrap is unavailable (#2939 M9)", async () => {
+	const env = setupTestEnvironment("pi-lens-2939-bootstrap-null-");
+	try {
+		requestBootstrapClients.mockResolvedValueOnce(null);
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const filePath = createTempFile(
+			env.tmpDir,
+			"edit.ts",
+			"export const x = 1;\n",
+		);
+		await handleToolResult({
+			event: {
+				toolName: "edit",
+				input: {
+					path: filePath,
+					oldText: "export const x = 1;",
+					newText: "export const x = 2;",
+				},
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+		expect(
+			vi.mocked((await import("../../clients/pipeline.js")).runPipeline),
+		).not.toHaveBeenCalled();
+	} finally {
+		env.cleanup();
+	}
 });
 
 describe("bash grep searchReads registration", () => {

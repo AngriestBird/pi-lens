@@ -1065,10 +1065,6 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// budgeted families rather than leaving this site to spell its
 				// own axis value (#2557 review F7).
 				hook: "tool_call",
-				// The ambient slot is populated by tool_result, after this hook has
-				// already run. Use the live tool_call signal so Escape can release
-				// this await (#2523 AC4).
-				signal: deps.ctx.signal,
 			})
 		)?.complexityClient;
 		const baseline = await complexityClient?.analyzeFile(filePath);
