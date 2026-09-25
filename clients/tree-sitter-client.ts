@@ -210,12 +210,6 @@ function createParserCounters(): TreeSitterParserCounters {
 }
 
 /**
- * `size:mtimeMs` identity for a grammar candidate, or undefined when the path
- * is absent or not a regular file. Doubles as the existence check on the
- * resolve path and as the invalidation key for the verified-preamble memo
- * (#1548) — `size` + `mtimeMs` is the codebase's standard cheap stamp.
- */
-/**
  * Where a runtime grammar fetch failed (#3409). Reported in the durable
  * `tree-sitter.log` record and used to pick the remedy the user is given:
  * "nowhere to write" and "cannot write there" are neither download failures
@@ -246,6 +240,12 @@ function grammarWriteBlockedReason(dir: string): string | undefined {
 	}
 }
 
+/**
+ * `size:mtimeMs` identity for a grammar candidate, or undefined when the path
+ * is absent or not a regular file. Doubles as the existence check on the
+ * resolve path and as the invalidation key for the verified-preamble memo
+ * (#1548) — `size` + `mtimeMs` is the codebase's standard cheap stamp.
+ */
 function grammarFileStamp(filePath: string): string | undefined {
 	try {
 		const stat = fs.statSync(filePath);
