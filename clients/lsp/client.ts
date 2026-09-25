@@ -67,6 +67,7 @@ import {
 	type TextDocumentSaveOptions,
 	type TextDocumentSyncKind,
 } from "./sync-kind.js";
+import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
@@ -3991,9 +3992,34 @@ async function sendDidSave(
 	const save = state.saveOptions;
 	if (!save) return;
 	if (!isClientAlive(state)) return;
+	// #3405 r2 (M3406-1): `text` is a SECOND full copy of bytes the server was
+	// just handed, so it is the one payload here that can be file-sized. The
+	// explicit `lsp_diagnostics` writer reads whole files with no bound of its
+	// own, so without this the same 32MB string would be framed twice. Bound it
+	// at the shared seam both writers pass through rather than at either caller.
+	//
+	// Omitting `text` is what the contract tolerates, and it is not a lost save:
+	// `DidSaveTextDocumentParams.text` is OPTIONAL ("Optional the content when
+	// saved") in the spec, FsAutoComplete — the one `includeText: true` server in
+	// the registry — types it `string option` and, given `None`, keeps the source
+	// it already holds and still runs its re-check
+	// (ionide/FsAutoComplete@85886b1, AdaptiveServerState.fs lines 2649-2673),
+	// and pi-lens only ever sends this after a landed didOpen/didChange for the
+	// same document, so the server has these bytes either way. Skipping the save
+	// outright would instead drop the diagnose trigger this PR exists to restore.
+	const limit = save.includeText
+		? exceedsLspSyncLimits(content)
+		: { tooLarge: false, reason: "" };
+	if (limit.tooLarge) {
+		recordDegradationOnce({
+			kind: "lsp-did-save-text-omitted",
+			subject: state.serverId,
+			reason: limit.reason,
+		});
+	}
 	await safeSendNotification(state.connection, "textDocument/didSave", {
 		textDocument: { uri },
-		...(save.includeText ? { text: content } : {}),
+		...(save.includeText && !limit.tooLarge ? { text: content } : {}),
 	});
 }
 

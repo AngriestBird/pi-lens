@@ -423,6 +423,17 @@ export type DegradationKind =
 	| "lsp-diagnostics-timeout"
 	| "lsp-diagnostics-unsupported"
 	/**
+	 * #3405: a `textDocument/didSave` was sent WITHOUT its `text` to a server
+	 * that negotiated `includeText: true`, because the document exceeded the
+	 * shared `exceedsLspSyncLimits` bound. The save itself still went out (the
+	 * server already received these exact bytes in the didOpen/didChange it
+	 * follows), so this is a dropped redundancy, not a dropped notification.
+	 * Subject is the server id and `recordDegradationOnce` keeps it at one row
+	 * per server per session — never one per edit, which is what a per-save
+	 * record on a large file would be.
+	 */
+	| "lsp-did-save-text-omitted"
+	/**
 	 * #3071: a live client's `onDrift` observer fired for a real resync or a
 	 * pacing-deferred heal (never for `unchanged`/`vanished`/`unheld`
 	 * bookkeeping) — `clients/lsp/index.ts`. Subject is the file path, and
