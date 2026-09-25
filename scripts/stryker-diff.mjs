@@ -8,6 +8,11 @@ import {
 	mapRelatedTests,
 } from "./lib/stryker-diff.mjs";
 
+// The PR-body corpus is deliberately real and its cold scan is slower under
+// Stryker instrumentation than in the ordinary suite. Keep this budget local
+// to the mutation command so the normal test contract remains unchanged.
+const MUTATION_TEST_TIMEOUT_MS = 30_000;
+
 function argumentValue(name, fallback) {
 	let value = fallback;
 	for (let index = 0; index < process.argv.length - 1; index += 1) {
@@ -49,6 +54,8 @@ function writeRunConfig(testFiles) {
 		"run",
 		"--configLoader",
 		"runner",
+		"--testTimeout",
+		String(MUTATION_TEST_TIMEOUT_MS),
 		...testFiles.map(shellQuote),
 	].join(" ");
 	const config = `import base from "../stryker.config.mjs";\nexport default { ...base, commandRunner: { ...base.commandRunner, command: ${JSON.stringify(command)} } };\n`;
@@ -88,7 +95,7 @@ const result = spawnSync(
 if (result.error || result.status !== 0) {
 	const exitMsg = result.error ? `: ${result.error.message}` : "";
 	console.error(
-		`mutation diff: Stryker status ${result.status ?? "unknown"}${exitMsg}`,
+		`mutation diff: no mutants evaluated; dry run or mutation execution failed (Stryker status ${result.status ?? "unknown"}${exitMsg})`,
 	);
 	process.exit(1);
 }

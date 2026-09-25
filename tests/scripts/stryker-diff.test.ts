@@ -12,6 +12,10 @@ const config = readFileSync(
 	resolve(import.meta.dirname, "../../stryker.config.mjs"),
 	"utf8",
 );
+const driver = readFileSync(
+	resolve(import.meta.dirname, "../../scripts/stryker-diff.mjs"),
+	"utf8",
+);
 
 describe("stryker diff selection", () => {
 	it.each([
@@ -110,5 +114,8 @@ describe("stryker diff selection", () => {
 		expect(config).toContain('buildCommand: "npm run build"');
 		expect(config).toContain("inPlace: true");
 		expect(config).not.toContain("clients/");
+		expect(driver).toContain('"--testTimeout"');
+		expect(driver).toContain("MUTATION_TEST_TIMEOUT_MS = 30_000");
+		expect(driver).toContain("no mutants evaluated");
 	});
 });
