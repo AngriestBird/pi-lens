@@ -78,26 +78,24 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 
 	async function runQuery(bytes: number, includeText: boolean) {
 		const clientModule = await import("../../clients/lsp/client.js");
-		const { createMockState } = await import(
-			"../clients/lsp/mock-client-state.js"
-		);
-		const { LSPService, resetLSPService } = await import(
-			"../../clients/lsp/index.js"
-		);
-		const { createLspDiagnosticsTool } = await import(
-			"../../tools/lsp-diagnostics.js"
-		);
-		const { resetDegradationLedger, getDegradationSummary } = await import(
-			"../../clients/degradation-ledger.js"
-		);
+		const { createMockState } =
+			await import("../clients/lsp/mock-client-state.js");
+		const { LSPService, resetLSPService } =
+			await import("../../clients/lsp/index.js");
+		const { createLspDiagnosticsTool } =
+			await import("../../tools/lsp-diagnostics.js");
+		const { resetDegradationLedger, getDegradationSummary } =
+			await import("../../clients/degradation-ledger.js");
 		resetDegradationLedger();
 		resetLSPService?.();
 
 		const file = path.join(tmpDir, "huge.fs");
-		// One long line would also trip the LINE bound's sibling; make it a
-		// genuine byte overrun with an ordinary line width.
-		const line = `${"x".repeat(99)}\n`;
-		fs.writeFileSync(file, line.repeat(Math.ceil(bytes / line.length)));
+		// Deliberately FEW lines (a minified-bundle shape): this must overrun the
+		// BYTE bound and nothing else, so that neutering the byte branch alone
+		// reds this file. A 100-char-per-line fixture also tripped the line bound,
+		// which made the byte mutation survive — the isolation is the point.
+		const lineWidth = Math.max(1, Math.ceil(bytes / 4));
+		fs.writeFileSync(file, `${"x".repeat(lineWidth)}\n`.repeat(4));
 
 		const state = createMockState({ root: tmpDir, serverId: "fsharp" });
 		state.saveOptions = { includeText };
@@ -198,8 +196,10 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 		// The save still goes out — dropping it would drop the diagnose trigger —
 		// but it no longer duplicates the file.
 		expect(save, "didSave was sent").toBeDefined();
-		expect(save!.params.text).toBeUndefined();
+		// The size IS the finding, so it is asserted first: the pre-fix transcript
+		// for this line is the measured payload the reviewer asked to see.
 		expect(save!.bytes).toBeLessThan(4096);
+		expect(save!.params.text).toBeUndefined();
 
 		// Bounded, once per server per session — never one row per edit.
 		const group = ledger.find((g) => g.kind === "lsp-did-save-text-omitted");
