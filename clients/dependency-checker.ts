@@ -94,6 +94,55 @@ export function parseMadgeSkips(stderr: string): {
 	return { total, local };
 }
 
+/**
+ * The ONE reader of madge's `--circular --json` contract (#3428).
+ *
+ * madge prints an array of cycles, each cycle an array of member paths —
+ * `[["src/a.ts", "src/b.ts"]]` — not a dependency graph. Upstream 8.0.0:
+ * `bin/cli.js:258-268` hands `Madge.circular()` (an Array, `lib/api.js:103`) to
+ * `output.circular`, which for `--json` is `printJSON(circular)`
+ * (`lib/output.js:71-73`). The graph OBJECT is what `--json` prints WITHOUT
+ * `--circular`, and `buildMadgeArgs` always passes `--circular`.
+ *
+ * This function exists because there were two readers and they disagreed: the
+ * whole-project scan read the array with `Object.entries`, so every cycle it
+ * reported was anchored at the array INDEX (`<root>/0`, a path that does not
+ * exist) and every member was resolved against the extension host's cwd. Both
+ * callers now share this one reader.
+ *
+ * `baseDir` is the directory madge's relative members resolve against, which is
+ * the TARGET it was pointed at (measured, madge 8.0.0: `--json <root>` prints
+ * `src/a.ts`; `--json <root>/src/a.ts` prints `a.ts`), so each caller passes
+ * the base its own target implies.
+ *
+ * Malformed JSON throws, which both callers already treat as "did not parse". A
+ * parse that is not an array does NOT throw: it yields zero cycles, so an
+ * unexpected shape reports no findings instead of turning a completed scan into
+ * a failed one (#2154 — a failed madge scan is a COLD lane in `mode=full`).
+ */
+export function parseMadgeCycles(
+	stdout: string,
+	baseDir: string,
+): { circular: CircularDep[]; circularFiles: Set<string> } {
+	const parsed = JSON.parse(stdout || "[]");
+	const cycles: string[][] = Array.isArray(parsed) ? parsed : [];
+	const circular: CircularDep[] = [];
+	const circularFiles = new Set<string>();
+
+	for (const cycle of cycles) {
+		const resolvedPaths = cycle.map((f: string) => path.resolve(baseDir, f));
+		for (const f of resolvedPaths) {
+			circularFiles.add(f);
+		}
+		circular.push({
+			file: resolvedPaths[0],
+			path: resolvedPaths,
+		});
+	}
+
+	return { circular, circularFiles };
+}
+
 export interface DepCheckResult {
 	hasCircular: boolean;
 	circular: CircularDep[];
@@ -744,26 +793,15 @@ export class DependencyChecker {
 				return { ok: false };
 			}
 
-			const output = result.stdout || "[]";
-			const parsed = JSON.parse(output);
-
-			// Madge --circular --json returns array of cycle arrays: [["a.ts", "b.ts"], ...]
-			const cycles: string[][] = Array.isArray(parsed) ? parsed : [];
-			const circular: CircularDep[] = [];
-			const circularFiles = new Set<string>();
-
-			for (const cycle of cycles) {
-				const resolvedPaths = cycle.map((f: string) =>
-					path.resolve(projectRoot, f),
-				);
-				for (const f of resolvedPaths) {
-					circularFiles.add(f);
-				}
-				circular.push({
-					file: resolvedPaths[0],
-					path: resolvedPaths,
-				});
-			}
+			// `projectRoot` is the base this lane has always used. madge resolves
+			// its members against the TARGET, which here is a single FILE, so a
+			// nested file's members come back relative to that file's directory
+			// (measured — see parseMadgeCycles). Keeping the base unchanged keeps
+			// the fold behaviour-preserving for this caller; #3435 tracks it.
+			const { circular, circularFiles } = parseMadgeCycles(
+				result.stdout || "",
+				projectRoot,
+			);
 
 			const skips = parseMadgeSkips(result.stderr || "");
 			if (skips.local.length > 0) {
@@ -1086,30 +1124,20 @@ export class DependencyChecker {
 				return { circular: [], count: 0 };
 			}
 
-			const output = result.stdout || "{}";
-			const data = JSON.parse(output);
-
-			const circular: CircularDep[] = [];
-			const circularFiles = new Set<string>();
-
-			for (const [file, deps] of Object.entries(data)) {
-				if (Array.isArray(deps) && deps.length > 0) {
-					const resolvedFile = path.resolve(file);
-					circularFiles.add(resolvedFile);
-
-					circular.push({
-						file: resolvedFile,
-						path: [resolvedFile, ...deps.map((d: string) => path.resolve(d))],
-					});
-				}
-			}
+			// The scan's target IS `projectRoot`, so that is the base madge's
+			// relative members resolve against (#3428: this site used to read the
+			// cycle array as a graph and anchor every finding at `<hostCwd>/0`).
+			const { circular, circularFiles } = parseMadgeCycles(
+				result.stdout || "",
+				projectRoot,
+			);
 
 			this.publishState(gen, circular, circularFiles);
 
-			// #2154: the one madge site that parsed a graph for this root. Every
-			// other return here (missing root, no top-level source file, madge
-			// unavailable, spawn error, parse throw) is the SAME empty shape and
-			// must not be read as "no cycles in this project".
+			// #2154: the one madge site that parsed madge's output for this root.
+			// Every other return here (missing root, no top-level source file,
+			// madge unavailable, spawn error, parse throw) is the SAME empty shape
+			// and must not be read as "no cycles in this project".
 			return { circular, count: circular.length, analyzed: true };
 		} catch (err: any) {
 			this.log(`Scan error: ${err.message}`);
