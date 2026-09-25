@@ -516,7 +516,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/debug-handles.ts": 1,
 		"clients/debug-heap.ts": 1,
 		"clients/degradation-ledger.ts": 2,
-		"clients/dependency-checker.ts": 9,
+		// 9 -> 7 (#3436): deleting `parseMadgeSkips` removed its two
+		// `Array.prototype.filter` uses; `localSkips`/the skip channel it served
+		// were structurally always zero under `--json`.
+		"clients/dependency-checker.ts": 7,
 		"clients/diagnostic-dispositions.ts": 3,
 		"clients/diagnostic-tracker.ts": 1,
 		"clients/diagnostics-publish.ts": 2,
@@ -687,7 +690,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dead-code-logger.ts": 1,
 		"clients/debug-handles.ts": 1,
 		"clients/debug-heap.ts": 1,
-		"clients/dependency-checker.ts": 9,
+		// 9 -> 8 (#3436): the `this.log(...)` line that reported madge's
+		// (always-zero) local skip count is deleted with the skip channel.
+		"clients/dependency-checker.ts": 8,
 		"clients/diagnostic-logger.ts": 4,
 		"clients/dispatch/dispatcher.ts": 4,
 		"clients/dispatch/runners/ast-grep-napi.ts": 6,
