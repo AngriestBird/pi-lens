@@ -47,7 +47,9 @@ vi.mock("../../clients/package-manager.js", async (importOriginal) => ({
 	findNodeToolBinary,
 }));
 vi.mock("../../clients/installer/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/installer/index.js")>()),
+	...(await importOriginal<
+		typeof import("../../clients/installer/index.js")
+	>()),
 	// No managed install and no installer work: this suite is about the PARSE,
 	// and resolution is pinned by dependency-checker-madge-resolution.test.ts.
 	findManagedToolBinary: vi.fn(async () => undefined),
@@ -70,7 +72,10 @@ interface MadgeCapture {
 
 function loadCapture(caseName: string): MadgeCapture {
 	return JSON.parse(
-		fs.readFileSync(path.join(FIXTURE_DIR, `${caseName}.captured.json`), "utf8"),
+		fs.readFileSync(
+			path.join(FIXTURE_DIR, `${caseName}.captured.json`),
+			"utf8",
+		),
 	);
 }
 
@@ -156,9 +161,8 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 	}
 
 	it("anchors each cycle at a real file, not the cycle's array index", async () => {
-		const { DependencyChecker } = await import(
-			"../../clients/dependency-checker.js"
-		);
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
 		writeCapturedWorkspace();
 		const capture = loadCapture("circular-two-file");
 		// madge exits 1 precisely BECAUSE it found a cycle (bin/cli.js:266-267),
@@ -198,9 +202,8 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 	});
 
 	it("resolves cycle members against the scanned root, not the host's cwd", async () => {
-		const { DependencyChecker } = await import(
-			"../../clients/dependency-checker.js"
-		);
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
 		writeCapturedWorkspace();
 		const capture = loadCapture("circular-two-file");
 		replay(capture);
@@ -222,9 +225,8 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 	});
 
 	it("reports no cycles for graph-shaped output, and still counts as analysed", async () => {
-		const { DependencyChecker } = await import(
-			"../../clients/dependency-checker.js"
-		);
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
 		writeCapturedWorkspace();
 		const capture = loadCapture("graph-without-circular");
 		replay(capture);
@@ -241,9 +243,8 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 	});
 
 	it("treats empty stdout as a completed scan with no cycles", async () => {
-		const { DependencyChecker } = await import(
-			"../../clients/dependency-checker.js"
-		);
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
 		writeCapturedWorkspace();
 		// Not red pre-fix: both readers already defaulted empty stdout to a
 		// parseable literal. It pins the `stdout || "[]"` fallback the fold now
@@ -262,9 +263,8 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 	});
 
 	it("leaves a malformed-JSON scan unanalysed rather than calling it cycle-free", async () => {
-		const { DependencyChecker } = await import(
-			"../../clients/dependency-checker.js"
-		);
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
 		writeCapturedWorkspace();
 		// The other direction of the same fallback: bytes that are not JSON must
 		// stay a FAILED scan (#2154 — `analyzed !== true` is a cold lane), so the
