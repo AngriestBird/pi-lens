@@ -699,7 +699,7 @@ export const TOOLS: ToolDefinition[] = [
 		checkCommand: "jscpd",
 		checkArgs: ["--version"],
 		installStrategy: "npm",
-		packageName: "jscpd@5.0.12", // v4's packaging bug (reprism dep missing lib/languages/) is gone in v5's ground-up Rust rewrite — verified: real per-platform native binary (jscpd-windows-x64-msvc etc. via optionalDependencies, no missing-dir regression), --min-lines/--min-tokens/--reporters/--output/--ignore all unchanged, JSON schema fields read by clients/jscpd-client.ts's parseReport() (statistics.total.*, duplicates[].firstFile/secondFile.name+start, .lines, .tokens) are identical, and it's ~50x faster on this repo (4.1s -> 76ms detection time) — closes #582
+		packageName: "jscpd@5.3.0", // v5.3.0 is the repository's exact devDependency; the v4 packaging defect that required the older v5.0.12 pin is gone, and parseReport() reads the unchanged clone-report fields.
 		binaryName: "jscpd",
 	},
 	// Structural search and dead code detection
