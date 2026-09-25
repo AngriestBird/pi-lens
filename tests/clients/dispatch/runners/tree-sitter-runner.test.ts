@@ -67,8 +67,33 @@ async function loadRunnerWithClient(isAvailable: boolean, initResult: boolean) {
  * Like loadRunnerWithClient, but with one or more queries loaded and client
  * spies for the batched (#888) and entity (#885) paths.
  */
-async function loadRunnerWithQueries(queries: unknown[]) {
+async function loadRunnerWithQueries(
+	queries: unknown[],
+	// Whether the client ended the run with the language LOADED. The real client
+	// exposes this through `getLanguage`, and a grammar it could not resolve,
+	// fetch or decode leaves it null (#3409) — the double has to model that axis
+	// or a run with no grammar is indistinguishable from a clean file here too.
+	options: { languageLoaded?: boolean; wasmAborted?: boolean } = {},
+) {
+	const languageLoaded = options.languageLoaded ?? true;
+	const wasmAborted = options.wasmAborted ?? false;
 	vi.resetModules();
+
+	if (wasmAborted) {
+		// Partial: `getSharedTreeSitterClient` must stay the real one so it still
+		// builds the mocked client class above.
+		vi.doMock("../../../../clients/tree-sitter-shared.js", async (orig) => ({
+			...(await orig<
+				typeof import("../../../../clients/tree-sitter-shared.js")
+			>()),
+			isTreeSitterWasmAborted: () => true,
+		}));
+	} else {
+		// Explicit, not merely absent: a `doMock` registered by an earlier load in
+		// this file otherwise survives `resetModules` and silently aborts the next
+		// test's runtime.
+		vi.doUnmock("../../../../clients/tree-sitter-shared.js");
+	}
 
 	const recordEntitySnapshotDiff = vi.fn(() => ({
 		added: [] as string[],
@@ -119,6 +144,7 @@ async function loadRunnerWithQueries(queries: unknown[]) {
 				init: () => Promise.resolve(true),
 				parseFile: () => Promise.resolve(null),
 				query: () => [],
+				getLanguage: () => (languageLoaded ? { name: "typescript" } : null),
 				runQueriesOnFile,
 				runQueryOnFile,
 			};
@@ -331,5 +357,66 @@ describe("tree-sitter runner — batched per-edit queries (#888)", () => {
 		expect(result.diagnostics[0]?.message).toBe(
 			"Hallucinated import 'JSONResponse' from 'django'",
 		);
+	});
+});
+
+/**
+ * #3409: on a host whose runtime cannot resolve a bare package specifier, no
+ * non-core grammar can be fetched, every parse of that language yields nothing,
+ * and `runner_complete` recorded `status: "succeeded"` with `diagnostics: 0` —
+ * byte-for-byte what a genuinely clean file records (the #1948 shape, in the
+ * grammar domain). The recurrence these two pin: a zero-diagnostic run reported
+ * as a pass without first asking whether the language was actually loaded.
+ */
+describe("tree-sitter runner — degraded grammar is not a clean file (#3409)", () => {
+	const fakeQuery = {
+		id: "fake-rule",
+		name: "fake-rule",
+		severity: "warning",
+		language: "typescript",
+		message: "fake",
+		query: "(identifier) @X",
+		metavars: ["X"],
+		has_fix: false,
+		filePath: "rules/tree-sitter-queries/typescript/fake-rule.yml",
+	};
+
+	it("does not claim success when the language's grammar never loaded", async () => {
+		const { runner, runQueriesOnFile } = await loadRunnerWithQueries(
+			[fakeQuery],
+			{ languageLoaded: false },
+		);
+		runQueriesOnFile.mockResolvedValue([]);
+
+		const result = await runner.run(createCtx("/fake/file.ts") as any);
+
+		expect(result.status).toBe("skipped");
+		expect(result.diagnostics).toHaveLength(0);
+	});
+
+	it("leaves a mid-run WASM abort to its own record instead of blaming the grammar", async () => {
+		const { runner, runQueriesOnFile } = await loadRunnerWithQueries(
+			[fakeQuery],
+			{ languageLoaded: false, wasmAborted: true },
+		);
+		runQueriesOnFile.mockResolvedValue([]);
+
+		const result = await runner.run(createCtx("/fake/file.ts") as any);
+
+		// #402's `runtime_abort` record owns this case; reporting it as a missing
+		// grammar would be the same misattribution #3409 is about.
+		expect(result.status).not.toBe("skipped");
+	});
+
+	it("still reports success for a genuinely clean file", async () => {
+		const { runner, runQueriesOnFile } = await loadRunnerWithQueries([
+			fakeQuery,
+		]);
+		runQueriesOnFile.mockResolvedValue([]);
+
+		const result = await runner.run(createCtx("/fake/file.ts") as any);
+
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toHaveLength(0);
 	});
 });

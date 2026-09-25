@@ -104,6 +104,7 @@
 		"scripts/install-selftest.mjs",
 		"scripts/lib/host-provided-deps.mjs",
 		"scripts/lib/skills-predicate.mjs",
+		"scripts/lib/web-tree-sitter-dir.mjs",
 		"scripts/lib/warm-loader-cache.mjs",
 		"scripts/warm-loader-cache.mjs",
 		"scripts/rpc-load-check.mjs",

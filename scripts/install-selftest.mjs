@@ -50,6 +50,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HOST_PROVIDED_PACKAGES } from "./lib/host-provided-deps.mjs";
 import { collectSkillEntryPaths } from "./lib/skills-predicate.mjs";
+import { resolveWebTreeSitterPackageDir } from "./lib/web-tree-sitter-dir.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
@@ -220,28 +221,31 @@ try {
 }
 
 // tree-sitter grammars — download-grammars.js postinstall writes them into
-// node_modules/web-tree-sitter/grammars/. Locate that dir via the resolved
-// web-tree-sitter package (matches tree-sitter-client's runtime strategy).
+// node_modules/web-tree-sitter/grammars/. Locate that dir through the SAME
+// shared ladder the extension runtime uses (#3409 round 1, R3418-2): this probe
+// used to resolve the BARE `web-tree-sitter` specifier and walk up, which throws
+// MODULE_NOT_FOUND inside a `bun build --compile` host — so on the very hosts pi
+// ships as, it reported the grammar asset missing while the exported wasm
+// subpath resolved fine. One ladder, one answer, for the client, the pasted
+// install fingerprint and this script.
 let grammarDetail = "tree-sitter-*.wasm missing (postinstall skipped?)";
 let hasCoreGrammar = false;
-try {
-	// web-tree-sitter restricts `exports`, so resolve its main entry and walk
-	// up to the package root (the dir literally named web-tree-sitter), where
-	// download-grammars.js writes grammars/.
-	let dir = path.dirname(require.resolve("web-tree-sitter"));
-	while (
-		path.basename(dir) !== "web-tree-sitter" &&
-		dir !== path.dirname(dir)
-	) {
-		dir = path.dirname(dir);
-	}
-	const grammarDir = path.join(dir, "grammars");
+const webTreeSitterDir = resolveWebTreeSitterPackageDir({
+	resolve: (specifier) => require.resolve(specifier),
+	packageRoot: () => pkgRoot,
+	cwd: () => process.cwd(),
+});
+if (!webTreeSitterDir) {
+	grammarDetail =
+		"web-tree-sitter package dir unresolvable (module resolver, package root and cwd)";
+} else {
+	const grammarDir = path.join(webTreeSitterDir, "grammars");
 	hasCoreGrammar = fs.existsSync(
 		path.join(grammarDir, "tree-sitter-typescript.wasm"),
 	);
-	if (hasCoreGrammar) grammarDetail = grammarDir;
-} catch (err) {
-	grammarDetail = `web-tree-sitter unresolved: ${err?.message || err}`;
+	grammarDetail = hasCoreGrammar
+		? grammarDir
+		: `tree-sitter-*.wasm missing in ${grammarDir} (postinstall skipped?)`;
 }
 record("tree-sitter grammars", "asset", hasCoreGrammar, grammarDetail);
 
