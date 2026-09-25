@@ -10,4 +10,6 @@ if git diff --cached --name-only | grep -qE '(^|/)(PR_BODY\.md|COMMIT_MSG\.txt|R
   exit 1
 fi
 
-npm run check:lockfile && npm run changelog:check && npm run lint
+npm run check:lockfile && npm run changelog:check && npm run lint && \
+  git diff --cached --name-only --diff-filter=ACMR -z | \
+  xargs -0 -r npx --no-install oxfmt --check

@@ -26,6 +26,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	collectTestFiles,
 	MAX_SELECTED_TESTS,
+	TREE_SCANNING_GOVERNANCE_TESTS,
+	changesProductionFile,
 	selectTargetedTests,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 
@@ -54,6 +56,30 @@ afterEach(() => {
 });
 
 describe("selectTargetedTests — path-mirror pass", () => {
+	it("selects the registered tree scanners for production changes", () => {
+		enterFixture();
+		for (const test of TREE_SCANNING_GOVERNANCE_TESTS)
+			write(test, "it('governance');\n");
+		write("clients/review-graph/git-identity.ts", "export {}\n");
+
+		const result = selectTargetedTests(
+			["clients/review-graph/git-identity.ts"],
+			collectTestFiles("tests"),
+		);
+
+		// Prevents tree scanners from disappearing from a production-file push
+		// because they do not import the changed module (#3426).
+		expect(changesProductionFile("clients/review-graph/git-identity.ts")).toBe(
+			true,
+		);
+		expect(result.selected).toEqual(TREE_SCANNING_GOVERNANCE_TESTS);
+	});
+
+	it("arms the registry for tools, mcp, scripts, and the root index", () => {
+		for (const file of ["tools/x.ts", "mcp/x.ts", "scripts/x.mjs", "index.ts"])
+			expect(changesProductionFile(file)).toBe(true);
+	});
+
 	it("selects the exact mirrored test path for a changed source file", () => {
 		enterFixture();
 		write("clients/foo/bar.ts", "export const x = 1;\n");
@@ -199,6 +225,18 @@ describe("selectTargetedTests — no-match fallback (F7)", () => {
 });
 
 describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)", () => {
+	it("pre-commit formats only staged files through the pinned binary (#3426)", () => {
+		const hook = fs.readFileSync(
+			path.join(repoRoot, ".husky/pre-commit"),
+			"utf8",
+		);
+		expect(hook).toContain(
+			"git diff --cached --name-only --diff-filter=ACMR -z",
+		);
+		expect(hook).toContain("npx --no-install oxfmt --check");
+		expect(hook).not.toContain("npm install oxfmt --no-save");
+	});
+
 	it.each(["1", "true"])(
 		"pre-commit exits 0 and skips without running checks when PI_LENS_SKIP_HOOKS=%s",
 		(value) => {

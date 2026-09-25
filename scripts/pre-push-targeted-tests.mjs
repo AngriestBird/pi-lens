@@ -38,6 +38,37 @@ import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
 
+// Measured on the built tree on 2026-09-25: the ten registry suites took
+// 32.68s. Keep the added population below two minutes so a production-file
+// push remains a bounded local convenience; CI is still authoritative.
+export const TREE_SCANNING_GOVERNANCE_BUDGET_MS = 120_000;
+
+// Tree scanners do not import the changed module, so path mirroring and
+// import resolution cannot discover them. The governance suite pins this
+// executable population against the scanner shape.
+export const TREE_SCANNING_GOVERNANCE_TESTS = [
+	"tests/clients/session-state-conformance.test.ts",
+	"tests/config/glossary-synonym-sweep.test.ts",
+	"tests/config/strictness-ratchet.test.ts",
+	"tests/config/hook-await-bounds.test.ts",
+	"tests/config/dmts-export-drift.test.ts",
+	"tests/config/vi-mock-export-sweep.test.ts",
+	"tests/config/degradation-kind-coverage.test.ts",
+	"tests/config/degradation-kind-order.test.ts",
+	"tests/config/sweep-floor-coverage.test.ts",
+	"tests/config/tracked-control-bytes.test.ts",
+];
+
+const PRODUCTION_ROOTS = ["clients/", "tools/", "mcp/", "scripts/"];
+
+export function changesProductionFile(file) {
+	const normalized = toPosix(file);
+	return (
+		normalized === "index.ts" ||
+		PRODUCTION_ROOTS.some((root) => normalized.startsWith(root))
+	);
+}
+
 function writeStepSummary(summary) {
 	const file = process.env.GITHUB_STEP_SUMMARY;
 	if (!file) return;
@@ -54,7 +85,7 @@ function writeSelectionSummary({
 		[
 			"### Targeted test selection",
 			"",
-			`- Changed TypeScript files: ${changedCount}`,
+			`- Changed source files: ${changedCount}`,
 			`- Selected test files: ${selectedCount}`,
 			`- Matches before cap: ${totalBeforeCap}`,
 			`- Result: ${status}`,
@@ -94,7 +125,7 @@ export function resolveDiffRange() {
 	return "origin/master...HEAD";
 }
 
-export function changedTsFiles(range) {
+export function changedFiles(range) {
 	try {
 		const out = execFileSync("git", ["diff", "--name-only", range], {
 			encoding: "utf8",
@@ -102,7 +133,7 @@ export function changedTsFiles(range) {
 		return out
 			.split("\n")
 			.map((line) => line.trim())
-			.filter((line) => line.endsWith(".ts") && !line.startsWith("dist/"));
+			.filter((line) => line.length > 0 && !line.startsWith("dist/"));
 	} catch (error) {
 		console.warn(
 			`[pre-push] could not compute diff range "${range}", falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
@@ -192,6 +223,15 @@ export function selectTargetedTests(changed, allTests) {
 		perFile.set(file, matches);
 	}
 
+	if (changed.some(changesProductionFile)) {
+		const available = new Set(allTests);
+		for (const test of TREE_SCANNING_GOVERNANCE_TESTS) {
+			if (!available.has(test)) continue;
+			if (!perFile.has(test)) perFile.set(test, new Set([test]));
+			else perFile.get(test).add(test);
+		}
+	}
+
 	const selected = new Set();
 	for (const matches of perFile.values()) {
 		for (const test of matches) selected.add(test);
@@ -264,7 +304,7 @@ function runTargetedTests(selected) {
 
 export async function main() {
 	const range = resolveDiffRange();
-	const changed = changedTsFiles(range);
+	const changed = changedFiles(range);
 	const skipBuild = process.argv.includes("--skip-build");
 
 	if (skipBuild) {
@@ -278,7 +318,7 @@ export async function main() {
 
 	if (changed === null || changed.length === 0) {
 		console.log(
-			"[pre-push] no TypeScript changes to target; build-only pass complete.",
+			"[pre-push] no source changes to target; build-only pass complete.",
 		);
 		writeSelectionSummary({
 			changedCount: changed?.length ?? 0,
@@ -335,7 +375,7 @@ export async function main() {
 	});
 
 	console.log(
-		`[pre-push] running ${selected.length} targeted test file(s) for ${changed.length} changed .ts file(s):`,
+		`[pre-push] running ${selected.length} targeted test file(s) for ${changed.length} changed source file(s):`,
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 

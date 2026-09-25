@@ -12,6 +12,12 @@ description: Run the pi-lens review → verify → merge policy over one or more
 The policy that landed the 2026-08-17 arc (11 PRs, every one adversarially
 reviewed, zero unreviewed merges). Apply it to each PR in the queue.
 
+A fix to a CI lane or workflow is accepted only when that lane's own run on
+the PR's exact head completes inside its `timeout-minutes`, with the
+acceptance surface quoted from that run's log. Any self-bound inside the lane
+must sit below the job cap by a stated margin so the loud-failure path is
+reachable.
+
 Every PR body starts with `## Why`, `## Notes for the reviewer`, and
 `## Change outline`, followed by the existing `## Summary`, `## Tests`,
 `## Blast radius`, `## Class sweep`, and `## Observability` sections. The

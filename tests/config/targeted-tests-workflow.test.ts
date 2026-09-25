@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { TREE_SCANNING_GOVERNANCE_TESTS } from "../../scripts/pre-push-targeted-tests.mjs";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW_PATH = resolve(ROOT, ".github/workflows/ci.yml");
@@ -25,6 +26,29 @@ function readWorkflow() {
 }
 
 describe("targeted advisory workflow contract (#3215)", () => {
+	it("pins every production tree-scanning governance suite (#3426)", () => {
+		const expected = [
+			"tests/clients/session-state-conformance.test.ts",
+			"tests/config/glossary-synonym-sweep.test.ts",
+			"tests/config/strictness-ratchet.test.ts",
+			"tests/config/hook-await-bounds.test.ts",
+			"tests/config/dmts-export-drift.test.ts",
+			"tests/config/vi-mock-export-sweep.test.ts",
+			"tests/config/degradation-kind-coverage.test.ts",
+			"tests/config/degradation-kind-order.test.ts",
+			"tests/config/sweep-floor-coverage.test.ts",
+			"tests/config/tracked-control-bytes.test.ts",
+		];
+		// This registry is deliberately exact: a scanner omitted here is
+		// invisible on the production-file change that should trigger it.
+		expect(TREE_SCANNING_GOVERNANCE_TESTS).toEqual(expected);
+		expect(new Set(TREE_SCANNING_GOVERNANCE_TESTS).size).toBe(expected.length);
+		for (const file of expected)
+			expect(readFileSync(resolve(ROOT, file), "utf8")).toMatch(
+				/(clients|tools|mcp|index\.ts|gitExecFileSync)/,
+			);
+	});
+
 	it("runs the selector on every PR with a full checkout and no gating power", () => {
 		const job = readWorkflow().jobs["targeted-tests-advisory"];
 		expect(job?.name).toBe("Targeted tests (advisory)");
