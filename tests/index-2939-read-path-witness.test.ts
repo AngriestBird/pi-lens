@@ -65,6 +65,10 @@ vi.mock("../clients/read-guard-logger.js", async (importOriginal) => {
 });
 
 import { agentBehaviorClient } from "../clients/agent-behavior-client.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../clients/degradation-ledger.js";
 import extension from "../index.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, type PiMock } from "./support/pi-mock.js";
@@ -93,6 +97,7 @@ const readResult = (id: string) => ({
 
 beforeEach(() => {
 	readGuardRows.length = 0;
+	resetDegradationLedger();
 	agentBehaviorClient.reset();
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2939-read-")),
@@ -122,6 +127,16 @@ describe("#2939 M11 — a read result still reaches the full handler", () => {
 			effectiveOffset: 1,
 			effectiveLimit: 3,
 		});
+		// #2523 AC5, and the other direction of the same `editClass` ternary:
+		// the read-only path uses `peekBootstrapClients()` and awaits NO
+		// analyzer-bootstrap load, so no bound can have fired on this emit.
+		// (The load installed above never completes, so a read that awaited it
+		// would be released only by the registration's own 500 ms bound.)
+		expect(
+			getDegradationSummary().filter(
+				(group) => group.kind === "hook-await-exceeded",
+			),
+		).toEqual([]);
 	});
 });
 
