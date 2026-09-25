@@ -266,6 +266,33 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		expect(client.grammarsWriteDir()).toBe(path.join(pkgDir, "grammars"));
 	});
 
+	it("refuses a resolved path with no web-tree-sitter ancestor instead of walking out to the filesystem root", async () => {
+		// The walk-up has to stop SOMEWHERE. Without the identity check at its end
+		// it returns "/" for any resolver that answers outside the package, and the
+		// write dir becomes "/grammars".
+		const stray = path.join(env.tmpDir, "elsewhere");
+		fs.mkdirSync(stray, { recursive: true });
+		fs.writeFileSync(path.join(stray, "tree-sitter.wasm"), "");
+		const emptyCwd = path.join(env.tmpDir, "empty");
+		fs.mkdirSync(emptyCwd, { recursive: true });
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
+		let instance: GrammarDirClient | undefined;
+		const client = new TreeSitterClient(false, undefined, {
+			resolveAsset: (asset: string) =>
+				instance?.resolveWebTreeSitterAsset(asset),
+			resolvePackage: (specifier: string) =>
+				specifier === "web-tree-sitter/tree-sitter.wasm"
+					? path.join(stray, "tree-sitter.wasm")
+					: moduleNotFound(specifier),
+			packageRoot: () => emptyCwd,
+			cwd: () => emptyCwd,
+		}) as unknown as GrammarDirClient;
+		instance = client;
+
+		expect(client.grammarsWriteDir()).toBeUndefined();
+	});
+
 	it("still returns undefined, and never invents a path, when web-tree-sitter is absent everywhere", async () => {
 		const { TreeSitterClient } =
 			await import("../../clients/tree-sitter-client.js");
