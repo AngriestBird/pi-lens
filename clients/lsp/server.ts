@@ -1516,6 +1516,12 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
 // --- Interactive Install Helper ---
 
 /**
+ * A resolved root plus the directories whose contents produced it. The memo is
+ * only as good as those directories' mtimes (#3412).
+ */
+type RootMemoEntry = { root: string; probedDirs: DirMtimeRecord[] };
+
+/**
  * Walk up the directory tree looking for project root markers.
  *
  * NearestRoot(includePatterns, excludePatterns?) → RootFunction
@@ -1529,12 +1535,6 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
  *
  * Equivalent to createRootDetector; exported under both names for clarity.
  */
-/**
- * A resolved root plus the directories whose contents produced it. The memo is
- * only as good as those directories' mtimes (#3412).
- */
-type RootMemoEntry = { root: string; probedDirs: DirMtimeRecord[] };
-
 export function NearestRoot(
 	includePatterns: string[],
 	excludePatterns?: string[],
