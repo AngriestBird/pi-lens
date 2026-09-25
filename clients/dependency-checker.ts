@@ -793,14 +793,18 @@ export class DependencyChecker {
 				return { ok: false };
 			}
 
-			// `projectRoot` is the base this lane has always used. madge resolves
-			// its members against the TARGET, which here is a single FILE, so a
-			// nested file's members come back relative to that file's directory
-			// (measured — see parseMadgeCycles). Keeping the base unchanged keeps
-			// the fold behaviour-preserving for this caller; #3435 tracks it.
+			// madge resolves its printed members against the TARGET, which this
+			// lane points at a single FILE, so they come back relative to that
+			// file's directory — `a.ts`/`b.ts` for a `src/a.ts` target, and
+			// `../lib/b.ts` for a cycle that leaves it (measured with madge 8.0.0,
+			// see parseMadgeCycles). Resolving them against `projectRoot` instead
+			// anchors `<root>/a.ts`, a path that does not exist, and keys the
+			// shared `circularFiles` set with it (#3435). `path.dirname` of the
+			// target is the file-independent form of "the directory madge printed
+			// relative to"; a top-level target degenerates to `projectRoot`.
 			const { circular, circularFiles } = parseMadgeCycles(
 				result.stdout || "",
-				projectRoot,
+				path.dirname(normalized),
 			);
 
 			const skips = parseMadgeSkips(result.stderr || "");
