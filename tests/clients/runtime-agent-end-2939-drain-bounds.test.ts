@@ -114,6 +114,17 @@ describe("#2939 M12 — the hook's own signal governs the deferred drain", () =>
 		expect(summary?.formatted).toBe(1);
 		expect(runtime.pendingDeferredMutationCount).toBe(0);
 	});
+
+	it("still falls back to the ambient slot when the host passes no signal", async () => {
+		// The other half of the `??`: an older host with no `ctx.signal` leaves
+		// the ambient slot as the only signal there is, and dropping the fallback
+		// would make this drain uninterruptible.
+		setAmbientAbortSignal(aborted());
+		const summary = await handleAgentEnd(deps());
+
+		expect(summary?.formatted).toBe(0);
+		expect(runtime.pendingDeferredMutationCount).toBe(1);
+	});
 });
 
 describe("#2939 W2 — work past the agent_settled bound is requeued, not dropped", () => {
