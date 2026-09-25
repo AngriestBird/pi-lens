@@ -240,6 +240,32 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		);
 	});
 
+	it("climbs to the package directory when the exported subpath lives in a subdirectory", async () => {
+		// Not today's layout (0.25.10 maps "./tree-sitter.wasm" to the package
+		// root) but the one the #381 0.26 migration may bring: an exports map that
+		// points into a subdirectory. The rung must land on the PACKAGE, never on
+		// the subdirectory that happened to hold the file.
+		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
+		fs.mkdirSync(path.join(pkgDir, "lib"), { recursive: true });
+		fs.writeFileSync(path.join(pkgDir, "lib", "tree-sitter.wasm"), "");
+		const { TreeSitterClient } =
+			await import("../../clients/tree-sitter-client.js");
+		let instance: GrammarDirClient | undefined;
+		const client = new TreeSitterClient(false, undefined, {
+			resolveAsset: (asset: string) =>
+				instance?.resolveWebTreeSitterAsset(asset),
+			resolvePackage: (specifier: string) =>
+				specifier === "web-tree-sitter/tree-sitter.wasm"
+					? path.join(pkgDir, "lib", "tree-sitter.wasm")
+					: moduleNotFound(specifier),
+			packageRoot: () => path.join(env.tmpDir, "pi-lens"),
+			cwd: () => path.join(env.tmpDir, "decoy"),
+		}) as unknown as GrammarDirClient;
+		instance = client;
+
+		expect(client.grammarsWriteDir()).toBe(path.join(pkgDir, "grammars"));
+	});
+
 	it("still returns undefined, and never invents a path, when web-tree-sitter is absent everywhere", async () => {
 		const { TreeSitterClient } =
 			await import("../../clients/tree-sitter-client.js");
@@ -293,7 +319,7 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		);
 	});
 
-	it("reports an unwritable destination as such, without spending a download on it", async () => {
+	it("reports an unwritable destination as such, without spending a download on it", async (ctx) => {
 		const readOnly = path.join(env.tmpDir, "read-only");
 		fs.mkdirSync(readOnly, { recursive: true });
 		fs.chmodSync(readOnly, 0o500);
@@ -308,7 +334,11 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		}
 		if (!enforced) {
 			fs.chmodSync(readOnly, 0o700);
-			return; // lane: the permission is not enforced for this process
+			// A VISIBLE skip (#2089): root, and most Windows ACL setups, can write
+			// into a 0o500 directory, so the case under test cannot exist there.
+			ctx.skip(
+				"this process can write into a 0o500 directory — no unwritable destination to test",
+			);
 		}
 
 		const { TreeSitterClient } =

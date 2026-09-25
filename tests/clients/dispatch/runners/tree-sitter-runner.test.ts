@@ -73,10 +73,22 @@ async function loadRunnerWithQueries(
 	// exposes this through `getLanguage`, and a grammar it could not resolve,
 	// fetch or decode leaves it null (#3409) — the double has to model that axis
 	// or a run with no grammar is indistinguishable from a clean file here too.
-	options: { languageLoaded?: boolean } = {},
+	options: { languageLoaded?: boolean; wasmAborted?: boolean } = {},
 ) {
 	const languageLoaded = options.languageLoaded ?? true;
+	const wasmAborted = options.wasmAborted ?? false;
 	vi.resetModules();
+
+	if (wasmAborted) {
+		// Partial: `getSharedTreeSitterClient` must stay the real one so it still
+		// builds the mocked client class above.
+		vi.doMock("../../../../clients/tree-sitter-shared.js", async (orig) => ({
+			...(await orig<
+				typeof import("../../../../clients/tree-sitter-shared.js")
+			>()),
+			isTreeSitterWasmAborted: () => true,
+		}));
+	}
 
 	const recordEntitySnapshotDiff = vi.fn(() => ({
 		added: [] as string[],
@@ -375,6 +387,20 @@ describe("tree-sitter runner — degraded grammar is not a clean file (#3409)", 
 
 		expect(result.status).toBe("skipped");
 		expect(result.diagnostics).toHaveLength(0);
+	});
+
+	it("leaves a mid-run WASM abort to its own record instead of blaming the grammar", async () => {
+		const { runner, runQueriesOnFile } = await loadRunnerWithQueries(
+			[fakeQuery],
+			{ languageLoaded: false, wasmAborted: true },
+		);
+		runQueriesOnFile.mockResolvedValue([]);
+
+		const result = await runner.run(createCtx("/fake/file.ts") as any);
+
+		// #402's `runtime_abort` record owns this case; reporting it as a missing
+		// grammar would be the same misattribution #3409 is about.
+		expect(result.status).not.toBe("skipped");
 	});
 
 	it("still reports success for a genuinely clean file", async () => {
