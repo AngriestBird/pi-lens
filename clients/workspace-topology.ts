@@ -291,7 +291,9 @@ function walkCacheKey(startDir: string, markerKey: string): string {
  */
 export type DirMtimeRecord = { dir: string; mtimeMs: number };
 
-function dirMtimesStillFresh(dirMtimes: readonly DirMtimeRecord[]): boolean {
+export function dirMtimesStillFresh(
+	dirMtimes: readonly DirMtimeRecord[],
+): boolean {
 	return dirMtimes.every(({ dir, mtimeMs }) => safeDirMtimeMs(dir) === mtimeMs);
 }
 
