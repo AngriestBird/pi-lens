@@ -751,6 +751,40 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		it("directory: preserves the bounded outcome for an oversized file (#3408)", async () => {
+			const tool = createLspDiagnosticsTool();
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-lsp-diag-dir-too-large-"),
+			);
+			const file = path.join(tmpDir, "huge.ts");
+			const content = `${"x".repeat(RUNTIME_CONFIG.pipeline.lspMaxFileBytes + 1)}\n`;
+			fs.writeFileSync(file, content);
+
+			try {
+				const result = (await tool.execute(
+					"diag-dir-too-large",
+					{ path: tmpDir, severity: "all" },
+					new AbortController().signal,
+					null,
+					{ cwd: tmpDir },
+				)) as any;
+
+				expect(result.details?.outcomeCounts?.too_large).toBe(1);
+				expect(result.details?.cleanFiles).toBe(0);
+				expect(String(result.content[0]?.text)).toContain(
+					"Files too large for LSP diagnostics:",
+				);
+				expect(String(result.content[0]?.text)).toContain(
+					`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+				);
+				expect(String(result.content[0]?.text)).not.toContain(
+					"No diagnostics found.",
+				);
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
 		// #2860 round 3 N5/F10: `createLspDiagnosticsTool` no longer returns a
 		// `renderResult` — the fold's only production caller
 		// (`tools/lens-diagnostics.ts`) routes rendering through its OWN

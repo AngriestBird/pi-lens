@@ -487,7 +487,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/effective-config.ts": 2,
 		"tools/lens-diagnostic-mark.ts": 4,
 		"tools/lens-diagnostics.ts": 6,
-		"tools/lsp-diagnostics.ts": 8,
+		"tools/lsp-diagnostics.ts": 10,
 		"tools/module-report.ts": 11,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 32,
