@@ -214,6 +214,14 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 	});
 
 	it("finds a grammar already on disk in the resolved package's grammars dir", async () => {
+		// The premise: c_sharp is not in `CORE` (scripts/download-grammars.ts:172),
+		// so it is never in the bundled `grammars/` dir that precedes
+		// web-tree-sitter's in `grammarSourceDirs()` — the very reason the reporter
+		// saw C# dead while typescript worked. If it is ever bundled, this pin reds
+		// and the fixture should move to another non-CORE grammar.
+		const { CORE } = await import("../../scripts/download-grammars.js");
+		expect(CORE).not.toContain("tree-sitter-c_sharp.wasm");
+
 		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
 		const grammars = path.join(pkgDir, "grammars");
 		fs.mkdirSync(grammars, { recursive: true });
