@@ -40,6 +40,7 @@ import {
 	matchesWorkspaceMemberPattern,
 	normalizeEphemeralMapKey,
 	pathsEqual,
+	toPosix,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -1465,7 +1466,7 @@ function isPermissionFsError(err: unknown): boolean {
  * stop covering a pattern shape (#3412).
  */
 function markerProbeDir(dir: string, pattern: string): string {
-	const normalized = pattern.replace(/\\/g, "/");
+	const normalized = toPosix(pattern);
 	const slash = normalized.lastIndexOf("/");
 	const parentPattern = slash >= 0 ? normalized.slice(0, slash) : "";
 	return parentPattern
