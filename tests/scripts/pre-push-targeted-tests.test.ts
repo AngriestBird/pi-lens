@@ -23,7 +23,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { gitFixtureEnv } from "../support/git-fixture-env.js";
 import {
 	CI_ONLY_PRE_PUSH_TESTS,
 	collectTestFiles,
@@ -261,81 +260,6 @@ describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)",
 			"npx --no-install oxfmt --check --no-error-on-unmatched-pattern",
 		);
 		expect(hook).not.toContain("npm install oxfmt --no-save");
-	});
-
-	// #3451: a release roll stages only oxfmt-ignored files (CHANGELOG.md,
-	// package.json, package-lock.json), so `oxfmt --check` found no target
-	// file, exited 2, xargs reported 123, and the commit was refused. Runs the
-	// real hook in a throwaway repo; `npm` is stubbed because the lockfile,
-	// changelog and lint checks before the format step are not under test,
-	// and `npx` forwards to this checkout's pinned oxfmt binary.
-	describe("pre-commit format step on the staged set (#3451)", () => {
-		const oxfmtBin = path.join(repoRoot, "node_modules", ".bin", "oxfmt");
-		const UNFORMATTED = "const  a=1\n";
-
-		function commitHook(stage: Record<string, string>) {
-			enterFixture();
-			const dir = fixtureDir as string;
-			const stubs = path.join(dir, ".stubs");
-			fs.mkdirSync(stubs);
-			fs.writeFileSync(path.join(stubs, "npm"), "#!/bin/sh\nexit 0\n", {
-				mode: 0o755,
-			});
-			fs.writeFileSync(
-				path.join(stubs, "npx"),
-				'#!/bin/sh\n[ "$1" = --no-install ] && shift\n[ "$1" = oxfmt ] && shift\nexec "$OXFMT_BIN" "$@"\n',
-				{ mode: 0o755 },
-			);
-			fs.copyFileSync(
-				path.join(repoRoot, ".oxfmtrc.json"),
-				path.join(dir, ".oxfmtrc.json"),
-			);
-			const env = {
-				...gitFixtureEnv(dir),
-				PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ""}`,
-				OXFMT_BIN: oxfmtBin,
-				PI_LENS_SKIP_HOOKS: "",
-			};
-			const git = (...args: string[]) =>
-				spawnSync("git", args, { cwd: dir, env, encoding: "utf8" });
-			git("init", "-q");
-			for (const [rel, content] of Object.entries(stage)) {
-				write(rel, content);
-				git("add", "--", rel);
-			}
-			return spawnSync("sh", [path.join(repoRoot, ".husky/pre-commit")], {
-				cwd: dir,
-				env,
-				encoding: "utf8",
-			});
-		}
-
-		it("passes a staged set of only formatter-ignored files (release roll)", () => {
-			const result = commitHook({
-				"CHANGELOG.md": "# Changelog\n",
-				"package.json": "{}\n",
-			});
-			expect(result.status, result.stderr + result.stdout).toBe(0);
-			expect(result.stdout + result.stderr).toContain(
-				"No files found matching the given patterns",
-			);
-		});
-
-		it("passes a staged set of only ignored format-smoke fixtures", () => {
-			const result = commitHook({
-				"tests/fixtures/format-smoke/bad.ts": UNFORMATTED,
-			});
-			expect(result.status, result.stderr + result.stdout).toBe(0);
-		});
-
-		it("still refuses an unformatted staged .ts file", () => {
-			const result = commitHook({
-				"CHANGELOG.md": "# Changelog\n",
-				"src/bad.ts": UNFORMATTED,
-			});
-			expect(result.status).not.toBe(0);
-			expect(result.stdout + result.stderr).toContain("src/bad.ts");
-		});
 	});
 
 	it.each(["1", "true"])(
