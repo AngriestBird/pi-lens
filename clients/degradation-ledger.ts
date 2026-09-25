@@ -609,6 +609,19 @@ export type DegradationKind =
 	 * `clients/installer/index.ts`'s `recordArchiveExtractionDegradation`.
 	 * Subject is `<toolId>:<format>`, reason names the extraction failure.
 	 */
+	/**
+	 * #3436: madge's `--warning` is inert under `--json` (its CLI gates the flag
+	 * on `!program.json`) and, ungated, prints the skip list to STDOUT where it
+	 * would corrupt the parsed JSON — so neither madge lane (the turn-end
+	 * `checkFilesBatch` and the session-start `scanProject`) can see which LOCAL
+	 * files madge failed to resolve, and such a file could hide a cycle.
+	 * Recorded from `parseMadgeCycles`, the one reader both lanes pass through,
+	 * ONCE per session/root (`recordDegradationOnce`), because the gap is a
+	 * property of the argv, not of any one scan. Subject is the project root.
+	 * Replaces the removed `parseMadgeSkips`/`localSkips` discriminator, which
+	 * was structurally always zero.
+	 */
+	| "madge-skip-visibility-unavailable"
 	| "managed-tool-install"
 	| "managed-tool-refresh"
 	/** A complete MCP result exceeded the hard input budget (#2848). */

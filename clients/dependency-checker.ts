@@ -10,6 +10,7 @@
  */
 
 import type { AnalysedRootSignal } from "./analysed-root.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -55,43 +56,17 @@ export function buildMadgeArgs(target: string, projectRoot: string): string[] {
 	if (fs.existsSync(tsConfig)) {
 		args.push("--ts-config", tsConfig);
 	}
-	// --warning surfaces files madge couldn't resolve into the graph (to stderr;
-	// stdout JSON is unaffected). Without it those skips are SILENT — and a
-	// skipped *local* file could hide a real cycle. We log them (see
-	// parseMadgeSkips) instead of discarding stderr.
-	args.push("--warning", "--json", target);
+	// No `--warning`: madge gates it on `!program.json` (bin/cli.js:195) and this
+	// argv always passes `--json`, so the flag is inert; ungated it prints the
+	// skipped-file list to STDOUT (lib/output.js), which would corrupt the JSON
+	// this reader parses. The skip list is therefore unreachable through any
+	// argv this builder emits — `parseMadgeSkips` could only ever return zeros
+	// (#3436). The lost visibility is disclosed once per session/root by
+	// `recordDegradationOnce` from `parseMadgeCycles`, the one reader both
+	// madge lanes pass through, instead of parsed from bytes madge never
+	// writes.
+	args.push("--json", target);
 	return args;
-}
-
-/**
- * Parse madge's `--warning` stderr for skipped (unresolvable) files. External
- * package specifiers (bare names / subpaths like `web-tree-sitter`,
- * `vitest/config`) are expected — madge doesn't traverse node_modules. We flag
- * only **local** skips (relative/absolute paths), which are the ones that could
- * silently drop an internal edge and hide a cycle.
- *
- * @returns total skip count and the subset that look local.
- */
-export function parseMadgeSkips(stderr: string): {
-	total: number;
-	local: string[];
-} {
-	const lines = (stderr || "").split(/\r?\n/);
-	const headerIdx = lines.findIndex((l) => /Skipped\s+\d+\s+file/i.test(l));
-	if (headerIdx === -1) return { total: 0, local: [] };
-	const total =
-		Number.parseInt(
-			lines[headerIdx].match(/Skipped\s+(\d+)/i)?.[1] ?? "0",
-			10,
-		) || 0;
-	const specifiers = lines
-		.slice(headerIdx + 1)
-		.map((l) => l.trim())
-		.filter(Boolean);
-	const local = specifiers.filter(
-		(s) => s.startsWith(".") || s.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(s),
-	);
-	return { total, local };
 }
 
 /**
@@ -119,10 +94,19 @@ export function parseMadgeSkips(stderr: string): {
  * parse that is not an array does NOT throw: it yields zero cycles, so an
  * unexpected shape reports no findings instead of turning a completed scan into
  * a failed one (#2154 — a failed madge scan is a COLD lane in `mode=full`).
+ *
+ * This reader is also the ONE place both madge lanes (the turn-end
+ * `runMadgeSpawn` and the session-start `runScanProject`) turn bytes into
+ * findings, so the argv's blind spot is recorded here rather than once per
+ * caller (#3436). `projectRoot` is the ledger subject, not the resolve
+ * `baseDir`: a single-file target resolves members against its own directory
+ * but the gap is a property of the project's scan, disclosed once per
+ * session/root.
  */
 function parseMadgeCycles(
 	stdout: string,
 	baseDir: string,
+	projectRoot: string,
 ): { circular: CircularDep[]; circularFiles: Set<string> } {
 	const parsed = JSON.parse(stdout || "[]");
 	const cycles: string[][] = Array.isArray(parsed) ? parsed : [];
@@ -140,6 +124,19 @@ function parseMadgeCycles(
 		});
 	}
 
+	// madge's `--warning` is inert under `--json` (bin/cli.js:195 gates it on
+	// `!program.json`) and, ungated, prints the skip list to stdout where it
+	// would corrupt the JSON this reader parses, so no argv `buildMadgeArgs`
+	// emits can report which LOCAL files madge failed to resolve. A skipped
+	// local file can hide a real cycle, so the gap is disclosed once per
+	// session/root instead of being read as a clean graph (#3436).
+	recordDegradationOnce({
+		kind: "madge-skip-visibility-unavailable",
+		subject: projectRoot,
+		reason:
+			"madge --warning is inert under --json; skipped-file visibility is unavailable for this scan",
+	});
+
 	return { circular, circularFiles };
 }
 
@@ -148,9 +145,6 @@ export interface DepCheckResult {
 	circular: CircularDep[];
 	checked: boolean;
 	cacheHit: boolean;
-	/** Count of LOCAL files madge skipped (couldn't resolve) — a potential
-	 * silent cycle-miss. Undefined when not checked. */
-	localSkips?: number;
 }
 
 /**
@@ -749,7 +743,6 @@ export class DependencyChecker {
 			),
 			checked: true,
 			cacheHit: false,
-			localSkips: spawnResult.localSkips,
 		};
 	}
 
@@ -769,7 +762,6 @@ export class DependencyChecker {
 				ok: true;
 				circular: CircularDep[];
 				circularFiles: Set<string>;
-				localSkips: number;
 		  }
 		| { ok: false }
 	> {
@@ -805,20 +797,13 @@ export class DependencyChecker {
 			const { circular, circularFiles } = parseMadgeCycles(
 				result.stdout || "",
 				path.dirname(normalized),
+				projectRoot,
 			);
-
-			const skips = parseMadgeSkips(result.stderr || "");
-			if (skips.local.length > 0) {
-				this.log(
-					`madge skipped ${skips.local.length} local file(s) (possible silent cycle-miss): ${skips.local.slice(0, 5).join(", ")}`,
-				);
-			}
 
 			return {
 				ok: true,
 				circular,
 				circularFiles,
-				localSkips: skips.local.length,
 			};
 		} catch (err: any) {
 			this.log(`Check error: ${err.message}`);
@@ -1034,7 +1019,6 @@ export class DependencyChecker {
 				),
 				checked: true,
 				cacheHit: false,
-				localSkips: spawnResult.localSkips,
 			});
 		}
 
@@ -1133,6 +1117,7 @@ export class DependencyChecker {
 			// cycle array as a graph and anchor every finding at `<hostCwd>/0`).
 			const { circular, circularFiles } = parseMadgeCycles(
 				result.stdout || "",
+				projectRoot,
 				projectRoot,
 			);
 

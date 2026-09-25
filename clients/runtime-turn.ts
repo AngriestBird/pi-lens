@@ -2282,13 +2282,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				const absPath = path.resolve(cwd, file);
 				const depResult = depResults.get(absPath);
 				if (!depResult) continue;
-				if (depResult.localSkips && depResult.localSkips > 0) {
-					// Not silent: a skipped LOCAL import means madge couldn't resolve
-					// it into the graph, so a cycle through it would be missed.
-					dbg(
-						`turn_end: madge skipped ${depResult.localSkips} local file(s) resolving ${file} — possible silent cycle-miss`,
-					);
-				}
 				if (depResult.hasCircular && depResult.circular.length > 0) {
 					// Whole-project circular deps are surfaced in lens_diagnostics via the
 					// session-start `madge` cache + extractor; this per-file turn-end pass
