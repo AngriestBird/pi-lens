@@ -75,15 +75,17 @@ export function capMutationFiles(files, maxFiles = DEFAULT_MAX_FILES) {
  */
 export function parseChangedLineRanges(diffText) {
 	const ranges = new Map();
-	let file = null;
+	// git always emits the "+++ b/<path>" header before that file's hunks, so
+	// `file` is set by the time a hunk header matches.
+	let file;
 	for (const line of diffText.split("\n")) {
 		const fileMatch = DIFF_FILE_RE.exec(line);
 		if (fileMatch) {
 			file = fileMatch[1];
-			if (!ranges.has(file)) ranges.set(file, []);
+			ranges.set(file, []);
 			continue;
 		}
-		const hunk = file === null ? null : HUNK_HEADER_RE.exec(line);
+		const hunk = HUNK_HEADER_RE.exec(line);
 		if (!hunk) continue;
 		const newStart = Number(hunk[1]);
 		const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
