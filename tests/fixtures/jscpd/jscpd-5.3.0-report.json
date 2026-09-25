@@ -1,0 +1,21 @@
+{
+	"statistics": {
+		"total": {
+			"clones": 4,
+			"duplicatedLines": 49,
+			"duplicatedTokens": 235,
+			"lines": 7197,
+			"percentage": 0.6808392385716271,
+			"sources": 2,
+			"tokens": 28253
+		}
+	},
+	"duplicates": [
+		{
+			"firstFile": { "name": "index.ts", "start": 1324 },
+			"secondFile": { "name": "index.ts", "start": 1638 },
+			"lines": 13,
+			"tokens": 62
+		}
+	]
+}
