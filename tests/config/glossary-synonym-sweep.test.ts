@@ -769,7 +769,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.resolve` calls and two `path:` members between them) folded into
 		// one shared `parseMadgeCycles` reader with one of each. Same senses,
 		// one reader of the contract instead of two.
-		"clients/dependency-checker.ts": 29,
+		// 29 -> 30 (#3435): the single-file lane now derives its base with
+		// `path.dirname(target)` instead of passing `projectRoot` through — one
+		// more `path` use, same sense (a path operation).
+		"clients/dependency-checker.ts": 30,
 		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
