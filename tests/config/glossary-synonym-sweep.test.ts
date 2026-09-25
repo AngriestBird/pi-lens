@@ -963,7 +963,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/effective-config.ts": 2,
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
-		"tools/lsp-diagnostics.ts": 9,
+		"tools/lsp-diagnostics.ts": 10,
 		"tools/lsp-navigation.ts": 14,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
