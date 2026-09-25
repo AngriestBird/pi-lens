@@ -86,6 +86,8 @@ flowchart TD
 
     SESSION["Session lifecycle<br/>primary, sequential replacement, concurrent secondary"]
     SINKS["Observability sinks<br/>latency.log, degradation ledger, bounded telemetry,<br/>cache observability, cascade and tree-sitter logs"]
+    CONFIG["Config-core<br/>resolve, merge, deny"]
+    REVIEWGRAPH["Review-graph intelligence<br/>call graph, reverse deps, import resolution"]
 
     HOST --> WRAP
     HOST -->|tool_call, raw| RG
@@ -100,6 +102,10 @@ flowchart TD
     PLAN --> STRUCT
     PIPE --> POOL
     PIPE --> BUS
+    CONFIG --> PIPE
+    CONFIG --> PLAN
+    STRUCT --> REVIEWGRAPH
+    REVIEWGRAPH --> CASC
     POOL --> DIAGS
     DIAGS --> CASC
     RUN --> STORES
@@ -130,8 +136,8 @@ flowchart TD
 Architecture-level view, updated when a lane changes. Per-tool inventories live
 in [features](docs/features.md) and
 [language coverage](docs/language-coverage.md). Today the edit-time lane carries
-45+ runner modules over 35+ file kinds, and the LSP lane speaks to a dozen-plus
-language servers.
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to 46
+language server definitions.
 
 The gating box is an abstraction, not a call order. Freshness covers several
 independent mechanisms: path freshness against scan time, past-EOF line checks,
@@ -194,6 +200,8 @@ expects to be operated.
 - [Custom rules](docs/custom-rules.md) — project ast-grep and tree-sitter rules
 - [MCP server](docs/mcp.md) — experimental MCP server for Claude Code and
   other MCP clients
+- [Architecture decision records](docs/adr/README.md) — settled design
+  decisions, linked from the engineering-defect catalog
 
 ## Contributing
 
