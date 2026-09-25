@@ -5702,7 +5702,7 @@ async function _doBuildGraph(
 				filesToBuild,
 				ignoredIds,
 				resolveIdentity,
-		  );
+			);
 	const graph = resumed?.graph ?? createEmptyGraph();
 	const filesToExtract = resumed?.remaining ?? filesToBuild;
 	const treeSitterClient = getSharedTreeSitterClient();
