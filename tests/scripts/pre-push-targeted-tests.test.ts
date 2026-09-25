@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	CI_ONLY_PRE_PUSH_TESTS,
 	collectTestFiles,
 	MAX_SELECTED_TESTS,
 	TREE_SCANNING_GOVERNANCE_TESTS,
@@ -94,6 +95,28 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		expect(result.selected).toEqual(["tests/clients/foo/bar.test.ts"]);
 		expect(result.unmatched).toEqual([]);
 		expect(result.capped).toBe(false);
+	});
+
+	it("defers a CI-only real-spawn suite to CI and reports it (#3426 H3432-1)", () => {
+		enterFixture();
+		const ciOnlyFile = Object.keys(CI_ONLY_PRE_PUSH_TESTS)[0];
+		expect(ciOnlyFile).toBeDefined();
+		write(ciOnlyFile as string, "it('hook', () => {});\n");
+
+		const allTests = collectTestFiles("tests");
+		const prePush = selectTargetedTests([ciOnlyFile as string], allTests);
+		// The budget-busting suite never enters the local pre-push selection…
+		expect(prePush.selected).toEqual([]);
+		// …and its deferral is disclosed, never silently dropped.
+		expect(prePush.excludedCiOnly).toEqual([ciOnlyFile]);
+		expect(prePush.capped).toBe(false);
+
+		// The CI job admits it through the same production entry point.
+		const ci = selectTargetedTests([ciOnlyFile as string], allTests, {
+			includeCiOnly: true,
+		});
+		expect(ci.selected).toEqual([ciOnlyFile]);
+		expect(ci.excludedCiOnly).toEqual([]);
 	});
 
 	it("always includes a changed test file itself", () => {

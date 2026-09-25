@@ -7,6 +7,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS: string[];
 
 export const TREE_SCANNING_GOVERNANCE_BUDGET_MS: number;
 
+/** CI-only suites (file → why it cannot run in pre-push), #3426 H3432-1. */
+export const CI_ONLY_PRE_PUSH_TESTS: Record<string, string>;
+
 export function resolveDiffRange(): string;
 
 export function changesProductionFile(file: string): boolean;
@@ -20,11 +23,14 @@ export interface TargetedTestSelection {
 	unmatched: string[];
 	capped: boolean;
 	totalBeforeCap: number;
+	/** CI-only suites removed from `selected` for the local pre-push caller. */
+	excludedCiOnly: string[];
 }
 
 export function selectTargetedTests(
 	changed: string[],
 	allTests: string[],
+	options?: { includeCiOnly?: boolean },
 ): TargetedTestSelection;
 
 export function main(): Promise<number>;

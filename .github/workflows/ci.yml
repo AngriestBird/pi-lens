@@ -263,7 +263,9 @@ jobs:
         run: npm run build
 
       - name: Run targeted tests
-        run: node scripts/pre-push-targeted-tests.mjs --skip-build
+        # --include-ci-only admits the real-spawn suites that exceed the local
+        # pre-push budget (#3426 H3432-1); this job is their CI row.
+        run: node scripts/pre-push-targeted-tests.mjs --skip-build --include-ci-only
 
   test:
     name: Unit tests
