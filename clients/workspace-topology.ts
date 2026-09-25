@@ -326,7 +326,7 @@ export function dirMtimesStillFreshAsync(
  * sides: `prisma/` not existing yet is a recordable state, and the record must
  * compare unequal once it is created (#3412).
  */
-export function dirMtimeMsAsync(dir: string): Promise<number> {
+function dirMtimeMsAsync(dir: string): Promise<number> {
 	return fs.promises.stat(dir).then(
 		(stats) => stats.mtimeMs,
 		() => -1,
