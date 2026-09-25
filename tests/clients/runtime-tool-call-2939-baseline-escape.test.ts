@@ -25,12 +25,43 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const loadDelayMs = 30_000;
+/**
+ * The analyzer-bootstrap load, held open until a case releases it. No timer:
+ * the point is a load still IN FLIGHT when the caller aborts, and a raw
+ * raw timer wait would be a new `raw-timer-wait` population entry for a wait
+ * this file does not actually need.
+ */
+const pendingLoad = vi.hoisted(() => ({
+	resolve: undefined as ((clients: unknown) => void) | undefined,
+}));
 
-vi.mock("../../clients/lsp/index.js", async () => {
+const LOADED_CLIENTS = {
+	complexityClient: {
+		isSupportedFile: () => true,
+		analyzeFile: async () => ({
+			maintainabilityIndex: 70,
+			cognitiveComplexity: 1,
+			maxNestingDepth: 1,
+			linesOfCode: 1,
+			maxCyclomaticComplexity: 1,
+			codeEntropy: 0,
+		}),
+	},
+	biomeClient: {},
+	ruffClient: {},
+	metricsClient: {},
+};
+
+// Partial mock (#2281 sweep): every real export stays, only the two accessors
+// `handleToolCall` reaches for are replaced, so nothing here spins up a real
+// LSP client for an auto-touch this case does not measure.
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/lsp/index.js")>();
 	const { makeLspServiceDouble } =
 		await import("../support/lsp-service-double.js");
 	return {
+		...actual,
 		getLSPService: () => makeLspServiceDouble({}),
 		resetLSPService: () => {},
 	};
@@ -40,28 +71,9 @@ vi.mock("../../clients/bootstrap.js", async () => {
 	const { bootstrapSeamMock } = await import("../support/bootstrap-mock.js");
 	return bootstrapSeamMock(
 		() =>
-			new Promise((resolve) =>
-				setTimeout(
-					() =>
-						resolve({
-							complexityClient: {
-								isSupportedFile: () => true,
-								analyzeFile: async () => ({
-									maintainabilityIndex: 70,
-									cognitiveComplexity: 1,
-									maxNestingDepth: 1,
-									linesOfCode: 1,
-									maxCyclomaticComplexity: 1,
-									codeEntropy: 0,
-								}),
-							},
-							biomeClient: {},
-							ruffClient: {},
-							metricsClient: {},
-						}),
-					loadDelayMs,
-				),
-			),
+			new Promise((resolve) => {
+				pendingLoad.resolve = resolve;
+			}),
 	);
 });
 
@@ -75,6 +87,7 @@ let runtime: RuntimeCoordinator;
 let filePath: string;
 
 beforeEach(() => {
+	pendingLoad.resolve = undefined;
 	env = setupTestEnvironment("pi-lens-2939-escape-");
 	runtime = new RuntimeCoordinator();
 	runtime.projectRoot = env.tmpDir;
@@ -109,20 +122,26 @@ describe("#2939 M7 — Escape releases the complexity-baseline demand", () => {
 	it("returns without waiting the bootstrap load out when the hook signal is already aborted", async () => {
 		const controller = new AbortController();
 		controller.abort();
+		// Fake timers only as a deterministic microtask/timer pump; no wall clock
+		// is spent and no timer is armed by this file.
 		vi.useFakeTimers();
 
 		let settled = false;
 		const call = handleToolCall(deps(controller.signal)).then(() => {
 			settled = true;
 		});
-		// Zero fake time: only microtasks. With the signal forwarded the demand
-		// fails open immediately, so the hook is already done.
 		await vi.advanceTimersByTimeAsync(0);
+
+		// Nothing has released the load, and the hook is already done: the
+		// aborted signal reached the demand, which failed open at once. (The
+		// shared double answers null before even starting the load; production
+		// starts it and abandons the wait — either way the wait is released by
+		// the signal, which is the axis under test.)
 		expect(settled).toBe(true);
 		expect(runtime.complexityBaselines.size).toBe(0);
 
-		// Drain the abandoned load so nothing dangles into the next case.
-		await vi.advanceTimersByTimeAsync(loadDelayMs);
+		// Let the abandoned load settle so nothing dangles into the next case.
+		pendingLoad.resolve?.(LOADED_CLIENTS);
 		await call;
 	});
 
@@ -130,7 +149,8 @@ describe("#2939 M7 — Escape releases the complexity-baseline demand", () => {
 		// The inverse direction: a live signal must not short-circuit the demand.
 		vi.useFakeTimers();
 		const call = handleToolCall(deps(new AbortController().signal));
-		await vi.advanceTimersByTimeAsync(loadDelayMs);
+		await vi.advanceTimersByTimeAsync(0);
+		pendingLoad.resolve?.(LOADED_CLIENTS);
 		await call;
 
 		expect(runtime.complexityBaselines.size).toBe(1);
