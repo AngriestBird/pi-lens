@@ -105,6 +105,14 @@ type GrammarDirClient = {
 	};
 };
 
+/**
+ * A grammar filename with no entry in `scripts/grammars.lock.json`, so the
+ * read-back case pins directory resolution without depending on which real
+ * grammars this host happens to have downloaded (CI has none in
+ * `node_modules/web-tree-sitter/grammars`).
+ */
+const GRAMMAR_FIXTURE = "tree-sitter-unpinned3409.wasm";
+
 function moduleNotFound(id: string): never {
 	const err = new Error(`Cannot find module '${id}'`) as Error & {
 		code?: string;
@@ -172,13 +180,15 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 
 		// Shape, not an absolute path: node_modules may be a symlink in a
 		// worktree, so require.resolve's realpath answer is not textually
-		// predictable. The last assertion ties it to the real installed package
-		// and to the grammar the issue names.
+		// predictable. The last assertion ties it to the REAL installed package
+		// through a file the package itself ships — `grammars/` is populated by a
+		// postinstall download and is EMPTY in CI, so asserting a grammar here
+		// would pin the install lottery rather than the resolution.
 		expect(dir).toBeDefined();
 		expect(path.basename(dir as string)).toBe("grammars");
 		expect(path.basename(path.dirname(dir as string))).toBe("web-tree-sitter");
 		expect(
-			fs.existsSync(path.join(dir as string, "tree-sitter-c_sharp.wasm")),
+			fs.existsSync(path.join(path.dirname(dir as string), "tree-sitter.wasm")),
 		).toBe(true);
 	});
 
@@ -216,37 +226,29 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 	});
 
 	it("finds a grammar already on disk in the resolved package's grammars dir", async () => {
-		// The premise: c_sharp is not in `CORE` (scripts/download-grammars.ts:172),
-		// so it is never in the bundled `grammars/` dir that precedes
-		// web-tree-sitter's in `grammarSourceDirs()` — the very reason the reporter
-		// saw C# dead while typescript worked. If it is ever bundled, this pin reds
-		// and the fixture should move to another non-CORE grammar.
-		const { CORE } = await import("../../scripts/download-grammars.js");
-		expect(CORE).not.toContain("tree-sitter-c_sharp.wasm");
-
 		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
 		const grammars = path.join(pkgDir, "grammars");
 		fs.mkdirSync(grammars, { recursive: true });
 		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
-		// The real pinned bytes: resolveGrammarFile verifies the wasm preamble
-		// AND the sha256 pinned in scripts/grammars.lock.json (#1548/#1760), so a
-		// stub body would be rejected as poisoned and prove nothing.
-		const realWasm = path.join(
-			process.cwd(),
-			"node_modules",
-			"web-tree-sitter",
-			"grammars",
-			"tree-sitter-c_sharp.wasm",
+		// A real wasm preamble: `resolveGrammarFile` rejects a body without it as
+		// poisoned (#1548), so a three-byte stub would prove nothing. The filename
+		// is deliberately NOT one of the pinned grammars: with no entry in
+		// scripts/grammars.lock.json the sha256 check is "cannot verify" rather
+		// than a mismatch (#1760), which keeps this case about WHERE the file was
+		// found — the only thing #3409 changed — and off the install lottery of
+		// which real grammars happen to be on this host.
+		fs.writeFileSync(
+			path.join(grammars, GRAMMAR_FIXTURE),
+			Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
 		);
-		fs.copyFileSync(realWasm, path.join(grammars, "tree-sitter-c_sharp.wasm"));
 		const client = await hoistedHostClient(
 			pkgDir,
 			path.join(env.tmpDir, "decoy"),
 			path.join(env.tmpDir, "pi-lens"),
 		);
 
-		expect(client.resolveGrammarFile("tree-sitter-c_sharp.wasm")).toBe(
-			path.join(grammars, "tree-sitter-c_sharp.wasm"),
+		expect(client.resolveGrammarFile(GRAMMAR_FIXTURE)).toBe(
+			path.join(grammars, GRAMMAR_FIXTURE),
 		);
 	});
 
@@ -461,7 +463,7 @@ describe("#3409 normal host — behaviour unchanged", () => {
 		expect(path.basename(dir as string)).toBe("grammars");
 		expect(path.basename(path.dirname(dir as string))).toBe("web-tree-sitter");
 		expect(
-			fs.existsSync(path.join(dir as string, "tree-sitter-typescript.wasm")),
+			fs.existsSync(path.join(path.dirname(dir as string), "tree-sitter.wasm")),
 		).toBe(true);
 	});
 
