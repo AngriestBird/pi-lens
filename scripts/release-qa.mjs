@@ -1964,9 +1964,7 @@ const ROW_PROBES = {
 			const shadowLine = (text) =>
 				text
 					.split(/\r?\n/)
-					.find((candidate) =>
-						candidate.includes("config-location-shadowed"),
-					);
+					.find((candidate) => candidate.includes("config-location-shadowed"));
 			const firstLine = shadowLine(first.text);
 			const secondLine = shadowLine(second.text);
 			const namesShadowed = (line) =>
