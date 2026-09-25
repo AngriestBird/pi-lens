@@ -8,5 +8,8 @@ section: Fixed
   manifest scaffolded below an already-resolved root (`swift package init` in a
   subdirectory, a new `package.json`, `prisma/schema.prisma` written into an
   existing `prisma/`) moves the root on the next file touch, and a manifest
-  deleted at the resolved root falls back to the outer project — neither needs a
-  restart any more. All 45 marker detectors share the one seam (refs #3412).
+  deleted at the resolved root falls back to the outer project. A hit also
+  expires on the shared 2 s re-check cadence, so even a change a directory mtime
+  cannot see — one made inside the same timestamp tick on a 1 s-granularity
+  volume — costs one window instead of a restart. All 45 marker detectors share
+  the one seam (refs #3412).
