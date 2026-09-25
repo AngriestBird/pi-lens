@@ -9,6 +9,9 @@ section: Fixed
   ever be analysed: symbol search, module reports and structural rules stayed
   degraded forever while the notification blamed package-manager build scripts
   and the network. Both the read and the write path now resolve web-tree-sitter
-  through a subpath that works there, the report names the real cause (nothing
-  resolved, or the directory is not writable), and a tree-sitter run whose
-  grammar never loaded is recorded as a skip instead of a clean pass.
+  through a subpath that works there — and only accept a directory that really is
+  that package, so a fetched grammar can never land in an unrelated tree — the
+  report names the real cause (nothing resolved, or the directory is not
+  writable), a tree-sitter run whose grammar never loaded is recorded as a skip
+  instead of a clean pass, and `scripts/install-selftest.mjs` stops reporting the
+  grammar asset missing on those same hosts.
