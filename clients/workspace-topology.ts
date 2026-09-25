@@ -303,14 +303,20 @@ function dirMtimesStillFresh(dirMtimes: readonly DirMtimeRecord[]): boolean {
  * directory there would block the event loop the walk deliberately keeps free.
  * Both arms live here so "is this recorded walk still current" has one owner
  * (#3412).
+ *
+ * Written with promise combinators rather than `await`, along with the two
+ * readers below, so the ONLY place that waits on these stats is the caller's
+ * `await bounded(...)` — a hook-path await that a later editor cannot leave
+ * unbounded, instead of an inner await bounded only by a registry admission
+ * (#3412 review round 1, M-3421-02).
  */
-export async function dirMtimesStillFreshAsync(
+export function dirMtimesStillFreshAsync(
 	dirMtimes: readonly DirMtimeRecord[],
 ): Promise<boolean> {
-	const current = await Promise.all(
-		dirMtimes.map(({ dir }) => dirMtimeMsAsync(dir)),
+	return Promise.all(dirMtimes.map(({ dir }) => dirMtimeMsAsync(dir))).then(
+		(current) =>
+			dirMtimes.every(({ mtimeMs }, index) => current[index] === mtimeMs),
 	);
-	return dirMtimes.every(({ mtimeMs }, index) => current[index] === mtimeMs);
 }
 
 /**
@@ -320,12 +326,37 @@ export async function dirMtimesStillFreshAsync(
  * sides: `prisma/` not existing yet is a recordable state, and the record must
  * compare unequal once it is created (#3412).
  */
-export async function dirMtimeMsAsync(dir: string): Promise<number> {
-	try {
-		return (await fs.promises.stat(dir)).mtimeMs;
-	} catch {
-		return -1;
-	}
+export function dirMtimeMsAsync(dir: string): Promise<number> {
+	return fs.promises.stat(dir).then(
+		(stats) => stats.mtimeMs,
+		() => -1,
+	);
+}
+
+/** One freshness record per directory, read in parallel (#3412). */
+export function dirMtimeRecordsAsync(
+	dirs: readonly string[],
+): Promise<DirMtimeRecord[]> {
+	return Promise.all(
+		dirs.map((dir) =>
+			dirMtimeMsAsync(dir).then((mtimeMs) => ({ dir, mtimeMs })),
+		),
+	);
+}
+
+/**
+ * Records for directories whose mtime could NOT be read — because the caller's
+ * bound fired, so the answer is unknown rather than absent. `NaN` compares
+ * unequal to every mtime including itself, so an entry carrying one of these
+ * can never be served: the walk's answer is still returned, it is simply not
+ * memoized. Unknown must never be spelled as a number a directory could
+ * actually have, and dropping the directory from the signature (recording
+ * nothing) would hide every later change in it (#3412 review round 1, S9).
+ */
+export function unknownDirMtimeRecords(
+	dirs: readonly string[],
+): DirMtimeRecord[] {
+	return dirs.map((dir) => ({ dir, mtimeMs: Number.NaN }));
 }
 
 /**

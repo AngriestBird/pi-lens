@@ -67,9 +67,13 @@ import { resolvePackagePath } from "../package-root.js";
 import { resolveToolCwd } from "../tool-cwd.js";
 import {
 	type DirMtimeRecord,
-	dirMtimeMsAsync,
+	dirMtimeRecordsAsync,
 	dirMtimesStillFreshAsync,
+	unknownDirMtimeRecords,
 } from "../workspace-topology.js";
+import { bounded } from "../deadline-utils.js";
+import { FRESHNESS_CADENCE_MS } from "../freshness-cadence.js";
+import { HOOK_WALL_BUDGET_MS } from "../hook-budgets.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import {
 	hasCargoWorkspaceTable,
@@ -1516,10 +1520,36 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
 // --- Interactive Install Helper ---
 
 /**
- * A resolved root plus the directories whose contents produced it. The memo is
- * only as good as those directories' mtimes (#3412).
+ * A resolved root, the directories whose contents produced it, and when the walk
+ * that produced it ran. The memo is only as good as those directories' mtimes —
+ * and a directory mtime cannot see a change made inside the same timestamp tick
+ * as the walk's own stat (1 s granularity on HFS+/FAT and on some network
+ * mounts), so `walkedAt` bounds how long a hit may be served without a real
+ * walk at all (#3412 review round 1, M-3421-01).
  */
-type RootMemoEntry = { root: string; probedDirs: DirMtimeRecord[] };
+type RootMemoEntry = {
+	root: string;
+	probedDirs: DirMtimeRecord[];
+	walkedAt: number;
+};
+
+/**
+ * One bound for every directory-mtime read this detector awaits. `signal` is
+ * `undefined` on purpose: `RootFunction` takes a file path and nothing else, so
+ * no hook signal reaches this seam until #2523 AC4 threads one — the wall clock
+ * is the live half, and the registry entry says so. The budget is the edit
+ * `tool_result` one because that is the hook the per-file touch path runs under
+ * and the only hook the contract lets block the host; a tighter number would
+ * abandon a revalidation that is strictly CHEAPER than the walk it falls back
+ * to, making the hook slower rather than safer.
+ */
+const rootMtimeBound = (label: string) =>
+	({
+		ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
+		signal: undefined,
+		hook: "tool_result_edit",
+		label,
+	}) as const;
 
 /**
  * Walk up the directory tree looking for project root markers.
@@ -1576,14 +1606,23 @@ export function NearestRoot(
 		const startDir = path.resolve(path.dirname(file));
 		const dirKey = normalizeMapKey(startDir);
 
-		// Fast path: already resolved for this directory, and nothing the walk
-		// looked at has changed since. One stat per probed directory replaces the
-		// whole walk (markers x directories, plus the hit directory's
-		// `isExcludedLspRoot` git-boundary walk), so the memo still pays for itself.
+		// Fast path: already resolved for this directory, nothing the walk looked at
+		// has changed since, and the entry is younger than the shared re-check
+		// cadence. One stat per probed directory replaces the whole walk (markers x
+		// directories, plus the hit directory's `isExcludedLspRoot` git-boundary
+		// walk), so the memo still pays for itself; the cadence is what bounds the
+		// axes a directory mtime cannot see — a same-tick create, and a `.gitignore`
+		// above the hit changing the exclusion verdict — to one window instead of
+		// the session (#3412 review round 1). A fired bound resolves `undefined`,
+		// which is NOT freshness: it falls through to the walk.
 		const cached = cache.get(dirKey);
 		if (
 			cached !== undefined &&
-			(await dirMtimesStillFreshAsync(cached.probedDirs))
+			Date.now() - cached.walkedAt < FRESHNESS_CADENCE_MS &&
+			(await bounded(
+				dirMtimesStillFreshAsync(cached.probedDirs),
+				rootMtimeBound("lsp-root-memo-freshness"),
+			)) === true
 		)
 			return cached.root;
 
@@ -1594,6 +1633,9 @@ export function NearestRoot(
 		if (flying) return flying;
 
 		const probedDirs: DirMtimeRecord[] = [];
+		// Stamped before the walk so the window also covers the walk's own duration
+		// — the conservative direction, by the walk's runtime (~0.2 ms measured).
+		const walkedAt = Date.now();
 		const promise = (async (): Promise<string | undefined> => {
 			let currentDir = startDir;
 			const fsRoot = path.parse(currentDir).root;
@@ -1615,17 +1657,17 @@ export function NearestRoot(
 				// already includes the creation and hide it for the session. Only
 				// directories up to the hit are recorded — a marker created above a
 				// hit cannot change which root is nearest.
-				for (const probeDir of [
+				const stepDirs = [
 					currentDir,
 					...subdirPatterns.map((pattern) =>
 						markerProbeDir(currentDir, pattern),
 					),
-				]) {
-					probedDirs.push({
-						dir: probeDir,
-						mtimeMs: await dirMtimeMsAsync(probeDir),
-					});
-				}
+				];
+				const stepRecords = await bounded(
+					dirMtimeRecordsAsync(stepDirs),
+					rootMtimeBound("lsp-root-walk-dir-mtimes"),
+				);
+				probedDirs.push(...(stepRecords ?? unknownDirMtimeRecords(stepDirs)));
 
 				// Check exclude patterns — skip this dir (but keep walking up)
 				if (excludePatterns) {
@@ -1667,7 +1709,8 @@ export function NearestRoot(
 		inFlight.set(dirKey, promise);
 		try {
 			const result = await promise;
-			if (result !== undefined) cache.set(dirKey, { root: result, probedDirs });
+			if (result !== undefined)
+				cache.set(dirKey, { root: result, probedDirs, walkedAt });
 			return result;
 		} finally {
 			inFlight.delete(dirKey);

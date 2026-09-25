@@ -445,7 +445,11 @@ describe("lsp server policy", () => {
 	// without re-probing the markers. The probed directories are pinned to a
 	// whole-second mtime (the only value `utimes` round-trips exactly) so the
 	// marker can be deleted and the invalidation key restored; a re-walk could
-	// not answer `tmp` after that deletion.
+	// not answer `tmp` after that deletion. What this case does NOT prove is that
+	// the restored mtime hid nothing — a directory mtime cannot tell "unchanged"
+	// from "changed inside the recorded tick" — which is why the memo is also
+	// cadence-bounded; the case below that is what pins the bound (review round 1,
+	// M-3421-01).
 	it("serves the memo while no probed directory has changed", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-cache-"));
@@ -474,6 +478,133 @@ describe("lsp server policy", () => {
 		expect(fs.statSync(tmp).mtimeMs).toBe(pinned * 1000);
 		const r2 = await resolver(file2);
 		expect(r2).toBe(tmp);
+	});
+
+	// Review round 1, M-3421-01: a marker created inside the same timestamp tick
+	// as the walk's own stat of that directory leaves the recorded mtime equal, so
+	// the invalidation key cannot see it — real on 1 s-granularity volumes (HFS+,
+	// FAT, some network mounts). The reviewer's probe manufactured it by restoring
+	// the tick, and this case does the same. Round 1 served that root for the rest
+	// of the SESSION; the shared re-check cadence bounds it to one window.
+	it("re-walks after the freshness cadence, so a same-tick create cannot hide for the session", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const { FRESHNESS_CADENCE_MS } =
+			await import("../../../clients/freshness-cadence.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-tick-"));
+		dirs.push(tmp);
+
+		const src = path.join(tmp, "src");
+		const file = path.join(src, "a.ts");
+		fs.mkdirSync(src, { recursive: true });
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+		fs.writeFileSync(file, "");
+		const pinned = 1_700_000_000;
+		for (const dir of [src, tmp]) fs.utimesSync(dir, pinned, pinned);
+
+		const resolver = NearestRoot(["package.json"], undefined, tmp);
+		expect(await resolver(file)).toBe(tmp);
+
+		// The nearer marker lands in the tick the walk recorded for `src`.
+		fs.writeFileSync(path.join(src, "package.json"), "{}");
+		fs.utimesSync(src, pinned, pinned);
+		expect(fs.statSync(src).mtimeMs).toBe(pinned * 1000);
+		// Inside the window the memo still answers — that is the state space row
+		// the cadence exists to bound, not a guarantee.
+		expect(await resolver(file)).toBe(tmp);
+
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(Date.now() + FRESHNESS_CADENCE_MS + 1);
+			expect(await resolver(file)).toBe(src);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Review round 1, M-3421-02: the freshness read is a filesystem await on the
+	// per-file touch path, so a wedged stat must not pin the hook. The bound
+	// resolves `undefined`, which is NOT freshness — the call falls through to the
+	// walk, which is why the nearer marker below is the expected answer: the memo
+	// would still say `tmp`. Only the topology module's directory stats are wedged
+	// here (`fs.promises.stat`); the walk's own marker probes use the
+	// `node:fs/promises` named binding and stay real.
+	it("bounds the memo freshness read, so a wedged directory stat cannot pin the hook", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const { HOOK_WALL_BUDGET_MS } =
+			await import("../../../clients/hook-budgets.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-wedge-"));
+		dirs.push(tmp);
+
+		const src = path.join(tmp, "src");
+		const file = path.join(src, "a.ts");
+		fs.mkdirSync(src, { recursive: true });
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+		fs.writeFileSync(file, "");
+
+		const resolver = NearestRoot(["package.json"], undefined, tmp);
+		expect(await resolver(file)).toBe(tmp);
+		// A nearer marker the memo does not know about, so "answered from the walk"
+		// and "answered from the memo" are different strings.
+		fs.writeFileSync(path.join(src, "package.json"), "{}");
+
+		const wedged = vi
+			.spyOn(fs.promises, "stat")
+			.mockImplementationOnce(() => new Promise(() => {}));
+		vi.useFakeTimers();
+		try {
+			const pending = resolver(file);
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.tool_result_edit + 1,
+			);
+			expect(await pending).toBe(src);
+			expect(wedged).toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+			wedged.mockRestore();
+		}
+	});
+
+	// Review round 1, S9: when the RECORDING read is cut short by its bound, the
+	// walk's answer is still returned but must not be memoized — the directories
+	// whose mtime is unknown are recorded unmatchable, so the entry can never be
+	// served. Without that, the entry would carry a partial signature and every
+	// later change in the missing directory would be invisible.
+	it("does not serve a memo whose directory mtimes could not be read", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const { HOOK_WALL_BUDGET_MS } =
+			await import("../../../clients/hook-budgets.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-unknown-"));
+		dirs.push(tmp);
+
+		const src = path.join(tmp, "src");
+		const file = path.join(src, "a.ts");
+		fs.mkdirSync(src, { recursive: true });
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+		fs.writeFileSync(file, "");
+		const pinned = 1_700_000_000;
+		for (const dir of [src, tmp]) fs.utimesSync(dir, pinned, pinned);
+
+		const resolver = NearestRoot(["package.json"], undefined, tmp);
+		const wedged = vi
+			.spyOn(fs.promises, "stat")
+			.mockImplementationOnce(() => new Promise(() => {}));
+		vi.useFakeTimers();
+		try {
+			const pending = resolver(file);
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.tool_result_edit + 1,
+			);
+			expect(await pending).toBe(tmp);
+		} finally {
+			vi.useRealTimers();
+			wedged.mockRestore();
+		}
+
+		// Remove the marker and restore the mtime the unlink bumped, so the ONLY
+		// thing that can force a re-walk is the unreadable record.
+		fs.unlinkSync(path.join(tmp, "package.json"));
+		fs.utimesSync(tmp, pinned, pinned);
+		expect(await resolver(file)).toBeUndefined();
 	});
 
 	// #3412: `swift package init` inside a subdirectory of a resolved root. The

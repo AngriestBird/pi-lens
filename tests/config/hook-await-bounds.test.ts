@@ -2283,13 +2283,8 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// went 111 -> 112 for the new
 	// `await server.root` inside resolveLspServerCwd. Neither number is the
 	// old bare probe being removed.
-	// #3412: `NearestRoot` awaits the memo's freshness check and one directory
-	// mtime read per probed directory, taking clients/lsp/server.ts 112 -> 114.
-	// Both awaits replace a full marker re-walk on the same path — measured 4
-	// stat calls per warm touch against 9 for re-walking — so the module's real
-	// unbounded fs work per resolution went DOWN, not up.
 	"clients/lsp/index.ts": 159,
-	"clients/lsp/server.ts": 114,
+	"clients/lsp/server.ts": 112,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	"clients/opaque-mutation-scan.ts": 10,
@@ -2321,16 +2316,6 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/warm-attach.ts": 9,
 	"clients/widget-state.ts": 3,
 	"clients/word-index.ts": 24,
-	// #3412: the LSP root memo is revalidated against the mtime of every
-	// directory its marker walk probed, so `workspace-topology.ts` gains the
-	// async arm of its own freshness predicate (`dirMtimesStillFreshAsync` and
-	// the `dirMtimeMsAsync` it reads through) — this module's first two entries
-	// here. They are directory `stat`s on the walk that has always been the
-	// resolver's cost; the module's existing SYNC statSync walk is unbounded too
-	// and simply invisible to this audit, so the growth is the measurement
-	// catching up with async-ness, not a new hang surface. Bounding them needs
-	// the hook signal that #2523 AC4 threads, same as every other entry here.
-	"clients/workspace-topology.ts": 2,
 	"clients/zizmor-config.ts": 2,
 	"tools/ast-grep-outline.ts": 2,
 	"tools/ast-grep-replace.ts": 3,
@@ -2419,6 +2404,22 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"abandons auxiliary warmup without gating the edit hook) and defaulted to the " +
 		"ambient signal on the touchFile with-auxiliary path. LSP_SPAWN_BUDGET_MS wall-clock " +
 		"bound is live per server.",
+	"call:clients/lsp/server.ts#NearestRoot:1969971c~30941cd1":
+		"`undefined`, and that is the whole decision: `RootFunction` is " +
+		"`(file: string) => Promise<string | undefined>`, so no hook signal reaches " +
+		"the root detector at all until #2523 AC4 threads one through the LSP deps. " +
+		"The wall clock is the live half, on the edit `tool_result` budget — the " +
+		"hook the per-file touch path runs under, and the only one the contract " +
+		"lets block the host. This is the memo's freshness read: a fired bound " +
+		"resolves `undefined`, which the caller treats as NOT fresh, so the worst " +
+		"case is the marker walk it was trying to skip (#3412 review round 1).",
+	"call:clients/lsp/server.ts#NearestRoot:7cc367bc~c3bf473d":
+		"Same `undefined` signal and the same edit `tool_result` budget as the " +
+		"freshness read above, for the walk's own per-step directory-mtime " +
+		"recording. A fired bound here records the step's directories as " +
+		"unreadable rather than dropping them, so the walk still answers and its " +
+		"answer is simply not memoized — never a partial signature that would hide " +
+		"a later change in the missing directory (#3412 review round 1).",
 	"call:clients/mcp/session.ts#runSessionStart:8d9498e9~c78f4265":
 		"The public MCP session_start result fallback is also wall-bounded; " +
 		"its signal is explicitly absent because MCP has no host abort signal.",
