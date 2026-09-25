@@ -722,6 +722,20 @@ export interface LSPTouchFileOptions {
 	/** Skip workspace/didChangeWatchedFiles — use for cascade reads, not real fs changes */
 	silent?: boolean;
 	/**
+	 * #3405: this touch's content IS the file's saved on-disk state and the
+	 * caller wants that file diagnosed now, so each server whose
+	 * `textDocumentSync.save` asked for it gets a `textDocument/didSave` after
+	 * its content notification lands. Two callers set it, both one-file and
+	 * caller-initiated: the post-write sync (`clients/pipeline.ts`
+	 * `resyncLspFile`) and the explicit `lsp_diagnostics` query
+	 * (`tools/lsp-diagnostics.ts`). Warm-ups, cascade neighbour reads, the drift
+	 * resync and the workspace sweep deliberately leave it unset — a save is a
+	 * recompile trigger on a save-triggered server (Expert schedules a whole
+	 * project compile), so one per background read would be a storm, and none of
+	 * those callers is answering "is this file clean right now".
+	 */
+	saved?: boolean;
+	/**
 	 * #645: per-sweep gate (see `createSweepIndexGate`/`SweepIndexGate`) that
 	 * lets a `workspaceIndexing`-strategy server (e.g. marksman) pay its full
 	 * `aggregateWaitMs` wait only once per `runWorkspaceDiagnostics` sweep
@@ -5067,7 +5081,14 @@ export class LSPService {
 							// (or any synchronous throw) still reads as a rejected write rather
 							// than rejecting the whole per-file `Promise.all`.
 							const writePromise = entry.client.notify
-								.open(filePath, content, languageId, undefined, silent)
+								.open(
+									filePath,
+									content,
+									languageId,
+									undefined,
+									silent,
+									options.saved === true,
+								)
 								.then(() => true as const);
 							// #1714: the document is now in this auxiliary's input queue,
 							// whether or not the write settles inside our budget. Counted here

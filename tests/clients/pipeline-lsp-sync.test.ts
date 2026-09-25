@@ -60,6 +60,39 @@ afterEach(() => {
 });
 
 describe("resyncLspFile — bounded pre-dispatch LSP sync", () => {
+	// #3405: this is the ONE touch in the tree that knows pi-lens just wrote the
+	// file, so it is the one that declares a save. Recurrence it prevents: the
+	// client advertised `didSave` for months with no caller emitting one, so a
+	// save-triggered server (Expert recompiles the project on didSave and on
+	// nothing else) published nothing for an edit made through pi-lens.
+	it("declares the post-write touch a save so didSave is sent", async () => {
+		const touch = vi.fn(async () => ({ diags: [] }));
+		mockService(touch);
+		await resyncLspFile("/proj/a.ts", "content", true, false, getFlag, dbg);
+		expect(touch).toHaveBeenCalledWith(
+			"/proj/a.ts",
+			"content",
+			expect.objectContaining({ source: "lsp_sync", saved: true }),
+		);
+	});
+
+	// #3405 r2: the byte/line bound moved to `clients/lsp/content-limits.ts`, so
+	// the pipeline now CALLS a shared predicate instead of owning a private copy.
+	// Recurrence this prevents: deleting that call along with the copy — which is
+	// what "delete the pipeline-local check" reads as — would start handing the
+	// server whole-file didOpen frames for documents this pipeline has always
+	// refused to sync. The save seam's policy (drop the redundant text, still
+	// send the save) is deliberately NOT this one.
+	it("does not sync a document past the shared content bound", async () => {
+		const touch = vi.fn(async () => ({ diags: [] }));
+		mockService(touch);
+		// Few lines, past the BYTE bound only — so neutering the shared byte
+		// branch reds this writer too, not just the save writer.
+		const oversized = `${"x".repeat(3 * 1024 * 1024)}\n`;
+		await resyncLspFile("/proj/huge.ts", oversized, true, false, getFlag, dbg);
+		expect(touch).not.toHaveBeenCalled();
+	});
+
 	it("abandons a wedged touch after the budget instead of hanging", async () => {
 		// touchFile that never resolves = a server whose didChange write backpressures.
 		// Kit-gated (#1838): the wedge is an explicit gatedPromise, so "the budget

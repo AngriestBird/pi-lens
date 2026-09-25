@@ -145,6 +145,35 @@ describe("lsp_diagnostics tool", () => {
 		}
 	});
 
+	// #3405: the explicit query reads the file from disk, so the bytes it pushes
+	// ARE the file's saved state — it declares the touch a save. Recurrence it
+	// prevents: for a save-triggered server (Expert publishes only after a
+	// project recompile, which only didSave schedules) this path returned zero
+	// diagnostics for every file and the tool reported them CLEAN.
+	it("declares the explicit query's touch a save", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-saved-"));
+		const file = path.join(tmpDir, "good.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+		try {
+			await createLspDiagnosticsTool().execute(
+				"diag-saved",
+				{ path: file, severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: "." },
+			);
+			expect(
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
+			).toHaveBeenCalledWith(
+				file,
+				"const value = 1;\n",
+				expect.objectContaining({ source: "lsp_diagnostics", saved: true }),
+			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	it("checks explicit filePaths as a batch", async () => {
 		const tool = createLspDiagnosticsTool();
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-diag-"));

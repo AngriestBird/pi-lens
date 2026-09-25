@@ -445,6 +445,21 @@ function handle(raw) {
 						change: process.env.FAKE_LSP_SYNC_KIND
 							? Number(process.env.FAKE_LSP_SYNC_KIND)
 							: 1,
+						// #3405: `save` is ABSENT by default, the shape this fixture has
+						// always advertised — upstream's rule is "If omitted the
+						// notification should not be sent", so the default fixture must
+						// receive no `textDocument/didSave`. `FAKE_LSP_SAVE=true` declares
+						// the bare boolean (Expert's shape), `=includeText` declares
+						// `{ includeText: true }`, `=false` declares an explicit refusal.
+						...(process.env.FAKE_LSP_SAVE === "true"
+							? { save: true }
+							: process.env.FAKE_LSP_SAVE === "includeText"
+								? { save: { includeText: true } }
+								: process.env.FAKE_LSP_SAVE === "emptyObject"
+									? { save: {} }
+									: process.env.FAKE_LSP_SAVE === "false"
+										? { save: false }
+										: {}),
 					},
 					// #269: only advertise a non-default position encoding when asked,
 					// so the bulk of the integration tests stay on the UTF-16 default.
@@ -652,6 +667,23 @@ function handle(raw) {
 				jsonrpc: "2.0",
 				method: "$/test/didChangeReceived",
 				params: { contentChanges: data.params?.contentChanges ?? [] },
+			});
+		}
+		return;
+	}
+	// #3405: twin of the didChange echo above — a real-init integration test
+	// asserts WHETHER a didSave arrived and whether it carried `text`, so the
+	// capability gate is proved over the wire and not only in the negotiation
+	// unit. Off by default.
+	if (data.method === "textDocument/didSave") {
+		if (process.env.FAKE_LSP_ECHO_DID_SAVE) {
+			send({
+				jsonrpc: "2.0",
+				method: "$/test/didSaveReceived",
+				params: {
+					uri: data.params?.textDocument?.uri,
+					hasText: typeof data.params?.text === "string",
+				},
 			});
 		}
 		return;

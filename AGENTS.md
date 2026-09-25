@@ -550,6 +550,11 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
+- A capability the client advertises has a sender, or the advertisement states
+  why it has none. `textDocument/didSave` follows a landed didOpen/didChange
+  only when the server declared `textDocumentSync.save` and the caller declared
+  the touch a save — the post-write sync and the explicit `lsp_diagnostics`
+  query, never a warm-up, cascade or sweep touch.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive.

@@ -60,11 +60,14 @@ import {
 	type PositionEncoding,
 } from "./position-encoding.js";
 import {
+	negotiateSaveOptions,
 	negotiateSyncKind,
 	TEXT_DOCUMENT_SYNC_KIND_FULL,
 	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
+	type TextDocumentSaveOptions,
 	type TextDocumentSyncKind,
 } from "./sync-kind.js";
+import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
@@ -331,6 +334,14 @@ export interface LSPClientInfo {
 			languageId: string,
 			preserveDiagnostics?: boolean,
 			silent?: boolean,
+			/**
+			 * #3405: the pushed bytes are this file's saved on-disk state and the
+			 * caller wants it diagnosed now — follow the didOpen/didChange with
+			 * `textDocument/didSave` when the server declared `save`. Only the
+			 * post-write sync and the explicit `lsp_diagnostics` query set it; warm
+			 * reads, cascade neighbours, desync repairs and bulk sweeps do not.
+			 */
+			saved?: boolean,
 		): Promise<void>;
 		change(filePath: string, content: string): Promise<void>;
 		/**
@@ -577,12 +588,22 @@ export interface LSPClientInfo {
  * document state waits behind it and supersedes only the still-pending entry.
  */
 interface PendingDocumentNotify {
-	run: (coalescedCount: number) => Promise<void>;
+	run: (coalescedCount: number, saved: boolean) => Promise<void>;
 	waiters: Array<{
 		resolve: () => void;
 		reject: (error: unknown) => void;
 	}>;
 	coalescedCount: number;
+	/**
+	 * #3405: sticky across coalescing. A superseded entry's save intent carries
+	 * onto its replacement — otherwise the post-write sync's save is silently
+	 * dropped whenever the dispatch runner's unsaved touch for the same path
+	 * replaces it before it starts writing, which is the common case when the
+	 * pipeline's write has not landed yet (so no debounce entry exists to skip
+	 * the runner's notify). The replacement carries NEWER disk bytes, which is
+	 * exactly what the save should describe.
+	 */
+	saved: boolean;
 }
 
 /**
@@ -1085,6 +1106,12 @@ export interface LSPClientState {
 	 *  `{ text }` shape pi-lens has always sent — an absent value never changes
 	 *  behavior. Set once at initialize, next to `positionEncoding`. */
 	syncKind?: TextDocumentSyncKind;
+	/** #3405: `textDocumentSync.save` the server negotiated at initialize, or
+	 *  `undefined` when it declared none — see `negotiateSaveOptions`. Absent by
+	 *  default (the initial state literal below never sets it), so a server that
+	 *  never advertised `save`, and every hand-written test double, receives no
+	 *  `textDocument/didSave`. Set once at initialize, next to `syncKind`. */
+	saveOptions?: TextDocumentSaveOptions | undefined;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
 	/** Live dynamic registrations from client/registerCapability: id → record.
@@ -3936,6 +3963,66 @@ export function handleNotifyExternalChange(
 	state.watchQueue.enqueue(uri, type);
 }
 
+/**
+ * #3405: tell the server the document it just received is the file's saved
+ * on-disk state.
+ *
+ * pi-lens has no unsaved-buffer concept — every notification it sends carries
+ * bytes read from disk — so a save-triggered server is the one class of server
+ * this client could never reach: `CLIENT_CAPABILITIES` has advertised
+ * `synchronization.didSave` since #278 and no caller emitted one, so Expert
+ * (whose ONLY whole-project recompile trigger is didSave —
+ * `expert-lsp/expert@6bbad8c` `apps/expert/lib/expert/state.ex:243-257`)
+ * published nothing for an edit made through pi-lens.
+ *
+ * Sent ONLY when the caller declared this touch a save (`saved`) AND the server
+ * declared `textDocumentSync.save`; `includeText` decides whether the text
+ * rides along. Both gates fail closed: an undeclared notification is the #278
+ * class of hazard, and a save claimed for content whose didOpen/didChange never
+ * left the process would tell the server to diagnose bytes it does not have —
+ * so every call site below sends this only after its own content notification
+ * returned `true` from `safeSendNotification`, and never for a document this
+ * client has not opened.
+ */
+async function sendDidSave(
+	state: LSPClientState,
+	uri: string,
+	content: string,
+): Promise<void> {
+	const save = state.saveOptions;
+	if (!save) return;
+	if (!isClientAlive(state)) return;
+	// #3405 r2 (M3406-1): `text` is a SECOND full copy of bytes the server was
+	// just handed, so it is the one payload here that can be file-sized. The
+	// explicit `lsp_diagnostics` writer reads whole files with no bound of its
+	// own, so without this the same 32MB string would be framed twice. Bound it
+	// at the shared seam both writers pass through rather than at either caller.
+	//
+	// Omitting `text` is what the contract tolerates, and it is not a lost save:
+	// `DidSaveTextDocumentParams.text` is OPTIONAL ("Optional the content when
+	// saved") in the spec, FsAutoComplete — the one `includeText: true` server in
+	// the registry — types it `string option` and, given `None`, keeps the source
+	// it already holds and still runs its re-check
+	// (ionide/FsAutoComplete@85886b1, AdaptiveServerState.fs lines 2649-2673),
+	// and pi-lens only ever sends this after a landed didOpen/didChange for the
+	// same document, so the server has these bytes either way. Skipping the save
+	// outright would instead drop the diagnose trigger this PR exists to restore.
+	const limit = save.includeText
+		? exceedsLspSyncLimits(content)
+		: { tooLarge: false, reason: "" };
+	if (limit.tooLarge) {
+		recordDegradationOnce({
+			kind: "lsp-did-save-text-omitted",
+			subject: state.serverId,
+			reason: limit.reason,
+		});
+	}
+	await safeSendNotification(state.connection, "textDocument/didSave", {
+		textDocument: { uri },
+		...(save.includeText && !limit.tooLarge ? { text: content } : {}),
+	});
+}
+
 async function handleNotifyOpenOnce(
 	state: LSPClientState,
 	filePath: string,
@@ -3944,6 +4031,7 @@ async function handleNotifyOpenOnce(
 	preserveDiagnostics = false,
 	silent = false,
 	coalescedCount = 0,
+	saved = false,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -4007,6 +4095,7 @@ async function handleNotifyOpenOnce(
 				);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
+			if (saved && reopenSent) await sendDidSave(state, uri, content);
 			return;
 		}
 		const changeSent = await safeSendNotification(
@@ -4025,6 +4114,7 @@ async function handleNotifyOpenOnce(
 				content,
 				coalescedCount,
 			);
+		if (saved && changeSent) await sendDidSave(state, uri, content);
 		return;
 	}
 
@@ -4070,6 +4160,7 @@ async function handleNotifyOpenOnce(
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
+	if (saved && openSent) await sendDidSave(state, uri, content);
 	// Telemetry is deliberately detached after didOpen succeeds.
 	// #1412 H1: routed through runReadOnlyServerCommand, NOT runServerCommand —
 	// the probe must never open the serverEditsAllowed/activeMutationContext
@@ -4103,7 +4194,8 @@ async function handleNotifyOpenOnce(
 function enqueueDocumentNotify(
 	state: LSPClientState,
 	normalizedPath: string,
-	run: (coalescedCount: number) => Promise<void>,
+	run: (coalescedCount: number, saved: boolean) => Promise<void>,
+	saved = false,
 ): Promise<void> {
 	let queue = state.notifyChangeQueues.get(normalizedPath);
 	if (!queue) {
@@ -4121,6 +4213,7 @@ function enqueueDocumentNotify(
 			run,
 			waiters,
 			coalescedCount: (previous?.coalescedCount ?? 0) + (previous ? 1 : 0),
+			saved: saved || previous?.saved === true,
 		};
 		if (queue!.running) return;
 		queue!.running = true;
@@ -4133,7 +4226,7 @@ function enqueueDocumentNotify(
 					if (!next) break;
 					queue!.pending = undefined;
 					try {
-						await next.run(next.coalescedCount);
+						await next.run(next.coalescedCount, next.saved);
 						for (const waiter of next.waiters) waiter.resolve();
 					} catch (error) {
 						for (const waiter of next.waiters) waiter.reject(error);
@@ -4168,19 +4261,25 @@ export function handleNotifyOpen(
 	languageId: string,
 	preserveDiagnostics = false,
 	silent = false,
+	saved = false,
 ): Promise<void> {
 	if (!isClientAlive(state)) return Promise.resolve();
 	const normalizedPath = normalizeMapKey(filePath);
-	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
-		handleNotifyOpenOnce(
-			state,
-			filePath,
-			content,
-			languageId,
-			preserveDiagnostics,
-			silent,
-			coalescedCount,
-		),
+	return enqueueDocumentNotify(
+		state,
+		normalizedPath,
+		(coalescedCount, queuedSaved) =>
+			handleNotifyOpenOnce(
+				state,
+				filePath,
+				content,
+				languageId,
+				preserveDiagnostics,
+				silent,
+				coalescedCount,
+				queuedSaved,
+			),
+		saved,
 	);
 }
 
@@ -4249,6 +4348,10 @@ export function handleNotifyChange(
 ): Promise<void> {
 	if (!isClientAlive(state)) return Promise.resolve();
 	const normalizedPath = normalizeMapKey(filePath);
+	// #3405: no `saved` argument — `LSPService.updateFile` is this path's only
+	// entry point and no caller declares a save through it, so a change never
+	// originates one. A save intent inherited from a superseded open entry is
+	// dropped here by construction rather than sent after a bare didChange.
 	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
 		handleNotifyChangeOnce(
 			state,
@@ -5600,6 +5703,9 @@ export async function createLSPClient(options: {
 	state.syncKind = negotiateSyncKind(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
+	state.saveOptions = negotiateSaveOptions(
+		(initResult as { capabilities?: unknown })?.capabilities,
+	);
 	state.rawCapabilityKeys = Object.keys(
 		(initResult as { capabilities?: Record<string, unknown> })?.capabilities ??
 			{},
@@ -5651,7 +5757,14 @@ export async function createLSPClient(options: {
 		getProcessPid: () => lspProcess.pid,
 
 		notify: {
-			async open(filePath, content, languageId, preserveDiagnostics, silent) {
+			async open(
+				filePath,
+				content,
+				languageId,
+				preserveDiagnostics,
+				silent,
+				saved,
+			) {
 				return handleNotifyOpen(
 					state,
 					filePath,
@@ -5659,6 +5772,7 @@ export async function createLSPClient(options: {
 					languageId,
 					preserveDiagnostics,
 					silent,
+					saved,
 				);
 			},
 			async change(filePath, content) {

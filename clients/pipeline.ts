@@ -106,9 +106,8 @@ import {
 	markdownlintConfigArgs,
 } from "./tool-policy.js";
 import type { PathSetLike } from "./runtime-coordinator.js";
+import { exceedsLspSyncLimits } from "./lsp/content-limits.js";
 
-const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
-const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
 const LSP_SPAWN_BUDGET_MS = RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs;
 const AUTOFIX_CHANGED_FILE_SCAN_LIMIT = 5000;
 
@@ -223,32 +222,6 @@ async function diffProjectSnapshot(
 		if (!after.has(filePath)) changed.add(filePath);
 	}
 	return [...changed].sort((a, b) => a.localeCompare(b));
-}
-
-function exceedsLspSyncLimits(
-	_filePath: string,
-	content: string,
-): {
-	tooLarge: boolean;
-	reason: string;
-} {
-	const sizeBytes = Buffer.byteLength(content, "utf-8");
-	if (sizeBytes > LSP_MAX_FILE_BYTES) {
-		return {
-			tooLarge: true,
-			reason: `${Math.round(sizeBytes / 1024)}KB exceeds ${Math.round(LSP_MAX_FILE_BYTES / 1024)}KB`,
-		};
-	}
-
-	const lineCount = content.split("\n").length;
-	if (lineCount > LSP_MAX_FILE_LINES) {
-		return {
-			tooLarge: true,
-			reason: `${lineCount} lines exceeds ${LSP_MAX_FILE_LINES}`,
-		};
-	}
-
-	return { tooLarge: false, reason: "" };
 }
 
 // --- Types ---
@@ -1091,7 +1064,13 @@ export async function resyncLspFile(
 	if (getFlag("no-lsp")) return;
 	if (!needsContentRefresh && lspSyncCompleted) return;
 
-	const limitCheck = exceedsLspSyncLimits(filePath, fileContent);
+	// #3405 r2: the bound is `clients/lsp/content-limits.ts` now, shared with the
+	// dispatch runner and the didSave payload. THIS call stays: a file past the
+	// bound is not synced to the server AT ALL, which is a stricter policy than
+	// the save seam's (drop the redundant text, still send the save) and the one
+	// a post-write sync owes — removing it would start writing whole-file
+	// didOpen frames for files this pipeline has always refused.
+	const limitCheck = exceedsLspSyncLimits(fileContent);
 	if (limitCheck.tooLarge) return;
 
 	try {
@@ -1125,6 +1104,11 @@ export async function resyncLspFile(
 					source: "lsp_sync",
 					clientScope: "primary",
 					maxClientWaitMs: LSP_SPAWN_BUDGET_MS,
+					// #3405: pi-lens just wrote these bytes to disk, so this is the one
+					// touch that is a save. A save-triggered server (Expert recompiles
+					// the project on didSave and on nothing else) publishes for the edit
+					// only because of this flag.
+					saved: true,
 				})
 				.then(() => "done" as const)
 				.catch((err) => {

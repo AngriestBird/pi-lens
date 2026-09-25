@@ -287,6 +287,11 @@ const timingSensitiveInclude = [
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
 	"tests/clients/dispatch/runners/lsp-real-runner.test.ts",
+	// #3405: its last describe spawns two real fake-server children through
+	// `spawnFakeLspServer` and waits on a real initialize handshake before
+	// asserting which notifications reached the server — the same #1022/#2332
+	// contention class as its lane siblings.
+	"tests/clients/lsp/did-save-notification.test.ts",
 	"tests/clients/lsp/fake-lsp-server-parent-watchdog.test.ts",
 	"tests/clients/lsp/integration.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-language-neutral.test.ts",
