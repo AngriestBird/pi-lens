@@ -31,14 +31,12 @@ import { circularDepsToProjectDiagnostics } from "../../clients/project-diagnost
 import { removeTempDirSync } from "./test-utils.js";
 
 const safeSpawnAsync = vi.fn();
-const safeSpawn = vi.fn();
 const findNodeToolBinary = vi.fn();
 const ensureTool = vi.fn();
 
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync,
-	safeSpawn,
 }));
 vi.mock("../../clients/package-manager.js", async (importOriginal) => ({
 	...(await importOriginal<
@@ -64,7 +62,7 @@ const FIXTURE_DIR = path.resolve(
 );
 
 interface MadgeCapture {
-	provenance: { version: string; argv: string[] };
+	provenance: { argv: string[] };
 	exitCode: number;
 	stdout: string;
 	stderr: string;
@@ -251,7 +249,7 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 		// owns for BOTH callers — without it `JSON.parse("")` throws and a
 		// completed scan degrades into a cold madge lane.
 		replay({
-			provenance: { version: "8.0.0", argv: [] },
+			provenance: { argv: [] },
 			exitCode: 0,
 			stdout: "",
 			stderr: "",
@@ -270,7 +268,7 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 		// stay a FAILED scan (#2154 — `analyzed !== true` is a cold lane), so the
 		// shared reader must keep throwing instead of swallowing the parse error.
 		replay({
-			provenance: { version: "8.0.0", argv: [] },
+			provenance: { argv: [] },
 			exitCode: 0,
 			stdout: "Cannot find module 'madge'\n",
 			stderr: "",

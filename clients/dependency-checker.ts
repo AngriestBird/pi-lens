@@ -120,7 +120,7 @@ export function parseMadgeSkips(stderr: string): {
  * unexpected shape reports no findings instead of turning a completed scan into
  * a failed one (#2154 — a failed madge scan is a COLD lane in `mode=full`).
  */
-export function parseMadgeCycles(
+function parseMadgeCycles(
 	stdout: string,
 	baseDir: string,
 ): { circular: CircularDep[]; circularFiles: Set<string> } {
