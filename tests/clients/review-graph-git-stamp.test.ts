@@ -403,6 +403,24 @@ describe("review-graph snapshot git stamp (#300)", () => {
 		await expect(buildOrUpdateGraph(cwd, [], facts)).resolves.toBeDefined();
 	});
 
+	it("revalidates git repository lifecycle changes within one process (#3417)", () => {
+		const cwd = tmpDir();
+
+		// Regression for #3417: a negative lookup must not hide a repository
+		// initialized later in the same process.
+		expect(resolveGitIdentity(cwd)).toBeUndefined();
+		makeFakeRepo(cwd, "a".repeat(40));
+		expect(resolveGitIdentity(cwd)).toEqual({
+			headCommit: "a".repeat(40),
+			worktreeRoot: path.resolve(cwd).replace(/\\/g, "/"),
+		});
+
+		// The inverse lifecycle direction is equally important: a positive
+		// lookup must not survive removal of the repository metadata.
+		fs.rmSync(path.join(cwd, ".git"), { recursive: true });
+		expect(resolveGitIdentity(cwd)).toBeUndefined();
+	});
+
 	it("malformed .git file / unreadable HEAD is treated as non-git (no throw)", () => {
 		const cwd = tmpDir();
 		// A `.git` FILE (as in a linked worktree) but with garbage content —
