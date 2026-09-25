@@ -193,7 +193,11 @@ export type BatchFileOutcome =
 export type BatchOutcomeDetail = {
 	file: string;
 	outcome: BatchFileOutcome;
-	reason?: string;
+	// Absent when the detail arrives through the compact renderer's `details`
+	// plumbing (tools/lens-diagnostics.ts), explicitly `undefined` when a
+	// producer folds four optional result fields into one reason. Both are the
+	// same "no reason" state to `renderBatchOutcomeLines`.
+	reason?: string | undefined;
 };
 
 function assertNeverBatchFileOutcome(value: never): never {
