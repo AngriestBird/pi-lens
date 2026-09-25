@@ -14,13 +14,10 @@ import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-// package-root.js is itself dependency-free (node:fs/path/url only), so
+// The shared web-tree-sitter ladder imports nothing but node:fs/node:path, so
 // importing it keeps this module's "loads even when the deps that failed are
 // unreachable" property intact.
-import {
-	getPackageRoot,
-	resolveWebTreeSitterPackageDir,
-} from "./package-root.js";
+import { resolveWebTreeSitterPackageDir } from "../scripts/lib/web-tree-sitter-dir.mjs";
 
 const require = createRequire(import.meta.url);
 const ISSUES_URL = "https://github.com/apmantza/pi-lens/issues";
@@ -142,7 +139,8 @@ export function collectInstallDiagnostics(): InstallDiagnostics {
 		// ladder.
 		const dir = resolveWebTreeSitterPackageDir({
 			resolve: (specifier) => require.resolve(specifier),
-			packageRoot: () => getPackageRoot(import.meta.url),
+			// `root` is this probe's own walk to the package root, computed above.
+			packageRoot: () => root,
 			cwd: () => process.cwd(),
 		});
 		return (

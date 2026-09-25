@@ -232,6 +232,23 @@ describe("host-provided packages are not vendored (#1926)", () => {
 		expect(selftest).toContain("lib/skills-predicate.mjs");
 	});
 
+	it("ships scripts/lib/web-tree-sitter-dir.mjs, because install-selftest.mjs imports it too (#3409)", () => {
+		// Third instance of the same shape, one module later: the shared
+		// web-tree-sitter package-directory ladder (#3409 round 1, R3418-2) folds
+		// `install-selftest.mjs`'s grammar-asset probe, `clients/install-diagnostics.ts`'s
+		// fingerprint probe and `clients/tree-sitter-client.ts`'s read/write dirs
+		// onto ONE resolution. If this file is missing from files[], the installed
+		// selftest's import throws in the tarball — the failure mode #1926 and
+		// #2626 guard for its two siblings above.
+		const files = pkg.files ?? [];
+		expect(files).toContain("scripts/lib/web-tree-sitter-dir.mjs");
+		const selftest = fs.readFileSync(
+			path.join(root, "scripts", "install-selftest.mjs"),
+			"utf8",
+		);
+		expect(selftest).toContain("lib/web-tree-sitter-dir.mjs");
+	});
+
 	it("splits host-provided packages into runtime and type-only, with no overlap", () => {
 		// CI installs the RUNTIME half before a bare `node dist/index.js` smoke
 		// check, because bare node is not pi. It must never install the type-only

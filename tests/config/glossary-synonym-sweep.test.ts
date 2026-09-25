@@ -882,7 +882,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		"clients/package-manager.ts": 20,
-		"clients/package-root.ts": 12,
+		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
 		"clients/path-utils.ts": 30,
 		"clients/php-cs-fixer-config.ts": 4,

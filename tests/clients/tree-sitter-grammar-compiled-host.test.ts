@@ -113,6 +113,23 @@ type GrammarDirClient = {
  */
 const GRAMMAR_FIXTURE = "tree-sitter-unpinned3409.wasm";
 
+/**
+ * Write the shape an installed web-tree-sitter package actually has: its own
+ * manifest and the wasm the runtime loads. Round 1 review R3418-1: a directory
+ * merely NAMED web-tree-sitter is not the package, and accepting one on
+ * existence alone let `grammarsWriteDir()` pick a write target in an unrelated
+ * tree.
+ */
+function writeWebTreeSitterPackage(dir: string): string {
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(path.join(dir, "tree-sitter.wasm"), "");
+	fs.writeFileSync(
+		path.join(dir, "package.json"),
+		JSON.stringify({ name: "web-tree-sitter", version: "0.25.10" }),
+	);
+	return dir;
+}
+
 function moduleNotFound(id: string): never {
 	const err = new Error(`Cannot find module '${id}'`) as Error & {
 		code?: string;
@@ -131,6 +148,28 @@ function moduleNotFound(id: string): never {
  * answer that came from either fallback rung is distinguishable from one that
  * came from the resolved package directory.
  */
+/**
+ * `grammarsWriteDir()` with BOTH resolver rungs unavailable, so only the
+ * package-root and cwd fallbacks can answer. Round 1 review: those two rungs had
+ * no signature of their own and no identity check.
+ */
+async function writeDirWithFallbacks(
+	packageRoot: string,
+	cwd: string,
+): Promise<string | undefined> {
+	const { TreeSitterClient } =
+		await import("../../clients/tree-sitter-client.js");
+	let instance: GrammarDirClient | undefined;
+	const client = new TreeSitterClient(false, undefined, {
+		resolveAsset: (asset: string) => instance?.resolveWebTreeSitterAsset(asset),
+		resolvePackage: (specifier: string) => moduleNotFound(specifier),
+		packageRoot: () => packageRoot,
+		cwd: () => cwd,
+	}) as unknown as GrammarDirClient;
+	instance = client;
+	return client.grammarsWriteDir();
+}
+
 async function hoistedHostClient(
 	pkgDir: string,
 	decoyCwd: string,
@@ -193,9 +232,9 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 	});
 
 	it("derives the write dir from a hoisted sibling install, not from pi-lens's own package root", async () => {
-		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
-		fs.mkdirSync(pkgDir, { recursive: true });
-		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(env.tmpDir, "hoisted", "web-tree-sitter"),
+		);
 		const client = await hoistedHostClient(
 			pkgDir,
 			path.join(env.tmpDir, "decoy"),
@@ -206,9 +245,10 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 	});
 
 	it("reads a grammars dir out of the resolved package instead of process.cwd()", async () => {
-		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(env.tmpDir, "hoisted", "web-tree-sitter"),
+		);
 		fs.mkdirSync(path.join(pkgDir, "grammars"), { recursive: true });
-		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
 		const decoyCwd = path.join(env.tmpDir, "decoy");
 		fs.mkdirSync(
 			path.join(decoyCwd, "node_modules", "web-tree-sitter", "grammars"),
@@ -226,10 +266,11 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 	});
 
 	it("finds a grammar already on disk in the resolved package's grammars dir", async () => {
-		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(env.tmpDir, "hoisted", "web-tree-sitter"),
+		);
 		const grammars = path.join(pkgDir, "grammars");
 		fs.mkdirSync(grammars, { recursive: true });
-		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
 		// A real wasm preamble: `resolveGrammarFile` rejects a body without it as
 		// poisoned (#1548), so a three-byte stub would prove nothing. The filename
 		// is deliberately NOT one of the pinned grammars: with no entry in
@@ -257,7 +298,9 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		// root) but the one the #381 0.26 migration may bring: an exports map that
 		// points into a subdirectory. The rung must land on the PACKAGE, never on
 		// the subdirectory that happened to hold the file.
-		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(env.tmpDir, "hoisted", "web-tree-sitter"),
+		);
 		fs.mkdirSync(path.join(pkgDir, "lib"), { recursive: true });
 		fs.writeFileSync(path.join(pkgDir, "lib", "tree-sitter.wasm"), "");
 		const { TreeSitterClient } =
@@ -285,12 +328,20 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		// `tree-sitter.wasm` the runtime loaded — a grammar built for another
 		// web-tree-sitter is the ABI-drift decode failure #1564 is about — so the
 		// resolver's answer outranks the package-root guess.
-		const pkgDir = path.join(env.tmpDir, "hoisted", "web-tree-sitter");
-		fs.mkdirSync(pkgDir, { recursive: true });
-		fs.writeFileSync(path.join(pkgDir, "tree-sitter.wasm"), "");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(env.tmpDir, "hoisted", "web-tree-sitter"),
+		);
 		const nestedRoot = path.join(env.tmpDir, "pi-lens");
+		// A REAL package, not just a directory with the name: otherwise the
+		// identity check alone would decide this case and the ORDER would go
+		// unpinned (round 1 review R3418-1).
 		fs.mkdirSync(
-			path.join(nestedRoot, "node_modules", "web-tree-sitter", "grammars"),
+			path.join(
+				writeWebTreeSitterPackage(
+					path.join(nestedRoot, "node_modules", "web-tree-sitter"),
+				),
+				"grammars",
+			),
 			{ recursive: true },
 		);
 		const { TreeSitterClient } =
@@ -336,6 +387,72 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 		instance = client;
 
 		expect(client.grammarsWriteDir()).toBeUndefined();
+	});
+
+	it("refuses a cwd directory that is merely NAMED web-tree-sitter", async () => {
+		// Round 1 review R3418-1, reproduced: the reviewer's probe got a write
+		// target out of an EMPTY `cwd/node_modules/web-tree-sitter`, so a fetched
+		// grammar would have been written into an unrelated tree.
+		const cwd = path.join(env.tmpDir, "project");
+		fs.mkdirSync(path.join(cwd, "node_modules", "web-tree-sitter"), {
+			recursive: true,
+		});
+
+		expect(await writeDirWithFallbacks(cwd, cwd)).toBeUndefined();
+	});
+
+	it("refuses a cwd web-tree-sitter directory belonging to another package", async () => {
+		// The name is right, the wasm is there, and the manifest says it is
+		// something else — a vendored fork, a stale rename, a coincidence.
+		const cwd = path.join(env.tmpDir, "project");
+		const foreign = path.join(cwd, "node_modules", "web-tree-sitter");
+		fs.mkdirSync(foreign, { recursive: true });
+		fs.writeFileSync(path.join(foreign, "tree-sitter.wasm"), "");
+		fs.writeFileSync(
+			path.join(foreign, "package.json"),
+			JSON.stringify({ name: "web-tree-sitter-fork", version: "9.9.9" }),
+		);
+
+		expect(await writeDirWithFallbacks(cwd, cwd)).toBeUndefined();
+	});
+
+	it("refuses a package-root directory that is merely NAMED web-tree-sitter", async () => {
+		const root = path.join(env.tmpDir, "pi-lens");
+		fs.mkdirSync(path.join(root, "node_modules", "web-tree-sitter"), {
+			recursive: true,
+		});
+		const emptyCwd = path.join(env.tmpDir, "empty");
+		fs.mkdirSync(emptyCwd, { recursive: true });
+
+		expect(await writeDirWithFallbacks(root, emptyCwd)).toBeUndefined();
+	});
+
+	it("accepts a real package under pi-lens's own package root when the resolver cannot answer", async () => {
+		// The #20 temp-dir-compile rung, with a signature of its own: before this
+		// round, deleting it left every case green.
+		const root = path.join(env.tmpDir, "pi-lens");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(root, "node_modules", "web-tree-sitter"),
+		);
+		const emptyCwd = path.join(env.tmpDir, "empty");
+		fs.mkdirSync(emptyCwd, { recursive: true });
+
+		expect(await writeDirWithFallbacks(root, emptyCwd)).toBe(
+			path.join(pkgDir, "grammars"),
+		);
+	});
+
+	it("accepts a real package under the working directory as the last resort", async () => {
+		const cwd = path.join(env.tmpDir, "project");
+		const pkgDir = writeWebTreeSitterPackage(
+			path.join(cwd, "node_modules", "web-tree-sitter"),
+		);
+		const emptyRoot = path.join(env.tmpDir, "pi-lens");
+		fs.mkdirSync(emptyRoot, { recursive: true });
+
+		expect(await writeDirWithFallbacks(emptyRoot, cwd)).toBe(
+			path.join(pkgDir, "grammars"),
+		);
 	});
 
 	it("still returns undefined, and never invents a path, when web-tree-sitter is absent everywhere", async () => {

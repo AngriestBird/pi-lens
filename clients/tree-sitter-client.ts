@@ -41,11 +41,8 @@ import {
 	vendoredGrammarRefusal,
 	vendoredGrammarsDir,
 } from "./grammar-source.js";
-import {
-	getPackageRoot,
-	resolvePackagePath,
-	resolveWebTreeSitterPackageDir,
-} from "./package-root.js";
+import { getPackageRoot, resolvePackagePath } from "./package-root.js";
+import { resolveWebTreeSitterPackageDir } from "../scripts/lib/web-tree-sitter-dir.mjs";
 import {
 	assertInstallAllowed,
 	getProjectTrustGeneration,
@@ -683,7 +680,7 @@ export class TreeSitterClient {
 
 	/**
 	 * web-tree-sitter's installed package directory, through the one shared
-	 * ladder in `package-root.ts` (#3409). Routed through
+	 * ladder in `scripts/lib/web-tree-sitter-dir.mjs` (#3409). Routed through
 	 * `grammarDirResolutionDeps` so the resolver context — the thing that
 	 * differs on a compiled host — stays the injected seam (#2112/#2136).
 	 */
