@@ -2404,6 +2404,22 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"abandons auxiliary warmup without gating the edit hook) and defaulted to the " +
 		"ambient signal on the touchFile with-auxiliary path. LSP_SPAWN_BUDGET_MS wall-clock " +
 		"bound is live per server.",
+	"call:clients/lsp/server.ts#NearestRoot:1969971c~30941cd1":
+		"`undefined`, and that is the whole decision: `RootFunction` is " +
+		"`(file: string) => Promise<string | undefined>`, so no hook signal reaches " +
+		"the root detector at all until #2523 AC4 threads one through the LSP deps. " +
+		"The wall clock is the live half, on the edit `tool_result` budget — the " +
+		"hook the per-file touch path runs under, and the only one the contract " +
+		"lets block the host. This is the memo's freshness read: a fired bound " +
+		"resolves `undefined`, which the caller treats as NOT fresh, so the worst " +
+		"case is the marker walk it was trying to skip (#3412 review round 1).",
+	"call:clients/lsp/server.ts#NearestRoot:7cc367bc~c3bf473d":
+		"Same `undefined` signal and the same edit `tool_result` budget as the " +
+		"freshness read above, for the walk's own per-step directory-mtime " +
+		"recording. A fired bound here records the step's directories as " +
+		"unreadable rather than dropping them, so the walk still answers and its " +
+		"answer is simply not memoized — never a partial signature that would hide " +
+		"a later change in the missing directory (#3412 review round 1).",
 	"call:clients/mcp/session.ts#runSessionStart:8d9498e9~c78f4265":
 		"The public MCP session_start result fallback is also wall-bounded; " +
 		"its signal is explicitly absent because MCP has no host abort signal.",
