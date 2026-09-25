@@ -128,6 +128,8 @@ import {
 	createLspDiagnosticsTool,
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
+	renderBatchOutcomeLines,
+	type BatchOutcomeDetail,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -344,6 +346,7 @@ export function createLensDiagnosticsTool(
 			navigationOnlyFiles?: number;
 			timedOutFiles?: number;
 			outcomeCounts?: Record<string, number>;
+			outcomes?: BatchOutcomeDetail[];
 			incompleteFiles?: number;
 			unconfirmed?: boolean;
 			timedOut?: boolean;
@@ -374,11 +377,15 @@ export function createLensDiagnosticsTool(
 				if ((details.unconfirmedFiles ?? 0) > 0)
 					return `lens_diagnostics${scope} — ${count} ${noun} · ${details.cleanFiles ?? 0} clean · ${details.unconfirmedFiles} unconfirmed${details.timedOutFiles ? ` (${details.timedOutFiles} timed out)` : ""}`;
 				const outcomeCounts = details.outcomeCounts;
+				const tooLargeLines = renderBatchOutcomeLines(details.outcomes ?? []);
+				if (tooLargeLines.length > 0)
+					return `lens_diagnostics${scope} — too large: ${tooLargeLines.join("; ")}`;
 				const notConfirmed = outcomeCounts
 					? (outcomeCounts.inconclusive ?? 0) +
 						(outcomeCounts.unavailable ?? 0) +
 						(outcomeCounts.unsupported ?? 0) +
-						(outcomeCounts.failed ?? 0)
+						(outcomeCounts.failed ?? 0) +
+						(outcomeCounts.too_large ?? 0)
 					: 0;
 				if (notConfirmed > 0)
 					return `lens_diagnostics${scope} — ${count} ${noun} · ${notConfirmed} checks not confirmed`;
@@ -1677,7 +1684,16 @@ type RunnerRetirementDecision = "retire" | "keep";
 
 /**
  * The one project-runner retirement decision. Coverage is authoritative when
- * present for the runner; the older id-only arm is used only when absent.
+ * present for the runner; the older id-only arm is used only when the runner
+ * declared no coverage at all.
+ *
+ * #2962: an entry with an EMPTY file set is a declaration, not a missing one —
+ * "this producer analysed the root and proved zero files". Selecting it out by
+ * its own size (the pre-#2962 `entry.files.size > 0` filter) dropped it into the
+ * whole-root id-only arm, so one complete opengrep report with
+ * `paths.scanned: []` retired every retained opengrep finding in the tree even
+ * though no file had been scanned. The id-only arm is unchanged for the eight
+ * runners that declare no coverage.
  */
 export function runnerRetirementDecision(
 	diagnostic: WidgetDiagnostic,
@@ -1687,7 +1703,7 @@ export function runnerRetirementDecision(
 ): RunnerRetirementDecision {
 	const runnerId = runnerIdOf(diagnostic);
 	const coverage = (authoritativeCoverage ?? []).filter(
-		(entry) => entry.runnerId === runnerId && entry.files.size > 0,
+		(entry) => entry.runnerId === runnerId,
 	);
 	if (coverage.length === 0) {
 		return authoritativeRunnerIds?.has(runnerId) ? "retire" : "keep";
@@ -2584,6 +2600,13 @@ async function formatFullMode(
 		});
 	}
 	for (const entry of authoritativeRunnerCoverage) {
+		// #2962: a zero-file declaration retires nothing, so it must neither
+		// write this row (a `runner_coverage_retired` row with count 0 would
+		// report the opposite of what happened) nor BURN the once-per-session
+		// claim — the session's first real coverage row would then be suppressed
+		// by the call that proved no coverage. Its own observation is the
+		// `runner-coverage-empty` ledger row raised at the fresh-fetch seam.
+		if (entry.files.size === 0) continue;
 		if (!claimPhaseOncePerSession("runner_coverage_retired", entry.runnerId)) {
 			continue;
 		}
