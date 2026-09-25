@@ -138,6 +138,31 @@ describe("madge --warning is not a usable skip channel under --json (#3436)", ()
 		expect("localSkips" in result).toBe(false);
 	});
 
+	it("records the unavailable skip visibility from the whole-project scan lane", async () => {
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
+		const { getDegradationSummary } =
+			await import("../../clients/degradation-ledger.js");
+		writeWorkspace();
+		replayNoCycles();
+
+		// The session-start `scanProject` lane shares the argv blind spot with
+		// the turn-end lane (#3441 F1): pre-fix it recorded nothing, so a hidden
+		// local file was read as a clean graph on the lane whose output becomes
+		// the user-facing `circular` diagnostics.
+		await new DependencyChecker().scanProject(tmp);
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "madge-skip-visibility-unavailable",
+		);
+		expect(group).toBeDefined();
+		expect(group?.count).toBe(1);
+		const latest = group?.latestReasons.at(-1);
+		expect(latest?.subject).toBe(tmp);
+		expect(latest?.reason).toContain("--json");
+		expect(latest?.reason).toContain("--warning");
+	});
+
 	it("records the unavailable skip visibility once per session/root", async () => {
 		const { DependencyChecker } =
 			await import("../../clients/dependency-checker.js");
@@ -146,12 +171,17 @@ describe("madge --warning is not a usable skip channel under --json (#3436)", ()
 		const file = writeWorkspace();
 		replayNoCycles();
 
-		await new DependencyChecker().checkFilesBatch([file], tmp);
+		// Two scans on the SAME root through different lanes, both funnelling
+		// through `parseMadgeCycles`. The once-wrapper keys on (kind, root), so
+		// the second scan must not add a record; swapping it for the unbounded
+		// `recordDegradation` would make this count 2 (#3441 F3).
+		const checker = new DependencyChecker();
+		await checker.checkFilesBatch([file], tmp);
+		await checker.scanProject(tmp);
 
 		const group = getDegradationSummary().find(
 			(candidate) => candidate.kind === "madge-skip-visibility-unavailable",
 		);
-		expect(group).toBeDefined();
 		expect(group?.count).toBe(1);
 		const latest = group?.latestReasons.at(-1);
 		expect(latest?.subject).toBe(tmp);
