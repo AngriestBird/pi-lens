@@ -855,6 +855,18 @@ export type DegradationKind =
 	 */
 	| "runner-collect-later"
 	/**
+	 * #2962: a project-runner COVERAGE PRODUCER analysed the analysis root and
+	 * declared zero scanned files (`AnalysedRootSignal.analyzedFiles === []` —
+	 * today only `OpengrepClient`, e.g. a complete report whose `paths.scanned`
+	 * is empty because no rule language matched). Its retained findings are
+	 * therefore KEPT rather than retired: nothing was scanned, so nothing was
+	 * proved gone. Without this row that kept finding is indistinguishable from
+	 * a healthy mode=full run that simply re-found it — the same clean-vs-did-
+	 * not-look discrimination `runner-empty-result` makes for shell-out runners.
+	 * Subject is `<runnerId>:<analysisRoot>`, once per session per pair.
+	 */
+	| "runner-coverage-empty"
+	/**
 	 * `ndjson-logger.ts`'s shared file-sink lost a write even after its one
 	 * reopen-and-retry (#1970) — the pi-analyze #15 shape, catching the
 	 * `ERR_STREAM_DESTROYED` writes that were vanishing silently after a sink
