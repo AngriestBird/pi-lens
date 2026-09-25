@@ -128,6 +128,8 @@ import {
 	createLspDiagnosticsTool,
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
+	renderBatchOutcomeLines,
+	type BatchOutcomeDetail,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -344,6 +346,7 @@ export function createLensDiagnosticsTool(
 			navigationOnlyFiles?: number;
 			timedOutFiles?: number;
 			outcomeCounts?: Record<string, number>;
+			outcomes?: BatchOutcomeDetail[];
 			incompleteFiles?: number;
 			unconfirmed?: boolean;
 			timedOut?: boolean;
@@ -374,11 +377,15 @@ export function createLensDiagnosticsTool(
 				if ((details.unconfirmedFiles ?? 0) > 0)
 					return `lens_diagnostics${scope} — ${count} ${noun} · ${details.cleanFiles ?? 0} clean · ${details.unconfirmedFiles} unconfirmed${details.timedOutFiles ? ` (${details.timedOutFiles} timed out)` : ""}`;
 				const outcomeCounts = details.outcomeCounts;
+				const tooLargeLines = renderBatchOutcomeLines(details.outcomes ?? []);
+				if (tooLargeLines.length > 0)
+					return `lens_diagnostics${scope} — too large: ${tooLargeLines.join("; ")}`;
 				const notConfirmed = outcomeCounts
 					? (outcomeCounts.inconclusive ?? 0) +
 						(outcomeCounts.unavailable ?? 0) +
 						(outcomeCounts.unsupported ?? 0) +
-						(outcomeCounts.failed ?? 0)
+						(outcomeCounts.failed ?? 0) +
+						(outcomeCounts.too_large ?? 0)
 					: 0;
 				if (notConfirmed > 0)
 					return `lens_diagnostics${scope} — ${count} ${noun} · ${notConfirmed} checks not confirmed`;

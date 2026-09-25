@@ -36,7 +36,7 @@ export function exceedsLspSyncLimits(content: string): LspContentLimitVerdict {
 	if (sizeBytes > LSP_MAX_FILE_BYTES) {
 		return {
 			tooLarge: true,
-			reason: `${Math.round(sizeBytes / 1024)}KB exceeds ${Math.round(LSP_MAX_FILE_BYTES / 1024)}KB`,
+			reason: `${sizeBytes} bytes > ${LSP_MAX_FILE_BYTES} limit`,
 		};
 	}
 
@@ -44,7 +44,7 @@ export function exceedsLspSyncLimits(content: string): LspContentLimitVerdict {
 	if (lineCount > LSP_MAX_FILE_LINES) {
 		return {
 			tooLarge: true,
-			reason: `${lineCount} lines exceeds ${LSP_MAX_FILE_LINES}`,
+			reason: `${lineCount} lines > ${LSP_MAX_FILE_LINES} limit`,
 		};
 	}
 
