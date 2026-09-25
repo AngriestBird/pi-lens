@@ -24,7 +24,7 @@ describe("exceedsLspSyncLimits (#3405 r2)", () => {
 		// this case can only fail on bytes.
 		const verdict = exceedsLspSyncLimits(`${"x".repeat(MAX_BYTES + 1)}\n`);
 		expect(verdict.tooLarge).toBe(true);
-		expect(verdict.reason).toContain("KB exceeds");
+		expect(verdict.reason).toContain("bytes >");
 	});
 
 	it("refuses a document past the line bound, well inside the byte bound", () => {
@@ -32,7 +32,7 @@ describe("exceedsLspSyncLimits (#3405 r2)", () => {
 		// case can only fail on lines.
 		const verdict = exceedsLspSyncLimits("a\n".repeat(MAX_LINES + 1));
 		expect(verdict.tooLarge).toBe(true);
-		expect(verdict.reason).toContain("lines exceeds");
+		expect(verdict.reason).toContain("lines >");
 	});
 
 	it("admits a document inside both bounds", () => {

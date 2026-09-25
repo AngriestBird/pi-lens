@@ -2724,6 +2724,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 						label: "tool-result-bootstrap",
 					})
 				: peekBootstrapClients();
+			// `return await`, not `return`: this `try` has a `finally` that clears
+			// the ambient abort signal. Without the await the `finally` runs the
+			// instant the promise is RETURNED, so the slot is empty for the whole
+			// pipeline and an Escape mid-edit no longer kills its child processes
+			// (#2897 round 2 V2; #2939 round 2 restored it after measuring the
+			// deletion observable).
 			return await bounded(
 				handleToolResult({
 					signal: ctx.signal,
