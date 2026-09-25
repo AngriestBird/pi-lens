@@ -200,7 +200,7 @@ describe("stryker diff mutation ranges", () => {
 		// Recurrence: a bare path in --mutate is read by Stryker as "mutate the
 		// whole file", which is exactly the 2220-mutant population that made the
 		// lane evaluate nothing.
-		const ranges = new Map([
+		const ranges = new Map<string, Array<[number, number]>>([
 			[
 				"scripts/one.mjs",
 				[
@@ -212,11 +212,11 @@ describe("stryker diff mutation ranges", () => {
 		]);
 
 		expect(
-			mutationRangePatterns(["scripts/one.mjs", "scripts/mode-only.mjs"], ranges),
-		).toEqual([
-			"scripts/one.mjs:394-394",
-			"scripts/one.mjs:761-765",
-		]);
+			mutationRangePatterns(
+				["scripts/one.mjs", "scripts/mode-only.mjs"],
+				ranges,
+			),
+		).toEqual(["scripts/one.mjs:394-394", "scripts/one.mjs:761-765"]);
 	});
 });
 

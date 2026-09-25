@@ -117,7 +117,7 @@ export function mutationRangePatterns(files, rangesByFile) {
  * child exits on the signal itself, which Stryker's UnexpectedExitHandler does,
  * so the signal is not a usable discriminator.
  *
- * @param {{status: number|null, error?: Error & {code?: string}}} result
+ * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
  * @param {number} budgetMinutes
  */
 export function describeStrykerFailure(result, budgetMinutes) {
