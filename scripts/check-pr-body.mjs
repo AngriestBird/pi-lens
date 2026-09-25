@@ -391,7 +391,7 @@ function sourceLines(source) {
 const HEAD_TEST_CORPUS_CACHE_LIMIT = 8;
 const headTestCorpusCache = new Map();
 
-function testCorpus(options = {}) {
+export function testCorpus(options = {}) {
 	const cwd = options.cwd ?? process.cwd();
 	let cacheKey;
 	if (!options.workingTree) {
@@ -758,7 +758,11 @@ function extractTestPathTokens(value) {
 	return tokens;
 }
 
-function lintTestReferences(body, options = {}, corpus = testCorpus(options)) {
+function lintTestReferences(
+	body,
+	options = {},
+	corpus = options.testCorpus ?? testCorpus(options),
+) {
 	const references = [];
 	const visibleBody = bodyLinesOutsideFences(body).join("\n");
 	const isExistingDirectory = (pathToken) => {
@@ -1236,7 +1240,7 @@ export function lintPrBody(body = "", options = {}) {
 			),
 		);
 	errors.push(...lintCodeCitations(body, options));
-	errors.push(...lintTestReferences(body, options, testCorpus(options)));
+	errors.push(...lintTestReferences(body, options));
 	errors.push(...lintMasterClaims(body));
 	return { valid: errors.length === 0, errors };
 }

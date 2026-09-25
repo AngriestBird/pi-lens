@@ -21,6 +21,7 @@ import {
 	lintLocalPrBody,
 	localDiff,
 	lintPrBody,
+	testCorpus,
 	splitMarkdownUnits,
 	repairEscapedNewlineBody,
 	repairFlattenedBody,
@@ -2225,6 +2226,20 @@ describe("head-tree citations and test references", () => {
 		}
 	});
 
+	it("accepts an injected corpus without rebuilding it", () => {
+		const injected = {
+			paths: new Set(["tests/injected.test.ts"]),
+			titles: new Set(["injected title"]),
+		};
+		const result = lintPrBody(`${body}\nit("injected title")`, {
+			testCorpus: injected,
+			git: () => {
+				throw new Error("corpus must not be rebuilt");
+			},
+		});
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
 	it("evicts the oldest HEAD-tree corpus beyond its bound", () => {
 		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-corpus-bound-"));
 		try {
@@ -2300,14 +2315,15 @@ describe("head-tree citations and test references", () => {
 				);
 			if (match?.[2]?.trim()) titles.add(match[2].trim());
 		}
+		const corpus = testCorpus();
 		const missing = [...titles]
 			.filter((title) => !/[`|\r\n]/.test(title))
 			.filter((title) => {
 				const quote = title.includes('"') ? "'" : '"';
 				const escaped = title.replaceAll(quote, `\\${quote}`);
-				return lintPrBody(
-					`${body}\nit(${quote}${escaped}${quote})`,
-				).errors.some((error) => error.includes(title));
+				return lintPrBody(`${body}\nit(${quote}${escaped}${quote})`, {
+					testCorpus: corpus,
+				}).errors.some((error) => error.includes(title));
 			});
 		expect(missing).toEqual([]);
 	});

@@ -1,4 +1,5 @@
 export declare const DEFAULT_MAX_FILES: 6;
+export declare const MUTATION_BUDGET_MINUTES: 60;
 export declare function capMutationFiles(
 	files: string[],
 	maxFiles?: number,
@@ -21,3 +22,18 @@ export declare function mapRelatedTests(
 	uncovered: string[];
 	tests: string[];
 };
+export declare function parseChangedLineRanges(
+	diffText: string,
+): Map<string, Array<[number, number]>>;
+export declare function mutationRangePatterns(
+	files: string[],
+	rangesByFile: Map<string, Array<[number, number]>>,
+): string[];
+export declare function describeStrykerFailure(
+	result: {
+		status: number | null;
+		signal?: NodeJS.Signals | null;
+		error?: Error & { code?: string };
+	},
+	budgetMinutes: number,
+): string;
