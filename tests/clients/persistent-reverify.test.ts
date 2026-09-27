@@ -372,6 +372,54 @@ describe("persistent reverify (#3170)", () => {
 		expect(historyLineCount()).toBe(secondTurnLines + 1);
 	});
 
+	it("F1: an incomplete replacement followed by confirmed findings is observed and relabelled", async () => {
+		// Recurrence: a confirmed replacement must not inherit the incomplete
+		// marker, or history skips a real observation and advisory labels it stale.
+		const carried = makeCarriedReport(filePath);
+		const cacheManager = new CacheManager(false);
+		cacheManager.writeCache("actionable-warnings", carried, cwd);
+		const historyPath = getActionableWarningsHistoryPath(cwd);
+		const historyLineCount = () =>
+			fs.existsSync(historyPath)
+				? fs.readFileSync(historyPath, "utf8").trimEnd().split("\n").length
+				: 0;
+
+		const incomplete = await runPersistentReverify({
+			report: carried,
+			cwd,
+			lspService: makeService("throw"),
+		});
+		expect(incomplete.replacementFiles[0]?.reVerifyIncomplete).toBe(true);
+		expect(historyLineCount()).toBe(0);
+
+		const confirmed = await runPersistentReverify({
+			// The real in-band publisher clears the deferred carry marker after
+			// persistence. Feed the replacement directly to the next pass so the
+			// test isolates the requested incomplete -> confirmed state transition.
+			report: { ...carried, files: incomplete.replacementFiles },
+			cwd,
+			lspService: makeService({
+				diags: [makeDiag()],
+				confirmation: "confirmed",
+			}),
+		});
+		publishActionableWarningsReport(
+			cacheManager,
+			cwd,
+			{ ...carried, files: confirmed.replacementFiles },
+			{ origin: "in-band" },
+		);
+		const afterConfirmed = cacheManager.readCache("actionable-warnings", cwd)
+			?.data as ActionableWarningsReport;
+		const confirmedFile = afterConfirmed.files[0];
+		expect(confirmedFile?.reVerified).toBe(true);
+		expect(confirmedFile?.reVerifyIncomplete).toBeUndefined();
+		expect(historyLineCount()).toBe(1);
+		expect(formatActionableWarningsAdvisory(afterConfirmed, cwd)).not.toContain(
+			"(re-verify incomplete)",
+		);
+	});
+
 	it("F6: an entry re-arms — the pass re-verifies it again on the next run", async () => {
 		const carried = makeCarriedReport(filePath);
 		const service = makeService({

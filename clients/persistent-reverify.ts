@@ -317,6 +317,7 @@ export async function runPersistentReverify(args: {
 			...entry,
 			warnings: freshRecords,
 			reVerified: true,
+			reVerifyIncomplete: undefined,
 			generatedAt: new Date(nowMs).toISOString(),
 		});
 	}
