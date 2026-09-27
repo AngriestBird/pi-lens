@@ -20,7 +20,7 @@ import { detectFileKind, KIND_EXTENSIONS } from "../file-kinds.js";
 import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
-import { realIsPidAlive } from "../instance-reaper.js";
+import { isStaleStageFile } from "../instance-reaper.js";
 import { logLatency } from "../latency-logger.js";
 import {
 	containerNameChain,
@@ -2556,11 +2556,14 @@ function resolvePersistWorkerPath(): string | undefined {
 	// the bundled dist/index.js a sibling ./persist-worker.js resolves beside
 	// the BUNDLE where nothing exists (#950 review F1 — the worker silently
 	// never ran in production). Try the compiled-sibling layout first (source
-	// checkout / unbundled dist/clients tree), then the dist-tree path
-	// relative to the bundle entry.
+	// checkout / tsc emit), then the bundled worker entry (#3219:
+	// dist/workers/, never the unbundled dist/clients tree, which the package
+	// no longer ships) — from dist/index.js or a dist/ chunk, then from a bin
+	// under dist/mcp/.
 	const candidates = [
 		new URL("./persist-worker.js", import.meta.url),
-		new URL("./clients/review-graph/persist-worker.js", import.meta.url),
+		new URL("./workers/review-graph-persist-worker.js", import.meta.url),
+		new URL("../workers/review-graph-persist-worker.js", import.meta.url),
 	];
 	for (const url of candidates) {
 		try {
@@ -2712,24 +2715,10 @@ function ensurePersistExitHook(): void {
 // artifact-specific pass.
 //
 // Liveness: an entry whose embedded stage pid is still alive belongs to a
-// concurrent healthy owner (or to us) and is skipped, reusing the reaper's
-// conservative `realIsPidAlive` (ESRCH-only-means-dead) rather than inventing
-// a second liveness probe. A recycled pid can therefore leave one stale stage
-// file behind instead of destroying a live one — deliberately the safe
-// direction; a later process whose pid table has moved on sweeps it.
+// concurrent healthy owner (or to us) and is skipped, through the reaper's
+// shared `isStaleStageFile` (the project snapshot sweeps with it too, #3510).
 const _sweptStageDirs = new Set<string>();
 const REVIEW_GRAPH_ARTIFACT_PREFIX = "review-graph.";
-const STAGE_PID_PATTERN = /\.stage-(\d+)-/;
-
-/** True only for a review-graph stage artifact left behind by a dead process. */
-function isStaleReviewGraphStageFile(entry: string): boolean {
-	if (!entry.startsWith(REVIEW_GRAPH_ARTIFACT_PREFIX)) return false;
-	const match = STAGE_PID_PATTERN.exec(entry);
-	if (!match) return false;
-	const pid = Number(match[1]);
-	if (pid === process.pid) return false; // our own live stage file
-	return !realIsPidAlive(pid);
-}
 
 function sweepStaleStageFiles(cacheDir: string): void {
 	if (_sweptStageDirs.has(cacheDir)) return;
@@ -2737,7 +2726,7 @@ function sweepStaleStageFiles(cacheDir: string): void {
 	fs.readdir(cacheDir, (err, entries) => {
 		if (err) return;
 		for (const entry of entries) {
-			if (!isStaleReviewGraphStageFile(entry)) continue;
+			if (!isStaleStageFile(entry, REVIEW_GRAPH_ARTIFACT_PREFIX)) continue;
 			fs.rm(path.join(cacheDir, entry), { force: true }, () => {});
 		}
 	});
@@ -3516,6 +3505,30 @@ export function flushReviewGraphPersist(
 				workerCompleted: false,
 			}),
 		});
+	}
+	// #3536: the generation gate binds the forced write too. The worker serves
+	// requests concurrently, so a newer generation can already have promoted
+	// while this one was in flight; writing it would put the older view back.
+	// persistGraph sets the key's generation before it queues any request and
+	// nothing clears it, so it is defined whenever a candidate exists.
+	const currentGeneration = _persistGenerations.get(key)!;
+	if (pending && pending.generation !== currentGeneration) {
+		logReviewGraph({
+			cwd: key,
+			phase: "persist_skipped",
+			reason: "superseded",
+			observability: persistObservability(pending, {
+				status: "superseded",
+				supersededByGeneration: currentGeneration,
+				reason: "forced_flush_superseded",
+				workerStarted: true,
+				workerCompleted: false,
+			}),
+		});
+		return {
+			ok: false,
+			reason: `queued snapshot generation ${pending.generation} was superseded by generation ${currentGeneration}`,
+		};
 	}
 	if (!pending) {
 		return {
@@ -5267,6 +5280,11 @@ async function trySeqFastpath(
 	// A pi-observed write can advance projectSeq without changing bytes (format
 	// no-op, save, or an idempotent edit). Confirm content before re-extracting so
 	// the seq fast path does not refresh builtAt or claim graphChanged for drift.
+	// #3535: stat BEFORE any read. A stat taken after the read signs bytes the
+	// graph never saw, and every sweep-path build then serves it as current.
+	const candidateStats = candidateFiles.map(
+		(file) => [file, sourceSignatureEntry(file)] as const,
+	);
 	const { trulyChanged, hashes } = await confirmContentChanged(
 		candidateFiles,
 		cached.fileHashes,
@@ -5283,8 +5301,8 @@ async function trySeqFastpath(
 		// Stamp the seq captured at BUILD START — a bump that raced in during this
 		// build has seq > stamp and is re-diffed next build, never missed.
 		const nextSignatures = new Map(cached.fileSignatures);
-		for (const file of candidateFiles) {
-			nextSignatures.set(file, sourceSignatureEntry(file));
+		for (const [file, stat] of candidateStats) {
+			nextSignatures.set(file, stat);
 		}
 		cached.signature = sourceSignatureFromMap(nextSignatures);
 		cached.fileSignatures = nextSignatures;
@@ -5327,8 +5345,8 @@ async function trySeqFastpath(
 	// those — the whole point of the fast path). Recompute the aggregate signature
 	// the same way the incremental branch does (sourceSignatureFromMap).
 	const nextSignatures = new Map(cached.fileSignatures);
-	for (const file of candidateFiles) {
-		nextSignatures.set(file, sourceSignatureEntry(file));
+	for (const [file, stat] of candidateStats) {
+		nextSignatures.set(file, stat);
 	}
 	const nextSignature = sourceSignatureFromMap(nextSignatures);
 
