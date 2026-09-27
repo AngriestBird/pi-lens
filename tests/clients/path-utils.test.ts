@@ -1795,9 +1795,10 @@ describe("workspace glob memo cell cap (#2629)", () => {
 		).toHaveLength(0);
 	});
 
-	it("declines over-cap matching literals and records once per pattern length", () => {
+	it("declines over-cap matching literals and reports the cap statelessly", () => {
 		// Recurrence prevented: #2629 allocated an unbounded matcher table even when a literal glob matched.
 		// 1,414 literal steps times 1,415 positions is 2,002,225 cells, above the 2,000,000-cell cap.
+		const capReports: number[] = [];
 		const patternA = "a".repeat(1_414);
 		const patternB = "b".repeat(1_414);
 		expect(
@@ -1805,6 +1806,7 @@ describe("workspace glob memo cell cap (#2629)", () => {
 				patternA,
 				patternA,
 				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(patternA.length),
 			),
 		).toBe(false);
 		expect(
@@ -1812,26 +1814,14 @@ describe("workspace glob memo cell cap (#2629)", () => {
 				patternB,
 				patternB,
 				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(patternB.length),
 			),
 		).toBe(false);
-
-		const rows = getDegradationSummary().filter(
-			(group) => group.kind === "workspace-glob-cap",
-		);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toMatchObject({
-			count: 1,
-			latestReasons: [{ subject: "1414" }],
-		});
-		expect(JSON.stringify(rows[0])).not.toContain(patternA);
-		expect(JSON.stringify(rows[0])).not.toContain(patternB);
+		expect(capReports).toEqual([1414, 1414]);
+		expect(getDegradationSummary()).toHaveLength(0);
 
 		resetDegradationLedger();
-		expect(
-			getDegradationSummary().filter(
-				(group) => group.kind === "workspace-glob-cap",
-			),
-		).toHaveLength(0);
+		expect(getDegradationSummary()).toHaveLength(0);
 		expect(
 			matchesWorkspaceMemberPattern(
 				patternA,
@@ -1839,15 +1829,12 @@ describe("workspace glob memo cell cap (#2629)", () => {
 				UV_WORKSPACE_MEMBERS_DIALECT,
 			),
 		).toBe(false);
-		expect(
-			getDegradationSummary().filter(
-				(group) => group.kind === "workspace-glob-cap",
-			),
-		).toMatchObject([{ count: 1, latestReasons: [{ subject: "1414" }] }]);
+		expect(getDegradationSummary()).toHaveLength(0);
 	});
 
-	it("bounds distinct over-cap pattern-length events per session", () => {
-		// Recurrence prevented: unique huge pattern lengths cannot grow the session latch without bound.
+	it("reports distinct over-cap lengths without retaining matcher state", () => {
+		// Recurrence prevented: unique huge pattern lengths cannot grow a matcher-local latch.
+		const capReports: number[] = [];
 		for (let length = 1_414; length <= 1_434; length += 1) {
 			const pattern = "x".repeat(length);
 			expect(
@@ -1855,16 +1842,13 @@ describe("workspace glob memo cell cap (#2629)", () => {
 					pattern,
 					pattern,
 					UV_WORKSPACE_MEMBERS_DIALECT,
+					() => capReports.push(length),
 				),
 			).toBe(false);
 		}
 
-		const [row] = getDegradationSummary().filter(
-			(group) => group.kind === "workspace-glob-cap",
-		);
-		expect(row?.count).toBe(21);
-		expect(row?.droppedCount).toBe(1);
-		expect(row?.latestReasons).toHaveLength(20);
+		expect(capReports).toHaveLength(21);
+		expect(getDegradationSummary()).toHaveLength(0);
 
 		// A length already in the retained set does not count as dropped when the cap is full.
 		const retainedPattern = "x".repeat(1_414);
@@ -1873,16 +1857,10 @@ describe("workspace glob memo cell cap (#2629)", () => {
 				retainedPattern,
 				retainedPattern,
 				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(retainedPattern.length),
 			),
 		).toBe(false);
-		const [afterRetainedLength] = getDegradationSummary().filter(
-			(group) => group.kind === "workspace-glob-cap",
-		);
-		expect(afterRetainedLength).toMatchObject({
-			count: 21,
-			droppedCount: 1,
-		});
-		expect(afterRetainedLength?.latestReasons).toHaveLength(20);
+		expect(capReports.at(-1)).toBe(1414);
 
 		resetDegradationLedger();
 		for (let length = 1_414; length <= 1_434; length += 1) {
@@ -1891,13 +1869,27 @@ describe("workspace glob memo cell cap (#2629)", () => {
 				pattern,
 				pattern,
 				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(pattern.length),
 			);
 		}
+		expect(capReports.slice(-21)).toHaveLength(21);
+	});
+
+	it("keeps a realistic upper-size matching glob under the cap", () => {
+		// Recurrence prevented: lowering the cap below realistic manifest work must
+		// not silently turn a valid deep workspace member into a non-member.
+		const relativePath = Array.from({ length: 2049 }, (_, index) =>
+			index % 2 === 0 ? "a" : "b",
+		).join("/");
+		const pattern = "**/".repeat(66) + "**";
+		expect(relativePath.length).toBeGreaterThanOrEqual(4096);
 		expect(
-			getDegradationSummary().find(
-				(group) => group.kind === "workspace-glob-cap",
+			matchesWorkspaceMemberPattern(
+				pattern,
+				relativePath,
+				UV_WORKSPACE_MEMBERS_DIALECT,
 			),
-		).toMatchObject({ count: 21, droppedCount: 1 });
+		).toBe(true);
 	});
 });
 

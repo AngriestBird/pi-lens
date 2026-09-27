@@ -38,6 +38,10 @@ import {
 	type PythonEnvironmentSource,
 } from "../../clients/python-environment.js";
 import { RUNNERS, TestRunnerClient } from "../../clients/test-runner-client.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 const tempDirs: string[] = [];
 let originalVirtualEnv: string | undefined;
@@ -136,6 +140,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	resetDegradationLedger();
 	restoreEnvironmentVariable("VIRTUAL_ENV", originalVirtualEnv);
 	restoreEnvironmentVariable("CONDA_PREFIX", originalCondaPrefix);
 	restoreEnvironmentVariable(
@@ -170,6 +175,36 @@ describe("pytest project environment", () => {
 		expect(process.env.VIRTUAL_ENV).toBeUndefined();
 		expect(process.env.PATH).toBe(inheritedPath);
 		expect(findGlobalBinary).not.toHaveBeenCalled();
+	});
+
+	it("records a capped member glob through the UV consumer", async () => {
+		const workspace = createProject(false);
+		const parts = Array.from({ length: 708 }, () => "a");
+		const relative = parts.join("/");
+		const member = path.join(workspace.root, ...parts);
+		fs.writeFileSync(
+			path.join(workspace.root, "pyproject.toml"),
+			`[tool.uv.workspace]\nmembers = ['${relative}']\n`,
+		);
+		fs.mkdirSync(member, { recursive: true });
+		fs.writeFileSync(
+			path.join(member, "pyproject.toml"),
+			"[project]\nname='member'\n",
+		);
+		createEnvironment(path.join(workspace.root, ".venv"));
+
+		await detectPythonEnvironment(member, os.tmpdir());
+
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "workspace-glob-cap",
+					latestReasons: [
+						expect.objectContaining({ subject: String(relative.length) }),
+					],
+				}),
+			]),
+		);
 	});
 
 	it("keeps the generic Python fallback when no project environment exists", async () => {
