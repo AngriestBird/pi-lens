@@ -131,6 +131,13 @@ export type DegradationKind =
 	| "cascade-pending-cap"
 	| "cascade-tier3-backlog-evicted"
 	/**
+	 * #3511: the change-log lock stayed held past its bounded wait (or its
+	 * directory failed), so a mutation's seq was allocated and appended without
+	 * it, and that runtime stops stamping fresh snapshots until its next seed.
+	 * Subject is the change-log path.
+	 */
+	| "change-log-lock-unavailable"
+	/**
 	 * A per-file touch skipped a language server because that server is in the
 	 * breaker cooldown or is latched permanently broken (#1743). During an
 	 * outage this fires once per file per touch, so the count here is the exact
@@ -260,6 +267,27 @@ export type DegradationKind =
 	 */
 	| "generation-guard-stale-write"
 	/**
+	 * #3476: a generation-lock holder (the bounded, quarantine or installer
+	 * lock) backed off because that lock's pre-generation file is held: by a
+	 * writer from an older version, or by this version's own holder whose
+	 * generation outlived the lease. Once per acquisition. Subject is the old
+	 * lock's path.
+	 */
+	| "generation-lock-legacy-held"
+	/**
+	 * #3476: a generation-lock acquisition (the bounded, quarantine or
+	 * installer lock) took over a generation whose holder was dead or past the
+	 * lock's lease. Subject is the generation directory.
+	 */
+	| "generation-lock-stale-takeover"
+	/**
+	 * #3578: a sync generation-lock wait (the change-log and snapshot cache
+	 * locks) was skipped because the holder an earlier wait ran out on is
+	 * still inside. The call fell back as a timed-out wait does. Once per
+	 * session; subject is the lock directory.
+	 */
+	| "generation-lock-wait-skipped"
+	/**
 	 * Failed-first test state was retired only after ENOENT/ENOTDIR evidence,
 	 * retained when the filesystem probe was indeterminate, or evicted at the
 	 * state cap (#2044). Subject is outcome + runner + bounded path, so repeated
@@ -304,6 +332,16 @@ export type DegradationKind =
 	 */
 	| "hook-handler-crash"
 	/**
+	 * #3506: the pi host adapter could not reach pi's `withFileMutationQueue`
+	 * (the host SDK import failed, exported no such function, or loaded a
+	 * second copy of the package whose `SessionManager` is not the host's), so
+	 * pi-lens' own format and autofix writers run outside pi's per-file queue
+	 * and can race a parallel agent edit of the same file. Subject is
+	 * `withFileMutationQueue`, recorded ONCE: the lookup is resolved once per
+	 * process.
+	 */
+	| "host-file-mutation-queue-unavailable"
+	/**
 	 * #3246: a live inline-blocker record re-served at turn end carried no
 	 * structured diagnostics, so the shared finding policy had no identity to
 	 * anchor a stored disposition against and the record's rendered summary was
@@ -317,6 +355,17 @@ export type DegradationKind =
 	 * (`runtime-tool-result.ts`); a row here names a producer that did not.
 	 */
 	| "inline-blocker-unstructured"
+	/**
+	 * #3515: the install lock's generation was no longer owned when
+	 * `installNpmTool` re-checked right before a second critical write (the
+	 * ERESOLVE `--legacy-peer-deps` retry spawn) — a competing installer
+	 * judged this hold stale and took over. The heartbeat that keeps the
+	 * generation's mtime fresh for the whole hold is what USUALLY prevents
+	 * this; this fires only on the tick it missed. Subject is the tool id,
+	 * once per session (`recordDegradationOnce`) since the same install
+	 * cannot lose the lock twice in one attempt.
+	 */
+	| "install-lock-lost-mid-install"
 	| "install-retry-exhausted"
 	/**
 	 * #3311: a command the resolution ladder found on PATH failed the registry
@@ -334,11 +383,41 @@ export type DegradationKind =
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
 	| "instance-registry-corrupt"
 	/**
+	 * #3498: the removal `deregisterInstance` queued took the registry lock
+	 * and ran, whether or not the entry was still there. A queued removal
+	 * with no landed record was lost (host exit, or the lock never came).
+	 * Subject is this process's pid.
+	 */
+	| "instance-registry-deregister-landed"
+	/**
+	 * #3498: `deregisterInstance`'s sync removal could not take the registry
+	 * lock, so the removal was queued on the registry tail behind the holder.
+	 * Subject is this process's pid.
+	 */
+	| "instance-registry-deregister-queued"
+	/**
 	 * #3071: a registration-record write fell back to the process cwd because
 	 * the session's identity carried no `projectRoot` — `instance-registry.ts`
 	 * still records the child, just without the caller-supplied root.
 	 */
 	| "instance-registry-identity-fallback"
+	/**
+	 * #3476: a registry-lock acquisition hit a filesystem error other than
+	 * contention (e.g. EACCES on a root-owned `<registry>.locks/`); the write
+	 * was skipped instead of throwing. Subject is the resolved lock target.
+	 */
+	| "instance-registry-lock-failed"
+	/**
+	 * #3476: a registry-lock holder backed off because the pre-generation
+	 * `<registry>.lock` file is held by a live writer from an older version.
+	 * Subject is that lock file's resolved path.
+	 */
+	| "instance-registry-lock-legacy-held"
+	/**
+	 * #3476: a registry-lock acquisition took over a generation whose holder
+	 * was dead or past the 5 s lease. Subject is the resolved lock target.
+	 */
+	| "instance-registry-lock-stale-takeover"
 	/**
 	 * #3071: a registry-file lock acquisition exhausted its retry budget
 	 * (`instance-registry-lock.ts`'s `recordLockTimeout`). Subject is the
@@ -351,6 +430,12 @@ export type DegradationKind =
 	 * synthesizes a minimal host entry so the child stays tracked.
 	 */
 	| "instance-registry-registration-missing"
+	/**
+	 * #3498: a registration made before `deregisterInstance` reached its
+	 * intent or its write after it, and dropped itself. Subject is the
+	 * normalized root it would have registered.
+	 */
+	| "instance-registry-registration-superseded"
 	/**
 	 * #3383: a newline-framed reader (`createWarmIpcLineReader`) discarded an
 	 * unterminated line that had grown past `MAX_FRAMED_LINE_BYTES`. The peer is
@@ -442,6 +527,14 @@ export type DegradationKind =
 	 */
 	| "lsp-document-drift"
 	| "lsp-document-send-order"
+	/**
+	 * #3541: an LSP workspace edit computed from a read of a file met other
+	 * bytes on disk when its turn in pi's mutation queue came (an agent edit
+	 * landed in between), so it was refused before any write rather than
+	 * applied at stale positions. Subject is the file path;
+	 * `incrementDegradationCount` keeps one bounded entry per file.
+	 */
+	| "lsp-edit-stale-content"
 	| "lsp-liveness-probe-unsupported"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
@@ -640,6 +733,14 @@ export type DegradationKind =
 	| "mode-suppression"
 	| "native-read-clipped"
 	/**
+	 * #3524: the file moved between a native read's tool_call and its
+	 * tool_result, so the read is recorded from the text pi delivered and
+	 * FileTime keeps the tool_call's stamp. Subject is the file, counted per
+	 * occurrence (`incrementDegradationCount`): a writer racing the agent's
+	 * reads repeatedly shows as a rising count.
+	 */
+	| "native-read-raced-writer"
+	/**
 	 * A shell-out runner's tool DID produce output, exited nonzero, and the
 	 * runner's parser extracted ZERO diagnostics from it (#1948). The adjacent
 	 * `runner-empty-result` covers "the tool produced nothing"; this covers
@@ -731,6 +832,13 @@ export type DegradationKind =
 	 * `recordDegradation`. One entry per family per process.
 	 */
 	| "process-singleton-reset"
+	/**
+	 * #3509: the project snapshot's cache-dir lock stayed held past its bounded
+	 * wait (or its directory failed), so an admission meta write was skipped or
+	 * a body promotion was dropped as a failed persist. Subject is the gz body
+	 * path; reason names which of the two.
+	 */
+	| "project-snapshot-lock-unavailable"
 	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
@@ -1011,6 +1119,14 @@ export type DegradationKind =
 	 * `truncatedBodies`) make the truncation reconstructable.
 	 */
 	| "snapshot-sequence-read-timeout"
+	/**
+	 * #3511: a runtime's view missed a logged change-log entry at or below its
+	 * seq (a sibling process logged it, or the runtime was seeded at 0 by a
+	 * timed-out read), so its snapshots are stamped incomplete and never
+	 * served fresh until the next seed. Once per session; subject is the
+	 * project root, reason names which.
+	 */
+	| "snapshot-view-incomplete"
 	/**
 	 * A `<script>` body of an HTML file the napi runner was evaluating (#2347)
 	 * refused to parse as JavaScript, so that body contributed no embedded
@@ -1696,6 +1812,9 @@ const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	// #2874: a successful legacy-directory migration is an upgrade tally, not
 	// a call to action. The hash-only subject avoids exposing the project path.
 	"data_dir_migrated",
+	// #3498: a queued registry removal that landed is the retry working; the
+	// `instance-registry-deregister-queued` beside it is the line that stands out.
+	"instance-registry-deregister-landed",
 ]);
 
 export function renderDegradationLines(

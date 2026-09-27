@@ -36,6 +36,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	createLSPClient,
+	handleNotifyChange,
 	handleNotifyOpen,
 	type LSPClientState,
 } from "../../../clients/lsp/client.js";
@@ -276,6 +277,82 @@ describe("textDocument/didSave on a declared save (#3405)", () => {
 		});
 	});
 
+	// #3545: the change runner dropped the save it inherited. A saved touch
+	// replaced by a change, or kept out behind one as the older read, then
+	// produced no didSave at all, unlike the open-over-open case above.
+	it("keeps the save when a change coalesces over a saved open", async () => {
+		state.saveOptions = { includeText: true };
+		const saved = handleNotifyOpen(
+			state,
+			TEST_FILE,
+			"const x = 1;\n",
+			"typescript",
+			false,
+			true,
+			true,
+		);
+		const superseding = handleNotifyChange(state, TEST_FILE, "const x = 2;\n");
+		await Promise.all([saved, superseding]);
+		expect(sentMethods(state)).toEqual([
+			"textDocument/didOpen",
+			"textDocument/didSave",
+		]);
+		expect(sentParams(state, "textDocument/didSave")).toEqual({
+			textDocument: { uri: TEST_URI },
+			text: "const x = 2;\n",
+		});
+	});
+
+	it.each([
+		["fallback didOpen", false, ["textDocument/didOpen"]],
+		["didChange", true, ["textDocument/didOpen", "textDocument/didChange"]],
+	] as const)(
+		"sends no didSave for a save a change carries when its %s never left the process",
+		async (_branch, openFirst, expected) => {
+			state.saveOptions = { includeText: false };
+			if (openFirst)
+				await handleNotifyOpen(
+					state,
+					TEST_FILE,
+					"const x = 0;\n",
+					"typescript",
+					false,
+					true,
+				);
+			vi.mocked(state.connection.sendNotification).mockRejectedValueOnce(
+				Object.assign(new Error("write after end"), {
+					code: "ERR_STREAM_WRITE_AFTER_END",
+				}),
+			);
+			const saved = handleNotifyOpen(
+				state,
+				TEST_FILE,
+				"const x = 1;\n",
+				"typescript",
+				false,
+				true,
+				true,
+			);
+			const superseding = handleNotifyChange(
+				state,
+				TEST_FILE,
+				"const x = 2;\n",
+			);
+			await Promise.all([saved, superseding]);
+			expect(sentMethods(state)).toEqual(expected);
+		},
+	);
+
+	it("sends no didSave after a change that carries no save", async () => {
+		state.saveOptions = { includeText: false };
+		await handleNotifyChange(state, TEST_FILE, "const x = 1;\n");
+		await handleNotifyChange(state, TEST_FILE, "const x = 2;\n");
+		expect(sentMethods(state)).toEqual([
+			"textDocument/didOpen",
+			"textDocument/didChange",
+		]);
+	});
+
 	it("sends no didSave when the client dies between the two notifications", async () => {
 		// The one window the caller's own entry guard cannot cover: the client is
 		// alive when the notify starts and destroyed by the time the content
@@ -375,6 +452,8 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 				true,
 			);
 			await recorder.untilSave();
+			// #3407: the inventory reads the same negotiated value.
+			expect(client.getSaveOptions?.()).toEqual({ includeText: false });
 
 			// The real `initialize` reply drove the send: the fixture advertises
 			// `save: true` and nothing else about saving, so no text rides along.
@@ -415,6 +494,8 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 				true,
 			);
 			await recorder.until("textDocument/didOpen");
+			// #3407: declared no save → the inventory reports none.
+			expect(client.getSaveOptions?.()).toBeUndefined();
 			// A stdio JSON-RPC stream is FIFO, so a reply to a request issued AFTER
 			// the notify proves the server has already drained everything the notify
 			// wrote. That is what makes the absence below evidence and not a race —
