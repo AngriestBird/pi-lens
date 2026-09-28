@@ -29,6 +29,8 @@ import {
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
+	mutationLaneExclusion,
+	MutationLaneExclusionError,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
@@ -463,6 +465,109 @@ describe("compiled-source mutation targets (#3531 rescope)", () => {
 });
 
 describe("mapRelatedTests generalized to compiled sources", () => {
+	it("excludes only source-marked tests with a checked reason", () => {
+		// Recurrence: #3625 admitted grammar, real-stdio, and host-witness tests
+		// into a dry run because they imported a widely-used module. The marker
+		// is source-derived; the reason is independently checked and an unmarked
+		// importer remains in the population.
+		const result = mapRelatedTests(["clients/degradation-ledger.ts"], {
+			testFiles: ["tests/marked.test.ts", "tests/plain.test.ts"],
+			readFile: (file) =>
+				file.includes("marked")
+					? '// mutation-lane: exclude\nimport "../clients/degradation-ledger.js";'
+					: 'import "../clients/degradation-ledger.js";',
+			exclusions: {
+				"tests/marked.test.ts": { reason: "fixture boundary" },
+			},
+		});
+
+		expect(result.tests).toEqual(["tests/plain.test.ts"]);
+		expect(result.excluded).toEqual([
+			{ file: "tests/marked.test.ts", reason: "fixture boundary" },
+		]);
+	});
+
+	it("rejects an exclusion marker without a checked reason", () => {
+		// Recurrence: a marker without an independently reviewed reason would be
+		// silent coverage loss rather than a bounded admission.
+		expect(() =>
+			mutationLaneExclusion("tests/marked.test.ts", {
+				readFile: () => "// mutation-lane: exclude",
+				exclusions: {},
+			}),
+		).toThrowError(
+			expect.objectContaining({
+				name: "MutationLaneExclusionError",
+				message: expect.stringContaining("no checked reason"),
+			}),
+		);
+	});
+
+	it("keeps an excluded sole importer uncovered", () => {
+		// Recurrence: an exclusion is not coverage. If it is the only importer,
+		// the source must retain the no-covering-test verdict rather than becoming
+		// a falsely covered mutation target.
+		const result = mapRelatedTests(["clients/degradation-ledger.ts"], {
+			testFiles: ["tests/marked.test.ts"],
+			readFile: () =>
+				'// mutation-lane: exclude\nimport "../clients/degradation-ledger.js";',
+			exclusions: {
+				"tests/marked.test.ts": { reason: "fixture boundary" },
+			},
+		});
+		expect(result.covered).toEqual([]);
+		expect(result.uncovered).toEqual(["clients/degradation-ledger.ts"]);
+		expect(result.tests).toEqual([]);
+		expect(result.excluded).toEqual([
+			{ file: "tests/marked.test.ts", reason: "fixture boundary" },
+		]);
+	});
+
+	it("parses failing test names from Stryker output before falling back", () => {
+		// Recurrence: the dry-run failure branch must preserve the child output's
+		// named failing tests, not discard it and report only the selected list.
+		const reason = describeStrykerFailure(
+			{ status: 1, signal: null, error: undefined },
+			60,
+			{
+				tests: ["tests/fallback.test.ts"],
+				output: "FAIL tests/first.test.ts:12\n❯ tests/second.test.ts:4",
+			},
+		);
+		expect(reason).toContain("tests/first.test.ts, tests/second.test.ts");
+		expect(reason).not.toContain("tests/fallback.test.ts");
+	});
+
+	it("uses a bounded named error for an unregistered marker", () => {
+		// Recurrence: a malformed checked registry used to escape the driver as
+		// an anonymous uncaught Error before it could write a bounded report.
+		try {
+			mutationLaneExclusion("tests/marked.test.ts", {
+				readFile: () => "// mutation-lane: exclude",
+				exclusions: {},
+			});
+		} catch (error) {
+			expect(error).toBeInstanceOf(MutationLaneExclusionError);
+			if (!(error instanceof Error)) throw error;
+			expect(error.name).toBe("MutationLaneExclusionError");
+			return;
+		}
+		throw new Error("expected the marker admission to fail");
+	});
+
+	it("names the related tests when the dry run fails", () => {
+		const reason = describeStrykerFailure(
+			{ status: 1, signal: null, error: undefined },
+			60,
+			{ tests: ["tests/mcp/server.smoke.test.ts"] },
+		);
+		expect(reason).toContain("dry run failed");
+		expect(reason).toContain("tests/mcp/server.smoke.test.ts");
+		expect(reason).not.toContain(
+			"mutation diff: no mutants evaluated; dry run or",
+		);
+	});
+
 	it("matches a compiled source's test import even though tests import the .js specifier", () => {
 		// Recurrence: TypeScript's nodenext resolution (and this repo's own
 		// tests, e.g. tests/index-wiring.test.ts importing "../index.js")
