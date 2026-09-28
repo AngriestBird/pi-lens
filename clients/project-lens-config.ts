@@ -1011,10 +1011,16 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 		os.homedir(),
 	);
 	const warnUnhonoredKey = (label: string, globalOnly: boolean): void => {
+		const isFlagKey = LENS_FLAGS.some(
+			({ configKey }) =>
+				configKey === label || configKey.startsWith(`${label}.`),
+		);
 		note(
-			globalOnly
-				? `"${label}" is a global-only pi-lens setting and is not honored in a project .pi-lens.json (set it in ${globalConfigLabel} or pass the matching CLI flag); ignored`
-				: `unknown key "${label}" is not a recognized pi-lens setting (check for a typo); ignored`,
+			globalOnly && !isFlagKey
+				? `"${label}" is a global-only pi-lens setting and is not honored in a project .pi-lens.json (set it in ${globalConfigLabel}); ignored`
+				: globalOnly
+					? `"${label}" is a global-only pi-lens setting and is not honored in a project .pi-lens.json (set it in ${globalConfigLabel} or pass the matching CLI flag); ignored`
+					: `unknown key "${label}" is not a recognized pi-lens setting (check for a typo); ignored`,
 		);
 	};
 	for (const key of Object.keys(obj)) {
