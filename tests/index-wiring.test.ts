@@ -346,6 +346,15 @@ describe("index.ts extension wiring", () => {
 				{ reason: "startup" },
 				makeCtx({ cwd: process.cwd(), sessionId: "parent" }),
 			);
+			// #3623: model the legitimate unrelated producer that can finish
+			// during the same real session_start. This uses the production ledger
+			// seam, not a fake ledger, and keeps the bus assertion honest about
+			// multi-producer lifecycle callbacks.
+			recordDegradation({
+				kind: "instance-registry-lock-stale-takeover",
+				subject: path.join(process.cwd(), ".probe-home", "instances.json"),
+				reason: "test fault injection: unrelated registry lock takeover",
+			});
 
 			const dbg = vi.fn();
 			wireBusEmitter(() => {
@@ -360,9 +369,19 @@ describe("index.ts extension wiring", () => {
 				dbg,
 			});
 			expect(dbg).toHaveBeenCalledTimes(1);
-			expect(getDegradationSummary()).toEqual([
-				expect.objectContaining({ kind: "bus-stale", count: 1 }),
-			]);
+			const busStaleRecords = getDegradationSummary().filter(
+				(record) => record.kind === "bus-stale",
+			);
+			expect(busStaleRecords).toHaveLength(1);
+			expect(busStaleRecords[0]).toEqual(
+				expect.objectContaining({
+					kind: "bus-stale",
+					count: 1,
+					latestReasons: [
+						expect.objectContaining({ subject: "pilens:files:touched" }),
+					],
+				}),
+			);
 
 			const recoveredEmit = vi.fn();
 			const subagent = createPiMock();
