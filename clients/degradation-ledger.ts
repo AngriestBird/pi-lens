@@ -1421,7 +1421,8 @@ export type DegradationKind =
 	 * `tree-sitter-shared.ts`) resolves zero files from a HEALTHY root and
 	 * must never be confused with the root itself being gone.
 	 */
-	| "word-index-orphan-file-id";
+	| "word-index-orphan-file-id"
+	| "workspace-glob-cap";
 
 export interface DegradationRecord {
 	kind: unknown;

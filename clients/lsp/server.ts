@@ -2717,6 +2717,12 @@ function cargoWorkspaceDeclaresMember(
 			pattern,
 			relativePath,
 			CARGO_WORKSPACE_MEMBER_DIALECT,
+			() =>
+				recordDegradationOnce({
+					kind: "workspace-glob-cap",
+					subject: String(pattern.length),
+					reason: "workspace glob matcher exceeded its memo-table cell cap",
+				}),
 		);
 	const excluded = readCargoWorkspaceExclude(workspaceContent);
 	if (excluded.some(matches)) return false;
