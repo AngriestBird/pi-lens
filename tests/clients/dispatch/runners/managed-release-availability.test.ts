@@ -163,11 +163,25 @@ describe("availability probe: pi-lens's own managed bin dir (#2140)", () => {
 		(await spawnMock()).mockImplementation(async (command: string) =>
 			command === managed ? (versionOk() as never) : (enoent() as never),
 		);
+		const installer = await import("../../../../clients/installer/index.js");
+		const managedReleaseLookupSpy = vi.spyOn(
+			installer,
+			"findManagedToolBinary",
+		);
+		const helpers =
+			await import("../../../../clients/dispatch/runners/utils/runner-helpers.js");
 
 		const checker = await actionlintChecker();
 
 		expect(await checker.isAvailableAsync(cwd)).toBe(true);
 		expect(checker.getCommand(cwd)).toBe(managed);
+		// The resolver's own result is authoritative; do not re-run its installer
+		// lookup just to reconstruct which rung answered (#2660).
+		expect(managedReleaseLookupSpy).toHaveBeenCalledTimes(1);
+		expect(await helpers.createVenvFinder("actionlint", ".exe")(cwd)).toEqual({
+			path: managed,
+			rung: "managed-release",
+		});
 		// Pre-fix this was two rows: a latched `unavailable` from the PATH-only
 		// probe, then the install fallback's compensating `available`.
 		expect(decisions()).toHaveLength(1);

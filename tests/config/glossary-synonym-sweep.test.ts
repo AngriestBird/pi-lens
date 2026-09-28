@@ -828,7 +828,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/tree-sitter.ts": 2,
 		"clients/dispatch/runners/trivy-config.ts": 4,
 		"clients/dispatch/runners/utils/diagnostic-parsers.ts": 3,
-		"clients/dispatch/runners/utils/runner-helpers.ts": 23,
+		// 23 -> 30 (#2660): the resolver now carries its selected `path` and
+		// `resolution.path` through the evidence seam, adding seven same-sense
+		// path identifiers while preserving the four-rung lookup ladder.
+		"clients/dispatch/runners/utils/runner-helpers.ts": 30,
 		"clients/dispatch/runners/vale.ts": 7,
 		"clients/dispatch/runners/yaml-rule-parser.ts": 7,
 		"clients/dispatch/runners/yamllint.ts": 3,
@@ -1398,7 +1401,7 @@ describe("glossary synonym-retirement sweep (#3259)", () => {
 
 	it("ignores comments, strings, and template text but counts interpolation code", () => {
 		const source = stripSource(
-			"// warning\n/* warning */ const a = 'warning'; const b = `warning`; const c = `\${warning}`;",
+			"// warning\n/* warning */ const a = 'warning'; const b = `warning`; const c = `${warning}`;",
 			{ strings: "blank" },
 		);
 		expect(countIdentifier(source, "warning")).toBe(1);
