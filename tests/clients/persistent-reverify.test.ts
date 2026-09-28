@@ -372,8 +372,9 @@ describe("persistent reverify (#3170)", () => {
 		expect(historyLineCount()).toBe(secondTurnLines + 1);
 	});
 
-	it("F1: an incomplete replacement followed by confirmed findings is observed and relabelled", async () => {
-		// Recurrence: a confirmed replacement must not inherit the incomplete
+	it("F1: the latent module transition clears the incomplete marker", async () => {
+		// Recurrence: when this module receives an incomplete replacement and
+		// later confirms it, the replacement must not inherit the incomplete
 		// marker, or history skips a real observation and advisory labels it stale.
 		const carried = makeCarriedReport(filePath);
 		const cacheManager = new CacheManager(false);
@@ -394,8 +395,9 @@ describe("persistent reverify (#3170)", () => {
 
 		const confirmed = await runPersistentReverify({
 			// The real in-band publisher clears the deferred carry marker after
-			// persistence. Feed the replacement directly to the next pass so the
-			// test isolates the requested incomplete -> confirmed state transition.
+			// persistence, so this latent module transition is not a live
+			// successive-turn path today. Feed the replacement directly to isolate
+			// the requested incomplete -> confirmed state transition.
 			report: { ...carried, files: incomplete.replacementFiles },
 			cwd,
 			lspService: makeService({

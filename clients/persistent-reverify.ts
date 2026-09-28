@@ -313,11 +313,14 @@ export async function runPersistentReverify(args: {
 			dropped,
 			kept,
 		});
+		const {
+			reVerifyIncomplete: _reVerifyIncomplete,
+			...entryWithoutIncomplete
+		} = entry;
 		replacementFiles.push({
-			...entry,
+			...entryWithoutIncomplete,
 			warnings: freshRecords,
 			reVerified: true,
-			reVerifyIncomplete: undefined,
 			generatedAt: new Date(nowMs).toISOString(),
 		});
 	}
