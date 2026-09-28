@@ -42,6 +42,11 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 
 const tempDirs: string[] = [];
 let originalVirtualEnv: string | undefined;
@@ -177,34 +182,89 @@ describe("pytest project environment", () => {
 		expect(findGlobalBinary).not.toHaveBeenCalled();
 	});
 
-	it("records a capped member glob through the UV consumer", async () => {
-		const workspace = createProject(false);
-		const parts = Array.from({ length: 708 }, () => "a");
-		const relative = parts.join("/");
-		const member = path.join(workspace.root, ...parts);
-		fs.writeFileSync(
-			path.join(workspace.root, "pyproject.toml"),
-			`[tool.uv.workspace]\nmembers = ['${relative}']\n`,
-		);
-		fs.mkdirSync(member, { recursive: true });
-		fs.writeFileSync(
-			path.join(member, "pyproject.toml"),
-			"[project]\nname='member'\n",
-		);
-		createEnvironment(path.join(workspace.root, ".venv"));
+	it("records capped member globs through the UV consumer and real sink", async () => {
+		// F7 recurrence: a consumer test that stopped at the in-memory summary
+		// stayed green when the durable degradation sink was suppressed.
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
+		const makeWorkspace = (partCount: number) => {
+			const workspace = createProject(false);
+			const parts = Array.from({ length: partCount }, () => "a");
+			const relative = parts.join("/");
+			const member = path.join(workspace.root, ...parts);
+			fs.mkdirSync(member, { recursive: true });
+			fs.writeFileSync(
+				path.join(member, "pyproject.toml"),
+				"[project]\nname='member'\n",
+			);
+			fs.writeFileSync(
+				path.join(workspace.root, "pyproject.toml"),
+				`[tool.uv.workspace]\nmembers = ['${relative}']\n`,
+			);
+			createEnvironment(path.join(workspace.root, ".venv"));
+			return { member, relative };
+		};
+		const first = makeWorkspace(708);
+		const second = makeWorkspace(709);
 
-		await detectPythonEnvironment(member, os.tmpdir());
+		try {
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await detectPythonEnvironment(second.member, os.tmpdir());
+			resetDegradationLedger();
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await flushLatencyLog();
 
-		expect(getDegradationSummary()).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					kind: "workspace-glob-cap",
-					latestReasons: [
-						expect.objectContaining({ subject: String(relative.length) }),
-					],
-				}),
-			]),
-		);
+			const rows = fs
+				.readFileSync(getLatencyLogPath(), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							filePath?: string;
+							metadata?: Record<string, unknown>;
+						},
+				)
+				.filter((row) => row.phase === "degradation_ledger");
+			expect(rows).toHaveLength(3);
+			expect(rows.map((row) => row.metadata)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "workspace-glob-cap",
+						subject: String(first.relative.length),
+						count: 1,
+					}),
+					expect.objectContaining({
+						kind: "workspace-glob-cap",
+						subject: String(second.relative.length),
+						count: 1,
+					}),
+				]),
+			);
+			expect(rows.map((row) => row.metadata?.subject)).toEqual([
+				String(first.relative.length),
+				String(second.relative.length),
+				String(first.relative.length),
+			]);
+			expect(rows.every((row) => row.metadata?.count === 1)).toBe(true);
+			expect(rows.every((row) => row.filePath === row.metadata?.subject)).toBe(
+				true,
+			);
+			expect(rows.every((row) => !row.filePath?.includes("/"))).toBe(true);
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ kind: "workspace-glob-cap" }),
+				]),
+			);
+		} finally {
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		}
 	});
 
 	it("keeps the generic Python fallback when no project environment exists", async () => {
