@@ -15,6 +15,7 @@ import {
 	augmentAndSummarize,
 	buildRunConfig,
 	capMutationFiles,
+	capRelatedTests,
 	compiledJsPath,
 	decideMutationOutcome,
 	dedupePatterns,
@@ -22,9 +23,11 @@ import {
 	describeStrykerFailure,
 	describeZeroMutantOutcome,
 	DEFAULT_MAX_RANGES,
+	DEFAULT_MAX_TESTS,
 	estimateAffordableMutants,
 	extractSnippet,
 	formatCapNotice,
+	formatTestCapNotice,
 	isCompiledMutationSource,
 	isMutationSourceFile,
 	isScriptMutationFile,
@@ -210,6 +213,95 @@ describe("stryker diff selection", () => {
 		expect(formatCapNotice(2, 3, result.skipped)).toBe(
 			"capped: 2 of 3 changed files mutated; skipped: scripts/z.mjs",
 		);
+	});
+
+	it("caps related tests with sibling and direct-import priority", () => {
+		// Recurrence: a widely-imported source handed the entire related-test
+		// population to every Stryker mutant, exhausting the advisory budget in
+		// dry-run. The cap must retain the conventional sibling before importers,
+		// and the notice must disclose the dropped population.
+		const tests = [
+			"tests/clients/incidental.test.ts",
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		];
+		const result = mapRelatedTests(["clients/server.ts"], {
+			testFiles: [
+				"tests/clients/server.test.ts",
+				"tests/clients/direct.test.ts",
+			],
+			readFile: (file) =>
+				file.includes("direct") ? 'import "../../clients/server.js"' : "",
+		});
+		expect(result.tests).toEqual([
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		]);
+		const capped = capRelatedTests(
+			[...tests],
+			2,
+			new Map([
+				["tests/clients/server.test.ts", 0],
+				["tests/clients/direct.test.ts", 1],
+				["tests/clients/incidental.test.ts", 2],
+			]),
+		);
+		expect(capped.selected).toEqual([
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		]);
+		expect(capped.dropped).toEqual(["tests/clients/incidental.test.ts"]);
+		expect(formatTestCapNotice(2, tests.length)).toBe(
+			"capped: 2 of 3 related tests selected; dropped: 1",
+		);
+		const measurement = JSON.parse(
+			readFileSync("tests/fixtures/mutation-test-cap-measurement.json", "utf8"),
+		);
+		expect(measurement.proxy.projectedElapsedSeconds).toBe(
+			measurement.proxy.meanElapsedSeconds * measurement.proxy.projectedSuites,
+		);
+		expect(measurement.proxy.remainingHeadroomSeconds).toBe(
+			measurement.proxy.budgetSeconds -
+				measurement.proxy.projectedElapsedSeconds,
+		);
+		// Recurrence M3648-3: the measured cap must remain checked against the
+		// evidence it cites, or the constant can silently drift from the budget.
+		expect(DEFAULT_MAX_TESTS).toBe(measurement.recommendedMaxTests);
+	});
+
+	it("keeps equal-priority selection stable when the input order is reversed", () => {
+		// Recurrence M3648-1: recursive readdirSync order must not decide which
+		// equal-priority related test consumes the cap.
+		const priorities = new Map([
+			["tests/z.test.ts", 1],
+			["tests/a.test.ts", 1],
+		]);
+		const forward = capRelatedTests(
+			["tests/z.test.ts", "tests/a.test.ts"],
+			1,
+			priorities,
+		);
+		const reversed = capRelatedTests(
+			["tests/a.test.ts", "tests/z.test.ts"],
+			1,
+			priorities,
+		);
+		expect(forward.selected).toEqual(["tests/a.test.ts"]);
+		expect(reversed.selected).toEqual(forward.selected);
+	});
+
+	it("leaves an under-cap related-test selection byte-for-byte unchanged", () => {
+		// Recurrence: narrow diffs must keep the same test order and score inputs.
+		const result = mapRelatedTests(["clients/server.ts"], {
+			testFiles: ["tests/clients/direct.test.ts"],
+			readFile: () => 'import "../../clients/server.js"',
+		});
+		expect(
+			capRelatedTests(result.tests, DEFAULT_MAX_TESTS, result.priorities),
+		).toEqual({
+			selected: result.tests,
+			dropped: [],
+		});
 	});
 
 	it("keeps the mutation population on scripts mjs files", () => {
