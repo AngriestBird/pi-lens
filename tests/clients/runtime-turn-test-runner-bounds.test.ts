@@ -11,7 +11,27 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+
+// The latency writer captures its path through these production imports.
+// Own it before import, independently of the per-case project/machine homes.
+const logHome = await vi.hoisted(async () => {
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const home = mkdtempSync(join(tmpdir(), "pi-lens-runner-bounds-log-"));
+	vi.stubEnv("PI_LENS_HOME", home);
+	return home;
+});
+
 import { CacheManager } from "../../clients/cache-manager.js";
 import { DependencyChecker } from "../../clients/dependency-checker.js";
 import { KnipClient } from "../../clients/knip-client.js";
@@ -38,7 +58,7 @@ import {
 	handleTurnEnd,
 	runTestTargetsBounded,
 } from "../../clients/runtime-turn.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const EMPTY_KNIP_RESULT = {
 	success: true,
@@ -73,6 +93,21 @@ beforeEach(() => {
 afterEach(() => {
 	env.cleanup();
 	resetDegradationLedger();
+});
+afterAll(async () => {
+	await flushLatencyLog();
+	vi.unstubAllEnvs();
+	removeTempDirSync(logHome);
+});
+
+it("keeps the captured latency sink private after per-case home changes", () => {
+	// #3644: the parent-companion witness's late pin did not isolate its clear.
+	vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "machine"));
+	try {
+		expect(getLatencyLogPath()).toBe(path.join(logHome, "latency.log"));
+	} finally {
+		vi.unstubAllEnvs();
+	}
 });
 
 const delay = (ms: number): Promise<void> =>
@@ -519,7 +554,7 @@ describe("#2522 AC1 — turn_end selection excludes integration/e2e targets", ()
 	it("runs the parent companion when a foreign checkout supplies the first discovery match", async () => {
 		// R2: a late veto used to discard the foreign match without recovering
 		// its parent alternative. Enter through real turn-end selection and state.
-		// Pin before constructing state: project data resolution also uses this home.
+		// Pin per-case state before construction; the log sink was pinned at import.
 		vi.stubEnv("PI_LENS_TEST_MODE", "0");
 		vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "machine"));
 		try {
@@ -575,7 +610,7 @@ describe("#2522 AC1 — turn_end selection excludes integration/e2e targets", ()
 						failures: [],
 					};
 				});
-			// Use the real sink without sharing a clearable log with parallel suites.
+			// Clear the real, file-owned sink captured before production imports.
 			clearLatencyLog();
 			try {
 				await handleTurnEnd({
@@ -2336,8 +2371,8 @@ describe("#2522 R4 — the deferral record across sessions, generations and caps
 
 		// `logLatency` short-circuits under `isTestMode()`, so the record can only
 		// be observed with the same opt-out the other latency-log tests in this
-		// repo use. `PI_LENS_HOME` stays pinned by the shared vitest setup, so
-		// this still writes into the per-worker temp home, never `~/.pi-lens`.
+		// repo use. The captured sink stays in this file's pre-import logHome,
+		// independently of later per-case home changes or parallel suites.
 		const previousTestMode = process.env.PI_LENS_TEST_MODE;
 		process.env.PI_LENS_TEST_MODE = "0";
 		clearLatencyLog();

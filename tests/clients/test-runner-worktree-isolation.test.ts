@@ -7,7 +7,27 @@ import fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { syncBuiltinESMExports } from "node:module";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+
+// The latency writer captures its path at import time, including through
+// transitive imports. A per-case PI_LENS_HOME cannot isolate its clears.
+const logHome = await vi.hoisted(async () => {
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const home = mkdtempSync(join(tmpdir(), "pi-lens-checkout-isolation-log-"));
+	vi.stubEnv("PI_LENS_HOME", home);
+	return home;
+});
+
 import { CacheManager } from "../../clients/cache-manager.js";
 import { DependencyChecker } from "../../clients/dependency-checker.js";
 import { KnipClient } from "../../clients/knip-client.js";
@@ -57,6 +77,7 @@ beforeEach(async () => {
 	root = fs.mkdtempSync(
 		path.join(os.tmpdir(), "pi-lens-test-checkout-isolation-"),
 	);
+	// Isolate per-case machine state; the log sink already belongs to logHome.
 	vi.stubEnv("PI_LENS_HOME", path.join(root, "machine"));
 	vi.stubEnv("PI_LENS_TEST_MODE", "0");
 	vi.stubEnv("VIRTUAL_ENV", "");
@@ -76,6 +97,15 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	removeTempDirSync(root);
+});
+afterAll(async () => {
+	await flushLatencyLog();
+	removeTempDirSync(logHome);
+});
+
+it("keeps the captured latency sink private after per-case home changes", () => {
+	// #3644: a late home pin let beforeEach erase opaque-mutation's record.
+	expect(getLatencyLogPath()).toBe(path.join(logHome, "latency.log"));
 });
 
 function write(directory: string, relative: string, text = "\n"): string {
