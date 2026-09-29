@@ -623,20 +623,68 @@ export interface FindNearestMarkerRootOptions {
 	markerPredicate?: (markerPath: string) => boolean;
 }
 
+export type GitMarkerResult =
+	| { kind: "valid" | "absent" }
+	| { kind: "unavailable"; cause: unknown };
+
+export type MarkerRootResult =
+	| { kind: "found"; root: string }
+	| {
+			kind: "not-found";
+			reason: "home-ceiling" | "boundary" | "root" | "depth-limit";
+	  }
+	| { kind: "unavailable"; markerPath: string; cause: unknown };
+
+/** Detailed ownership walks require a probe that can distinguish I/O failure. */
+export interface FindNearestMarkerRootDetailedOptions {
+	details: true;
+	homeDir?: string;
+	markerPredicate: (markerPath: string) => GitMarkerResult;
+}
+
 /**
  * Accept only a real Git repository marker: a directory with HEAD, or a
  * worktree/submodule marker file whose first line starts with `gitdir:`.
+ * Ownership callers request details: absence may permit climbing, but a read
+ * error must not invent an enclosing owner. Legacy callers retain a boolean.
  */
-export function isRealGitMarker(markerPath: string): boolean {
+export function isRealGitMarker(
+	markerPath: string,
+	details: true,
+): GitMarkerResult;
+export function isRealGitMarker(markerPath: string): boolean;
+export function isRealGitMarker(
+	markerPath: string,
+	details?: true,
+): boolean | GitMarkerResult {
+	// Array callbacks supply an index here; only the documented true opts in.
+	const detailed = details === true;
 	try {
 		const marker = statSync(markerPath);
-		if (marker.isDirectory()) return existsSync(path.join(markerPath, "HEAD"));
-		if (!marker.isFile()) return false;
-		return readFileSync(markerPath, "utf8")
-			.split(/\r?\n/, 1)[0]
-			.startsWith("gitdir:");
-	} catch {
-		return false;
+		let valid = false;
+		if (marker.isDirectory()) {
+			// existsSync hides EACCES as false. HEAD is part of ownership evidence,
+			// so detailed callers need its failure just as much as the marker's.
+			statSync(path.join(markerPath, "HEAD"));
+			valid = true;
+		} else if (marker.isFile()) {
+			valid = readFileSync(markerPath, "utf8")
+				.split(/\r?\n/, 1)[0]
+				.startsWith("gitdir:");
+		}
+		if (!detailed) return valid;
+		return { kind: valid ? "valid" : "absent" };
+	} catch (cause) {
+		if (!detailed) return false;
+		if (
+			typeof cause === "object" &&
+			cause !== null &&
+			"code" in cause &&
+			(cause.code === "ENOENT" || cause.code === "ENOTDIR")
+		) {
+			return { kind: "absent" };
+		}
+		return { kind: "unavailable", cause };
 	}
 }
 
@@ -665,28 +713,66 @@ export function isRealGitMarker(markerPath: string): boolean {
 export function findNearestMarkerRoot(
 	startDir: string,
 	markers: readonly string[],
-	options: FindNearestMarkerRootOptions = {},
-): string | null {
-	const boundaries = options.boundaries ?? [];
+	options: FindNearestMarkerRootDetailedOptions,
+): MarkerRootResult;
+export function findNearestMarkerRoot(
+	startDir: string,
+	markers: readonly string[],
+	options?: FindNearestMarkerRootOptions,
+): string | null;
+export function findNearestMarkerRoot(
+	startDir: string,
+	markers: readonly string[],
+	options:
+		| FindNearestMarkerRootOptions
+		| FindNearestMarkerRootDetailedOptions = {},
+): string | null | MarkerRootResult {
+	// Structural legacy options can carry extra false/undefined fields. Presence
+	// alone must not change either the result shape or predicate preconditions.
+	const detailed = "details" in options && options.details === true;
+	const boundaries = "boundaries" in options ? (options.boundaries ?? []) : [];
 	const homeDir = path.resolve(options.homeDir ?? os.homedir());
-	const markerPredicate = options.markerPredicate ?? (() => true);
+	// Capture legacy callbacks for an unbound call, as before detailed mode.
+	// Detailed predicate access must remain behind the walk's home ceiling.
+	const legacyPredicate = detailed ? undefined : options.markerPredicate;
+	// One bounded walk, with a compatibility projection for existing callers.
+	const finish = (
+		result: MarkerRootResult,
+	): string | null | MarkerRootResult => {
+		if (detailed) return result;
+		return result.kind === "found" ? result.root : null;
+	};
 	let current = path.resolve(startDir);
 	for (let depth = 0; depth < 64; depth++) {
-		if (isAtOrAboveHomeDir(current, homeDir)) return null;
-		if (
-			markers.some(
-				(m) =>
-					existsSync(path.join(current, m)) &&
-					markerPredicate(path.join(current, m)),
+		if (isAtOrAboveHomeDir(current, homeDir))
+			return finish({ kind: "not-found", reason: "home-ceiling" });
+		for (const marker of markers) {
+			const markerPath = path.join(current, marker);
+			// Legacy searches keep their existence precheck and predicate ordering.
+			// Detailed probes must see errors that existsSync would swallow.
+			const checked = detailed
+				? options.markerPredicate(markerPath)
+				: existsSync(markerPath) && (legacyPredicate?.(markerPath) ?? true);
+			if (typeof checked !== "boolean" && checked.kind === "unavailable")
+				return finish({
+					kind: "unavailable",
+					markerPath,
+					cause: checked.cause,
+				});
+			if (
+				checked === true ||
+				(typeof checked !== "boolean" && checked.kind === "valid")
 			)
-		)
-			return current;
-		if (boundaries.some((m) => existsSync(path.join(current, m)))) return null;
+				return finish({ kind: "found", root: current });
+		}
+		if (boundaries.some((m) => existsSync(path.join(current, m))))
+			return finish({ kind: "not-found", reason: "boundary" });
 		const parent = path.dirname(current);
-		if (parent === current) return null;
+		if (parent === current)
+			return finish({ kind: "not-found", reason: "root" });
 		current = parent;
 	}
-	return null;
+	return finish({ kind: "not-found", reason: "depth-limit" });
 }
 
 /**

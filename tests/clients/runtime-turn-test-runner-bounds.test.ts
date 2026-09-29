@@ -11,8 +11,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { DependencyChecker } from "../../clients/dependency-checker.js";
+import { KnipClient } from "../../clients/knip-client.js";
 import { mergeGitGuardTestFailure } from "../../clients/git-guard.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
@@ -365,7 +367,7 @@ describe("#2504 AC2 — turn_end wires the bounds into the real fan-out", () => 
  * hand-fed input shaped to hit the guard.
  */
 describe("#2522 AC1 — turn_end selection excludes integration/e2e targets", () => {
-	it("never spawns a target resolved under tests/integration/, and dbg names the excluded target", async () => {
+	it("never spawns a target resolved under tests/integration/, and dbg reports the exclusion without guessing its cause", async () => {
 		const runtime = new RuntimeCoordinator();
 		const cacheManager = new CacheManager(false);
 
@@ -437,9 +439,169 @@ describe("#2522 AC1 — turn_end selection excludes integration/e2e targets", ()
 		await delay(200);
 
 		expect(ran).toHaveLength(0);
-		expect(
-			dbgLines.some((l) => l.includes("excluded") && l.includes("integration")),
-		).toBe(true);
+		expect(dbgLines).toContainEqual(
+			expect.stringContaining(
+				`test target excluded by the built-in turn-end policy, skipping spawn (${path.relative(env.tmpDir, integrationTest)})`,
+			),
+		);
+	});
+
+	it("reports a nested worktree exclusion without mislabelling it integration/e2e", async () => {
+		// Regression: the turn-end gate now excludes a nested Git checkout as
+		// well as integration/e2e suites; its debug record must not invent a reason.
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		fs.writeFileSync(
+			path.join(env.tmpDir, "vitest.config.ts"),
+			"export default {};\n",
+		);
+		const worktree = path.join(env.tmpDir, ".worktrees", "other");
+		fs.mkdirSync(worktree, { recursive: true });
+		fs.writeFileSync(
+			path.join(worktree, ".git"),
+			"gitdir: /git/worktrees/other\n",
+		);
+		const nestedTest = path.join(worktree, "tests", "other.test.ts");
+		fs.mkdirSync(path.dirname(nestedTest));
+		fs.writeFileSync(nestedTest, "export {};\n");
+		cacheManager.addModifiedRange(
+			nestedTest,
+			{ start: 1, end: 1 },
+			false,
+			env.tmpDir,
+			runtime.telemetrySessionId,
+		);
+
+		const realClient = new TestRunnerClient(false);
+		expect(realClient.getTestRunTarget(nestedTest, env.tmpDir)?.strategy).toBe(
+			"self",
+		);
+		// Keep typed real clients; only replace the external test execution. This
+		// fixture has no package.json/knip config, and the madge flag is disabled.
+		const run = vi.spyOn(realClient, "runTestFileAsync").mockResolvedValue({
+			file: nestedTest,
+			sourceFile: nestedTest,
+			runner: "vitest",
+			passed: 1,
+			failed: 0,
+			skipped: 0,
+			duration: 1,
+			failures: [],
+		});
+		const dbgLines: string[] = [];
+		try {
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: (msg: string) => dbgLines.push(msg),
+				runtime,
+				cacheManager,
+				knipClient: new KnipClient(false),
+				deadCodeClients: [],
+				depChecker: new DependencyChecker(false),
+				testRunnerClient: realClient,
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			});
+
+			expect(run).not.toHaveBeenCalled();
+			expect(dbgLines).toContainEqual(
+				expect.stringContaining(
+					"test target excluded by the built-in turn-end policy",
+				),
+			);
+			expect(dbgLines.join("\n")).not.toContain("integration/e2e");
+		} finally {
+			run.mockRestore();
+		}
+	});
+
+	it("runs the parent companion when a foreign checkout supplies the first discovery match", async () => {
+		// R2: a late veto used to discard the foreign match without recovering
+		// its parent alternative. Enter through real turn-end selection and state.
+		// Pin before constructing state: project data resolution also uses this home.
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "machine"));
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			fs.mkdirSync(path.join(env.tmpDir, ".git"));
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".git", "HEAD"),
+				"ref: refs/heads/main\n",
+			);
+			fs.writeFileSync(path.join(env.tmpDir, "pytest.ini"), "[pytest]\n");
+			const source = path.join(env.tmpDir, "widget.py");
+			fs.writeFileSync(source, "VALUE = 1\n");
+			const nested = path.join(env.tmpDir, "tests", "a-checkout");
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(
+				path.join(nested, ".git"),
+				"gitdir: /git/worktrees/other\n",
+			);
+			const foreign = path.join(nested, "test_widget.py");
+			fs.writeFileSync(foreign, "def test_foreign(): pass\n");
+			const parent = path.join(
+				env.tmpDir,
+				"tests",
+				"z-parent",
+				"test_widget.py",
+			);
+			fs.mkdirSync(path.dirname(parent));
+			fs.writeFileSync(parent, "def test_parent(): pass\n");
+			cacheManager.addModifiedRange(
+				source,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				runtime.telemetrySessionId,
+			);
+
+			const client = new TestRunnerClient(false);
+			expect(client.findTestFile(source, env.tmpDir)?.testFile).toBe(foreign);
+			const ran: string[] = [];
+			const run = vi
+				.spyOn(client, "runTestFileAsync")
+				.mockImplementation(async (testFile) => {
+					ran.push(testFile);
+					return {
+						file: testFile,
+						sourceFile: source,
+						runner: "pytest",
+						passed: 1,
+						failed: 0,
+						skipped: 0,
+						duration: 1,
+						failures: [],
+					};
+				});
+			// Use the real sink without sharing a clearable log with parallel suites.
+			clearLatencyLog();
+			try {
+				await handleTurnEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					knipClient: new KnipClient(false),
+					deadCodeClients: [],
+					depChecker: new DependencyChecker(false),
+					testRunnerClient: client,
+					resetLSPService: () => {},
+					resetFormatService: () => {},
+				});
+				await flushLatencyLog();
+				expect(ran).toEqual([parent]);
+				expect(fs.readFileSync(getLatencyLogPath(), "utf8")).toContain(
+					'"kind":"test-discovery-foreign-checkout"',
+				);
+			} finally {
+				run.mockRestore();
+			}
+		} finally {
+			vi.unstubAllEnvs();
+		}
 	});
 });
 

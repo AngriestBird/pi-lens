@@ -902,7 +902,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/package-manager.ts": 20,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
-		"clients/path-utils.ts": 30,
+		// 30 -> 29: the shared marker walk now joins each candidate once.
+		"clients/path-utils.ts": 29,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 7,
@@ -959,7 +960,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/source-walker.ts": 3,
 		"clients/spawn-timeout-cooldown.ts": 3,
 		"clients/startup-scan.ts": 11,
-		"clients/test-runner-client.ts": 61,
+		// 61 -> 66: filesystem ownership/discovery operations plus the alias
+		// exception's physical policy-relative path (R4). These remain filesystem
+		// operations, not delivery lanes; the census measures every use.
+		"clients/test-runner-client.ts": 66,
 		"clients/todo-scanner.ts": 3,
 		"clients/tool-agreement.ts": 4,
 		"clients/tool-cwd.ts": 13,
