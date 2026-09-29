@@ -25,6 +25,8 @@ import {
 	findLocalToolConfig,
 	findNearestContaining,
 	findNearestMarkerRoot,
+	type FindNearestMarkerRootDetailedOptions,
+	type GitMarkerResult,
 	isRealGitMarker,
 	homeRelativePath,
 	matchesWorkspaceMemberPattern,
@@ -1064,6 +1066,49 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 					},
 				}),
 			).toThrow("legacy predicate failure");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("reads each detailed predicate lazily with its options receiver", () => {
+		// refs #3644: extracting the per-directory scan must not freeze the
+		// detailed accessor or give it the legacy callback's unbound receiver.
+		const env = setupTestEnvironment("pi-lens-marker-detailed-receiver-");
+		try {
+			const project = path.join(env.tmpDir, "project");
+			const nested = path.join(project, "src");
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(path.join(project, ".git"), "gitdir: ../metadata\n");
+			let predicateReads = 0;
+			const visited: string[] = [];
+			const options: FindNearestMarkerRootDetailedOptions = {
+				details: true,
+				homeDir: env.tmpDir,
+				get markerPredicate() {
+					predicateReads++;
+					return function (
+						this: FindNearestMarkerRootDetailedOptions | undefined,
+						file: string,
+					): GitMarkerResult {
+						visited.push(file);
+						if (this?.homeDir !== env.tmpDir) return { kind: "absent" };
+						return isRealGitMarker(file, true);
+					};
+				},
+			};
+			expect(
+				findNearestMarkerRoot(nested, [".git", "missing"], options),
+			).toEqual({
+				kind: "found",
+				root: project,
+			});
+			expect(visited).toEqual([
+				path.join(nested, ".git"),
+				path.join(nested, "missing"),
+				path.join(project, ".git"),
+			]);
+			expect(predicateReads).toBe(3);
 		} finally {
 			env.cleanup();
 		}

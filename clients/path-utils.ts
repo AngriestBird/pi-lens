@@ -742,29 +742,35 @@ export function findNearestMarkerRoot(
 		if (detailed) return result;
 		return result.kind === "found" ? result.root : null;
 	};
-	let current = path.resolve(startDir);
-	for (let depth = 0; depth < 64; depth++) {
-		if (isAtOrAboveHomeDir(current, homeDir))
-			return finish({ kind: "not-found", reason: "home-ceiling" });
+	// Scan one directory without changing callback access or marker order.
+	const probeMarkers = (directory: string): MarkerRootResult | undefined => {
 		for (const marker of markers) {
-			const markerPath = path.join(current, marker);
+			const markerPath = path.join(directory, marker);
 			// Legacy searches keep their existence precheck and predicate ordering.
 			// Detailed probes must see errors that existsSync would swallow.
 			const checked = detailed
 				? options.markerPredicate(markerPath)
 				: existsSync(markerPath) && (legacyPredicate?.(markerPath) ?? true);
 			if (typeof checked !== "boolean" && checked.kind === "unavailable")
-				return finish({
+				return {
 					kind: "unavailable",
 					markerPath,
 					cause: checked.cause,
-				});
+				};
 			if (
 				checked === true ||
 				(typeof checked !== "boolean" && checked.kind === "valid")
 			)
-				return finish({ kind: "found", root: current });
+				return { kind: "found", root: directory };
 		}
+		return undefined;
+	};
+	let current = path.resolve(startDir);
+	for (let depth = 0; depth < 64; depth++) {
+		if (isAtOrAboveHomeDir(current, homeDir))
+			return finish({ kind: "not-found", reason: "home-ceiling" });
+		const markerResult = probeMarkers(current);
+		if (markerResult) return finish(markerResult);
 		if (boundaries.some((m) => existsSync(path.join(current, m))))
 			return finish({ kind: "not-found", reason: "boundary" });
 		const parent = path.dirname(current);
