@@ -277,17 +277,17 @@ export const TURN_END_EXCLUDED_TEST_GLOBS: readonly string[] = [
 ];
 
 /** One hash-before-clipping record for both filesystem and ownership-walk gaps. */
-function recordCheckoutIdentityGap(metadata: {
-	cwd: string;
-	candidate: string;
-	lookup: "filesystem" | "target-root" | "dispatch-root";
-	detail:
-		| "realpath"
-		| "marker-error"
-		| Extract<MarkerRootResult, { kind: "not-found" }>["reason"];
-	errorCode?: string | undefined;
-	markerPath?: string;
-}): void {
+function recordCheckoutIdentityGap(
+	metadata: {
+		cwd: string;
+		candidate: string;
+		lookup: "filesystem" | "target-root" | "dispatch-root";
+		markerPath?: string;
+	} & (
+		| { detail: "realpath" | "marker-error"; errorCode: string | undefined }
+		| { detail: Extract<MarkerRootResult, { kind: "not-found" }>["reason"] }
+	),
+): void {
 	recordDegradationOnce({
 		kind: "test-checkout-identity-unavailable",
 		subject: createHash("sha256")
@@ -309,7 +309,7 @@ function foreignGitRoot(testFilePath: string, cwd: string): string | null {
 		realTarget = fs.realpathSync.native(
 			path.resolve(cwd, toPosix(testFilePath)),
 		);
-	} catch (lookupFailure) {
+	} catch (error_) {
 		// Missing/unreadable paths do not prove foreign ownership. The existing
 		// missing-target classifier and spawn checks retain their own decisions.
 		recordCheckoutIdentityGap({
@@ -317,7 +317,7 @@ function foreignGitRoot(testFilePath: string, cwd: string): string | null {
 			candidate: testFilePath,
 			lookup: "filesystem",
 			detail: "realpath",
-			errorCode: filesystemErrorCode(lookupFailure),
+			errorCode: filesystemErrorCode(error_),
 		});
 		return null;
 	}
@@ -3184,9 +3184,8 @@ export class TestRunnerClient {
 				continue;
 			}
 			for (const entry of entries) {
-				if (!testPattern.test(entry)) continue;
 				const testPath = path.join(dir, entry);
-				if (!acceptCandidate(testPath)) continue;
+				if (!testPattern.test(entry) || !acceptCandidate(testPath)) continue;
 				let content: string;
 				try {
 					content = fs.readFileSync(testPath, "utf-8");

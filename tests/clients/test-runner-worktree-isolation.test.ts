@@ -644,6 +644,7 @@ for (const row of runners) {
 			).toHaveLength(2);
 			expect(log).toContain('"lookup":"target-root"');
 			expect(log).toContain('"detail":"depth-limit"');
+			expect(log).not.toContain('"errorCode"');
 		});
 
 		it("does not record ordinary Gitless absence as a capped or unreadable walk", async () => {
@@ -656,6 +657,30 @@ for (const row of runners) {
 				: "";
 			expect(log).not.toContain('"kind":"test-checkout-identity-unavailable"');
 		});
+
+		it.each(["EACCES", undefined])(
+			"preserves a filesystem lookup record with code %s without changing eligibility",
+			async (code) => {
+				// refs #3644: the metadata type must admit an unknown error code
+				// without adding an errorCode field to ordinary bounded walk misses.
+				const f = fixture();
+				const native = vi.spyOn(fs.realpathSync, "native");
+				native.mockImplementationOnce(() => {
+					throw Object.assign(new Error("ownership lookup denied"), { code });
+				});
+				try {
+					expect(isExcludedTestTarget(f.parentFailure, f.project)).toBe(false);
+				} finally {
+					native.mockRestore();
+				}
+				await flushLatencyLog();
+				const log = fs.readFileSync(getLatencyLogPath(), "utf8");
+				expect(log).toContain('"kind":"test-checkout-identity-unavailable"');
+				expect(log).toContain('"lookup":"filesystem"');
+				expect(log).toContain('"detail":"realpath"');
+				expect(log).toContain(`"errorCode":"${code ?? "unknown"}"`);
+			},
+		);
 
 		it.each(["cwd", "target"] as const)(
 			"does not invent foreign ownership when %s identity is unavailable and records the gap once",
@@ -724,6 +749,7 @@ for (const row of runners) {
 				log.match(/"kind":"test-checkout-identity-unavailable"/g),
 			).toHaveLength(2);
 			expect(log).toContain('"lookup":"dispatch-root"');
+			expect(log).not.toContain('"errorCode"');
 		});
 
 		it.each([
@@ -1027,6 +1053,43 @@ describe("R4/R6 real turn-end policy after checkout selection", () => {
 			expect(records.join("\n")).toContain("first.test.ts");
 			expect(records.join("\n")).toContain("second.test.ts");
 		});
+	}
+});
+
+it("keeps import discovery filename and eligibility checks ahead of file reads", () => {
+	// refs #3644: combining the skip guards must not admit or read an earlier
+	// non-test/rejected candidate, or return an eligible file without an import.
+	const project = path.join(root, "main");
+	const source = write(project, "widget.ts");
+	const imported = 'import "../widget.js";\n';
+	const note = write(project, "tests/notes.txt", imported);
+	const rejected = write(project, "tests/rejected.test.ts", imported);
+	const noImport = write(project, "tests/accepted.test.ts", "export {};\n");
+	// A second search directory fixes traversal order without mocking readdir.
+	const eligible = write(project, "__tests__/accepted.test.ts", imported);
+	const visited: string[] = [];
+	const read = vi.spyOn(fs, "readFileSync");
+	syncBuiltinESMExports();
+	try {
+		const client = new TestRunnerClient(false);
+		expect(
+			client.findTestFile(source, project, "vitest", (candidate) => {
+				visited.push(candidate);
+				return candidate !== rejected;
+			}),
+		).toEqual({ testFile: eligible, runner: "vitest" });
+		expect(visited).toEqual(
+			expect.arrayContaining([rejected, noImport, eligible]),
+		);
+		expect(visited).not.toContain(note);
+		expect(visited.at(-1)).toBe(eligible);
+		const filesRead = read.mock.calls.map(([file]) => file);
+		expect(filesRead).toEqual(expect.arrayContaining([noImport, eligible]));
+		expect(filesRead).not.toContain(note);
+		expect(filesRead).not.toContain(rejected);
+	} finally {
+		read.mockRestore();
+		syncBuiltinESMExports();
 	}
 });
 
