@@ -1,7 +1,7 @@
 ---
 name: pi-lens-reviewer
 description: Adversarial pre-merge review of a pi-lens PR. Use for every PR before merge, including small and self-authored ones. Spawn with the PR number, a one-paragraph summary of what the fix claims, and any PR-specific attack angles; docs/pi-lens-reviewer.md supplies the rest.
-model: opus
+model: sonnet
 disallowedTools: Agent, Monitor
 effort: high
 ---
