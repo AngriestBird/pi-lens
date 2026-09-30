@@ -129,6 +129,41 @@ function gh(args) {
 	);
 }
 
+/** Both gh lists, each refused when it comes back at the limit. `run` is gh (injectable). */
+export function loadLists(run, repo) {
+	const prs = assertNotTruncated(
+		run([
+			"pr",
+			"list",
+			"-R",
+			repo,
+			"--state",
+			"merged",
+			"--limit",
+			String(LIST_LIMIT),
+			"--json",
+			"author,number",
+		]),
+		"merged PRs",
+	);
+	const issues = assertNotTruncated(
+		run([
+			"issue",
+			"list",
+			"-R",
+			repo,
+			"--state",
+			"all",
+			"--limit",
+			String(LIST_LIMIT),
+			"--json",
+			"author,number,title,labels",
+		]),
+		"issues",
+	);
+	return { prs, issues };
+}
+
 function main(argv) {
 	const dry = argv.includes("--dry-run");
 	const rc = JSON.parse(readFileSync(".all-contributorsrc", "utf8"));
@@ -136,30 +171,7 @@ function main(argv) {
 	const existing = Object.fromEntries(
 		rc.contributors.map((c) => [c.login, c.contributions]),
 	);
-	const prs = gh([
-		"pr",
-		"list",
-		"-R",
-		repo,
-		"--state",
-		"merged",
-		"--limit",
-		String(LIST_LIMIT),
-		"--json",
-		"author,number",
-	]);
-	const issues = gh([
-		"issue",
-		"list",
-		"-R",
-		repo,
-		"--state",
-		"all",
-		"--limit",
-		String(LIST_LIMIT),
-		"--json",
-		"author,number,title,labels",
-	]);
+	const { prs, issues } = loadLists(gh, repo);
 	const filesByPr = {};
 	for (const pr of prs) {
 		const login = pr.author?.login;

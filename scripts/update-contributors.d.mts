@@ -29,3 +29,7 @@ export declare function assertNotTruncated<T>(
 	what: string,
 	limit?: number,
 ): T[];
+export declare function loadLists(
+	run: (args: string[]) => any,
+	repo: string,
+): { prs: any[]; issues: any[] };

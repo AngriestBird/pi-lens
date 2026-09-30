@@ -5,6 +5,7 @@ import {
 	formatPlan,
 	assertNotTruncated,
 	isBot,
+	loadLists,
 	planContributions,
 } from "../../scripts/update-contributors.mjs";
 
@@ -168,5 +169,36 @@ describe("update-contributors classification", () => {
 			/truncated/,
 		);
 		expect(assertNotTruncated([1, 2], "issues", 3)).toEqual([1, 2]);
+	});
+
+	// Recurrence: assertNotTruncated existed but main() never called it (verify of #3773).
+	it("loadLists refuses a full-limit gh result for either list", () => {
+		const full = Array.from({ length: 5000 }, (_, i) => ({ number: i }));
+		expect(() => loadLists((a) => (a[0] === "pr" ? full : []), "o/r")).toThrow(
+			/merged PRs/,
+		);
+		expect(() =>
+			loadLists((a) => (a[0] === "issue" ? full : []), "o/r"),
+		).toThrow(/issues/);
+		expect(loadLists(() => [], "o/r")).toEqual({ prs: [], issues: [] });
+	});
+
+	// Recurrence: a planner that ignored gh's author.is_bot stayed green (verify of #3773).
+	it("plans nothing for an author gh marks as a bot", () => {
+		const plan = planContributions({
+			prs: [{ number: 1, author: { login: "x-robot", is_bot: true } }],
+			issues: [
+				{
+					number: 2,
+					title: "Bug: crash",
+					labels: [],
+					author: { login: "x-robot", is_bot: true },
+				},
+			],
+			filesByPr: { 1: ["clients/a.ts"] },
+			existing: {},
+			owner: "apmantza",
+		});
+		expect(plan).toEqual([]);
 	});
 });
