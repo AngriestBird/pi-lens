@@ -707,6 +707,16 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 			);
 			expect(groups).toHaveLength(1);
 			expect(groups[0].count).toBe(1);
+			// The one row names the field and the first value's type against the
+			// live epoch (#3677 round 3: Stryker left the subject and the reason
+			// unread by every test).
+			expect(groups[0].latestReasons).toEqual([
+				{
+					subject: "readGuardBranchEpoch",
+					reason:
+						"ignored a foreign readGuardBranchEpoch (typeof number) (current 0)",
+				},
+			]);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
