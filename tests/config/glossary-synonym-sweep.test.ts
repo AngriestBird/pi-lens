@@ -642,7 +642,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-session.ts": 4,
 		"clients/runtime-tool-call.ts": 3,
 		"clients/runtime-tool-result.ts": 5,
-		"clients/runtime-turn.ts": 32,
+		"clients/runtime-turn.ts": 31,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -1045,9 +1045,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/read-guard.ts": 20,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
-		// 17 -> 24 (#3218): `noteResolvedBlockerFile` reads the removed
+		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
 		// `InlineBlockerRecord` (param, path, count, write index).
-		"clients/runtime-coordinator.ts": 24,
+		"clients/runtime-coordinator.ts": 23,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker
