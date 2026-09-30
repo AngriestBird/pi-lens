@@ -28,6 +28,8 @@ import {
 	type DispositionMarkTarget,
 } from "./diagnostic-dispositions.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { defineSessionStore } from "./session-scope.js";
+import { dropStaleFiles } from "./session-state-store.js";
 
 /**
  * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
@@ -745,6 +747,37 @@ export function importWidgetState(
 	requestRenderFn?.();
 	return true;
 }
+
+/**
+ * The widget's per-file diagnostics as a session store (#190, #3589). The
+ * widget is shared by every live session in the process, so it has one cell,
+ * this module's state, which outlives the factory re-run: an in-process
+ * `/fork`, `/clone` or `/reload` keeps it as the parent left it (#3589 was the
+ * fork start clearing it). A resume, a launch and `pi --fork` adopt a
+ * sidecar, reconciled with disk first, so a file changed since the save
+ * re-scans.
+ */
+export const widgetStore = defineSessionStore<PersistedWidgetState>({
+	name: "widget",
+	policy: {
+		startup: "adopt",
+		new: "reset",
+		resume: "adopt",
+		fork: "none",
+		reload: "none",
+	},
+	snapshot: () => exportWidgetState(),
+	restore: async (_scope, payload, ctx) => {
+		clearWidgetState();
+		const state = payload as PersistedWidgetState | undefined;
+		if (!state?.files) return;
+		// Only a sidecar reaches here (startup, resume), and it carries savedAt.
+		importWidgetState(await dropStaleFiles(state, ctx.savedAt as number));
+	},
+	reset: () => clearWidgetState(),
+	reason:
+		"the diagnostics a conversation's edits produced, which a resume and a relaunch show again",
+});
 
 export function setSessionLanguages(langs: string[]): void {
 	sessionLanguages = langs;

@@ -80,10 +80,16 @@ the cost of not doing so.
   live under `tests/fixtures/witness/<slice>/`.
 
 - Add a regression test through the production path.
-- Capture the pre-fix assertion failure.
+- Capture the pre-fix assertion failure for every new test (red-first stays
+  mandatory).
 - Prove the fixed test passes.
-- Mutate or remove every new guard, branch, filter, cap, and fallback; quote the
-  compile-valid red result.
+- Hand-mutate only the NEW guard, branch, filter or cap the PR is about, one
+  row per direction, and quote the compile-valid red. Stryker samples at most 6
+  files and cannot give the red-first proof, so it does not replace this.
+- After the push, read the `Mutation diff` comment for your exact head (its
+  `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
+  `MUTATION` line). Kill every survivor on a line you added with a test in the
+  PR, or show it equivalent with a reason in the PR body.
 - Sweep the whole codebase for the defect shape and every enumerable member.
 - Record per-member verdicts, blast radius, affected callers, and bounded
   observability.
