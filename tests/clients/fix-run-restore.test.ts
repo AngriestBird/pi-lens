@@ -31,11 +31,14 @@ import {
 } from "../../clients/pipeline.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import {
 	beginFixRun,
 	FIX_RUN_MAX_FILE_BYTES,
+	runWithFixRestore,
 } from "../../clients/fix-run-restore.js";
+import { getProcessSingleton } from "../../clients/process-singletons.js";
 import {
 	type MutationBridgeDeps,
 	recordMutationThroughSeam,
@@ -394,9 +397,9 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		proceed.open();
 		await run;
 
+		expect(overwrittenCount()).toBe(1);
 		expect(fs.readFileSync(aRs, "utf-8")).toBe("let AGENT = 1;\n");
 		expect(fs.readFileSync(bRs, "utf-8")).toBe("let AGENT = 1;\n");
-		expect(overwrittenCount()).toBe(1);
 	});
 
 	it("reports a lost edit by file name when the tool wrote before the capture", async () => {
@@ -424,6 +427,54 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(result.output).toContain("a.rs");
 		expect(result.output).toContain("re-apply");
 		expect(overwrittenCount()).toBe(1);
+	});
+
+	it("warns at agent_end when the deferred fix run overwrote an edit it could not restore", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = tmpDir;
+		runtime.deferMutation(mainRs, tmpDir, "edit", tmpDir, "autofix");
+		const notify = vi.fn();
+
+		const drain = handleAgentEnd({
+			ctxCwd: tmpDir,
+			getFlag: (name: string) => name === "no-lsp",
+			notify,
+			dbg: () => {},
+			runtime,
+			cacheManager: { addModifiedRange: vi.fn() } as never,
+			biomeClient: {} as never,
+			ruffClient: {} as never,
+			getFormatService: () =>
+				({
+					recordRead: () => {},
+					formatFile: async (filePath: string) => ({
+						filePath,
+						formatters: [],
+						anyChanged: false,
+						allSucceeded: true,
+					}),
+				}) as never,
+		});
+		await started.p;
+		const edit = agentEdit(aRs, "let AGENT = 1;");
+		edit.write();
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		await edit.deliver();
+		proceed.open();
+		await drain;
+
+		expect(notify).toHaveBeenCalledWith(
+			expect.stringContaining(aRs),
+			"warning",
+		);
 	});
 
 	it("keeps an edit recorded through the mutation bridge that landed during the run", async () => {
@@ -559,6 +610,36 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 		expect(fs.readFileSync(aDart, "utf-8")).toBe("int a() => AGENT;\n");
 		expect(overwrittenCount()).toBe(1);
+	});
+});
+
+describe("fix-run registry (#3598)", () => {
+	function activeRuns(): Set<unknown> {
+		return getProcessSingleton<{ active: Set<unknown> }>(
+			"fix-run-restore",
+			1,
+			() => ({ active: new Set() }),
+		).active;
+	}
+
+	it("unregisters the run when the fixer settles and when it throws", async () => {
+		const before = activeRuns().size;
+		await runWithFixRestore(
+			{ tool: "rust-clippy", extension: ".rs", candidates: [] },
+			async () => {
+				expect(activeRuns().size).toBe(before + 1);
+			},
+		);
+		expect(activeRuns().size).toBe(before);
+		await expect(
+			runWithFixRestore(
+				{ tool: "rust-clippy", extension: ".rs", candidates: [] },
+				async () => {
+					throw new Error("spawn exploded");
+				},
+			),
+		).rejects.toThrow("spawn exploded");
+		expect(activeRuns().size).toBe(before);
 	});
 });
 
