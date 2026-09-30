@@ -1808,7 +1808,7 @@ export function getDegradationSummary(): DegradationGroup[] {
 				{
 					subject: truncateForLedger(probeHomeRedirect.probeHome),
 					reason: truncateForLedger(
-						`PI_LENS_HOME unset with cwd in an agent worktree/tmp probe context, or PILENS_PROBE=1 forced it; LOGS redirected away from the real home directory (tools, bin and instances.json are unaffected) (cwd: ${probeHomeRedirect.cwd})`,
+						"PI_LENS_HOME unset with cwd in an agent worktree/tmp probe context, or PILENS_PROBE=1 forced it; LOGS redirected away from the real home directory (tools, bin and instances.json are unaffected)",
 					),
 				},
 			],
