@@ -51,6 +51,7 @@ import {
 	DRIFT_SUMMARY_PATH,
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
+	resolveProbeServerId,
 	strategyKeyForLang,
 } from "./lib/clean-signal.mjs";
 import {
@@ -275,9 +276,7 @@ async function probeFixture(fx, dst, row) {
 		repoRoot,
 		workspace: dst,
 	});
-	row.serverId = getServersForFileWithConfig(absFile).find(
-		(server) => server.role !== "auxiliary",
-	)?.id;
+	row.serverId = resolveProbeServerId(fx, getServersForFileWithConfig(absFile));
 	if (install && ensureTool) {
 		for (const t of fx.tools ?? []) await ensureTool(t).catch(() => undefined);
 	}
