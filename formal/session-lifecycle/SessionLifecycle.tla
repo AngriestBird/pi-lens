@@ -70,6 +70,11 @@
 (*                       advisories its own scope queued, and a retired    *)
 (*                       scope's advisories are dropped with a record;     *)
 (*                       without it, the first context call takes them all *)
+(*   "ticketKey"         #3819: a file-less slot is keyed by the S1 ticket *)
+(*                       of the scope that left it, and a start's key is   *)
+(*                       the ticket last bound, by a primary start, to its *)
+(*                       pi session manager (Carrier); without it, both    *)
+(*                       keys are undefined and the reason alone matches   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -308,9 +313,35 @@ Draw ==
 
 HostOk == pend.k = "none" /\ forking = "no" /\ primary # 0 /\ steps < MaxSteps
 
+\* Whether scope s began on its predecessor's pi session manager: pi keeps
+\* the manager on /reload and on an in-memory /fork or /clone, and makes a
+\* new one for /new, resume, a persisted fork, pi --fork and a subagent.
+SameMgr(s) ==
+    /\ predOf[s] # 0
+    /\ why[predOf[s]] \in {"reload", "fork", "clone"}
+    /\ why[predOf[s]] = "reload" \/ sess[s] \in FileLess
+
+\* #3819 (adoptHandoff's binding): the ticket last bound to scope s's session
+\* manager. Every primary start binds its own ticket (Init, Begin, a
+\* SecReplace classified primary, PiFork); a secondary start binds nothing.
+RECURSIVE Carrier(_)
+Carrier(s) ==
+    IF s = 0 THEN 0
+    ELSE IF role[s] = "primary" THEN s
+    ELSE IF SameMgr(s) THEN Carrier(predOf[s])
+    ELSE 0
+
+\* The ticket a start replacing scope s with reason k finds bound to the
+\* manager pi hands it (only a manager-keeping transition inherits one).
+Via(k, s) == IF k \in {"reload", "fork", "clone"} THEN Carrier(s) ELSE 0
+
 \* takeHandoff (clients/session-scope.ts): the slot's key equals the start's
-\* (start reason, session file). A file-less session's file is undefined.
-SlotMatch(r, f) == slot.has /\ slot.reason = r /\ slot.file = Key(f)
+\* (start reason, session file). A file-less session's file is undefined;
+\* under "ticketKey" its key is the ticket that left the slot (slot.from),
+\* and the start's is c, the ticket bound to its manager (Via).
+SlotMatch(r, f, c) ==
+    /\ slot.has /\ slot.reason = r /\ slot.file = Key(f)
+    /\ (Has("ticketKey") /\ f \in FileLess) => slot.from = c
 
 \* The queue after a prune: under #3757, a retired scope's advisories go
 \* (pruneRetiredAdvisories), each with a counted record.
@@ -453,9 +484,9 @@ Begin ==
            f == NewFile(k)
            nb == NewBranch(k)
            takes == IF Has("consumeOnMatch")
-                    THEN SR(k) \in SlotReasons /\ SlotMatch(SR(k), f)
+                    THEN SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
                     ELSE slot.has
-           match == takes /\ SlotMatch(SR(k), f)
+           match == takes /\ SlotMatch(SR(k), f, Via(k, pend.from))
            src == Src(k, match)
            a == Policy("RG", k)
            base == IF a \in {"reset", "none"} THEN {}
@@ -660,9 +691,9 @@ SecReplace(k) ==
                        ELSE ForkBranch(branch[sess[s]])
                  asPrimary == primary = 0
                  takes == asPrimary /\
-                          IF Has("consumeOnMatch") THEN SlotMatch(k, f)
+                          IF Has("consumeOnMatch") THEN SlotMatch(k, f, Via(k, s))
                           ELSE slot.has
-                 match == takes /\ SlotMatch(k, f)
+                 match == takes /\ SlotMatch(k, f, Via(k, s))
                  src == IF ~asPrimary THEN "none"
                         ELSE IF match THEN "slot"
                         ELSE IF k = "fork" THEN "parent" ELSE "own"
