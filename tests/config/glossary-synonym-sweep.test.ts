@@ -752,7 +752,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/bash-file-access.ts": 9,
 		"clients/biome-client.ts": 10,
 		"clients/blocker-freshness.ts": 4,
-		"clients/bounded-pid-file-lock.ts": 5,
+		// 5 -> 6 (#3594): the remembered-holder skip's degradation `subject`,
+		// `path.resolve(dir)`, mirroring `withGenerationLockSync`'s own (#3578).
+		"clients/bounded-pid-file-lock.ts": 6,
 		"clients/build-identity.ts": 3,
 		"clients/bus-events-logger.ts": 2,
 		"clients/bus-publish.ts": 3,
@@ -885,7 +887,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/server.ts": 121,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
-		"clients/mcp/analyze.ts": 6,
+		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
+		// dispatch identity now arrives on DispatchResult.
+		"clients/mcp/analyze.ts": 5,
 		"clients/mcp/ipc.ts": 4,
 		"clients/mcp/session.ts": 3,
 		"clients/metrics-client.ts": 6,

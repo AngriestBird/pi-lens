@@ -124,6 +124,14 @@ export type DegradationKind =
 	 */
 	| "bash-view-clipped"
 	| "biome-explain-unavailable"
+	/**
+	 * #3594: `acquireBoundedPidFileLock`'s wait (the durable-store sync
+	 * waiter) was skipped because the same top-generation holder an earlier
+	 * wait ran out on is still there. The call falls back at once, same as
+	 * a timed-out wait — throwing, or returning `null` under `skip-log`.
+	 * Once per session; subject is the lock's generation directory.
+	 */
+	| "bounded-pid-lock-wait-skipped"
 	| "bus-stale"
 	| "cache-usage-attribution-stale"
 	| "cascade-budget-override-disarmed"
@@ -1417,7 +1425,8 @@ export type DegradationKind =
 	 * `tree-sitter-shared.ts`) resolves zero files from a HEALTHY root and
 	 * must never be confused with the root itself being gone.
 	 */
-	| "word-index-orphan-file-id";
+	| "word-index-orphan-file-id"
+	| "workspace-glob-cap";
 
 export interface DegradationRecord {
 	kind: unknown;
