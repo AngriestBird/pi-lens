@@ -77,7 +77,7 @@
 		"scripts/pre-commit-hook.test.ts": 3,
 		"scripts/pre-push-targeted-tests.test.ts": 6,
 		"scripts/prune-agent-worktrees.test.ts": 8,
-		"scripts/red-on-base.test.ts": 9,
+		"scripts/red-on-base.test.ts": 4,
 		"scripts/rekey-hook-await-exemptions.test.ts": 2,
 		"scripts/release-qa.test.ts": 4,
 		"scripts/resolve-newest-in-range-host.test.ts": 3,

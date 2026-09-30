@@ -1,25 +1,94 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
-	mkdtempSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	unlinkSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { constants as osConstants } from "node:os";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import {
+	claimScratchDir,
+	ownerAlive,
+	SCRATCH_DIR_ROOT,
+	sweepScratchDirs,
+} from "./lib/scratch-dir.mjs";
 
-/** Decide which of the three observed run states explains a red. */
-export function decideVerdict({ head, base, isolation }) {
-	const failingNames = [
-		...new Set([...head.names, ...base.names, ...isolation.names]),
-	];
-	if (isolation.passed) return { verdict: "ISOLATION-GREEN", failingNames };
-	if (!head.passed && base.passed)
-		return { verdict: "CAUSED-BY-CHANGE", failingNames };
-	return { verdict: "RED-ON-BASE", failingNames };
+// Verdicts are PER TEST (file + full name from vitest's JSON report), never per
+// file: a red test that also fails on base must not hide a sibling test in the
+// same file that the change broke (#3724 review r1, F3). Only RED-ON-BASE for
+// every failing test justifies calling a red "unrelated".
+export const EXIT = {
+	OK: 0, // RED-ON-BASE for every failing test, or ALL-GREEN
+	CAUSED: 1,
+	USAGE: 2,
+	INCONCLUSIVE: 3,
+	BUILD: 4,
+};
+
+export const HEAD_GREEN_MESSAGE =
+	"HEAD green when run alone; the red may be concurrency OR a flaky change. Not evidence of unrelated.";
+
+const RUN_PREFIX = "pi-lens-red-on-base-";
+const USAGE =
+	"usage: node scripts/red-on-base.mjs <test files…> [--base ref] [--repeat N]";
+
+class UsageError extends Error {}
+class Interrupted extends Error {}
+
+/**
+ * Classify each HEAD-failing test against the base run.
+ * `head` is one `{ failed: string[] }` per HEAD run; `base` is `{ failed }`.
+ */
+export function decideVerdict({ head, base }) {
+	const runs = head.length;
+	const redCounts = new Map();
+	for (const run of head)
+		for (const id of new Set(run.failed))
+			redCounts.set(id, (redCounts.get(id) ?? 0) + 1);
+	const baseFailed = new Set(base.failed);
+	const tests = [...redCounts].map(([id, count]) => {
+		if (count < runs)
+			return {
+				id,
+				verdict: "INCONCLUSIVE",
+				detail: `red in ${count}/${runs} HEAD runs`,
+			};
+		return {
+			id,
+			verdict: baseFailed.has(id) ? "RED-ON-BASE" : "CAUSED-BY-CHANGE",
+		};
+	});
+	const has = (verdict) => tests.some((test) => test.verdict === verdict);
+	let verdict;
+	if (has("CAUSED-BY-CHANGE")) verdict = "CAUSED-BY-CHANGE";
+	else if (has("INCONCLUSIVE")) verdict = "INCONCLUSIVE";
+	else if (tests.length) verdict = "RED-ON-BASE";
+	else verdict = base.failed.length ? "INCONCLUSIVE" : "ALL-GREEN";
+	return { verdict, tests };
+}
+
+/** Ids (`file > full name`) of every failed test in a vitest JSON report. */
+export function failedTestIds(report, cwd) {
+	const ids = [];
+	for (const file of report.testResults ?? []) {
+		const rel = relative(cwd, file.name).split(sep).join("/");
+		const failed = (file.assertionResults ?? []).filter(
+			(assertion) => assertion.status === "failed",
+		);
+		for (const assertion of failed) ids.push(`${rel} > ${assertion.fullName}`);
+		// A suite that failed to load has no assertions; it is still one red.
+		if (file.status === "failed" && !failed.length)
+			ids.push(`${rel} > (suite failed to run)`);
+	}
+	return [...new Set(ids)];
 }
 
 function parseArgs(argv) {
@@ -27,146 +96,283 @@ function parseArgs(argv) {
 	let base = "origin/master";
 	let repeat = 1;
 	let testCommand;
+	const value = (index, flag) => {
+		if (argv[index] === undefined)
+			throw new UsageError(`${flag} needs a value`);
+		return argv[index];
+	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
-		if (arg === "--base") base = argv[++index];
-		else if (arg === "--repeat") repeat = Number(argv[++index]);
-		else if (arg === "--test-command") testCommand = argv[++index];
+		if (arg === "--base") base = value(++index, arg);
+		else if (arg === "--repeat") repeat = Number(value(++index, arg));
+		else if (arg === "--test-command") testCommand = value(++index, arg);
+		else if (arg.startsWith("--")) throw new UsageError(`unknown flag ${arg}`);
 		else files.push(arg);
 	}
-	if (!files.length)
-		throw new Error(
-			"usage: node scripts/red-on-base.mjs <test files…> [--base ref] [--repeat N]",
-		);
+	if (!files.length) throw new UsageError("no test files given");
 	if (!Number.isInteger(repeat) || repeat < 1)
-		throw new Error("--repeat must be a positive integer");
+		throw new UsageError("--repeat must be a positive integer");
 	return { files, base, repeat, testCommand };
 }
 
-function failingNames(output) {
-	return [
-		...new Set(
-			output.split(/\r?\n/).flatMap((line) => {
-				const match = line.match(/^\s*(?:FAIL|[×✗])\s+(.+?)\s*$/);
-				if (match) return [match[1]];
-				const fake = line.match(/^\s*failing test:\s*(.+?)\s*$/i);
-				return fake ? [fake[1]] : [];
-			}),
-		),
-	];
+function git(args, cwd) {
+	return gitExecFileSync(args, { cwd, encoding: "utf8", stdio: "pipe" });
 }
 
-function runTests({ cwd, files, repeat, testCommand, env }) {
-	let passed = true;
-	const names = [];
-	for (let attempt = 0; attempt < repeat; attempt += 1) {
-		const command = testCommand ?? resolve(cwd, "node_modules/.bin/vitest");
-		const commandArgs = testCommand?.endsWith(".mjs")
-			? [testCommand, ...files]
-			: ["run", ...files];
-		const result = spawnSync(
-			testCommand?.endsWith(".mjs") ? process.execPath : command,
-			commandArgs,
-			{
-				cwd,
-				env: { ...env, PI_LENS_TEST_MAX_WORKERS: "6" },
-				encoding: "utf8",
-			},
-		);
-		const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-		if (result.status !== 0) passed = false;
-		names.push(...failingNames(output));
-	}
-	return { passed, names: [...new Set(names)] };
+function tail(text) {
+	return text.slice(-1500).trim();
 }
 
-function git(args, cwd, env) {
-	return execFileSync("git", args, {
-		cwd,
-		env,
-		stdio: "pipe",
-		encoding: "utf8",
-	});
-}
-
-function baseWorktree({ cwd, base, root, env }) {
-	const worktree = mkdtempSync(join(root, "base-"));
-	let added = false;
-	let linked = false;
+/** Unlink the shared-install symlink BEFORE git sees the worktree: a forced
+ *  remove that follows it can delete the shared install (#3173). */
+function removeWorktree(cwd, worktree) {
 	const nodeModules = join(worktree, "node_modules");
 	try {
-		git(["worktree", "add", "--detach", worktree, base], cwd, env);
-		added = true;
-		symlinkSync(resolve(cwd, "node_modules"), nodeModules, "dir");
-		linked = true;
-		const build = spawnSync("npm", ["run", "build"], {
-			cwd: worktree,
-			env: { ...env, PI_LENS_TEST_MAX_WORKERS: "6" },
-			stdio: "inherit",
-		});
-		if (build.status !== 0)
-			throw new Error(`base build failed with status ${build.status}`);
-		return { worktree, nodeModules, linked };
-	} catch (error) {
-		if (linked && existsSync(nodeModules)) unlinkSync(nodeModules);
-		if (added) git(["worktree", "remove", "--force", worktree], cwd, env);
-		rmSync(worktree, { recursive: true, force: true });
-		throw error;
+		if (lstatSync(nodeModules).isSymbolicLink()) unlinkSync(nodeModules);
+	} catch {
+		// no link (never created, or already gone)
 	}
-}
-
-function removeBaseWorktree({ cwd, env, worktree, nodeModules, linked }) {
-	// The symlink must be gone before git sees the worktree; git's forced remove
-	// otherwise follows it and can delete the shared install (#3173).
-	if (linked && existsSync(nodeModules)) unlinkSync(nodeModules);
-	git(["worktree", "remove", "--force", worktree], cwd, env);
+	try {
+		git(["worktree", "remove", "--force", worktree], cwd);
+	} catch (error) {
+		console.error(`red-on-base: worktree remove failed: ${error.message}`);
+	}
 	rmSync(worktree, { recursive: true, force: true });
 }
 
-export function main(argv = process.argv.slice(2)) {
-	const { files, base, repeat, testCommand } = parseArgs(argv);
-	const cwd = process.cwd();
-	const configuredTmp = process.env.TMPDIR || tmpdir();
-	const runRoot = mkdtempSync(join(configuredTmp, "pi-lens-red-on-base-"));
-	const home = join(runRoot, "home");
-	const baseHome = join(runRoot, "base-home");
-	mkdirSync(home);
-	mkdirSync(baseHome);
-	const env = { ...process.env, TMPDIR: configuredTmp, PI_LENS_HOME: home };
-	let baseState;
-	let cleaned = false;
-	const cleanup = () => {
-		if (cleaned) return;
-		cleaned = true;
-		if (baseState) removeBaseWorktree({ cwd, env, ...baseState });
-		rmSync(runRoot, { recursive: true, force: true });
-	};
-	const onSignal = () => {
-		cleanup();
-		process.exit(130);
-	};
-	process.once("SIGINT", onSignal);
-	process.once("SIGTERM", onSignal);
+/** A SIGKILLed run leaves a registered worktree behind; reap the ones whose
+ *  owner is dead, with the same unlink-first order as a normal exit. */
+function reapStaleRuns(cwd) {
+	let entries;
 	try {
-		const head = runTests({ cwd, files, repeat, testCommand, env });
-		baseState = baseWorktree({ cwd, base, root: runRoot, env });
-		const baseResult = runTests({
-			cwd: baseState.worktree,
-			files,
-			repeat,
-			testCommand,
-			env: { ...env, PI_LENS_HOME: baseHome },
+		entries = readdirSync(SCRATCH_DIR_ROOT);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.startsWith(RUN_PREFIX)) continue;
+		const dir = join(SCRATCH_DIR_ROOT, entry);
+		if (ownerAlive(dir) === false) removeWorktree(cwd, join(dir, "base"));
+	}
+	sweepScratchDirs(SCRATCH_DIR_ROOT, RUN_PREFIX);
+	try {
+		git(["worktree", "prune"], cwd);
+	} catch {
+		// prune is housekeeping; the run itself does not depend on it
+	}
+}
+
+function readReport(file) {
+	try {
+		return JSON.parse(readFileSync(file, "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+export async function main(argv = process.argv.slice(2)) {
+	const cwd = process.cwd();
+	let args;
+	let baseSha;
+	let headSha;
+	try {
+		args = parseArgs(argv);
+		for (const file of args.files)
+			if (!existsSync(resolve(cwd, file)))
+				throw new UsageError(`${file} does not exist in this tree`);
+		try {
+			baseSha = git(
+				["rev-parse", "--verify", `${args.base}^{commit}`],
+				cwd,
+			).trim();
+		} catch {
+			throw new UsageError(`--base ${args.base} is not a commit`);
+		}
+		headSha = git(["rev-parse", "HEAD"], cwd).trim();
+	} catch (error) {
+		if (!(error instanceof UsageError)) throw error;
+		console.error(`red-on-base: ${error.message}\n${USAGE}`);
+		return EXIT.USAGE;
+	}
+	const { files, base, repeat, testCommand } = args;
+
+	reapStaleRuns(cwd);
+	const runRoot = realpathSync(claimScratchDir(SCRATCH_DIR_ROOT, RUN_PREFIX));
+	const worktree = join(runRoot, "base");
+	const tmp = join(runRoot, "tmp");
+	const homes = {
+		head: join(runRoot, "head-home"),
+		base: join(runRoot, "base-home"),
+	};
+	for (const dir of [tmp, ...Object.values(homes)]) mkdirSync(dir);
+	const envFor = (side) => ({
+		...process.env,
+		TMPDIR: tmp,
+		PI_LENS_HOME: homes[side],
+		PI_LENS_TEST_MAX_WORKERS: "6",
+	});
+
+	const live = new Set();
+	let interrupted = 0;
+	let added = false;
+	const throwIfInterrupted = () => {
+		if (interrupted) throw new Interrupted();
+	};
+	const signalGroup = (child, signal) => {
+		try {
+			// detached children lead their own group, so a build's or a
+			// runner's grandchildren die with them
+			if (process.platform === "win32") child.kill(signal);
+			else process.kill(-child.pid, signal);
+		} catch {
+			// already gone
+		}
+	};
+	const onSignal = (signal) => {
+		if (interrupted) return;
+		interrupted = osConstants.signals[signal];
+		for (const entry of live) {
+			signalGroup(entry.child, "SIGTERM");
+			setTimeout(() => signalGroup(entry.child, "SIGKILL"), 3000).unref();
+		}
+	};
+	const onSigint = () => onSignal("SIGINT");
+	const onSigterm = () => onSignal("SIGTERM");
+	process.on("SIGINT", onSigint);
+	process.on("SIGTERM", onSigterm);
+
+	async function run(command, commandArgs, options) {
+		throwIfInterrupted();
+		const child = spawn(command, commandArgs, {
+			...options,
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: process.platform !== "win32",
 		});
-		const isolation = runTests({ cwd, files, repeat, testCommand, env });
-		const result = decideVerdict({ head, base: baseResult, isolation });
-		console.log(result.verdict);
-		for (const name of result.failingNames)
-			console.log(`failing test: ${name}`);
-		return result.verdict === "ISOLATION-GREEN" ? 0 : 1;
+		let output = "";
+		for (const stream of [child.stdout, child.stderr]) {
+			stream.setEncoding("utf8");
+			stream.on("data", (chunk) => {
+				output = (output + chunk).slice(-4000);
+			});
+		}
+		const entry = { child };
+		live.add(entry);
+		const result = await new Promise((settle) => {
+			child.once("close", (status, signal) => settle({ status, signal }));
+			child.once("error", (error) => {
+				output += String(error);
+				settle({ status: null, signal: null });
+			});
+		});
+		live.delete(entry);
+		throwIfInterrupted();
+		return { ...result, output };
+	}
+
+	const build = (cwdOfTree, side) =>
+		run("npm", ["run", "build"], { cwd: cwdOfTree, env: envFor(side) });
+
+	let reportCount = 0;
+	async function runTests(cwdOfTree, side, testFiles) {
+		reportCount += 1;
+		const outputFile = join(runRoot, `report-${reportCount}.json`);
+		const vitestArgs = [
+			"run",
+			"--reporter=json",
+			`--outputFile=${outputFile}`,
+			...testFiles,
+		];
+		const options = { cwd: cwdOfTree, env: envFor(side) };
+		const result = testCommand?.endsWith(".mjs")
+			? await run(process.execPath, [testCommand, ...vitestArgs], options)
+			: await run(
+					testCommand ?? resolve(cwdOfTree, "node_modules/.bin/vitest"),
+					vitestArgs,
+					options,
+				);
+		const report = readReport(outputFile);
+		const failed = report ? failedTestIds(report, cwdOfTree) : [];
+		// A red with no failing test to name (no report, a signal, an unhandled
+		// error) cannot be attributed to either side.
+		const broken = !report || (result.status !== 0 && !failed.length);
+		return { failed, broken, status: result.status, output: result.output };
+	}
+
+	try {
+		console.log(`HEAD ${headSha}`);
+		console.log(`BASE ${base} ${baseSha}`);
+
+		const headBuild = await build(cwd, "head");
+		if (headBuild.status !== 0) {
+			console.error(
+				`red-on-base: HEAD build failed (status ${headBuild.status}); fix the build first.\n${tail(headBuild.output)}`,
+			);
+			return EXIT.BUILD;
+		}
+		git(["worktree", "add", "--detach", worktree, baseSha], cwd);
+		added = true;
+		symlinkSync(
+			resolve(cwd, "node_modules"),
+			join(worktree, "node_modules"),
+			"dir",
+		);
+		const baseBuild = await build(worktree, "base");
+		if (baseBuild.status !== 0) {
+			console.error(
+				`red-on-base: base build failed (status ${baseBuild.status}) at ${baseSha}.\n${tail(baseBuild.output)}`,
+			);
+			return EXIT.BUILD;
+		}
+
+		const headRuns = [];
+		for (let attempt = 0; attempt < repeat; attempt += 1)
+			headRuns.push(await runTests(cwd, "head", files));
+		// A file the change adds does not exist on base: that is "no such test",
+		// not a red (vitest would exit 1 on it).
+		const baseFiles = files.filter((file) => existsSync(join(worktree, file)));
+		const baseRun = baseFiles.length
+			? await runTests(worktree, "base", baseFiles)
+			: { failed: [], broken: false };
+
+		const broken = [
+			...headRuns.map((headRun, index) => [`HEAD run ${index + 1}`, headRun]),
+			["base run", baseRun],
+		].filter(([, result]) => result.broken);
+		if (broken.length) {
+			for (const [name, result] of broken)
+				console.log(
+					`${name}: no per-test report (status ${result.status}); cannot attribute.\n${tail(result.output)}`,
+				);
+			console.log("VERDICT: INCONCLUSIVE");
+			return EXIT.INCONCLUSIVE;
+		}
+
+		const result = decideVerdict({ head: headRuns, base: baseRun });
+		for (const test of result.tests)
+			console.log(
+				`${test.verdict}  ${test.id}${test.detail ? ` (${test.detail})` : ""}`,
+			);
+		if (result.verdict === "INCONCLUSIVE") console.log(HEAD_GREEN_MESSAGE);
+		if (result.verdict === "ALL-GREEN")
+			console.log(
+				"Nothing failed on HEAD or base; the red was not reproduced. Not evidence of unrelated.",
+			);
+		console.log(`VERDICT: ${result.verdict}`);
+		return (
+			{
+				"CAUSED-BY-CHANGE": EXIT.CAUSED,
+				INCONCLUSIVE: EXIT.INCONCLUSIVE,
+			}[result.verdict] ?? EXIT.OK
+		);
+	} catch (error) {
+		if (error instanceof Interrupted) return 128 + interrupted;
+		console.error(`red-on-base: ${error.message}`);
+		return EXIT.INCONCLUSIVE;
 	} finally {
-		process.removeListener("SIGINT", onSignal);
-		process.removeListener("SIGTERM", onSignal);
-		cleanup();
+		process.removeListener("SIGINT", onSigint);
+		process.removeListener("SIGTERM", onSigterm);
+		if (added) removeWorktree(cwd, worktree);
+		rmSync(runRoot, { recursive: true, force: true });
 	}
 }
 
@@ -174,4 +380,4 @@ if (
 	process.argv[1] &&
 	fileURLToPath(import.meta.url) === resolve(process.argv[1])
 )
-	process.exitCode = main();
+	process.exitCode = await main();

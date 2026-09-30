@@ -1,132 +1,468 @@
-import { execFileSync } from "node:child_process";
-import {
-	chmodSync,
-	lstatSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { decideVerdict } from "../../scripts/red-on-base.mjs";
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { failedTestIds } from "../../scripts/red-on-base.mjs";
+import { setupTestEnvironment } from "../clients/test-utils.js";
+import { gitExecFileSync, gitFixtureEnv } from "../support/git-fixture-env.js";
 
-// flake-shape: real-process-spawn — the real CLI, Git worktree lifecycle, and
-// child-process cleanup ordering are the contract; in-process stubs cannot prove it.
+// flake-shape: real-process-spawn — the real CLI, Git worktree lifecycle,
+// signal delivery and child-process cleanup ordering are the contract;
+// in-process stubs cannot prove them. The ONLY seam is --test-command, a fake
+// `vitest run --reporter=json` (tests/support/red-on-base-fake-vitest.mjs)
+// whose report shape is pinned to a real vitest 5.0.2 report below.
+// lane: ubuntu Unit tests (POSIX sh git shim, TMPDIR-derived scratch root).
 
-const CLI = resolve("scripts/red-on-base.mjs");
+const CLI = path.resolve("scripts/red-on-base.mjs");
+const FAKE = path.resolve("tests/support/red-on-base-fake-vitest.mjs");
+const REAL_REPORT = path.resolve(
+	"tests/scripts/fixtures/red-on-base-vitest-report.json",
+);
 
-describe("red-on-base verdict", () => {
-	it("classifies a red head and green base as caused by the change", () => {
-		expect(
-			decideVerdict({
-				head: { passed: false, names: ["changed test"] },
-				base: { passed: true, names: [] },
-				isolation: { passed: false, names: ["changed test"] },
-			}),
-		).toEqual({ verdict: "CAUSED-BY-CHANGE", failingNames: ["changed test"] });
+type TestSpec = {
+	name: string;
+	status: "passed" | "failed";
+	failOnRuns?: number[];
+};
+type Scenario = {
+	files: Record<string, { tests: TestSpec[] } | { suiteFailure: true }>;
+	buildExit?: number;
+	noReport?: boolean;
+	signalParent?: boolean;
+};
+type Repo = ReturnType<typeof makeRepo>;
+
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+	for (const cleanup of cleanups.splice(0)) cleanup();
+});
+
+const pass = (name: string): TestSpec => ({ name, status: "passed" });
+const red = (name: string, failOnRuns?: number[]): TestSpec => ({
+	name,
+	status: "failed",
+	failOnRuns,
+});
+const file = (...tests: TestSpec[]) => ({ tests });
+
+function git(cwd: string, ...args: string[]) {
+	return gitExecFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function makeRepo(base: Scenario, head: Scenario) {
+	const env = setupTestEnvironment("pi-lens-red-on-base-test-");
+	cleanups.push(env.cleanup);
+	const root = path.join(env.tmpDir, "repo");
+	const tmp = path.join(env.tmpDir, "tmp");
+	const bin = path.join(env.tmpDir, "bin");
+	for (const dir of [root, tmp, bin]) fs.mkdirSync(dir);
+	const commit = (scenario: Scenario, message: string) => {
+		fs.rmSync(path.join(root, "tests"), { recursive: true, force: true });
+		fs.writeFileSync(
+			path.join(root, "package.json"),
+			JSON.stringify({ scripts: { build: `node ${FAKE} --build` } }),
+		);
+		fs.writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+		fs.writeFileSync(
+			path.join(root, "scenario.json"),
+			JSON.stringify(scenario),
+		);
+		for (const name of Object.keys(scenario.files)) {
+			fs.mkdirSync(path.join(root, path.dirname(name)), { recursive: true });
+			fs.writeFileSync(path.join(root, name), `// ${message}\n`);
+		}
+		git(root, "add", ".");
+		git(
+			root,
+			"-c",
+			"user.email=t@example.com",
+			"-c",
+			"user.name=T",
+			"commit",
+			"-q",
+			"--allow-empty",
+			"-m",
+			message,
+		);
+	};
+	git(root, "init", "-q", "-b", "main");
+	commit(base, "base");
+	commit(head, "head");
+	fs.mkdirSync(path.join(root, "node_modules"));
+	// The real git behind a PATH shim that refuses `worktree remove --force` while
+	// node_modules is still inside the tree (the #3173 hazard) and logs each ok one.
+	const realGit = spawnSync("sh", ["-c", "command -v git"], {
+		encoding: "utf8",
+	}).stdout.trim();
+	fs.writeFileSync(
+		path.join(bin, "git"),
+		[
+			"#!/bin/sh",
+			`real=${realGit}`,
+			"if [ \"$1 $2 $3\" = 'worktree remove --force' ]; then",
+			'  if [ -e "$4/node_modules" ] || [ -L "$4/node_modules" ]; then echo \'node_modules still present at remove\' >&2; exit 91; fi',
+			'  echo unlink-before-remove >> "$CLEANUP_LOG"',
+			"fi",
+			'exec "$real" "$@"',
+		].join("\n"),
+		{ mode: 0o755 },
+	);
+	return {
+		root,
+		tmp,
+		bin,
+		probeLog: path.join(env.tmpDir, "probe.log"),
+		cleanupLog: path.join(env.tmpDir, "cleanup.log"),
+		ambientHome: path.join(env.tmpDir, "ambient-home"),
+	};
+}
+
+function run(
+	repo: Repo,
+	argv: string[],
+	extraEnv: Record<string, string> = {},
+) {
+	return spawnSync(process.execPath, [CLI, ...argv, "--test-command", FAKE], {
+		cwd: repo.root,
+		encoding: "utf8",
+		timeout: 120_000,
+		env: {
+			...gitFixtureEnv(repo.root),
+			PATH: `${repo.bin}${path.delimiter}${process.env.PATH}`,
+			TMPDIR: repo.tmp,
+			PI_LENS_HOME: repo.ambientHome,
+			PROBE_LOG: repo.probeLog,
+			CLEANUP_LOG: repo.cleanupLog,
+			...extraEnv,
+		},
 	});
+}
 
-	it("classifies a red head and red base as red on base", () => {
-		expect(
-			decideVerdict({
-				head: { passed: false, names: ["base test"] },
-				base: { passed: false, names: ["base test"] },
-				isolation: { passed: false, names: ["base test"] },
-			}).verdict,
-		).toBe("RED-ON-BASE");
-	});
+type Probe = {
+	phase: string;
+	cwd: string;
+	pid: number;
+	home: string;
+	tmp: string;
+	files?: string[];
+};
+const probes = (repo: Repo): Probe[] =>
+	fs.existsSync(repo.probeLog)
+		? fs
+				.readFileSync(repo.probeLog, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line))
+		: [];
+const cleanupLines = (repo: Repo) =>
+	fs.existsSync(repo.cleanupLog)
+		? fs.readFileSync(repo.cleanupLog, "utf8").trim().split("\n")
+		: [];
+const worktrees = (repo: Repo) =>
+	git(repo.root, "worktree", "list", "--porcelain")
+		.split("\n")
+		.filter((line) => line.startsWith("worktree ")).length;
+const scratch = (repo: Repo) => {
+	const dir = path.join(repo.tmp, "pi-lens-scratch");
+	return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+};
+function expectCleanedUp(repo: Repo) {
+	expect(worktrees(repo)).toBe(1);
+	expect(scratch(repo)).toEqual([]);
+}
+const verdictLine = (stdout: string) =>
+	stdout.split("\n").find((line) => line.startsWith("VERDICT: "));
+const baseTests = (repo: Repo) =>
+	probes(repo).filter((e) => e.phase === "test" && e.cwd !== repo.root);
+const headTests = (repo: Repo) =>
+	probes(repo).filter((e) => e.phase === "test" && e.cwd === repo.root);
 
-	it("classifies a green isolated head as isolation green", () => {
-		expect(
-			decideVerdict({
-				head: { passed: false, names: ["interference"] },
-				base: { passed: false, names: ["interference"] },
-				isolation: { passed: true, names: [] },
-			}).verdict,
-		).toBe("ISOLATION-GREEN");
+const A = "tests/a.test.mjs";
+
+describe("red-on-base report parsing", () => {
+	it("reads the failed tests and the failed suite out of a real vitest 5.0.2 report", () => {
+		// The vector was generated by running the repo's vitest (5.0.2) with
+		// --reporter=json over a passing/failing/skipped test and an unloadable
+		// file, paths rewritten to /repo. A hand-shaped double would encode a guess.
+		const report = JSON.parse(fs.readFileSync(REAL_REPORT, "utf8"));
+		expect(failedTestIds(report, "/repo")).toEqual([
+			"tests/scripts/zz/load.test.ts > (suite failed to run)",
+			"tests/scripts/zz/vec.test.ts > suite fails",
+		]);
 	});
 });
 
-describe("red-on-base CLI", () => {
-	it("uses the injected test command and unlinks node_modules before removal", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-lens-red-on-base-test-"));
-		const bin = join(root, "bin");
-		mkdirSync(bin);
-		try {
-			const realGit = "/usr/bin/git";
-			writeFileSync(
-				join(root, "package.json"),
-				JSON.stringify({ scripts: { build: 'node -e \\"\\"' } }),
-			);
-			writeFileSync(join(root, "version.txt"), "base\n");
-			writeFileSync(
-				join(root, "fake-test.mjs"),
-				[
-					"import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';",
-					"import { join } from 'node:path';",
-					"const dir = process.env.PI_LENS_HOME; mkdirSync(dir, { recursive: true });",
-					"const countFile = join(dir, 'count'); const count = Number(existsSync(countFile) ? readFileSync(countFile, 'utf8') : 0) + 1; writeFileSync(countFile, String(count));",
-					"if (readFileSync(join(process.cwd(), 'version.txt'), 'utf8').trim() === 'base') process.exit(0);",
-					"if (count === 1) { console.error('failing test: changed test'); process.exit(1); }",
-				].join("\n"),
-			);
-			writeFileSync(
-				join(bin, "git"),
-				[
-					"#!/bin/sh",
-					`real=${realGit}`,
-					"if [ \"$1 $2 $3\" = 'worktree remove --force' ]; then",
-					"  test ! -e \"$4/node_modules\" || { echo 'node_modules still present at remove' >&2; exit 91; }",
-					'  echo unlink-before-remove > "$CLEANUP_LOG"',
-					"fi",
-					'exec "$real" "$@"',
-				].join("\n"),
-			);
-			const git = join(bin, "git");
-			const chmod = 0o755;
-			chmodSync(git, chmod);
-			execFileSync(realGit, ["init", "-q"], { cwd: root });
-			execFileSync(realGit, ["config", "user.email", "test@example.com"], {
-				cwd: root,
-			});
-			execFileSync(realGit, ["config", "user.name", "Test"], { cwd: root });
-			execFileSync(realGit, ["add", "."], { cwd: root });
-			execFileSync(realGit, ["commit", "-qm", "base"], { cwd: root });
-			writeFileSync(join(root, "version.txt"), "head\n");
-			execFileSync(realGit, ["add", "version.txt"], { cwd: root });
-			execFileSync(realGit, ["commit", "-qm", "head"], { cwd: root });
-			mkdirSync(join(root, "node_modules"));
-			const output = execFileSync(
-				process.execPath,
-				[
-					CLI,
-					"version.txt",
-					"--base",
-					"HEAD~1",
-					"--test-command",
-					join(root, "fake-test.mjs"),
-				],
-				{
-					cwd: root,
-					env: {
-						...process.env,
-						PATH: `${bin}${delimiter}${process.env.PATH}`,
-						CLEANUP_LOG: join(root, "cleanup-proof"),
-						PI_LENS_TEST_MAX_WORKERS: "6",
-					},
-					encoding: "utf8",
-				},
-			);
-			expect(output).toContain("ISOLATION-GREEN");
-			expect(readFileSync(join(root, "cleanup-proof"), "utf8")).toContain(
-				"unlink-before-remove",
-			);
-			expect(lstatSync(join(root, "node_modules")).isDirectory()).toBe(true);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
+describe("red-on-base CLI verdicts", () => {
+	it("CAUSED-BY-CHANGE: red on HEAD, green on base, exit 1, both SHAs and both builds", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(red("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain(
+			`HEAD ${git(repo.root, "rev-parse", "HEAD")}`,
+		);
+		expect(result.stdout).toContain(
+			`BASE HEAD~1 ${git(repo.root, "rev-parse", "HEAD~1")}`,
+		);
+		expect(result.stdout).toContain(`CAUSED-BY-CHANGE  ${A} > t`);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: CAUSED-BY-CHANGE");
+		// HEAD and base are both built and both tested, the base one elsewhere.
+		const builds = probes(repo).filter((e) => e.phase === "build");
+		expect(builds.map((e) => e.cwd === repo.root)).toEqual([true, false]);
+		expect(headTests(repo)).toHaveLength(1);
+		expect(baseTests(repo)).toHaveLength(1);
+		expectCleanedUp(repo);
+		expect(cleanupLines(repo)).toEqual(["unlink-before-remove"]);
+	});
+
+	it("RED-ON-BASE: red on both sides, exit 0", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(red("t")) } },
+			{ files: { [A]: file(red("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain(`RED-ON-BASE  ${A} > t`);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: RED-ON-BASE");
+		expectCleanedUp(repo);
+	});
+
+	it("per test, not per file: a base-red test does not hide a change-broken sibling", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(red("X pre-existing"), pass("Y")) } },
+			{ files: { [A]: file(red("X pre-existing"), red("Y")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain(`RED-ON-BASE  ${A} > X pre-existing`);
+		expect(result.stdout).toContain(`CAUSED-BY-CHANGE  ${A} > Y`);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: CAUSED-BY-CHANGE");
+	});
+
+	it("a test file the change adds is CAUSED-BY-CHANGE, not red on a base that lacks it", () => {
+		const B = "tests/new.test.mjs";
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")), [B]: file(red("new feature")) } },
+		);
+		const result = run(repo, [A, B, "--base", "HEAD~1"]);
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain(`CAUSED-BY-CHANGE  ${B} > new feature`);
+		// Base is only asked about the file it has.
+		expect(baseTests(repo).map((e) => e.files)).toEqual([[A]]);
+	});
+
+	it("a run over only new test files never runs the base tests and is CAUSED-BY-CHANGE", () => {
+		const B = "tests/new.test.mjs";
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")), [B]: file(red("new feature")) } },
+		);
+		const result = run(repo, [B, "--base", "HEAD~1"]);
+		expect(result.status).toBe(1);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: CAUSED-BY-CHANGE");
+		expect(baseTests(repo)).toEqual([]);
+		expectCleanedUp(repo);
+	});
+
+	it("a suite that fails to load is a red with its own id, compared across sides", () => {
+		const caused = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: { suiteFailure: true } } },
+		);
+		const causedResult = run(caused, [A, "--base", "HEAD~1"]);
+		expect(causedResult.status).toBe(1);
+		expect(causedResult.stdout).toContain(
+			`CAUSED-BY-CHANGE  ${A} > (suite failed to run)`,
+		);
+		const onBase = makeRepo(
+			{ files: { [A]: { suiteFailure: true } } },
+			{ files: { [A]: { suiteFailure: true } } },
+		);
+		const onBaseResult = run(onBase, [A, "--base", "HEAD~1"]);
+		expect(onBaseResult.status).toBe(0);
+		expect(onBaseResult.stdout).toContain(
+			`RED-ON-BASE  ${A} > (suite failed to run)`,
+		);
+	});
+
+	it("ALL-GREEN: nothing fails anywhere, exit 0, and says it is not evidence of unrelated", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(0);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: ALL-GREEN");
+		expect(result.stdout).toContain("Not evidence of unrelated");
+	});
+
+	it("INCONCLUSIVE: a test red in some HEAD runs but not all, with counts (--repeat)", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("flaky")) } },
+			{ files: { [A]: file(red("flaky", [1])) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1", "--repeat", "3"]);
+		expect(result.status).toBe(3);
+		expect(result.stdout).toContain(
+			`INCONCLUSIVE  ${A} > flaky (red in 1/3 HEAD runs)`,
+		);
+		expect(result.stdout).toContain(
+			"HEAD green when run alone; the red may be concurrency OR a flaky change. Not evidence of unrelated.",
+		);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+		expect(headTests(repo)).toHaveLength(3);
+	});
+
+	it("INCONCLUSIVE: HEAD green while base is red is not a HEAD verdict", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(red("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(3);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+	});
+
+	it("INCONCLUSIVE: a run with no per-test report is never counted as red", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) }, noReport: true },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(3);
+		expect(result.stdout).toContain("HEAD run 1: no per-test report");
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+	});
+});
+
+describe("red-on-base usage and build failures", () => {
+	it("a typo'd test path is a usage error (exit 2), builds nothing and prints no verdict", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		const result = run(repo, ["tests/typo.test.mjs", "--base", "HEAD~1"]);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("tests/typo.test.mjs does not exist");
+		expect(result.stdout).not.toContain("VERDICT");
+		expect(probes(repo)).toEqual([]);
+	});
+
+	it("a --base that is not a commit is a usage error (exit 2)", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		const result = run(repo, [A, "--base", "no-such-ref"]);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("--base no-such-ref is not a commit");
+		expect(probes(repo)).toEqual([]);
+	});
+
+	it("a HEAD build failure is exit 4 before any test runs", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(red("t")) }, buildExit: 1 },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(4);
+		expect(result.stderr).toContain("HEAD build failed");
+		expect(result.stdout).not.toContain("VERDICT");
+		expect(probes(repo).filter((e) => e.phase === "test")).toEqual([]);
+		expectCleanedUp(repo);
+	});
+
+	it("a base build failure is exit 4, no verdict, and the worktree is unlinked then removed", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) }, buildExit: 1 },
+			{ files: { [A]: file(red("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(4);
+		expect(result.stderr).toContain("base build failed");
+		expect(result.stdout).not.toContain("VERDICT");
+		expect(probes(repo).filter((e) => e.phase === "test")).toEqual([]);
+		expectCleanedUp(repo);
+		expect(cleanupLines(repo)).toEqual(["unlink-before-remove"]);
+	});
+});
+
+describe("red-on-base hygiene pins", () => {
+	it("pins TMPDIR and a separate PI_LENS_HOME for every HEAD and base child", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		run(repo, [A, "--base", "HEAD~1"]);
+		const log = probes(repo);
+		expect(log).toHaveLength(4); // head build, base build, head test, base test
+		const scratchRoot = fs.realpathSync(path.join(repo.tmp, "pi-lens-scratch"));
+		for (const entry of log) {
+			expect(entry.home).not.toBe(repo.ambientHome);
+			expect(entry.home.startsWith(scratchRoot)).toBe(true);
+			expect(entry.tmp.startsWith(scratchRoot)).toBe(true);
 		}
+		const homeOf = (phase: string, onBase: boolean) =>
+			log.find((e) => e.phase === phase && (e.cwd !== repo.root) === onBase)
+				?.home;
+		expect(homeOf("test", false)).toBe(homeOf("build", false));
+		expect(homeOf("test", true)).toBe(homeOf("build", true));
+		expect(homeOf("test", false)).not.toBe(homeOf("test", true));
+	});
+});
+
+describe("red-on-base interruption", () => {
+	const interrupted = { files: { [A]: file(pass("t")) }, signalParent: true };
+	const green = { files: { [A]: file(pass("t")) } };
+
+	it.each([
+		["SIGINT", 130],
+		["SIGTERM", 143],
+	])(
+		"%s mid base-run kills the child, cleans up, exits %i and prints no verdict",
+		(signal, code) => {
+			const repo = makeRepo(interrupted, green);
+			const result = run(repo, [A, "--base", "HEAD~1"], {
+				FAKE_SIGNAL_PARENT: signal,
+			});
+			expect(result.signal).toBeNull();
+			expect(result.status).toBe(code);
+			expect(result.stdout).not.toContain("VERDICT");
+			expect(result.stdout).not.toMatch(
+				/CAUSED-BY-CHANGE|RED-ON-BASE|ALL-GREEN/,
+			);
+			expectCleanedUp(repo);
+			expect(cleanupLines(repo)).toEqual(["unlink-before-remove"]);
+			const [child] = baseTests(repo);
+			expect(() => process.kill(child.pid, 0)).toThrow(/ESRCH/);
+		},
+	);
+
+	it("a SIGKILLed run leaves a worktree that the next run reaps, unlinking first", () => {
+		const repo = makeRepo(interrupted, green);
+		const killed = run(repo, [A, "--base", "HEAD~1"], {
+			FAKE_SIGNAL_PARENT: "SIGKILL",
+		});
+		expect(killed.signal).toBe("SIGKILL");
+		const [stranded] = baseTests(repo);
+		// Precondition: the leftover is real (registered, symlink still in place).
+		expect(worktrees(repo)).toBe(2);
+		expect(
+			fs.lstatSync(path.join(stranded.cwd, "node_modules")).isSymbolicLink(),
+		).toBe(true);
+		expect(cleanupLines(repo)).toEqual([]);
+
+		const next = run(repo, [A, "--base", "HEAD~1"]);
+		expect(next.status).toBe(0);
+		expectCleanedUp(repo);
+		expect(fs.existsSync(stranded.cwd)).toBe(false);
+		// One removal for the reaped leftover, one for the second run's own worktree.
+		expect(cleanupLines(repo)).toEqual([
+			"unlink-before-remove",
+			"unlink-before-remove",
+		]);
 	});
 });

@@ -1,11 +1,33 @@
-export type TestRun = { passed: boolean; names: string[] };
-export type Verdict = {
-	verdict: "CAUSED-BY-CHANGE" | "RED-ON-BASE" | "ISOLATION-GREEN";
-	failingNames: string[];
+export type Verdict =
+	| "CAUSED-BY-CHANGE"
+	| "RED-ON-BASE"
+	| "INCONCLUSIVE"
+	| "ALL-GREEN";
+export type TestVerdict = {
+	id: string;
+	verdict: "CAUSED-BY-CHANGE" | "RED-ON-BASE" | "INCONCLUSIVE";
+	detail?: string;
 };
+export const EXIT: {
+	OK: 0;
+	CAUSED: 1;
+	USAGE: 2;
+	INCONCLUSIVE: 3;
+	BUILD: 4;
+};
+export const HEAD_GREEN_MESSAGE: string;
 export function decideVerdict(runs: {
-	head: TestRun;
-	base: TestRun;
-	isolation: TestRun;
-}): Verdict;
-export function main(argv?: string[]): number;
+	head: { failed: string[] }[];
+	base: { failed: string[] };
+}): { verdict: Verdict; tests: TestVerdict[] };
+export function failedTestIds(
+	report: {
+		testResults?: {
+			name: string;
+			status?: string;
+			assertionResults?: { status: string; fullName: string }[];
+		}[];
+	},
+	cwd: string,
+): string[];
+export function main(argv?: string[]): Promise<number>;
