@@ -3738,7 +3738,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// the session manager pi hands it. A stale ctx throws here.
 					sessionManager: (() => {
 						try {
-							return (ctx as { sessionManager?: unknown })?.sessionManager;
+							return (ctx as { sessionManager?: unknown }).sessionManager;
 						} catch {
 							return undefined;
 						}

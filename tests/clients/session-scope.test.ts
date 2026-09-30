@@ -341,13 +341,15 @@ describe("#3612 the hand-off slot (F2)", () => {
 	// subagent's own reload took the primary's hand-off.
 	it("keys a file-less session on the ticket of the scope that left it", () => {
 		const left = scopeWith(["ast_grep_search"]);
-		// A host without a session manager object leaves an unbound slot.
-		stashHandoff(left, {
-			reason: "reload",
-			sessionFile: undefined,
-			targetSessionFile: undefined,
-			sessionManager: null,
-		});
+		// A host without a session manager object leaves an unbound slot; a
+		// WeakMap key that is not an object would throw into the shutdown.
+		for (const sessionManager of ["manager", null])
+			stashHandoff(left, {
+				reason: "reload",
+				sessionFile: undefined,
+				targetSessionFile: undefined,
+				sessionManager,
+			});
 
 		expect(takeHandoff("reload", undefined)).toBeUndefined();
 		expect(takeHandoff("reload", left.scopeId + 1)).toBeUndefined();
