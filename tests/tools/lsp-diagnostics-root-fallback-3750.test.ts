@@ -18,7 +18,6 @@
  * through the production `spawn` of `RustServer`/`OCamlServer`/`GoServer`, so
  * the root function, the root fallback and the verdict code are all production.
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -290,7 +289,10 @@ describe("#3750 an empty result under a server-root fallback", () => {
 	it("names the missing project, not a refused .git, for a rust file in a git repo with no Cargo.toml", async () => {
 		answerWith("empty");
 		const repo = workspace();
-		execFileSync("git", ["init", "--quiet"], { cwd: repo });
+		// A repository as `isRealGitMarker` reads one (a `.git` directory with a
+		// HEAD, clients/path-utils.ts); a real `git init` spawn is not needed.
+		fs.mkdirSync(path.join(repo, ".git"));
+		fs.writeFileSync(path.join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
 		const file = source(repo, "orphan.rs");
 
 		for (const sessionCwd of [repo, path.dirname(repo)]) {
