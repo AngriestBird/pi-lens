@@ -629,15 +629,11 @@ export type GitMarkerResult =
 
 export type MarkerRootResult =
 	| { kind: "found"; root: string }
-	| {
-			kind: "not-found";
-			reason: "home-ceiling" | "boundary" | "root" | "depth-limit";
-	  }
+	| { kind: "not-found"; reason: "home-ceiling" | "root" | "depth-limit" }
 	| { kind: "unavailable"; markerPath: string; cause: unknown };
 
 /** Detailed ownership walks require a probe that can distinguish I/O failure. */
 export interface FindNearestMarkerRootDetailedOptions {
-	details: true;
 	homeDir?: string;
 	markerPredicate: (markerPath: string) => GitMarkerResult;
 }
@@ -713,72 +709,62 @@ export function isRealGitMarker(
 export function findNearestMarkerRoot(
 	startDir: string,
 	markers: readonly string[],
-	options: FindNearestMarkerRootDetailedOptions,
-): MarkerRootResult;
-export function findNearestMarkerRoot(
-	startDir: string,
-	markers: readonly string[],
-	options?: FindNearestMarkerRootOptions,
-): string | null;
-export function findNearestMarkerRoot(
-	startDir: string,
-	markers: readonly string[],
-	options:
-		| FindNearestMarkerRootOptions
-		| FindNearestMarkerRootDetailedOptions = {},
-): string | null | MarkerRootResult {
-	// Structural legacy options can carry extra false/undefined fields. Presence
-	// alone must not change either the result shape or predicate preconditions.
-	const detailed = "details" in options && options.details === true;
-	const boundaries = "boundaries" in options ? (options.boundaries ?? []) : [];
+	options: FindNearestMarkerRootOptions = {},
+): string | null {
+	const boundaries = options.boundaries ?? [];
 	const homeDir = path.resolve(options.homeDir ?? os.homedir());
-	// Capture legacy callbacks for an unbound call, as before detailed mode.
-	// Detailed predicate access must remain behind the walk's home ceiling.
-	const legacyPredicate = detailed ? undefined : options.markerPredicate;
-	// One bounded walk, with a compatibility projection for existing callers.
-	const finish = (
-		result: MarkerRootResult,
-	): string | null | MarkerRootResult => {
-		if (detailed) return result;
-		return result.kind === "found" ? result.root : null;
-	};
-	// Scan one directory without changing callback access or marker order.
-	const probeMarkers = (directory: string): MarkerRootResult | undefined => {
-		for (const marker of markers) {
-			const markerPath = path.join(directory, marker);
-			// Legacy searches keep their existence precheck and predicate ordering.
-			// Detailed probes must see errors that existsSync would swallow.
-			const checked = detailed
-				? options.markerPredicate(markerPath)
-				: existsSync(markerPath) && (legacyPredicate?.(markerPath) ?? true);
-			if (typeof checked !== "boolean" && checked.kind === "unavailable")
-				return {
-					kind: "unavailable",
-					markerPath,
-					cause: checked.cause,
-				};
-			if (
-				checked === true ||
-				(typeof checked !== "boolean" && checked.kind === "valid")
+	const markerPredicate = options.markerPredicate ?? (() => true);
+	let current = path.resolve(startDir);
+	for (let depth = 0; depth < 64; depth++) {
+		if (isAtOrAboveHomeDir(current, homeDir)) return null;
+		if (
+			markers.some(
+				(m) =>
+					existsSync(path.join(current, m)) &&
+					markerPredicate(path.join(current, m)),
 			)
-				return { kind: "found", root: directory };
-		}
-		return undefined;
-	};
+		)
+			return current;
+		if (boundaries.some((m) => existsSync(path.join(current, m)))) return null;
+		const parent = path.dirname(current);
+		if (parent === current) return null;
+		current = parent;
+	}
+	return null;
+}
+
+/**
+ * Ownership walk for callers that must tell "no marker here" from "could not
+ * tell" (refs #3644, #3691). Same climb as `findNearestMarkerRoot` (home
+ * ceiling, 64-step cap) but the predicate returns a `GitMarkerResult`, so an I/O
+ * failure stops the walk as `unavailable` instead of becoming "absent" and
+ * letting an enclosing root be mistaken for the owner. It takes no
+ * `boundaries`, so `"boundary"` is not a reason it can return. Kept separate
+ * from the legacy walker so the legacy callers' `existsSync` precheck and
+ * boolean predicate contract cannot drift with it.
+ */
+export function findNearestMarkerRootDetailed(
+	startDir: string,
+	markers: readonly string[],
+	options: FindNearestMarkerRootDetailedOptions,
+): MarkerRootResult {
+	const homeDir = path.resolve(options.homeDir ?? os.homedir());
 	let current = path.resolve(startDir);
 	for (let depth = 0; depth < 64; depth++) {
 		if (isAtOrAboveHomeDir(current, homeDir))
-			return finish({ kind: "not-found", reason: "home-ceiling" });
-		const markerResult = probeMarkers(current);
-		if (markerResult) return finish(markerResult);
-		if (boundaries.some((m) => existsSync(path.join(current, m))))
-			return finish({ kind: "not-found", reason: "boundary" });
+			return { kind: "not-found", reason: "home-ceiling" };
+		for (const marker of markers) {
+			const markerPath = path.join(current, marker);
+			const checked = options.markerPredicate(markerPath);
+			if (checked.kind === "unavailable")
+				return { kind: "unavailable", markerPath, cause: checked.cause };
+			if (checked.kind === "valid") return { kind: "found", root: current };
+		}
 		const parent = path.dirname(current);
-		if (parent === current)
-			return finish({ kind: "not-found", reason: "root" });
+		if (parent === current) return { kind: "not-found", reason: "root" };
 		current = parent;
 	}
-	return finish({ kind: "not-found", reason: "depth-limit" });
+	return { kind: "not-found", reason: "depth-limit" };
 }
 
 /**

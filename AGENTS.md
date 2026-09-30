@@ -436,6 +436,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
     and the stale-read drop discarded the close). No model composes the two
     fixes yet; that is #3495.
 
+56. **Subset without a population verdict:** when a mechanism, policy, guard,
+    or optimisation targets N of M members, name the excluded default and a
+    generalization verdict; see `docs/pi-lens-reviewer.md` (recurrence: #3622).
+
 </important>
 
 <important if="availability policy or installer">
@@ -577,7 +581,8 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
-- Automatic tests do not cross a Git checkout boundary, including through filesystem aliases. Use `foreignGitRoot` in `clients/test-runner-client.ts` before failed-first cache admission, during bounded retirement, before automatic discovery accepts its first eligible match, and at the turn-end gate. Resolve filesystem identities without changing cache keys or display paths; indeterminate ownership is not a foreign verdict. Ownership walks use the detailed `isRealGitMarker`/`findNearestMarkerRoot` results: marker/HEAD/read failures must not become an enclosing owner, and capped walks disclose uncertainty. An alias-containment exception derives an in-root relative spelling for integration/e2e policy, without changing display paths. Final foreign rejections emit `test-target-foreign-checkout`, including self/deferred targets with debug output disabled. A checkout's own failures and ordinary nested packages remain eligible. `tests/clients/test-runner-worktree-isolation.test.ts` proves admission, retirement, all four discovery paths, no-drop controls, and bounded decision records.
+- Automatic tests do not cross a Git checkout boundary, including through filesystem aliases. Use `foreignGitRoot` in `clients/test-runner-client.ts` before failed-first cache admission, during bounded retirement, before automatic discovery accepts its first eligible match, and at the turn-end gate. Resolve filesystem identities without changing cache keys or display paths; indeterminate ownership is not a foreign verdict. Ownership walks use `isRealGitMarker(…, true)` with `findNearestMarkerRootDetailed` (a separate walker; `findNearestMarkerRoot` keeps its legacy `string | null` contract): marker/HEAD/read failures must not become an enclosing owner, and capped walks disclose uncertainty. A deleted or renamed target (`ENOENT`/`ENOTDIR` on the realpath) is not an identity gap: it reaches `retired-missing`, and recording it would fill the per-kind ledger cap ahead of a real `EACCES`. An alias-containment exception derives an in-root relative spelling for integration/e2e policy, without changing display paths. Final foreign rejections emit `test-target-foreign-checkout`, including self/deferred targets with debug output disabled. A checkout's own failures and ordinary nested packages remain eligible. `tests/clients/test-runner-worktree-isolation.test.ts` proves admission, retirement, all four discovery paths, no-drop controls, and bounded decision records.
+- By design, a session whose cwd is a plain folder with no `.git` that holds several repositories, a submodule, or a nested linked worktree gets no automatic tests for the files inside them: any nested `.git` is a foreign checkout, and there is no per-project opt-in (maintainer decision, #3649/#3691). Run them explicitly.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.

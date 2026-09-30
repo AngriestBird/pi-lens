@@ -907,8 +907,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/package-manager.ts": 20,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
-		// 30 -> 29: the shared marker walk now joins each candidate once.
-		"clients/path-utils.ts": 29,
+		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
+		// path locals; the legacy walker body is back to its pre-#3649 text.
+		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 7,

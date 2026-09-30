@@ -37,6 +37,13 @@
   `tests/clients/lsp/service-crash-respawn.test.ts` and
   `tests/clients/lsp/service-notify-per-server.test.ts` — the two suites that
   exercise idle eviction — and both were red on the required Unit tests.
+- **Population screen (generalization verdict).** When a PR applies a mechanism,
+  policy, guard, or optimisation to a named subset of a larger set (registry
+  entries, servers, tools, languages, stores), name the population M, state why
+  the other M−N are excluded and what their default is, and end with a
+  **Generalization verdict**: *widen in this PR* / *follow-up issue* (with its
+  seam group) / *stay specific* (with the reason). A missing verdict is a
+  finding. Recurrence: #3622. The optional ast-grep assist is #3684.
 - Revert or neuter the source fix and verify the red-first test fails.
 - Mutate every new guard, filter, cap, fallback, and lifecycle path.
 - Probe inversions, concurrency, input channels, trust boundaries, strict
@@ -73,6 +80,8 @@ Then include:
 
 - `Could not verify`: every blocked or environment-limited check.
 - `Named output`: structural insight not closed by the probes.
+- `Generalization verdict`: the population, excluded defaults, and one of the
+  three required verdicts above.
 - `Disposition table`: each prior finding as `fixed`, `not fixed`, `new defect`,
   or `withdrawn (reason)`.
 - Cleared categories and exact-head identity.

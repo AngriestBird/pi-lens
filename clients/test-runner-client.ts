@@ -32,7 +32,7 @@ import {
 	detectPythonEnvironment,
 } from "./python-environment.js";
 import {
-	findNearestMarkerRoot,
+	findNearestMarkerRootDetailed,
 	type MarkerRootResult,
 	isRealGitMarker,
 	isUnderDir,
@@ -312,19 +312,27 @@ function foreignGitRoot(testFilePath: string, cwd: string): string | null {
 	} catch (error_) {
 		// Missing/unreadable paths do not prove foreign ownership. The existing
 		// missing-target classifier and spawn checks retain their own decisions.
+		const errorCode = filesystemErrorCode(error_);
+		// A deleted or renamed target is ordinary and already reaches
+		// `retired-missing`; recording it would fill the ledger's per-kind cap
+		// and hide a real EACCES identity failure (#3691 F1).
+		if (errorCode === "ENOENT" || errorCode === "ENOTDIR") return null;
 		recordCheckoutIdentityGap({
 			cwd,
 			candidate: testFilePath,
 			lookup: "filesystem",
 			detail: "realpath",
-			errorCode: filesystemErrorCode(error_),
+			errorCode,
 		});
 		return null;
 	}
-	const targetWalk = findNearestMarkerRoot(path.dirname(realTarget), [".git"], {
-		details: true,
-		markerPredicate: (marker) => isRealGitMarker(marker, true),
-	});
+	const targetWalk = findNearestMarkerRootDetailed(
+		path.dirname(realTarget),
+		[".git"],
+		{
+			markerPredicate: (marker) => isRealGitMarker(marker, true),
+		},
+	);
 	if (targetWalk.kind !== "found") {
 		if (targetWalk.kind === "unavailable") {
 			recordCheckoutIdentityGap({
@@ -352,8 +360,7 @@ function foreignGitRoot(testFilePath: string, cwd: string): string | null {
 	if (!isUnderDir(realCwd, root)) return root;
 	// A marker error on EITHER walk must not turn an enclosing root into proof
 	// of foreign ownership. In particular, do not retire cached failures on it.
-	const dispatchWalk = findNearestMarkerRoot(realCwd, [".git"], {
-		details: true,
+	const dispatchWalk = findNearestMarkerRootDetailed(realCwd, [".git"], {
 		markerPredicate: (marker) => isRealGitMarker(marker, true),
 	});
 	if (dispatchWalk.kind !== "found") {
