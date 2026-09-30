@@ -2,6 +2,7 @@ export declare const DEFAULT_MAX_FILES: 6;
 export declare const DEFAULT_MAX_RANGES: 40;
 export declare const DEFAULT_MAX_TESTS: 47;
 export declare const MUTATION_BUDGET_MINUTES: 60;
+export declare const DEFAULT_MUTATION_FIXED_OVERHEAD_MS: number;
 export declare class MutationLaneExclusionError extends Error {
 	constructor(file: string);
 }
@@ -65,13 +66,17 @@ export declare function describeStrykerFailure(
 	budgetMinutes: number,
 	options?: { tests?: string[]; output?: string },
 ): string;
-export declare function describePartialInterruptCause(
+export declare function describePartialMutationOutcome(
 	result: {
 		status: number | null;
 		signal?: NodeJS.Signals | null;
 		error?: Error & { code?: string };
 	},
 	budgetMinutes: number,
+	partial: {
+		evaluated: number;
+		total: number | null;
+	},
 ): string;
 export declare function sampleRangesDeterministically(
 	patterns: string[],
@@ -96,8 +101,8 @@ export declare function parseDryRunCost(
 ): { totalMutants: number; dryRunMs: number } | null;
 export declare function estimateAffordableMutants(args: {
 	remainingMs: number;
-	concurrency: number;
 	dryRunMs: number;
+	fixedOverheadMs?: number;
 	safetyFactor?: number;
 }): number;
 export declare function dedupePatterns(patterns: string[]): string[];

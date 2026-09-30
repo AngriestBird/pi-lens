@@ -845,6 +845,15 @@ export type DegradationKind =
 	 */
 	| "process-singleton-reset"
 	/**
+	 * #3600: the projectDelta report carried diagnostics but its `generatedAt`
+	 * could not be parsed, so those rows fell back to the fold's `Date.now()`
+	 * instead of the report's own observation time. Recorded once per distinct
+	 * unparseable value (`recordDegradationOnce` keys on kind and subject), so
+	 * the fallback is visible rather than a silent freshness widening. Subject
+	 * is the unparseable raw value.
+	 */
+	| "project-delta-generatedat-unparseable"
+	/**
 	 * #3509: the project snapshot's cache-dir lock stayed held past its bounded
 	 * wait (or its directory failed), so an admission meta write was skipped or
 	 * a body promotion was dropped as a failed persist. Subject is the gz body

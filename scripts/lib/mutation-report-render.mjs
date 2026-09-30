@@ -178,7 +178,7 @@ export function renderMutationMarkdown(report) {
 	// range it set out to.
 	if (meta.partial) {
 		lines.push(
-			`**Partial run** -- ${meta.partial.evaluated} of ${meta.partial.total ?? "an unknown total of"} mutant(s) evaluated before the budget expired.`,
+			`**Partial run** -- ${meta.partial.evaluated} of ${meta.partial.total ?? "an unknown total of"} mutant(s) evaluated before the interrupt.`,
 			"",
 			`> ${meta.partial.reason}`,
 			"",

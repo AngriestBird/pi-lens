@@ -440,6 +440,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
     or optimisation targets N of M members, name the excluded default and a
     generalization verdict; see `docs/pi-lens-reviewer.md` (recurrence: #3622).
 
+57. **Released-writer input shapes:** property-test generators include the
+    input shapes produced by older released writers (#3594 R2-F1).
+
+58. **Known identity carried forward:** when a producer knows an identity,
+    carry it through asynchronous stages instead of re-deriving it downstream
+    (#3643 F3).
+
 </important>
 
 <important if="availability policy or installer">
@@ -601,6 +608,7 @@ ADR: docs/adr/0009-reported-path-attribution.md
   unreadable, unparseable, unsupported, or unregistered evidence; callers emit
   bounded degradation records. Ktlint's standalone-CLI exception still
   declines Gradle-owned projects without guessing a CLI version.
+- Node tool agreement in `nodeAgreement` is established from the project's lockfile evidence in the deterministic order npm (`package-lock.json`) → pnpm (`pnpm-lock.yaml`, v9 `importers` and v6 top-level maps) → yarn (`yarn.lock`, v1 blocks and Berry `npm:` descriptors); the decision names the supplying lockfile, and missing, unreadable, unparseable, or shape-unsupported evidence declines.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
