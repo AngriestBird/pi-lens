@@ -204,6 +204,8 @@ interface ToolResultEvent {
 	toolCallId?: string | number;
 	/** Host tool_result status; distinct from pi-lens PipelineResult.isError. */
 	isError?: boolean;
+	/** pi 0.99 codemode value; preserve it when rewriting the result. */
+	structuredContent?: unknown;
 	input: unknown;
 	details?: unknown;
 	content: Array<{ type: string; text?: string }>;
@@ -488,6 +490,7 @@ function claimPipelineDispatch(args: {
 type ToolResultReturn = {
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
+	structuredContent?: unknown;
 } | void;
 
 interface DebouncedEntry {
@@ -844,6 +847,7 @@ async function dispatchPipelineAnalysis(args: {
 			response: {
 				content: Array<{ type: string; text?: string }>;
 				isError: true;
+				structuredContent?: unknown;
 			};
 	  }
 > {
@@ -1021,6 +1025,7 @@ async function dispatchPipelineAnalysis(args: {
 					? [...event.content, { type: "text", text: notice }]
 					: event.content,
 				isError: true,
+				structuredContent: event.structuredContent,
 			},
 		};
 	} finally {
@@ -1225,6 +1230,7 @@ function readWideningNote(widening: ReadWidening): string {
 export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
+	structuredContent?: unknown;
 } | void> {
 	const {
 		event,
@@ -1352,7 +1358,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			metadata: { toolCallId, rawFilePath, guessedPath },
 		});
 		return readNote.length > 0
-			? { content: [...readNote, ...event.content] }
+			? {
+					content: [...readNote, ...event.content],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	} else {
 		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
@@ -2286,7 +2295,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 		}
 		return syntheticWriteContent.length > 0
-			? { content: [...event.content, ...syntheticWriteContent] }
+			? {
+					content: [...event.content, ...syntheticWriteContent],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	}
 	if (mutation === undefined) {
@@ -2294,7 +2306,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			`tool_result: skipped turn tracking - toolName="${event.toolName}" is not a classified mutation`,
 		);
 		return syntheticWriteContent.length > 0 || readNote.length > 0
-			? { content: [...readNote, ...event.content, ...syntheticWriteContent] }
+			? {
+					content: [...readNote, ...event.content, ...syntheticWriteContent],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	}
 	if (!filePath) {
@@ -2350,7 +2365,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				}),
 			},
 		});
-		return { content: event.content, isError: true };
+		return {
+			content: event.content,
+			isError: true,
+			structuredContent: event.structuredContent,
+		};
 	}
 
 	// One post-result raw-byte hash, reused for the applied-edit records below and
@@ -2932,6 +2951,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return {
 			content: [...event.content, { type: "text", text: result.output }],
 			isError: true,
+			structuredContent: event.structuredContent,
 		};
 	}
 
@@ -3057,5 +3077,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		content: output
 			? [...returnedContent, { type: "text", text: output }]
 			: returnedContent,
+		structuredContent: event.structuredContent,
 	};
 }

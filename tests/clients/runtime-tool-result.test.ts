@@ -125,6 +125,139 @@ it("does not dispatch an edit when analyzer bootstrap is unavailable (#2939 M9)"
 });
 
 describe("bash grep searchReads registration", () => {
+	it("preserves structuredContent for a decorated non-zero bash tool_result (#3832)", async () => {
+		const env = setupTestEnvironment("pi-lens-3832-structured-content-");
+		try {
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			});
+			const filePath = path.join(env.tmpDir, "changed.ts");
+			fs.writeFileSync(filePath, "export const before = true;\n");
+			const command = `sed -i 's/before/after/' ${filePath}; exit 3`;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const cacheManager = new CacheManager(false);
+			await handleToolCall({
+				event: {
+					toolName: "bash",
+					toolCallId: "3832-bash",
+					input: { path: filePath, command },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+			const bashTool = createBashToolDefinition(env.tmpDir, {
+				exposeSessionEnvironment: false,
+			});
+			let hostError: unknown;
+			try {
+				await bashTool.execute("3832-bash", { command }, undefined, undefined, {
+					cwd: env.tmpDir,
+				} as never);
+			} catch (error) {
+				hostError = error;
+			}
+			expect(hostError).toBeInstanceOf(Error);
+
+			const rewritten = await handleToolResult({
+				event: {
+					// The installed pi package throws before exposing its newer bash
+					// result object; model the pi 0.99 event at the handler boundary.
+					toolName: "edit",
+					toolCallId: "3832-bash",
+					input: { path: filePath, command },
+					content: [{ type: "text", text: (hostError as Error).message }],
+					isError: true,
+					// pi 0.99 supplies this before the tool_result extension hook.
+					structuredContent: { exit_code: 3 },
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(rewritten).toEqual(
+				expect.objectContaining({
+					structuredContent: { exit_code: 3 },
+					isError: true,
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("preserves structuredContent on pipeline rewrites (#3832)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-3832-pipeline-content-");
+		try {
+			const filePath = path.join(env.tmpDir, "changed.ts");
+			fs.writeFileSync(filePath, "export const value = true;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const base = {
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					content: [{ type: "text", text: "ok" }],
+					structuredContent: { result: "structured" },
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any;
+
+			vi.mocked(runPipeline).mockResolvedValueOnce({
+				output: "pipeline warning",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			});
+			expect(await handleToolResult(base)).toEqual(
+				expect.objectContaining({
+					structuredContent: { result: "structured" },
+				}),
+			);
+
+			runtime.beginTurn();
+			vi.mocked(runPipeline).mockResolvedValueOnce({
+				output: "pipeline error",
+				hasBlockers: false,
+				isError: true,
+				fileModified: false,
+			});
+			expect(await handleToolResult(base)).toEqual(
+				expect.objectContaining({
+					isError: true,
+					structuredContent: { result: "structured" },
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("supersedes the provisional native read before checkEdit", async () => {
 		const env = setupTestEnvironment("pi-lens-2802-native-supersession-");
 		try {
