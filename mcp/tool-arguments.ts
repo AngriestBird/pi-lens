@@ -55,7 +55,7 @@ function withinOneEdit(a: string, b: string): boolean {
 /**
  * The declared key a caller most plausibly meant by `key`: one containing
  * (or contained in) the other once case and punctuation are folded away
- * (`filePath` for `path` or `file`; `FILE` for `file`), then a one-character
+ * (`filePath` for `path` or `file`; `FILE` for `file`), or a one-character
  * typo. `undefined` when nothing is near: a wrong suggestion is worse than
  * none.
  */
@@ -68,15 +68,13 @@ function nearestDeclaredKey(
 	let best: { key: string; score: number } | undefined;
 	for (const candidate of declared) {
 		const other = fold(candidate);
-		let score: number | undefined;
-		if (
+		const contained =
 			Math.min(folded.length, other.length) >= 3 &&
-			(folded.includes(other) || other.includes(folded))
-		)
-			score = 100 + Math.abs(folded.length - other.length);
-		else if (withinOneEdit(folded, other)) score = 200;
-		if (score !== undefined && (!best || score < best.score))
-			best = { key: candidate, score };
+			(folded.includes(other) || other.includes(folded));
+		if (!contained && !withinOneEdit(folded, other)) continue;
+		// The closest in length wins; a tie keeps the earlier declared key.
+		const score = Math.abs(folded.length - other.length);
+		if (!best || score < best.score) best = { key: candidate, score };
 	}
 	return best?.key;
 }

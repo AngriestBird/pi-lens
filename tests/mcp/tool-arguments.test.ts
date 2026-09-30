@@ -49,6 +49,25 @@ describe("findIgnoredArguments", () => {
 		expect(findIgnoredArguments(ANALYZE, { FILE: "a.ts" })?.ignored).toEqual([
 			{ key: "FILE", suggestion: "file" },
 		]);
+		// Several candidates: the closest in length wins, a tie keeps the first.
+		expect(
+			findIgnoredArguments(
+				{ properties: { path: {}, filepath: {} } },
+				{ filePaths: 1 },
+			)?.ignored,
+		).toEqual([{ key: "filePaths", suggestion: "filepath" }]);
+		expect(
+			findIgnoredArguments(
+				{ properties: { file: {}, path: {} } },
+				{ filePath: 1 },
+			)?.ignored,
+		).toEqual([{ key: "filePath", suggestion: "file" }]);
+		expect(
+			findIgnoredArguments(
+				{ properties: { path: {}, file: {} } },
+				{ filePath: 1 },
+			)?.ignored,
+		).toEqual([{ key: "filePath", suggestion: "path" }]);
 		// One character dropped, added or replaced; two edits is not a typo.
 		expect(findIgnoredArguments(ANALYZE, { modee: 1 })?.ignored).toEqual([
 			{ key: "modee", suggestion: "mode" },
