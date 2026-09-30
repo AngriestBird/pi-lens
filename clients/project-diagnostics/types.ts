@@ -15,6 +15,19 @@ export interface ProjectDiagnostic {
 	code?: string;
 	message: string;
 	source: ProjectDiagnosticSource;
+	/**
+	 * #3600: wall-clock time (ms) the analyzer READ the bytes this row was
+	 * computed from. A heavyweight lane sets it from its own result's
+	 * `scannedAt` (taken before the read), or from the moment the lane started
+	 * when its result carries no stamp. The #1888 correlated commit otherwise
+	 * re-stamps every folded row with the cheap project scan's `scannedAt`
+	 * (taken after its whole file loop) or the fold's `Date.now()`, so a file
+	 * edited while the analyzer was still reading looked older than the row and
+	 * no widget gate demoted it. Absent for the cheap-tier project scan and the
+	 * projectDelta report, whose rows are aged by a content fingerprint and the
+	 * report's own `generatedAt` instead.
+	 */
+	observedAt?: number;
 }
 
 /**

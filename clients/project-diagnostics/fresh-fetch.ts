@@ -88,6 +88,7 @@ import type { BootstrapClients } from "../bootstrap.js";
 import type { CacheManager } from "../cache-manager.js";
 import type { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { applyDispositionsMultiFile } from "../diagnostic-dispositions.js";
+import { parseScannedAtMs } from "../advisory-provenance.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir, realpathOrResolve } from "../path-utils.js";
 import { isSameOrWithin } from "../lsp/server.js";
@@ -244,6 +245,21 @@ export const ANALYZER_IDS = [
 
 function pushUnique(list: string[], id: string): void {
 	if (!list.includes(id)) list.push(id);
+}
+
+/**
+ * #3600: the time a heavyweight lane observed the bytes its rows were computed
+ * from. Prefer the result's own `scannedAt` (taken before the scan's read, and
+ * the stamp a joined in-flight run was already given); fall back to the moment
+ * this lane started for the clients whose results carry no stamp. Either is
+ * at-or-before the read, so an edit landing while the analyzer is still
+ * reading is NEWER than the row and the widget's stale gate demotes it.
+ */
+function laneObservedAtMs(
+	scannedAt: string | number | undefined,
+	startedAtMs: number,
+): number {
+	return parseScannedAtMs(scannedAt) ?? startedAtMs;
 }
 
 /**
@@ -420,6 +436,7 @@ export async function fetchFreshProjectDiagnostics(
 		elapsedMs: number,
 		analysedRoot: boolean,
 		analysis?: { analyzedFiles?: string[] },
+		observedAt?: number,
 	): void {
 		if (analysedRoot) {
 			pushUnique(analyzed, id);
@@ -456,8 +473,15 @@ export async function fetchFreshProjectDiagnostics(
 			}
 		}
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
+		// #3600: the row carries the lane's own observation time through the
+		// #1888 fold, which otherwise stamps it with the project scan's time or
+		// the fold's `now`.
+		const stamped =
+			observedAt === undefined
+				? adapted
+				: adapted.map((diagnostic) => ({ ...diagnostic, observedAt }));
 		const kept = applyDispositionsMultiFile(
-			adapted,
+			stamped,
 			analysisRoot,
 			(d) => d.filePath,
 		);
@@ -524,6 +548,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
+				startMs,
 			);
 		}),
 
@@ -571,6 +596,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
+				startMs,
 			);
 		}),
 
@@ -597,6 +623,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				startMs,
 			);
 		}),
 
@@ -641,6 +668,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -686,6 +714,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -736,6 +765,7 @@ export async function fetchFreshProjectDiagnostics(
 					Date.now() - startMs,
 					false,
 					result,
+					laneObservedAtMs(result.scannedAt, startMs),
 				);
 				return;
 			}
@@ -752,6 +782,7 @@ export async function fetchFreshProjectDiagnostics(
 					Date.now() - startMs,
 					true,
 					result,
+					laneObservedAtMs(result.scannedAt, startMs),
 				);
 				return;
 			}
@@ -764,6 +795,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -801,6 +833,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -842,6 +875,7 @@ export async function fetchFreshProjectDiagnostics(
 						Date.now() - startMs,
 						result.analyzed === true,
 						result,
+						startMs,
 					);
 				}),
 			);
@@ -906,6 +940,9 @@ export async function fetchFreshProjectDiagnostics(
 				// Never authoritative: this lane reads the cache turn_end wrote,
 				// it never runs a suite over the root this call (#2154).
 				false,
+				undefined,
+				// #3600: the cache entry's own write time, not this read.
+				laneObservedAtMs(cached.meta.timestamp, startMs),
 			);
 		}),
 	];

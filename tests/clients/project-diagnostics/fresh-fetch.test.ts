@@ -69,6 +69,7 @@ function makeClients(
 		jscpdResult: unknown;
 		madgeAvailable: boolean;
 		madgeResult: unknown;
+		opengrepResult: unknown;
 	}> = {},
 ): BootstrapClients {
 	return {
@@ -146,12 +147,14 @@ function makeClients(
 		// defaults to available + a clean scan; individual tests override `scan`.
 		opengrepClient: {
 			ensureAvailable: vi.fn().mockResolvedValue(true),
-			scan: vi.fn().mockResolvedValue({
-				success: true,
-				analyzed: true,
-				findings: [],
-				scannedAt: "now",
-			}),
+			scan: vi.fn().mockResolvedValue(
+				overrides.opengrepResult ?? {
+					success: true,
+					analyzed: true,
+					findings: [],
+					scannedAt: "now",
+				},
+			),
 		},
 		deadCodeClients: [],
 		// The remaining BootstrapClients fields are unused by fetchFreshProjectDiagnostics.
@@ -181,6 +184,66 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(result.runners).toContain("knip");
 		expect(result.diagnostics.length).toBeGreaterThan(0);
 		expect(result.timings.knip).toBeGreaterThanOrEqual(0);
+	});
+
+	// #3600: the widget's stale gate judges a folded row against the time the
+	// analyzer READ its bytes. A lane whose result carries no `scannedAt` is
+	// stamped at the moment its run began.
+	it("stamps a heavyweight row with its lane's start when the result has no scannedAt (#3600)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const fetchStart = 1_900_000_000_000;
+		vi.setSystemTime(fetchStart);
+		try {
+			const result = await fetchFreshProjectDiagnostics(
+				makeCacheManager(),
+				tmp,
+				makeClients({
+					knipIssues: [{ type: "file", name: "dead.ts", file: "dead.ts" }],
+				}),
+			);
+			expect(result.diagnostics.length).toBeGreaterThan(0);
+			expect(result.diagnostics.every((d) => d.observedAt === fetchStart)).toBe(
+				true,
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("prefers the analyzer's own scannedAt over the fetch clock (#3600)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const fetchStart = 1_900_000_000_000;
+		const scannerRead = fetchStart - 5_000;
+		vi.setSystemTime(fetchStart);
+		try {
+			const result = await fetchFreshProjectDiagnostics(
+				makeCacheManager(),
+				tmp,
+				makeClients({
+					opengrepResult: {
+						success: true,
+						analyzed: true,
+						scannedAt: new Date(scannerRead).toISOString(),
+						findings: [
+							{
+								checkId: "rule",
+								path: path.join(tmp, "a.ts"),
+								startLine: 1,
+								startCol: 1,
+								endLine: 1,
+								endCol: 1,
+								message: "OPENGREP ROW",
+								severity: "ERROR",
+							},
+						],
+					},
+				}),
+			);
+			const row = result.diagnostics.find((d) => d.runner === "opengrep");
+			expect(row?.observedAt).toBe(scannerRead);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("reports a failed knip run and does not cache it (#925)", async () => {

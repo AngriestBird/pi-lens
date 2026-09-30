@@ -29,7 +29,10 @@ import {
 	applyFindingPolicy,
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
-import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
+import {
+	gateFindingsByPathFreshness,
+	parseScannedAtMs,
+} from "../clients/advisory-provenance.js";
 import {
 	formatCacheAgeLabel,
 	markUnreconciledFindings,
@@ -1649,6 +1652,13 @@ function projectDiagnosticToWidget(
 		rule: diagnostic.rule ?? diagnostic.code,
 		tool: diagnostic.runner || diagnostic.tool,
 		uri: widgetDiagnosticUri(filePath, diagnostic.line, diagnostic.column),
+		// #3600: carry the analyzer's own read stamp through the #1888
+		// correlated commit, which otherwise re-stamps the row with the project
+		// scan's `scannedAt` or the fold's `Date.now()`. Absent for the cheap
+		// scan's rows, whose freshness is settled by a content fingerprint.
+		...(diagnostic.observedAt !== undefined && {
+			observedAt: diagnostic.observedAt,
+		}),
 	};
 }
 
@@ -2043,6 +2053,8 @@ function mergeDiagnosticsWithWidgetSummaries(
 		}
 	}
 
+	// #3600: the delta report's own `generatedAt`, never the fold's `now`.
+	const deltaObservedAt = parseScannedAtMs(projectDelta?.generatedAt);
 	for (const diagnostic of projectSnapshot?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
@@ -2050,10 +2062,11 @@ function mergeDiagnosticsWithWidgetSummaries(
 		);
 	}
 	for (const diagnostic of projectDelta?.diagnostics ?? []) {
-		addDiagnostic(
-			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
-		);
+		const widget = projectDiagnosticToWidget(diagnostic, diagnostic.filePath);
+		addDiagnostic(path.resolve(diagnostic.filePath), {
+			...widget,
+			...(deltaObservedAt !== undefined && { observedAt: deltaObservedAt }),
+		});
 	}
 
 	return [...byFile.values()];

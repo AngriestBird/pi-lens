@@ -83,6 +83,7 @@ import { LSPService } from "../../clients/lsp/index.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	saveProjectDiagnosticsSnapshot,
+	writeProjectDiagnosticsDeltaReport,
 } from "../../clients/project-diagnostics/cache.js";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 
@@ -404,6 +405,128 @@ describe("lens_diagnostics mode=full stamps a swept row at its read (#3573)", ()
 						metadata: expect.objectContaining({ files: 1, arm: "cached" }),
 					}),
 				]);
+			},
+			CASE_MS,
+		);
+	});
+
+	// ── heavyweight-analyzer and projectDelta rows (#3600) ────────────────────
+	describe("a folded heavyweight-analyzer row", () => {
+		it(
+			"an edit between the analyzer's read and the fold drops its widget row (#3600)",
+			async () => {
+				// The analyzer read the bytes at T_READ; its row carries that stamp.
+				fetchFreshProjectDiagnostics.mockResolvedValue({
+					diagnostics: [
+						{
+							filePath: other,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "knip",
+							runner: "knip",
+							rule: "knip:file",
+							message: "ANALYZER ROW computed on the bytes the analyzer read",
+							source: "project-scan",
+							observedAt: T_READ,
+						},
+					],
+					runners: ["knip"],
+					analyzed: ["knip"],
+					authoritativeCoverage: [],
+					cold: [],
+					coldReasons: {},
+					failed: [],
+					timings: {},
+				});
+				// The edit lands after the analyzer's read, before the fold at T_REC.
+				fs.writeFileSync(other, "export const other = 2;\n");
+				setMtime(other, T_EDIT);
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				expect(widgetRows(other)).toHaveLength(1);
+				expect(await reconcileStaleWidgetFiles()).toBe(1);
+				expect(widgetRows(other)).toEqual([]);
+			},
+			CASE_MS,
+		);
+
+		it(
+			"a file written before the analyzer's read keeps its row (#3600)",
+			async () => {
+				fetchFreshProjectDiagnostics.mockResolvedValue({
+					diagnostics: [
+						{
+							filePath: other,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "knip",
+							runner: "knip",
+							rule: "knip:file",
+							message: "ANALYZER ROW computed on the bytes the analyzer read",
+							source: "project-scan",
+							observedAt: T_READ,
+						},
+					],
+					runners: ["knip"],
+					analyzed: ["knip"],
+					authoritativeCoverage: [],
+					cold: [],
+					coldReasons: {},
+					failed: [],
+					timings: {},
+				});
+				// Written before the read, its mtime leading the clock by 40 ms (the
+				// #1710 skew the 50 ms tolerance absorbs).
+				setMtime(other, T_READ + 40);
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				expect(await reconcileStaleWidgetFiles()).toBe(0);
+				expect(widgetRows(other)).toEqual([
+					{ observedAt: T_READ, stale: false, staleReason: undefined },
+				]);
+			},
+			CASE_MS,
+		);
+	});
+
+	describe("a projectDelta row", () => {
+		it(
+			"an edit between the delta report's generatedAt and the fold drops its widget row (#3600)",
+			async () => {
+				writeProjectDiagnosticsDeltaReport(tmp, {
+					version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
+					cwd: tmp,
+					generatedAt: new Date(T_READ).toISOString(),
+					sessionId: "session",
+					turnIndex: 1,
+					diagnostics: [
+						{
+							filePath: other,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "madge",
+							runner: "madge",
+							rule: "madge:circular",
+							message: "DELTA ROW generated before the edit",
+							source: "project-scan",
+						},
+					],
+					sources: ["madge"],
+				});
+				// The edit lands after the report was generated, before the fold.
+				fs.writeFileSync(other, "export const other = 2;\n");
+				setMtime(other, T_EDIT);
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				expect(widgetRows(other)).toHaveLength(1);
+				expect(await reconcileStaleWidgetFiles()).toBe(1);
+				expect(widgetRows(other)).toEqual([]);
 			},
 			CASE_MS,
 		);
