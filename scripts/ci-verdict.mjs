@@ -2091,11 +2091,8 @@ function rerunCancelledRows({ number, sha, rows, ghExec }) {
 	const done = new Set();
 	for (const row of rows) {
 		const args = rerunArgsFor(row);
-		const label = args ? args.join(" ") : null;
-		if (!args || done.has(label)) {
-			if (!args) ok = false;
-			continue;
-		}
+		if (!args || done.has(args.join(" "))) continue;
+		const label = args.join(" ");
 		done.add(label);
 		try {
 			ghExec(args, { timeoutMs: DEFAULT_GH_TIMEOUT_MS });

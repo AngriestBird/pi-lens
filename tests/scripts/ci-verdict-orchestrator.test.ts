@@ -1646,6 +1646,33 @@ describe("run --watch-open --stream — one line per event, until the window end
 		]);
 	});
 
+	it("--rerun-cancelled re-runs a run once even when two of its jobs were cancelled, and skips a check that is not an Actions job", async () => {
+		const run = "https://github.com/apmantza/pi-lens/actions/runs/500";
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					checkRuns: [
+						row("Unit tests", "cancelled", 11, `${run}/job/11`),
+						row("Lint & type-check", "cancelled", 12, `${run}/job/12`),
+						row(
+							"Vendor scan",
+							"cancelled",
+							77,
+							"https://vendor.example/checks/77",
+						),
+					],
+				},
+			],
+		});
+		await cli(
+			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
+			w,
+		);
+		expect(w.mutations).toEqual(["run rerun 500"]);
+	});
+
 	it("prints MERGED with the closing issues' states, and a plain closed line for a closed PR", async () => {
 		const file = stateFile();
 		writeFileSync(
