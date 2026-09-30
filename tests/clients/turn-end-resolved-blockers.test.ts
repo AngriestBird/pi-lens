@@ -318,13 +318,27 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			);
 
 			const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+			const later: string[] = [];
+			while (runtime.hasResolvedBlockerFiles() && later.length < 10) {
+				runtime.beginTurn();
+				later.push(await runTurnEnd(runtime, cacheManager, env.tmpDir));
+			}
 
-			expect(content.match(/Resolved this turn:/g) ?? []).toHaveLength(10);
+			// At most four file lines per message (review-3776-r3 W1: the
+			// section is a bounded share, never the whole cap); the ten the
+			// coordinator kept arrive over later turn_ends, the eleventh is
+			// the counted overflow.
+			expect(content.match(/Resolved this turn:/g) ?? []).toHaveLength(4);
 			expect(content).toContain("… and 1 more");
-			expect(resolvedBlockerFileCounts()).toEqual([10]);
+			expect(
+				later.flatMap(
+					(text) => text.match(/Resolved since the last report:/g) ?? [],
+				),
+			).toHaveLength(6);
+			expect(resolvedBlockerFileCounts()).toEqual([4, 4, 2]);
 			// The unit is named: `resolvedBlockerFiles` is the files LISTED, the
 			// sibling field is the retire events past the cap (review-3776 F7).
-			expect(turnEndMetadata("resolvedBlockerFilesDropped")).toEqual([1]);
+			expect(turnEndMetadata("resolvedBlockerFilesDropped")).toEqual([1, 0, 0]);
 		} finally {
 			env.cleanup();
 		}
@@ -778,13 +792,14 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			cwd: string,
 			name: string,
 			rows = 5,
+			pad = "",
 		): void {
 			const file = path.join(cwd, name);
 			fs.writeFileSync(file, "const a = 1;\n".repeat(rows));
 			runtime.bumpFileSeq(file);
 			const body = Array.from(
 				{ length: rows },
-				(_, index) => `  L${index + 1}: blocker ${index}`,
+				(_, index) => `  L${index + 1}: blocker ${index}${pad}`,
 			).join("\n");
 			runtime.recordInlineBlockers(
 				file,
@@ -813,6 +828,31 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 
 		const line = (name: string, label = "Resolved this turn") =>
 			`${label}: ${name} (2 blocker(s) cleared by the 2nd write)`;
+
+		/** End turns until nothing is pending (at most ten more); every message. */
+		async function drain(
+			runtime: RuntimeCoordinator,
+			cacheManager: CacheManager,
+			cwd: string,
+		): Promise<string[]> {
+			const messages = [await runTurnEnd(runtime, cacheManager, cwd)];
+			while (runtime.hasResolvedBlockerFiles() && messages.length < 11) {
+				runtime.beginTurn();
+				messages.push(await runTurnEnd(runtime, cacheManager, cwd));
+			}
+			return messages;
+		}
+
+		/** A blocker section exactly as the turn-end block renders it. */
+		const blockerSection = (name: string, rows: number, pad = "") =>
+			[
+				`Unresolved from this turn — ${name}:`,
+				`🔴 STOP — ${rows} issue(s) must be fixed:`,
+				...Array.from(
+					{ length: rows },
+					(_, index) => `  L${index + 1}: blocker ${index}${pad}`,
+				),
+			].join("\n");
 
 		function newTurn() {
 			const runtime = new RuntimeCoordinator();
@@ -882,13 +922,13 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 
 				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
 
+				// The blockers alone pass the cap, so the section gets its floor:
+				// one file line plus the tail, both whole; the rest wait.
 				expect(content).toContain("... (truncated)");
-				for (let index = 0; index < 10; index += 1) {
-					expect(content).toContain(line(`file-${index}.ts`));
-				}
-				expect(content).toContain("… and 1 more");
-				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
-				expect(resolvedBlockerFileCounts()).toEqual([10]);
+				expect(content).toContain(`${line("file-0.ts")}\n… and 1 more\n\n`);
+				expect(content).not.toContain("file-1.ts");
+				expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+				expect(resolvedBlockerFileCounts()).toEqual([1]);
 			} finally {
 				env.cleanup();
 			}
@@ -896,9 +936,7 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 
 		it("holds the resolved lines that do not fit the cap for the next turn_end", async () => {
 			// Ten 165-char lines are ~1650 chars: the section alone passes the
-			// 1000-char cap, so putting it first is not enough on its own. Six
-			// lines (996 chars) would fit a budget with no room for the tail,
-			// and the cap would then cut "… and 1 more" after its reset.
+			// 1000-char cap, so putting it first is not enough on its own.
 			const env = setupTestEnvironment("pi-lens-3218-hold-");
 			try {
 				const { runtime, cacheManager } = newTurn();
@@ -916,28 +954,36 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 					"session-3218",
 				);
 
-				const first = await runTurnEnd(runtime, cacheManager, env.tmpDir);
-				runtime.beginTurn();
-				const second = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				const [first, ...later] = await drain(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+				);
 
-				// Nothing the first message consumed was cut by the cap.
-				expect(first).not.toContain("(truncated)");
+				// Nothing any message consumed was cut by the cap.
+				for (const message of [first!, ...later]) {
+					expect(message).not.toContain("(truncated)");
+				}
 				expect(first).toContain("… and 1 more");
 				const listedFirst = names
 					.slice(0, 10)
-					.filter((name) => first.includes(line(name)));
-				const listedSecond = names
-					.slice(0, 10)
-					.filter((name) =>
-						second.includes(line(name, "Resolved since the last report")),
-					);
+					.filter((name) => first!.includes(line(name)));
+				const listedLater = later.map((message) =>
+					names
+						.slice(0, 10)
+						.filter((name) =>
+							message.includes(line(name, "Resolved since the last report")),
+						),
+				);
 				expect(listedFirst.length).toBeGreaterThan(0);
 				expect(listedFirst.length).toBeLessThan(10);
 				// Every one of the ten listed files is named exactly once, in order.
-				expect([...listedFirst, ...listedSecond]).toEqual(names.slice(0, 10));
+				expect([...listedFirst, ...listedLater.flat()]).toEqual(
+					names.slice(0, 10),
+				);
 				expect(resolvedBlockerFileCounts()).toEqual([
 					listedFirst.length,
-					listedSecond.length,
+					...listedLater.map((listed) => listed.length),
 				]);
 				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
 			} finally {
@@ -951,22 +997,23 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 					? "fills the resolved budget exactly and holds nothing"
 					: "holds the last resolved line one char over the budget",
 				async () => {
-					// The budget is the 1000-char cap less room for the widest
-					// overflow tail, so the tail can never be the part the cap cuts.
-					const budget = 1000 - "… and 9007199254740991 more".length;
+					// With no blockers the budget is the section's 40% share of the
+					// 1000-char cap, less room for the widest overflow tail, so the
+					// tail can never be the part the cap cuts.
+					const budget = 400 - "… and 9007199254740991 more".length;
 					const env = setupTestEnvironment("pi-lens-3218-edge-");
 					try {
 						const { runtime, cacheManager } = newTurn();
-						// Five lines whose `line.length + 1` sum to the budget exactly.
-						const stems = [0, 1, 2, 3, 4].map((index) => `n${index}-`);
+						// Three lines whose `line.length + 1` sum to the budget exactly.
+						const stems = [0, 1, 2].map((index) => `n${index}-`);
 						const fixed = stems.reduce(
 							(sum, stem) => sum + line(`${stem}.ts`).length + 1,
 							0,
 						);
 						const pad = budget - fixed;
 						const names = stems.map((stem, index) => {
-							const share = Math.floor(pad / 5) + (index < pad % 5 ? 1 : 0);
-							const extra = index === 4 ? over : 0;
+							const share = Math.floor(pad / 3) + (index < pad % 3 ? 1 : 0);
+							const extra = index === 2 ? over : 0;
 							return `${stem}${"y".repeat(share + extra)}.ts`;
 						});
 						expect(
@@ -976,12 +1023,12 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 
 						const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
 
-						for (const name of names.slice(0, 4)) {
+						for (const name of names.slice(0, 2)) {
 							expect(content).toContain(line(name));
 						}
-						expect(content.includes(line(names[4]!))).toBe(over === 0);
+						expect(content.includes(line(names[2]!))).toBe(over === 0);
 						expect(runtime.hasResolvedBlockerFiles()).toBe(over === 1);
-						expect(resolvedBlockerFileCounts()).toEqual([5 - over]);
+						expect(resolvedBlockerFileCounts()).toEqual([3 - over]);
 					} finally {
 						env.cleanup();
 					}
@@ -989,10 +1036,12 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			);
 		}
 
-		it("delivers a lone over-budget line instead of holding it forever", async () => {
+		it("shortens a lone over-budget path with a middle ellipsis", async () => {
 			// A hold for budget must still drain: were the first line held too,
 			// a single long path would stay pending and every read-only turn
-			// would fall through to the composer again.
+			// would fall through to the composer again. Taken whole, though, a
+			// ~1000-char path let the cap cut the consumed line itself
+			// (review-3776-r3 W2), so the path is shortened in the middle.
 			const env = setupTestEnvironment("pi-lens-3218-long-");
 			try {
 				const { runtime, cacheManager } = newTurn();
@@ -1006,9 +1055,122 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 
 				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
 
-				expect(content).toContain(`Resolved this turn: ${"d".repeat(250)}/`);
+				const resolved = content
+					.split("\n")
+					.find((text) => text.startsWith("Resolved this turn: "));
+				// Both ends of the path survive around the `…`, and the clause
+				// after the path is whole: nothing consumed was cut.
+				expect(resolved).toMatch(
+					/^Resolved this turn: d{20,}…g{20,}\.ts \(2 blocker\(s\) cleared by the 2nd write\)$/,
+				);
+				expect(resolved!.length).toBeLessThanOrEqual(400);
+				expect(content).not.toContain("(truncated)");
 				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
 				expect(resolvedBlockerFileCounts()).toEqual([1]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("keeps all three blockers when ten files resolve", async () => {
+			// Recurrence (review-3776-r3 W1, probe S1): the round-3 section took
+			// ~973 of the 1000 chars, came first, and the cap left one truncated
+			// blocker stub; blocked-1 and blocked-2 never reached the agent.
+			const env = setupTestEnvironment("pi-lens-3218-s1-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				for (let index = 0; index < 10; index += 1) {
+					retire(
+						runtime,
+						env.tmpDir,
+						`src/module-${index}/resolved-file-name.ts`,
+					);
+				}
+				for (let index = 0; index < 3; index += 1) {
+					recordUnresolvedBlocker(
+						runtime,
+						cacheManager,
+						env.tmpDir,
+						`blocked-${index}.ts`,
+						3,
+					);
+				}
+
+				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+				expect(content).not.toContain("(truncated)");
+				for (let index = 0; index < 3; index += 1) {
+					expect(content).toContain(blockerSection(`blocked-${index}.ts`, 3));
+				}
+				expect(content).toContain("Resolved this turn: src/module-0/");
+				expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("sizes the resolved lines to the chars the blockers leave", async () => {
+			// One wide blocker (~700 chars, 5 lines) leaves under the 40% share,
+			// so chars, not lines, bound the section.
+			const env = setupTestEnvironment("pi-lens-3218-wide-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				for (let index = 0; index < 10; index += 1) {
+					retire(
+						runtime,
+						env.tmpDir,
+						`src/module-${index}/resolved-file-name.ts`,
+					);
+				}
+				const pad = ` ${"w".repeat(200)}`;
+				recordUnresolvedBlocker(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+					"wide.ts",
+					3,
+					pad,
+				);
+
+				const messages = await drain(runtime, cacheManager, env.tmpDir);
+
+				expect(messages[0]).not.toContain("(truncated)");
+				expect(messages[0]).toContain(blockerSection("wide.ts", 3, pad));
+				expect(messages[0]).toContain("Resolved this turn: src/module-0/");
+				// Each file is named once across the turn_ends that follow.
+				for (let index = 0; index < 10; index += 1) {
+					expect(
+						messages.filter((text) => text.includes(`src/module-${index}/`)),
+					).toHaveLength(1);
+				}
+				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("sizes the resolved lines to the lines the blockers leave", async () => {
+			// Two short five-row blockers take 15 of the 20 lines (plus the
+			// blank that joins them to the section), so lines, not chars, bound
+			// it, and the overflow tail needs its own line.
+			const env = setupTestEnvironment("pi-lens-3218-tall-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				for (let index = 0; index < 11; index += 1) {
+					retire(runtime, env.tmpDir, `file-${index}.ts`);
+				}
+				for (const name of ["tall-0.ts", "tall-1.ts"]) {
+					recordUnresolvedBlocker(runtime, cacheManager, env.tmpDir, name, 5);
+				}
+
+				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+				expect(content).not.toContain("(truncated)");
+				expect(content).toContain(blockerSection("tall-0.ts", 5));
+				expect(content).toContain(blockerSection("tall-1.ts", 5));
+				expect(content).toContain(`${line("file-0.ts")}\n`);
+				expect(content).toContain("… and 1 more");
+				expect(runtime.hasResolvedBlockerFiles()).toBe(true);
 			} finally {
 				env.cleanup();
 			}
