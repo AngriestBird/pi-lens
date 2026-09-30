@@ -509,9 +509,17 @@ export function computeVerdict(
 	} else if (cancelledLatestRows.length > 0) {
 		exitCode = EXIT_PENDING;
 		kind = "cancelled";
-		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
-			.map(formatRerunHint)
-			.join(", ")}`;
+		const seenRerunHints = new Set();
+		const rerunHints = cancelledLatestRows
+			.map((row) => {
+				const args = rerunArgsFor(row);
+				const key = args?.join(" ") ?? formatRerunHint(row);
+				if (seenRerunHints.has(key)) return null;
+				seenRerunHints.add(key);
+				return formatRerunHint(row);
+			})
+			.filter((hint) => hint !== null);
+		reason = `superseded run cancelled and not replaced: ${rerunHints.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
 		kind = "failed";
