@@ -3765,6 +3765,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	/** #3248: bounded per-turn on this lane's own row, never per finding. */
 	let runnerFindingsDispositionSuppressed = 0;
 	const runnerFindingsDeliveredIds: string[] = [];
+	/** #3796: late parts carrying a blocking finding — never "no action required". */
+	const unlabeledAdvisoryParts = new Set<string>();
 	for (const pending of pendingRunnerFindings) {
 		const result = pending.result;
 		if (!result) continue;
@@ -3776,7 +3778,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			Date.now() - pending.markedAtMs,
 			pending.writeIndex,
 		);
-		if (result.status === "failed") {
+		// #3796: a runner whose findings fail its check reports `failed` WITH
+		// diagnostics; only a failed result with none is a broken runner. The
+		// rest goes through the freshness gate and delivery like a success.
+		if (result.status === "failed" && result.diagnostics.length === 0) {
 			runnerFindingsFailed += 1;
 			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
 			// @delivery-surface: runtime-turn:late-runner-findings
@@ -3849,10 +3854,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			runnerSuppressedHere > 0
 				? `; suppressed by disposition: ${runnerSuppressedHere} finding(s)`
 				: "";
-		// @delivery-surface: runtime-turn:late-runner-findings
-		advisoryParts.push(
-			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit${runnerSuppressedNote}):\n${lines.join("\n")}`,
+		const lateBlocking = runnerKept.some(
+			(finding) => finding.semantic === "blocking",
 		);
+		const lateRunnerPart = `⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit${runnerSuppressedNote}${lateBlocking ? "; blocking: fix before continuing" : ""}):\n${lines.join("\n")}`;
+		if (lateBlocking) unlabeledAdvisoryParts.add(lateRunnerPart);
+		// @delivery-surface: runtime-turn:late-runner-findings
+		advisoryParts.push(lateRunnerPart);
 	}
 	logLatency({
 		type: "phase",
@@ -4289,8 +4297,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 
-	const labeledAdvisoryParts = advisoryParts.map(
-		(p) => `ℹ️ Advisory — no action required this turn:\n${p}`,
+	const labeledAdvisoryParts = advisoryParts.map((p) =>
+		unlabeledAdvisoryParts.has(p)
+			? p
+			: `ℹ️ Advisory — no action required this turn:\n${p}`,
 	);
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
