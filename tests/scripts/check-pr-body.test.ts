@@ -1460,10 +1460,30 @@ describe("PR body lint (#1844)", () => {
 			);
 			for (const args of [
 				[checker, "--lint-local", bodyPath],
+				[
+					checker,
+					"--lint-local",
+					bodyPath,
+					"--title",
+					"ci(test): verify local body lint (refs #2807)",
+				],
 				[checker, "--body", bodyPath, "--title", titlePath],
 			]) {
 				execFileSync(process.execPath, args, { cwd: fixtureCwd });
 			}
+			expect(() =>
+				execFileSync(
+					process.execPath,
+					[
+						checker,
+						"--lint-local",
+						bodyPath,
+						"--title",
+						"ci(test): verify local body lint (closes #2807)",
+					],
+					{ cwd: fixtureCwd, stdio: "pipe" },
+				),
+			).toThrow();
 			expect(() =>
 				execFileSync(
 					process.execPath,
@@ -2570,6 +2590,22 @@ describe("local lint parity", () => {
 			},
 		);
 		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("reports a bad --ref before trying to read its cited file (#3681)", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst ref = true;\n\`\`\``,
+			{
+				ref: "missing-ref",
+				git: () => {
+					throw new Error("bad ref");
+				},
+			},
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			"revision missing-ref does not exist or is not a commit",
+		);
 	});
 	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
 		const ranges: string[][] = [];

@@ -34,6 +34,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	classifySegment,
 	classifyPayload,
 	findDeny,
 	RULE_MESSAGES,
@@ -444,7 +445,7 @@ function commandHash(command: string): string {
 //     stripped).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"21def4efd19e12fd4fcb3f0cfcbc7f000814ed54d6ecdb39701e74b08288811f",
-	"30b1b57e56ca162793f411ef91bc8e47607a91f420039b3e00451ecd5278ea02",
+	"22441661595314c7a8207f7cb04bee63c81882c05e64e5325d7245ffcb3ec5d7",
 	// #3471 checkUngated -- audited true positives, round 1 (20):
 	"ff582cb347e379fcf2dd2e965ea22a0313e76f18edad51ef7efc0cd01ad7b0ae",
 	"ada188d5f502c2c534e449a06b19aeef59e5d3f48e47f7061a1b8e65d1c55bce",
@@ -481,13 +482,17 @@ const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"e3cbc7a31b6837426817b794e54db318d3fef8fb766c023014336d7c1baae8e5",
 	// #3526 review round 2, F4 -- timeout-wrapped / basename-resolved
 	// vitest, previously invisible to the check set entirely (7):
-	"22441661595314c7a8207f7cb04bee63c81882c05e64e5325d7245ffcb3ec5d7",
 	"99384a2525ff8dddfee78c82c51af7021f01d6165005167033a717ffc56ea077",
 	"a6e2260e0c64ac20af126d1d7990830de94cce598da9bde0610262e75e3c905d",
 	"e849647d34e37aab0f927095172358192015259992a7202e98c09ee960b26a31",
 	"830516326aef8a7961d80c8b2ebcf53243a6c3408a2120f4bb6dcfc3386b3650",
 	"f8e25082d8aab77f62006719b1a214b65cb87af7faeb8d5baf12574d9480c366",
 	"cad4314ec40a34fb85ae43f865f96b5862397f363e26003cc814e87dfafceebf",
+]);
+
+const EXPECTED_TRANSCRIPT_ALLOWS = new Set([
+	// Historical plegma maintenance transcript is an explicit allow.
+	"30b1b57e56ca162793f411ef91bc8e47607a91f420039b3e00451ecd5278ea02",
 ]);
 
 describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
@@ -718,25 +723,41 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 
 describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_DATE} (#2705)`, () => {
 	it("keeps the transcript corpus at zero non-rule denies", () => {
+		const corpusHome = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-corpus-home-"),
+		);
+		const corpusEnv = {
+			...BASE_ENV,
+			HOME: corpusHome,
+			PI_LENS_HOME: join(corpusHome, ".pi-lens"),
+			PILENS_DATA_DIR: join(corpusHome, "data"),
+			PI_LENS_INSTALL_LOG: join(corpusHome, "logs", "install.log"),
+		};
 		const started = performance.now();
 		const offenses: string[] = [];
 		let actualDenies = 0;
+		try {
+			for (const { command } of TRANSCRIPT_CORPUS) {
+				const result = runHook(command, corpusEnv);
+				const hash = commandHash(command);
+				const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
+				const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
+				if (result.status === 2) actualDenies++;
 
-		for (const { command } of TRANSCRIPT_CORPUS) {
-			const result = runHook(command);
-			const hash = commandHash(command);
-			const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
-			if (result.status === 2) actualDenies++;
-
-			if (expectedDeny) {
-				if (result.status !== 2)
-					offenses.push(`expected deny was allowed: ${command}`);
-				continue;
+				if (expectedDeny) {
+					if (result.status !== 2)
+						offenses.push(`expected deny was allowed: ${command}`);
+					continue;
+				}
+				if (expectedAllow && result.status !== 0)
+					offenses.push(`expected allow was denied: ${command}`);
+				else if (!expectedAllow && result.status !== 0)
+					offenses.push(`non-rule deny (${result.status}): ${command}`);
+				else if (result.stderr !== "")
+					offenses.push(`unexpected stderr: ${command}`);
 			}
-			if (result.status !== 0)
-				offenses.push(`non-rule deny (${result.status}): ${command}`);
-			else if (result.stderr !== "")
-				offenses.push(`unexpected stderr: ${command}`);
+		} finally {
+			rmSync(corpusHome, { recursive: true, force: true });
 		}
 
 		const elapsedMs = performance.now() - started;
@@ -2387,6 +2408,15 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 					repoRoot,
 				).status,
 			).toBe(0);
+			// A nonexistent cd target is unknowable to the static guard, so the
+			// conservative probe denial remains pinned.
+			expect(
+				runHook(
+					`cd ${join(foreignDir, "missing")} && node dist/cli.js --help`,
+					BASE_ENV,
+					repoRoot,
+				).status,
+			).toBe(2);
 		} finally {
 			rmSync(otherRepo, { recursive: true, force: true });
 			rmSync(foreignDir, { recursive: true, force: true });
@@ -2416,6 +2446,25 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 			).toBe(2);
 		} finally {
 			rmSync(linkRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("pins the process-cwd initialIdentity fallback for a relative probe", () => {
+		const previous = process.env.PI_LENS_HOME;
+		delete process.env.PI_LENS_HOME;
+		try {
+			expect(classifySegment("node clients/probe.mjs")).toBe("probe");
+			expect(
+				classifySegment(
+					`node ${join(repoRoot, "clients", "probe.mjs")}`,
+					{},
+					"/tmp/3688-foreign-cwd",
+					null as unknown as undefined,
+				),
+			).toBe("probe");
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
 		}
 	});
 });

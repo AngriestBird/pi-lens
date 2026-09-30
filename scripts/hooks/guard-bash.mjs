@@ -1404,7 +1404,6 @@ function loadsPiLensRuntime(fileOrSpecifier, cwd, initialIdentity) {
 		initialIdentity ?? repositoryIdentity(repositoryRoot(process.cwd()));
 	if (loadedIdentity && referenceIdentity)
 		return loadedIdentity === referenceIdentity;
-	if (loadedRoot && referenceIdentity) return false;
 	if (!isAbsolute(fileOrSpecifier)) {
 		// The test harness and hook callers may carry a synthetic cwd. A path
 		// relative to a cwd that is not present cannot establish ownership, so
