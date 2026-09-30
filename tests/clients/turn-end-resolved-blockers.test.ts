@@ -1072,6 +1072,50 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			}
 		});
 
+		it("does not split emoji when shortening paths or capping turn-end text", async () => {
+			// Recurrence (review-3776-r4 probe M): raw UTF-16 slice offsets can
+			// leave an unpaired surrogate in either turn-end rendering path.
+			const env = setupTestEnvironment("pi-lens-3218-emoji-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				const emojiPath = Array.from(
+					{ length: 18 },
+					(_, index) => `${"😀".repeat(9)}-${index}`,
+				).join("/");
+				retire(runtime, env.tmpDir, `${emojiPath}/file.ts`);
+				const resolvedContent = await runTurnEnd(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+				);
+
+				expect(resolvedContent).toContain("…");
+				expect(Buffer.from(resolvedContent).toString("utf8")).toBe(
+					resolvedContent,
+				);
+
+				const capped = newTurn();
+				recordUnresolvedBlocker(
+					capped.runtime,
+					capped.cacheManager,
+					env.tmpDir,
+					"emoji-blocker.ts",
+					5,
+					"😀".repeat(100),
+				);
+				const cappedContent = await runTurnEnd(
+					capped.runtime,
+					capped.cacheManager,
+					env.tmpDir,
+				);
+
+				expect(cappedContent).toContain("(truncated)");
+				expect(Buffer.from(cappedContent).toString("utf8")).toBe(cappedContent);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("keeps all three blockers when ten files resolve", async () => {
 			// Recurrence (review-3776-r3 W1, probe S1): the round-3 section took
 			// ~973 of the 1000 chars, came first, and the cap left one truncated

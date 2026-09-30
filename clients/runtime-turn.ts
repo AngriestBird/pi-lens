@@ -661,10 +661,42 @@ function capTurnEndMessage(content: string): string {
 		out = `${lines.slice(0, maxLines).join("\n")}\n... (truncated)`;
 	}
 	if (out.length > maxChars) {
-		out = `${out.slice(0, maxChars)}\n... (truncated)`;
+		out = `${sliceAtCodePointBoundaries(out, 0, maxChars)}\n... (truncated)`;
 	}
 
 	return out;
+}
+
+function sliceAtCodePointBoundaries(
+	value: string,
+	start: number,
+	end: number,
+): string {
+	if (
+		start > 0 &&
+		start < value.length &&
+		isLowSurrogate(value.charCodeAt(start)) &&
+		isHighSurrogate(value.charCodeAt(start - 1))
+	) {
+		start += 1;
+	}
+	if (
+		end > 0 &&
+		end < value.length &&
+		isLowSurrogate(value.charCodeAt(end)) &&
+		isHighSurrogate(value.charCodeAt(end - 1))
+	) {
+		end -= 1;
+	}
+	return value.slice(start, end);
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 /**
@@ -4365,7 +4397,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const room = resolvedShareChars - 1 - head.length - tail.length;
 		if (display.length > room) {
 			const keepHead = Math.ceil((room - 1) / 2);
-			display = `${display.slice(0, keepHead)}…${display.slice(display.length - (room - 1 - keepHead))}`;
+			display = `${sliceAtCodePointBoundaries(display, 0, keepHead)}…${sliceAtCodePointBoundaries(display, display.length - (room - 1 - keepHead), display.length)}`;
 		}
 		return `${head}${display}${tail}`;
 	};
