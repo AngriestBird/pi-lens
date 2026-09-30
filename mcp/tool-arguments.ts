@@ -61,9 +61,10 @@ function levenshtein(a: string, b: string): number {
 }
 
 /**
- * The declared key a caller most plausibly meant by `key`: a case/punctuation
- * variant, then one containing (or contained in) the other (`filePath` for
- * `path` or `file`), then a one-or-two-character typo. `undefined` when
+ * The declared key a caller most plausibly meant by `key`: one containing
+ * (or contained in) the other once case and punctuation are folded away
+ * (`filePath` for `path` or `file`; `FILE` for `file`), then a one-or-two-
+ * character typo. `undefined` when
  * nothing is near: a wrong suggestion is worse than none.
  */
 function nearestDeclaredKey(
@@ -76,8 +77,7 @@ function nearestDeclaredKey(
 	for (const candidate of declared) {
 		const other = fold(candidate);
 		let score: number | undefined;
-		if (folded === other) score = 0;
-		else if (
+		if (
 			Math.min(folded.length, other.length) >= 3 &&
 			(folded.includes(other) || other.includes(folded))
 		)

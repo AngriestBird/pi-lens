@@ -823,8 +823,10 @@ describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
 		const before = (await health())?.count ?? 0;
 		await call("pilens_diagnostics", { onlyKeyA: 1, onlyKeyB: 2 });
 		await call("pilens_diagnostics", { onlyKeyA: 1 });
+		// A refused call is still counted (the row is written before the refusal).
+		await call("pilens_analyze", { onlyKeyC: 1 });
 		const after = await health();
-		expect(after?.count).toBe(before + 2);
+		expect(after?.count).toBe(before + 3);
 		const row = after?.latestReasons.find(
 			(entry) => entry.subject === "pilens_diagnostics",
 		);
