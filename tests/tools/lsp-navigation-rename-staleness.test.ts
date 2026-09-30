@@ -80,6 +80,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	lsp.service = undefined;
+	vi.restoreAllMocks();
 	setHostFileMutationQueueLoader(undefined);
 	env.cleanup();
 });
@@ -302,8 +303,12 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		await withFileMutationQueue(fileB, async () => {
 			fs.writeFileSync(fileB, "AGENT = 8;\n");
 		});
+		// The compute outlasts the mtime margin: an instant taken only when the
+		// server answers would sit a minute past this write.
+		const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
 		resume.open();
 		const result = await pending;
+		clock.mockRestore();
 
 		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 8;\n");
 		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
