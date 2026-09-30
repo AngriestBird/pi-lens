@@ -142,11 +142,11 @@ function countDroppedAdvisory(
 
 /** Drop what a retired scope queued: no later `context` call belongs to it. */
 function pruneRetiredAdvisories(): void {
-	const live = _advisories.filter((entry) => {
-		if (entry.scope.isCurrent()) return true;
-		countDroppedAdvisory("scope-retired", entry.scope.scopeId);
-		return false;
-	});
+	const live: QueuedAdvisory[] = [];
+	for (const entry of _advisories) {
+		if (entry.scope.isCurrent()) live.push(entry);
+		else countDroppedAdvisory("scope-retired", entry.scope.scopeId);
+	}
 	_advisories.splice(0, _advisories.length, ...live);
 }
 
