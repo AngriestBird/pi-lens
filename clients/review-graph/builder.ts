@@ -6,7 +6,7 @@ import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "../atomic-write.js";
 import type { CallGraphEvidenceCoverage } from "../call-graph.js";
-import type { FactStore } from "../dispatch/fact-store.js";
+import { FactStore, type ReadonlyFactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
 import type { FunctionSummary } from "../dispatch/facts/function-facts.js";
 import type {
@@ -3775,6 +3775,15 @@ function upsertChangedSymbols(
 	}
 }
 
+/**
+ * Derive one file's structural facts into `facts`, which MUST be a run-local
+ * store that only this graph run touches (#3552). The providers await (dynamic
+ * import, tree-sitter parse), so a same-file dispatch can land between any two
+ * awaits: anything written into the shared dispatch store would replace that
+ * dispatch's `file.content` and derived facts, and anything read back from it
+ * could be the dispatch's version. Callers construct the store; nothing here
+ * accepts the shared one.
+ */
 async function ensureReviewGraphFacts(
 	filePath: string,
 	cwd: string,
@@ -4150,19 +4159,28 @@ export async function captureReviewGraphStructuralIr(
 	filePath: string,
 	cwd: string,
 	content: string,
-	facts: FactStore,
+	borrowed: ReadonlyFactStore,
 ): Promise<{ complete: boolean; structural?: ReviewGraphStructuralIr }> {
 	const kind = detectFileKind(filePath);
 	if (!kind || !MAIN_KINDS.has(kind) || detectFileRole(filePath) === "test") {
 		return { complete: true };
 	}
 	if (kind === "jsts") {
-		if (
-			!facts.hasFileFact(filePath, "file.imports") ||
-			!facts.hasFileFact(filePath, "file.reexports") ||
-			!facts.hasFileFact(filePath, "file.functionSummaries")
-		) {
-			await ensureReviewGraphFacts(filePath, cwd, facts, content);
+		// `borrowed` is the caller's store (the scanner's own, never the dispatch
+		// store) and is only READ: its derived facts are reused when they are
+		// present AND its `file.content` is the very bytes being captured. Facts
+		// derived from other bytes are never taken. Otherwise derive into a
+		// run-local store, so the caller's store is never written (#3552).
+		const borrowable =
+			borrowed.hasFileFact(filePath, "file.imports") &&
+			borrowed.hasFileFact(filePath, "file.reexports") &&
+			borrowed.hasFileFact(filePath, "file.functionSummaries") &&
+			borrowed.getFileFact<string | null>(filePath, "file.content") === content;
+		let facts: ReadonlyFactStore = borrowed;
+		if (!borrowable) {
+			const run = new FactStore("review-graph-run");
+			await ensureReviewGraphFacts(filePath, cwd, run, content);
+			facts = run;
 		}
 		const parsed = await withTreeSitterRoot(
 			filePath,
@@ -4676,7 +4694,6 @@ async function addFileToGraph(
 	graph: ReviewGraph,
 	cwd: string,
 	file: string,
-	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
 	contentOverride?: string | null,
 ): Promise<void> {
@@ -4693,44 +4710,34 @@ async function addFileToGraph(
 		? getFreshReviewGraphFileIr(cwd, file, contentHash)?.structural
 		: undefined;
 	if (kind === "jsts") {
-		// Release content ONLY when this builder seeded it. The incremental
-		// per-edit path receives the LIVE dispatch FactStore (via the
-		// fire-and-forget blast-radius build), and the dispatch still reads
-		// file.content after its runner groups settle — inline suppressions,
-		// dispositions, and fact rules would race a delete and silently see
-		// undefined. Content the dispatch put there is the dispatch's to free.
-		const dispatchOwnsContent =
-			facts.getFileFact<string>(file, "file.content") !== undefined &&
-			contentOverride == null;
-		try {
-			if (sharedIr?.kind === "jsts") {
-				facts.setFileFact(file, "file.content", contentOverride ?? "");
-				facts.setFileFact(file, "file.imports", sharedIr.imports);
-				facts.setFileFact(file, "file.reexports", sharedIr.reexports);
-				facts.setFileFact(
-					file,
-					"file.functionSummaries",
-					sharedIr.functionSummaries,
-				);
-				facts.setFileFact(
-					file,
-					"file.functionFactsCoverage",
-					sharedIr.coverage.calls,
-				);
-				facts.setFileFact(
-					file,
-					"file.importFactsCoverage",
-					sharedIr.coverage.imports,
-				);
-			} else {
-				await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
-			}
-			addJsTsFile(graph, cwd, file, facts, ignoredIds);
-		} finally {
-			// The graph has copied every durable value it needs. Keep derived facts
-			// available to callers, but do not retain full source in a shared store.
-			if (!dispatchOwnsContent) facts.deleteFileFact(file, "file.content");
+		// #3552: per-file extraction state lives in a store only this run touches
+		// (see ensureReviewGraphFacts). The shared dispatch store is never written
+		// or released here, so a live dispatch's `file.content` and derived facts
+		// are exactly what they would be with no graph running.
+		const run = new FactStore("review-graph-run");
+		if (sharedIr?.kind === "jsts") {
+			run.setFileFact(file, "file.content", contentOverride ?? "");
+			run.setFileFact(file, "file.imports", sharedIr.imports);
+			run.setFileFact(file, "file.reexports", sharedIr.reexports);
+			run.setFileFact(
+				file,
+				"file.functionSummaries",
+				sharedIr.functionSummaries,
+			);
+			run.setFileFact(
+				file,
+				"file.functionFactsCoverage",
+				sharedIr.coverage.calls,
+			);
+			run.setFileFact(
+				file,
+				"file.importFactsCoverage",
+				sharedIr.coverage.imports,
+			);
+		} else {
+			await ensureReviewGraphFacts(file, cwd, run, contentOverride);
 		}
+		addJsTsFile(graph, cwd, file, run, ignoredIds);
 		return;
 	}
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
@@ -4964,7 +4971,7 @@ async function updateGraphFiles(
 		preservedIncoming.push(
 			...removeFileOwnedGraphData(graph, file, removedEdges),
 		);
-		await addFileToGraph(graph, cwd, file, facts, ignoredIds);
+		await addFileToGraph(graph, cwd, file, ignoredIds);
 	}
 	if (removedEdges.size > 0) {
 		unindexEdges(graph, removedEdges);
@@ -5853,7 +5860,7 @@ async function _doBuildGraph(
 				content = null;
 				fileHashes.set(file, "missing");
 			}
-			await addFileToGraph(graph, cwd, file, facts, ignoredIds, content);
+			await addFileToGraph(graph, cwd, file, ignoredIds, content);
 			if (normalizedChangedSet.has(file)) {
 				upsertChangedSymbols(graph, facts, file);
 			}
