@@ -50,16 +50,14 @@ import {
 import { takeHandoff } from "../clients/session-scope.js";
 import { exportWidgetState } from "../clients/widget-state.js";
 import { queueAgentAdvisory } from "../clients/agent-nudge.js";
+import { AstGrepClient } from "../clients/ast-grep-client.js";
 import {
 	deferRunnerFindings,
 	pendingRunnerFindingsSize,
 	resetPendingRunnerFindings,
 } from "../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
-import {
-	getDegradationSummary,
-	resetDegradationLedger,
-} from "../clients/degradation-ledger.js";
+import { getDegradationSummary } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -1616,17 +1614,22 @@ describe("#3758 pending runner findings and session scope", () => {
 	}
 
 	it("drops, and counts, a result whose session ended before a secondary's turn end drains it", async () => {
-		resetDegradationLedger();
 		const seen = coordinators();
 		let subagent: AgentSessionRuntime | undefined;
 		let subagentSaw: string | undefined;
+		let dropped: string[] | undefined;
 		// Runs after pi-lens's own session_shutdown handler has retired the
-		// primary's scope, and before pi builds the next session.
+		// primary's scope, and before pi builds the next session (whose start
+		// resets the in-memory ledger, so the row is read here).
 		const inTheGap = (pi: ExtensionAPI) => {
 			pi.on("session_shutdown", async () => {
 				if (!subagent) return;
 				await endTurn(subagent);
 				subagentSaw = await contextText(subagent);
+				dropped = getDegradationSummary()
+					.find((group) => group.kind === "generation-guard-stale-write")
+					?.latestReasons.map((row) => row.subject)
+					.filter((subject) => subject.includes("probe-3758"));
 			});
 		};
 		const primary = await startRuntime(SessionManager.inMemory(cwd), [
@@ -1643,10 +1646,7 @@ describe("#3758 pending runner findings and session scope", () => {
 		expect({
 			subagentSees: subagentSaw?.includes("probe-3758 crashed"),
 			pending: pendingRunnerFindingsSize(),
-			dropped: getDegradationSummary()
-				.find((group) => group.kind === "generation-guard-stale-write")
-				?.latestReasons.map((row) => row.subject)
-				.filter((subject) => subject.includes("probe-3758")),
+			dropped,
 		}).toEqual({
 			subagentSees: false,
 			pending: 0,
@@ -1689,5 +1689,53 @@ describe("#3758 pending runner findings and session scope", () => {
 				"probe-3758-live crashed",
 			),
 		}).toEqual({ subagentSees: true, primarySees: false });
+	});
+});
+
+/**
+ * #3763 item 4, the host wiring: index.ts hands `ast_grep_replace` the
+ * capture of its coordinator's session. The recurrence: the tool built with
+ * no capture, so every in-pi rewrite reaches the bridge without a lineage and
+ * stays fail-open while every unit test of the tool stays green.
+ */
+describe("#3763 ast_grep_replace is wired to the live session", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("passes the session scope the call ran in to the apply", async () => {
+		const seen = coordinators();
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		vi.spyOn(AstGrepClient.prototype, "ensureAvailable").mockResolvedValue(
+			true,
+		);
+		const replace = vi
+			.spyOn(AstGrepClient.prototype, "replace")
+			.mockResolvedValue({
+				matches: [],
+				totalMatches: 0,
+				truncated: false,
+				applied: true,
+			});
+		const tool = runtime.session.getToolDefinition("ast_grep_replace");
+		if (!tool) throw new Error("ast_grep_replace is not registered");
+
+		await tool.execute(
+			"call-3763-wired",
+			{
+				pattern: "var $X",
+				rewrite: "let $X",
+				lang: "typescript",
+				apply: true,
+			} as never,
+			undefined,
+			undefined,
+			runtime.session.extensionRunner.createContext(),
+		);
+
+		const lineage = (
+			replace.mock.calls[0]?.[5] as { lineage?: { scopeId: number } }
+		)?.lineage;
+		expect(lineage?.scopeId).toBe(seen[0]!.captureSessionGeneration().scopeId);
 	});
 });

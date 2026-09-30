@@ -1531,3 +1531,103 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 		}
 	});
 });
+
+/**
+ * #3763 item 1: `recordMutationToolReceipt` writes the live coordinator's
+ * per-turn maps (the write-then-edit transition that demotes a file's
+ * autofix to the deferred pass). A handler that resumes from the settle after
+ * a replacement wrote its receipt into session 2's turn, so a file session 2
+ * wrote was demoted by session 1's edit of it. The recurrence: a receipt that
+ * ignores the handler's own session.
+ */
+describe("#3763 a dead handler's mutation receipt stays out of session 2's turn", () => {
+	async function acrossSettle(
+		slug: string,
+		body: (args: { tmpDir: string; filePath: string }) => Promise<void>,
+	): Promise<void> {
+		const env = setupTestEnvironment(`pi-lens-3763-${slug}-`);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		ungatePipeline(vi.mocked(runPipeline));
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			await body({ tmpDir: env.tmpDir, filePath });
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	/** Session 2 wrote `filePath` this turn; its next write's autofix mode. */
+	function sessionTwoWriteMode(
+		runtime: RuntimeCoordinator,
+		filePath: string,
+	): "immediate" | "deferred" {
+		return runtime.recordMutationToolReceipt(filePath, "write").autofixMode;
+	}
+
+	it("an observed edit settling after the replacement leaves session 2's write immediate", async () => {
+		await acrossSettle("observed", async ({ tmpDir, filePath }) => {
+			const { runtime, cacheManager } = newSession(tmpDir);
+			const event = patchEvent(filePath, "call-3763-observed");
+			await handleToolCall(
+				toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			const handler = handleToolResult(
+				toolResultDeps({ event, runtime, cacheManager }),
+			);
+			// The handler is parked on the settle's first await.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			sessionTwoWriteMode(runtime, filePath);
+			await handler;
+			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
+		});
+	});
+
+	it("a learned tool's classified receipt after the replacement leaves session 2's write immediate", async () => {
+		await acrossSettle("classified", async ({ tmpDir, filePath }) => {
+			const { runtime, cacheManager } = newSession(tmpDir);
+			// Call one teaches the name; call two is classified by it and still
+			// armed, so it awaits the settle, which finds no change.
+			const first = patchEvent(filePath, "call-3763-learn");
+			await handleToolCall(
+				toolCallDeps({ event: first, cwd: tmpDir, runtime, cacheManager }),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			await handleToolResult(
+				toolResultDeps({ event: first, runtime, cacheManager }),
+			);
+			const second = patchEvent(filePath, "call-3763-classified");
+			await handleToolCall(
+				toolCallDeps({ event: second, cwd: tmpDir, runtime, cacheManager }),
+			);
+			const handler = handleToolResult(
+				toolResultDeps({ event: second, runtime, cacheManager }),
+			);
+			runtime.resetForSession();
+			runtime.beginTurn();
+			sessionTwoWriteMode(runtime, filePath);
+			await handler;
+			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
+		});
+	});
+
+	it("an observed edit in its own session still demotes that session's later write", async () => {
+		await acrossSettle("observed-live", async ({ tmpDir, filePath }) => {
+			const { runtime, cacheManager } = newSession(tmpDir);
+			const event = patchEvent(filePath, "call-3763-live");
+			await handleToolCall(
+				toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
+			);
+			sessionTwoWriteMode(runtime, filePath);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+			expect(sessionTwoWriteMode(runtime, filePath)).toBe("deferred");
+		});
+	});
+});

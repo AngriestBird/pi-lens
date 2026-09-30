@@ -68,6 +68,11 @@ interface LspMutationRuntime {
 	 * behavior of falling back to `cwd`.
 	 */
 	projectRoot?: string;
+	/**
+	 * #3763: the session a tool call runs in, captured at its `execute` entry
+	 * into `LspMutationContext.session`.
+	 */
+	captureSessionGeneration?: () => GenerationHandle;
 }
 
 interface LspMutationCacheManager {

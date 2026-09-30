@@ -21,7 +21,10 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
-import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import {
+	clearLastAnalyzedStateCache,
+	handleToolResult,
+} from "../../clients/runtime-tool-result.js";
 import {
 	clearFormatterRuntimeState,
 	getFormattersForFile,
@@ -1755,6 +1758,16 @@ describe("monorepo turn-state cwd alignment", () => {
 					current: h.isCurrent(),
 				})),
 			).toEqual([{ generation: entered, current: false }]);
+			// #3763 item 1: the second file's write receipt resumed after the
+			// replacement too. Session 2 edits that file, then writes it: a dead
+			// receipt in session 2's turn would demote the write to deferred.
+			expect(
+				[directPath, existingPath].map((written) => {
+					runtime.recordMutationToolReceipt(written, "edit");
+					return runtime.recordMutationToolReceipt(written, "write")
+						.autofixMode;
+				}),
+			).toEqual(["immediate", "immediate"]);
 		} finally {
 			env.cleanup();
 		}
@@ -1976,6 +1989,69 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 				release.resolve();
 				await handler;
 				expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			},
+		);
+	});
+	it("a session-1 pipeline finishing in session 2's turn does not mark session 2's bytes analysed (#3763)", async () => {
+		// #3763 item 2: the already-analysed latch is keyed by the LIVE turn
+		// index, so a dead pipeline that settled after session 2's turn_start
+		// told session 2's own write of the same bytes that they were analysed:
+		// session 2's write was never dispatched, and the skip also passes over
+		// its turn-state range and change-log receipt.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		await acrossReplacement(
+			"latch",
+			async ({ filePath, runtime, cacheManager }) => {
+				vi.mocked(runPipeline).mockReset();
+				vi.mocked(runPipeline).mockImplementation(async () => {
+					if (vi.mocked(runPipeline).mock.calls.length === 1) {
+						entered.resolve();
+						await release.promise;
+					}
+					return {
+						output: "",
+						hasBlockers: false,
+						isError: false,
+						fileModified: false,
+					};
+				});
+				const handler = handleToolResult(
+					toolResultDeps({ filePath, runtime, cacheManager }),
+				);
+				await entered.promise;
+				runtime.resetForSession();
+				runtime.beginTurn();
+				// index.ts' turn_start clears the latch for the new turn.
+				clearLastAnalyzedStateCache();
+				release.resolve();
+				await handler;
+				await handleToolResult(
+					toolResultDeps({ filePath, runtime, cacheManager }),
+				);
+				expect(vi.mocked(runPipeline).mock.calls.length).toBe(2);
+			},
+		);
+	});
+
+	it("a live pipeline still marks its bytes analysed for its own turn (#3763)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		await acrossReplacement(
+			"latch-live",
+			async ({ filePath, runtime, cacheManager }) => {
+				vi.mocked(runPipeline).mockReset();
+				vi.mocked(runPipeline).mockResolvedValue({
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+				});
+				for (let call = 0; call < 2; call++)
+					await handleToolResult(
+						toolResultDeps({ filePath, runtime, cacheManager }),
+					);
+				expect(vi.mocked(runPipeline).mock.calls.length).toBe(1);
 			},
 		);
 	});

@@ -18,6 +18,8 @@ interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
 	promise: Promise<RunnerResult>;
 	settled: boolean;
 	result?: RunnerResult;
+	/** #3758: the dispatch's session; a drain after it retired drops the result. */
+	session?: GenerationHandle;
 }
 
 const pending: PendingRunnerPromise[] = [];
@@ -43,7 +45,7 @@ export function deferRunnerFindings(
 		void entry.promise.catch(() => undefined);
 		return;
 	}
-	const tracked: PendingRunnerPromise = { ...owned, settled: false };
+	const tracked: PendingRunnerPromise = { ...owned, session, settled: false };
 	// Attach exactly once at ownership time. Re-attaching at every turn end
 	// accumulates handlers on a promise that may never settle (#2122 F8).
 	void tracked.promise.then(
@@ -96,6 +98,17 @@ export async function drainPendingRunnerFindings(
 		});
 	}
 	for (const entry of current) {
+		// #3758: a turn end of another session (a concurrent secondary's, in
+		// the gap before the next session_start clears this store) must not
+		// deliver a retired session's result; the drop leaves the handle's row.
+		if (
+			entry.session !== undefined &&
+			entry.session.guardedWrite(
+				`turn-end:${entry.runnerId}:${entry.filePath}`,
+				() => true,
+			) === undefined
+		)
+			continue;
 		if (entry.settled && entry.result) {
 			results.push({
 				filePath: entry.filePath,
