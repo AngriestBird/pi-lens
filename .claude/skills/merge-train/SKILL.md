@@ -74,7 +74,10 @@ moved lines; include only structural views that changed.
    sweeps is not green — run the sweep on the merge before merging. Survivors
    in the `Mutation diff` comment for the exact head on lines the PR added must
    be killed or shown equivalent (`ci-verdict` prints the `MUTATION` line; it
-   never gates, the review does).
+   never gates, the review does). A `MUTATION` line that reads PENDING, STALE,
+   `0 mutants evaluated` or `no report` is not evidence: wait for the job (about
+   36 minutes, so gating checks can go green first) or name the gap in the merge
+   note.
 5. **Merge.** `gh pr merge <N> --merge` (merge commit, repo convention).
    If "not up to date", `gh api -X PUT .../pulls/<N>/update-branch`, wait for
    CI, re-gate, merge. On GitHub 503s: retry with backoff, never switch to

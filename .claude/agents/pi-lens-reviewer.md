@@ -127,10 +127,10 @@ can trip, and say in your report which you ran and what each returned.
   reason; triage "truncated test population" survivors, never auto-accept them.
   Spot-check at most one of the fixer's hand mutations (revert the guard, leave
   the test, rebuild, expect red) instead of re-running the table; a guard whose
-  removal keeps the suite green is vacuous (#1887). Mutate yourself only what
-  Stryker did not evaluate (a 0-mutant or **partial** run, a file skipped over
-  `--max-files`, a range the sampler dropped). Absent or stale mutation evidence
-  is named in the verdict, never implied green.
+  removal keeps the suite green is vacuous (#1887). When the comment is absent
+  or STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
+  --report <downloaded mutation.json>`). Absent or stale mutation evidence goes
+  under `Could not verify`, never implied green.
 - **Changelog fragment front matter.** The fragment needs YAML front matter
   with a `section:` key set to one of Added, Changed, Deprecated, Removed,
   Fixed, or Security, followed by exactly one top-level entry. Title

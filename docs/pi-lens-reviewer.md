@@ -51,8 +51,10 @@
   `PENDING`). Every survivor on an added line is killed by a test folded into
   the PR or shown equivalent with a reason; triage "truncated test population"
   survivors, never auto-accept them. Spot-check at most one of the fixer's hand
-  mutations instead of re-running the table. Absent or stale mutation evidence
-  goes under `Could not verify`, never implied green.
+  mutations instead of re-running the table. When the comment is absent or
+  STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
+  --report <downloaded mutation.json>`). Absent or stale mutation evidence goes
+  under `Could not verify`, never implied green.
 - Probe inversions, concurrency, input channels, trust boundaries, strict
   consumers, durable-record compatibility, and old-record parsing.
 - Repeat the pattern and population sweeps.
