@@ -2460,7 +2460,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// arm — the fallback for "a service shape without touchFile", which the
 	// real `LSPService` never was.
 	"tools/lsp-diagnostics.ts": 29,
-	"tools/lsp-navigation.ts": 32,
+	// #3601: the rename's staleness capture adds four awaits — `realpath` for
+	// the target, `realpath` plus the content read for every other file the
+	// edit touches, and the `await captureRenameExpectedContent(...)` itself.
+	// They run on the tool call's own lifecycle like every other entry here;
+	// bounding them needs the hook signal threaded to the tool layer (#2523 AC4).
+	"tools/lsp-navigation.ts": 36,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,

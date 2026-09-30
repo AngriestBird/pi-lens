@@ -22,6 +22,7 @@ import { compactRenderResult } from "./render-compact.js";
 import {
 	applyWorkspaceEdit,
 	summarizeWorkspaceEdit,
+	workspaceEditDiskPaths,
 } from "../clients/lsp/edits.js";
 import {
 	getLSPService,
@@ -694,14 +695,16 @@ async function openFileBestEffort(
 	lspService: ReturnType<typeof getLSPService>,
 	filePath: string,
 	waitForDiagnostics = false,
-): Promise<void> {
+): Promise<string | undefined> {
 	let fileContent: string | undefined;
 	try {
 		fileContent = nodeFs.readFileSync(filePath, "utf-8");
 	} catch {
-		return;
+		return undefined;
 	}
-	if (!fileContent) return;
+	// #3601: an empty file is still content a caller can hold the edit to; the
+	// read is returned and the touch below is skipped exactly as before.
+	if (fileContent === "") return "";
 	try {
 		// #2598: `touchFile` is defined unconditionally on the real `LSPService`
 		// (clients/lsp/index.ts), so the former `typeof … === "function"` hedge
@@ -716,6 +719,49 @@ async function openFileBestEffort(
 	} catch {
 		/* LSP server may not be ready yet — proceed anyway */
 	}
+	return fileContent;
+}
+
+/**
+ * #3601: the content on disk that every file this rename's edit writes must
+ * still hold, keyed the way `applyWorkspaceEdit` keys expected content (the
+ * file's realpath). The rename's own target uses the content the pre-rename
+ * `openFileBestEffort` read and sent to the server; a file the edit also
+ * touches is read here, after the server computed the edit but before the
+ * edit reaches its queue. A file the edit creates, or one that cannot be
+ * read, is left out of the map and is not content-checked, matching every
+ * other `expectedContent` caller.
+ */
+async function captureRenameExpectedContent(
+	lspService: ReturnType<typeof getLSPService>,
+	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
+	targetFilePath: string,
+	targetContent: string | undefined,
+): Promise<Map<string, string>> {
+	const expected = new Map<string, string>();
+	let targetRealPath: string | undefined;
+	if (targetContent !== undefined) {
+		try {
+			targetRealPath = await nodeFs.promises.realpath(targetFilePath);
+		} catch {
+			targetRealPath = undefined;
+		}
+	}
+	for (const diskPath of workspaceEditDiskPaths(edit)) {
+		let realPath: string;
+		try {
+			realPath = await nodeFs.promises.realpath(diskPath);
+		} catch {
+			continue;
+		}
+		const content =
+			targetRealPath !== undefined && realPath === targetRealPath
+				? targetContent
+				: await openFileBestEffort(lspService, diskPath);
+		if (content === undefined) continue;
+		expected.set(realPath, content);
+	}
+	return expected;
 }
 
 export function createLspNavigationTool(
@@ -884,6 +930,9 @@ export function createLspNavigationTool(
 			let supported: boolean | null = null;
 			let diagnosticsMode: "pull" | "push-only" | "unknown" = "unknown";
 			let columnResolution: SymbolColumnResolution | undefined;
+			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
+			// held as the expected content for the rename's own target file.
+			let openedFileContent: string | undefined;
 			let mutationContext: LspMutationContext | undefined;
 			let requestedApply = false;
 			const workspaceScopeAttribution: LSPWorkspaceScopeAttribution = {};
@@ -1343,7 +1392,7 @@ export function createLspNavigationTool(
 					);
 				}
 
-				await openFileBestEffort(lspService, filePath);
+				openedFileContent = await openFileBestEffort(lspService, filePath);
 			}
 
 			// Convert 1-based editor coords to 0-based LSP coords.
@@ -1503,6 +1552,16 @@ export function createLspNavigationTool(
 						}
 						const applied = await applyWorkspaceEdit(edit, ctx.cwd || ".", {
 							mutationContext,
+							// #3601: the server computed this edit from the bytes each touched
+							// file held when it answered. A file that changed in between is
+							// refused inside pi's queue, before any write, so the edit never
+							// lands on text it was not computed for.
+							expectedContent: await captureRenameExpectedContent(
+								lspService,
+								edit,
+								filePath,
+								openedFileContent,
+							),
 						});
 						for (const touchedFile of applied.files) {
 							try {
