@@ -3,6 +3,7 @@ import {
 	classifyFiles,
 	classifyIssue,
 	formatPlan,
+	assertNotTruncated,
 	isBot,
 	planContributions,
 } from "../../scripts/update-contributors.mjs";
@@ -128,5 +129,44 @@ describe("update-contributors classification", () => {
 		expect(isBot("app/dependabot")).toBe(true);
 		expect(isBot("renovate[bot]")).toBe(true);
 		expect(isBot("LucaBarrella")).toBe(false);
+		expect(isBot("anyone", true)).toBe(true);
+	});
+
+	// Recurrence: the first bot regex ended in (\\b|$), so human logins that merely
+	// start with a bot name were dropped from the credit list (review of #3773).
+	it("keeps human logins that start with a bot name", () => {
+		for (const login of [
+			"claude-fan",
+			"copilot-jones",
+			"codecov-user",
+			"renovate-x",
+			"github-actions-fan",
+		]) {
+			expect(isBot(login)).toBe(false);
+		}
+	});
+
+	// Recurrence: repo-specific words in the bug regex made docs/UX questions count as bugs.
+	it("does not classify generic titles as bugs", () => {
+		expect(
+			classifyIssue({ title: "Question about reference docs", labels: [] }),
+		).toBeNull();
+		expect(
+			classifyIssue({ title: "Make error messages clearer", labels: [] }),
+		).toBe("ideas");
+		expect(classifyIssue({ title: "Add fix for error", labels: [] })).toBe(
+			"ideas",
+		);
+		expect(
+			classifyIssue({ title: "Multiple failures on start", labels: [] }),
+		).toBe("bug");
+	});
+
+	// Recurrence: a gh list truncated at --limit silently dropped contributors.
+	it("refuses a list that came back at the limit", () => {
+		expect(() => assertNotTruncated([1, 2, 3], "issues", 3)).toThrow(
+			/truncated/,
+		);
+		expect(assertNotTruncated([1, 2], "issues", 3)).toEqual([1, 2]);
 	});
 });

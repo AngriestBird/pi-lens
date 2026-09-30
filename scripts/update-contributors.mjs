@@ -15,17 +15,17 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const BOT_LOGIN =
-	/^app\/|\[bot\]$|^(dependabot|renovate|github-actions|sonarcloud|sonarqubecloud|codecov|copilot|claude)(\b|$)/i;
+const BOT_LOGIN = /^app\/|\[bot\]$/;
 const DOC_FILE = /^(docs\/|\.changelog\/)|(^|\/)[^/]*\.(md|mdx)$/i;
 const TEST_FILE = /^tests\/|(^|\/)[^/]*\.(test|spec)\.[cm]?[jt]sx?$/i;
 const BUG_TITLE =
-	/\b(bug|crash(es)?|error|fail(s|ed|ure)?|broken|collision|ignores?|kills?|false positives?|leak(s|age)?|stale|wrong|silently|corrupts?|uncaught|mistakes?|retain|blind write|dirty|reference|posted)\b/i;
+	/\b(bug|crash(es)?|error|fail(s|ed|ures?)?|broken|collision|ignores?|kills?|false positives?|leak(s|age)?|stale|wrong|silently|corrupts?|uncaught|blind write)\b/i;
 const IDEAS_TITLE =
 	/^(add|allow|support|optional|separate|per-|condense|make|inherit|feature|request|proposal)\b|\b(opt-out|denylist)\b/i;
 
-export function isBot(login) {
-	return BOT_LOGIN.test(login);
+/** gh marks bot authors with `is_bot`; the login patterns cover `app/x` and `x[bot]`. */
+export function isBot(login, isBotFlag = false) {
+	return isBotFlag === true || BOT_LOGIN.test(login);
 }
 
 /** Types earned by one merged PR from its changed file paths. */
@@ -47,8 +47,9 @@ export function classifyIssue({ title = "", labels = [] }) {
 	if (names.includes("enhancement") || names.includes("feature"))
 		return "ideas";
 	if (names.some((n) => /^(nightly-drift|duplicate)$/.test(n))) return null;
-	if (/^(bug|fix)\b/i.test(title) || BUG_TITLE.test(title)) return "bug";
+	if (/^(bug|fix)\b/i.test(title)) return "bug";
 	if (IDEAS_TITLE.test(title)) return "ideas";
+	if (BUG_TITLE.test(title)) return "bug";
 	return null;
 }
 
@@ -58,8 +59,10 @@ export function classifyIssue({ title = "", labels = [] }) {
  * @returns {{login:string,isNew:boolean,add:string[],evidence:Record<string,number[]>}[]}
  */
 export function planContributions({ prs, issues, filesByPr, existing, owner }) {
-	const skip = (login) =>
-		!login || login.toLowerCase() === owner.toLowerCase() || isBot(login);
+	const skip = (login, author) =>
+		!login ||
+		login.toLowerCase() === owner.toLowerCase() ||
+		isBot(login, author?.is_bot);
 	const earned = new Map();
 	const earn = (login, type, n) => {
 		const e = earned.get(login) ?? {};
@@ -68,13 +71,13 @@ export function planContributions({ prs, issues, filesByPr, existing, owner }) {
 	};
 	for (const pr of prs) {
 		const login = pr.author?.login;
-		if (skip(login)) continue;
+		if (skip(login, pr.author)) continue;
 		for (const t of classifyFiles(filesByPr[pr.number] ?? []))
 			earn(login, t, pr.number);
 	}
 	for (const is of issues) {
 		const login = is.author?.login;
-		if (skip(login)) continue;
+		if (skip(login, is.author)) continue;
 		const t = classifyIssue(is);
 		if (t) earn(login, t, is.number);
 	}
@@ -105,6 +108,18 @@ export function formatPlan(plan) {
 		.join("\n");
 }
 
+const LIST_LIMIT = 5000;
+
+/** A list that comes back exactly at the limit may be truncated; refuse to plan from it. */
+export function assertNotTruncated(list, what, limit = LIST_LIMIT) {
+	if (list.length >= limit) {
+		throw new Error(
+			`gh returned ${list.length} ${what} (limit ${limit}); the list may be truncated, raise the limit`,
+		);
+	}
+	return list;
+}
+
 function gh(args) {
 	return JSON.parse(
 		execFileSync("gh", args, {
@@ -129,7 +144,7 @@ function main(argv) {
 		"--state",
 		"merged",
 		"--limit",
-		"5000",
+		String(LIST_LIMIT),
 		"--json",
 		"author,number",
 	]);
@@ -141,14 +156,15 @@ function main(argv) {
 		"--state",
 		"all",
 		"--limit",
-		"5000",
+		String(LIST_LIMIT),
 		"--json",
 		"author,number,title,labels",
 	]);
 	const filesByPr = {};
 	for (const pr of prs) {
 		const login = pr.author?.login;
-		if (!login || isBot(login) || login === rc.projectOwner) continue;
+		if (!login || isBot(login, pr.author?.is_bot) || login === rc.projectOwner)
+			continue;
 		filesByPr[pr.number] = gh([
 			"pr",
 			"view",

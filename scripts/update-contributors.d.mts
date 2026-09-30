@@ -1,15 +1,15 @@
-export declare function isBot(login: string): boolean;
+export declare function isBot(login: string, isBotFlag?: boolean): boolean;
 export declare function classifyFiles(paths: string[]): string[];
 export declare function classifyIssue(issue: {
 	title?: string;
 	labels?: unknown[];
 }): "bug" | "ideas" | null;
 export declare function planContributions(input: {
-	prs: { number: number; author?: { login: string } }[];
+	prs: { number: number; author?: { login: string; is_bot?: boolean } }[];
 	issues: {
 		number: number;
 		title: string;
-		author?: { login: string };
+		author?: { login: string; is_bot?: boolean };
 		labels: unknown[];
 	}[];
 	filesByPr: Record<number, string[]>;
@@ -24,3 +24,8 @@ export declare function planContributions(input: {
 export declare function formatPlan(
 	plan: ReturnType<typeof planContributions>,
 ): string;
+export declare function assertNotTruncated<T>(
+	list: T[],
+	what: string,
+	limit?: number,
+): T[];
