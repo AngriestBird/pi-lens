@@ -421,6 +421,43 @@ describe("turn-end demoted blocker (#1944)", () => {
 		}
 	});
 
+	it("keeps the promotion note on a LIVE promoted STOP block (#3748 item 3)", async () => {
+		// Recurrence guard for the drop above: the note is true of a live
+		// blocker, so only the demotion seam may remove it. A drop applied in
+		// `handleTurnEnd` for every row would strip the rationale from a block
+		// that really does block in delta mode.
+		const env = setupTestEnvironment("pi-lens-3748-live-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "s-3748-live" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const summary = formatDiagnostics([PROMOTED_UNUSED], "blocking").trim();
+			const target = path.join(env.tmpDir, "live-promoted.ts");
+			// Line 12 exists, so the past-EOF gate leaves the record live.
+			fs.writeFileSync(
+				target,
+				`${Array.from({ length: 20 }, (_, i) => `const v${i} = ${i};`).join("\n")}\n`,
+			);
+			runtime.bumpFileSeq(target);
+			runtime.recordInlineBlockers(target, summary, 1, ["lsp"], [12]);
+			markTurnModified(cacheManager, target, env.tmpDir, "s-3748-live");
+
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, env.tmpDir));
+
+			const content =
+				cacheManager.readCache<{ content: string }>(
+					"turn-end-findings",
+					env.tmpDir,
+				)?.data?.content ?? "";
+			expect(content).toContain("Unresolved from this turn");
+			expect(content).not.toContain("[stale — re-run to confirm]");
+			expect(content).toContain("blocks in delta mode");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("does not retire a dependency-drift demotion — its coordinates still exist", async () => {
 		const env = setupTestEnvironment("pi-lens-1944-drift-");
 		try {

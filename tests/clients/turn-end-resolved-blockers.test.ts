@@ -66,10 +66,11 @@ function makeTurnEndDeps(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
+	lensGuard = false,
 ) {
 	return {
 		ctxCwd: cwd,
-		getFlag: () => false,
+		getFlag: (name: string) => lensGuard && name === "lens-guard",
 		dbg: () => {},
 		runtime,
 		cacheManager,
@@ -90,23 +91,29 @@ async function runTurnEnd(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
+	lensGuard = false,
 ): Promise<string> {
-	await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+	await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd, lensGuard));
 	return (
 		consumeTurnEndFindings(cacheManager, cwd, runtime)?.messages?.[0]
 			?.content ?? ""
 	);
 }
 
-/** `resolvedBlockerFiles` from every `turn_end` tool_result so far. */
-function resolvedBlockerFileCounts(): Array<number | undefined> {
+/** One `turn_end` tool_result metadata field, from every row so far. */
+function turnEndMetadata(field: string): Array<number | undefined> {
 	return logLatency.mock.calls
 		.map((call) => call[0])
 		.filter(
 			(entry: any) =>
 				entry?.type === "tool_result" && entry?.toolName === "turn_end",
 		)
-		.map((entry: any) => entry?.metadata?.resolvedBlockerFiles);
+		.map((entry: any) => entry?.metadata?.[field]);
+}
+
+/** `resolvedBlockerFiles` from every `turn_end` tool_result so far. */
+function resolvedBlockerFileCounts(): Array<number | undefined> {
+	return turnEndMetadata("resolvedBlockerFiles");
 }
 
 /** Seed a recorded blocker, a clean dispatch that clears it, a touched turn. */
@@ -170,46 +177,52 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 		}
 	});
 
-	it("names a file retired by a confirmed-clean check, from the write-order token", async () => {
-		const env = setupTestEnvironment("pi-lens-3218-retire-");
-		try {
-			const runtime = new RuntimeCoordinator();
-			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
-			runtime.beginTurn();
-			const cacheManager = new CacheManager(false);
-			const target = path.join(env.tmpDir, "a.ts");
-			fs.writeFileSync(target, "const a = 1;\nconst b = 2;\n");
-			const recordOrder = runtime.nextWriteIndex();
-			runtime.recordInlineBlockers(
-				target,
-				SUMMARY,
-				recordOrder,
-				["lsp"],
-				[1, 2],
-				undefined,
-				blockerDiagnostics(2),
-			);
-			// `lens_diagnostics` reserves a turn-leading order token (#3540).
-			const order = runtime.nextWriteOrderToken();
-			expect(
-				runtime.retireInlineBlockerOnConfirmedClean(target, order, ["lsp"]),
-			).toBe(true);
-			cacheManager.addModifiedRange(
-				target,
-				{ start: 1, end: 1 },
-				false,
-				env.tmpDir,
-				"session-3218",
-			);
+	it("names a file retired by a confirmed-clean check on a read-only turn", async () => {
+		// Recurrence (review-3776 F2/F4): `lens_diagnostics` confirms clean on a
+		// turn with NO modified files, which takes the read-only early return;
+		// the round-1 test called `addModifiedRange` first and never reached it.
+		// No write happened, so the line must not claim one.
+		for (const lensGuard of [false, true]) {
+			logLatency.mockClear();
+			const env = setupTestEnvironment("pi-lens-3218-retire-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const target = path.join(env.tmpDir, "a.ts");
+				fs.writeFileSync(target, "const a = 1;\nconst b = 2;\n");
+				runtime.recordInlineBlockers(
+					target,
+					SUMMARY,
+					runtime.nextWriteIndex(),
+					["lsp"],
+					[1, 2],
+					undefined,
+					blockerDiagnostics(2),
+				);
+				// `lens_diagnostics` reserves a turn-leading order token (#3540).
+				const order = runtime.nextWriteOrderToken();
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(target, order, ["lsp"]),
+				).toBe(true);
+				expect(cacheManager.readTurnState(env.tmpDir).files).toEqual({});
 
-			const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				const content = await runTurnEnd(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+					lensGuard,
+				);
 
-			expect(content).toContain(
-				"Resolved this turn: a.ts (2 blocker(s) cleared by the 2nd write)",
-			);
-			expect(resolvedBlockerFileCounts()).toEqual([1]);
-		} finally {
-			env.cleanup();
+				expect(content).toContain(
+					"Resolved this turn: a.ts (2 blocker(s) confirmed clean)",
+				);
+				expect(content).not.toContain("cleared by");
+				expect(resolvedBlockerFileCounts()).toEqual([1]);
+			} finally {
+				env.cleanup();
+			}
 		}
 	});
 
@@ -309,6 +322,9 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			expect(content.match(/Resolved this turn:/g) ?? []).toHaveLength(10);
 			expect(content).toContain("… and 1 more");
 			expect(resolvedBlockerFileCounts()).toEqual([10]);
+			// The unit is named: `resolvedBlockerFiles` is the files LISTED, the
+			// sibling field is the retire events past the cap (review-3776 F7).
+			expect(turnEndMetadata("resolvedBlockerFilesDropped")).toEqual([1]);
 		} finally {
 			env.cleanup();
 		}
@@ -359,5 +375,344 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	it("delivers the line under lens-guard and keeps the record until it is consumed", async () => {
+		// Recurrence (review-3776 F3): every round-1 case ran with lens-guard OFF,
+		// so deleting `resolvedParts.length === 0 &&` from the no-blockers
+		// clean-up left the whole suite green while the clean-up erased the
+		// guard record (and the line) for lens-guard users.
+		const env = setupTestEnvironment("pi-lens-3218-guard-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const target = path.join(env.tmpDir, "a.ts");
+			seedResolvedBlocker(runtime, cacheManager, env.tmpDir, target);
+
+			const content = await runTurnEnd(runtime, cacheManager, env.tmpDir, true);
+
+			expect(content).toContain(
+				"Resolved this turn: a.ts (2 blocker(s) cleared by the 5th write)",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("renders the write ordinal with its irregular teens", async () => {
+		// Recurrence (review-3776 F5): the 11-13 guard in `formatWriteOrdinal`
+		// could be deleted with no red, shipping "11st", "12nd" and "13rd".
+		const env = setupTestEnvironment("pi-lens-3218-ordinal-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const target = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(target, "const a = 1;\n");
+			const cases: Array<[number, string]> = [
+				[1, "1st"],
+				[2, "2nd"],
+				[3, "3rd"],
+				[4, "4th"],
+				[11, "11th"],
+				[12, "12th"],
+				[13, "13th"],
+				[21, "21st"],
+				[22, "22nd"],
+			];
+			for (const [index, ordinal] of cases) {
+				runtime.recordInlineBlockers(
+					target,
+					SUMMARY,
+					0,
+					["lsp"],
+					[1, 2],
+					undefined,
+					blockerDiagnostics(2),
+				);
+				runtime.clearInlineBlockers(target, index);
+				cacheManager.addModifiedRange(
+					target,
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+					"session-3218",
+				);
+				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				expect(content).toContain(`cleared by the ${ordinal} write)`);
+				// Reset the write-order guard for the next case's lower record token.
+				runtime.beginTurn();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("names no write when a legacy caller supplies no order", async () => {
+		// Recurrence (review-3776 F5/M6): with no order token the retire fell
+		// back to the RECORDING write's index, so the line said "cleared by the
+		// 3rd write" about the write that created the blocker.
+		const env = setupTestEnvironment("pi-lens-3218-legacy-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const target = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(target, "const a = 1;\n");
+			runtime.recordInlineBlockers(
+				target,
+				SUMMARY,
+				3,
+				["lsp"],
+				[1, 2],
+				undefined,
+				blockerDiagnostics(2),
+			);
+			expect(runtime.clearInlineBlockers(target)).toBe(true);
+			cacheManager.addModifiedRange(
+				target,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"session-3218",
+			);
+
+			const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain("Resolved this turn: a.ts (2 blocker(s))");
+			expect(content).not.toContain("cleared by");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops a resolved entry when the file is blocking again", () => {
+		// Recurrence (review-3776 F1 design): a retained entry for a file that
+		// blocks again must not linger and turn into a false claim once the new
+		// record is later removed some other way.
+		const env = setupTestEnvironment("pi-lens-3218-supersede-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			const target = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(target, "const a = 1;\n");
+			runtime.recordInlineBlockers(target, SUMMARY, 1, ["lsp"], [1, 2]);
+			runtime.clearInlineBlockers(target, 2);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+			runtime.recordInlineBlockers(target, SUMMARY, 3, ["lsp"], [1, 2]);
+
+			expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+			expect(runtime.consumeResolvedBlockerFiles(() => false)).toEqual({
+				files: [],
+				dropped: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	describe("a retirement that lands during turn-end processing (review-3776 F1)", () => {
+		// Recurrence: `consumeResolvedBlockerFiles` ran ~3300 lines after the
+		// `unresolvedBlockers` snapshot. A retire in that window put the file in
+		// the resolved list while the SAME message still told the agent the file
+		// was unresolved; the filter then dropped the entry AND the consume
+		// cleared it, so the agent kept a STOP block for a clean file forever.
+		for (const lensGuard of [false, true]) {
+			it(
+				lensGuard
+					? "carries a retirement that lands during turn-end processing under lens-guard"
+					: "carries a retirement that lands during turn-end processing to the next turn_end",
+				async () => {
+					const env = setupTestEnvironment("pi-lens-3218-during-");
+					try {
+						const runtime = new RuntimeCoordinator();
+						runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+						runtime.beginTurn();
+						const cacheManager = new CacheManager(false);
+						const target = path.join(env.tmpDir, "a.ts");
+						fs.writeFileSync(target, "const a = 1;\nconst b = 2;\n");
+						runtime.bumpFileSeq(target);
+						runtime.recordInlineBlockers(
+							target,
+							SUMMARY,
+							3,
+							["lsp"],
+							[1, 2],
+							undefined,
+							blockerDiagnostics(2),
+						);
+						cacheManager.addModifiedRange(
+							target,
+							{ start: 1, end: 1 },
+							false,
+							env.tmpDir,
+							"session-3218",
+						);
+						// The retire lands after the turn_end snapshot of the unresolved
+						// blockers: `consumeCascadeRuns` is awaited past it.
+						const consumeCascadeRuns = runtime.consumeCascadeRuns.bind(runtime);
+						const spy = vi
+							.spyOn(runtime, "consumeCascadeRuns")
+							.mockImplementation(() => {
+								runtime.clearInlineBlockers(target, 9);
+								return consumeCascadeRuns();
+							});
+
+						const first = await runTurnEnd(
+							runtime,
+							cacheManager,
+							env.tmpDir,
+							lensGuard,
+						);
+						spy.mockRestore();
+
+						expect(first).toContain("Unresolved from this turn — a.ts");
+						expect(first).not.toContain("Resolved");
+
+						runtime.beginTurn();
+						cacheManager.addModifiedRange(
+							target,
+							{ start: 1, end: 1 },
+							false,
+							env.tmpDir,
+							"session-3218",
+						);
+						const second = await runTurnEnd(
+							runtime,
+							cacheManager,
+							env.tmpDir,
+							lensGuard,
+						);
+
+						expect(second).toContain(
+							"Resolved since the last report: a.ts (2 blocker(s) cleared by the 9th write)",
+						);
+						expect(second).not.toContain("Unresolved");
+						expect(second).not.toContain("Resolved this turn");
+						expect(resolvedBlockerFileCounts()).toEqual([0, 1]);
+					} finally {
+						env.cleanup();
+					}
+				},
+			);
+		}
+	});
+
+	describe("turn_end paths that deliver nothing carry the entry (review-3776 F2)", () => {
+		// Recurrence: the list was consumed only at the composer, so these two
+		// early returns left the entry behind and a LATER turn rendered it as
+		// "Resolved this turn" (probe P3: two turns stale, mislabelled).
+		async function laterTurn(
+			runtime: RuntimeCoordinator,
+			cacheManager: CacheManager,
+			cwd: string,
+			target: string,
+		): Promise<string> {
+			runtime.beginTurn();
+			cacheManager.addModifiedRange(
+				target,
+				{ start: 1, end: 1 },
+				false,
+				cwd,
+				"session-3218",
+			);
+			return runTurnEnd(runtime, cacheManager, cwd);
+		}
+
+		it("carries an entry across a max-cycles turn_end", async () => {
+			const env = setupTestEnvironment("pi-lens-3218-maxcycles-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const target = path.join(env.tmpDir, "a.ts");
+				seedResolvedBlocker(runtime, cacheManager, env.tmpDir, target);
+				const state = cacheManager.readTurnState(env.tmpDir);
+				state.turnCycles = state.maxCycles;
+				cacheManager.writeTurnState(state, env.tmpDir);
+
+				const first = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				expect(first).toBe("");
+				expect(resolvedBlockerFileCounts()).toEqual([]);
+
+				const later = await laterTurn(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+					target,
+				);
+				expect(later).toContain(
+					"Resolved since the last report: a.ts (2 blocker(s) cleared by the 5th write)",
+				);
+				expect(later).not.toContain("Resolved this turn");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("carries an entry across a foreign-owner turn_end", async () => {
+			const env = setupTestEnvironment("pi-lens-3218-foreign-");
+			const killSpy = vi
+				.spyOn(process, "kill")
+				.mockImplementation(() => true as never);
+			try {
+				const runtime = new RuntimeCoordinator();
+				runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const target = path.join(env.tmpDir, "a.ts");
+				fs.writeFileSync(target, "const a = 1;\nconst b = 2;\n");
+				runtime.recordInlineBlockers(
+					target,
+					SUMMARY,
+					3,
+					["lsp"],
+					[1, 2],
+					undefined,
+					blockerDiagnostics(2),
+				);
+				runtime.clearInlineBlockers(target, 5);
+				cacheManager.addModifiedRange(
+					target,
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+					"mcp-foreign",
+					"mcp",
+				);
+				const foreign = cacheManager.readTurnState(env.tmpDir);
+				foreign.owner!.pid = process.pid + 1;
+				cacheManager.writeTurnState(foreign, env.tmpDir);
+
+				const first = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				expect(first).toBe("");
+				expect(resolvedBlockerFileCounts()).toEqual([]);
+
+				killSpy.mockRestore();
+				cacheManager.writeTurnState(
+					{ files: {}, turnCycles: 0, maxCycles: 3, lastUpdated: "" },
+					env.tmpDir,
+				);
+				const later = await laterTurn(
+					runtime,
+					cacheManager,
+					env.tmpDir,
+					target,
+				);
+				expect(later).toContain(
+					"Resolved since the last report: a.ts (2 blocker(s) cleared by the 5th write)",
+				);
+				expect(later).not.toContain("Resolved this turn");
+			} finally {
+				killSpy.mockRestore();
+				env.cleanup();
+			}
+		});
 	});
 });

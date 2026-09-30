@@ -880,7 +880,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		}
 		resetFormatService();
-		if (pendingRunnerFindingsSize() === 0) return;
+		// #3218 criterion 2: a retirement nobody has reported (a
+		// `lens_diagnostics` confirmation lands on exactly this turn) falls
+		// through to the composer like a carried runner finding.
+		if (pendingRunnerFindingsSize() === 0 && !runtime.hasResolvedBlockerFiles())
+			return;
 	}
 
 	// Cancel any pending idle reset since we're actively working. #1618: also
@@ -4313,30 +4317,35 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// file, how many blockers, and the retiring write; this composer only
 	// formats them. Consumed HERE, once, so a retire is delivered exactly once
 	// (the coordinator clears its list and the line cannot re-serve).
-	const {
-		files: resolvedBlockerFileList,
-		dropped: resolvedBlockerFilesDropped,
-	} = runtime.consumeResolvedBlockerFiles();
 	const unresolvedKeys = new Set(
 		unresolvedBlockers.map((record) =>
 			normalizeMapKey(path.resolve(record.filePath)),
 		),
 	);
-	const resolvedLines = resolvedBlockerFileList
-		// A file that is blocking AGAIN by the time this turn ends is not
-		// resolved now; its live `Unresolved from this turn` section is the
-		// current truth, and a "Resolved" line beside it would contradict.
-		.filter(
-			(entry) =>
-				!unresolvedKeys.has(normalizeMapKey(path.resolve(entry.filePath))),
-		)
-		.map((entry) => {
-			const writeClause =
-				entry.writeIndex === undefined
-					? ""
-					: ` cleared by the ${formatWriteOrdinal(entry.writeIndex)} write`;
-			return `Resolved this turn: ${toRunnerDisplayPath(cwd, entry.filePath)} (${entry.blockerCount} blocker(s)${writeClause})`;
-		});
+	// A file this message still lists under `Unresolved` is HELD for the next
+	// turn_end, not dropped: a retire that landed after the snapshot above
+	// (the awaits between it and here) is real, and discarding it leaves the
+	// agent holding a STOP block for a file that is clean.
+	const {
+		files: resolvedBlockerFileList,
+		dropped: resolvedBlockerFilesDropped,
+	} = runtime.consumeResolvedBlockerFiles((filePath) =>
+		unresolvedKeys.has(normalizeMapKey(path.resolve(filePath))),
+	);
+	const resolvedLines = resolvedBlockerFileList.map((entry) => {
+		const clause = entry.confirmedClean
+			? " confirmed clean"
+			: entry.writeIndex === undefined
+				? ""
+				: ` cleared by the ${formatWriteOrdinal(entry.writeIndex)} write`;
+		// "This turn" only for a retire from this turn; an entry a turn_end
+		// that delivered nothing left behind is "since the last report".
+		const label =
+			entry.turnIndex === runtime.turnIndex
+				? "Resolved this turn"
+				: "Resolved since the last report";
+		return `${label}: ${toRunnerDisplayPath(cwd, entry.filePath)} (${entry.blockerCount} blocker(s)${clause})`;
+	});
 	if (resolvedBlockerFilesDropped > 0) {
 		resolvedLines.push(`… and ${resolvedBlockerFilesDropped} more`);
 	}
@@ -4577,11 +4586,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			blockerSections: blockerParts.length,
 			staleSecretSections: staleSecretParts.length,
 			advisorySections: advisoryParts.length,
-			// #3218 criterion 2: how many files this turn named as resolved.
-			// The line itself is in the delivered content; this counter makes
-			// the feature visible in latency.log even when the block is
-			// suppressed or the agent reads only telemetry.
+			// #3218 criterion 2: how many files this turn LISTED as resolved
+			// (held-back entries are not counted), and how many retire events
+			// fell past the cap. The line itself is in the delivered content;
+			// these make the feature visible in latency.log even when the block
+			// is suppressed or the agent reads only telemetry.
 			resolvedBlockerFiles: resolvedBlockerFileList.length,
+			resolvedBlockerFilesDropped,
 			// #1944 AC3: an empty advisory section on its own cannot say whether
 			// the turn had nothing to report or dropped something. This counter
 			// answers that from latency.log even when the payload is empty, and

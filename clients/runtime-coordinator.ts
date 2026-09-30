@@ -338,12 +338,21 @@ interface ResolvedBlockerFile {
 	/** How many blocking diagnostics the retired record carried. */
 	blockerCount: number;
 	/**
-	 * The retiring write's index. For `clearInlineBlockers` this is the clean
-	 * dispatch's own index; for `retireInlineBlockerOnConfirmedClean` it is
-	 * the write-index half of the confirmed-clean order token. `undefined`
-	 * when a legacy caller supplied no order at all.
+	 * The retiring write's index, from `clearInlineBlockers`'s own order.
+	 * `undefined` when no write retired it: a confirmed-clean check takes a
+	 * write slot but performs no write, and a legacy caller may supply no order.
+	 * Never the RECORDING write's index, which would name the write that created
+	 * the blocker as the one that cleared it.
 	 */
 	writeIndex: number | undefined;
+	/** Retired by `retireInlineBlockerOnConfirmedClean`, not by a clean write. */
+	confirmedClean: boolean;
+	/**
+	 * `turnIndex` when the retire happened. The composer says "this turn" only
+	 * for an entry from its own turn; a carried entry (a turn_end that delivered
+	 * nothing, or a retire that landed mid-handler) says "since the last report".
+	 */
+	turnIndex: number;
 }
 
 /**
@@ -551,8 +560,10 @@ export class RuntimeCoordinator {
 	 * #3218 criterion 2: inline blockers a fresh clean verdict retired this
 	 * turn, keyed by resolved path so a file is named once. Bounded at
 	 * `MAX_RESOLVED_BLOCKER_FILES`; the overflow is counted so the delivery can
-	 * still say "… and N more". The turn-end composer consumes it, so a retire
-	 * is delivered exactly once, and session reset clears it.
+	 * still say "… and N more" (counting retire events past the cap). The
+	 * turn-end composer consumes it, so a retire is delivered exactly once; an
+	 * entry no turn_end delivered stays until one does, and session reset clears
+	 * it.
 	 */
 	private readonly _resolvedBlockerFilesThisTurn =
 		new PathKeyedMap<ResolvedBlockerFile>(normalizeMapKey);
@@ -1410,6 +1421,10 @@ export class RuntimeCoordinator {
 			)
 		)
 			return undefined;
+		// #3218 criterion 2: a newer blocking verdict supersedes an earlier
+		// retirement of the same file — the agent is blocked on it again, so a
+		// carried "Resolved" entry would be a false claim.
+		this._resolvedBlockerFilesThisTurn.delete(filePath);
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
 			summary,
@@ -1432,16 +1447,17 @@ export class RuntimeCoordinator {
 
 	/**
 	 * #3218 criterion 2: remember one file whose blocker a clean verdict just
-	 * retired, for the turn-end "Resolved this turn" line. Called from the two
-	 * retire seams (`clearInlineBlockers` and
-	 * `retireInlineBlockerOnConfirmedClean`) with the record that was removed
-	 * and the retiring write's order, so the composer never has to re-derive
-	 * the count from rendered text. Bounded at `MAX_RESOLVED_BLOCKER_FILES`;
-	 * the overflow is counted for the "… and N more" tail.
+	 * retired, for the turn-end "Resolved" line. Called from the two retire
+	 * seams (`clearInlineBlockers` and `retireInlineBlockerOnConfirmedClean`)
+	 * with the record that was removed and the retiring write's order, so the
+	 * composer never has to re-derive the count from rendered text. Bounded at
+	 * `MAX_RESOLVED_BLOCKER_FILES`; the overflow is counted for the "… and N
+	 * more" tail.
 	 */
 	private noteResolvedBlockerFile(
 		record: InlineBlockerRecord,
 		retiringWriteOrder: number | undefined,
+		confirmedClean: boolean,
 	): void {
 		if (
 			!this._resolvedBlockerFilesThisTurn.has(record.filePath) &&
@@ -1454,12 +1470,13 @@ export class RuntimeCoordinator {
 			filePath: record.filePath,
 			blockerCount: record.diagnostics?.length ?? record.lines?.length ?? 1,
 			// A write order token carries its turn above the write index
-			// (`writeOrderToken`); the line names only the write. A raw index
-			// passed by a legacy caller is its own index under the same mask.
+			// (`writeOrderToken`); the line names only the write.
 			writeIndex:
-				retiringWriteOrder === undefined
-					? record.writeIndex
+				confirmedClean || retiringWriteOrder === undefined
+					? undefined
 					: retiringWriteOrder % 2 ** 32,
+			confirmedClean,
+			turnIndex: this._turnIndex,
 		});
 	}
 
@@ -1484,6 +1501,7 @@ export class RuntimeCoordinator {
 			this.noteResolvedBlockerFile(
 				existing,
 				writeOrderToken(orderTurn, writeIndex),
+				false,
 			);
 		}
 		this._pendingInlineBlockers.delete(path.resolve(filePath));
@@ -1760,23 +1778,45 @@ export class RuntimeCoordinator {
 		const covered = new Set(coveredSources ?? []);
 		if (!existing.sources.every((source) => covered.has(source))) return false;
 		// #3218 criterion 2: this retire is a resolution — name it at turn end.
-		this.noteResolvedBlockerFile(existing, confirmedAtWriteOrder);
+		this.noteResolvedBlockerFile(existing, undefined, true);
 		this._pendingInlineBlockers.delete(key);
 		return true;
 	}
 
 	/**
-	 * #3218 criterion 2: hand the turn-end composer the files whose blockers a
-	 * fresh clean verdict retired this turn, then clear the list so a retire is
-	 * delivered exactly once. The "… and N more" overflow count rides along.
+	 * #3218 criterion 2: a retirement no turn_end has delivered yet. The
+	 * read-only turn_end path uses it to fall through to the composer instead of
+	 * returning early, so a `lens_diagnostics` confirmation reaches the agent.
 	 */
-	consumeResolvedBlockerFiles(): {
+	hasResolvedBlockerFiles(): boolean {
+		return this._resolvedBlockerFilesThisTurn.size > 0;
+	}
+
+	/**
+	 * #3218 criterion 2: hand the turn-end composer the retired files it can
+	 * deliver, and remove exactly those, so a retire is delivered once. An entry
+	 * `holdBack` names STAYS for the next turn_end: the composer holds back a
+	 * file its own message still lists as unresolved (a retire that landed after
+	 * the blockers were snapshotted), because one message must never say both.
+	 * The "… and N more" overflow count rides with a batch that lists files and
+	 * is otherwise kept, so a bare tail is never delivered.
+	 */
+	consumeResolvedBlockerFiles(holdBack: (filePath: string) => boolean): {
 		files: ResolvedBlockerFile[];
 		dropped: number;
 	} {
-		const files = [...this._resolvedBlockerFilesThisTurn.values()];
-		const dropped = this._resolvedBlockerFilesDropped;
+		const files: ResolvedBlockerFile[] = [];
+		const held: ResolvedBlockerFile[] = [];
+		for (const entry of this._resolvedBlockerFilesThisTurn.values()) {
+			(holdBack(entry.filePath) ? held : files).push(entry);
+		}
+		// Rebuild, never delete-in-place (see `reconcileInlineBlockers`).
 		this._resolvedBlockerFilesThisTurn.clear();
+		for (const entry of held) {
+			this._resolvedBlockerFilesThisTurn.set(entry.filePath, entry);
+		}
+		if (files.length === 0) return { files, dropped: 0 };
+		const dropped = this._resolvedBlockerFilesDropped;
 		this._resolvedBlockerFilesDropped = 0;
 		return { files, dropped };
 	}
