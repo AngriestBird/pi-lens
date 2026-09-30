@@ -55,7 +55,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import extension from "../index.js";
 import {
 	clearLatencyLog,
@@ -70,6 +78,21 @@ import {
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+// Every vitest worker shares one PI_LENS_HOME (tests/support/vitest-setup.ts),
+// and this file drives real session_starts with test mode off: each appends a
+// `config_resolved` row to latency.log and `config resolved` lines to
+// sessionstart.log, and beforeEach truncates latency.log. On the shared home
+// that fed rows into, and truncated rows out of, a concurrent reader
+// (tests/clients/config-resolved-phase.test.ts) — the sibling defect #3682
+// fixes. The loggers fix their paths when they load, so pin a private home
+// before any import and remove it after the file.
+const wiringHome = vi.hoisted(() => {
+	const previous = process.env.PI_LENS_HOME;
+	const home = `${previous ?? "."}/pi-lens-3682-config-wiring-home-${process.pid}`;
+	process.env.PI_LENS_HOME = home;
+	return { home, previous };
+});
 
 interface ConfigResolvedRow {
 	filePath: string;
@@ -139,6 +162,14 @@ afterEach(async () => {
 		await import("../clients/lsp/config.js");
 	resetLSPConfigStateForTests();
 	for (const dir of roots.splice(0)) removeTempDirSync(dir);
+});
+
+afterAll(async () => {
+	await flushLatencyLog();
+	await flushSessionStartLog();
+	removeTempDirSync(wiringHome.home);
+	if (wiringHome.previous === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = wiringHome.previous;
 });
 
 /** A fresh workspace, so index.ts's process-lifetime cwd memo cannot skip it. */

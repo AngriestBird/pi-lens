@@ -63,6 +63,7 @@ import {
 	type ProcessTableOptions,
 	readProcessStart,
 } from "./process-snapshot.js";
+import { queueRegistryMutation } from "./instance-registry-tail.js";
 import { getProcessSingleton } from "./process-singletons.js";
 import { getSubagentIdentity, isSubagentSession } from "./subagent-mode.js";
 
@@ -678,46 +679,6 @@ export interface RecordLspChildInput {
 	};
 }
 
-// Every mutation routed through this tail (`registerInstance`,
-// `registerInstanceRoot`, `recordLspChild`, `removeLspChild`) reads the WHOLE
-// registry file, edits this process's own entry, and writes the whole
-// file back. Two such mutations from the SAME process — e.g. a client-ceiling
-// eviction's `removeLspChild(victimPid)` racing the replacement spawn's
-// `recordLspChild(newChild)` that follows it — are ordinary concurrent async
-// calls with no ordering guarantee between them. Without serialization, the
-// later WRITE can be built from a read taken before the earlier write landed,
-// silently reverting it (last-writer-wins losing a same-process update, not
-// just the already-accepted cross-process one — see the module docstring).
-// #1724: this is why a forced LSP shutdown's deregistration could get
-// clobbered by a concurrent respawn's registration. One shared tail
-// serializes every same-process registry mutation of this shape so "record"
-// and "remove" can never interleave their read-modify-write against each
-// other — the single seam both the forced-shutdown and self-crash
-// deregistration paths route through.
-//
-// #2146: the tail must be the PROCESS's one serialization point, and module
-// scope did not deliver that. pi evaluates the pi-lens module graph up to nine
-// times per process, so this module had up to nine tails, each serializing only
-// its own callers. The dogfood run measured the consequence directly: three
-// `instance-registry-corrupt` records inside nine seconds, with two project
-// roots and one live instance's entry lost from `instances.json` — exactly the
-// torn read-modify-write this tail exists to prevent, reintroduced by
-// duplication rather than by a missing await. Keying it on `globalThis` makes
-// every evaluation queue onto the same tail.
-const REGISTRY_TAIL_FAMILY = "instance-registry.mutation-tail";
-/** Bump when the tail cell's shape changes. */
-const REGISTRY_TAIL_VERSION = 1;
-
-function registryTailState(): { tail: Promise<void> } {
-	return getProcessSingleton(
-		REGISTRY_TAIL_FAMILY,
-		REGISTRY_TAIL_VERSION,
-		() => ({
-			tail: Promise.resolve(),
-		}),
-	);
-}
-
 /**
  * #3447: the root `registerInstance` was last asked to register, and the
  * registry file it was meant for. A registration can be dropped for good --
@@ -795,25 +756,9 @@ function rememberRegistrationRoot(root: string | undefined): void {
 	intent.target = root === undefined ? undefined : registryPath();
 }
 
-function queueRegistryMutation(op: () => Promise<void>): Promise<void> {
-	const state = registryTailState();
-	const run = state.tail.then(op);
-	state.tail = run.catch(() => {});
-	return run;
-}
-
-/**
- * Test-only: resolve once every registry mutation queued so far has landed.
- *
- * Several production call sites fire registry writes and deliberately do not
- * await them (`void registerInstance(...)` in the session_start handler), so a
- * test that reads the file straight afterwards races them. Queuing an empty op
- * on the same tail joins the queue rather than sleeping on it, which keeps the
- * wait exact instead of timing-dependent.
- */
-export function _settleRegistryMutationsForTests(): Promise<void> {
-	return queueRegistryMutation(async () => {});
-}
+// The tail lives in a dependency leaf so the shared test setup can join it
+// without loading this module's import graph (#3703).
+export { _settleRegistryMutationsForTests } from "./instance-registry-tail.js";
 
 /** Append/replace (by pid) an LSP child under this process's entry. */
 export function recordLspChild(entry: RecordLspChildInput): Promise<void> {
@@ -1043,11 +988,10 @@ function withoutOwnEntry(
  * {@link deregisterInstance}, for a worktree this host stops serving while the
  * host itself keeps running.
  *
- * SYNC fs inside, matching `deregisterInstance`'s `session_shutdown` contract
- * (#234: no child spawns at teardown; this function spawns none). Removing the
- * LAST root removes the whole entry — a host serving no root is not a peer any
- * caller should find. Removing the primary promotes the next root to
- * `projectRoot` rather than leaving a stale scalar behind.
+ * The operation runs on the registry tail and uses async filesystem calls.
+ * Removing the LAST root removes the whole entry — a host serving no root is
+ * not a peer any caller should find. Removing the primary promotes the next
+ * root to `projectRoot` rather than leaving a stale scalar behind.
  *
  * QUEUED, unlike `deregisterInstance` (#2130 round 2). The two look alike but
  * run at opposite ends of a process's life. `deregisterInstance` runs as the
@@ -1065,11 +1009,8 @@ function withoutOwnEntry(
  * but they can no longer read the file straight afterwards and expect the
  * removal to be visible.
  *
- * The sync attempt below can meet this process's OWN hold, the same shape
- * #3498 fixed for `deregisterInstance` (#3587): this op already runs on the
- * tail, so unlike `deregisterInstance` it never needs to bypass the tail to
- * retry — it just waits through the lock lease in place, on the same tail
- * slot, before giving the next queued op its turn.
+ * The single lock below waits through the lease for a peer or own prior
+ * holder, on this tail slot, before giving the next queued op its turn.
  */
 export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
 	const generation = registrationGeneration().capture();
@@ -1080,9 +1021,9 @@ export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
 
 /**
  * The write this root removal must make (or none), plus the intent-cell side
- * effect, from a fresh read (#3587). Shared by the sync attempt and its
- * queued fallback so a holder that outlasts the sync wait gets the identical
- * decision, not a second, possibly-stale one. Keys the entry through
+ * effect, from a fresh read (#3587). The single lease-waiting lock path calls
+ * this once under the lock, so a holder cannot force a second, stale decision.
+ * Keys the entry through
  * `isOwnEntry`, and the whole-entry removal through `withoutOwnEntry`, exactly
  * as `deregisterInstance` does (#3498).
  */
@@ -1130,49 +1071,12 @@ function planRootRemoval(
 	};
 }
 
-function deregisterInstanceRootNow(
+async function deregisterInstanceRootNow(
 	projectRoot: string,
 	generation: GenerationHandle,
-): Promise<void> | void {
+): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const normalizedRoot = normalizeFilePath(projectRoot);
-	const selfStart = ownProcessStartIfKnown();
-	const applied = withInstanceRegistryLockSync(registryPath(), () => {
-		const next = planRootRemoval(
-			readRegistrySync(),
-			normalizedRoot,
-			selfStart,
-			generation,
-		);
-		if (next) writeRegistrySync(next);
-		return true;
-	});
-	if (applied) return;
-	// #3587: the sync wait can meet this process's own hold (the heartbeat, or
-	// a registration under the lock) or a peer past 500ms, exactly as #3498
-	// found for `deregisterInstance`. This op already runs on the registry
-	// tail, so there is nothing to bypass: queue the same op behind the
-	// holder, on this tail slot, waiting through the lock lease instead of
-	// leaking the root for the rest of the session.
-	incrementDegradationCount({
-		kind: "instance-registry-deregister-queued",
-		subject: String(process.pid),
-		reason:
-			"the sync removal could not take the registry lock; queued behind the holder",
-	});
-	return deregisterInstanceRootAfterHolder(normalizedRoot, generation);
-}
-
-/**
- * The removal `deregisterInstanceRootNow` could not make in its sync wait
- * (#3587), mirroring `deregisterInstanceAfterHolder` (#3498): waits through
- * the lock lease, so a holder that outlives the sync wait and one ordinary
- * async wait still cannot make it drop.
- */
-async function deregisterInstanceRootAfterHolder(
-	normalizedRoot: string,
-	generation: GenerationHandle,
-): Promise<void> {
 	const selfStart = await ownProcessStart(startReadOptions());
 	await withInstanceRegistryLock(
 		registryPath(),

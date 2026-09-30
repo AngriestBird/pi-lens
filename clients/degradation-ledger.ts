@@ -399,12 +399,11 @@ export type DegradationKind =
 	 */
 	| "instance-registry-deregister-landed"
 	/**
-	 * #3498: the sync removal `deregisterInstance` or `deregisterInstanceRoot`
-	 * (#3587) attempts first could not take the registry lock, so it was
-	 * queued behind the holder — on the registry tail for `deregisterInstance`
-	 * (which itself runs off the tail, at shutdown), or in place on the same
-	 * tail slot for `deregisterInstanceRoot` (which already runs on it).
-	 * Subject is this process's pid.
+	 * #3498: the sync removal `deregisterInstance` attempts first (it runs off
+	 * the tail, at shutdown) could not take the registry lock, so it was
+	 * queued on the registry tail behind the holder. `deregisterInstanceRoot`
+	 * no longer emits it: it has no sync attempt, only the lease-waiting
+	 * lock on its tail slot (#3618). Subject is this process's pid.
 	 */
 	| "instance-registry-deregister-queued"
 	/**
@@ -547,6 +546,12 @@ export type DegradationKind =
 	 * `incrementDegradationCount` keeps one bounded entry per file.
 	 */
 	| "lsp-edit-stale-content"
+	/**
+	 * An idle LSP client was released by the shared idle-eviction timer (a
+	 * server whose registry `idleEviction` is `transparent`); it respawns on the
+	 * next request. Subject is the client key.
+	 */
+	| "lsp-idle-eviction"
 	| "lsp-liveness-probe-unsupported"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
@@ -1384,7 +1389,6 @@ export type DegradationKind =
 	 * every cycle is the resolver's whole correctness argument. See
 	 * `probe-home-state.ts`'s doc comment.
 	 */
-	| "ts-idle-eviction"
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
