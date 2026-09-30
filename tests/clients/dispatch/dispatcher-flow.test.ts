@@ -724,6 +724,69 @@ describe("Dispatch Flow", () => {
 			expect(result.hasBlockers).toBe(true);
 		});
 
+		it("states why a delta-promoted unused finding blocks, once for several items (#3218)", async () => {
+			// Recurrence (2026-09-19 live session): the agent's own edit promoted
+			// two hint-severity ts:6133 findings to `blocking`, but the STOP block
+			// gave only the tier, so the agent re-ran lens_diagnostics to reconcile
+			// "all listed items are ℹ️ tier" with the blocker header.
+			const facts = new FactStore();
+			setBaselineFacts(facts, "/project/test.ts", []);
+
+			registerRunner(
+				createMockRunner({
+					id: "reporter",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "new-unused-a",
+								message: "'tmpdir' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 12,
+								severity: "hint",
+								semantic: "none",
+								tool: "lsp",
+								code: "6133",
+							},
+							{
+								id: "new-unused-b",
+								message:
+									"'FetchError' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 18,
+								severity: "hint",
+								semantic: "none",
+								tool: "lsp",
+								code: "6133",
+							},
+						],
+						semantic: "warning",
+					},
+				}),
+			);
+
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				facts,
+			);
+			const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["reporter"] }];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.hasBlockers).toBe(true);
+			expect(result.blockerOutput).toContain(
+				"🔴 STOP — 2 issue(s) must be fixed",
+			);
+			const reason =
+				"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
+			expect(result.blockerOutput).toContain(reason);
+			// One line, never per-item boilerplate.
+			expect(result.blockerOutput.split(reason)).toHaveLength(2);
+		});
+
 		it("does not cross-contaminate delta baselines across cwds sharing a relative path (refs #2489)", async () => {
 			// Simulates the warm `pilens_analyze` MCP route: one `FactStore`
 			// instance (production's module-scope `sessionFacts` singleton)
