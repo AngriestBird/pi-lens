@@ -16,6 +16,7 @@ import {
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
 	flushReviewGraphPersistsForTests,
+	getGraphBuildInfoForGraph,
 } from "../../../clients/review-graph/builder.js";
 import { logReviewGraph } from "../../../clients/review-graph-logger.js";
 import { getSharedTreeSitterClient } from "../../../clients/tree-sitter-shared.js";
@@ -47,15 +48,37 @@ afterEach(() => {
 	while (cleanups.length) cleanups.pop()?.();
 });
 
-function pythonProject(): { tmpDir: string; files: string[] } {
+/**
+ * `b` is b.py's source. A trap is charged to its input (language + content),
+ * so each test that traps gives b.py its own content.
+ */
+function pythonProject(b = "def trap_here_fn():\n    return 2\n"): {
+	tmpDir: string;
+	files: string[];
+} {
 	const env = setupTestEnvironment("pi-lens-wasm-trap-");
 	cleanups.push(env.cleanup);
 	const files = [
 		createTempFile(env.tmpDir, "a.py", "def alpha_fn():\n    return 1\n"),
-		createTempFile(env.tmpDir, "b.py", "def trap_here_fn():\n    return 2\n"),
+		createTempFile(env.tmpDir, "b.py", b),
 		createTempFile(env.tmpDir, "c.py", "def gamma_fn():\n    return 3\n"),
 	];
 	return { tmpDir: env.tmpDir, files };
+}
+
+/** Trap `Query.prototype.matches` on b.py's tree while `shouldTrap()` says so. */
+async function trapQueryMatches(shouldTrap: () => boolean): Promise<void> {
+	const { Query } = await loadWebTreeSitter();
+	const realMatches = Query.prototype.matches;
+	vi.spyOn(Query.prototype, "matches").mockImplementation(function (
+		this: InstanceType<typeof Query>,
+		...args: Parameters<typeof realMatches>
+	) {
+		if (args[0].text.includes("trap_here") && shouldTrap()) {
+			throw new WebAssembly.RuntimeError("table index is out of bounds");
+		}
+		return realMatches.apply(this, args);
+	});
 }
 
 function symbolNames(graph: Awaited<ReturnType<typeof buildOrUpdateGraph>>) {
@@ -144,5 +167,72 @@ describe("review-graph build contains a web-tree-sitter trap to its file (#3605)
 				reason: "extractor bug",
 			}),
 		]);
+	});
+});
+
+/**
+ * #3605 review F2 and F3. Round 1 committed a trapped file as zero symbols,
+ * and every later build in the process reused that entry while the file was
+ * unchanged, so a one-off trap lost the file's symbols until someone edited
+ * it; the cascade then gave its dependents a clean verdict. Every trap below
+ * spends one unit of this file's process budget (`WASM_TRAP_BUDGET`, 3), and
+ * the first `describe` spends one.
+ */
+describe("review graph after a contained trap (#3605 F2, F3)", () => {
+	it("re-extracts a file a one-off trap cost on the next build", async () => {
+		const { tmpDir, files } = pythonProject(
+			"def trap_here_fn():\n    return 11\n",
+		);
+		let traps = 1;
+		await trapQueryMatches(() => traps-- > 0);
+
+		const trapped = await buildOrUpdateGraph(tmpDir, files, new FactStore());
+		expect(symbolNames(trapped)).not.toContain("trap_here_fn");
+		expect(getGraphBuildInfoForGraph(trapped).wasmTrappedFiles).toBe(1);
+
+		const next = await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		expect(getGraphBuildInfoForGraph(next).mode).toBe("incremental");
+		expect(symbolNames(next)).toContain("trap_here_fn");
+		expect(getGraphBuildInfoForGraph(next).wasmTrappedFiles).toBeUndefined();
+
+		// Healthy again, so no later build re-extracts it.
+		const settled = await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		expect(getGraphBuildInfoForGraph(settled).mode).toBe("cached");
+	});
+
+	it("charges a file that traps every time, and retries it once per restart", async () => {
+		const { tmpDir, files } = pythonProject(
+			"def trap_here_fn():\n    return 12\n",
+		);
+		const trappedBefore = wasmTrapCount() ?? 0;
+		await trapQueryMatches(() => true);
+
+		await buildOrUpdateGraph(tmpDir, files, new FactStore());
+		const retried = await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		expect(getGraphBuildInfoForGraph(retried).mode).toBe("incremental");
+		// Charged by its second trap: the process does not re-extract it again.
+		const charged = await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		expect(getGraphBuildInfoForGraph(charged).mode).toBe("cached");
+		expect(getGraphBuildInfoForGraph(charged).wasmTrappedFiles).toBe(1);
+		expect(symbolNames(charged)).not.toContain("trap_here_fn");
+		// One unit of budget and one charge.
+		expect(wasmTrapCount()).toBe(trappedBefore + 2);
+
+		// A graph that does not hold the charged file is not degraded by it.
+		const other = pythonProject("def beta_fn():\n    return 12\n");
+		const clean = await buildOrUpdateGraph(
+			other.tmpDir,
+			other.files,
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(clean).wasmTrappedFiles).toBeUndefined();
+
+		// A restart reads the persisted graph, which marks the charged file, so
+		// the new process tries it again.
+		flushReviewGraphPersistsForTests();
+		clearReviewGraphWorkspaceCache();
+		const restarted = await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		expect(getGraphBuildInfoForGraph(restarted).mode).toBe("incremental");
+		expect(getGraphBuildInfoForGraph(restarted).wasmTrappedFiles).toBe(1);
 	});
 });
