@@ -115,6 +115,7 @@ untouched file is older than the margin.
 | `MergedWitness` | `NoAppliedAfterInFlightWrite` violated (non-vacuity) | 15499 |
 | `MergedTargetRevert` | `NoStaleApply` violated | 23944 |
 | `MergedTargetOlderSync` | `NoStaleApply` violated | 25122 |
+| `CandidateStampedPrepare` | pass (`NoStaleApply`, `AtomicRefusal`) | 63835 |
 | `MergedSplitApply` | `NoStaleApply` violated | 6431 |
 | `PreFix` | `NoStaleApply` violated | 503 |
 | `R1CaptureRead` | `NoStaleApply` violated | 199 |
@@ -141,7 +142,8 @@ TLC's traces, because it is chosen under `\E p \in pending`.
 | `Merged` | #3601, #3736 | master, under the three assumptions below: the target and opened files are bound; pi writes, external writes and touches of the target and an opened file; an unopened file that nobody writes | none (pass) |
 | `MergedWitness` | non-vacuity | master, as `Merged` | `Prepare`, a pi write to the opened file and its sync, `Tick`, `Request`, `Capture`, `ApplyEdit` applies. |
 | `MergedTargetRevert` | outside `Merged`'s claim (A-B-A) | master, with `Revert` | `Prepare` reads the target, a pi write to it and its sync, `Request` (the server has the new bytes), `Capture`, a write restoring the old bytes, `ApplyEdit`: the target matches what `Prepare` read but not what the server computed from. Checks `NoStaleApply` and `AtomicRefusal` only: A-B-A also gives safe false refusals of opened files. |
-| `MergedTargetOlderSync` | outside `Merged`'s claim (older sync) | master, with `SyncCarriesRead` | Two pi writes to the target, `Prepare` reads and sends the second, the first write's stamped sync lands after it (it is the first stamped sync, so nothing drops it), `Request`, `Capture`, `ApplyEdit`. |
+| `MergedTargetOlderSync` | outside `Merged`'s claim (older sync) | master, with `SyncCarriesRead` | Two pi writes to the target, `Prepare` reads and sends the second, the first write's stamped sync lands after it (it is the first stamped sync, so nothing drops it), `Request`, `Capture`, `ApplyEdit`. Checks `NoStaleApply` and `AtomicRefusal` only: an older sync of an opened file after the request also gives safe false refusals. |
+| `CandidateStampedPrepare` | #3481 drop, candidate | candidate: `openFileBestEffort`'s send carries a `readStamp` (`StampedPrepare`), with `SyncCarriesRead` | none (pass on `NoStaleApply` and `AtomicRefusal`). Without the #3481 drop it is violated. `NoUnexplainedRefusal` is left out: it still reds, on the safe false refusal above. |
 | `MergedSplitApply` | outside `Merged`'s claim (lane L5) | master, with `SplitApply` | `Prepare`, `Request`, `Capture`, the apply's compare, an external write to the target, the apply's write. |
 | `PreFix` | #3601 | pre-fix: no `expectedContent` before #3736 | `Prepare`, `Request`, `Capture`, a pi write to the target, `ApplyEdit` over it. |
 | `R1CaptureRead` | #3736 round-1 review F1 | pre-fix: round 1 (`1fbc52f4d`) binds every file to a read at capture | `Prepare`, `Request`, a pi write to the opened file, `Capture` (binds the new bytes), `ApplyEdit`. |
@@ -211,7 +213,8 @@ TLC's traces, because it is chosen under `\E p \in pending`.
   - every write produces bytes the file never held (`Revert = FALSE`;
     dropped by `MergedTargetRevert`);
   - a pi sync sends the current disk (`SyncCarriesRead = FALSE`; dropped by
-    `MergedTargetOlderSync`);
+    `MergedTargetOlderSync`; `CandidateStampedPrepare` shows that stamping
+    `openFileBestEffort`'s send makes the #3481 drop close it);
   - the apply is atomic against unqueued writers (`SplitApply = FALSE`;
     dropped by `MergedSplitApply`).
 - **The empty target is not modelled.** `openFileBestEffort` returns `""`

@@ -64,6 +64,7 @@ CONSTANTS
     Revert,         \* TRUE: a write may restore earlier bytes (A-B-A)
     SyncCarriesRead,\* TRUE: a pi sync sends its own pipeline's bytes, not the current disk
     SplitApply,     \* TRUE: an unqueued writer may land between the apply's compare and write
+    StampedPrepare, \* candidate: openFileBestEffort's send carries a readStamp (#3481)
     Margin,         \* RENAME_MTIME_MARGIN_MS, in clock ticks
     MaxWrites,
     MaxClock
@@ -184,13 +185,16 @@ ExternalWrite(f) ==
     /\ UNCHANGED <<sent, stamp, pending, stampedW, clock, phase, T, tContent, basis,
                    expected, wrote, stale, refused>>
 
-\* openFileBestEffort: read the target and send it.
+\* openFileBestEffort: read the target and send it. Its send carries no
+\* readStamp; the StampedPrepare candidate stamps it with the writes so far.
 Prepare ==
     /\ Flow = "rename" /\ phase = "idle"
     /\ tContent' = disk[Target]
     /\ Send(Target, disk[Target])
+    /\ stampedW' = IF StampedPrepare
+                     THEN [stampedW EXCEPT ![Target] = writes] ELSE stampedW
     /\ phase' = "prepared"
-    /\ UNCHANGED <<disk, mtime, pending, stampedW, nextId, clock, writes, T, basis,
+    /\ UNCHANGED <<disk, mtime, pending, nextId, clock, writes, T, basis,
                    expected, wrote, stale, refused, inflight>>
 
 \* T is taken, and the server computes from its view.
