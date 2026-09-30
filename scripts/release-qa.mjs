@@ -399,8 +399,9 @@ export function shipVerdict(results, options = {}) {
  * entries.
  *
  * NEWLINE-delimited, never whitespace-delimited. A peer range can legitimately
- * contain a space — `@earendil-works/pi-tui@^0.84.1 || ^0.85.0` after #2586 —
- * and the upstream script emits one entry per line for exactly that reason.
+ * contain a space — an OR-form range such as `^0.84.1 || ^0.85.0`, which
+ * pi-tui's peer was until #3805 — and the upstream script emits one entry per
+ * line for exactly that reason.
  * A `/\s+/` split explodes such a range into three argv entries and hands
  * `npm install` the tokens `||` and `^0.85.0` as package names. This runner
  * shipped that split for one commit; the OR-form range arrived from master in
