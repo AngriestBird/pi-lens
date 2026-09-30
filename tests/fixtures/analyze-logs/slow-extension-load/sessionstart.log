@@ -1,7 +1,9 @@
 [2026-09-30T12:25:38.171Z] pi-lens loaded: 6123ms after process start (from dist)
-[2026-09-30T12:25:38.230Z] session_start fired
+[2026-09-30T12:25:38.171Z] session_start fired
 [2026-09-30T09:00:00.000Z] pi-lens loaded: 5608ms after process start (from dist)
+[2026-09-30T09:01:00.000Z] session_start fired
 [2026-09-30T09:30:00.000Z] pi-lens loaded: 6013ms after process start (from dist)
+[2026-09-30T09:31:00.001Z] session_start fired
 [2026-09-30T08:00:00.000Z] pi-lens loaded: 310ms after process start (from dist)
 [2026-09-30T08:01:00.000Z] pi-lens loaded: 375ms after process start (from dist)
 [2026-09-30T08:02:00.000Z] pi-lens loaded: 412ms after process start (from dist)
