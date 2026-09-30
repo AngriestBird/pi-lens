@@ -51,11 +51,13 @@ describe("language-neutral workspace resync (#2817)", () => {
 	const factsImporter = path.join(workspace, `consumer${factsExtension}`);
 	const fallbackImporter = path.join(workspace, `consumer${fallbackExtension}`);
 	const traceFile = path.join(root, "fake-lsp.trace");
+	let originalPiLensHome: string | undefined;
 	console.log(
 		`workspace diagnostics language matrix: facts=${factsLanguage.id}; no-facts=${fallbackLanguage.id}`,
 	);
 
 	beforeAll(async () => {
+		originalPiLensHome = process.env.PI_LENS_HOME;
 		fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
 		for (const [file, content] of [
 			[factsDependency, "value = 1\n"],
@@ -121,6 +123,8 @@ describe("language-neutral workspace resync (#2817)", () => {
 		const { resetLSPService } = await import("../../../clients/lsp/index.js");
 		resetLSPService({ reason: "test" });
 		delete process.env.FAKE_LSP_TRACE_FILE;
+		if (originalPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = originalPiLensHome;
 		probe.cleanup();
 	});
 
