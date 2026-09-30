@@ -503,6 +503,42 @@ export function takeHandoff(
 	return handoff.stores;
 }
 
+/**
+ * A start's slot key: its session file, or, file-less, the ticket its session
+ * manager left (#3819). pi hands a file-less `/reload` or in-memory `/fork`
+ * successor its predecessor's manager.
+ */
+function startKey(
+	sessionFile: string | undefined,
+	sessionManager: unknown,
+): string | number | undefined {
+	const manager = asManager(sessionManager);
+	return sessionFile ?? (manager && handoffSlot().left.get(manager));
+}
+
+/**
+ * A declined (demoted) `session_start` (#3819 r2): discard, without adopting,
+ * the slot left for it. A row-17 start demoted the real successor, which can
+ * return later as a primary start of the same conversation and must not take
+ * the stale slot then. Only the start the slot was left for can match it, so
+ * no other start's slot is lost. True when a slot was discarded.
+ */
+export function discardHandoff(args: {
+	reason: string | undefined;
+	sessionFile: string | undefined;
+	sessionManager: unknown;
+}): boolean {
+	const reason = toStartReason(args.reason);
+	if (!takeHandoff(reason, startKey(args.sessionFile, args.sessionManager)))
+		return false;
+	recordDegradationOnce({
+		kind: "session-scope-handoff-discarded",
+		subject: reason,
+		reason: `a demoted ${reason} start discarded the hand-off slot left for it, so a later start of its conversation cannot take it stale`,
+	});
+	return true;
+}
+
 export interface PersistedStores {
 	savedAt: number;
 	stores: Record<string, unknown>;
@@ -525,17 +561,11 @@ export async function adoptHandoff(
 	},
 ): Promise<StartSource> {
 	const reason = toStartReason(args.reason);
-	// #3819: a file-less start's key is the ticket its session manager left.
-	const manager = asManager(args.sessionManager);
-	const predecessor = manager && handoffSlot().left.get(manager);
 	// Only a fork or reload slot is ever left, so no other reason matches.
-	const slotted = takeHandoff(reason, args.sessionFile ?? predecessor);
-	// #3819 (option a): no slot outlives a primary start. The start it was
-	// left for took it above; any other one (a gap subagent's own reload or
-	// fork, #3668 row 17) must not leave it for a later start of the session
-	// that start demoted. Cleared before the first await: a primary shutdown
-	// may stash for its own successor while this start loads a sidecar.
-	handoffSlot().handoff = undefined;
+	const slotted = takeHandoff(
+		reason,
+		startKey(args.sessionFile, args.sessionManager),
+	);
 	let source: StartSource = "none";
 	let found: { savedAt?: number; stores: Record<string, unknown> } | undefined;
 	for (const candidate of SOURCES[reason]) {
@@ -555,7 +585,7 @@ export async function adoptHandoff(
 		recordDegradationOnce({
 			kind: "session-scope-handoff-missed",
 			subject: reason,
-			reason: `a ${reason} start found no hand-off slot left for its session file; it started from ${source}`,
+			reason: `a ${reason} start found no hand-off slot keyed by its session file or its predecessor's ticket; it started from ${source}`,
 		});
 	for (const spec of sessionStores.values()) {
 		const action = spec.policy[reason];

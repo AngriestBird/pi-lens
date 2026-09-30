@@ -1601,11 +1601,12 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 			return { subagent: subagent!, written, a };
 		}
 
-		function missedSubjects(): string[] {
+		function subjects(kind: string): string[] {
 			return getDegradationSummary()
-				.filter((group) => group.kind === "session-scope-handoff-missed")
+				.filter((group) => group.kind === kind)
 				.flatMap((group) => group.latestReasons.map((r) => r.subject));
 		}
+		const missedSubjects = () => subjects("session-scope-handoff-missed");
 
 		for (const kind of ["reload", "fork"] as const) {
 			it(`gives a subagent's own ${kind} in the gap none of the primary's activations, advisories or authorship`, async () => {
@@ -1676,6 +1677,8 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 				// The reload leaves its slot; in its gap the subagent's own fork
 				// classifies primary and the real successor is demoted.
 				await reload(primary);
+				// The demoted successor discarded the slot left for it (#3819 r2).
+				expect(subjects("session-scope-handoff-discarded")).toEqual(["reload"]);
 				// The subagent's /new leaves no slot; in its gap the demoted
 				// session reloads itself and classifies primary.
 				await subagent!.newSession();
@@ -1692,6 +1695,47 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 					// that shutdown left for the start it demoted.
 					["primary", "own-sidecar"],
 				]);
+			});
+		}
+
+		/**
+		 * The r1 review's F1 probe: option (a) cleared the slot at every
+		 * primary start. A gap subagent's own /reload classifies primary (row
+		 * 17), takes nothing, and quits inside the gap, so the real successor
+		 * still classifies primary. The recurrence: that start found the slot
+		 * cleared, and an in-memory /fork lost its activations.
+		 */
+		for (const store of ["in-memory", "file-backed"] as const) {
+			it(`keeps an in-memory /fork's activations when a gap subagent (${store}) reloads itself and quits inside the gap`, async () => {
+				let subagent: AgentSessionRuntime | undefined;
+				const reloadAndQuitInGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== "fork") return;
+						if (subagent) return;
+						subagent = await startRuntime(
+							store === "in-memory"
+								? SessionManager.inMemory(cwd)
+								: SessionManager.create(cwd, sessionsDir),
+						);
+						await reload(subagent);
+						await subagent.dispose();
+						runtimes.splice(runtimes.indexOf(subagent), 1);
+					});
+				};
+				const primary = await startRuntime(SessionManager.inMemory(cwd), [
+					reloadAndQuitInGap,
+				]);
+				const c = conversation(primary);
+				c.user("prompt 1");
+				c.done();
+				await activateTools(primary, "act", ["ast_grep_search"]);
+				const u2 = c.user("prompt 2");
+				c.done();
+
+				await primary.fork(u2);
+
+				expect(subagent).toBeDefined();
+				expect(activeSituational(primary)).toEqual(["ast_grep_search"]);
 			});
 		}
 	});
