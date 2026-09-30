@@ -430,6 +430,9 @@ describe("turn-end blocker freshness (#1631)", () => {
 			markedAtMs?: number;
 			driftAfterMark?: boolean;
 			failureMessage?: string;
+			runnerId?: string;
+			/** `null` leaves the result without a failureKind (the item-3 arms). */
+			failureKind?: string | null;
 		}) {
 			const env = setupTestEnvironment("pi-lens-runner-failed-turnend-");
 			try {
@@ -443,16 +446,18 @@ describe("turn-end blocker freshness (#1631)", () => {
 					filePath,
 					cwd: env.tmpDir,
 					projectRoot: env.tmpDir,
-					runnerId: "pyright",
+					runnerId: opts.runnerId ?? "pyright",
 					markedAtMs: opts.markedAtMs ?? Date.now() + 60_000,
 					promise: Promise.resolve({
 						status: "failed",
-						failureKind: "blocking_diagnostics",
+						...(opts.failureKind === null
+							? {}
+							: { failureKind: opts.failureKind ?? "blocking_diagnostics" }),
 						failureMessage: opts.failureMessage,
 						diagnostics: opts.diagnostics.map((d) => ({
 							...d,
 							filePath,
-							tool: "pyright",
+							tool: opts.runnerId ?? "pyright",
 							severity: d.semantic === "blocking" ? "error" : "warning",
 						})),
 						semantic: "blocking",
@@ -464,24 +469,31 @@ describe("turn-end blocker freshness (#1631)", () => {
 					driftIntoFuture(filePath);
 				}
 				await handleTurnEnd(
-					makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+					makeTurnEndDeps(runtime, cacheManager, {
+						ctxCwd: env.tmpDir,
+						getFlag: (name: string) => name === "lens-guard",
+					}),
 				);
-				const content =
-					cacheManager.readCache<{ content: string }>(
-						"turn-end-findings",
-						env.tmpDir,
-					)?.data?.content ?? "";
+				const guard = cacheManager.readCache<{
+					content: string;
+					hasBlockers?: boolean;
+				}>("turn-end-findings", env.tmpDir)?.data;
+				const content = guard?.content ?? "";
 				const record = logLatency.mock.calls
 					.map((call) => call[0])
 					.find((entry: any) => entry?.phase === "late_runner_findings");
-				return { content, metadata: record?.metadata };
+				return {
+					content,
+					hasBlockers: guard?.hasBlockers,
+					metadata: record?.metadata,
+				};
 			} finally {
 				env.cleanup();
 			}
 		}
 
 		it("delivers a failed deferred runner's blocking finding instead of a broken-runner note", async () => {
-			const { content, metadata } = await runDeferredFailed({
+			const { content, metadata, hasBlockers } = await runDeferredFailed({
 				diagnostics: [
 					{
 						id: "probe-type-error",
@@ -494,6 +506,10 @@ describe("turn-end blocker freshness (#1631)", () => {
 			expect(content).not.toContain("Deferred runner");
 			// A blocking finding must not be framed as "no action required".
 			expect(content).not.toContain("no action required");
+			expect(content).toContain("blocking: fix before continuing");
+			// The late part rides the advisory channel: it must not flip the
+			// git guard (pre-existing channel for deferred findings).
+			expect(hasBlockers).toBe(false);
 			expect(metadata).toMatchObject({
 				pending: 1,
 				delivered: 1,
@@ -521,6 +537,44 @@ describe("turn-end blocker freshness (#1631)", () => {
 			});
 			expect(content).toContain("WARN-ONLY-PROBE");
 			expect(content).toContain("Advisory — no action required");
+			expect(content).not.toContain("Deferred runner");
+			expect(metadata).toMatchObject({ delivered: 1, failed: 0 });
+		});
+
+		// #3796 r2 F1. Recurrence prevented: keying only on diagnostics hid the
+		// failure of runners that return `failed` + a failureKind + PARTIAL
+		// diagnostics (rust-clippy timeout, lsp server_error, oxlint).
+		it("reports a failed deferred runner with a fault kind as broken and still delivers its partial finding", async () => {
+			const { content, metadata } = await runDeferredFailed({
+				runnerId: "rust-clippy",
+				failureKind: "timeout",
+				diagnostics: [
+					{
+						id: "clippy-partial",
+						message: "CLIPPY-PARTIAL-PROBE",
+						semantic: "warning",
+					},
+				],
+			});
+			expect(content).toContain("Deferred runner rust-clippy failed (timeout)");
+			expect(content).toContain("CLIPPY-PARTIAL-PROBE");
+			expect(metadata).toMatchObject({
+				delivered: 1,
+				failed: 1,
+				deliveredIds: ["clippy-partial"],
+			});
+		});
+
+		// The four item-3 arms set no failureKind; until #3796 item 3 gives them
+		// one they are indistinguishable from findings and are delivered.
+		it("delivers a failed deferred result with diagnostics and no failureKind as findings", async () => {
+			const { content, metadata } = await runDeferredFailed({
+				failureKind: null,
+				diagnostics: [
+					{ id: "no-kind", message: "NO-KIND-PROBE", semantic: "warning" },
+				],
+			});
+			expect(content).toContain("NO-KIND-PROBE");
 			expect(content).not.toContain("Deferred runner");
 			expect(metadata).toMatchObject({ delivered: 1, failed: 0 });
 		});
