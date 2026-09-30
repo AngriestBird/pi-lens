@@ -175,7 +175,11 @@ function conversation(runtime: AgentSessionRuntime) {
 		S().sessionManager.appendMessage(
 			message as Parameters<SessionManager["appendMessage"]>[0],
 		);
-	const toolCall = async (id: string, name: string, args: object) => {
+	const toolCall = async (
+		id: string,
+		name: string,
+		args: Record<string, unknown>,
+	) => {
 		const callEntry = append(
 			assistant([{ type: "toolCall", id, name, arguments: args }]),
 		);
@@ -188,7 +192,7 @@ function conversation(runtime: AgentSessionRuntime) {
 	const toolResult = async (
 		id: string,
 		name: string,
-		args: object,
+		args: Record<string, unknown>,
 		content: unknown[],
 		isError = false,
 	): Promise<string> => {
@@ -270,7 +274,7 @@ function conversation(runtime: AgentSessionRuntime) {
 			return toolResult(id, "bash", args, [{ type: "text", text: output }]);
 		},
 		/** One of pi-lens's own tools, executed as the host would. */
-		async ownTool(id: string, name: string, args: object) {
+		async ownTool(id: string, name: string, args: Record<string, unknown>) {
 			await toolCall(id, name, args);
 			const tool = S().getToolDefinition(name);
 			if (!tool) throw new Error(`tool ${name} is not registered`);
