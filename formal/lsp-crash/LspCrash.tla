@@ -20,7 +20,8 @@
 (*    #3584): retireClient is the one helper every path uses, and it        *)
 (*    forgets the aux-notify inflight count (noteAuxNotifyIssued), the     *)
 (*    drained-barrier latency EWMA (noteAuxNotifyDrainLatency) and the     *)
-(*    consecutive write-timeout streak (recordNotifyWriteBackpressure).    *)
+(*    consecutive write-timeout streak (recordNotifyWriteBackpressure),    *)
+(*    which registration (forgetReadiness) drops a second time.            *)
 (*    DerivedIsCurrent checks that none outlives its generation;           *)
 (*  - touches of the one file (LSPService.touchFile), sequential or        *)
 (*    concurrent, with the same content:                                   *)
@@ -77,14 +78,24 @@ CONSTANTS
                     \* client's notify resolving false; since #3543 every
                     \* value resolves false, so it is the same model as
                     \* "clear")
-    DerivedMissPath \* "off": the older configs, which do not depend on the
+    DerivedMissPath, \* "off": the older configs, which do not depend on the
                     \* per-generation derived state; its actions are disabled.
                     \* "none": the code since #3672/#3584, every retirement
                     \* path drops every derived fact. "capacity"|"idle"|
-                    \* "stall"|"respawn": a mutant that drops the clear on
-                    \* that path. "legacy": the pre-#3672 code, where only
-                    \* the notify-stall path dropped the aux backlog and no
-                    \* path dropped the EWMA.
+                    \* "stall"|"respawn"|"all": a mutant in which that
+                    \* path (or every path) fails to drop the kinds in
+                    \* DerivedMissKinds. "pre3584" and "pre3672": the exact
+                    \* per-kind drop tables of those trees (ClearedKinds).
+    DerivedMissKinds, \* subset of {"ewma","inflight","streak"}: the kinds a
+                    \* mutant path fails to drop ({} unless DerivedMissPath
+                    \* names a path or "all")
+    RegStreak,      \* registering a client forgets the key's write-timeout
+                    \* streak (TRUE = code since #3537/#3584, forgetReadiness
+                    \* in registration; FALSE = mutant, or the pre-#3584 tree)
+    DeriveGuard     \* a derived write lands only while its touch's client is
+                    \* still the registered one (TRUE = code for the streak,
+                    \* #3584 (b), and the EWMA; FALSE = mutant, and the code's
+                    \* noteAuxNotifyIssued, which has no registry check)
 
 \* "S" sync, "C" collect, "W" ensureWarmForSweep's warm-up touch: it waits
 \* for a verdict, and a failed one caches the key cold (demonstratedCold).
@@ -109,10 +120,22 @@ DerivedKinds == {"ewma", "inflight", "streak"}
 
 DerivedOn == DerivedMissPath # "off"
 
-\* Does retirement path `path` drop the derived facts? Code: yes on all.
-ClearsDerived(path) ==
-    CASE DerivedMissPath = "legacy" -> path = "stall"
-      [] OTHER -> DerivedMissPath # path
+\* The kinds retirement path `path` drops. Code since #3672: all three, on
+\* every path. The pre trees are read off clients/lsp/index.ts at their
+\* parents: 5be1dda35^ (pre-#3584) dropped the streak and the aux backlog in
+\* demoteForNotifyStall only and never the EWMA; 625aa8018^ (pre-#3672)
+\* dropped the streak on every path (forgetReadiness, #3537), the aux backlog
+\* in demoteForNotifyStall only, and never the EWMA.
+ClearedKinds(path) ==
+    CASE DerivedMissPath = "pre3584" ->
+           IF path = "stall" THEN {"streak", "inflight"} ELSE {}
+      [] DerivedMissPath = "pre3672" ->
+           IF path = "stall" THEN {"streak", "inflight"} ELSE {"streak"}
+      [] DerivedMissPath \in {path, "all"} -> DerivedKinds \ DerivedMissKinds
+      [] OTHER -> DerivedKinds
+
+\* registration's forgetReadiness drops the streak
+AfterRegistration(d) == IF RegStreak THEN d \ {"streak"} ELSE d
 
 VARIABLES
     gen,        \* generation of the newest client in the registry
@@ -158,12 +181,15 @@ Leased == \E i \in T : pc[i] \in {"decide", "write", "mark", "wait", "gate"}
 Touching == <<pc, tg, skip, wrote, verdict>>
 Breaker == <<earlyStreak, windowDeaths, permBroken, cooling, loopRespawns>>
 
+\* The facts left after a drop, tagged with the generation they describe.
+SetDerived(d) ==
+    /\ derived' = d
+    /\ derivedGen' = IF d = {} THEN None ELSE derivedGen
+
 \* retireClient's derived-state drop, for one retirement path.
-RetireDerived(path) ==
-    IF DerivedOn /\ ~ClearsDerived(path)
-    THEN UNCHANGED <<derived, derivedGen>>
-    ELSE /\ derived' = {}
-         /\ derivedGen' = None
+DerivedAfterRetire(path) == derived \ ClearedKinds(path)
+
+RetireDerived(path) == SetDerived(DerivedAfterRetire(path))
 
 
 -----------------------------------------------------------------------------
@@ -208,8 +234,9 @@ IdleEvict ==
     /\ UNCHANGED <<gen, held, pub, crashes, uptime, Breaker, Touching>>
 
 \* demoteForNotifyStall: the consecutive write-timeout streak reached its
-\* threshold, so the client is demoted through the broken cooldown. The
-\* retirement drops the streak and the other derived facts.
+\* threshold, so the client is retired. The code also sets the key's breaker
+\* cooldown (state.broken); the model leaves Breaker unchanged, so a
+\* replacement may spawn at once. The retirement drops the derived facts.
 StallDemote ==
     /\ DerivedOn
     /\ registry = "live"
@@ -325,17 +352,20 @@ Acquire(i) ==
                         /\ cold' = FALSE /\ coldGen' = None
                    ELSE UNCHANGED <<ready, readyGen, cold, coldGen>>
               /\ rt' = IF Fix \in {"clear", "clearDeath", "clearDeadFalse"} THEN None ELSE rt
-              /\ RetireDerived("respawn")
               /\ IF NewCooling(uptime)
                    THEN /\ registry' = "empty" /\ Unavailable(i)
                         /\ UNCHANGED <<gen, loopRespawns>>
+                        /\ RetireDerived("respawn")
                    ELSE /\ SpawnFor(i, uptime \in {"early", "mid"})
                         /\ UNCHANGED verdict
+                        \* retireClient's drop, then the replacement registers
+                        /\ SetDerived(AfterRegistration(DerivedAfterRetire("respawn")))
          [] registry = "empty" ->
               /\ IF cooling
                    THEN /\ Unavailable(i) /\ UNCHANGED <<gen, registry, loopRespawns>>
-                        /\ UNCHANGED <<ready, readyGen, cold, coldGen>>
+                        /\ UNCHANGED <<ready, readyGen, cold, coldGen, derived, derivedGen>>
                    ELSE /\ SpawnFor(i, FALSE) /\ UNCHANGED verdict
+                        /\ SetDerived(AfterRegistration(derived))
                         \* #3502 verify round 3: registration forgets a verdict
                         \* cached while no client was registered.
                         /\ IF RegClear
@@ -343,7 +373,7 @@ Acquire(i) ==
                                   /\ cold' = FALSE /\ coldGen' = None
                              ELSE UNCHANGED <<ready, readyGen, cold, coldGen>>
               /\ UNCHANGED <<rt, uptime, earlyStreak, windowDeaths, permBroken,
-                             cooling, derived, derivedGen>>
+                             cooling>>
     /\ UNCHANGED <<held, pub, crashes, evicts, skip, wrote, evictUnderLease>>
 
 \* A warm-up that finds no client to ask (the key in its breaker cooldown, a
@@ -402,10 +432,13 @@ Mark(i) ==
 \* notify issue count (noteAuxNotifyIssued), a drained-barrier latency
 \* sample (noteAuxNotifyDrainLatency) and a timeout strike
 \* (recordNotifyWriteBackpressure). One action writes all three; a
-\* retirement path drops all three, or a mutant drops none.
+\* retirement path drops the kinds ClearedKinds names. DeriveGuard is the
+\* write-side generation check: recordNotifyWriteBackpressure (#3584 (b)) and
+\* noteAuxNotifyDrainLatency have it; noteAuxNotifyIssued does not.
 Derive(i) ==
     /\ DerivedOn
-    /\ pc[i] = "mark" /\ wrote[i] /\ Live(tg[i])
+    /\ pc[i] = "mark" /\ wrote[i]
+    /\ DeriveGuard => Live(tg[i])
     /\ derived' = DerivedKinds
     /\ derivedGen' = tg[i]
     /\ UNCHANGED <<gen, registry, held, pub, rt, crashes, evicts, uptime, Breaker,
