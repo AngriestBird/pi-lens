@@ -550,7 +550,7 @@ export interface LSPClientInfo {
 	 */
 	getSentContent?(
 		filePath: string,
-	): { hash: string; changedAtMs?: number } | undefined;
+	): { hash: string; changedAtMs?: number | undefined } | undefined;
 	/** Whether this client currently has an LSP request in flight. */
 	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
@@ -1058,7 +1058,7 @@ export interface LSPClientState {
 			/** #3601: `Date.now()` when a send last CHANGED this document's bytes
 			 *  on the server (a re-send of the same bytes keeps it), so a caller
 			 *  can tell whether the server's copy changed after a request it made. */
-			changedAtMs?: number;
+			changedAtMs?: number | undefined;
 			text?: string;
 			lastLine?: LastLinePosition;
 		}
