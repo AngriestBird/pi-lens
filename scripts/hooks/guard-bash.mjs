@@ -26,6 +26,11 @@
  *     hygiene")
  *   - `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's own home
  *     (AGENTS.md "Probe hygiene", #3026) -- see {@link classifyTempDirVars}
+ *   - a git HOOK BYPASS on `git commit`/`push`/`merge`/`rebase` (#3778, the
+ *     #3703 class): `--no-verify`, `-n` (commit only -- on `push` it is
+ *     `--dry-run`), `-c core.hooksPath=…`, a `git config core.hooksPath`
+ *     write, and the `HUSKY=0` / `PI_LENS_SKIP_HOOKS` env prefixes the repo's
+ *     husky hooks honour -- see {@link classifyHookBypass}
  *
  * ## Contract source
  *
@@ -119,6 +124,11 @@
  *     `${G} stash`, `$(which git) stash`): no static text scan can resolve
  *     a runtime-computed word.
  *   - `require(mod)` with a variable specifier, for the probe rule.
+ *   - A hook bypass spelled some other way (#3778):
+ *     `GIT_CONFIG_KEY_0=core.hooksPath`, the separate-token
+ *     `--config-env core.hooksPath=X`, a hand edit of `.git/config`, or `git
+ *     commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
+ *     is ambiguous, so git itself rejects it.)
  *   - `kill $(pgrep -f tlc2.TLC)` and `pgrep -f tlc2 | xargs kill` (#3556
  *     review F6): the same machine-wide kill harm `sharedKill` denies, but
  *     `pgrep` alone only lists PIDs -- nothing in this scan currently
@@ -156,7 +166,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -176,6 +186,8 @@ export const RULE_MESSAGES = {
 		"pkill/killall with a bare (unscoped) pattern is forbidden (#3556) -- it matches machine-wide and can kill another concurrent session's TLC/vitest/etc run on this shared host -- kill the recorded PID of your own background job instead (`kill <pid>`), or use `pkill -f` with a pattern that includes your worktree's absolute path so only your own processes match.",
 	tmpCheckout:
 		"a checkout or scratch directory under /tmp is forbidden (#3526) -- /tmp on the maintainer host is tmpfs (RAM + swap; #2912 saw inode exhaustion there) and review/merge scratch checkouts filled it to 8/8 GB swap -- use `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator/reviewer scratch, `<worktree>/../probes-<pr>` for probe files, or `.claude/worktrees/` for a fixer's own worktree.",
+	hookBypass:
+		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
 		"a `git commit`/`git push` chained after a check (`npm run lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node scripts/check-*.mjs`) through `;` or a pipe, rather than `&&`, is forbidden (#3471) -- the check's exit code gates nothing that way, so a real failure can still get committed or pushed; gate it with `&&`, or read the check's result in its own separate call.",
 };
@@ -1031,6 +1043,109 @@ function collectPositionals(args, valueFlags) {
 	return positionals;
 }
 
+/** The git subcommands whose hooks `--no-verify` and friends skip (#3778). */
+const HOOK_SUBCOMMANDS = new Set(["commit", "push", "merge", "rebase"]);
+
+/** Message flags whose SEPARATE next token is text, not a flag -- so a
+ *  `git commit -m "--no-verify"` is never read as the flag it quotes. Applies
+ *  to `commit` and `merge` only: on `rebase` `-m` takes no value, and no
+ *  `push` flag carries message text. */
+const MESSAGE_VALUE_FLAGS = new Set(["-m", "-F", "--message", "--file"]);
+
+/** `git commit` short options that take a value (the rest of the bundle, or
+ *  the next token), so a bundle such as `-mn` stops being flags at `m`. */
+const COMMIT_VALUE_LETTERS = "mFCctuS";
+
+/** `git config` words that remove a key, leaving no trailing value to see
+ *  (a SET always has a value after the key). */
+const CONFIG_UNSET_WORDS = new Set(["--unset", "--unset-all", "unset"]);
+
+/**
+ * Does the env carry a variable the repo's husky hooks honour as an opt-out
+ * (#3778)? `HUSKY=0` is husky's own dispatcher (`node_modules/husky/husky`:
+ * `[ "${HUSKY-}" = "0" ] && exit 0`); `PI_LENS_SKIP_HOOKS` is tested with
+ * `[ -n … ]` in .husky/pre-commit and .husky/pre-push, so any NON-EMPTY value
+ * (even `0`) skips. `PI_LENS_PREPUSH_LOCK_SKIP` is deliberately absent: it is
+ * the recorded opt-out #3717's own push-blocked message tells the pusher to
+ * use, and it skips only the targeted-test step after a bounded lock wait.
+ *
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function hasHookSkipEnv(env) {
+	return env.HUSKY === "0" || (env.PI_LENS_SKIP_HOOKS ?? "") !== "";
+}
+
+/**
+ * Classify a `git commit` short-option bundle. Stops at the first
+ * value-taking letter: `-mn` is a message `n`, `-unormal` is an untracked
+ * mode, neither is a bypass. "bypass": `-n` (`--no-verify`) came first.
+ * "detached": the bundle ENDS on `m`/`F`, so the NEXT token is its value
+ * (`-am "-n"`, `-aF -n`) and must not be read as a flag.
+ *
+ * @param {string} arg
+ * @returns {"bypass" | "detached" | null}
+ */
+function scanCommitBundle(arg) {
+	if (!/^-[A-Za-z]+$/.test(arg)) return null;
+	const letters = arg.slice(1);
+	for (let k = 0; k < letters.length; k++) {
+		const ch = letters[k];
+		if (ch === "n") return "bypass";
+		if (COMMIT_VALUE_LETTERS.includes(ch))
+			return k === letters.length - 1 && (ch === "m" || ch === "F")
+				? "detached"
+				: null;
+	}
+	return null;
+}
+
+/**
+ * #3778: is `args[i]` (the subcommand) a hook bypass -- a `git config
+ * core.hooksPath` WRITE, or a `commit`/`push`/`merge`/`rebase` carrying
+ * `--no-verify`, `-n` (commit only: `git push -n` is `--dry-run`, and on
+ * merge/rebase `-n` is `--no-stat`), a `core.hooksPath` global option, or a
+ * skip env variable. Reads of `core.hooksPath` stay allowed.
+ *
+ * @param {string[]} args
+ * @param {number} i index of the subcommand, after {@link gitSubcommandIndex}
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function classifyHookBypass(args, i, env) {
+	const subcommand = args[i];
+	if (subcommand === "config") {
+		const rest = args.slice(i + 1);
+		const key = rest.findIndex((a) => /^core\.hookspath$/i.test(a));
+		if (key === -1) return false;
+		return (
+			rest.some((a) => CONFIG_UNSET_WORDS.has(a)) ||
+			(rest[key + 1] !== undefined && !rest[key + 1].startsWith("-"))
+		);
+	}
+	if (!HOOK_SUBCOMMANDS.has(subcommand)) return false;
+	if (hasHookSkipEnv(env)) return true;
+	if (args.slice(0, i).some((a) => /core\.hookspath/i.test(a))) return true;
+	const skipsMessageValues = subcommand === "commit" || subcommand === "merge";
+	for (let j = i + 1; j < args.length; j++) {
+		const a = args[j];
+		if (a === "--") break;
+		if (skipsMessageValues && MESSAGE_VALUE_FLAGS.has(a)) {
+			j++;
+			continue;
+		}
+		// git accepts the unambiguous abbreviations `--no-veri`/`--no-verif`;
+		// `--no-ver` is ambiguous and git rejects it.
+		if (/^--no-veri(f(y)?)?$/.test(a)) return true;
+		if (subcommand === "commit") {
+			const bundle = scanCommitBundle(a);
+			if (bundle === "bypass") return true;
+			if (bundle === "detached") j++;
+		}
+	}
+	return false;
+}
+
 /**
  * Classify a `git` invocation's args (after the leading "git" word).
  *
@@ -1053,6 +1168,7 @@ function collectPositionals(args, valueFlags) {
 function classifyGit(args, cwd, env = {}) {
 	const i = gitSubcommandIndex(args);
 	const subcommand = args[i];
+	if (classifyHookBypass(args, i, env)) return "hookBypass";
 	if (subcommand === "stash") return "stash";
 	if (subcommand === "reset") {
 		const rest = args.slice(i + 1);
