@@ -54,6 +54,23 @@ const codeqlSteps = (job: Job) =>
 		String(entry.uses).startsWith("github/codeql-action/"),
 	);
 
+function ifClauses(condition: string): string[] {
+	return condition
+		.replace(/^\$\{\{\s*|\s*\}\}$/g, "")
+		.split(" && ")
+		.map((clause) => clause.trim())
+		.sort();
+}
+
+const codeqlIfClauses = [
+	"!cancelled()",
+	"github.event_name == 'pull_request'",
+	"needs.install-test.result == 'success'",
+	"needs.lint-and-typecheck.result == 'success'",
+	"needs.tla-models.result == 'success'",
+	"needs.unit-tests.result == 'success'",
+].sort();
+
 describe("#3801 CodeQL advanced-setup workflow contract", () => {
 	// Recurrence: a committed workflow with no `name:` shows up in the Actions
 	// UI and in check-run groupings under its file path.
@@ -117,7 +134,9 @@ describe("#3801 CodeQL advanced-setup workflow contract", () => {
 	it("keeps codeql.yml off pull_request and the ci.yml job on pull_request only", () => {
 		const triggers = Object.keys(load("codeql.yml").on ?? {}).sort();
 		expect(triggers).toEqual(["push", "schedule", "workflow_dispatch"]);
-		expect(codeqlJob().if).toContain("github.event_name == 'pull_request'");
+		const condition = String(codeqlJob().if);
+		expect(condition).not.toContain("||");
+		expect(ifClauses(condition)).toEqual(codeqlIfClauses);
 	});
 
 	// Recurrence: GitHub's default for a job whose `needs` did not all pass is
@@ -131,10 +150,8 @@ describe("#3801 CodeQL advanced-setup workflow contract", () => {
 			["install-test", "lint-and-typecheck", "tla-models", "unit-tests"].sort(),
 		);
 		const condition = String(job.if);
-		expect(condition).toContain("!cancelled()");
-		for (const need of asList(job.needs)) {
-			expect(condition).toContain(`needs.${need}.result == 'success'`);
-		}
+		expect(condition).not.toContain("||");
+		expect(ifClauses(condition)).toEqual(codeqlIfClauses);
 		// Advisory red on a fork PR (read-only token, SARIF upload refused) is
 		// accepted; a silent skip is not.
 		expect(condition).not.toMatch(/fork/);
