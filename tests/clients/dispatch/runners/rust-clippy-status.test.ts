@@ -142,6 +142,58 @@ describe("rust-clippy status is the execution outcome (#3751)", () => {
 		}
 	});
 
+	it("artifact and failed build output remains failed on a nonzero exit", async () => {
+		// #3775 recurrence: a failed cargo build with only cargo progress records
+		// must not be mistaken for a clean run when the status guard is weakened.
+		const env = setupTestEnvironment("pi-lens-clippy-build-failed-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = [
+				'{"reason":"compiler-artifact"}',
+				'{"reason":"build-finished","success":false}',
+			].join("\n");
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: {
+							stdout: output,
+							stderr: "cargo: compiler failed",
+							status: 101,
+						},
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("failed");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("non-cargo stdout remains failed on a zero exit", async () => {
+		// #3775 recurrence: successful process exit with non-cargo noise must not
+		// be admitted as a clean cargo run when recognition is weakened.
+		const env = setupTestEnvironment("pi-lens-clippy-non-cargo-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: {
+							stdout: "Finished dev profile [unoptimized + debuginfo]",
+							stderr: "",
+							status: 0,
+						},
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("failed");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("a clean cargo stream with build-finished is a successful clean run", async () => {
 		const env = setupTestEnvironment("pi-lens-clippy-clean-");
 		try {
