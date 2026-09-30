@@ -124,9 +124,11 @@
  *     `${G} stash`, `$(which git) stash`): no static text scan can resolve
  *     a runtime-computed word.
  *   - `require(mod)` with a variable specifier, for the probe rule.
- *   - A hook bypass spelled some other way (#3778): an abbreviated long
- *     option (`--no-ver`), `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of
- *     `.git/config`, or `git commit` through an alias.
+ *   - A hook bypass spelled some other way (#3778):
+ *     `GIT_CONFIG_KEY_0=core.hooksPath`, the separate-token
+ *     `--config-env core.hooksPath=X`, a hand edit of `.git/config`, or `git
+ *     commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
+ *     is ambiguous, so git itself rejects it.)
  *   - `kill $(pgrep -f tlc2.TLC)` and `pgrep -f tlc2 | xargs kill` (#3556
  *     review F6): the same machine-wide kill harm `sharedKill` denies, but
  *     `pgrep` alone only lists PIDs -- nothing in this scan currently
@@ -185,7 +187,7 @@ export const RULE_MESSAGES = {
 	tmpCheckout:
 		"a checkout or scratch directory under /tmp is forbidden (#3526) -- /tmp on the maintainer host is tmpfs (RAM + swap; #2912 saw inode exhaustion there) and review/merge scratch checkouts filled it to 8/8 GB swap -- use `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator/reviewer scratch, `<worktree>/../probes-<pr>` for probe files, or `.claude/worktrees/` for a fixer's own worktree.",
 	hookBypass:
-		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it.",
+		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
 		"a `git commit`/`git push` chained after a check (`npm run lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node scripts/check-*.mjs`) through `;` or a pipe, rather than `&&`, is forbidden (#3471) -- the check's exit code gates nothing that way, so a real failure can still get committed or pushed; gate it with `&&`, or read the check's result in its own separate call.",
 };
@@ -1075,20 +1077,27 @@ function hasHookSkipEnv(env) {
 }
 
 /**
- * Is this a `git commit` short-option bundle containing `-n` (`--no-verify`)?
- * Stops at the first value-taking letter: `-mn` is a message `n`, `-unormal`
- * is an untracked mode, neither is a bypass.
+ * Classify a `git commit` short-option bundle. Stops at the first
+ * value-taking letter: `-mn` is a message `n`, `-unormal` is an untracked
+ * mode, neither is a bypass. "bypass": `-n` (`--no-verify`) came first.
+ * "detached": the bundle ENDS on `m`/`F`, so the NEXT token is its value
+ * (`-am "-n"`, `-aF -n`) and must not be read as a flag.
  *
  * @param {string} arg
- * @returns {boolean}
+ * @returns {"bypass" | "detached" | null}
  */
-function isCommitNoVerifyBundle(arg) {
-	if (!/^-[A-Za-z]+$/.test(arg)) return false;
-	for (const ch of arg.slice(1)) {
-		if (ch === "n") return true;
-		if (COMMIT_VALUE_LETTERS.includes(ch)) return false;
+function scanCommitBundle(arg) {
+	if (!/^-[A-Za-z]+$/.test(arg)) return null;
+	const letters = arg.slice(1);
+	for (let k = 0; k < letters.length; k++) {
+		const ch = letters[k];
+		if (ch === "n") return "bypass";
+		if (COMMIT_VALUE_LETTERS.includes(ch))
+			return k === letters.length - 1 && (ch === "m" || ch === "F")
+				? "detached"
+				: null;
 	}
-	return false;
+	return null;
 }
 
 /**
@@ -1125,8 +1134,14 @@ function classifyHookBypass(args, i, env) {
 			j++;
 			continue;
 		}
-		if (a === "--no-verify") return true;
-		if (subcommand === "commit" && isCommitNoVerifyBundle(a)) return true;
+		// git accepts the unambiguous abbreviations `--no-veri`/`--no-verif`;
+		// `--no-ver` is ambiguous and git rejects it.
+		if (/^--no-veri(f(y)?)?$/.test(a)) return true;
+		if (subcommand === "commit") {
+			const bundle = scanCommitBundle(a);
+			if (bundle === "bypass") return true;
+			if (bundle === "detached") j++;
+		}
 	}
 	return false;
 }

@@ -2492,6 +2492,17 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		"git merge --no-verify origin/master",
 		"git rebase --no-verify origin/master",
 		"git rebase -m --no-verify origin/master", // rebase -m takes no value
+		// git accepts the unambiguous abbreviations (r1 F3)
+		"git commit --no-veri -m x",
+		"git commit --no-verif -m x",
+		"git push --no-veri origin y",
+		"git push --no-verif origin y",
+		"git rebase --no-veri origin/master",
+		"git merge --no-verif origin/master",
+		// a bundle ending on -m/-F takes the NEXT token as its value, and a
+		// later -n is still a flag
+		"git commit -am x -n",
+		"git commit -aF msg.txt -n",
 		// -n means --no-verify on `git commit`, alone or bundled
 		"git commit -n -m x",
 		"git commit -anm x",
@@ -2549,6 +2560,12 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		'git commit -m "drop --no-verify from the runbook"',
 		'git commit -m "--no-verify"',
 		'git commit -m "-n"',
+		// a bundle ending on -m/-F: the detached value is text (r1 F4)
+		'git commit -am "-n"',
+		'git commit -sm "-n"',
+		'git commit -am "--no-verify"',
+		"git commit -aF -n",
+		"git commit --no-ver -m x", // ambiguous: git itself rejects it
 		'git commit --message "--no-verify"',
 		'git commit -F "-n"',
 		'git commit --file "--no-verify"',
@@ -2601,6 +2618,15 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 	// -<letter>n... with a value-taking letter first is a value, not `-n`.
 	it.each([..."mFCctuS"])("commit -%s<value with n> is not a bypass", (l) => {
 		expect(findDeny(`git commit -${l}nx`)).toBeNull();
+	});
+
+	// r1 F1: a core.hooksPath write is denied whatever the value (the repair
+	// `git config core.hooksPath .husky/_` is in the maintainer's transcripts),
+	// so the message must name the sanctioned repair instead.
+	it("a core.hooksPath write names setup-git-hooks as the repair", () => {
+		const result = runHook("git config core.hooksPath /x/.husky/_");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("node scripts/setup-git-hooks.mjs");
 	});
 
 	it("declares hookBypass in the DenyRule union the .d.mts exports", () => {
