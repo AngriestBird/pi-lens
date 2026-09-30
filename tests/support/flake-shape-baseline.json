@@ -92,7 +92,8 @@
 		"support/fault-injection.test.ts": 3,
 		"support/git-config-guard.test.ts": 5,
 		"support/git-fixture-env.test.ts": 9,
-		"support/tests-tree-write-guard-race.test.ts": 1
+		"support/tests-tree-write-guard-race.test.ts": 1,
+		"support/vitest-setup-registry-teardown.test.ts": 2
 	},
 	"elapsed-time-assertion": {
 		"clients/actionable-warnings-bounds.test.ts": 1,
