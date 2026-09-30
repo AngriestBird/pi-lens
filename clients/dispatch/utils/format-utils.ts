@@ -68,9 +68,11 @@ export function formatDiagnostics(
 		output += `  ... and ${diagnostics.length - maxDisplay} more\n`;
 	}
 
-	if (semantic === "blocking") {
-		output += formatPromotionNotes(diagnostics);
-	}
+	// #3218: promotion notes ride only on blocking diagnostics (the promotion
+	// seam sets one with `semantic: "blocking"`), so there is no semantic guard
+	// to make; collecting unconditionally is the same output for every
+	// reachable input and one fewer unreachable branch.
+	output += formatPromotionNotes(diagnostics);
 
 	return output;
 }
