@@ -36,7 +36,10 @@ change.
     optional relocation (~1585), the host apply, then `recordWritten` at
     tool_result (~2367). Since #3523, an edit the guard allowed unrelocated
     (`markToolCallEditInPlace`, ~1628) is recorded as a read of the lines it
-    wrote, hashed from its `newText` (`runtime-tool-result.ts` ~2316);
+    wrote, hashed from its `newText` (`runtime-tool-result.ts` ~2316). Only a
+    single `edits[].range` replacement is recorded (#3760): a multi-range
+    batch, an `oldRange` edit and a hashline edit keep being refused on a
+    re-edit, and a relocated edit is never recorded (`OwnEditRelocInsert`);
   - **write**: `noteCreatedFile` at tool_call, the host write, and
     `recordWritten`, which injects the creation read (`read-guard.ts`
     `injectCreationRead`). Since #3524's remainder it is hashed from the
@@ -97,7 +100,7 @@ needs it.
 A config that turns one of these off either names the bug it isolates (for
 example `MtimeAuthored = FALSE` in `Guarded`, so bug 2 does not mask the rest)
 or is a mutant of a fix (`*NoRecord`, `EvidenceAtResultHandler`,
-`OwnEditRelocRecorded`, `SpanSnapshotFixAnyReloc`, `SpanSnapshotFixNoOwnRecord`).
+`OwnEditRelocInsertRecorded`, `SpanSnapshotFixAnyReloc`, `SpanSnapshotFixNoOwnRecord`).
 
 ## Guard (as coded)
 
@@ -163,7 +166,8 @@ head that added this model. It is not checked in CI.
 | `OwnReEdit` | #3523 fixed: the agent re-edits a line it just wrote | pass | 2,036 |
 | `OwnReEditNoRecord` | the same without the own-edit record (the code before #3523) | violated `NoFalseBlock` | 327 |
 | `OwnEditReloc` | #3523 fixed: a relocated edit is not recorded; write + autofix, an other-writer insert, a relocated edit, then an edit | pass | 1,608 |
-| `OwnEditRelocRecorded` | the same with a relocated edit recorded: the #3522 rule now refuses that stale allow itself | pass | 1,592 |
+| `OwnEditRelocInsert` | #3760: ranged reads, another writer's insert, an own edit, a relocated two-line edit, then an edit at the agent's numbering; the relocated edit is not recorded | pass | 609,580 |
+| `OwnEditRelocInsertRecorded` | the same with the relocated edit recorded at the lines it wrote: the next edit passes on the wrong line of the agent's own text | violated `NoStaleAllow` | 39,157 |
 | `EvidenceAtResult` | #3524 fixed: another writer lands between the host read and the tool_result | pass | 23,571 |
 | `EvidenceAtResultHandler` | the same with the read taken from disk at tool_result (the code before #3524) | violated `NoStaleAllow` | 316 |
 | `EvidenceFromDelivered` | #3524 fixed, another writer anywhere, replace/delete/insert | pass | 93,904 |
@@ -194,7 +198,7 @@ head that added this model. It is not checked in CI.
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 fixed: no own-edit rescue; the drain credits authorship only | pass | 1,338 / 245 |
 | `UnhashedOwnEditRescueOn`, `UnhashedFormatStampOn` | the same with the rescue / the drain's FileTime stamp back (the code before #3525) | violated `NoStaleAllow` | 437 / 101 |
 
-`OwnEditReloc` and `OwnEditRelocRecorded` set `CreationHandlerEvidence =
+`OwnEditReloc` sets `CreationHandlerEvidence =
 FALSE`, so the creation-read race `CreationAtResult` documents cannot mask the
 relocation check.
 

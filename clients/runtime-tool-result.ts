@@ -1147,6 +1147,14 @@ async function dispatchPipelineAnalysis(args: {
 /**
  * #3523: the one `edits[].range` replacement of a positional edit call, as
  * executed. Its `newText` then occupies the lines from `range.start.line`.
+ *
+ * #3760: the only shape recorded. A multi-range batch is not: no host
+ * pi-lens adapts pins whether its ranges are in original or sequential line
+ * numbers, and a guessed shift would put `newText` on lines the host did not
+ * write. `oldRange` carries no replacement text. A hashline edit's lines come
+ * from anchors pi-lens recomputes, not from the tool's own store
+ * (`hashline-anchor.ts`), so where they landed is unverified. Each keeps its
+ * re-edit refused as range-stale: a re-read, never a stale allow.
  */
 function singlePositionalEdit(
 	input: unknown,

@@ -20,6 +20,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { computeHashlineAnchors } from "../../clients/hashline-anchor.js";
 import { lineContentHash } from "../../clients/read-guard.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -320,6 +321,13 @@ async function textEdit(
 		}),
 	);
 	return { blocked: false };
+}
+
+/** The host's apply of a one-line replacement at line `n` (1-based). */
+function hostApplyLine(file: string, n: number, text: string): void {
+	const v = diskLines(file);
+	v[n - 1] = text;
+	writeNow(file, v.join("\n"));
 }
 
 /** A `write` whose turn-first autofix (a biome double) drops line 1. */
@@ -780,7 +788,7 @@ describe("#3523: the agent's own positional edit is a read", () => {
 		}
 	});
 
-	it("does not record a relocated edit at the agent's line numbers", async () => {
+	it("does not record a relocated edit at the agent's line numbers (OwnEditRelocInsert)", async () => {
 		const env = setupTestEnvironment("rg-3523-relocated-");
 		try {
 			const file = fixture(env.tmpDir, "r.ts", `${lines(10).join("\n")}\n`);
@@ -830,6 +838,89 @@ describe("#3523: the agent's own positional edit is a read", () => {
 			const next = await positionalEdit(runtime, file, [[5, 6, "p\nq"]]);
 			expect(next.ranges).toEqual([[5, 6]]);
 			expect(next.blocked).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #3760: the shapes whose written lines pi-lens cannot place record no
+	// own-edit read, so the re-edit is a re-read, never an allow from a guessed
+	// geometry. Recurrence: recording them from a host contract no test pins.
+	const ownEditRecords = (runtime: RuntimeCoordinator, file: string) =>
+		runtime.readGuard
+			.getReadHistory(file)
+			.filter((record) => record.source === "own-edit").length;
+
+	it("records no own-edit read for an oldRange edit, which carries no text", async () => {
+		const env = setupTestEnvironment("rg-3760-old-range-");
+		try {
+			const file = fixture(env.tmpDir, "o.ts", `${lines(6).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, { offset: 1, limit: 6 });
+			const oldRangeEdit = async (toolCallId: string) => {
+				const input = {
+					path: file,
+					oldRange: { start: { line: 2 }, end: { line: 2 } },
+				};
+				const verdict = (await handleToolCall(
+					callDeps(runtime, { toolName: "edit", toolCallId, input }),
+				)) as { block?: boolean; reason?: string } | undefined;
+				return { input, verdict };
+			};
+			const first = await oldRangeEdit(`old-range-${++seq}`);
+			expect(first.verdict?.block).not.toBe(true);
+			hostApplyLine(file, 2, "agent2");
+			await handleToolResult(
+				resultDeps(runtime, {
+					toolName: "edit",
+					toolCallId: `old-range-${seq}`,
+					input: first.input,
+					content: [{ type: "text", text: "ok" }],
+				}),
+			);
+			expect(ownEditRecords(runtime, file)).toBe(0);
+			const again = await oldRangeEdit(`old-range-${++seq}`);
+			expect(again.verdict?.block).toBe(true);
+			expect(again.verdict?.reason).toContain("Edit range changed since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("records no own-edit read for a hashline replace, whose anchors pi-lens recomputes", async () => {
+		const env = setupTestEnvironment("rg-3760-hashline-");
+		try {
+			const file = fixture(env.tmpDir, "h.ts", `${lines(6).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, { offset: 1, limit: 6 });
+			const replace = async (toolCallId: string) => {
+				const anchors = computeHashlineAnchors(fs.readFileSync(file, "utf8"));
+				const input = {
+					path: file,
+					remove_from: anchors?.[1],
+					remove_to: anchors?.[1],
+					replacement_lines: ["agent2"],
+				};
+				const verdict = (await handleToolCall(
+					callDeps(runtime, { toolName: "replace", toolCallId, input }),
+				)) as { block?: boolean; reason?: string } | undefined;
+				return { input, verdict };
+			};
+			const first = await replace(`hashline-${++seq}`);
+			expect(first.verdict?.block).not.toBe(true);
+			hostApplyLine(file, 2, "agent2");
+			await handleToolResult(
+				resultDeps(runtime, {
+					toolName: "replace",
+					toolCallId: `hashline-${seq}`,
+					input: first.input,
+					content: [{ type: "text", text: "replaced" }],
+				}),
+			);
+			expect(ownEditRecords(runtime, file)).toBe(0);
+			const again = await replace(`hashline-${++seq}`);
+			expect(again.verdict?.block).toBe(true);
+			expect(again.verdict?.reason).toContain("Edit range changed since read");
 		} finally {
 			env.cleanup();
 		}
