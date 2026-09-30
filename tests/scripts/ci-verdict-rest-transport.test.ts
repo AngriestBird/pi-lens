@@ -760,6 +760,52 @@ describe("run() — REST transport end to end (#3497)", () => {
 		expect(stdoutLines.join("\n")).toContain("acme/repo@c0ffee");
 	});
 
+	// #3700: the failed-job log read is `gh api --allow-escape-sequences`, which
+	// this transport has no REST twin for. A red head must still exit 1 with the
+	// plain table -- not spawn a `gh` that is not there and print its ENOENT as
+	// a note under every failed row.
+	it("a red head on the REST transport exits 1 without trying to read job logs through gh", async () => {
+		const gitExec = () => "https://github.com/acme/repo.git\n";
+		const fetchImpl = async (url: string) => {
+			if (url.includes("/pulls/2539")) {
+				return new Response(
+					JSON.stringify({
+						head: { sha: "c0ffee" },
+						mergeable: true,
+						mergeable_state: "clean",
+					}),
+				);
+			}
+			if (url.includes("/branches/master/protection")) {
+				return new Response("", { status: 403 });
+			}
+			return new Response(
+				JSON.stringify({
+					total_count: 2,
+					check_runs: [
+						checkRun({ name: "Unit tests", id: 1, conclusion: "failure" }),
+						checkRun({ name: "Lint & type-check", id: 2 }),
+					],
+				}),
+			);
+		};
+		const stdoutLines: string[] = [];
+		let exitCode: number | undefined;
+		await withEmptyPathAndToken(async () => {
+			exitCode = await run({
+				argv: ["2539"],
+				gitExec,
+				fetchImpl,
+				stdout: (line: string) => stdoutLines.push(line),
+				stderr: () => {},
+			});
+		});
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(stdoutLines).toContain("Transport: rest");
+		expect(stdoutLines.join("\n")).not.toContain("failed step");
+		expect(stdoutLines.join("\n")).not.toContain("could not read the job");
+	});
+
 	it("still exits 70 when gh is missing and NO token is set (unchanged acceptance case)", async () => {
 		const originalPath = process.env.PATH;
 		const originalGhToken = process.env.GH_TOKEN;

@@ -346,8 +346,8 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 			throw trap();
 		});
 
-		// A report from outside any consumer (the tree-cache retire observer,
-		// a batch compile) is a trap on no input: it spends budget.
+		// A report from outside any consumer (the tree-cache retire observer)
+		// is a trap on no input: it spends budget.
 		for (let i = 1; i < WASM_TRAP_BUDGET; i++) {
 			expect(client.reportWasmAbort(trap())).toBe(false);
 		}

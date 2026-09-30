@@ -355,19 +355,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"queue, not the work it admits — #2523 says so explicitly.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#0b7eb0bf~12dfd718": {
-		family: "hook-await",
-		site: "off-hook",
-		reason:
-			"#3529's post-exit resync awaits the abandoned format phase's " +
-			"`abandoned` promise inside a `void`-launched task that starts " +
-			"only after `agent_settled`'s own `bounded()` gave up on the " +
-			"phase; the hook never awaits it. It settles when the abandoned " +
-			"formatter run does: its spawn has a 15 s timeout, the command " +
-			"resolution before the spawn has none. #3558 moved that " +
-			"resolution out of pi's queue; bounding the wait is #3599.",
-		owner: "#3599",
-	},
 	"clients/runtime-agent-end.ts#0e5eaed5~b2556cb0": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -407,16 +394,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(it starts after `agent_settled`'s `bounded()` gave up on the " +
 			"phase). The resync races its own touch against the LSP sync " +
 			"budget. #3576 re-keyed it: the same await, through `syncDrainWrite`.",
-		owner: "#3529",
-	},
-	"clients/runtime-agent-end.ts#5f7b6a40~380334ff": {
-		family: "hook-await",
-		site: "off-hook",
-		reason:
-			"#3529's post-exit resync awaits the abandoned format phase " +
-			"itself inside a `void`-launched task that starts only after " +
-			"`agent_settled`'s own `bounded()` gave up on that phase; the " +
-			"hook never awaits it.",
 		owner: "#3529",
 	},
 	"clients/runtime-agent-end.ts#846909f2~82252dcb": {
@@ -2596,6 +2573,13 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"The AMBIENT turn abort signal, set for the whole tool_result path and " +
 		"absent only in a bare unit harness. PI_LENS_LSP_SYNC_BUDGET_MS is the " +
 		"bound that is always live.",
+	"call:clients/runtime-agent-end.ts#fc644b89~26fd2489":
+		"The drain's post-exit resync of a formatter its own bound gave up on " +
+		"runs OFF the hook (the `void`-launched task starts only after " +
+		"`agent_settled`'s bound gave up), so it carries the same " +
+		"`ambientSignal` the in-hook bound does: the hook's `ctx.signal`, or " +
+		"the ambient slot in a standalone harness, absent only there. The " +
+		"wall-clock half is always live, capped by `DEFERRED_FORMAT_BUDGET_MS`.",
 	"call:clients/runtime-agent-end.ts#fc644b89~93eae0ad":
 		"The deferred formatter drain receives AgentEndDeps.signal, or the " +
 		"ambient signal in a standalone harness; agent_settled bounds the wait.",

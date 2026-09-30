@@ -63,6 +63,14 @@ import {
  */
 const DEFERRED_FORMAT_STALE_AFTER_MS = 10 * 60_000;
 const DEFERRED_FORMAT_CONCURRENCY = 3;
+/**
+ * The formatter aggregate budget the deferred drain hands each file. The
+ * post-exit resync waits for the formatter the hook bound gave up on under
+ * this same budget, so a command resolution that outlives it (an auto-install
+ * has no leaf bound) settles as an abandoned resync instead of parking the
+ * detached task forever (#3599).
+ */
+const DEFERRED_FORMAT_BUDGET_MS = 30_000;
 
 interface AgentEndDeps {
 	/** Abort signal owned by the agent_end/agent_settled hook. */
@@ -688,7 +696,7 @@ export async function handleAgentEnd({
 						getFormatService,
 						dbg,
 						ambientSignal,
-						30_000,
+						DEFERRED_FORMAT_BUDGET_MS,
 						"agent_settled",
 						formatHold,
 					).finally(() => formatHold?.release());
@@ -712,19 +720,39 @@ export async function handleAgentEnd({
 							let outcome: LspResyncOutcome | "stale-session" | "read-failed" =
 								"stale-session";
 							try {
-								await (
-									await phase
-								).abandoned;
-								// #3528 r1 F1, #3576: a replaced session or a retired LSP
-								// service gets no touch that would spawn a server.
-								outcome =
-									(await syncDrainWrite(filePath, () => {
-										const readStamp = performance.now();
-										return {
-											readStamp,
-											content: nodeFs.readFileSync(filePath, "utf-8"),
-										};
-									})) ?? "stale-session";
+								// #3599: the abandoned formatter's command resolution can outlive
+								// every leaf bound (an auto-install has none), so wait for the
+								// formatter under the drain's own budget instead of forever. A
+								// wait that expires is a degradation, recorded once by
+								// `bounded()` as `off_hook:deferred-format-post-exit-resync`.
+								const formatterSettled = await bounded(
+									phase
+										.then((summary) => summary.abandoned)
+										.then(() => true as const),
+									{
+										ms: DEFERRED_FORMAT_BUDGET_MS,
+										signal: ambientSignal,
+										hook: "off_hook",
+										label: "deferred-format-post-exit-resync",
+									},
+								);
+								if (formatterSettled === undefined) {
+									// The formatter is still running; its later write cannot be
+									// synced from here, and a read now could publish bytes it is
+									// about to replace. Report the resync as abandoned.
+									outcome = "abandoned";
+								} else {
+									// #3528 r1 F1, #3576: a replaced session or a retired LSP
+									// service gets no touch that would spawn a server.
+									outcome =
+										(await syncDrainWrite(filePath, () => {
+											const readStamp = performance.now();
+											return {
+												readStamp,
+												content: nodeFs.readFileSync(filePath, "utf-8"),
+											};
+										})) ?? "stale-session";
+								}
 							} catch (err) {
 								outcome = "read-failed";
 								dbg(

@@ -42,7 +42,21 @@ export interface VerdictRow {
 	status: string | null;
 	conclusion: string | null;
 	url: string | null;
+	detailsUrl?: string | null;
 	gating: boolean;
+}
+
+export interface FailedJobDetail {
+	name: string;
+	rowId: number | null;
+	jobId: string | null;
+	steps: string[];
+	failures: string[];
+	extraFailures: number;
+	summary: string[];
+	mergeBase: string | null;
+	missingMergeRefPr: string | null;
+	note: string | null;
 }
 
 export interface AbsentContext {
@@ -58,6 +72,10 @@ export interface Verdict {
 	rows: VerdictRow[];
 	reason: string;
 	mergeState: string;
+	kind: string;
+	failingRows: VerdictRow[];
+	details?: FailedJobDetail[];
+	hints?: string[];
 }
 
 export declare function computeVerdict(
@@ -77,6 +95,7 @@ export declare function computeVerdict(
 		} | null;
 	} | null,
 	absentContext?: AbsentContext | (() => AbsentContext | null) | null,
+	noiseRowIds?: Set<number | null> | null,
 ): Verdict;
 
 export declare function formatVerdictTable(rows: VerdictRow[]): string;
@@ -130,7 +149,7 @@ export declare function pollVerdict(args: {
 
 export type GhExec = (
 	args: string[],
-	options?: { timeoutMs?: number },
+	options?: { timeoutMs?: number; maxBuffer?: number },
 ) => string;
 
 export declare function resolveRepository(
@@ -170,6 +189,7 @@ export declare function fetchAutoMergeAge(
 	sha: string,
 	ghExec?: GhExec,
 	timeoutMs?: number,
+	knownPushedMs?: number | null,
 ): { autoMerge: boolean; pushedMs: number | null };
 
 export declare function fetchRerunState(
@@ -282,6 +302,9 @@ export declare function formatVersionTooOldMessage(
 export declare function parseArgs(argv: string[]): {
 	target: string | null;
 	waitSeconds: number | null;
+	all: boolean;
+	watchOpen: boolean;
+	stateFile: string | null;
 };
 
 export declare function run(args?: {
@@ -293,6 +316,11 @@ export declare function run(args?: {
 	stderr?: (line: string) => void;
 	sleepImpl?: (ms: number) => Promise<void>;
 	now?: () => number;
+	onVerdict?: (info: {
+		repository: string;
+		sha: string;
+		verdict: Verdict;
+	}) => void;
 }): Promise<number>;
 
 export declare function callWithTransientRetry<T>(
@@ -304,3 +332,73 @@ export declare function callWithTransientRetry<T>(
 		onRetry?: (line: string) => void;
 	},
 ): Promise<T>;
+
+export declare const MAX_FAILURE_LINES: number;
+export declare const JOB_LOG_MAX_BUFFER: number;
+export declare const WATCH_POLL_INTERVAL_SECONDS: number;
+
+export declare function parseJobLog(logText: unknown): {
+	failures: string[];
+	extraFailures: number;
+	summary: string[];
+	mergeBase: string | null;
+	missingMergeRefPr: string | null;
+};
+
+export declare function readFailedJob(
+	repository: string,
+	row: VerdictRow,
+	ghExec?: GhExec,
+	timeoutMs?: number,
+): FailedJobDetail;
+
+export declare function readFailureDetails(args: {
+	rows: VerdictRow[];
+	target: string;
+	repository: string;
+	ghExec?: GhExec;
+	timeoutMs?: number;
+}): {
+	details: FailedJobDetail[];
+	hints: string[];
+	noiseRowIds: Set<number | null> | null;
+};
+
+export declare function formatFailureLines(
+	verdict: Pick<Verdict, "details" | "hints">,
+): string[];
+
+export declare function formatGatingSplit(
+	rows: VerdictRow[],
+	failingRows?: VerdictRow[],
+): string[];
+
+export interface OpenPr {
+	number: number;
+	author?: { login?: string } | null;
+	headRefOid?: string;
+	autoMergeRequest?: unknown;
+}
+
+export declare function readOpenPrs(
+	ghExec?: GhExec,
+	timeoutMs?: number,
+): OpenPr[];
+
+export declare function snapshotOpenPrs(args: {
+	ghExec?: GhExec;
+	stdout?: (line: string) => void;
+	stderr?: (line: string) => void;
+	sleepImpl?: (ms: number) => Promise<void>;
+	now?: () => number;
+}): Promise<number>;
+
+export declare function watchOpenPrs(args: {
+	ghExec?: GhExec;
+	waitSeconds?: number | null;
+	stateFile?: string | null;
+	stdout?: (line: string) => void;
+	stderr?: (line: string) => void;
+	sleepImpl?: (ms: number) => Promise<void>;
+	now?: () => number;
+}): Promise<number>;
