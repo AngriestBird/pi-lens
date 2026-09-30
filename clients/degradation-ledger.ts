@@ -745,8 +745,9 @@ export type DegradationKind =
 	| "mode-suppression"
 	/**
 	 * #3677: the mutation bridge received a foreign `readGuardBranchEpoch` that
-	 * was not a finite integer in `[0, currentBranchEpoch]` — NaN, a negative,
-	 * a fraction, an epoch from the future, or not a number. It is ignored so
+	 * was not an integer `>= 0` — NaN, a negative, a fraction, or not a number.
+	 * (An integer above the live epoch is a dead session's capture, not this
+	 * kind: the read guard refuses it and nothing is queued.) It is ignored so
 	 * the `Math.max` merge cannot poison a legitimate deferred record with a
 	 * bogus epoch (a false block, since `Math.max` can only raise it), and the
 	 * ignored value is named. Once per session: a producer that sends one bad
