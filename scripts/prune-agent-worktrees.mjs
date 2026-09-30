@@ -1052,6 +1052,24 @@ function enrichCwd(rows) {
 	return rows;
 }
 
+export function liveProcessCwds() {
+	if (isWindows || !fs.existsSync("/proc")) return null;
+	const cwds = new Set();
+	try {
+		for (const entry of fs.readdirSync("/proc")) {
+			if (!/^\d+$/.test(entry)) continue;
+			try {
+				cwds.add(toComparablePath(fs.readlinkSync(`/proc/${entry}/cwd`)));
+			} catch {
+				/* process exited or cwd is unreadable */
+			}
+		}
+		return cwds;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * @param {number} pid
  * @returns {boolean}
@@ -1654,6 +1672,7 @@ async function main(argv) {
 		// worktree root, so equality never fired.
 		selfPath: [SCRIPT_DIR, process.cwd()],
 		isPidAlive,
+		liveProcessCwds: liveProcessCwds(),
 	});
 
 	// #2631: the merged-branch sweep plans over every non-primary tree the

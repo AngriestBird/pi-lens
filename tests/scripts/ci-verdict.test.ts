@@ -4,6 +4,7 @@ import * as yaml from "js-yaml";
 import { describe, expect, it } from "vitest";
 import {
 	computeVerdict,
+	formatAbsentRequiredReason,
 	DEFAULT_GH_TIMEOUT_MS,
 	EXIT_DIRTY,
 	EXIT_FAILURE,
@@ -74,6 +75,25 @@ const PR_3382_CANCELLED = JSON.parse(
 );
 
 describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", () => {
+	it("#3694 reports fork approval with the non-approving command", () => {
+		const verdict = computeVerdict({
+			check_runs: [
+				checkRun({ name: "Unit tests", status: "action_required", id: 77 }),
+				checkRun({ name: "Lint & type-check", id: 2 }),
+			],
+		});
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toContain("awaiting fork approval");
+		expect(verdict.reason).toContain(
+			"gh api -X POST repos/<repo>/actions/runs/77/approve",
+		);
+	});
+
+	it("#3694 formats the absent-required auto-merge re-arm message", () => {
+		expect(formatAbsentRequiredReason("abc123", 12)).toBe(
+			"required checks absent for 12 min on abc123 (auto-merge on) — push or merge master to re-arm",
+		);
+	});
 	it("reports an armed infrastructure rerun only while its later attempt runs", () => {
 		const verdict = computeVerdict(
 			{

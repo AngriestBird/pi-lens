@@ -17,7 +17,14 @@
  * Throwing here aborts the run, so stale output can never silently pass.
  */
 
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	type Dirent,
+	existsSync,
+	readFileSync,
+	readdirSync,
+	statSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testSourceFiles } from "./module-instance-scan.js";
@@ -161,6 +168,28 @@ export function runFreshnessChecks(root: string): void {
 	}
 }
 
+/** Warn, but never abort, when the shared node_modules was installed from a
+ * different package-lock.json (#3694). The stamp is written by prepare after
+ * npm has populated node_modules; absence is deliberately only a warning so
+ * package managers and source checkouts without the stamp remain usable. */
+export function nodeModulesLockWarning(root: string): string | null {
+	try {
+		const lockHash = createHash("sha256")
+			.update(readFileSync(join(root, "package-lock.json")))
+			.digest("hex");
+		const stamp = readFileSync(
+			join(root, "node_modules", ".pi-lens-package-lock-sha256"),
+			"utf8",
+		).trim();
+		if (stamp === lockHash) return null;
+		return `⚠️ node_modules may be stale: package-lock.json does not match the install stamp; run \`npm install\` (resolved node_modules: ${resolve(join(root, "node_modules"))})`;
+	} catch {
+		return null;
+	}
+}
+
 export default function setup(): void {
+	const warning = nodeModulesLockWarning(repoRoot);
+	if (warning) console.warn(warning);
 	runFreshnessChecks(repoRoot);
 }

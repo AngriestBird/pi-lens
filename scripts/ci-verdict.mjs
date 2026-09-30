@@ -191,6 +191,10 @@ export const EXIT_PENDING = 3;
 export const EXIT_USAGE = 64;
 export const EXIT_TRANSPORT = 70;
 
+export function formatAbsentRequiredReason(sha, minutes = 0) {
+	return `required checks absent for ${Math.max(0, Math.floor(Number(minutes) || 0))} min on ${sha} (auto-merge on) — push or merge master to re-arm`;
+}
+
 export const POLL_INTERVAL_SECONDS = 30;
 export const HARD_CAP_SECONDS = 20 * 60;
 
@@ -422,6 +426,11 @@ export function computeVerdict(
 	);
 	const failingGatingRows = rows.filter((row) => {
 		if (!row.gating || !row.present || row.status !== "completed") return false;
+		if (
+			row.status === "action_required" ||
+			row.conclusion === "action_required"
+		)
+			return false;
 		if (isUncertainConclusion(row.conclusion)) return false;
 		if (infraRerunPending && row.name === "Unit tests") return false;
 		if (requiredNameSet.has(row.name)) return row.conclusion !== "success";
@@ -429,9 +438,21 @@ export function computeVerdict(
 	});
 	const pendingGatingRows = rows.filter((row) => {
 		if (!row.gating) return false;
+		if (
+			row.status === "action_required" ||
+			row.conclusion === "action_required"
+		)
+			return true;
 		if (row.status !== "completed") return true;
 		return false;
 	});
+	const forkApprovalRows = rows.filter(
+		(row) =>
+			row.gating &&
+			row.present &&
+			(row.status === "action_required" ||
+				row.conclusion === "action_required"),
+	);
 
 	let exitCode;
 	let reason;
@@ -454,7 +475,13 @@ export function computeVerdict(
 		reason = `gating check(s) completed with a non-success conclusion: ${failingGatingRows.map((row) => `${row.name} (${row.conclusion})`).join(", ")}`;
 	} else if (pendingGatingRows.length > 0) {
 		exitCode = EXIT_PENDING;
-		if (anyAbsent) {
+		if (forkApprovalRows.length > 0) {
+			reason = `awaiting fork approval: ${forkApprovalRows
+				.map(
+					(row) => `gh api -X POST repos/<repo>/actions/runs/${row.id}/approve`,
+				)
+				.join(", ")}`;
+		} else if (anyAbsent) {
 			reason =
 				mergeable == null
 					? "one or more required checks are absent and there is no PR context (bare-SHA target) to confirm they are not merge-conflicted; treating as pending, not DIRTY -- pass a PR number, or wait for CI to register"
@@ -783,6 +810,32 @@ export function fetchCheckRunsPayload(
 		page += 1;
 	}
 	return { total_count: totalCount ?? checkRuns.length, check_runs: checkRuns };
+}
+
+export function fetchActionRequiredRuns(
+	repository,
+	sha,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+) {
+	try {
+		const payload = JSON.parse(
+			ghExec(
+				[
+					"api",
+					`repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`,
+				],
+				{ timeoutMs },
+			),
+		);
+		return (Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [])
+			.filter(
+				(run) => run?.head_sha === sha && run?.status === "action_required",
+			)
+			.map((run) => ({ id: run.id, name: run.name ?? "CI" }));
+	} catch {
+		return [];
+	}
 }
 
 /** Read Actions attempts through the existing ghExec seam. Check-runs do not
@@ -1337,6 +1390,10 @@ export async function run({
 			transport === TRANSPORT_GH && ciClassification && isPrNumber(target)
 				? () => fetchRerunState(repository, sha, ghExec, initialTimeoutMs)
 				: null;
+		const actionRequiredRuns =
+			transport === TRANSPORT_GH && ghExec === gh
+				? fetchActionRequiredRuns(repository, sha, ghExec, initialTimeoutMs)
+				: [];
 		// #2609: read once, before polling starts (branch protection does not
 		// change between polls of the same head). `null` means unreadable --
 		// `requiredChecks` then falls back to the constant default, and every
@@ -1393,7 +1450,14 @@ export async function run({
 		// reading the output never has to infer it from context.
 		stdout(`Transport: ${transport}`);
 		stdout(`Gating source: ${gatingSource}`);
-		stdout(verdict.reason);
+		stdout(
+			actionRequiredRuns.length > 0
+				? `awaiting fork approval: ${actionRequiredRuns.map((run) => `gh api -X POST repos/<repo>/actions/runs/${run.id}/approve`).join(", ")}`
+				: verdict.reason.includes("required checks are absent")
+					? formatAbsentRequiredReason(sha)
+					: verdict.reason,
+		);
+		if (actionRequiredRuns.length > 0) return EXIT_PENDING;
 		return verdict.exitCode;
 	} catch (error) {
 		// Transport/unexpected (F3): `gh` missing from PATH, a call that hit its

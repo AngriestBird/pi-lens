@@ -25,6 +25,7 @@ import {
 	HOOK_REMOVE_RESERVE_MS,
 	HOOK_TIMEOUT_MARGIN_MS,
 	HOOK_TIMEOUT_MS,
+	liveProcessCwds,
 	MIN_SCAN_BUDGET_MS,
 	RECHECK_TIMEOUT_MS,
 	REMOVE_TIMEOUT_MS,
@@ -145,6 +146,49 @@ describe("parseArgs", () => {
 		expect(hookBudgetMs("who-knows", resolveHookPolicy("subagent-stop"))).toBe(
 			DEFAULT_HOOK_BUDGET_MS,
 		);
+	});
+});
+
+describe("#3694 live cwd safety rail", () => {
+	it("keeps a worktree containing a live process cwd", () => {
+		const result = planWorktreePrune({
+			worktrees: [
+				{
+					path: "/repo/.claude/worktrees/agent-a",
+					branch: "refs/heads/agent-a",
+					mtimeMs: 0,
+					dirty: false,
+					pushed: true,
+				},
+			],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			liveProcessCwds: new Set(["/repo/.claude/worktrees/agent-a/src"]),
+		});
+		expect(result.remove).toHaveLength(0);
+		expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
+	});
+
+	it("keeps with an explicit reason when cwd inspection is unsupported", () => {
+		const result = planWorktreePrune({
+			worktrees: [
+				{
+					path: "/repo/.claude/worktrees/agent-a",
+					mtimeMs: 0,
+					dirty: false,
+					pushed: true,
+				},
+			],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			liveProcessCwds: null,
+		});
+		expect(result.keep[0]).toMatchObject({ reason: "live-cwd-unsupported" });
+	});
+
+	it("reads Linux process cwd entries when procfs is available", () => {
+		const cwds = liveProcessCwds();
+		if (process.platform === "linux") expect(cwds).toBeInstanceOf(Set);
 	});
 });
 
@@ -1637,7 +1681,10 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 
 			const helperScript = path.join(worktree, "keepalive.mjs");
 			const helper = spawn(process.execPath, [helperScript], {
-				cwd: worktree,
+				// Keep the delayed-write helper outside the candidate. The #3694
+				// live-cwd rail must be exercised by dedicated planner cases, while
+				// this case remains the independent late-write recheck witness.
+				cwd: repo,
 				stdio: "ignore",
 			});
 			try {

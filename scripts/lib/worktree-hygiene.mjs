@@ -387,6 +387,7 @@ export function parseDuration(text) {
  *   lives in — its own file location AND its cwd can sit in different trees,
  *   and neither may ever be removed out from under a running sweep.
  * @param {(pid: number) => boolean} [options.isPidAlive]
+ * @param {Set<string>|null} [options.liveProcessCwds]
  * @returns {{ remove: { path: string, branch: string|null, ageMs: number, locked: boolean, selected: boolean }[], keep: { path: string, reason: string, detail: string|null }[] }}
  */
 export function planWorktreePrune({
@@ -396,6 +397,7 @@ export function planWorktreePrune({
 	only = null,
 	selfPath = null,
 	isPidAlive = () => false,
+	liveProcessCwds = undefined,
 }) {
 	const selectedKeys = only ? new Set(only.map(toComparablePath)) : null;
 	// By CONTAINMENT, not equality (review S4): the caller's "where am I"
@@ -427,6 +429,20 @@ export function planWorktreePrune({
 		}
 		if (selfKeys.has(key)) {
 			push("self", "this sweep is running inside it");
+			continue;
+		}
+		if (liveProcessCwds === null) {
+			push("live-cwd-unsupported", "live process cwd scan is unavailable");
+			continue;
+		}
+		const liveCwd =
+			liveProcessCwds === undefined
+				? null
+				: [...liveProcessCwds].find(
+						(cwd) => cwd === key || cwd.startsWith(`${key}/`),
+					);
+		if (liveCwd) {
+			push("live-cwd", `a live process has cwd ${liveCwd}`);
 			continue;
 		}
 		if (selectedKeys && !selected) {

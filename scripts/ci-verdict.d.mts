@@ -5,6 +5,10 @@ export declare const EXIT_DIRTY: number;
 export declare const EXIT_PENDING: number;
 export declare const EXIT_USAGE: number;
 export declare const EXIT_TRANSPORT: number;
+export declare function formatAbsentRequiredReason(
+	sha: string,
+	minutes?: number,
+): string;
 export declare const POLL_INTERVAL_SECONDS: number;
 export declare const HARD_CAP_SECONDS: number;
 export declare const DEFAULT_GH_TIMEOUT_MS: number;
@@ -137,6 +141,13 @@ export declare function fetchCheckRunsPayload(
 	ghExec?: GhExec,
 	timeoutMs?: number,
 ): { total_count?: number; check_runs?: unknown[] };
+
+export declare function fetchActionRequiredRuns(
+	repository: string,
+	sha: string,
+	ghExec?: GhExec,
+	timeoutMs?: number,
+): { id: number; name: string }[];
 
 export declare function fetchRerunState(
 	repository: string,

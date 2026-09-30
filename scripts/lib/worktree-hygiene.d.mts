@@ -84,6 +84,7 @@ export function planWorktreePrune(options: {
 	only?: string[] | null;
 	selfPath?: string | string[] | null;
 	isPidAlive?: (pid: number) => boolean;
+	liveProcessCwds?: Set<string> | null;
 }): PrunePlan;
 
 export interface MergedWorktreeCandidate {

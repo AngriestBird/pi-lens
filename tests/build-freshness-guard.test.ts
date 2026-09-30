@@ -6,6 +6,7 @@
  * controlled temp fixture with explicit mtimes.
  */
 
+import { createHash } from "node:crypto";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -19,8 +20,38 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	findResidueCompiledTestSources,
 	findStaleCompiledSources,
+	nodeModulesLockWarning,
 	runFreshnessChecks,
 } from "./support/check-build-freshness.js";
+
+describe("node_modules lock stamp (#3694)", () => {
+	it("warns without failing for a stale shared install", () => {
+		const fixture = mkdtempSync(join(tmpdir(), "pi-lens-lock-warning-"));
+		mkdirSync(join(fixture, "node_modules"));
+		writeFileSync(join(fixture, "package-lock.json"), "current");
+		writeFileSync(
+			join(fixture, "node_modules", ".pi-lens-package-lock-sha256"),
+			"stale\n",
+		);
+		expect(nodeModulesLockWarning(fixture)).toContain(
+			"node_modules may be stale",
+		);
+		rmSync(fixture, { recursive: true, force: true });
+	});
+
+	it("accepts a matching install stamp", () => {
+		const fixture = mkdtempSync(join(tmpdir(), "pi-lens-lock-match-"));
+		mkdirSync(join(fixture, "node_modules"));
+		const lock = "current";
+		writeFileSync(join(fixture, "package-lock.json"), lock);
+		writeFileSync(
+			join(fixture, "node_modules", ".pi-lens-package-lock-sha256"),
+			createHash("sha256").update(lock).digest("hex"),
+		);
+		expect(nodeModulesLockWarning(fixture)).toBeNull();
+		rmSync(fixture, { recursive: true, force: true });
+	});
+});
 
 let root: string;
 const older = new Date("2020-01-01T00:00:00Z");
