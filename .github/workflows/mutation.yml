@@ -8,7 +8,7 @@ on:
 # runs; the older one's report can still land (and its comment update fire)
 # AFTER the newer one's, showing a stale head's result as current.
 concurrency:
-  group: mutation-${{ github.event.pull_request.number || github.ref }}
+  group: mutation-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action || 'default' }}
   cancel-in-progress: true
 
 permissions: {}

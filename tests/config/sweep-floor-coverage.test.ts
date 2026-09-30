@@ -84,6 +84,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"LSP registry policy census; its registry-specific boundary tests are not a sweep-kit floor",
 	"tests/config/github-token-write-gates.test.ts":
 		"workflow population governance sweep; its own detector is not a production registry sweep",
+	"tests/config/workflow-concurrency-edit-safety.test.ts":
+		"workflow concurrency governance sweep; its own detector is the contract under test",
 	// #2725: two-direction set equality over every .d.mts/.mjs sibling pair; the
 	// failure list is the whole registry and there are no exemptions by design.
 	"tests/config/dmts-export-drift.test.ts":

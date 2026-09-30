@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened, edited]
 
 concurrency:
-  group: close-keywords-${{ github.event.pull_request.number }}
+  group: close-keywords-${{ github.event.pull_request.number }}-${{ github.event.action }}
   cancel-in-progress: true
 
 permissions:
