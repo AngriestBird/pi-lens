@@ -17,7 +17,7 @@
 		"build": "tsc --project tsconfig.build.json",
 		"build:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && node scripts/build-dist-tsc.mjs tsconfig.dist.json && npm run bundle:dist",
 		"bundle:dist": "node scripts/bundle-dist.mjs",
-		"prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs",
+		"prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/stamp-package-lock.mjs && node scripts/warm-loader-cache.mjs",
 		"prepack": "node scripts/strip-dev-deps-for-pack.mjs --strip",
 		"postpack": "node scripts/strip-dev-deps-for-pack.mjs --restore",
 		"lint": "tsc --project tsconfig.json && npm run lint:js && npm run lint:js:tests",

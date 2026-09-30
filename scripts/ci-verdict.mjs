@@ -191,6 +191,27 @@ export const EXIT_PENDING = 3;
 export const EXIT_USAGE = 64;
 export const EXIT_TRANSPORT = 70;
 
+/** Minutes a required check may stay unregistered on a head with auto-merge
+ * armed before the verdict says "re-arm" (#3694). CI normally registers within
+ * a minute or two; ten is well past that without hiding a stuck retarget. */
+export const ABSENT_REQUIRED_REARM_MINUTES = 10;
+
+export function formatAbsentRequiredReason(sha, minutes = 0) {
+	return `required checks absent for ${Math.max(0, Math.floor(Number(minutes) || 0))} min on ${sha} (auto-merge on) — push or merge master to re-arm`;
+}
+
+/** Never approves: GitHub shows a fork PR's first runs as `action_required`
+ * until a maintainer approves them, so the verdict names the command and stops
+ * (#3694). `repository` is the real `<owner>/<repo>`, so it pastes as is. */
+export function formatForkApprovalReason(repository, runs) {
+	return `awaiting fork approval (maintainer decision, never automatic): ${runs
+		.map(
+			(run) =>
+				`gh api -X POST repos/${repository}/actions/runs/${run.id}/approve`,
+		)
+		.join(", ")}`;
+}
+
 export const POLL_INTERVAL_SECONDS = 30;
 export const HARD_CAP_SECONDS = 20 * 60;
 
@@ -345,6 +366,7 @@ export function computeVerdict(
 	mergeable = null,
 	classification = null,
 	rerunState = null,
+	absentContext = null,
 ) {
 	const checkRuns = Array.isArray(checkRunsPayload?.check_runs)
 		? checkRunsPayload.check_runs
@@ -455,10 +477,27 @@ export function computeVerdict(
 	} else if (pendingGatingRows.length > 0) {
 		exitCode = EXIT_PENDING;
 		if (anyAbsent) {
-			reason =
-				mergeable == null
-					? "one or more required checks are absent and there is no PR context (bare-SHA target) to confirm they are not merge-conflicted; treating as pending, not DIRTY -- pass a PR number, or wait for CI to register"
-					: `one or more required checks are absent but the PR is not merge-conflicted (mergeable=${mergeable}); CI likely hasn't registered yet -- treating as pending, not DIRTY -- if the base was retargeted after this PR opened, push a commit or close/reopen to re-arm ci.yml`;
+			// Both messages below are reachable only here: CONFLICTING was
+			// answered above (its reason must never be rewritten), and a
+			// failing/cancelled/infra-rerun state outranks "absent". #3694.
+			const context =
+				typeof absentContext === "function" ? absentContext() : absentContext;
+			const approvalRuns = Array.isArray(context?.actionRequiredRuns)
+				? context.actionRequiredRuns
+				: [];
+			if (approvalRuns.length > 0) {
+				reason = formatForkApprovalReason(context.repository, approvalRuns);
+			} else if (
+				context?.autoMerge === true &&
+				context.absentMinutes >= ABSENT_REQUIRED_REARM_MINUTES
+			) {
+				reason = formatAbsentRequiredReason(context.sha, context.absentMinutes);
+			} else {
+				reason =
+					mergeable == null
+						? "one or more required checks are absent and there is no PR context (bare-SHA target) to confirm they are not merge-conflicted; treating as pending, not DIRTY -- pass a PR number, or wait for CI to register"
+						: `one or more required checks are absent but the PR is not merge-conflicted (mergeable=${mergeable}); CI likely hasn't registered yet -- treating as pending, not DIRTY -- if the base was retargeted after this PR opened, push a commit or close/reopen to re-arm ci.yml`;
+			}
 		} else {
 			// Only non-completed rows reach this branch; latest cancellations have
 			// already been reported with an explicit rerun command above.
@@ -616,6 +655,7 @@ export async function pollVerdict({
 	requiredChecks = REQUIRED_CHECKS,
 	classification = null,
 	rerunState = null,
+	absentContext = null,
 	sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	now = () => Date.now(),
 	onRetry = () => {},
@@ -639,6 +679,7 @@ export async function pollVerdict({
 			mergeable,
 			classification,
 			currentRerunState,
+			absentContext,
 		);
 		polls += 1;
 		if (verdict.exitCode !== EXIT_PENDING) break;
@@ -783,6 +824,88 @@ export function fetchCheckRunsPayload(
 		page += 1;
 	}
 	return { total_count: totalCount ?? checkRuns.length, check_runs: checkRuns };
+}
+
+/** Fork-approval runs for `sha`. GitHub reports one as `status: "completed"`
+ * with `conclusion: "action_required"` -- never `status: "action_required"` --
+ * and its head has no CI check-run rows at all (#3694). */
+export function fetchActionRequiredRuns(
+	repository,
+	sha,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+) {
+	try {
+		const payload = JSON.parse(
+			ghExec(
+				[
+					"api",
+					`repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`,
+				],
+				{ timeoutMs },
+			),
+		);
+		return (Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [])
+			.filter(
+				(run) => run?.head_sha === sha && run?.conclusion === "action_required",
+			)
+			.map((run) => ({ id: run.id }));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * What the absent-required message needs beyond the check-run rows (#3694):
+ * whether auto-merge is armed on the PR, and when the head was pushed: the
+ * earliest `created_at` among the head's check suites. Every app subscribed
+ * to pushes opens a suite within seconds of the push (PR #3679's head: 14
+ * suites, the first 22 s after the push, a rerun's suite 20 min later), so the
+ * earliest is the push clock. The commit date is not: an old commit pushed
+ * just now would read as long-absent at once (PR #3697 round 2, finding A).
+ * Every read fails open to "unknown" -- no auto-merge, no push time -- which
+ * selects the original, quieter text.
+ */
+export function fetchAutoMergeAge(
+	target,
+	repository,
+	sha,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+) {
+	let autoMerge = false;
+	if (isPrNumber(target)) {
+		try {
+			autoMerge = Boolean(
+				JSON.parse(
+					ghExec(["pr", "view", String(target), "--json", "autoMergeRequest"], {
+						timeoutMs,
+					}),
+				)?.autoMergeRequest,
+			);
+		} catch {
+			/* unknown => not armed */
+		}
+	}
+	// No suite yet (`Math.min()` is Infinity) or an undated one (NaN) never
+	// reaches the threshold, so both read as the quiet text, like a failed read.
+	let pushedMs = null;
+	try {
+		pushedMs = Math.min(
+			...JSON.parse(
+				ghExec(
+					[
+						"api",
+						`repos/${repository}/commits/${sha}/check-suites?per_page=100`,
+					],
+					{ timeoutMs },
+				),
+			).check_suites.map((suite) => Date.parse(suite.created_at)),
+		);
+	} catch {
+		/* unknown => no age */
+	}
+	return { autoMerge, pushedMs };
 }
 
 /** Read Actions attempts through the existing ghExec seam. Check-runs do not
@@ -1337,6 +1460,42 @@ export async function run({
 			transport === TRANSPORT_GH && ciClassification && isPrNumber(target)
 				? () => fetchRerunState(repository, sha, ghExec, initialTimeoutMs)
 				: null;
+		// #3694: read lazily, only when computeVerdict reaches its absent-required
+		// branch, so a healthy head costs no extra API call. The head's auto-merge
+		// state and push time are read once; the age is recomputed and approval
+		// runs are re-read every poll (a maintainer approving mid-`--wait` must
+		// clear the message).
+		let headInfo;
+		const absentContext =
+			transport === TRANSPORT_GH
+				? () => {
+						headInfo ??= fetchAutoMergeAge(
+							target,
+							repository,
+							sha,
+							ghExec,
+							initialTimeoutMs,
+						);
+						return {
+							repository,
+							sha,
+							actionRequiredRuns: fetchActionRequiredRuns(
+								repository,
+								sha,
+								ghExec,
+								initialTimeoutMs,
+							),
+							autoMerge: headInfo.autoMerge,
+							absentMinutes:
+								headInfo.pushedMs === null
+									? null
+									: Math.max(
+											0,
+											Math.floor((clock() - headInfo.pushedMs) / 60_000),
+										),
+						};
+					}
+				: null;
 		// #2609: read once, before polling starts (branch protection does not
 		// change between polls of the same head). `null` means unreadable --
 		// `requiredChecks` then falls back to the constant default, and every
@@ -1375,6 +1534,7 @@ export async function run({
 			requiredChecks,
 			classification: ciClassification,
 			rerunState,
+			absentContext,
 			onRetry: stderr,
 			...(sleepImpl ? { sleepImpl } : {}),
 			...(now ? { now } : {}),

@@ -338,16 +338,18 @@ operator's private notes, so a different orchestrator can run the same train.
   whole catalog. This prevents concurrent lanes from colliding without
   shipping a gap.
 - **On a CROSS-REPOSITORY PR, `action_required` is not `absent` (2026-09-12).**
-  A fork PR's workflow runs sit unstarted until a maintainer approves them, and
-  `ci-verdict` correctly reports the required checks as absent and therefore
-  pending. Absent because CI has not registered yet and absent because nobody
-  approved the run look identical in the verdict table and are hours apart in
-  remedy. Before treating a fork PR as "CI still coming", read the runs
-  directly:
-  `gh api "repos/<owner>/<repo>/actions/runs?head_sha=<sha>" --jq '.workflow_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion)"'`
-  and approve each `action_required` run with
-  `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`. #2983 sat
-  unapproved while the lane read it as a slow queue.
+  A fork PR's workflow runs sit unapproved until a maintainer approves them
+  (GitHub reports them as `status: completed`, `conclusion: action_required`,
+  with no CI check-run rows), so the required checks read as absent and the
+  verdict is pending. Absent because CI has not registered yet and absent
+  because nobody approved the run look identical in the verdict table and are
+  hours apart in remedy. `node scripts/ci-verdict.mjs <pr>` now tells them
+  apart (#3694): when the verdict is otherwise pending and required checks
+  are absent, it prints `awaiting fork approval` with one
+  `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve` per run. It
+  never approves; approving is the maintainer's call. A head that is green or
+  failing keeps that verdict whatever stale `action_required` runs it carries.
+  #2983 sat unapproved while the lane read it as a slow queue.
 - **Read the advisory rows before merging, even though they never gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a
