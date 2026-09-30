@@ -180,6 +180,12 @@ describe("waitForRequired", () => {
 });
 
 describe("run (the CLI the workflow step calls)", () => {
+	// A fake clock for every run() case: a regression that keeps polling then
+	// reds in milliseconds instead of sleeping the real 300 s deadline.
+	function fakeClock() {
+		let t = 0;
+		return { now: () => t, sleep: (ms: number) => void (t += ms) };
+	}
 	function tmpFiles() {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-heavy-gate-"));
 		return {
@@ -230,6 +236,7 @@ describe("run (the CLI the workflow step calls)", () => {
 		const files = tmpFiles();
 		try {
 			const code = run(argv, {
+				...fakeClock(),
 				env: { GITHUB_OUTPUT: files.output },
 				fetchRuns: () => [
 					cr("knip", "completed", "failure"),
