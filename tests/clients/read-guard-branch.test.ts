@@ -25,9 +25,6 @@ import {
 import {
 	branchToolResultIds,
 	readSessionHeaderId,
-	resolveReadGuardStartState,
-	stashForkHandoff,
-	takeForkHandoff,
 } from "../../clients/read-guard-branch.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -37,11 +34,9 @@ const LONG_AGO = new Date("2000-01-01T00:00:00Z");
 let env: ReturnType<typeof setupTestEnvironment>;
 beforeEach(() => {
 	env = setupTestEnvironment("read-guard-branch-");
-	takeForkHandoff();
 });
 afterEach(() => {
 	vi.useRealTimers();
-	takeForkHandoff();
 	env.cleanup();
 });
 
@@ -213,6 +208,47 @@ describe("ReadGuard.retainBranch (#3521)", () => {
 		fresh.retainBranch(new Set());
 
 		expect(verdict(fresh, c, 2)).toMatch(/^block: .*Edit without read/);
+	});
+});
+
+/**
+ * #3612 (D5): the authorship a `/reload` carries. The recurrences: a file the
+ * session wrote and never read needs a re-read after a reload although the
+ * conversation still shows the write; and a malformed sidecar payload (the
+ * reload's fallback source) throwing inside the reload's session start.
+ */
+describe("ReadGuard authorship export/import (#3612)", () => {
+	it("hands the written files to another guard, as JSON", () => {
+		const c = path.join(env.tmpDir, "c.ts");
+		fs.writeFileSync(c, "c1\nc2\nc3\n");
+		fs.utimesSync(c, LONG_AGO, LONG_AGO);
+		const before = createReadGuard("authorship-before");
+		before.recordWritten(c);
+		const after = createReadGuard("authorship-after");
+		expect(verdict(after, c, 2)).toMatch(/^block: .*Edit without read/);
+
+		after.importAuthorship(
+			JSON.parse(JSON.stringify(before.exportAuthorship())),
+		);
+
+		expect(verdict(after, c, 2)).toBe("allow");
+	});
+
+	it("skips a malformed payload instead of throwing", () => {
+		const c = oldFile("c.ts", 3);
+		const guard = createReadGuard("authorship-malformed");
+		for (const payload of [
+			undefined,
+			null,
+			{},
+			{ written: [42, null] },
+			// Last, so nothing after it can overwrite the anchor it carries.
+			{ written: "c.ts", sessionStartMs: "0" },
+		])
+			expect(() => guard.importAuthorship(payload)).not.toThrow();
+		expect(guard.exportAuthorship().written).toEqual([]);
+		// A non-numeric anchor is ignored: an old file is still not authored.
+		expect(verdict(guard, c, 2)).toMatch(/^block: .*Edit without read/);
 	});
 });
 
@@ -400,11 +436,7 @@ describe("branchToolResultIds (#3521)", () => {
 	});
 });
 
-describe("resolveReadGuardStartState (#3521)", () => {
-	const own: PersistedReadGuardState = { version: 2, reads: [] };
-	const fromSlot: PersistedReadGuardState = { version: 2, reads: [] };
-	const fromParent: PersistedReadGuardState = { version: 2, reads: [] };
-
+describe("readSessionHeaderId (#3521)", () => {
 	function parentFile(id: string): string {
 		const file = path.join(env.tmpDir, `${id}.jsonl`);
 		fs.writeFileSync(
@@ -413,80 +445,6 @@ describe("resolveReadGuardStartState (#3521)", () => {
 		);
 		return file;
 	}
-
-	const loadParentState = vi.fn(async (id: string) =>
-		id === "parent-id" ? fromParent : undefined,
-	);
-
-	it("hands a fork the slot its parent left, once", async () => {
-		const file = parentFile("parent-id");
-		stashForkHandoff({ sourceSessionFile: file, readGuard: fromSlot });
-
-		await expect(
-			resolveReadGuardStartState({
-				reason: "fork",
-				ownState: undefined,
-				parentSessionFile: file,
-				loadParentState,
-			}),
-		).resolves.toEqual({ state: fromSlot, source: "fork-slot" });
-		expect(takeForkHandoff()).toBeUndefined();
-	});
-
-	it("uses the slot of an in-memory parent (no session file on either side)", async () => {
-		stashForkHandoff({ sourceSessionFile: undefined, readGuard: fromSlot });
-
-		await expect(
-			resolveReadGuardStartState({
-				reason: "fork",
-				ownState: undefined,
-				parentSessionFile: undefined,
-				loadParentState,
-			}),
-		).resolves.toEqual({ state: fromSlot, source: "fork-slot" });
-	});
-
-	it("falls back to the parent's sidecar when the slot came from another session", async () => {
-		const file = parentFile("parent-id");
-		stashForkHandoff({
-			sourceSessionFile: path.join(env.tmpDir, "other.jsonl"),
-			readGuard: fromSlot,
-		});
-
-		await expect(
-			resolveReadGuardStartState({
-				reason: "fork",
-				ownState: undefined,
-				parentSessionFile: file,
-				loadParentState,
-			}),
-		).resolves.toEqual({ state: fromParent, source: "parent-sidecar" });
-	});
-
-	it("resumes from the session's own sidecar and discards a stale slot", async () => {
-		stashForkHandoff({ sourceSessionFile: undefined, readGuard: fromSlot });
-
-		await expect(
-			resolveReadGuardStartState({
-				reason: "resume",
-				ownState: own,
-				parentSessionFile: undefined,
-				loadParentState,
-			}),
-		).resolves.toEqual({ state: own, source: "own-sidecar" });
-		expect(takeForkHandoff()).toBeUndefined();
-	});
-
-	it("starts `pi --fork <path>` from the parent's sidecar", async () => {
-		await expect(
-			resolveReadGuardStartState({
-				reason: "startup",
-				ownState: undefined,
-				parentSessionFile: parentFile("parent-id"),
-				loadParentState,
-			}),
-		).resolves.toEqual({ state: fromParent, source: "parent-sidecar" });
-	});
 
 	it("reads the stable id from a session file's header, and nothing from a bad one", async () => {
 		expect(await readSessionHeaderId(parentFile("abc"))).toBe("abc");

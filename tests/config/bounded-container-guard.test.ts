@@ -25,9 +25,11 @@ const BOUNDED_HELPERS = new Set([
 	"BoundedSet",
 	"PathKeyedMap",
 ]);
-// No currently flagged occurrence is a finite vocabulary. Keep the channel
-// content-keyed so a future exemption must be re-confirmed after an edit.
-const FINITE_REASONS: Readonly<Record<string, string>> = {};
+// Content-keyed, so an exemption must be re-confirmed after an edit.
+const FINITE_REASONS: Readonly<Record<string, string>> = {
+	"clients/session-scope.ts#toStartReason:e2e4ae2a":
+		"#3612 `sessionStores`: keyed by store name, one entry per `defineSessionStore` call at module load (a second declaration of a name throws); four stores today, and the session-scope sweep pins every name",
+};
 
 type Verdict = 1 | 2 | 3 | 5;
 type KeyAxis =

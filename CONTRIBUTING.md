@@ -87,6 +87,9 @@ mechanically enforced rather than relied on.
 - **Release QA.** `node scripts/release-qa.mjs` runs the pre-release
   readiness pass documented in `docs/release-qa-baseline.md` and
   `.claude/skills/release-qa/SKILL.md`; there is no `npm run` alias.
+- **Contributors list.** Before a release, run `npm run contributors:update -- --dry-run`
+  to preview, then `npm run contributors:update` to credit new PR authors and
+  issue reporters in `.all-contributorsrc` and the README table (refs #3772).
 
 ## What belongs here?
 
