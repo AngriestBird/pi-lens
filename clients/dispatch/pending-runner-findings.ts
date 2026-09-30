@@ -19,7 +19,7 @@ interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
 	settled: boolean;
 	result?: RunnerResult;
 	/** #3758: the dispatch's session; a drain after it retired drops the result. */
-	session?: GenerationHandle;
+	session: GenerationHandle | undefined;
 }
 
 const pending: PendingRunnerPromise[] = [];
