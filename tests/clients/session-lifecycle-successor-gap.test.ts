@@ -136,6 +136,16 @@ describe("successor-pending gap (#3662)", () => {
 		]);
 	});
 
+	it("a live-sibling decline after the successor registered is not a gap decline", () => {
+		// The marker is only read while no primary is registered; a subagent
+		// beside the live successor must not be reported as a gap decline.
+		primaryShutsDown("reload");
+		decideSessionStart(liveCtx(), "host-session", REPO, "reload");
+		const sibling = decideSessionStart(liveCtx(), "subagent", REPO, "startup");
+		expect(sibling.classification).toBe("concurrent-secondary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
 	it("a marker older than the bound expires: the late startup is primary", () => {
 		// A replacement whose successor never starts (pi `reload()` with no
 		// bindings, a host without `rebindSession`) must not decline every
