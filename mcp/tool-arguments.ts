@@ -153,8 +153,7 @@ export function findIgnoredArguments(
 			)
 				unsentSuggestions.push({ key, suggestion: unsent });
 			// The hint prefers the refusal match, so the line and the refusal agree.
-			const suggestion =
-				unsent ?? matches[0] ?? nearestDeclaredKey(key, declared);
+			const suggestion = matches[0] ?? nearestDeclaredKey(key, declared);
 			return suggestion === undefined ? { key } : { key, suggestion };
 		});
 	if (ignored.length === 0) return undefined;
