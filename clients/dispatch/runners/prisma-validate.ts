@@ -14,6 +14,7 @@ import { finishParsedRun } from "./utils/tool-failure.js";
 /**
  * The trailer of prisma's own validation report, measured on prisma 6.16.2:
  * every schema-error run ends with `Validation Error Count: N` (#3781).
+ * Measured on prisma 4.16.2, 5.22.0, 6.16.2 and 7.10.0 (stderr; the runner joins both streams).
  */
 const PRISMA_VALIDATION_REPORT = /\bValidation Error Count:\s*\d+/;
 
