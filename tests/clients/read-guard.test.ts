@@ -966,13 +966,42 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		it("blocks a stale hashed line even when the range also holds lines the read has no hash for", () => {
+			// The read's effective range (1-10) outruns the 6-line file it hashed,
+			// so lines 7-8 (appended later) have no hash. They are missing, not a
+			// reason to stop checking line 5.
+			const env = setupTestEnvironment("read-guard-snapshot-partial-hash-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 10,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8");
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [5, 8]).action).toBe("block");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "mismatch",
+					mismatchedLines: [5],
+					missingLines: [7, 8],
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("reports a line only a context zone covers as unavailable and blocks nothing", () => {
 			// ContextSlack (admitted): line 3 was never delivered, so nothing can
 			// check it, and it must not read as a match.
 			const env = setupTestEnvironment("read-guard-snapshot-ctx-line-");
 			try {
 				const filePath = path.join(env.tmpDir, "api.ts");
-				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6\n");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
 				const guard = createReadGuard("test-session");
 				guard.recordRead(
 					createReadRecord(filePath, {

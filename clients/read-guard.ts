@@ -1765,15 +1765,15 @@ export class ReadGuard {
 		const reads = this.reads.get(filePath) ?? [];
 		// Judge each line by the newest read that delivered it (#3522), in runs
 		// that share one read. A line no read delivered (only in a context zone)
-		// or whose newest view carries no hashes cannot be checked and is
+		// or whose newest view carries no hash for it cannot be checked and is
 		// reported missing; it never blocks and never lets an older read speak
 		// for it.
 		const runs: Array<{ read: ReadRecord; range: [number, number] }> = [];
-		const undelivered: number[] = [];
+		const missingLines: number[] = [];
 		for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
 			const view = newestViewOfLine(reads, lineNo);
-			if (!view) {
-				undelivered.push(lineNo);
+			if (!view || view.lineHashes?.[lineNo] === undefined) {
+				missingLines.push(lineNo);
 				continue;
 			}
 			const last = runs.at(-1);
@@ -1783,17 +1783,13 @@ export class ReadGuard {
 				runs.push({ read: view, range: [lineNo, lineNo] });
 			}
 		}
-		const missingLines = [...undelivered];
 		const mismatchedLines: number[] = [];
 		let checkedLineCount = 0;
 		for (const { read, range } of runs) {
-			const validation = currentLinesMatchReadSnapshot(filePath, read, range);
-			if (!validation.checked) {
-				missingLines.push(...validation.missingLines);
-				continue;
-			}
 			checkedLineCount += range[1] - range[0] + 1;
-			mismatchedLines.push(...validation.mismatchedLines);
+			mismatchedLines.push(
+				...currentLinesMatchReadSnapshot(filePath, read, range).mismatchedLines,
+			);
 		}
 		const status: "match" | "mismatch" | "unavailable" =
 			mismatchedLines.length > 0
