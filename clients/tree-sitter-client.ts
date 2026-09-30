@@ -292,6 +292,9 @@ export function classifyTreeSitterWasmError(
 		return "abort";
 	}
 	// `WebAssembly` is a runtime global the build's `lib` does not declare.
+	// SAFETY: every supported Node runtime defines `WebAssembly` with a
+	// `RuntimeError` constructor; the cast only names that global for the
+	// `instanceof` check below and reads nothing else from it.
 	const { WebAssembly } = globalThis as unknown as {
 		WebAssembly: { RuntimeError: new () => Error };
 	};

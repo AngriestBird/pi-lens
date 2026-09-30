@@ -363,8 +363,11 @@ function touchWorkspaceGraph(key: string): void {
  * #3605: files whose last tree-sitter extraction a web-tree-sitter trap cost,
  * with the trapped input's state. `addFileToGraph` is the only writer: each
  * extraction sets or deletes its file. Keys are the build's normalized paths.
- * Only files that held one of the client's trapped inputs (at most
- * `WASM_TRAP_BUDGET + 1`) get an entry.
+ * Only paths whose content is one of the client's trapped inputs (at most
+ * `WASM_TRAP_BUDGET + 1` distinct inputs) get an entry, so the map is
+ * bounded by the paths holding a trapped input. Many identical files can
+ * share one input, and an entry for a deleted path is only overwritten,
+ * never evicted, until the process ends.
  */
 const _wasmTrappedFiles = new Map<string, WasmTrapState>();
 
