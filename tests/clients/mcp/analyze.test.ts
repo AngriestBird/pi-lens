@@ -327,6 +327,7 @@ describe("analyzeFile", () => {
 				overallEndMs: 10,
 				totalDurationMs: 10,
 				runners: [
+					row("lsp", "failed", "blocking_diagnostics"),
 					row("eslint", "failed", "blocking_diagnostics"),
 					row("oxlint", "failed", "timeout"),
 					row("tree-sitter", "succeeded"),
@@ -347,10 +348,16 @@ describe("analyzeFile", () => {
 				runner.failureKind,
 			]),
 		).toEqual([
+			["lsp", "failed", "blocking_diagnostics"],
 			["eslint", "failed", "blocking_diagnostics"],
 			["oxlint", "failed", "timeout"],
 			["tree-sitter", "succeeded", undefined],
 		]);
+		// The headline `lsp` summary carries the same answer (#3800 review F3).
+		expect(result.lsp).toMatchObject({
+			status: "failed",
+			failureKind: "blocking_diagnostics",
+		});
 	});
 
 	it("attaches the latency report even when the ring is already at its 100-entry cap (#3642)", async () => {

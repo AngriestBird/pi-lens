@@ -651,11 +651,26 @@ const DRIVERS: Record<string, Driver> = {
 	},
 	"prisma-validate": {
 		file: "schema.prisma",
-		content: "model User {\n",
+		content: "model User {\n  id Int @id\n  posts Post[]\n}\n",
 		status: "failed",
+		// prisma 6.16.2's own report, captured from `prisma validate` on a pipe
+		// (colour codes included); only the unknown type's name carries MARKER.
 		reply: () => ({
 			status: 1,
-			stderr: `Error: Schema validation error ${MARKER}\n  -->  schema.prisma:4\n`,
+			stdout: "Prisma schema loaded from schema.prisma\n",
+			stderr: [
+				"",
+				"Error: Prisma schema validation - (validate wasm)",
+				"Error code: P1012",
+				`\u001b[1;91merror\u001b[0m: \u001b[1mType "Post${MARKER}" is neither a built-in type, nor refers to another model, composite type, or enum.\u001b[0m`,
+				"  \u001b[1;94m-->\u001b[0m  \u001b[4mschema.prisma:3\u001b[0m",
+				"",
+				"Validation Error Count: 1",
+				"[Context: validate]",
+				"",
+				"Prisma CLI Version : 6.16.2",
+				"",
+			].join("\n"),
 		}),
 	},
 	psscriptanalyzer: {
@@ -1176,20 +1191,93 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		expect(observed.result?.failureKind).toBeUndefined();
 	});
 
-	// The dangerous inverse (F4): a run whose output could not be read is a
-	// runner that produced no usable result. Labelling it blocking_diagnostics
-	// would tell the analyzer and the MCP consumer "the file has problems" when
-	// nothing was checked.
-	it("leaves an unparsable run failed without blocking_diagnostics", async () => {
-		const observed = await drive("eslint", {
-			...DRIVERS.eslint,
-			reply: () => ({ status: 2, stdout: "Oops! Something went wrong" }),
-		});
-		expect(observed.result?.status).toBe("failed");
-		expect(observed.result?.diagnostics.map((d) => d.id)).toEqual([
-			"eslint:parse-error:1",
-		]);
-		expect(observed.result?.failureKind).toBeUndefined();
-		expect(observed.row?.failureKind).toBeUndefined();
-	});
+	// The dangerous inverse (F4): a run that produced no usable result must never
+	// read as findings. One row per fault arm that returns `failed`: stamping
+	// blocking_diagnostics on any of them would tell the analyzer and the MCP
+	// consumer "the file has problems" when nothing was checked (#3800 review
+	// F1: four of these arms took the stamp with the whole suite green).
+	const FAULT_ARMS: ReadonlyArray<
+		readonly [
+			name: string,
+			runnerId: string,
+			reply: Driver["reply"],
+			ids: string[],
+		]
+	> = [
+		[
+			"finishParsedRun parse-error (eslint)",
+			"eslint",
+			() => ({ status: 2, stdout: "Oops! Something went wrong" }),
+			["eslint:parse-error:1"],
+		],
+		[
+			"biome JSON parse error",
+			"biome-check-json",
+			() => ({ status: 1, stdout: `not json ${MARKER}` }),
+			["biome:parse-error:1"],
+		],
+		[
+			"pyright JSON catch",
+			"pyright",
+			() => ({ status: 1, stdout: `Traceback ${MARKER}` }),
+			[],
+		],
+		[
+			"cue-vet unattributable output",
+			"cue-vet",
+			() => ({ status: 1, stderr: `cue: internal failure ${MARKER}\n` }),
+			["cue-vet-unparsed"],
+		],
+		[
+			"gleam nonzero exit with no diagnostics",
+			"gleam-check",
+			() => ({
+				status: 1,
+				stderr: `gleam: could not load project ${MARKER}\n`,
+			}),
+			["gleam-check-nonzero-no-diagnostics"],
+		],
+		[
+			"spotbugs with no report file",
+			"spotbugs",
+			() => ({ status: 2, stderr: `spotbugs crashed ${MARKER}` }),
+			[],
+		],
+		[
+			"rust-clippy unparsable output",
+			"rust-clippy",
+			() => ({ status: 101, stdout: `garbage ${MARKER}\n` }),
+			[],
+		],
+		[
+			// Real npm 9.2.0 bytes for `npx --no prisma` with nothing to run
+			// (#3800 review F2): a tool that never validated the schema.
+			"prisma-validate npm E404",
+			"prisma-validate",
+			() => ({
+				status: 1,
+				stderr: [
+					"npm ERR! code E404",
+					"npm ERR! 404 Not Found - GET https://registry.npmjs.org/prisma - Not found",
+					"npm ERR! 404 ",
+					"npm ERR! 404  'prisma@*' is not in this registry.",
+					"",
+				].join("\n"),
+			}),
+			["prisma-validate:parse-error:1"],
+		],
+	];
+
+	it.each(FAULT_ARMS)(
+		"%s stays failed without blocking_diagnostics",
+		async (_name, runnerId, reply, ids) => {
+			const driver = DRIVERS[runnerId];
+			if (!driver) throw new Error(`no driver for ${runnerId}`);
+			const observed = await drive(runnerId, { ...driver, reply });
+			expect(observed.result?.status).toBe("failed");
+			expect(observed.result?.diagnostics.map((d) => d.id)).toEqual(ids);
+			expect(observed.result?.failureKind).not.toBe("blocking_diagnostics");
+			expect(observed.row?.failureKind).not.toBe("blocking_diagnostics");
+		},
+	);
 });

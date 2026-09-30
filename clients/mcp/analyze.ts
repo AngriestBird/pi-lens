@@ -312,6 +312,8 @@ export interface McpAnalyzeResult {
 	lsp?: {
 		ran: boolean;
 		status: string;
+		/** As on the `latency.runners[]` row: why a `failed` LSP run failed (#3781). */
+		failureKind?: string;
 		diagnosticCount: number;
 		durationMs: number;
 	};
@@ -618,6 +620,7 @@ export async function analyzeFile(
 					lspRunner.status !== "when_skipped" &&
 					lspRunner.status !== "test_file_skipped",
 				status: lspRunner.status,
+				failureKind: lspRunner.failureKind,
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,
 			}

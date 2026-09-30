@@ -8,8 +8,16 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
 import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
+import { finishParsedRun } from "./utils/tool-failure.js";
+
+/**
+ * Markers of prisma's own validation report, measured on prisma 6.16.2:
+ * `Error code: P1012` and `Validation Error Count: N` frame every schema
+ * error it prints (#3781).
+ */
+const PRISMA_VALIDATION_REPORT =
+	/\bValidation Error Count:\s*\d+|\bError code:\s*P\d{4}\b/;
 
 function parsePrismaValidateOutput(
 	raw: string,
@@ -71,17 +79,22 @@ const prismaValidateRunner: RunnerDefinition = {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
 
-		const diagnostics = parsePrismaValidateOutput(
-			`${result.stdout ?? ""}\n${result.stderr ?? ""}`,
-			ctx.filePath,
-		);
+		const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+		const diagnostics = parsePrismaValidateOutput(output, ctx.filePath);
 		if (diagnostics.length === 0) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		return findingsResult(diagnostics, {
-			status: "failed",
-			semantic: "blocking",
+		return finishParsedRun({
+			tool: "prisma-validate",
+			ctx,
+			result,
+			// #3781: only prisma's own validation report is findings. Any other
+			// nonzero output (npm's E404 when `npx --no prisma` has nothing to
+			// run) is a tool that never validated, and goes to the shared
+			// parse-error arm instead of becoming a blocking "schema" finding.
+			diagnostics: PRISMA_VALIDATION_REPORT.test(output) ? diagnostics : [],
+			classify: () => ({ status: "failed", semantic: "blocking" }),
 		});
 	},
 };
