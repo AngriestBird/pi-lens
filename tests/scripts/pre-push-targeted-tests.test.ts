@@ -32,6 +32,7 @@ import {
 	changesProductionFile,
 	changesTestTreeFile,
 	selectTargetedTests,
+	resolveDiffRange,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -56,6 +57,57 @@ afterEach(() => {
 		fs.rmSync(fixtureDir, { recursive: true, force: true });
 		fixtureDir = undefined;
 	}
+});
+
+describe("resolveDiffRange — pre-push ref population (#3661)", () => {
+	const zero = "0".repeat(40);
+
+	it("returns no ranges for a deletion-only push so the hook skips before building", () => {
+		// #3661 recurrence: a deletion's all-zero local sha was treated as a
+		// normal update, causing a failed diff and an unnecessary build.
+		expect(
+			resolveDiffRange(`(delete) ${zero} refs/heads/removed abc123\n`),
+		).toBeNull();
+	});
+
+	it("exits before the build on a deletion-only hook invocation", () => {
+		// #3661 recurrence: the hook must make the deletion decision before its
+		// build entry point, not merely avoid selecting tests afterward.
+		const result = spawnSync(
+			process.execPath,
+			[path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"), "--skip-build"],
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				input: `(delete) ${zero} refs/heads/removed abc123\n`,
+			},
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("deletion-only push; skipping build and tests");
+	});
+
+	it.each([
+		[
+			"deletion first",
+			`(delete) ${zero} refs/heads/removed abc123\nrefs/heads/topic localsha refs/heads/topic remotesha\n`,
+		],
+		[
+			"update first",
+			`refs/heads/topic localsha refs/heads/topic remotesha\n(delete) ${zero} refs/heads/removed abc123\n`,
+		],
+	])("ignores deletion lines regardless of their order (%s)", (_name, stdin) => {
+		// #3661 recurrence: reading only the first line made mixed pushes
+		// depend on ref ordering and could select a deletion range.
+		expect(resolveDiffRange(stdin)).toEqual(["remotesha...localsha"]);
+	});
+
+	it("keeps the origin/master fallback for a new branch", () => {
+		// #3661 recurrence: a non-deletion line with an all-zero remote sha is
+		// the new-branch case and must retain the existing fallback.
+		expect(
+			resolveDiffRange(`refs/heads/topic localsha refs/heads/topic ${zero}\n`),
+		).toEqual(["origin/master...HEAD"]);
+	});
 });
 
 describe("selectTargetedTests — path-mirror pass", () => {
