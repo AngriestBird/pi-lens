@@ -166,6 +166,7 @@ async function piRead(
 	opts: {
 		gate?: () => void | Promise<void>;
 		beforeExec?: () => void;
+		afterToolCall?: () => void;
 		rewrite?: (text: string) => string;
 		skipToolCall?: boolean;
 	} = {},
@@ -176,6 +177,7 @@ async function piRead(
 		await handleToolCall(
 			callDeps(runtime, { toolName: "read", toolCallId, input: args }),
 		);
+		opts.afterToolCall?.();
 	}
 	opts.beforeExec?.();
 	const tool = createReadToolDefinition(runtime.projectRoot);
@@ -507,6 +509,38 @@ describe("#3519: the attached post-autofix bytes are a read", () => {
 });
 
 describe("#3523: the agent's own positional edit is a read", () => {
+	it.each([0, -5])(
+		"allows editing line 1 shown by pi when native read offset is %s (#3588)",
+		async (offset) => {
+			const env = setupTestEnvironment(`rg-3588-offset-${offset}-`);
+			try {
+				const file = fixture(env.tmpDir, "g.ts", `${lines(6).join("\\n")}\\n`);
+				const runtime = newRuntime(env.tmpDir);
+				let provisionalOffset: number | undefined;
+				await piRead(
+					runtime,
+					file,
+					{ offset, limit: 2 },
+					{
+						afterToolCall: () => {
+							provisionalOffset = runtime.readGuard
+								.getReadHistory(file)
+								.at(-1)?.requestedOffset;
+						},
+					},
+				);
+				expect(provisionalOffset).toBe(1);
+				expect(
+					runtime.readGuard.getReadHistory(file).at(-1)?.requestedOffset,
+				).toBe(1);
+				const edit = await positionalEdit(runtime, file, [[1, 1, "agent1"]]);
+				expect(edit.blocked).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
 	it("allows re-editing the line the agent just wrote (OwnReEdit)", async () => {
 		const env = setupTestEnvironment("rg-3523-reedit-");
 		const realLogLatency = vi.mocked(logLatency).getMockImplementation()!;
