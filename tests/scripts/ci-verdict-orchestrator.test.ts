@@ -711,7 +711,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		dirs = [];
 	});
 	const stateFile = () => {
-		const dir = mkdtempSync(join(tmpdir(), "ci-verdict-watch-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-watch-"));
 		dirs.push(dir);
 		return join(dir, "state.json");
 	};
