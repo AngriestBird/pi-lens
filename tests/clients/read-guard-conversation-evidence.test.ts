@@ -21,6 +21,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { lineContentHash } from "../../clients/read-guard.js";
+import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -271,6 +272,54 @@ async function applyEdit(
 			content: [{ type: "text", text: "ok" }],
 		}),
 	);
+}
+
+/**
+ * pi's `write`: tool_call, the host writes `content` verbatim (pi's write
+ * tool is `writeFile(path, content, "utf-8")`), `gate` (another writer
+ * between the host write and the handler), tool_result. No autofix runs.
+ */
+async function piWrite(
+	runtime: RuntimeCoordinator,
+	file: string,
+	content: string,
+	gate?: () => void,
+): Promise<void> {
+	const toolCallId = `write-${++seq}`;
+	const input = { path: file, content };
+	await handleToolCall(
+		callDeps(runtime, { toolName: "write", toolCallId, input }),
+	);
+	writeNow(file, content);
+	gate?.();
+	await handleToolResult(
+		resultDeps(runtime, { toolName: "write", toolCallId, input, content: [] }),
+	);
+}
+
+/** pi's native `edit` (oldText/newText): tool_call, host apply, tool_result. */
+async function textEdit(
+	runtime: RuntimeCoordinator,
+	file: string,
+	oldText: string,
+	newText: string,
+): Promise<{ blocked: boolean; reason?: string }> {
+	const toolCallId = `text-edit-${++seq}`;
+	const input = { path: file, edits: [{ oldText, newText }] };
+	const verdict = (await handleToolCall(
+		callDeps(runtime, { toolName: "edit", toolCallId, input }),
+	)) as { block?: boolean; reason?: string } | undefined;
+	if (verdict?.block === true) return { blocked: true, reason: verdict.reason };
+	writeNow(file, fs.readFileSync(file, "utf8").replace(oldText, newText));
+	await handleToolResult(
+		resultDeps(runtime, {
+			toolName: "edit",
+			toolCallId,
+			input,
+			content: [{ type: "text", text: "ok" }],
+		}),
+	);
+	return { blocked: false };
 }
 
 /** A `write` whose turn-first autofix (a biome double) drops line 1. */
@@ -689,15 +738,15 @@ describe("#3523: the agent's own positional edit is a read", () => {
 
 	it("still blocks a foreign change to the agent's own line after its edit", async () => {
 		const env = setupTestEnvironment("rg-3523-foreign-after-");
-		// The own-edit record must postdate the edit's verdict record; in one
-		// millisecond the #3525 own-edit rescue would still downgrade to a warn.
+		// One frozen millisecond: the own-edit record ties the edit's verdict
+		// record, the #3523 tie that let the 120 s own-edit rescue skip
+		// FileTime and the range-stale grace downgrade to a warn (#3525).
 		vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
 		try {
 			const file = fixture(env.tmpDir, "g.ts", `${lines(6).join("\n")}\n`);
 			const runtime = newRuntime(env.tmpDir);
 			await piRead(runtime, file, { offset: 1, limit: 6 });
 			const first = await positionalEdit(runtime, file, [[2, 2, "agent2"]]);
-			vi.setSystemTime(Date.now() + 5);
 			await applyEdit(runtime, file, first);
 			const v = diskLines(file);
 			v[1] = "EXTERNAL2";
@@ -1799,6 +1848,191 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 			]);
 			expect(edit.blocked).toBe(false);
 			expect(edit.ranges).toEqual([[5, 6]]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #3525: FileTime is the only staleness check for a line whose newest view
+ * carries no hash (a record past READ_HASH_MAX_LINES), so it may move only
+ * over bytes the conversation accounts for: the agent's own call. Recurrence:
+ * the 120 s own-edit rescue skipped it for any writer, an own edit that
+ * passed a stale FileTime re-stamped it over the other writer's bytes (#3519
+ * r4, R4), and the deferred agent_end format re-stamped it over bytes the
+ * agent never saw. Each case replays a `formal/read-guard` trace, or R4,
+ * through the real handlers.
+ */
+describe("#3525: FileTime moves only over bytes the conversation accounts for", () => {
+	/** Past READ_HASH_MAX_LINES (3000): the write's creation read has no hashes. */
+	const BIG = `${lines(3100).join("\n")}\n`;
+	const foreignWrite = (file: string, n: number, text: string) => {
+		const v = diskLines(file);
+		v[n - 1] = text;
+		writeNow(file, v.join("\n"));
+	};
+	/** The deferred agent_end format, its formatter doubled at the service. */
+	const drainFormat = async (
+		runtime: RuntimeCoordinator,
+		file: string,
+		format: (text: string) => string,
+	) => {
+		runtime.deferFormat(file, runtime.projectRoot, "edit", runtime.projectRoot);
+		await handleAgentEnd({
+			ctxCwd: runtime.projectRoot,
+			getFlag: noLspOrComplexity,
+			notify: () => {},
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			getFormatService: () =>
+				({
+					recordRead: () => {},
+					formatFile: async (fp: string) => {
+						writeNow(fp, format(fs.readFileSync(fp, "utf8")));
+						return {
+							filePath: fp,
+							formatters: [{ name: "biome", success: true, changed: true }],
+							anyChanged: true,
+							allSucceeded: true,
+						};
+					},
+				}) as never,
+		});
+	};
+
+	it("keeps another writer's change stale after an oldText edit passed it (R4)", async () => {
+		const env = setupTestEnvironment("rg-3525-r4-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", "");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, BIG);
+			foreignWrite(file, 11, "EXTERNAL11");
+			// The host resolves oldText in the live bytes, so FileTime is skipped.
+			expect(
+				(await textEdit(runtime, file, "line3\n", "agent3\n")).blocked,
+			).toBe(false);
+			const edit = await positionalEdit(runtime, file, [[11, 11, "agent11"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps another writer's change stale after an own positional edit (UnhashedOwnEditRescue)", async () => {
+		const env = setupTestEnvironment("rg-3525-rescue-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", "");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, BIG);
+			const own = await positionalEdit(runtime, file, [[3, 3, "agent3"]]);
+			expect(own.blocked).toBe(false);
+			await applyEdit(runtime, file, own);
+			// The own edit left no read record newer than its verdict (an
+			// oldText edit records none), so the rescue would read the next
+			// staleness as its own.
+			expect(
+				(await textEdit(runtime, file, "line5\n", "agent5\n")).blocked,
+			).toBe(false);
+			foreignWrite(file, 11, "EXTERNAL11");
+			const edit = await positionalEdit(runtime, file, [[11, 11, "agent11"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not credit the deferred format's bytes to an unhashed read (UnhashedFormatStamp)", async () => {
+		const env = setupTestEnvironment("rg-3525-format-stamp-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", "");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, BIG);
+			// The formatter inserts a line on top: line 5 now holds "line4".
+			await drainFormat(runtime, file, (text) => `// formatted\n${text}`);
+			expect(diskLines(file)[4]).toBe("line4");
+			const edit = await positionalEdit(runtime, file, [[5, 5, "agent5"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("lets the hash rescue absorb a whitespace-only deferred format", async () => {
+		const env = setupTestEnvironment("rg-3525-format-ws-");
+		try {
+			const file = fixture(env.tmpDir, "f.ts", `${lines(8).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, { offset: 1, limit: 8 });
+			await drainFormat(runtime, file, (text) => text.replace(/\n/g, "  \n"));
+			const edit = await positionalEdit(runtime, file, [[5, 5, "agent5"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-stamps after an own edit made at a fresh FileTime, so a shifted edit still relocates", async () => {
+		const env = setupTestEnvironment("rg-3525-fresh-stamp-");
+		try {
+			const file = fixture(env.tmpDir, "r.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, { offset: 1, limit: 10 });
+			const grow = await positionalEdit(runtime, file, [[2, 2, "a\nb"]]);
+			await applyEdit(runtime, file, grow);
+			// "line5"/"line6" moved to 6-7; only a fresh FileTime reaches the
+			// content-verified relocation.
+			const edit = await positionalEdit(runtime, file, [[5, 6, "x\ny"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.ranges).toEqual([[6, 7]]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #3524 remainder: the creation read a `write` injects is the agent's view of
+ * the bytes it wrote, so it is hashed from the executed `content`, not from
+ * the disk at tool_result. Recurrence: `injectCreationRead` read the disk and
+ * vouched for another writer's change between the host write and the handler.
+ */
+describe("#3524: the creation read is the written content", () => {
+	it("does not credit a write that lands between the host write and its tool_result (CreationAtResult)", async () => {
+		const env = setupTestEnvironment("rg-3524-creation-");
+		try {
+			// An overwrite: pi-lens' tool_call returns before noting a creation
+			// for a path that does not exist yet (that write's first edit takes
+			// the #3520 `session_authored` path).
+			const file = fixture(env.tmpDir, "c.ts", "old\n");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, `${lines(6).join("\n")}\n`, () => {
+				const v = diskLines(file);
+				v[1] = "EXTERNAL2";
+				writeNow(file, v.join("\n"));
+			});
+			const edit = await positionalEdit(runtime, file, [[2, 2, "agent2"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("Edit range changed since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows an edit of a line the write put there", async () => {
+		const env = setupTestEnvironment("rg-3524-creation-ok-");
+		try {
+			const file = fixture(env.tmpDir, "c.ts", "old\n");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, `${lines(6).join("\n")}\n`);
+			const edit = await positionalEdit(runtime, file, [[2, 2, "agent2"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
 		} finally {
 			env.cleanup();
 		}

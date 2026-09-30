@@ -561,9 +561,11 @@ export async function handleAgentEnd({
 						source: "autofix",
 						dbg,
 					});
+					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard"))
 						runtime.readGuard.recordWritten(changedPath, {
 							branchEpoch: queuedBranchEpoch,
+							stampFileTime: false,
 						});
 					const content = nodeFs.readFileSync(changedPath, "utf-8");
 					cacheManager.addModifiedRange(
@@ -911,9 +913,11 @@ export async function handleAgentEnd({
 						source: "format",
 						dbg,
 					});
+					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard")) {
 						runtime.readGuard.recordWritten(filePath, {
 							branchEpoch: queuedBranchEpoch,
+							stampFileTime: false,
 						});
 					}
 					try {
@@ -1141,8 +1145,12 @@ export async function handleAgentEnd({
 					readGuard: getFlag("no-read-guard")
 						? undefined
 						: {
+								// #3525: bytes the agent never saw; authorship, not FileTime.
 								recordWritten: (filePath: string) =>
-									runtime.readGuard.recordWritten(filePath, { branchEpoch }),
+									runtime.readGuard.recordWritten(filePath, {
+										branchEpoch,
+										stampFileTime: false,
+									}),
 							},
 					// #3576: a /new during the pass stops it and its bookkeeping.
 					session,

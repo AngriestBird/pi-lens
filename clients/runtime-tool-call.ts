@@ -1576,6 +1576,8 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					isExistingFile,
 				},
 			});
+			// #3525: read before the verdict, which does not move FileTime.
+			const fileTimeMoved = readGuard.fileTimeMoved?.(filePath) === true;
 			const verdict =
 				typeof readGuard.checkEdit === "function"
 					? readGuard.checkEdit(filePath, touchedLines, editRanges, {
@@ -1583,6 +1585,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 							oldTextResolved: !!contentMatchValidated,
 						})
 					: { action: "allow" as const };
+			// #3525: an edit that passes a moved FileTime leaves it moved.
+			if (fileTimeMoved && toolCallId !== undefined)
+				runtime.markToolCallFileTimeStale(toolCallId);
 			// Content-verified range-stale relocation: the lines the agent meant
 			// to edit moved (read-time line hashes uniquely match the new spot),
 			// so re-target the positional edit to where the content now lives

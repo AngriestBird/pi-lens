@@ -33,7 +33,8 @@
 (*  - another writer (external editor, second pi-lens instance, git):      *)
 (*    changes F between any two steps.                                     *)
 (*  - pi-lens' deferred agent_end format drain (runtime-agent-end.ts ~710):*)
-(*    rewrites F, then recordWritten.                                      *)
+(*    rewrites F, then recordWritten: authorship only since #3525, which   *)
+(*    leaves FileTime where it was (FormatStamp).                          *)
 (*  - boundaries: user turn (kTurn = what the agent knew before the        *)
 (*    prompt), /new (fresh guard), /fork (the conversation restarts BEFORE *)
 (*    a chosen user message) and /tree (the conversation moves). Since     *)
@@ -63,12 +64,13 @@ CONSTANTS
     Ctx,            \* contextLines (DEFAULT_CONFIG: 3)
     \* ---- current-code switches ----
     HandlerEvidence,\* TRUE (pre-#3524 code): a native read's hashes, range and FileTime come from disk at tool_result
-    CreationHandlerEvidence, \* TRUE (code): the injected creation read is hashed from disk at tool_result
+    CreationHandlerEvidence, \* TRUE (code before #3524's remainder): the injected creation read is hashed from disk at tool_result
     MtimeAuthored,  \* TRUE (code): zero-read allow when mtime >= guard construction
-    OwnEditRescue,  \* TRUE (code): canTreatStalenessAsOwnPriorEdit
+    OwnEditRescue,  \* TRUE (code before #3525): canTreatStalenessAsOwnPriorEdit
     ForkImport,     \* FALSE (code before #3521): pi re-runs the factory for a fork, so the closure stash died and the fork imported nothing
     SuppressByNewerContext, \* TRUE (code before #3522): a newer context-only candidate cancels a snapshot mismatch; read only when SpanSnapshot = FALSE
-    FormatStamp,    \* TRUE (code): the agent_end format drain calls recordWritten
+    FormatStamp,    \* TRUE (code before #3525): the agent_end format drain's recordWritten also stamps FileTime
+                    \* (FALSE: it credits authorship, `written`, only)
     \* ---- candidate fixes ----
     RecordAuthoritative, \* record the attached post-autofix bytes as a full read (code since #3519)
     RecordOwnEdit,       \* record the lines an allowed positional edit wrote as read (code since #3523)
@@ -420,9 +422,8 @@ Turn ==
     /\ Idle /\ "turn" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ IF DrainMode = "atomic" /\ FormatDrain # "none" /\ mutatedTurn /\ ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
-              /\ IF FormatStamp                               \* recordWritten after the format
-                   THEN ft' = rev + 1 /\ written' = TRUE
-                   ELSE UNCHANGED <<ft, written>>
+              /\ written' = TRUE                              \* recordWritten after the format
+              /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
     /\ kTurn' = know /\ turnNo' = turnNo + 1
     /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE /\ nb' = nb + 1
@@ -455,8 +456,9 @@ Drain ==
     /\ dr' = [dr EXCEPT !.q = FALSE]
     /\ IF ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
-              /\ IF FormatStamp /\ (DrainMode = "unfenced" \/ dr.ep = dr.cur)
-                   THEN ft' = rev + 1 /\ written' = TRUE
+              /\ IF DrainMode = "unfenced" \/ dr.ep = dr.cur
+                   THEN /\ written' = TRUE
+                        /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
                    ELSE UNCHANGED <<ft, written>>
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
     /\ UNCHANGED <<know, kTurn, reads, pendCreate, lastEditOk, born, turnNo, pc, pend,

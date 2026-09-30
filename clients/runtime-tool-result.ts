@@ -265,7 +265,12 @@ interface ToolResultDeps {
 	_allowAutonomousWriters?: boolean;
 	/** Internal (#3568): synthetic dispatch inherits the parent's session. */
 	_sessionGeneration?: LineageHandle;
+	/** Internal (#3525): the debounce re-entry keeps its call's stamp decision. */
+	_ownWriteStamp?: OwnWriteStamp;
 }
+
+/** How the agent's own write/edit moves the read guard (#3524, #3525). */
+type OwnWriteStamp = { stampFileTime: boolean; writtenContent?: string };
 
 function ensureToolResultClients(
 	deps: ToolResultDeps,
@@ -837,6 +842,12 @@ async function dispatchPipelineAnalysis(args: {
 	 * through it once the session is replaced.
 	 */
 	sessionGeneration: GenerationHandle;
+	/**
+	 * #3525: false when the agent's own edit passed a moved FileTime, so the
+	 * post-pipeline re-stamp of `filePath` must not credit those bytes.
+	 * Omitted: stamp, as before.
+	 */
+	ownFileTimeStamp?: boolean;
 }): Promise<
 	| { crashed: false; result: PipelineResult }
 	| {
@@ -866,6 +877,7 @@ async function dispatchPipelineAnalysis(args: {
 		nativeAppliedPairs,
 		allowAutonomousWriters,
 		sessionGeneration,
+		ownFileTimeStamp = true,
 	} = args;
 	const {
 		event,
@@ -1113,15 +1125,18 @@ async function dispatchPipelineAnalysis(args: {
 	// reflected on disk. Refresh read-guard staleness stamps so a follow-up edit
 	// is judged by read-range coverage, not by our own previous write.
 	if (!getFlag("no-read-guard") && allowAutonomousWriters) {
+		const ownPath = path.resolve(filePath);
 		const changedForReadGuard = new Set([
-			path.resolve(filePath),
+			ownPath,
 			...(result.changedFiles ?? []).map((changedFile) =>
 				path.resolve(changedFile),
 			),
 		]);
 		for (const changedFile of changedForReadGuard) {
 			if (nodeFs.existsSync(changedFile)) {
-				deps.readGuard?.recordWritten(changedFile);
+				deps.readGuard?.recordWritten(changedFile, {
+					stampFileTime: ownFileTimeStamp || changedFile !== ownPath,
+				});
 			}
 		}
 	}
@@ -2406,6 +2421,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		logConversationRead("own-edit", filePath, ownEdit.start, evidence);
 	}
 
+	// #3525: an edit the guard passed over a moved FileTime leaves it moved;
+	// #3524: a write's creation read is the `content` it executed. Taken here,
+	// before the debounce, which the attribution does not survive.
+	const executedContent = (event.input as { content?: unknown } | undefined)
+		?.content;
+	const ownWriteStamp: OwnWriteStamp = deps._ownWriteStamp ?? {
+		stampFileTime: attribution?.fileTimeStale !== true,
+		...(mutation.kind === "write" &&
+			typeof executedContent === "string" && {
+				writtenContent: executedContent,
+			}),
+	};
+
 	// Must happen before debounce admission: latestDeps intentionally retains only
 	// the latest event, but write -> edit is a sticky turn transition.
 	const receipt = (runtime as Partial<RuntimeCoordinator>)
@@ -2430,6 +2458,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				// #3596 G: the re-entry keeps the session this handler entered in.
 				_sessionGeneration: writeSession,
 				_autofixMode: autofixMode,
+				_ownWriteStamp: ownWriteStamp,
 				_telemetryParticipantIds: [readGuardCorrelationId],
 				_telemetryParticipantTotal: 1,
 			});
@@ -2438,7 +2467,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	// Refresh the read-guard's FileTime stamp so that the model's own write
 	// doesn't trigger a spurious "file_modified" block on the next edit.
-	if (bashAuthorshipConfirmed) deps.readGuard?.recordWritten(filePath);
+	if (bashAuthorshipConfirmed)
+		deps.readGuard?.recordWritten(filePath, ownWriteStamp);
 
 	// Keep cachedExports in sync after each write/edit so the pre-write STOP
 	// check doesn't fire on names that were removed from this file this session.
@@ -2494,10 +2524,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	if (!getFlag("no-read-guard") && bashAuthorshipConfirmed) {
 		const readGuard = (
 			runtime as {
-				readGuard?: { recordWritten?: (writtenPath: string) => void };
+				readGuard?: {
+					recordWritten?: (writtenPath: string, opts: OwnWriteStamp) => void;
+				};
 			}
 		).readGuard;
-		if (entryLive) readGuard?.recordWritten?.(filePath);
+		if (entryLive) readGuard?.recordWritten?.(filePath, ownWriteStamp);
 		else
 			recordDroppedRead(writeSession, "tool-result", writeSession.branchEpoch);
 	}
@@ -2678,6 +2710,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// #3512: one capture for the whole dispatch, the same one the
 			// inline verdict below writes through.
 			sessionGeneration: writeSession,
+			ownFileTimeStamp: ownWriteStamp.stampFileTime,
 		}),
 		{
 			ms: HOOK_WALL_BUDGET_MS.tool_result_edit,

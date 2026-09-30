@@ -688,7 +688,9 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 
 			// The synthetic post-edit dispatch stamps the read guard so a
 			// follow-up edit is not judged stale against our own commit.
-			expect(recordWritten).toHaveBeenCalledWith(filePath);
+			expect(recordWritten).toHaveBeenCalledWith(filePath, {
+				stampFileTime: true,
+			});
 		} finally {
 			env.cleanup();
 		}
