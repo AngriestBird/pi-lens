@@ -103,6 +103,7 @@ interface World {
 	jobs: Job[];
 	logThrows?: boolean;
 	listThrows?: boolean;
+	listTransientFailures?: number;
 	prStateThrows?: boolean;
 	calls: string[];
 	logCalls: { args: string[]; options?: Record<string, unknown> }[];
@@ -137,6 +138,10 @@ function ghFor(w: World) {
 		if (args[0] === "repo") return `${w.owner}/pi-lens`;
 		if (args[0] === "pr" && args[1] === "list") {
 			if (w.listThrows) throw new Error("HTTP 404: not found");
+			if ((w.listTransientFailures ?? 0) > 0) {
+				w.listTransientFailures = (w.listTransientFailures ?? 0) - 1;
+				throw Object.assign(new Error("gh failed"), { stderr: "HTTP 502" });
+			}
 			return JSON.stringify(
 				w.prs
 					.filter((p) => (p.state ?? "OPEN") === "OPEN")
@@ -666,6 +671,17 @@ describe("run --all — one line per open PR (#3700)", () => {
 				{ number: 12, login: "stranger", checkRuns: [], workflowRuns: [] },
 				{ number: 13, login: "stranger", headReadThrows: true },
 				{ number: 14, login: "stranger", state: "MERGED" },
+				{
+					number: 15,
+					login: "stranger",
+					checkRuns: [GREEN[0], row("Lint & type-check", "cancelled", 12)],
+				},
+				{
+					number: 16,
+					login: "stranger",
+					mergeable: "CONFLICTING",
+					checkRuns: GREEN,
+				},
 			],
 			jobs: [unit],
 		});
@@ -676,6 +692,8 @@ describe("run --all — one line per open PR (#3700)", () => {
 			`#11 stranger auto-merge=off head=${sha9(11)} gating=success`,
 			`#12 stranger auto-merge=off head=${sha9(12)} gating=pending`,
 			`#13 stranger auto-merge=off head=${sha9(13)} gating=unreadable`,
+			`#15 stranger auto-merge=off head=${sha9(15)} gating=cancelled`,
+			`#16 stranger auto-merge=off head=${sha9(16)} gating=dirty`,
 		]);
 	});
 });
@@ -942,6 +960,43 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		expect(exitCode).toBe(EXIT_PENDING);
 		expect(out).toBe("watch window elapsed with no event");
 		expect(errors.join("\n")).toContain("HTTP 404");
+	});
+
+	// Recurrence (#2935): two GitHub outages killed seven armed waits at once; a
+	// watch armed for 20 minutes must ride out a 502 on its list read too.
+	it("waits out a transient error on the open-PR list read instead of exiting 70", async () => {
+		const { unit, runs } = failedRuns();
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+			listTransientFailures: 1,
+		});
+		const { exitCode, lines, errors, sleeps } = await cli(["--watch-open"], w);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(sleeps).toEqual([30_000]);
+		expect(errors.join("\n")).toContain("transient gh error, retrying in 30s");
+		expect(lines[0]).toContain("#3688 failed");
+	});
+
+	it("starts empty from a corrupt or non-object state file, and rewrites it as an object", async () => {
+		const { unit, runs } = failedRuns();
+		for (const content of ["not json", "null", '["3688"]']) {
+			const file = stateFile();
+			writeFileSync(file, content);
+			const w = world({
+				prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+				jobs: [unit],
+			});
+			const { exitCode, lines } = await cli(
+				["--watch-open", "--state-file", file],
+				w,
+			);
+			expect(exitCode).toBe(EXIT_SUCCESS);
+			expect(lines[0]).toContain("#3688 failed");
+			expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+				"3688": `${shaOf(3688)}:failed`,
+			});
+		}
 	});
 
 	it("exits 70, not a verdict code, when the open-PR list cannot be read", async () => {

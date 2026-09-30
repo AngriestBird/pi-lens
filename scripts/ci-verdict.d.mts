@@ -74,7 +74,6 @@ export interface Verdict {
 	mergeState: string;
 	kind: string;
 	failingRows: VerdictRow[];
-	noiseRows: VerdictRow[];
 	details?: FailedJobDetail[];
 	hints?: string[];
 }

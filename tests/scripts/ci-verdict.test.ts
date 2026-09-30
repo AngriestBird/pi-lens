@@ -98,6 +98,7 @@ describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", 
 		);
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.reason).toContain("infra (rerun armed)");
+		expect(verdict.kind).toBe("infra-rerun");
 	});
 	it("reports a concluded rerun failure even when ci:infra remains", () => {
 		const verdict = computeVerdict(

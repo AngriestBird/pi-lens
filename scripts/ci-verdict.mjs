@@ -532,7 +532,7 @@ export function computeVerdict(
 		}
 	} else {
 		exitCode = EXIT_SUCCESS;
-		kind = noiseRows.length > 0 ? "post-merge-noise" : "success";
+		kind = "success";
 		reason =
 			noiseRows.length > 0
 				? `post-merge noise, not a failure: ${noiseRows.map((row) => row.name).join(", ")} could not fetch refs/pull/N/merge after the PR merged; every other gating check concluded success`
@@ -545,7 +545,6 @@ export function computeVerdict(
 		mergeState,
 		kind,
 		failingRows: failingGatingRows,
-		noiseRows,
 	};
 }
 
@@ -1088,8 +1087,9 @@ export function stripAnsi(text) {
 /**
  * What one job log says (the lines the orchestrator pulled out by hand from
  * `gh api --allow-escape-sequences .../jobs/<id>/logs`): the vitest `FAIL`
- * lines and `AssertionError` lines (each once -- vitest prints the message
- * again as `##[error]`), the `Test Files` / `Tests` summary, the merge
+ * lines and `AssertionError` lines (the `##[error]` annotation vitest repeats
+ * the message in starts with `#`, so it never matches), the `Test Files` /
+ * `Tests` summary, the merge
  * commit's base from the checkout's `HEAD is now at <sha> Merge <head> into
  * <base>` line, and whether the checkout could not fetch the PR's merge ref.
  * `FAIL` must START the line: a passing test titled "does not FAIL when ..."
@@ -1104,13 +1104,12 @@ export function parseJobLog(logText) {
 		const line = stripAnsi(raw)
 			.replace(/\r$/, "")
 			.replace(LOG_TIMESTAMP, "")
-			.replace(/^##\[error\]/, "")
 			.trimEnd();
 		const text = line.trim();
 		if (/^(?:FAIL\s|\w*AssertionError\b)/.test(text)) {
-			if (!failures.includes(text)) failures.push(text);
+			failures.push(text);
 		} else if (/^(?:Test Files|Tests)\s+\d/.test(text)) {
-			if (!summary.includes(text)) summary.push(text);
+			summary.push(text);
 		}
 		const base =
 			/HEAD is now at \S+ Merge [0-9a-f]{40} into ([0-9a-f]{40})$/.exec(line);
