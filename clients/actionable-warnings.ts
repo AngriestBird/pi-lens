@@ -31,7 +31,6 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
-import { LEDGER_FIELD_MAX } from "./ledger-bounds.js";
 import {
 	recordLspMutationBatch,
 	type LspMutationContext,
@@ -1775,17 +1774,10 @@ export function publishActionableWarningsReport(
 			? "the publish crossed a session boundary"
 			: "changed before this turn's in-band publish could keep them";
 		const reason = `${merged.droppedFiles.length} carried-forward entries: findings are LOST on this channel; ${cause} (files: ${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`;
-		// incrementDegradationCount appends `(count: N)` after its bounded reason.
-		// Leave room for that suffix so this diagnostic stays within the ledger's
-		// 200-character field cap while retaining the files list and its cause.
-		const boundedReason =
-			reason.length > LEDGER_FIELD_MAX - 12
-				? `${reason.slice(0, LEDGER_FIELD_MAX - 13)}…`
-				: reason;
 		incrementDegradationCount({
 			kind: "actionable-warnings-inband-superseded",
 			subject: `${path.resolve(cwd)}:inband-carry-superseded`,
-			reason: boundedReason,
+			reason,
 		});
 		opts.dbg?.(
 			`actionable_warnings: in-band publish dropped ${merged.droppedFiles.length} superseded carried-forward file entry/entries (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,

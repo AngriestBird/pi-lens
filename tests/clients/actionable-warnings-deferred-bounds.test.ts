@@ -2146,7 +2146,9 @@ describe("#2504 r7 F4 — a foreign session's zero-seq entry no longer passes th
 		// #3712: the fixed diagnostic must precede the path list.
 		expect(reason).toContain("LOST");
 		expect(reason).toContain("findings are LOST");
-		expect(reason.length).toBeLessThanOrEqual(200);
+		// The ledger's contract is LEDGER_FIELD_MAX plus the `(count: N)`
+		// suffix it appends after truncation (#1816).
+		expect(reason.length).toBeLessThanOrEqual(220);
 		expect(reason).toContain("(files: ");
 		expect(reason).toContain("foreign-");
 	});
