@@ -141,4 +141,133 @@ describe("rust-clippy status is the execution outcome (#3751)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("a clean cargo stream with build-finished is a successful clean run", async () => {
+		const env = setupTestEnvironment("pi-lens-clippy-clean-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = fs
+				.readFileSync(CLIPPY_FIXTURE, "utf8")
+				.split("\n")
+				.filter((line) => !line.includes('"reason":"compiler-message"'))
+				.join("\n")
+				.replace('"success":false', '"success":true');
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: { stdout: output, stderr: "", status: 0 },
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			// Cargo emits artifact/build-finished records even when clippy finds no
+			// diagnostics; they are evidence of a parseable clean run (#3775).
+			expect(observed?.status).toBe("succeeded");
+			expect(observed?.semantic).toBe("none");
+			expect(observed?.diagnostics).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a timeout with partial parseable output remains failed", async () => {
+		const env = setupTestEnvironment("pi-lens-clippy-timeout-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = fs.readFileSync(CLIPPY_FIXTURE, "utf8");
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: {
+							stdout: output,
+							stderr: "",
+							status: null,
+							error: new Error("timed out"),
+							failure: "timeout",
+						},
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("failed");
+			expect(observed?.failureKind).toBe("timeout");
+			expect(observed?.semantic).toBe("blocking");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("an output-capped truncated stream remains failed", async () => {
+		const env = setupTestEnvironment("pi-lens-clippy-cap-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = fs.readFileSync(CLIPPY_FIXTURE, "utf8").slice(0, -8);
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: {
+							stdout: output,
+							stderr: "",
+							status: null,
+							error: new Error("output cap"),
+							failure: "signal",
+							killedForOutputCap: true,
+						},
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("failed");
+			expect(observed?.failureKind).toBe("server_error");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps warning-only output succeeded and non-blocking", async () => {
+		const env = setupTestEnvironment("pi-lens-clippy-warning-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = fs
+				.readFileSync(CLIPPY_FIXTURE, "utf8")
+				.replace('"level":"error"', '"level":"warning"')
+				.replace('"success":false', '"success":true');
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: { stdout: output, stderr: "", status: 0 },
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("succeeded");
+			expect(observed?.semantic).toBe("warning");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps mixed warning and blocking output blocking", async () => {
+		const env = setupTestEnvironment("pi-lens-clippy-mixed-");
+		try {
+			const filePath = writeCrate(env.tmpDir);
+			const output = fs
+				.readFileSync(CLIPPY_FIXTURE, "utf8")
+				.replace('"level":"error"', '"level":"warning"');
+			const mixed = `${output}${fs.readFileSync(CLIPPY_FIXTURE, "utf8")}`;
+			safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+				args.includes("--version")
+					? { stdout: "clippy 0.1.0", stderr: "", status: 0 }
+					: { stdout: mixed, stderr: "", status: 0 },
+			);
+
+			const { observed } = await dispatchClippy(env.tmpDir, filePath);
+
+			expect(observed?.status).toBe("succeeded");
+			expect(observed?.semantic).toBe("blocking");
+			expect(observed?.diagnostics).toHaveLength(2);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
