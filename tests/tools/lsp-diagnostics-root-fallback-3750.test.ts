@@ -141,6 +141,9 @@ describe("#3750 an empty result under a server-root fallback", () => {
 			"Primary LSP (rust): unconfirmed — rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
 		);
 		expect(text).toContain("NOT the same as 0 diagnostics");
+		expect(text).toContain(
+			"check the file from inside its project and re-run.",
+		);
 		expect(text).not.toContain("confirmed clean");
 		expect(details.unconfirmed).toBe(true);
 		expect(String(details.rootFallbackReason)).toContain("rust-analyzer");
@@ -254,6 +257,20 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		);
 		expect(text).not.toContain("silent-on-clean");
 		expect(details.filesChecked).toBe(2);
+	});
+
+	it("joins the distinct reasons of different servers in one batch", async () => {
+		answerWith("empty");
+		const dir = workspace();
+		const rust = source(dir, "orphan.rs");
+		const ocaml = source(dir, "orphan.ml");
+
+		const { text } = await runTool(root, { paths: [rust, ocaml] });
+
+		expect(text).toContain("0 files confirmed clean, 2 unconfirmed");
+		expect(text).toContain(
+			"may not have analysed it; ocamllsp: no project root found for this file",
+		);
 	});
 
 	it("counts a fallback-rooted file that published findings as findings in a batch, and only its empty sibling as unconfirmed", async () => {
