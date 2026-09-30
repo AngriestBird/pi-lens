@@ -3,9 +3,9 @@
  * list and the ONE fail-closed "latest check-run per name" resolver, shared
  * by every consumer that reads GitHub check-runs for this repo's two gating
  * checks -- merge-train-warden.mjs (GraphQL rollup: `startedAt`, UPPERCASE
- * `status`/`conclusion`), merge-train-lane.mjs (via the warden today, moved
- * to import this module directly in this round), and ci-verdict.mjs (REST
- * `commits/<sha>/check-runs`: `started_at`, lowercase `status`/`conclusion`).
+ * `status`/`conclusion`) and ci-verdict.mjs (REST `commits/<sha>/check-runs`:
+ * `started_at`, lowercase `status`/`conclusion`). A third consumer,
+ * merge-train-lane.mjs, was retired in #3837.
  *
  * Before this round, ci-verdict.mjs hand-rolled its own `latestRunNamed`
  * with an `id`-as-tiebreak policy that is NOT fail-closed (a superseded
@@ -53,8 +53,6 @@ export function isUnitTestsShardJobName(name) {
 // hand-rolling its own -- AGENTS.md shape 38's own warning ("the cheapest
 // evasion is adding a real gate to the advisory list") is a defect risk
 // multiplied by every duplicate copy of this set, not just the original.
-// merge-train-lane.mjs re-exports these three names unchanged for its
-// existing importers.
 const ADVISORY_SUFFIX = "(advisory)";
 export const ADVISORY_CHECKS = new Set([
 	// Third-party SonarCloud GitHub App check-run (posted via the SonarCloud
