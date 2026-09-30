@@ -796,7 +796,22 @@ npm run changelog:check               changelog validation
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
+node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
 ```
+
+CI cost gates (#3801). The heavy advisory jobs (`mutation (advisory)`, `Unit
+tests Windows (advisory)`) start only after every required check passed on the
+head (`heavy-gate` in ci.yml); ci-verdict lists them PENDING until then. A
+docs-only pull request (root `*.md`, `docs/**`, `.changelog/**` and nothing
+else, classified by `scripts/ci-changed-files.mjs`; every doubt runs the full
+suite) skips the Unit shards and the heavy jobs and runs tests/config and
+tests/docs instead, and `TLA+ models` model-checks only when `formal/` (or its
+checker or ci.yml) changed. A REQUIRED job never skips at job level: ci-verdict
+and the merge train demand a literal `success`, and a skipped matrix job
+leaves its required names absent, so required jobs start and skip their steps.
+The Unit shards are packed by the per-file seconds in
+`scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
+`vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
 
 A workflow edit whose only executing lane is master-only (a job gated
 `if: github.event_name != 'pull_request'`) has no CI evidence at merge time:
