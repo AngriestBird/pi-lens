@@ -1810,14 +1810,14 @@ export class TreeSitterClient {
 		try {
 			this.activeWasmInput = input;
 			return { parsed: true, value: consume(tree) };
-		} catch (error) {
+		} catch (thrown) {
 			// #3605: a wasm abort or trap while querying the tree degrades this
 			// file alone, like a failed parse; any other error is a bug.
-			this.reportWasmAbort(error);
-			if (classifyTreeSitterWasmError(error)) {
-				return this.notParsed(error, input);
+			this.reportWasmAbort(thrown);
+			if (classifyTreeSitterWasmError(thrown)) {
+				return this.notParsed(thrown, input);
 			}
-			throw error;
+			throw thrown;
 		} finally {
 			this.activeWasmInput = undefined;
 		}
