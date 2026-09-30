@@ -33,6 +33,7 @@ import { AstGrepClient } from "../clients/ast-grep-client.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
 	getDegradationSummary,
+	incrementDegradationCount,
 	recordDegradationOnce,
 	renderDegradationLines,
 } from "../clients/degradation-ledger.js";
@@ -101,6 +102,12 @@ import {
 import { flushExtensionLog } from "../clients/extension-log.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
 import { shouldInitializeSessionRoot } from "../clients/lsp/session-roots.js";
+import {
+	findIgnoredArguments,
+	ignoredArgumentsStructured,
+	missingRequiredResult,
+	withIgnoredArguments,
+} from "./tool-arguments.js";
 import {
 	computeBuildStamp,
 	STALE_SERVED_BY_FRESH,
@@ -1950,6 +1957,29 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 				);
 				return;
 			}
+			// #3749: one check for every tool, against the schema `tools/list`
+			// advertises. The retired alias resolves to the canonical tool's schema.
+			const inputSchema = ALL_TOOLS.find(
+				(tool) => tool.name === enabledName,
+			)?.inputSchema;
+			const argumentReport = inputSchema
+				? findIgnoredArguments(inputSchema, args)
+				: undefined;
+			if (argumentReport) {
+				incrementDegradationCount({
+					kind: "mcp-ignored-arguments",
+					subject: name,
+					reason: `ignored argument(s): ${ignoredArgumentsStructured(argumentReport).ignoredArguments.join(", ")}`,
+				});
+				const refused = missingRequiredResult(name, argumentReport);
+				if (refused) {
+					sendResult(
+						id ?? null,
+						stripResultDetails(finalizeToolResult(refused)),
+					);
+					return;
+				}
+			}
 			const entry = toolRegistryEntryForMcp(name);
 			if (entry && "situational" in entry && entry.situational) {
 				startSituationalToolTelemetrySession("mcp");
@@ -1981,6 +2011,8 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 				// #2800 item 7: the payload bound runs first with the footer's own
 				// size reserved, then the footer is stamped with the delivered
 				// payload's byte count and the bound's truncated flag.
+				if (argumentReport)
+					result = withIgnoredArguments(result, name, argumentReport);
 				const delivery = finalizeToolResultWithDelivery(result);
 				// The gate consumed `details` for the footer's diag lines above;
 				// strip it so the wire carries only the bounded text (#2852 N1).

@@ -20,6 +20,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { findIgnoredArguments } from "../../mcp/tool-arguments.js";
 import { McpHarness, repoRoot } from "./harness.js";
 import { stripSource } from "../support/sweep-kit.js";
 
@@ -602,4 +603,232 @@ describe("pi-lens MCP result bounds", { retry: 2 }, () => {
 			fs.rmSync(workspace, { recursive: true, force: true });
 		}
 	}, 45_000);
+});
+
+// #3749: `pilens_diagnostics {"filePath": ...}` (the schema says `path`) ran on
+// defaults and answered "No issues in the current turn delta." -- a false clean.
+// The dispatcher now checks every tool's arguments against the schema it
+// advertises. Own harness, so the degradation ledger these tests read starts
+// empty.
+describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
+	type WireResult = {
+		isError?: boolean;
+		content: { text: string }[];
+		structuredContent?: {
+			ignoredArguments: string[];
+			ignoredArgumentCount: number;
+		};
+	};
+	let harness: McpHarness;
+	let nextId = 374_900;
+	const call = async (
+		name: string,
+		args: Record<string, unknown>,
+	): Promise<WireResult> => {
+		const response = await harness.request(nextId++, "tools/call", {
+			name,
+			arguments: args,
+		});
+		expect(response.error).toBeUndefined();
+		return response.result as WireResult;
+	};
+	const firstLine = (result: WireResult): string =>
+		result.content[0]?.text.split("\n")[0] ?? "";
+
+	beforeAll(async () => {
+		harness = new McpHarness();
+		await harness.request(374_899, "initialize", {
+			protocolVersion: "2025-06-18",
+			capabilities: {},
+			clientInfo: { name: "unknown-arguments", version: "0" },
+		});
+		harness.notify("notifications/initialized");
+	}, 25_000);
+
+	afterAll(() => {
+		harness.dispose();
+	});
+
+	it("reports a mistyped diagnostics key instead of a clean-looking result", async () => {
+		const result = await call("pilens_diagnostics", {
+			filePath: "/tmp/x/bad.ts",
+		});
+		expect(firstLine(result)).toBe(
+			"Ignored unknown argument(s) for pilens_diagnostics: `filePath` (did you mean `path`?). They had no effect on this call.",
+		);
+		expect(result.content[0]?.text).toContain("No issues");
+		expect(result.isError).toBe(false);
+		expect(result.structuredContent).toEqual({
+			ignoredArguments: ["filePath"],
+			ignoredArgumentCount: 1,
+		});
+		expect(result.content[0]?.text).toMatch(
+			/result ok\nusage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=false$/,
+		);
+	}, 25_000);
+
+	it("turns an ignored key that leaves a required input missing into an error", async () => {
+		const result = await call("pilens_analyze", { filePath: "/tmp/x/bad.ts" });
+		expect(result.isError).toBe(true);
+		expect(firstLine(result)).toBe(
+			"Ignored unknown argument(s) for pilens_analyze: `filePath` (did you mean `file`?). They had no effect on this call.",
+		);
+		expect(result.content[0]?.text).toContain(
+			"Not run: required argument(s) `file` missing.",
+		);
+		expect(result.structuredContent?.ignoredArguments).toEqual(["filePath"]);
+		// The refusal still goes through the result-footer gate.
+		expect(result.content[0]?.text).toMatch(
+			/result error\nusage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=false$/,
+		);
+	}, 25_000);
+
+	it("runs the tool when the required key is sent next to an ignored one", async () => {
+		const result = await call("pilens_module_report", {
+			file: "missing.ts",
+			bogus: true,
+		});
+		expect(firstLine(result)).toContain("Ignored unknown argument(s)");
+		expect(result.content[0]?.text).toContain("No module report for");
+		expect(result.content[0]?.text).not.toContain("Not run");
+	}, 25_000);
+
+	it("leaves a call with only declared keys byte-for-byte free of the report", async () => {
+		const result = await call("pilens_diagnostics", { mode: "delta" });
+		expect(result.content[0]?.text).not.toContain("Ignored unknown");
+		expect(result.structuredContent).toBeUndefined();
+	}, 25_000);
+
+	it("keeps the tool's own message when a required key is missing and nothing is ignored", async () => {
+		const result = await call("pilens_analyze", {});
+		expect(result.content[0]?.text).toContain(
+			"pilens_analyze requires a 'file' string.",
+		);
+		expect(result.content[0]?.text).not.toContain("Ignored unknown");
+	}, 25_000);
+
+	it("checks the retired LSP diagnostics name against the folded tool's schema", async () => {
+		const result = await call("pilens_lsp_diagnostics", {
+			paths: ["missing-file.ts"],
+			pth: "x.ts",
+		});
+		expect(firstLine(result)).toBe(
+			"Ignored unknown argument(s) for pilens_lsp_diagnostics: `pth` (did you mean `path`?). They had no effect on this call.",
+		);
+		expect(result.content[0]?.text).toContain("Checks not confirmed");
+	}, 25_000);
+
+	it("does not change the answer for an unknown tool", async () => {
+		const result = await call("pilens_not_a_tool", { bogus: 1 });
+		expect(result.isError).toBe(true);
+		expect(firstLine(result)).toBe(
+			"Unknown or disabled tool: pilens_not_a_tool",
+		);
+		expect(result.structuredContent).toBeUndefined();
+	}, 25_000);
+
+	it("names Object.prototype keys as ignored and bounds a flood of keys", async () => {
+		const proto = await call("pilens_diagnostics", {
+			constructor: 1,
+			toString: 2,
+		});
+		expect(proto.structuredContent?.ignoredArguments).toEqual([
+			"constructor",
+			"toString",
+		]);
+		const flood = await call("pilens_diagnostics", {
+			...Object.fromEntries(
+				Array.from({ length: 50 }, (_, index) => [
+					`${"k".repeat(200)}${index}`,
+					index,
+				]),
+			),
+		});
+		expect(flood.structuredContent?.ignoredArgumentCount).toBe(50);
+		expect(flood.structuredContent?.ignoredArguments).toHaveLength(8);
+		expect(firstLine(flood).length).toBeLessThan(1000);
+		expect(firstLine(flood)).toContain("and 42 more");
+	}, 25_000);
+
+	// Recurrence this prevents: a tool added later that skips the check (the
+	// bug was that NO tool had one). Iterates tools/list, so a new tool is
+	// covered without anyone editing this test. `pilens_rebuild` is the one
+	// tool not driven over the wire: it runs `npm run build` on the checkout
+	// that holds this very test run; its schema still goes through the
+	// schema-level rows below.
+	it("reports an unknown key on every registered tool", async () => {
+		const listed = (await harness.request(374_898, "tools/list")).result as {
+			tools: {
+				name: string;
+				inputSchema: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+				};
+			}[];
+		};
+		expect(listed.tools.length).toBeGreaterThan(10);
+		for (const tool of listed.tools) {
+			// Every declared key of every tool is accepted silently...
+			expect(
+				findIgnoredArguments(
+					tool.inputSchema,
+					Object.fromEntries(
+						Object.keys(tool.inputSchema.properties ?? {}).map((key) => [
+							key,
+							null,
+						]),
+					),
+				),
+				tool.name,
+			).toBeUndefined();
+			// ...and an undeclared one is always reported.
+			expect(
+				findIgnoredArguments(tool.inputSchema, { __bogus_key__: 1 })?.ignored,
+				tool.name,
+			).toEqual([{ key: "__bogus_key__" }]);
+		}
+		for (const tool of listed.tools) {
+			if (tool.name === "pilens_rebuild") continue;
+			const result = await call(tool.name, { __bogus_key__: 1 });
+			expect(firstLine(result), tool.name).toBe(
+				`Ignored unknown argument(s) for ${tool.name}: \`__bogus_key__\`. They had no effect on this call.`,
+			);
+			expect(result.structuredContent, tool.name).toEqual({
+				ignoredArguments: ["__bogus_key__"],
+				ignoredArgumentCount: 1,
+			});
+			// A tool with a required input never runs on the defaults.
+			if ((tool.inputSchema.required ?? []).length > 0) {
+				expect(result.isError, tool.name).toBe(true);
+				expect(result.content[0]?.text, tool.name).toContain("Not run:");
+			}
+		}
+	}, 240_000);
+
+	it("records each call in the degradation ledger as a counted row, not one row per key", async () => {
+		const health = async () => {
+			const text = (await call("pilens_health", {})).content[0]?.text ?? "";
+			const json = text.match(/```json\n([\s\S]*?)\n```/)?.[1];
+			if (!json) throw new Error("missing health JSON");
+			return (
+				JSON.parse(json) as {
+					degradations: {
+						kind: string;
+						count: number;
+						latestReasons: { subject: string; reason: string }[];
+					}[];
+				}
+			).degradations.find((group) => group.kind === "mcp-ignored-arguments");
+		};
+		const before = (await health())?.count ?? 0;
+		await call("pilens_diagnostics", { onlyKeyA: 1, onlyKeyB: 2 });
+		await call("pilens_diagnostics", { onlyKeyA: 1 });
+		const after = await health();
+		expect(after?.count).toBe(before + 2);
+		const row = after?.latestReasons.find(
+			(entry) => entry.subject === "pilens_diagnostics",
+		);
+		expect(row?.reason).toContain("ignored argument(s): onlyKeyA");
+		expect(row?.reason).not.toContain("onlyKeyB");
+	}, 25_000);
 });
