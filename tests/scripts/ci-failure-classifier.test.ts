@@ -1216,6 +1216,102 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		expect(api.rerunCallCount).toBe(0);
 	});
 
+	// #3753 recurrence: `Unit tests` is an aggregate over `Unit tests (shard
+	// k/3)` jobs. The exact-name lookup picked the AGGREGATE, whose log carries
+	// no kill signature and no FAIL line, so every shard kill classified `real`
+	// and the infra rerun never fired. The shard's log is the evidence.
+	describe("#3753 sharded Unit tests", () => {
+		function shardedFetcher(
+			api: ReturnType<typeof makeStatefulApi>,
+			logs: Record<string, string>,
+			jobs: Array<{ id: number; name: string; conclusion: string }>,
+		) {
+			return async (url: string, init?: RequestInit) => {
+				if (url.endsWith("/actions/runs/999/jobs")) {
+					return jsonResponse({ jobs });
+				}
+				const logMatch = /\/actions\/jobs\/(\d+)\/logs$/.exec(url);
+				if (logMatch) return textResponse(logs[logMatch[1]] ?? "");
+				return api.fetcher(url, init);
+			};
+		}
+		const AGGREGATE_LOG = "Unit tests shard jobs (test): failure\n";
+
+		it("classifies the failed shard's log, not the aggregate's, and reruns an infra-killed shard", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": "all good\n",
+						"302": fixture("infra-kill-wrapper-killed.real.log"),
+						"111": AGGREGATE_LOG,
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "success" },
+						{ id: 302, name: "Unit tests (shard 2/3)", conclusion: "failure" },
+						{ id: 111, name: "Unit tests", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+				skipMissingJob: true,
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("infra-kill");
+			expect(result.rerunTriggeredThisPass).toBe(true);
+			expect(result.jobName).toBe("Unit tests (shard 2/3)");
+			expect(api.rerunCallCount).toBe(1);
+		});
+
+		it("a real failure in ANY failed shard wins over an infra kill in another (no rerun)", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": fixture("infra-kill-wrapper-killed.real.log"),
+						"303": fixture("real-assertion-failure.real.log"),
+						"111": AGGREGATE_LOG,
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "failure" },
+						{ id: 303, name: "Unit tests (shard 3/3)", conclusion: "failure" },
+						{ id: 111, name: "Unit tests", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("real");
+			expect(result.rerunTriggeredThisPass).toBe(false);
+			expect(api.rerunCallCount).toBe(0);
+		});
+
+		it("falls back to the exact-name job when no shard failed (a pre-sharding run)", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{ "111": fixture("infra-kill-wrapper-killed.real.log") },
+					[{ id: 111, name: "Unit tests", conclusion: "failure" }],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("infra-kill");
+			expect(result.jobName).toBe("Unit tests");
+		});
+	});
+
 	it("updates the existing sticky comment in place instead of posting a second one, and skips the rerun once already triggered for this SHA", async () => {
 		const priorBody = `ci-classifier: infra-kill (no failing assertion; auto-rerun triggered) ${buildMarker("deadbeef", "true")}`;
 		const { fetcher, calls } = makeStatefulApi({

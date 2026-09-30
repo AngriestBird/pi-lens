@@ -33,6 +33,8 @@ import {
 import {
 	ADVISORY_CHECKS,
 	isAdvisoryCheck,
+	isUnitTestsJobName,
+	isUnitTestsShardJobName,
 } from "../../scripts/lib/ci-checks.mjs";
 
 function checkRun({
@@ -99,6 +101,89 @@ describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", 
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.reason).toContain("infra (rerun armed)");
 		expect(verdict.kind).toBe("infra-rerun");
+	});
+	// #3753 recurrence: `Unit tests` became an aggregate over `Unit tests
+	// (shard k/3)` matrix rows. The infra-rerun hold matched the literal name
+	// `Unit tests`, so a shard kill (the row that actually failed) read as a
+	// hard FAILURE while the rerun that would replace it was already queued.
+	it("#3753: holds every Unit tests shard row, not only the aggregate, while an armed rerun runs", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					checkRun({ name: "Unit tests", conclusion: "failure", id: 1 }),
+					checkRun({
+						name: "Unit tests (shard 2/3)",
+						conclusion: "failure",
+						id: 2,
+					}),
+					checkRun({ name: "Lint & type-check", id: 3 }),
+				],
+			},
+			["Unit tests", "Lint & type-check"],
+			"MERGEABLE",
+			"infra-kill",
+			{
+				originalFailed: true,
+				latestAttempt: { status: "queued", conclusion: null, run_attempt: 2 },
+			},
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.kind).toBe("infra-rerun");
+		expect(verdict.failingRows).toEqual([]);
+	});
+	// #3753: the matcher is a prefix, so it must not swallow the advisory
+	// Windows job (`Unit tests Windows (advisory)`), which a Linux kill's rerun
+	// hold has no business excusing.
+	it("#3753: recognizes the aggregate and shard rows, never the Windows advisory job", () => {
+		expect(isUnitTestsJobName("Unit tests")).toBe(true);
+		expect(isUnitTestsJobName("Unit tests (shard 2/3)")).toBe(true);
+		expect(isUnitTestsJobName("Unit tests Windows (advisory)")).toBe(false);
+		expect(isUnitTestsJobName("Lint & type-check")).toBe(false);
+		expect(isUnitTestsShardJobName("Unit tests")).toBe(false);
+		expect(isUnitTestsShardJobName("Unit tests (shard 1/3)")).toBe(true);
+	});
+	it("#3753: a red shard fails the verdict and is named beside the aggregate", () => {
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					checkRun({ name: "Unit tests", conclusion: "failure", id: 1 }),
+					checkRun({ name: "Unit tests (shard 1/3)", id: 2 }),
+					checkRun({
+						name: "Unit tests (shard 2/3)",
+						conclusion: "failure",
+						id: 3,
+					}),
+					checkRun({ name: "Unit tests (shard 3/3)", id: 4 }),
+					checkRun({ name: "Lint & type-check", id: 5 }),
+				],
+			},
+			["Unit tests", "Lint & type-check"],
+		);
+		expect(verdict.exitCode).toBe(EXIT_FAILURE);
+		expect(verdict.failingRows.map((row) => row.name)).toEqual([
+			"Unit tests",
+			"Unit tests (shard 2/3)",
+		]);
+	});
+	it("#3753: exits 0 only when the aggregate AND every shard concluded success", () => {
+		const green = {
+			check_runs: [
+				checkRun({ name: "Unit tests", id: 1 }),
+				checkRun({ name: "Unit tests (shard 1/3)", id: 2 }),
+				checkRun({ name: "Unit tests (shard 2/3)", id: 3 }),
+				checkRun({ name: "Unit tests (shard 3/3)", id: 4 }),
+				checkRun({ name: "Lint & type-check", id: 5 }),
+			],
+		};
+		expect(computeVerdict(green).exitCode).toBe(EXIT_SUCCESS);
+		const running = {
+			check_runs: green.check_runs.map((entry) =>
+				entry.name === "Unit tests (shard 3/3)"
+					? { ...entry, status: "in_progress", conclusion: null }
+					: entry,
+			),
+		};
+		expect(computeVerdict(running).exitCode).toBe(EXIT_PENDING);
 	});
 	it("reports a concluded rerun failure even when ci:infra remains", () => {
 		const verdict = computeVerdict(

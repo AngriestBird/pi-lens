@@ -331,18 +331,36 @@ jobs:
         # pre-push budget (#3426 H3432-1); this job is their CI row.
         run: node scripts/pre-push-targeted-tests.mjs --skip-build --include-ci-only
 
+  # #3753: the suite runs as three parallel `vitest --shard=i/3` jobs. This job
+  # id stays `test` (install-test and record-post-merge-validation `needs:` it,
+  # and a matrix job's `needs.test.result` is success only when EVERY shard
+  # succeeded). The check-run the ruleset requires is the `unit-tests`
+  # aggregate below, named exactly `Unit tests`.
   test:
-    name: Unit tests
+    name: Unit tests (shard ${{ matrix.shard }}/3)
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
+    strategy:
+      # One red shard must not cancel its siblings: ci-verdict then names the
+      # failing tests of every red shard, not just the first to finish.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     # Bounds the job so a reader that is alive but never drains (e.g. an
     # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
     # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
     # headroom: the longest Unit job over 9 successful master runs
     # (2026-09-15/16) was 12m42s; 26m would sit exactly on a 2x-slow runner, so 30m (refs #3111).
+    # A shard runs about a third of that suite, so this is looser than before.
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      # #3753: pinned so the tmp-fixture-hygiene owner step below shares this
+      # shard's run id (baseline, run-file manifest, owner markers) with the
+      # sharded `Run tests` step. vitest.config.ts mints a fresh id only when
+      # this is unset.
+      PI_LENS_TMP_HYGIENE_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -466,7 +484,21 @@ jobs:
         # mark and a verdict line, so the next `Killed npm test` / exit 137 —
         # which carries no failing assertion and reads as infrastructure noise —
         # arrives with a number attached.
-        run: node scripts/with-memory-watch.mjs -- npm test -- --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
+        run: node scripts/with-memory-watch.mjs -- npm test -- --shard=${{ matrix.shard }}/3 --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
+
+      # #3753: tmp-fixture-hygiene is the serialized owner that reds on tmp
+      # entries any OTHER file leaked during the run. `--shard` hands it to
+      # exactly one shard, which would leave the other two shards' leaks
+      # unjudged, so every shard re-runs it here as a second invocation. The
+      # shared PI_LENS_TMP_HYGIENE_RUN_ID (job env) makes it read this shard's
+      # baseline and run-file manifest. In the one shard `--shard` also gave it
+      # to, it ran already (and cleaned its records), so this run is a cheap
+      # no-op there; it never weakens the check.
+      - name: Tmp-fixture hygiene owner
+        env:
+          PI_LENS_TEST_TIMEOUT_SCALE: '3'
+          PI_LENS_TEST_NO_LOCK: '1'
+        run: npm test -- tests/config/tmp-fixture-hygiene.test.ts
 
       # Listener input for #3215. The default reporter remains explicit above,
       # so this adds a file reporter in the same invocation and preserves the
@@ -491,7 +523,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: unit-test-results-linux
+          name: unit-test-results-linux-shard-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/vitest-results.json
             ${{ runner.temp }}/test-history-metadata.json
@@ -578,6 +610,33 @@ jobs:
           echo "--- memory now ---"
           free -m
           exit 0
+
+  # #3753: the ONE check-run named exactly `Unit tests`, the name the ruleset
+  # requires and every tool (ci-verdict, merge-train-warden, the lane gate)
+  # keys on. A job whose `needs` failed is SKIPPED by default, and GitHub
+  # counts a skipped required check as passing, so `if: always()` is what
+  # makes a red or cancelled shard red here instead of green-by-skip.
+  # `needs.test.result` must be exactly `success`: skipped, cancelled and
+  # failure all fail this job.
+  unit-tests:
+    name: Unit tests
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    # Runs one `echo` and a comparison; 10 min is the repo's floor (refs #3123).
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SHARDS_RESULT: ${{ needs.test.result }}
+    steps:
+      - name: Require every Unit tests shard to succeed
+        run: |
+          echo "Unit tests shard jobs (test): ${SHARDS_RESULT}"
+          if [[ "${SHARDS_RESULT}" != "success" ]]; then
+            echo "::error::a Unit tests shard did not succeed (${SHARDS_RESULT}); the failing tests are in that shard's own log, check-run 'Unit tests (shard k/3)'"
+            exit 1
+          fi
 
   # Windows coverage starts as advisory because the repository has no prior Windows Vitest signal.
   # Promote this job to gating once the Run Windows Vitest subset step outcome has been success

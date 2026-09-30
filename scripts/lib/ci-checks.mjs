@@ -25,6 +25,25 @@ export const CI_JOB_NAMES = Object.freeze({
 	UNIT_TESTS: "Unit tests",
 });
 
+// #3753: the suite runs as `Unit tests (shard k/N)` matrix jobs (ci.yml job
+// `test`) behind ONE aggregate check-run named exactly `Unit tests`. The
+// aggregate is what the ruleset requires; a consumer that keys on "the Unit
+// tests job" (ci-verdict's infra-rerun hold, the failure classifier's log
+// read) must also recognize the shard rows, because the failing test output
+// and any kill signature live in the shard's log, not the aggregate's.
+const UNIT_TESTS_SHARD_PREFIX = `${CI_JOB_NAMES.UNIT_TESTS} (shard `;
+
+export function isUnitTestsJobName(name) {
+	const text = String(name ?? "");
+	return (
+		text === CI_JOB_NAMES.UNIT_TESTS || text.startsWith(UNIT_TESTS_SHARD_PREFIX)
+	);
+}
+
+export function isUnitTestsShardJobName(name) {
+	return String(name ?? "").startsWith(UNIT_TESTS_SHARD_PREFIX);
+}
+
 // How this repository ACTUALLY marks a check advisory: the workflow job name
 // ends in "(advisory)". Probed 2026-08-26 against the live rollups of every
 // open PR -- `PR body (advisory)`, `Vale prose lint (advisory)`,
