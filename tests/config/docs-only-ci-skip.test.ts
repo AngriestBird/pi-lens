@@ -233,7 +233,12 @@ const DOCS_ONLY = [
 	".changelog/3801-x.md",
 ];
 // The jobs behind `heavy-gate`: advisory, and the only jobs a docs-only diff skips.
-const HEAVY_ADVISORY = ["heavy-gate", "unit-tests-windows", "mutation"];
+const HEAVY_ADVISORY = [
+	"heavy-gate",
+	"unit-tests-windows",
+	"mutation",
+	"codeql",
+];
 // Every test-running job: a docs edit can red these (review r1 F2), so a
 // docs-only diff runs ALL of them.
 const TEST_JOBS = [
@@ -341,6 +346,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 			// mutation, targeted tests and the changelog fast-fail are pull_request jobs
 			for (const id of [
 				"mutation",
+				"codeql",
 				"targeted-tests-advisory",
 				"changelog-fragment-fastfail",
 			]) {

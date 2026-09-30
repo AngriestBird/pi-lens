@@ -32,7 +32,7 @@ type Job = {
 	permissions?: Record<string, string>;
 	"timeout-minutes"?: number;
 	"continue-on-error"?: boolean;
-	strategy?: { matrix?: { os?: string[] } };
+	strategy?: { matrix?: { os?: string[]; language?: string[] } };
 	steps?: Step[];
 };
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
@@ -60,8 +60,14 @@ const REQUIRED_CONTEXTS = [
 /** Every check-run name a job can produce (a matrix expands its `name`). */
 function checkNamesOf(job: Job): string[] {
 	const name = job.name ?? "";
-	const legs = job.strategy?.matrix?.os;
-	return legs ? legs.map((os) => name.replace("${{ matrix.os }}", os)) : [name];
+	const matrix = job.strategy?.matrix;
+	if (matrix?.os)
+		return matrix.os.map((os) => name.replace("${{ matrix.os }}", os));
+	if (matrix?.language)
+		return matrix.language.map((language) =>
+			name.replace("${{ matrix.language }}", language),
+		);
+	return [name];
 }
 
 const CI = load(".github/workflows/ci.yml");
@@ -188,9 +194,9 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	// Recurrence: the deferred-row list in ci-checks.mjs (what ci-verdict shows
 	// as PENDING) drifting from the jobs actually behind the gate.
 	it("lists exactly the gated jobs as ci-verdict's deferred advisory checks", () => {
-		expect(gated.map(([, job]) => job.name).sort(byCodeUnit)).toEqual(
-			[...DEFERRED_ADVISORY_CHECKS].sort(byCodeUnit),
-		);
+		expect(
+			gated.flatMap(([, job]) => checkNamesOf(job)).sort(byCodeUnit),
+		).toEqual([...DEFERRED_ADVISORY_CHECKS].sort(byCodeUnit));
 	});
 
 	// Recurrence (AGENTS.md shape 38): a heavy or gate row that gates. ci-verdict

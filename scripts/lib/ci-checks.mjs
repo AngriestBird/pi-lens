@@ -61,10 +61,13 @@ export const ADVISORY_CHECKS = new Set([
 	// integration, not a workflow job in .github/workflows) -- has no
 	// "(advisory)" suffix to self-identify by, so it needs an explicit entry.
 	"SonarCloud Code Analysis",
-	// GitHub's own code-scanning summary check (default CodeQL setup -- there
-	// is no committed codeql.yml; the per-language "Analyze (<lang>)" jobs it
-	// spawns are a DIFFERENT, unrelated set of check-run names this list does
-	// NOT cover, and they gate like any other non-advisory check).
+	// GitHub's own code-scanning summary check. Since #3801 CodeQL runs as a
+	// committed advanced setup: ci.yml's PR-time `CodeQL (<lang>) (advisory)` and
+	// codeql.yml's `CodeQL baseline (<lang>) (advisory)` are classified by the
+	// suffix, not by an entry here. The legacy default-setup `Analyze (<lang>)`
+	// rows, which a PR head older than the switch still carries, are a
+	// DIFFERENT set of names this list does NOT cover; they keep gating because
+	// an alert on such a head is a real result.
 	"CodeQL",
 	// #2706 tooling jobs have explicit advisory entries as well as the suffix.
 	"jscpd (advisory)",
@@ -103,6 +106,9 @@ export const CHANGES_CHECK = "Changed files (advisory)";
 export const DEFERRED_ADVISORY_CHECKS = Object.freeze([
 	"mutation (advisory)",
 	"Unit tests Windows (advisory)",
+	// #3801: ci.yml's PR-time CodeQL matrix (one check-run per language).
+	"CodeQL (actions) (advisory)",
+	"CodeQL (javascript-typescript) (advisory)",
 ]);
 
 export function isAdvisoryCheck(name) {

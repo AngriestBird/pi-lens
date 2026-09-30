@@ -2375,9 +2375,10 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === false),
 			).toHaveLength(2);
 			expect(runtime.pendingDeferredMutationCount).toBe(1);
-			expect(recordWritten).toHaveBeenCalledWith(directPath);
-			expect(recordWritten).not.toHaveBeenCalledWith(existingPath);
-			expect(recordWritten).not.toHaveBeenCalledWith(createdPath);
+			// Authorship for the recognized write, never a FileTime stamp (#3525).
+			expect(recordWritten).toHaveBeenCalled();
+			for (const call of recordWritten.mock.calls)
+				expect(call).toEqual([directPath, { stampFileTime: false }]);
 			for (const [filePath, bytes] of opaqueBytesBeforePipeline) {
 				expect(fs.readFileSync(filePath)).toEqual(bytes);
 			}
