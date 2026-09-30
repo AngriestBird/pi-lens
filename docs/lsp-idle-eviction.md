@@ -19,63 +19,68 @@ _Last generated: 2026-09-30 on linux; 46 registry servers: 26 eligible, 0 vetoed
 
 ## Per-server rows
 
-Durations and memory are bucketed so the nightly refresh only changes this file
-when a server moves between buckets; the raw figures are in the nightly run's
-step summary. `n/a` means not measured, never zero: **init** is spawn plus
-initialize plus first diagnostics, **rss** is the resident memory of the
-server's process tree after load (`n/a` where the platform cannot report it),
-**respawn** is whether the next request after eviction brought the server back,
-**cold start** is the time from that request to the first diagnostics that
-preserve the baseline findings.
+Only stable columns are committed, so the nightly refresh changes this file
+only when a server's outcome changes. The measured init duration, resident
+memory of the server's process tree and post-eviction cold start are in the
+nightly run's step log and job summary, one row per server. `n/a` means not
+measured, never zero: **respawn** is whether the next request after eviction
+brought the server back, **coverage** is whether the respawned server kept
+every baseline finding.
 
-| server | role | declared | result | reason | init | rss | respawn | cold start | coverage |
-|---|---|---|---|---|---|---|---|---|---|
-| ast-grep | auxiliary | unmeasured | eligible | · | 1-3s | <100 MB | ok | 1-3s | preserved |
-| bash | primary | unmeasured | inconclusive | no-baseline | 1-3s | n/a | n/a | n/a | unproven |
-| clojure | primary | unmeasured | eligible | · | <1s | 100-250 MB | ok | <1s | preserved |
-| cmake | primary | unmeasured | inconclusive | no-baseline | 1-3s | n/a | n/a | n/a | unproven |
-| cpp | primary | unmeasured | eligible | · | <1s | 100-250 MB | ok | <1s | preserved |
-| csharp | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| css | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| cue | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| dart | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| deno | primary | unmeasured | eligible | · | <1s | 250-500 MB | ok | <1s | preserved |
-| docker | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| elixir | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| expert | primary | unmeasured | unavailable | setup-failed | n/a | n/a | n/a | n/a | n/a |
-| fish | primary | unmeasured | unavailable | server-not-started | n/a | n/a | n/a | n/a | n/a |
-| fsharp | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| gleam | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| go | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| haskell | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| html | primary | unmeasured | eligible | · | 1-3s | 100-250 MB | ok | 1-3s | preserved |
-| java | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| json | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| kotlin | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| lua | primary | unmeasured | eligible | · | 1-3s | <100 MB | ok | <1s | preserved |
-| marksman | primary | transparent | eligible | · | 1-3s | <100 MB | ok | 1-3s | preserved |
-| nix | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| ocaml | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| omnisharp | primary | unmeasured | unavailable | no-fixture | n/a | n/a | n/a | n/a | n/a |
-| opengrep | auxiliary | transparent | eligible | · | 1-3s | 100-250 MB | ok | 1-3s | preserved |
-| php | primary | unmeasured | eligible | · | 1-3s | 100-250 MB | ok | <1s | preserved |
-| powershell | primary | unmeasured | unavailable | server-not-started | n/a | n/a | n/a | n/a | n/a |
-| prisma | primary | unmeasured | eligible | · | <1s | 100-250 MB | ok | <1s | preserved |
-| python | primary | transparent | eligible | · | <1s | 100-250 MB | ok | <1s | preserved |
-| python-jedi | primary | unmeasured | eligible | · | 1-3s | <100 MB | ok | 1-3s | preserved |
-| ruby | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| rust | primary | unmeasured | inconclusive | no-baseline | <1s | n/a | n/a | n/a | unproven |
-| svelte | primary | unmeasured | eligible | · | 1-3s | 100-250 MB | ok | 1-3s | preserved |
-| swift | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |
-| terraform | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| tinymist | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| toml | primary | unmeasured | eligible | · | <1s | <100 MB | ok | 1-3s | preserved |
-| typescript | primary | transparent | eligible | · | <1s | 500 MB-1 GB | ok | <1s | preserved |
-| typos | auxiliary | unmeasured | eligible | · | 1-3s | <100 MB | ok | 1-3s | preserved |
-| vue | primary | unmeasured | inconclusive | no-baseline | 1-3s | n/a | n/a | n/a | unproven |
-| yaml | primary | unmeasured | eligible | · | <1s | 100-250 MB | ok | <1s | preserved |
-| zig | primary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
-| zizmor | auxiliary | unmeasured | eligible | · | <1s | <100 MB | ok | <1s | preserved |
+A server that reports extra findings after the respawn (`widened`) still reads
+`preserved`, because nothing was lost, but a first scan that grows on respawn
+is a sign the baseline was partial. Any policy flip needs `preserved` on
+several nights, not one; a `widened` disclosure is per run and is shown in the
+step log only, because it flaps.
+
+| server | role | declared | result | reason | respawn | coverage |
+|---|---|---|---|---|---|---|
+| ast-grep | auxiliary | unmeasured | eligible | · | ok | preserved |
+| bash | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
+| clojure | primary | unmeasured | eligible | · | ok | preserved |
+| cmake | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
+| cpp | primary | unmeasured | eligible | · | ok | preserved |
+| csharp | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| css | primary | unmeasured | eligible | · | ok | preserved |
+| cue | primary | unmeasured | eligible | · | ok | preserved |
+| dart | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| deno | primary | unmeasured | eligible | · | ok | preserved |
+| docker | primary | unmeasured | eligible | · | ok | preserved |
+| elixir | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| expert | primary | unmeasured | unavailable | setup-failed | n/a | n/a |
+| fish | primary | unmeasured | unavailable | server-not-started | n/a | n/a |
+| fsharp | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| gleam | primary | unmeasured | eligible | · | ok | preserved |
+| go | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| haskell | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| html | primary | unmeasured | eligible | · | ok | preserved |
+| java | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| json | primary | unmeasured | eligible | · | ok | preserved |
+| kotlin | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| lua | primary | unmeasured | eligible | · | ok | preserved |
+| marksman | primary | transparent | eligible | · | ok | preserved |
+| nix | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| ocaml | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| omnisharp | primary | unmeasured | unavailable | no-fixture | n/a | n/a |
+| opengrep | auxiliary | transparent | eligible | · | ok | preserved |
+| php | primary | unmeasured | eligible | · | ok | preserved |
+| powershell | primary | unmeasured | unavailable | server-not-started | n/a | n/a |
+| prisma | primary | unmeasured | eligible | · | ok | preserved |
+| python | primary | transparent | eligible | · | ok | preserved |
+| python-jedi | primary | unmeasured | eligible | · | ok | preserved |
+| ruby | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| rust | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
+| svelte | primary | unmeasured | eligible | · | ok | preserved |
+| swift | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
+| terraform | primary | unmeasured | eligible | · | ok | preserved |
+| tinymist | primary | unmeasured | eligible | · | ok | preserved |
+| toml | primary | unmeasured | eligible | · | ok | preserved |
+| typescript | primary | transparent | eligible | · | ok | preserved |
+| typos | auxiliary | unmeasured | eligible | · | ok | preserved |
+| vue | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
+| yaml | primary | unmeasured | eligible | · | ok | preserved |
+| zig | primary | unmeasured | eligible | · | ok | preserved |
+| zizmor | auxiliary | unmeasured | eligible | · | ok | preserved |
 
 ## Declared versus measured
 

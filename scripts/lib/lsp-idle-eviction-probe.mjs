@@ -408,7 +408,7 @@ export function createServiceDriver(args) {
 			const hadWindow = Object.hasOwn(env, "PI_LENS_LSP_IDLE_EVICT_MS");
 			const priorWindow = env.PI_LENS_LSP_IDLE_EVICT_MS;
 			let restored = false;
-			let restore = () => {
+			const restore = () => {
 				if (restored) return;
 				restored = true;
 				server.idleEviction = policy;
@@ -429,14 +429,6 @@ export function createServiceDriver(args) {
 						}
 					};
 					client.shutdown = observed;
-					const unwrap = () => {
-						if (client.shutdown === observed) client.shutdown = original;
-					};
-					const restoreAll = restore;
-					restore = () => {
-						restoreAll();
-						unwrap();
-					};
 				}
 			} catch (err) {
 				restore();
