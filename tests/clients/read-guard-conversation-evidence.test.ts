@@ -1282,11 +1282,10 @@ describe("#3524: a native read's evidence is the delivered text", () => {
 				},
 			);
 			expect(shown).toMatch(/\(50\.0KB limit\)/);
-			const own = await positionalEdit(runtime, file, [
-				[10, 10, line(10, "own")],
-			]);
-			expect(own.blocked).toBe(false);
-			await applyEdit(runtime, file, own);
+			// A later read of other lines re-stamps FileTime (an own edit no
+			// longer does over the racer's bytes, #3525), so the edit below
+			// reaches the snapshot gate.
+			await piRead(runtime, file, { offset: 1, limit: 2 });
 			// Y45-46 moved to 47-48; the agent never saw Y.
 			const edit = await positionalEdit(runtime, file, [
 				[45, 46, "agentX45\nagentX46"],
@@ -1320,9 +1319,8 @@ describe("#3524: a native read's evidence is the delivered text", () => {
 						),
 				},
 			);
-			const own = await positionalEdit(runtime, file, [[3, 3, "agent3"]]);
-			expect(own.blocked).toBe(false);
-			await applyEdit(runtime, file, own);
+			// As above: a read of other lines re-stamps FileTime (#3525).
+			await piRead(runtime, file, { offset: 1, limit: 2 });
 			// pi showed 8 lines; line 16 was never delivered.
 			const edit = await positionalEdit(runtime, file, [[16, 16, "agent16"]]);
 			expect(edit.blocked).toBe(true);
@@ -1938,6 +1936,26 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			).toBe(false);
 			foreignWrite(file, 11, "EXTERNAL11");
 			const edit = await positionalEdit(runtime, file, [[11, 11, "agent11"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps another writer's change stale after a positional edit its line hashes passed", async () => {
+		const env = setupTestEnvironment("rg-3525-hash-passed-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", "");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, BIG);
+			// Lines 1-10 get a hashed view; line 20 keeps only the unhashed one.
+			await piRead(runtime, file, { offset: 1, limit: 10 });
+			foreignWrite(file, 20, "EXTERNAL20");
+			const own = await positionalEdit(runtime, file, [[3, 3, "agent3"]]);
+			expect(own.blocked).toBe(false);
+			await applyEdit(runtime, file, own);
+			const edit = await positionalEdit(runtime, file, [[20, 20, "agent20"]]);
 			expect(edit.blocked).toBe(true);
 			expect(edit.reason).toContain("File modified since read");
 		} finally {

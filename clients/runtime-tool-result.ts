@@ -2397,27 +2397,30 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// edit only: in a batch, each range's lines shift by the others' growth.
 	// Per event, so before the debounce keeps only the latest. The mark is
 	// only ever set by the guard's own check, so `--no-read-guard` never
-	// reaches here. recordWritten re-stamps FileTime after this, so the
-	// record's own stamp is always superseded.
+	// reaches here. FileTime is recordWritten's to move (#3525): after an
+	// edit that passed a moved FileTime, it must stay moved.
 	const ownEdit = attribution?.editInPlace
 		? singlePositionalEdit(event.input)
 		: undefined;
 	if (ownEdit) {
 		const evidence = ownEditEvidence(filePath, ownEdit);
-		deps.readGuard?.recordRead({
-			filePath,
-			requestedOffset: ownEdit.start,
-			requestedLimit: evidence.lineCount,
-			effectiveOffset: ownEdit.start,
-			effectiveLimit: evidence.lineCount,
-			expandedByLsp: false,
-			...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
-			turnIndex: runtime.turnIndex,
-			writeIndex: runtime.peekWriteIndex(),
-			timestamp: Date.now(),
-			source: "own-edit",
-			...(toolCallId !== undefined && { toolCallId }),
-		});
+		deps.readGuard?.recordRead(
+			{
+				filePath,
+				requestedOffset: ownEdit.start,
+				requestedLimit: evidence.lineCount,
+				effectiveOffset: ownEdit.start,
+				effectiveLimit: evidence.lineCount,
+				expandedByLsp: false,
+				...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
+				turnIndex: runtime.turnIndex,
+				writeIndex: runtime.peekWriteIndex(),
+				timestamp: Date.now(),
+				source: "own-edit",
+				...(toolCallId !== undefined && { toolCallId }),
+			},
+			{ stampFileTime: false },
+		);
 		logConversationRead("own-edit", filePath, ownEdit.start, evidence);
 	}
 
