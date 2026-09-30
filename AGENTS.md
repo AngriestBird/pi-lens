@@ -440,6 +440,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
     or optimisation targets N of M members, name the excluded default and a
     generalization verdict; see `docs/pi-lens-reviewer.md` (recurrence: #3622).
 
+57. **Released-writer input shapes:** property-test generators include the
+    input shapes produced by older released writers (#3594 R2-F1).
+
+58. **Known identity carried forward:** when a producer knows an identity,
+    carry it through asynchronous stages instead of re-deriving it downstream
+    (#3643 F3).
+
 </important>
 
 <important if="availability policy or installer">
