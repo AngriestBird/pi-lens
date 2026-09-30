@@ -1919,6 +1919,49 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
+	it("carries the stamp decision through the tool_result debounce (R4)", async () => {
+		const env = setupTestEnvironment("rg-3525-r4-debounce-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", "");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, BIG);
+			foreignWrite(file, 11, "EXTERNAL11");
+			// The re-entry after the debounce finds the attribution taken.
+			vi.stubEnv("PI_LENS_TOOL_RESULT_DEBOUNCE_MS", "5");
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const toolCallId = `text-edit-${++seq}`;
+			const input = {
+				path: file,
+				edits: [{ oldText: "line3\n", newText: "agent3\n" }],
+			};
+			await handleToolCall(
+				callDeps(runtime, { toolName: "edit", toolCallId, input }),
+			);
+			writeNow(
+				file,
+				fs.readFileSync(file, "utf8").replace("line3\n", "agent3\n"),
+			);
+			const result = handleToolResult(
+				resultDeps(runtime, {
+					toolName: "edit",
+					toolCallId,
+					input,
+					content: [{ type: "text", text: "ok" }],
+				}),
+			);
+			await vi.advanceTimersByTimeAsync(5);
+			await result;
+			vi.useRealTimers();
+			const edit = await positionalEdit(runtime, file, [[11, 11, "agent11"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			vi.useRealTimers();
+			vi.unstubAllEnvs();
+			env.cleanup();
+		}
+	});
+
 	it("keeps another writer's change stale after an own positional edit (UnhashedOwnEditRescue)", async () => {
 		const env = setupTestEnvironment("rg-3525-rescue-");
 		try {
