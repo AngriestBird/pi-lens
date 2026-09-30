@@ -118,7 +118,6 @@ describe("#3611 N4: scope tickets are process-unique", () => {
 			await reEvaluatedCoordinatorModule();
 		const second = new ReEvaluated();
 		second.resetForSession();
-		expect(second.sessionGeneration).not.toBe(first.sessionGeneration);
 
 		// Session 1 arms a baseline for a call id; session 2 settles that id.
 		await armObservedMutation({
@@ -147,6 +146,7 @@ describe("#3611 N4: scope tickets are process-unique", () => {
 			reason: "session-generation-advanced",
 		});
 		expect(replayed).toEqual([]);
+		expect(second.sessionGeneration).not.toBe(first.sessionGeneration);
 	});
 });
 
