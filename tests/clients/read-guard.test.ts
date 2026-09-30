@@ -929,6 +929,71 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		it("checks each line only against its own newest read when an older read brackets a newer one", () => {
+			// Old read A [1-6]; line 5 changes and the agent re-reads it alone (B).
+			// Editing [4-6]: 4 and 6 come from A, 5 from B. A's stale hash for line
+			// 5 must not be held against the edit (one run per read, not one span).
+			const env = setupTestEnvironment("read-guard-snapshot-bracket-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 6,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6\n");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 1,
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "match",
+					viewReadCount: 3,
+					checkedLineCount: 3,
+					enforced: true,
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("reports a line only a context zone covers as unavailable and blocks nothing", () => {
+			// ContextSlack (admitted): line 3 was never delivered, so nothing can
+			// check it, and it must not read as a match.
+			const env = setupTestEnvironment("read-guard-snapshot-ctx-line-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 2,
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [3, 3]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					missingLines: [3],
+					enforced: false,
+					outcome: "not-decidable",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("does not hash-check an edit the coverage gate refuses", () => {
 			// The per-line check walks the range line by line, so it must only ever
 			// run on a range some read covers, never on a caller-supplied

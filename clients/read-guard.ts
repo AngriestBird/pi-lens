@@ -1798,7 +1798,7 @@ export class ReadGuard {
 		const status: "match" | "mismatch" | "unavailable" =
 			mismatchedLines.length > 0
 				? "mismatch"
-				: missingLines.length === 0 && checkedLineCount > 0
+				: missingLines.length === 0
 					? "match"
 					: "unavailable";
 		const shouldBlock = status === "mismatch";
