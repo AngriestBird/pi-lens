@@ -64,11 +64,12 @@ one same-shape sibling in the same change, or the brief must name every sibling,
 explain why folding is unsafe, and link the follow-up.
 
 Every bug fix has a regression test that fails on the pre-fix production path.
-Read the failure and preserve its transcript. Every new guard, branch, filter,
-cap, or fallback gets a compile-valid mutation that turns at least one test
-red. A test that passes before the fix, or remains green after the guard is
-neutered, is not evidence. For a behaviour-preserving refactor declared in the
-PR, the red-first proof is instead an old-vs-new probe table through the built
+Read the failure and preserve its transcript. The new guard, branch, filter,
+or cap the PR is about gets a compile-valid mutation that turns at least one
+test red, and every `Mutation diff` survivor on an added line is killed or
+shown equivalent. A test that passes before the fix, or remains green after the
+guard is neutered, is not evidence. For a behaviour-preserving refactor declared
+in the PR, the red-first proof is instead an old-vs-new probe table through the built
 seam plus a shared-seam mutation that reds a caller-side witness; a passing
 pre-fix run is expected and is not a finding.
 
