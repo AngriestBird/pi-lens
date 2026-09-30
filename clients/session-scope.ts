@@ -478,7 +478,7 @@ export function stashHandoff(
 	if (!SOURCES[reason].includes("slot")) return false;
 	const cell = handoffSlot();
 	const manager = asManager(args.sessionManager);
-	if (manager) cell.left.set(manager, scope.scopeId);
+	if (manager !== undefined) cell.left.set(manager, scope.scopeId);
 	cell.handoff = {
 		reason,
 		key: args.targetSessionFile ?? args.sessionFile ?? scope.scopeId,
