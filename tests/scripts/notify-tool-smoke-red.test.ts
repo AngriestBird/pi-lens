@@ -71,6 +71,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp-handshake.log", REPLAY_LOG),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LENS_FULL_OUTCOME: "skipped",
+			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
 			FORMAT_LAYER_LOG: writeLog(dir, "format-layer.log", ""),
 		});
@@ -82,7 +84,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 		expect(out).toContain("36 passed · 1 failed · 0 setup-failed · 12 skipped");
 	});
 
-	it("plans a close when all four gating layers succeeded", () => {
+	it("plans a close when all five gating layers succeeded", () => {
 		const dir = mkTempDir("pi-lens-tool-smoke-clean-");
 		const out = runDryRun({
 			TOOL_LAYER_OUTCOME: "success",
@@ -102,6 +104,12 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				dir,
 				"lsp-gate.log",
 				"38 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+			),
+			LENS_FULL_OUTCOME: "success",
+			LENS_FULL_LOG: writeLog(
+				dir,
+				"lens-full.log",
+				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
 			),
 			FORMAT_LAYER_OUTCOME: "success",
 			FORMAT_LAYER_LOG: writeLog(
@@ -134,6 +142,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				"lsp-gate.log",
 				"✗  lua          lua-language-server          0     lens_diagnostics returned 0 diagnostic(s) but 0 primary findings\n1 passed · 1 failed · 0 setup-failed · 0 skipped\n",
 			),
+			LENS_FULL_OUTCOME: "skipped",
+			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 		});
@@ -158,6 +168,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", ""),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LENS_FULL_OUTCOME: "skipped",
+			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 		});
@@ -183,6 +195,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", ""),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LENS_FULL_OUTCOME: "skipped",
+			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 		});
@@ -197,6 +211,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				TOOL_LAYER_OUTCOME: undefined as unknown as string,
 				LSP_HANDSHAKE_OUTCOME: undefined as unknown as string,
 				LSP_GATE_OUTCOME: undefined as unknown as string,
+				LENS_FULL_OUTCOME: undefined as unknown as string,
 				FORMAT_LAYER_OUTCOME: undefined as unknown as string,
 			},
 			encoding: "utf-8",
@@ -282,6 +297,8 @@ const RED_ENV = (dir: string) => ({
 	LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", REPLAY_LOG),
 	LSP_GATE_OUTCOME: "skipped",
 	LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+	LENS_FULL_OUTCOME: "skipped",
+	LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 	FORMAT_LAYER_OUTCOME: "skipped",
 	FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 });
@@ -304,6 +321,12 @@ const GREEN_ENV = (dir: string) => ({
 		dir,
 		"lsp-gate.log",
 		"38 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+	),
+	LENS_FULL_OUTCOME: "success",
+	LENS_FULL_LOG: writeLog(
+		dir,
+		"lens-full.log",
+		"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
 	),
 	FORMAT_LAYER_OUTCOME: "success",
 	FORMAT_LAYER_LOG: writeLog(

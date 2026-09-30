@@ -94,24 +94,32 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(step["continue-on-error"]).toBe(true);
 	});
 
-	it("reads all three gating layers' step outcomes via env, by expression (not hardcoded literals)", () => {
+	it("reads all five gating layers' step outcomes via env, by expression (not hardcoded literals)", () => {
 		const env = notifyStep.env ?? {};
 		expect(env.TOOL_LAYER_OUTCOME).toBe("${{ steps.tool_layer.outcome }}");
 		expect(env.LSP_HANDSHAKE_OUTCOME).toBe(
 			"${{ steps.lsp_handshake.outcome }}",
 		);
+		expect(env.LSP_GATE_OUTCOME).toBe("${{ steps.lsp_gate.outcome }}");
+		expect(env.LENS_FULL_OUTCOME).toBe("${{ steps.lens_full.outcome }}");
 		expect(env.FORMAT_LAYER_OUTCOME).toBe("${{ steps.format_layer.outcome }}");
 	});
 
 	it("each referenced layer step actually declares the id the notify step reads", () => {
 		expect(findStep(workflow, "Tool layer").id).toBe("tool_layer");
 		expect(findStep(workflow, "LSP handshake layer").id).toBe("lsp_handshake");
+		expect(findStep(workflow, "LSP diagnostics clean-gate").id).toBe(
+			"lsp_gate",
+		);
+		expect(findStep(workflow, "lens_diagnostics mode=full row").id).toBe(
+			"lens_full",
+		);
 		expect(findStep(workflow, "Format layer").id).toBe("format_layer");
 	});
 
-	// #2723 review F3: disambiguates "the job failed before the three
+	// #2723 review F3: disambiguates "the job failed before the five
 	// tracked layers even started" from a genuine cancellation -- both
-	// leave all three layers "skipped", which decideAction alone cannot
+	// leave all five layers "skipped", which decideAction alone cannot
 	// tell apart (see scripts/lib/tool-smoke-drift.mjs's decideToolSmokeAction).
 	it("reads GitHub's job.status context so the notifier can tell a genuine failure outside the tracked layers from a cancellation", () => {
 		const env = notifyStep.env ?? {};

@@ -57,6 +57,9 @@ export interface LspFixture {
 	/** Why this gate-eligible fixture cannot opt in (#3217). Mutually exclusive
 	 *  with `lspGate`; the reason is asserted, not just the key's presence. */
 	lspGateExempt?: string;
+	/** The one fixture the nightly `lens_diagnostics mode=full` row drives
+	 *  (#2780), mirroring `lspGate`. */
+	lensFull?: boolean;
 	lombokJar?: boolean;
 	expectNoMessageMatch?: string;
 	/** A diagnostic message that MUST arrive. The lane's default verdict passes
@@ -152,6 +155,21 @@ export function classifyLspGateResult(
 ): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
 /** Run the production LSP clean-gate layer, optionally with test seams. */
 export function runLspGate(options?: {
+	langs?: string[];
+	install?: boolean;
+	verbose?: boolean;
+	deps?: unknown;
+}): Promise<number>;
+/** The fixtures the nightly `lens_diagnostics mode=full` row drives (#2780). */
+export function lensFullPopulation(fixtures?: LspFixture[]): LspFixture[];
+/** Classify one real `lens_diagnostics mode=full` LSP-primary-finding result. */
+export function classifyLensFullResult(
+	result: unknown,
+	fixture: Pick<LspFixture, "serverHint">,
+	unavailable?: boolean,
+): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+/** Run the nightly `lens_diagnostics mode=full` row, optionally with test seams. */
+export function runLensFull(options?: {
 	langs?: string[];
 	install?: boolean;
 	verbose?: boolean;

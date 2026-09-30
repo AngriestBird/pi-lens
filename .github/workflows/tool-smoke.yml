@@ -186,7 +186,7 @@ jobs:
       - name: Build dist
         run: npm run build:dist
 
-      # `id:` + a captured log (#2723): this is one of the three steps whose
+      # `id:` + a captured log (#2723): this is one of the five steps whose
       # outcome can actually turn the job red (no continue-on-error), so the
       # final notify step below needs both this step's `outcome` and its raw
       # log text (for the ✗ row detail) to build a useful tracking-issue
@@ -229,6 +229,20 @@ jobs:
         run: |
           set -o pipefail
           node scripts/smoke-tools.mjs --lsp-gate --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-gate.log"
+
+      # Nightly `lens_diagnostics mode=full` row (#2780): the clean gate above
+      # drives `lsp_diagnostics`; this drives `lens_diagnostics`, the default
+      # agent tool whose verdict shaping mirrors it, over ONE cheap seeded
+      # fixture with `mode=full refreshRunners=cheap`. It requires a fresh
+      # LSP-sweep PRIMARY finding, so a divergence between the two handlers'
+      # verdict shaping reds the nightly. One row, not per server: the clean
+      # gate already owns the per-server provenance question.
+      - name: lens_diagnostics mode=full row (LSP primary finding)
+        id: lens_full
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          node scripts/smoke-tools.mjs --lens-full --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lens-full.log"
 
       # Diagnostic-mode matrix (#240): spawn each server and record its
       # advertised mode (pull vs push) — the first cut of the affirmative-clean
@@ -397,8 +411,8 @@ jobs:
       # independent notifier scoped to the job's actual pass/fail verdict,
       # placed last and gated on `if: always()` so it runs on every outcome,
       # mirroring install-smoke.yml's `Notify install drift` step. Reads the
-      # four gating layers' outcomes + captured logs (the only four steps
-      # above without `continue-on-error`, so the only four whose outcome
+      # five gating layers' outcomes + captured logs (the only five steps
+      # above without `continue-on-error`, so the only five whose outcome
       # can turn the job red) — see scripts/lib/tool-smoke-drift.mjs's module
       # doc. GITHUB_TOKEN is inherited from this job's own env (`issues:
       # write` already granted at job level, #529/#594). Best-effort:
@@ -415,12 +429,14 @@ jobs:
           LSP_HANDSHAKE_LOG: ${{ runner.temp }}/tool-smoke-lsp-handshake.log
           LSP_GATE_OUTCOME: ${{ steps.lsp_gate.outcome }}
           LSP_GATE_LOG: ${{ runner.temp }}/tool-smoke-lsp-gate.log
+          LENS_FULL_OUTCOME: ${{ steps.lens_full.outcome }}
+          LENS_FULL_LOG: ${{ runner.temp }}/tool-smoke-lens-full.log
           FORMAT_LAYER_OUTCOME: ${{ steps.format_layer.outcome }}
           FORMAT_LAYER_LOG: ${{ runner.temp }}/tool-smoke-format-layer.log
-          # #2723 review F3: a job failure BEFORE the three tracked layers
+          # #2723 review F3: a job failure BEFORE the five tracked layers
           # even start (checkout, a best-effort setup action, npm install,
           # build:dist — twelve steps, none of which set an *_OUTCOME above)
-          # leaves all three "skipped", identically to a genuine
+          # leaves all five "skipped", identically to a genuine
           # cancellation. `job.status` disambiguates: "failure" only when a
           # non-continue-on-error step actually failed somewhere in the job.
           JOB_STATUS: ${{ job.status }}

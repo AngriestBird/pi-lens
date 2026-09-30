@@ -4,7 +4,7 @@
 // managed formatters as "ran clean but left the file unchanged". Per-run
 // isolation stays the LOCAL default (scripts/lib/scratch-dir.mjs); in CI the
 // job-level pin wins because withScratchHome() respects an explicit value.
-// #2670 review F1: `tool-smoke.yml` runs EIGHT `--install` invocations
+// #2670 review F1: `tool-smoke.yml` runs NINE `--install` invocations
 // (smoke-tools.mjs x3, characterize-lsp.mjs, probe-clean-signal.mjs,
 // server-capabilities.mjs, measure-lsp-idle-eviction.mjs) in ONE job. `PI_LENS_HOME` relocates the
 // installer's tool tree/bin dir/probe cache (module-level consts at
@@ -43,7 +43,7 @@ function loadWorkflow(workflowPath: string, source?: string): Workflow {
 // too, so a step added/removed under one of these jobs without updating this
 // table's own understanding of "how many steps share the cache" is visible.
 const WORKFLOWS: Array<[string, string, number]> = [
-	[".github/workflows/tool-smoke.yml", "tool-smoke", 8], // #3645 idle-eviction measurement added an eighth cache-sharing install (#2780 added the seventh).
+	[".github/workflows/tool-smoke.yml", "tool-smoke", 9], // #2780 lens_diagnostics mode=full row added a ninth cache-sharing install (the clean gate was the seventh; #3645 idle-eviction the eighth).
 	[".github/workflows/parser-smoke.yml", "parser-smoke", 1],
 ];
 
