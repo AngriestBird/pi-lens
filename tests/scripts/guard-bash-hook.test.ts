@@ -2572,6 +2572,7 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		'git commit -F "-n"',
 		'git commit --file "--no-verify"',
 		'git merge -m "--no-verify" origin/master',
+		'git merge -F "--no-verify" origin/master',
 		"git commit -F msg.txt",
 		"git commit -am x",
 		"git commit -mn",
