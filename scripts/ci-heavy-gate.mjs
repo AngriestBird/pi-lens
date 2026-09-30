@@ -12,10 +12,11 @@
  * `oxfmt format check`) are read here from the head's check-runs. Result:
  * `ready=true` on the step output only when every named check's LATEST
  * check-run on the exact head concluded success. Red, absent at the deadline,
- * or a transport failure all give `ready=false`: the heavy advisory jobs are
- * then skipped, never run early and never a red row of their own. The script
- * exits 0 in every one of those cases (the gate job is advisory and a
- * not-ready head is a verdict, not a crash); only bad arguments exit 2.
+ * or a transport failure all give `ready=false` and exit 1: the heavy advisory
+ * jobs are then skipped (their `needs:` failed), and the gate row is RED, so a
+ * deferred run is a visible, pushed fact a reader tells apart from a dropped
+ * one. The row is advisory by name, so red never gates a merge. Bad arguments
+ * exit 2; a ready head exits 0.
  *
  * The latest-check-run-per-name choice is scripts/lib/ci-checks.mjs's
  * fail-closed `resolveLatestByName`, the same one ci-verdict and the merge
@@ -190,12 +191,12 @@ export function run(argv, io = {}) {
 	const line = result.ready
 		? `heavy advisory jobs: START -- ${result.reason}`
 		: `heavy advisory jobs: SKIPPED on ${options.sha.slice(0, 9)} -- ${result.reason}`;
-	log(line);
+	log(result.ready ? line : `::error::${line}`);
 	if (env.GITHUB_OUTPUT)
 		fs.appendFileSync(env.GITHUB_OUTPUT, `ready=${result.ready}\n`);
 	if (env.GITHUB_STEP_SUMMARY)
 		fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n`);
-	return 0;
+	return result.ready ? 0 : 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)

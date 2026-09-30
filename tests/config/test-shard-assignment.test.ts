@@ -6,14 +6,19 @@ import { BalancedShardSequencer } from "../../scripts/lib/balanced-shard-sequenc
 import {
 	assignShards,
 	loadShardWeights,
+	PROJECT_PARALLELISM,
+	projectWorkers,
 	SHARD_WEIGHTS_FILE,
 	specCost,
 } from "../../scripts/lib/test-shard-assignment.mjs";
+import { resolveTestWorkerBudget } from "../../scripts/lib/worker-budget.mjs";
 import { repoRoot } from "../support/flake-shape-scan.js";
 import { testSourceFiles } from "../support/module-instance-scan.js";
 // The REAL config object (explicit `.ts`: the `.js` spelling is the stale
 // compiled twin), so the wiring test reads what vitest actually loads.
 import vitestConfig from "../../vitest.config.ts";
+
+const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 // #3771 / #3801: Unit tests shards are packed by recorded duration. Each
 // shard job recomputes the assignment on its own, so the recurrences below are
@@ -34,7 +39,7 @@ function realTestFiles(): string[] {
 	return testSourceFiles()
 		.filter((file) => /\.test\.(?:ts|mts)$/.test(file))
 		.map((file) => path.relative(ROOT, file).split(path.sep).join("/"))
-		.sort();
+		.sort(byCodeUnit);
 }
 
 function specsFor(files: string[], maxWorkers = 3): Spec[] {
@@ -148,7 +153,7 @@ describe("#3771 duration-balanced Unit tests shards", () => {
 			const log: string[] = [];
 			const specs = ["a", "b", "planted"].map((name) => ({
 				moduleId: path.join(root, `tests/${name}.test.ts`),
-				project: { name: "default", config: { maxWorkers: 1 } },
+				project: { name: "wall-clock-budget", config: { maxWorkers: 1 } },
 			}));
 			const ctx = {
 				config: { root, shard: { index: 1, count: 2 } },
@@ -169,8 +174,88 @@ describe("#3771 duration-balanced Unit tests shards", () => {
 	it("costs a serialized file at full seconds and a parallel file at seconds over workers", () => {
 		expect(specCost(9, 1)).toBe(9);
 		expect(specCost(9, 3)).toBe(3);
-		expect(specCost(9, "50%")).toBe(9);
-		expect(specCost(9, undefined)).toBe(9);
+		expect(specCost(9, 0)).toBe(9);
+		expect(projectWorkers("default")).toBe(3);
+		expect(projectWorkers("timing-sensitive")).toBe(2);
+		expect(projectWorkers("wall-clock-budget")).toBe(1);
+		expect(projectWorkers(undefined)).toBe(1);
+	});
+
+	// Recurrence (review r1 F4): the divisor came from each spec's resolved
+	// `maxWorkers`, which vitest.config.ts derives from the HOST's CPU count and
+	// memory, so shard 1 on a 4-CPU host and shards 2-4 on an 8-CPU host computed
+	// different assignments: 995 of 1301 specs distinct, 248 in two shards, 306 in
+	// none, with no error. The assignment must be a pure function of the checkout.
+	// A shard host of any shape (a number, a derived string, nothing) must agree.
+	it("gives the same slices whatever maxWorkers each shard's host resolved", async () => {
+		const names = [
+			"default",
+			"wall-clock-budget",
+			"timing-sensitive",
+			"grammar-heavy",
+		];
+		const files = realTestFiles();
+		const build = (maxWorkers: unknown): Spec[] =>
+			files.map((file, index) => ({
+				moduleId: path.join(ROOT, file),
+				project: {
+					name: names[index % names.length],
+					config: { maxWorkers: maxWorkers as number },
+				},
+			}));
+		const hosts = [3, 7, 1, "50%", undefined];
+		const slices: string[][][] = [];
+		for (const maxWorkers of hosts) {
+			slices.push(await shardSlices(build(maxWorkers), 4));
+		}
+		for (const other of slices.slice(1)) {
+			for (let shard = 0; shard < 4; shard += 1) {
+				expect(new Set(other[shard])).toEqual(new Set(slices[0][shard]));
+			}
+		}
+		// the mixed-host run (shard k computed on host k) still partitions exactly
+		const mixed: string[] = [];
+		for (let index = 1; index <= 4; index += 1) {
+			const host = hosts[index % hosts.length];
+			const mine = await sequencerFor(index, 4).shard(build(host) as never[]);
+			mixed.push(...mine.map((spec) => (spec as unknown as Spec).moduleId));
+		}
+		expect(mixed).toHaveLength(files.length);
+		expect(new Set(mixed).size).toBe(files.length);
+	});
+
+	// Recurrence: the name table drifting from the config it stands in for. The
+	// CI-shaped budget (4 vCPU, 16 GB, CI=true) gives the default project 3
+	// workers and the grammar-heavy one 1 (serialized); timing-sensitive is a
+	// literal 2 in the config.
+	it("keeps the project parallelism table equal to the CI-shaped worker budget and the config", () => {
+		const budget = resolveTestWorkerBudget({
+			totalMemMb: 15990,
+			cpus: 4,
+			ci: true,
+		});
+		expect(PROJECT_PARALLELISM.default).toBe(budget.maxWorkers);
+		expect(projectWorkers("grammar-heavy")).toBe(budget.heavyMaxWorkers);
+		const projects = (
+			vitestConfig as {
+				test?: {
+					projects?: Array<{ test?: { name?: string; maxWorkers?: unknown } }>;
+				};
+			}
+		).test?.projects;
+		// `default` and `grammar-heavy` take their `maxWorkers` from the host-derived
+		// budget (compared above); these five are literals in the config.
+		const literal = [
+			"timing-sensitive",
+			"lsp-spawn-heavy",
+			"real-harness",
+			"wall-clock-budget",
+			"tmp-fixture-hygiene",
+		];
+		for (const name of literal) {
+			const project = projects?.find((entry) => entry.test?.name === name);
+			expect(project?.test?.maxWorkers, name).toBe(projectWorkers(name));
+		}
 	});
 
 	// Recurrence: a stale snapshot. Renames and additions slowly un-model the
@@ -246,7 +331,9 @@ describe("#3771 duration-balanced Unit tests shards", () => {
 				?.sequence?.sequencer,
 		).toBe(BalancedShardSequencer);
 		expect(
-			Object.getOwnPropertyNames(BalancedShardSequencer.prototype).sort(),
+			Object.getOwnPropertyNames(BalancedShardSequencer.prototype).sort(
+				byCodeUnit,
+			),
 		).toEqual(["constructor", "shard"]);
 	});
 });

@@ -232,9 +232,14 @@ describe("run (the CLI the workflow step calls)", () => {
 		}
 	});
 
-	it("appends ready=false and still exits 0 when a check is red", () => {
+	// Recurrence (review r1 F3): a gate that decided not-ready concluded GREEN, so
+	// a deferred mutation run was indistinguishable from a dropped one. Not ready
+	// is exit 1 (a red advisory row) with the reason as an error annotation, and
+	// still writes ready=false so dependents skip.
+	it("appends ready=false and exits 1 with an error annotation when a check is red", () => {
 		const files = tmpFiles();
 		try {
+			const lines: string[] = [];
 			const code = run(argv, {
 				...fakeClock(),
 				env: { GITHUB_OUTPUT: files.output },
@@ -242,10 +247,13 @@ describe("run (the CLI the workflow step calls)", () => {
 					cr("knip", "completed", "failure"),
 					cr("oxfmt format check", "completed", "success"),
 				],
-				log: () => {},
+				log: (line: string) => lines.push(line),
 			});
-			expect(code).toBe(0);
+			expect(code).toBe(1);
 			expect(fs.readFileSync(files.output, "utf8")).toBe("ready=false\n");
+			expect(lines[0]).toMatch(
+				/^::error::heavy advisory jobs: SKIPPED on a{9} -- not green: knip \(failure\)$/,
+			);
 		} finally {
 			fs.rmSync(files.dir, { recursive: true, force: true });
 		}

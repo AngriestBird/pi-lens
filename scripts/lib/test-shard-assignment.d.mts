@@ -4,7 +4,9 @@ export declare function loadShardWeights(filePath: string): {
 	median: number;
 };
 export declare function median(values: number[]): number;
-export declare function specCost(seconds: number, maxWorkers: unknown): number;
+export declare const PROJECT_PARALLELISM: Readonly<Record<string, number>>;
+export declare function projectWorkers(projectName: unknown): number;
+export declare function specCost(seconds: number, workers: number): number;
 export declare function assignShards(
 	items: Array<{ id: string; cost: number }>,
 	count: number,

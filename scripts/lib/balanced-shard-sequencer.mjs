@@ -14,6 +14,7 @@ import { BaseSequencer } from "vitest/node";
 import {
 	assignShards,
 	loadShardWeights,
+	projectWorkers,
 	SHARD_WEIGHTS_FILE,
 	shardLoads,
 	specCost,
@@ -40,7 +41,7 @@ export class BalancedShardSequencer extends BaseSequencer {
 				id: rel,
 				cost: specCost(
 					known ?? weights.median,
-					spec.project?.config?.maxWorkers,
+					projectWorkers(spec.project?.name),
 				),
 				spec,
 			};

@@ -21,7 +21,9 @@ import {
 	formatVerdictTable,
 } from "../../scripts/ci-verdict.mjs";
 import {
+	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,
+	HEAVY_GATE_CHECK,
 	isAdvisoryCheck,
 } from "../../scripts/lib/ci-checks.mjs";
 
@@ -143,5 +145,96 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 		expect(line).toContain(
 			"PENDING -- the mutation job is waiting for the required checks on PR head",
 		);
+	});
+
+	// Recurrence (review r1 F3): the deferred rows vanished exactly when the
+	// verdict turned success, so "mutation starts when the gate gets a runner",
+	// "the gate decided not-ready" and "mutation will never run" all read the
+	// same (exit 0, MUTATION: STALE). Every gate state must be distinguishable
+	// AFTER the required checks are green, and never move the exit code.
+	describe("after the required checks are green (the window a merger reads)", () => {
+		const green = [
+			checkRun("Unit tests", "completed", "success", 1),
+			checkRun("Lint & type-check", "completed", "success", 2),
+			checkRun(CHANGES_CHECK, "completed", "success", 3),
+		];
+		const head = "b".repeat(40);
+		const stale = {
+			id: 9,
+			user: { login: "github-actions[bot]" },
+			body: `<!-- pi-lens-mutation-diff -->\n### Mutation diff (advisory)\n\n- **Head:** \`${"a".repeat(40)}\`\n\nNo survivors.`,
+		};
+		const read = (gate: ReturnType<typeof checkRun> | null) => {
+			const verdict = computeVerdict({
+				check_runs: gate ? [...green, gate] : green,
+			});
+			const table = formatVerdictTable(verdict.rows);
+			const status = (name: string) =>
+				table
+					.split("\n")
+					.map((line) => line.split(/\s{2,}/))
+					.find((columns) => columns[0] === name)?.[1];
+			return {
+				verdict,
+				status,
+				line: formatMutationLine([stale], head, verdict.rows),
+			};
+		};
+
+		it.each([
+			[
+				"no gate row yet",
+				null,
+				"PENDING",
+				/PENDING -- the mutation job is waiting for the required checks/,
+			],
+			[
+				"gate queued",
+				checkRun(HEAVY_GATE_CHECK, "queued", null, 4),
+				"PENDING",
+				/PENDING -- the mutation job is waiting for the required checks/,
+			],
+			[
+				"gate running",
+				checkRun(HEAVY_GATE_CHECK, "in_progress", null, 4),
+				"PENDING",
+				/PENDING -- the mutation job is waiting for the required checks/,
+			],
+			[
+				"gate passed, jobs not queued yet",
+				checkRun(HEAVY_GATE_CHECK, "completed", "success", 4),
+				"PENDING",
+				/PENDING -- the mutation job is the gate passed and the job is about to be queued/,
+			],
+			[
+				"gate skipped",
+				checkRun(HEAVY_GATE_CHECK, "completed", "skipped", 4),
+				"NOT RUN",
+				/NOT RUN -- the heavy gate was skipped .*STALE \(PR head is b{12}\)/,
+			],
+			[
+				"gate red (ready=false)",
+				checkRun(HEAVY_GATE_CHECK, "completed", "failure", 4),
+				"NOT RUN",
+				/NOT RUN -- the heavy gate concluded failure .*lint\.yml required check was red or unfinished/,
+			],
+		])("%s -> %s", (_label, gate, state, mutationLine) => {
+			const { verdict, status, line } = read(gate);
+			expect(verdict.exitCode).toBe(EXIT_SUCCESS);
+			expect(verdict.kind).toBe("success");
+			for (const name of DEFERRED_ADVISORY_CHECKS) {
+				expect(status(name), name).toBe(state);
+			}
+			expect(line).toMatch(mutationLine);
+		});
+
+		// An older workflow (neither the gate nor `changes` exists) must not be
+		// relabelled once its verdict is terminal.
+		it("lists nothing for a head of the older shape", () => {
+			const verdict = computeVerdict({
+				check_runs: green.filter((run) => run.name !== CHANGES_CHECK),
+			});
+			expect(deferred(verdict.rows)).toEqual([]);
+		});
 	});
 });

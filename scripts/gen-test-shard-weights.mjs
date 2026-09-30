@@ -16,20 +16,9 @@
  */
 
 import fs from "node:fs";
-import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { rowsFromArtifacts } from "./test-history-rollup.mjs";
 import { median } from "./lib/test-shard-assignment.mjs";
-
-/** @param {string} dir @returns {string[]} */
-function resultFilesUnder(dir) {
-	const found = [];
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		const full = path.join(dir, entry.name);
-		if (entry.isDirectory()) found.push(...resultFilesUnder(full));
-		else if (entry.name === "vitest-results.json") found.push(full);
-	}
-	return found;
-}
 
 /**
  * Repo-relative posix id of a vitest JSON `name`: everything from the first
@@ -46,23 +35,23 @@ export function testFileId(name) {
 }
 
 /**
- * @param {string[][]} runs per run, the JSON report paths of its shards
+ * The artifact walk and the per-file duration rule are the nightly test-history
+ * rollup's (`rowsFromArtifacts`), so a report shape that rollup reads is read
+ * here identically. Each run directory holds the shards' `vitest-results.json`
+ * and `test-history-metadata.json` (what `gh run download` produces).
+ *
+ * @param {string[]} runDirs one directory per CI run
  * @returns {Record<string, number>}
  */
-export function buildWeights(runs) {
+export function buildWeights(runDirs) {
 	/** @type {Map<string, number[]>} */
 	const samples = new Map();
-	for (const reports of runs) {
+	for (const dir of runDirs) {
 		/** @type {Map<string, number>} */
 		const thisRun = new Map();
-		for (const report of reports) {
-			const parsed = JSON.parse(fs.readFileSync(report, "utf8"));
-			for (const result of parsed.testResults ?? []) {
-				const id = testFileId(result.name);
-				if (id === null) continue;
-				const seconds = (result.endTime - result.startTime) / 1000;
-				if (Number.isFinite(seconds) && seconds >= 0) thisRun.set(id, seconds);
-			}
+		for (const row of rowsFromArtifacts([dir])) {
+			const id = testFileId(row.file);
+			if (id !== null) thisRun.set(id, row.durationMs / 1000);
 		}
 		for (const [id, seconds] of thisRun) {
 			const list = samples.get(id) ?? [];
@@ -71,7 +60,9 @@ export function buildWeights(runs) {
 		}
 	}
 	const files = {};
-	for (const id of [...samples.keys()].sort()) {
+	for (const id of [...samples.keys()].sort((a, b) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	)) {
 		files[id] = Math.round(median(samples.get(id)) * 100) / 100;
 	}
 	return files;
@@ -87,13 +78,9 @@ function main(argv) {
 	}
 	if (runDirs.length === 0)
 		throw new Error("at least one --run <dir> is required");
-	const runs = runDirs.map((dir) => {
-		const reports = resultFilesUnder(dir);
-		if (reports.length === 0)
-			throw new Error(`no vitest-results.json under ${dir}`);
-		return reports;
-	});
-	const files = buildWeights(runs);
+	const files = buildWeights(runDirs);
+	if (Object.keys(files).length === 0)
+		throw new Error("no vitest-results.json found under the --run directories");
 	const body = {
 		generatedBy: "node scripts/gen-test-shard-weights.mjs",
 		runs: runDirs.length,

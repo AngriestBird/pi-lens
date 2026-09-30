@@ -96,8 +96,9 @@ the cost of not doing so.
   `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
   `MUTATION` line). Kill every survivor on a line you added with a test in the
   PR, or show it equivalent with a reason in the PR body. The `mutation` job
-  starts only after every required check passed on the head (#3801), so a red
-  required check leaves it skipped (`STALE`) and a running one `PENDING`.
+  starts only after every required check passed on the head (#3801): until then the
+  `MUTATION` line reads `PENDING`, and after a red required check or a red gate it
+  reads `NOT RUN` with the reason.
 - Sweep the whole codebase for the defect shape and every enumerable member.
 - Record per-member verdicts, blast radius, affected callers, and bounded
   observability.

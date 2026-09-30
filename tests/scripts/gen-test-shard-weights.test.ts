@@ -12,6 +12,9 @@ import {
 // (every key then mismatches the sequencer's repo-relative ids and the whole
 // snapshot reads as "unmodeled"), or that takes one slow runner's number.
 
+// The shape `gh run download` yields and the nightly test-history rollup reads:
+// vitest-results.json beside test-history-metadata.json (which this generator
+// shares the reader of, `rowsFromArtifacts`, so its headSha rules apply).
 function report(dir: string, name: string, entries: Array<[string, number]>) {
 	const file = path.join(dir, name);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -24,6 +27,10 @@ function report(dir: string, name: string, entries: Array<[string, number]>) {
 				endTime: 1000 + seconds * 1000,
 			})),
 		}),
+	);
+	fs.writeFileSync(
+		path.join(path.dirname(file), "test-history-metadata.json"),
+		JSON.stringify({ headSha: "a".repeat(40), runId: "1", lane: "linux" }),
 	);
 	return file;
 }
@@ -43,26 +50,22 @@ describe("#3771 test shard weights generator", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-shard-gen-"));
 		try {
 			const prefix = "/home/runner/work/pi-lens/pi-lens";
-			const run1 = [
-				report(dir, "r1/s1/vitest-results.json", [
-					[`${prefix}/tests/z.test.ts`, 1],
-				]),
-				report(dir, "r1/s2/vitest-results.json", [
-					[`${prefix}/tests/a.test.ts`, 2],
-				]),
-			];
-			const run2 = [
-				report(dir, "r2/s1/vitest-results.json", [
-					[`${prefix}/tests/z.test.ts`, 9],
-					[`${prefix}/tests/a.test.ts`, 4],
-				]),
-			];
-			const run3 = [
-				report(dir, "r3/s1/vitest-results.json", [
-					[`${prefix}/tests/z.test.ts`, 3],
-				]),
-			];
-			const weights = buildWeights([run1, run2, run3]);
+			report(dir, "r1/s1/vitest-results.json", [
+				[`${prefix}/tests/z.test.ts`, 1],
+			]);
+			report(dir, "r1/s2/vitest-results.json", [
+				[`${prefix}/tests/a.test.ts`, 2],
+			]);
+			report(dir, "r2/s1/vitest-results.json", [
+				[`${prefix}/tests/z.test.ts`, 9],
+				[`${prefix}/tests/a.test.ts`, 4],
+			]);
+			report(dir, "r3/s1/vitest-results.json", [
+				[`${prefix}/tests/z.test.ts`, 3],
+			]);
+			const weights = buildWeights(
+				["r1", "r2", "r3"].map((run) => path.join(dir, run)),
+			);
 			expect(Object.keys(weights)).toEqual([
 				"tests/a.test.ts",
 				"tests/z.test.ts",

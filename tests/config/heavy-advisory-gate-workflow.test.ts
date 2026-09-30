@@ -3,10 +3,14 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
+	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,
+	HEAVY_GATE_CHECK,
 	isAdvisoryCheck,
 } from "../../scripts/lib/ci-checks.mjs";
 import { DEFAULT_DEADLINE_SECONDS } from "../../scripts/ci-heavy-gate.mjs";
+
+const byCodeUnit = (a = "", b = "") => (a < b ? -1 : a > b ? 1 : 0);
 
 // #3801: the heavy advisory jobs (mutation, the Windows Vitest subset) start
 // only after the required checks passed on the same head. Each case names the
@@ -99,7 +103,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 				.filter(([, job]) => checkNamesOf(job).includes(context))
 				.map(([id]) => id),
 		);
-		expect([...new Set(ciRequired)].sort()).toEqual([
+		expect([...new Set(ciRequired)].sort(byCodeUnit)).toEqual([
 			"install-test",
 			"lint-and-typecheck",
 			"tla-models",
@@ -108,23 +112,23 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		for (const id of ciRequired) expect(needs).toContain(id);
 	});
 
-	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff,
-	// where `unit-tests` passes on SKIPPED shards, would launch mutation and the
-	// Windows run for a change that skipped the whole suite.
+	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff
+	// would launch mutation and the Windows run for a change the maintainer wants
+	// spared them. And a status function in the gate's `if` (always(),
+	// cancelled(), failure()) would replace the implicit success() over its
+	// needs, releasing the heavy jobs on a head whose required job is red.
 	it("starts only for a code diff, and only when every needed job succeeded", () => {
 		expect(asList(gate.needs)).toContain("changes");
-		expect(gate.if).toContain("needs.changes.outputs.code == 'true'");
-		// (`validate-merge-train-dispatch` is reached through each of these and
-		// must not be re-listed: #3859 removes that hop.)
-		for (const id of [
-			"lint-and-typecheck",
-			"tla-models",
-			"unit-tests",
-			"install-test",
-		]) {
-			expect(gate.if, id).toContain(`needs.${id}.result == 'success'`);
-		}
-		expect(gate.if).toContain("!cancelled()");
+		expect(gate.if).toBe("needs.changes.outputs.code == 'true'");
+		expect(gate.if).not.toMatch(/\b(always|cancelled|failure|success)\(\)/);
+	});
+
+	// Recurrence (review r1 F3): ci-verdict reads the gate's and the changes
+	// job's rows by name to tell a deferred run from a dropped one; a renamed
+	// job silently reads every head as "older workflow".
+	it("names the two jobs ci-verdict reads the deferred state from", () => {
+		expect(gate.name).toBe(HEAVY_GATE_CHECK);
+		expect(CI.jobs.changes.name).toBe(CHANGES_CHECK);
 	});
 
 	// Recurrence: `needs:` cannot reach lint.yml, so a required check hosted
@@ -141,7 +145,9 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 			),
 		);
 		expect(lintHosted.length).toBeGreaterThan(0);
-		expect([...args].sort()).toEqual([...lintHosted].sort());
+		expect([...args].sort(byCodeUnit)).toEqual(
+			[...lintHosted].sort(byCodeUnit),
+		);
 	});
 
 	// Recurrence (#3807 head 46f5f5ebf, knip RED): knip reads every workflow
@@ -182,8 +188,8 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	// Recurrence: the deferred-row list in ci-checks.mjs (what ci-verdict shows
 	// as PENDING) drifting from the jobs actually behind the gate.
 	it("lists exactly the gated jobs as ci-verdict's deferred advisory checks", () => {
-		expect(gated.map(([, job]) => job.name).sort()).toEqual(
-			[...DEFERRED_ADVISORY_CHECKS].sort(),
+		expect(gated.map(([, job]) => job.name).sort(byCodeUnit)).toEqual(
+			[...DEFERRED_ADVISORY_CHECKS].sort(byCodeUnit),
 		);
 	});
 

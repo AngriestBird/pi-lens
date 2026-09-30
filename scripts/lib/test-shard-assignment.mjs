@@ -66,22 +66,37 @@ export function median(values) {
 }
 
 /**
+ * Parallelism each vitest project runs with on the CI runner the snapshot was
+ * measured on (4 vCPU: `scripts/lib/worker-budget.mjs` gives `maxWorkers` 3 and
+ * `heavyMaxWorkers` 1; `timing-sensitive` is a literal 2). Keyed by project NAME,
+ * never read from the host: every shard job recomputes the whole assignment, and
+ * a divisor taken from `os.availableParallelism()` made two shard hosts of
+ * different shapes disagree, so a file ran twice or nowhere (review r1 F4).
+ * A project not listed is serialized (`maxWorkers: 1`): grammar-heavy,
+ * lsp-spawn-heavy, real-harness, wall-clock-budget, tmp-fixture-hygiene.
+ * tests/config/test-shard-assignment.test.ts pins this table to the config.
+ */
+export const PROJECT_PARALLELISM = Object.freeze({
+	default: 3,
+	"timing-sensitive": 2,
+});
+
+/** @param {unknown} projectName a vitest project's name */
+export function projectWorkers(projectName) {
+	return PROJECT_PARALLELISM[String(projectName ?? "")] ?? 1;
+}
+
+/**
  * Model cost of one spec: its measured seconds divided by the parallelism its
  * project runs with, because a shard's phases run one after another and a
  * `maxWorkers: 3` phase takes about a third of its summed file time while a
  * `maxWorkers: 1` (serialized) phase takes all of it.
  *
  * @param {number} seconds
- * @param {unknown} maxWorkers a resolved project's `maxWorkers` (a number in CI)
+ * @param {number} workers a project's parallelism (see `projectWorkers`)
  */
-export function specCost(seconds, maxWorkers) {
-	const workers =
-		typeof maxWorkers === "number" &&
-		Number.isFinite(maxWorkers) &&
-		maxWorkers > 1
-			? maxWorkers
-			: 1;
-	return seconds / workers;
+export function specCost(seconds, workers) {
+	return seconds / Math.max(1, workers);
 }
 
 /**

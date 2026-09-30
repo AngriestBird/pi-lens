@@ -5,8 +5,11 @@ import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { run as runChangedFiles } from "../../scripts/ci-changed-files.mjs";
 
-// #3801: a docs-only pull request skips the heavy CI jobs, a single non-docs
-// file runs everything, and no REQUIRED check can be absent or skipped. This
+const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+// #3801: a docs-only pull request does not start the HEAVY ADVISORY jobs
+// (mutation, the Windows run) but runs every test job, a single non-docs file
+// runs everything, and no REQUIRED check can be absent or skipped. This
 // evaluates the real ci.yml: each job's `needs` and `if`, each gated step's
 // `if`, under the outputs the real classifier script produced for a diff.
 // Every case names the recurrence it keeps out.
@@ -222,30 +225,78 @@ const DOCS_ONLY = [
 	"README.md",
 	".changelog/3801-x.md",
 ];
-const HEAVY = [
+// The jobs behind `heavy-gate`: advisory, and the only jobs a docs-only diff skips.
+const HEAVY_ADVISORY = ["heavy-gate", "unit-tests-windows", "mutation"];
+// Every test-running job: a docs edit can red these (review r1 F2), so a
+// docs-only diff runs ALL of them.
+const TEST_JOBS = [
 	"test",
+	"unit-tests",
+	"install-test",
 	"prod-install-build",
 	"targeted-tests-advisory",
-	"heavy-gate",
-	"unit-tests-windows",
-	"mutation",
+	"lint-and-typecheck",
+	"tla-models",
 ];
 
-describe("#3801 docs-only pull requests skip the heavy CI", () => {
-	it("skips every heavy job for a docs-only diff and runs the cheap ones", () => {
+describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () => {
+	it("skips the heavy advisory jobs for a docs-only diff and runs every test job", () => {
 		const { changes, results } = simulate("pull_request", DOCS_ONLY);
 		expect(changes).toEqual({ code: "false", formal: "false" });
-		for (const id of HEAVY) expect(results[id], id).toBe("skipped");
+		for (const id of HEAVY_ADVISORY) expect(results[id], id).toBe("skipped");
 		expect(results["mutation-comment"]).toBe("skipped");
 		for (const id of [
 			"changes",
 			"dependency-boundaries",
 			"changelog-fragment-fastfail",
-			"lint-and-typecheck",
-			"docs-governance",
+			...TEST_JOBS,
 		]) {
 			expect(results[id], id).toBe("success");
 		}
+	});
+
+	// Recurrence (review r1 F2): the docs-only lane skipped the Unit shards and
+	// replaced them with tests/config + tests/docs, so a docs edit that reds a
+	// test OUTSIDE those directories merged green. Proven red by
+	// `docs/public-api-stability.md` (tests/clients/config-diagnostic-codes.test.ts)
+	// and `docs/*_rules_catalog.md` (tests/scripts/rule-catalogs.test.ts).
+	// The shards carry no `if:`, no `changes` need and no replacement lane exists.
+	it("keeps the Unit shards on a docs-only diff: no `if`, no `changes` need, no replacement lane", () => {
+		const { results } = simulate("pull_request", DOCS_ONLY);
+		expect(results.test).toBe("success");
+		expect(results["unit-tests"]).toBe("success");
+		expect(CI.test.if).toBeUndefined();
+		expect(asList(CI.test.needs)).not.toContain("changes");
+		expect(asList(CI["unit-tests"].needs)).toEqual(["test"]);
+		expect(
+			Object.values(CI).filter((job) => job.name === "Docs governance tests"),
+		).toEqual([]);
+		// the aggregate is the sharded contract unchanged: only a green shard set passes
+		const run = String(CI["unit-tests"].steps?.[0].run);
+		expect(run).not.toContain("CODE_CHANGED");
+		expect(run.match(/exit 0/g)).toBeNull();
+	});
+
+	// Recurrence: the Install legs skipping their steps on docs-only. `docs/` is
+	// in the published `files`, so a docs edit changes the packed tarball the
+	// legs verify.
+	it("runs every step of every Install test leg on a docs-only diff, as on a code diff", () => {
+		const docs = simulate("pull_request", DOCS_ONLY);
+		const code = simulate("pull_request", ["clients/index.ts"]);
+		expect(
+			stepsRun("install-test", "pull_request", docs.changes, docs.results),
+		).toEqual(
+			stepsRun("install-test", "pull_request", code.changes, code.results),
+		);
+		const total = (CI["install-test"].steps ?? []).length;
+		const docsSteps = stepsRun(
+			"install-test",
+			"pull_request",
+			docs.changes,
+			docs.results,
+		);
+		expect(docsSteps["ubuntu-latest"]).toHaveLength(total - 2); // dispatch validation, macOS-only APFS step
+		expect(docsSteps["macos-latest"]).toHaveLength(total - 1);
 	});
 
 	// Recurrence: one non-docs file in an otherwise docs diff (the allowlist is
@@ -260,8 +311,8 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 	])("runs everything when %s joins a docs diff", (file) => {
 		const { changes, results } = simulate("pull_request", [...DOCS_ONLY, file]);
 		expect(changes.code).toBe("true");
-		for (const id of HEAVY) expect(results[id], id).toBe("success");
-		expect(results["docs-governance"]).toBe("skipped");
+		for (const id of [...HEAVY_ADVISORY, ...TEST_JOBS])
+			expect(results[id], id).toBe("success");
 		expect(results["mutation-comment"]).toBe("success");
 	});
 
@@ -273,17 +324,12 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 			const { changes, results } = simulate(event, DOCS_ONLY);
 			expect(changes).toEqual({ code: "true", formal: "true" });
 			for (const id of [
-				"test",
-				"unit-tests",
-				"install-test",
-				"tla-models",
-				"prod-install-build",
+				...TEST_JOBS.filter((id) => id !== "targeted-tests-advisory"),
 				"heavy-gate",
 				"unit-tests-windows",
 			]) {
 				expect(results[id], id).toBe("success");
 			}
-			expect(results["docs-governance"]).toBe("skipped");
 			// mutation, targeted tests and the changelog fast-fail are pull_request jobs
 			for (const id of [
 				"mutation",
@@ -320,32 +366,6 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 		},
 	);
 
-	// Recurrence: the install legs skipping at job level (raw-name quirk) or
-	// still doing the heavy work on a docs-only diff.
-	it("skips every step of every Install test leg on a docs-only diff, and none on a code diff except per-leg ones", () => {
-		const docs = simulate("pull_request", DOCS_ONLY);
-		const docsSteps = stepsRun(
-			"install-test",
-			"pull_request",
-			docs.changes,
-			docs.results,
-		);
-		for (const [leg, steps] of Object.entries(docsSteps))
-			expect(steps, leg).toEqual([]);
-
-		const code = simulate("pull_request", ["clients/index.ts"]);
-		const codeSteps = stepsRun(
-			"install-test",
-			"pull_request",
-			code.changes,
-			code.results,
-		);
-		const total = (CI["install-test"].steps ?? []).length;
-		expect(codeSteps["ubuntu-latest"]).toHaveLength(total - 2); // dispatch validation, macOS-only APFS step
-		expect(codeSteps["windows-latest"]).toHaveLength(total - 2);
-		expect(codeSteps["macos-latest"]).toHaveLength(total - 1); // dispatch validation
-	});
-
 	// Recurrence: TLA+ running on every diff (8 minutes of the heaviest required
 	// job), or skipping when formal/ or its checker changed.
 	it("model-checks only when formal/ or what runs it changed, and always on master", () => {
@@ -375,73 +395,30 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 		);
 	});
 
-	// Recurrence: a FAILED classification reading as docs-only (skipping the
-	// suite for a diff nobody classified). Every job gated on `changes` is then
-	// skipped by its failed need, never run and never read as "docs-only": the
-	// docs-only-only job stays off too, and the aggregate (see the next case)
-	// fails because its proof is missing.
-	it("never reads a failed classification as docs-only", () => {
+	// Recurrence: a FAILED classification reading as docs-only or as code. The
+	// heavy jobs and TLA+ depend on `changes`, so a failed one skips them (a
+	// visible red `Changed files` row); the test jobs never depended on it and
+	// still run.
+	it("never reads a failed classification as docs-only: heavy jobs skip, test jobs still run", () => {
 		const { results } = simulate("pull_request", DOCS_ONLY, "true", true);
 		expect(results.changes).toBe("failure");
-		expect(results["docs-governance"]).toBe("skipped");
-		for (const id of HEAVY) expect(results[id], id).toBe("skipped");
-		// the aggregate still runs (always()); its script fails without the proof
-		expect(CI["unit-tests"].steps?.[0].run).toContain(
-			'"${CODE_CHANGED}" == "false"',
-		);
+		for (const id of HEAVY_ADVISORY) expect(results[id], id).toBe("skipped");
+		for (const id of ["test", "unit-tests", "install-test"])
+			expect(results[id], id).toBe("success");
 	});
 
-	// Recurrence: a failed or empty classification reading as docs-only. The
-	// aggregate may pass on skipped shards only for code == 'false'.
-	it("passes the Unit tests aggregate on skipped shards ONLY for a proven docs-only diff", () => {
-		const aggregate = CI["unit-tests"];
-		expect(aggregate.if).toBe("always()");
-		expect(asList(aggregate.needs)).toEqual(["test", "changes"]);
-		const run = String(aggregate.steps?.[0].run);
-		const docsBranch =
-			/if \[\[ "\$\{SHARDS_RESULT\}" == "skipped" && "\$\{CODE_CHANGED\}" == "false" \]\]; then[\s\S]*?\n\s*exit 0\n\s*fi/;
-		expect(run).toMatch(docsBranch);
-		// the failure branch still follows it, and nothing else exits 0
-		expect(run.replace(docsBranch, "")).toMatch(
-			/if \[\[ "\$\{SHARDS_RESULT\}" != "success" \]\]; then[\s\S]*\n\s*exit 1\n\s*fi\s*$/,
-		);
-		expect(run.match(/exit 0/g)).toHaveLength(1);
-	});
-
-	// Recurrence: a docs edit that breaks a governance suite merging unread,
-	// because the shards that would have run it were skipped.
-	it("keeps tests/config and tests/docs running for a docs-only diff, and only for one", () => {
-		const job = CI["docs-governance"];
-		expect(job.name).toBe("Docs governance tests");
-		expect(job.if).toBe("needs.changes.outputs.code == 'false'");
-		const command = (job.steps ?? [])
-			.map((s) => s.run)
-			.find((r) => r?.startsWith("npm test"));
-		expect(command).toBe("npm test -- tests/config tests/docs");
-	});
-
-	// Recurrence: a heavy job that forgot the skip (a new job copied without the
-	// `changes` need). Every job that is not cheap-by-design must depend on it.
-	it("makes every non-cheap ci.yml job depend on `changes`", () => {
-		const cheap = new Set([
-			"validate-merge-train-dispatch",
-			"changes",
-			"dependency-boundaries",
-			"changelog-fragment-fastfail",
-			"lint-and-typecheck",
-			"record-post-merge-validation",
-			"mutation-comment",
-			"unit-tests-windows",
-			"mutation",
-		]);
-		for (const [id, job] of Object.entries(CI)) {
-			if (cheap.has(id)) continue;
-			expect(asList(job.needs), `${id} must need changes`).toContain("changes");
-		}
-		// the two heavy advisory jobs reach it through heavy-gate, which needs it
-		expect(asList(CI["heavy-gate"].needs)).toContain("changes");
-		expect(CI["heavy-gate"].if).toContain(
-			"needs.changes.outputs.code == 'true'",
-		);
+	// Recurrence: a new job gated on `changes` without being a heavy advisory or
+	// TLA+ job would reintroduce a docs-only skip of tests. Exactly these two
+	// (and the gate itself) read `changes`.
+	it("lets only tla-models and heavy-gate depend on `changes`", () => {
+		const dependents = Object.entries(CI)
+			.filter(
+				([id, job]) =>
+					id !== "changes" && asList(job.needs).includes("changes"),
+			)
+			.map(([id]) => id)
+			.sort(byCodeUnit);
+		expect(dependents).toEqual(["heavy-gate", "tla-models"]);
+		expect(CI["heavy-gate"].if).toBe("needs.changes.outputs.code == 'true'");
 	});
 });
