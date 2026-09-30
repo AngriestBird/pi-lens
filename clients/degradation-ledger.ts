@@ -55,6 +55,13 @@ export type DegradationKind =
 	 */
 	| "actionable-warnings-inband-superseded"
 	/**
+	 * #3748: a model-facing advisory (`clients/agent-nudge.ts`'s queue) never
+	 * reached a `context` call. Subject `cap:<scope id>`: the queue already held
+	 * its bound. Subject `scope-retired:<scope id>`: the scope that queued it
+	 * ended first, so no later call belongs to it. Counted.
+	 */
+	| "agent-advisory-dropped"
+	/**
 	 * #2430: an observational capture — the pre-snapshot, the post-diff, or the
 	 * `agent_settled` sweep — hit its per-turn wall-clock budget, timed out, or
 	 * was aborted. The net then has NO opinion about that call, which must be

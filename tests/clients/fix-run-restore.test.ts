@@ -46,6 +46,7 @@ import {
 	runWithFixRestore,
 } from "../../clients/fix-run-restore.js";
 import { getProcessSingleton } from "../../clients/process-singletons.js";
+import { beginScope } from "../../clients/session-scope.js";
 import {
 	type MutationBridgeDeps,
 	recordMutationThroughSeam,
@@ -521,8 +522,12 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			expect.stringContaining("a.rs"),
 			"warning",
 		);
-		// The agent, not only the UI, is told: the next `context` call carries it.
-		const nudge = consumeAgentNudge();
+		// The agent, not only the UI, is told: the next `context` call of THIS
+		// session carries it, and another session's call (#3748) does not.
+		expect(
+			consumeAgentNudge(undefined, beginScope({ role: "secondary" })),
+		).toBeUndefined();
+		const nudge = consumeAgentNudge(undefined, runtime.sessionScope);
 		expect(nudge?.messages[0]?.content).toContain("a.rs");
 	});
 
