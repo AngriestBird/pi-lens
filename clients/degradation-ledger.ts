@@ -1072,6 +1072,14 @@ export type DegradationKind =
 	| "self-drift-unverifiable"
 	| "session-start-duplicate"
 	/**
+	 * #3662: a primary replacement shutdown left the process with no primary
+	 * and a successor pending. Subject `declined`: a `startup` start in that
+	 * gap was classified `concurrent-secondary` instead of taking the primary
+	 * slot. Subject `expired`: no successor started within
+	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 */
+	| "session-successor-pending"
+	/**
 	 * #3071: `clients/sgconfig.ts` evicted the oldest sg-config baseline
 	 * entries over its retained-entry cap. Subject is the baseline directory;
 	 * reason carries the evicted count.
