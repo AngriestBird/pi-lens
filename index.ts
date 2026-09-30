@@ -4124,7 +4124,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 					const injectedText = injectedMessages
 						.map((m) => m.content)
-						.filter(Boolean)
 						.join("\n\n");
 					if (!injectedText) {
 						logContextObservation(existingMessages, "none", []);
