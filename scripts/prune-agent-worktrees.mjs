@@ -1055,8 +1055,8 @@ function enrichCwd(rows) {
 /**
  * The cwd of every live process, as `toComparablePath` keys, or `null` when
  * that cannot be known (#3694). Linux `/proc` only: macOS and Windows have no
- * equivalent read here, so the merged sweep falls back to its age rail and the
- * age sweep keeps its own -- both remove only trees quiet for `--min-age`.
+ * equivalent read here, so both sweeps are left with their `--min-age` rail:
+ * only a tree quiet that long is removable.
  *
  * "Cannot be known" includes a scan that ran but proves nothing: EACCES on
  * every entry, a `hidepid` mount or a foreign pid namespace all yield a valid
@@ -1683,10 +1683,12 @@ async function main(argv) {
 	// sweep each remove trees and kill what is inside them.
 	// PI_LENS_PRUNE_PROC_ROOT is the tests' handle on the "scan unknowable"
 	// path (a nonexistent root reads as null), which no Linux run can reach
-	// through the real /proc. An unreadable root only ever makes the sweep MORE
-	// conservative (the age rails), never less.
+	// through the real /proc. It is NOT conservative-only: a missing, empty or
+	// crafted root drops the live-cwd rail, and with `--min-age 0` the sweep
+	// then removes live trees and kills their processes (PR #3697 round 2
+	// verify). So it is honoured only under Vitest and ignored everywhere else.
 	const liveCwds = liveProcessCwds(
-		process.env.PI_LENS_PRUNE_PROC_ROOT || undefined,
+		(process.env.VITEST && process.env.PI_LENS_PRUNE_PROC_ROOT) || undefined,
 	);
 	const plan = planWorktreePrune({
 		worktrees: candidates,

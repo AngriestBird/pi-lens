@@ -242,44 +242,33 @@ describe("#3694 live cwd safety rail (planners)", () => {
 			expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
 		});
 
-		it("does not add an age rail while liveness is known", () => {
-			const result = planMergedWorktreeRemovals({
-				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
-				nowMs: 10_000_000,
-				minAgeMs: 1_000_000,
-				liveProcessCwds: new Set(["/somewhere/else"]),
-			});
-			expect(result.remove).toHaveLength(1);
-		});
-
-		it("still removes a merged tree when the caller supplies no scan", () => {
-			const result = planMergedWorktreeRemovals({
-				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
-				nowMs: 10_000_000,
-				minAgeMs: 1_000_000,
-			});
-			expect(result.remove).toHaveLength(1);
-		});
-
-		// F6: an unknowable scan (macOS, Windows, hidden pid namespace) used to be
-		// "keep everything" -- prune became a no-op. Now only a recently active
-		// tree is kept; a quiet merged tree is removable.
-		it("keeps only recently active trees when the scan is unknowable", () => {
-			const recent = planMergedWorktreeRemovals({
-				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
-				nowMs: 10_000_000,
-				minAgeMs: 1_000_000,
-				liveProcessCwds: null,
-			});
-			expect(recent.remove).toHaveLength(0);
-			expect(recent.keep[0]).toMatchObject({ reason: "live-cwd-unknown" });
-			const quiet = planMergedWorktreeRemovals({
-				candidates: [mergedRow],
-				nowMs: 10_000_000,
-				minAgeMs: 1_000_000,
-				liveProcessCwds: null,
-			});
-			expect(quiet.remove).toHaveLength(1);
+		// Round 3, finding B (#3694 "or modified within N minutes"): the rail
+		// holds whatever the cwd scan answered. Recurrence: round 2 applied it
+		// only to an unknowable scan, so a fresh merged tree with no process
+		// inside was removable while liveness was known; before that, round 1's
+		// unknowable scan kept everything (F6).
+		it("keeps a recently active unnamed tree and removes a quiet one, whatever the cwd scan says", () => {
+			for (const liveProcessCwds of [
+				new Set(["/somewhere/else"]),
+				null,
+				undefined,
+			]) {
+				const recent = planMergedWorktreeRemovals({
+					candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+					nowMs: 10_000_000,
+					minAgeMs: 1_000_000,
+					liveProcessCwds,
+				});
+				expect(recent.remove).toHaveLength(0);
+				expect(recent.keep[0]).toMatchObject({ reason: "too-young" });
+				const quiet = planMergedWorktreeRemovals({
+					candidates: [mergedRow],
+					nowMs: 10_000_000,
+					minAgeMs: 1_000_000,
+					liveProcessCwds,
+				});
+				expect(quiet.remove).toHaveLength(1);
+			}
 		});
 
 		it("does not protect a named tree from its own leftover processes", () => {
@@ -1522,12 +1511,25 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		records.map((record) => record.event);
 
 	it("leaves both candidate kinds untouched in dry-run and at --max 0", () => {
+		// `--min-age 0` throughout: these fresh trees are the subject of the cap,
+		// not of the merged sweep's recent-activity rail (#3694 round 3).
 		const candidates = fixture.addCapCandidates(5);
 		const before = [candidates.registered[0], candidates.unregistered[0]].map(
 			(entry) => ({ entry, stat: fs.statSync(entry) }),
 		);
 		const dryRun = JSON.parse(
-			runCli(["--max", "2", "--dry-run", "--no-orphan-sweep", "--json"], ""),
+			runCli(
+				[
+					"--max",
+					"2",
+					"--dry-run",
+					"--no-orphan-sweep",
+					"--json",
+					"--min-age",
+					"0",
+				],
+				"",
+			),
 		) as { remove: unknown[]; unregistered: { remove: unknown[] } };
 		expect(dryRun.remove).toHaveLength(2);
 		expect(dryRun.unregistered.remove).toHaveLength(0);
@@ -1538,7 +1540,10 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		}
 
 		const zero = JSON.parse(
-			runCli(["--max", "0", "--no-orphan-sweep", "--json"], ""),
+			runCli(
+				["--max", "0", "--no-orphan-sweep", "--json", "--min-age", "0"],
+				"",
+			),
 		) as {
 			remove: unknown[];
 			deferred: string[];
@@ -1564,8 +1569,13 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 			// the operator's one explicit deletion budget. Five candidates in each
 			// population with --max 2 must remove exactly two total, then defer the
 			// other eight from the same raw combined plan.
+			// `--min-age 0`: the fresh trees are the subject of the cap, not of the
+			// merged sweep's recent-activity rail (#3694 round 3).
 			const candidates = fixture.addCapCandidates(5);
-			const out = runCli(["--max", "2", "--no-orphan-sweep", "--json"], "");
+			const out = runCli(
+				["--max", "2", "--no-orphan-sweep", "--json", "--min-age", "0"],
+				"",
+			);
 			const plan = JSON.parse(out) as {
 				remove: { path: string }[];
 				deferred: string[];
@@ -1601,7 +1611,7 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 
 			// The deferred candidates use the same raw plan on the next run. This
 			// also drives both execution paths and their distinct ledger records.
-			runCli(["--max", "10", "--no-orphan-sweep"], "");
+			runCli(["--max", "10", "--no-orphan-sweep", "--min-age", "0"], "");
 			const records = ledgerRecords();
 			expect(
 				records.filter((record) => record.event === "hygiene.worktree-removed"),
@@ -1677,17 +1687,18 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		list.find(
 			(entry) => toComparablePath(entry.path) === toComparablePath(target),
 		)?.reason;
-	// Linux reads /proc; elsewhere the scan is unknowable and the (fresh) tree
-	// is kept by the recently-active fallback instead -- never removed.
-	const LIVE_REASON =
-		process.platform === "linux" ? "live-cwd" : "live-cwd-unknown";
+	// lane: ubuntu Unit tests. Liveness is read from Linux /proc only; on
+	// macOS and Windows the scan is unknowable and only `--min-age` protects a
+	// tree, so these `--min-age 0` cases have no subject there.
+	const linuxOnly = it.skipIf(process.platform !== "linux");
 
 	// F1 (PR #3697 round 2). The DEFAULT sweep is the merged-branch pass, and
 	// round 1 put the live-cwd rail only in the age planner. The reviewer's
 	// probe: a merged clean tree with a live process inside it was planned for
 	// removal and the process was killed. Drives the whole CLI so that dropping
 	// `liveProcessCwds` from main()'s merged call (mutation M10b) reds.
-	it(
+	// `--min-age 0` throughout, so the live-cwd rail is the only one left.
+	linuxOnly(
 		"keeps a merged clean tree that a live process is using, and never kills that process (#3694 F1)",
 		{ timeout: 90_000 },
 		() => {
@@ -1696,14 +1707,14 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 			git(["worktree", "add", "-q", "-b", "pr-9300", merged], repo);
 			// Positive control: with nothing inside it, this exact tree IS removable,
 			// so the keep below is the rail and not some other rule.
-			expect(planned(dryRun(), merged)).toBe(true);
+			expect(planned(dryRun("--min-age", "0"), merged)).toBe(true);
 
 			const holder = holdCwd(merged);
 			try {
-				const dry = dryRun();
+				const dry = dryRun("--min-age", "0");
 				expect(planned(dry, merged)).toBe(false);
-				expect(keptAs(dry.mergedKeep, merged)).toBe(LIVE_REASON);
-				runCli(["--no-orphan-sweep", "--json"], "");
+				expect(keptAs(dry.mergedKeep, merged)).toBe("live-cwd");
+				runCli(["--no-orphan-sweep", "--json", "--min-age", "0"], "");
 				expect(fs.existsSync(merged)).toBe(true);
 				expect(isAlive(holder.pid)).toBe(true);
 			} finally {
@@ -1737,15 +1748,79 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 				) as Dry;
 			const recent = run();
 			expect(planned(recent, merged)).toBe(false);
-			expect(keptAs(recent.mergedKeep, merged)).toBe("live-cwd-unknown");
+			expect(keptAs(recent.mergedKeep, merged)).toBe("too-young");
 			expect(planned(run("--min-age", "0"), merged)).toBe(true);
+		},
+	);
+
+	// Round 3, finding B: "or modified within N minutes" holds whatever the
+	// cwd scan says. Recurrence: round 2 applied the rail only when liveness
+	// was unknowable, so a fixer tree cut at origin/master a moment ago --
+	// merged, clean, and with no process inside at the instant of the sweep
+	// (agent shells reset their cwd between calls) -- was removed at the
+	// default --min-age. Both shapes: an agent tree and any other tree.
+	it(
+		"keeps a fresh merged tree with no process inside at the default --min-age (#3694 round 3)",
+		{ timeout: 90_000 },
+		() => {
+			const fresh = path.join(repo, "merged-candidates", "fresh-fixer");
+			fs.mkdirSync(path.dirname(fresh), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "fresh-fixer", fresh], repo);
+			const agent = fixture.addSiblingWorktree("a0000000000000004");
+			// Positive control: both ARE merged-sweep removals once quiet.
+			const quiet = dryRun("--min-age", "0");
+			expect(planned(quiet, fresh)).toBe(true);
+			expect(planned(quiet, agent)).toBe(true);
+
+			const dry = dryRun();
+			for (const tree of [fresh, agent]) {
+				expect(planned(dry, tree)).toBe(false);
+				expect(keptAs(dry.mergedKeep, tree)).toBe("too-young");
+			}
+		},
+	);
+
+	// Round 3, finding C: the proc-root handle is not conservative-only -- a
+	// missing, empty or crafted root drops the live-cwd rail, and with
+	// `--min-age 0` the sweep then removes a live tree and kills its process.
+	// Recurrence: round 2 honoured it in every environment. Both directions:
+	// under Vitest the handle works (the tree is planned), outside it the real
+	// /proc is read and the tree is kept.
+	linuxOnly(
+		"honours PI_LENS_PRUNE_PROC_ROOT only under Vitest (#3694 round 3)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "proc-root-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9303", merged], repo);
+			const holder = holdCwd(merged);
+			try {
+				const withRoot = (vitest: string) =>
+					JSON.parse(
+						runCli(
+							["--dry-run", "--no-orphan-sweep", "--json", "--min-age", "0"],
+							"",
+							{
+								PI_LENS_PRUNE_PROC_ROOT: path.join(root, "no-proc"),
+								VITEST: vitest,
+							},
+						),
+					) as Dry;
+				expect(planned(withRoot("true"), merged)).toBe(true);
+				const outside = withRoot("");
+				expect(planned(outside, merged)).toBe(false);
+				expect(keptAs(outside.mergedKeep, merged)).toBe("live-cwd");
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
 		},
 	);
 
 	// The age planner's own signature: a pushed-but-UNMERGED agent tree is
 	// invisible to the merged pass ("unmerged"), so only main()'s call into
 	// planWorktreePrune can keep it (mutation M10a).
-	it(
+	linuxOnly(
 		"keeps a pushed, unmerged agent tree that a live process is using (#3694 F1)",
 		{ timeout: 90_000 },
 		() => {
@@ -1760,7 +1835,7 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 			try {
 				const dry = dryRun("--min-age", "0");
 				expect(planned(dry, other)).toBe(false);
-				expect(keptAs(dry.keep, other)).toBe(LIVE_REASON);
+				expect(keptAs(dry.keep, other)).toBe("live-cwd");
 				runCli(["--no-orphan-sweep", "--json", "--min-age", "0"], "");
 				expect(fs.existsSync(other)).toBe(true);
 				expect(isAlive(holder.pid)).toBe(true);

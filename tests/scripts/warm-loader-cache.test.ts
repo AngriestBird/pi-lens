@@ -1,6 +1,10 @@
 // flake-shape: real-process-spawn — the warm's install-log home resolution is
 // the subject: a real child whose env is fully pinned decides where the record
 // lands, and its own `os.homedir()` fallback is unobservable in-process (#2628).
+// The fifth spawn (#3694, "the stamp step never fails prepare") pins only the
+// stamp script's CLI entry guard: `prepare` runs it as a file, and its
+// `import.meta.url` check is unobservable in-process. `stampPackageLock`
+// itself is tested in-process in tests/build-freshness-guard.test.ts.
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";

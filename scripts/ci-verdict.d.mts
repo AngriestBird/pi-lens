@@ -170,7 +170,7 @@ export declare function fetchAutoMergeAge(
 	sha: string,
 	ghExec?: GhExec,
 	timeoutMs?: number,
-): { autoMerge: boolean; committedMs: number | null };
+): { autoMerge: boolean; pushedMs: number | null };
 
 export declare function fetchRerunState(
 	repository: string,

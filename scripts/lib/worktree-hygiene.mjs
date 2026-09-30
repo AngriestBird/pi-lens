@@ -542,15 +542,16 @@ export function planWorktreePrune({
  * clean, pushed trees because the sweep only ever considered
  * `.claude/worktrees/agent-*`.
  *
- * Deliberately NO age rail while liveness is KNOWN: a clean tree at a merged
- * HEAD is byte-identical to a commit that is already on `origin/master`, so
- * there is nothing in it to lose at any age. The protection a live session
- * gets is the rails below — uncommitted or untracked files (a working tree is
- * rarely clean), the git lock naming a live pid, and (#3694) a live process
- * whose cwd is inside the tree (the sweep used to `kill` exactly that process
- * and delete its directory). When liveness is UNKNOWABLE (`liveProcessCwds`
- * null: macOS, Windows, no /proc, a hidden pid namespace) the age rail is
- * the fallback: only a tree quiet for `minAgeMs` is removable.
+ * A clean tree at a merged HEAD is byte-identical to a commit that is
+ * already on `origin/master`, so nothing COMMITTED in it can be lost. What
+ * can be lost is the session working in it, so a live session gets the rails
+ * below — uncommitted or untracked files (a working tree is rarely clean),
+ * the git lock naming a live pid, a live process whose cwd is inside the
+ * tree (the sweep used to `kill` exactly that process and delete its
+ * directory), and activity within `minAgeMs` (#3694): a fixer that has just
+ * cut its tree at `origin/master` is merged and clean, and often holds no
+ * process at the instant of the sweep. A NAMED tree is exempt from the last
+ * three, as in the age sweep.
  *
  * THE UNTRACKED-FILE RAIL IS THE WHOLE POINT. An untracked file is a
  * deliverable, never disposable: on 2026-09-09 a 22 KB report left untracked
@@ -575,10 +576,10 @@ export function planWorktreePrune({
  * @param {Set<string>|null} [options.liveProcessCwds] A tree holding a live
  *   process's cwd is kept (#3694) -- a merged, clean tree is still someone's
  *   working directory. `null` means liveness is unknowable (no /proc, a hidden
- *   pid namespace): then only a tree quiet for `minAgeMs` is removable, which
- *   is the only signal left. A NAMED tree (`selectedKeys`) is exempt from both.
- * @param {number} [options.minAgeMs] Quiet time required when liveness is
- *   unknowable; unused when the scan answered.
+ *   pid namespace) and adds no rail of its own: `minAgeMs` already applies.
+ *   A NAMED tree (`selectedKeys`) is exempt.
+ * @param {number} [options.minAgeMs] Quiet time an unnamed tree needs before
+ *   it is removable (#3694), whether or not liveness is known.
  * @returns {PrunePlan}
  */
 export function planMergedWorktreeRemovals({
@@ -646,15 +647,16 @@ export function planMergedWorktreeRemovals({
 			push("live-cwd", `a live process has cwd ${liveCwd}`);
 			continue;
 		}
-		if (!selected && liveProcessCwds === null && ageMs < minAgeMs) {
-			push(
-				"live-cwd-unknown",
-				`live process cwds are unavailable and the tree was active ${ageMs}ms ago (< ${minAgeMs}ms)`,
-			);
-			continue;
-		}
 		if (!row.mergedIntoMaster) {
 			push("unmerged", "HEAD is not an ancestor of origin/master");
+			continue;
+		}
+		// #3694: "or modified within N minutes", whatever the cwd scan said. A
+		// fresh fixer tree cut at origin/master is merged and clean, and agent
+		// shells reset their cwd between calls, so at the instant of the sweep
+		// it often holds no process at all (PR #3697 round 2 verify).
+		if (!selected && ageMs < minAgeMs) {
+			push("too-young", `age ${ageMs}ms < min ${minAgeMs}ms`);
 			continue;
 		}
 		remove.push({

@@ -857,10 +857,14 @@ export function fetchActionRequiredRuns(
 
 /**
  * What the absent-required message needs beyond the check-run rows (#3694):
- * whether auto-merge is armed on the PR, and when the head commit was made
- * (the REST API has no push time, so this bounds how long checks have been
- * absent from above). Every read fails open to "unknown" -- no auto-merge, no
- * commit time -- which selects the original, quieter text.
+ * whether auto-merge is armed on the PR, and when the head was pushed: the
+ * earliest `created_at` among the head's check suites. Every app subscribed
+ * to pushes opens a suite within seconds of the push (PR #3679's head: 14
+ * suites, the first 22 s after the push, a rerun's suite 20 min later), so the
+ * earliest is the push clock. The commit date is not: an old commit pushed
+ * just now would read as long-absent at once (PR #3697 round 2, finding A).
+ * Every read fails open to "unknown" -- no auto-merge, no push time -- which
+ * selects the original, quieter text.
  */
 export function fetchAutoMergeAge(
 	target,
@@ -883,18 +887,26 @@ export function fetchAutoMergeAge(
 			/* unknown => not armed */
 		}
 	}
-	let committedMs = null;
+	let pushedMs = null;
 	try {
-		const committed = Date.parse(
+		const created = (
 			JSON.parse(
-				ghExec(["api", `repos/${repository}/commits/${sha}`], { timeoutMs }),
-			)?.commit?.committer?.date,
-		);
-		if (Number.isFinite(committed)) committedMs = committed;
+				ghExec(
+					[
+						"api",
+						`repos/${repository}/commits/${sha}/check-suites?per_page=100`,
+					],
+					{ timeoutMs },
+				),
+			)?.check_suites ?? []
+		)
+			.map((suite) => Date.parse(suite?.created_at))
+			.filter(Number.isFinite);
+		if (created.length > 0) pushedMs = Math.min(...created);
 	} catch {
 		/* unknown => no age */
 	}
-	return { autoMerge, committedMs };
+	return { autoMerge, pushedMs };
 }
 
 /** Read Actions attempts through the existing ghExec seam. Check-runs do not
@@ -1451,7 +1463,7 @@ export async function run({
 				: null;
 		// #3694: read lazily, only when computeVerdict reaches its absent-required
 		// branch, so a healthy head costs no extra API call. The head's auto-merge
-		// state and commit time are read once; the age is recomputed and approval
+		// state and push time are read once; the age is recomputed and approval
 		// runs are re-read every poll (a maintainer approving mid-`--wait` must
 		// clear the message).
 		let headInfo;
@@ -1476,11 +1488,11 @@ export async function run({
 							),
 							autoMerge: headInfo.autoMerge,
 							absentMinutes:
-								headInfo.committedMs === null
+								headInfo.pushedMs === null
 									? null
 									: Math.max(
 											0,
-											Math.floor((clock() - headInfo.committedMs) / 60_000),
+											Math.floor((clock() - headInfo.pushedMs) / 60_000),
 										),
 						};
 					}
