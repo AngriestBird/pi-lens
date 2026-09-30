@@ -793,7 +793,7 @@ from your tree and paste its output. It builds HEAD and the base, then compares
 failing tests one by one (file plus full name). Only `RED-ON-BASE` for every
 failing test (exit 0, with the failing tests listed) justifies "unrelated".
 `CAUSED-BY-CHANGE` (exit 1) means yours, including a test file your change
-adds. `INCONCLUSIVE` (exit 3: a flaky or unreproduced HEAD red, or a run with no
+adds. `INCONCLUSIVE` (exit 3: a flaky or unreproduced HEAD red, a suite that fails to load for a different reason than on base, or a run with no
 per-test report) and `ALL-GREEN` (exit 0, nothing failed anywhere) are not
 evidence of unrelated; exit 2 is a usage error, 4 a build failure.
 
