@@ -59,8 +59,13 @@ part of the state-space-table step. Find the family the changed files map to in
 `formal/coverage-map.json`, write the invariant the change preserves or
 tightens, and show the violating config red on the pre-fix model and green
 after. When the change genuinely does not move the model, carry a
-`TLA+ unaffected: <family> — <reason>` line in the PR body. The `unmodelled`
-rows mark known gaps; they do not excuse a change that moves the behaviour.
+`TLA+ unaffected: <family> — <reason>` line in the PR body. A row is any-of: a
+`.tla`/`.cfg` change under, or a declaration for, any one of the row's families
+satisfies it. The `unmodelled` rows mark known gaps, and a row of 4+ families
+only prints a note (#3878); neither excuses a change that moves the behaviour.
+A TLA lane that adds a `formal/<family>/` directory adds it to `families` and
+adds the map row naming it in the same PR; `validateCoverageMap` reds the Unit
+tests lane otherwise.
 
 1. `gh issue view <N>` with comments — the issue body is the spec; its
    acceptance criteria are the contract. Read AGENTS.md, especially

@@ -70,9 +70,11 @@ owner (#3781, #3794, #3796).
 
 A change on a lifecycle, timing, or identity seam extends or adds a TLA+ model
 in step with the code: `formal/coverage-map.json` maps source globs to model
-families, and the PR-body lint requires a `.tla`/`.cfg` change under a mapped
-family or a `TLA+ unaffected: <family> — <reason>` line. `unmodelled` rows stay
-advisory. See `docs/pi-lens-fixer.md` and `docs/pi-lens-reviewer.md` (#3802).
+families, and the PR-body lint requires a `.tla`/`.cfg` change under any one of
+a mapped row's families or a `TLA+ unaffected: <family> — <reason>` line for
+any one of them. `unmodelled` rows and rows of 4+ families stay advisory. A TLA
+lane that adds a family adds its map row. See `docs/pi-lens-fixer.md` and
+`docs/pi-lens-reviewer.md` (#3802).
 
 Every bug fix has a regression test that fails on the pre-fix production path.
 Read the failure and preserve its transcript. The new guard, branch, filter,

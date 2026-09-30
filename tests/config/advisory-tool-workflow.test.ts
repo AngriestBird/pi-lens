@@ -177,8 +177,9 @@ describe("#3030 PR body lint event coverage", () => {
 	}
 
 	it("keeps the workflow event matrix and PR-body action matrix exact", () => {
-		// Recurrence: ordinary synchronize events need not revalidate an unchanged
-		// PR body, but edited metadata/body events must still run the advisory check.
+		// Recurrence: #3864 F2. The TLA+ coverage rule reads the PR diff, so a push
+		// (synchronize) can make a green PR red or fix a red one; every PR event
+		// that can change the body or the diff must run the advisory check.
 		expect(workflow.on?.pull_request?.types).toEqual([
 			"opened",
 			"synchronize",
@@ -189,7 +190,7 @@ describe("#3030 PR body lint event coverage", () => {
 			opened: true,
 			reopened: true,
 			edited: true,
-			synchronize: false,
+			synchronize: true,
 		} as const;
 		for (const [action, expected] of Object.entries(actionMatrix)) {
 			expect(bodyJobRunsFor(action), `${action} PR-body validation`).toBe(
@@ -198,12 +199,12 @@ describe("#3030 PR body lint event coverage", () => {
 		}
 	});
 
-	it("keeps the synchronize exclusion exclusive to PR-body lint", () => {
+	it("keeps every PR event running the PR-body lint, none excluding synchronize", () => {
 		const excludedJobs = Object.entries(workflow.jobs)
 			.filter(([, job]) =>
 				(job.if ?? "").includes("github.event.action != 'synchronize'"),
 			)
 			.map(([key]) => key);
-		expect(excludedJobs).toEqual(["pr-body-lint"]);
+		expect(excludedJobs).toEqual([]);
 	});
 });

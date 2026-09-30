@@ -5,10 +5,13 @@
 // this module imports must therefore come from `node:` only -- `minimatch` and
 // the other glob packages are unavailable on that lane.
 //
-// A PR that changes a file the checked-in `formal/coverage-map.json` maps to a
-// model family must also change a `.tla`/`.cfg` under that family's
-// `formal/<family>/`, or carry a `TLA+ unaffected: <family> — <reason>` line in
-// the PR body. `unmodelled` entries are advisory and never fail. #3802.
+// A PR that changes a file the checked-in `formal/coverage-map.json` maps to
+// model families must also change a `.tla`/`.cfg` under ANY ONE of the row's
+// families' `formal/<family>/`, or carry a `TLA+ unaffected: <family> —
+// <reason>` line in the PR body for any one of them. A row listing
+// `HUB_FAMILY_THRESHOLD` or more families is too coarse for a file-level rule
+// to call, so it only prints a note. `unmodelled` entries are advisory and
+// never fail. #3802.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -20,6 +23,17 @@ const UNMODELLED = "unmodelled";
 
 /** A coverage file whose change proves the family's model moved with the code. */
 const MODEL_FILE = /\.(?:tla|cfg)$/;
+
+/**
+ * A row listing this many families or more is a hub file (`index.ts`, the LSP
+ * client): file-level matching cannot tell which family a change moves, so an
+ * unmet hub row is a note, not an error, until hunk-level matching exists.
+ */
+const HUB_FAMILY_THRESHOLD = 4;
+
+function compareStrings(a, b) {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
 
 function toPosix(value) {
 	return String(value).replaceAll("\\", "/");
@@ -68,9 +82,7 @@ export function matchGlob(glob, filePath) {
 
 /** Read and parse the checked-in map. Throws when it is absent or malformed. */
 export function loadCoverageMap(rootDir = process.cwd()) {
-	const mapPath = path.isAbsolute(COVERAGE_MAP_PATH)
-		? COVERAGE_MAP_PATH
-		: path.join(rootDir, COVERAGE_MAP_PATH);
+	const mapPath = path.join(rootDir, COVERAGE_MAP_PATH);
 	let raw;
 	try {
 		raw = fs.readFileSync(mapPath, "utf8");
@@ -145,8 +157,10 @@ function globMatchesAnyFile(glob, rootDir = process.cwd()) {
 /**
  * Structural validation of the map itself: every glob matches at least one
  * file, every named family exists under `formal/` with at least one
- * `.tla`/`.cfg`, and every value is `unmodelled` or a known-family array.
- * Returns error strings (empty when the map is sound).
+ * `.tla`/`.cfg`, every `formal/<dir>` is a listed family (a TLA lane that adds
+ * a family adds it, and its map row, here), and every value is `unmodelled`
+ * or a known-family array. Returns error strings (empty when the map is
+ * sound).
  */
 export function validateCoverageMap(map, rootDir = process.cwd()) {
 	const errors = [];
@@ -165,6 +179,19 @@ export function validateCoverageMap(map, rootDir = process.cwd()) {
 			errors.push(`formal/${family}/ has no .tla/.cfg`);
 	}
 	const known = new Set(families);
+	let formalEntries = [];
+	try {
+		formalEntries = fs.readdirSync(path.join(rootDir, "formal"), {
+			withFileTypes: true,
+		});
+	} catch {
+		// A root with no formal/ already reports every listed family missing.
+	}
+	for (const entry of formalEntries)
+		if (entry.isDirectory() && !known.has(entry.name))
+			errors.push(
+				`formal/${entry.name}/ is not listed in ${COVERAGE_MAP_PATH} families; add it and a map row naming it`,
+			);
 	for (const [glob, value] of Object.entries(map.map ?? {})) {
 		if (!globMatchesAnyFile(glob, rootDir))
 			errors.push(`glob ${glob} matches no file`);
@@ -179,30 +206,55 @@ export function validateCoverageMap(map, rootDir = process.cwd()) {
 			if (!known.has(family))
 				errors.push(`map.${glob} names unknown family ${family}`);
 	}
-	for (const glob of Object.keys(map.excluded ?? {})) {
-		if (!globMatchesAnyFile(glob, rootDir))
-			errors.push(`excluded glob ${glob} matches no file`);
-	}
 	return errors;
+}
+
+/**
+ * The PR body with fenced code blocks (``` or ~~~, closed by a marker at least
+ * as long) and HTML comments blanked, so a declaration a reader cannot see
+ * rendered never satisfies the rule. Fences are blanked first: GitHub gives a
+ * fence precedence over a `<!--` inside it.
+ */
+function blankFencesAndComments(body) {
+	let fence = null;
+	const unfenced = String(body ?? "")
+		.split(/\r?\n/)
+		.map((line) => {
+			const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+			if (marker) {
+				if (!fence) fence = marker;
+				else if (marker[0] === fence[0] && marker.length >= fence.length)
+					fence = null;
+				return "";
+			}
+			return fence ? "" : line;
+		})
+		.join("\n");
+	return unfenced.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
 }
 
 function bodyNamesFamily(lines, family) {
 	const escaped = family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	// `(?![\w-])` keeps `read-guard` from matching `read-guard-foo`: the family
+	// must end at a word boundary before its separator dash.
 	const pattern = new RegExp(
-		`^\\s*(?:[-*+]\\s+)?\\**TLA\\+ unaffected:\\s*${escaped}\\s*[—–-]\\s*\\S`,
+		`^\\s*(?:[-*+]\\s+)?\\**TLA\\+ unaffected:\\s*${escaped}(?![\\w-])\\s*[—–-]\\s*\\S`,
 	);
 	return lines.some((line) => pattern.test(line));
 }
 
 /**
  * The rule itself. Given the parsed map, the diff's changed paths, and the PR
- * body, return `{ errors, advisories }`. Errors are the unmet requirements;
- * advisories keep `unmodelled` seams visible without gating.
+ * body, return `{ errors, advisories }`. A changed mapped file is satisfied
+ * when ANY family on its row moved (a `.tla`/`.cfg` under `formal/<family>/`)
+ * or is declared unaffected in the body; an unmet row with fewer than
+ * `HUB_FAMILY_THRESHOLD` families is an error, an unmet hub row a note.
+ * `unmodelled` seams stay advisories.
  */
 export function evaluateTlaCoverage({ map, changedFiles = [], body = "" }) {
-	const changed = changedFiles.map(toPosix).sort();
+	const changed = changedFiles.map(toPosix).sort(compareStrings);
 	const formalChanged = changed.filter((file) => file.startsWith("formal/"));
-	const lines = String(body ?? "").split(/\r?\n/);
+	const lines = blankFencesAndComments(body).split(/\r?\n/);
 	const errors = new Set();
 	const advisories = new Set();
 	const families = new Set(Array.isArray(map?.families) ? map.families : []);
@@ -223,19 +275,33 @@ export function evaluateTlaCoverage({ map, changedFiles = [], body = "" }) {
 			);
 			continue;
 		}
-		for (const family of list) {
-			if (!families.has(family)) {
-				errors.add(`coverage map row ${glob} names unknown family ${family}`);
-				continue;
-			}
-			const modelMoved = formalChanged.some(
-				(file) => file.startsWith(`formal/${family}/`) && MODEL_FILE.test(file),
+		const unknown = list.filter((family) => !families.has(family));
+		for (const family of unknown)
+			errors.add(`coverage map row ${glob} names unknown family ${family}`);
+		if (unknown.length) continue;
+		const satisfied = list.some(
+			(family) =>
+				formalChanged.some(
+					(file) =>
+						file.startsWith(`formal/${family}/`) && MODEL_FILE.test(file),
+				) || bodyNamesFamily(lines, family),
+		);
+		if (satisfied) continue;
+		if (list.length >= HUB_FAMILY_THRESHOLD) {
+			advisories.add(
+				`TLA+ note: ${matched[0]} maps to ${list.length} families (${list.join(", ")}) and file-level matching cannot tell which your change moves; if it changes lifecycle, timing or identity behaviour, change a .tla/.cfg under one of them or add "TLA+ unaffected: <family> \u2014 <reason>" to the PR body (hunk-level matching is #3878).`,
 			);
-			if (modelMoved || bodyNamesFamily(lines, family)) continue;
-			errors.add(
-				`Changed file ${matched[0]} is modelled by formal/${family}/: change a .tla/.cfg there, or add "TLA+ unaffected: ${family} \u2014 <reason>" to the PR body.`,
-			);
+			continue;
 		}
+		const target = list.map((family) => `formal/${family}/`).join(", ");
+		errors.add(
+			list.length === 1
+				? `Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg there, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" to the PR body.`
+				: `Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg under any one of them, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" (any one listed family) to the PR body.`,
+		);
 	}
-	return { errors: [...errors].sort(), advisories: [...advisories].sort() };
+	return {
+		errors: [...errors].sort(compareStrings),
+		advisories: [...advisories].sort(compareStrings),
+	};
 }

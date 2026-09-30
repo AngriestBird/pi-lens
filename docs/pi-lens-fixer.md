@@ -77,8 +77,17 @@ in this step (#3802). Find the family the changed files map to in
 tightens, and show the violating config red on the pre-fix model and green
 after. When the change genuinely does not move the model, carry a
 `TLA+ unaffected: <family> — <reason>` line in the PR body instead of leaving
-the obligation silent. The `unmodelled` rows mark known gaps; they do not
-excuse a change that moves the behaviour.
+the obligation silent. A row is any-of: a `.tla`/`.cfg` change under, or a
+declaration for, any one of the row's families satisfies it. The `unmodelled`
+rows mark known gaps, and a row of 4+ families (a hub file) only prints a note
+until hunk-level matching exists (#3878); neither excuses a change that moves
+the behaviour.
+
+The map owner is the lane that adds the family: a TLA lane that adds a
+`formal/<family>/` directory adds it to `families` and adds (or extends) the
+map row naming it in `formal/coverage-map.json` in the same PR.
+`validateCoverageMap` reds the Unit tests lane on a `formal/<dir>` the map
+does not list.
 
 ### Review follow-ups
 

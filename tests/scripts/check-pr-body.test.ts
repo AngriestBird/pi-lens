@@ -2836,3 +2836,67 @@ foo.test.ts uniquely pins the retry ladder.`;
 		warning.mockRestore();
 	});
 });
+
+describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
+	// The diff touches a runtime file, so the Observability section must carry
+	// the literal the runtime-observability lint accepts; the coverage rule is
+	// then the only open question.
+	const runtimeBody = body.replace(
+		"The advisory check run is the record.",
+		"No new failure path; no record added.",
+	);
+	// Recurrence: PR #3864 r1 wired `lintTlaCoverage` into `lintPullRequestEvent`
+	// with no test through that entry; deleting the wire left 293 tests green,
+	// because the existing coverage case drove only `lintLocalPrBody`.
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		mkdirSync(join(fixtureCwd, "clients"));
+		writeFileSync(join(fixtureCwd, "clients", "read-guard.ts"), "// touched\n");
+		gitExecFileSync(["add", "clients/read-guard.ts"], { cwd: fixtureCwd });
+		gitExecFileSync(
+			[
+				"-c",
+				"user.name=pi-lens-test",
+				"-c",
+				"user.email=pi-lens-test@example.com",
+				"commit",
+				"--quiet",
+				"-m",
+				"fixture-mapped",
+			],
+			{ cwd: fixtureCwd },
+		);
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("fails a mapped change with no model move and no declaration", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(runtimeBody, []), {
+			pull_request: { number: 7, body: runtimeBody },
+		});
+		expect(result.valid).toBe(false);
+		expect(errors.mock.calls.flat().join("\n")).toContain("formal/read-guard/");
+	});
+
+	it("passes the same diff once the body declares one listed family", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const declared = `${runtimeBody}\n\nTLA+ unaffected: read-guard — only a local helper moved.`;
+		const result = await lintPullRequestEvent(fetchForEvent(declared, []), {
+			pull_request: { number: 7, body: declared },
+		});
+		expect(errors.mock.calls.flat().join("\n")).not.toContain("formal/");
+		expect(result).toMatchObject({ valid: true });
+	});
+});

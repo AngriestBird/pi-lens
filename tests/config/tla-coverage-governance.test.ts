@@ -1,5 +1,7 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	evaluateTlaCoverage,
 	loadCoverageMap,
@@ -13,7 +15,11 @@ import { lintLocalPrBody } from "../../scripts/check-pr-body.mjs";
 // (a .tla/.cfg under the family) or say "TLA+ unaffected: <family> — <reason>".
 // The recurrence this prevents is #3524/#3525's class: a lifecycle seam changed
 // while its TLA+ model kept describing the old behaviour, so TLC stayed green
-// and proved nothing about the new code.
+// and proved nothing about the new code. A row is ANY-OF (one listed family's
+// model move or declaration satisfies it): PR #3864 r1 demanded every family,
+// which reddened 81 of the last 200 merged PRs (40.5%), 17 of the 22 that did
+// move a model. The map-drift half (#3864 F4) is the same #3279/#3283 class as
+// an exact-count pin: a tree that grows a family the map never learns.
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const map = loadCoverageMap(REPO_ROOT);
 
@@ -23,8 +29,16 @@ const READ_GUARD_MAP = {
 };
 
 const TWO_FAMILY_MAP = {
-	families: ["read-guard", "session-lifecycle"],
+	families: ["read-guard", "session-lifecycle", "file-locks"],
 	map: { "clients/read-guard.ts": ["read-guard", "session-lifecycle"] },
+};
+
+const hubMap = (count: number) => {
+	const families = ["alpha", "beta", "gamma", "delta", "epsilon"].slice(
+		0,
+		count,
+	);
+	return { families, map: { "clients/hub.ts": families } };
 };
 
 // A structurally valid PR body with no code citations and no test references,
@@ -61,18 +75,76 @@ const READ_GUARD_DIFF = [
 	"+// touched",
 ].join("\n");
 
+function compareStrings(a: string, b: string) {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
 describe("TLA+ coverage map (#3802)", () => {
-	it("checks in the audited population", () => {
-		expect(map.families).toHaveLength(19);
-		expect(Object.keys(map.map ?? {})).toHaveLength(78);
-		expect(
-			Object.values(map.map ?? {}).filter((value) => value === "unmodelled"),
-		).toHaveLength(11);
-		expect(Object.keys(map.excluded ?? {})).toHaveLength(5);
+	it("keeps the checked-in population consistent with the tree", () => {
+		// Derived, never pinned: a count pin reds every legitimate map edit.
+		const formalDirs = fs
+			.readdirSync(path.join(REPO_ROOT, "formal"), { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name);
+		expect([...(map.families ?? [])].sort(compareStrings)).toEqual(
+			formalDirs.sort(compareStrings),
+		);
+		const named = new Set(
+			Object.values(map.map ?? {}).flatMap((value) =>
+				Array.isArray(value) ? value : [],
+			),
+		);
+		// A TLA lane that adds a family adds its map row in the same PR.
+		expect((map.families ?? []).filter((family) => !named.has(family))).toEqual(
+			[],
+		);
 	});
 
 	it("matches every glob to a file and every family to a model", () => {
 		expect(validateCoverageMap(map, REPO_ROOT)).toEqual([]);
+	});
+
+	describe("tree-to-map validation", () => {
+		let root: string | undefined;
+		afterEach(() => {
+			if (root) fs.rmSync(root, { recursive: true, force: true });
+			root = undefined;
+		});
+
+		function fixtureTree() {
+			root = fs.mkdtempSync(path.join(os.tmpdir(), "tla-coverage-tree-"));
+			fs.mkdirSync(path.join(root, "clients"));
+			fs.writeFileSync(path.join(root, "clients", "a.ts"), "");
+			fs.mkdirSync(path.join(root, "formal"));
+			// A non-directory entry under formal/ is never a family.
+			fs.writeFileSync(path.join(root, "formal", "coverage-map.json"), "{}");
+			return root;
+		}
+
+		it("errors on a formal/<dir> the map does not list", () => {
+			const tree = fixtureTree();
+			for (const dir of ["fam-a", "fam-b"]) {
+				fs.mkdirSync(path.join(tree, "formal", dir), { recursive: true });
+				fs.writeFileSync(path.join(tree, "formal", dir, "Model.cfg"), "");
+			}
+			const errors = validateCoverageMap(
+				{ families: ["fam-a"], map: { "clients/a.ts": ["fam-a"] } },
+				tree,
+			);
+			expect(errors).toEqual([expect.stringContaining("formal/fam-b/")]);
+		});
+
+		it("accepts a tree whose every formal/<dir> is listed", () => {
+			const tree = fixtureTree();
+			fs.mkdirSync(path.join(tree, "formal", "fam-a"), { recursive: true });
+			fs.writeFileSync(path.join(tree, "formal", "fam-a", "Model.cfg"), "");
+			expect(
+				validateCoverageMap(
+					{ families: ["fam-a"], map: { "clients/a.ts": ["fam-a"] } },
+					tree,
+				),
+			).toEqual([]);
+		});
 	});
 
 	it("matches a nested ** glob to files under its directory", () => {
@@ -90,7 +162,7 @@ describe("TLA+ coverage map (#3802)", () => {
 	it("keeps both sides of a rename as changed paths", () => {
 		const diff =
 			"diff --git a/clients/read-guard.ts b/clients/read-guard-branch.ts";
-		expect(parseChangedFiles(diff).sort()).toEqual([
+		expect(parseChangedFiles(diff).sort(compareStrings)).toEqual([
 			"clients/read-guard-branch.ts",
 			"clients/read-guard.ts",
 		]);
@@ -136,14 +208,91 @@ describe("TLA+ coverage rule", () => {
 		expect(result.errors).toHaveLength(1);
 	});
 
-	it("requires every family the changed file maps to", () => {
+	it("passes a multi-family row when any one family's model moved", () => {
 		const result = evaluateTlaCoverage({
 			map: TWO_FAMILY_MAP,
 			changedFiles: ["clients/read-guard.ts", "formal/read-guard/Guarded.cfg"],
 			body: "",
 		});
+		expect(result).toEqual({ errors: [], advisories: [] });
+	});
+
+	it("passes a multi-family row when any one family is declared unaffected", () => {
+		const result = evaluateTlaCoverage({
+			map: TWO_FAMILY_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: "TLA+ unaffected: session-lifecycle — only a local helper moved.",
+		});
+		expect(result).toEqual({ errors: [], advisories: [] });
+	});
+
+	it("names every family on an unmet multi-family row in one error", () => {
+		const result = evaluateTlaCoverage({
+			map: TWO_FAMILY_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: "",
+		});
 		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0]).toContain("session-lifecycle");
+		expect(result.errors[0]).toContain("formal/read-guard/");
+		expect(result.errors[0]).toContain("formal/session-lifecycle/");
+	});
+
+	it("does not let a model move or declaration for a family off the row satisfy it", () => {
+		const result = evaluateTlaCoverage({
+			map: TWO_FAMILY_MAP,
+			changedFiles: ["clients/read-guard.ts", "formal/file-locks/Locks.cfg"],
+			body: "TLA+ unaffected: file-locks — unrelated.",
+		});
+		expect(result.errors).toHaveLength(1);
+	});
+
+	it("turns an unmet hub row (4+ families) into a note, not an error", () => {
+		const result = evaluateTlaCoverage({
+			map: hubMap(4),
+			changedFiles: ["clients/hub.ts"],
+			body: "",
+		});
+		expect(result.errors).toEqual([]);
+		expect(result.advisories).toHaveLength(1);
+		expect(result.advisories[0]).toContain("TLA+ note: clients/hub.ts");
+	});
+
+	it("keeps an unmet 3-family row an error (hub threshold boundary)", () => {
+		const result = evaluateTlaCoverage({
+			map: hubMap(3),
+			changedFiles: ["clients/hub.ts"],
+			body: "",
+		});
+		expect(result.errors).toHaveLength(1);
+		expect(result.advisories).toEqual([]);
+	});
+
+	it("prints no note for a hub row whose model moved or is declared", () => {
+		const moved = evaluateTlaCoverage({
+			map: hubMap(5),
+			changedFiles: ["clients/hub.ts", "formal/gamma/Model.tla"],
+			body: "",
+		});
+		const declared = evaluateTlaCoverage({
+			map: hubMap(5),
+			changedFiles: ["clients/hub.ts"],
+			body: "TLA+ unaffected: delta — a comment moved.",
+		});
+		expect(moved).toEqual({ errors: [], advisories: [] });
+		expect(declared).toEqual({ errors: [], advisories: [] });
+	});
+
+	it("still errors on an unknown family in a hub row", () => {
+		const map = {
+			families: ["alpha"],
+			map: { "clients/hub.ts": hubMap(4).families },
+		};
+		const result = evaluateTlaCoverage({
+			map,
+			changedFiles: ["clients/hub.ts"],
+			body: "",
+		});
+		expect(result.errors.join(" ")).toContain("unknown family");
 	});
 
 	it("does not count a non-model file under the family directory", () => {
@@ -153,6 +302,46 @@ describe("TLA+ coverage rule", () => {
 			body: "",
 		});
 		expect(result.errors).toHaveLength(1);
+	});
+
+	it("does not let a family name match another family it prefixes", () => {
+		const result = evaluateTlaCoverage({
+			map: READ_GUARD_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: "TLA+ unaffected: read-guard-foo — not this family.",
+		});
+		expect(result.errors).toHaveLength(1);
+	});
+
+	it.each([
+		["a backtick fence", "```\nTLA+ unaffected: read-guard — hidden.\n```"],
+		["a tilde fence", "~~~\nTLA+ unaffected: read-guard — hidden.\n~~~"],
+		[
+			"a fence the inner shorter marker does not close",
+			"````\n```\nTLA+ unaffected: read-guard — hidden.\n```\n````",
+		],
+		["an HTML comment", "<!-- TLA+ unaffected: read-guard — hidden. -->"],
+		[
+			"a multi-line HTML comment",
+			"<!--\nTLA+ unaffected: read-guard — hidden.\n-->",
+		],
+		["an unterminated HTML comment", "<!--\nTLA+ unaffected: read-guard — x"],
+	])("does not accept a declaration inside %s", (_label, hidden) => {
+		const result = evaluateTlaCoverage({
+			map: READ_GUARD_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: hidden,
+		});
+		expect(result.errors).toHaveLength(1);
+	});
+
+	it("accepts a declaration that follows a closed fence and comment", () => {
+		const result = evaluateTlaCoverage({
+			map: READ_GUARD_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: "```\ncode\n```\n<!-- note -->\n- TLA+ unaffected: read-guard — real reason.",
+		});
+		expect(result).toEqual({ errors: [], advisories: [] });
 	});
 
 	it("reports unmodelled seams as advisories, never errors", () => {

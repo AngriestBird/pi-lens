@@ -17,6 +17,5 @@ export interface TlaCoverageMap {
 	version?: number;
 	families?: string[];
 	map?: Record<string, string | string[]>;
-	excluded?: Record<string, string>;
 	notes?: Record<string, string>;
 }

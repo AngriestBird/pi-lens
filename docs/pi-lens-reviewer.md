@@ -51,8 +51,9 @@
 - Revert or neuter the source fix and verify the red-first test fails.
 - **Check that the model covers the change, not only that TLC is green.** When
   the diff touches a file mapped in `formal/coverage-map.json`, require either
-  a `.tla`/`.cfg` change under that family or a `TLA+ unaffected: <family> —
-  <reason>` line in the PR body. A green `TLA+ models` run over an unchanged
+  a `.tla`/`.cfg` change under any one of the row's families or a `TLA+
+  unaffected: <family> — <reason>` line in the PR body for any one of them
+  (rows of 4+ families only print a note). A green `TLA+ models` run over an unchanged
   model proves nothing about the new code (#3802).
 - Mutation evidence: read the `Mutation diff` comment for the EXACT head. The
   sticky can describe an older or cancelled head, so check its `Head:` line
