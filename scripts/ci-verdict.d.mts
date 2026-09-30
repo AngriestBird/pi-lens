@@ -389,14 +389,22 @@ export declare function formatGatingSplit(
 export declare function formatMutationLine(
 	comments: Array<{ id: number; body?: string; user?: { login?: string } }>,
 	prHead: string,
-	rows?: Array<{ name: string; present: boolean; status: string | null }>,
+	rows?: Array<{
+		name: string;
+		status: string | null;
+		conclusion?: string | null;
+	}>,
 ): string;
 
 export declare function readMutationLine(options: {
 	repository: string;
 	target: string | number;
 	sha: string;
-	rows?: Array<{ name: string; present: boolean; status: string | null }>;
+	rows?: Array<{
+		name: string;
+		status: string | null;
+		conclusion?: string | null;
+	}>;
 	ghExec?: (args: string[], options?: Record<string, unknown>) => string;
 	timeoutMs?: number;
 }): string;

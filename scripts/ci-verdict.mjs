@@ -1348,23 +1348,25 @@ const MUTATION_PREFIX = "MUTATION (advisory, never gates):";
 /** The Mutation diff sticky comment's own lines (scripts/lib/
  * mutation-report-render.mjs): the head it covers, and what it says about it. */
 function readStickyBody(body) {
+	// Every form is anchored on a line start: a survivor cell quotes source text,
+	// and this repo's renderer literals are source text (#3779 round 2).
 	const head =
-		/\*\*Head:\*\* `([0-9a-f]{7,40})`/.exec(body)?.[1] ??
-		/\*\*Stale\.\*\* This head \(`([0-9a-f]{7,40})`\)/.exec(body)?.[1] ??
+		/^- \*\*Head:\*\* `([0-9a-f]{7,40})`/m.exec(body)?.[1] ??
+		/^\*\*Stale\.\*\* This head \(`([0-9a-f]{7,40})`\)/m.exec(body)?.[1] ??
 		null;
 	let count = "unparsed comment";
-	if (body.includes("**Stale.**"))
+	if (/^\*\*Stale\.\*\*/m.test(body))
 		count = "no report for that head (crash, cancel or time cap)";
-	else if (body.includes("**0 mutants evaluated.**"))
+	else if (/^\*\*0 mutants evaluated\.\*\*/m.test(body))
 		count = "0 mutants evaluated (not a clean pass)";
-	else if (body.includes("**Incomplete run.**"))
+	else if (/^\*\*Incomplete run\.\*\*/m.test(body))
 		count = "incomplete run (not a clean pass)";
 	else if (/^#### Survivors \(\d+\)$/m.test(body))
 		count = `${/^#### Survivors \((\d+)\)$/m.exec(body)[1]} survivors`;
-	else if (body.includes("No survivors.")) count = "0 survivors";
+	else if (/^No survivors\.$/m.test(body)) count = "0 survivors";
 	const flags = [
-		body.includes("**Partial run**") ? ", partial run" : "",
-		body.includes("truncated test population")
+		/^\*\*Partial run\*\*/m.test(body) ? ", partial run" : "",
+		/^\*\*Score:.*truncated test population/m.test(body)
 			? ", truncated test population"
 			: "",
 	].join("");
@@ -1380,14 +1382,16 @@ function readStickyBody(body) {
  *
  * @param {Array<{id: number, body?: string, user?: {login?: string}}>} comments
  * @param {string} prHead
- * @param {Array<{name: string, present: boolean, status: string|null}>} rows
+ * @param {Array<{name: string, status: string|null, conclusion?: string|null}>} rows
  */
 export function formatMutationLine(comments, prHead, rows = []) {
 	const job = rows.find((row) => row.name === MUTATION_CHECK);
 	const inFlight = job && job.status !== "completed";
 	const id = findStickyCommentId(comments, STICKY_MARKER);
 	if (id === null)
-		return `${MUTATION_PREFIX} PENDING -- no Mutation diff comment on this PR yet`;
+		return inFlight || !job
+			? `${MUTATION_PREFIX} PENDING -- no Mutation diff comment on this PR yet`
+			: `${MUTATION_PREFIX} no report (job ${job.conclusion}) -- no Mutation diff comment on this PR`;
 	const { head, count } = readStickyBody(
 		comments.find((comment) => comment.id === id)?.body ?? "",
 	);
@@ -2154,13 +2158,6 @@ export async function watchOpenPrs({
 						info.verdict.reason,
 					),
 					...formatFailureLines(info.verdict).map((line) => `  ${line}`),
-					`  ${readMutationLine({
-						repository: info.repository,
-						target: pr.number,
-						sha: info.sha,
-						rows: info.verdict.rows,
-						ghExec,
-					})}`,
 				]);
 			}
 			// Decided every poll, not only on the transition: a refused re-run of
@@ -2323,8 +2320,8 @@ export async function run({
 	// #3700: when `--watch-open` first saw this head; the absence clock of a
 	// head with no check suite.
 	absentSinceMs = null,
-	// #3779: false for a poll (`readPrVerdict`): the MUTATION line is read once
-	// per report, never once per `--watch-open` poll.
+	// #3779: false for a `--watch-open` poll (`readPrVerdict`), whose stdout is
+	// discarded: the MUTATION read is for a report someone reads.
 	mutation = true,
 } = {}) {
 	const {
@@ -2596,7 +2593,10 @@ export async function run({
 					sha,
 					rows: verdict.rows,
 					ghExec,
-					timeoutMs: initialTimeoutMs,
+					// What the polls left of --wait, not the startup allowance.
+					timeoutMs: resolveGhTimeoutMs(
+						deadline === undefined ? undefined : deadline - clock(),
+					),
 				}),
 			);
 		stdout(verdict.reason);

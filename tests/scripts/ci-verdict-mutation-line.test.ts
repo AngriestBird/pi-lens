@@ -222,6 +222,41 @@ describe("run — the MUTATION line over recorded Mutation diff comments (#3779)
 		]);
 	});
 
+	// Recurrence (round 2, F3): with no sticky and a COMPLETED job (it failed,
+	// was cancelled, or the comment job never ran: `--stale` posts nothing when
+	// no sticky exists) the line read PENDING forever.
+	it.each(["failure", "cancelled", "success"])(
+		"no comment although the mutation job completed (%s) is a finished job with no report, not PENDING",
+		async (conclusion) => {
+			const out = await cli(
+				["3755"],
+				world({
+					sha: HEAD_3755,
+					comments: [],
+					checkRuns: [...GREEN, check("mutation (advisory)", conclusion)],
+				}),
+			);
+			expect(out.mutation).toEqual([
+				`${PREFIX} no report (job ${conclusion}) -- no Mutation diff comment on this PR`,
+			]);
+			expect(out.exitCode).toBe(EXIT_SUCCESS);
+		},
+	);
+
+	it("PENDING: no comment while the mutation job is still running", async () => {
+		const out = await cli(
+			["3755"],
+			world({
+				sha: HEAD_3755,
+				comments: [],
+				checkRuns: [...GREEN, check("mutation (advisory)", null, "queued")],
+			}),
+		);
+		expect(out.mutation).toEqual([
+			`${PREFIX} PENDING -- no Mutation diff comment on this PR yet`,
+		]);
+	});
+
 	it("PENDING: the mutation job is still running on this head, even with an older comment", async () => {
 		const out = await cli(
 			["3755"],
@@ -275,6 +310,37 @@ describe("run — the MUTATION line over recorded Mutation diff comments (#3779)
 		const bare = world({ sha: HEAD_3755, comments: recorded(3755) });
 		await cli([HEAD_3755], bare);
 		expect(commentCalls(bare)).toEqual([]);
+	});
+});
+
+describe("run --wait — the MUTATION read is charged to the --wait budget (#3779 round 2)", () => {
+	// Recurrence: the post-verdict read took the startup timeout (up to 60 s)
+	// however much of --wait the polls had already spent, so a hung api call
+	// could overshoot the budget it was armed with.
+	it("gets only what the poll left of --wait, not the startup allowance", async () => {
+		const w = world({ sha: HEAD_3755, comments: recorded(3755) });
+		const gh = ghFor(w);
+		let reads = 0;
+		let clock = Date.parse("2026-09-30T12:00:00Z");
+		const exitCode = await run({
+			argv: ["3755", "--wait", "40"],
+			ghExec: (args: string[], options?: { timeoutMs?: number }) => {
+				if (/check-runs/.test(args[1] ?? "") && (reads += 1) === 1)
+					w.checkRuns = [check("Unit tests", null, "in_progress"), GREEN[1]];
+				else if (/check-runs/.test(args[1] ?? "")) w.checkRuns = GREEN;
+				return gh(args, options);
+			},
+			stdout: () => {},
+			stderr: () => {},
+			now: () => clock,
+			sleepImpl: async (ms: number) => {
+				clock += ms;
+			},
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(w.commentOptions).toEqual([
+			{ timeoutMs: 40_000 - 30_000, maxBuffer: JOB_LOG_MAX_BUFFER },
+		]);
 	});
 });
 
@@ -427,6 +493,42 @@ describe("the MUTATION line — every body form the renderer writes (#3779)", ()
 		);
 	});
 
+	// Recurrence (round 2, F4): a survivor cell quotes source text, and this
+	// repo's own renderer literals are source text (the workflow mutates
+	// scripts/**/*.mjs). An unanchored match read "0 mutants evaluated" or "no
+	// report" for a body that carried real survivors.
+	it.each([
+		"**0 mutants evaluated.** x",
+		"**Stale.** This head (`dddddddddddd`) produced no mutation report",
+		"**Incomplete run.** x",
+		"**Partial run** -- x",
+		"truncated test population",
+		"- **Head:** `dddddddddddd`",
+	])(
+		"a survivor cell quoting %j does not change the reading",
+		async (quoted) => {
+			const base = report({}, 2);
+			const body = renderMutationMarkdown({
+				...base,
+				files: {
+					"clients/x.js": {
+						mutants: [
+							...base.files["clients/x.js"].mutants,
+							{
+								status: "Survived",
+								mutatorName: "StringLiteral",
+								original: quoted,
+								replacement: quoted,
+								location: { start: { line: 3 } },
+							},
+						],
+					},
+				},
+			});
+			expect(await lineFor(body)).toBe(`${PREFIX} 3 survivors, head ${SHORT}`);
+		},
+	);
+
 	it("a body with no recognisable form is named, not guessed", async () => {
 		const body = "<!-- pi-lens-mutation-diff -->\nsomething else entirely";
 		expect(await lineFor(body)).toBe(
@@ -435,7 +537,12 @@ describe("the MUTATION line — every body form the renderer writes (#3779)", ()
 	});
 });
 
-describe("run --watch-open --stream — the comment is read at an event, not per poll (#3779)", () => {
+describe("run --watch-open --stream — the MUTATION line is not part of an event (#3779 round 2)", () => {
+	// Recurrence: round 1 appended a second line to each event and read the
+	// comments at an event. An event is never a mergeable head, so the read
+	// decided nothing, it broke the documented one-line-per-event stream, and
+	// it redded master's "deduplicates one CANCELLED-NOT-REPLACED hint" test
+	// on the merge ref (an unmocked /comments call).
 	const watch = async (w: World, onSleep: (sleeps: number) => void) => {
 		const lines: string[] = [];
 		let sleeps = 0;
@@ -460,7 +567,7 @@ describe("run --watch-open --stream — the comment is read at an event, not per
 		return lines;
 	};
 
-	it("three polls with one DIRTY event read the comments once", async () => {
+	it("a DIRTY event is exactly one line, and no poll or event reads the comments", async () => {
 		const w = world({
 			sha: HEAD_3755,
 			comments: recorded(3755),
@@ -473,18 +580,10 @@ describe("run --watch-open --stream — the comment is read at an event, not per
 			call.startsWith("pr view 3755"),
 		).length;
 		expect(headReads).toBeGreaterThanOrEqual(3);
-		expect(commentCalls(w)).toHaveLength(1);
-		expect(lines.some((line) => line.startsWith("DIRTY #3755"))).toBe(true);
-		expect(lines).toContain(`  ${PREFIX} 2 survivors, head 9cf3972f9421`);
-	});
-
-	it("polls with no event read the comments zero times", async () => {
-		const w = world({
-			sha: HEAD_3755,
-			comments: recorded(3755),
-			prs: [{ number: 3755 }],
-		});
-		await watch(w, () => {});
+		expect(lines.filter((line) => line.startsWith("DIRTY #3755"))).toHaveLength(
+			1,
+		);
+		expect(lines.some((line) => line.includes("MUTATION"))).toBe(false);
 		expect(commentCalls(w)).toEqual([]);
 	});
 });
