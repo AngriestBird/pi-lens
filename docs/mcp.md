@@ -112,7 +112,7 @@ New files:
 
 | tool | maps to | purpose |
 |------|---------|---------|
-| `pilens_analyze` | `analyzeFile` (warm) / worker (fresh) | run the per-edit pipeline on a file; returns diagnostics + timing. `mode: warm\|fresh`. **Correctness + mechanism probe.** |
+| `pilens_analyze` | `analyzeFile` (warm) / worker (fresh) | run the per-edit pipeline on a file; returns diagnostics + timing. `mode: warm\|fresh`. **Correctness + mechanism probe.** Each `latency.runners[]` row carries `failureKind` when the runner set one: `failed` + `blocking_diagnostics` is a run whose findings failed the check; `failed` with any other kind, or none, is a runner that produced no usable result. |
 | `pilens_ast_grep_search` | `ast_grep_search` | AST-aware structural search. |
 | `pilens_ast_grep_replace` | `ast_grep_replace` | AST-aware structural replace. |
 | `pilens_diagnostics` | `lens_diagnostics` | session or LSP diagnostics, selected by `source`, `scope`, and `severity`. |
