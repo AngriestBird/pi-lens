@@ -68,7 +68,7 @@ describe("supply-host-provided-deps.mjs --install-args (#2586 review F1)", () =>
 		const tui = "@earendil-works/pi-tui";
 		const range = "^0.84.1 || ^0.85.0";
 		const fixtureRoot = fs.mkdtempSync(
-			path.join(os.tmpdir(), "supply-spaced-range-"),
+			path.join(os.tmpdir(), "pi-lens-supply-spaced-range-"),
 		);
 		try {
 			fs.mkdirSync(path.join(fixtureRoot, "scripts", "lib"), {

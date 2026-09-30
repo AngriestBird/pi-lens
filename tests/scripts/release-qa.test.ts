@@ -1905,7 +1905,9 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 		});
 
 		it("drives no pi and skips, without leaving the run INCONCLUSIVE, on an old pi", async () => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codemode-old-pi-"));
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-codemode-old-pi-"),
+			);
 			try {
 				const fakePi = path.join(dir, "fake-pi.mjs");
 				fs.writeFileSync(
@@ -1933,7 +1935,9 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 
 	describe("locating the pi binary's own pi-ai", () => {
 		const layout = (hoisted: boolean) => {
-			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ai-locate-"));
+			const root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-pi-ai-locate-"),
+			);
 			const pkg = path.join(
 				root,
 				"node_modules",
@@ -1980,7 +1984,9 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 		});
 
 		it("is null when the binary is not inside a pi-coding-agent package", () => {
-			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ai-none-"));
+			const root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-pi-ai-none-"),
+			);
 			try {
 				fs.writeFileSync(path.join(root, "pi"), "");
 				expect(locatePiAiIndex(path.join(root, "pi"), {})).toBeNull();
@@ -2023,7 +2029,9 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 
 	describe("the latency-log wait the scenario runs", () => {
 		const run = (rows: unknown[], key: string, capMs: number) => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codemode-poll-"));
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-codemode-poll-"),
+			);
 			try {
 				const script = path.join(dir, "poll.mjs");
 				const log = path.join(dir, "latency.log");
