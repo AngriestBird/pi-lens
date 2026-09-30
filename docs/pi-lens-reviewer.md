@@ -45,7 +45,17 @@
   seam group) / *stay specific* (with the reason). A missing verdict is a
   finding. Recurrence: #3622. The optional ast-grep assist is #3684.
 - Revert or neuter the source fix and verify the red-first test fails.
-- Mutate every new guard, filter, cap, fallback, and lifecycle path.
+- Mutation evidence: read the `Mutation diff` comment for the EXACT head. The
+  sticky can describe an older or cancelled head, so check its `Head:` line
+  (`node scripts/ci-verdict.mjs <pr>` prints `MUTATION` with `STALE` or
+  `PENDING`). Every survivor on an added line is killed by a test folded into
+  the PR or shown equivalent with a reason; triage "truncated test population"
+  survivors, never auto-accept them. Spot-check at most one of the fixer's hand
+  mutations instead of re-running the table. When the comment is absent or
+  STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
+  --report <downloaded mutation.json>`). Absent, stale, `0 mutants evaluated`,
+  partial or `no report` mutation evidence goes under `Could not verify`, never
+  implied green.
 - Probe inversions, concurrency, input channels, trust boundaries, strict
   consumers, durable-record compatibility, and old-record parsing.
 - Repeat the pattern and population sweeps.
