@@ -2,6 +2,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import {
+	INVALID_CLOSE_KEYWORD_MESSAGE,
+	lintCloseKeywordPlacement,
+	lintCloseKeywords,
+} from "./lib/close-keywords.mjs";
 
 const TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md";
 const TEMPLATE_FILE = resolve(
@@ -450,6 +455,18 @@ const MASTER_CLAIM =
 function headFileSource(file, options = {}) {
 	if (options.headFiles?.has?.(file)) return options.headFiles.get(file);
 	if (/(?:^|\/)\.\.(?:\/|$)/.test(file) || isAbsolute(file)) return null;
+	if (options.ref) {
+		try {
+			return String(
+				(options.git ?? gitExecFileSync)(["show", `${options.ref}:${file}`], {
+					cwd: options.cwd ?? process.cwd(),
+					encoding: "utf8",
+				}),
+			);
+		} catch {
+			return null;
+		}
+	}
 	if (options.workingTree) {
 		try {
 			return readFileSync(resolve(options.cwd ?? process.cwd(), file), "utf8");
@@ -785,7 +802,9 @@ function lintCodeCitations(body, options = {}) {
 		}
 		const source = headFileSource(file, options);
 		if (source === null) {
-			errors.push(`PR body citation ${key} does not exist in the HEAD tree.`);
+			errors.push(
+				`PR body citation ${key} does not exist in the ${options.ref ?? "HEAD"} tree.`,
+			);
 			continue;
 		}
 		if (options.workingTree && isGitIgnoredPath(file, options)) {
@@ -796,7 +815,9 @@ function lintCodeCitations(body, options = {}) {
 		}
 		const sourceRows = sourceLines(source);
 		if (lineNumber < 1 || lineNumber > sourceRows.length) {
-			errors.push(`PR body citation ${key} is outside the HEAD tree.`);
+			errors.push(
+				`PR body citation ${key} is outside the ${options.ref ?? "HEAD"} tree.`,
+			);
 			continue;
 		}
 		const quote = sourceQuoteAfter(rawLines, bodyLine);
@@ -1543,6 +1564,7 @@ export function lintLocalPrBody(
 	body,
 	cwd = process.cwd(),
 	git = gitExecFileSync,
+	options = {},
 ) {
 	let diff;
 	try {
@@ -1552,34 +1574,64 @@ export function lintLocalPrBody(
 		// upstream ref, retain structural lint rather than inventing scope.
 		diff = "";
 	}
-	return lintPrBody(body, {
+	const result = lintPrBody(body, {
 		requireTestAssessment: localTouchesTests(cwd, git),
 		diff,
 		cwd,
 		workingTree: true,
+		ref: options.ref,
 	});
+	const closeSyntax = lintCloseKeywords(body);
+	if (!closeSyntax.valid) {
+		result.valid = false;
+		result.errors.push(INVALID_CLOSE_KEYWORD_MESSAGE);
+		for (const line of closeSyntax.offendingLines)
+			result.errors.push(`  offending line: ${line}`);
+	}
+	const placement = lintCloseKeywordPlacement(options.title ?? "", body);
+	if (!placement.valid) {
+		result.valid = false;
+		const missing = placement.missingBodyIssues;
+		result.errors.push(
+			`Invalid close-keyword placement: title closes issue(s) missing from the body: ${missing.map((number) => `#${number}`).join(", ")}. Add one "Closes #N" line per issue.`,
+		);
+	}
+	return result;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	// Local contract: --lint-local <body-file> remains the preflight form from
-	// #2796. The equivalent --body <body-file> --title <title-file> form keeps
-	// title validation in check-pr-title.mjs while accepting preflight's inputs.
+	// #2796. Optional --title text and --ref revision add the CI close-keyword
+	// and head-tree citation checks to that same local entry point.
 	const bodyIndex = process.argv.indexOf("--body");
 	const titleIndex = process.argv.indexOf("--title");
+	const refIndex = process.argv.indexOf("--ref");
+	const title = titleIndex === -1 ? "" : process.argv[titleIndex + 1];
+	const ref = refIndex === -1 ? "HEAD" : process.argv[refIndex + 1];
+	if (titleIndex !== -1 && !title) throw new Error("--title requires text");
+	if (refIndex !== -1 && !ref) throw new Error("--ref requires a revision");
 	if (bodyIndex !== -1) {
 		const bodyPath = process.argv[bodyIndex + 1];
 		if (!bodyPath) throw new Error("--body requires a file path");
 		// --title is accepted for preflight parity. Title validation belongs to
 		// check-pr-title.mjs, but preflight passes both local input files.
-		if (titleIndex !== -1 && !process.argv[titleIndex + 1])
-			throw new Error("--title requires a file path");
-		const result = lintLocalPrBody(readFileSync(bodyPath, "utf8"));
+		const result = lintLocalPrBody(
+			readFileSync(bodyPath, "utf8"),
+			process.cwd(),
+			gitExecFileSync,
+			{ title, ref },
+		);
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;
 	} else if (process.argv[2] === "--lint-local") {
 		const bodyPath = process.argv[3];
 		if (!bodyPath) throw new Error("--lint-local requires a file path");
-		const result = lintLocalPrBody(readFileSync(bodyPath, "utf8"));
+		const result = lintLocalPrBody(
+			readFileSync(bodyPath, "utf8"),
+			process.cwd(),
+			gitExecFileSync,
+			{ title, ref },
+		);
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;
 	} else

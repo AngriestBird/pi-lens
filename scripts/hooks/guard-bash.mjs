@@ -136,7 +136,14 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import { readFileSync, readlinkSync, readSync, writeSync } from "node:fs";
+import {
+	existsSync,
+	readFileSync,
+	readlinkSync,
+	readSync,
+	realpathSync,
+	writeSync,
+} from "node:fs";
 import {
 	dirname,
 	isAbsolute,
@@ -1336,6 +1343,57 @@ function fileArgUnderDir(fileArg, dirName) {
 	return fileArg.split(/[\\/]+/).includes(dirName);
 }
 
+function repositoryRoot(start) {
+	if (!start) return undefined;
+	let current = resolve(start);
+	while (true) {
+		if (existsSync(join(current, ".git"))) return current;
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function repositoryIdentity(root) {
+	if (!root) return undefined;
+	const gitEntry = join(root, ".git");
+	try {
+		if (readFileSync(gitEntry, "utf8").startsWith("gitdir: ")) {
+			const gitDir = resolve(
+				root,
+				readFileSync(gitEntry, "utf8").slice(8).trim(),
+			);
+			return realpathSync(dirname(dirname(gitDir)));
+		}
+		return realpathSync(gitEntry);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The probe rule is about pi-lens runtime code, not every directory named
+ * `clients` or `dist`. Resolve the loaded path from the command's effective
+ * cwd and compare repository identity, including linked worktrees. #3680 is
+ * the recurrence: `cd` into another repository must not inherit this repo's
+ * relative `dist/` spelling.
+ */
+function loadsPiLensRuntime(fileOrSpecifier, cwd, initialIdentity) {
+	if (!cwd) return !isAbsolute(fileOrSpecifier);
+	const loaded = isAbsolute(fileOrSpecifier)
+		? resolve(fileOrSpecifier)
+		: resolve(cwd, fileOrSpecifier);
+	const loadedRoot = repositoryRoot(loaded);
+	const loadedIdentity = repositoryIdentity(loadedRoot);
+	if (loadedIdentity && initialIdentity)
+		return loadedIdentity === initialIdentity;
+	if (loadedRoot && initialIdentity) return false;
+	// Synthetic cwd fixtures cannot carry git metadata. Preserve the existing
+	// conservative relative-path guard there; absolute paths remain safe unless
+	// they identify this repository or one of its worktrees.
+	return !isAbsolute(fileOrSpecifier);
+}
+
 /**
  * A `require(`/`import(` call, or a bare `from`, whose string-literal
  * specifier mentions a `clients/` or `dist/` path segment -- the shape of
@@ -1348,7 +1406,7 @@ function fileArgUnderDir(fileArg, dirName) {
  * since no static text scan can resolve a runtime-computed specifier.
  */
 const RUNTIME_LOAD_PATTERN =
-	/\b(?:require|import)\s*\(\s*["'`][^"'`]*(?:clients|dist)\/[^"'`]*["'`]|\bfrom\s+["'`][^"'`]*(?:clients|dist)\/[^"'`]*["'`]/;
+	/\b(?:require|import)\s*\(\s*["'`]([^"'`]*(?:clients|dist)\/[^"'`]*)["'`]|\bfrom\s+["'`]([^"'`]*(?:clients|dist)\/[^"'`]*)["'`]/g;
 
 /**
  * Classify a `node`/`nodejs` invocation's args. Denies only when ALL hold
@@ -1365,7 +1423,7 @@ const RUNTIME_LOAD_PATTERN =
  * @param {string} rawSegment
  * @returns {DenyRule | null}
  */
-function classifyNode(args, env, rawSegment) {
+function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
 	const hasFlag = args.some(
 		(a) =>
 			a === "-e" ||
@@ -1379,9 +1437,13 @@ function classifyNode(args, env, rawSegment) {
 	);
 	const fileArgLoadsRuntimeCode =
 		fileArg !== undefined &&
-		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist"));
+		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist")) &&
+		loadsPiLensRuntime(fileArg, cwd, initialIdentity);
 	const evalPayloadLoadsRuntimeCode =
-		hasFlag && RUNTIME_LOAD_PATTERN.test(rawSegment);
+		hasFlag &&
+		[...rawSegment.matchAll(RUNTIME_LOAD_PATTERN)].some((match) =>
+			loadsPiLensRuntime(match[1] ?? match[2], cwd, initialIdentity),
+		);
 	if (!fileArgLoadsRuntimeCode && !evalPayloadLoadsRuntimeCode) return null;
 	if ("PI_LENS_HOME" in env) return null;
 	if ("PI_LENS_HOME" in process.env) return null;
@@ -1508,7 +1570,12 @@ function commandBasename(cmd) {
  * @param {string} [cwd] the PreToolUse payload's own cwd, for {@link classifyGit}'s worktree-path resolution
  * @returns {DenyRule | null}
  */
-export function classifySegment(rawSegment, sharedEnv = {}, cwd) {
+export function classifySegment(
+	rawSegment,
+	sharedEnv = {},
+	cwd,
+	originCwd = cwd,
+) {
 	const rawWords = splitWords(rawSegment);
 	if (rawWords.length === 0) return null;
 	const words = stripCommandGroupAndRunnerPrefixes(rawWords);
@@ -1538,7 +1605,13 @@ export function classifySegment(rawSegment, sharedEnv = {}, cwd) {
 	const args = rest.slice(1);
 	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv);
 	if (cmd === "node" || cmd === "nodejs")
-		return classifyNode(args, effectiveEnv, rawSegment);
+		return classifyNode(
+			args,
+			effectiveEnv,
+			rawSegment,
+			cwd,
+			repositoryIdentity(repositoryRoot(originCwd)),
+		);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
@@ -1833,12 +1906,20 @@ export function findDeny(commandText, cwd) {
 	const sharedEnv = {};
 	for (let index = 0; index < regions.length; index++) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
+		let effectiveCwd = cwd;
 		const segments = splitSegmentsWithSeparators(regions[index]);
 		const chainRule = findUngatedWriteInChain(segments);
 		if (chainRule) return chainRule;
 		for (const { text: segment } of segments) {
-			const rule = classifySegment(segment, env, cwd);
+			const rule = classifySegment(segment, env, effectiveCwd, cwd);
 			if (rule) return rule;
+			const words = stripCommandGroupAndRunnerPrefixes(splitWords(segment));
+			if (words[0] === "cd" && words[1] && effectiveCwd) {
+				const target = words[1].startsWith("~")
+					? join(process.env.HOME ?? "", words[1].slice(1))
+					: words[1];
+				effectiveCwd = resolve(effectiveCwd, target);
+			}
 		}
 	}
 	return null;

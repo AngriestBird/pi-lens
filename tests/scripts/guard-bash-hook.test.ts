@@ -2363,3 +2363,28 @@ describe("scripts/hooks/guard-bash.mjs -- a redirection `&` is not a segment sep
 		]);
 	});
 });
+
+describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680)", () => {
+	it("allows a node file outside this repository, including after cd", () => {
+		const otherRepo = mkdtempSync(join(tmpdir(), "pi-lens-3680-other-repo-"));
+		try {
+			mkdirSync(join(otherRepo, "dist"));
+			gitExecFileSync("git", ["init", "--quiet", otherRepo], {
+				stdio: "ignore",
+			});
+			expect(
+				runHook(`node ${otherRepo}/dist/cli.js --help`, {}, repoRoot).status,
+			).toBe(0);
+			expect(
+				runHook(`cd ${otherRepo} && node dist/cli.js --help`, {}, repoRoot)
+					.status,
+			).toBe(0);
+		} finally {
+			rmSync(otherRepo, { recursive: true, force: true });
+		}
+	});
+
+	it("still denies a runtime file in this linked worktree", () => {
+		expect(runHook("node dist/cli.js --help", {}, repoRoot).status).toBe(2);
+	});
+});

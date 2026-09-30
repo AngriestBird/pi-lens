@@ -2524,6 +2524,34 @@ describe("local lint parity", () => {
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("Test assessment");
 	});
+
+	it("matches CI close-keyword placement and rejects comma lists (#3681)", () => {
+		const withTitle = `${body}\n\nCloses #3680, #3681.`;
+		const result = lintLocalPrBody(withTitle, process.cwd(), () => "", {
+			title: "fix: tooling (closes #3680)",
+		});
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("comma-separated close list");
+		const missing = lintLocalPrBody(body, process.cwd(), () => "", {
+			title: "fix: tooling (closes #3680)",
+		});
+		expect(missing.valid).toBe(false);
+		expect(missing.errors.join(" ")).toContain("#3680");
+	});
+
+	it("resolves path citations from --ref instead of the working tree (#3681)", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst fromRef = true;\n\`\`\``,
+			{
+				ref: "release-ref",
+				git: (args: string[]) => {
+					expect(args).toEqual(["show", "release-ref:clients/ref.ts"]);
+					return "const fromRef = true;";
+				},
+			},
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
 	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
 		const ranges: string[][] = [];
 		const result = lintLocalPrBody(body, process.cwd(), (args) => {
