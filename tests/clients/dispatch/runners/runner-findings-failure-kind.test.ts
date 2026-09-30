@@ -36,9 +36,19 @@ import type { RunnerResult } from "../../../../clients/dispatch/types.js";
 import { makeLspServiceDouble } from "../../../support/lsp-service-double.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
-const { safeSpawnAsync, lspTouch } = vi.hoisted(() => ({
+const { safeSpawnAsync, lspTouch, logLatency } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	lspTouch: vi.fn(),
+	logLatency: vi.fn(),
+}));
+
+// The latency.log runner row is what scripts/analyze-pi-lens-logs.mjs reads
+// `metadata.failureKind` from.
+vi.mock("../../../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/latency-logger.js")
+	>()),
+	logLatency,
 }));
 
 vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
@@ -1028,12 +1038,14 @@ interface Observed {
 	row:
 		| { status: string; failureKind?: string; diagnosticCount: number }
 		| undefined;
-	spawned: number;
+	/** The latency.log runner row's metadata, as the log analyzer reads it. */
+	logged: { failureKind?: string } | undefined;
 }
 
 async function drive(runnerId: string, driver: Driver): Promise<Observed> {
 	safeSpawnAsync.mockReset();
 	lspTouch.mockReset();
+	logLatency.mockClear();
 	const env = setupTestEnvironment(`pi-lens-3781-${runnerId}-`);
 	try {
 		const root = path.join(env.tmpDir, "workspace");
@@ -1092,7 +1104,11 @@ async function drive(runnerId: string, driver: Driver): Promise<Observed> {
 			row: dispatched.latencyReport?.runners.find(
 				(runner) => runner.runnerId === runnerId,
 			),
-			spawned: safeSpawnAsync.mock.calls.length,
+			logged: logLatency.mock.calls
+				.map(([entry]) => entry)
+				.find(
+					(entry) => entry?.type === "runner" && entry.runnerId === runnerId,
+				)?.metadata,
 		};
 	} finally {
 		env.cleanup();
@@ -1135,9 +1151,11 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 				driver.status === "failed" ? "blocking_diagnostics" : undefined,
 			);
 
-			// The in-memory latency row MCP reads carries the same answer (F7).
+			// The in-memory latency row MCP reads carries the same answer (F7),
+			// and so does the latency.log row the log analyzer reads.
 			expect(observed.row?.status).toBe(result.status);
 			expect(observed.row?.failureKind).toBe(result.failureKind);
+			expect(observed.logged?.failureKind).toBe(result.failureKind);
 		},
 		30_000,
 	);
