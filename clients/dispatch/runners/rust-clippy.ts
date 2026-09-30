@@ -181,11 +181,18 @@ const rustClippyRunner: RunnerDefinition = {
 			pathsEqual(resolve(cargoDir, d.filePath), absEdited),
 		);
 
-		const hasErrors = diagnostics.some((d) => d.semantic === "blocking");
+		// #3751: `status` is the execution outcome, not a severity channel. clippy
+		// ran and produced parseable output, so the run succeeded even when a
+		// deny-level lint is present; severity lives in `semantic` and the
+		// diagnostics. The dispatcher derives blocking from `semantic ===
+		// "blocking"` (dispatcher.ts), never from `status`. `status: "failed"` is
+		// reserved for the unparsable-output arm above — a genuine failure to
+		// produce a usable result. `failureKind` is therefore unnecessary here.
+		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
 		return {
-			status: hasErrors ? "failed" : "succeeded",
+			status: "succeeded",
 			diagnostics,
-			semantic: hasErrors
+			semantic: hasBlocking
 				? "blocking"
 				: diagnostics.length > 0
 					? "warning"
