@@ -260,8 +260,12 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 			.toEqual(["retry", "charged", "charged", "charged", "charged"]);
 		// One retry, then the charged input is skipped, not parsed again.
 		expect(boomParses).toBe(2);
-		// The first trap and the charge; nothing spent the rest of the budget.
+		// Two records: the first trap and the charge.
 		expect(kindCount("wasm-trap")).toBe(2);
+		expect(
+			getDegradationSummary().find((group) => group.kind === "wasm-trap")
+				?.latestReasons[0]?.reason,
+		).toMatch(/^input charged: memory access out of bounds/);
 		expect(onAbort).not.toHaveBeenCalled();
 		// The charge is the content's, not the file's: an edit parses again.
 		expect(
@@ -274,6 +278,11 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 				)
 			).parsed,
 		).toBe(true);
+		// Only the first trap spent budget: the rest is still there.
+		for (let i = 1; i < WASM_TRAP_BUDGET; i++) {
+			expect(client.reportWasmAbort(trap())).toBe(false);
+		}
+		expect(client.reportWasmAbort(trap())).toBe(true);
 	});
 
 	it("charges a trap the symbol extractor reports to the file being consumed", async () => {
