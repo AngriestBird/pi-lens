@@ -2614,14 +2614,20 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				...base,
 				event: { toolName: "edit", input: { path: filePath }, content: [] },
 			});
+			// #3763: both handlers' receipts reached their own (live) turn, so the
+			// file's next bash write in it is demoted too.
+			fs.writeFileSync(filePath, "let value = 3;\n");
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `echo y > "${filePath}"` },
+					content: [],
+				},
+			});
 			expect(
 				vi.mocked(runPipeline).mock.calls.map((call) => call[0].autofixMode),
-			).toEqual(["immediate", "deferred"]);
-			// #3763: both handlers' receipts reached their own (live) turn, so the
-			// file's next write in it is demoted too.
-			expect(
-				runtime.recordMutationToolReceipt(filePath, "write").autofixMode,
-			).toBe("deferred");
+			).toEqual(["immediate", "deferred", "deferred"]);
 			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(
 				new Set(["format", "autofix"]),
 			);
