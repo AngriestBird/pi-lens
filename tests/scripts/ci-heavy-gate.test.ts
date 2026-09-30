@@ -199,9 +199,9 @@ describe("run (the CLI the workflow step calls)", () => {
 		"apmantza/pi-lens",
 		"--sha",
 		SHA,
-		"--require",
+		"--context",
 		"knip",
-		"--require",
+		"--context",
 		"oxfmt format check",
 	];
 
@@ -256,20 +256,20 @@ describe("run (the CLI the workflow step calls)", () => {
 		try {
 			const bad = [
 				[],
-				["--repo", "nope", "--sha", SHA, "--require", "knip"],
-				["--repo", "a/b", "--sha", "abc123", "--require", "knip"],
+				["--repo", "nope", "--sha", SHA, "--context", "knip"],
+				["--repo", "a/b", "--sha", "abc123", "--context", "knip"],
 				["--repo", "a/b", "--sha", SHA],
 				[
 					"--repo",
 					"a/b",
 					"--sha",
 					SHA,
-					"--require",
+					"--context",
 					"knip",
 					"--deadline-seconds",
 					"0",
 				],
-				["--repo", "a/b", "--sha", SHA, "--require", "knip", "--bogus", "x"],
+				["--repo", "a/b", "--sha", SHA, "--context", "knip", "--bogus", "x"],
 			];
 			for (const args of bad) {
 				expect(

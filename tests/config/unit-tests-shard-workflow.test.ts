@@ -116,14 +116,22 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		expect(owner.env?.PI_LENS_TMP_HYGIENE_RUN_ID).toBe(undefined);
 	});
 
-	// Recurrence: install-test and the post-merge recorder were written
-	// against the single `test` job; they must still wait for EVERY shard.
-	it("keeps the downstream jobs waiting on the shard job", () => {
+	// Recurrence: the post-merge recorder was written against the single `test`
+	// job; it must still wait for EVERY shard. #3801 (maintainer scope, from the
+	// 1500-run CI-friction study) dropped install-test's own `needs: test` and
+	// `needs: lint-and-typecheck`: a cost gate, not a data dependency, that made
+	// Install the LAST required check in 35 of 37 green runs, a median 3.5
+	// minutes behind Unit tests. The recorder keeps waiting for all of them, so
+	// the post-merge verdict is unchanged.
+	it("keeps the post-merge recorder waiting on every shard and lets Install start beside them", () => {
 		const jobs = CI();
-		expect(asList(jobs["install-test"].needs)).toContain("test");
-		expect(asList(jobs["record-post-merge-validation"].needs)).toContain(
-			"test",
+		expect(asList(jobs["record-post-merge-validation"].needs)).toEqual(
+			expect.arrayContaining(["test", "lint-and-typecheck", "install-test"]),
 		);
+		const install = asList(jobs["install-test"].needs);
+		expect(install).not.toContain("test");
+		expect(install).not.toContain("lint-and-typecheck");
+		expect(install).toContain("validate-merge-train-dispatch");
 	});
 
 	// Recurrence: the shard artifact names are the nightly rollup's input

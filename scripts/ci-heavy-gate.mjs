@@ -3,7 +3,7 @@
  * scripts/ci-heavy-gate.mjs (#3801)
  *
  *   node scripts/ci-heavy-gate.mjs --repo <owner/repo> --sha <head-sha> \
- *     --require <check name> [--require <check name> ...] \
+ *     --context <check name> [--context <check name> ...] \
  *     [--deadline-seconds 300] [--interval-seconds 15]
  *
  * The last step of ci.yml's `heavy-gate` job. The job's own `needs:` already
@@ -125,7 +125,7 @@ export function parseArgs(argv) {
 		if (value === undefined) throw new Error(`${flag} needs a value`);
 		if (flag === "--repo") options.repo = value;
 		else if (flag === "--sha") options.sha = value;
-		else if (flag === "--require") options.required.push(value);
+		else if (flag === "--context") options.required.push(value);
 		else if (flag === "--deadline-seconds")
 			options.deadlineSeconds = Number(value);
 		else if (flag === "--interval-seconds")
@@ -137,7 +137,7 @@ export function parseArgs(argv) {
 	if (!options.sha || !/^[0-9a-f]{40}$/i.test(options.sha))
 		throw new Error("--sha must be a 40-hex commit");
 	if (options.required.length === 0)
-		throw new Error("at least one --require is needed");
+		throw new Error("at least one --context is needed");
 	for (const key of ["deadlineSeconds", "intervalSeconds"]) {
 		if (!Number.isFinite(options[key]) || options[key] <= 0)
 			throw new Error(

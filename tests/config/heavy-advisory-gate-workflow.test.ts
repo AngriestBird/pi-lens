@@ -128,11 +128,11 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 
 	// Recurrence: `needs:` cannot reach lint.yml, so a required check hosted
 	// there (knip, oxfmt) was simply not waited for. The gate step names each
-	// one; a context hosted by lint.yml but missing from `--require` fails here.
+	// one; a context hosted by lint.yml but missing from `--context` fails here.
 	it("waits, through the script, for every required context that lint.yml hosts", () => {
 		const step = gate.steps?.find((entry) => entry.id === "gate");
 		const args = [
-			...String(step?.run).matchAll(/--require (?:"([^"]+)"|(\S+))/g),
+			...String(step?.run).matchAll(/--context (?:"([^"]+)"|(\S+))/g),
 		].map((match) => match[1] ?? match[2]);
 		const lintHosted = REQUIRED_CONTEXTS.filter((context) =>
 			Object.values(LINT.jobs).some((job) =>
@@ -141,6 +141,28 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		);
 		expect(lintHosted.length).toBeGreaterThan(0);
 		expect([...args].sort()).toEqual([...lintHosted].sort());
+	});
+
+	// Recurrence (#3807 head 46f5f5ebf, knip RED): knip reads every workflow
+	// `run:` line as a command, and `node script.mjs --require <x>` parses as
+	// node's own `--require` preload, so `"oxfmt format check"` reported as an
+	// unresolved import and the required knip check went red. A script flag
+	// must not share a spelling with a node option.
+	it("never spells a script flag like a node option in a run: command", () => {
+		const nodeOptions =
+			/\bnode\b[^\n|&;]*?\s(--require|-r|--import|--check|-c|--eval|-e|--print|-p)\b/;
+		const offenders: string[] = [];
+		for (const [id, job] of Object.entries(CI.jobs)) {
+			for (const step of job.steps ?? []) {
+				for (const line of String(step.run ?? "").split("\n")) {
+					// a flag AFTER the script path belongs to the script, but knip
+					// cannot tell; flag only the ambiguous spellings
+					if (/\bnode\s+scripts\/\S+/.test(line) && nodeOptions.test(line))
+						offenders.push(`${id}: ${line.trim()}`);
+				}
+			}
+		}
+		expect(offenders).toEqual([]);
 	});
 
 	// Recurrence: the output key or step id drifting makes every dependent's

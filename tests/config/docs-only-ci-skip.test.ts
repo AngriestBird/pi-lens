@@ -114,7 +114,12 @@ const hasStatusFunction = (expression: string) =>
 	/\b(always|cancelled|failure|success)\(\)/.test(expression);
 
 /** Run the job graph for one event and diff; every job that runs succeeds. */
-function simulate(event: string, files: string[], gateReady = "true") {
+function simulate(
+	event: string,
+	files: string[],
+	gateReady = "true",
+	changesFails = false,
+) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-docs-skip-"));
 	const output = path.join(dir, "output");
 	try {
@@ -126,19 +131,25 @@ function simulate(event: string, files: string[], gateReady = "true") {
 				log: () => {},
 			},
 		);
-		const changes = Object.fromEntries(
-			fs
-				.readFileSync(output, "utf8")
-				.trim()
-				.split("\n")
-				.map((l) => l.split("=")),
+		const changes = (
+			changesFails
+				? {}
+				: Object.fromEntries(
+						fs
+							.readFileSync(output, "utf8")
+							.trim()
+							.split("\n")
+							.map((l) => l.split("=")),
+					)
 		) as { code: string; formal: string };
-		const results: Record<string, string> = {};
+		const results: Record<string, string> = changesFails
+			? { changes: "failure" }
+			: {};
 		const outputs: Record<string, Record<string, string>> = {
 			changes,
 			"heavy-gate": { ready: gateReady },
 		};
-		const remaining = Object.keys(CI);
+		const remaining = Object.keys(CI).filter((id) => !(id in results));
 		while (remaining.length) {
 			const id = remaining.find((candidate) =>
 				asList(CI[candidate].needs).every((need) => need in results),
@@ -362,6 +373,22 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 		}
 		expect(names("push", ["clients/index.ts"])).toContain(
 			"Model-check formal/ against each config's expected verdict",
+		);
+	});
+
+	// Recurrence: a FAILED classification reading as docs-only (skipping the
+	// suite for a diff nobody classified). Every job gated on `changes` is then
+	// skipped by its failed need, never run and never read as "docs-only": the
+	// docs-only-only job stays off too, and the aggregate (see the next case)
+	// fails because its proof is missing.
+	it("never reads a failed classification as docs-only", () => {
+		const { results } = simulate("pull_request", DOCS_ONLY, "true", true);
+		expect(results.changes).toBe("failure");
+		expect(results["docs-governance"]).toBe("skipped");
+		for (const id of HEAVY) expect(results[id], id).toBe("skipped");
+		// the aggregate still runs (always()); its script fails without the proof
+		expect(CI["unit-tests"].steps?.[0].run).toContain(
+			'"${CODE_CHANGED}" == "false"',
 		);
 	});
 
