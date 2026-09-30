@@ -7,7 +7,10 @@ Every config here states its expected verdict on its first line (see
 `formal/file-locks/README.md`), and the `TLA+ models` CI job checks them all.
 
 Issues: #3501 (the touch debounce outlives its client), #3502
-(`demonstratedReady` survives a crash-respawn).
+(`demonstratedReady` survives a crash-respawn), #3672 (`retireClient` is the
+one retirement helper and drops the per-generation derived state), #3584 (the
+write-timeout streak belongs to one client), #3622 (idle eviction is a
+retirement path).
 
 ## What the model covers
 
@@ -17,6 +20,20 @@ Issues: #3501 (the touch debounce outlives its client), #3502
   entry stays until the next attach notices the death.
 - **Capacity eviction** (`makeCapacityForClient`): an idle client with no
   lease is shut down and removed from the registry.
+- **Idle eviction** (`scheduleIdleEviction`, widened by #3622): an idle,
+  unleased `transparent` client's timer fires. `retireClient` publishes the
+  cold state before the awaited teardown, so a request during the shutdown
+  waits on the spawn gate.
+- **Notify-stall demotion** (`demoteForNotifyStall`): the consecutive
+  write-timeout streak reaches its threshold and the client is retired
+  through the broken cooldown.
+- **The per-generation derived state** (#3672, #3584): one touch writes the
+  aux-notify inflight count (`noteAuxNotifyIssued`), a drained-barrier
+  latency sample (`noteAuxNotifyDrainLatency`) and a timeout strike
+  (`recordNotifyWriteBackpressure`) for its client generation. `retireClient`
+  drops all of them on capacity eviction, idle eviction, notify-stall
+  demotion and the dead-client respawn. A replacement that reads a
+  predecessor's value is the defect `DerivedIsCurrent` rejects.
 - **Touches** of the one file (`LSPService.touchFile`) with the same content,
   sequential or concurrent: `"S"` is the pipeline's `lsp_sync` touch (no
   diagnostics), `"C"` the dispatch runner's collecting touch, and `"W"`
@@ -52,6 +69,10 @@ Issues: #3501 (the touch debounce outlives its client), #3502
   the registry.
 - `ColdIsCurrent`: the key's `demonstratedCold` describes the client now in
   the registry, or the absence of one while none is registered.
+- `DerivedIsCurrent`: the key's derived facts (aux inflight count, drain
+  latency EWMA, write-timeout streak) describe the client now in the
+  registry, or the absence of one a retirement leaves before a replacement
+  spawns.
 - `NoEvictUnderLease`: eviction never takes a client out from under an
   in-flight touch.
 
@@ -81,6 +102,30 @@ Issues: #3501 (the touch debounce outlives its client), #3502
   its replacement now holds.
 - `PingGuard`, `WaitTimeout`, `LeaseCheck`, `FastPath`, `WindowTrip`: `TRUE`
   is the code; `FALSE` is a guard mutant.
+- `DerivedMissPath`: `"off"` disables the per-generation derived-state
+  actions (the older configs, whose verdicts do not depend on them).
+  `"none"` is the code since #3672: every retirement path drops every derived
+  fact. `"capacity"`, `"idle"`, `"stall"` and `"respawn"` drop the clear on
+  that one path. `"legacy"` is the pre-#3672 code: only the notify-stall path
+  dropped the aux backlog and no path dropped the EWMA.
+
+## Source anchors (master)
+
+The derived-state wires in `clients/lsp/index.ts`, at the lines current on
+master. The symbols are authoritative; the line numbers drift.
+
+- `notifyWriteBackpressureStreak` field: 1489
+- `auxNotifyDrainLatencyEwma` field: 1505
+- `auxNotifyInflight` field: 1528
+- `makeCapacityForClient` (capacity eviction): 1844
+- `retireClient` (the one retirement helper): 1905
+- `scheduleIdleEviction` (idle eviction, #3622): 1931
+- `forgetReadiness` (the streak drop): 2103
+- `recordNotifyWriteBackpressure` (the streak): 2133
+- `auxNotifyWedgeBudgetMs` (reads the EWMA): 2272
+- `demoteForNotifyStall` (stall demotion): 2290
+- `noteAuxNotifyIssued` (the inflight count): 2357
+- `noteAuxNotifyDrainLatency` (the EWMA): 2375
 
 ## Results
 
@@ -117,6 +162,12 @@ Issues: #3501 (the touch debounce outlives its client), #3502
 | `MutWarmupColdNoGuard` (the cold cache without its guard) | violated `ColdIsCurrent` | violated | 799 | 3.3 |
 | `WarmupColdNoClient` (code, #3502 verify round 3) | pass | pass | 249 | 3.2 |
 | `MutWarmupColdNoRegClear` (registration keeps the no-client verdict) | violated `ColdIsCurrent` | violated | 184 | 3.5 |
+| `DerivedCurrent` (code, #3672/#3584) | pass | pass | 7851 | 1.7 |
+| `MutDerivedLeakCapacity` (capacity misses the derived drop) | violated `DerivedIsCurrent` | violated | 54 | 1.3 |
+| `MutDerivedLeakIdle` (idle eviction misses it) | violated `DerivedIsCurrent` | violated | 54 | 1.4 |
+| `MutDerivedLeakStall` (stall demotion misses it) | violated `DerivedIsCurrent` | violated | 54 | 1.3 |
+| `MutDerivedLeakRespawn` (respawn misses it) | violated `DerivedIsCurrent` | violated | 142 | 1.3 |
+| `PreFixDerivedLeak` (pre-#3672 code) | violated `DerivedIsCurrent` | violated | 228 | 1.5 |
 
 State counts of a violated config vary between runs: TLC stops at the first
 counterexample its workers reach.
@@ -143,6 +194,13 @@ counterexample its workers reach.
   key; the warm-up then caches the key cold, and B is skipped from the cache
   on every later sweep. Since #3502's verify round 2 the cache is taken only
   for the client the warm-up judged.
+- **`MutDerivedLeak*` and `PreFixDerivedLeak`**: one touch writes the three
+  derived facts, then the named retirement path retires the client without
+  dropping them, and the next touch spawns a replacement. The retained facts
+  still name the old generation, so `DerivedIsCurrent` is false. The four
+  path mutants cover capacity eviction, idle eviction, notify-stall demotion
+  and the dead-client respawn; `PreFixDerivedLeak` runs the pre-#3672 rule
+  where only the stall path dropped the aux backlog.
 - **`MutWarmupColdNoRegClear`**: a warm-up finds the key in its breaker
   cooldown and caches it cold with no client; after the cooldown a touch
   spawns a client, which keeps the cached verdict and is skipped from the
@@ -197,6 +255,9 @@ The throwaway replays became the regression tests:
 
 Not modelled:
 - one file, one server key, primary scope only;
+- the three derived facts are written by one action (`Derive`) rather than at
+  their real write points (notify issue, drained barrier, timeout); only their
+  generation and their retirement are modelled;
 - the warm-up's retry: a `"W"` touch is one attempt, and its verdict is that
   attempt's (the code snapshots the registered client after attempt 1 and
   checks it after the retry). The no-client verdict is reached only from the
