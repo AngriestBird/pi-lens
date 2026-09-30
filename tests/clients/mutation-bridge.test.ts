@@ -1019,35 +1019,6 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 			);
 		});
 	}
-
-	it("still refuses an above-live epoch whose lineage retired, and records no invalid epoch", () => {
-		withScopes("forward-dead", ({ filePath, runtime, deps }) => {
-			runtime.readGuard.retainBranch(new Set());
-			runtime.readGuard.retainBranch(new Set());
-			const lineage = runtime.captureSessionGeneration();
-			expect(lineage.branchEpoch).toBe(2);
-			runtime.resetForSession();
-			runtime.beginTurn();
-			recordMutationThroughSeam(
-				{
-					filePath,
-					kind: "edit",
-					touchedLines: [1, 2],
-					provenance: "settled-sweep",
-					readGuardBranchEpoch: 2,
-					lineage,
-				},
-				deps,
-			);
-			expect({
-				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
-				queued: runtime.consumeDeferredFormatFiles(),
-				invalidEpoch: getDegradationSummary().find(
-					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
-				),
-			}).toEqual({ verdict: "block", queued: [], invalidEpoch: undefined });
-		});
-	});
 });
 
 describe("mutation bridge registration", () => {

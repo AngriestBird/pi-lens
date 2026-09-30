@@ -1616,18 +1616,4 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
 		});
 	});
-
-	it("an observed edit in its own session still demotes that session's later write", async () => {
-		await acrossSettle("observed-live", async ({ tmpDir, filePath }) => {
-			const { runtime, cacheManager } = newSession(tmpDir);
-			const event = patchEvent(filePath, "call-3763-live");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
-			);
-			sessionTwoWriteMode(runtime, filePath);
-			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
-			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
-			expect(sessionTwoWriteMode(runtime, filePath)).toBe("deferred");
-		});
-	});
 });

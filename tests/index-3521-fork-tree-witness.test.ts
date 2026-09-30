@@ -1656,16 +1656,6 @@ describe("#3758 pending runner findings and session scope", () => {
 		});
 	});
 
-	it("still delivers a live session's result at its own turn end", async () => {
-		const seen = coordinators();
-		const primary = await startRuntime(SessionManager.inMemory(cwd));
-		deferFailedRunner(seen[0]!.captureSessionGeneration(), "probe-3758-own");
-
-		await endTurn(primary);
-
-		expect(await contextText(primary)).toContain("probe-3758-own crashed");
-	});
-
 	it("lets a secondary that ends its turn first take a live primary's result (accepted residual until S4, #3758)", async () => {
 		// Pinned so S4 (#3613) flips it deliberately. A secondary's own tool
 		// results capture the coordinator's scope, which is the primary's

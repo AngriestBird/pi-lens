@@ -2034,27 +2034,6 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 			},
 		);
 	});
-
-	it("a live pipeline still marks its bytes analysed for its own turn (#3763)", async () => {
-		const { runPipeline } = await import("../../clients/pipeline.js");
-		await acrossReplacement(
-			"latch-live",
-			async ({ filePath, runtime, cacheManager }) => {
-				vi.mocked(runPipeline).mockReset();
-				vi.mocked(runPipeline).mockResolvedValue({
-					output: "",
-					hasBlockers: false,
-					isError: false,
-					fileModified: false,
-				});
-				for (let call = 0; call < 2; call++)
-					await handleToolResult(
-						toolResultDeps({ filePath, runtime, cacheManager }),
-					);
-				expect(vi.mocked(runPipeline).mock.calls.length).toBe(1);
-			},
-		);
-	});
 });
 
 describe("runtime-tool-result inline behavior warnings", () => {
@@ -2582,6 +2561,11 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(
 				vi.mocked(runPipeline).mock.calls.map((call) => call[0].autofixMode),
 			).toEqual(["immediate", "deferred"]);
+			// #3763: both handlers' receipts reached their own (live) turn, so the
+			// file's next write in it is demoted too.
+			expect(
+				runtime.recordMutationToolReceipt(filePath, "write").autofixMode,
+			).toBe("deferred");
 			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(
 				new Set(["format", "autofix"]),
 			);

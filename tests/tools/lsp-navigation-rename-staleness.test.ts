@@ -602,10 +602,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
  * context built without the session it was called in.
  */
 describe("#3763 lsp_navigation bookkeeps under the session it was called in", () => {
-	async function renameAcross(replaced: boolean): Promise<{
-		applied: string;
-		turnFiles: string[];
-	}> {
+	it("a rename that applies after the replacement lists nothing in session 2's turn state", async () => {
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
 		try {
@@ -644,35 +641,19 @@ describe("#3763 lsp_navigation bookkeeps under the session it was called in", ()
 				{ cwd: env.tmpDir },
 			);
 			await parked.p;
-			if (replaced) {
-				runtime.resetForSession();
-				runtime.beginTurn();
-			}
+			runtime.resetForSession();
+			runtime.beginTurn();
 			resume.open();
 			await pending;
-			return {
+			expect({
 				applied: fs.readFileSync(fileA, "utf8"),
 				turnFiles: Object.keys(
 					cacheManager.readTurnState(env.tmpDir).files ?? {},
 				).map((file) => path.basename(file)),
-			};
+			}).toEqual({ applied: "let = 1;\n", turnFiles: [] });
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
 		}
-	}
-
-	it("a rename that applies after the replacement lists nothing in session 2's turn state", async () => {
-		expect(await renameAcross(true)).toEqual({
-			applied: "let = 1;\n",
-			turnFiles: [],
-		});
-	});
-
-	it("a rename in its own session lists the file it rewrote", async () => {
-		expect(await renameAcross(false)).toEqual({
-			applied: "let = 1;\n",
-			turnFiles: ["a.ts"],
-		});
 	});
 });

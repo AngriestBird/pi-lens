@@ -143,26 +143,7 @@ describe("#3763 ast_grep_replace records under the session it was called in", ()
 		recorded.length = 0;
 		const runtime = new RuntimeCoordinator();
 		const entered = runtime.captureSessionGeneration();
-		let applying!: () => void;
-		const applyStarted = new Promise<void>((resolve) => {
-			applying = resolve;
-		});
-		let finish!: () => void;
-		const applyDone = new Promise<void>((resolve) => {
-			finish = resolve;
-		});
-		const client = clientWithExec(async (args: string[]) => {
-			if (args.includes("--update-all")) {
-				applying();
-				await applyDone;
-				return { matches: [], totalMatches: 0, truncated: false };
-			}
-			return {
-				matches: MATCHES,
-				totalMatches: MATCHES.length,
-				truncated: false,
-			};
-		});
+		const client = clientWithExec(execFor(MATCHES));
 		vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
 		vi.spyOn(client, "formatMatches").mockReturnValue("");
 		const tool = createAstGrepReplaceTool(client, () =>
@@ -176,9 +157,9 @@ describe("#3763 ast_grep_replace records under the session it was called in", ()
 			undefined,
 			{ cwd: "." },
 		);
-		await applyStarted;
+		// `/new` while the call awaits its first spawn: the preview, the apply
+		// and the record all land after it.
 		runtime.resetForSession();
-		finish();
 		await run;
 
 		expect(
