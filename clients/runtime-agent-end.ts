@@ -41,6 +41,7 @@ import { renderFixRunLoss } from "./fix-run-restore.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
+import { surfaceHandlerCrash } from "./session-event-guard.js";
 import { recordDroppedRead } from "./session-scope.js";
 import {
 	getAutofixPolicyForFile,
@@ -732,39 +733,67 @@ export async function handleAgentEnd({
 						void (async () => {
 							let outcome: LspResyncOutcome | "stale-session" | "read-failed" =
 								"stale-session";
+							// The post-exit resync and, once its wait gave up, the late one
+							// (#3828): a fresh stamped read of F, sent through the drain's
+							// session and LSP-service guard (`syncDrainWrite`), so a
+							// replaced session or a retired service spawns nothing.
+							const resyncFromDisk = () =>
+								syncDrainWrite(filePath, () => {
+									const readStamp = performance.now();
+									return {
+										readStamp,
+										content: nodeFs.readFileSync(filePath, "utf-8"),
+									};
+								});
 							try {
 								// #3599: the abandoned formatter's command resolution can outlive
 								// every leaf bound (an auto-install has none), so wait for the
 								// formatter under the drain's own budget instead of forever. A
 								// wait that expires is a degradation, recorded once by
 								// `bounded()` as `off_hook:deferred-format-post-exit-resync`.
-								const formatterSettled = await bounded(
-									phase
-										.then((summary) => summary.abandoned)
-										.then(() => true as const),
-									{
-										ms: DEFERRED_FORMAT_BUDGET_MS,
-										signal: ambientSignal,
-										hook: "off_hook",
-										label: "deferred-format-post-exit-resync",
-									},
-								);
+								const formatterSettling = phase
+									.then((summary) => summary.abandoned)
+									.then(() => true as const);
+								const formatterSettled = await bounded(formatterSettling, {
+									ms: DEFERRED_FORMAT_BUDGET_MS,
+									signal: ambientSignal,
+									hook: "off_hook",
+									label: "deferred-format-post-exit-resync",
+								});
 								if (formatterSettled === undefined) {
-									// The formatter is still running; its later write cannot be
-									// synced from here, and a read now could publish bytes it is
-									// about to replace. Report the resync as abandoned.
+									// The formatter is still running, so a read now could publish
+									// bytes it is about to replace. Report this resync as abandoned
+									// and chain the same resync onto the formatter's settlement
+									// instead (#3828): it parks no awaiting task and holds no
+									// resource, it is one more reaction on a promise the formatter
+									// already owns.
 									outcome = "abandoned";
+									const logLate = (lateOutcome: string) =>
+										logLatency({
+											type: "phase",
+											toolName: "agent_end",
+											filePath,
+											phase: "deferred_format_late_resync",
+											durationMs: Date.now() - fileStart,
+											metadata: { outcome: lateOutcome },
+										});
+									void formatterSettling
+										.then(async () =>
+											logLate((await resyncFromDisk()) ?? "stale-session"),
+										)
+										.catch((err) => {
+											// One bounded `hook-handler-crash` row per session, and
+											// no rethrow: nothing awaits this continuation.
+											surfaceHandlerCrash("deferred-format-late-resync", err, {
+												dbg,
+												rethrow: false,
+											});
+											logLate("read-failed");
+										});
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
 									// service gets no touch that would spawn a server.
-									outcome =
-										(await syncDrainWrite(filePath, () => {
-											const readStamp = performance.now();
-											return {
-												readStamp,
-												content: nodeFs.readFileSync(filePath, "utf-8"),
-											};
-										})) ?? "stale-session";
+									outcome = (await resyncFromDisk()) ?? "stale-session";
 								}
 							} catch (err) {
 								outcome = "read-failed";

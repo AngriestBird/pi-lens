@@ -270,6 +270,14 @@ const postExitRows = () =>
 	logLatency.mock.calls
 		.map(([row]) => row as { phase?: string; metadata?: unknown })
 		.filter((row) => row.phase === "deferred_format_post_exit_resync");
+/**
+ * #3828: the drain's LATE resync rows: the resync chained onto an abandoned
+ * formatter's settlement after the post-exit wait above gave up.
+ */
+const lateRows = () =>
+	logLatency.mock.calls
+		.map(([row]) => row as { phase?: string; metadata?: unknown })
+		.filter((row) => row.phase === "deferred_format_late_resync");
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
@@ -497,6 +505,9 @@ describe("#3599: an abandoned formatter's resync wait is bounded", () => {
 		expect(postExitResyncSubjects()).toEqual([
 			"off_hook:deferred-format-post-exit-resync",
 		]);
+		// #3828: a formatter that never settles is never synced, and the
+		// continuation chained on it writes no row and holds nothing.
+		expect(lateRows()).toEqual([]);
 	});
 });
 
@@ -1025,6 +1036,8 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				metadata: expect.objectContaining({ outcome: "synced" }),
 			}),
 		]);
+		// The wait did not give up, so nothing is chained for a second sync.
+		expect(lateRows()).toEqual([]);
 	});
 
 	it("OrphanLsp (#3529): the child the writer's own 30 s aggregate gave up on is synced after it writes, not before", async () => {
@@ -1458,6 +1471,154 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				metadata: expect.objectContaining({ outcome: "read-failed" }),
 			}),
 		]);
+	});
+
+	/**
+	 * #3828 (`formal/format-drain` `OrphanNoLateSync`, `FixNoLateSync`; the
+	 * merged-fix configs `OrphanLsp` and `Fix`): #3728 bounded the post-exit
+	 * wait and, on expiry, never synced again, so a formatter that writes
+	 * after the bound left the LSP document behind the disk. The wait gives up
+	 * on a formatter whose command resolution (an auto-install) outlives the
+	 * hook's 10 s bound, the writer's own 30 s aggregate and the wait's 30 s
+	 * budget; the child then runs and writes.
+	 */
+	describe("#3828: a formatter that writes after the post-exit wait gave up", () => {
+		async function giveUpBeforeTheChildRuns() {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const drain = handleAgentEnd(drainDeps());
+			await resolving.p;
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.agent_settled + 30_000 + 1,
+			);
+			await drain;
+			await postExitSettled();
+			return { c, install: resolution.open };
+		}
+		const lateSettled = () =>
+			waitFor(lateRows, (rows) => rows.length > 0, {
+				yieldControl: tick,
+				timeoutMs: 2_000,
+			});
+		const spawns = () => lsp.createLSPClient.mock.calls.length;
+		/** `/new`: the session bump and the service retire `session_start` runs. */
+		function newSession() {
+			runtime.resetForSession(Date.now());
+			resetLSPService({ reason: "session_start" });
+		}
+
+		it("OrphanGiveUp (#3828): the LSP document equals the disk once the child settles", async () => {
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			// The wait gave up: one abandoned row, and the LSP still has the bytes
+			// from before the format.
+			expect(postExitRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+			]);
+			expect(wire.at(-1)).toBe("const x=1\n");
+			install();
+			await c.wrote;
+			expect(disk()).toBe("const x = 1\n");
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await lateSettled();
+			expect(lateRows()).toEqual([
+				expect.objectContaining({
+					filePath,
+					metadata: { outcome: "synced" },
+				}),
+			]);
+			// The give-up row stays the only post-exit row: nothing re-reported it.
+			expect(postExitRows()).toHaveLength(1);
+			// `hook-await-exceeded` is still recorded once, at the give-up.
+			expect(postExitResyncSubjects()).toEqual([
+				"off_hook:deferred-format-post-exit-resync",
+			]);
+		});
+
+		it("OrphanGiveUp (#3828): after session_shutdown retired the service the late resync spawns no server", async () => {
+			lsp.realService = getLSPService;
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			resetLSPService({ reason: "session_shutdown" });
+			const spawnsBefore = spawns();
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "stale-session" } }),
+			]);
+		});
+
+		it("OrphanGiveUp (#3828): after /new the late resync spawns no server and is recorded stale-session", async () => {
+			lsp.realService = getLSPService;
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			newSession();
+			const spawnsBefore = spawns();
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "stale-session" } }),
+			]);
+			expect(staleWriteSubjects()).toContain(`runtime-session:${filePath}`);
+		});
+
+		it("OrphanGiveUp (#3828, #3576 R1): after /new the late resync brings only a document the next session already holds to the bytes on disk, without a spawn", async () => {
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			newSession();
+			// Session 2's read-warm touch opens F before the child writes.
+			const spawnsBefore = spawns();
+			await getLSPService().touchFile(filePath, disk(), {
+				diagnostics: "none",
+				source: "read-warm",
+				readStamp: performance.now(),
+			});
+			expect(spawns() - spawnsBefore).toBe(1);
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+			expect(spawns() - spawnsBefore).toBe(1);
+		});
+
+		it("OrphanGiveUp (#3828): a late resync of a file the child removed records one failure and rejects nothing", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				child.removeAfterWrite = true;
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				install();
+				await c.wrote;
+				await lateSettled();
+				// Unhandled rejections surface after the microtask queue drains.
+				await tick();
+				await tick();
+				expect(lateRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "read-failed" } }),
+				]);
+				expect(rejections).toEqual([]);
+				expect(
+					getDegradationSummary()
+						.filter((group) => group.kind === "hook-handler-crash")
+						.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+				).toEqual(["deferred-format-late-resync"]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
 	});
 });
 
