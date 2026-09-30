@@ -2192,6 +2192,57 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	// #3678 F-B: after the process-wide WASM abort, later builds have no
+	// tree-sitter symbols and may have no per-file trap count. Keep that state
+	// from becoming a silent `no_neighbors` all-clear.
+	it("returns indeterminate after the process-wide tree-sitter abort", async () => {
+		const env = setupTestEnvironment("cascade-wasm-aborted-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.py");
+			fs.writeFileSync(primary, "x = 1\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const {
+				_resetSharedTreeSitterClientForTests,
+				getSharedTreeSitterClient,
+			} = await import("../../clients/tree-sitter-shared.js");
+			const client = getSharedTreeSitterClient();
+			expect(client).not.toBeNull();
+			for (let i = 0; i < 4; i++) {
+				expect(
+					client!.reportWasmAbort(new Error("table index is out of bounds"), {
+						languageId: "python",
+						source: `def trap_${i}():\\n    return ${i}\\n`,
+					} as never),
+				).toBe(i === 3);
+			}
+			try {
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+				expect(run.skipReason).toBe("indeterminate");
+				expect(run.indeterminate).toEqual({
+					reason: "graph_degraded",
+					detail:
+						"review graph degraded — tree-sitter is disabled for this process until restart",
+				});
+			} finally {
+				_resetSharedTreeSitterClientForTests();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1093/#1092: the cascade computes the correcting cross-file truth for every
 	// edited file's dependents, but that truth used to be display-only and was
 	// never reconciled into the footer widget. So a finding in A caused by B,

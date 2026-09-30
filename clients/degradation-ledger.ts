@@ -1206,6 +1206,19 @@ export type DegradationKind =
 	 */
 	| "startup-analyzer-disabled"
 	/**
+	 * Automatic test ownership is indeterminate: filesystem identity or marker
+	 * I/O failed, a target walk hit its depth bound, or the dispatch walk missed.
+	 * Retain eligibility, once per complete hashed candidate/lookup identity;
+	 * metadata carries bounded display paths, the side, and the miss/error reason.
+	 */
+	| "test-checkout-identity-unavailable"
+	/**
+	 * Automatic discovery rejected a foreign-checkout candidate before its
+	 * first-match return. Once per hashed cwd/candidate/checkout identity;
+	 * eligible alternatives remain discoverable in the existing order/limits.
+	 */
+	| "test-discovery-foreign-checkout"
+	/**
 	 * #3071: a deferred turn-end test target hit `TEST_RUNNER_MAX_DEFERRALS`
 	 * and was retired from turn-end selection for the rest of the session —
 	 * `runtime-turn.ts`, subject `<cwd>:deferral-exhausted`. Counted, not
@@ -1239,6 +1252,12 @@ export type DegradationKind =
 	 * analyzer finding nothing read identically (AGENTS.md shape 10).
 	 */
 	| "test-runner-failed-target-state"
+	/**
+	 * The final automatic-test gate rejected a positively foreign checkout.
+	 * Self and deferred targets may have no discovery/cache record; keep this
+	 * decision visible even with dbg disabled, once per hashed cwd/target/owner.
+	 */
+	| "test-target-foreign-checkout"
 	/**
 	 * The analyzer bootstrap stopped rebuilding after
 	 * `BOOTSTRAP_FAILURE_STRIKE_LIMIT` consecutive failed loads (#2467 review).
