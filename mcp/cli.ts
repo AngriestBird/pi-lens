@@ -20,6 +20,7 @@ import {
 	graphWasmTrapDetail,
 	reviewGraphCachePath,
 } from "../clients/review-graph/builder.js";
+import { isTreeSitterWasmAborted } from "../clients/tree-sitter-shared.js";
 
 function cwdArg(): string {
 	const equals = process.argv.find((arg) => arg.startsWith("--cwd="));
@@ -99,17 +100,26 @@ async function buildGraph(): Promise<void> {
 	const coverage = persisted.coverage;
 	const wasmTrappedFiles =
 		getGraphBuildInfoForGraph(graph).wasmTrappedFiles ?? 0;
-	if (wasmTrappedFiles > 0) {
-		// #3678: the build succeeded and persisted, but a web-tree-sitter trap
-		// cost some files their symbols. Like the over-cap PARTIAL persist (#960),
-		// this is honest-but-successful: exit 0 so a scheduled nightly build is not
-		// failed by one bad file, but never print the clean line. The affected
-		// files re-extract on the next build (#3605 F2).
+	// #3678: the build persisted, but tree-sitter lost symbols — either a
+	// per-file web-tree-sitter trap (#3605) or the process-wide runtime abort
+	// that follows a 4th trap or an abort-class error. Both are
+	// honest-but-successful, matching the over-cap PARTIAL persist (#960): exit
+	// 0 so a scheduled nightly build is not failed, but never print the clean
+	// line. An abort is process-lifetime, so only a restart recovers it.
+	const wasmAborted = isTreeSitterWasmAborted();
+	if (wasmAborted || wasmTrappedFiles > 0) {
+		const degraded = wasmAborted
+			? "review graph degraded — tree-sitter disabled for this process until restart"
+			: graphWasmTrapDetail(wasmTrappedFiles);
+		const recovery = wasmAborted
+			? ""
+			: "those files were skipped and are re-extracted on the next build; ";
 		process.stdout.write(
-			`pi-lens build-graph: ${graphWasmTrapDetail(wasmTrappedFiles)}; ` +
-				`those files were skipped and are re-extracted on the next build ` +
+			`pi-lens build-graph: ${degraded}; ${recovery}` +
 				(coverage?.partial
-					? `PARTIAL persist (cap=${coverage.cap} exceeded) `
+					? `PARTIAL persist (cap=${coverage.cap} exceeded) ` +
+						`persistedNodes=${coverage.persistedNodes}/${coverage.totalNodes} ` +
+						`persistedEdges=${coverage.persistedEdges}/${coverage.totalEdges} `
 					: "") +
 				`files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
 				`edges=${graph.edges.length} elements=${persisted.elements} ` +
