@@ -141,6 +141,11 @@ export function logReadGuardBranchMove(args: {
  */
 export const READ_GUARD_CELL = "read-guard";
 
+/**
+ * The guard bound to `scope`. A snapshot can find none (a start that threw
+ * before binding it); a restore cannot, because the primary start binds the
+ * guard before it adopts.
+ */
 function guardOf(scope: SessionScope): ReadGuard | undefined {
 	return scopeCell<ReadGuard>(scope, READ_GUARD_CELL);
 }
@@ -161,8 +166,7 @@ export const readGuardStore = defineSessionStore<PersistedReadGuardState>({
 	},
 	snapshot: (scope) => guardOf(scope)?.exportState(),
 	restore: (scope, payload, ctx: AdoptContext) => {
-		const guard = guardOf(scope);
-		if (!guard) return;
+		const guard = guardOf(scope) as ReadGuard;
 		const branch = branchToolResultIds(ctx.sessionManager);
 		const imported = guard.importBranch(
 			payload as PersistedReadGuardState | undefined,
@@ -196,7 +200,8 @@ export const readGuardAuthorshipStore = defineSessionStore({
 		reload: "adopt",
 	},
 	snapshot: (scope) => guardOf(scope)?.exportAuthorship(),
-	restore: (scope, payload) => guardOf(scope)?.importAuthorship(payload),
+	restore: (scope, payload) =>
+		(guardOf(scope) as ReadGuard).importAuthorship(payload),
 	reason:
 		"the files this session wrote; a reload keeps the conversation, so they stay authored",
 });
