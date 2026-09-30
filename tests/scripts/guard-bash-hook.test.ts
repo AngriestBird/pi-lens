@@ -42,6 +42,7 @@ import {
 	stripEnvAssignments,
 } from "../../scripts/hooks/guard-bash.mjs";
 import type { DenyRule } from "../../scripts/hooks/guard-bash.d.mts";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -1735,47 +1736,129 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 // a real linked worktree -- #3526/#3556 review F6 needs a REAL one for the
 // scoped-allow direction).
 describe("scripts/hooks/guard-bash.mjs -- pkill/killall shared-tool kill guard (#3556)", () => {
+	function makeLinkedWorktreeFixture(): {
+		root: string;
+		main: string;
+		linked: string;
+	} {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-git-"));
+		const main = join(root, "main");
+		const linked = join(root, "linked");
+		mkdirSync(main);
+		gitExecFileSync("git", ["init", "-q"], { cwd: main });
+		writeFileSync(join(main, "README.md"), "fixture\n");
+		gitExecFileSync("git", ["add", "README.md"], { cwd: main });
+		gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
+			cwd: main,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "pi-lens test",
+				GIT_AUTHOR_EMAIL: "test@example.com",
+				GIT_COMMITTER_NAME: "pi-lens test",
+				GIT_COMMITTER_EMAIL: "test@example.com",
+			},
+		});
+		gitExecFileSync("git", ["worktree", "add", "-q", linked], {
+			cwd: main,
+		});
+		return { root, main, linked };
+	}
+
+	it("denies a scoped pattern from the fixture's non-linked main checkout", () => {
+		// #3663: keep the CI/plain-clone negative arm explicit so a test cannot
+		// pass merely because this suite happens to run in a linked worktree.
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const result = runHook(
+				`pkill -f ${fixture.main}.*tlc2`,
+				BASE_ENV,
+				fixture.main,
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("pkill");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	it("allows pkill -f scoped to this worktree's own absolute path, run FROM that worktree", () => {
-		const result = runHook(`pkill -f ${repoRoot}.*tlc2`, BASE_ENV, repoRoot);
-		expect(result.status).toBe(0);
-		expect(result.stderr).toBe("");
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const result = runHook(
+				`pkill -f ${fixture.linked}.*tlc2`,
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 
 	it("denies pkill -f scoped to a DIFFERENT worktree's path", () => {
-		const result = runHook(
-			"pkill -f /some/other/worktree.*tlc2",
-			BASE_ENV,
-			repoRoot,
-		);
-		expect(result.status).toBe(2);
-		expect(result.stderr.toLowerCase()).toContain("pkill");
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const result = runHook(
+				"pkill -f /some/other/worktree.*tlc2",
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("pkill");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 
 	it("still denies a bare (no -f) pkill even when the pattern text happens to contain the worktree path -- bare pkill matches by NAME only, never full command line", () => {
-		const result = runHook(`pkill ${repoRoot}`, BASE_ENV, repoRoot);
-		expect(result.status).toBe(2);
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const result = runHook(
+				`pkill ${fixture.linked}`,
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(result.status).toBe(2);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 
 	it("strips a runner prefix (sudo) before finding the -f pattern", () => {
-		const denied = runHook("sudo pkill -f tlc2.TLC", BASE_ENV, repoRoot);
-		expect(denied.status).toBe(2);
-		const allowed = runHook(
-			`sudo pkill -f ${repoRoot}.*tlc2`,
-			BASE_ENV,
-			repoRoot,
-		);
-		expect(allowed.status).toBe(0);
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const denied = runHook(
+				"sudo pkill -f tlc2.TLC",
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(denied.status).toBe(2);
+			const allowed = runHook(
+				`sudo pkill -f ${fixture.linked}.*tlc2`,
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(allowed.status).toBe(0);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 
 	it("a signal flag before -f does not defeat pattern parsing", () => {
-		const denied = runHook("pkill -9 -f tlc2.TLC", BASE_ENV, repoRoot);
-		expect(denied.status).toBe(2);
-		const allowed = runHook(
-			`pkill -9 -f ${repoRoot}.*tlc2`,
-			BASE_ENV,
-			repoRoot,
-		);
-		expect(allowed.status).toBe(0);
+		const fixture = makeLinkedWorktreeFixture();
+		try {
+			const denied = runHook("pkill -9 -f tlc2.TLC", BASE_ENV, fixture.linked);
+			expect(denied.status).toBe(2);
+			const allowed = runHook(
+				`pkill -9 -f ${fixture.linked}.*tlc2`,
+				BASE_ENV,
+				fixture.linked,
+			);
+			expect(allowed.status).toBe(0);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 
 	it("killall is never scoped -- it matches by process NAME only, so no pattern text can allow it", () => {
@@ -1978,9 +2061,9 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			expect(
 				findDeny("TMPDIR=/tmp mktemp -d -t rvprobe.XXXX", PAYLOAD_CWD),
 			).toBe("tmpCheckout");
-			expect(
-				findDeny("TMPDIR=/tmp mktemp -dt rvprobe.XXXX", PAYLOAD_CWD),
-			).toBe("tmpCheckout");
+			expect(findDeny("TMPDIR=/tmp mktemp -dt rvprobe.XXXX", PAYLOAD_CWD)).toBe(
+				"tmpCheckout",
+			);
 			expect(findDeny("mktemp -dp /tmp rvprobe.XXXX", PAYLOAD_CWD)).toBe(
 				"tmpCheckout",
 			);
