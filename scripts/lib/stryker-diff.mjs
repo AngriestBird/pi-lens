@@ -76,6 +76,7 @@ export const DEFAULT_MAX_TESTS = 47;
  * and the report upload.
  */
 export const MUTATION_BUDGET_MINUTES = 60;
+export const DEFAULT_MUTATION_FIXED_OVERHEAD_MS = 5 * 60_000;
 
 // `git diff --unified=0` headers. Only the "+" side is used: it numbers lines
 // in HEAD, which is the tree Stryker mutates in place.
@@ -309,6 +310,29 @@ export function describePartialInterruptCause(result, budgetMinutes) {
 	return `mutation diff: ${strykerFailureCause(result, budgetMinutes)}`;
 }
 
+/**
+ * The user-facing verdict for a partial report. A timed-out child has already
+ * completed its initial test run, so the zero-mutant dry-run failure wording
+ * is false and hides the score and survivors that the incremental report
+ * contains (#3683).
+ *
+ * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
+ * @param {number} budgetMinutes
+ * @param {{evaluated: number, total: number|null, score: string, survivors: string[]}} partial
+ */
+export function describePartialMutationOutcome(
+	result,
+	budgetMinutes,
+	{ evaluated, total, score, survivors },
+) {
+	const totalText = total ?? "an unknown total of";
+	const survivorText = survivors.length > 0 ? survivors.join(", ") : "none";
+	if (result.error?.code === "ETIMEDOUT") {
+		return `mutation diff: budget expired after ${evaluated} of ${totalText} mutants evaluated; partial score ${score}%; survivors: ${survivorText}`;
+	}
+	return `mutation diff: partial run interrupted after ${evaluated} of ${totalText} mutants evaluated; partial score ${score}%; survivors: ${survivorText}; ${strykerFailureCause(result, budgetMinutes)}`;
+}
+
 export function formatCapNotice(selectedCount, totalCount, skipped) {
 	return `capped: ${selectedCount} of ${totalCount} changed files mutated; skipped: ${skipped.join(", ")}`;
 }
@@ -536,18 +560,22 @@ export function parseDryRunCost(output) {
  * writing, sandbox teardown, timing variance between runs) -- without it, a
  * budget sized exactly to the point estimate still overruns in practice.
  *
- * @param {{remainingMs: number, concurrency: number, dryRunMs: number, safetyFactor?: number}} args
+ * @param {{remainingMs: number, concurrency: number, dryRunMs: number, fixedOverheadMs?: number, safetyFactor?: number}} args
  * @returns {number} at least 1
  */
 export function estimateAffordableMutants({
 	remainingMs,
 	concurrency,
 	dryRunMs,
+	fixedOverheadMs = 0,
 	safetyFactor = 0.7,
 }) {
 	if (dryRunMs <= 0) return 1;
+	const effectiveConcurrency = Math.max(1, Math.floor(concurrency));
+	const budgetAfterOverhead = Math.max(0, remainingMs - fixedOverheadMs);
 	const affordable = Math.floor(
-		((remainingMs / 1000) * concurrency * safetyFactor) / (dryRunMs / 1000),
+		((budgetAfterOverhead / 1000) * effectiveConcurrency * safetyFactor) /
+			(dryRunMs / 1000),
 	);
 	return Math.max(1, affordable);
 }

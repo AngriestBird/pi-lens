@@ -20,6 +20,7 @@ import {
 	decideMutationOutcome,
 	dedupePatterns,
 	describePartialInterruptCause,
+	describePartialMutationOutcome,
 	describeStrykerFailure,
 	describeZeroMutantOutcome,
 	DEFAULT_MAX_RANGES,
@@ -863,6 +864,21 @@ describe("parseDryRunCost (#3531 round 2 S2)", () => {
 });
 
 describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
+	it("samples the #3683 run instead of admitting 270 mutants into a 60-minute budget", () => {
+		// Recurrence #3683: 270 measured mutants at 17,824ms per mutant were
+		// admitted as "within the remaining budget" even though the projected
+		// mutation run plus fixed overhead and safety margin did not fit.
+		const allowed = estimateAffordableMutants({
+			remainingMs: 3_600_000,
+			concurrency: 2,
+			dryRunMs: 17_824,
+			fixedOverheadMs: 300_000,
+			safetyFactor: 0.7,
+		});
+
+		expect(allowed).toBeLessThan(270);
+	});
+
 	it("implements the reviewer's formula: budget × concurrency ÷ dry-run seconds, safety-factored", () => {
 		// 3600s remaining, concurrency 2, 2s dry run, safetyFactor 1 (isolate
 		// the arithmetic from the safety margin): 3600 * 2 / 2 = 3600.
@@ -944,6 +960,29 @@ describe("dedupePatterns (#3531 round 2 S3)", () => {
 });
 
 describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
+	it("classifies a timed-out partial report with its evaluated count, score, and survivors (#3683)", () => {
+		const verdict = describePartialMutationOutcome(
+			{
+				status: 143,
+				signal: null,
+				error: Object.assign(new Error("spawnSync ETIMEDOUT"), {
+					code: "ETIMEDOUT",
+				}),
+			},
+			60,
+			{
+				evaluated: 221,
+				total: 270,
+				score: "42.53",
+				survivors: ["scripts/lib/stryker-diff.mjs:521"],
+			},
+		);
+
+		expect(verdict).toBe(
+			"mutation diff: budget expired after 221 of 270 mutants evaluated; partial score 42.53%; survivors: scripts/lib/stryker-diff.mjs:521",
+		);
+	});
+
 	it("never says 'no mutants evaluated' -- some mutants WERE, which is why a partial report exists", () => {
 		// Recurrence: the review found the partial reason quoting
 		// describeStrykerFailure's "no mutants evaluated" prefix directly under

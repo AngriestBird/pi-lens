@@ -17,7 +17,7 @@ import {
 	dedupePatterns,
 	DEFAULT_MAX_FILES,
 	DEFAULT_MAX_RANGES,
-	describePartialInterruptCause,
+	describePartialMutationOutcome,
 	describeStrykerFailure,
 	estimateAffordableMutants,
 	formatCapNotice,
@@ -27,6 +27,7 @@ import {
 	isScriptMutationFile,
 	mapRelatedTests,
 	DEFAULT_MAX_TESTS,
+	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
@@ -497,6 +498,7 @@ if (!cost) {
 		remainingMs: remainingBudgetMs(),
 		concurrency: CONCURRENCY,
 		dryRunMs: cost.dryRunMs,
+		fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	});
 	if (cost.totalMutants > allowedMutants) {
 		const keepRangeCount = Math.max(
@@ -593,6 +595,13 @@ for (;;) {
 				);
 			}
 		}
+		const partialSurvivors = partialMutants
+			.filter((entry) => entry.status === "Survived")
+			.map((entry) =>
+				entry.tsLocation
+					? `${entry.tsLocation.fileName}:${entry.tsLocation.line}`
+					: `${entry.fileName}:${entry.location?.start?.line ?? "?"}`,
+			);
 		// round 2 R2-2: routed through decideMutationOutcome, the same
 		// function the two zero-mutant branches use, so a mutation of any of
 		// the three original independent conditions is caught by one shared
@@ -605,10 +614,15 @@ for (;;) {
 			rangesTotal: allPatterns.length,
 			totalMutants: costEstimate?.totalMutants ?? null,
 			failureReason: describeStrykerFailure(result, budgetMinutes, { tests }),
-			partialReason: describePartialInterruptCause(result, budgetMinutes),
+			partialReason: describePartialMutationOutcome(result, budgetMinutes, {
+				evaluated: partialMutants.length,
+				total: costEstimate?.totalMutants ?? null,
+				score: partialScore,
+				survivors: partialSurvivors,
+			}),
 		});
-		console.error(describeStrykerFailure(result, budgetMinutes, { tests }));
 		if (outcome.partial) {
+			console.error(outcome.partial.reason);
 			console.log(
 				`mutation diff: partial report -- ${outcome.partial.evaluated} of ${outcome.partial.total ?? "an unknown total of"} mutant(s) evaluated before the interrupt`,
 			);
@@ -629,6 +643,7 @@ for (;;) {
 				}),
 			);
 		} else {
+			console.error(describeStrykerFailure(result, budgetMinutes, { tests }));
 			writeReport(
 				null,
 				baseMeta({
