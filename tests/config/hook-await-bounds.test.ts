@@ -1542,24 +1542,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would add a second timer per target.",
 		owner: "#2523 slice 3",
 	},
-	"index.ts#037ff762~80c6c04d": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
-			"the settle's branch epoch.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#03f9a37d~c085098b": {
+	"index.ts#03f9a37d~70299538": {
 		family: "hook-await",
 		site: "agent_settled",
 		reason:
 			"`onAgentSettled` awaits its three phases in sequence with no " +
 			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
 			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
-			"the settle's branch epoch.",
+			"the settle's branch epoch. #3620 re-keyed it: the sweep call " +
+			"above it wraps.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#1946ceb9~8beff560": {
@@ -1647,6 +1638,17 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"is waiting for its answer, so no hook budget applies. Flagged " +
 			"only because the await scan covers whole files rather than " +
 			"walking reachability.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#5e46a749~e2db26e6": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
+			"the settle's branch epoch. #3620 re-keyed it: the sweep also " +
+			"takes the settle's lineage handle.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#65b51dab~a327124f": {

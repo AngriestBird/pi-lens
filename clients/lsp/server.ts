@@ -525,8 +525,43 @@ const directLspCommandSkipLoggedUntil = new Map<string, number>();
 // live LSP generation. A session reset can retire that generation while a
 // managed lookup, install, or launch is still awaiting; stale work must not
 // publish into the replacement session (#2351, shape 22).
+//
+// The LSP service is a process singleton, so this counter is one too: a source
+// built per module evaluation would give a second evaluation a second counter
+// for one service, and a handle captured through the first would stay current
+// after the second's `resetLSPService` (#3733, N4 of #3609). The cell shares
+// the `lsp.service` lifetime; it is a sibling family because `lsp/index.ts`,
+// which owns that cell, imports this module.
+const LSP_SERVICE_GENERATION_FAMILY = "lsp.service.generation";
+/**
+ * The counter name `generation` is frozen: a cell of another version hands it
+ * over by name, so a renamed or nested counter would restart its sequence
+ * within the process. Add a field beside it; never rename or move it.
+ */
+const LSP_SERVICE_GENERATION_VERSION = 1;
+
+function lspServiceGenerationCell(): { generation: number } {
+	let seed = 0;
+	return getProcessSingleton(
+		LSP_SERVICE_GENERATION_FAMILY,
+		LSP_SERVICE_GENERATION_VERSION,
+		() => ({ generation: seed }),
+		(previous) => {
+			// A cell from another build is replaced, but its count seeds the new
+			// one: a generation never repeats within a process.
+			const value = (previous as { generation?: unknown } | undefined)
+				?.generation;
+			seed =
+				typeof value === "number" && Number.isSafeInteger(value) && value > 0
+					? value
+					: 0;
+		},
+	);
+}
+
 const lspLaunchAvailabilityGeneration = createGenerationSource(
 	"lsp-launch-availability",
+	lspServiceGenerationCell,
 );
 
 export function resetLspLaunchAvailabilityGeneration(): void {

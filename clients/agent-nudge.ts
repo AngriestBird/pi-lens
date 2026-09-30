@@ -46,9 +46,11 @@
  * behavior change beyond "no nudges".
  */
 import type { FilesTouchedPayload } from "./bus-publish.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import type { ReadGuard } from "./read-guard.js";
+import type { LineageHandle, SessionScope } from "./session-scope.js";
 
 const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 const MAX_NAMES_SHOWN = 5;
@@ -109,18 +111,58 @@ let _relevanceFilteredCount = 0;
 
 // #3598: model-facing advisories a producer cannot put in a tool result because
 // its tool result was already delivered (the deferred agent_end drain). Same
-// `context` channel and the same drain-on-injection rule as `_touched`; bounded
-// so a wedged producer cannot grow it.
+// `context` channel as `_touched`, but drained per session scope (#3748): the
+// queue is process-global while sessions are not, so an untagged advisory was
+// delivered to, or drained by, whichever session's `context` call came first.
+// Bounded so a wedged producer cannot grow it.
 const MAX_QUEUED_ADVISORIES = 8;
-const _advisories: string[] = [];
+
+interface QueuedAdvisory {
+	/** The scope that queued it; current while that scope is live. */
+	readonly scope: LineageHandle;
+	readonly text: string;
+}
+
+const _advisories: QueuedAdvisory[] = [];
+
+/** One counted row per distinct (why, scope) a queued advisory never reached the model. */
+function countDroppedAdvisory(
+	why: "cap" | "scope-retired",
+	scopeId: number,
+): void {
+	incrementDegradationCount({
+		kind: "agent-advisory-dropped",
+		subject: `${why}:${scopeId}`,
+		reason:
+			why === "cap"
+				? `an agent advisory of scope ${scopeId} was dropped: ${MAX_QUEUED_ADVISORIES} were already queued`
+				: `an agent advisory of scope ${scopeId} was dropped: its session scope retired before its next context call`,
+	});
+}
+
+/** Drop what a retired scope queued: no later `context` call belongs to it. */
+function pruneRetiredAdvisories(): void {
+	const live: QueuedAdvisory[] = [];
+	for (const entry of _advisories) {
+		if (entry.scope.isCurrent()) live.push(entry);
+		else countDroppedAdvisory("scope-retired", entry.scope.scopeId);
+	}
+	_advisories.splice(0, _advisories.length, ...live);
+}
 
 /**
- * Queue one advisory for the model's next `context` call. Not gated by the
- * nudge kill switch: it reports that an edit of the agent's may be gone, which
- * is a correctness signal, not a formatting nudge.
+ * Queue one advisory for the next `context` call of `scope`, the session the
+ * producer ran in (capture it before the first await). Not gated by the nudge
+ * kill switch: it reports that an edit of the agent's may be gone, which is a
+ * correctness signal, not a formatting nudge.
  */
-export function queueAgentAdvisory(text: string): void {
-	if (_advisories.length < MAX_QUEUED_ADVISORIES) _advisories.push(text);
+export function queueAgentAdvisory(text: string, scope: LineageHandle): void {
+	pruneRetiredAdvisories();
+	if (_advisories.length >= MAX_QUEUED_ADVISORIES) {
+		countDroppedAdvisory("cap", scope.scopeId);
+		return;
+	}
+	_advisories.push({ scope, text });
 }
 
 /** Test-only: clear accumulator state between test files/cases. */
@@ -367,11 +409,20 @@ export function wireAgentNudgeSubscriber(
  */
 export function consumeAgentNudge(
 	dbg?: (msg: string) => void,
+	/** The session scope of this `context` call; none drains no advisory. */
+	scope?: SessionScope,
 ): { messages: Array<{ role: "user"; content: string }> } | undefined {
 	const touched = consumeTouchedNudge(dbg);
-	const advisories = _advisories.splice(0).map((text) => ({
+	pruneRetiredAdvisories();
+	const own: QueuedAdvisory[] = [];
+	const others: QueuedAdvisory[] = [];
+	for (const entry of _advisories) {
+		(scope && entry.scope.scopeId === scope.scopeId ? own : others).push(entry);
+	}
+	_advisories.splice(0, _advisories.length, ...others);
+	const advisories = own.map((entry) => ({
 		role: "user" as const,
-		content: `[pi-lens automated context — not a user request] ${text}`,
+		content: `[pi-lens automated context — not a user request] ${entry.text}`,
 	}));
 	const messages = [...(touched?.messages ?? []), ...advisories];
 	return messages.length > 0 ? { messages } : undefined;

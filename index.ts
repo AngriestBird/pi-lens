@@ -76,6 +76,7 @@ import {
 } from "./clients/read-guard-branch.js";
 import {
 	beginScope,
+	type LineageHandle,
 	logScopeTransition,
 	retireScope,
 	type SessionScope,
@@ -3070,6 +3071,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	async function runObservedSettledSweepSafely(
 		ctx: DeferredDrainCtx,
 		readGuardBranchEpoch: number,
+		lineage: LineageHandle,
 	): Promise<void> {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
 		try {
@@ -3083,8 +3085,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 					}),
 				// #3521: a /tree can land while the sweep awaits; the replayed
 				// write then must not vouch for a file the new branch never showed.
+				// #3620: nor, after `/new`, for one the new session never read.
 				record: (entry) =>
-					replayThroughMutationBridge({ ...entry, readGuardBranchEpoch }),
+					replayThroughMutationBridge({
+						...entry,
+						readGuardBranchEpoch,
+						lineage,
+					}),
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(runtime.readGuard, candidate),
 				// Merge of #2449 into #2450: #2449 wrote this gate as the
@@ -3690,7 +3697,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// widget diagnostic files, open LSP documents — and never walks the
 				// workspace. Bounded on both axes (timeout + this ctx's abort) and
 				// wrapped, because an advisory sweep must never cost the drain.
-				await runObservedSettledSweepSafely(ctx, settleBranchEpoch);
+				await runObservedSettledSweepSafely(
+					ctx,
+					settleBranchEpoch,
+					settleSession,
+				);
 				await runDeferredMutationDrain(ctx, settleBranchEpoch);
 				// The drain just wrote formatted/autofixed bytes to files pi-lens
 				// itself owns. Re-baseline them, or the NEXT settle reads our own
@@ -4136,7 +4147,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cacheManager,
 						runtime,
 					});
-					const agentNudge = consumeAgentNudge(dbg);
+					const agentNudge = consumeAgentNudge(dbg, scope);
 					const sourceMessages = [
 						{
 							source: "session-guidance" as const,
