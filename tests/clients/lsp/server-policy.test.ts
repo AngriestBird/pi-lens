@@ -2081,6 +2081,40 @@ describe("monorepo root hoisting (#1671)", () => {
 		expect(roots[0]).toBe(tmp);
 	});
 
+	it("records a capped member glob through the Cargo consumer", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const { getDegradationSummary } =
+			await import("../../../clients/degradation-ledger.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-cap-"));
+		dirs.push(tmp);
+		const parts = Array.from({ length: 708 }, () => "a");
+		const relative = parts.join("/");
+		const crateDir = path.join(tmp, ...parts);
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			`[workspace]\nmembers = ["${relative}"]\n`,
+		);
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(crateDir, "Cargo.toml"),
+			'[package]\nname = "deep"\n',
+		);
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(crateDir);
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "workspace-glob-cap",
+					latestReasons: [
+						expect.objectContaining({ subject: String(relative.length) }),
+					],
+				}),
+			]),
+		);
+	});
+
 	it("RustServer.root hoists to the workspace root even when Cargo.toml opens with a UTF-8 BOM (#2498/#2520 round 2, F4)", async () => {
 		const { RustServer } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-bom-"));
