@@ -235,6 +235,8 @@ describe("#3611 the lineage handle", () => {
 		runtime.readGuard.retainBranch(new Set());
 
 		expect(handle.isCurrent("session")).toBe(true);
+		// A bare isCurrent() is the GenerationHandle contract: session level.
+		expect(handle.isCurrent()).toBe(true);
 		expect(handle.isCurrent("branch")).toBe(false);
 		// One epoch: the read guard's is its scope's.
 		expect(runtime.readGuard.currentBranchEpoch).toBe(
