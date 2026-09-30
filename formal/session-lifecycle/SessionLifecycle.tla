@@ -1086,12 +1086,16 @@ NoCrossSessionDelivery ==
     \A d \in advOut : d.o \in lin[sess[d.to]]
 
 \* S2 (#3612): an advisory still queued when its scope retired by /reload is
-\* not lost: once the successor started, it is queued again or delivered.
-\* One queued after its scope retired (late) is an accepted, recorded drop.
+\* not lost: once the successor started, it is queued again, and so is
+\* later delivered, still queued, or dropped for another reason (a later
+\* /new). One queued after its scope retired (late) is an accepted,
+\* recorded drop.
 NoLostAdvisory ==
     pend.k # "reload" =>
         \A d \in advDrop :
             (d.why = "reload" /\ ~d.late)
-                => (\E a \in adv : a.o = d.o) \/ (\E x \in advOut : x.o = d.o)
+                => \/ \E a \in adv : a.o = d.o
+                   \/ \E x \in advOut : x.o = d.o
+                   \/ \E d2 \in advDrop : d2.o = d.o /\ (d2.why # "reload" \/ d2.late)
 
 =============================================================================
