@@ -675,7 +675,7 @@ function formatWriteOrdinal(n: number): string {
 		case 1:
 			return `${n}st`;
 		case 2:
-			return `${n}nd`;
+			return `${n}nd`; // spellchecker:disable-line
 		case 3:
 			return `${n}rd`;
 		default:
