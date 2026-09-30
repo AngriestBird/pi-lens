@@ -43,17 +43,19 @@
 (*   "handoffAtShutdown" the hand-off slot is written at session_shutdown  *)
 (*                       with targetSessionFile (D3); without it, at       *)
 (*                       session_before_fork (the G10 design)              *)
-(*   "roleGatedHandoff"  only a primary session_start takes the slot       *)
+(*   "consumeOnMatch"    a session_start consumes the slot only when it    *)
+(*                       matches (maintainer decision on F2, amending      *)
+(*                       section 3.4); an unmatched slot stays in place.   *)
+(*                       Without it, every start takes the slot (section   *)
+(*                       3.4 as written) and discards it when unmatched    *)
 (*   "processOrderTurn"  the write-order turn is a process counter (the    *)
 (*                       design's nextOrderTurn); without it, a field of   *)
 (*                       each entry-module evaluation (G5 _writeOrderTurn) *)
 (*   "dedupe"            the #2890 duplicate session_start gate            *)
-(*   "forwardStale"      the model's amendment (not in the design): a      *)
-(*                       read-guard write whose handle is no longer        *)
-(*                       current is re-filtered against every live scope   *)
-(*                       descending from the writer's (parentScopeId),     *)
-(*                       and joins a descendant's pending hand-off or      *)
-(*                       unserved sidecar, instead of being dropped        *)
+(*   "recordDrop"        a dropped read-guard write whose entry is still   *)
+(*                       on its conversation's branch leaves a record (the *)
+(*                       maintainer decision on F1: the drop stays, and    *)
+(*                       is counted in the degradation ledger)             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -67,6 +69,9 @@ CONSTANTS
     FixParts,       \* see the header
     MaxSteps,       \* bound on host transitions
     MaxTurns,       \* bound on turn_start events (primary and secondary)
+    LateHandlers,   \* TRUE: a read-guard writer may hold any entry of its
+                    \*   branch, so its handler outlived a later entry;
+                    \*   FALSE: it holds the branch's newest entry
     Policy(_, _),   \* [store, reason] -> action
     Fence(_),       \* store -> "branch" | "session" | "service" | "none"
     SecPolicy(_)    \* store -> "own" | "shared" | "primaryOnly"
@@ -169,8 +174,6 @@ VARIABLES
     lin,                     \* file -> the scopes whose conversation its history
                              \* holds (/fork, /clone and pi --fork copy it); the
                              \* truth the invariants check, whatever the policy
-    par,                     \* scope -> the scope its facts were adopted from
-                             \* (the design's parentScopeId; 0: none)
     slot,                    \* the process hand-off slot
     side, sideOwner,         \* per-file sidecar: facts; the scope that saved it
     wr,                      \* in-flight writers
@@ -182,16 +185,17 @@ VARIABLES
     wgTok, wgDone,           \* the widget guard's stored token; written this turn
     lastTok, prevMax,        \* the last order token drawn, the max before it
     ownDrop,                 \* a guard dropped a write whose own lineage was current
+    recorded,                \* dropped RG facts that left a degradation record
     resets, dupDone,         \* session_start mutation passes per scope; dup seen
     landed, reads,           \* RG facts that reached a cell; RG writes completed
     predOf,                  \* scope -> the scope its session_start replaced
     steps, used
 
 vars == <<st, role, sess, ep, primary, last, nxt, pend, forking, branch, cell,
-          imp, lin, par, slot, side, sideOwner, wr, entry, intent,
+          imp, lin, slot, side, sideOwner, wr, entry, intent,
           reg, svc, fleet, turn, begun, turns, procTurn, evalTurn, wgTok,
-          wgDone, lastTok, prevMax, ownDrop, resets, dupDone, landed, reads,
-          predOf, steps, used>>
+          wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone, landed,
+          reads, predOf, steps, used>>
 
 Init ==
     /\ st = [t \in Tickets |-> IF t = 1 THEN "live" ELSE "free"]
@@ -204,7 +208,6 @@ Init ==
     /\ cell = [t \in Tickets |-> {}]
     /\ imp = [t \in Tickets |-> {}]
     /\ lin = [f \in Files |-> IF f = "A" THEN {1} ELSE {}]
-    /\ par = [t \in Tickets |-> 0]
     /\ slot = NoSlot
     /\ side = [f \in Files |-> {}]
     /\ sideOwner = [f \in Files |-> 0]
@@ -216,7 +219,7 @@ Init ==
     /\ turn = [t \in Tickets |-> 0] /\ begun = [t \in Tickets |-> 0]
     /\ turns = 0 /\ procTurn = 0 /\ evalTurn = 0
     /\ wgTok = 0 /\ wgDone = FALSE /\ lastTok = 0 /\ prevMax = 0
-    /\ ownDrop = FALSE
+    /\ ownDrop = FALSE /\ recorded = {}
     /\ resets = [t \in Tickets |-> IF t = 1 THEN 1 ELSE 0]
     /\ dupDone = FALSE
     /\ landed = {} /\ reads = {}
@@ -230,11 +233,6 @@ Init ==
 \* shared with secondaries (today), the one the module-level runtime serves.
 CellOf(t) == IF role[t] = "secondary" /\ SecPolicy("RG") = "shared"
              THEN last ELSE t
-
-\* A scope and the scopes its facts descend from (parent tickets are always
-\* smaller, so the recursion ends).
-RECURSIVE Anc(_)
-Anc(t) == IF par[t] = 0 THEN {t} ELSE {t} \cup Anc(par[t])
 
 Ents(S) == {x.e : x \in S}
 
@@ -267,9 +265,9 @@ BeforeFork(k) ==
                ELSE [has |-> TRUE, from |-> primary, file |-> sess[primary],
                      target |-> "-", facts |-> cell[primary], takenBy |-> 0]
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, branch, cell,
-                   imp, lin, par, side, sideOwner, wr, entry,
+                   imp, lin, side, sideOwner, wr, entry,
                    intent, reg, svc, fleet, turn, begun, turns, procTurn,
-                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, resets,
+                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets,
                    dupDone, landed, reads, predOf, steps, used>>
 
 \* Another extension cancels the fork after pi-lens' handler ran (I3).
@@ -277,9 +275,9 @@ CancelFork ==
     /\ "CancelFork" \in Transitions /\ forking # "no" /\ steps < MaxSteps
     /\ forking' = "no" /\ steps' = steps + 1
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, branch, cell,
-                   imp, lin, par, slot, side, sideOwner, wr, entry,
+                   imp, lin, slot, side, sideOwner, wr, entry,
                    intent, reg, svc, fleet, turn, begun, turns, procTurn,
-                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, resets,
+                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets,
                    dupDone, landed, reads, predOf, used>>
 
 TargetOf(k) ==
@@ -327,15 +325,25 @@ Retire(k) ==
        /\ forking' = "no"
        /\ steps' = steps + 1
        /\ used' = used \cup {k}
-    /\ UNCHANGED <<role, sess, ep, last, nxt, branch, cell, imp, lin, par,
+    /\ UNCHANGED <<role, sess, ep, last, nxt, branch, cell, imp, lin,
                    intent, reg, turn, begun, turns, procTurn, evalTurn, wgTok,
-                   wgDone, lastTok, prevMax, ownDrop, resets, dupDone, landed,
+                   wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone, landed,
                    reads, predOf>>
 
 NewFile(k) == IF k = "reload" THEN pend.file ELSE TargetOf(k)
 
+\* The design's match (section 3.4): the slot names the taker's previous
+\* session file and, under D3, the targetSessionFile the host replaced it
+\* with. A primary start passes its pending replacement. A subagent's start
+\* is not a replacement: it has no previous file, and its own file is "S".
+SlotMatch(prev, tgt) ==
+    /\ slot.has /\ slot.takenBy = 0
+    /\ slot.file = prev
+    /\ (Has("handoffAtShutdown") => slot.target = tgt)
+
 \* session_start of the new activation: the design's beginScope. It takes
-\* the slot once (every primary start), then runs each store's action.
+\* the slot once, then runs each store's action. In-process under D3 the
+\* slot it finds is always its predecessor's, so it always matches (F3).
 Begin ==
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
     /\ LET k == pend.k
@@ -345,9 +353,7 @@ Begin ==
                    [] k = "clone" -> branch[pend.file]
                    [] OTHER       -> branch[f]
            a == Policy("RG", k)
-           match == /\ slot.has /\ slot.takenBy = 0
-                    /\ slot.file = pend.file
-                    /\ (Has("handoffAtShutdown") => slot.target = pend.target)
+           match == SlotMatch(pend.file, pend.target)
            src == IF a \in {"carry", "filter-by-branch", "import-parent"} /\ match
                   THEN "slot"
                   ELSE IF a = "import-parent" THEN "parent"
@@ -357,10 +363,6 @@ Begin ==
                      [] src = "parent" -> side[pend.file]
                      [] src = "own"    -> side[f]
                      [] OTHER          -> {}
-           from == CASE src = "slot"   -> slot.from
-                     [] src = "parent" -> sideOwner[pend.file]
-                     [] src = "own"    -> sideOwner[f]
-                     [] OTHER          -> 0
            kept == IF a = "carry" THEN base ELSE {x \in base : x.e \in nb}
        IN
        /\ st' = [st EXCEPT ![t] = "live"]
@@ -373,7 +375,6 @@ Begin ==
        /\ lin' = IF k \in {"fork", "clone"}
                  THEN [lin EXCEPT ![f] = lin[pend.file] \cup {t}]
                  ELSE [lin EXCEPT ![f] = @ \cup {t}]
-       /\ par' = [par EXCEPT ![t] = from]
        /\ slot' = IF slot.has /\ slot.takenBy = 0
                   THEN [slot EXCEPT !.takenBy = t] ELSE slot
        /\ reg' = IF RegOn THEN [reg EXCEPT ![t] = "queued"] ELSE reg
@@ -389,7 +390,7 @@ Begin ==
        /\ pend' = NoPend
     /\ UNCHANGED <<ep, forking, side, sideOwner, wr, entry, intent,
                    svc, fleet, turn, begun, turns, procTurn, wgDone, lastTok,
-                   prevMax, ownDrop, dupDone, landed, reads, steps, used>>
+                   prevMax, ownDrop, recorded, dupDone, landed, reads, steps, used>>
 
 \* pi --fork <path>: a new process after this one quit. The header names the
 \* parent; the parent's sidecar is the only channel.
@@ -419,8 +420,8 @@ PiFork ==
        /\ predOf' = [predOf EXCEPT ![t] = pend.from]
        /\ pend' = NoPend
        /\ steps' = steps + 1 /\ used' = used \cup {"piFork"}
-    /\ UNCHANGED <<ep, forking, par, side, sideOwner, wr, svc, turn,
-                   begun, turns, wgDone, ownDrop, dupDone, landed, reads>>
+    /\ UNCHANGED <<ep, forking, side, sideOwner, wr, svc, turn,
+                   begun, turns, wgDone, ownDrop, recorded, dupDone, landed, reads>>
 
 \* /tree: the same activation. The branch loses its last entry and the
 \* branch epoch bumps (G10's epoch, moved into the scope by S1).
@@ -440,9 +441,9 @@ Tree ==
                     [] OTHER -> cell
        /\ steps' = steps + 1 /\ used' = used \cup {"tree"}
     /\ UNCHANGED <<st, role, sess, primary, last, nxt, pend, forking, imp, lin,
-                   par, slot, side, sideOwner, wr, entry, intent,
+                   slot, side, sideOwner, wr, entry, intent,
                    reg, svc, fleet, turn, begun, turns, procTurn, evalTurn,
-                   wgTok, wgDone, lastTok, prevMax, ownDrop, resets, dupDone,
+                   wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone,
                    landed, reads, predOf>>
 
 \* The LSP idle reset: pi-lens' own timer, not a host event. It resets the
@@ -454,14 +455,15 @@ IdleReset ==
        ELSE UNCHANGED <<svc, fleet>>
     /\ steps' = steps + 1 /\ used' = used \cup {"idle"}
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, wr, entry, intent, reg, turn, begun, turns,
                    procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
-                   ownDrop, resets, dupDone, landed, reads, predOf>>
+                   ownDrop, recorded, resets, dupDone, landed, reads, predOf>>
 
 \* A concurrent secondary binds (I6). It skips handleSessionStart (#473) and
-\* gets fresh own cells. Without the role gate, its beginScope takes the
-\* slot like any start, and discards it as unmatched.
+\* gets fresh own cells. Its beginScope calls takeHandoff() like any start.
+\* Section 3.4 as written takes the slot and discards it as unmatched; with
+\* consumeOnMatch the unmatched slot stays in place for the primary.
 SecStart ==
     /\ "SecStart" \in Transitions /\ steps < MaxSteps /\ "secStart" \notin used
     /\ LET t == nxt IN
@@ -470,13 +472,14 @@ SecStart ==
        /\ sess' = [sess EXCEPT ![t] = "S"]
        /\ lin' = [lin EXCEPT !["S"] = {t}]
        /\ nxt' = t + 1
-       /\ slot' = IF ~Has("roleGatedHandoff") /\ slot.has /\ slot.takenBy = 0
-                  THEN [slot EXCEPT !.takenBy = t] ELSE slot
+       /\ LET takes == IF Has("consumeOnMatch") THEN SlotMatch("-", "S")
+                        ELSE slot.has /\ slot.takenBy = 0
+          IN slot' = IF takes THEN [slot EXCEPT !.takenBy = t] ELSE slot
     /\ steps' = steps + 1 /\ used' = used \cup {"secStart"}
-    /\ UNCHANGED <<ep, primary, last, pend, forking, branch, cell, imp, par,
+    /\ UNCHANGED <<ep, primary, last, pend, forking, branch, cell, imp,
                    side, sideOwner, wr, entry, intent, reg, svc,
                    fleet, turn, begun, turns, procTurn, evalTurn, wgTok,
-                   wgDone, lastTok, prevMax, ownDrop, resets, dupDone, landed,
+                   wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone, landed,
                    reads, predOf>>
 
 \* The secondary's session_shutdown: its scope retires and its own cells go.
@@ -488,9 +491,9 @@ SecEnd ==
           /\ cell' = [cell EXCEPT ![s] = {}]
     /\ steps' = steps + 1
     /\ UNCHANGED <<role, sess, ep, primary, last, nxt, pend, forking, branch,
-                   imp, lin, par, slot, side, sideOwner, wr, entry,
+                   imp, lin, slot, side, sideOwner, wr, entry,
                    intent, reg, svc, fleet, turn, begun, turns, procTurn,
-                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, resets,
+                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets,
                    dupDone, landed, reads, predOf, used>>
 
 \* A duplicate session_start for the same replacement (I5, #2890).
@@ -503,10 +506,10 @@ Dup ==
             /\ cell' = [cell EXCEPT ![primary] = {}]
     /\ steps' = steps + 1
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, imp, lin, par, slot, side, sideOwner, wr,
+                   branch, imp, lin, slot, side, sideOwner, wr,
                    entry, intent, reg, svc, fleet, turn, begun, turns,
                    procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
-                   ownDrop, landed, reads, predOf, used>>
+                   ownDrop, recorded, landed, reads, predOf, used>>
 
 -----------------------------------------------------------------------------
 (* Turns and the widget's write-order guard.                               *)
@@ -518,9 +521,9 @@ TurnStart ==
     /\ turns' = turns + 1
     /\ Draw
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, wr, entry, intent, reg, svc, fleet, wgTok,
-                   ownDrop, resets, dupDone, landed, reads, predOf, steps,
+                   ownDrop, recorded, resets, dupDone, landed, reads, predOf, steps,
                    used>>
 
 \* A secondary's turn_start. Today onTurnStart calls runtime.beginTurn() with
@@ -535,9 +538,9 @@ SecTurn ==
     /\ turns' = turns + 1
     /\ Draw
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, wr, entry, intent, reg, svc, fleet, wgTok,
-                   ownDrop, resets, dupDone, landed, reads, predOf, steps,
+                   ownDrop, recorded, resets, dupDone, landed, reads, predOf, steps,
                    used>>
 
 \* A pipeline verdict write to the widget in the current turn. The guard
@@ -551,9 +554,9 @@ WidgetWrite ==
        THEN wgTok' = OrderNow /\ UNCHANGED ownDrop
        ELSE ownDrop' = TRUE /\ UNCHANGED wgTok
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, wr, entry, intent, reg, svc, fleet, turn, begun,
-                   turns, procTurn, evalTurn, lastTok, prevMax, resets,
+                   turns, procTurn, evalTurn, lastTok, prevMax, recorded, resets,
                    dupDone, landed, reads, predOf, steps, used>>
 
 -----------------------------------------------------------------------------
@@ -563,19 +566,26 @@ WidgetWrite ==
 \* record or recordWritten (#3596), or the agent_settled drain's (G10 F1).
 \* "secRead": the same in a secondary. "heartbeat": the registry heartbeat's
 \* repair. "lsp": LSP work that can spawn a server (#3576).
+\* The entry a writer holds. A handler that has not outlived a later entry
+\* holds its branch's newest one (LateHandlers = FALSE).
+Held(x, s) ==
+    IF x \notin {"read", "secRead"} THEN {1}
+    ELSE IF LateHandlers \/ branch[sess[s]] = {} THEN branch[sess[s]]
+    ELSE {Max(branch[sess[s]])}
+
 WriterBegin(x) ==
     /\ x \in FlightIds /\ wr[x].pc = "idle"
     /\ \E s \in Tickets :
           /\ st[s] = "live"
           /\ IF x = "secRead" THEN role[s] = "secondary" ELSE s = primary
-          /\ \E e \in (IF x \in {"read", "secRead"} THEN branch[sess[s]] ELSE {1}) :
+          /\ \E e \in Held(x, s) :
                 wr' = [wr EXCEPT ![x] = [pc |-> "flight", s |-> s, ep |-> ep[s],
                                          e |-> e, svc |-> svc]]
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, entry, intent, reg, svc, fleet, turn, begun,
                    turns, procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
-                   ownDrop, resets, dupDone, landed, reads, predOf, steps,
+                   ownDrop, recorded, resets, dupDone, landed, reads, predOf, steps,
                    used>>
 
 LandRead(x) ==
@@ -587,42 +597,22 @@ LandRead(x) ==
            f == [e |-> w.e, o |-> w.s]
            current == st[hs] = "live" /\ (Fence("RG") = "branch" => ep[hs] = hep)
            lineageCurrent == st[w.s] = "live" /\ ep[w.s] = w.ep
-           \* forwardStale's targets: every live primary descending from the
-           \* writer's scope whose branch still holds the entry (after /tree,
-           \* the writer's own scope); the pending hand-off of a descendant;
-           \* the sidecar of a descendant's file that no live scope serves.
-           liveT == {t \in Tickets :
-                        /\ st[t] = "live" /\ role[t] = "primary"
-                        /\ w.s \in Anc(t) /\ w.e \in branch[sess[t]]}
-           toSlot == slot.has /\ slot.takenBy = 0 /\ w.s \in Anc(slot.from)
-           sideT == {g \in Files :
-                        /\ sideOwner[g] # 0 /\ st[sideOwner[g]] = "retired"
-                        /\ w.s \in Anc(sideOwner[g]) /\ w.e \in branch[g]
-                        /\ \A t \in Tickets : st[t] = "live" => sess[t] # g}
        IN
        /\ reads' = reads \cup {f}
        /\ IF current
           THEN /\ cell' = [cell EXCEPT ![CellOf(hs)] = @ \cup {f}]
                /\ landed' = landed \cup {f}
                /\ wr' = [wr EXCEPT ![x].pc = "landed"]
-               /\ UNCHANGED <<imp, slot, side, ownDrop>>
-          ELSE IF Has("forwardStale") /\ (liveT # {} \/ toSlot \/ sideT # {})
-          THEN /\ cell' = [t \in Tickets |->
-                             IF t \in liveT THEN cell[t] \cup {f} ELSE cell[t]]
-               /\ imp' = [t \in Tickets |->
-                             IF t \in liveT THEN imp[t] \cup {f} ELSE imp[t]]
-               /\ landed' = IF liveT # {} THEN landed \cup {f} ELSE landed
-               /\ slot' = IF toSlot THEN [slot EXCEPT !.facts = @ \cup {f}]
-                          ELSE slot
-               /\ side' = [g \in Files |->
-                             IF g \in sideT THEN side[g] \cup {f} ELSE side[g]]
-               /\ wr' = [wr EXCEPT ![x].pc = "forwarded"]
-               /\ UNCHANGED ownDrop
+               /\ UNCHANGED <<ownDrop, recorded>>
           ELSE /\ wr' = [wr EXCEPT ![x].pc = "dropped"]
                /\ ownDrop' = (ownDrop \/ lineageCurrent)
-               /\ UNCHANGED <<cell, imp, slot, side, landed>>
+               \* F1's record: the dropped entry is still on the branch of
+               \* the writer's conversation, so a live scope may hold it.
+               /\ recorded' = IF Has("recordDrop") /\ w.e \in branch[sess[w.s]]
+                               THEN recorded \cup {f} ELSE recorded
+               /\ UNCHANGED <<cell, landed>>
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, lin, par, sideOwner, entry, intent, reg,
+                   branch, imp, lin, slot, side, sideOwner, entry, intent, reg,
                    svc, fleet, turn, begun, turns, procTurn, evalTurn, wgTok,
                    wgDone, lastTok, prevMax, resets, dupDone, predOf, steps,
                    used>>
@@ -642,9 +632,9 @@ LandHeartbeat ==
        /\ wr' = [wr EXCEPT !["heartbeat"].pc = IF ok THEN "landed" ELSE "dropped"]
        /\ ownDrop' = (ownDrop \/ (~ok /\ st[w.s] = "live"))
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, intent, reg, svc, fleet, turn, begun, turns,
-                   procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
+                   procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax, recorded,
                    resets, dupDone, landed, reads, predOf, steps, used>>
 
 \* LSP work that outlived its hook calls getLSPService(). With G5's
@@ -659,9 +649,9 @@ LandLsp ==
        /\ wr' = [wr EXCEPT !["lsp"].pc = IF ok THEN "landed" ELSE "dropped"]
        /\ ownDrop' = (ownDrop \/ (~ok /\ w.svc = svc))
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, entry, intent, reg, svc, turn, begun, turns,
-                   procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
+                   procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax, recorded,
                    resets, dupDone, landed, reads, predOf, steps, used>>
 
 \* A queued registration lands; the #3498 generation gate drops it once its
@@ -674,9 +664,9 @@ RegLand(t) ==
        ELSE /\ reg' = [reg EXCEPT ![t] = "dropped"]
             /\ UNCHANGED <<entry, intent>>
     /\ UNCHANGED <<st, role, sess, ep, primary, last, nxt, pend, forking,
-                   branch, cell, imp, lin, par, slot, side,
+                   branch, cell, imp, lin, slot, side,
                    sideOwner, wr, svc, fleet, turn, begun, turns, procTurn,
-                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, resets,
+                   evalTurn, wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets,
                    dupDone, landed, reads, predOf, steps, used>>
 
 Next ==
@@ -741,11 +731,20 @@ NoLostCarry ==
 
 \* The same over every read-guard write that COMPLETED, whether it reached a
 \* cell or a guard dropped it: a read whose tool result is in the live
-\* conversation authorises an edit there. A violation is a false block.
+\* conversation authorises an edit there. A violation is a false block. The
+\* design accepts it (F1); the AcceptedLateRead* configs pin where it occurs.
 NoFalseBlock ==
     \A t \in Tickets :
         st[t] = "live" =>
             \A x \in reads :
+                (x.o \in lin[sess[t]] /\ x.e \in branch[sess[t]])
+                    => x.e \in Ents(cell[CellOf(t)])
+
+\* F1's decision: every false block left a degradation record.
+NoUnrecordedFalseBlock ==
+    \A t \in Tickets :
+        st[t] = "live" =>
+            \A x \in reads \ recorded :
                 (x.o \in lin[sess[t]] /\ x.e \in branch[sess[t]])
                     => x.e \in Ents(cell[CellOf(t)])
 
@@ -773,5 +772,12 @@ OrderMonotone == lastTok = 0 \/ prevMax < lastTok
 
 \* #2890: one session_start mutation pass per scope.
 OneResetPerScope == \A t \in Tickets : resets[t] <= 1
+
+\* A live scope's cell holds only facts of its own conversation lineage, on
+\* its current branch (the review's invariant).
+NoForeignFact ==
+    \A t \in Tickets :
+        st[t] = "live" =>
+            \A x \in cell[t] : x.o \in lin[sess[t]] /\ x.e \in branch[sess[t]]
 
 =============================================================================
