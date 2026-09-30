@@ -1972,12 +1972,15 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 	// real GNU coreutils 9.4 (PR body has the transcript).
 	describe("bundled short mktemp flags and -t (review F2)", () => {
 		it("denies -d -t, -dt, -dp DIR, and -qd /tmp/X", () => {
-			expect(findDeny("mktemp -d -t rvprobe.XXXX", PAYLOAD_CWD)).toBe(
-				"tmpCheckout",
-			);
-			expect(findDeny("mktemp -dt rvprobe.XXXX", PAYLOAD_CWD)).toBe(
-				"tmpCheckout",
-			);
+			// #3556 S4: make the intended /tmp landing explicit. The classifier
+			// correctly reads the real process environment for `-t`, so an
+			// orchestrator lane's off-/tmp TMPDIR must not change this fixture.
+			expect(
+				findDeny("TMPDIR=/tmp mktemp -d -t rvprobe.XXXX", PAYLOAD_CWD),
+			).toBe("tmpCheckout");
+			expect(
+				findDeny("TMPDIR=/tmp mktemp -dt rvprobe.XXXX", PAYLOAD_CWD),
+			).toBe("tmpCheckout");
 			expect(findDeny("mktemp -dp /tmp rvprobe.XXXX", PAYLOAD_CWD)).toBe(
 				"tmpCheckout",
 			);
