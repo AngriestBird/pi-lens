@@ -178,7 +178,7 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		write("clients/second.ts", "export const second = true;\n");
 		write("tests/clients/second.test.ts", "it('second', () => {});\n");
 		const git = (args: string[]) =>
-			gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" });
+			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
 		git(["init", "--quiet", "--initial-branch=main"]);
 		git(["config", "user.name", "pi-lens test"]);
 		git(["config", "user.email", "test@example.com"]);
