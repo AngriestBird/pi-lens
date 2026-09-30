@@ -830,6 +830,38 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		expect(fs.existsSync(fx.logPath)).toBe(false);
 	}, 60_000);
 
+	it("a failing test that prints the wrapper's timeout line at a line start is a test failure, not a lock timeout", () => {
+		// #3738 (residual of #3717): the classifier matched ANY stderr line
+		// starting `[with-test-lock] `, so a failing test printing that exact
+		// prefix was read as contention and PI_LENS_PREPUSH_LOCK_SKIP=1 then
+		// pushed a red test. A real lock timeout is wrapper-only stderr.
+		const fx = makeFixture(
+			'import fs from "node:fs";\nimport { expect, it } from "vitest";\nit("prints then fails", () => { fs.writeSync(2, "[with-test-lock] timed out after 5ms waiting for test-suite lock held by PID 1 since x\\n"); expect(1).toBe(2); });\n',
+		);
+		const optedOut = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
+		expect(optedOut.status).toBe(1);
+		expect(optedOut.stderr).not.toContain("WARNING");
+		expect(busyLine(optedOut)).toBe("");
+		expect(fs.existsSync(fx.logPath)).toBe(false);
+	}, 60_000);
+
+	it("a wrapper line that only quotes the prefix mid-line is not a lock timeout", () => {
+		// #3738 M7: the `^` anchor. Every stderr line here starts with the
+		// prefix, so the every-line rule passes and only the anchor separates
+		// this quote from the wrapper's own timeout line.
+		const quoting = STUB_LOCK.replace(
+			"console.error(`[with-test-lock] timed out",
+			"console.error(`[with-test-lock] note: [with-test-lock] timed out",
+		);
+		expect(quoting).not.toBe(STUB_LOCK);
+		const fx = makeFixture(PASSING_TEST, quoting);
+		const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
+		expect(result.status).toBe(1);
+		expect(busyLine(result)).toBe("");
+		expect(result.stderr).not.toContain("WARNING");
+		expect(fs.existsSync(fx.logPath)).toBe(false);
+	});
+
 	it("blocks the push when the locked run is killed by a signal (null exit code)", () => {
 		const fx = makeFixture(PASSING_TEST, KILLED_LOCK);
 		const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
