@@ -238,7 +238,6 @@ describe("#3801 docs-only pull requests skip the heavy CI", () => {
 		for (const id of HEAVY) expect(results[id], id).toBe("skipped");
 		expect(results["mutation-comment"]).toBe("skipped");
 		for (const id of [
-			"validate-merge-train-dispatch",
 			"changes",
 			"dependency-boundaries",
 			"changelog-fragment-fastfail",

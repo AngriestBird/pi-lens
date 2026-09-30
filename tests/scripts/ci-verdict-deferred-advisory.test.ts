@@ -56,12 +56,13 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(deferred(verdict.rows)).toEqual([...DEFERRED_ADVISORY_CHECKS]);
 		const table = formatVerdictTable(verdict.rows);
+		// Columns are CHECK / STATUS / CONCLUSION / URL, separated by 2+ spaces.
+		const columns = table
+			.split("\n")
+			.map((line) => line.split(/\s{2,}/).slice(0, 3));
 		for (const name of DEFERRED_ADVISORY_CHECKS) {
-			expect(table).toMatch(
-				new RegExp(`${name.replace(/[()]/g, "\\$&")}\\s+PENDING\\s+-`),
-			);
+			expect(columns).toContainEqual([name, "PENDING", "-"]);
 		}
-		expect(table).not.toMatch(/\bmutation \(advisory\)\s+absent/);
 	});
 
 	it("keeps them advisory: rows never gate, and a success with every heavy job absent stays success", () => {

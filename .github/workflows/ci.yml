@@ -795,19 +795,19 @@ jobs:
     name: Heavy advisory gate (advisory)
     needs:
       - changes
-      - validate-merge-train-dispatch
       - lint-and-typecheck
       - tla-models
       - unit-tests
       - install-test
-    # #3801: a docs-only diff makes `unit-tests` pass on SKIPPED shards, and the
-    # heavy jobs must not start for it. So: run only for a code diff, and only
+    # #3801: `validate-merge-train-dispatch` is reached through every job below
+    # (and #3859 removes that hop), so it is not listed here. A docs-only diff
+    # makes `unit-tests` pass on SKIPPED shards, and the heavy jobs must not
+    # start for it. So: run only for a code diff, and only
     # when every needed job really succeeded (`!cancelled()` so the explicit
     # result checks, not the implicit skip-if-a-need-skipped rule, decide).
     if: >-
       !cancelled() &&
       needs.changes.outputs.code == 'true' &&
-      needs.validate-merge-train-dispatch.result == 'success' &&
       needs.lint-and-typecheck.result == 'success' &&
       needs.tla-models.result == 'success' &&
       needs.unit-tests.result == 'success' &&
@@ -842,7 +842,7 @@ jobs:
   # on 7 consecutive master/PR runs.
   unit-tests-windows:
     name: Unit tests Windows (advisory)
-    needs: [validate-merge-train-dispatch, heavy-gate]
+    needs: heavy-gate
     if: needs.heavy-gate.outputs.ready == 'true'
     runs-on: windows-latest
     outputs:
@@ -1496,7 +1496,7 @@ jobs:
   # `heavy-gate` above. The runtime ceiling below is unchanged.
   mutation:
     name: mutation (advisory)
-    needs: [validate-merge-train-dispatch, heavy-gate]
+    needs: heavy-gate
     # #3801: moved here from the former mutation.yml so `needs:` can hold it
     # until the required checks passed (a separate workflow cannot). The
     # `pull_request`-only scope is unchanged.

@@ -114,8 +114,9 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	it("starts only for a code diff, and only when every needed job succeeded", () => {
 		expect(asList(gate.needs)).toContain("changes");
 		expect(gate.if).toContain("needs.changes.outputs.code == 'true'");
+		// (`validate-merge-train-dispatch` is reached through each of these and
+		// must not be re-listed: #3859 removes that hop.)
 		for (const id of [
-			"validate-merge-train-dispatch",
 			"lint-and-typecheck",
 			"tla-models",
 			"unit-tests",
