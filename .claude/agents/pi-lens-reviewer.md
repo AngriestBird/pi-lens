@@ -114,6 +114,12 @@ can trip, and say in your report which you ran and what each returned.
   claims "proven red" without the transcript has not proven it. When the output
   is missing or paraphrased, reproduce the red run yourself (step 3) and treat
   the gap as a finding in its own right.
+- **Model covers the change, not just TLC green (#3802).** When the diff
+  touches a file mapped in `formal/coverage-map.json`, require either a
+  `.tla`/`.cfg` change under that family or a `TLA+ unaffected: <family> —
+  <reason>` line in the PR body. A green `TLA+ models` run over an unchanged
+  model proves nothing about the new code; name the family that covers the
+  change and why.
 - **Quoted-evidence audit.** Diff every CI line the PR body quotes against the
   ACTUAL job log on the exact head. A worker has fabricated a CI quote from its
   local numbers (the local branch graph and CI's merge-ref graph differ); a

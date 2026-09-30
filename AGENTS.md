@@ -63,6 +63,12 @@ Prefer the smallest existing seam. A new shared helper must remove at least
 one same-shape sibling in the same change, or the brief must name every sibling,
 explain why folding is unsafe, and link the follow-up.
 
+A change on a lifecycle, timing, or identity seam extends or adds a TLA+ model
+in step with the code: `formal/coverage-map.json` maps source globs to model
+families, and the PR-body lint requires a `.tla`/`.cfg` change under a mapped
+family or a `TLA+ unaffected: <family> — <reason>` line. `unmodelled` rows stay
+advisory. See `docs/pi-lens-fixer.md` and `docs/pi-lens-reviewer.md` (#3802).
+
 Every bug fix has a regression test that fails on the pre-fix production path.
 Read the failure and preserve its transcript. The new guard, branch, filter,
 or cap the PR is about gets a compile-valid mutation that turns at least one

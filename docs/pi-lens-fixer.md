@@ -63,6 +63,17 @@ beyond the fix's own lines; deepening is its own slice under the owning
 umbrella. #3254 and #3256 stayed inside their briefs; #3178's four rounds show
 the cost of not doing so.
 
+### Lifecycle, timing, and identity seams
+
+A change on a lifecycle, timing, or identity seam extends or adds a TLA+ model
+in this step (#3802). Find the family the changed files map to in
+`formal/coverage-map.json`, write the invariant the change preserves or
+tightens, and show the violating config red on the pre-fix model and green
+after. When the change genuinely does not move the model, carry a
+`TLA+ unaffected: <family> — <reason>` line in the PR body instead of leaving
+the obligation silent. The `unmodelled` rows mark known gaps; they do not
+excuse a change that moves the behaviour.
+
 ### Review follow-ups
 
 - Apply folded follow-ups in the same PR when they share the seam or files, are

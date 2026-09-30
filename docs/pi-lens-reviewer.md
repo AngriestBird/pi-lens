@@ -45,6 +45,11 @@
   seam group) / *stay specific* (with the reason). A missing verdict is a
   finding. Recurrence: #3622. The optional ast-grep assist is #3684.
 - Revert or neuter the source fix and verify the red-first test fails.
+- **Check that the model covers the change, not only that TLC is green.** When
+  the diff touches a file mapped in `formal/coverage-map.json`, require either
+  a `.tla`/`.cfg` change under that family or a `TLA+ unaffected: <family> —
+  <reason>` line in the PR body. A green `TLA+ models` run over an unchanged
+  model proves nothing about the new code (#3802).
 - Mutation evidence: read the `Mutation diff` comment for the EXACT head. The
   sticky can describe an older or cancelled head, so check its `Head:` line
   (`node scripts/ci-verdict.mjs <pr>` prints `MUTATION` with `STALE` or

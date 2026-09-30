@@ -3,6 +3,11 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
+	evaluateTlaCoverage,
+	loadCoverageMap,
+	parseChangedFiles,
+} from "./lib/tla-coverage.mjs";
+import {
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	closeKeywordPlacementMessage,
 	lintCloseKeywordPlacement,
@@ -15,6 +20,10 @@ const TEMPLATE_FILE = resolve(
 	"..",
 	TEMPLATE_PATH,
 );
+// The coverage map is a repository artifact, so it resolves from THIS script's
+// checkout root, never the caller's cwd: the fixture repos the check-pr-body
+// tests build carry no `formal/` tree, and a diff path is repo-relative.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_SECTIONS = [
 	"Why",
 	"Notes for the reviewer",
@@ -344,7 +353,7 @@ function runtimeObservabilityFromDiff(diff = "") {
 	};
 }
 
-function observabilitySectionContent(body, lines, headings) {
+function observabilitySectionContent(lines, headings) {
 	const heading = headings.find((candidate) =>
 		hasSection(candidate, "observability"),
 	);
@@ -1054,16 +1063,10 @@ function lintMasterClaims(body) {
 	return errors;
 }
 
-function lintRuntimeObservability(
-	body,
-	lines,
-	headings,
-	diff,
-	cwd = process.cwd(),
-) {
+function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
 	const observation = runtimeObservabilityFromDiff(diff);
 	if (!observation.runtime) return [];
-	const content = observabilitySectionContent(body, lines, headings);
+	const content = observabilitySectionContent(lines, headings);
 	if ([...observation.records].some((record) => content.includes(record)))
 		return [];
 	const existingRecordCitation = pathLineReferences(content).find(
@@ -1383,13 +1386,7 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.diff)
 		errors.push(
-			...lintRuntimeObservability(
-				body,
-				lines,
-				headings,
-				options.diff,
-				options.cwd,
-			),
+			...lintRuntimeObservability(lines, headings, options.diff, options.cwd),
 		);
 	errors.push(...lintCodeCitations(body, options));
 	errors.push(...lintTestReferences(body, options));
@@ -1508,7 +1505,21 @@ export async function resolveTouchesTests(
 function eventPayload() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
-	return JSON.parse(readFileSync(eventPath, "utf8"));
+	let raw;
+	try {
+		raw = readFileSync(eventPath, "utf8");
+	} catch (error) {
+		throw new Error(
+			`cannot read GITHUB_EVENT_PATH: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	try {
+		return JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`cannot parse GITHUB_EVENT_PATH: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 /**
@@ -1544,6 +1555,11 @@ export async function lintPullRequestEvent(
 		diff,
 		workingTree: true,
 	});
+	const coverage = lintTlaCoverage(body, { diff });
+	result.errors.push(...coverage.errors);
+	if (coverage.errors.length) result.valid = false;
+	for (const advisory of coverage.advisories)
+		console.warn(`::notice::${advisory}`);
 	if (result.valid) {
 		console.log(`PR body OK: ${pullRequest.number}`);
 		return { valid: true, repaired: normalized };
@@ -1556,6 +1572,36 @@ export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
 	return git(["diff", "--unified=0", "--no-color", "origin/master...HEAD"], {
 		cwd,
 		encoding: "utf8",
+	});
+}
+
+/**
+ * #3802 rule 2: a PR that changes a file the checked-in
+ * `formal/coverage-map.json` maps to a model family must move that family's
+ * `.tla`/`.cfg`, or say `TLA+ unaffected: <family> — <reason>`. `unmodelled`
+ * rows stay advisory. The map logic is dependency-free because this script
+ * runs with no `npm install` in the PR-body lane.
+ */
+export function lintTlaCoverage(
+	body = "",
+	{ diff = "", cwd = REPO_ROOT } = {},
+) {
+	if (!diff) return { errors: [], advisories: [] };
+	let map;
+	try {
+		map = loadCoverageMap(cwd);
+	} catch (error) {
+		return {
+			errors: [
+				`TLA+ coverage map unavailable: ${error instanceof Error ? error.message : String(error)}`,
+			],
+			advisories: [],
+		};
+	}
+	return evaluateTlaCoverage({
+		map,
+		changedFiles: parseChangedFiles(diff),
+		body,
 	});
 }
 
@@ -1603,6 +1649,10 @@ export function lintLocalPrBody(
 		workingTree: true,
 		ref: options.ref,
 	});
+	const coverage = lintTlaCoverage(body, { diff });
+	result.errors.push(...coverage.errors);
+	if (coverage.errors.length) result.valid = false;
+	for (const advisory of coverage.advisories) console.warn(advisory);
 	const closeSyntax = lintCloseKeywords(body);
 	if (!closeSyntax.valid) {
 		result.valid = false;

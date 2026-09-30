@@ -47,6 +47,15 @@ beyond the fix's own lines; deepening is its own slice under the owning
 umbrella. #3254 and #3256 stayed inside their briefs; #3178's four rounds show
 the cost of not doing so.
 
+**Lifecycle, timing, and identity seams extend or add a model (#3802).** A
+change on a lifecycle, timing, or identity seam extends or adds a TLA+ model as
+part of the state-space-table step. Find the family the changed files map to in
+`formal/coverage-map.json`, write the invariant the change preserves or
+tightens, and show the violating config red on the pre-fix model and green
+after. When the change genuinely does not move the model, carry a
+`TLA+ unaffected: <family> — <reason>` line in the PR body. The `unmodelled`
+rows mark known gaps; they do not excuse a change that moves the behaviour.
+
 1. `gh issue view <N>` with comments — the issue body is the spec; its
    acceptance criteria are the contract. Read AGENTS.md, especially
    "Recurring defect shapes — screen against these BEFORE you write code",
