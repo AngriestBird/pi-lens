@@ -30,6 +30,7 @@ type Job = {
 	if?: unknown;
 	needs?: string | string[];
 	steps?: Step[];
+	strategy?: { matrix?: { os?: unknown } };
 };
 type Workflow = {
 	on?: unknown;
@@ -80,6 +81,15 @@ function isDispatchOnly(job: Job): boolean {
 
 function jobCheckName(key: string, job: Job): string {
 	return job.name ?? key;
+}
+
+function jobCheckNames(key: string, job: Job): string[] {
+	const name = jobCheckName(key, job);
+	const matrixOs = job.strategy?.matrix?.os;
+	if (!name.includes("${{ matrix.os }}") || !Array.isArray(matrixOs)) {
+		return [name];
+	}
+	return matrixOs.map((os) => name.replace("${{ matrix.os }}", String(os)));
 }
 
 describe("retired merge-train lane and its dispatch hop (#3837)", () => {
@@ -207,8 +217,8 @@ describe("PR metadata checks live in their own workflow (#3838)", () => {
 		// move between workflows must not rename one.
 		const names = new Set(
 			all.flatMap(({ workflow }) =>
-				Object.entries(workflow.jobs ?? {}).map(([key, job]) =>
-					jobCheckName(key, job),
+				Object.entries(workflow.jobs ?? {}).flatMap(([key, job]) =>
+					jobCheckNames(key, job),
 				),
 			),
 		);
@@ -216,6 +226,10 @@ describe("PR metadata checks live in their own workflow (#3838)", () => {
 			...REQUIRED_CHECKS,
 			CI_JOB_NAMES.KNIP,
 			"oxfmt format check",
+			"Install test (ubuntu-latest)",
+			"Install test (windows-latest)",
+			"Install test (macos-latest)",
+			"TLA+ models",
 		]) {
 			expect(names.has(required), `job named ${required}`).toBe(true);
 		}
