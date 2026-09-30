@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { LSP_SERVERS } from "../../clients/lsp/server.js";
 import {
+	IDLE_EVICTION_DRIFT_TITLE,
 	idleEvictionDrift,
 	parseIdleEvictionDoc,
 	RESULT_STATES,
@@ -183,6 +184,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 				steps: Array<{
 					id?: string;
 					name?: string;
+					if?: string;
 					uses?: string;
 					run?: string;
 					"continue-on-error"?: boolean;
@@ -217,6 +219,31 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 	it("regenerates the document before the diff step reads it", () => {
 		expect(measureAt).toBeGreaterThanOrEqual(0);
 		expect(diffAt).toBeGreaterThan(measureAt);
+	});
+
+	it("files the drift issue from the files the measurement step writes, and only on schedule or master", () => {
+		const measure = steps[measureAt];
+		const notifyAt = steps.findIndex((s) =>
+			s.name?.startsWith("Notify on idle-eviction drift"),
+		);
+		const driftSibling = steps.find((s) =>
+			s.name?.startsWith("Notify on silentOnClean drift"),
+		);
+		expect(notifyAt).toBeGreaterThan(measureAt);
+		const notify = steps[notifyAt];
+		expect(notify["continue-on-error"]).toBe(true);
+		// Same scoping as the other tracking-issue writer: a branch dispatch must
+		// not file or close issues.
+		expect(notify.if).toBe(driftSibling?.if);
+		for (const path of [
+			"$RUNNER_TEMP/lsp-idle-eviction-drift.md",
+			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
+		]) {
+			expect(measure.run, `measurement writes ${path}`).toContain(path);
+			expect(notify.run, `notifier reads ${path}`).toContain(path);
+		}
+		expect(notify.run).toContain("scripts/upsert-tracking-issue.mjs");
+		expect(notify.run).toContain(IDLE_EVICTION_DRIFT_TITLE);
 	});
 
 	it("keeps the measurement non-gating and bounded well under the job cap", () => {

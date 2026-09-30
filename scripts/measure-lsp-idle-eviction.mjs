@@ -12,12 +12,17 @@
  * under test, and restores it.
  *
  *   node scripts/measure-lsp-idle-eviction.mjs [serverId ...] [--install]
- *       [--doc <path>] [--summary <path>] [--budget-seconds <n>] [--window-ms <n>]
+ *       [--doc <path>] [--summary <path>] [--drift-body <path>]
+ *       [--budget-seconds <n>] [--window-ms <n>]
  *
  * Requires `npm run build:dist`. Writes docs/lsp-idle-eviction.md (bucketed,
  * regenerated from scratch each run so an absent server reads `unavailable`,
  * never a stale or zero row), appends the raw figures to the job summary when
  * `GITHUB_STEP_SUMMARY` is set, and optionally writes them as JSON.
+ *
+ * `--drift-body` writes the tracking-issue body when a server is in hard drift
+ * and removes the file otherwise; the nightly's notify step files, refreshes or
+ * closes the single tracking issue from it (scripts/upsert-tracking-issue.mjs).
  *
  * Exit code: 1 only for drift (a server the registry declares `transparent`
  * that the measurement vetoes). The nightly step is `continue-on-error`, so
@@ -28,6 +33,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+	buildIdleEvictionDriftBody,
 	idleEvictionDrift,
 	renderIdleEvictionDoc,
 	renderRawTable,
@@ -57,6 +63,7 @@ const flagValue = (name, fallback) => {
 const flagNames = new Set([
 	"--doc",
 	"--summary",
+	"--drift-body",
 	"--budget-seconds",
 	"--window-ms",
 ]);
@@ -73,6 +80,7 @@ const summaryPath = flagValue("--summary", undefined);
 // instead of letting the job timeout discard the whole artifact.
 const budgetMs = Number(flagValue("--budget-seconds", "780")) * 1000;
 const windowMs = Number(flagValue("--window-ms", "3000"));
+const driftBodyPath = flagValue("--drift-body", undefined);
 
 // #2670/#2506-shape: pin PI_LENS_HOME/PILENS_DATA_DIR to a scratch dir BEFORE
 // the first dist/ import below; the latency logger reads its directory at
@@ -260,6 +268,17 @@ if (summaryPath)
 		summaryPath,
 		JSON.stringify({ counts, rows, drift }, null, 2),
 	);
+if (driftBodyPath) {
+	const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env;
+	const body = buildIdleEvictionDriftBody(drift, {
+		runUrl:
+			GITHUB_SERVER_URL && GITHUB_REPOSITORY && GITHUB_RUN_ID
+				? `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`
+				: null,
+	});
+	if (body) fs.writeFileSync(driftBodyPath, body);
+	else fs.rmSync(driftBodyPath, { force: true });
+}
 if (process.env.GITHUB_STEP_SUMMARY) {
 	fs.appendFileSync(
 		process.env.GITHUB_STEP_SUMMARY,

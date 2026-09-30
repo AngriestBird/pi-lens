@@ -296,7 +296,27 @@ jobs:
       - name: LSP idle-eviction measurement (regenerate docs/lsp-idle-eviction.md)
         continue-on-error: true
         timeout-minutes: 15
-        run: node scripts/measure-lsp-idle-eviction.mjs --install --budget-seconds 600 --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json"
+        run: node scripts/measure-lsp-idle-eviction.mjs --install --budget-seconds 600 --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json" --drift-body "$RUNNER_TEMP/lsp-idle-eviction-drift.md"
+
+      # #3645: make a server the registry evicts but the measurement vetoes
+      # ACTIONABLE (the #594 shape: a finding only in a step log or a doc diff
+      # has nobody reading it). One persistent tracking issue, refreshed while
+      # the drift lasts and closed when a run that DID measure finds none. A
+      # missing summary file (the measurement crashed or never ran) is not
+      # "clean", so it neither files nor closes. Scoped like the other
+      # tracking-issue writers: a branch dispatch must not touch issues.
+      - name: Notify on idle-eviction drift (file/update/close tracking issue)
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          TITLE='nightly: LSP idle-eviction drift (declared transparent, measured vetoed)'
+          if [ -s "$RUNNER_TEMP/lsp-idle-eviction-drift.md" ]; then
+            gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/lsp-idle-eviction-drift.md"
+          elif [ -f "$RUNNER_TEMP/lsp-idle-eviction-summary.json" ]; then
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --clean --close-when-clean
+          fi
 
       - name: Check LSP docs refresh diff
         id: docs_diff

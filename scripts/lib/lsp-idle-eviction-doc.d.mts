@@ -67,3 +67,10 @@ export function parseIdleEvictionDoc(text: string):
 			reason: string | undefined;
 	  }[]
 	| null;
+
+export const IDLE_EVICTION_DRIFT_TITLE: string;
+
+export function buildIdleEvictionDriftBody(
+	findings: readonly IdleEvictionFinding[],
+	options?: { runUrl?: string | null },
+): string | null;

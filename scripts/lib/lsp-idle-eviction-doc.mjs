@@ -160,6 +160,37 @@ export function idleEvictionDrift(rows, declared) {
 	return findings;
 }
 
+/** Title of the single persistent tracking issue for hard drift (#3645). */
+export const IDLE_EVICTION_DRIFT_TITLE =
+	"nightly: LSP idle-eviction drift (declared transparent, measured vetoed)";
+
+/**
+ * The tracking issue's body, or null when no server is in hard drift. Only
+ * `drift` findings file an issue: a proposal or note is for the committed
+ * document's reviewers, while a server the registry evicts that the measurement
+ * vetoes is shipped behaviour breaking on respawn.
+ *
+ * @param {{ serverId: string, kind: string, severity: string, detail: string }[]} findings
+ * @param {{ runUrl?: string | null }} [options]
+ */
+export function buildIdleEvictionDriftBody(findings, options = {}) {
+	const drift = findings.filter((f) => f.severity === "drift");
+	if (drift.length === 0) return null;
+	const lines = [
+		"Auto-filed by the nightly `tool-smoke` idle-eviction measurement (#3645).",
+		"",
+		'The registry declares these servers `idleEviction: "transparent"`, so the shared idle timer releases them, but this run\'s respawn of each one failed or reported fewer findings than before eviction. Declare them `resident` (with a reason in `tests/config/lsp-idle-eviction-reasons.json`) or fix the respawn. The per-server rows are in `docs/lsp-idle-eviction.md`.',
+		"",
+		...drift.map((f) => `- **${f.serverId}**: ${f.detail}`),
+	];
+	if (options.runUrl) lines.push("", `Workflow run: ${options.runUrl}`);
+	lines.push(
+		"",
+		"This issue is closed automatically once a nightly run finds no such server.",
+	);
+	return lines.join("\n");
+}
+
 const cell = (value) => (value === undefined || value === null ? "n/a" : value);
 
 function rowCells(row, declared) {

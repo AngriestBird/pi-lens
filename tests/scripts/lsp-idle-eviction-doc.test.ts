@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 import {
 	bucketBytes,
 	bucketMs,
+	buildIdleEvictionDriftBody,
+	IDLE_EVICTION_DRIFT_TITLE,
 	idleEvictionDrift,
 	parseIdleEvictionDoc,
 	renderIdleEvictionDoc,
@@ -311,6 +313,46 @@ describe("idleEvictionDrift", () => {
 		});
 		expect(drifted).toContain(
 			"- **alpha** [drift] declared transparent but the measurement vetoes it (respawn-failed)",
+		);
+	});
+});
+
+describe("buildIdleEvictionDriftBody", () => {
+	const finding = (
+		serverId: string,
+		severity: "drift" | "proposal" | "info",
+	) => ({
+		serverId,
+		kind: "k",
+		severity,
+		detail: `${serverId} detail`,
+	});
+
+	it("is null unless a server is in hard drift, so proposals and notes never file an issue", () => {
+		expect(buildIdleEvictionDriftBody([])).toBeNull();
+		expect(
+			buildIdleEvictionDriftBody([
+				finding("a", "proposal"),
+				finding("b", "info"),
+			]),
+		).toBeNull();
+	});
+
+	it("names each drifting server and only those, with the run link", () => {
+		const body = buildIdleEvictionDriftBody(
+			[finding("a", "drift"), finding("b", "proposal"), finding("c", "drift")],
+			{ runUrl: "https://example.test/run/1" },
+		);
+		expect(body).toContain("- **a**: a detail");
+		expect(body).toContain("- **c**: c detail");
+		expect(body).not.toContain("**b**");
+		expect(body).toContain("Workflow run: https://example.test/run/1");
+		expect(body).toContain("closed automatically");
+	});
+
+	it("keeps a stable title, because the tracking issue is found by exact title", () => {
+		expect(IDLE_EVICTION_DRIFT_TITLE).toBe(
+			"nightly: LSP idle-eviction drift (declared transparent, measured vetoed)",
 		);
 	});
 });
