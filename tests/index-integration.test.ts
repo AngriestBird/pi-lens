@@ -127,7 +127,6 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 		// #3612: a /reload hands the guard's authorship to the reloaded one.
 		exportAuthorship = () => ({
 			written: [],
-			unchanged: [],
 			sessionStartMs: 0,
 		});
 		importAuthorship = () => {};

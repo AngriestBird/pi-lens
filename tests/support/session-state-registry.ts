@@ -260,8 +260,7 @@ export const SESSION_STORE_REGISTRY: Readonly<
 	},
 	"read-guard-authorship": {
 		module: "read-guard-branch.ts",
-		state:
-			"the ReadGuard's writtenThisSession, unchangedThisSession and mtime anchor",
+		state: "the ReadGuard's writtenThisSession and its mtime anchor",
 	},
 	widget: {
 		module: "widget-state.ts",

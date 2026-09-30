@@ -1283,6 +1283,13 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 
 		expect(subagents).toHaveLength(1);
 		expect(await c.editLine("post_a", a, 2, "Y", false)).toBe("ALLOW");
+		// From the slot: the sidecar the reload shutdown saved would carry the
+		// read too, and would hide a subagent that took the slot.
+		expect((await branchRetainedRows()).at(-1)).toMatchObject({
+			trigger: "reload",
+			source: "slot",
+			kept: 1,
+		});
 	});
 });
 

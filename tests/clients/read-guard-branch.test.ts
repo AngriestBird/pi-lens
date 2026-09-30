@@ -226,6 +226,43 @@ describe("ReadGuard.retainBranch (#3521)", () => {
 	});
 });
 
+/**
+ * #3612 (D5): the authorship a `/reload` carries. The recurrences: a file the
+ * session wrote and never read needs a re-read after a reload although the
+ * conversation still shows the write; and a malformed sidecar payload (the
+ * reload's fallback source) throwing inside the reload's session start.
+ */
+describe("ReadGuard authorship export/import (#3612)", () => {
+	it("hands the written files to another guard, as JSON", () => {
+		const c = path.join(env.tmpDir, "c.ts");
+		fs.writeFileSync(c, "c1\nc2\nc3\n");
+		fs.utimesSync(c, LONG_AGO, LONG_AGO);
+		const before = createReadGuard("authorship-before");
+		before.recordWritten(c);
+		const after = createReadGuard("authorship-after");
+		expect(verdict(after, c, 2)).toMatch(/^block: .*Edit without read/);
+
+		after.importAuthorship(
+			JSON.parse(JSON.stringify(before.exportAuthorship())),
+		);
+
+		expect(verdict(after, c, 2)).toBe("allow");
+	});
+
+	it("skips a malformed payload instead of throwing", () => {
+		const guard = createReadGuard("authorship-malformed");
+		for (const payload of [
+			undefined,
+			null,
+			{},
+			{ written: "c.ts", sessionStartMs: "0" },
+			{ written: [42, null] },
+		])
+			expect(() => guard.importAuthorship(payload)).not.toThrow();
+		expect(guard.exportAuthorship().written).toEqual([]);
+	});
+});
+
 describe("ReadGuard.importBranch (#3521, replaces #1041's importState)", () => {
 	function exported(records: ReadRecord[]): PersistedReadGuardState {
 		const source = createReadGuard("export-source");

@@ -178,7 +178,6 @@ export interface PersistedReadGuardState {
 /** A session's authorship ({@link ReadGuard.exportAuthorship}), keys in `normalizeFilePath` form. */
 export interface PersistedReadGuardAuthorship {
 	written: string[];
-	unchanged: string[];
 	sessionStartMs: number;
 }
 
@@ -1571,7 +1570,6 @@ export class ReadGuard {
 	exportAuthorship(): PersistedReadGuardAuthorship {
 		return {
 			written: [...this.writtenThisSession],
-			unchanged: [...this.unchangedThisSession],
 			sessionStartMs: this.sessionStartMs,
 		};
 	}
@@ -1579,13 +1577,9 @@ export class ReadGuard {
 	/** Restore {@link exportAuthorship}'s output. Null-safe on a malformed payload. */
 	importAuthorship(state: unknown): void {
 		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
-		for (const [paths, into] of [
-			[authorship?.written, this.writtenThisSession],
-			[authorship?.unchanged, this.unchangedThisSession],
-		] as const)
-			if (Array.isArray(paths))
-				for (const filePath of paths)
-					if (typeof filePath === "string") into.add(filePath);
+		if (Array.isArray(authorship?.written))
+			for (const filePath of authorship.written)
+				if (typeof filePath === "string") this.writtenThisSession.add(filePath);
 		if (typeof authorship?.sessionStartMs === "number")
 			this.sessionStartMs = authorship.sessionStartMs;
 	}
