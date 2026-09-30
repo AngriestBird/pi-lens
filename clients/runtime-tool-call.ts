@@ -18,6 +18,7 @@ import {
 } from "./opaque-mutation-scan.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
 import { retargetReplacementIndentation } from "./indent-retarget.js";
+import { noteAgentCallEnd, noteAgentCallStart } from "./fix-run-restore.js";
 import { LANGUAGE_POLICY } from "./language-policy.js";
 import { isComplexitySupportedFile } from "./tree-sitter-shared.js";
 import {
@@ -428,6 +429,7 @@ export async function handleToolCall(
 				if (toolCallId !== undefined) {
 					deps.runtime.takeToolCallAttribution(toolCallId);
 				}
+				noteAgentCallEnd(toolCallId);
 			} catch (cleanupError) {
 				const reason =
 					cleanupError instanceof Error
@@ -745,6 +747,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			skipped: targetIgnored,
 			originCwd: ctx.cwd ?? runtime.projectRoot,
 		});
+		// #3598: this mutation is now in flight, so a running whole-package fixer
+		// must not write an older capture over it. Cleared at its tool_result, or
+		// below when the call is blocked.
+		noteAgentCallStart(toolCallId, filePath);
 	}
 	if (targetMissing) {
 		// #1655 item 5: this early return used to be the whole story — pi-lens

@@ -2234,8 +2234,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// file, batched), the settle's compare-and-restore, and the wrapper's
 	// awaits. Each is a local file operation on a file of at most 1 MiB, inside a
 	// run that already waits on the fixer's own spawn; none can take the hook's
-	// signal until #2523 AC4 threads it, so this records the increase.
-	"clients/fix-run-restore.ts": 9,
+	// signal until #2523 AC4 threads it, so this records the increase. 9 -> 11
+	// (#3741 round 2): the settle stats the file before reading it and again just
+	// before the write, so a newer edit is never written over.
+	"clients/fix-run-restore.ts": 11,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.

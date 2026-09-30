@@ -35,7 +35,9 @@ import {
 	runAutofix,
 	runFormatPhase,
 } from "./pipeline.js";
+import { queueAgentAdvisory } from "./agent-nudge.js";
 import { holdFileMutationQueue } from "./file-mutation-queue.js";
+import { renderFixRunLoss } from "./fix-run-restore.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -524,11 +526,16 @@ export async function handleAgentEnd({
 				getFlagSource,
 				fixHold,
 			);
-			if (result.lostFiles?.length) {
-				notify(
-					`pi-lens: an auto-fix run overwrote an edit to ${result.lostFiles.join(", ")} and could not restore it; re-read and re-apply`,
-					"warning",
-				);
+			if (result.lostFiles?.length || result.possiblyLostFiles?.length) {
+				// The agent's turn is over, so a UI notify alone reaches nobody it
+				// could act through (and print/json modes drop it): queue the same
+				// text for the model's next `context` call as well.
+				const loss = renderFixRunLoss({
+					lost: result.lostFiles ?? [],
+					possiblyLost: result.possiblyLostFiles ?? [],
+				});
+				queueAgentAdvisory(loss);
+				notify(`pi-lens: ${loss}`, "warning");
 			}
 			const tools = result.autofixTools.map((label) => label.split(":")[0]);
 			for (const changed of result.changedFiles) {

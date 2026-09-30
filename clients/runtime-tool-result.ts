@@ -35,6 +35,7 @@ import { invalidateFormatterCacheForPath } from "./formatters.js";
 import { deliveredLineEvidence, type ReadGuard } from "./read-guard.js";
 import {
 	expectationFromToolInput,
+	noteAgentCallEnd,
 	noteAgentMutation,
 } from "./fix-run-restore.js";
 import { getFormatService } from "./format-service.js";
@@ -1242,6 +1243,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// `rawFilePath` against that basis, rather than trusting a call-time path
 	// that a later handler may have superseded.
 	const toolCallId = resolveToolCallCorrelationId(event);
+	// #3598: the host tool for this call has finished, whatever it did. Before
+	// any return below, so a call that exits early is still no longer in flight.
+	noteAgentCallEnd(toolCallId);
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
