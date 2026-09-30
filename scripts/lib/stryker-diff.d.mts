@@ -66,14 +66,6 @@ export declare function describeStrykerFailure(
 	budgetMinutes: number,
 	options?: { tests?: string[]; output?: string },
 ): string;
-export declare function describePartialInterruptCause(
-	result: {
-		status: number | null;
-		signal?: NodeJS.Signals | null;
-		error?: Error & { code?: string };
-	},
-	budgetMinutes: number,
-): string;
 export declare function describePartialMutationOutcome(
 	result: {
 		status: number | null;
@@ -84,8 +76,6 @@ export declare function describePartialMutationOutcome(
 	partial: {
 		evaluated: number;
 		total: number | null;
-		score: string;
-		survivors: string[];
 	},
 ): string;
 export declare function sampleRangesDeterministically(
@@ -111,7 +101,6 @@ export declare function parseDryRunCost(
 ): { totalMutants: number; dryRunMs: number } | null;
 export declare function estimateAffordableMutants(args: {
 	remainingMs: number;
-	concurrency: number;
 	dryRunMs: number;
 	fixedOverheadMs?: number;
 	safetyFactor?: number;

@@ -258,9 +258,9 @@ export function extractSnippet(sourceLines, location) {
  * The bare cause clause a Stryker child's failed/interrupted exit maps to
  * (round 2 R2-4), shared by `describeStrykerFailure` (a full, zero-mutant
  * failure -- prefixed "no mutants evaluated") and
- * `describePartialInterruptCause` (a PARTIAL result -- some mutants WERE
- * evaluated, so that prefix would contradict the "N of M evaluated" banner
- * shown right above it). `spawnSync` marks an expired budget with
+ * a PARTIAL result -- some mutants WERE evaluated, so that prefix would
+ * contradict the "N of M evaluated" banner shown right above it).
+ * `spawnSync` marks an expired budget with
  * `error.code === "ETIMEDOUT"`; `signal` is null when the child exits on the
  * signal itself, which Stryker's UnexpectedExitHandler does, so the signal is
  * not a usable discriminator.
@@ -299,18 +299,6 @@ export function describeStrykerFailure(
 }
 
 /**
- * The reason text for a PARTIAL run's interrupt (round 2 R2-4): unlike
- * `describeStrykerFailure`, this never says "no mutants evaluated" -- some
- * mutants were, which is exactly why a partial report exists to show them.
- *
- * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
- * @param {number} budgetMinutes
- */
-export function describePartialInterruptCause(result, budgetMinutes) {
-	return `mutation diff: ${strykerFailureCause(result, budgetMinutes)}`;
-}
-
-/**
  * The user-facing verdict for a partial report. A timed-out child has already
  * completed its initial test run, so the zero-mutant dry-run failure wording
  * is false and hides the score and survivors that the incremental report
@@ -318,19 +306,18 @@ export function describePartialInterruptCause(result, budgetMinutes) {
  *
  * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
  * @param {number} budgetMinutes
- * @param {{evaluated: number, total: number|null, score: string, survivors: string[]}} partial
+ * @param {{evaluated: number, total: number|null}} partial
  */
 export function describePartialMutationOutcome(
 	result,
 	budgetMinutes,
-	{ evaluated, total, score, survivors },
+	{ evaluated, total },
 ) {
 	const totalText = total ?? "an unknown total of";
-	const survivorText = survivors.length > 0 ? survivors.join(", ") : "none";
 	if (result.error?.code === "ETIMEDOUT") {
-		return `mutation diff: budget expired after ${evaluated} of ${totalText} mutants evaluated; partial score ${score}%; survivors: ${survivorText}`;
+		return `mutation diff: budget expired after ${evaluated} of ${totalText} evaluated; M is the measured mutant population`;
 	}
-	return `mutation diff: partial run interrupted after ${evaluated} of ${totalText} mutants evaluated; partial score ${score}%; survivors: ${survivorText}; ${strykerFailureCause(result, budgetMinutes)}`;
+	return `mutation diff: partial run interrupted after ${evaluated} of ${totalText} evaluated; M is the measured mutant population; ${strykerFailureCause(result, budgetMinutes)}`;
 }
 
 export function formatCapNotice(selectedCount, totalCount, skipped) {
@@ -553,29 +540,25 @@ export function parseDryRunCost(output) {
 
 /**
  * How many mutants the remaining budget affords, from a real measured dry
- * run (round 2 S2's arithmetic: `allowed = budget × concurrency ÷ dry-run
- * seconds`, the command runner reruns the WHOLE related-test dry run for
- * every mutant at the configured concurrency). `safetyFactor` (< 1) reserves
- * headroom for the real run's own overhead the estimate cannot see (report
- * writing, sandbox teardown, timing variance between runs) -- without it, a
- * budget sized exactly to the point estimate still overruns in practice.
+ * run. Vitest runners are CPU-bound in this lane: the #3649 measurement saw
+ * only 1.11x wall-clock speedup at Stryker concurrency 2, so this estimator
+ * deliberately models one effective worker. `safetyFactor` (< 1) reserves
+ * headroom for timing variance and fixed run overhead.
  *
- * @param {{remainingMs: number, concurrency: number, dryRunMs: number, fixedOverheadMs?: number, safetyFactor?: number}} args
- * @returns {number} at least 1
+ * @param {{remainingMs: number, dryRunMs: number, fixedOverheadMs?: number, safetyFactor?: number}} args
+ * @returns {number} zero when fixed overhead leaves no capacity, otherwise at least 1
  */
 export function estimateAffordableMutants({
 	remainingMs,
-	concurrency,
 	dryRunMs,
 	fixedOverheadMs = 0,
 	safetyFactor = 0.7,
 }) {
 	if (dryRunMs <= 0) return 1;
-	const effectiveConcurrency = Math.max(1, Math.floor(concurrency));
-	const budgetAfterOverhead = Math.max(0, remainingMs - fixedOverheadMs);
+	const budgetAfterOverhead = remainingMs - fixedOverheadMs;
+	if (budgetAfterOverhead <= 0) return 0;
 	const affordable = Math.floor(
-		((budgetAfterOverhead / 1000) * effectiveConcurrency * safetyFactor) /
-			(dryRunMs / 1000),
+		((budgetAfterOverhead / 1000) * safetyFactor) / (dryRunMs / 1000),
 	);
 	return Math.max(1, affordable);
 }
@@ -642,7 +625,7 @@ export function describeZeroMutantOutcome({
  *   failureReason?: string,
  *   partialReason?: string,
  * }} args `failureReason` (`describeStrykerFailure`'s output) and
- *   `partialReason` (`describePartialInterruptCause`'s output) matter only
+ *   `partialReason` (`describePartialMutationOutcome`'s output) matter only
  *   when `interrupted` is true.
  * @returns {{
  *   zeroMutants: {reason: string} | null,

@@ -57,12 +57,6 @@ const MUTATION_TEST_TIMEOUT_MS = 30_000;
 const MUTATION_TSCONFIG = "tsconfig.mutation.json";
 const REPORT_PATH = "reports/mutation/mutation.json";
 const INCREMENTAL_PATH = ".stryker/incremental.json";
-// stryker.config.mjs's own concurrency, read from the live import rather than
-// duplicated here (single-source-of-truth): round 2 S2's budget arithmetic
-// needs it, and a future change to the base config must not silently drift
-// the two apart.
-const CONCURRENCY = base.concurrency;
-
 function argumentValue(name, fallback) {
 	let value = fallback;
 	for (let index = 0; index < process.argv.length - 1; index += 1) {
@@ -496,10 +490,25 @@ if (!cost) {
 	}
 	const allowedMutants = estimateAffordableMutants({
 		remainingMs: remainingBudgetMs(),
-		concurrency: CONCURRENCY,
 		dryRunMs: cost.dryRunMs,
 		fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	});
+	if (allowedMutants === 0) {
+		const reason =
+			"the remaining mutation budget is smaller than the fixed run overhead; no mutant could be evaluated safely";
+		console.log(`mutation diff: no mutants evaluated; ${reason}`);
+		writeReport(
+			null,
+			baseMeta({
+				zeroMutants: { reason },
+				filesSkippedOverCap: skipped,
+				filesUncovered: uncovered,
+				rangesTotal: allPatterns.length,
+				testsRun: tests,
+			}),
+		);
+		process.exit(0);
+	}
 	if (cost.totalMutants > allowedMutants) {
 		const keepRangeCount = Math.max(
 			1,
@@ -595,13 +604,6 @@ for (;;) {
 				);
 			}
 		}
-		const partialSurvivors = partialMutants
-			.filter((entry) => entry.status === "Survived")
-			.map((entry) =>
-				entry.tsLocation
-					? `${entry.tsLocation.fileName}:${entry.tsLocation.line}`
-					: `${entry.fileName}:${entry.location?.start?.line ?? "?"}`,
-			);
 		// round 2 R2-2: routed through decideMutationOutcome, the same
 		// function the two zero-mutant branches use, so a mutation of any of
 		// the three original independent conditions is caught by one shared
@@ -617,8 +619,6 @@ for (;;) {
 			partialReason: describePartialMutationOutcome(result, budgetMinutes, {
 				evaluated: partialMutants.length,
 				total: costEstimate?.totalMutants ?? null,
-				score: partialScore,
-				survivors: partialSurvivors,
 			}),
 		});
 		if (outcome.partial) {

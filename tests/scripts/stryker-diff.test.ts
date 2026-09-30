@@ -19,7 +19,6 @@ import {
 	compiledJsPath,
 	decideMutationOutcome,
 	dedupePatterns,
-	describePartialInterruptCause,
 	describePartialMutationOutcome,
 	describeStrykerFailure,
 	describeZeroMutantOutcome,
@@ -864,43 +863,50 @@ describe("parseDryRunCost (#3531 round 2 S2)", () => {
 });
 
 describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
+	it("pins the fixed-overhead budget through the production driver", () => {
+		// Recurrence #3686 F2: passing a test-only overhead would make the
+		// estimator appear safe while the driver still used zero overhead.
+		expect(driver).toContain(
+			"fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS",
+		);
+	});
+
 	it("samples the #3683 run instead of admitting 270 mutants into a 60-minute budget", () => {
 		// Recurrence #3683: 270 measured mutants at 17,824ms per mutant were
 		// admitted as "within the remaining budget" even though the projected
 		// mutation run plus fixed overhead and safety margin did not fit.
 		const allowed = estimateAffordableMutants({
-			remainingMs: 3_600_000,
-			concurrency: 2,
+			remainingMs: 3_560_000,
 			dryRunMs: 17_824,
 			fixedOverheadMs: 300_000,
 			safetyFactor: 0.7,
 		});
 
 		expect(allowed).toBeLessThan(270);
+		expect(allowed).toBe(128);
+		expect(allowed * 16_050 + 300_000).toBeLessThanOrEqual(3_560_000);
 	});
 
-	it("implements the reviewer's formula: budget × concurrency ÷ dry-run seconds, safety-factored", () => {
-		// 3600s remaining, concurrency 2, 2s dry run, safetyFactor 1 (isolate
-		// the arithmetic from the safety margin): 3600 * 2 / 2 = 3600.
+	it("models CPU-bound vitest runners as serial even when Stryker concurrency is 2", () => {
+		// Recurrence #3649: concurrency 2 achieved only 1.11x wall-clock
+		// speedup (16.05s per mutant), so multiplying by 2 over-admitted work.
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 3_600_000,
-				concurrency: 2,
 				dryRunMs: 2_000,
 				safetyFactor: 1,
 			}),
-		).toBe(3600);
+		).toBe(1800);
 	});
 
 	it("applies the safety factor as a multiplier on the raw estimate", () => {
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 3_600_000,
-				concurrency: 2,
 				dryRunMs: 2_000,
 				safetyFactor: 0.5,
 			}),
-		).toBe(1800);
+		).toBe(900);
 	});
 
 	it("reproduces the #3579 replay's real blowup: 290 mutants against ~85s dry runs vastly exceeds a 60-minute budget", () => {
@@ -908,7 +914,6 @@ describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
 		// this exact measured cost, needing ~3.4h against a 60-minute budget.
 		const allowed = estimateAffordableMutants({
 			remainingMs: 55 * 60_000,
-			concurrency: 2,
 			dryRunMs: 85_000,
 			safetyFactor: 0.7,
 		});
@@ -916,21 +921,20 @@ describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
 		expect(allowed).toBeGreaterThan(0);
 	});
 
-	it("never returns fewer than 1, even against a dry run that alone exceeds the remaining budget", () => {
+	it("returns zero when fixed overhead consumes the remaining budget", () => {
 		expect(
 			estimateAffordableMutants({
-				remainingMs: 1000,
-				concurrency: 2,
-				dryRunMs: 999_999,
+				remainingMs: 240_000,
+				dryRunMs: 2_000,
+				fixedOverheadMs: 300_000,
 			}),
-		).toBe(1);
+		).toBe(0);
 	});
 
-	it("never returns fewer than 1 for a degenerate (zero or negative) dry-run duration", () => {
+	it("keeps a degenerate dry-run duration bounded", () => {
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 60_000,
-				concurrency: 2,
 				dryRunMs: 0,
 			}),
 		).toBe(1);
@@ -959,8 +963,8 @@ describe("dedupePatterns (#3531 round 2 S3)", () => {
 	});
 });
 
-describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
-	it("classifies a timed-out partial report with its evaluated count, score, and survivors (#3683)", () => {
+describe("describePartialMutationOutcome (#3531 round 3 R2-4)", () => {
+	it("classifies a timed-out partial report with a bounded measured-population verdict (#3683)", () => {
 		const verdict = describePartialMutationOutcome(
 			{
 				status: 143,
@@ -973,22 +977,20 @@ describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
 			{
 				evaluated: 221,
 				total: 270,
-				score: "42.53",
-				survivors: ["scripts/lib/stryker-diff.mjs:521"],
 			},
 		);
 
 		expect(verdict).toBe(
-			"mutation diff: budget expired after 221 of 270 mutants evaluated; partial score 42.53%; survivors: scripts/lib/stryker-diff.mjs:521",
+			"mutation diff: budget expired after 221 of 270 evaluated; M is the measured mutant population",
 		);
 	});
 
-	it("never says 'no mutants evaluated' -- some mutants WERE, which is why a partial report exists", () => {
+	it("bounds the timeout reason instead of duplicating the score and survivor table", () => {
 		// Recurrence: the review found the partial reason quoting
 		// describeStrykerFailure's "no mutants evaluated" prefix directly under
 		// the render's own "Partial run -- 8 of 9 evaluated" banner --
 		// self-contradictory.
-		const reason = describePartialInterruptCause(
+		const reason = describePartialMutationOutcome(
 			{
 				status: 143,
 				signal: null,
@@ -997,16 +999,20 @@ describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
 				}),
 			},
 			60,
+			{ evaluated: 8, total: 9 },
 		);
 
 		expect(reason).not.toContain("no mutants evaluated");
-		expect(reason).toContain("60-minute mutation budget expired");
+		expect(reason).toBe(
+			"mutation diff: budget expired after 8 of 9 evaluated; M is the measured mutant population",
+		);
 	});
 
 	it("still names Stryker's own status for a non-timeout interrupt", () => {
-		const reason = describePartialInterruptCause(
+		const reason = describePartialMutationOutcome(
 			{ status: 1, signal: null, error: undefined },
 			60,
+			{ evaluated: 8, total: 9 },
 		);
 
 		expect(reason).not.toContain("no mutants evaluated");
