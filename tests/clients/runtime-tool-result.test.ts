@@ -1747,18 +1747,237 @@ describe("monorepo turn-state cwd alignment", () => {
 			runtime.resetForSession();
 			release.resolve();
 			await handler;
+			// #3596: the second file's synthetic call inherits the dead session,
+			// so it is not dispatched at all.
 			expect(
 				handles.map((h) => ({
 					generation: h.generation,
 					current: h.isCurrent(),
 				})),
-			).toEqual([
-				{ generation: entered, current: false },
-				{ generation: entered, current: false },
-			]);
+			).toEqual([{ generation: entered, current: false }]);
 		} finally {
 			env.cleanup();
 		}
+	});
+});
+
+// #3596 (S3 of #3609): the writers `handleToolResult` still ran after an
+// upstream await against the LIVE coordinator. A handler abandoned by
+// index.ts' bound resumes after a replacement's reset and wrote a session-1
+// edit into session 2: a read-guard credit for a file session 2 never read
+// (#3528's stale-allow shape), its ranges into session 2's turn-state
+// worklist (#2504's shape), deferrals the drain then credits, the turn
+// summary, and the git-guard cache.
+describe("runtime-tool-result writers across a replacement (#3596)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+
+	function toolResultDeps(args: {
+		filePath: string;
+		runtime: RuntimeCoordinator;
+		cacheManager: CacheManager;
+		flags?: string[];
+	}) {
+		return {
+			event: {
+				toolName: "edit",
+				input: { path: args.filePath },
+				details: { diff: "+  1 export const x = 2;" },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: (name: string) => args.flags?.includes(name) ?? false,
+			dbg: () => {},
+			runtime: args.runtime,
+			cacheManager: args.cacheManager,
+			readGuard: args.runtime.readGuard,
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as any;
+	}
+
+	async function acrossReplacement(
+		slug: string,
+		body: (args: {
+			tmpDir: string;
+			filePath: string;
+			runtime: RuntimeCoordinator;
+			cacheManager: CacheManager;
+		}) => Promise<void>,
+	): Promise<void> {
+		resetDegradationLedger();
+		const env = setupTestEnvironment(`pi-lens-3596-${slug}-`);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"edit.ts",
+				"export const x = 2;\n",
+			);
+			// Aged, so only an explicit credit can make session 2 allow an edit.
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			await body({
+				tmpDir: env.tmpDir,
+				filePath,
+				runtime,
+				cacheManager: new CacheManager(false),
+			});
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	const turnFiles = (cacheManager: CacheManager, tmpDir: string) =>
+		Object.keys(cacheManager.readTurnState(tmpDir).files ?? {}).map((f) =>
+			path.basename(f),
+		);
+
+	it("a session-1 edit parked on its analysers credits nothing in session 2", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockReset();
+		vi.mocked(runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		requestBootstrapClients.mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			return { biomeClient: {}, ruffClient: {}, metricsClient: {} };
+		});
+		await acrossReplacement(
+			"parked",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				const handler = handleToolResult(
+					toolResultDeps({ filePath, runtime, cacheManager }),
+				);
+				await entered.promise;
+				runtime.resetForSession();
+				runtime.beginTurn();
+				release.resolve();
+				await handler;
+				expect({
+					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+					turnFiles: turnFiles(cacheManager, tmpDir),
+					dispatched: vi.mocked(runPipeline).mock.calls.length,
+					// The edit did land on disk: the change log keeps it (I5).
+					receipts: readChangesSince(tmpDir, 0).map((c) => c.filePath),
+					falseBlocks: getDegradationSummary()
+						.find((group) => group.kind === "session-scope-read-dropped")
+						?.latestReasons.map((r) => r.subject),
+				}).toEqual({
+					verdict: "block",
+					turnFiles: [],
+					dispatched: 0,
+					receipts: [filePath],
+					falseBlocks: ["superseded:tool-result"],
+				});
+			},
+		);
+	});
+
+	it("a session-1 pipeline settling after the replacement queues nothing in session 2", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		await acrossReplacement(
+			"settled",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				const sidePath = createTempFile(tmpDir, "side.ts", "export {};\n");
+				vi.mocked(runPipeline).mockReset();
+				vi.mocked(runPipeline).mockImplementation(async () => {
+					entered.resolve();
+					await release.promise;
+					return {
+						output: "",
+						hasBlockers: false,
+						isError: false,
+						fileModified: false,
+						changedFiles: [sidePath],
+						diagnostics: [
+							{
+								filePath,
+								tool: "eslint",
+								rule: "no-unused-vars",
+								severity: "warning",
+								line: 1,
+								message: "unused",
+							},
+						],
+					} as never;
+				});
+				const handler = handleToolResult(
+					toolResultDeps({
+						filePath,
+						runtime,
+						cacheManager,
+						flags: ["lens-turn-summary"],
+					}),
+				);
+				await entered.promise;
+				runtime.resetForSession();
+				runtime.beginTurn();
+				release.resolve();
+				await handler;
+				expect({
+					queued: runtime.pendingDeferredFormatCount,
+					sideInTurnState: turnFiles(cacheManager, tmpDir).includes("side.ts"),
+					sideReceipt: readChangesSince(tmpDir, 0).some(
+						(c) => c.filePath === sidePath && c.source === "autofix",
+					),
+					summaryEmpty: runtime.turnSummary.isEmpty(),
+				}).toEqual({
+					queued: 0,
+					sideInTurnState: false,
+					sideReceipt: true,
+					summaryEmpty: true,
+				});
+			},
+		);
+	});
+
+	it("a session-1 pipeline error leaves session 2's git-guard cache alone", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		vi.mocked(runPipeline).mockReset();
+		vi.mocked(runPipeline).mockImplementation(async () => {
+			entered.resolve();
+			await release.promise;
+			return {
+				output: "pipeline failed",
+				hasBlockers: false,
+				isError: true,
+				fileModified: false,
+			};
+		});
+		await acrossReplacement(
+			"git-guard",
+			async ({ filePath, runtime, cacheManager }) => {
+				const handler = handleToolResult(
+					toolResultDeps({
+						filePath,
+						runtime,
+						cacheManager,
+						flags: ["lens-guard"],
+					}),
+				);
+				await entered.promise;
+				runtime.resetForSession();
+				runtime.beginTurn();
+				release.resolve();
+				await handler;
+				expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			},
+		);
 	});
 });
 

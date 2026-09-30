@@ -121,6 +121,7 @@ import { getProcessSingleton } from "./process-singletons.js";
 import { bounded } from "./deadline-utils.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
 import { lineContentHash } from "./read-guard.js";
+import type { LineageHandle } from "./session-scope.js";
 
 /**
  * Wall-clock CEILING for the ARM capture — not its cost.
@@ -257,6 +258,8 @@ export interface ObservedReplayEntry {
 	provenance?: "observed" | "settled-sweep";
 	/** #3521: see `BridgeMutationEntry.readGuardBranchEpoch`. */
 	readGuardBranchEpoch?: number;
+	/** #3620: see `BridgeMutationEntry.lineage`. */
+	lineage?: LineageHandle;
 }
 
 /** How a caller hands an observed change back to the pipeline. */
