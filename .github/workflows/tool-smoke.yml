@@ -245,10 +245,15 @@ jobs:
       # built on master's current doc; otherwise keep master's (absent branch,
       # squash-merged, hand-edited since). Fail-open: any error leaves master's
       # doc and the step exits 0. Scoped like the PR step below, so a branch
-      # dispatch never swaps a PR branch's own doc for the bot's.
+      # dispatch never swaps a PR branch's own doc for the bot's. Closing the
+      # bot PR unmerged does NOT reset the bookkeeping (the branch is kept,
+      # `delete-branch: false`, and keeps seeding); only deleting
+      # `bot/lsp-docs-refresh` does. `timeout-minutes` bounds a hung fetch,
+      # which `continue-on-error` does not.
       - name: Seed the capability matrix from the last unmerged refresh
         if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
         continue-on-error: true
+        timeout-minutes: 2
         run: node scripts/seed-matrix-from-bot-branch.mjs
 
       # Diagnostic-mode matrix (#240): spawn each server and record its

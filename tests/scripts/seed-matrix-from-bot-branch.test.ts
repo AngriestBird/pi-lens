@@ -271,6 +271,7 @@ describe("#3401 the workflow wiring", () => {
 		run?: string;
 		if?: string;
 		"continue-on-error"?: boolean;
+		"timeout-minutes"?: number;
 	};
 	const workflow = yaml.load(
 		readFileSync(
@@ -293,5 +294,7 @@ describe("#3401 the workflow wiring", () => {
 			"github.event_name == 'schedule' || github.ref == 'refs/heads/master'",
 		);
 		expect(step["continue-on-error"]).toBe(true);
+		// `continue-on-error` does not bound a hung fetch; only a step timeout does.
+		expect(step["timeout-minutes"]).toBe(2);
 	});
 });

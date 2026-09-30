@@ -126,7 +126,8 @@ is the nightly run, not the bot PR's merge: each nightly starts from the last
 `bot/lsp-docs-refresh` doc when that branch is ahead of master and was built on
 master's current doc (`scripts/seed-matrix-from-bot-branch.mjs`), and from
 master's doc otherwise (branch absent, squash-merged, or master edited the doc
-since).
+since). Closing the bot PR unmerged does not reset the bookkeeping: the branch
+is kept and keeps seeding, so only deleting `bot/lsp-docs-refresh` resets it.
 
 `vue`'s `clean-behavior` was hand-reset to `unknown` (#3390): its
 `publishes-unversioned` cell came from 58/45 publishes that the shared

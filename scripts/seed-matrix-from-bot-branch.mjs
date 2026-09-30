@@ -20,15 +20,21 @@
  *
  * Fail-open and side-effect-light: it only ever overwrites the one matrix doc,
  * and every error path leaves master's doc in place and exits 0. The fetch is
- * unauthenticated because the repository is public.
+ * unauthenticated because the repository is public. Git runs through
+ * `gitExecFileSync` like `check-generated-docs-diff.mjs` in the same job: the
+ * remote URL is repo-local config, which the fixture env leaves alone.
+ *
+ * Closing the bot PR unmerged does NOT reset the bookkeeping: the branch is not
+ * deleted (`delete-branch: false`), stays ahead of master and built on master's
+ * current doc, and keeps seeding. Only deleting `bot/lsp-docs-refresh` resets it.
  *
  * Usage: node scripts/seed-matrix-from-bot-branch.mjs
  */
 
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
 export const BOT_BRANCH = "bot/lsp-docs-refresh";
 export const MATRIX_DOC = "docs/lsp-capability-matrix.md";
@@ -61,7 +67,7 @@ export function decideMatrixSeed({ masterBlob, botBlob, botBaseBlob }) {
 
 /** @param {string[]} args @param {{ cwd: string }} options */
 function defaultGit(args, options) {
-	return execFileSync("git", args, {
+	return gitExecFileSync(args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
 		maxBuffer: 64 * 1024 * 1024,
