@@ -71,7 +71,7 @@ export const TOOL_SMOKE_DRIFT_TITLE =
 // of the five layers this file tracks:
 //   `${pass} passed · ${fail} failed · ${setupFailed} setup-failed · ${skip} skipped (tool/config unavailable)`
 const SUMMARY_LINE_RE =
-	/(\d+) passed · (\d+) failed · (\d+) setup-failed · (\d+) skipped/;
+	/(SKIPPED:\s*)?(\d+) passed · (\d+) failed · (\d+) setup-failed · (\d+) skipped/;
 
 /**
  * Parse the "N passed · M failed · K setup-failed · S skipped" line
@@ -88,10 +88,10 @@ export function parseLayerSummary(text) {
 	const m = SUMMARY_LINE_RE.exec(text);
 	if (!m) return null;
 	return {
-		passed: Number(m[1]),
-		failed: Number(m[2]),
-		setupFailed: Number(m[3]),
-		skipped: Number(m[4]),
+		passed: Number(m[2]),
+		failed: Number(m[3]),
+		setupFailed: Number(m[4]),
+		skipped: Number(m[5]),
 	};
 }
 
@@ -183,8 +183,8 @@ export function nextConsecutiveRedCount(existingBody) {
 }
 
 /**
- * #2723 review F3: `decideAction`'s three-layer-outcome view cannot
- * distinguish "the job failed somewhere BEFORE the three tracked layers
+ * #2723 review F3: `decideAction`'s five-layer-outcome view cannot
+ * distinguish "the job failed somewhere BEFORE the five tracked layers
  * even started" (checkout, seven best-effort setup actions — already
  * `continue-on-error` and so cannot flip this, `npm install`, or
  * `build:dist`) from a genuine GitHub Actions cancellation: both leave
@@ -195,7 +195,7 @@ export function nextConsecutiveRedCount(existingBody) {
  * reads "failure" only when a non-`continue-on-error` step genuinely failed
  * somewhere in the job; a plain cancellation reports "cancelled", never
  * "failure". This promotes "no-action" to "file-or-refresh" ONLY when the
- * job is genuinely red for a reason outside the three tracked layers, and
+ * job is genuinely red for a reason outside the five tracked layers, and
  * leaves an actual cancellation exactly as untouched as before.
  *
  * #2723 review F4: `set -o pipefail` on each layer step is load-bearing —
@@ -240,7 +240,10 @@ export function decideToolSmokeAction(report, jobStatus) {
 export function layersGenuinelyClean(layers) {
 	return layers.every(
 		(l) =>
-			!l.summary || (l.summary.failed === 0 && l.summary.setupFailed === 0),
+			!l.summary ||
+			(l.summary.failed === 0 &&
+				l.summary.setupFailed === 0 &&
+				!(l.summary.passed === 0 && l.summary.skipped > 0)),
 	);
 }
 
@@ -276,7 +279,7 @@ export function buildToolSmokeDriftBody(report, opts = {}) {
 		...layers.map((l) => {
 			const s = l.summary;
 			const summaryText = s
-				? `${s.passed} passed · ${s.failed} failed · ${s.setupFailed} setup-failed · ${s.skipped} skipped`
+				? `${s.passed === 0 && s.failed === 0 && s.setupFailed === 0 && s.skipped > 0 ? "SKIPPED: " : ""}${s.passed} passed · ${s.failed} failed · ${s.setupFailed} setup-failed · ${s.skipped} skipped`
 				: "(no report — step did not run)";
 			return `| ${l.name} | ${l.outcome} | ${summaryText} |`;
 		}),

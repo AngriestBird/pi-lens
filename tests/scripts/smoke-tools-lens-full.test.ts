@@ -15,7 +15,11 @@ import {
 	runLensFull,
 } from "../../scripts/smoke-tools.mjs";
 
-const fixture = { lang: "typescript", serverHint: "probe-primary" };
+const fixture = {
+	lang: "typescript",
+	serverHint: "probe-primary",
+	expectedMessage: "Type 'string' is not assignable to type 'number'.",
+};
 
 // The real opted-in fixture, not a hand-shaped stand-in: the row is only ever
 // driven by `lensFullPopulation()`, so the test selects the same way.
@@ -88,6 +92,12 @@ describe("lens_diagnostics mode=full row classification (#2780)", () => {
 		expect(
 			classifyLensFullResult(
 				{
+					content: [
+						{
+							type: "text",
+							text: "Type 'string' is not assignable to type 'number'.",
+						},
+					],
 					details: {
 						lspPrimaryDiagnosticsCount: 1,
 						lspAuxiliaryDiagnosticsCount: 0,
@@ -118,19 +128,31 @@ describe("lens_diagnostics mode=full row classification (#2780)", () => {
 		).toMatchObject({ state: "fail", diags: 1 });
 	});
 
-	it("skips a server whose handshake census did not pass", () => {
-		expect(classifyLensFullResult(undefined, fixture, true)).toMatchObject({
-			state: "skip",
-		});
-	});
-
-	it("skips a result the handler itself marked unavailable", () => {
+	it("fails a result whose rendered verdict has no project finding", () => {
 		expect(
 			classifyLensFullResult(
-				{ details: { unavailable: "probe server unavailable" } },
+				{ details: { lspPrimaryDiagnosticsCount: 1, totalErrors: 0 } },
 				fixture,
 			),
-		).toMatchObject({ state: "skip" });
+		).toMatchObject({ state: "fail" });
+	});
+
+	it("fails when the rendered text omits the fixture's expected message", () => {
+		const messageFixture = {
+			...fixture,
+			expectedMessage: "expected fixture message",
+		};
+		expect(
+			classifyLensFullResult(
+				{
+					content: [
+						{ type: "text", text: "No files diagnosed yet this session." },
+					],
+					details: { lspPrimaryDiagnosticsCount: 1, totalErrors: 1 },
+				},
+				messageFixture,
+			),
+		).toMatchObject({ state: "fail" });
 	});
 
 	it("fails when the handler ran but reported no primary finding", () => {
@@ -154,7 +176,15 @@ describe("smoke-tools --lens-full entry (#2780)", () => {
 		const execute = vi.fn(
 			async (_toolCallId: string, params: Record<string, unknown>) => {
 				calls.push(params);
-				return { details: { lspPrimaryDiagnosticsCount: 1, totalErrors: 1 } };
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Type 'string' is not assignable to type 'number'.",
+						},
+					],
+					details: { lspPrimaryDiagnosticsCount: 1, totalErrors: 1 },
+				};
 			},
 		);
 		const output = await runWithCensus("pass", execute);

@@ -151,6 +151,44 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 		expect(out).toContain("lua-language-server");
 	});
 
+	it("acceptance #F2: files a lens_full red with its layer and row detail", () => {
+		const dir = mkTempDir("pi-lens-tool-smoke-lens-full-red-");
+		const out = runDryRun({
+			TOOL_LAYER_OUTCOME: "success",
+			TOOL_LAYER_LOG: writeLog(
+				dir,
+				"tool.log",
+				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+			),
+			LSP_HANDSHAKE_OUTCOME: "success",
+			LSP_HANDSHAKE_LOG: writeLog(
+				dir,
+				"lsp.log",
+				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+			),
+			LSP_GATE_OUTCOME: "success",
+			LSP_GATE_LOG: writeLog(
+				dir,
+				"lsp-gate.log",
+				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+			),
+			LENS_FULL_OUTCOME: "failure",
+			LENS_FULL_LOG: writeLog(
+				dir,
+				"lens-full.log",
+				"✗  typescript   typescript-language-server   0     lens_diagnostics mode=full returned 0 finding(s) but 0 primary LSP findings (auxiliary=0, lspFilesUnconfirmed=1, partial=1)\n0 passed · 1 failed · 0 setup-failed · 0 skipped\n",
+			),
+			FORMAT_LAYER_OUTCOME: "success",
+			FORMAT_LAYER_LOG: writeLog(
+				dir,
+				"fmt.log",
+				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
+			),
+		});
+		expect(out).toContain("Failing layer: **lens_diagnostics mode=full row**");
+		expect(out).toContain("lspFilesUnconfirmed=1, partial=1");
+	});
+
 	// Acceptance #3, the green-path-only regression this file's own module
 	// doc calls out (#2723): a run where an earlier layer failed and a later
 	// one was therefore SKIPPED must still be read as drift, not "no-action" --

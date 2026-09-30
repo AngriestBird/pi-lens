@@ -237,7 +237,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 	});
 });
 
-// #2723 review F4: `set -o pipefail` is LOAD-BEARING on each of the three
+// #2723 review F4: `set -o pipefail` is LOAD-BEARING on each of the five
 // gating layer steps, not documentation -- GitHub's default shell for a
 // `run:` step with no `shell:` key is `bash -e {0}` (no pipefail); without
 // this line, `node scripts/smoke-tools.mjs ... | tee logfile`'s exit code
@@ -250,6 +250,8 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 	const LAYER_STEP_NAMES = [
 		"Tool layer",
 		"LSP handshake layer",
+		"LSP diagnostics clean-gate",
+		"lens_diagnostics mode=full row",
 		"Format layer",
 	];
 
@@ -272,6 +274,21 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 			expect(mutated).not.toMatch(/^\s*set -o pipefail\s*$/m);
 		},
 	);
+
+	it("pins the lens_full run to the full-mode command", () => {
+		const step = findStep(workflow, "lens_diagnostics mode=full row");
+		expect(step.run).toContain("smoke-tools.mjs --lens-full --install");
+	});
+
+	it("keeps the lens_full gate fail-fast", () => {
+		const step = findStep(
+			workflow,
+			"lens_diagnostics mode=full row",
+		) as Step & {
+			"continue-on-error"?: unknown;
+		};
+		expect(step["continue-on-error"]).not.toBe(true);
+	});
 });
 
 // #2723 review F6: the `tee` target each layer step writes to and the
@@ -311,6 +328,8 @@ describe("each layer's tee log filename matches the notify step's *_LOG env (#27
 	it.each([
 		["Tool layer", "TOOL_LAYER_LOG"],
 		["LSP handshake layer", "LSP_HANDSHAKE_LOG"],
+		["LSP diagnostics clean-gate", "LSP_GATE_LOG"],
+		["lens_diagnostics mode=full row", "LENS_FULL_LOG"],
 		["Format layer", "FORMAT_LAYER_LOG"],
 	])("%s's tee target matches env.%s", (stepName, envVar) => {
 		const step = findStep(workflow, stepName);

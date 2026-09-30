@@ -230,20 +230,6 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --lsp-gate --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-gate.log"
 
-      # Nightly `lens_diagnostics mode=full` row (#2780): the clean gate above
-      # drives `lsp_diagnostics`; this drives `lens_diagnostics`, the default
-      # agent tool whose verdict shaping mirrors it, over ONE cheap seeded
-      # fixture with `mode=full refreshRunners=cheap`. It requires a fresh
-      # LSP-sweep PRIMARY finding, so a divergence between the two handlers'
-      # verdict shaping reds the nightly. One row, not per server: the clean
-      # gate already owns the per-server provenance question.
-      - name: lens_diagnostics mode=full row (LSP primary finding)
-        id: lens_full
-        timeout-minutes: 15
-        run: |
-          set -o pipefail
-          node scripts/smoke-tools.mjs --lens-full --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lens-full.log"
-
       # Diagnostic-mode matrix (#240): spawn each server and record its
       # advertised mode (pull vs push) — the first cut of the affirmative-clean
       # -signal classification (docs/lsp-capability-matrix.md). Best-effort: the
@@ -383,6 +369,21 @@ jobs:
         run: |
           set -o pipefail
           node scripts/smoke-tools.mjs --format --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-format-layer.log"
+
+      # Nightly `lens_diagnostics mode=full` row (#2780): the clean gate above
+      # drives `lsp_diagnostics`; this drives `lens_diagnostics`, the default
+      # agent tool whose verdict shaping mirrors it, over ONE cheap seeded
+      # fixture with `mode=full refreshRunners=cheap`. It requires a fresh
+      # LSP-sweep PRIMARY finding, so a divergence between the two handlers'
+      # verdict shaping reds the nightly. One row, not per server: the clean
+      # gate already owns the per-server provenance question. It follows the
+      # best-effort layers and Format so a red full-mode row does not hide them.
+      - name: lens_diagnostics mode=full row (LSP primary finding)
+        id: lens_full
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          node scripts/smoke-tools.mjs --lens-full --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lens-full.log"
 
       # #3319: PR analyses cover only their diff, so a master-only SonarCloud
       # quality regression otherwise stays invisible to the merge train. Keep

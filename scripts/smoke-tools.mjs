@@ -163,19 +163,10 @@ export function lensFullPopulation(fixtures = LSP_FIXTURES) {
  * `classifyLspGateResult`: it counts the fresh LSP sweep's PRIMARY bucket
  * (`lspPrimaryDiagnosticsCount`) so an auxiliary-only result (ast-grep,
  * opengrep, ...) cannot be mistaken for the configured primary answering —
- * exactly the #2776 provenance shape. `unavailable` is the shared handshake
- * census verdict, identical to the clean-gate's.
+ * exactly the #2776 provenance shape. Handshake availability is admitted by
+ * the census in `runLensFull`, before this classifier is called.
  */
-export function classifyLensFullResult(result, fx, unavailable = false) {
-	if (unavailable || result?.details?.unavailable) {
-		return {
-			state: "skip",
-			detail:
-				result?.details?.unavailable ??
-				`${fx.serverHint} unavailable (handshake did not complete)`,
-			diags: 0,
-		};
-	}
+export function classifyLensFullResult(result, fx) {
 	if (!result) {
 		return {
 			state: "fail",
@@ -187,10 +178,14 @@ export function classifyLensFullResult(result, fx, unavailable = false) {
 	const primary = Number(details.lspPrimaryDiagnosticsCount ?? 0);
 	const auxiliary = Number(details.lspAuxiliaryDiagnosticsCount ?? 0);
 	const projectFindings =
-		Number(details.totalBlocking ?? 0) +
-		Number(details.totalErrors ?? 0) +
-		Number(details.totalWarnings ?? 0);
-	if (primary > 0) {
+		Number(details.totalBlocking ?? 0) + Number(details.totalErrors ?? 0);
+	const renderedText = result.content?.[0]?.text ?? "";
+	const renderedMessage = fx.expectedMessage;
+	const renderedMessageMissing =
+		typeof renderedMessage === "string" &&
+		renderedMessage.length > 0 &&
+		!renderedText.includes(renderedMessage);
+	if (primary > 0 && projectFindings > 0 && !renderedMessageMissing) {
 		return {
 			state: "pass",
 			detail: `lens_diagnostics mode=full returned ${primary} primary finding${primary === 1 ? "" : "s"}`,
@@ -199,7 +194,7 @@ export function classifyLensFullResult(result, fx, unavailable = false) {
 	}
 	return {
 		state: "fail",
-		detail: `lens_diagnostics mode=full returned ${projectFindings} finding(s) but 0 primary LSP findings (auxiliary=${auxiliary})`,
+		detail: `lens_diagnostics mode=full returned ${projectFindings} finding(s) but ${primary} primary LSP findings (auxiliary=${auxiliary}, lspFilesUnconfirmed=${details.lspFilesUnconfirmed ?? 0}, partial=${details.lspFilesPartiallyCovered ?? 0}${renderedMessageMissing ? `, rendered text missing expected message "${renderedMessage}"` : ""})`,
 		diags: primary + auxiliary,
 	};
 }
@@ -542,6 +537,7 @@ const LSP_FIXTURES = [
 		expectServerId: "typescript",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
+		expectedMessage: "Type 'string' is not assignable to type 'number'.",
 		// The single fixture the nightly `lens_diagnostics mode=full` row drives
 		// (#2780). Cheap (typescript-language-server, no toolchain setup) and
 		// seeded with a type error only the real LSP can see, so a zero primary
@@ -2260,13 +2256,17 @@ function report(rows, title) {
 	}
 	const counts = { pass: 0, fail: 0, skip: 0, "setup-failed": 0 };
 	for (const r of rows) counts[r.state]++;
-	console.log(
-		`\n${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`,
-	);
+	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`;
+	const skippedOnly =
+		counts.pass === 0 &&
+		counts.fail === 0 &&
+		counts["setup-failed"] === 0 &&
+		counts.skip > 0;
+	console.log(`\n${skippedOnly ? "SKIPPED: " : ""}${summary}`);
 	console.log(
 		"Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)\n",
 	);
-	return counts.fail + counts["setup-failed"];
+	return skippedOnly ? 1 : counts.fail + counts["setup-failed"];
 }
 
 /**

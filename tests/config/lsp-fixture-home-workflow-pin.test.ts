@@ -5,7 +5,7 @@
 // isolation stays the LOCAL default (scripts/lib/scratch-dir.mjs); in CI the
 // job-level pin wins because withScratchHome() respects an explicit value.
 // #2670 review F1: `tool-smoke.yml` runs NINE `--install` invocations
-// (smoke-tools.mjs x3, characterize-lsp.mjs, probe-clean-signal.mjs,
+// (smoke-tools.mjs x5, characterize-lsp.mjs, probe-clean-signal.mjs,
 // server-capabilities.mjs, measure-lsp-idle-eviction.mjs) in ONE job. `PI_LENS_HOME` relocates the
 // installer's tool tree/bin dir/probe cache (module-level consts at
 // `clients/installer/index.ts`), not just logs — with no JOB-level pin, each
