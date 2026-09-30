@@ -2257,7 +2257,18 @@ export class TreeSitterClient {
 		}
 		this.queryBatchLoadFailures.delete(cacheKey);
 
+		// #3707: a compile that trapped this build makes the result degraded (a
+		// rule skipped, or the batch nulled). A transient trap must not stay
+		// cached for the process, so such a build is not cached below.
+		let trapped = false;
+		// One entry per query source (#3605): the combined compile is charged to
+		// the batch key, each probe to the rule's raw-query key, which
+		// `compileRawQuery` shares. A charged key is never compiled again, so
+		// its cached result is permanent either way.
+		const batchInput = wasmQueryInput(cacheKey);
+
 		const build = async (): Promise<QueryBatch | null> => {
+			if (this.wasmInputTraps(batchInput) > 1) return null;
 			const Query = (await loadWebTreeSitter()).Query;
 
 			const entries: QueryBatchEntry[] = [];
@@ -2265,13 +2276,25 @@ export class TreeSitterClient {
 			const ownerOfPattern: number[] = [];
 			for (const queryDef of queryDefs) {
 				let patternCount: number;
+				const probeInput = wasmQueryInput(
+					this.getQueryCacheKey(
+						`raw:${queryDef.id}:${queryDef.query}`,
+						languageId,
+					),
+				);
+				if (this.wasmInputTraps(probeInput) > 1) {
+					this.dbg(`Batch: skipping ${queryDef.id}, its compile trapped twice`);
+					continue;
+				}
 				try {
 					// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 					const probe = new Query(language as any, queryDef.query);
 					patternCount = probe.patternCount();
 					probe.delete?.();
+					this.clearWasmInput(probeInput);
 				} catch (err) {
-					if (this.reportWasmAbort(err)) return null;
+					if (this.reportWasmAbort(err, probeInput)) return null;
+					if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 					// A rule that can't compile against THIS grammar is simply not
 					// applicable here (e.g. a `type_annotation` pattern on javascript).
 					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
@@ -2299,16 +2322,18 @@ export class TreeSitterClient {
 					);
 					return null;
 				}
+				this.clearWasmInput(batchInput);
 				return { query, entries, ownerOfPattern, key: cacheKey };
 			} catch (err) {
-				if (this.reportWasmAbort(err)) return null;
+				if (this.reportWasmAbort(err, batchInput)) return null;
+				if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 				this.dbg(`Batch compile failed for ${languageId}: ${err}`);
 				return null;
 			}
 		};
 
 		const batch = await build();
-		this.cacheQueryBatch(cacheKey, batch);
+		if (!trapped) this.cacheQueryBatch(cacheKey, batch);
 		return batch;
 	}
 
