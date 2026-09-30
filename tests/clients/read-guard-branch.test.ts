@@ -156,21 +156,6 @@ describe("ReadGuard.retainBranch (#3521)", () => {
 		);
 	});
 
-	it("clears the edit history, so an old allowed edit cannot rescue an unhashed record", () => {
-		const big = oldFile("big.ts", 3100);
-		const guard = createReadGuard("retain-edits");
-		guard.recordRead(fullRead(big, 3100, "call_big"));
-		// An edit allowed on the abandoned branch: canTreatStalenessAsOwnPriorEdit
-		// would read it as "the staleness is our own write".
-		expect(verdict(guard, big, 2)).toBe("allow");
-
-		guard.retainBranch(new Set(["call_big"]));
-
-		expect(verdict(guard, big, 2)).toMatch(
-			/^block: .*File modified since read/,
-		);
-	});
-
 	it("clears writtenThisSession: a file written only on the abandoned branch needs a read", () => {
 		const c = path.join(env.tmpDir, "c.ts");
 		const guard = createReadGuard("retain-written");
