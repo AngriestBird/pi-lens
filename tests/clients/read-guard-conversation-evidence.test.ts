@@ -2234,7 +2234,6 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			expect(edit.reason).toContain("File modified since read");
 		} finally {
 			setHostFileMutationQueueLoader(undefined);
-			vi.mocked(getLSPService).mockReset();
 			env.cleanup();
 		}
 	});
