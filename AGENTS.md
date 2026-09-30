@@ -63,6 +63,11 @@ Prefer the smallest existing seam. A new shared helper must remove at least
 one same-shape sibling in the same change, or the brief must name every sibling,
 explain why folding is unsafe, and link the follow-up.
 
+A core-domain rule lives in its owning module; every other caller asks that owner.
+A fix that re-derives an owned rule at a consumer is wrong. Extend the owner;
+create a new one only with a stated reason, and put new rules in their domain
+owner (#3781, #3794, #3796).
+
 A change on a lifecycle, timing, or identity seam extends or adds a TLA+ model
 in step with the code: `formal/coverage-map.json` maps source globs to model
 families, and the PR-body lint requires a `.tla`/`.cfg` change under a mapped

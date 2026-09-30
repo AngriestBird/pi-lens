@@ -757,6 +757,12 @@ export type DegradationKind =
 	/** A complete MCP result exceeded the hard input budget (#2848). */
 	| "mcp-complete-result-budget-exceeded"
 	/**
+	 * An MCP `tools/call` carried argument keys the tool's schema does not
+	 * declare (#3749). Counted, not once: the subject is the tool name, the
+	 * group count is the exact number of such calls, the reason the latest keys.
+	 */
+	| "mcp-ignored-arguments"
+	/**
 	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, trivy-config, …)
 	 * produced no usable output — empty stdout, unparseable stdout (e.g. a
 	 * rejected CLI flag that prints usage text instead of the expected report;

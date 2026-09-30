@@ -28,6 +28,10 @@
   #3288), plus #3284's own `path` count red (cue-vet 5→6, dart-analyze 6→4)
   until a trailing re-pin.
 - Build and run the targeted and required governance suites.
+- Flag any new rule predicate added outside its owning domain module; consumers
+  must ask the owner rather than re-derive its rule (#3781, #3794, #3796).
+- Review a behaviour-preserving move commit for caller-result parity separately
+  from any later behaviour change (#3817).
 - **Name the behaviour population; never clear a seam from a curated list.**
   When a change replaces, moves, or widens a lifecycle, dispatch, or ownership
   seam, enumerate EVERY suite that exercises the behaviour the seam governs,
