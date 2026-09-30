@@ -510,28 +510,34 @@ export function mergeServerCapabilitiesDoc(priorText, freshText) {
 // Two bounded rules fix that, and both need a per-cell observation memory that
 // outlives one nightly run:
 //
-//  - EXPIRY (first-publish): a cell carrying a measurement (`direct`/
-//    `empty-first`) whose axis is not re-observed for `FIRST_PUBLISH_EXPIRY_RUNS`
-//    consecutive runs degrades to `unknown`.
-//  - HYSTERESIS (clean-behavior/tier): a change is written only after
+//  - EXPIRY (first-publish, DATE-based): a `direct` cell whose axis the probe
+//    does not re-observe is stamped once with `firstMissed` (a UTC date) and
+//    degrades to `unknown` once `FIRST_PUBLISH_EXPIRY_DAYS` have elapsed. Only
+//    `direct` is in the population: `empty-first` backs live
+//    `emptyFirstPublish` markers, so expiring it would erase the measurement
+//    behind a marker while the first-publish census stays green.
+//  - HYSTERESIS (clean-behavior/tier, run-based): a change is written only after
 //    `TIER_CHANGE_AGREE_RUNS` consecutive runs observe the same new value, so a
-//    single flapping run (ast-grep 2 → 2* → 3 → 2* across four nightlies) cannot
-//    rewrite a cell.
+//    single flapping run (ast-grep 2 -> 2* -> 3 -> 2* across four nightlies)
+//    cannot rewrite a cell. A night that measured nothing for the lang resets
+//    the hold.
 //
-// The matrix doc is the only state the refresh persists: the nightly
-// `bot/lsp-docs-refresh` auto-PR commits it (and `check-generated-docs-diff.mjs`
-// opens the PR when it changes, including a state-only change). So the counters
-// live in a generated section of that same doc and survive with it. Nothing
-// here is a measurement; the section is bookkeeping.
+// The matrix doc is the only state the refresh persists, so the bookkeeping
+// lives in a generated section of that same doc. The nightly seeds its working
+// copy from the last `bot/lsp-docs-refresh` doc when that branch is ahead of
+// master (scripts/seed-matrix-from-bot-branch.mjs), so the state advances per
+// nightly run whether or not the bot PR has merged. Nothing here is a
+// measurement; the section is bookkeeping.
 // ---------------------------------------------------------------------------
 
 /**
- * #3401: consecutive unobserved runs before a measured `first-publish` cell
- * degrades to `unknown`. Five nights is long enough that a transient runner or
- * toolchain gap does not erase a dev-box measurement, and short enough that a
- * dead cell cannot outlive the instrument that produced it (#3310's lesson).
+ * #3401: elapsed days after the first miss before a `direct` `first-publish`
+ * cell degrades to `unknown`. Five days is long enough that a transient runner
+ * or toolchain gap does not erase a dev-box measurement, and short enough that
+ * a dead cell cannot outlive the instrument that produced it (#3310's lesson).
+ * Elapsed calendar days, not runs: a skipped nightly cannot stall it.
  */
-export const FIRST_PUBLISH_EXPIRY_RUNS = 5;
+export const FIRST_PUBLISH_EXPIRY_DAYS = 5;
 
 /**
  * #3401: consecutive agreeing runs before a `clean-behavior`/`tier` change is
@@ -539,6 +545,32 @@ export const FIRST_PUBLISH_EXPIRY_RUNS = 5;
  * two agreeing nights commit.
  */
 export const TIER_CHANGE_AGREE_RUNS = 2;
+
+/** The one first-publish class the expiry may retire (see the block above). */
+const EXPIRABLE_FIRST_PUBLISH = "direct";
+
+/** @param {Date | number | string} now @returns {string} UTC `YYYY-MM-DD` */
+function utcDay(now) {
+	if (isUtcDay(now)) return now;
+	return new Date(now).toISOString().slice(0, 10);
+}
+
+/** True for a real `YYYY-MM-DD` calendar date (`2026-13-45` is not). */
+function isUtcDay(value) {
+	if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
+		return false;
+	const ms = Date.parse(`${value}T00:00:00Z`);
+	return !Number.isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === value;
+}
+
+/** Whole UTC days from `from` to `to` (both `YYYY-MM-DD`); `null` if `from` is not a real date. */
+function elapsedDays(from, to) {
+	if (!isUtcDay(from)) return null;
+	return Math.round(
+		(Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
+			86_400_000,
+	);
+}
 
 const REFRESH_STATE_HEADING =
 	"## Capability matrix refresh state (nightly-generated)";
@@ -551,7 +583,7 @@ const REFRESH_STATE_FENCE_END = "```";
  * to "no memory this run", never a crash.
  *
  * @param {string} text
- * @returns {{ "first-publish"?: Record<string, { missed: number }>, "clean-behavior"?: Record<string, { pendingBehavior: string, pendingTier: string, runs: number }> }}
+ * @returns {{ "first-publish"?: Record<string, { firstMissed: string }>, "clean-behavior"?: Record<string, { pendingBehavior: string, pendingTier: string, runs: number }> }}
  */
 export function parseRefreshState(text) {
 	const lines = String(text ?? "").split("\n");
@@ -581,8 +613,8 @@ function renderRefreshStateSection(state) {
 	for (const lang of Object.keys(state?.["first-publish"] ?? {}).sort(
 		compareStableStrings,
 	)) {
-		const missed = Number(state["first-publish"][lang]?.missed ?? 0);
-		if (missed > 0) firstPublish[lang] = { missed };
+		const firstMissed = state["first-publish"][lang]?.firstMissed;
+		if (isUtcDay(firstMissed)) firstPublish[lang] = { firstMissed };
 	}
 	const cleanBehavior = {};
 	for (const lang of Object.keys(state?.["clean-behavior"] ?? {}).sort(
@@ -605,8 +637,9 @@ function renderRefreshStateSection(state) {
 	return [
 		REFRESH_STATE_HEADING,
 		"",
-		"Bookkeeping for the `first-publish` expiry (#3401) and the two-run",
-		"`clean-behavior` hysteresis. Regenerated every run; never a measurement.",
+		"Bookkeeping for the date-based `direct` `first-publish` expiry (#3401) and",
+		"the two-run `clean-behavior` hysteresis. Regenerated every run; never a",
+		"measurement.",
 		"",
 		REFRESH_STATE_FENCE,
 		JSON.stringify(payload),
@@ -650,7 +683,10 @@ function replaceRefreshStateSection(text, section) {
  * @param {Array<{ lang: string, firstPublish?: string | null, cleanBehavior?: string | null, tier?: string | null }>} observations
  *   this run's comparable observations, already resolved onto target langs by
  *   the caller (a non-comparable axis is `null`)
- * @param {{ src?: string, marker?: string, agreeRuns?: number, expireRuns?: number }} [opts]
+ * @param {{ src?: string, marker?: string, agreeRuns?: number, expireDays?: number, now?: Date | number | string, probedLangs?: Iterable<string> }} [opts]
+ *   `now` is the injected clock (default: the real one); `probedLangs` scopes a
+ *   subset probe: a lang outside it keeps its bookkeeping untouched. Omitted
+ *   means a full run.
  * @returns {{ text: string, changed: boolean, reason?: string, expired: number, pending: number, committed: number }}
  */
 export function refreshCapabilityMatrix(text, observations, opts = {}) {
@@ -660,10 +696,12 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		1,
 		Number(opts.agreeRuns ?? TIER_CHANGE_AGREE_RUNS),
 	);
-	const expireRuns = Math.max(
+	const expireDays = Math.max(
 		1,
-		Number(opts.expireRuns ?? FIRST_PUBLISH_EXPIRY_RUNS),
+		Number(opts.expireDays ?? FIRST_PUBLISH_EXPIRY_DAYS),
 	);
+	const today = utcDay(opts.now ?? new Date());
+	const probed = opts.probedLangs ? new Set(opts.probedLangs) : null;
 	const tbl = parseTable(text, marker);
 	if (!tbl) {
 		return {
@@ -694,21 +732,35 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		const lang = cells[langIdx];
 		const observed = byLang.get(lang);
 		const cell = { lang };
+		if (probed && !probed.has(lang)) {
+			// A subset probe says nothing about this lang: neither advance nor drop
+			// its bookkeeping (a one-lang dev run must not tick or expire cells).
+			if (priorFp[lang]) nextState["first-publish"][lang] = priorFp[lang];
+			if (priorCb[lang]) nextState["clean-behavior"][lang] = priorCb[lang];
+			measured.push(cell);
+			continue;
+		}
 		if (observed)
 			cell.src = mergeSrc(srcIdx >= 0 ? (cells[srcIdx] ?? "") : "", src);
-		// first-publish: an observation writes immediately; a measured cell the
-		// probe no longer observes is counted and, at the bound, expired.
+		// first-publish: an observation writes immediately; a `direct` cell the
+		// probe no longer observes is stamped with its first miss and, once
+		// `expireDays` have elapsed, expired.
 		const observedFp = observed?.firstPublish ?? null;
 		const currentFp = fpIdx >= 0 ? cells[fpIdx] : "";
 		if (observedFp) {
 			cell["first-publish"] = observedFp;
-		} else if (currentFp === "direct" || currentFp === "empty-first") {
-			const missed = Number(priorFp[lang]?.missed ?? 0) + 1;
-			if (missed >= expireRuns) {
-				cell["first-publish"] = "unknown";
-				expired++;
+		} else if (currentFp === EXPIRABLE_FIRST_PUBLISH) {
+			// A missing, garbage or future stamp restarts the clock today.
+			const elapsed = elapsedDays(priorFp[lang]?.firstMissed, today);
+			if (elapsed !== null && elapsed >= 0) {
+				if (elapsed >= expireDays) {
+					cell["first-publish"] = "unknown";
+					expired++;
+				} else {
+					nextState["first-publish"][lang] = priorFp[lang];
+				}
 			} else {
-				nextState["first-publish"][lang] = { missed };
+				nextState["first-publish"][lang] = { firstMissed: today };
 			}
 		}
 		// clean-behavior/tier: hold a change until `agreeRuns` runs agree.

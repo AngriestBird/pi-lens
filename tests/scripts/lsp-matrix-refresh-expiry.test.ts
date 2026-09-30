@@ -17,15 +17,24 @@
  * a change as `pending` until `TIER_CHANGE_AGREE_RUNS` consecutive runs agree.
  *
  * Both need an observation memory that outlives one nightly. The matrix doc is
- * the only state the refresh persists (the `bot/lsp-docs-refresh` auto-PR
- * commits it, and `check-generated-docs-diff.mjs` opens the PR when it
- * changes), so the counters live in a generated section of that same doc. These
+ * the only state the refresh persists, so the bookkeeping lives in a generated
+ * section of that same doc. The nightly seeds its working copy from the last
+ * `bot/lsp-docs-refresh` doc (even an unmerged one), so the clock is the
+ * nightly run, not the bot PR's merge (round 2; the seed is tested in
+ * tests/scripts/seed-matrix-from-bot-branch.test.ts). The first-publish expiry
+ * is DATE-based (`firstMissed`, written once, expires after N elapsed days) so a
+ * skipped nightly cannot stall it; the tier hysteresis stays run-based. These
  * tests drive the real refresh entry, `refreshCapabilityMatrix`, with recorded
- * run inputs and no LSP spawn.
+ * run inputs, an injected clock and no LSP spawn.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { strategyKeyForLang } from "../../scripts/lib/clean-signal.mjs";
+import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
 import {
-	FIRST_PUBLISH_EXPIRY_RUNS,
+	FIRST_PUBLISH_EXPIRY_DAYS,
 	TIER_CHANGE_AGREE_RUNS,
 	mergeRows,
 	parseRefreshState,
@@ -36,6 +45,10 @@ import {
 } from "../../scripts/lib/md-matrix.mjs";
 
 const MARKER = "| lang | server |";
+const repoRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 
 const FIXTURE = [
 	"# LSP capability matrix",
@@ -45,6 +58,8 @@ const FIXTURE = [
 	"| vue | @vue/language-server | push-only | unknown | direct | 2/3? | dev+ci |",
 	"| ast-grep | ast-grep (aux) | push-only | publishes-versioned | direct | 2 | dev+ci |",
 	"| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev+ci |",
+	"| php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci |",
+	"| svelte | svelteserver | push-only | unknown | unknown | 3? | dev |",
 	"",
 	"## Key findings",
 	"",
@@ -100,7 +115,26 @@ function measured(
 	});
 }
 
-describe("#3401 first-publish expiry", () => {
+/** The injected clock: nightly `n` days after 2026-09-01 (UTC). */
+function day(n: number): string {
+	return new Date(Date.UTC(2026, 8, 1 + n)).toISOString().slice(0, 10);
+}
+
+/** One nightly run on `day(n)`; `extra` carries probedLangs etc. */
+function nightly(
+	text: string,
+	n: number,
+	observations: readonly MatrixObservation[] = [],
+	extra: { probedLangs?: readonly string[] } = {},
+) {
+	return refreshCapabilityMatrix(text, observations, {
+		src: "ci",
+		now: day(n),
+		...extra,
+	});
+}
+
+describe("#3401 first-publish expiry (date-based)", () => {
 	it("preserves a stale first-publish cell through the plain merge guard (the pre-fix defect)", () => {
 		// The pre-fix production path: the merge guard writes only the columns a
 		// run measured, so a run with no first-publish observation leaves the
@@ -124,42 +158,196 @@ describe("#3401 first-publish expiry", () => {
 		expect(cellOf(preFix, "vue", "first-publish")).toBe("direct");
 	});
 
-	it("keeps the stale cell until the bound, then expires it to unknown", () => {
+	it("keeps the stale cell until FIRST_PUBLISH_EXPIRY_DAYS have elapsed, then expires it to unknown", () => {
 		let text = FIXTURE;
-		for (let run = 1; run < FIRST_PUBLISH_EXPIRY_RUNS; run++) {
-			text = refreshCapabilityMatrix(text, [], { src: "ci" }).text;
+		for (let n = 0; n < FIRST_PUBLISH_EXPIRY_DAYS; n++) {
+			text = nightly(text, n).text;
 			expect(
 				cellOf(text, "vue", "first-publish"),
-				`run ${run} of ${FIRST_PUBLISH_EXPIRY_RUNS} must still hold the measured cell`,
+				`night ${n} is ${n} elapsed days after the first miss: the cell must still stand`,
 			).toBe("direct");
 		}
-		const final = refreshCapabilityMatrix(text, [], { src: "ci" });
+		const final = nightly(text, FIRST_PUBLISH_EXPIRY_DAYS);
 		expect(cellOf(final.text, "vue", "first-publish")).toBe("unknown");
 		expect(cellOf(final.text, "ast-grep", "first-publish")).toBe("unknown");
-		expect(final.expired).toBeGreaterThanOrEqual(2);
+		expect(final.expired).toBe(2);
+		// The expired cell's bookkeeping is gone, so a settled doc is stable.
+		expect(parseRefreshState(final.text)["first-publish"]).toBeUndefined();
 	});
 
-	it("resets the miss streak when the axis is observed again", () => {
-		const observed = observation("vue", { firstPublish: "direct" });
+	it("writes firstMissed once, at the first miss, and never slides it", () => {
+		let text = nightly(FIXTURE, 0).text;
+		expect(parseRefreshState(text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(0),
+		});
+		text = nightly(text, 1).text;
+		text = nightly(text, 3).text;
+		expect(parseRefreshState(text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(0),
+		});
+	});
+
+	it("counts elapsed days, not runs: a run after skipped nights expires a stale cell", () => {
+		// Night 0 is the only run; nights 1-8 were skipped (the bot PR sat, the
+		// workflow was disabled). The next run, on day 9, is 9 elapsed days.
+		const first = nightly(FIXTURE, 0).text;
+		expect(cellOf(first, "vue", "first-publish")).toBe("direct");
+		const later = nightly(first, 9);
+		expect(cellOf(later.text, "vue", "first-publish")).toBe("unknown");
+		expect(later.expired).toBe(2);
+	});
+
+	it("does not advance on extra runs the same day", () => {
 		let text = FIXTURE;
-		// Three misses, then a fresh observation must clear the counter.
-		for (let run = 0; run < 3; run++)
-			text = refreshCapabilityMatrix(text, [], { src: "ci" }).text;
-		expect(parseRefreshState(text)["first-publish"]?.vue?.missed).toBe(3);
-		text = refreshCapabilityMatrix(text, [observed], { src: "ci" }).text;
-		expect(parseRefreshState(text)["first-publish"]?.vue).toBeUndefined();
-		// The bound is measured in CONSECUTIVE misses, so re-arming starts over.
-		for (let run = 1; run < FIRST_PUBLISH_EXPIRY_RUNS; run++)
-			text = refreshCapabilityMatrix(text, [], { src: "ci" }).text;
+		for (let run = 0; run < FIRST_PUBLISH_EXPIRY_DAYS + 3; run++) {
+			text = nightly(text, 0).text;
+		}
 		expect(cellOf(text, "vue", "first-publish")).toBe("direct");
+	});
+
+	it("resets the clock when the axis is observed again", () => {
+		const observed = observation("vue", { firstPublish: "direct" });
+		let text = nightly(FIXTURE, 0).text;
+		text = nightly(text, 3).text;
+		text = nightly(text, 4, [observed]).text;
+		expect(parseRefreshState(text)["first-publish"]?.vue).toBeUndefined();
+		// The next miss is a NEW first miss on day 5: elapsed time is measured
+		// from it, not from day 0.
+		text = nightly(text, 5).text;
+		expect(parseRefreshState(text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(5),
+		});
+		text = nightly(text, 5 + FIRST_PUBLISH_EXPIRY_DAYS - 1).text;
+		expect(cellOf(text, "vue", "first-publish")).toBe("direct");
+		text = nightly(text, 5 + FIRST_PUBLISH_EXPIRY_DAYS).text;
+		expect(cellOf(text, "vue", "first-publish")).toBe("unknown");
+	});
+
+	it("treats a garbage or future firstMissed as a fresh first miss, never an expiry", () => {
+		for (const bad of ["not-a-date", "2099-01-01", "2026-13-45", ""]) {
+			const doc = `${FIXTURE}\n## Capability matrix refresh state (nightly-generated)\n\n\`\`\`json\n${JSON.stringify(
+				{ "first-publish": { vue: { firstMissed: bad } } },
+			)}\n\`\`\`\n`;
+			const result = nightly(doc, 40);
+			expect(cellOf(result.text, "vue", "first-publish"), bad).toBe("direct");
+			expect(parseRefreshState(result.text)["first-publish"]?.vue, bad).toEqual(
+				{ firstMissed: day(40) },
+			);
+		}
 	});
 
 	it("never expires a pull row's n/a (pull) cell", () => {
 		let text = FIXTURE;
-		for (let run = 0; run < FIRST_PUBLISH_EXPIRY_RUNS + 2; run++)
-			text = refreshCapabilityMatrix(text, [], { src: "ci" }).text;
+		for (let n = 0; n < FIRST_PUBLISH_EXPIRY_DAYS + 7; n++)
+			text = nightly(text, n).text;
 		expect(cellOf(text, "rust", "first-publish")).toBe("n/a (pull)");
 		expect(parseRefreshState(text)["first-publish"]?.rust).toBeUndefined();
+	});
+
+	it("never counts an unknown first-publish cell (no measurement to expire)", () => {
+		// Recurrence: counting every non-empty cell would tick `unknown` forever
+		// and keep the bot PR noisy with bookkeeping for a cell that holds nothing.
+		let text = FIXTURE;
+		for (let n = 0; n < FIRST_PUBLISH_EXPIRY_DAYS + 3; n++)
+			text = nightly(text, n).text;
+		expect(cellOf(text, "svelte", "first-publish")).toBe("unknown");
+		expect(parseRefreshState(text)["first-publish"]?.svelte).toBeUndefined();
+	});
+
+	it("never expires an empty-first cell (the evidence behind a live emptyFirstPublish marker)", () => {
+		// Recurrence (review F2, mutation M7b): php/terraform `empty-first` back a
+		// LIVE `emptyFirstPublish: "indexing"` marker. Expiring the cell erases the
+		// measurement behind the marker while the first-publish census stays green
+		// (it ignores `unknown`). Only a stale `direct` -- the no-op default -- may
+		// expire.
+		let text = FIXTURE;
+		for (let n = 0; n < FIRST_PUBLISH_EXPIRY_DAYS * 6; n++)
+			text = nightly(text, n).text;
+		expect(cellOf(text, "php", "first-publish")).toBe("empty-first");
+		expect(parseRefreshState(text)["first-publish"]?.php).toBeUndefined();
+		// ...while the `direct` cells in the same doc did expire, so the loop
+		// genuinely ran the expiry.
+		expect(cellOf(text, "vue", "first-publish")).toBe("unknown");
+	});
+
+	it("keeps every marker-backed empty-first cell of the real matrix through a month of misses", () => {
+		// The same rule against the real registry: every server the wait policy
+		// marks `emptyFirstPublish: "indexing"` keeps its measured cell.
+		const real = fs.readFileSync(
+			path.join(repoRoot, "docs", "lsp-capability-matrix.md"),
+			"utf8",
+		);
+		const table = parseTable(real, MARKER)!;
+		const langIdx = table.header.indexOf("lang");
+		const marked = table.rows
+			.filter(
+				(cells) =>
+					SERVER_DIAGNOSTIC_STRATEGIES[strategyKeyForLang(cells[langIdx])]
+						?.emptyFirstPublish === "indexing",
+			)
+			.map((cells) => cells[langIdx]);
+		expect(
+			marked.length,
+			"the registry marks at least one server",
+		).toBeGreaterThan(0);
+		let text = real;
+		for (let n = 0; n < 30; n++) text = nightly(text, n).text;
+		for (const lang of marked) {
+			expect(cellOf(text, lang, "first-publish"), lang).toBe("empty-first");
+		}
+	});
+});
+
+describe("#3401 subset probe", () => {
+	it("does not advance or expire the state of a lang it did not probe", () => {
+		// Recurrence (review F4): `probe-clean-signal.mjs typescript` used to tick
+		// every unprobed first-publish cell, so a dev's one-lang run expired cells.
+		const first = nightly(FIXTURE, 0).text;
+		const subset = nightly(first, 30, [], { probedLangs: ["rust"] });
+		expect(subset.expired).toBe(0);
+		expect(cellOf(subset.text, "vue", "first-publish")).toBe("direct");
+		expect(parseRefreshState(subset.text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(0),
+		});
+		// The bookkeeping survived intact: the next FULL run expires it.
+		expect(cellOf(nightly(subset.text, 30).text, "vue", "first-publish")).toBe(
+			"unknown",
+		);
+	});
+
+	it("does not start a clock for an unprobed lang either", () => {
+		const subset = nightly(FIXTURE, 0, [], { probedLangs: ["rust"] });
+		expect(parseRefreshState(subset.text)["first-publish"]).toBeUndefined();
+		expect(subset.changed).toBe(false);
+	});
+
+	it("still processes the langs it did probe", () => {
+		const first = nightly(FIXTURE, 0).text;
+		const subset = nightly(first, 30, [], { probedLangs: ["vue"] });
+		expect(cellOf(subset.text, "vue", "first-publish")).toBe("unknown");
+		// ast-grep was not probed: still direct, clock kept.
+		expect(cellOf(subset.text, "ast-grep", "first-publish")).toBe("direct");
+		expect(
+			parseRefreshState(subset.text)["first-publish"]?.["ast-grep"],
+		).toEqual({ firstMissed: day(0) });
+	});
+
+	it("keeps an unprobed lang's pending tier hold", () => {
+		const a = measured("ast-grep", "publishes-unversioned", "2*");
+		const held = nightly(FIXTURE, 0, [a]).text;
+		expect(
+			parseRefreshState(held)["clean-behavior"]?.["ast-grep"],
+		).toBeDefined();
+		const subset = nightly(held, 1, [], { probedLangs: ["vue"] });
+		expect(
+			parseRefreshState(subset.text)["clean-behavior"]?.["ast-grep"],
+		).toBeDefined();
+		// The hold survived, so the next agreeing full run commits.
+		const commit = nightly(subset.text, 2, [a]);
+		expect(commit.committed).toBe(1);
+		expect(cellOf(commit.text, "ast-grep", "clean-behavior")).toBe(
+			"publishes-unversioned",
+		);
 	});
 });
 
@@ -216,6 +404,26 @@ describe("#3401 clean-behavior hysteresis", () => {
 		);
 	});
 
+	it("resets the hold on a probed night that measured nothing for the lang", () => {
+		// Pins the skip semantics (review mutation M13): A, a night with no
+		// comparable observation, A again is two NON-consecutive runs, so the
+		// second A is a first sighting again and must not commit.
+		const a = measured("ast-grep", "publishes-unversioned", "2*");
+		let text = refreshCapabilityMatrix(FIXTURE, [a], { src: "ci" }).text;
+		expect(parseRefreshState(text)["clean-behavior"]?.["ast-grep"]?.runs).toBe(
+			1,
+		);
+		text = refreshCapabilityMatrix(text, [], { src: "ci" }).text;
+		expect(
+			parseRefreshState(text)["clean-behavior"]?.["ast-grep"],
+		).toBeUndefined();
+		const third = refreshCapabilityMatrix(text, [a], { src: "ci" });
+		expect(third.committed).toBe(0);
+		expect(cellOf(third.text, "ast-grep", "clean-behavior")).toBe(
+			"publishes-versioned",
+		);
+	});
+
 	it("clears a held change when the cell already matches", () => {
 		const change = measured("ast-grep", "publishes-unversioned", "2*");
 		const steady = measured("ast-grep", "publishes-versioned", "2");
@@ -235,12 +443,12 @@ describe("#3401 clean-behavior hysteresis", () => {
 
 describe("#3401 refresh state block", () => {
 	it("records a state-only change so the refresh PR can persist it", () => {
-		const result = refreshCapabilityMatrix(FIXTURE, [], { src: "ci" });
+		const result = nightly(FIXTURE, 0);
 		expect(result.changed).toBe(true);
 		expect(result.expired).toBe(0);
-		expect(parseRefreshState(result.text)["first-publish"]?.vue?.missed).toBe(
-			1,
-		);
+		expect(parseRefreshState(result.text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(0),
+		});
 	});
 
 	it("is byte-stable when every measured cell already matches", () => {
@@ -255,14 +463,14 @@ describe("#3401 refresh state block", () => {
 	});
 
 	it("round-trips the state block and treats an absent or corrupt block as empty", () => {
-		const text = refreshCapabilityMatrix(FIXTURE, [], { src: "ci" }).text;
-		expect(parseRefreshState(text)["first-publish"]?.vue?.missed).toBe(1);
-		// A second pass parses what the first wrote and advances the counter.
+		const text = nightly(FIXTURE, 0).text;
+		expect(parseRefreshState(text)["first-publish"]?.vue).toEqual({
+			firstMissed: day(0),
+		});
+		// A second pass parses what the first wrote and keeps the first miss.
 		expect(
-			parseRefreshState(refreshCapabilityMatrix(text, [], { src: "ci" }).text)[
-				"first-publish"
-			]?.vue?.missed,
-		).toBe(2);
+			parseRefreshState(nightly(text, 2).text)["first-publish"]?.vue,
+		).toEqual({ firstMissed: day(0) });
 		expect(parseRefreshState("# no state block\n")).toEqual({});
 		expect(
 			parseRefreshState(
