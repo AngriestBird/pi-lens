@@ -146,6 +146,30 @@ describe("successor-pending gap (#3662)", () => {
 		expect(successorPendingReasons()).toEqual([]);
 	});
 
+	it("a marker exactly as old as the bound has expired", () => {
+		// Pins the bound's edge: the marker declines strictly inside the
+		// window, so an off-by-one `<=` would keep declining at the bound.
+		vi.useFakeTimers();
+		primaryShutsDown("reload");
+		vi.advanceTimersByTime(SUCCESSOR_PENDING_TTL_MS);
+		const atBound = decideSessionStart(liveCtx(), "at-bound", REPO, "startup");
+		expect(atBound.classification).toBe("primary");
+	});
+
+	it("with the guard off a gap startup is primary, as before #3662", () => {
+		// I5: PI_LENS_CONCURRENT_SESSION_GUARD=0 restores pre-guard behavior
+		// for the whole guard, including the successor-pending decline.
+		process.env.PI_LENS_CONCURRENT_SESSION_GUARD = "0";
+		try {
+			primaryShutsDown("reload");
+			const gap = decideSessionStart(liveCtx(), "subagent", REPO, "startup");
+			expect(gap.classification).toBe("primary");
+			expect(gap.runFullSessionStart).toBe(true);
+		} finally {
+			delete process.env.PI_LENS_CONCURRENT_SESSION_GUARD;
+		}
+	});
+
 	it("a marker older than the bound expires: the late startup is primary", () => {
 		// A replacement whose successor never starts (pi `reload()` with no
 		// bindings, a host without `rebindSession`) must not decline every
