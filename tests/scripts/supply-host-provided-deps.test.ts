@@ -32,9 +32,9 @@ const root = path.resolve(
 );
 const scriptPath = path.join(root, "scripts", "supply-host-provided-deps.mjs");
 
-function runInstallArgs(): string {
-	return execFileSync(process.execPath, [scriptPath, "--install-args"], {
-		cwd: root,
+function runInstallArgs(script = scriptPath, cwd = root): string {
+	return execFileSync(process.execPath, [script, "--install-args"], {
+		cwd,
 		encoding: "utf8",
 	});
 }
@@ -93,13 +93,9 @@ describe("supply-host-provided-deps.mjs --install-args (#2586 review F1)", () =>
 				path.join(fixtureRoot, "package.json"),
 				JSON.stringify({ peerDependencies: peers }),
 			);
-			const output = execFileSync(
-				process.execPath,
-				[
-					path.join(fixtureRoot, "scripts", "supply-host-provided-deps.mjs"),
-					"--install-args",
-				],
-				{ cwd: fixtureRoot, encoding: "utf8" },
+			const output = runInstallArgs(
+				path.join(fixtureRoot, "scripts", "supply-host-provided-deps.mjs"),
+				fixtureRoot,
 			);
 			const tokens = output.split("\n").filter((line) => line.length > 0);
 			expect(tokens).toContain(`${tui}@${range}`);

@@ -1,4 +1,4 @@
-// flake-shape: real-process-spawn — four spawns, each pinning something no
+// flake-shape: real-process-spawn — five spawns, each pinning something no
 // in-process double can reach. (1) `npm pack` of a two-line fixture package
 // whose `prepare` writes through `os.homedir()`: the F1 defect was npm
 // IGNORING the env it was handed, so an assertion on scratchEnv()'s OUTPUT
@@ -7,7 +7,11 @@
 // the test process can only ever report the ambient home. (3) the real
 // release-qa CLI, run out of a throwaway dirty tree, because main()'s CALL to
 // the dirty-checkout refusal is reachable only through the process entry
-// point (#2619 review N3, MP-E).
+// point (#2619 review N3, MP-E). (5) the codemode row's latency-log wait
+// (#3805): it is a standalone program pi's own bash tool runs, so what the row
+// reads is that real process's stdout and exit; `process.exit` and the
+// `POLL_COMPLETE`/`POLL_EXPIRED` line cannot be observed from an in-process
+// import (its expiry cases use a cap in the past, so none waits on the clock).
 /**
  * #2606 — the release-QA runner's pure core.
  *
