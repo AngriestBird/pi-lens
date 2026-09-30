@@ -1,0 +1,37 @@
+id: advisory-registry-subset
+language: TypeScript
+severity: info
+metadata:
+  category: pi-lens-self-scan
+message: "Hand-enumerated registry subset — explain the excluded ids or use the registry"
+constraints:
+  A: { regex: '^("|'' )?(typescript|deno|python|python-jedi|go|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)("|'' )?$' }
+  B: { regex: '^("|'' )?(typescript|deno|python|python-jedi|go|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)("|'' )?$' }
+ignores:
+  - "**/tests/**"
+note: |
+  Advisory only; this is a population-screening prompt, never a gate. It
+  catches LSP server ids from clients/lsp/server.ts in regex alternations or
+  arrays of string literals. The AST matcher does not scan comments or
+  ordinary strings. Tool and language registries remain a follow-up because
+  their larger populations need a separate low-noise rule shape.
+
+  Admission list:
+  - `tests/fixtures/**`: fixtures intentionally demonstrate the detector.
+  - `clients/lsp/server.ts:LSP_SERVERS`: the registry source itself is not a
+    hand-enumerated consumer subset.
+  - `clients/lsp/server.ts:OPENGREP_KINDS`: auxiliary-server coverage is an
+    intentional cross-language subset.
+  - `clients/file-kinds.ts:CODE_KINDS` and `NON_CODE_KINDS`: derived kind
+    partitions, not independent registry choices.
+  - `clients/gradle-ktfmt-style.ts`: ktfmt method names are unrelated enum
+    names; this is a lexical false positive admitted until a narrower branch
+    matcher exists.
+  - `clients/dispatch/runners/trivy-config.ts`: runner applicability is an
+    intentional file-kind subset.
+  Any other hit requires a reason in the owning change before admission.
+rule:
+  any:
+    - kind: regex
+      regex: '^/[^/\n|]*(?:typescript|deno|python|python-jedi|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)[^/\n|]*\|[^/\n|]*(?:typescript|deno|python|python-jedi|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)[^/\n|]*(?:\|[^/\n|]*)*/[dgimsuvy]*$'
+    - pattern: '[$A, $B, $$$REST]'

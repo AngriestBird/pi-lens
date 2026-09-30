@@ -1,0 +1,14 @@
+id: advisory-registry-subset
+valid:
+  - |
+    // /^(typescript|python|marksman|opengrep):/ is prose, not code.
+    const one = "typescript|python";
+  - |
+    const one = /^(typescript):/;
+  - |
+    const one = ["typescript"];
+invalid:
+  - |
+    const servers = /^(typescript|python|marksman|opengrep):/;
+  - |
+    const servers = ["typescript", "python", "marksman"];
