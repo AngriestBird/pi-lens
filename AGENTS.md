@@ -526,6 +526,14 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
   orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
   per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
+- Test tmp roots are swept by the worker that made them, not only by the
+  hygiene owner (#2912): `tests/support/vitest-setup.ts` removes every
+  `setupTestEnvironment` root at `afterAll` and on SIGTERM whatever the test did,
+  and removes a raw `pi-lens-*` `mkdtemp` root only after seeing its file remove
+  it and something recreate it. A root the file never removed, and any directory
+  made another way, still reds the owner; do not widen the sweep to hide those,
+  and do not add a per-file drain for a straggler write. Registry:
+  `tests/support/tmp-root-registry.ts` (per process, on `globalThis`).
 - Two vitest invocations may share one `TMPDIR`: `npm run test:targeted` takes
   one of two SHARED lock slots, and any lane inherits whatever `TMPDIR` its
   shell exports. The rule is that an invocation judges and sweeps only tmp

@@ -1,5 +1,7 @@
 // Per-worker test environment defaults (vitest `setupFiles`).
 import * as fs from "node:fs";
+import nodeFs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
@@ -7,6 +9,14 @@ import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import {
+	formatTmpRootSweep,
+	getTmpRootRegistry,
+	installTmpRootInterposer,
+	sampleTmpRoots,
+	sweepTmpRoots,
+	type MkdtempTarget,
+} from "./tmp-root-registry.js";
 // The tail's dependency leaf, never `instance-registry.js`: this file loads
 // before every test file's `vi.mock`, so whatever it imports is cached before
 // the mock registers (#3703 round 1: 56 files red).
@@ -213,6 +223,62 @@ export function touchTmpHygieneOwnerMarker(
 }
 beforeEach(() => touchTmpHygieneOwnerMarker());
 afterEach(() => touchTmpHygieneOwnerMarker());
+
+/**
+ * #2912: the worker's own tmp roots are removed by THIS file, at teardown and on
+ * SIGTERM, not only by the owner at the end of the run. See
+ * `tests/support/tmp-root-registry.ts` for the two rules and the recurrences.
+ *
+ * The interposer is published to ESM importers (`import { mkdtempSync }`, `import
+ * * as fs`) by `syncBuiltinESMExports`. The `fs` functions are captured here,
+ * at load, so a test that spies or mocks `node:fs` later cannot redirect the
+ * sweep. The hook below is registered first, so under the default `stack`
+ * hook order it runs AFTER the test file's own `afterEach`: a root the file
+ * just removed is seen absent, which is what marks a later reappearance as a
+ * straggler.
+ */
+const tmpRootRegistry = getTmpRootRegistry();
+installTmpRootInterposer(
+	tmpRootRegistry,
+	nodeFs as unknown as MkdtempTarget,
+	tmpHygieneRealTmp,
+);
+syncBuiltinESMExports();
+const tmpRootIo = {
+	exists: (dir: string): boolean => fs.existsSync(dir),
+	remove: (dir: string): void =>
+		fs.rmSync(dir, { recursive: true, force: true }),
+};
+const tmpRootExists = tmpRootIo.exists;
+afterEach(() => sampleTmpRoots(tmpRootRegistry, tmpRootExists));
+
+function sweepOwnTmpRoots(via: "afterAll" | "SIGTERM"): void {
+	const line = formatTmpRootSweep(
+		tmpHygieneOwnFile,
+		sweepTmpRoots(tmpRootRegistry, tmpRootIo),
+		tmpRootRegistry,
+		via,
+	);
+	// Synchronous and unbuffered: this can be the last thing the fork does.
+	if (line)
+		try {
+			fs.writeSync(2, line);
+		} catch {
+			// stderr closed under a teardown race; the sweep itself already ran.
+		}
+}
+
+// Vitest SIGTERMs a fork after its file ends, with no `exit` event and a 500 ms
+// SIGKILL fallback; a deferred write can land in that window. Sweep, then
+// re-raise as `clients/safe-spawn.ts` does so the fork still dies at once.
+process.once("SIGTERM", () => {
+	sweepOwnTmpRoots("SIGTERM");
+	try {
+		process.kill(process.pid, "SIGTERM");
+	} catch {
+		// Already dying; the sweep has run.
+	}
+});
 
 /** Root-level `orphan-backstop*` entries of a home, each with its mtime: the
  *  stamp, the transient lock, and the `orphan-backstop.lock.quarantine-…/`
@@ -1137,6 +1203,8 @@ afterAll(async () => {
 		// generation is left behind for the next file to take over. Bounded,
 		// and it never throws, so the checks below always run.
 		await settleRegistryMutationsBeforeTeardown();
+		// #2912: before the checks, so the leak notice below names what is left.
+		sweepOwnTmpRoots("afterAll");
 		runTeardownWithMemReport(
 			[checkKillGuard, checkTmpHygiene, checkBackstop],
 			emitMemReport,
