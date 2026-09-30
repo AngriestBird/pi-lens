@@ -53,7 +53,7 @@
 (*   "handoffAtShutdown" S2 (D3): the hand-off slot is written at          *)
 (*                       session_shutdown, keyed by (start reason,         *)
 (*                       successor file); without it, at                   *)
-(*                       session_before_fork (G10's design alternative)    *)
+(*                       session_before_fork, as #3669 shipped it (pre-S2) *)
 (*   "consumeOnMatch"    S2 (F2): only a primary fork or reload start      *)
 (*                       takes the slot, and only on an equal key; an      *)
 (*                       unmatched slot stays in place, with no expiry.    *)
@@ -131,9 +131,9 @@ TargetPolicy(s, r) ==
 
 \* master at df5fb8abb (2026-09-27), before #3669 and S1-S3. The read guard:
 \* resetForSession on every primary session_start, so /reload resets it
-\* (N1); the fork stash of #3669 was an activation-closure `let`, which the
-\* fork's new activation could not see, so /fork and /clone started clean;
-\* before #3669, no session_tree handler. The lazy-tool memory was a
+\* (N1); the fork stash was an activation-closure `let`
+\* (pendingForkReadGuard), which the fork's new activation could not see, so
+\* /fork and /clone started clean; no session_tree handler. The lazy-tool memory was a
 \* file-keyed in-process map, so pi --fork started without it (#3604). No
 \* advisory crossed a start (the queue was untagged, see "advisoryScope").
 \* The widget's fork start cleared it (#3589).
@@ -332,8 +332,8 @@ Retag(A, carried, t) ==
 
 \* session_before_fork (0 ms, may not await). S2 deleted pi-lens' handler
 \* (#3777); under "handoffAtShutdown" this action changes nothing but the
-\* forking flag. Without it, it is G10's design alternative: the slot is
-\* filled here.
+\* forking flag. Without it, it is #3669's pre-S2 stashForkHandoff: the
+\* slot is filled here.
 BeforeFork(k) ==
     /\ (k = "fork" /\ "Fork" \in Transitions)
        \/ (k = "clone" /\ "Clone" \in Transitions)
