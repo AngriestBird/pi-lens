@@ -8,8 +8,9 @@ const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
 
 type PullRequestTrigger = { types?: string[] };
+type PushTrigger = { branches?: string[] };
 type Workflow = {
-	on?: { pull_request?: PullRequestTrigger };
+	on?: { pull_request?: PullRequestTrigger; push?: PushTrigger };
 	concurrency?: { group?: unknown; "cancel-in-progress"?: unknown };
 };
 
@@ -79,7 +80,48 @@ function evaluateGroup(group: string, action: string, runId: string): string {
 	);
 }
 
+function cancelInProgressOn(eventName: string, value: unknown): boolean {
+	if (typeof value === "boolean") return value;
+	if (typeof value !== "string") return false;
+	const expression = value.trim().replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
+	return expression.split("||").some((alternative) =>
+		alternative
+			.split("&&")
+			.map((term) => term.trim())
+			.every((term) => {
+				const equality = term.split("==").map((part) => part.trim());
+				if (equality.length !== 2) return term === "true";
+				const [left, right] = equality;
+				const resolve = (operand: string) =>
+					operand.replace(/^['\"]|['\"]$/g, "") === "github.event_name"
+						? eventName
+						: operand.replace(/^['\"]|['\"]$/g, "");
+				return resolve(left) === resolve(right);
+			}),
+	);
+}
+
 describe("workflow concurrency edit safety", () => {
+	it("never cancels a push to master", () => {
+		// Recurrence #3798: every merge cancelled the master CI run before it
+		// could finish, hiding the post-merge result behind the next merge.
+		const findings: string[] = [];
+		for (const file of readdirSync(WORKFLOWS)) {
+			if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
+			const workflow = loadWorkflow(file);
+			if (!workflow.on?.push?.branches?.includes("master")) continue;
+			if (
+				cancelInProgressOn("push", workflow.concurrency?.["cancel-in-progress"])
+			) {
+				findings.push(file);
+			}
+		}
+		expect(
+			findings,
+			"master-push workflows must let their runs finish",
+		).toEqual([]);
+	});
+
 	it("keeps edited PR groups distinct without splitting pushed groups", () => {
 		// Recurrence #3716: an edit must not cancel the pushed head, while
 		// opened, synchronize, and reopened must retain their existing latch.
@@ -90,11 +132,14 @@ describe("workflow concurrency edit safety", () => {
 			const trigger = workflow.on?.pull_request;
 			if (
 				!trigger?.types?.includes("edited") ||
-				workflow.concurrency?.["cancel-in-progress"] !== true
+				!cancelInProgressOn(
+					"pull_request",
+					workflow.concurrency?.["cancel-in-progress"],
+				)
 			) {
 				continue;
 			}
-			const group = workflow.concurrency.group;
+			const group = workflow.concurrency?.group;
 			if (typeof group === "string") eligible.push({ file, group });
 		}
 

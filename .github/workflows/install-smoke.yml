@@ -86,7 +86,7 @@ on:
 # events for that commit must not run concurrently.
 concurrency:
   group: install-smoke-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'repository_dispatch' }}
 
 permissions: {}
 
