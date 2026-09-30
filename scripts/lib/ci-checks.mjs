@@ -140,8 +140,8 @@ export function isBlockingConclusion(conclusion) {
 
 // #2618 fix-round-2, F2: `CANCELLED` sits in `BLOCKING_CONCLUSIONS` above
 // because a check a HUMAN cancelled genuinely is not passing -- but
-// `cancel-in-progress: true` (ci.yml:15-16) cancels the PREVIOUS in-flight
-// run of a concurrency group on every new push/dispatch to the SAME ref, and
+// Event-scoped `cancel-in-progress` cancels the PREVIOUS in-flight run of a
+// concurrency group when a cancelling event targets the SAME ref, and
 // that cancelled check-run can be the ONLY row present for its name for
 // several minutes before its replacement posts (live-probed 2026-09-06 on
 // PR #2607's head: three "Record post-merge validation" check-suites on ONE
