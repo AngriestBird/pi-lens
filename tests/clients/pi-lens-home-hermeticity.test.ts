@@ -549,8 +549,12 @@ describe("clients/ hazardous exported registry symbols stay derived, not guessed
 		// producer: a BARE inline object return type
 		// (`registryTailState(): { tail: Promise<void> }`) whose annotation
 		// brace would bind as the body just as readily as a default value's.
+		// #3703 moved the tail into its dependency leaf.
 		const registryStripped = stripSource(
-			fs.readFileSync(path.join(CLIENTS_ROOT, "instance-registry.ts"), "utf8"),
+			fs.readFileSync(
+				path.join(CLIENTS_ROOT, "instance-registry-tail.ts"),
+				"utf8",
+			),
 			{ strings: "blank" },
 		);
 		expect(registryStripped).toMatch(

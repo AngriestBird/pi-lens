@@ -549,6 +549,10 @@ export const wallClockBudgetInclude = [
 	// create/remove and polls the guard's own report (real setTimeout, bounded)
 	// rather than sleeping a guessed settle time (flake-shape admission).
 	"tests/support/tests-tree-write-guard.test.ts",
+	// #3617 / #3703 round 2: a child Vitest run through the real shared setup,
+	// so the pool's SIGTERM of each fixture fork and a real hook timeout are
+	// what the file observes (flake-shape admission).
+	"tests/support/vitest-setup-registry-teardown.test.ts",
 ];
 
 // #2912: the tmp-fixture governance sweep compares the real process-wide

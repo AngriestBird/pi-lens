@@ -570,6 +570,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a real cross-process directory removal races node's own recursive-watch readdirSync; no in-process stand-in can occupy the other side of that window",
 	},
+	"real-process-spawn:support/vitest-setup-registry-teardown.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"#3617: the subject is Vitest's own fork teardown (the pool SIGTERMs the worker after the shared afterAll); no in-process double reproduces that kill or a hook timeout",
+	},
 	// 2026-09-26 (#3511 review round 3): the quick-mode warmup witness must
 	// run the real warmup timer and background word-index save, which no
 	// test hook awaits.

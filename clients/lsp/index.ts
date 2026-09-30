@@ -410,16 +410,23 @@ async function runRenameNotify(
 	}
 }
 const DEFAULT_LSP_CLIENT_CEILING = 24;
-const DEFAULT_TS_IDLE_EVICT_MS = 20 * 60_000;
+const DEFAULT_IDLE_EVICT_MS = 20 * 60_000;
 
-export function getTypeScriptIdleEvictMs(): number {
-	const parsed = Number.parseInt(
-		process.env.PI_LENS_TS_IDLE_EVICT_MS ?? "",
-		10,
-	);
-	return Number.isSafeInteger(parsed) && parsed > 0
-		? parsed
-		: DEFAULT_TS_IDLE_EVICT_MS;
+/**
+ * #3645: the idle window shared by every server whose registry policy is
+ * `transparent`. `PI_LENS_LSP_IDLE_EVICT_MS` is the generic spelling; the
+ * original `PI_LENS_TS_IDLE_EVICT_MS` keeps its meaning and is consulted when
+ * the generic one is unset or invalid.
+ */
+export function getLspIdleEvictMs(): number {
+	for (const name of [
+		"PI_LENS_LSP_IDLE_EVICT_MS",
+		"PI_LENS_TS_IDLE_EVICT_MS",
+	]) {
+		const parsed = Number.parseInt(process.env[name] ?? "", 10);
+		if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+	}
+	return DEFAULT_IDLE_EVICT_MS;
 }
 
 export function getLspClientCeiling(): number {
@@ -1565,12 +1572,12 @@ export class LSPService {
 	 */
 	private readonly clientLeases = new Map<string, number>();
 	/**
-	 * Per-root idle eviction for TypeScript's large, rebuildable program graph.
+	 * Per-root idle eviction for servers whose registry policy is `transparent`.
 	 * Timers are unref'd so an idle language service cannot keep a one-shot host
 	 * alive, and are removed before shutdown so a concurrent request rebuilds
 	 * instead of receiving the retiring client.
 	 */
-	private readonly typeScriptIdleTimers = new Map<
+	private readonly idleEvictionTimers = new Map<
 		string,
 		ReturnType<typeof setTimeout>
 	>();
@@ -1810,7 +1817,7 @@ export class LSPService {
 		this.clientLeases.delete(key);
 		if (this.state.clients.has(key)) {
 			this.clientLastUsedAt.set(key, Date.now());
-			this.scheduleTypeScriptIdleEviction(key, server);
+			this.scheduleIdleEviction(key, server);
 		}
 	}
 
@@ -1879,15 +1886,15 @@ export class LSPService {
 		return true;
 	}
 
-	private clearTypeScriptIdleTimer(key: string): void {
-		const timer = this.typeScriptIdleTimers.get(key);
+	private clearIdleEvictionTimer(key: string): void {
+		const timer = this.idleEvictionTimers.get(key);
 		if (timer) clearTimeout(timer);
-		this.typeScriptIdleTimers.delete(key);
+		this.idleEvictionTimers.delete(key);
 	}
 
 	/**
 	 * #3585: the ONE retirement of a client generation, used by capacity
-	 * eviction, TypeScript idle eviction, notify-stall demotion and the
+	 * eviction, idle eviction, notify-stall demotion and the
 	 * dead-client respawn. Everything keyed to the retired client's lifetime is
 	 * dropped here, so a replacement starts cold: a path that forgot one entry
 	 * was the defect shape behind #3502 (readiness) and #3537 (timeout streak).
@@ -1901,7 +1908,7 @@ export class LSPService {
 		this.state.clientSpawnedAt.delete(key);
 		this.forgetReadiness(key);
 		this.clientLastUsedAt.delete(key);
-		this.clearTypeScriptIdleTimer(key);
+		this.clearIdleEvictionTimer(key);
 		// #1714: the backlog count describes a process that no longer exists.
 		this.auxNotifyInflight.delete(key);
 		// #3585: a per-write latency estimate belongs to a client generation; a
@@ -1921,19 +1928,16 @@ export class LSPService {
 		current.resolveSettled();
 	}
 
-	private scheduleTypeScriptIdleEviction(
-		key: string,
-		server: LSPServerInfo,
-	): void {
+	private scheduleIdleEviction(key: string, server: LSPServerInfo): void {
 		// The registry owns this policy. Unmeasured and resident servers stay resident.
 		if (server.idleEviction !== "transparent") return;
 		// Pressure-gating these timers would require a separate reconciliation pass
 		// when the manager crosses the threshold; keep ownership simple and use the
 		// warm-LSP-friendly 20-minute default instead.
-		this.clearTypeScriptIdleTimer(key);
+		this.clearIdleEvictionTimer(key);
 		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
 		const timer = setTimeout(() => {
-			this.typeScriptIdleTimers.delete(key);
+			this.idleEvictionTimers.delete(key);
 			void this.withClientSpawnGate(async () => {
 				if (this.isDestroyed) return;
 				const client = this.state.clients.get(key);
@@ -1943,7 +1947,7 @@ export class LSPService {
 					(this.clientLeases.get(key) ?? 0) > 0 ||
 					(this.clientLastUsedAt.get(key) ?? 0) !== lastUsedAt
 				) {
-					this.scheduleTypeScriptIdleEviction(key, server);
+					this.scheduleIdleEviction(key, server);
 					return;
 				}
 
@@ -1952,21 +1956,21 @@ export class LSPService {
 				// and creates a fresh client; it can never receive this retiring one.
 				this.retireClient(key);
 				try {
-					await client.shutdown({ reason: "typescript_idle_eviction" });
+					await client.shutdown({ reason: "idle_eviction" });
 				} catch {
 					// The strong manager reference is already gone; shutdown is best-effort
 					// like the other eviction paths and must not reject from a timer callback.
 				}
-				logSessionStart(`lsp typescript idle eviction: released ${key}`);
+				logSessionStart(`lsp idle eviction: released ${key}`);
 				recordDegradation({
-					kind: "ts-idle-eviction",
+					kind: "lsp-idle-eviction",
 					subject: key,
-					reason: "idle TypeScript client released to bound memory",
+					reason: "idle LSP client released to bound memory",
 				});
 			}).catch(() => {});
-		}, getTypeScriptIdleEvictMs());
+		}, getLspIdleEvictMs());
 		timer.unref?.();
-		this.typeScriptIdleTimers.set(key, timer);
+		this.idleEvictionTimers.set(key, timer);
 	}
 
 	/**
@@ -2170,14 +2174,14 @@ export class LSPService {
 	): Promise<void> {
 		if (this.state.clients.get(key) !== entry.client) return;
 		// The CPU verdict is asynchronous, but the streak has already committed to
-		// this client's teardown path. Release the TypeScript idle-timer ownership
+		// this client's teardown path. Release the idle-eviction timer ownership
 		// before sampling so another idle callback cannot target the same client
 		// while the verdict is in flight. A BUSY verdict below re-arms a fresh timer.
-		this.clearTypeScriptIdleTimer(key);
+		this.clearIdleEvictionTimer(key);
 		const verdict = await this.notifyStallCpuVerdict(entry);
 		if (verdict.cpuVerdict === "busy") {
 			if (this.state.clients.get(key) === entry.client) {
-				this.scheduleTypeScriptIdleEviction(key, entry.info);
+				this.scheduleIdleEviction(key, entry.info);
 			}
 			this.logNotifyStallCpuBusy(key, entry, filePath, 0, verdict);
 			return;
@@ -4063,7 +4067,7 @@ export class LSPService {
 			if (existing.isAlive()) {
 				this.unavailableLogged.delete(key);
 				this.clientLastUsedAt.set(key, Date.now());
-				this.scheduleTypeScriptIdleEviction(key, server);
+				this.scheduleIdleEviction(key, server);
 				if (!this.warmStartLogged.has(key)) {
 					logSessionStart(
 						`lsp warm-start ${server.id}: reused root=${root} file=${filePath}`,
@@ -4549,7 +4553,7 @@ export class LSPService {
 			this.lastSpawnVerdict.delete(key);
 			this.state.clientSpawnedAt.set(key, Date.now());
 			this.clientLastUsedAt.set(key, Date.now());
-			this.scheduleTypeScriptIdleEviction(key, server);
+			this.scheduleIdleEviction(key, server);
 			this.failureCounts.delete(key);
 			if (isOptionalServer) {
 				this.optionalDisabled.delete(key);
@@ -10272,8 +10276,8 @@ export class LSPService {
 		for (const [key, token] of this.outstandingAuxNotifyWrites) {
 			this.releaseOutstandingAuxNotifyWrite(key, token);
 		}
-		for (const key of this.typeScriptIdleTimers.keys()) {
-			this.clearTypeScriptIdleTimer(key);
+		for (const key of this.idleEvictionTimers.keys()) {
+			this.clearIdleEvictionTimer(key);
 		}
 
 		// Belt-and-braces: wait for any in-flight spawns so that Guard 1/2 in
