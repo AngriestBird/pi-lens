@@ -895,15 +895,17 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 		});
 
 		it("holds the resolved lines that do not fit the cap for the next turn_end", async () => {
-			// Ten 160-char lines are ~1600 chars: the section alone passes the
-			// 1000-char cap, so putting it first is not enough on its own.
+			// Ten 165-char lines are ~1650 chars: the section alone passes the
+			// 1000-char cap, so putting it first is not enough on its own. Six
+			// lines (996 chars) would fit a budget with no room for the tail,
+			// and the cap would then cut "… and 1 more" after its reset.
 			const env = setupTestEnvironment("pi-lens-3218-hold-");
 			try {
 				const { runtime, cacheManager } = newTurn();
 				const names = Array.from(
 					{ length: 11 },
 					(_, index) =>
-						`${String(index).padStart(2, "0")}-${"x".repeat(94)}.ts`,
+						`${String(index).padStart(2, "0")}-${"x".repeat(98)}.ts`,
 				);
 				for (const name of names) retire(runtime, env.tmpDir, name);
 				cacheManager.addModifiedRange(
