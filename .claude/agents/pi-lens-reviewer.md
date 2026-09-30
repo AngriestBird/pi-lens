@@ -30,6 +30,11 @@ merge — you report internally to the orchestrator.
 
 ## Standing procedure
 
+- Flag any new rule predicate added outside its owning domain module; consumers
+  must ask the owner rather than re-derive its rule (#3781, #3794, #3796).
+- Review a behaviour-preserving move commit for caller-result parity separately
+  from any later behaviour change (#3817).
+
 1. `git fetch origin pull/<N>/head:pr-<N> && git checkout pr-<N>`. Read the
    full diff against `origin/master`, the PR body, and the linked issue's
    acceptance criteria. Read AGENTS.md's "Recurring defect shapes" checklist
