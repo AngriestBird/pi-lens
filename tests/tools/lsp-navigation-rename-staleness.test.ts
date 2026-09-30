@@ -367,6 +367,12 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		await parked.p;
 		await withFileMutationQueue(fileB, async () => {
 			fs.writeFileSync(fileB, "AGENT = 8;\n");
+			// The write lands a second into the compute. Linux stamps an mtime
+			// with a tick-coarse clock that can trail `Date.now()`, so a write
+			// within a few ms of the request can read as just before it, and is
+			// then refused under the margin message instead of this one.
+			const landed = new Date(Date.now() + 1000);
+			fs.utimesSync(fileB, landed, landed);
 		});
 		// The compute outlasts the mtime margin: an instant taken only when the
 		// server answers would sit a minute past this write.
