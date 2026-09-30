@@ -350,6 +350,62 @@ operator's private notes, so a different orchestrator can run the same train.
   never approves; approving is the maintainer's call. A head that is green or
   failing keeps that verdict whatever stale `action_required` runs it carries.
   #2983 sat unapproved while the lane read it as a slow queue.
+- **`ci-verdict` is the ONE CI reader; do not hand-roll `gh pr checks`,
+  `gh run view --log` or a `watch-*.sh` poller (#3700, 2026-09-30).** Every
+  read the orchestrator did by hand is a mode of `node scripts/ci-verdict.mjs`:
+  - `<pr|sha> [--wait N]` — the gating verdict (exit 0 / 1 / 2 / 3, see the
+    merge loop above). A failed gating job now also prints its failed STEP
+    (so `Ast-grep self-scan` or `Audit production dependencies` reads as what
+    it is, not as a test failure), its `FAIL` and assertion lines and the
+    `Tests` summary with the ANSI codes stripped, the gating and advisory
+    counts on separate lines (advisory reds never gate, and are read before
+    merging), and the remedy hint: `gh run rerun <run>` for a cancelled or
+    superseded run, the `gh api -X POST .../approve` command for fork
+    approval, `gh pr update-branch <pr>` when the failed merge's base is no
+    longer master's head (a rerun replays the old merge commit, #3660). A job
+    that failed with `couldn't find remote ref refs/pull/N/merge` on a MERGED
+    PR is reported as post-merge noise, exit 0, not a red lane.
+  - `--all` — one line per open PR (`#N <author> auto-merge=on|off head=<sha>
+    gating=<state> [first-failure=<check>]`) for status reports; it always
+    exits 0.
+  - `--watch-open [--wait N] [--state-file <path>]` — the notifying wait:
+    watches every open PR that has auto-merge armed or is authored by the
+    repository owner or the `gh` viewer (a PR in a fix round has no
+    auto-merge and still goes red), polls every 90 s, and exits 0 on the first
+    poll with an event, printing `#<pr> <event> @<sha>: <reason>` plus the
+    failure detail (events: `failed`, `fork-approval`, `absent-rearm`,
+    `merged`, `closed`; each PR reports on the TRANSITION from its last seen
+    state, keyed by head SHA). Exit 3 means the window ended with none.
+    `--state-file ~/.cache/pi-lens-orchestrator/watch-state.json` keeps the
+    last seen state across re-arms so the same red is not reported twice. Run
+    it with `run_in_background: true`; it replaces the session-local
+    `watch-automerge.sh`. Events also include `dirty` (merge-conflicted) and
+    `cancelled` (a superseded run nobody replaced, with its rerun command),
+    and a `merged` PR lists its closing issues' states.
+  - `--watch-open --stream` — does not exit on an event: it prints one line per
+    event per head (`FAIL #N@sha: ...` plus the failing test names,
+    `DIRTY #N@sha`, `CANCELLED-NOT-REPLACED #N@sha: ... (gh run rerun <id>)`,
+    `MERGED #N` plus `closes #M: <state>`, `CLOSED #N`) until the window ends
+    (exit 0 if any line was printed, 3 if none).
+  - `--rerun-cancelled` (with `--watch-open`, and REQUIRING `--state-file`:
+    without it every re-armed watch would re-run the same head, so it is a
+    usage error) re-runs a cancelled, unreplaced run itself
+    (`RERUN #N@sha: gh run rerun <id>`), once per head. A refused re-run is
+    retried on the next poll after a backoff (180 s, then 360 s), at most
+    three attempts per head, then left to you.
+  - `--sync-main <path>` (with `--watch-open`) fast-forwards that checkout after
+    a merge (`git pull --ff-only`) and prints `SYNCED <path>: <old> -> <new>`.
+    It refuses, saying why (git's own line, such as `Not possible to
+    fast-forward`), when the checkout is off master, has modified tracked
+    files, or cannot fast-forward, notes local commits not on origin, and prints `LOCKFILE CHANGED: run
+    npm ci when no worker is live` when `package-lock.json` moved. It never
+    runs `npm ci`: live workers share that install.
+  - `--approve-fork <PR>` approves that PR's `action_required` runs on its
+    current head (`gh api -X POST .../actions/runs/<id>/approve`). Explicit,
+    per PR, never part of any watch.
+  Apart from `--approve-fork`, `--rerun-cancelled` and `--sync-main`, which you
+  pass by name, it never approves, reruns or updates a branch: it prints the
+  command.
 - **Read the advisory rows before merging, even though they never gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a

@@ -1185,7 +1185,7 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 	 * `related` strategy on every turn that touches its source) and `fresh.ts` +
 	 * `fresh.test.ts` (an ordinary target that must keep running).
 	 */
-	function seedRetirementProject(): {
+	function seedRetirementProject(longTarget = false): {
 		fresh: string;
 		freshTest: string;
 		foreverSource: string;
@@ -1199,7 +1199,13 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 		const fresh = path.join(env.tmpDir, "src", "fresh.ts");
 		const freshTest = path.join(env.tmpDir, "src", "fresh.test.ts");
 		const foreverSource = path.join(env.tmpDir, "src", "forever.ts");
-		const forever = path.join(env.tmpDir, "src", "forever.test.ts");
+		const forever = path.join(
+			env.tmpDir,
+			"src",
+			longTarget
+				? `forever.test.ts${"x".repeat(70)}.test.ts`
+				: "forever.test.ts",
+		);
 		fs.writeFileSync(fresh, "export const fresh = 1;\n");
 		fs.writeFileSync(freshTest, "export {};\n");
 		fs.writeFileSync(foreverSource, "export const forever = 1;\n");
@@ -1420,6 +1426,40 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 			setAmbientAbortSignal(undefined);
 		}
 		await delay(300);
+	});
+
+	it("keeps the retirement remedy with a long test target path (#3712)", async () => {
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		const { fresh, foreverSource, forever } = seedRetirementProject(true);
+		markEdited(cacheManager, runtime, [fresh, foreverSource]);
+		cacheManager.writeCache(
+			"test-runner-findings",
+			{
+				content: "1 test target(s) deferred to the next turn",
+				deferredTargets: [
+					{
+						testFile: forever,
+						runner: "vitest",
+						attempts: TEST_RUNNER_MAX_DEFERRALS,
+						sessionId: runtime.telemetrySessionId,
+					},
+				],
+			},
+			env.tmpDir,
+		);
+		await runTurn({
+			cacheManager,
+			runtime,
+			client: recordingClient([]),
+			dbgLines: [],
+		});
+		const reason =
+			getDegradationSummary().find(
+				(group) => group.kind === "test-runner-batch-capped",
+			)?.latestReasons[0]?.reason ?? "";
+		// #3712: the remedy must precede the long relative target path.
+		expect(reason).toContain("run it explicitly");
 	});
 
 	it("keeps the target retired on the NEXT turn, with no deferral list left to read", async () => {
