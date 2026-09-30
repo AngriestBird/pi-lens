@@ -740,15 +740,20 @@ const RENAME_MTIME_MARGIN_MS = 2000;
  * #3601: the content every file this rename's edit writes text to must still
  * hold, keyed the way `applyWorkspaceEdit` keys expected content (the file's
  * realpath). The rename's own target uses the content the pre-rename
- * `openFileBestEffort` read and sent to the server. Any other file is bound to
- * what the server computed from:
- * - a file the language client has open: the disk must still hash to the
- *   client's last send;
- * - a file it has not opened: the server read it from disk at some point after
- *   `requestedAtMs` (recorded just before the rename request), so a write the
- *   server did not see has an mtime at or after that instant. The file is
- *   refused when its mtime is at or after `requestedAtMs` minus the margin.
- *   The residual is a same-mtime edit within the margin's granularity.
+ * `openFileBestEffort` read and sent to the server. Any other file:
+ * - a file the language client has open: the server computed from the last
+ *   send made before the request (`requestedAtMs`, taken just before it, on the
+ *   same connection). The disk must hash to the client's last send, and that
+ *   send's bytes must not have changed at or after `requestedAtMs`: a
+ *   hook-synced write after the request makes the disk equal the last send
+ *   while the server answered from the one before it.
+ * - a file it has not opened: best effort only. The file is refused when its
+ *   mtime is at or after `requestedAtMs` minus the margin. This cannot prove
+ *   the server read the current bytes: the server answers from a copy it read
+ *   earlier, and pi-lens does not tell it about a write it did not make, so an
+ *   external write older than the margin that the server's own file watching
+ *   missed, or a write that keeps the old mtime, is applied at the server's
+ *   offsets (#3747).
  * The read that passed either check is the content the apply is then held to.
  * A file the edit creates, or one that cannot be read, is left out of the map,
  * matching every other `expectedContent` caller.
@@ -787,18 +792,26 @@ function captureRenameExpectedContent(
 			expected.set(realPath, targetContent);
 			continue;
 		}
-		const sent = lspService.getTrackedContentHash(diskPath, cwd);
+		const sent = lspService.getTrackedContent(diskPath, cwd);
 		if (sent !== undefined) {
-			if (sent !== hashDiagnosticContent(content)) {
+			if (
+				sent.hash !== hashDiagnosticContent(content) ||
+				(sent.changedAtMs ?? requestedAtMs) >= requestedAtMs
+			) {
 				refuseStaleWorkspaceEdit(
 					diskPath,
-					"it changed after the language server last saw it",
+					"it changed after the language server computed the rename from it",
 				);
 			}
-		} else if (mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS) {
+		} else if (mtimeMs >= requestedAtMs) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
 				"it was written after the rename was requested and the language server has no open copy, so it may not have read these bytes",
+			);
+		} else if (mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS) {
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				`it was modified within ${RENAME_MTIME_MARGIN_MS / 1000} s of the rename request; retry`,
 			);
 		}
 		expected.set(realPath, content);
@@ -975,8 +988,9 @@ export function createLspNavigationTool(
 			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
 			// held as the expected content for the rename's own target file.
 			let openedFileContent: string | undefined;
-			// #3601: when the rename request was last sent; an unopened file the
-			// edit touches is refused if written at or after it (see the capture).
+			// #3601: when the rename request was last sent; a touched file whose
+			// send changed, or (unopened) whose mtime is, at or after it is refused
+			// (see the capture).
 			let renameRequestedAtMs = 0;
 			let mutationContext: LspMutationContext | undefined;
 			let requestedApply = false;

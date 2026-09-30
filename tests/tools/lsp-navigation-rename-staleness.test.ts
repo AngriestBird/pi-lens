@@ -47,12 +47,18 @@ function sameFile(a: string, b: string): boolean {
 	}
 }
 
-/** What the language client last sent for each path, as `getTrackedContentHash` reports it. */
+/**
+ * What the language client last sent for each path, as `getTrackedContent`
+ * reports it. The seeded sends were made a minute ago, before any rename.
+ */
 function trackedSends(sent: Record<string, string>) {
 	const byReal = new Map(
 		Object.entries(sent).map(([p, content]) => [
 			fs.realpathSync(p),
-			hashDiagnosticContent(content),
+			{
+				hash: hashDiagnosticContent(content),
+				changedAtMs: Date.now() - 60_000,
+			},
 		]),
 	);
 	return vi.fn((p: string) => {
@@ -63,6 +69,12 @@ function trackedSends(sent: Record<string, string>) {
 		}
 	});
 }
+
+/** A tracked send of `content` made a minute ago (before any rename). */
+const pastSend = (content: string) => ({
+	hash: hashDiagnosticContent(content),
+	changedAtMs: Date.now() - 60_000,
+});
 
 let env: ReturnType<typeof setupTestEnvironment>;
 let fileA: string;
@@ -179,7 +191,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: trackedSends({
+			getTrackedContent: trackedSends({
 				[fileA]: "const = 1;\n",
 				[fileB]: "const = 2;\n",
 			}),
@@ -212,6 +224,57 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 	});
 
+	it("an agent write to an OPENED non-target file, synced to the server after the rename request, is not overwritten", async () => {
+		// #3601 round 4 (verifier r3 V1): the agent's write hook re-sends the file
+		// (`touchFile`), so the disk equals the client's last send, but the server
+		// answered from the send before it. The clock is frozen, so the hook's
+		// send carries the very millisecond the request was stamped with.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		const sends = new Map([
+			[fs.realpathSync(fileA), pastSend("const = 1;\n")],
+			[fs.realpathSync(fileB), pastSend("const = 2;\n")],
+		]);
+		const parked = gate();
+		const resume = gate();
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			// Production's client records each send's hash, and stamps it when the
+			// bytes change (clients/lsp/client.ts `recordSentContent`).
+			touchFile: vi.fn(async (p: string, content: string) => {
+				const key = fs.realpathSync(p);
+				const hash = hashDiagnosticContent(content);
+				if (sends.get(key)?.hash !== hash)
+					sends.set(key, { hash, changedAtMs: Date.now() });
+				return { diags: [] };
+			}),
+			getTrackedContent: vi.fn((p: string) => sends.get(fs.realpathSync(p))),
+			rename: async () => {
+				parked.open();
+				await resume.p;
+				return twoFileEdit();
+			},
+		});
+
+		const pending = runRename();
+		await parked.p;
+		// The server has answered; the agent writes b.ts and its hook syncs it.
+		await withFileMutationQueue(fileB, async () => {
+			fs.writeFileSync(fileB, "AGENT = 8;\n");
+		});
+		await (
+			lsp.service as { touchFile: (p: string, c: string) => Promise<unknown> }
+		).touchFile(fileB, "AGENT = 8;\n");
+		resume.open();
+		const result = await pending;
+
+		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 8;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain(path.basename(fileB));
+		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+	});
+
 	it("an agent write to a non-target file made after the capture read is not overwritten", async () => {
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
@@ -220,12 +283,10 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 			// and the agent's write lands in the window before the apply. The write
 			// runs inside the tracked-hash lookup, which the capture makes after it
 			// has read the file.
-			getTrackedContentHash: vi.fn((p: string) => {
-				const hash = hashDiagnosticContent(
-					p === fileA ? "const = 1;\n" : "const = 2;\n",
-				);
+			getTrackedContent: vi.fn((p: string) => {
+				const sent = pastSend(p === fileA ? "const = 1;\n" : "const = 2;\n");
 				if (sameFile(p, fileB)) fs.writeFileSync(fileB, "AGENT = 7;\n");
-				return hash;
+				return sent;
 			}),
 			rename: async () => ({
 				changes: {
@@ -252,7 +313,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 			supportsLSP: () => true,
 			hasLSP: async () => true,
 			// Only the target was ever sent; the server reads the other from disk.
-			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			getTrackedContent: trackedSends({ [fileA]: "const = 1;\n" }),
 			rename: async () => twoFileEdit(),
 		});
 
@@ -262,6 +323,10 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(fs.readFileSync(fileB, "utf8")).toBe("const = 2;\n");
 		expect(result.isError).toBe(true);
 		expect(resultText(result)).toContain(path.basename(fileB));
+		// Written before the request: a retry may pass, so the message says so.
+		expect(resultText(result)).toContain(
+			"modified within 2 s of the rename request; retry",
+		);
 		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 	});
 
@@ -271,7 +336,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			getTrackedContent: trackedSends({ [fileA]: "const = 1;\n" }),
 			rename: async () => twoFileEdit(),
 		});
 
@@ -290,7 +355,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			getTrackedContent: trackedSends({ [fileA]: "const = 1;\n" }),
 			rename: async () => {
 				parked.open();
 				await resume.p;
@@ -314,6 +379,9 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
 		expect(result.isError).toBe(true);
 		expect(resultText(result)).toContain(path.basename(fileB));
+		expect(resultText(result)).toContain(
+			"written after the rename was requested",
+		);
 		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 	});
 
@@ -326,13 +394,13 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: vi.fn((p: string) => {
+			getTrackedContent: vi.fn((p: string) => {
 				if (sameFile(p, fileB)) {
 					fs.writeFileSync(fileB, "AGENT = 6;\n");
 					fs.utimesSync(fileB, oldMtime, oldMtime);
 					return undefined;
 				}
-				return hashDiagnosticContent("const = 1;\n");
+				return pastSend("const = 1;\n");
 			}),
 			rename: async () => twoFileEdit(),
 		});
@@ -350,7 +418,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: trackedSends({
+			getTrackedContent: trackedSends({
 				[fileA]: "const = 1;\n",
 				[fileB]: "const = 2;\n",
 			}),
@@ -376,7 +444,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 			supportsLSP: () => true,
 			hasLSP: async () => true,
 			// The created file cannot be tracked; only the target exists.
-			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			getTrackedContent: trackedSends({ [fileA]: "const = 1;\n" }),
 			rename: async () => ({
 				documentChanges: [
 					{ kind: "create", uri: pathToFileURL(created).href },
@@ -414,7 +482,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			getTrackedContent: trackedSends({ [fileA]: "const = 1;\n" }),
 			rename: async () => ({
 				documentChanges: [
 					{ kind: "delete", uri: pathToFileURL(doomed).href },

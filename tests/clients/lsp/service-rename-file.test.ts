@@ -823,12 +823,12 @@ describe("LSPService.renameFile", () => {
 	});
 });
 
-describe("LSPService.getTrackedContentHash (#3601)", () => {
+describe("LSPService.getTrackedContent (#3601)", () => {
 	// `lsp_navigation`'s rename binds each touched file to what a live client
 	// last sent for it. The lookup must skip a dead client, a client rooted
 	// elsewhere, and one that does not track the document, and must report
 	// nothing when no client does (the caller refuses such a file).
-	it("returns the send hash of the first live in-root client that tracks the document", () => {
+	it("returns the send of the first live in-root client that tracks the document", () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-tracked-"));
 		const other = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-tracked-o-"));
 		try {
@@ -836,34 +836,40 @@ describe("LSPService.getTrackedContentHash (#3601)", () => {
 			const service = new LSPService();
 			const untracking = {
 				...makeClient(tmpDir, null),
-				getSentContentHash: vi.fn(() => undefined),
+				getSentContent: vi.fn(() => undefined),
 			};
 			const tracking = {
 				...makeClient(tmpDir, null),
-				getSentContentHash: vi.fn((): string | undefined => "hash-in-root"),
+				getSentContent: vi.fn(
+					(): { hash: string; changedAtMs?: number } | undefined => ({
+						hash: "hash-in-root",
+						changedAtMs: 7,
+					}),
+				),
 			};
 			const dead = {
 				...makeClient(tmpDir, null),
 				isAlive: vi.fn(() => false),
-				getSentContentHash: vi.fn(() => "hash-dead"),
+				getSentContent: vi.fn(() => ({ hash: "hash-dead" })),
 			};
 			const elsewhere = {
 				...makeClient(other, null),
-				getSentContentHash: vi.fn(() => "hash-other-root"),
+				getSentContent: vi.fn(() => ({ hash: "hash-other-root" })),
 			};
 			addClient(service, "aux-a", tmpDir, untracking);
 			addClient(service, "aux-b", tmpDir, tracking);
 			addClient(service, "aux-c", tmpDir, dead);
 			addClient(service, "aux-d", other, elsewhere);
 
-			expect(service.getTrackedContentHash(filePath, tmpDir)).toBe(
-				"hash-in-root",
-			);
-			expect(dead.getSentContentHash).not.toHaveBeenCalled();
-			expect(elsewhere.getSentContentHash).not.toHaveBeenCalled();
+			expect(service.getTrackedContent(filePath, tmpDir)).toEqual({
+				hash: "hash-in-root",
+				changedAtMs: 7,
+			});
+			expect(dead.getSentContent).not.toHaveBeenCalled();
+			expect(elsewhere.getSentContent).not.toHaveBeenCalled();
 
-			tracking.getSentContentHash.mockReturnValue(undefined);
-			expect(service.getTrackedContentHash(filePath, tmpDir)).toBeUndefined();
+			tracking.getSentContent.mockReturnValue(undefined);
+			expect(service.getTrackedContent(filePath, tmpDir)).toBeUndefined();
 		} finally {
 			removeTempDirSync(tmpDir);
 			removeTempDirSync(other);

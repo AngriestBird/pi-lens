@@ -3013,17 +3013,20 @@ export class LSPService {
 
 	/**
 	 * #3601: the fingerprint of the content the first live client (the file's
-	 * own servers first) last sent for `filePath`, or `undefined` when no live
-	 * client under `cwd` tracks the document. In-memory only: it spawns, opens
-	 * and stats nothing.
+	 * own servers first) last sent for `filePath`, and when a send last changed
+	 * it, or `undefined` when no live client under `cwd` tracks the document.
+	 * In-memory only: it spawns, opens and stats nothing.
 	 */
-	getTrackedContentHash(filePath: string, cwd: string): string | undefined {
+	getTrackedContent(
+		filePath: string,
+		cwd: string,
+	): { hash: string; changedAtMs?: number } | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
 		for (const { client } of this.activeClientsForCwd(cwd, priorityServerIds)) {
-			const hash = client.getSentContentHash?.(filePath);
-			if (hash !== undefined) return hash;
+			const sent = client.getSentContent?.(filePath);
+			if (sent !== undefined) return sent;
 		}
 		return undefined;
 	}

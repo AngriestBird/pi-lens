@@ -58,10 +58,12 @@ describe("lsp_navigation tool", () => {
 			rename: vi.fn().mockResolvedValue(null),
 			// #3601: a rename edit that writes a file besides its target is applied
 			// only to a file the client tracks. These cases are about provenance,
-			// not staleness, so every file reads as tracked in sync with the disk.
-			getTrackedContentHash: vi.fn((filePath: string) =>
-				hashDiagnosticContent(fs.readFileSync(filePath, "utf-8")),
-			),
+			// not staleness, so every file reads as tracked in sync with the disk,
+			// sent long before the rename.
+			getTrackedContent: vi.fn((filePath: string) => ({
+				hash: hashDiagnosticContent(fs.readFileSync(filePath, "utf-8")),
+				changedAtMs: 0,
+			})),
 			renameFile: vi.fn().mockResolvedValue({
 				applied: false,
 				serverIds: [],

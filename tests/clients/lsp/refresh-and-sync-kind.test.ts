@@ -560,6 +560,54 @@ async function measureDocumentScans(
 // one. The last two folded into a single scan whose result rides on the
 // `documentContentHashes` entry. These pin what must not move: the range on
 // the wire, and the number of JS passes that produce it.
+describe("#3601: when a send last changed a document's bytes", () => {
+	// `lsp_navigation`'s rename refuses a touched file whose send changed at or
+	// after its request: the server answered from the send before it. A re-send
+	// of the same bytes (a read auto-touch, a cascade touch) must not look like
+	// a change, or it falsely refuses; an evicted document must keep its stamp,
+	// or it reads as never stamped.
+	it("stamps a send that changes the bytes and keeps the stamp across a re-send of the same bytes", async () => {
+		const state = createMockState({ syncKind: 1 });
+		const clock = vi.spyOn(Date, "now");
+		try {
+			clock.mockReturnValue(1_000);
+			await handleNotifyChange(state, TEST_FILE, "const a = 1;\n");
+			clock.mockReturnValue(2_000);
+			await handleNotifyChange(state, TEST_FILE, "const a = 1;\n");
+			expect(state.documentContentHashes.get(TEST_KEY)?.changedAtMs).toBe(
+				1_000,
+			);
+			clock.mockReturnValue(3_000);
+			await handleNotifyChange(state, TEST_FILE, "const a = 2;\n");
+			expect(state.documentContentHashes.get(TEST_KEY)?.changedAtMs).toBe(
+				3_000,
+			);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("keeps the stamp of a document whose Incremental text is evicted", async () => {
+		const state = createMockState({ syncKind: 2 });
+		const paths = Array.from(
+			{ length: MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES + 1 },
+			(_, index) => `/project/stamped-${index}.ts`,
+		);
+		const clock = vi.spyOn(Date, "now").mockReturnValue(5_000);
+		try {
+			for (const filePath of paths) {
+				state.openDocuments.add(normalizeMapKey(filePath));
+				await handleNotifyChange(state, filePath, "x\n");
+			}
+		} finally {
+			clock.mockRestore();
+		}
+		const evicted = state.documentContentHashes.get(normalizeMapKey(paths[0]));
+		expect(evicted?.text).toBeUndefined();
+		expect(evicted?.changedAtMs).toBe(5_000);
+	});
+});
+
 describe("#2066 one JS document pass per send", () => {
 	interface RangeCase {
 		name: string;
@@ -1526,14 +1574,15 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			// (a Full-sync client retains no text, only the fingerprint), which
 			// is what `lsp_navigation`'s rename binds a touched file to. A path it
 			// never opened, and one it has closed, report nothing.
-			expect(client.getSentContentHash?.(filePath)).toBe(
-				hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
-			);
+			expect(client.getSentContent?.(filePath)).toEqual({
+				hash: hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
+				changedAtMs: expect.any(Number),
+			});
 			expect(
-				client.getSentContentHash?.(path.join(os.tmpdir(), "never-opened.ts")),
+				client.getSentContent?.(path.join(os.tmpdir(), "never-opened.ts")),
 			).toBeUndefined();
 			await client.closeDocument(filePath);
-			expect(client.getSentContentHash?.(filePath)).toBeUndefined();
+			expect(client.getSentContent?.(filePath)).toBeUndefined();
 		} finally {
 			await client.shutdown().catch(() => {});
 			await stopLSP(proc).catch(() => {});
