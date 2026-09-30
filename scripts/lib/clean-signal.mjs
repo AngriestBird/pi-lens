@@ -429,6 +429,20 @@ export function classifyFirstPublish(dirtyPublishes) {
 export const COMPARABLE_FIRST_PUBLISH = new Set(["empty-first", "direct"]);
 
 /**
+ * The matrix `clean-behavior` values that are a measurement of anything.
+ * `unknown` is evidence in neither direction (the #240 doctrine), so it never
+ * enters a comparison. Shared by `scripts/lib/md-matrix.mjs` (the writer's
+ * expiry/hysteresis population) and `tests/config/lsp-clean-behavior-census.test.ts`
+ * (the marker census), which previously kept two independent spellings of the
+ * same set (#3401).
+ */
+export const MEASURED_CLEAN_BEHAVIORS = new Set([
+	"publishes-versioned",
+	"publishes-unversioned",
+	"silent",
+]);
+
+/**
  * Fixture `lang` → `SERVER_DIAGNOSTIC_STRATEGIES` key, for the few fixtures
  * whose lang is not the server id (a language-alias fixture). Anything absent
  * falls back to identity, which covers the core set. Shared by

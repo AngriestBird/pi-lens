@@ -85,3 +85,44 @@ export function mergeServerCapabilitiesDoc(
 	priorText: string,
 	freshText: string,
 ): { text: string; preservedCount: number };
+
+/** #3401: consecutive unobserved runs before a measured `first-publish` cell expires. */
+export const FIRST_PUBLISH_EXPIRY_RUNS: number;
+
+/** #3401: consecutive agreeing runs before a `clean-behavior`/`tier` change is written. */
+export const TIER_CHANGE_AGREE_RUNS: number;
+
+export interface MatrixObservation {
+	lang: string;
+	firstPublish?: string | null;
+	cleanBehavior?: string | null;
+	tier?: string | null;
+}
+
+export interface RefreshState {
+	"first-publish"?: Record<string, { missed: number }>;
+	"clean-behavior"?: Record<
+		string,
+		{ pendingBehavior: string; pendingTier: string; runs: number }
+	>;
+}
+
+export function parseRefreshState(text: string): RefreshState;
+
+export function refreshCapabilityMatrix(
+	text: string,
+	observations: readonly MatrixObservation[],
+	opts?: {
+		src?: string;
+		marker?: string;
+		agreeRuns?: number;
+		expireRuns?: number;
+	},
+): {
+	text: string;
+	changed: boolean;
+	reason?: string;
+	expired: number;
+	pending: number;
+	committed: number;
+};

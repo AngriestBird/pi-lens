@@ -107,6 +107,15 @@ nightly steps, **dev** = the dev box (a row measured on both reads `dev+ci`).
 Merges never blank a prior good value, so a CI non-result leaves the dev
 classification standing.
 
+Two bounded guards keep that preservation from hiding a dead instrument
+(#3401). A `first-publish` cell carrying a measurement (`direct`/`empty-first`)
+whose axis is not re-observed for five consecutive nightly runs degrades to
+`unknown`; and a `clean-behavior`/`tier` change is written only after two
+consecutive runs observe the same new value, so one flapping nightly (ast-grep
+went 2 → 2* → 3 → 2* across four runs) cannot rewrite a cell. The counters live
+in the generated `## Capability matrix refresh state` section at the end of this
+doc, the only state the refresh persists across runs.
+
 `vue`'s `clean-behavior` was hand-reset to `unknown` (#3390): its
 `publishes-unversioned` cell came from 58/45 publishes that the shared
 `extension.log` window had attributed to vue but that belonged to `tinymist`.

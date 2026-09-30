@@ -5,6 +5,9 @@
 // unavailable/unknown here) is preserved verbatim. Server-row count never
 // shrinks. Used by characterize-lsp.mjs + probe-clean-signal.mjs (which share
 // docs/lsp-capability-matrix.md) and server-capabilities.mjs. #460/#390.
+//
+// Deliberately dependency-free: tests and scripts copy this file alone into a
+// scratch checkout (release-qa.test.ts), so it imports nothing.
 
 /**
  * The generated LSP docs the nightly regenerates and `check-generated-docs-diff`
@@ -495,4 +498,257 @@ export function mergeServerCapabilitiesDoc(priorText, freshText) {
 		text = mergeBulletSection(text, heading, priorBullets, preservedServers);
 	}
 	return { text, preservedCount: preservedServers.length };
+}
+
+// ---------------------------------------------------------------------------
+// #3401: the capability-matrix staleness guards.
+//
+// The merge guard above preserves a row the current run did not measure, which
+// is right for an ubuntu-poor host but leaves a measured cell unexpirable: the
+// vue/ast-grep `first-publish=direct` cells came from the pre-#3394 attribution
+// defect and NOTHING observed them afterwards, yet the guard kept them forever.
+// Two bounded rules fix that, and both need a per-cell observation memory that
+// outlives one nightly run:
+//
+//  - EXPIRY (first-publish): a cell carrying a measurement (`direct`/
+//    `empty-first`) whose axis is not re-observed for `FIRST_PUBLISH_EXPIRY_RUNS`
+//    consecutive runs degrades to `unknown`.
+//  - HYSTERESIS (clean-behavior/tier): a change is written only after
+//    `TIER_CHANGE_AGREE_RUNS` consecutive runs observe the same new value, so a
+//    single flapping run (ast-grep 2 → 2* → 3 → 2* across four nightlies) cannot
+//    rewrite a cell.
+//
+// The matrix doc is the only state the refresh persists: the nightly
+// `bot/lsp-docs-refresh` auto-PR commits it (and `check-generated-docs-diff.mjs`
+// opens the PR when it changes, including a state-only change). So the counters
+// live in a generated section of that same doc and survive with it. Nothing
+// here is a measurement; the section is bookkeeping.
+// ---------------------------------------------------------------------------
+
+/**
+ * #3401: consecutive unobserved runs before a measured `first-publish` cell
+ * degrades to `unknown`. Five nights is long enough that a transient runner or
+ * toolchain gap does not erase a dev-box measurement, and short enough that a
+ * dead cell cannot outlive the instrument that produced it (#3310's lesson).
+ */
+export const FIRST_PUBLISH_EXPIRY_RUNS = 5;
+
+/**
+ * #3401: consecutive agreeing runs before a `clean-behavior`/`tier` change is
+ * written. Two, so one odd nightly (the ast-grep flap) is held as pending but
+ * two agreeing nights commit.
+ */
+export const TIER_CHANGE_AGREE_RUNS = 2;
+
+const REFRESH_STATE_HEADING =
+	"## Capability matrix refresh state (nightly-generated)";
+const REFRESH_STATE_FENCE = "```json";
+const REFRESH_STATE_FENCE_END = "```";
+
+/**
+ * Parse the `## Capability matrix refresh state` JSON block. An absent or
+ * malformed block parses as `{}`: it is bookkeeping, so a lost block degrades
+ * to "no memory this run", never a crash.
+ *
+ * @param {string} text
+ * @returns {{ "first-publish"?: Record<string, { missed: number }>, "clean-behavior"?: Record<string, { pendingBehavior: string, pendingTier: string, runs: number }> }}
+ */
+export function parseRefreshState(text) {
+	const lines = String(text ?? "").split("\n");
+	const headingIdx = lines.findIndex(
+		(l) => l.trim() === REFRESH_STATE_HEADING.trim(),
+	);
+	if (headingIdx < 0) return {};
+	const openIdx = lines.indexOf(REFRESH_STATE_FENCE, headingIdx + 1);
+	if (openIdx < 0) return {};
+	const closeIdx = lines.indexOf(REFRESH_STATE_FENCE_END, openIdx + 1);
+	if (closeIdx < 0) return {};
+	try {
+		const parsed = JSON.parse(lines.slice(openIdx + 1, closeIdx).join("\n"));
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Render the refresh-state section's lines, or `[]` when there is nothing to
+ * remember. Keys are sorted and zero counters are dropped so a settled run
+ * writes a byte-identical block and the refresh PR does not open on churn.
+ */
+function renderRefreshStateSection(state) {
+	const firstPublish = {};
+	for (const lang of Object.keys(state?.["first-publish"] ?? {}).sort(
+		compareStableStrings,
+	)) {
+		const missed = Number(state["first-publish"][lang]?.missed ?? 0);
+		if (missed > 0) firstPublish[lang] = { missed };
+	}
+	const cleanBehavior = {};
+	for (const lang of Object.keys(state?.["clean-behavior"] ?? {}).sort(
+		compareStableStrings,
+	)) {
+		const pending = state["clean-behavior"][lang];
+		if (pending?.pendingBehavior && pending?.pendingTier) {
+			cleanBehavior[lang] = {
+				pendingBehavior: pending.pendingBehavior,
+				pendingTier: pending.pendingTier,
+				runs: Number(pending.runs ?? 1),
+			};
+		}
+	}
+	const payload = {};
+	if (Object.keys(cleanBehavior).length)
+		payload["clean-behavior"] = cleanBehavior;
+	if (Object.keys(firstPublish).length) payload["first-publish"] = firstPublish;
+	if (Object.keys(payload).length === 0) return [];
+	return [
+		REFRESH_STATE_HEADING,
+		"",
+		"Bookkeeping for the `first-publish` expiry (#3401) and the two-run",
+		"`clean-behavior` hysteresis. Regenerated every run; never a measurement.",
+		"",
+		REFRESH_STATE_FENCE,
+		JSON.stringify(payload),
+		REFRESH_STATE_FENCE_END,
+	];
+}
+
+/**
+ * Replace (or append) the refresh-state section at the end of `text`. Placing it
+ * after the generated drift footnote keeps the drift writer's own "up to the
+ * next `## ` heading" scan from swallowing it.
+ */
+function replaceRefreshStateSection(text, section) {
+	const lines = String(text).split("\n");
+	const headingIdx = lines.findIndex(
+		(l) => l.trim() === REFRESH_STATE_HEADING.trim(),
+	);
+	let kept = lines;
+	if (headingIdx >= 0) {
+		let end = lines.length;
+		for (let i = headingIdx + 1; i < lines.length; i++) {
+			if (/^##\s/.test(lines[i])) {
+				end = i;
+				break;
+			}
+		}
+		kept = [...lines.slice(0, headingIdx), ...lines.slice(end)];
+	}
+	while (kept.length && kept.at(-1) === "") kept.pop();
+	const body = kept.join("\n");
+	if (section.length === 0) return `${body}\n`;
+	return `${body}\n\n${section.join("\n")}\n`;
+}
+
+/**
+ * Refresh docs/lsp-capability-matrix.md from one probe run, applying the two
+ * #3401 staleness guards. Text in, text out (plus counts) so the nightly's real
+ * refresh entry is testable with recorded run inputs and no LSP spawn.
+ *
+ * @param {string} text  the current doc
+ * @param {Array<{ lang: string, firstPublish?: string | null, cleanBehavior?: string | null, tier?: string | null }>} observations
+ *   this run's comparable observations, already resolved onto target langs by
+ *   the caller (a non-comparable axis is `null`)
+ * @param {{ src?: string, marker?: string, agreeRuns?: number, expireRuns?: number }} [opts]
+ * @returns {{ text: string, changed: boolean, reason?: string, expired: number, pending: number, committed: number }}
+ */
+export function refreshCapabilityMatrix(text, observations, opts = {}) {
+	const marker = opts.marker ?? "| lang | server |";
+	const src = opts.src ?? "ci";
+	const agreeRuns = Math.max(
+		1,
+		Number(opts.agreeRuns ?? TIER_CHANGE_AGREE_RUNS),
+	);
+	const expireRuns = Math.max(
+		1,
+		Number(opts.expireRuns ?? FIRST_PUBLISH_EXPIRY_RUNS),
+	);
+	const tbl = parseTable(text, marker);
+	if (!tbl) {
+		return {
+			text,
+			changed: false,
+			reason: "capability table not found in doc",
+			expired: 0,
+			pending: 0,
+			committed: 0,
+		};
+	}
+	const idx = (name) => tbl.header.indexOf(name);
+	const langIdx = idx("lang");
+	const srcIdx = idx("src");
+	const fpIdx = idx("first-publish");
+	const cbIdx = idx("clean-behavior");
+	const tierIdx = idx("tier");
+	const byLang = new Map((observations ?? []).map((o) => [o.lang, o]));
+	const prior = parseRefreshState(text);
+	const priorFp = prior["first-publish"] ?? {};
+	const priorCb = prior["clean-behavior"] ?? {};
+	const nextState = { "first-publish": {}, "clean-behavior": {} };
+	let expired = 0;
+	let pending = 0;
+	let committed = 0;
+	const measured = [];
+	for (const cells of tbl.rows) {
+		const lang = cells[langIdx];
+		const observed = byLang.get(lang);
+		const cell = { lang };
+		if (observed)
+			cell.src = mergeSrc(srcIdx >= 0 ? (cells[srcIdx] ?? "") : "", src);
+		// first-publish: an observation writes immediately; a measured cell the
+		// probe no longer observes is counted and, at the bound, expired.
+		const observedFp = observed?.firstPublish ?? null;
+		const currentFp = fpIdx >= 0 ? cells[fpIdx] : "";
+		if (observedFp) {
+			cell["first-publish"] = observedFp;
+		} else if (currentFp === "direct" || currentFp === "empty-first") {
+			const missed = Number(priorFp[lang]?.missed ?? 0) + 1;
+			if (missed >= expireRuns) {
+				cell["first-publish"] = "unknown";
+				expired++;
+			} else {
+				nextState["first-publish"][lang] = { missed };
+			}
+		}
+		// clean-behavior/tier: hold a change until `agreeRuns` runs agree.
+		const observedCb = observed?.cleanBehavior ?? null;
+		if (observedCb) {
+			const observedTier = observed.tier ?? "";
+			const currentCb = cbIdx >= 0 ? cells[cbIdx] : "";
+			const currentTier = tierIdx >= 0 ? cells[tierIdx] : "";
+			if (observedCb !== currentCb || observedTier !== currentTier) {
+				const held = priorCb[lang];
+				const sameHeld =
+					held?.pendingBehavior === observedCb &&
+					held?.pendingTier === observedTier;
+				const runs = sameHeld ? Number(held.runs ?? 1) + 1 : 1;
+				if (sameHeld && runs >= agreeRuns) {
+					cell["clean-behavior"] = observedCb;
+					cell.tier = observedTier;
+					committed++;
+				} else {
+					nextState["clean-behavior"][lang] = {
+						pendingBehavior: observedCb,
+						pendingTier: observedTier,
+						runs,
+					};
+					pending++;
+				}
+			}
+		}
+		measured.push(cell);
+	}
+	const merged = mergeRows(
+		tbl.rows,
+		tbl.header,
+		measured,
+		"lang",
+		["clean-behavior", "first-publish", "tier", "src"],
+		{ updateOnly: true },
+	);
+	let out = replaceTable(text, marker, tbl.header, tbl.sep, merged);
+	if (!out) out = text;
+	out = replaceRefreshStateSection(out, renderRefreshStateSection(nextState));
+	return { text: out, changed: out !== text, expired, pending, committed };
 }

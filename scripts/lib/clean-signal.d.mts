@@ -88,6 +88,9 @@ export function classifyFirstPublish(
 
 export const COMPARABLE_FIRST_PUBLISH: Set<string>;
 
+/** #3401: the `clean-behavior` values that are a measurement of anything. */
+export const MEASURED_CLEAN_BEHAVIORS: Set<string>;
+
 export const LANG_TO_STRATEGY_KEY: Record<string, string>;
 
 export function strategyKeyForLang(lang: string): string;
