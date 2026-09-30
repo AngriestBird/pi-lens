@@ -2034,6 +2034,62 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 			},
 		);
 	});
+
+	// #3763 r2 (F1): the pipeline's immediate autofix marks the file fixed
+	// after its fixer awaits (`runAutofix`), through the `fixedThisTurn` the
+	// handler hands `runPipeline`. A write whose autofix finished after the
+	// replacement marked session 2's copy, so session 2's own autofix of that
+	// file was skipped as already fixed. The recurrence: the raw set handed to
+	// the pipeline instead of one fenced by the handler's session.
+	async function immediateAutofixMark(replaced: boolean): Promise<boolean> {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		let marked = false;
+		await acrossReplacement(
+			replaced ? "fixed-mark" : "fixed-mark-live",
+			async ({ filePath, runtime, cacheManager }) => {
+				vi.mocked(runPipeline).mockReset();
+				vi.mocked(runPipeline).mockImplementation(async (ctx, deps) => {
+					entered.resolve();
+					await release.promise;
+					// What `runAutofix` does once its fixer returned (pipeline.ts).
+					if (ctx.autofixMode === "immediate") deps.fixedThisTurn.add(filePath);
+					return {
+						output: "",
+						hasBlockers: false,
+						isError: false,
+						fileModified: false,
+					};
+				});
+				const handler = handleToolResult({
+					...toolResultDeps({ filePath, runtime, cacheManager }),
+					event: {
+						toolName: "write",
+						input: { path: filePath, content: "export const x = 2;\n" },
+						content: [{ type: "text", text: "ok" }],
+					},
+				});
+				await entered.promise;
+				if (replaced) {
+					runtime.resetForSession();
+					runtime.beginTurn();
+				}
+				release.resolve();
+				await handler;
+				marked = runtime.fixedThisTurn.has(filePath);
+			},
+		);
+		return marked;
+	}
+
+	it("a session-1 autofix finishing after the replacement leaves session 2's file unmarked (#3763)", async () => {
+		expect(await immediateAutofixMark(true)).toBe(false);
+	});
+
+	it("an immediate autofix in its own session marks the file fixed (#3763)", async () => {
+		expect(await immediateAutofixMark(false)).toBe(true);
+	});
 });
 
 describe("runtime-tool-result inline behavior warnings", () => {

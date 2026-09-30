@@ -90,6 +90,7 @@ import {
 } from "./project-changes.js";
 import type { RuffClient } from "./ruff-client.js";
 import type {
+	PathSetLike,
 	ReadWidening,
 	RuntimeCoordinator,
 } from "./runtime-coordinator.js";
@@ -878,6 +879,19 @@ async function dispatchPipelineAnalysis(args: {
 		resetLSPService,
 	} = deps;
 
+	// #3763 r2: `runAutofix` marks the file fixed after its fixer awaits; a
+	// replaced session's mark would skip the next session's own autofix of
+	// that file (the #3576 facade of the agent_end drain, for this caller).
+	const sessionFixedThisTurn = runtime.fixedThisTurn;
+	const fixedThisTurn: PathSetLike = {
+		...sessionFixedThisTurn,
+		add: (fixedPath) => {
+			sessionGeneration.guardedWrite(fixedPath, () =>
+				sessionFixedThisTurn.add(fixedPath),
+			);
+			return fixedThisTurn;
+		},
+	};
 	const pipelinePromise = runPipeline(
 		{
 			signal: deps.signal,
@@ -936,7 +950,7 @@ async function dispatchPipelineAnalysis(args: {
 			ruffClient: ruffClient!,
 			metricsClient: metricsClient!,
 			getFormatService,
-			fixedThisTurn: runtime.fixedThisTurn,
+			fixedThisTurn,
 		},
 	);
 	const pipelineTelemetry: InFlightPipeline = {

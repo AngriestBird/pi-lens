@@ -32,6 +32,11 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { readChangesSince } from "../../clients/project-changes.js";
+import {
+	_observedMutationStateForTests,
+	resetObservedMutationNet,
+} from "../../clients/observed-mutation.js";
 
 function gate() {
 	let open!: () => void;
@@ -605,6 +610,7 @@ describe("#3763 lsp_navigation bookkeeps under the session it was called in", ()
 	it("a rename that applies after the replacement lists nothing in session 2's turn state", async () => {
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetObservedMutationNet();
 		try {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -650,7 +656,25 @@ describe("#3763 lsp_navigation bookkeeps under the session it was called in", ()
 				turnFiles: Object.keys(
 					cacheManager.readTurnState(env.tmpDir).files ?? {},
 				).map((file) => path.basename(file)),
-			}).toEqual({ applied: "let = 1;\n", turnFiles: [] });
+				// #3763 r2 (F2): the bytes did change, so the disk facts stay
+				// (I5): the change-log receipt, the file's seq (the staleness key
+				// of test-runner and actionable-warning verdicts) and the settled
+				// sweep's handled mark.
+				receipts: readChangesSince(env.tmpDir, 0).map((change) => [
+					path.basename(change.filePath),
+					change.source,
+				]),
+				fileSeq: runtime.getFileSeq(fileA),
+				handled: _observedMutationStateForTests().handled.some((key) =>
+					key.endsWith("a.ts"),
+				),
+			}).toEqual({
+				applied: "let = 1;\n",
+				turnFiles: [],
+				receipts: [["a.ts", "lsp-rename"]],
+				fileSeq: 1,
+				handled: true,
+			});
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
