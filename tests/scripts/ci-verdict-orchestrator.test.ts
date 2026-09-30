@@ -13,9 +13,16 @@
 //  - the --wait loop caching the push time once (#3697 round-3 verify);
 //  - 2026-09-30: a rerun replayed a stale merge commit (#3660) and a
 //    post-merge `refs/pull/N/merge` checkout failure was read as a red lane.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	EXIT_FAILURE,
@@ -621,6 +628,73 @@ describe("run — post-merge noise is not a failure (#3700)", () => {
 		expect(exitCode).toBe(EXIT_FAILURE);
 	});
 
+	// Recurrence (review r1, F1): the excuse fired on ANY log line quoting the
+	// ref text, so a MERGED PR whose Unit tests really failed (and whose output
+	// happens to contain the text) read as exit 0 "post-merge noise".
+	it("keeps a MERGED PR's real test failure a failure when the same log also quotes the missing merge ref", async () => {
+		const unit = job(
+			"unit-tests-fail-101554674114",
+			`${readFileSync(join(JOBS, "unit-tests-fail-101554674114.log"), "utf8")}\n2026-09-06T20:44:10.0300000Z fatal: couldn't find remote ref refs/pull/5/merge\n`,
+		);
+		const w = world({
+			prs: [
+				{
+					number: 5,
+					state: "MERGED",
+					checkRuns: [jobRow(unit), GREEN[1]],
+				},
+			],
+			jobs: [unit],
+		});
+		const { exitCode, out, reason } = await cli(["5"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(reason).not.toContain("post-merge noise");
+		expect(out).toContain("Gating: 2 checks, 1 failing: Unit tests (failure)");
+	});
+
+	it("keeps it a failure when the ref that could not be fetched is another PR's", async () => {
+		const { j, rows } = noisy();
+		const w = world({
+			prs: [{ number: 2624, state: "MERGED", checkRuns: rows }],
+			jobs: [j],
+		});
+		const { exitCode } = await cli(["2624"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+	});
+
+	it("keeps it a failure when the failed step is not the checkout", async () => {
+		const lint = job(
+			"lint-install-fail-101496353689",
+			readFileSync(
+				join(JOBS, "checkout-fail-post-merge-101528749222.log"),
+				"utf8",
+			),
+		);
+		const w = world({
+			prs: [
+				{
+					number: 2623,
+					state: "MERGED",
+					checkRuns: [GREEN[0], jobRow(lint)],
+				},
+			],
+			jobs: [lint],
+		});
+		const { exitCode } = await cli(["2623"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+	});
+
+	it("keeps it a failure when the job names no failed step at all", async () => {
+		const { j, rows } = noisy();
+		const bare = { ...j, json: { ...j.json, steps: [] } };
+		const w = world({
+			prs: [{ number: 2623, state: "MERGED", checkRuns: rows }],
+			jobs: [bare],
+		});
+		const { exitCode } = await cli(["2623"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+	});
+
 	it("drops only the noise row when a real failure sits beside it", async () => {
 		const { j } = noisy();
 		const unit = UNIT_FAIL();
@@ -1003,6 +1077,121 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 				"3688": `${shaOf(3688)}:failed`,
 			});
 		}
+	});
+
+	// Recurrence (review r1, F2): a merge-conflicted armed PR (its gates are
+	// skipped, AGENTS.md shape 11) sat silent for the whole window.
+	it("reports a merge-conflicted armed PR once per head", async () => {
+		const file = stateFile();
+		const w = world({
+			prs: [
+				{
+					number: 6,
+					login: "stranger",
+					autoMerge: true,
+					mergeable: "CONFLICTING",
+					checkRuns: [],
+				},
+			],
+		});
+		const first = await cli(["--watch-open", "--state-file", file], w);
+		expect(first.exitCode).toBe(EXIT_SUCCESS);
+		expect(first.lines[0]).toContain(
+			`#6 dirty @${sha9(6)}: one or more required checks are absent and the PR is merge-conflicted (mergeable=CONFLICTING)`,
+		);
+		const again = await cli(
+			["--watch-open", "--wait", "0", "--state-file", file],
+			w,
+		);
+		expect(again.exitCode).toBe(EXIT_PENDING);
+	});
+
+	it("reaches absent-rearm for an armed PR whose head has no check suite, measured from when the watch first saw it", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3679,
+					login: "stranger",
+					autoMerge: true,
+					checkRuns: [],
+					workflowRuns: [],
+					suites: [],
+				},
+			],
+		});
+		const { exitCode, lines, sleeps } = await cli(
+			["--watch-open", "--wait", "900"],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(lines[0]).toBe(
+			`#3679 absent-rearm @${sha9(3679)}: ${formatAbsentRequiredReason(shaOf(3679), 10)}`,
+		);
+		// 7 sleeps of 90 s = 630 s: the first poll at which 10 whole minutes passed.
+		expect(sleeps).toHaveLength(7);
+	});
+
+	it("reaches the re-arm text under --wait for a head with no check suite, and stays quiet on a one-shot read", async () => {
+		const pr: PrFixture = {
+			number: 3679,
+			autoMerge: true,
+			checkRuns: [],
+			workflowRuns: [],
+			suites: [],
+		};
+		const waited = await cli(["3679", "--wait", "1200"], world({ prs: [pr] }));
+		expect(waited.reason).toBe(formatAbsentRequiredReason(shaOf(3679), 20));
+		const once = await cli(["3679"], world({ prs: [pr] }));
+		expect(once.reason).toContain("CI likely hasn't registered yet");
+	});
+
+	// Recurrence (review r1, F3): a truncated state file reads as empty, so
+	// every PR reported again; a bad path lost the poll's own report.
+	it("writes the state file atomically into a directory it creates", async () => {
+		const { unit, runs } = failedRuns();
+		const dir = join(dirname(stateFile()), "nested", "deeper");
+		const file = join(dir, "state.json");
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+		});
+		await cli(["--watch-open", "--state-file", file], w);
+		expect(readdirSync(dir)).toEqual(["state.json"]);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+			"3688": `${shaOf(3688)}:failed`,
+		});
+	});
+
+	it("prints the events before it persists the state, and keeps them when the state cannot be saved", async () => {
+		const { unit, runs } = failedRuns();
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+		});
+		const file = stateFile();
+		const seenOnFirstLine: boolean[] = [];
+		const time = clock();
+		const errors: string[] = [];
+		const exitCode = await run({
+			argv: ["--watch-open", "--state-file", file],
+			ghExec: ghFor(w),
+			now: time.now,
+			sleepImpl: time.sleepImpl,
+			stdout: () => seenOnFirstLine.push(existsSync(file)),
+			stderr: (line: string) => errors.push(line),
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(seenOnFirstLine.length).toBeGreaterThan(0);
+		expect(seenOnFirstLine.every((exists) => !exists)).toBe(true);
+		expect(existsSync(file)).toBe(true);
+		// A path whose parent is a regular file cannot be written at all.
+		const bad = await cli(
+			["--watch-open", "--state-file", join(file, "x.json")],
+			w,
+		);
+		expect(bad.exitCode).toBe(EXIT_SUCCESS);
+		expect(bad.lines[0]).toContain("#3688 failed");
+		expect(bad.errors.join("\n")).toContain("could not save the watch state");
 	});
 
 	it("exits 70, not a verdict code, when the open-PR list cannot be read", async () => {

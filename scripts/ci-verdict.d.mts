@@ -55,7 +55,7 @@ export interface FailedJobDetail {
 	extraFailures: number;
 	summary: string[];
 	mergeBase: string | null;
-	missingMergeRef: boolean;
+	missingMergeRefPr: string | null;
 	note: string | null;
 }
 
@@ -337,14 +337,12 @@ export declare const MAX_FAILURE_LINES: number;
 export declare const JOB_LOG_MAX_BUFFER: number;
 export declare const WATCH_POLL_INTERVAL_SECONDS: number;
 
-export declare function stripAnsi(text: unknown): string;
-
 export declare function parseJobLog(logText: unknown): {
 	failures: string[];
 	extraFailures: number;
 	summary: string[];
 	mergeBase: string | null;
-	missingMergeRef: boolean;
+	missingMergeRefPr: string | null;
 };
 
 export declare function readFailedJob(

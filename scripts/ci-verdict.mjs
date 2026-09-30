@@ -176,8 +176,15 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	ASSERTION_LINE,
+	BARE_FAIL_LINE,
+	stripAnsi,
+	stripLineTimestamps,
+} from "./lib/ci-failure-classifier.mjs";
 import {
 	isAdvisoryCheck,
 	isBlockingConclusion,
@@ -1084,13 +1091,6 @@ export const MAX_FAILURE_LINES = 20;
  * on a good day: without this a big red log ENOBUFS and prints no failure. */
 export const JOB_LOG_MAX_BUFFER = 64 * 1024 * 1024;
 
-const ANSI_SEQUENCE = new RegExp(String.raw`\u001b\[[0-9;?]*[ -/]*[@-~]`, "g");
-const LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
-
-export function stripAnsi(text) {
-	return String(text ?? "").replace(ANSI_SEQUENCE, "");
-}
-
 /**
  * What one job log says (the lines the orchestrator pulled out by hand from
  * `gh api --allow-escape-sequences .../jobs/<id>/logs`): the vitest `FAIL`
@@ -1106,14 +1106,11 @@ export function parseJobLog(logText) {
 	const failures = [];
 	const summary = [];
 	let mergeBase = null;
-	let missingMergeRef = false;
+	let missingMergeRefPr = null;
 	for (const raw of String(logText ?? "").split("\n")) {
-		const line = stripAnsi(raw)
-			.replace(/\r$/, "")
-			.replace(LOG_TIMESTAMP, "")
-			.trimEnd();
+		const line = stripLineTimestamps(stripAnsi(raw)).trimEnd();
 		const text = line.trim();
-		if (/^(?:FAIL\s|\w*AssertionError\b)/.test(text)) {
+		if (BARE_FAIL_LINE.test(line) || ASSERTION_LINE.test(line)) {
 			failures.push(text);
 		} else if (/^(?:Test Files|Tests)\s+\d/.test(text)) {
 			summary.push(text);
@@ -1121,15 +1118,16 @@ export function parseJobLog(logText) {
 		const base =
 			/HEAD is now at \S+ Merge [0-9a-f]{40} into ([0-9a-f]{40})$/.exec(line);
 		if (base) mergeBase = base[1];
-		if (/couldn't find remote ref refs\/pull\/\d+\/merge/.test(line))
-			missingMergeRef = true;
+		missingMergeRefPr =
+			/couldn't find remote ref refs\/pull\/(\d+)\/merge/.exec(line)?.[1] ??
+			missingMergeRefPr;
 	}
 	return {
 		failures: failures.slice(0, MAX_FAILURE_LINES),
 		extraFailures: Math.max(0, failures.length - MAX_FAILURE_LINES),
 		summary,
 		mergeBase,
-		missingMergeRef,
+		missingMergeRefPr,
 	};
 }
 
@@ -1220,9 +1218,9 @@ function readMasterSha(repository, ghExec, timeoutMs) {
 
 /**
  * Failure detail plus remedy hints for a FAILED verdict's rows (#3700):
- *  - post-merge noise: a job whose checkout could not fetch
- *    `refs/pull/N/merge` on a PR that is MERGED (the ref is gone; the job never
- *    ran). Only MERGED excuses it: on an open PR the same line means the PR is
+ *  - post-merge noise: a job whose checkout step could not fetch this PR's
+ *    `refs/pull/N/merge`, with no failing test line, on a PR that is MERGED
+ *    (the ref is gone; the job never ran). Only MERGED excuses it: on an open PR the same line means the PR is
  *    conflicted, which is real. The ids come back so the caller recomputes the
  *    verdict without them.
  *  - update-branch: the failed run's merge commit was built on a base that is
@@ -1242,7 +1240,17 @@ export function readFailureDetails({
 	const hints = [];
 	let noiseRowIds = null;
 	if (isPrNumber(target)) {
-		const noisy = details.filter((detail) => detail.missingMergeRef);
+		// The excuse is tied to the failure it excuses: the job's own failed step
+		// is the checkout, it printed no failing test line, and the ref it could
+		// not fetch is THIS PR's. A test that quotes the ref text in its output
+		// (this repo's own fixtures do) must not turn a red run green.
+		const noisy = details.filter(
+			(detail) =>
+				detail.missingMergeRefPr === String(target).trim() &&
+				detail.failures.length === 0 &&
+				detail.steps.length > 0 &&
+				detail.steps.every((step) => step.startsWith("Run actions/checkout")),
+		);
 		if (
 			noisy.length > 0 &&
 			readPrState(target, ghExec, timeoutMs) === "MERGED"
@@ -1639,7 +1647,12 @@ export function resolveReexecPlan({
 export const WATCH_POLL_INTERVAL_SECONDS = 90;
 
 // The verdict kinds `--watch-open` reports; every other kind is progress.
-const WATCH_EVENT_KINDS = new Set(["failed", "fork-approval", "absent-rearm"]);
+const WATCH_EVENT_KINDS = new Set([
+	"failed",
+	"fork-approval",
+	"absent-rearm",
+	"dirty",
+]);
 
 export function readOpenPrs(ghExec = gh, timeoutMs = DEFAULT_GH_TIMEOUT_MS) {
 	return JSON.parse(
@@ -1669,7 +1682,10 @@ function readViewerLogin(ghExec, timeoutMs) {
 
 /** One PR's `{ repository, sha, verdict }`, or `null` when its read failed
  * (`run()` already said why on `stderr`). */
-async function readPrVerdict(pr, { ghExec, stderr, sleepImpl, now }) {
+async function readPrVerdict(
+	pr,
+	{ ghExec, stderr, sleepImpl, now, absentSinceMs },
+) {
 	let captured = null;
 	const exitCode = await run({
 		argv: [String(pr)],
@@ -1678,6 +1694,7 @@ async function readPrVerdict(pr, { ghExec, stderr, sleepImpl, now }) {
 		stderr,
 		...(sleepImpl ? { sleepImpl } : {}),
 		...(now ? { now } : {}),
+		absentSinceMs,
 		onVerdict: (info) => {
 			captured = info;
 		},
@@ -1718,6 +1735,22 @@ function loadWatchState(stateFile) {
 			: {};
 	} catch {
 		return {};
+	}
+}
+
+/** Temp file then rename, directory created: a kill mid-write leaves the old
+ * state, never a truncated one (which the loader would read as empty and every
+ * PR would report again). A failure is a note, not an exit: the poll's events
+ * are already printed. */
+function saveWatchState(stateFile, seen, stderr) {
+	if (!stateFile) return;
+	const temporary = `${stateFile}.${process.pid}.tmp`;
+	try {
+		mkdirSync(dirname(stateFile), { recursive: true });
+		writeFileSync(temporary, `${JSON.stringify(seen, null, 2)}\n`);
+		renameSync(temporary, stateFile);
+	} catch (error) {
+		stderr(`could not save the watch state: ${firstLine(error)}`);
 	}
 }
 
@@ -1762,6 +1795,7 @@ export async function watchOpenPrs({
 	).split("/")[0];
 	const viewer = readViewerLogin(ghExec, DEFAULT_GH_TIMEOUT_MS);
 	const seen = loadWatchState(stateFile);
+	const firstSeenMs = new Map();
 	for (;;) {
 		const events = [];
 		const open = await retry((remainingMs) =>
@@ -1774,11 +1808,14 @@ export async function watchOpenPrs({
 				pr.author?.login === viewer,
 		);
 		for (const pr of watched) {
+			const headKey = `${pr.number}:${pr.headRefOid}`;
+			if (!firstSeenMs.has(headKey)) firstSeenMs.set(headKey, now());
 			const info = await readPrVerdict(pr.number, {
 				ghExec,
 				stderr,
 				sleepImpl,
 				now,
+				absentSinceMs: firstSeenMs.get(headKey),
 			});
 			if (!info) continue;
 			const { kind } = info.verdict;
@@ -1803,12 +1840,11 @@ export async function watchOpenPrs({
 				delete seen[number];
 			}
 		}
-		if (stateFile)
-			writeFileSync(stateFile, `${JSON.stringify(seen, null, 2)}\n`);
-		if (events.length > 0) {
-			for (const lines of events) for (const line of lines) stdout(line);
-			return EXIT_SUCCESS;
-		}
+		// Events first: a state file that cannot be written must not swallow the
+		// report the poll just produced.
+		for (const lines of events) for (const line of lines) stdout(line);
+		saveWatchState(stateFile, seen, stderr);
+		if (events.length > 0) return EXIT_SUCCESS;
 		if (now() >= deadline) break;
 		await sleepImpl(
 			Math.min(WATCH_POLL_INTERVAL_SECONDS * 1000, deadline - now()),
@@ -1865,6 +1901,9 @@ export async function run({
 	// #3700: receives `{ repository, sha, verdict }` just before the report
 	// prints; `--all` and `--watch-open` read every PR through it.
 	onVerdict = () => {},
+	// #3700: when `--watch-open` first saw this head; the absence clock of a
+	// head with no check suite.
+	absentSinceMs = null,
 } = {}) {
 	const { target, waitSeconds, all, watchOpen, stateFile } = parseArgs(argv);
 	if (all || watchOpen) {
@@ -1965,6 +2004,10 @@ export async function run({
 		// clear the message). #3700: the first poll before any suite exists must
 		// not pin the whole window on the quiet text.
 		let headInfo = { autoMerge: false, pushedMs: null };
+		// #3700: a head with no check suite has no push clock (GitHub never opened
+		// one), so absence is measured from when this read -- or the watch that
+		// passed `absentSinceMs` -- first saw it absent.
+		let firstAbsentMs = null;
 		const absentContext =
 			transport === TRANSPORT_GH
 				? () => {
@@ -1986,13 +2029,16 @@ export async function run({
 								initialTimeoutMs,
 							),
 							autoMerge: headInfo.autoMerge,
-							absentMinutes:
-								headInfo.pushedMs === null
-									? null
-									: Math.max(
-											0,
-											Math.floor((clock() - headInfo.pushedMs) / 60_000),
-										),
+							absentMinutes: Math.max(
+								0,
+								Math.floor(
+									(clock() -
+										(Number.isFinite(headInfo.pushedMs)
+											? headInfo.pushedMs
+											: (absentSinceMs ?? (firstAbsentMs ??= clock())))) /
+										60_000,
+								),
+							),
 						};
 					}
 				: null;
