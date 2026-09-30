@@ -794,17 +794,18 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		}
 		measured.push(cell);
 	}
-	const merged = mergeRows(
-		tbl.rows,
-		tbl.header,
-		measured,
-		"lang",
-		["clean-behavior", "first-publish", "tier", "src"],
-		{ updateOnly: true },
+	const merged = mergeRows(tbl.rows, tbl.header, measured, "lang", [
+		"clean-behavior",
+		"first-publish",
+		"tier",
+		"src",
+	]);
+	// `replaceTable` only returns null for a table `parseTable` cannot find, and
+	// this same text and marker were parsed above.
+	const out = replaceRefreshStateSection(
+		replaceTable(text, marker, tbl.header, tbl.sep, merged),
+		renderRefreshStateSection(nextState),
 	);
-	let out = replaceTable(text, marker, tbl.header, tbl.sep, merged);
-	if (!out) out = text;
-	out = replaceRefreshStateSection(out, renderRefreshStateSection(nextState));
 	return {
 		text: out,
 		changed: out !== text,

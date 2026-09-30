@@ -583,6 +583,9 @@ describe("#3401 state block parsing, rendering and replacement", () => {
 		const doc = `${stateBlock({ "first-publish": { vue: { firstMissed: day(0) } } })}\n${FIXTURE}`;
 		const out = nightly(doc, 1).text;
 		expect(out.split(STATE_HEADING).length - 1).toBe(1);
+		// A stray trailing space on the old heading must still find it.
+		const spaced = doc.replace(STATE_HEADING, `${STATE_HEADING} `);
+		expect(nightly(spaced, 1).text.split(STATE_HEADING).length - 1).toBe(1);
 	});
 
 	it("tolerates a null entry and a missing runs field in a hand-edited block", () => {
