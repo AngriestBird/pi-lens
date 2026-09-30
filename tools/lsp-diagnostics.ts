@@ -26,7 +26,10 @@ import {
 	primaryServerId,
 	resolveLspCwdForFile,
 } from "../clients/lsp/config.js";
-import type { LspRootFallback } from "../clients/lsp/server.js";
+import {
+	describeRootFallback,
+	type LspRootFallback,
+} from "../clients/lsp/server.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import {
 	combineAbortSignals,
@@ -851,11 +854,8 @@ async function primaryRootFallback(
 ): Promise<LspRootFallback | undefined> {
 	const seen: LspRootFallback[] = [];
 	await resolveLspCwdForFile(file, cwd, (fallback) => seen.push(fallback));
-	return seen[0];
-}
-
-function rootFallbackReason(fallback: LspRootFallback): string {
-	return `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")}); the server was started at the file's directory and may not have analysed it`;
+	// Only a server that needs a project is demoted; see `requiresProjectRoot`.
+	return seen.find((fallback) => fallback.requiresProjectRoot);
 }
 
 // --- #611/#707: tier-3 silent escape hatch (typescript.tsserverRequest sync
@@ -1659,17 +1659,17 @@ async function runFileDiagnostics(
 				"Re-check after the server settles, or increase waitMs."
 			);
 		}
+		if (rootFallback) {
+			return (
+				`Primary LSP${primaryId ? ` (${primaryId})` : ""}: unconfirmed — ` +
+				`${describeRootFallback(rootFallback)}. NOT the same as 0 diagnostics; ` +
+				"check the file from inside its project and re-run."
+			);
+		}
 		// #1470: a file demoted ONLY because an auxiliary was cut off must not render
 		// the silent-on-clean text — the primary did confirm, and saying otherwise is
 		// the same overclaim in the opposite direction. The coverage line below names
 		// what is actually missing.
-		if (rootFallback) {
-			return (
-				`Primary LSP${primaryId ? ` (${primaryId})` : ""}: unconfirmed — ` +
-				`${rootFallbackReason(rootFallback)}. NOT the same as 0 diagnostics; ` +
-				"check the file from inside its project and re-run."
-			);
-		}
 		if (unconfirmed && !primaryCoverageGapOnly) {
 			return (
 				`Primary LSP${primaryId ? ` (${primaryId})` : ""}: unconfirmed — ` +
@@ -1757,7 +1757,7 @@ async function runFileDiagnostics(
 				diagnosticsUnsupportedServerIds.length > 0 ? 1 : undefined,
 			...(skipReason !== undefined && { skipReason }),
 			...(rootFallback && {
-				rootFallbackReason: rootFallbackReason(rootFallback),
+				rootFallbackReason: describeRootFallback(rootFallback),
 			}),
 			// #1470: which servers this result does NOT speak for. Absent when it
 			// speaks for all of them.
@@ -1808,7 +1808,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 			// separately so the aggregate text can say WHY, not just THAT.
 			if (result.timedOut) timedOut += 1;
 			if (result.rootFallback) {
-				rootFallbackReasons.add(rootFallbackReason(result.rootFallback));
+				rootFallbackReasons.add(describeRootFallback(result.rootFallback));
 			}
 		} else {
 			clean += 1;

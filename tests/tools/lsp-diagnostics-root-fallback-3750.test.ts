@@ -114,7 +114,14 @@ describe("#3750 an empty result under a server-root fallback", () => {
 	let service: { shutdown: () => Promise<void> } | undefined;
 
 	beforeAll(async () => {
-		for (const name of ["rust-analyzer", "ocamllsp", "gopls"]) writeShim(name);
+		for (const name of [
+			"rust-analyzer",
+			"csharp-ls",
+			"lua-language-server",
+			"ocamllsp",
+			"gopls",
+		])
+			writeShim(name);
 		process.env.PATH = `${shimDir}${path.delimiter}${originalPath ?? ""}`;
 		const lsp = await import("../../clients/lsp/index.js");
 		service = lsp.getLSPService();
@@ -218,17 +225,61 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		expect(details.primaryDiagnosticsCount).toBe(1);
 	});
 
-	it("applies to every server whose root function returns undefined, not only rust (ocamllsp)", async () => {
+	it("applies to every server that requires a project, not only rust (csharp-ls)", async () => {
+		answerWith("empty");
+		const dir = workspace();
+		const file = source(dir, "Orphan.cs");
+
+		const { text } = await runTool(dir, { path: file });
+
+		expect(text).toContain(
+			"Primary LSP (csharp): unconfirmed — csharp-ls: no project root found for this file",
+		);
+		expect(text).not.toContain("confirmed clean");
+	});
+
+	// Recurrence guarded: #3750 round 1 demoted all 11 undefined-root servers, so a
+	// healthy Lua repo (`.luarc.json` is optional; lua-language-server analyses
+	// standalone files) could never read confirmed clean.
+	it("keeps confirmed clean for a server whose root markers are optional (lua-language-server)", async () => {
+		answerWith("empty");
+		const dir = workspace();
+		const file = source(dir, "main.lua");
+
+		const { text, details } = await runTool(dir, { path: file });
+
+		expect(text).toContain("Primary LSP (lua): confirmed clean.");
+		expect(details.unconfirmed).toBe(false);
+		expect(details.rootFallbackReason).toBeUndefined();
+	});
+
+	it("keeps confirmed clean for a second server whose markers are optional (ocamllsp)", async () => {
 		answerWith("empty");
 		const dir = workspace();
 		const file = source(dir, "orphan.ml");
 
 		const { text } = await runTool(dir, { path: file });
 
+		expect(text).toContain("Primary LSP (ocaml): confirmed clean.");
+	});
+
+	// Recurrence guarded: the round-1 text said "no project root found (looked for
+	// Cargo.toml / Cargo.lock)" while a Cargo.toml sat right there, because
+	// NearestRoot refuses fixture and ignored directories.
+	it("uses neutral wording when a marker exists but the directory is excluded as a root", async () => {
+		answerWith("empty");
+		const dir = workspace();
+		const crate = path.join(dir, "__fixtures__", "crate");
+		fs.mkdirSync(path.join(crate, "src"), { recursive: true });
+		fs.writeFileSync(path.join(crate, "Cargo.toml"), '[package]\nname = "z"\n');
+		const file = source(path.join(crate, "src"), "lib.rs");
+
+		const { text } = await runTool(dir, { path: file });
+
 		expect(text).toContain(
-			"Primary LSP (ocaml): unconfirmed — ocamllsp: no project root found for this file (looked for dune-project / opam)",
+			"Primary LSP (rust): unconfirmed — rust-analyzer: found Cargo.toml for this file but pi-lens did not select it as the project root",
 		);
-		expect(text).not.toContain("confirmed clean");
+		expect(text).not.toContain("no project root found");
 	});
 
 	it("keeps confirmed clean for a server whose root falls back to the file directory by design (gopls)", async () => {
@@ -263,14 +314,15 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		answerWith("empty");
 		const dir = workspace();
 		const rust = source(dir, "orphan.rs");
-		const ocaml = source(dir, "orphan.ml");
+		const csharp = source(dir, "Orphan.cs");
 
-		const { text } = await runTool(root, { paths: [rust, ocaml] });
+		const { text } = await runTool(root, { paths: [rust, csharp] });
 
 		expect(text).toContain("0 files confirmed clean, 2 unconfirmed");
 		expect(text).toContain(
-			"may not have analysed it; ocamllsp: no project root found for this file",
+			"may not have analysed it; csharp-ls: no project root found for this file",
 		);
+		expect(text).toContain("NOT the same as 0 diagnostics.");
 	});
 
 	it("counts a fallback-rooted file that published findings as findings in a batch, and only its empty sibling as unconfirmed", async () => {
@@ -310,6 +362,9 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text } = await runTool(dir, { path: dir });
 
 		expect(text).toContain("1 unconfirmed");
+		expect(text).toContain(
+			"(1 unconfirmed in all). NOT the same as 0 diagnostics.",
+		);
 		expect(text).toContain(
 			"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
 		);
