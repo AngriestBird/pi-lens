@@ -2369,6 +2369,21 @@ describe("run — fork approval from the real workflow-run shape (#3694)", () =>
 		expect(calls.some((call) => call.includes("POST"))).toBe(false);
 	});
 
+	it("ignores an action_required run that belongs to another head", async () => {
+		const { reason } = await runVerdict(["3443"], {
+			workflowRuns: [
+				{
+					id: 1,
+					name: "CI",
+					head_sha: "0".repeat(40),
+					status: "completed",
+					conclusion: "action_required",
+				},
+			],
+		});
+		expect(reason).not.toContain("awaiting fork approval");
+	});
+
 	it("keeps a head green when a success run coexists with stale action_required runs", async () => {
 		const { exitCode, out } = await runVerdict(["3443"], {
 			checkRuns: BOTH_SUCCESS,
