@@ -336,12 +336,11 @@ function createState(files) {
 			staleRanges: [],
 			zeroReads: [],
 			unavailableSnapshots: [],
-			// E2: the block/warn split with the hostWouldApply provenance tag.
+			// E2: the block/warn split. These rows do not carry a host-side
+			// decision, so the analyzer must not invent one.
 			blocks: [],
 			warns: [],
 			blockByKind: counter(),
-			hostSideFalseBlock: 0,
-			modelSideBlock: 0,
 			bypassedMismatch: 0,
 			// D10: per-(session,file) evidence that a read or a committed edit
 			// happened earlier in the session, so a later `zero_read` block is a
@@ -683,7 +682,15 @@ async function analyzeReadGuard(files, state) {
 	for (const file of files) {
 		await forEachJsonLine(file, "read-guard", state, (entry) => {
 			const ts = dateOf(entry.ts);
-			if (!inWindow(ts)) return;
+			if (!inWindow(ts)) {
+				// D10 needs evidence that may precede a live-monitor window.
+				// Keep this lookback state private; outside rows never affect counts.
+				if (entry.event === "edit_batch_summary") {
+					const key = `${readGuardSessionOf(entry) ?? "?"}\u0000${entry.filePath ?? "?"}`;
+					state.readGuard.fileEvidence.set(key, true);
+				}
+				return;
+			}
 			state.seen.inc("read-guard");
 			trackProject(state, entry.filePath);
 			const event = entry.event ?? "unknown";
@@ -802,16 +809,13 @@ function readGuardSessionOf(entry) {
 	return null;
 }
 
-/** E2: one blocked edit, tagged by whether the host would have applied it. */
+/** E2: one blocked edit. Host/model provenance is not present on this row. */
 function registerBlock(state, entry, source) {
 	const summary = summarizeReadGuard(entry);
 	pushTop(state.readGuard.blocks, summary, limit * 3, byLine);
 	state.readGuard.blockByKind.inc(
 		`${source}:${entry.metadata?.reasonKind ?? "unknown"}`,
 	);
-	if (entry.metadata?.hostWouldApply === true)
-		state.readGuard.hostSideFalseBlock += 1;
-	else state.readGuard.modelSideBlock += 1;
 	return summary;
 }
 
@@ -870,8 +874,16 @@ async function analyzeSessionStart(files, state) {
 			const match = lineRe.exec(line);
 			if (!match) return;
 			const ts = dateOf(match[1]);
-			if (!inWindow(ts)) return;
 			const message = match[2];
+			if (!inWindow(ts)) {
+				// A --since window can begin after the session_start that owns its
+				// rows. Carry only that run anchor into the visible window.
+				if (message.startsWith("session_start fired")) {
+					state.session.currentRun = newRun();
+					state.session.currentRun.startTs = iso(ts);
+				}
+				return;
+			}
 			if (isExcludedText(message)) {
 				state.excludedRows++;
 				return;
@@ -979,7 +991,7 @@ async function analyzeSessionStart(files, state) {
 
 			const run = state.session.currentRun;
 			const modified = /turn_end: (\d+) file\(s\) modified/.exec(message);
-			if (modified) run.edits += Number(modified[1]);
+			if (modified) run.edits += 1;
 			if (message.includes("excluded by the built-in turn-end policy")) {
 				run.excluded += 1;
 				const excludedPath = /turn_end:\s*(\S+)\s+→ test target excluded/.exec(
@@ -1023,7 +1035,7 @@ async function analyzeSessionStart(files, state) {
 			// failure words. The 20 false positives in the live session were all
 			// path tokens, not spawn failures.
 			if (
-				/^lsp (?:spawn|launch candidate|process) [^:]+: (?:unavailable|failed|timeout|skipped_broken|exited immediately|binary not found)/i.test(
+				/^(?:lsp (?:launch (?:candidate|managed|bundle|tree-bin) failed|spawn [^:]+: (?:unavailable|failed|timeout|skipped_broken|exited immediately|binary not found)|process [^:]+: (?:unavailable|failed|timeout|skipped_broken|exited immediately|binary not found)))/i.test(
 					maskSessionStartPaths(message),
 				)
 			) {
@@ -1581,11 +1593,16 @@ function trackLatencyProject(state, entry) {
 	// A bash command leaks in as `filePath`; whitespace, `&&` and the `<pi-lens>`
 	// sentinel are the three shapes that are never a project path.
 	if (filePath.startsWith("<")) return;
-	if (/\s|&&/.test(filePath)) return;
+	if (/\n|&&/.test(filePath)) return;
 	state.projects.inc(projectOf(filePath));
 }
 
 function trackLatencyPollution(state, entry) {
+	if (
+		entry.phase === "opaque_mutation_prescan" ||
+		entry.phase === "opaque_mutation_coverage_unknown"
+	)
+		return;
 	const hit = pathValues(entry).some((value) => SCRATCH_PATH_RE.test(value));
 	if (!hit) return;
 	const pid = String(entry.pid ?? "unknown");
@@ -1853,43 +1870,10 @@ function computeCoverageGaps(state) {
 }
 
 /** D1 second rule: the active latency file's first row was already rotated away. */
-function activeLatencyTruncation(state) {
-	const active = (state.files.latency ?? []).find(
-		(file) => path.basename(file) === "latency.log",
-	);
-	if (!active) return null;
-	const first = firstJsonLine(active);
-	if (!first) return null;
-	const md = first.metadata ?? {};
-	if (
-		first.phase === "degradation_ledger" &&
-		Number(md.ledgerGeneration ?? 0) > 1
-	) {
-		return {
-			file: path.basename(active),
-			phase: first.phase,
-			kind: md.kind,
-			ledgerGeneration: Number(md.ledgerGeneration),
-			ts: first.ts,
-		};
-	}
+function activeLatencyTruncation(_state) {
+	// ledgerGeneration belongs to the in-process degradation ledger. It does
+	// not identify a file rotation, so there is no trustworthy detector here.
 	return null;
-}
-
-function firstJsonLine(file) {
-	try {
-		const fd = fs.openSync(file, "r");
-		try {
-			const buf = Buffer.alloc(1 << 16);
-			const read = fs.readSync(fd, buf, 0, buf.length, 0);
-			const line = buf.subarray(0, read).toString("utf8").split("\n")[0];
-			return JSON.parse(line);
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return null;
-	}
 }
 
 /** D5: the sessionstart firing/stale text joined to the delivery outcomes. */
@@ -1947,7 +1931,8 @@ function computeKnip(state) {
 		const hours = first != null && last != null ? (last - first) / 3600000 : 0;
 		const totalMs = rows.reduce((n, r) => n + r.durationMs, 0);
 		const maxRow = rows.reduce((n, r) => Math.max(n, r.durationMs), 0);
-		const perHour = hours > 0 ? totalMs / hours : totalMs > 0 ? Infinity : 0;
+		const hasMeaningfulLifetime = hours >= 1 / 60;
+		const perHour = hasMeaningfulLifetime ? totalMs / hours : 0;
 		if (perHour >= 30000 || maxRow >= 5000)
 			cost.push({ pid, rows: rows.length, totalMs, hours, perHour, maxRow });
 	}
@@ -2275,7 +2260,7 @@ function buildReport(state) {
 		"read-guard-blocks",
 		state.readGuard.events.get("edit_blocked") +
 			state.readGuard.events.get("edit_preflight_blocked"),
-		`Read-guard blocked edits (model-side ${state.readGuard.modelSideBlock}, host would-have-applied ${state.readGuard.hostSideFalseBlock}); warns and exact-replacement misses are informational`,
+		"Read-guard blocked edits; host/model provenance is not present on the block rows, and warns and exact-replacement misses are informational",
 		state.readGuard.blocks.slice(0, limit),
 	);
 	addSmell(
@@ -2356,9 +2341,9 @@ function buildReport(state) {
 	addSmell(
 		smells,
 		"log-rotation-truncation",
-		rotationTruncation ? 1 : 0,
-		"Active latency.log opens mid-ledger (degradation_ledger ledgerGeneration > 1): earlier rows were cut without a rotation record",
-		rotationTruncation ? [rotationTruncation] : [],
+		0,
+		"No reliable rotation marker is available in latency.log; ledgerGeneration is not a rotation signal",
+		[],
 	);
 	// D2: orchestrator/test scratch paths in a real log. Never added to the
 	// default denylist so the pollution stays visible.
@@ -2491,6 +2476,16 @@ function buildReport(state) {
 			message: `${f.slow}/${f.rows} over 3s (${Math.round(
 				f.share * 100,
 			)}%), max ${f.max}ms`,
+		})),
+	);
+	addSmell(
+		smells,
+		"turn-end-retained-state",
+		turnEndSlow.retainRuns.length,
+		"Turn-end retained newer turn state at least 5 times in one session",
+		turnEndSlow.retainRuns.slice(0, limit).map((r) => ({
+			ts: r.start,
+			count: r.count,
 		})),
 	);
 	// D9: empty-candidate waits and no-client/edit warm-reuse contradictions.
@@ -2670,8 +2665,6 @@ function buildReport(state) {
 			// E2/D10: the block/warn split and the lost-read-set classification.
 			warns: state.readGuard.warns.slice(0, limit),
 			blockByKind: state.readGuard.blockByKind.toJSON(),
-			hostSideFalseBlock: state.readGuard.hostSideFalseBlock,
-			modelSideBlock: state.readGuard.modelSideBlock,
 			bypassedMismatch: state.readGuard.bypassedMismatch,
 			stateLost: state.readGuard.stateLost.slice(0, limit),
 			genuineZeroRead: state.readGuard.genuineZeroRead.slice(0, limit),

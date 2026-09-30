@@ -2,3 +2,4 @@
 [2026-09-30T12:47:38.642Z] lsp launch candidate attempt tool=typos-lsp idx=0/1 command=/home/user/.pi-lens/bin/typos-lsp cwd=/home/user/Desktop/proj/.worktrees/468-wait-timeout
 [2026-09-30T12:47:38.663Z] lsp launch candidate attempt tool=ast-grep idx=0/1 command=/home/user/.pi/agent/git/github.com/apmantza/pi-lens/node_modules/@ast-grep/cli-linux-x64-gnu/ast-grep cwd=/home/user/Desktop/proj/.worktrees/468-wait-timeout
 [2026-09-15T18:21:02.732Z] lsp spawn opengrep: failed (15151ms) error=Timeout after 15000ms
+[2026-09-15T18:21:03.732Z] lsp launch candidate failed tool=vscode-json-language-server idx=0 command=vscode-json-language-server error=Cannot spawn vscode-json-language-server: tool not found (spawn vscode-json-language-server ENOENT)

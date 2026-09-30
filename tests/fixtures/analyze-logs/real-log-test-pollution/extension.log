@@ -3,3 +3,4 @@
 {"ts":"2026-09-30T07:52:28.005Z","pid":650825,"turnId":"turn:0","level":"debug","subsystem":"safe-spawn","message":"spawn failure classified","metadata":{"kind":"tool-not-found","command":"ast-grep","cwd":"/home/user/Desktop/pi-lens-worktrees/review-3673"}}
 {"ts":"2026-09-30T12:40:31.501Z","pid":240029,"turnId":"turn:0","level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=/home/user/.local/share/pi-lens-orchestrator/tmp/review-3703/pi-lens-test-checkout-isolation-xNZNoE/main/checkouts/topic reason=marker:pytest.ini"}
 {"ts":"2026-09-30T12:40:31.513Z","pid":240029,"turnId":"turn:0","level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=/home/user/.local/share/pi-lens-orchestrator/tmp/review-3703/pi-lens-test-checkout-isolation-c7RReJ/main/checkouts/topic reason=marker:pytest.ini"}
+{"ts":"2026-09-30T12:40:32.513Z","pid":240029,"turnId":"turn:0","level":"warn","subsystem":"lsp-config","message":"deprecated configuration"}

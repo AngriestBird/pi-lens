@@ -3,8 +3,8 @@
  * #3870: `scripts/analyze-pi-lens-logs.mjs` detects the live-session smells
  * (D1-D16 add, E1-E5 enhance, R1-R2 remove).
  *
- * Every fixture is a redacted cut of the read-only forensics session logs the
- * report used (session 01a0f1c5, 2026-09-30). Each test pins one report row's
+ * Fixtures are redacted cuts of the read-only forensics session logs unless a
+ * test comment labels a minimal synthetic boundary row. Each test pins one report row's
  * match rule and its expected count from section 8.2. The quoted transcript in
  * each header is the real log line the detector must catch (or, for E1/E2/E3,
  * the real false positive the enhancement must stop counting).
@@ -33,7 +33,7 @@ interface Smell {
 	examples: any[];
 }
 
-function run(fixture: string): any {
+function run(fixture: string, since = "all"): any {
 	const out = execFileSync(
 		process.execPath,
 		[
@@ -42,7 +42,7 @@ function run(fixture: string): any {
 			path.join(FIXTURES, fixture),
 			"--json",
 			"--since",
-			"all",
+			since,
 		],
 		{ encoding: "utf8" },
 	);
@@ -68,23 +68,25 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "log-coverage-gap")?.count).toBe(1);
 	});
 
-	it("D1 log-rotation-truncation: active latency.log opens mid-ledger", () => {
+	it("F8: ledger generation is not treated as a log rotation marker", () => {
 		const report = run("log-coverage-gap");
-		expect(report.detectors.logCoverageGap.rotationTruncation).toMatchObject({
-			file: "latency.log",
-			phase: "degradation_ledger",
-			ledgerGeneration: 31,
-		});
-		expect(smell(report, "log-rotation-truncation")?.count).toBe(1);
+		expect(report.detectors.logCoverageGap.rotationTruncation).toBeNull();
+		expect(smell(report, "log-rotation-truncation")).toBeUndefined();
 	});
 
 	it("D2 real-log-test-pollution: counts scratch paths in latency + extension", () => {
 		// latency: {"phase":"degradation_ledger","filePath":".../pi-lens-orchestrator/tmp/review-.../proj",...}
 		// extension: {"level":"warn","subsystem":"lsp-config","message":"deprecated LSP config location in .../pi-lens-orchestrator/tmp/review-..."}
 		const report = run("real-log-test-pollution");
-		expect(report.detectors.realLogTestPollution.latencyTotal).toBe(5);
+		expect(report.detectors.realLogTestPollution.latencyTotal).toBe(0);
 		expect(report.detectors.realLogTestPollution.extensionTotal).toBe(5);
-		expect(smell(report, "real-log-test-pollution")?.count).toBe(10);
+		expect(smell(report, "real-log-test-pollution")?.count).toBe(5);
+		expect(smell(report, "extension-warn-errors")?.count).toBe(1);
+	});
+
+	it("F2: a real worktree mentioned by opaque mutation telemetry is not pollution", () => {
+		const report = run("real-log-test-pollution");
+		expect(report.detectors.realLogTestPollution.latencyTotal).toBe(0);
 	});
 
 	it("D3 turn-end-tests-excluded: flags the run that excluded its test files", () => {
@@ -95,7 +97,7 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(runs).toHaveLength(1);
 		expect(runs[0].excluded).toBe(3);
 		expect(runs[0].ran).toBe(0);
-		expect(runs[0].edits).toBeGreaterThanOrEqual(10);
+		expect(runs[0].edits).toBe(1);
 		expect(smell(report, "turn-end-tests-excluded")?.count).toBe(1);
 	});
 
@@ -148,6 +150,7 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(flagged[0].slow).toBe(14);
 		expect(flagged[0].max).toBe(10188);
 		expect(smell(report, "turn-end-slow")?.count).toBe(1);
+		expect(smell(report, "turn-end-retained-state")?.count).toBe(1);
 	});
 
 	it("D9 lsp-wait-empty-candidates: empty waits, no-client edits, warm-reuse clashes", () => {
@@ -171,6 +174,12 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(report.detectors.resumeStateLoss.stateLost).toHaveLength(2);
 		expect(report.detectors.resumeStateLoss.genuine).toHaveLength(1);
 		expect(smell(report, "resume-state-loss")?.count).toBe(2);
+	});
+
+	it("F3: a window starting mid-session keeps the anchored read evidence", () => {
+		const report = run("window-anchors", "2026-09-30T12:00:00Z");
+		expect(report.detectors.resumeStateLoss.stateLost).toHaveLength(1);
+		expect(smell(report, "resume-state-loss")?.count).toBe(1);
 	});
 
 	it("D11 carry-empty-restart: flags an empty carry into a populated branch", () => {
@@ -239,17 +248,22 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 		// false: "lsp launch: command=... cwd=.../.worktrees/468-wait-timeout shell=false pid=384054"
 		// real:  "[...] lsp spawn marksman: failed (15299ms) error=Timeout after 15000ms"
 		const report = run("lsp-availability-noise");
-		expect(smell(report, "lsp-availability-noise")?.count).toBe(1);
+		expect(smell(report, "lsp-availability-noise")?.count).toBe(2);
 	});
 
-	it("E2 read-guard-blocks: separates blocks from warns and tags host-vs-model", () => {
+	it("F1: matches the launch-candidate failure emitted by the LSP server", () => {
+		const report = run("lsp-availability-noise");
+		expect(smell(report, "lsp-availability-noise")?.count).toBe(2);
+	});
+
+	it("F4: E2 reports blocks without claiming an unobservable host/model split", () => {
 		// edit_blocked + edit_preflight_blocked are blocks; edit_warned is informational.
 		const report = run("read-guard-blocks");
 		expect(report.readGuard.events.edit_blocked).toBe(3);
 		expect(report.readGuard.events.edit_preflight_blocked).toBe(3);
 		expect(report.readGuard.warns).toHaveLength(5);
-		expect(report.readGuard.modelSideBlock).toBe(6);
-		expect(report.readGuard.hostSideFalseBlock).toBe(0);
+		expect(report.readGuard.modelSideBlock).toBeUndefined();
+		expect(report.readGuard.hostSideFalseBlock).toBeUndefined();
 		expect(smell(report, "read-guard-blocks")?.count).toBe(6);
 	});
 
@@ -280,6 +294,7 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 		expect(
 			report.projects.filter((p: any) => p.key.includes("&&")),
 		).toHaveLength(0);
+		expect(report.projects.find((p: any) => p.key === "home")?.count).toBe(6);
 	});
 });
 
