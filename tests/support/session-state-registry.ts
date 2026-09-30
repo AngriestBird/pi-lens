@@ -245,6 +245,10 @@ function scratchCwd(): string {
 export const SESSION_STORE_REGISTRY: Readonly<
 	Record<string, { module: string; state: string }>
 > = {
+	"agent-advisories": {
+		module: "agent-nudge.ts",
+		state: "the scope's queued, undelivered agent advisories (_advisories)",
+	},
 	"lazy-tool-memory": {
 		module: "tool-set-policy.ts",
 		state: "a per-scope Set of the lazy tools the conversation activated",

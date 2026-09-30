@@ -49,6 +49,8 @@ import {
 } from "../clients/latency-logger.js";
 import { takeHandoff } from "../clients/session-scope.js";
 import { exportWidgetState } from "../clients/widget-state.js";
+import { queueAgentAdvisory } from "../clients/agent-nudge.js";
+import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -1429,5 +1431,66 @@ describe("#3589 a fork starts with the parent's widget files", () => {
 		await runtime.newSession();
 
 		expect(widgetFiles()).toEqual([]);
+	});
+});
+
+/**
+ * #3612 scope note (from the #3757 review): the agent advisory queue is
+ * drained per session scope (#3748), and `/reload` retires the scope while
+ * the conversation goes on. The recurrence: an advisory queued before a
+ * `/reload`, such as the fix-run lost-edit notice, is dropped as its scope's
+ * and never reaches the model.
+ */
+describe("#3612 a queued agent advisory follows /reload", () => {
+	/** Observe (not replace) the coordinators index.ts resets. */
+	function coordinators(): RuntimeCoordinator[] {
+		const seen: RuntimeCoordinator[] = [];
+		const reset = RuntimeCoordinator.prototype.resetForSession;
+		vi.spyOn(
+			RuntimeCoordinator.prototype,
+			"resetForSession",
+		).mockImplementation(function (this: RuntimeCoordinator, ...args) {
+			seen.push(this);
+			return reset.apply(this, args);
+		});
+		return seen;
+	}
+
+	async function contextText(runtime: AgentSessionRuntime): Promise<string> {
+		const messages = await runtime.session.extensionRunner.emitContext([
+			{ role: "user", content: "keep working", timestamp: Date.now() },
+		] as never);
+		return JSON.stringify(messages);
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("delivers an advisory queued before /reload to the reloaded session's context call", async () => {
+		const seen = coordinators();
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		queueAgentAdvisory(
+			"lost edit in a.rs",
+			seen[0]!.captureSessionGeneration(),
+		);
+
+		await reload(runtime);
+
+		expect(await contextText(runtime)).toContain("lost edit in a.rs");
+		expect(await contextText(runtime)).not.toContain("lost edit in a.rs");
+	});
+
+	it("still drops an advisory whose session ended with /new", async () => {
+		const seen = coordinators();
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		queueAgentAdvisory(
+			"lost edit in a.rs",
+			seen[0]!.captureSessionGeneration(),
+		);
+
+		await runtime.newSession();
+
+		expect(await contextText(runtime)).not.toContain("lost edit in a.rs");
 	});
 });

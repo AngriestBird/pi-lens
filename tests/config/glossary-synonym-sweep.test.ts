@@ -1053,6 +1053,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"index.ts": 3,
 	},
 	snapshot: {
+		"clients/agent-nudge.ts": 1,
 		"clients/dispatch/runners/tree-sitter.ts": 5,
 		"clients/file-utils.ts": 3,
 		"clients/lens-engine.ts": 11,
