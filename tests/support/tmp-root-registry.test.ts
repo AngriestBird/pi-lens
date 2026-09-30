@@ -52,6 +52,13 @@ describe("tmp-root registry decisions (#2912)", () => {
 		expect(io.present.size).toBe(0);
 	});
 
+	it("does not report a recorded root that is already gone as removed", () => {
+		const registry = createTmpRootRegistry();
+		registerTmpRoot(registry, "/tmp/pi-lens-gone", "registered");
+		const io = memoryIo([]);
+		expect(sweepTmpRoots(registry, io)).toEqual({ removed: [], failed: [] });
+	});
+
 	it("keeps an observed root the file never removed and removes one it removed then saw return", () => {
 		const registry = createTmpRootRegistry();
 		const io = memoryIo(["/tmp/pi-lens-forgotten", "/tmp/pi-lens-straggler"]);
