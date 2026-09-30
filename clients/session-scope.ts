@@ -528,9 +528,8 @@ export async function adoptHandoff(
 	// #3819: a file-less start's key is the ticket its session manager left.
 	const manager = asManager(args.sessionManager);
 	const predecessor = manager && handoffSlot().left.get(manager);
-	const slotted = SOURCES[reason].includes("slot")
-		? takeHandoff(reason, args.sessionFile ?? predecessor)
-		: undefined;
+	// Only a fork or reload slot is ever left, so no other reason matches.
+	const slotted = takeHandoff(reason, args.sessionFile ?? predecessor);
 	// #3819 (option a): no slot outlives a primary start. The start it was
 	// left for took it above; any other one (a gap subagent's own reload or
 	// fork, #3668 row 17) must not leave it for a later start of the session
