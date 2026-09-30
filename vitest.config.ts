@@ -326,6 +326,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #3750: launches the fake server THROUGH the production `RustServer`,
+	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
+	// initialize handshake plus a pull round trip per case -- the same
+	// #1022/#2332 contention class as its lane siblings.
+	"tests/tools/lsp-diagnostics-root-fallback-3750.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
@@ -512,6 +517,10 @@ export const wallClockBudgetInclude = [
 	// #2613: the resolver CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT
 	// write are the subject under test; no in-process double is faithful.
 	"tests/scripts/resolve-newest-in-range-host.test.ts",
+	// #3401: the seed script's default git path (depth-2 fetch, refspec, blob
+	// specs) against real throwaway repos and a depth-1 clone (flake-shape
+	// admission).
+	"tests/scripts/seed-matrix-from-bot-branch-real-git.test.ts",
 	// #3674: real git worktrees and the real hook script (flake-shape admission).
 	"tests/scripts/setup-git-hooks.test.ts",
 	// #2369: the fixture-ordering defect lives in the CLI's own module-load

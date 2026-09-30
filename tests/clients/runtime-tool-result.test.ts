@@ -2375,9 +2375,10 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === false),
 			).toHaveLength(2);
 			expect(runtime.pendingDeferredMutationCount).toBe(1);
-			expect(recordWritten).toHaveBeenCalledWith(directPath);
-			expect(recordWritten).not.toHaveBeenCalledWith(existingPath);
-			expect(recordWritten).not.toHaveBeenCalledWith(createdPath);
+			// Authorship for the recognized write, never a FileTime stamp (#3525).
+			expect(recordWritten).toHaveBeenCalled();
+			for (const call of recordWritten.mock.calls)
+				expect(call).toEqual([directPath, { stampFileTime: false }]);
 			for (const [filePath, bytes] of opaqueBytesBeforePipeline) {
 				expect(fs.readFileSync(filePath)).toEqual(bytes);
 			}
@@ -4240,6 +4241,84 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			expect(fs.existsSync(fileB)).toBe(true);
 			expect(runtime.takeToolCallAttribution("call-A")).toBeUndefined();
 			expect(runtime.takeToolCallAttribution("call-B")).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+			env.cleanup();
+		}
+	});
+
+	it("keeps parallel nested codemode calls apart under an 86-char parent id (#3833)", async () => {
+		// pi 0.99 codemode names nested calls `<parent>/<n>`; an OpenAI
+		// Responses parent id (`call_id|item.id`) is ~80 chars, so the old
+		// 64-char slice in sanitizeCorrelationId cut BOTH ids to the same key:
+		// the second tool_call overwrote the first's attribution, the first
+		// result took the wrong one, the second found none and refused with
+		// path_attribution_missing -> a false-clean turn_end while both files
+		// held blockers. Recurrence: two ids differing only after char 64.
+		const env = setupTestEnvironment("pi-lens-nested-long-id-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const fileB = createTempFile(env.tmpDir, "b.ts", "debugger;\n");
+			const fileC = createTempFile(env.tmpDir, "c.ts", "debugger;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const parent = `call_${"x".repeat(40)}|fc_${"y".repeat(40)}`;
+			expect(parent.length).toBeGreaterThan(80);
+
+			const dbg = vi.fn();
+			const callDeps = (toolCallId: string, relPath: string) => ({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: relPath, content: "debugger;\n" },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			});
+			const resultDeps = (toolCallId: string, relPath: string) => ({
+				event: {
+					toolCallId,
+					toolName: "write",
+					input: { path: relPath, content: "debugger;\n" },
+					content: [],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			});
+
+			await handleToolCall(callDeps(`${parent}/1`, "b.ts") as any);
+			await handleToolCall(callDeps(`${parent}/2`, "c.ts") as any);
+			await handleToolResult(resultDeps(`${parent}/1`, "b.ts") as any);
+			await handleToolResult(resultDeps(`${parent}/2`, "c.ts") as any);
+
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_missing"),
+			);
+			const queued = runtime
+				.consumeDeferredFormatFiles()
+				.map((record) => path.resolve(record.filePath));
+			expect(queued).toContain(path.resolve(fileB));
+			expect(queued).toContain(path.resolve(fileC));
 		} finally {
 			if (previousDataDir === undefined) {
 				delete process.env.PILENS_DATA_DIR;
