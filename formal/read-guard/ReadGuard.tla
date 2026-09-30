@@ -67,14 +67,15 @@ CONSTANTS
     MtimeAuthored,  \* TRUE (code): zero-read allow when mtime >= guard construction
     OwnEditRescue,  \* TRUE (code): canTreatStalenessAsOwnPriorEdit
     ForkImport,     \* FALSE (code before #3521): pi re-runs the factory for a fork, so the closure stash died and the fork imported nothing
-    SuppressByNewerContext, \* TRUE (code): a newer context-only candidate cancels a snapshot mismatch
+    SuppressByNewerContext, \* TRUE (code before #3522): a newer context-only candidate cancels a snapshot mismatch; read only when SpanSnapshot = FALSE
     FormatStamp,    \* TRUE (code): the agent_end format drain calls recordWritten
     \* ---- candidate fixes ----
     RecordAuthoritative, \* record the attached post-autofix bytes as a full read (code since #3519)
     RecordOwnEdit,       \* record the lines an allowed positional edit wrote as read (code since #3523)
     OwnEditSkipsReloc,   \* TRUE (code): ... but not when the edit was relocated
-    SpanSnapshot,        \* check each line of the range against the newest read that delivered it
-    RelocFromLatest,     \* relocate only from a read that is the agent's latest view of every line
+    SpanSnapshot,        \* TRUE (code since #3522): check each line of the range against the newest read that delivered it
+    RelocFromLatest,     \* TRUE (code since #3522): relocate only from a read that is the agent's latest view of every line
+    WholeVouchesPastEnd, \* FALSE (code): a whole-file view also vouches that lines past its end do not exist (#3522 part 3; no invariant needs it)
     ForkAtBoundary,      \* fork/tree: forget reads made after the fork point
     BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born
     DrainMode,           \* "atomic": the format drain runs inside Turn (no /tree can interleave);
@@ -180,11 +181,11 @@ SnapBlock(lo, hi) ==
     /\ (SuppressByNewerContext => LastIdx(Unavail(lo, hi)) <= LastIdx(Checked(lo, hi)))
     /\ HashUnavail(lo, hi) = {}
 
-\* Candidate fix (SpanSnapshot): every line of the range is compared with the
+\* SpanSnapshot (code since #3522): every line of the range is compared with the
 \* newest read that DELIVERED it (the agent's latest view of that line).
 NewestDeliv(l) == LastIdx({i \in Idx(reads) : ~reads[i].prov
                               /\ ((reads[i].lo <= l /\ l <= reads[i].hi /\ reads[i].h[l] # 0)
-                                  \/ reads[i].whole)})
+                                  \/ (WholeVouchesPastEnd /\ reads[i].whole))})
 SpanBlock(lo, hi) ==
     /\ SnapshotCheck
     /\ \E l \in lo..hi : NewestDeliv(l) # 0

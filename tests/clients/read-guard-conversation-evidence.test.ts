@@ -1664,6 +1664,33 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 		}
 	});
 
+	it("does not relocate or allow an edit onto the line past the attachment's end (AutofixPastEnd)", async () => {
+		const env = setupTestEnvironment("rg-3522-past-end-");
+		try {
+			biomeProject(env.tmpDir);
+			const file = fixture(env.tmpDir, "b.ts", "old\n");
+			const runtime = newRuntime(env.tmpDir);
+			// The write's creation read covers 5 lines; the autofix drops line 1,
+			// so the attachment (the agent's newest view) has 4.
+			await writeWithAutofix(runtime, file, WRITTEN);
+			expect(diskLines(file)).toHaveLength(4);
+			// Line 5 exists only in the older creation read.
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[4, 5]]);
+			expect(diskLines(file)).toEqual([
+				"const a = 1;",
+				"const b = 2;",
+				"const c = 3;",
+				"const d = 4;",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("relocates a shifted two-line edit from the read that is the newest view of both lines", async () => {
 		const { env, file, runtime } = setup("reloc");
 		try {
