@@ -32,9 +32,16 @@
 // covering test), this builds only and skips the test run — never silently
 // skips the build too.
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getLockPath } from "./lib/suite-lock.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
@@ -345,7 +352,11 @@ function runInherit(command, args, { needsShimShell = false } = {}) {
 	}
 }
 
-const LOCK_TIMEOUT_RE = /timed out after \d+ms waiting for test-suite lock/;
+// Anchored to the wrapper's own line (`console.error("[with-test-lock] ...")`)
+// so a failing test whose output merely quotes the timeout text is a test
+// failure, not contention (#3717 F5). Groups: waited ms, holder/slot detail.
+const LOCK_TIMEOUT_RE =
+	/^\[with-test-lock\] timed out after (\d+)ms waiting for test-suite lock:? ?(.*)$/m;
 
 // Runs the targeted vitest selection through with-test-lock.mjs, streaming
 // stdout live and mirroring stderr live while also buffering it — the
@@ -369,11 +380,12 @@ function runTargetedTests(selected) {
 			stderrBuffer += chunk.toString();
 		});
 		child.on("error", (error) => {
-			resolve({ code: 1, timedOut: false, error, stderr: stderrBuffer });
+			resolve({ code: 1, lockTimeout: null, error });
 		});
 		child.on("close", (code) => {
-			const timedOut = code !== 0 && LOCK_TIMEOUT_RE.test(stderrBuffer);
-			resolve({ code: code ?? 1, timedOut, stderr: stderrBuffer });
+			const lockTimeout =
+				code !== 0 ? (stderrBuffer.match(LOCK_TIMEOUT_RE) ?? null) : null;
+			resolve({ code: code ?? 1, lockTimeout });
 		});
 	});
 }
@@ -484,23 +496,28 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
-	const { code, timedOut, error, stderr } = await runTargetedTests(selected);
-	if (timedOut) {
-		const timeoutMs =
-			Number(process.env.PI_LENS_TEST_LOCK_TIMEOUT_MS) || 120_000;
-		const holder =
-			stderr.match(
-				/timed out after \d+ms waiting for test-suite lock(?::| )\s*(.*)/,
-			)?.[1] ?? "held by an unknown owner";
-		const detail = holder.startsWith("held by") ? holder : `held by ${holder}`;
+	const { code, lockTimeout, error } = await runTargetedTests(selected);
+	if (lockTimeout) {
+		const waitedMs = Number(lockTimeout[1]);
+		const holder = lockTimeout[2] || "an unknown owner";
+		const lockPath = getLockPath();
+		const logPath = path.join(path.dirname(lockPath), "pre-push.log");
 		if (process.env.PI_LENS_PREPUSH_LOCK_SKIP === "1") {
+			// The opt-out is a decision, so it leaves a durable trace beside the
+			// lock (#3717): stderr scrolls away, the push does not.
+			mkdirSync(path.dirname(logPath), { recursive: true });
+			appendFileSync(
+				logPath,
+				`${JSON.stringify({ ts: new Date().toISOString(), event: "lock-skip", waitedMs, holder, lockPath, selected: selected.length })}\n`,
+				"utf8",
+			);
 			console.error(
-				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 explicitly opted out of the targeted test run after ${Math.ceil(timeoutMs / 1000)} s; the push is ungated and CI remains the real gate.`,
+				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 opted out of the targeted test run after ${waitedMs / 1000} s (${holder}); the push is ungated, recorded in ${logPath}, and CI remains the real gate.`,
 			);
 			return 0;
 		}
 		console.error(
-			`[pre-push] test lock busy for ${Math.ceil(timeoutMs / 1000)} s; ${detail}; retry, or run the targeted set with: node scripts/with-test-lock.mjs --shared -- vitest run ${selected.join(" ")}`,
+			`[pre-push] test lock busy after ${waitedMs / 1000} s (${holder}); push blocked. Lock file: ${lockPath}. Wait and push again (to wait longer: PI_LENS_TEST_LOCK_TIMEOUT_MS=600000 git push); if it names a PID that is not a test run, delete the lock file. To push without the targeted run: PI_LENS_PREPUSH_LOCK_SKIP=1 git push (recorded in ${logPath}; CI remains the gate).`,
 		);
 		return 1;
 	}

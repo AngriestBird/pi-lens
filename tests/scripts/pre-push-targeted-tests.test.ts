@@ -1,5 +1,8 @@
-// flake-shape: raw-timer-wait — a live lock-holder process must be given a
-// real scheduling window to publish its lock before the real hook observes it.
+// flake-shape: real-process-spawn — the subject is the pre-push hook's own
+// contract with git: the stdin ref lines git writes, and the script's
+// deletion-only early exit and range union (#3661). The main-level witness
+// runs the real script over a real git fixture; an in-process call cannot
+// see the CLI's exit status or its build/test skip.
 /**
  * Tests for scripts/pre-push-targeted-tests.mjs's selection logic (#1804
  * review round 1, findings F1/F6/F7).
@@ -20,12 +23,12 @@
  * never touches the real `tests/`/`clients/` trees.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	CI_ONLY_PRE_PUSH_TESTS,
 	collectTestFiles,
@@ -507,7 +510,7 @@ describe("selectTargetedTests — no-match fallback (F7)", () => {
 	});
 });
 
-describe(".husky hooks — pre-push lock admission (#3717)", () => {
+describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)", () => {
 	it("pre-commit formats only staged files through the pinned binary (#3426)", () => {
 		const hook = fs.readFileSync(
 			path.join(repoRoot, ".husky/pre-commit"),
@@ -536,67 +539,294 @@ describe(".husky hooks — pre-push lock admission (#3717)", () => {
 		},
 	);
 
-	it("pre-push does not honor the broad PI_LENS_SKIP_HOOKS bypass", () => {
-		const hook = fs.readFileSync(
-			path.join(repoRoot, ".husky/pre-push"),
-			"utf8",
-		);
-		expect(hook).not.toContain("PI_LENS_SKIP_HOOKS");
-	});
+	it.each(["1", "true"])(
+		"pre-push exits 0 and skips without running the targeted-test script when PI_LENS_SKIP_HOOKS=%s",
+		(value) => {
+			const result = spawnSync("sh", [".husky/pre-push"], {
+				cwd: repoRoot,
+				env: { ...process.env, PI_LENS_SKIP_HOOKS: value },
+				encoding: "utf8",
+				input: "",
+			});
 
-	it.each([false, true])(
-		"pre-push lock contention is %s only with the named opt-out",
-		async (optOut) => {
-			// #3717 recurrence: a live machine-wide lock timed out, the targeted
-			// run was skipped, and pre-push exited 0 without an explicit decision.
-			const home = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-prepush-lock-"),
-			);
-			const holder = spawn(
-				process.execPath,
-				[
-					"-e",
-					"const fs=require('node:fs'); const path=require('node:path'); const home=process.env.PI_LENS_HOME; fs.mkdirSync(home,{recursive:true}); fs.writeFileSync(path.join(home,'test-suite.lock'),JSON.stringify({pid:process.pid,startedIso:new Date().toISOString()})); setInterval(()=>{},1000);",
-				],
-				{ env: { ...process.env, PI_LENS_HOME: home }, stdio: "ignore" },
-			);
-			try {
-				await new Promise((resolve) => setTimeout(resolve, 50));
-				const head = String(
-					gitExecFileSync(["rev-parse", "HEAD"], {
-						cwd: repoRoot,
-						encoding: "utf8",
-					}),
-				).trim();
-				const base = String(
-					gitExecFileSync(["rev-parse", "HEAD^"], {
-						cwd: repoRoot,
-						encoding: "utf8",
-					}),
-				).trim();
-				const result = spawnSync("sh", [".husky/pre-push"], {
-					cwd: repoRoot,
-					env: {
-						...process.env,
-						PI_LENS_HOME: home,
-						PI_LENS_TEST_LOCK_TIMEOUT_MS: "50",
-						PI_LENS_TEST_LOCK_POLL_MS: "10",
-						...(optOut ? { PI_LENS_PREPUSH_LOCK_SKIP: "1" } : {}),
-					},
-					encoding: "utf8",
-					input: `refs/heads/test ${head} refs/heads/test ${base}\n`,
-				});
-				if (optOut) {
-					expect(result.status).toBe(0);
-					expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
-				} else {
-					expect(result.status).not.toBe(0);
-					expect(result.stderr).toContain("test lock busy for");
-				}
-			} finally {
-				if (!holder.killed) holder.kill("SIGTERM");
-				fs.rmSync(home, { recursive: true, force: true });
-			}
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("[pre-push] skipped");
 		},
 	);
+});
+
+// #3717 recurrence: a busy machine-wide test lock made pre-push exit 0 without
+// running the targeted tests, silently. Every case drives the REAL
+// `.husky/pre-push` -> `pre-push-targeted-tests.mjs` -> `with-test-lock.mjs`
+// chain inside a throwaway git fixture (copied scripts, a stub `npm run build`,
+// one mirrored test), so the cases hold in CI's shape: a depth-1 checkout (no
+// `HEAD^` of the live repo is read), `PI_LENS_TEST_NO_LOCK=1` in the ambient
+// env (stripped from the child, or the hook would run the tests unlocked and
+// recurse into this file), and no `tsc` rewrite of the shared tree.
+describe("pre-push lock admission (#3717)", () => {
+	const roots: string[] = [];
+
+	beforeEach(() => {
+		// CI's shape: the ambient env carries the no-lock switch.
+		vi.stubEnv("PI_LENS_TEST_NO_LOCK", "1");
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		for (const root of roots.splice(0))
+			fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	const PASSING_TEST =
+		'import { expect, it } from "vitest";\nit("ok", () => { expect(1).toBe(1); });\n';
+
+	// Stands in for scripts/with-test-lock.mjs only where a case must observe
+	// the bound the hook hands it without waiting that long: it prints the line
+	// the real wrapper prints, carrying the bound it received.
+	const STUB_LOCK = `import path from "node:path";
+import { fileURLToPath } from "node:url";
+export function quoteForWindowsCmd(arg) { return arg; }
+if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	console.error(\`[with-test-lock] timed out after \${process.env.PI_LENS_TEST_LOCK_TIMEOUT_MS}ms waiting for test-suite lock held by PID 4242 since 2026-01-01T00:00:00.000Z\`);
+	process.exitCode = 1;
+}
+`;
+
+	function makeFixture(testSource = PASSING_TEST, stubLock = false) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-prepush-fx-"));
+		roots.push(root);
+		const put = (rel: string, content: string) => {
+			const full = path.join(root, rel);
+			fs.mkdirSync(path.dirname(full), { recursive: true });
+			fs.writeFileSync(full, content, "utf8");
+		};
+		for (const rel of [
+			".husky/pre-push",
+			"scripts/pre-push-targeted-tests.mjs",
+			"scripts/with-test-lock.mjs",
+			"scripts/lib/suite-lock.mjs",
+		])
+			put(rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+		if (stubLock) put("scripts/with-test-lock.mjs", STUB_LOCK);
+		put(
+			"package.json",
+			JSON.stringify({
+				scripts: {
+					build:
+						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+				},
+			}),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(root, "node_modules"),
+			"junction",
+		);
+		const git = (...args: string[]) =>
+			String(
+				gitExecFileSync(
+					[
+						"-c",
+						"user.name=t",
+						"-c",
+						"user.email=t@example.com",
+						"-c",
+						"commit.gpgsign=false",
+						...args,
+					],
+					{ cwd: root, encoding: "utf8" },
+				),
+			).trim();
+		git("init", "-q");
+		git("add", ".husky", "scripts", "package.json");
+		git("commit", "-q", "-m", "base");
+		const base = git("rev-parse", "HEAD");
+		put("clients/x.ts", "export const x = 1;\n");
+		put("tests/clients/x.test.ts", testSource);
+		git("add", "clients", "tests");
+		git("commit", "-q", "-m", "change");
+		const head = git("rev-parse", "HEAD");
+		const home = path.join(root, "home");
+		fs.mkdirSync(home);
+		return {
+			root,
+			home,
+			lockPath: path.join(home, "test-suite.lock"),
+			logPath: path.join(home, "pre-push.log"),
+			refs: `refs/heads/t ${head} refs/heads/t ${base}\n`,
+		};
+	}
+
+	function runHook(
+		fx: ReturnType<typeof makeFixture>,
+		extra: Record<string, string | undefined> = {},
+	) {
+		const env = envFor(fx.root);
+		for (const key of Object.keys(env))
+			if (
+				/^(VITEST|PI_LENS_|PILENS_|NODE_OPTIONS$|GITHUB_STEP_SUMMARY$)/.test(
+					key,
+				)
+			)
+				delete env[key];
+		Object.assign(env, {
+			PI_LENS_HOME: fx.home,
+			PI_LENS_TEST_LOCK_POLL_MS: "10",
+			PI_LENS_TEST_LOCK_TIMEOUT_MS: "300",
+			...extra,
+		});
+		for (const [key, value] of Object.entries(extra))
+			if (value === undefined) delete env[key];
+		return spawnSync("sh", [".husky/pre-push"], {
+			cwd: fx.root,
+			env,
+			encoding: "utf8",
+			input: fx.refs,
+		});
+	}
+
+	function holdExclusiveLock(fx: ReturnType<typeof makeFixture>) {
+		// This test process is alive, so the lock is a live holder without a
+		// second process or a scheduling wait.
+		fs.writeFileSync(
+			fx.lockPath,
+			JSON.stringify({
+				pid: process.pid,
+				startedIso: "2026-01-01T00:00:00.000Z",
+			}),
+		);
+	}
+
+	it("runs the selected test and builds inside the fixture when the lock is free", () => {
+		const fx = makeFixture();
+		const result = runHook(fx);
+		expect(result.stderr).not.toContain("test lock busy");
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("running 1 targeted test file(s)");
+		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(true);
+	}, 60_000);
+
+	it("blocks a busy exclusive lock, names the holder, lock path, bound and opt-out, and records nothing", () => {
+		const fx = makeFixture();
+		holdExclusiveLock(fx);
+		const result = runHook(fx);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("test lock busy after 0.3 s");
+		expect(result.stderr).toContain(
+			`PID ${process.pid} since 2026-01-01T00:00:00.000Z`,
+		);
+		expect(result.stderr).toContain(fx.lockPath);
+		expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
+		expect(fs.existsSync(fx.logPath)).toBe(false);
+	});
+
+	it("blocks when the exclusive lock cannot drain the shared slots and says how many are busy", () => {
+		// #3717 F4: the common contention is other lanes' shared slots, which
+		// carry no exclusive-holder line to quote.
+		const fx = makeFixture();
+		for (const index of [0, 1])
+			fs.writeFileSync(
+				path.join(fx.home, `test-suite.slot-${index}.lock`),
+				JSON.stringify({
+					pid: process.pid,
+					startedIso: "2026-01-01T00:00:00.000Z",
+				}),
+			);
+		const result = runHook(fx);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("2 of 2 shared slot(s) still busy");
+		expect(result.stderr).toContain(fx.lockPath);
+		expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
+	});
+
+	it("PI_LENS_PREPUSH_LOCK_SKIP=1 exits 0 with a warning and appends one durable record", () => {
+		const fx = makeFixture();
+		holdExclusiveLock(fx);
+		const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
+		expect(result.status).toBe(0);
+		expect(result.stderr).toContain("WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1");
+		const lines = fs.readFileSync(fx.logPath, "utf8").trim().split("\n");
+		expect(lines).toHaveLength(1);
+		const record = JSON.parse(lines[0]);
+		expect(record).toMatchObject({
+			event: "lock-skip",
+			waitedMs: 300,
+			lockPath: fx.lockPath,
+			selected: 1,
+		});
+		expect(record.holder).toContain(`PID ${process.pid}`);
+		expect(typeof record.ts).toBe("string");
+	});
+
+	it.each(["true", "0", "yes"])(
+		"PI_LENS_PREPUSH_LOCK_SKIP=%s is not the opt-out: the push stays blocked and nothing is recorded",
+		(value) => {
+			const fx = makeFixture();
+			holdExclusiveLock(fx);
+			const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: value });
+			expect(result.status).toBe(1);
+			expect(result.stderr).not.toContain("WARNING");
+			expect(fs.existsSync(fx.logPath)).toBe(false);
+		},
+	);
+
+	it.each([
+		["unset", undefined, "120 s"],
+		["zero", "0", "120 s"],
+		["leading zeros", "00", "120 s"],
+		["garbage", "abc", "120 s"],
+		["negative", "-5", "120 s"],
+		["fractional", "1.5", "120 s"],
+		["positive override", "2500", "2.5 s"],
+	])(
+		"hands the wrapper a real bound: %s falls back or passes through (%s -> %s)",
+		(_name, value, printed) => {
+			// #3717 F2: the hook let an ambient 0/garbage through, which the
+			// wrapper reads as "wait forever". The stub wrapper echoes the bound
+			// it received in the real wrapper's own message shape.
+			const fx = makeFixture(PASSING_TEST, true);
+			const result = runHook(fx, { PI_LENS_TEST_LOCK_TIMEOUT_MS: value });
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain(`test lock busy after ${printed}`);
+		},
+	);
+
+	it("a failing test that quotes the lock-timeout text is a test failure, not a lock timeout", () => {
+		// #3717 F5: the classifier matched the whole stderr buffer, so vitest's
+		// own failure output quoting the wrapper's text was read as contention,
+		// and the opt-out then turned a failing test into exit 0.
+		const fx = makeFixture(
+			'import { expect, it } from "vitest";\nit("quotes", () => { expect("timed out after 100ms waiting for test-suite lock held by PID 1 since x").toBe("something else"); });\n',
+		);
+		const plain = runHook(fx);
+		expect(plain.status).toBe(1);
+		expect(plain.stderr).not.toContain("test lock busy");
+		const optedOut = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
+		expect(optedOut.status).toBe(1);
+		expect(optedOut.stderr).not.toContain("WARNING");
+		expect(fs.existsSync(fx.logPath)).toBe(false);
+	}, 60_000);
+
+	it("blocks the push, with the reason, when the locked test run cannot start", () => {
+		// #3717 recurrence class: master returned 0 ("letting the push proceed")
+		// on a spawn error. A preload turns the wrapper spawn into a real ENOENT.
+		const fx = makeFixture();
+		fs.writeFileSync(
+			path.join(fx.root, "spawn-fails.cjs"),
+			`const cp = require("node:child_process");
+const original = cp.spawn;
+if (process.argv[1] && process.argv[1].endsWith("pre-push-targeted-tests.mjs")) {
+	cp.spawn = (command, args, options) => original(require("node:path").join(__dirname, "no-such-node"), args, options);
+	require("node:module").syncBuiltinESMExports();
+}
+`,
+		);
+		const result = runHook(fx, {
+			NODE_OPTIONS: `--require ${path.join(fx.root, "spawn-fails.cjs")}`,
+			PI_LENS_PREPUSH_LOCK_SKIP: "1",
+		});
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("could not run targeted tests");
+		expect(result.stderr).toContain("push blocked");
+	});
 });

@@ -444,10 +444,11 @@ async function drainSharedSlots({
 
 		const now = Date.now();
 		if (timeoutMs > 0 && now - start > timeoutMs) {
-			// Prefix is pinned: scripts/pre-push-targeted-tests.mjs greps a
-			// caller's stderr for /timed out after \d+ms waiting for test-suite
-			// lock/ to classify a bounded lock wait separately from a real test
-			// failure. Keep the prefix when rewording.
+			// Prefix is pinned: scripts/pre-push-targeted-tests.mjs matches a
+			// caller's stderr for a LINE STARTING `[with-test-lock] timed out after
+			// <n>ms waiting for test-suite lock` (with-test-lock.mjs adds the
+			// bracket prefix) to classify a bounded lock wait separately from a
+			// real test failure. Keep the prefix when rewording.
 			throw new Error(
 				`timed out after ${timeoutMs}ms waiting for test-suite lock: ` +
 					`${busy} of ${slots} shared slot(s) still busy`,
@@ -735,9 +736,9 @@ export async function acquireTestLock(options = {}) {
 			if (timeoutMs > 0 && now - start > timeoutMs) {
 				// Message shape is pinned: tests/scripts/suite-lock.test.ts:233
 				// asserts against it directly, and scripts/pre-push-targeted-tests.mjs
-				// greps a caller's stderr for "timed out after \d+ms waiting for
-				// test-suite lock" to classify a lock timeout separately from a
-				// real test failure. Reword both call
+				// matches a caller's stderr for a line starting "[with-test-lock]
+				// timed out after <n>ms waiting for test-suite lock" to classify a
+				// lock timeout separately from a real test failure. Reword both call
 				// sites together with this string.
 				throw new Error(
 					`timed out after ${timeoutMs}ms waiting for test-suite lock held by ${describeOwner(owner)}`,
