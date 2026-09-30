@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import { defineConfig } from "vitest/config";
+import { BalancedShardSequencer } from "./scripts/lib/balanced-shard-sequencer.mjs";
 import {
 	formatTestWorkerBudget,
 	resolveTestWorkerBudget,
@@ -588,6 +589,11 @@ export default defineConfig({
 		// below) — applies to every project's fork teardown, not just the
 		// grammar-heavy one, which is strictly more forgiving everywhere else.
 		teardownTimeout: 30_000,
+		// #3771: `--shard=k/N` packs files by recorded duration instead of vitest's
+		// equal-count sha1 cut (scripts/test-shard-weights.json). Root-config-only
+		// in Vitest 4 (`sequencer` is shared across projects); only `shard()` is
+		// overridden, so a run without `--shard` sorts exactly as before.
+		sequence: { sequencer: BalancedShardSequencer },
 		projects: [
 			{
 				test: {
