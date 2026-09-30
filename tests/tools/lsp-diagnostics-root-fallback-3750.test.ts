@@ -231,6 +231,19 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		expect(details.filesChecked).toBe(2);
 	});
 
+	it("counts a fallback-rooted file that published findings as findings in a batch, and only its empty sibling as unconfirmed", async () => {
+		answerWith("mixed");
+		const dir = workspace();
+		const empty = source(dir, "orphan.rs", "// fake-lsp-clean\n");
+		const found = source(dir, "found.rs");
+
+		const { text } = await runTool(root, { paths: [empty, found] });
+
+		expect(text).toContain("findings=1");
+		expect(text).toContain("inconclusive=1");
+		expect(text).toContain("0 files confirmed clean, 1 unconfirmed");
+	});
+
 	it("names the fallback in a directory scan that also found diagnostics", async () => {
 		answerWith("mixed");
 		const dir = workspace();
