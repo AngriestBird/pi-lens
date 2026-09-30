@@ -1423,7 +1423,7 @@ describe("glossary synonym-retirement sweep (#3259)", () => {
 
 	it("ignores comments, strings, and template text but counts interpolation code", () => {
 		const source = stripSource(
-			"// warning\n/* warning */ const a = 'warning'; const b = `warning`; const c = `${warning}`;",
+			"// warning\n/* warning */ const a = 'warning'; const b = `warning`; const c = `\${warning}`;",
 			{ strings: "blank" },
 		);
 		expect(countIdentifier(source, "warning")).toBe(1);
