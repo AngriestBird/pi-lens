@@ -23,7 +23,7 @@ export function classifyCleanBehavior(obs: CleanSignalObservations): {
 };
 
 export function resolveProbeServerId(
-	fx: { auxiliaryServerIds?: readonly string[] },
+	fx: { lang?: string; auxiliaryServerIds?: readonly string[] },
 	servers: ReadonlyArray<{ id: string; role?: string }>,
 ): string | undefined;
 
