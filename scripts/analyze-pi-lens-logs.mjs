@@ -380,6 +380,9 @@ function createState(files) {
 			// D16: `pi-lens loaded: Nms` lines, with their wall clock so a short
 			// lived pid can be marked.
 			slowLoads: [],
+			// D16: the wall clock of every `session_start fired`, so a load with no
+			// session start within 60 s (a short-lived pid) is visible.
+			firedTs: [],
 			// D3/D4/D5/D8: one run per `session_start fired`. Run splitting is the
 			// only way to attribute a turn-end test decision to the session that made it.
 			runs: [],
@@ -881,6 +884,7 @@ async function analyzeSessionStart(files, state) {
 			// same line opens a D3/D4/D5/D8 run.
 			if (message.startsWith("session_start fired")) {
 				state.session.starts++;
+				if (ts) state.session.firedTs.push(ts.getTime());
 				state.session.runs.push(state.session.currentRun);
 				state.session.currentRun = newRun();
 				state.session.currentRun.startTs = iso(ts);
@@ -967,6 +971,7 @@ async function analyzeSessionStart(files, state) {
 			if (load) {
 				state.session.slowLoads.push({
 					ts: iso(ts),
+					ms: ts ? ts.getTime() : null,
 					durationMs: Number(load[1]),
 					message,
 				});
@@ -2103,9 +2108,19 @@ function computeAdvisoryProvenance(state) {
 	});
 }
 
-/** D16: `pi-lens loaded: Nms` loads over 2 s. */
+/** D16: `pi-lens loaded: Nms` loads over 2 s. A load with no
+ * `session_start fired` within the next 60 s is a short-lived pid. */
 function computeSlowExtensionLoad(state) {
-	return state.session.slowLoads.filter((l) => l.durationMs >= 2000);
+	const fired = state.session.firedTs;
+	return state.session.slowLoads
+		.filter((l) => l.durationMs >= 2000)
+		.map((l) => ({
+			...l,
+			shortLived: !(
+				Number.isFinite(l.ms) &&
+				fired.some((f) => f >= l.ms && f - l.ms <= 60000)
+			),
+		}));
 }
 
 function buildReport(state) {
@@ -2575,8 +2590,11 @@ function buildReport(state) {
 		smells,
 		"slow-extension-load",
 		slowExtensionLoad.length,
-		"pi-lens loaded >= 2000ms after process start",
-		slowExtensionLoad.slice(0, limit),
+		"pi-lens loaded >= 2000ms after process start (short-lived: no session_start fired within 60 s)",
+		slowExtensionLoad.slice(0, limit).map((l) => ({
+			...l,
+			message: `${l.message}${l.shortLived ? " [short-lived]" : ""}`,
+		})),
 	);
 
 	return {
@@ -2847,6 +2865,12 @@ function printReport(report) {
 			console.log(
 				`  pid ${c.pid}: ${Math.round(c.perHour)}ms/h, max ${c.maxRow}ms`,
 			);
+	}
+	const extLoads = det.slowExtensionLoad ?? [];
+	if (extLoads.length) {
+		const shortLived = extLoads.filter((l) => l.shortLived).length;
+		console.log("\nExtension loads");
+		console.log(`  slow=${extLoads.length} shortLived=${shortLived}`);
 	}
 
 	section(

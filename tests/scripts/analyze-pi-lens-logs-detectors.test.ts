@@ -225,6 +225,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// [2026-09-30T12:25:38.171Z] pi-lens loaded: 6123ms after process start (from dist)
 		const report = run("slow-extension-load");
 		expect(report.detectors.slowExtensionLoad).toHaveLength(3);
+		expect(
+			report.detectors.slowExtensionLoad.filter((l: any) => l.shortLived),
+		).toHaveLength(2);
 		expect(smell(report, "slow-extension-load")?.count).toBe(3);
 	});
 });
