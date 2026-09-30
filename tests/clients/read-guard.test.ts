@@ -995,6 +995,45 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		it("does not judge a line whose newest view is unhashed by the older read on both sides of it", () => {
+			// A [1-6] hashed; line 5 changes and the agent re-reads it unhashed (B).
+			// Line 5 is missing, so [4-6] is two runs of A (4 and 6): merging them
+			// would hold A's stale hash for line 5 against the edit.
+			const env = setupTestEnvironment("read-guard-snapshot-gap-run-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 6,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 1,
+						lineHashes: {},
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					viewReadCount: 2,
+					checkedLineCount: 2,
+					missingLines: [5],
+					enforced: false,
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("reports a line only a context zone covers as unavailable and blocks nothing", () => {
 			// ContextSlack (admitted): line 3 was never delivered, so nothing can
 			// check it, and it must not read as a match.

@@ -1691,6 +1691,27 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 		}
 	});
 
+	it("does not relocate from the read that delivered the first line when a newer read delivered the last (SpanSnapshotFixAnyReloc)", async () => {
+		const { env, file, runtime } = setup("any-reloc-last");
+		try {
+			await read(runtime, file, { offset: 1, limit: 6 });
+			writeNow(file, ["INS1", "INS2", ...diskLines(file)].join("\n"));
+			// The agent's newest view of line 4 is now the shifted "line2".
+			await read(runtime, file, { offset: 4, limit: 1 });
+			// The first read's run (line3, line4) is unique at 5-6, but its line4
+			// is not what the agent last saw at line 4.
+			const edit = await positionalEdit(runtime, file, [
+				[3, 4, "agent3\nagent4"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[3, 4]]);
+			expect(edit.reason).toContain(RANGE_STALE);
+			expect(edit.reason).not.toContain("Re-target");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("relocates a shifted two-line edit from the read that is the newest view of both lines", async () => {
 		const { env, file, runtime } = setup("reloc");
 		try {
