@@ -51,7 +51,14 @@ change.
 - **The deferred `agent_end` format drain**: rewrites the file, then calls
   `recordWritten` (`runtime-agent-end.ts`). Since #3525 that call credits
   authorship (`written`) and leaves FileTime where it was
-  (`stampFileTime: false`): the agent never saw those bytes. With `DrainMode = "atomic"` it
+  (`stampFileTime: false`): the agent never saw those bytes. The format
+  service's own FileTime is its own table (`format-service.ts`, keyed
+  `<session>:format`) since #3785 review round 2. Before that it was built
+  with the guard's session id, and a `FileTime` is keyed by session id, so
+  its stamp before formatting (`pipeline.ts` `runFormatPhase`) and after
+  (`FormatService.formatFile`) landed in the guard's table: production
+  was `FormatStamp = TRUE` (`UnhashedFormatStampOn`) even with
+  `stampFileTime: false`. With `DrainMode = "atomic"` it
   runs inside the turn boundary. Otherwise it is queued at `Settle` (pi's
   `agent_settled`, when pi already accepts `/tree`) and lands in `Drain`,
   possibly after a `/tree`, or an aborted or failed drain puts it back
@@ -238,6 +245,17 @@ the `#3522` block of the same file.
   `tests/clients/read-guard-conversation-evidence.test.ts` replays that case
   ("keeps another writer's change stale after an oldText edit passed it
   (R4)").
+- Not modelled, and covered by replays in
+  `tests/clients/read-guard-conversation-evidence.test.ts` only: R4 (the
+  own-edit stamp decided by `fileTimeMoved` at the check; see above), the
+  own-edit read's `stampFileTime: false`, the debounce carrying that
+  decision (`_ownWriteStamp`), the partial apply's decision taken at its
+  preflight, and the settled sweep. Bash writes, LSP rename and code-action
+  applies and the format service credit authorship and leave FileTime:
+  for FileTime and hashes that is the model's "another writer", and the
+  `written` they add is not modelled for them. The mutation bridge's other
+  producers (`observed`, `ast_grep_replace`, co-process extensions) and the
+  read bridge still stamp FileTime; they are not modelled either.
 - The immediate autofix's `recordWritten` still stamps FileTime (`WriteRW2`),
   including when the attachment was withheld (the agent never saw the
   post-fix bytes). Its unhashed stale allow is a named residual of #3525.
