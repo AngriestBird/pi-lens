@@ -76,10 +76,11 @@
 (*                       ticket bound to the manager pi hands it           *)
 (*                       (Carrier); without it, both keys are undefined    *)
 (*                       and the reason alone matches                      *)
-(*   "clearOnStart"      #3819 (audit option a): every primary start       *)
-(*                       clears the slot after its take attempt, matched   *)
-(*                       or not, so no later start takes a slot left for   *)
-(*                       an earlier one                                    *)
+(*   "demotedDiscard"    #3819 r2: a declined (demoted) start whose key    *)
+(*                       matches the slot discards it without adopting,    *)
+(*                       so the demoted session cannot take it stale when  *)
+(*                       it later classifies primary; no other start       *)
+(*                       removes a slot except by taking it                *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -519,7 +520,7 @@ Begin ==
        /\ cell' = [cell EXCEPT ![t] = kept]
        /\ imp' = [imp EXCEPT ![t] = kept]
        /\ lin' = NewLin(k, t)
-       /\ slot' = IF takes \/ Has("clearOnStart") THEN NoSlot ELSE slot
+       /\ slot' = IF takes THEN NoSlot ELSE slot
        /\ taken' = IF takes THEN taken \cup {[by |-> t, from |-> slot.from]}
                    ELSE taken
        /\ act' = [act EXCEPT ![t] = abase]
@@ -543,7 +544,8 @@ Begin ==
 \* The replacement's session_start when another start already registered as
 \* primary in its gap (a subagent's own /reload or /fork, #3668 row 17): the
 \* probe finds that primary's ctx live, so it is a concurrent secondary. It
-\* skips handleSessionStart and adopts nothing.
+\* skips handleSessionStart and adopts nothing. Under "demotedDiscard" it
+\* discards the slot when the slot's key is its own (#3819 r2).
 BeginDemoted ==
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
     /\ primary # 0
@@ -559,7 +561,10 @@ BeginDemoted ==
        /\ lin' = NewLin(k, t)
        /\ predOf' = [predOf EXCEPT ![t] = pend.from]
        /\ pend' = NoPend
-    /\ UNCHANGED <<ep, why, primary, last, forking, cell, imp, slot, taken,
+       /\ slot' = IF Has("demotedDiscard")
+                     /\ SlotMatch(SR(k), f, Via(k, pend.from))
+                  THEN NoSlot ELSE slot
+    /\ UNCHANGED <<ep, why, primary, last, forking, cell, imp, taken,
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
                    prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
@@ -734,8 +739,7 @@ SecReplace(k) ==
                        ELSE [lin EXCEPT ![f] = @ \cup {t}]
              /\ cell' = [cell EXCEPT ![s] = {}, ![t] = kept]
              /\ imp' = [imp EXCEPT ![t] = kept]
-             /\ slot' = IF takes \/ (asPrimary /\ Has("clearOnStart"))
-                        THEN NoSlot ELSE slot
+             /\ slot' = IF takes THEN NoSlot ELSE slot
              /\ taken' = IF takes
                          THEN taken \cup {[by |-> t, from |-> slot.from]}
                          ELSE taken
