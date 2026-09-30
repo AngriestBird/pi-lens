@@ -177,6 +177,9 @@ export async function withTreeSitterRoot<T>(
 	filePath: string,
 	content: string,
 	consume: (root: TsNode) => T,
+	/** The consumer's own trap identity (#3678 F4): callers here consume
+	 * differently, so they must not share one. */
+	caller: string,
 ): Promise<ParsedTreeOutcome<T>> {
 	const languageId = resolveTreeSitterLanguage(filePath);
 	const client = getSharedTreeSitterClient();
@@ -187,7 +190,7 @@ export async function withTreeSitterRoot<T>(
 		languageId,
 		content,
 		(tree) => consume(tree.rootNode as TsNode),
-		"tree-sitter-shared",
+		caller,
 	);
 }
 
