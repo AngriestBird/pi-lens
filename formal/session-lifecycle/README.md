@@ -253,11 +253,16 @@ dropped read whose entry is still on the branch leaves one bounded
 degradation-ledger record, so the loss is measured. The forwarding amendment
 that round 1 proposed is not adopted. `recordDrop` models the record, and
 `NoUnrecordedFalseBlock` checks that every false block `Fix` reaches is
-recorded. The record's condition reads the writer's own conversation branch
-at drop time, because in the shutdown gap no successor branch exists yet. The
-model cannot see a record that is too wide (a correct drop recorded as a
-loss): no invariant reads one, so the precision of the count is for the S1
-code's tests.
+recorded. The model's condition reads the writer's own conversation branch at
+drop time. In code, the writer's branch for that condition must come from a capture at
+hook entry or a registry snapshot of the retired scope; it must never be a
+live read of the retired writer's branch, which the drop path cannot access.
+The record also carries the retirement reason: `new`, `resume`, `reload`,
+`tree` or `fork`. This separates the correct `/new` drops from the false
+blocks on `/reload` and resume. The model cannot distinguish a record that is
+too wide (mutation `r01` survives: a correct drop recorded as a loss): no
+invariant reads the record's precision, so that part belongs to S1's code
+tests.
 
 **F2. A subagent's `beginScope` can consume the hand-off.** Section 3.4 has
 `beginScope` call `takeHandoff()` once and discard an unmatched slot, and
@@ -283,8 +288,17 @@ replacing it with `slot.has /\ slot.takenBy = 0` in the subagent's take reds
 The subagent has neither the slot's previous file nor its target, so either
 conjunct alone rejects it. A primary start's match still cannot be made red
 in-process under D3: every primary start directly follows its predecessor's
-retire, so it always matches. It stays for in-memory sessions, which have no
-files.
+retire, so it always matches. For an in-memory (`--no-session`) session, the
+slot file and target are undefined, so an undefined previous file equals the
+slot's undefined value and the match is vacuous. The take must therefore fall
+back to role or order for file-less sessions; the model cannot show this case
+because `slot.file` is never `"-"`. The file-match claim is load-bearing only
+for file-backed sessions.
+
+S2 tests must pin the stale-slot behavior that the model does not reach:
+`takeHandoff` clears the slot on a match, while a mismatch leaves the slot in
+place. Mutations `c05` and `c06` pass every model configuration, so this is a
+code-level contract rather than a model result.
 
 **F4. Today, a subagent's read authorises the primary's edit** [I]. The shared
 read guard puts a subagent's read in the primary's cell
@@ -314,6 +328,9 @@ Not modelled:
   two evaluations never share one.
 - **N5** (the turn summary and test-runner delivery after `/tree`), and #3603
   (authorship on `/tree`: G10 resets it, and the table keeps that).
+- **The remaining section 6 design rows:** `MutDrainAfterNew`,
+  `MutGenPerEval` (N4), `MutDeliveryAfterTree` (N5), `CurrentG5G10`, the IB
+  and TS stores, and `MutBeforeForkCancel` / `FixNoFileMatch`.
 - **The ALS hazard of D2.** A long-lived resource that inherits a stale
   ambient handle (design section 3.3, item 5) is not modelled.
 - **D4** (tool-call id reuse across branches). Entries are unique here.
