@@ -2241,7 +2241,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// its own 5s spawn budget (MANAGED_VERIFY_TIMEOUT_MS) — the same shape as
 	// the npm-shim rung beside them, and none can take a hook's signal until
 	// #2523 AC4 threads it through the deps types.
-	"clients/dispatch/runners/utils/runner-helpers.ts": 37,
+	// 37 → 35 (#2660): evidence now reuses the resolver's rung instead of
+	// awaiting a second managed-binary lookup, removing the resolver's two
+	// unbounded awaits (the lookup and its caller-side reconstruction).
+	"clients/dispatch/runners/utils/runner-helpers.ts": 35,
 	// #3541: `withHostFileMutationQueues` awaits the realpath of each path an
 	// LSP workspace edit names, which keys it the way pi keys its queue. It
 	// runs inside `applyWorkspaceEdit`, which the agent_settled actionable fix
