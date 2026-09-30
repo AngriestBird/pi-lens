@@ -841,7 +841,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		// The classifier reads the timeout line only from a failed run: a green
 		// run must not be blocked by text it printed itself.
 		const fx = makeFixture(
-			'import { expect, it } from "vitest";\nit("prints", () => { console.error("[with-test-lock] timed out after 5ms waiting for test-suite lock held by PID 1 since x"); expect(1).toBe(1); });\n',
+			'import fs from "node:fs";\nimport { expect, it } from "vitest";\nit("prints", () => { fs.writeSync(2, "[with-test-lock] timed out after 5ms waiting for test-suite lock held by PID 1 since x\\n"); expect(1).toBe(1); });\n',
 		);
 		const result = runHook(fx);
 		expect(result.status).toBe(0);
