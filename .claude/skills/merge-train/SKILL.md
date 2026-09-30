@@ -350,6 +350,37 @@ operator's private notes, so a different orchestrator can run the same train.
   never approves; approving is the maintainer's call. A head that is green or
   failing keeps that verdict whatever stale `action_required` runs it carries.
   #2983 sat unapproved while the lane read it as a slow queue.
+- **`ci-verdict` is the ONE CI reader; do not hand-roll `gh pr checks`,
+  `gh run view --log` or a `watch-*.sh` poller (#3700, 2026-09-30).** Every
+  read the orchestrator did by hand is a mode of `node scripts/ci-verdict.mjs`:
+  - `<pr|sha> [--wait N]` — the gating verdict (exit 0 / 1 / 2 / 3, see the
+    merge loop above). A failed gating job now also prints its failed STEP
+    (so `Ast-grep self-scan` or `Audit production dependencies` reads as what
+    it is, not as a test failure), its `FAIL` and assertion lines and the
+    `Tests` summary with the ANSI codes stripped, the gating and advisory
+    counts on separate lines (advisory reds never gate, and are read before
+    merging), and the remedy hint: `gh run rerun <run>` for a cancelled or
+    superseded run, the `gh api -X POST .../approve` command for fork
+    approval, `gh pr update-branch <pr>` when the failed merge's base is no
+    longer master's head (a rerun replays the old merge commit, #3660). A job
+    that failed with `couldn't find remote ref refs/pull/N/merge` on a MERGED
+    PR is reported as post-merge noise, exit 0, not a red lane.
+  - `--all` — one line per open PR (`#N <author> auto-merge=on|off head=<sha>
+    gating=<state> [first-failure=<check>]`) for status reports; it always
+    exits 0.
+  - `--watch-open [--wait N] [--state-file <path>]` — the notifying wait:
+    watches every open PR that has auto-merge armed or is authored by the
+    repository owner or the `gh` viewer (a PR in a fix round has no
+    auto-merge and still goes red), polls every 90 s, and exits 0 on the first
+    poll with an event, printing `#<pr> <event> @<sha>: <reason>` plus the
+    failure detail (events: `failed`, `fork-approval`, `absent-rearm`,
+    `merged`, `closed`; each PR reports on the TRANSITION from its last seen
+    state, keyed by head SHA). Exit 3 means the window ended with none.
+    `--state-file ~/.cache/pi-lens-orchestrator/watch-state.json` keeps the
+    last seen state across re-arms so the same red is not reported twice. Run
+    it with `run_in_background: true`; it replaces the session-local
+    `watch-automerge.sh`.
+  It never approves, reruns or updates a branch: it prints the command.
 - **Read the advisory rows before merging, even though they never gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a

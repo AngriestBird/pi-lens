@@ -178,11 +178,28 @@ export type ParsedTreeOutcome<T> =
 export type WasmTrapState = "retry" | "charged";
 
 /** What a trap is charged to (#3605): a file's language and content, or a
- * query's cache key. `key` is its hash, computed on first need. */
-interface WasmInput {
+ * query's cache key. `key` is its hash, computed on first need.
+ *
+ * `caller` names who is acting on the input: a consumer of the parsed tree,
+ * or none for the parse itself and a query compile. It is not part of the
+ * key, so every caller of one content shares one entry and one budget unit
+ * (#3678 F5, F6). It only decides which success may decay the entry (F2). */
+export interface WasmInput {
 	languageId: string;
 	source: string;
 	key?: string;
+	caller?: string;
+}
+
+/**
+ * The trap-map input a compiled query is charged to (#3605; #3678 F-C). The
+ * client's own compile paths and the symbol extractor share this key path, so
+ * one always-trapping query source is charged to itself instead of spending
+ * the process budget at every extractor init and poisoning the runtime on the
+ * fourth (#3678).
+ */
+export function wasmQueryInput(queryKey: string): WasmInput {
+	return { languageId: "query", source: queryKey };
 }
 
 const NOT_PARSED: ParsedTreeOutcome<never> = { parsed: false };
@@ -200,6 +217,8 @@ interface QueryBatch {
 	entries: QueryBatchEntry[];
 	/** patternIndex → index into `entries`. */
 	ownerOfPattern: number[];
+	/** The batch cache key: the rule set's identity for trap decay (#3678 F4). */
+	key: string;
 }
 
 interface GrammarDirResolutionDeps {
@@ -591,7 +610,10 @@ export class TreeSitterClient {
 	 * charges the input, which is then skipped until its content changes. Only
 	 * a trap that spends budget (or escalates) adds an entry, so the map never
 	 * holds more than `WASM_TRAP_BUDGET + 1`. */
-	private trappedInputs = new Map<string, number>();
+	private trappedInputs = new Map<
+		string,
+		{ traps: number; by: string | undefined }
+	>();
 	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
 	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
 	private activeWasmInput: WasmInput | undefined;
@@ -653,9 +675,10 @@ export class TreeSitterClient {
 				this.reportedTraps.add(thrown);
 			}
 			if (input) {
-				const traps = this.wasmInputTraps(input);
-				this.trappedInputs.set(this.wasmInputKey(input), traps + 1);
-				if (traps > 0) {
+				const key = this.wasmInputKey(input);
+				const entry = this.trappedInputs.get(key);
+				if (entry) {
+					entry.traps++;
 					// A second trap on one input is that input's fault, not the
 					// heap's: charge it, and spend no budget (#3605).
 					incrementDegradationCount({
@@ -665,6 +688,7 @@ export class TreeSitterClient {
 					});
 					return false;
 				}
+				this.trappedInputs.set(key, { traps: 1, by: input.caller });
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
 				incrementDegradationCount({
@@ -708,7 +732,24 @@ export class TreeSitterClient {
 	/** Traps charged to `input` so far; no hash while nothing has trapped. */
 	private wasmInputTraps(input: WasmInput | undefined): number {
 		if (!input || this.trappedInputs.size === 0) return 0;
-		return this.trappedInputs.get(this.wasmInputKey(input)) ?? 0;
+		return this.trappedInputs.get(this.wasmInputKey(input))?.traps ?? 0;
+	}
+
+	/**
+	 * Forget `input`'s trap entry after it parsed or compiled successfully
+	 * (#3678 F-A). A trap can be a one-off on an otherwise healthy input, so a
+	 * stale entry would let the next one-off trap charge the input and skip it
+	 * for the rest of the process. The hash is already computed on this path,
+	 * and the map is non-empty; the process budget still bounds trap absorption.
+	 * Only a success by the entry's first trapper decays it (#3678 F2, F4): a
+	 * healthy consumer says nothing about another consumer's trap.
+	 */
+	clearWasmInput(input: WasmInput | undefined): void {
+		if (!input || this.trappedInputs.size === 0) return;
+		const key = this.wasmInputKey(input);
+		if (this.trappedInputs.get(key)?.by === input.caller) {
+			this.trappedInputs.delete(key);
+		}
 	}
 
 	/** The not-parsed outcome for `thrown` on `input` (#3605). */
@@ -1747,6 +1788,7 @@ export class TreeSitterClient {
 			languageId,
 			contentOverride,
 			(tree) => tree,
+			"parseFile",
 		);
 		return outcome.parsed ? outcome.value : null;
 	}
@@ -1756,8 +1798,15 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller = "withParsedTree",
 	): Promise<ParsedTreeOutcome<T>> {
-		return this.parseFileAndUse(filePath, languageId, contentOverride, consume);
+		return this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			consume,
+			caller,
+		);
 	}
 
 	private async parseFileAndUse<T>(
@@ -1765,6 +1814,7 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller: string,
 	): Promise<ParsedTreeOutcome<T>> {
 		this.dbg(`Parsing ${filePath} with language ${languageId}`);
 		const parser = await this.getParser(languageId);
@@ -1778,6 +1828,7 @@ export class TreeSitterClient {
 		try {
 			const content = contentOverride ?? fs.readFileSync(filePath, "utf-8");
 			this.dbg(`File content length: ${content.length}`);
+			// #3678 F5: the parse carries no caller; the content traps it for all.
 			input = { languageId, source: content };
 			// #3605: an input that trapped twice is not parsed again.
 			if (this.wasmInputTraps(input) > 1) {
@@ -1810,9 +1861,25 @@ export class TreeSitterClient {
 			this.dbg(`Parse error: ${err}`);
 			return this.notParsed(err, input);
 		}
+		// #3678 F-A: a clean parse heals a parse-phase entry, whoever asked.
+		this.clearWasmInput(input);
+		// The consumer shares the parse's entry and key; its identity decides
+		// only which of its own successes may decay that entry (#3678 F2, F4).
+		input = { ...input, caller };
 		try {
 			this.activeWasmInput = input;
-			return { parsed: true, value: consume(tree) };
+			// #3678 F1: an entry a trap sets inside `consume` must survive the
+			// success path. A swallowing consumer returns normally after it
+			// reports the trap, so snapshot the count and clear only when this
+			// call did not charge the input itself.
+			const trapsBefore = this.wasmInputTraps(input);
+			const value = consume(tree);
+			if (this.wasmInputTraps(input) <= trapsBefore) {
+				// #3678 F-A: a healthy consume by the consumer that trapped drops
+				// its entry, so a later one-off trap starts from `retry`.
+				this.clearWasmInput(input);
+			}
+			return { parsed: true, value };
 		} catch (thrown) {
 			// #3605: a wasm abort or trap while querying the tree degrades this
 			// file alone, like a failed parse; any other error is a bug.
@@ -2017,7 +2084,7 @@ export class TreeSitterClient {
 			compiled.query,
 			compiled.metavars,
 			languageId,
-			queryDef.id,
+			`${queryDef.id}\0${queryDef.query}`,
 			compiled.postFilter,
 			compiled.postFilterParams,
 			contentOverride,
@@ -2126,6 +2193,9 @@ export class TreeSitterClient {
 					this.dbg(`Batched query matching error: ${err}`);
 				}
 			},
+			// #3678 F4: the scanner and the dispatch runner run different rule
+			// sets under this one call site.
+			`runQueriesOnFile\0${batch.key}`,
 		);
 
 		const results: Array<{
@@ -2187,7 +2257,18 @@ export class TreeSitterClient {
 		}
 		this.queryBatchLoadFailures.delete(cacheKey);
 
+		// #3707: a compile that trapped this build makes the result degraded (a
+		// rule skipped, or the batch nulled). A transient trap must not stay
+		// cached for the process, so such a build is not cached below.
+		let trapped = false;
+		// One entry per query source (#3605): the combined compile is charged to
+		// the batch key, each probe to the rule's raw-query key, which
+		// `compileRawQuery` shares. A charged key is never compiled again, so
+		// its cached result is permanent either way.
+		const batchInput = wasmQueryInput(cacheKey);
+
 		const build = async (): Promise<QueryBatch | null> => {
+			if (this.wasmInputTraps(batchInput) > 1) return null;
 			const Query = (await loadWebTreeSitter()).Query;
 
 			const entries: QueryBatchEntry[] = [];
@@ -2195,13 +2276,25 @@ export class TreeSitterClient {
 			const ownerOfPattern: number[] = [];
 			for (const queryDef of queryDefs) {
 				let patternCount: number;
+				const probeInput = wasmQueryInput(
+					this.getQueryCacheKey(
+						`raw:${queryDef.id}:${queryDef.query}`,
+						languageId,
+					),
+				);
+				if (this.wasmInputTraps(probeInput) > 1) {
+					this.dbg(`Batch: skipping ${queryDef.id}, its compile trapped twice`);
+					continue;
+				}
 				try {
 					// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 					const probe = new Query(language as any, queryDef.query);
 					patternCount = probe.patternCount();
 					probe.delete?.();
+					this.clearWasmInput(probeInput);
 				} catch (err) {
-					if (this.reportWasmAbort(err)) return null;
+					if (this.reportWasmAbort(err, probeInput)) return null;
+					if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 					// A rule that can't compile against THIS grammar is simply not
 					// applicable here (e.g. a `type_annotation` pattern on javascript).
 					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
@@ -2229,16 +2322,18 @@ export class TreeSitterClient {
 					);
 					return null;
 				}
-				return { query, entries, ownerOfPattern };
+				this.clearWasmInput(batchInput);
+				return { query, entries, ownerOfPattern, key: cacheKey };
 			} catch (err) {
-				if (this.reportWasmAbort(err)) return null;
+				if (this.reportWasmAbort(err, batchInput)) return null;
+				if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 				this.dbg(`Batch compile failed for ${languageId}: ${err}`);
 				return null;
 			}
 		};
 
 		const batch = await build();
-		this.cacheQueryBatch(cacheKey, batch);
+		if (!trapped) this.cacheQueryBatch(cacheKey, batch);
 		return batch;
 	}
 
@@ -2392,7 +2487,7 @@ export class TreeSitterClient {
 		}
 
 		// #3605: a query whose compile trapped twice is not compiled again.
-		const input: WasmInput = { languageId: "query", source: cacheKey };
+		const input = wasmQueryInput(cacheKey);
 		if (this.wasmInputTraps(input) > 1) return null;
 
 		const language = await this.loadLanguage(languageId);
@@ -2417,6 +2512,8 @@ export class TreeSitterClient {
 			this.dbg(`Query compiled with ${query.patternCount()} patterns`);
 
 			const result = { query, metavars, postFilter, postFilterParams };
+			// #3678 F-A: a successful compile drops this query source's entry.
+			this.clearWasmInput(input);
 			// Cache the compiled query
 			this.cacheQuery(cacheKey, result);
 			return result;
@@ -2454,7 +2551,7 @@ export class TreeSitterClient {
 		}
 
 		// #3605: a query whose compile trapped twice is not compiled again.
-		const input: WasmInput = { languageId: "query", source: cacheKey };
+		const input = wasmQueryInput(cacheKey);
 		if (this.wasmInputTraps(input) > 1) return null;
 
 		const language = await this.loadLanguage(languageId);
@@ -2466,6 +2563,8 @@ export class TreeSitterClient {
 			// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 			const query = new Query(language as any, queryStr);
 			const result = { query, metavars, postFilter, postFilterParams };
+			// #3678 F-A: a successful compile drops this query source's entry.
+			this.clearWasmInput(input);
 			this.cacheQuery(cacheKey, result);
 			return result;
 		} catch (err) {
@@ -4850,7 +4949,7 @@ export class TreeSitterClient {
 		query: any,
 		metavars: string[],
 		languageId: string,
-		_originalPattern?: string,
+		queryKey: string,
 		postFilter?: string,
 		// biome-ignore lint/suspicious/noExplicitAny: Post filter params
 		postFilterParams?: any,
@@ -4922,6 +5021,8 @@ export class TreeSitterClient {
 					this.dbg(`Query matching error: ${err}`);
 				}
 			},
+			// #3678 F4: every rule and pattern searched here is its own consumer.
+			`runQueryOnFile\0${queryKey}`,
 		);
 
 		return matches;
