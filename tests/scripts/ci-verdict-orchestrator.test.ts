@@ -15,8 +15,8 @@
 //    post-merge `refs/pull/N/merge` checkout failure was read as a red lane.
 import {
 	existsSync,
+	linkSync,
 	mkdtempSync,
-	readdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -684,6 +684,25 @@ describe("run — post-merge noise is not a failure (#3700)", () => {
 		expect(exitCode).toBe(EXIT_FAILURE);
 	});
 
+	it("keeps it a failure when the checkout step failed but the log also carries failing test lines", async () => {
+		const mixed = job(
+			"checkout-fail-post-merge-101528749222",
+			`${readFileSync(join(JOBS, "checkout-fail-post-merge-101528749222.log"), "utf8")}\n2026-09-06T17:32:37.0000000Z  FAIL   default  tests/x.test.ts > real bug\n`,
+		);
+		const w = world({
+			prs: [
+				{
+					number: 2623,
+					state: "MERGED",
+					checkRuns: [...GREEN, jobRow(mixed)],
+				},
+			],
+			jobs: [mixed],
+		});
+		const { exitCode } = await cli(["2623"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+	});
+
 	it("keeps it a failure when the job names no failed step at all", async () => {
 		const { j, rows } = noisy();
 		const bare = { ...j, json: { ...j.json, steps: [] } };
@@ -1131,6 +1150,28 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		expect(sleeps).toHaveLength(7);
 	});
 
+	it("restarts the no-suite clock for a new head of the same PR", async () => {
+		const pr: PrFixture = {
+			number: 3679,
+			login: "stranger",
+			autoMerge: true,
+			checkRuns: [],
+			workflowRuns: [],
+			suites: [],
+		};
+		const w = world({ prs: [pr] });
+		const newSha = "b".repeat(40);
+		const { lines, sleeps } = await cli(["--watch-open", "--wait", "1200"], w, {
+			onSleep: (index) => {
+				if (index === 2) pr.sha = newSha;
+			},
+		});
+		// First head seen at 0 s, the new one at 180 s: 10 minutes later is 780 s
+		// -> the first 90 s poll at or after it is 810 s = 9 sleeps.
+		expect(sleeps).toHaveLength(9);
+		expect(lines[0]).toContain(`@${newSha.slice(0, 9)}`);
+	});
+
 	it("reaches the re-arm text under --wait for a head with no check suite, and stays quiet on a one-shot read", async () => {
 		const pr: PrFixture = {
 			number: 3679,
@@ -1156,7 +1197,24 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 			jobs: [unit],
 		});
 		await cli(["--watch-open", "--state-file", file], w);
-		expect(readdirSync(dir)).toEqual(["state.json"]);
+		expect(existsSync(`${file}.${process.pid}.tmp`)).toBe(false);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+			"3688": `${shaOf(3688)}:failed`,
+		});
+	});
+
+	it("replaces the state file rather than writing through it (a hard link keeps its old content)", async () => {
+		const { unit, runs } = failedRuns();
+		const file = stateFile();
+		const other = `${file}.other`;
+		writeFileSync(other, "keep");
+		linkSync(other, file);
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+		});
+		await cli(["--watch-open", "--state-file", file], w);
+		expect(readFileSync(other, "utf8")).toBe("keep");
 		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
 			"3688": `${shaOf(3688)}:failed`,
 		});
