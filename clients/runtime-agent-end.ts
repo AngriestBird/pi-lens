@@ -39,6 +39,7 @@ import { holdFileMutationQueue } from "./file-mutation-queue.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
+import { recordDroppedRead } from "./session-scope.js";
 import {
 	getAutofixPolicyForFile,
 	hasBiomeConfig,
@@ -528,7 +529,7 @@ export async function handleAgentEnd({
 					});
 				if (!nodeFs.existsSync(changedPath)) continue;
 				// #3528: this session's change log, read guard and turn state only.
-				session.guardedWrite(changedPath, () => {
+				const landed = session.guardedWrite(changedPath, () => {
 					recordProjectChange({
 						runtime,
 						cwd: record.turnStateCwd,
@@ -551,7 +552,11 @@ export async function handleAgentEnd({
 						currentSessionId ?? runtime.telemetrySessionId,
 						"pi",
 					);
+					return true;
 				});
+				// #3611 F1: the read guard lost this authorship; count it by reason.
+				if (landed === undefined && !getFlag("no-read-guard"))
+					recordDroppedRead(session, "deferred-autofix");
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -855,7 +860,7 @@ export async function handleAgentEnd({
 				const bookkeepingCwd = record.turnStateCwd;
 				// #3528: this session's change log, read guard, turn state and turn
 				// summary only.
-				session.guardedWrite(filePath, () => {
+				const landed = session.guardedWrite(filePath, () => {
 					recordProjectChange({
 						runtime,
 						cwd: bookkeepingCwd,
@@ -895,7 +900,11 @@ export async function handleAgentEnd({
 							runtime.turnSummary.recordFormat(filePath, { tool });
 						}
 					}
+					return true;
 				});
+				// #3611 F1: the read guard lost this authorship; count it by reason.
+				if (landed === undefined && !getFlag("no-read-guard"))
+					recordDroppedRead(session, "deferred-format");
 			}
 
 			if (result.fileContent) {

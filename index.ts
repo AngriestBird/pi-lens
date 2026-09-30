@@ -74,6 +74,12 @@ import {
 	resolveReadGuardStartState,
 	stashForkHandoff,
 } from "./clients/read-guard-branch.js";
+import {
+	beginScope,
+	logScopeTransition,
+	retireScope,
+	type SessionScope,
+} from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import { registerMutationBridge } from "./clients/mutation-bridge.js";
 import {
@@ -758,6 +764,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// misclassify its context/message_end/shutdown as primary. Closure ownership
 	// avoids a shared mutable "last session" race between sibling activations.
 	let ownedSessionRole: "primary" | "concurrent-secondary" | undefined;
+	// #3611: the session scope THIS activation serves, set once at its
+	// session_start and retired at its session_shutdown. Activation equals
+	// session (pi re-runs this factory on every transition except /tree).
+	let scope: SessionScope | undefined;
 	const classifyOwnedSessionEmission = (
 		ctx: unknown,
 		sessionId: string | undefined,
@@ -2236,6 +2246,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 								// best-effort observability — never fail session_start
 							});
 						}
+						// #3611: a secondary's own scope. The coordinator, and so the
+						// primary's generation, stays untouched (#473).
+						scope = beginScope({ role: "secondary" });
+						logScopeTransition(scope, {
+							transition: "start",
+							reason: sessionReason,
+							sessionId: stableSessionId,
+							cwd: sessionStartCwd ?? runtime.projectRoot,
+						});
 						return;
 					}
 
@@ -2513,6 +2532,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionId: stableSessionId,
 						reason: sessionReason,
 					});
+					// #3611: handleSessionStart's resetForSession began this session's
+					// scope before its first await.
+					scope = runtime.sessionScope;
+					logScopeTransition(scope, {
+						transition: "start",
+						reason: sessionReason,
+						sessionId: stableSessionId,
+						cwd: ctx.cwd ?? process.cwd(),
+					});
 
 					// Lifecycle-aware widget state (#190). The "should I rehydrate" signal is
 					// NOT the reason — it's whether a persisted snapshot exists for this
@@ -2731,6 +2759,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 						kept: retained.kept,
 						dropped: retained.dropped,
 						branch,
+						cwd: ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
+					});
+					// #3611: retainBranch moved the scope's branch epoch.
+					logScopeTransition(runtime.sessionScope, {
+						transition: "tree",
+						reason: "tree",
+						sessionId: runtime.telemetrySessionId,
 						cwd: ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
 					});
 				} catch (treeErr) {
@@ -3721,6 +3756,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 		dbg(`agent_settled registration failed (older pi host?): ${registerErr}`);
 	}
 
+	// #3611: retire this activation's scope once, with pi's shutdown reason.
+	const retireOwnScope = (
+		reason: string | undefined,
+		sessionId: string | undefined,
+	): void => {
+		if (!scope || !retireScope(scope, reason ?? "shutdown")) return;
+		logScopeTransition(scope, {
+			transition: "shutdown",
+			reason: scope.retiredBy(),
+			sessionId,
+			cwd: runtime.projectRoot,
+		});
+	};
+
 	// --- Session shutdown: release all handles so subagent processes exit cleanly ---
 	// The LSP idle-reset timer (240s) is unref'd but we cancel it explicitly here
 	// so it does not fire after shutdown. resetLSPService shuts down any live clients.
@@ -3793,6 +3842,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// Best-effort observability bookkeeping — a stale ctx or an
 				// unresolvable path must never break teardown.
 			}
+			// #3611: only this secondary's own scope retires.
+			retireOwnScope(
+				(event as { reason?: string } | undefined)?.reason,
+				stableSessionId,
+			);
 			dbg(
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);
@@ -3872,6 +3926,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// process from exiting (the #1097 lesson: what survives IS the leak).
 		// No-op unless PI_LENS_DEBUG_HANDLES=1.
 		dumpActiveHandles("session_shutdown");
+		// #3611: last, so nothing above runs under a retired scope. Every
+		// handle this session issued stops being current (design §3.4).
+		retireOwnScope(shutdownReason, stableSessionId);
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

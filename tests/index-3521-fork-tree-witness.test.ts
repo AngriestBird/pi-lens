@@ -963,3 +963,122 @@ describe("#3521 a resumed session keeps only its branch's reads", () => {
 		});
 	});
 });
+
+/** The `session_scope_transition` rows (#3611), in write order. */
+async function scopeTransitionRows(): Promise<Record<string, unknown>[]> {
+	await flushLatencyLog();
+	const text = fs.existsSync(getLatencyLogPath())
+		? fs.readFileSync(getLatencyLogPath(), "utf8")
+		: "";
+	return text
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter((row) => row.phase === "session_scope_transition")
+		.map((row) => row.metadata as Record<string, unknown>);
+}
+
+/**
+ * #3611 acceptance: one `session_scope_transition` row per transition,
+ * carrying `evaluationOrdinal`, through pi's real runtime. The recurrence:
+ * a transition that begins or retires a scope without a row leaves N3's
+ * residence question (does `/reload` re-evaluate the entry?) and every
+ * lifecycle straddle unreadable from `latency.log`.
+ */
+describe("#3611 one session_scope_transition row per transition", () => {
+	it("writes one row per start, /tree, /fork, /new and quit, each start on a fresh ticket naming its predecessor", async () => {
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		const c = conversation(runtime);
+		const u1 = c.user("prompt 1");
+		c.done();
+		c.user("prompt 2");
+		c.done();
+		await c.S().navigateTree(u1);
+		const y = c.user("prompt 2 on branch Y");
+		c.done();
+		await runtime.fork(y);
+		await runtime.newSession();
+		await runtime.dispose();
+		runtimes.splice(runtimes.indexOf(runtime), 1);
+
+		const rows = await scopeTransitionRows();
+		expect(rows.map((row) => [row.transition, row.reason, row.role])).toEqual([
+			["start", "startup", "primary"],
+			["tree", "tree", "primary"],
+			["shutdown", "fork", "primary"],
+			["start", "fork", "primary"],
+			["shutdown", "new", "primary"],
+			["start", "new", "primary"],
+			["shutdown", "quit", "primary"],
+		]);
+		for (const row of rows) {
+			expect(row.evaluationOrdinal).toEqual(expect.any(Number));
+			expect(row.evaluationOrdinal as number).toBeGreaterThan(0);
+		}
+		// One coordinator (pi re-ran the factory, not the module).
+		expect(new Set(rows.map((row) => row.coordinatorId)).size).toBe(1);
+		const starts = rows.filter((row) => row.transition === "start");
+		expect(new Set(starts.map((row) => row.scopeId)).size).toBe(3);
+		expect(starts[1]?.parentScopeId).toBe(starts[0]?.scopeId);
+		expect(starts[2]?.parentScopeId).toBe(starts[1]?.scopeId);
+		// A shutdown retires the scope its activation started; /tree moves it.
+		expect(rows[1]).toMatchObject({
+			scopeId: starts[0]?.scopeId,
+			branchEpoch: 1,
+		});
+		expect(rows[2]?.scopeId).toBe(starts[0]?.scopeId);
+		expect(rows[4]?.scopeId).toBe(starts[1]?.scopeId);
+		expect(rows[6]?.scopeId).toBe(starts[2]?.scopeId);
+	});
+
+	it("writes a shutdown and a start row for resume and /reload, the reload start on a fresh ticket", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		c.done();
+		const firstFile = c.S().sessionManager.getSessionFile()!;
+		await runtime.newSession();
+		await runtime.switchSession(firstFile);
+		// pi's reload emits session_start only for a session with host
+		// bindings (the interactive mode's). Binding re-emits the resume start,
+		// which the #2890 gate suppresses: a duplicate draws no ticket.
+		await runtime.session.bindExtensions({ onError: () => {} });
+		await runtime.session.reload();
+
+		const rows = await scopeTransitionRows();
+		expect(rows.map((row) => [row.transition, row.reason])).toEqual([
+			["start", "startup"],
+			["shutdown", "new"],
+			["start", "new"],
+			["shutdown", "resume"],
+			["start", "resume"],
+			["shutdown", "reload"],
+			["start", "reload"],
+		]);
+		const starts = rows.filter((row) => row.transition === "start");
+		expect(new Set(starts.map((row) => row.scopeId)).size).toBe(4);
+		expect(starts[3]?.parentScopeId).toBe(starts[2]?.scopeId);
+	});
+
+	it("gives a concurrent secondary its own scope and retires only that scope at its shutdown", async () => {
+		const primaryRuntime = await startRuntime(SessionManager.inMemory(cwd));
+		const secondaryRuntime = await startRuntime(SessionManager.inMemory(cwd));
+		await secondaryRuntime.dispose();
+		runtimes.splice(runtimes.indexOf(secondaryRuntime), 1);
+
+		const rows = await scopeTransitionRows();
+		expect(rows.map((row) => [row.transition, row.role])).toEqual([
+			["start", "primary"],
+			["start", "secondary"],
+			["shutdown", "secondary"],
+		]);
+		expect(rows[1]?.scopeId).not.toBe(rows[0]?.scopeId);
+		expect(rows[2]?.scopeId).toBe(rows[1]?.scopeId);
+		// The primary's scope is still live: its edits still go through.
+		const primary = conversation(primaryRuntime);
+		const b = fixture("b.conf", 6);
+		primary.user("prompt");
+		await primary.read("call_read_b", b);
+		expect(await primary.editLine("post_b", b, 2, "Y", false)).toBe("ALLOW");
+	});
+});
