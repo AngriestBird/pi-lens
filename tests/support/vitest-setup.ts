@@ -7,7 +7,10 @@ import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
-import { _settleRegistryMutationsForTests } from "../../clients/instance-registry.js";
+// The tail's dependency leaf, never `instance-registry.js`: this file loads
+// before every test file's `vi.mock`, so whatever it imports is cached before
+// the mock registers (#3703 round 1: 56 files red).
+import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
@@ -1091,9 +1094,44 @@ export function runTeardownWithMemReport(
 	}
 }
 
-/** Join the real registry tail before a worker teardown can be interrupted. */
-export async function settleRegistryMutationsBeforeTeardown(): Promise<void> {
-	await _settleRegistryMutationsForTests();
+// Captured when the worker loads this file, before the test file can install
+// fake timers: the bound below must still fire in a file that leaves them on.
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+
+/**
+ * How long the teardown waits for the registry tail (#3703 round 2): one
+ * lease-waiting lock (`LOCK_WAIT_THROUGH_LEASE_MS`, 5.5 s) plus 1 s, so a
+ * queued op waiting out a peer's lease still lands. It stays under Vitest's
+ * default 10 s hook timeout, so the checks after it keep 3.5 s.
+ */
+export const REGISTRY_SETTLE_BOUND_MS = 6_500;
+
+/**
+ * Join the real registry tail before the fork is SIGTERM'd (#3617), for at
+ * most {@link REGISTRY_SETTLE_BOUND_MS}. A file that leaves fake timers on,
+ * or mocks a write that never settles, keeps a queued op pending forever; an
+ * unbounded join timed the hook out and skipped every check after it. On
+ * give-up it writes one stderr line and returns.
+ */
+async function settleRegistryMutationsBeforeTeardown(): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const gaveUp = new Promise<true>((resolve) => {
+		timer = realSetTimeout(() => resolve(true), REGISTRY_SETTLE_BOUND_MS);
+	});
+	try {
+		const timedOut = await Promise.race([
+			_settleRegistryMutationsForTests().then(() => false),
+			gaveUp,
+		]);
+		if (timedOut) {
+			process.stderr.write(
+				`[registry-settle] a registry mutation was still pending after ${REGISTRY_SETTLE_BOUND_MS}ms (fake timers left on, or a write that never settles); teardown continues without it (#3617)\n`,
+			);
+		}
+	} finally {
+		realClearTimeout(timer);
+	}
 }
 
 afterAll(async () => {
@@ -1101,7 +1139,8 @@ afterAll(async () => {
 		// #3617: Vitest SIGTERMs fork workers without a Node `exit` event. Join
 		// the real registry mutation tail before teardown, including the quiet-
 		// window heartbeat's queued updateHeartbeat, so no live worker's lock
-		// generation is left behind for the next file to take over.
+		// generation is left behind for the next file to take over. Bounded,
+		// and it never throws, so the checks below always run.
 		await settleRegistryMutationsBeforeTeardown();
 		runTeardownWithMemReport(
 			[checkKillGuard, checkTmpHygiene, checkBackstop],
