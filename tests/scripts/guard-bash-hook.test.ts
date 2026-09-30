@@ -2367,6 +2367,7 @@ describe("scripts/hooks/guard-bash.mjs -- a redirection `&` is not a segment sep
 describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680)", () => {
 	it("allows a node file outside this repository, including after cd", () => {
 		const otherRepo = mkdtempSync(join(tmpdir(), "pi-lens-3680-other-repo-"));
+		const foreignDir = mkdtempSync(join(tmpdir(), "pi-lens-3680-foreign-dir-"));
 		try {
 			mkdirSync(join(otherRepo, "dist"));
 			gitExecFileSync("git", ["init", "--quiet", otherRepo], {
@@ -2379,12 +2380,42 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 				runHook(`cd ${otherRepo} && node dist/cli.js --help`, {}, repoRoot)
 					.status,
 			).toBe(0);
+			expect(
+				runHook(
+					`cd ${foreignDir} && node dist/cli.js --help`,
+					BASE_ENV,
+					repoRoot,
+				).status,
+			).toBe(0);
 		} finally {
 			rmSync(otherRepo, { recursive: true, force: true });
+			rmSync(foreignDir, { recursive: true, force: true });
 		}
 	});
 
-	it("still denies a runtime file in this linked worktree", () => {
-		expect(runHook("node dist/cli.js --help", {}, repoRoot).status).toBe(2);
+	it("denies a runtime file in this checkout, including a plain clone", () => {
+		expect(
+			runHook(
+				`node ${join(repoRoot, "clients", "probe.mjs")}`,
+				BASE_ENV,
+				repoRoot,
+			).status,
+		).toBe(2);
+	});
+
+	it("denies a runtime file reached through a symlink", () => {
+		const linkRoot = mkdtempSync(join(tmpdir(), "pi-lens-3680-link-"));
+		try {
+			symlinkSync(join(repoRoot, "clients"), join(linkRoot, "clients"));
+			expect(
+				runHook(
+					`node ${join(linkRoot, "clients", "probe.mjs")}`,
+					BASE_ENV,
+					repoRoot,
+				).status,
+			).toBe(2);
+		} finally {
+			rmSync(linkRoot, { recursive: true, force: true });
+		}
 	});
 });

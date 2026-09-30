@@ -1448,12 +1448,29 @@ describe("PR body lint (#1844)", () => {
 				titlePath,
 				"ci(test): verify local body lint (refs #2807)\n",
 			);
+			mkdirSync(join(fixtureCwd, "clients"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "clients", "ref.ts"),
+				"const local = true;\n",
+			);
+			const localBody = `${body}\n\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst local = true;\n\`\`\``;
+			writeFileSync(
+				bodyPath,
+				`${localBody}\n\n### Test assessment\nThe targeted test covers the local CLI.`,
+			);
 			for (const args of [
 				[checker, "--lint-local", bodyPath],
 				[checker, "--body", bodyPath, "--title", titlePath],
 			]) {
 				execFileSync(process.execPath, args, { cwd: fixtureCwd });
 			}
+			expect(() =>
+				execFileSync(
+					process.execPath,
+					[checker, "--lint-local", bodyPath, "--ref", "HEAD"],
+					{ cwd: fixtureCwd, stdio: "pipe" },
+				),
+			).toThrow();
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
@@ -2537,6 +2554,7 @@ describe("local lint parity", () => {
 		});
 		expect(missing.valid).toBe(false);
 		expect(missing.errors.join(" ")).toContain("#3680");
+		expect(missing.errors.join(" ")).toContain("Alternatively, use refs #3680");
 	});
 
 	it("resolves path citations from --ref instead of the working tree (#3681)", () => {
@@ -2544,8 +2562,9 @@ describe("local lint parity", () => {
 			`${body}\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst fromRef = true;\n\`\`\``,
 			{
 				ref: "release-ref",
-				git: (args: string[]) => {
+				git: (args: string[], options?: { maxBuffer?: number }) => {
 					expect(args).toEqual(["show", "release-ref:clients/ref.ts"]);
+					expect(options?.maxBuffer).toBe(16 * 1024 * 1024);
 					return "const fromRef = true;";
 				},
 			},

@@ -142,12 +142,14 @@ import {
 	readlinkSync,
 	readSync,
 	realpathSync,
+	statSync,
 	writeSync,
 } from "node:fs";
 import {
 	dirname,
 	isAbsolute,
 	join,
+	basename,
 	relative,
 	resolve,
 	sep as SEP,
@@ -1358,11 +1360,10 @@ function repositoryIdentity(root) {
 	if (!root) return undefined;
 	const gitEntry = join(root, ".git");
 	try {
-		if (readFileSync(gitEntry, "utf8").startsWith("gitdir: ")) {
-			const gitDir = resolve(
-				root,
-				readFileSync(gitEntry, "utf8").slice(8).trim(),
-			);
+		if (statSync(gitEntry).isDirectory()) return realpathSync(gitEntry);
+		const gitEntryText = readFileSync(gitEntry, "utf8");
+		if (gitEntryText.startsWith("gitdir: ")) {
+			const gitDir = resolve(root, gitEntryText.slice(8).trim());
 			return realpathSync(dirname(dirname(gitDir)));
 		}
 		return realpathSync(gitEntry);
@@ -1379,19 +1380,49 @@ function repositoryIdentity(root) {
  * relative `dist/` spelling.
  */
 function loadsPiLensRuntime(fileOrSpecifier, cwd, initialIdentity) {
-	if (!cwd) return !isAbsolute(fileOrSpecifier);
-	const loaded = isAbsolute(fileOrSpecifier)
+	const loadedSpelling = isAbsolute(fileOrSpecifier)
 		? resolve(fileOrSpecifier)
-		: resolve(cwd, fileOrSpecifier);
+		: cwd
+			? resolve(cwd, fileOrSpecifier)
+			: resolve(fileOrSpecifier);
+	let loaded;
+	try {
+		loaded = realpathSync(loadedSpelling);
+	} catch {
+		try {
+			loaded = join(
+				realpathSync(dirname(loadedSpelling)),
+				basename(loadedSpelling),
+			);
+		} catch {
+			loaded = loadedSpelling;
+		}
+	}
 	const loadedRoot = repositoryRoot(loaded);
 	const loadedIdentity = repositoryIdentity(loadedRoot);
-	if (loadedIdentity && initialIdentity)
-		return loadedIdentity === initialIdentity;
-	if (loadedRoot && initialIdentity) return false;
-	// Synthetic cwd fixtures cannot carry git metadata. Preserve the existing
-	// conservative relative-path guard there; absolute paths remain safe unless
-	// they identify this repository or one of its worktrees.
-	return !isAbsolute(fileOrSpecifier);
+	const referenceIdentity =
+		initialIdentity ?? repositoryIdentity(repositoryRoot(process.cwd()));
+	if (loadedIdentity && referenceIdentity)
+		return loadedIdentity === referenceIdentity;
+	if (loadedRoot && referenceIdentity) return false;
+	if (!isAbsolute(fileOrSpecifier)) {
+		// The test harness and hook callers may carry a synthetic cwd. A path
+		// relative to a cwd that is not present cannot establish ownership, so
+		// retain the conservative denial; a real directory outside a repository
+		// is the reviewed #3680 allow case.
+		try {
+			if (!cwd) return true;
+			if (cwd && !repositoryRoot(realpathSync(cwd))) return false;
+		} catch {
+			return true;
+		}
+	}
+	// A relative path from an unknown cwd stays conservative. For an absolute
+	// path, the realpath/identity checks above are authoritative when cwd is
+	// known; an absent cwd remains conservative through the process-cwd
+	// reference identity, while a known foreign cwd must not deny an unrelated
+	// path whose repository identity could not be read.
+	return !isAbsolute(fileOrSpecifier) || !cwd;
 }
 
 /**
