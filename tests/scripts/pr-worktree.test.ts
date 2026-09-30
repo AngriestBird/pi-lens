@@ -292,7 +292,7 @@ describe("pr-worktree planner (pure)", () => {
 			[
 				"detached commits",
 				{ detachedCommits: ["abc1234 lost work"] },
-				/detached HEAD[^]*abc1234 lost work[^]*git branch <name> HEAD/,
+				/detached HEAD[^]*abc1234 lost work[^]*git switch -c <name>/,
 			],
 			[
 				"detached check failed",
@@ -747,7 +747,7 @@ describe("pr-worktree CLI close detached HEAD", () => {
 		expect(result.status).toBe(1);
 		const stderr = result.stderr.join("\n");
 		expect(stderr).toContain("detached work");
-		expect(stderr).toContain("git branch <name> HEAD");
+		expect(stderr).toContain("git switch -c <name>");
 		expect(fixture.git(["worktree", "list", "--porcelain"])).toContain(
 			worktree,
 		);

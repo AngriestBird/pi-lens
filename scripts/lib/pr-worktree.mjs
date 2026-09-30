@@ -239,7 +239,7 @@ export function deriveClosePlan({
 			error:
 				`refusing ${worktreePath}: detached HEAD holds commits no remote has:\n` +
 				`${detachedCommits.join("\n")}\n` +
-				"keep them with `git branch <name> HEAD` inside the tree, or push them",
+				"keep them with `git switch -c <name>` inside the tree, or push them",
 		};
 	}
 	if (nodeModulesKind === "directory") {
