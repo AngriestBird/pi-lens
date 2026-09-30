@@ -2435,14 +2435,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #3525: an edit the guard passed over a moved FileTime leaves it moved;
 	// #3524: a write's creation read is the `content` it executed. Taken here,
 	// before the debounce, which the attribution does not survive.
-	const executedContent = (event.input as { content?: unknown } | undefined)
-		?.content;
+	// Only a write's tool_call notes a pending creation, so only a write's
+	// `content` is ever read.
+	const executedContent = (event.input as { content?: unknown }).content;
 	const ownWriteStamp: OwnWriteStamp = deps._ownWriteStamp ?? {
 		stampFileTime: attribution?.fileTimeStale !== true,
-		...(mutation.kind === "write" &&
-			typeof executedContent === "string" && {
-				writtenContent: executedContent,
-			}),
+		...(typeof executedContent === "string" && {
+			writtenContent: executedContent,
+		}),
 	};
 
 	// Must happen before debounce admission: latestDeps intentionally retains only
