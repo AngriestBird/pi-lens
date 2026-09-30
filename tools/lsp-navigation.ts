@@ -765,17 +765,14 @@ function captureRenameExpectedContent(
 			expected.set(realPath, targetContent);
 			continue;
 		}
-		const sent = lspService.getTrackedContentHash(diskPath, cwd);
-		if (sent === undefined) {
+		// A file no client tracks reports no send, which never matches the disk.
+		if (
+			lspService.getTrackedContentHash(diskPath, cwd) !==
+			hashDiagnosticContent(content)
+		) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
-				"the language server holds no tracked copy of it, so the edit cannot be checked against the bytes it was computed from",
-			);
-		}
-		if (sent !== hashDiagnosticContent(content)) {
-			refuseStaleWorkspaceEdit(
-				diskPath,
-				"it changed after the language server last saw it",
+				"the language server's last-sent copy of it is missing or differs from the disk, so the edit cannot be checked against the bytes it was computed from",
 			);
 		}
 		expected.set(realPath, content);

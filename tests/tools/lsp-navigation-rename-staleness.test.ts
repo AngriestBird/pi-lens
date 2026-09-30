@@ -275,6 +275,44 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(staleRows()).toEqual([]);
 	});
 
+	it("a file the edit creates is not content-checked and is written", async () => {
+		const created = path.join(env.tmpDir, "c.ts");
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			// The created file cannot be tracked; only the target exists.
+			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			rename: async () => ({
+				documentChanges: [
+					{ kind: "create", uri: pathToFileURL(created).href },
+					{
+						textDocument: { uri: pathToFileURL(created).href, version: null },
+						edits: [
+							{
+								range: {
+									start: { line: 0, character: 0 },
+									end: { line: 0, character: 0 },
+								},
+								newText: "export {};\n",
+							},
+						],
+					},
+					{
+						textDocument: { uri: pathToFileURL(fileA).href, version: null },
+						edits: valueEdit(fileA).changes[pathToFileURL(fileA).href],
+					},
+				],
+			}),
+		});
+
+		const result = await runRename();
+
+		expect(result.isError).toBeUndefined();
+		expect(fs.readFileSync(created, "utf8")).toBe("export {};\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("let = 1;\n");
+		expect(staleRows()).toEqual([]);
+	});
+
 	it("an agent edit between an empty first answer and the retry does not refuse a valid edit", async () => {
 		// The cold-server path: the first answer is empty, the tool re-opens the
 		// target (sending the bytes now on disk) and asks again. The retried
