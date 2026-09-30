@@ -389,6 +389,11 @@ describe("importFactProvider — moduleType of a dynamic import (#3780)", () => 
 		["another object's .exports is not cjs", `x.exports = 1;`, "unknown"],
 		["another module property is not cjs", `module.id;`, "unknown"],
 		[
+			"a namespace named module.exports is not cjs",
+			`namespace module.exports {}`,
+			"unknown",
+		],
+		[
 			"a require call marks the file cjs",
 			`const r = require("./r.js");`,
 			"cjs",
