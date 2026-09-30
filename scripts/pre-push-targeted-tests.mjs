@@ -352,9 +352,8 @@ const LOCK_TIMEOUT_RE = /timed out after \d+ms waiting for test-suite lock/;
 // buffer is only needed to tell "the shared machine-wide lock timed out"
 // (with-test-lock.mjs's own message, PI_LENS_TEST_LOCK_TIMEOUT_MS in
 // .husky/pre-push) apart from "the tests actually failed". A lock timeout
-// must let the push proceed (the hook is a convenience layer, CI is
-// authoritative, and a blocked push queue on a shared machine is worse than
-// a skipped local run); a real test failure must still block the push.
+// fails the push unless the named opt-out is explicit; a real test failure
+// always blocks the push.
 function runTargetedTests(selected) {
 	return new Promise((resolve) => {
 		const child = spawn(
@@ -370,11 +369,11 @@ function runTargetedTests(selected) {
 			stderrBuffer += chunk.toString();
 		});
 		child.on("error", (error) => {
-			resolve({ code: 1, timedOut: false, error });
+			resolve({ code: 1, timedOut: false, error, stderr: stderrBuffer });
 		});
 		child.on("close", (code) => {
 			const timedOut = code !== 0 && LOCK_TIMEOUT_RE.test(stderrBuffer);
-			resolve({ code: code ?? 1, timedOut });
+			resolve({ code: code ?? 1, timedOut, stderr: stderrBuffer });
 		});
 	});
 }
@@ -485,18 +484,31 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
-	const { code, timedOut, error } = await runTargetedTests(selected);
+	const { code, timedOut, error, stderr } = await runTargetedTests(selected);
 	if (timedOut) {
-		console.warn(
-			"[pre-push] the shared machine-wide test-suite lock (#1101) timed out; letting the push proceed without the targeted run. CI runs the real gate.",
+		const timeoutMs =
+			Number(process.env.PI_LENS_TEST_LOCK_TIMEOUT_MS) || 120_000;
+		const holder =
+			stderr.match(
+				/timed out after \d+ms waiting for test-suite lock(?::| )\s*(.*)/,
+			)?.[1] ?? "held by an unknown owner";
+		const detail = holder.startsWith("held by") ? holder : `held by ${holder}`;
+		if (process.env.PI_LENS_PREPUSH_LOCK_SKIP === "1") {
+			console.error(
+				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 explicitly opted out of the targeted test run after ${Math.ceil(timeoutMs / 1000)} s; the push is ungated and CI remains the real gate.`,
+			);
+			return 0;
+		}
+		console.error(
+			`[pre-push] test lock busy for ${Math.ceil(timeoutMs / 1000)} s; ${detail}; retry, or run the targeted set with: node scripts/with-test-lock.mjs --shared -- vitest run ${selected.join(" ")}`,
 		);
-		return 0;
+		return 1;
 	}
 	if (error) {
 		console.warn(
-			`[pre-push] could not run targeted tests (${error.message}); letting the push proceed. CI runs the real gate.`,
+			`[pre-push] could not run targeted tests (${error.message}); push blocked.`,
 		);
-		return 0;
+		return 1;
 	}
 	return code;
 }

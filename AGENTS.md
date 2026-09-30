@@ -785,7 +785,9 @@ registered there with the reason a pull request cannot exercise it.
 
 Build after TypeScript changes before tests. The stale-build guard rejects a
 missing or older compiled twin. Run targeted tests while iterating and one
-bounded full suite at the end; CI is authoritative under contention.
+bounded full suite at the end; pre-push fails closed when its machine-wide test
+lock is busy, unless `PI_LENS_PREPUSH_LOCK_SKIP=1` explicitly records the
+opt-out; CI is authoritative only after that visible decision.
 
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`

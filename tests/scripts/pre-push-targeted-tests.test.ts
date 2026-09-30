@@ -1,8 +1,5 @@
-// flake-shape: real-process-spawn — the subject is the pre-push hook's own
-// contract with git: the stdin ref lines git writes, and the script's
-// deletion-only early exit and range union (#3661). The main-level witness
-// runs the real script over a real git fixture; an in-process call cannot
-// see the CLI's exit status or its build/test skip.
+// flake-shape: raw-timer-wait — a live lock-holder process must be given a
+// real scheduling window to publish its lock before the real hook observes it.
 /**
  * Tests for scripts/pre-push-targeted-tests.mjs's selection logic (#1804
  * review round 1, findings F1/F6/F7).
@@ -23,7 +20,7 @@
  * never touches the real `tests/`/`clients/` trees.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -510,7 +507,7 @@ describe("selectTargetedTests — no-match fallback (F7)", () => {
 	});
 });
 
-describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)", () => {
+describe(".husky hooks — pre-push lock admission (#3717)", () => {
 	it("pre-commit formats only staged files through the pinned binary (#3426)", () => {
 		const hook = fs.readFileSync(
 			path.join(repoRoot, ".husky/pre-commit"),
@@ -539,18 +536,67 @@ describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)",
 		},
 	);
 
-	it.each(["1", "true"])(
-		"pre-push exits 0 and skips without running the targeted-test script when PI_LENS_SKIP_HOOKS=%s",
-		(value) => {
-			const result = spawnSync("sh", [".husky/pre-push"], {
-				cwd: repoRoot,
-				env: { ...process.env, PI_LENS_SKIP_HOOKS: value },
-				encoding: "utf8",
-				input: "",
-			});
+	it("pre-push does not honor the broad PI_LENS_SKIP_HOOKS bypass", () => {
+		const hook = fs.readFileSync(
+			path.join(repoRoot, ".husky/pre-push"),
+			"utf8",
+		);
+		expect(hook).not.toContain("PI_LENS_SKIP_HOOKS");
+	});
 
-			expect(result.status).toBe(0);
-			expect(result.stdout).toContain("[pre-push] skipped");
+	it.each([false, true])(
+		"pre-push lock contention is %s only with the named opt-out",
+		async (optOut) => {
+			// #3717 recurrence: a live machine-wide lock timed out, the targeted
+			// run was skipped, and pre-push exited 0 without an explicit decision.
+			const home = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-prepush-lock-"),
+			);
+			const holder = spawn(
+				process.execPath,
+				[
+					"-e",
+					"const fs=require('node:fs'); const path=require('node:path'); const home=process.env.PI_LENS_HOME; fs.mkdirSync(home,{recursive:true}); fs.writeFileSync(path.join(home,'test-suite.lock'),JSON.stringify({pid:process.pid,startedIso:new Date().toISOString()})); setInterval(()=>{},1000);",
+				],
+				{ env: { ...process.env, PI_LENS_HOME: home }, stdio: "ignore" },
+			);
+			try {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				const head = String(
+					gitExecFileSync(["rev-parse", "HEAD"], {
+						cwd: repoRoot,
+						encoding: "utf8",
+					}),
+				).trim();
+				const base = String(
+					gitExecFileSync(["rev-parse", "HEAD^"], {
+						cwd: repoRoot,
+						encoding: "utf8",
+					}),
+				).trim();
+				const result = spawnSync("sh", [".husky/pre-push"], {
+					cwd: repoRoot,
+					env: {
+						...process.env,
+						PI_LENS_HOME: home,
+						PI_LENS_TEST_LOCK_TIMEOUT_MS: "50",
+						PI_LENS_TEST_LOCK_POLL_MS: "10",
+						...(optOut ? { PI_LENS_PREPUSH_LOCK_SKIP: "1" } : {}),
+					},
+					encoding: "utf8",
+					input: `refs/heads/test ${head} refs/heads/test ${base}\n`,
+				});
+				if (optOut) {
+					expect(result.status).toBe(0);
+					expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
+				} else {
+					expect(result.status).not.toBe(0);
+					expect(result.stderr).toContain("test lock busy for");
+				}
+			} finally {
+				if (!holder.killed) holder.kill("SIGTERM");
+				fs.rmSync(home, { recursive: true, force: true });
+			}
 		},
 	);
 });

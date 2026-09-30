@@ -161,6 +161,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// timer against a real OS pipe's backpressure (no fake clock drains a
 	// kernel buffer), and the note-write retry cap and the hang/exit-code
 	// bound both wait on a real, separately spawned process's real exit.
+	"raw-timer-wait:scripts/pre-push-targeted-tests.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"a live lock-holder process must publish through the real OS scheduler before the real pre-push hook observes contention; a fake clock cannot prove this cross-process race",
+	},
 	"raw-timer-wait:scripts/with-memory-watch.test.ts": {
 		detector: "raw-timer-wait",
 		reason:
@@ -465,11 +470,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real hook pipes git through xargs into the pinned oxfmt; the exit-123 refusal is a process-boundary fact",
-	},
-	"real-process-spawn:scripts/pre-push-targeted-tests.test.ts": {
-		detector: "real-process-spawn",
-		reason:
-			"git's pre-push stdin and the hook script's exit/skip contract are the subject; the union witness needs a real git fixture",
 	},
 	"real-process-spawn:scripts/prune-agent-worktrees.test.ts": {
 		detector: "real-process-spawn",
