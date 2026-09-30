@@ -20,7 +20,7 @@ import {
 	dispatchLintWithResult,
 } from "../dispatch/integration.js";
 import { FactStore } from "../dispatch/fact-store.js";
-import type { Diagnostic } from "../dispatch/types.js";
+import type { Diagnostic, DispatchResult } from "../dispatch/types.js";
 import { detectFileKind } from "../file-kinds.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
 import { getLSPService } from "../lsp/index.js";
@@ -368,6 +368,29 @@ export interface AnalyzeFileOptions {
 	ownerId?: string;
 }
 
+/**
+ * #3752: the serialized `diagnostics` list must contain one entry for every
+ * count in `counts`. `DispatchResult.diagnostics` is the dispatch's full
+ * visible set, but `DispatchResult.warnings` is NOT a strict subset of it: the
+ * dispatcher appends its synthetic coverage notice (`coverage-unavailable:*` /
+ * `coverage-partial:*`) to `warnings` — and to the rendered `output` — AFTER
+ * `visibleDiagnostics` is finalized, so that entry is counted by
+ * `counts.warnings`/`counts.advisories` while `result.diagnostics` never
+ * carries it. A Go/PHP file with no toolchain on the host therefore reported
+ * `counts.warnings: 1` beside `diagnostics: []`, with no way to see what the
+ * warning was. Merge the warnings bucket in, deduping by the dispatch `id`
+ * (Diagnostic.id is unique per dispatch), so `counts.diagnostics` and the
+ * listed entries agree in both directions.
+ */
+function listDiagnosticsForCounts(result: DispatchResult): Diagnostic[] {
+	if (result.warnings.length === 0) return result.diagnostics;
+	const listedIds = new Set(result.diagnostics.map((d) => d.id));
+	const extras = result.warnings.filter((w) => !listedIds.has(w.id));
+	return extras.length === 0
+		? result.diagnostics
+		: [...result.diagnostics, ...extras];
+}
+
 function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
 	return {
 		line: diagnostic.line,
@@ -571,6 +594,9 @@ export async function analyzeFile(
 	}
 
 	const latencyReport = result.latencyReport;
+	// #3752: the listed set, not just `result.diagnostics`, so every count above
+	// has a matching entry (see {@link listDiagnosticsForCounts}).
+	const listedDiagnostics = listDiagnosticsForCounts(result);
 
 	const lspRunner = latencyReport?.runners.find(
 		(runner) => runner.runnerId === "lsp",
@@ -597,7 +623,7 @@ export async function analyzeFile(
 		durationMs,
 		hasBlockers: result.hasBlockers,
 		counts: {
-			diagnostics: result.diagnostics.length,
+			diagnostics: listedDiagnostics.length,
 			blockers: result.blockers.length,
 			// #2420: `result.warnings` is the dispatch warnings bucket
 			// (`semantic:"warning"|"none"`), which still carries `hint`/`info`-tier
@@ -608,7 +634,7 @@ export async function analyzeFile(
 			fixed: result.fixed.length,
 		},
 		lsp,
-		diagnostics: result.diagnostics.map(toMcpDiagnostic),
+		diagnostics: listedDiagnostics.map(toMcpDiagnostic),
 		latency: latencyReport
 			? {
 					totalDurationMs: latencyReport.totalDurationMs,
