@@ -1468,6 +1468,21 @@ describe("#3611 F1: a drain write dropped by its retired scope is counted by rea
 		expect(readDrops()).toEqual([]);
 	});
 
+	it("records nothing for a write queued before a /tree and dropped by /reload after it", async () => {
+		// #3611 r2 F1 (review probe A): the record was queued at epoch 0; the
+		// live read guard would refuse its write as a branch move, so its drop
+		// is no false block and must not count as one.
+		runtime.readGuard.retainBranch(new Set());
+		const c = armChild({ write: true });
+		const drain = handleAgentEnd(drainDeps());
+		await c.didRead;
+		retireScope(runtime.sessionScope, "reload");
+		c.openWrite();
+		await drain;
+		expect(staleWriteSubjects()).toEqual([`runtime-session:${filePath}`]);
+		expect(readDrops()).toEqual([]);
+	});
+
 	it("records nothing when the read guard is off", async () => {
 		flags.add("no-read-guard");
 		const c = armChild({ write: true });

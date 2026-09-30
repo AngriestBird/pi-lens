@@ -27,6 +27,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+	containerDeclarationNames,
 	moduleContainerNames,
 	repoRoot,
 } from "../support/session-state-scan.js";
@@ -96,12 +97,18 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * §3.8 item 2.2: one-tab `let`s in `activateExtension`. They die with the
- * activation, which pi replaces on every transition except `/tree`.
+ * §3.8 item 2.2: one-tab `let`s and containers (`const x = new Map()`, a
+ * `clients/` class) in `activateExtension`. They die with the activation,
+ * which pi replaces on every transition except `/tree`. #3611 r2 F3 added
+ * the containers: `astGrepClient` and `enabledLazyTools` joined the pin.
  */
 const ACTIVATION_STATE: Readonly<Record<string, string>> = {
+	astGrepClient:
+		"a per-activation AstGrepClient handle for the tools this factory registers; it holds no conversation facts",
 	contextInjectionEnabled:
 		"the /lens-context-toggle choice; D6 was not approved, so it resets per activation (N6 accepted)",
+	enabledLazyTools:
+		"the lazy tools the config enables, derived once per activation (design B6)",
 	lastSessionStartIdentity:
 		"the #2890 duplicate-start gate, which must be per activation",
 	lensEnabled:
@@ -219,14 +226,18 @@ function liveModuleState(relative: string): string[] {
 	].sort();
 }
 
-function liveActivationLets(): string[] {
+/** One-tab `let`s and containers (`const x = new Map()`) in the factory. */
+function liveActivationState(): string[] {
 	const activation = bodyAfter(
 		stripSource(read("index.ts")),
 		/function activateExtension\s*\(/,
 	);
-	return [...activation.matchAll(/^\tlet\s+([A-Za-z_$][\w$]*)/gm)]
-		.map((match) => match[1])
-		.sort();
+	return [
+		...[...activation.matchAll(/^\tlet\s+([A-Za-z_$][\w$]*)/gm)].map(
+			(match) => match[1],
+		),
+		...containerDeclarationNames(activation, "\t"),
+	].sort();
 }
 
 function liveCoordinatorFields(): Record<string, "reset" | "kept"> {
@@ -237,7 +248,7 @@ function liveCoordinatorFields(): Record<string, "reset" | "kept"> {
 	const reset = bodyAfter(cls, /^\tresetForSession\s*\(/m);
 	const fields = [
 		...cls.matchAll(
-			/^\t(?:(?:private|public|protected|readonly)\s+)*([A-Za-z_$][\w$]*)\s*[:=?!]/gm,
+			/^\t(?:(?:private|public|protected|readonly|static)\s+)*(#?[A-Za-z_$][\w$]*)\s*[:=?!]/gm,
 		),
 	].map((match) => match[1]);
 	return Object.fromEntries(
@@ -300,12 +311,12 @@ describe("session-scope ratchet (#3609 S8)", () => {
 		expect(problems).toEqual([]);
 	});
 
-	it("admits no new activation-closure let without a reason (item 2.2)", () => {
-		const live = liveActivationLets();
-		assertNonEmptyScan("activation-closure lets", live.length, 11);
+	it("admits no new activation-closure let or container without a reason (item 2.2)", () => {
+		const live = liveActivationState();
+		assertNonEmptyScan("activation-closure state", live.length, 13);
 		expect(
 			diffNames(
-				"activateExtension let",
+				"activateExtension state",
 				live,
 				Object.keys(ACTIVATION_STATE).sort(),
 			),

@@ -35,8 +35,13 @@ import {
 	resetObservedMutationNet,
 	settleObservedMutation,
 } from "../../clients/observed-mutation.js";
+import { _seedProcessSingletonCellForTests } from "../../clients/process-singletons.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { beginScope, retireScope } from "../../clients/session-scope.js";
+import {
+	beginScope,
+	nextOrderTurn,
+	retireScope,
+} from "../../clients/session-scope.js";
 import {
 	clearWidgetState,
 	getFileDiagnostics,
@@ -147,6 +152,43 @@ describe("#3611 N4: scope tickets are process-unique", () => {
 		});
 		expect(replayed).toEqual([]);
 		expect(second.sessionGeneration).not.toBe(first.sessionGeneration);
+	});
+});
+
+describe("#3611 r2 F2: another build's registry cell hands over its counters", () => {
+	// getProcessSingleton replaces a cell of another version. Without the
+	// hand-over both counters restart, tickets collide (N4) and the order turn
+	// falls (N3) whenever two builds meet in one process.
+	it("a new coordinator's ticket and order turn stay above a version-mismatched cell's", () => {
+		const first = new RuntimeCoordinator();
+		first.resetForSession();
+		for (let turn = 0; turn < 3; turn += 1) first.beginTurn();
+		// Another build's live cell: same counters, another version.
+		_seedProcessSingletonCellForTests("session-scope.registry", {
+			schema: "pi-lens.process-singletons",
+			version: 999,
+			value: {
+				nextTicket: first.sessionGeneration,
+				orderTurn: first.writeOrderTurn,
+			},
+		});
+
+		const second = new RuntimeCoordinator();
+		second.resetForSession();
+		second.beginTurn();
+
+		expect(second.sessionGeneration).toBeGreaterThan(first.sessionGeneration);
+		expect(second.writeOrderTurn).toBeGreaterThan(first.writeOrderTurn);
+	});
+
+	it("a cell whose counters are not positive integers seeds nothing", () => {
+		_seedProcessSingletonCellForTests("session-scope.registry", {
+			schema: "pi-lens.process-singletons",
+			version: 999,
+			value: { nextTicket: "7", orderTurn: -3 },
+		});
+		expect(beginScope({ role: "primary" }).scopeId).toBe(1);
+		expect(nextOrderTurn()).toBe(1);
 	});
 });
 

@@ -966,6 +966,54 @@ describe("index.ts integration", () => {
 	);
 
 	it(
+		"session_shutdown retires the session's scope even when a teardown step throws (#3611 r2)",
+		async () => {
+			// The recurrence: the retire ran last and unguarded, so a throw from
+			// any teardown step above it left the scope live. After a /reload that
+			// re-evaluated the entry, nothing else ever ends the old scope.
+			vi.doMock("../clients/lsp/index.js", () => ({
+				getLSPService: () => makeLspServiceDouble(),
+				resetLSPService: vi.fn(),
+			}));
+			vi.doMock("../clients/debug-handles.js", () => ({
+				dumpActiveHandles: () => {
+					throw new Error("teardown step failed");
+				},
+			}));
+			const retireScope = vi.fn();
+			vi.doMock("../clients/session-scope.js", async (importActual) => {
+				const actual =
+					await importActual<typeof import("../clients/session-scope.js")>();
+				retireScope.mockImplementation(actual.retireScope);
+				return { ...actual, retireScope };
+			});
+
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			await handlers.session_start?.[0]?.(
+				{},
+				{ cwd: tmpDir, ui: { notify: vi.fn() } },
+			);
+
+			expect(() =>
+				handlers.session_shutdown?.[0]?.({ reason: "quit" }, { cwd: tmpDir }),
+			).toThrow("teardown step failed");
+
+			// The last retire is the shutdown's (the start's resetForSession
+			// retired the coordinator's construction scope first).
+			expect(retireScope).toHaveBeenLastCalledWith(expect.anything(), "quit");
+			const [scope] = retireScope.mock.calls.at(-1) as [
+				{ isLive(): boolean; retiredBy(): string | undefined },
+			];
+			expect(scope.isLive()).toBe(false);
+			expect(scope.retiredBy()).toBe("quit");
+			vi.doUnmock("../clients/session-scope.js");
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
 		"session_shutdown emits the bus-event session-end rollup (S2d gap 5, #1432 review)",
 		async () => {
 			vi.doMock("../clients/lsp/index.js", () => ({

@@ -556,7 +556,11 @@ export async function handleAgentEnd({
 				});
 				// #3611 F1: the read guard lost this authorship; count it by reason.
 				if (landed === undefined && !getFlag("no-read-guard"))
-					recordDroppedRead(session, "deferred-autofix");
+					recordDroppedRead(
+						session,
+						"deferred-autofix",
+						record!.readGuardBranchEpoch,
+					);
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -904,7 +908,11 @@ export async function handleAgentEnd({
 				});
 				// #3611 F1: the read guard lost this authorship; count it by reason.
 				if (landed === undefined && !getFlag("no-read-guard"))
-					recordDroppedRead(session, "deferred-format");
+					recordDroppedRead(
+						session,
+						"deferred-format",
+						record.readGuardBranchEpoch,
+					);
 			}
 
 			if (result.fileContent) {

@@ -68,15 +68,41 @@ const REGISTRY_FAMILY = "session-scope.registry";
 /** Bump when the registry's shape changes. */
 const REGISTRY_VERSION = 1;
 
+interface RegistryCounters {
+	nextTicket: number;
+	orderTurn: number;
+}
+
+/** A counter carried over from another build's cell, or 0 when it has none. */
+function carriedCounter(cell: unknown, field: keyof RegistryCounters): number {
+	const value = (cell as Partial<Record<keyof RegistryCounters, unknown>>)?.[
+		field
+	];
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+		? value
+		: 0;
+}
+
 /**
  * Process-wide, so a second module evaluation continues both counters
- * instead of restarting them (catalog shape 25).
+ * instead of restarting them (catalog shape 25). A cell from another build
+ * (another version) is replaced, but its counters seed the new cell: a
+ * ticket or an order turn never repeats within a process, whichever builds
+ * meet in it (#3611 r2).
  */
-function registry(): { nextTicket: number; orderTurn: number } {
-	return getProcessSingleton(REGISTRY_FAMILY, REGISTRY_VERSION, () => ({
-		nextTicket: 0,
-		orderTurn: 0,
-	}));
+function registry(): RegistryCounters {
+	let seed: RegistryCounters = { nextTicket: 0, orderTurn: 0 };
+	return getProcessSingleton(
+		REGISTRY_FAMILY,
+		REGISTRY_VERSION,
+		() => seed,
+		(previous) => {
+			seed = {
+				nextTicket: carriedCounter(previous, "nextTicket"),
+				orderTurn: carriedCounter(previous, "orderTurn"),
+			};
+		},
+	);
 }
 
 /**
@@ -232,17 +258,25 @@ export function logScopeTransition(
  * lineage fence dropped is a false block when its entry is still on its
  * writer's branch. Such a drop leaves one counted record carrying the scope's
  * retirement reason, so correct `/new` drops can be told from `/reload` and
- * resume false blocks. "Still on the branch" is read from the handle's own
- * capture, never from a live session: with no `/tree` since the capture, the
- * entries the writer held are still on its conversation's branch. When the
- * branch moved, the entry cannot be shown to be on it, and only the fence's
- * own stale-write record stays.
+ * resume false blocks. "Still on the branch" is read from captures, never
+ * from a live session: the write was queued at `writeBranchEpoch`, and with
+ * no `/tree` between that queue and the drop, the entry it credits is still
+ * on its conversation's branch. When the branch moved in between, the entry
+ * cannot be shown to be on it, the live read guard would have refused the
+ * write as a branch move, and only the fence's own stale-write record stays.
  */
-export function recordDroppedRead(handle: LineageHandle, site: string): void {
+export function recordDroppedRead(
+	handle: LineageHandle,
+	site: string,
+	writeBranchEpoch: number,
+): void {
 	const captured = (
 		handle as LineageHandle & { [CAPTURED_SCOPE]?: CapturedScope }
 	)[CAPTURED_SCOPE];
+	// The branch did not move after the drop's capture, nor between the
+	// write's queue and that capture (#3611 r2 F1).
 	if (!captured?.branch.isCurrent()) return;
+	if (writeBranchEpoch !== handle.branchEpoch) return;
 	// A handle whose scope is live and whose branch did not move is current,
 	// so its guard never drops: a caller reaches here only after a retire.
 	const reason = captured.scope.retiredBy();
