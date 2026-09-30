@@ -771,15 +771,12 @@ export const widgetStore = defineSessionStore<PersistedWidgetState>({
 		clearWidgetState();
 		const state = payload as PersistedWidgetState | undefined;
 		if (!state?.files) return;
-		importWidgetState(
-			ctx.savedAt === undefined
-				? state
-				: await dropStaleFiles(state, ctx.savedAt),
-		);
+		// Only a sidecar reaches here (startup, resume), and it carries savedAt.
+		importWidgetState(await dropStaleFiles(state, ctx.savedAt as number));
 	},
 	reset: () => clearWidgetState(),
 	reason:
-		"the diagnostics a conversation's edits produced, which a fork, a resume and a relaunch show again",
+		"the diagnostics a conversation's edits produced, which a resume and a relaunch show again",
 });
 
 export function setSessionLanguages(langs: string[]): void {

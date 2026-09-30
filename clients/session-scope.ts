@@ -425,7 +425,6 @@ export function snapshotSessionStores(
 interface Handoff {
 	reason: StartReason;
 	sessionFile: string | undefined;
-	fromScopeId: number;
 	stores: Record<string, unknown>;
 }
 
@@ -453,12 +452,12 @@ export function stashHandoff(
 		targetSessionFile: string | undefined;
 	},
 ): boolean {
-	const reason = args.reason as StartReason;
-	if (!SOURCES[reason]?.includes("slot")) return false;
+	// `quit` and a missing reason have no successor: they read as `startup`.
+	const reason = toStartReason(args.reason);
+	if (!SOURCES[reason].includes("slot")) return false;
 	handoffSlot().handoff = {
 		reason,
 		sessionFile: args.targetSessionFile ?? args.sessionFile,
-		fromScopeId: scope.scopeId,
 		stores: snapshotSessionStores(scope),
 	};
 	return true;

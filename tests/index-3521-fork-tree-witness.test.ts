@@ -1069,6 +1069,14 @@ describe("#3611 one session_scope_transition row per transition", () => {
 		const starts = rows.filter((row) => row.transition === "start");
 		expect(new Set(starts.map((row) => row.scopeId)).size).toBe(4);
 		expect(starts[3]?.parentScopeId).toBe(starts[2]?.scopeId);
+		// #3612: each start names its hand-off source. No turn ended, so no
+		// sidecar exists; the reload takes the slot its shutdown left.
+		expect(starts.map((row) => row.handoffSource)).toEqual([
+			"none",
+			"none",
+			"none",
+			"slot",
+		]);
 	});
 
 	it("gives a concurrent secondary its own scope and retires only that scope at its shutdown", async () => {

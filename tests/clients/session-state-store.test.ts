@@ -495,14 +495,12 @@ describe("version-1 sidecars still load (#3612)", () => {
 });
 
 /**
- * #3612: the widget as a session store. The recurrences: a fork or resume
- * that shows a file changed on disk since its sidecar was saved (#180/#190),
- * a fork whose in-process hand-off is reconciled against a save time it
- * never had (every file dropped), and a malformed sidecar that crashes the
- * session start.
+ * #3612: the widget as a session store. The recurrences: a resume or a
+ * `pi --fork` that shows a file changed on disk since its sidecar was saved
+ * (#180/#190), and a malformed sidecar that crashes the session start.
  */
 describe("the widget store's restore (#3612)", () => {
-	function ctxFor(source: "slot" | "own-sidecar", savedAt?: number) {
+	function ctxFor(source: "own-sidecar", savedAt: number) {
 		return {
 			reason: "fork" as const,
 			source,
@@ -512,7 +510,7 @@ describe("the widget store's restore (#3612)", () => {
 		};
 	}
 
-	it("reconciles a sidecar with disk and restores the slot as it was", async () => {
+	it("reconciles a sidecar with disk: a file changed since the save re-scans", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-lens-widget-store-"));
 		try {
 			const kept = join(dir, "kept.ts");
@@ -532,11 +530,11 @@ describe("the widget store's restore (#3612)", () => {
 					.map((f) => f.filePath)
 					.sort();
 
+			await widgetStore.restore(scope, saved, ctxFor("own-sidecar", 9_000_000));
+			expect(files()).toEqual([changed, kept].sort());
+
 			await widgetStore.restore(scope, saved, ctxFor("own-sidecar", 2_000_000));
 			expect(files()).toEqual([kept]);
-
-			await widgetStore.restore(scope, saved, ctxFor("slot"));
-			expect(files()).toEqual([changed, kept].sort());
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
