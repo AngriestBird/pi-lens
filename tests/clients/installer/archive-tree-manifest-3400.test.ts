@@ -503,6 +503,9 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 			outcome: "unavailable",
 			reason: "runtime java not found on PATH or its home",
 		});
+		expect(logRows()).toContain(
+			"auto-install kotlin-language-server: runtime java not found on PATH or its home",
+		);
 	});
 
 	// Review F2: fwcd's launcher resolves $JAVA_HOME/bin/java, so a box whose
