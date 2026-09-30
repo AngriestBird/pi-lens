@@ -308,6 +308,8 @@ describe("red-on-base CLI verdicts", () => {
 		expect(result.stdout).toContain(
 			"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.",
 		);
+		// #3748 item 4: the concurrency hint misattributes a load failure.
+		expect(result.stdout).not.toContain("HEAD green when run alone");
 		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
 	});
 
