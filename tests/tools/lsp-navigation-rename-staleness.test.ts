@@ -1,9 +1,10 @@
 /**
  * #3601: `lsp_navigation`'s rename binds every file its workspace edit writes
  * text to the content the language server computed against: the target to the
- * read it sent, every other file to the client's tracked send. A file that
- * changed since, or that the client does not track, is refused, and the
- * refusal names it in the tool result and in the degradation ledger. The LSP
+ * read it sent, every other file to the client's tracked send when the client
+ * has it open, else (the server read it from disk) to an mtime check against
+ * the instant the request was sent. A file that changed since is refused, and
+ * the refusal names it in the tool result and in the degradation ledger. The LSP
  * service is a fake at that one boundary (its tracked-send accessor answers
  * from what the test "sent"); the apply, pi's mutation queue, and the
  * degradation ledger are the real ones.
@@ -97,6 +98,20 @@ const valueEdit = (target = fileA) => ({
 		],
 	},
 });
+
+/** Both files, as one rename edit. */
+const twoFileEdit = () => ({
+	changes: {
+		...valueEdit(fileA).changes,
+		...valueEdit(fileB).changes,
+	},
+});
+
+/** Sets `file`'s mtime to `ageMs` before now. */
+function ageFile(file: string, ageMs: number): void {
+	const when = new Date(Date.now() - ageMs);
+	fs.utimesSync(file, when, when);
+}
 
 const staleRows = () =>
 	getDegradationSummary().filter(
@@ -228,24 +243,99 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 	});
 
-	it("a non-target file the client does not track is refused, naming the file", async () => {
+	it("an unopened non-target file whose mtime is inside the margin is refused, naming the file", async () => {
+		// Written 1.5 s before the request, inside the 2 s margin: the server
+		// may have read either side of that write.
+		ageFile(fileB, 1500);
 		lsp.service = makeLspServiceDouble({
 			supportsLSP: () => true,
 			hasLSP: async () => true,
-			// Only the target was ever sent; the server read the other file itself.
+			// Only the target was ever sent; the server reads the other from disk.
 			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
-			rename: async () => ({
-				changes: {
-					...valueEdit(fileA).changes,
-					...valueEdit(fileB).changes,
-				},
-			}),
+			rename: async () => twoFileEdit(),
 		});
 
 		const result = await runRename();
 
 		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
 		expect(fs.readFileSync(fileB, "utf8")).toBe("const = 2;\n");
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain(path.basename(fileB));
+		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+	});
+
+	it("an unopened, untouched non-target file older than the margin is renamed with its target", async () => {
+		// A cross-file rename whose other file the server read from disk.
+		ageFile(fileB, 2500);
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			rename: async () => twoFileEdit(),
+		});
+
+		const result = await runRename();
+
+		expect(result.isError).toBeUndefined();
+		expect(fs.readFileSync(fileA, "utf8")).toBe("let = 1;\n");
+		expect(fs.readFileSync(fileB, "utf8")).toBe("let = 2;\n");
+		expect(staleRows()).toEqual([]);
+	});
+
+	it("an unopened non-target file written while the rename is computed is refused, naming the file", async () => {
+		ageFile(fileB, 3_600_000);
+		const parked = gate();
+		const resume = gate();
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			rename: async () => {
+				parked.open();
+				await resume.p;
+				return twoFileEdit();
+			},
+		});
+
+		const pending = runRename();
+		await parked.p;
+		await withFileMutationQueue(fileB, async () => {
+			fs.writeFileSync(fileB, "AGENT = 8;\n");
+		});
+		resume.open();
+		const result = await pending;
+
+		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 8;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain(path.basename(fileB));
+		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+	});
+
+	it("an unopened file that passes the mtime check is still held to the bytes read at capture", async () => {
+		// The same-mtime blind spot: the agent rewrites the file after the
+		// capture read and restores its old mtime. Only the apply-time content
+		// comparison can catch it.
+		ageFile(fileB, 3_600_000);
+		const oldMtime = fs.statSync(fileB).mtime;
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			getTrackedContentHash: vi.fn((p: string) => {
+				if (sameFile(p, fileB)) {
+					fs.writeFileSync(fileB, "AGENT = 6;\n");
+					fs.utimesSync(fileB, oldMtime, oldMtime);
+					return undefined;
+				}
+				return hashDiagnosticContent("const = 1;\n");
+			}),
+			rename: async () => twoFileEdit(),
+		});
+
+		const result = await runRename();
+
+		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 6;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
 		expect(result.isError).toBe(true);
 		expect(resultText(result)).toContain(path.basename(fileB));
 		expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);

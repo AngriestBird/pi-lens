@@ -725,16 +725,33 @@ async function openFileBestEffort(
 }
 
 /**
+ * #3601: how far before the rename request a file's mtime may sit and still
+ * count as "written after the request". Filesystem timestamps are coarse: FAT
+ * stores 2 s, HFS+ 1 s, ext4/APFS/NTFS well under 1 ms, and Linux stamps a
+ * write with a tick-coarse clock that can trail `Date.now()` by several ms. A
+ * write made just after the request can therefore carry an mtime a little
+ * before it, so 2 s (the coarsest common granularity) is the margin. The cost
+ * is a false refusal for an unopened file written within 2 s before the
+ * request; the failure it prevents is an overwrite.
+ */
+const RENAME_MTIME_MARGIN_MS = 2000;
+
+/**
  * #3601: the content every file this rename's edit writes text to must still
  * hold, keyed the way `applyWorkspaceEdit` keys expected content (the file's
  * realpath). The rename's own target uses the content the pre-rename
  * `openFileBestEffort` read and sent to the server. Any other file is bound to
- * what the language client last sent for it, the bytes the server answered
- * from: the disk must still hash to that send, and the read that proves it is
- * the content the apply is then held to. A file the client does not track, or
- * one whose disk content no longer matches its send, is refused. A file the
- * edit creates, or one that cannot be read, is left out of the map, matching
- * every other `expectedContent` caller.
+ * what the server computed from:
+ * - a file the language client has open: the disk must still hash to the
+ *   client's last send;
+ * - a file it has not opened: the server read it from disk at some point after
+ *   `requestedAtMs` (recorded just before the rename request), so a write the
+ *   server did not see has an mtime at or after that instant. The file is
+ *   refused when its mtime is at or after `requestedAtMs` minus the margin.
+ *   The residual is a same-mtime edit within the margin's granularity.
+ * The read that passed either check is the content the apply is then held to.
+ * A file the edit creates, or one that cannot be read, is left out of the map,
+ * matching every other `expectedContent` caller.
  */
 function captureRenameExpectedContent(
 	lspService: ReturnType<typeof getLSPService>,
@@ -742,6 +759,7 @@ function captureRenameExpectedContent(
 	cwd: string,
 	targetFilePath: string,
 	targetContent: string | undefined,
+	requestedAtMs: number,
 ): Map<string, string> {
 	const expected = new Map<string, string>();
 	let targetRealPath: string | undefined;
@@ -755,9 +773,13 @@ function captureRenameExpectedContent(
 	for (const diskPath of workspaceEditTextPaths(edit)) {
 		let realPath: string;
 		let content: string;
+		let mtimeMs: number;
 		try {
 			realPath = nodeFs.realpathSync.native(diskPath);
 			content = nodeFs.readFileSync(realPath, "utf-8");
+			// Stat AFTER the read: a write before the read is then visible in the
+			// mtime, and one after it is caught by the apply-time comparison.
+			mtimeMs = nodeFs.statSync(realPath).mtimeMs;
 		} catch {
 			continue;
 		}
@@ -765,14 +787,18 @@ function captureRenameExpectedContent(
 			expected.set(realPath, targetContent);
 			continue;
 		}
-		// A file no client tracks reports no send, which never matches the disk.
-		if (
-			lspService.getTrackedContentHash(diskPath, cwd) !==
-			hashDiagnosticContent(content)
-		) {
+		const sent = lspService.getTrackedContentHash(diskPath, cwd);
+		if (sent !== undefined) {
+			if (sent !== hashDiagnosticContent(content)) {
+				refuseStaleWorkspaceEdit(
+					diskPath,
+					"it changed after the language server last saw it",
+				);
+			}
+		} else if (mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
-				"the language server's last-sent copy of it is missing or differs from the disk, so the edit cannot be checked against the bytes it was computed from",
+				"it was written after the rename was requested and the language server has no open copy, so it may not have read these bytes",
 			);
 		}
 		expected.set(realPath, content);
@@ -949,6 +975,9 @@ export function createLspNavigationTool(
 			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
 			// held as the expected content for the rename's own target file.
 			let openedFileContent: string | undefined;
+			// #3601: when the rename request was last sent; an unopened file the
+			// edit touches is refused if written at or after it (see the capture).
+			let renameRequestedAtMs = 0;
 			let mutationContext: LspMutationContext | undefined;
 			let requestedApply = false;
 			const workspaceScopeAttribution: LSPWorkspaceScopeAttribution = {};
@@ -1552,6 +1581,7 @@ export function createLspNavigationTool(
 								"__BADINPUT__ newName parameter required for rename",
 							);
 						}
+						renameRequestedAtMs = Date.now();
 						const edit = await lspService.rename(
 							filePath,
 							lspLine,
@@ -1578,6 +1608,7 @@ export function createLspNavigationTool(
 								ctx.cwd || ".",
 								filePath,
 								openedFileContent,
+								renameRequestedAtMs,
 							),
 						});
 						for (const touchedFile of applied.files) {
