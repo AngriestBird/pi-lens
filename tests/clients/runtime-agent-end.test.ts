@@ -2871,6 +2871,50 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 		).toBe("allow");
 	});
 
+	// #3677 round 3 (verify r2 V2): a settle that captured epoch 2 replays drift
+	// after `resetForSession`, whose new guard restarts at 0. Round 2 queued that
+	// dead session's write at the CURRENT epoch, so this drain credited it to the
+	// new session one hop after the bridge's own stamp refused it.
+	const deadSessionReplay = (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		cwd: string,
+		queueFirst: boolean,
+	) => {
+		runtime.readGuard.retainBranch(new Set());
+		runtime.readGuard.retainBranch(new Set());
+		const captured = runtime.readGuard.currentBranchEpoch;
+		runtime.resetForSession();
+		expect(runtime.readGuard.currentBranchEpoch).toBeLessThan(captured);
+		if (queueFirst) runtime.deferFormat(filePath, cwd, "edit", cwd);
+		sweepReplay(runtime, filePath, cwd, captured);
+	};
+
+	it("drains nothing a dead session's sweep replay queued after a session reset", async () => {
+		expect(
+			await acrossSettles({
+				onX: async () => {},
+				moved: false,
+				onY: (runtime, filePath, cwd) =>
+					deadSessionReplay(runtime, filePath, cwd, false),
+			}),
+		).toBe("block");
+	});
+
+	// The #3677 poison: the dead session's epoch must not reach the `Math.max`
+	// merge of a record the new session queued itself, or its own write is
+	// refused.
+	it("credits the new session's queued format when a dead session's sweep replay re-touches it", async () => {
+		expect(
+			await acrossSettles({
+				onX: async () => {},
+				moved: false,
+				onY: (runtime, filePath, cwd) =>
+					deadSessionReplay(runtime, filePath, cwd, true),
+			}),
+		).toBe("allow");
+	});
+
 	// T6: the settled sweep's entries are created inside the settle, after its
 	// awaits. A /tree can land first; the deferred record the replay queues must
 	// carry the epoch the settle captured, not the one current at queue time.
