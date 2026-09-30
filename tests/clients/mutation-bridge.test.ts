@@ -539,6 +539,7 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 			runtime.readGuard.retainBranch(new Set());
 			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
 			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
 
 			expect(
 				recordMutationThroughSeam(
@@ -548,12 +549,30 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 						touchedLines: [1, 2],
 						readGuardBranchEpoch: 0,
 					},
-					makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager }),
+					deps,
 				),
 			).toBe(true);
 
 			const [record] = runtime.consumeDeferredFormatFiles();
 			expect(record.readGuardBranchEpoch).toBe(0);
+
+			// The boundary itself (#3677 round 3): an epoch EQUAL to the live one
+			// is this session's and still queues. Only one above it queues
+			// nothing; with `<` there, a current write lost its deferral and
+			// no other test noticed.
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 1,
+					},
+					deps,
+				),
+			).toBe(true);
+			const [current] = runtime.consumeDeferredFormatFiles();
+			expect(current?.readGuardBranchEpoch).toBe(1);
 			expect(
 				getDegradationSummary().find(
 					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
