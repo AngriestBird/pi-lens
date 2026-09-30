@@ -286,11 +286,11 @@ changes. The run is `mutants.py` from #3829's round 2.
 |---|---|---|
 | parse heal (`parseFileAndUse`, caller undefined) | `Parse`, `Clr(sr, kp, ...)` | `MergedFiles` |
 | consume heal (`parseFileAndUse`, caller set) | `Parse`, `Clr(s1, kc, ...)` | `MergedFiles`, `MutF2`, `MutF4`, `ResidualR1` |
-| probe heal (`compileQueryBatch`, `probeInput`) | `Probe` | `MergedBatch`, both races |
-| combined heal (`compileQueryBatch`, `batchInput`) | `Combine` | `MergedBatch`, both races |
+| probe heal (`compileQueryBatch`, `probeInput`) | `Probe` | `MergedBatch`, `MergedBatchRaw`, both races |
+| combined heal (`compileQueryBatch`, `batchInput`) | `Combine` | `MergedBatch`, `MergedBatchRaw`, both races |
 | raw heal (`compileRawQuery`) | `RawDo` | `MergedBatchRaw`, `RaceRawHeal` |
 | parse skip | `Parse` | `MergedFiles`, `MutF2`, `MutF4`, `ResidualR1` |
-| probe skip | `Probe` | `MergedBatch`, `ReachSkipCached`, both races |
-| batch-key skip (charged null) | `BatchCheck` | `MergedBatch`, both races |
+| probe skip | `Probe` | `MergedBatch`, `MergedBatchRaw`, `ReachSkipCached`, both races |
+| batch-key skip (charged null) | `BatchCheck` | `MergedBatch`, `MergedBatchRaw`, both races |
 | raw skip | `RawCheck` | `MergedBatchRaw`, `RaceRawHeal` |
 | aborted-build cached null (B13) | `BatchBuild` | none (see Scope) |
