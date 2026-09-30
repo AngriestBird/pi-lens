@@ -1,3 +1,8 @@
+// flake-shape: real-process-spawn — the subject is the pre-push hook's own
+// contract with git: the stdin ref lines git writes, and the script's
+// deletion-only early exit and range union (#3661). The main-level witness
+// runs the real script over a real git fixture; an in-process call cannot
+// see the CLI's exit status or its build/test skip.
 /**
  * Tests for scripts/pre-push-targeted-tests.mjs's selection logic (#1804
  * review round 1, findings F1/F6/F7).
