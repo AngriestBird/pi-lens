@@ -37,8 +37,7 @@ export class BalancedShardSequencer extends BaseSequencer {
 			const known = weights.files[rel];
 			if (known === undefined) unmodeled += 1;
 			return {
-				// Project-qualified: one file in two projects is two specs.
-				id: `${spec.project?.name ?? ""}:${rel}`,
+				id: rel,
 				cost: specCost(
 					known ?? weights.median,
 					spec.project?.config?.maxWorkers,

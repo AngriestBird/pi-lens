@@ -131,6 +131,39 @@ describe("#3771 duration-balanced Unit tests shards", () => {
 		expect(slices.flat()).toHaveLength(specs.length);
 	});
 
+	// Recurrence: an unknown file's cost. A zero cost would park every new file
+	// on the lightest shard regardless of size; the median keeps the planned
+	// load honest. Pinned through the planned mean the shard logs, on a tiny
+	// snapshot whose median (10) differs from zero.
+	it("costs a file with no recorded duration at the snapshot median", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-shard-root-"));
+		try {
+			fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
+			fs.writeFileSync(
+				path.join(root, SHARD_WEIGHTS_FILE),
+				JSON.stringify({
+					files: { "tests/a.test.ts": 10, "tests/b.test.ts": 10 },
+				}),
+			);
+			const log: string[] = [];
+			const specs = ["a", "b", "planted"].map((name) => ({
+				moduleId: path.join(root, `tests/${name}.test.ts`),
+				project: { name: "default", config: { maxWorkers: 1 } },
+			}));
+			const ctx = {
+				config: { root, shard: { index: 1, count: 2 } },
+				logger: { log: (line: string) => log.push(line) },
+			};
+			await new BalancedShardSequencer(ctx as never).shard(specs as never[]);
+			// Three files at 10s over two shards: a 15s mean (10+10+0 would be 10s).
+			expect(log[0]).toContain(
+				"against a 15s mean (slowest shard 20s, 1 files without",
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	// Recurrence: a serialized project's file costs its full seconds, a
 	// maxWorkers:3 file a third, so the same seconds weigh differently.
 	it("costs a serialized file at full seconds and a parallel file at seconds over workers", () => {
@@ -172,6 +205,12 @@ describe("#3771 duration-balanced Unit tests shards", () => {
 				JSON.stringify({ files: { "tests/a.test.ts": -1 } }),
 			);
 			expect(() => loadShardWeights(negative)).toThrow(/non-negative/);
+			const text = path.join(dir, "text.json");
+			fs.writeFileSync(
+				text,
+				JSON.stringify({ files: { "tests/a.test.ts": "5" } }),
+			);
+			expect(() => loadShardWeights(text)).toThrow(/non-negative/);
 			const noFiles = path.join(dir, "nofiles.json");
 			fs.writeFileSync(noFiles, JSON.stringify({}));
 			expect(() => loadShardWeights(noFiles)).toThrow(/"files" object/);
