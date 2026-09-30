@@ -295,4 +295,378 @@ describe("runAutofix tool agreement seam (#3005)", () => {
 			).toMatchObject({ withoutEvidence: "decline" });
 		}
 	});
+	it("establishes Node agreement from an npm package-lock.json", () => {
+		const dir = path.join(env.tmpDir, "npm-direct");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "package-lock.json"),
+			JSON.stringify({
+				lockfileVersion: 3,
+				packages: { "": {}, "node_modules/stylelint": { version: "16.4.0" } },
+			}),
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "package-lock.json",
+		});
+	});
+
+	it("establishes Node agreement from a pnpm v9 importers lockfile", () => {
+		const dir = path.join(env.tmpDir, "pnpm-v9");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  .:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: ^16.0.0\n" +
+				"        version: 16.4.0\n",
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("establishes Node agreement from a pnpm workspace importer above the member", () => {
+		const ws = path.join(env.tmpDir, "pnpm-workspace");
+		const member = path.join(ws, "packages", "member");
+		fs.mkdirSync(member, { recursive: true });
+		fs.writeFileSync(
+			path.join(ws, "package.json"),
+			JSON.stringify({ private: true }),
+		);
+		fs.writeFileSync(
+			path.join(ws, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  packages/member:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: ^16.0.0\n" +
+				"        version: 16.4.0\n",
+		);
+		fs.writeFileSync(
+			path.join(member, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		expect(establishToolAgreement("stylelint", member)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("establishes Node agreement from a pnpm v6 top-level lockfile", () => {
+		const dir = path.join(env.tmpDir, "pnpm-v6");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 5.4\n" +
+				"specifiers:\n" +
+				"  stylelint: ^16.0.0\n" +
+				"devDependencies:\n" +
+				"  stylelint:\n" +
+				"    specifier: ^16.0.0\n" +
+				"    version: 16.4.0\n",
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("establishes Node agreement from a yarn v1 lockfile with multiple descriptors", () => {
+		const dir = path.join(env.tmpDir, "yarn-v1");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "yarn.lock"),
+			"# yarn lockfile v1\n" +
+				"\n" +
+				"stylelint@^16.0.0, stylelint@^16.1.0:\n" +
+				'  version "16.4.0"\n' +
+				'  resolved "https://registry.yarnpkg.com/stylelint/-/stylelint-16.4.0.tgz#abc"\n',
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "yarn.lock",
+		});
+	});
+
+	it("establishes Node agreement from a yarn Berry lockfile", () => {
+		const dir = path.join(env.tmpDir, "yarn-berry");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "yarn.lock"),
+			"__metadata:\n" +
+				"  version: 8\n" +
+				"  cacheKey: 10c0\n" +
+				'"stylelint@npm:^16.0.0":\n' +
+				"  version: 16.4.0\n" +
+				'  resolution: "stylelint@npm:16.4.0"\n',
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "yarn.lock",
+		});
+	});
+
+	it("runs autofix end to end in a pnpm project once agreement is established", async () => {
+		const dir = path.join(env.tmpDir, "pnpm-e2e");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  .:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: ^16.0.0\n" +
+				"        version: 16.4.0\n",
+		);
+		fs.writeFileSync(path.join(dir, ".stylelintrc.json"), "{}\n");
+		const file = path.join(dir, "style.css");
+		fs.writeFileSync(file, "a { color: red; }\n");
+
+		const result = await runAutofix(
+			file,
+			dir,
+			() => undefined,
+			() => {},
+			deps(),
+		);
+
+		expect(result.fixedCount).toBe(1);
+		expect(detectFileChangedAfterCommand).toHaveBeenCalledOnce();
+	});
+
+	it("prefers package-lock.json when several lockfiles share one directory", () => {
+		const dir = path.join(env.tmpDir, "lockfile-precedence");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "package-lock.json"),
+			JSON.stringify({
+				lockfileVersion: 3,
+				packages: { "": {}, "node_modules/stylelint": { version: "15.11.0" } },
+			}),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  .:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: ^16.0.0\n" +
+				"        version: 16.4.0\n",
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			subject: "node:stylelint",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("package-lock.json");
+		}
+	});
+
+	it("declines with evidence-absent when no lockfile exists", () => {
+		const dir = path.join(env.tmpDir, "no-lockfile");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			subject: "node:stylelint",
+			reasonCode: "evidence-absent",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("package-lock.json");
+		}
+	});
+
+	it("declines an unparseable npm lockfile and names the supplier", () => {
+		const dir = path.join(env.tmpDir, "bad-npm-lock");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(path.join(dir, "package-lock.json"), "{invalid json");
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unparseable",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("package-lock.json");
+		}
+	});
+
+	it("declines an unparseable pnpm lockfile and names the supplier", () => {
+		const dir = path.join(env.tmpDir, "bad-pnpm-lock");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(path.join(dir, "pnpm-lock.yaml"), "[unclosed");
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unparseable",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("pnpm-lock.yaml");
+		}
+	});
+
+	it("declines an unparseable yarn lockfile and names the supplier", () => {
+		const dir = path.join(env.tmpDir, "bad-yarn-lock");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(path.join(dir, "yarn.lock"), "[unclosed");
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unparseable",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("yarn.lock");
+		}
+	});
+
+	it("declines a pnpm resolution that disagrees and names the supplying lockfile", () => {
+		const dir = path.join(env.tmpDir, "pnpm-disagree");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  .:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: ^16.0.0\n" +
+				"        version: 15.11.0\n",
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({ decision: "decline" });
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("pnpm-lock.yaml");
+			expect(agreement.reason).toContain("stylelint@15.11.0");
+		}
+	});
+
+	it("declines a yarn v1 resolution that disagrees and names the supplying lockfile", () => {
+		const dir = path.join(env.tmpDir, "yarn-v1-disagree");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "yarn.lock"),
+			"# yarn lockfile v1\n" +
+				"\n" +
+				"stylelint@^16.0.0:\n" +
+				'  version "15.11.0"\n' +
+				'  resolved "https://registry.yarnpkg.com/stylelint/-/stylelint-15.11.0.tgz#abc"\n',
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({ decision: "decline" });
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("yarn.lock");
+			expect(agreement.reason).toContain("stylelint@15.11.0");
+		}
+	});
+
+	it("declines a yarn Berry resolution that disagrees and names the supplying lockfile", () => {
+		const dir = path.join(env.tmpDir, "yarn-berry-disagree");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "yarn.lock"),
+			"__metadata:\n" +
+				"  version: 8\n" +
+				'"stylelint@npm:^16.0.0":\n' +
+				"  version: 15.11.0\n" +
+				'  resolution: "stylelint@npm:15.11.0"\n',
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({ decision: "decline" });
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("yarn.lock");
+			expect(agreement.reason).toContain("stylelint@15.11.0");
+		}
+	});
+
+	it("declines an unsupported declared range against pnpm evidence", () => {
+		const dir = path.join(env.tmpDir, "pnpm-unsupported-range");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: ">=16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(dir, "pnpm-lock.yaml"),
+			"lockfileVersion: 9.0\n" +
+				"importers:\n" +
+				"  .:\n" +
+				"    devDependencies:\n" +
+				"      stylelint:\n" +
+				"        specifier: '>=16.0.0'\n" +
+				"        version: 16.4.0\n",
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unsupported",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("unsupported");
+			expect(agreement.reason).toContain("pnpm-lock.yaml");
+		}
+	});
 });

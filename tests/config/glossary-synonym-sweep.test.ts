@@ -961,7 +961,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/startup-scan.ts": 11,
 		"clients/test-runner-client.ts": 61,
 		"clients/todo-scanner.ts": 3,
-		"clients/tool-agreement.ts": 4,
+		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
+		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
+		// and `path.resolve` — six more `path` operations, same sense
+		// (a path operation).
+		"clients/tool-agreement.ts": 10,
 		"clients/tool-cwd.ts": 13,
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
@@ -1245,7 +1249,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
 		"clients/session-state-store.ts": 3,
-		"clients/tool-agreement.ts": 19,
+		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
+		// supplier's resolved `version` (params, `.version` fields, and the
+		// shared version verdict) through the same agreement comparison.
+		// Same sense — lockfile resolved versions, not generations.
+		"clients/tool-agreement.ts": 52,
 		"clients/turn-summary.ts": 2,
 		"clients/warm-attach.ts": 4,
 		"clients/widget-state.ts": 5,
