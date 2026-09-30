@@ -20,6 +20,7 @@ import {
 	type LSPClientState,
 	MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES,
 } from "../../../clients/lsp/client.js";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { stopLSP } from "../../../clients/lsp/launch.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
@@ -1520,6 +1521,19 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			const [change] = received[0].contentChanges;
 			expect(change.range).toBeUndefined();
 			expect(change.text).toBe("const x = 1;\nconst y = 2;\n");
+
+			// #3601: the client reports what it last SENT for an open document
+			// (a Full-sync client retains no text, only the fingerprint), which
+			// is what `lsp_navigation`'s rename binds a touched file to. A path it
+			// never opened, and one it has closed, report nothing.
+			expect(client.getSentContentHash?.(filePath)).toBe(
+				hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
+			);
+			expect(
+				client.getSentContentHash?.(path.join(os.tmpdir(), "never-opened.ts")),
+			).toBeUndefined();
+			await client.closeDocument(filePath);
+			expect(client.getSentContentHash?.(filePath)).toBeUndefined();
 		} finally {
 			await client.shutdown().catch(() => {});
 			await stopLSP(proc).catch(() => {});

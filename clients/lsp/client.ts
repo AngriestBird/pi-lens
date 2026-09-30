@@ -540,6 +540,14 @@ export interface LSPClientInfo {
 	 * that cannot enumerate simply contributes no paths.
 	 */
 	openDocumentPaths?(): string[];
+	/**
+	 * #3601: the fingerprint (`hashDiagnosticContent`) of the last didOpen or
+	 * didChange payload this client sent for an open document, or `undefined`
+	 * for a document it does not track (never opened, or closed). It is the
+	 * bytes the server answers from, read from state already held in memory.
+	 * Optional for the same reason `openDocumentPaths` is.
+	 */
+	getSentContentHash?(filePath: string): string | undefined;
 	/** Whether this client currently has an LSP request in flight. */
 	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
@@ -6451,6 +6459,10 @@ export async function createLSPClient(options: {
 
 		openDocumentPaths() {
 			return [...state.openDocuments];
+		},
+
+		getSentContentHash(filePath) {
+			return state.documentContentHashes.get(normalizeMapKey(filePath))?.hash;
 		},
 
 		isBusy() {

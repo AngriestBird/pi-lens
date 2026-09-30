@@ -21,9 +21,11 @@ import { isRecordableProjectPath } from "../clients/file-utils.js";
 import { compactRenderResult } from "./render-compact.js";
 import {
 	applyWorkspaceEdit,
+	refuseStaleWorkspaceEdit,
 	summarizeWorkspaceEdit,
-	workspaceEditDiskPaths,
+	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
+import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
 	type LSPWorkspaceScopeAttribution,
@@ -723,42 +725,59 @@ async function openFileBestEffort(
 }
 
 /**
- * #3601: the content on disk that every file this rename's edit writes must
- * still hold, keyed the way `applyWorkspaceEdit` keys expected content (the
- * file's realpath). The rename's own target uses the content the pre-rename
- * `openFileBestEffort` read and sent to the server; a file the edit also
- * touches is read here, after the server computed the edit but before the
- * edit reaches its queue. A file the edit creates, or one that cannot be
- * read, is left out of the map and is not content-checked, matching every
- * other `expectedContent` caller.
+ * #3601: the content every file this rename's edit writes text to must still
+ * hold, keyed the way `applyWorkspaceEdit` keys expected content (the file's
+ * realpath). The rename's own target uses the content the pre-rename
+ * `openFileBestEffort` read and sent to the server. Any other file is bound to
+ * what the language client last sent for it, the bytes the server answered
+ * from: the disk must still hash to that send, and the read that proves it is
+ * the content the apply is then held to. A file the client does not track, or
+ * one whose disk content no longer matches its send, is refused. A file the
+ * edit creates, or one that cannot be read, is left out of the map, matching
+ * every other `expectedContent` caller.
  */
-async function captureRenameExpectedContent(
+function captureRenameExpectedContent(
 	lspService: ReturnType<typeof getLSPService>,
 	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
+	cwd: string,
 	targetFilePath: string,
 	targetContent: string | undefined,
-): Promise<Map<string, string>> {
+): Map<string, string> {
 	const expected = new Map<string, string>();
 	let targetRealPath: string | undefined;
 	if (targetContent !== undefined) {
 		try {
-			targetRealPath = await nodeFs.promises.realpath(targetFilePath);
+			targetRealPath = nodeFs.realpathSync.native(targetFilePath);
 		} catch {
 			targetRealPath = undefined;
 		}
 	}
-	for (const diskPath of workspaceEditDiskPaths(edit)) {
+	for (const diskPath of workspaceEditTextPaths(edit)) {
 		let realPath: string;
+		let content: string;
 		try {
-			realPath = await nodeFs.promises.realpath(diskPath);
+			realPath = nodeFs.realpathSync.native(diskPath);
+			content = nodeFs.readFileSync(realPath, "utf-8");
 		} catch {
 			continue;
 		}
-		const content =
-			targetRealPath !== undefined && realPath === targetRealPath
-				? targetContent
-				: await openFileBestEffort(lspService, diskPath);
-		if (content === undefined) continue;
+		if (targetContent !== undefined && realPath === targetRealPath) {
+			expected.set(realPath, targetContent);
+			continue;
+		}
+		const sent = lspService.getTrackedContentHash(diskPath, cwd);
+		if (sent === undefined) {
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				"the language server holds no tracked copy of it, so the edit cannot be checked against the bytes it was computed from",
+			);
+		}
+		if (sent !== hashDiagnosticContent(content)) {
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				"it changed after the language server last saw it",
+			);
+		}
 		expected.set(realPath, content);
 	}
 	return expected;
@@ -1556,9 +1575,10 @@ export function createLspNavigationTool(
 							// file held when it answered. A file that changed in between is
 							// refused inside pi's queue, before any write, so the edit never
 							// lands on text it was not computed for.
-							expectedContent: await captureRenameExpectedContent(
+							expectedContent: captureRenameExpectedContent(
 								lspService,
 								edit,
+								ctx.cwd || ".",
 								filePath,
 								openedFileContent,
 							),
@@ -1730,7 +1750,11 @@ export function createLspNavigationTool(
 						"implementation",
 					].includes(operation);
 				if (shouldRetryOnEmpty) {
-					await openFileBestEffort(lspService, filePath, true);
+					openedFileContent = await openFileBestEffort(
+						lspService,
+						filePath,
+						true,
+					);
 					result = await runOperation();
 				}
 
