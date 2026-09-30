@@ -72,6 +72,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/config/degradation-kind-order.test.ts",
 	"tests/config/sweep-floor-coverage.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
+	// Reads scripts/measure-lsp-idle-eviction.mjs as source (the script runs on
+	// load and cannot be imported), so no import path selects this test (#3645).
+	"tests/config/lsp-idle-eviction-measurement.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer

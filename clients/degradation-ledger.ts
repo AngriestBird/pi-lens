@@ -547,6 +547,12 @@ export type DegradationKind =
 	 * `incrementDegradationCount` keeps one bounded entry per file.
 	 */
 	| "lsp-edit-stale-content"
+	/**
+	 * An idle LSP client was released by the shared idle-eviction timer (a
+	 * server whose registry `idleEviction` is `transparent`); it respawns on the
+	 * next request. Subject is the client key.
+	 */
+	| "lsp-idle-eviction"
 	| "lsp-liveness-probe-unsupported"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
@@ -1376,7 +1382,6 @@ export type DegradationKind =
 	 * every cycle is the resolver's whole correctness argument. See
 	 * `probe-home-state.ts`'s doc comment.
 	 */
-	| "ts-idle-eviction"
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
