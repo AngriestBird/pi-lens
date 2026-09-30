@@ -68,7 +68,13 @@ import {
 	wireWidgetDispositionSubscriber,
 } from "./clients/widget-state.js";
 import { selectLspStatus } from "./clients/lsp-status.js";
-import type { PersistedReadGuardState } from "./clients/read-guard.js";
+import {
+	branchToolResultIds,
+	logReadGuardBranchMove,
+	resolveReadGuardStartState,
+	stashForkHandoff,
+} from "./clients/read-guard-branch.js";
+import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import { registerMutationBridge } from "./clients/mutation-bridge.js";
 import {
 	OBSERVED_TRACKED_MAX_FILES,
@@ -1076,10 +1082,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// `session_start` (reason="fork"). In-memory hand-off (same process) — avoids
 	// deriving the source id from a file path (the id lives in the file header).
 	let pendingForkSnapshot: PersistedWidgetState | undefined;
-	// #1041: the source session's read-guard read-set, stashed at
-	// `session_before_fork` alongside the widget snapshot so a forked session
-	// adopts its parent's read history (same in-memory hand-off pattern).
-	let pendingForkReadGuard: PersistedReadGuardState | undefined;
 	type LensWidgetTui = { requestRender: () => void };
 	type LensWidgetTheme = { fg: (color: string, s: string) => string };
 	type LensWidgetComponent = {
@@ -1757,22 +1759,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 			() => runtime.projectRoot,
 			// Read-substitute tie-in (#245): a returned symbol body is a genuine read
 			// of that range, so record it as read-guard coverage for the symbol.
-			(filePath, symbol) =>
+			(filePath, symbol, toolCallId) =>
 				runtime.readGuard.recordSymbolRead(
 					filePath,
 					symbol,
 					runtime.turnIndex,
 					runtime.peekWriteIndex(),
+					sanitizeCorrelationId(toolCallId),
 				),
 		),
 		createReadEnclosingTool(
 			() => runtime.projectRoot,
-			(filePath, symbol) =>
+			(filePath, symbol, toolCallId) =>
 				runtime.readGuard.recordSymbolRead(
 					filePath,
 					symbol,
 					runtime.turnIndex,
 					runtime.peekWriteIndex(),
+					sanitizeCorrelationId(toolCallId),
 				),
 		),
 	];
@@ -2524,6 +2528,55 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionReason,
 						!!pendingForkSnapshot,
 					);
+					const ownPersisted =
+						startMode === "maybe-rehydrate" && stableSessionId
+							? await loadSessionState(
+									ctx.cwd ?? process.cwd(),
+									stableSessionId,
+								)
+							: undefined;
+
+					// #3521: the read guard holds exactly the reads whose tool result
+					// is on the branch this session starts on. The fork hand-off rides
+					// a process-wide slot (pi re-runs this factory for the fork), with
+					// the parent's sidecar as fallback; resume uses its own sidecar.
+					// `/new` and reload find neither (a reload does not load its own
+					// sidecar here), unless the session has a parent.
+					const sessionHeader = (() => {
+						try {
+							return (
+								ctx as {
+									sessionManager?: {
+										getHeader?: () => { parentSession?: string } | null;
+									};
+								}
+							)?.sessionManager?.getHeader?.();
+						} catch {
+							return undefined;
+						}
+					})();
+					const readGuardStart = await resolveReadGuardStartState({
+						reason: sessionReason,
+						ownState: ownPersisted?.readGuard,
+						parentSessionFile: sessionHeader?.parentSession,
+						loadParentState: (parentSessionId) =>
+							loadSessionState(ctx.cwd ?? process.cwd(), parentSessionId).then(
+								(parent) => parent?.readGuard,
+							),
+					});
+					const branch = branchToolResultIds(ctx.sessionManager);
+					const readImport = runtime.readGuard.importBranch(
+						readGuardStart.state,
+						branch.ids,
+					);
+					logReadGuardBranchMove({
+						trigger: reasonLabel,
+						source: readGuardStart.source,
+						kept: readImport.imported,
+						dropped: readImport.dropped,
+						branch,
+						cwd: ctx.cwd ?? process.cwd(),
+					});
 					if (startMode === "fork" && pendingForkSnapshot) {
 						// Branch the forked session from the source's in-memory snapshot, then
 						// persist it under the new session id so the fork owns its own copy.
@@ -2531,17 +2584,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						importWidgetState(pendingForkSnapshot);
 						const forkedFileCount = pendingForkSnapshot.files.length;
 						pendingForkSnapshot = undefined;
-						// #1041: adopt the source session's read history (staleness-reconciled
-						// against current disk) so the fork isn't zero-read-blocked on files
-						// the parent already read.
-						let forkReadImport:
-							| { imported: number; dropped: number }
-							| undefined;
-						if (pendingForkReadGuard) {
-							forkReadImport =
-								runtime.readGuard.importState(pendingForkReadGuard);
-							pendingForkReadGuard = undefined;
-						}
 						if (stableSessionId) {
 							void saveSessionState(
 								ctx.cwd ?? process.cwd(),
@@ -2551,28 +2593,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 							);
 						}
 						dbg(
-							`session_start: fork — branched ${forkedFileCount} file(s) from source` +
-								(forkReadImport
-									? `, read-guard +${forkReadImport.imported} (dropped ${forkReadImport.dropped})`
-									: ""),
+							`session_start: fork — branched ${forkedFileCount} file(s) from source`,
 						);
 					} else if (startMode === "keep") {
 						dbg("session_start: reload — keeping widget state");
 					} else if (startMode === "clean") {
 						pendingForkSnapshot = undefined;
-						pendingForkReadGuard = undefined;
 						clearWidgetState();
 						dbg("session_start: new — clean widget");
 					} else {
 						// maybe-rehydrate: covers resume AND startup (e.g. `pi --session <id>`)
 						pendingForkSnapshot = undefined;
-						pendingForkReadGuard = undefined;
 						clearWidgetState();
 						if (stableSessionId) {
-							const persisted = await loadSessionState(
-								ctx.cwd ?? process.cwd(),
-								stableSessionId,
-							);
+							const persisted = ownPersisted;
 							if (persisted?.widget) {
 								// #180/#190: drop files changed on disk since the snapshot so a
 								// resume never surfaces stale diagnostics; they re-scan on edit.
@@ -2583,20 +2617,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 								const dropped =
 									persisted.widget.files.length - fresh.files.length;
 								importWidgetState(fresh);
-								// #1041: rehydrate the read-before-edit guard's read-set on the
-								// SAME path so the first post-resume edit of a previously-read
-								// file isn't falsely zero-read-blocked. importState reconciles
-								// each read against current disk (drops changed/missing files),
-								// so a resume never masks a real staleness.
-								const readImport = runtime.readGuard.importState(
-									persisted.readGuard,
-								);
 								dbg(
 									`session_start: ${reasonLabel} ${stableSessionId} — rehydrated ${fresh.files.length} file(s)` +
-										(dropped > 0 ? `, dropped ${dropped} stale` : "") +
-										(readImport.imported > 0 || readImport.dropped > 0
-											? `; read-guard +${readImport.imported} read(s) (dropped ${readImport.dropped} stale)`
-											: ""),
+										(dropped > 0 ? `, dropped ${dropped} stale` : ""),
 								);
 							} else {
 								dbg(
@@ -2644,20 +2667,80 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// so the forked session (its `session_start` fires with reason="fork") can
 	// branch from them instead of starting empty. In-memory hand-off within the
 	// same process; cleared once adopted (or on any non-fork start).
-	(pi as any).on("session_before_fork", () => {
-		try {
-			pendingForkSnapshot = exportWidgetState();
-			// #1041: the source guard is still live here (reset happens in the
-			// fork's own session_start, which fires later), so this captures the
-			// parent's read-set for the fork to adopt.
-			pendingForkReadGuard = runtime.readGuard.exportState();
-			dbg(
-				`session_before_fork: stashed ${pendingForkSnapshot.files.length} file(s) + ${pendingForkReadGuard.reads.length} read-guard file(s) for the fork`,
-			);
-		} catch (forkErr) {
-			surfaceHandlerCrash("session_before_fork", forkErr, { dbg });
-		}
-	});
+	(pi as any).on(
+		"session_before_fork",
+		wrapSessionEventHandler(
+			"session_before_fork",
+			(
+				_event: unknown,
+				ctx: { cwd?: string; sessionManager?: unknown } | undefined,
+			) => {
+				try {
+					pendingForkSnapshot = exportWidgetState();
+					// #3521: pi re-runs this factory for the fork, so the read-set
+					// goes to the process-wide slot, not this closure. The hook may
+					// not await (#2523): the parent's sidecar, the fallback, is saved
+					// fire-and-forget.
+					const readGuard = runtime.readGuard.exportState();
+					stashForkHandoff({
+						sourceSessionFile: getSessionFile(ctx),
+						readGuard,
+					});
+					if (runtime.hasStableSessionId) {
+						void saveSessionState(
+							ctx?.cwd ?? process.cwd(),
+							runtime.telemetrySessionId,
+							exportWidgetState(),
+							readGuard,
+						);
+					}
+					dbg(
+						`session_before_fork: stashed ${pendingForkSnapshot.files.length} file(s) for the fork`,
+					);
+				} catch (forkErr) {
+					if (isStaleExtensionCtxError(forkErr)) throw forkErr;
+					surfaceHandlerCrash("session_before_fork", forkErr, { dbg });
+				}
+			},
+			{ dbg },
+		),
+	);
+
+	// #3521: `/tree` moves the conversation inside this activation. Keep only
+	// the reads whose tool result is on the new branch. A concurrent secondary
+	// shares the module-level runtime, so its tree moves never touch the
+	// primary's guard; the other direction is an accepted residual (#3521 F2):
+	// a primary /tree clears a live secondary's reads, costing it one re-read.
+	// `session_before_tree` can still be cancelled by a later handler, so
+	// nothing happens there.
+	(pi as any).on(
+		"session_tree",
+		wrapSessionEventHandler(
+			"session_tree",
+			(
+				_event: unknown,
+				ctx: { cwd?: string; sessionManager?: unknown } | undefined,
+			) => {
+				try {
+					if (ownedSessionRole !== "primary") return;
+					const branch = branchToolResultIds(ctx?.sessionManager);
+					const retained = runtime.readGuard.retainBranch(branch.ids);
+					logReadGuardBranchMove({
+						trigger: "tree",
+						source: "live",
+						kept: retained.kept,
+						dropped: retained.dropped,
+						branch,
+						cwd: ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
+					});
+				} catch (treeErr) {
+					if (isStaleExtensionCtxError(treeErr)) throw treeErr;
+					surfaceHandlerCrash("session_tree", treeErr, { dbg });
+				}
+			},
+			{ dbg },
+		),
+	);
 
 	pi.on("tool_call", async (event, ctx) => {
 		const toolEntry = toolRegistryEntryForPi(
@@ -2950,6 +3033,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	 */
 	async function runObservedSettledSweepSafely(
 		ctx: DeferredDrainCtx,
+		readGuardBranchEpoch: number,
 	): Promise<void> {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
 		try {
@@ -2961,7 +3045,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cwd,
 						limit: OBSERVED_TRACKED_MAX_FILES,
 					}),
-				record: replayThroughMutationBridge,
+				// #3521: a /tree can land while the sweep awaits; the replayed
+				// write then must not vouch for a file the new branch never showed.
+				record: (entry) =>
+					replayThroughMutationBridge({ ...entry, readGuardBranchEpoch }),
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(runtime.readGuard, candidate),
 				// Merge of #2449 into #2450: #2449 wrote this gate as the
@@ -3020,6 +3107,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	async function runDeferredMutationDrain(
 		ctx: DeferredDrainCtx,
+		readGuardBranchEpoch: number,
 	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
 		// #791 defense-in-depth: mirrors how session_start already skips
@@ -3061,6 +3149,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { biomeClient, ruffClient };
 			},
 			currentSessionId,
+			readGuardBranchEpoch,
 		});
 		if (ctx.ui?.setStatus && ctx.ui.theme) {
 			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
@@ -3342,7 +3431,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					runtime.telemetrySessionId,
 					exportWidgetState(),
 					// #1041: persist the read-guard read-set on the same snapshot so a
-					// later resume can rehydrate it (reconciled against disk on load).
+					// later resume can rehydrate it (filtered to its branch, #3521).
 					runtime.readGuard.exportState(),
 				);
 			}
@@ -3526,6 +3615,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	}
 	const onAgentSettled = async (_event: unknown, ctx: DeferredDrainCtx) => {
 		if (!lensEnabled) return;
+		// #3521: pi marks the run inactive before it awaits this handler, so a
+		// /tree can land while the sweep and drain below await. Captured before
+		// the first await: their writes from before the move are not credited.
+		const settleBranchEpoch = runtime.readGuard.currentBranchEpoch;
 		// Keep the activation-owned live ctx current for the detached delivery
 		// task. It must probe idleness and append through this run's host seam.
 		rememberOwnEventCtx(ctx);
@@ -3561,8 +3654,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// widget diagnostic files, open LSP documents — and never walks the
 				// workspace. Bounded on both axes (timeout + this ctx's abort) and
 				// wrapped, because an advisory sweep must never cost the drain.
-				await runObservedSettledSweepSafely(ctx);
-				await runDeferredMutationDrain(ctx);
+				await runObservedSettledSweepSafely(ctx, settleBranchEpoch);
+				await runDeferredMutationDrain(ctx, settleBranchEpoch);
 				// The drain just wrote formatted/autofixed bytes to files pi-lens
 				// itself owns. Re-baseline them, or the NEXT settle reads our own
 				// formatter output as unexplained third-party drift and requeues the

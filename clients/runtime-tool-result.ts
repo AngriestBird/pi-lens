@@ -1678,6 +1678,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					turnIndex: runtime.turnIndex,
 					writeIndex: runtime.peekWriteIndex(),
 					timestamp: Date.now(),
+					...(toolCallId !== undefined && { toolCallId }),
 				});
 			}
 		}
@@ -1746,6 +1747,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				projectRoot: workspaceRoot,
 				turnIndex: runtime.turnIndex,
 				writeIndex: runtime.peekWriteIndex(),
+				...(toolCallId !== undefined && { toolCallId }),
 			});
 		}
 	}
@@ -1912,6 +1914,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						turnIndex: runtime.turnIndex,
 						writeIndex: runtime.peekWriteIndex(),
 						timestamp: Date.now(),
+						...(toolCallId !== undefined && { toolCallId }),
 					};
 					deps.readGuard.recordRead(deliveredRecord, {
 						...(nativeReadToolCallId && {
@@ -2350,6 +2353,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			writeIndex: runtime.peekWriteIndex(),
 			timestamp: Date.now(),
 			source: "own-edit",
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 		logConversationRead("own-edit", filePath, ownEdit.start, evidence);
 	}

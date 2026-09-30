@@ -488,6 +488,10 @@ export const wallClockBudgetInclude = [
 	// #3451: runs the real pre-commit hook through git and xargs (flake-shape
 	// admission).
 	"tests/scripts/pre-commit-hook.test.ts",
+	// #3661: the pre-push hook's own stdin parsing and deletion-only early exit
+	// are the subject; the union witness runs the real script over a real git
+	// fixture (flake-shape admission).
+	"tests/scripts/pre-push-targeted-tests.test.ts",
 	"tests/scripts/prune-agent-worktrees.test.ts",
 	// #2619 review F1: the release-QA hermeticity canary spawns a REAL child
 	// under scratchEnv() and reads back what that child resolved. The defect it
