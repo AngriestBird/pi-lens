@@ -35,6 +35,8 @@ export const EXIT = {
 
 export const HEAD_GREEN_MESSAGE =
 	"HEAD green when run alone; the red may be concurrency OR a flaky change. Not evidence of unrelated.";
+const LOAD_FAILURE_MESSAGE =
+	"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.";
 
 const RUN_PREFIX = "pi-lens-red-on-base-";
 const USAGE =
@@ -384,7 +386,20 @@ export async function main(argv = process.argv.slice(2)) {
 			console.log(
 				`${test.verdict}  ${test.id}${test.detail ? ` (${test.detail})` : ""}`,
 			);
-		if (result.verdict === "INCONCLUSIVE") console.log(HEAD_GREEN_MESSAGE);
+		if (result.verdict === "INCONCLUSIVE") {
+			if (
+				result.tests.some((test) =>
+					test.detail?.startsWith("suite failed to load"),
+				)
+			)
+				console.log(LOAD_FAILURE_MESSAGE);
+			if (
+				result.tests.some(
+					(test) => !test.detail?.startsWith("suite failed to load"),
+				)
+			)
+				console.log(HEAD_GREEN_MESSAGE);
+		}
 		if (result.verdict === "ALL-GREEN")
 			console.log(
 				"Nothing failed on HEAD or base; the red was not reproduced. Not evidence of unrelated.",

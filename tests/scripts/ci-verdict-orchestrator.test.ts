@@ -555,6 +555,56 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 	});
 });
 
+describe("run — sharded Unit tests (#3753)", () => {
+	// Recurrence: `Unit tests` is now an aggregate over `Unit tests (shard k/3)`
+	// jobs. The failing test lines live in the SHARD's log; the aggregate's own
+	// log only says a shard failed. Red on the pre-fix tree only if ci-verdict
+	// stopped reading a failed row's log by the row's own job id.
+	it("names the failing test from the red shard's log and the aggregate's own step", async () => {
+		const shard = UNIT_FAIL();
+		shard.json.name = "Unit tests (shard 2/3)";
+		const aggregate: Job = {
+			id: 11,
+			json: {
+				id: 11,
+				name: "Unit tests",
+				html_url: "https://github.com/apmantza/pi-lens/actions/runs/1/job/11",
+				steps: [
+					{
+						name: "Require every Unit tests shard to succeed",
+						conclusion: "failure",
+					},
+				],
+			} as Job["json"],
+			log: "Unit tests shard jobs (test): failure\n",
+		};
+		const w = world({
+			prs: [
+				{
+					number: 5,
+					checkRuns: [
+						row("Unit tests", "failure", 11),
+						jobRow(shard),
+						GREEN[1],
+					],
+				},
+			],
+			jobs: [aggregate, shard],
+		});
+		const { exitCode, out } = await cli(["5"], w);
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(out).toContain(
+			"Unit tests (shard 2/3) (job 101554674114): failed step: Run tests",
+		);
+		expect(out).toContain(
+			"  FAIL   default  tests/clients/instance-reaper-backstop.test.ts > #1864 review F2: a grace-spared candidate is re-examined > arms one follow-",
+		);
+		expect(out).toContain(
+			"Unit tests (job 11): failed step: Require every Unit tests shard to succeed",
+		);
+	});
+});
+
 describe("run — rerun and update-branch remedies (#3700)", () => {
 	// Recurrence (#3660, 2026-09-30): `gh run rerun` replays the ORIGINAL merge
 	// commit, so a lane red on a base master has since moved past reds again.
@@ -1587,6 +1637,28 @@ describe("run --watch-open --stream — one line per event, until the window end
 			`CANCELLED-NOT-REPLACED #3382@${cancelled.source.head.slice(0, 9)}: superseded run cancelled and not replaced: rerun 36022234159 (gh run rerun 36022234159)`,
 		);
 		expect(w.mutations).toEqual([]);
+	});
+
+	it("deduplicates one CANCELLED-NOT-REPLACED hint per Actions run", async () => {
+		const run = "https://github.com/apmantza/pi-lens/actions/runs/500";
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					sha: cancelled.source.head,
+					checkRuns: [
+						GREEN[0],
+						row("Unit tests", "cancelled", 11, `${run}/job/11`),
+						row("Lint & type-check", "cancelled", 12, `${run}/job/12`),
+					],
+				},
+			],
+		});
+		const { lines } = await cli(["--watch-open", "--stream", "--wait", "0"], w);
+		expect(lines).toEqual([
+			`CANCELLED-NOT-REPLACED #3382@${cancelled.source.head.slice(0, 9)}: superseded run cancelled and not replaced: rerun 500 (gh run rerun 500)`,
+		]);
 	});
 
 	it("--rerun-cancelled re-runs the cancelled run itself, once per head", async () => {

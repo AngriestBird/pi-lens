@@ -195,6 +195,7 @@ import {
 	isAdvisoryCheck,
 	isBlockingConclusion,
 	isUncertainConclusion,
+	isUnitTestsJobName,
 	REQUIRED_CHECKS,
 	resolveLatestByName,
 } from "./lib/ci-checks.mjs";
@@ -472,7 +473,9 @@ export function computeVerdict(
 		if (!row.gating || !row.present || row.status !== "completed") return false;
 		if (isUncertainConclusion(row.conclusion)) return false;
 		if (isNoiseRow(row)) return false;
-		if (infraRerunPending && row.name === "Unit tests") return false;
+		// #3753: the aggregate AND every `Unit tests (shard k/N)` row: the kill
+		// that armed the rerun sits in a shard, and the rerun replays it.
+		if (infraRerunPending && isUnitTestsJobName(row.name)) return false;
 		if (requiredNameSet.has(row.name)) return row.conclusion !== "success";
 		return isBlockingConclusion(row.conclusion);
 	});
@@ -502,9 +505,17 @@ export function computeVerdict(
 	} else if (cancelledLatestRows.length > 0) {
 		exitCode = EXIT_PENDING;
 		kind = "cancelled";
-		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
-			.map(formatRerunHint)
-			.join(", ")}`;
+		const seenRerunHints = new Set();
+		const rerunHints = cancelledLatestRows
+			.map((row) => {
+				const args = rerunArgsFor(row);
+				const key = args?.join(" ") ?? formatRerunHint(row);
+				if (seenRerunHints.has(key)) return null;
+				seenRerunHints.add(key);
+				return formatRerunHint(row);
+			})
+			.filter((hint) => hint !== null);
+		reason = `superseded run cancelled and not replaced: ${rerunHints.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
 		kind = "failed";
