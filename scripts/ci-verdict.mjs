@@ -42,6 +42,13 @@
  * check still in flight, not one that failed.
  *
  *   node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>]
+ *   node scripts/ci-verdict.mjs --all
+ *   node scripts/ci-verdict.mjs --watch-open [--wait <seconds>] [--state-file <path>]
+ *
+ * #3700: `--all` and `--watch-open` (a notifying wait: exit 0 on the first poll
+ * with a per-PR event, 3 when the window ends with none) read every PR through
+ * `run()` itself, and a FAILED verdict now names the failed step, the failing
+ * test lines and a remedy hint -- see `readFailureDetails` and `watchOpenPrs`.
  *
  * Exit codes:
  *   0  -- every gating check-run concluded "success", or (discovered rows

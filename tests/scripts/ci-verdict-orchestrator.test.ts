@@ -299,6 +299,8 @@ describe("run — failing-test extraction from the recorded job log (#3700)", ()
 			"  Tests  1 failed | 13035 passed | 67 skipped (13103)",
 		);
 		expect(out).not.toContain(ESC);
+		// Costs nothing extra: no PR-state read (only a noise candidate needs it).
+		expect(w.calls.some((call) => call.includes("--json state"))).toBe(false);
 		// vitest prints the assertion twice (`##[error]` repeats it): listed once.
 		expect(
 			out.match(/AssertionError: expected undefined to be 5/g),
@@ -435,6 +437,10 @@ describe("run — failing-test extraction from the recorded job log (#3700)", ()
 			"Vendor scan: not a GitHub Actions job: no log to read",
 		);
 		expect(w.logCalls).toHaveLength(0);
+		// No merge base was found, so master's head is not read either.
+		expect(w.calls.some((call) => call.endsWith("/branches/master"))).toBe(
+			false,
+		);
 	});
 
 	it("reads no job or log for a green head", async () => {
