@@ -733,7 +733,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		expect(result.status).toBe(1);
 		expect(busyLine(result)).toContain("test lock busy after 0.3 s");
 		expect(busyLine(result)).toContain(
-			`PID ${process.pid} since 2026-01-01T00:00:00.000Z`,
+			`(held by PID ${process.pid} since 2026-01-01T00:00:00.000Z)`,
 		);
 		expect(busyLine(result)).toContain(fx.lockPath);
 		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1 git push");
@@ -755,7 +755,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 			);
 		const result = runHook(fx);
 		expect(result.status).toBe(1);
-		expect(busyLine(result)).toContain("2 of 2 shared slot(s) still busy");
+		expect(busyLine(result)).toContain("(2 of 2 shared slot(s) still busy)");
 		expect(busyLine(result)).toContain(fx.lockPath);
 		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
 	});
