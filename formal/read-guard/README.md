@@ -49,11 +49,15 @@ change.
   a tool call.
 - **The deferred `agent_end` format drain**: rewrites the file, then calls
   `recordWritten` (`runtime-agent-end.ts`). With `DrainMode = "atomic"` it
-  runs inside the turn boundary. With `"unfenced"` or `"fenced"` it is queued
-  at `Settle` (pi's `agent_settled`, when pi already accepts `/tree`) with
-  the branch epoch it captured, and lands in `Drain`, possibly after a
-  `/tree`. `"fenced"` (the code since #3521 review F1) refuses its
-  `recordWritten` once a `/tree` bumped the epoch.
+  runs inside the turn boundary. Otherwise it is queued at `Settle` (pi's
+  `agent_settled`, when pi already accepts `/tree`) and lands in `Drain`,
+  possibly after a `/tree`, or an aborted or failed drain puts it back
+  (`Requeue`) for the next settle. `"unfenced"` credits its
+  `recordWritten`. `"settle"` (#3521 round 2) refuses it once a `/tree`
+  moved the branch since the settle that dequeued it, so requeued work is
+  credited to the new branch. `"fenced"` (the code since #3521 round 3)
+  refuses it against the epoch the work was queued with, which `Requeue`
+  keeps; a new write on the current branch merges into the newer epoch.
 - **Boundaries**:
   - user turn;
   - `/new` (a fresh guard);
@@ -164,9 +168,10 @@ head that added this model. It is not checked in CI.
 | `ForkFilter` | #3521 fixed: `/fork` | pass | 50,036 |
 | `ForkFilterUnhashed` | #3521 fixed at `/fork` without hashes | pass | 1,150 |
 | `ForkDropsReads` | `BranchFilter = FALSE`, `ForkImport = FALSE` (the code before #3521: the fork imports nothing) | violated `NoFalseBlock` | 876 |
-| `TreeDrainFenced` | #3521 review F1 fixed: the settle drain lands after a `/tree` and its stamp is refused | pass | 132,248 |
-| `TreeDrainUnfenced` | the same, stamp credited (the code before round 2) | violated `NoBlindAllow` | 2,457 |
-| `TreeDrainFencedMtime` | the fenced drain with the #3520 mtime fallback: the formatter write postdates the re-anchor (residual until #3520) | violated `NoBlindAllow` | 2,457 |
+| `TreeDrainFenced` | #3521 review F1 and R2-F1 fixed: the settle drain lands after a `/tree`, possibly requeued first, and its stamp is refused | pass | 179,312 |
+| `TreeDrainRequeue` | the same with the epoch taken at the settle that dequeues it (round 2): requeued work is credited to the new branch | violated `NoBlindAllow` | 15,534 |
+| `TreeDrainUnfenced` | the same, stamp credited (the code before round 2) | violated `NoBlindAllow` | 2,529 |
+| `TreeDrainFencedMtime` | the fenced drain with the #3520 mtime fallback: the formatter write postdates the re-anchor (residual until #3520) | violated `NoBlindAllow` | 2,528 |
 | `ContextSuppress`, `SpanAcrossReads` | #3522 | violated `NoStaleAllow` | 2,905 / 2,964 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 | violated `NoStaleAllow` | 449 / 160 |
 

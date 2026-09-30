@@ -79,7 +79,10 @@ CONSTANTS
     BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born
     DrainMode,           \* "atomic": the format drain runs inside Turn (no /tree can interleave);
                          \* "unfenced": it is queued at settle and may land after a /tree (code before #3521 round 2);
-                         \* "fenced": the same, and its recordWritten is refused once a /tree moved the branch (code)
+                         \* "settle": the same, and its recordWritten is refused once a /tree moved the branch
+                         \*   since the settle that dequeued it (#3521 round 2);
+                         \* "fenced": the refusal is against the epoch the work was queued with, which a
+                         \*   Requeue keeps (code since #3521 round 3)
     \* ---- existing guards (FALSE = mutant with the guard removed) ----
     FileTimeCheck, CoverageCheck, SnapshotCheck
 
@@ -109,7 +112,8 @@ VARIABLES
     know, kTurn,                \* agent knowledge; knowledge before the current prompt
     reads, ft, written, pendCreate, lastEditOk, born, turnNo,  \* guard state
     pc, pend, ops, ext, nb, fixedTurn, mutatedTurn,
-    dr,                         \* settle drain: queued (q), branch epoch it captured (ep), current epoch (cur)
+    dr,                         \* settle drain: queued (q), branch epoch it carries (ep), current epoch (cur),
+                                \* work put back by an aborted or failed drain (rq)
     staleAllow, blindAllow, falseBlock  \* ghost verdict flags
 
 vars == <<disk, rev, tok, know, kTurn, reads, ft, written, pendCreate, lastEditOk,
@@ -128,7 +132,7 @@ Init ==
     /\ lastEditOk = FALSE /\ born = 0 /\ turnNo = 0
     /\ pc = "idle" /\ pend = [k |-> "none"] /\ ops = 0 /\ ext = 0 /\ nb = 0
     /\ fixedTurn = FALSE /\ mutatedTurn = FALSE
-    /\ dr = [q |-> FALSE, ep |-> 0, cur |-> 0]
+    /\ dr = [q |-> FALSE, ep |-> 0, cur |-> 0, rq |-> FALSE]
     /\ staleAllow = FALSE /\ blindAllow = FALSE /\ falseBlock = FALSE
 
 KnowAll(c) == [l \in Lines |-> IF l <= Len(c) THEN c[l] ELSE 0]
@@ -430,9 +434,14 @@ Turn ==
 \* then invokes the handlers, so pi-lens's handler captures the epoch before
 \* any /tree can land (SettleDue gates the boundaries below); an earlier
 \* extension's handler that awaits first is not modelled (README Limits).
+\* Requeued work is drained by the next settle, whenever it comes. "fenced"
+\* keeps the epoch the work was queued with, unless this branch wrote the file
+\* again (mutatedTurn): the merged record then carries the newer epoch.
 Settle ==
-    /\ Idle /\ SettleDue /\ ~dr.q
-    /\ dr' = [dr EXCEPT !.q = TRUE, !.ep = dr.cur]
+    /\ Idle /\ (SettleDue \/ dr.rq) /\ ~dr.q
+    /\ dr' = [dr EXCEPT !.q = TRUE, !.rq = FALSE,
+                        !.ep = IF DrainMode = "fenced" /\ dr.rq /\ ~mutatedTurn
+                                 THEN dr.ep ELSE dr.cur]
     /\ mutatedTurn' = FALSE
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, reads, ft, written, pendCreate, lastEditOk,
                    born, turnNo, pc, pend, ops, ext, nb, fixedTurn,
@@ -452,6 +461,17 @@ Drain ==
     /\ UNCHANGED <<know, kTurn, reads, pendCreate, lastEditOk, born, turnNo, pc, pend,
                    ops, ext, nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
 
+\* An aborted or failed drain puts its work back without writing (#3521
+\* round-2 verify R2-F1): ESC, a formatter or autofix failure, missing
+\* clients. pi's /tree awaits abort() first, so an aborted settle then a
+\* /tree is the common order.
+Requeue ==
+    /\ Idle /\ dr.q
+    /\ dr' = [dr EXCEPT !.q = FALSE, !.rq = TRUE]
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, reads, ft, written, pendCreate, lastEditOk,
+                   born, turnNo, pc, pend, ops, ext, nb, fixedTurn, mutatedTurn,
+                   staleAllow, blindAllow, falseBlock>>
+
 FreshGuard ==
     /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE
     /\ born' = rev
@@ -462,7 +482,7 @@ New ==
     /\ reads' = <<>> /\ FreshGuard /\ UNCHANGED turnNo
     /\ know' = [l \in Lines |-> 0] /\ kTurn' = know'
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
-    /\ dr' = [dr EXCEPT !.q = FALSE]          \* the session generation drops the old drain (#3528)
+    /\ dr' = [dr EXCEPT !.q = FALSE, !.rq = FALSE]   \* the session generation drops the old drain (#3528)
     /\ UNCHANGED <<disk, rev, tok, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
 \* /fork: the conversation restarts before the current prompt (kTurn).
@@ -485,7 +505,7 @@ Fork ==
     /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE /\ born' = rev
     /\ know' = kTurn
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
-    /\ dr' = [dr EXCEPT !.q = FALSE]          \* the session generation drops the old drain (#3528)
+    /\ dr' = [dr EXCEPT !.q = FALSE, !.rq = FALSE]   \* the session generation drops the old drain (#3528)
     /\ UNCHANGED <<disk, rev, tok, kTurn, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
 \* /tree: the conversation moves to an earlier point in the same activation.
@@ -517,7 +537,7 @@ Next ==
     \/ \E lo \in 1..MaxLen, s \in Spans : Edit(lo, s)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2
-    \/ External \/ Turn \/ Settle \/ Drain \/ New \/ Fork \/ Tree
+    \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars
 
