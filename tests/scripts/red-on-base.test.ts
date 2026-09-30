@@ -28,6 +28,7 @@ type Scenario = {
 	files: Record<string, { tests: TestSpec[] } | { suiteFailure: true }>;
 	buildExit?: number;
 	noReport?: boolean;
+	failExit?: boolean;
 	signalParent?: boolean;
 };
 type Repo = ReturnType<typeof makeRepo>;
@@ -103,6 +104,7 @@ function makeRepo(base: Scenario, head: Scenario) {
 			'  if [ -e "$4/node_modules" ] || [ -L "$4/node_modules" ]; then echo \'node_modules still present at remove\' >&2; exit 91; fi',
 			'  echo unlink-before-remove >> "$CLEANUP_LOG"',
 			"fi",
+			"if [ \"$1 $2\" = 'worktree add' ] && [ -n \"$FAIL_WORKTREE_ADD\" ]; then echo 'add refused' >&2; exit 92; fi",
 			'exec "$real" "$@"',
 		].join("\n"),
 		{ mode: 0o755 },
@@ -326,6 +328,29 @@ describe("red-on-base CLI verdicts", () => {
 		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
 	});
 
+	it("CAUSED-BY-CHANGE outranks INCONCLUSIVE when a run has both a flaky and a broken test", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("flaky"), pass("Y")) } },
+			{ files: { [A]: file(red("flaky", [1]), red("Y")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1", "--repeat", "3"]);
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain(`INCONCLUSIVE  ${A} > flaky`);
+		expect(result.stdout).toContain(`CAUSED-BY-CHANGE  ${A} > Y`);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: CAUSED-BY-CHANGE");
+	});
+
+	it("INCONCLUSIVE: a nonzero exit whose report names no failing test is not attributable", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) }, failExit: true },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(3);
+		expect(result.stdout).toContain("HEAD run 1: no per-test report");
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+	});
+
 	it("INCONCLUSIVE: a run with no per-test report is never counted as red", () => {
 		const repo = makeRepo(
 			{ files: { [A]: file(pass("t")) } },
@@ -372,6 +397,20 @@ describe("red-on-base usage and build failures", () => {
 		expect(result.stderr).toContain("HEAD build failed");
 		expect(result.stdout).not.toContain("VERDICT");
 		expect(probes(repo).filter((e) => e.phase === "test")).toEqual([]);
+		expectCleanedUp(repo);
+	});
+
+	it("a tool failure (git refuses the base worktree) is exit 3, never 0, and prints no verdict", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(pass("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"], {
+			FAIL_WORKTREE_ADD: "1",
+		});
+		expect(result.status).toBe(3);
+		expect(result.stderr).toContain("red-on-base:");
+		expect(result.stdout).not.toContain("VERDICT");
 		expectCleanedUp(repo);
 	});
 

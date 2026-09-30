@@ -181,10 +181,7 @@ export async function main(argv = process.argv.slice(2)) {
 			if (!existsSync(resolve(cwd, file)))
 				throw new UsageError(`${file} does not exist in this tree`);
 		try {
-			baseSha = git(
-				["rev-parse", "--verify", `${args.base}^{commit}`],
-				cwd,
-			).trim();
+			baseSha = git(["rev-parse", "--verify", args.base], cwd).trim();
 		} catch {
 			throw new UsageError(`--base ${args.base} is not a commit`);
 		}
@@ -242,7 +239,6 @@ export async function main(argv = process.argv.slice(2)) {
 	process.on("SIGTERM", onSigterm);
 
 	async function run(command, commandArgs, options) {
-		throwIfInterrupted();
 		const child = spawn(command, commandArgs, {
 			...options,
 			stdio: ["ignore", "pipe", "pipe"],

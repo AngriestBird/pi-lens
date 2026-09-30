@@ -96,5 +96,5 @@ if (scenario.signalParent && process.env.FAKE_SIGNAL_PARENT) {
 	});
 	if (!scenario.noReport)
 		writeFileSync(outputFile, JSON.stringify({ testResults }));
-	process.exit(failed || scenario.noReport ? 1 : 0);
+	process.exit(failed || scenario.noReport || scenario.failExit ? 1 : 0);
 }
