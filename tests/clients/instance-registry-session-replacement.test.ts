@@ -100,23 +100,24 @@ async function expectSessionTwoRegistersAlone(): Promise<void> {
 	});
 }
 
+// Shared by both describes below: a fresh registry dir and module graph per case.
+beforeEach(async () => {
+	dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+	vi.resetModules();
+	registry = await import("../../clients/instance-registry.js");
+	ledger = await import("../../clients/degradation-ledger.js");
+});
+
+afterEach(async () => {
+	vi.restoreAllMocks();
+	peerReleases();
+	// The tail is a process singleton: settle it here so nothing queued by
+	// one case lands in the next case's directory.
+	await registry._settleRegistryMutationsForTests();
+	removeTempDirSync(dir);
+});
+
 describe("instance registry across a session replacement (#3498)", () => {
-	beforeEach(async () => {
-		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-3498-"));
-		vi.resetModules();
-		registry = await import("../../clients/instance-registry.js");
-		ledger = await import("../../clients/degradation-ledger.js");
-	});
-
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		peerReleases();
-		// The tail is a process singleton: settle it here so nothing queued by
-		// one case lands in the next case's directory.
-		await registry._settleRegistryMutationsForTests();
-		removeTempDirSync(dir);
-	});
-
 	/**
 	 * session_shutdown arrives while the heartbeat's read of the registry is in
 	 * flight, i.e. while the heartbeat holds the registry lock. The sync
@@ -377,18 +378,6 @@ describe("instance registry across a session replacement (#3498)", () => {
  * or the intent a removal of a root that was never served must leave alone.
  */
 describe("a scoped root removal's decision (#3587)", () => {
-	beforeEach(async () => {
-		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-3780-"));
-		vi.resetModules();
-		registry = await import("../../clients/instance-registry.js");
-		ledger = await import("../../clients/degradation-ledger.js");
-	});
-
-	afterEach(async () => {
-		await registry._settleRegistryMutationsForTests();
-		removeTempDirSync(dir);
-	});
-
 	function landedReasons(): string[] {
 		return (
 			ledger
