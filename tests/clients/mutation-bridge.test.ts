@@ -464,10 +464,11 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
 				),
 			).toBeUndefined();
-			// The deferred record takes the CURRENT epoch, so `Math.max` cannot
-			// keep the dead session's number.
-			const [record] = runtime.consumeDeferredFormatFiles();
-			expect(record.readGuardBranchEpoch).toBe(0);
+			// Nothing is queued (#3677 round 3, verify r2 V2): round 2 queued the
+			// write at the CURRENT epoch, and the drain's own `recordWritten`
+			// then credited it (tests/clients/runtime-agent-end.test.ts, "drains
+			// nothing a dead session's sweep replay queued after a session reset").
+			expect(runtime.consumeDeferredFormatFiles()).toEqual([]);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;

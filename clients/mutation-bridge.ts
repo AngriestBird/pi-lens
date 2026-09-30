@@ -224,7 +224,8 @@ export function isValidMutationEntry(
 
 /**
  * #3677: a foreign producer may pass the read guard's branch epoch it captured
- * before it awaited. Resolve it into the two epochs the bridge forwards.
+ * before it awaited. Resolve it into the epoch the bridge forwards, and
+ * whether it may queue a deferral at all.
  *
  * `stamp` reaches `ReadGuard.recordWritten`. A concrete epoch makes the guard
  * refuse to credit a write that landed on a different branch (#3521). A
@@ -234,10 +235,14 @@ export function isValidMutationEntry(
  * session lands here. It is still handed to the stamp so the guard fails
  * closed rather than crediting a dead session's write to the new one.
  *
- * `defer` reaches `RuntimeCoordinator.deferMutation`, whose `Math.max` merge
- * must never keep a dead session's epoch. A value at or below the current
- * epoch is forwarded unchanged; one above it is dropped so the queue falls
- * back to the current epoch instead of poisoning the merge.
+ * `stamp` also reaches `RuntimeCoordinator.deferMutation` when a value at or
+ * below the current epoch is queued. For one above it, `queueable` is false
+ * and the bridge queues nothing (#3677 round 3, verify r2 V2): the
+ * drain's own `recordWritten` credits a record at the epoch it carries, so
+ * queuing at the current epoch credited the dead session's write one hop
+ * later, and queuing at the captured epoch would let `Math.max` keep it over
+ * a record the new session queued itself (#3677's false block).
+ * `resetForSession` already drops every deferral the dead session queued.
  *
  * Only a value that is not an integer `>= 0` at all (NaN, a negative, a
  * fraction, a string, a null-proto object) is ignored for BOTH consumers, with
@@ -248,12 +253,10 @@ export function isValidMutationEntry(
 function resolveReadGuardBranchEpoch(
 	value: unknown,
 	currentEpoch: number,
-): { stamp: number | undefined; defer: number | undefined } {
-	if (value === undefined) return { stamp: undefined, defer: undefined };
+): { stamp: number | undefined; queueable: boolean } {
+	if (value === undefined) return { stamp: undefined, queueable: true };
 	if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-		return value <= currentEpoch
-			? { stamp: value, defer: value }
-			: { stamp: value, defer: undefined };
+		return { stamp: value, queueable: value <= currentEpoch };
 	}
 	recordDegradationOnce({
 		kind: "mutation-bridge-invalid-branch-epoch",
@@ -263,7 +266,7 @@ function resolveReadGuardBranchEpoch(
 		// record (turn state, receipt, deferral) out of the bridge's try.
 		reason: `ignored a foreign readGuardBranchEpoch (typeof ${typeof value}) (current ${currentEpoch})`,
 	});
-	return { stamp: undefined, defer: undefined };
+	return { stamp: undefined, queueable: true };
 }
 
 /**
@@ -388,7 +391,8 @@ export function recordMutationThroughSeam(
 		//    behaviorally equivalent for the same write. Every other producer
 		//    (ast_grep_replace, a third-party extension) omits the field and
 		//    keeps deferring, unchanged.
-		if (entry.deferAutofix !== false) {
+		//    #3677 round 3: nothing is queued for an epoch above the live one.
+		if (entry.deferAutofix !== false && resolvedEpoch.queueable) {
 			for (const kind of ["autofix", "format"] as const) {
 				runtime.deferMutation?.(
 					filePath,
@@ -399,10 +403,10 @@ export function recordMutationThroughSeam(
 					runtime.telemetrySessionId,
 					projectRoot,
 					// #3521: the settled sweep's epoch, so a record it queues after
-					// a /tree is not credited to the new branch. #3677 F1: a value
-					// above the live epoch is dropped (undefined) so the merge uses
-					// the current epoch rather than keeping a dead session's.
-					resolvedEpoch.defer,
+					// a /tree is not credited to the new branch. #3677: a malformed
+					// value is dropped (undefined), so the merge uses the current
+					// epoch.
+					resolvedEpoch.stamp,
 				);
 			}
 		}
