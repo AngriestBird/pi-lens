@@ -3966,9 +3966,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		content: unknown;
 	}): boolean => {
 		if (msg.role !== "user") return false;
-		// String content is a plain prompt; only an array of content blocks can
-		// carry a tool_result, which must not be preceded by an injected message.
-		if (!Array.isArray(msg.content)) return true;
+		if (typeof msg.content === "string") return true;
+		if (!Array.isArray(msg.content)) return false;
 		return !msg.content.some(
 			(block) =>
 				typeof block === "object" &&
@@ -3976,35 +3975,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				(block as { type?: unknown }).type === "tool_result",
 		);
 	};
-	const extractInjectedText = (
-		messages: ReadonlyArray<{ role: string; content: unknown }>,
-	): string => {
-		const parts: string[] = [];
-		for (const msg of messages) {
-			if (typeof msg.content === "string") {
-				if (msg.content) parts.push(msg.content);
-			} else if (Array.isArray(msg.content)) {
-				for (const block of msg.content) {
-					if (typeof block === "string") {
-						if (block) parts.push(block);
-					} else if (
-						typeof block === "object" &&
-						block !== null &&
-						"type" in block &&
-						block.type === "text" &&
-						"text" in block &&
-						typeof (block as { text: unknown }).text === "string"
-					) {
-						const text = (block as { text: string }).text;
-						if (text) parts.push(text);
-					}
-				}
-			} else if (msg.content != null) {
-				const str = String(msg.content);
-				if (str) parts.push(str);
-			}
+	const appendToUserPromptContent = (
+		content: string | unknown[],
+		injectedText: string,
+	): unknown => {
+		if (typeof content === "string") {
+			return content.length > 0
+				? `${content}\n\n${injectedText}`
+				: injectedText;
 		}
-		return parts.join("\n\n");
+		return [...content, { type: "text", text: injectedText }];
 	};
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on("context") overload has TS resolution bug
 	(pi as any).on(
@@ -4142,39 +4122,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return { messages: resultMessages };
 					}
 
-					// #3693: Append the injected findings to the active user prompt so
-					// the prior transcript prefix is kept, messages[0] stays stable,
-					// and no consecutive user turns are created (avoiding ChatML/Qwen
-					// GGUF template issues on local runners like llama.cpp).
-					const injectedText = extractInjectedText(injectedMessages);
+					const injectedText = injectedMessages
+						.map((m) => m.content)
+						.filter(Boolean)
+						.join("\n\n");
 					if (!injectedText) {
 						logContextObservation(existingMessages, "none", []);
 						return;
 					}
 
-					let updatedContent: unknown;
-					if (typeof lastMessage.content === "string") {
-						updatedContent =
-							lastMessage.content.length > 0
-								? `${lastMessage.content}\n\n${injectedText}`
-								: injectedText;
-					} else if (Array.isArray(lastMessage.content)) {
-						updatedContent = [
-							...lastMessage.content,
-							{ type: "text", text: injectedText },
-						];
-					} else {
-						const stringContent =
-							lastMessage.content != null ? String(lastMessage.content) : "";
-						updatedContent =
-							stringContent.length > 0
-								? `${stringContent}\n\n${injectedText}`
-								: injectedText;
-					}
-
 					const updatedLastMessage = {
 						...lastMessage,
-						content: updatedContent,
+						content: appendToUserPromptContent(
+							lastMessage.content as string | unknown[],
+							injectedText,
+						),
 					};
 
 					const resultMessages = [

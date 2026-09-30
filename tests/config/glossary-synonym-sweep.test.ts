@@ -672,7 +672,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 9,
-		"index.ts": 21,
+		// 21 -> 22 (#3693): inlined injectedMessages.map(...).filter(Boolean).join(...)
+		// per review feedback.
+		"index.ts": 22,
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,

@@ -263,4 +263,39 @@ describe("context injection appends to last user message (#3693)", () => {
 		},
 		TIMEOUT_MS,
 	);
+
+	it(
+		"routes a non-string non-array prompt down the append-after path preserving content uncoerced",
+		async () => {
+			const { context } = await loadContextHandler();
+
+			new CacheManager(false).writeCache(
+				"session-start-guidance",
+				{ content: "Uncoerced test guidance." },
+				tmpDir,
+			);
+
+			const customContent = { weird: true };
+			const customUser = { role: "user", content: customContent };
+			const existing = [{ role: "assistant", content: "Ready." }, customUser];
+
+			const result = (await context(
+				{ messages: existing },
+				makeCtx({ cwd: tmpDir, sessionId: "sess-7" }),
+			)) as { messages: Array<{ role: string; content: unknown }> };
+
+			expect(result).toBeDefined();
+			// Appends AFTER the transcript as a new message, leaving customContent untouched
+			expect(result.messages).toHaveLength(3);
+			expect(result.messages[0]).toEqual({
+				role: "assistant",
+				content: "Ready.",
+			});
+			expect(result.messages[1]).toBe(customUser);
+			expect(result.messages[1].content).toBe(customContent);
+			expect(result.messages[2].role).toBe("user");
+			expect(result.messages[2].content).toContain("Uncoerced test guidance.");
+		},
+		TIMEOUT_MS,
+	);
 });

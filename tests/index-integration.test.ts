@@ -1775,7 +1775,8 @@ describe("index.ts integration", () => {
 			// is identical between the two turns — this is what prefix-caching providers reuse.
 			const prefixA = resultA.messages.slice(0, -1);
 			const prefixB = resultB.messages.slice(0, -1);
-			expect(prefixA).toEqual(prefixB);
+			// Assert that turn 2's prefix equals turn 1's prefix byte-for-byte:
+			expect(prefixB).toEqual(prefixA);
 			expect(prefixA).toEqual([firstUser, assistant]);
 
 			// The trailing message starts with the same user prompt text across turns
