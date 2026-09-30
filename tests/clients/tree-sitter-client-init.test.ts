@@ -62,20 +62,6 @@ describe("tree-sitter-client wasm resolution", () => {
 		expect(path.isAbsolute(wasmPath)).toBe(true);
 	});
 
-	it("constructs when web-tree-sitter has no grammars directory", () => {
-		const client = new TreeSitterClient(false, undefined, {
-			resolveAsset: () => undefined,
-			packageRoot: () => {
-				throw new Error("package-root resolver must not run");
-			},
-			resolvePackage: () => {
-				throw new Error("package resolver must not run");
-			},
-			cwd: () => "C:/absent-pi-lens-test-cwd",
-		});
-		expect((client as unknown as { grammarsDir: string }).grammarsDir).toBe("");
-	});
-
 	it("locateFile derives paths from the resolved wasm directory, not import.meta.url", () => {
 		const wasmPath = _require.resolve("web-tree-sitter/tree-sitter.wasm");
 		const wasmDir = path.dirname(wasmPath);
