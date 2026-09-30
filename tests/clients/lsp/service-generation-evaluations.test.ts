@@ -97,6 +97,16 @@ describe("#3733 LSP service generation is per process", () => {
 		},
 	);
 
+	it("starts at 0 when the other build's cell holds no value at all", async () => {
+		_seedProcessSingletonCellForTests("lsp.service.generation", {
+			schema: "pi-lens.process-singletons",
+			version: 99,
+		});
+		const server = await evaluateServerModule();
+
+		expect(server.captureLspServiceGeneration().generation).toBe(0);
+	});
+
 	it("reads the cell another build replaced after a handle was captured", async () => {
 		const first = await evaluateServerModule();
 		const captured = first.captureLspServiceGeneration();
