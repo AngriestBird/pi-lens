@@ -367,7 +367,12 @@ function matchLockTimeout(stderr) {
 	return stderr.match(LOCK_TIMEOUT_RE);
 }
 
-// Runs the targeted vitest selection through with-test-lock.mjs, streaming
+// Runs the targeted vitest selection through with-test-lock.mjs in SHARED
+// mode (#3839): it is always a batch of named files, which is what a shared
+// slot is for, and the exclusive lock stays with full-suite runs. The slot
+// count is deliberately not passed here: the exclusive holder drains the
+// DEFAULT_SHARED_SLOTS (scripts/lib/suite-lock.mjs), so a hook-side count above
+// it would let a slot run beside a full suite. Streaming
 // stdout live and mirroring stderr live while also buffering it — the
 // buffer is only needed to tell "the shared machine-wide lock timed out"
 // (with-test-lock.mjs's own message, PI_LENS_TEST_LOCK_TIMEOUT_MS in
@@ -378,7 +383,14 @@ function runTargetedTests(selected) {
 	return new Promise((resolve) => {
 		const child = spawn(
 			process.execPath,
-			["scripts/with-test-lock.mjs", "--", "vitest", "run", ...selected],
+			[
+				"scripts/with-test-lock.mjs",
+				"--shared",
+				"--",
+				"vitest",
+				"run",
+				...selected,
+			],
 			{
 				stdio: ["ignore", "inherit", "pipe"],
 			},

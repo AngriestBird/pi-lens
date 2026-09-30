@@ -733,7 +733,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		expect(result.status).toBe(1);
 		expect(busyLine(result)).toContain("test lock busy after 0.3 s");
 		expect(busyLine(result)).toContain(
-			`(held by PID ${process.pid} since 2026-01-01T00:00:00.000Z)`,
+			`(exclusive test-suite lock held by PID ${process.pid} since 2026-01-01T00:00:00.000Z)`,
 		);
 		expect(busyLine(result)).toContain(fx.lockPath);
 		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1 git push");
@@ -741,9 +741,10 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		expect(fs.existsSync(fx.logPath)).toBe(false);
 	});
 
-	it("blocks when the exclusive lock cannot drain the shared slots and says how many are busy", () => {
+	it("blocks when every shared slot is busy and says how many there are", () => {
 		// #3717 F4: the common contention is other lanes' shared slots, which
-		// carry no exclusive-holder line to quote.
+		// carry no exclusive-holder line to quote. #3839: the hook now takes a
+		// shared slot itself, so the wait it reports is the slot ceiling (2).
 		const fx = makeFixture();
 		for (const index of [0, 1])
 			fs.writeFileSync(
@@ -755,10 +756,58 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 			);
 		const result = runHook(fx);
 		expect(result.status).toBe(1);
-		expect(busyLine(result)).toContain("(2 of 2 shared slot(s) still busy)");
+		expect(busyLine(result)).toContain("(all 2 shared slot(s) busy)");
 		expect(busyLine(result)).toContain(fx.lockPath);
 		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
 	});
+
+	// #3839 recurrence: the hook took the EXCLUSIVE lock for a named-file
+	// batch (history: hook 08-20, shared slots 09-02, never migrated), so one
+	// other agent's `test:targeted` made a push wait or fail at the 120 s
+	// bound, and a push stalled every other targeted run. The probe below runs
+	// INSIDE the hook's own vitest run, so every wrapper it spawns meets the
+	// lock state the hook really holds: no wall-clock wait, no sleeping holder.
+	const CONCURRENCY_PROBE = `import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { it } from "vitest";
+it("probes the lock the hook holds", () => {
+	const wrap = (...flags) => spawnSync(process.execPath, ["scripts/with-test-lock.mjs", ...flags, "--", process.execPath, "-e", "0", "tests/x.test.ts"], { encoding: "utf8", env: process.env });
+	const exclusive = wrap();
+	const shared = wrap("--shared");
+	fs.writeFileSync("probe.json", JSON.stringify({ exclusive: { status: exclusive.status, stderr: exclusive.stderr }, shared: { status: shared.status, stderr: shared.stderr } }));
+});
+`;
+
+	it("admits the hook beside another shared holder; a full-suite run and a third shared run both wait for them (#3839)", () => {
+		const fx = makeFixture(CONCURRENCY_PROBE);
+		// Another lane's targeted run, already inside slot 0 (this test process
+		// is alive, so the slot is a live holder).
+		fs.writeFileSync(
+			path.join(fx.home, "test-suite.slot-0.lock"),
+			JSON.stringify({
+				pid: process.pid,
+				startedIso: "2026-01-01T00:00:00.000Z",
+			}),
+		);
+		const result = runHook(fx);
+		expect(result.stderr).not.toContain("test lock busy");
+		expect(result.status).toBe(0);
+		const probe = JSON.parse(
+			fs.readFileSync(path.join(fx.root, "probe.json"), "utf8"),
+		);
+		// A full-suite run still excludes the hook: it drains the slots and finds
+		// slot 0 (the other lane) and slot 1 (the hook) busy.
+		expect(probe.exclusive.status).toBe(1);
+		expect(probe.exclusive.stderr).toContain(
+			"timed out after 300ms waiting for test-suite lock: 2 of 2 shared slot(s) still busy",
+		);
+		// The hook took a slot, not the machine, and the ceiling still holds: a
+		// third shared run finds both slots taken.
+		expect(probe.shared.status).toBe(1);
+		expect(probe.shared.stderr).toContain(
+			"timed out after 300ms waiting for test-suite lock: all 2 shared slot(s) busy",
+		);
+	}, 60_000);
 
 	it("PI_LENS_PREPUSH_LOCK_SKIP=1 exits 0 with a warning and appends one durable record", () => {
 		const fx = makeFixture();
