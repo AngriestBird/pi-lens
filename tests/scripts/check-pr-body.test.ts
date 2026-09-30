@@ -1448,12 +1448,49 @@ describe("PR body lint (#1844)", () => {
 				titlePath,
 				"ci(test): verify local body lint (refs #2807)\n",
 			);
+			mkdirSync(join(fixtureCwd, "clients"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "clients", "ref.ts"),
+				"const local = true;\n",
+			);
+			const localBody = `${body}\n\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst local = true;\n\`\`\``;
+			writeFileSync(
+				bodyPath,
+				`${localBody}\n\n### Test assessment\nThe targeted test covers the local CLI.`,
+			);
 			for (const args of [
 				[checker, "--lint-local", bodyPath],
+				[
+					checker,
+					"--lint-local",
+					bodyPath,
+					"--title",
+					"ci(test): verify local body lint (refs #2807)",
+				],
 				[checker, "--body", bodyPath, "--title", titlePath],
 			]) {
 				execFileSync(process.execPath, args, { cwd: fixtureCwd });
 			}
+			expect(() =>
+				execFileSync(
+					process.execPath,
+					[
+						checker,
+						"--lint-local",
+						bodyPath,
+						"--title",
+						"ci(test): verify local body lint (closes #2807)",
+					],
+					{ cwd: fixtureCwd, stdio: "pipe" },
+				),
+			).toThrow();
+			expect(() =>
+				execFileSync(
+					process.execPath,
+					[checker, "--lint-local", bodyPath, "--ref", "HEAD"],
+					{ cwd: fixtureCwd, stdio: "pipe" },
+				),
+			).toThrow();
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
@@ -2523,6 +2560,52 @@ describe("local lint parity", () => {
 		);
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("Test assessment");
+	});
+
+	it("matches CI close-keyword placement and rejects comma lists (#3681)", () => {
+		const withTitle = `${body}\n\nCloses #3680, #3681.`;
+		const result = lintLocalPrBody(withTitle, process.cwd(), () => "", {
+			title: "fix: tooling (closes #3680)",
+		});
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("comma-separated close list");
+		const missing = lintLocalPrBody(body, process.cwd(), () => "", {
+			title: "fix: tooling (closes #3680)",
+		});
+		expect(missing.valid).toBe(false);
+		expect(missing.errors.join(" ")).toContain("#3680");
+		expect(missing.errors.join(" ")).toContain("Alternatively, use refs #3680");
+	});
+
+	it("resolves path citations from --ref instead of the working tree (#3681)", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst fromRef = true;\n\`\`\``,
+			{
+				ref: "release-ref",
+				git: (args: string[], options?: { maxBuffer?: number }) => {
+					expect(args).toEqual(["show", "release-ref:clients/ref.ts"]);
+					expect(options?.maxBuffer).toBe(16 * 1024 * 1024);
+					return "const fromRef = true;";
+				},
+			},
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("reports a bad --ref before trying to read its cited file (#3681)", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/ref.ts:1\`\n\`\`\`ts\nconst ref = true;\n\`\`\``,
+			{
+				ref: "missing-ref",
+				git: () => {
+					throw new Error("bad ref");
+				},
+			},
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			"revision missing-ref does not exist or is not a commit",
+		);
 	});
 	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
 		const ranges: string[][] = [];

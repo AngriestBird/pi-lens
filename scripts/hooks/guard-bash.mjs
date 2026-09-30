@@ -136,11 +136,20 @@
  * and allows. (Round 2 capped nesting at depth 8, which silently ALLOWED
  * anything nested deeper; the cap is deleted rather than raised.)
  */
-import { readFileSync, readlinkSync, readSync, writeSync } from "node:fs";
+import {
+	existsSync,
+	readFileSync,
+	readlinkSync,
+	readSync,
+	realpathSync,
+	statSync,
+	writeSync,
+} from "node:fs";
 import {
 	dirname,
 	isAbsolute,
 	join,
+	basename,
 	relative,
 	resolve,
 	sep as SEP,
@@ -1336,6 +1345,85 @@ function fileArgUnderDir(fileArg, dirName) {
 	return fileArg.split(/[\\/]+/).includes(dirName);
 }
 
+function repositoryRoot(start) {
+	if (!start) return undefined;
+	let current = resolve(start);
+	while (true) {
+		if (existsSync(join(current, ".git"))) return current;
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function repositoryIdentity(root) {
+	if (!root) return undefined;
+	const gitEntry = join(root, ".git");
+	try {
+		if (statSync(gitEntry).isDirectory()) return realpathSync(gitEntry);
+		const gitEntryText = readFileSync(gitEntry, "utf8");
+		if (gitEntryText.startsWith("gitdir: ")) {
+			const gitDir = resolve(root, gitEntryText.slice(8).trim());
+			return realpathSync(dirname(dirname(gitDir)));
+		}
+		return realpathSync(gitEntry);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The probe rule is about pi-lens runtime code, not every directory named
+ * `clients` or `dist`. Resolve the loaded path from the command's effective
+ * cwd and compare repository identity, including linked worktrees. #3680 is
+ * the recurrence: `cd` into another repository must not inherit this repo's
+ * relative `dist/` spelling.
+ */
+function loadsPiLensRuntime(fileOrSpecifier, cwd, initialIdentity) {
+	const loadedSpelling = isAbsolute(fileOrSpecifier)
+		? resolve(fileOrSpecifier)
+		: cwd
+			? resolve(cwd, fileOrSpecifier)
+			: resolve(fileOrSpecifier);
+	let loaded;
+	try {
+		loaded = realpathSync(loadedSpelling);
+	} catch {
+		try {
+			loaded = join(
+				realpathSync(dirname(loadedSpelling)),
+				basename(loadedSpelling),
+			);
+		} catch {
+			loaded = loadedSpelling;
+		}
+	}
+	const loadedRoot = repositoryRoot(loaded);
+	const loadedIdentity = repositoryIdentity(loadedRoot);
+	const referenceIdentity =
+		initialIdentity ?? repositoryIdentity(repositoryRoot(process.cwd()));
+	if (loadedIdentity && referenceIdentity)
+		return loadedIdentity === referenceIdentity;
+	if (!isAbsolute(fileOrSpecifier)) {
+		// The test harness and hook callers may carry a synthetic cwd. A path
+		// relative to a cwd that is not present cannot establish ownership, so
+		// retain the conservative denial; a real directory outside a repository
+		// is the reviewed #3680 allow case.
+		try {
+			if (!cwd) return true;
+			if (cwd && !repositoryRoot(realpathSync(cwd))) return false;
+		} catch {
+			return true;
+		}
+	}
+	// A relative path from an unknown cwd stays conservative. For an absolute
+	// path, the realpath/identity checks above are authoritative when cwd is
+	// known; an absent cwd remains conservative through the process-cwd
+	// reference identity, while a known foreign cwd must not deny an unrelated
+	// path whose repository identity could not be read.
+	return !isAbsolute(fileOrSpecifier) || !cwd;
+}
+
 /**
  * A `require(`/`import(` call, or a bare `from`, whose string-literal
  * specifier mentions a `clients/` or `dist/` path segment -- the shape of
@@ -1348,7 +1436,7 @@ function fileArgUnderDir(fileArg, dirName) {
  * since no static text scan can resolve a runtime-computed specifier.
  */
 const RUNTIME_LOAD_PATTERN =
-	/\b(?:require|import)\s*\(\s*["'`][^"'`]*(?:clients|dist)\/[^"'`]*["'`]|\bfrom\s+["'`][^"'`]*(?:clients|dist)\/[^"'`]*["'`]/;
+	/\b(?:require|import)\s*\(\s*["'`]([^"'`]*(?:clients|dist)\/[^"'`]*)["'`]|\bfrom\s+["'`]([^"'`]*(?:clients|dist)\/[^"'`]*)["'`]/g;
 
 /**
  * Classify a `node`/`nodejs` invocation's args. Denies only when ALL hold
@@ -1365,7 +1453,7 @@ const RUNTIME_LOAD_PATTERN =
  * @param {string} rawSegment
  * @returns {DenyRule | null}
  */
-function classifyNode(args, env, rawSegment) {
+function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
 	const hasFlag = args.some(
 		(a) =>
 			a === "-e" ||
@@ -1379,9 +1467,13 @@ function classifyNode(args, env, rawSegment) {
 	);
 	const fileArgLoadsRuntimeCode =
 		fileArg !== undefined &&
-		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist"));
+		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist")) &&
+		loadsPiLensRuntime(fileArg, cwd, initialIdentity);
 	const evalPayloadLoadsRuntimeCode =
-		hasFlag && RUNTIME_LOAD_PATTERN.test(rawSegment);
+		hasFlag &&
+		[...rawSegment.matchAll(RUNTIME_LOAD_PATTERN)].some((match) =>
+			loadsPiLensRuntime(match[1] ?? match[2], cwd, initialIdentity),
+		);
 	if (!fileArgLoadsRuntimeCode && !evalPayloadLoadsRuntimeCode) return null;
 	if ("PI_LENS_HOME" in env) return null;
 	if ("PI_LENS_HOME" in process.env) return null;
@@ -1508,7 +1600,12 @@ function commandBasename(cmd) {
  * @param {string} [cwd] the PreToolUse payload's own cwd, for {@link classifyGit}'s worktree-path resolution
  * @returns {DenyRule | null}
  */
-export function classifySegment(rawSegment, sharedEnv = {}, cwd) {
+export function classifySegment(
+	rawSegment,
+	sharedEnv = {},
+	cwd,
+	originCwd = cwd,
+) {
 	const rawWords = splitWords(rawSegment);
 	if (rawWords.length === 0) return null;
 	const words = stripCommandGroupAndRunnerPrefixes(rawWords);
@@ -1538,7 +1635,13 @@ export function classifySegment(rawSegment, sharedEnv = {}, cwd) {
 	const args = rest.slice(1);
 	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv);
 	if (cmd === "node" || cmd === "nodejs")
-		return classifyNode(args, effectiveEnv, rawSegment);
+		return classifyNode(
+			args,
+			effectiveEnv,
+			rawSegment,
+			cwd,
+			repositoryIdentity(repositoryRoot(originCwd)),
+		);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
@@ -1833,12 +1936,20 @@ export function findDeny(commandText, cwd) {
 	const sharedEnv = {};
 	for (let index = 0; index < regions.length; index++) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
+		let effectiveCwd = cwd;
 		const segments = splitSegmentsWithSeparators(regions[index]);
 		const chainRule = findUngatedWriteInChain(segments);
 		if (chainRule) return chainRule;
 		for (const { text: segment } of segments) {
-			const rule = classifySegment(segment, env, cwd);
+			const rule = classifySegment(segment, env, effectiveCwd, cwd);
 			if (rule) return rule;
+			const words = stripCommandGroupAndRunnerPrefixes(splitWords(segment));
+			if (words[0] === "cd" && words[1] && effectiveCwd) {
+				const target = words[1].startsWith("~")
+					? join(process.env.HOME ?? "", words[1].slice(1))
+					: words[1];
+				effectiveCwd = resolve(effectiveCwd, target);
+			}
 		}
 	}
 	return null;

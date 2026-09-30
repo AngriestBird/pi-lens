@@ -405,7 +405,7 @@ describe("renderMutationMarkdown", () => {
 				headSha: "abc1234",
 				zeroMutants: null,
 				partial: {
-					// round 3 R2-4: describePartialInterruptCause's shape -- never
+					// round 3 R2-4: describePartialMutationOutcome's shape -- never
 					// "no mutants evaluated" under a "6 of 9 evaluated" banner.
 					reason:
 						"mutation diff: the 0.55-minute mutation budget expired before Stryker produced a result",
@@ -418,7 +418,9 @@ describe("renderMutationMarkdown", () => {
 		});
 
 		expect(markdown).toContain("Partial run");
-		expect(markdown).toContain("6 of 9 mutant(s) evaluated");
+		expect(markdown).toContain(
+			"**Partial run** -- 6 of 9 mutant(s) evaluated before the interrupt.",
+		);
 		expect(markdown).toContain("budget expired");
 		// Recurrence (round 3 R2-4): the reason sits right under "6 of 9
 		// evaluated" -- it must never itself say the run evaluated nothing.
