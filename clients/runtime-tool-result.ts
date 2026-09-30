@@ -2194,6 +2194,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				// release then evicted the outer entry a live, unrelated classified
 				// pipeline had since re-created under it.
 				for (const observedPath of observedDispatchPaths) {
+					// #3596: a replaced session dispatches no further path; each
+					// one's writes would be dropped, so its run is wasted work.
+					if (writeSession.guardedWrite(observedPath, () => true) !== true)
+						continue;
 					const observedDispatchSignal = deps.signal;
 					const observedJoinSignal = deps.signal;
 					const observedStateHashForPath = getFileStateHash(observedPath);
@@ -2215,60 +2219,51 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						}
 						continue;
 					}
-					// #3596: a replaced session dispatches no further path; each
-					// one's writes would be dropped, so its run is wasted work.
-					const observedDispatchOutcome = await writeSession.guardedWrite(
-						observedPath,
-						() =>
-							bounded(
-								dispatchPipelineAnalysis({
-									deps,
-									runtime,
-									filePath: observedPath,
-									dispatchCwd: resolveLanguageRootForFile(
-										observedPath,
-										workspaceRoot,
-									),
-									turnStateCwd: path.resolve(workspaceRoot),
-									autofixMode: observedAutofixMode,
-									modifiedRanges: undefined,
-									writeIndex: runtime.nextWriteIndex(),
-									writeOrderTurn: runtime.writeOrderTurn,
-									initialStateHash: observedStateHashForPath,
-									readGuardCorrelationId: observedReadGuardCorrelationId,
-									requestedEditIndexes: getRequestedEditIndexes(
-										event,
-										observedKind,
-									),
-									requestedEditTotal: getRequestedEditCount(
-										event,
-										observedKind,
-									),
-									isPartialApplyResult:
-										((event.details ?? {}) as Record<string, unknown>)
-											.piLensPartialApply === true,
-									participantIds: [observedReadGuardCorrelationId],
-									participantTotal: 1,
-									toolResultStart,
-									nativeAppliedPairs: observedAppliedPairs,
-									// #2802 authorship rule (master): the observational
-									// settle already recorded this edit through the
-									// bridge, so the dispatch's read-guard write refresh
-									// carries evidence and stays enabled on every
-									// per-path dispatch.
-									allowAutonomousWriters: true,
-									// #3512: this path admits no cascade, so the capture
-									// only guards the cascade's tier-3 touch. #3568: the
-									// handler's, not one taken after path 1's await.
-									sessionGeneration: writeSession,
-								}),
-								{
-									ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
-									signal: observedDispatchSignal,
-									hook: "tool_result_edit",
-									label: "observed-tool-result-analysis",
-								},
+					const observedDispatchOutcome = await bounded(
+						dispatchPipelineAnalysis({
+							deps,
+							runtime,
+							filePath: observedPath,
+							dispatchCwd: resolveLanguageRootForFile(
+								observedPath,
+								workspaceRoot,
 							),
+							turnStateCwd: path.resolve(workspaceRoot),
+							autofixMode: observedAutofixMode,
+							modifiedRanges: undefined,
+							writeIndex: runtime.nextWriteIndex(),
+							writeOrderTurn: runtime.writeOrderTurn,
+							initialStateHash: observedStateHashForPath,
+							readGuardCorrelationId: observedReadGuardCorrelationId,
+							requestedEditIndexes: getRequestedEditIndexes(
+								event,
+								observedKind,
+							),
+							requestedEditTotal: getRequestedEditCount(event, observedKind),
+							isPartialApplyResult:
+								((event.details ?? {}) as Record<string, unknown>)
+									.piLensPartialApply === true,
+							participantIds: [observedReadGuardCorrelationId],
+							participantTotal: 1,
+							toolResultStart,
+							nativeAppliedPairs: observedAppliedPairs,
+							// #2802 authorship rule (master): the observational
+							// settle already recorded this edit through the
+							// bridge, so the dispatch's read-guard write refresh
+							// carries evidence and stays enabled on every
+							// per-path dispatch.
+							allowAutonomousWriters: true,
+							// #3512: this path admits no cascade, so the capture
+							// only guards the cascade's tier-3 touch. #3568: the
+							// handler's, not one taken after path 1's await.
+							sessionGeneration: writeSession,
+						}),
+						{
+							ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
+							signal: observedDispatchSignal,
+							hook: "tool_result_edit",
+							label: "observed-tool-result-analysis",
+						},
 					);
 					if (observedDispatchOutcome?.crashed) {
 						// #2464 review round 2, S6: parity with the classified chain — a
