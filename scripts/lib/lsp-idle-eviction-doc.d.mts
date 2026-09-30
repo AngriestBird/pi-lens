@@ -20,6 +20,8 @@ export interface IdleEvictionRow {
 	respawn?: "ok" | "failed" | "not-evicted";
 	coldStartMs?: number;
 	coverage?: "preserved" | "narrowed" | "unproven";
+	/** Findings the respawned server reported that the baseline did not. */
+	widened?: number;
 }
 
 export interface IdleEvictionFinding {
@@ -31,9 +33,6 @@ export interface IdleEvictionFinding {
 
 export const REASONS: Record<string, string>;
 export const RESULT_STATES: readonly IdleEvictionResult[];
-
-export function bucketMs(ms: number | undefined | null): string;
-export function bucketBytes(bytes: number | undefined | null): string;
 
 export function summarizeRows(rows: readonly IdleEvictionRow[]): {
 	total: number;
@@ -74,3 +73,8 @@ export function buildIdleEvictionDriftBody(
 	findings: readonly IdleEvictionFinding[],
 	options?: { runUrl?: string | null },
 ): string | null;
+
+export function driftIssueState(
+	rows: readonly IdleEvictionRow[],
+	declared: ReadonlyMap<string, string>,
+): "drift" | "clean" | "unknown";

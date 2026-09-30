@@ -115,8 +115,8 @@ export function findingKey(d) {
 	].join("|");
 }
 
-/** Keys present in `before` and absent from `after`: what eviction narrowed. */
-function narrowedKeys(before, after) {
+/** Keys present in `before` and absent from `after` (narrowing, or widening when swapped). */
+function missingKeys(before, after) {
 	const kept = new Set(after);
 	return [...before].filter((key) => !kept.has(key));
 }
@@ -279,17 +279,19 @@ export async function probeServer({ server, fixture, createDriver, budgets }) {
 			}
 			if (findings !== undefined && driver.isTargetAlive()) {
 				respawned = true;
-				narrowed = narrowedKeys(
-					baselineKeys,
-					attributed(findings).map(findingKey),
-				);
+				const postKeys = attributed(findings).map(findingKey);
+				narrowed = missingKeys(baselineKeys, postKeys);
 				if (narrowed.length === 0) {
+					// Extra findings are not a veto, but they are disclosed: a first scan
+					// that grows on respawn may have been partial.
+					const widened = missingKeys(new Set(postKeys), baselineKeys).length;
 					return {
 						...measured,
 						result: "eligible",
 						respawn: "ok",
 						coldStartMs: driver.now() - evictedAt,
 						coverage: "preserved",
+						...(widened > 0 ? { widened } : {}),
 					};
 				}
 			}

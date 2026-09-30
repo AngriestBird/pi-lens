@@ -2,10 +2,13 @@
  * #3645: the durable artifact and the declared-versus-measured drift check.
  *
  * Recurrences these tests prevent:
- *  - a nightly artifact that changes on every run (raw RSS and milliseconds)
- *    opens a refresh PR every night and stops being reviewed; the document
- *    shows buckets, so two runs that differ inside a bucket must render the
- *    same text;
+ *  - a nightly artifact that changes on every run (raw or bucketed RSS and
+ *    milliseconds) opens a refresh PR most nights and stops being reviewed;
+ *    the document carries only stable columns, so two runs that differ only in
+ *    timings and memory must render the same text (review round 1 F1);
+ *  - a tracking issue that auto-closes because the measurement could not see
+ *    (review round 1 F3): it closes only when every transparent server is
+ *    eligible;
  *  - a coverage gap read as a clean zero: an unmeasured figure renders `n/a`,
  *    never `0`, and the header counts what was not measured;
  *  - a registry that evicts a server the measurement vetoes (the only `drift`),
@@ -13,9 +16,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-	bucketBytes,
-	bucketMs,
 	buildIdleEvictionDriftBody,
+	driftIssueState,
 	IDLE_EVICTION_DRIFT_TITLE,
 	idleEvictionDrift,
 	parseIdleEvictionDoc,
@@ -47,57 +49,6 @@ const eligible = (serverId: string, extra: Partial<IdleEvictionRow> = {}) =>
 		coverage: "preserved",
 		...extra,
 	}) as IdleEvictionRow;
-
-describe("buckets", () => {
-	it("places each boundary in the upper bucket and labels overflow", () => {
-		expect(
-			[
-				0, 999, 1_000, 2_999, 3_000, 9_999, 10_000, 29_999, 30_000, 59_999,
-				60_000,
-			].map(bucketMs),
-		).toEqual([
-			"<1s",
-			"<1s",
-			"1-3s",
-			"1-3s",
-			"3-10s",
-			"3-10s",
-			"10-30s",
-			"10-30s",
-			"30-60s",
-			"30-60s",
-			">60s",
-		]);
-		expect(
-			[
-				99 * MB,
-				100 * MB,
-				249 * MB,
-				250 * MB,
-				499 * MB,
-				500 * MB,
-				1023 * MB,
-				1024 * MB,
-			].map(bucketBytes),
-		).toEqual([
-			"<100 MB",
-			"100-250 MB",
-			"100-250 MB",
-			"250-500 MB",
-			"250-500 MB",
-			"500 MB-1 GB",
-			"500 MB-1 GB",
-			">1 GB",
-		]);
-	});
-
-	it("labels an unmeasured figure n/a, never a zero bucket", () => {
-		for (const value of [undefined, null, Number.NaN, -1]) {
-			expect(bucketMs(value as number)).toBe("n/a");
-			expect(bucketBytes(value as number)).toBe("n/a");
-		}
-	});
-});
 
 describe("renderIdleEvictionDoc", () => {
 	const rows: IdleEvictionRow[] = [
@@ -133,14 +84,17 @@ describe("renderIdleEvictionDoc", () => {
 		expect(render([...rows].reverse())).toBe(render(rows));
 	});
 
-	it("renders identical text for two runs that differ only inside a bucket", () => {
+	it("renders identical text for two runs that differ only in timings and memory", () => {
+		// Review round 1 F1: two back-to-back local runs flipped 7 of 30 bucket
+		// cells (prisma init 5417 vs 592 ms), so no timing or memory figure may
+		// reach the committed document, bucketed or not.
 		const noisy = rows.map((r) =>
-			r.result === "eligible"
+			r.result === "eligible" || r.result === "vetoed"
 				? {
 						...r,
-						initMs: (r.initMs ?? 0) + 311,
-						rssBytes: (r.rssBytes ?? 0) + 7 * MB,
-						coldStartMs: (r.coldStartMs ?? 0) + 402,
+						initMs: (r.initMs ?? 0) * 9 + 4_321,
+						rssBytes: r.rssBytes === null ? null : (r.rssBytes ?? 0) * 7,
+						coldStartMs: (r.coldStartMs ?? 0) * 13 + 77,
 					}
 				: r,
 		);
@@ -150,9 +104,9 @@ describe("renderIdleEvictionDoc", () => {
 		).toBe(false);
 	});
 
-	it("changes the text when a server crosses a bucket", () => {
+	it("changes the text when a stable column changes", () => {
 		const moved = rows.map((r) =>
-			r.serverId === "alpha" ? { ...r, rssBytes: 600 * MB } : r,
+			r.serverId === "alpha" ? { ...r, coverage: "narrowed" as const } : r,
 		);
 		expect(compareGeneratedDocs(render(moved), render(rows))).toBe(true);
 	});
@@ -175,10 +129,12 @@ describe("renderIdleEvictionDoc", () => {
 		const doc = render(rows);
 		const delta = doc.split("\n").find((l) => l.startsWith("| delta |"));
 		expect(delta).toBe(
-			"| delta | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a | n/a | n/a | n/a |",
+			"| delta | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |",
 		);
 		const charlie = doc.split("\n").find((l) => l.startsWith("| charlie |"));
-		expect(charlie).toContain("| 1-3s | n/a | ok | n/a | narrowed |");
+		expect(charlie).toBe(
+			"| charlie | auxiliary | resident | vetoed | findings-narrowed | ok | narrowed |",
+		);
 	});
 
 	it("round-trips the per-server rows through the parser", () => {
@@ -354,5 +310,101 @@ describe("buildIdleEvictionDriftBody", () => {
 		expect(IDLE_EVICTION_DRIFT_TITLE).toBe(
 			"nightly: LSP idle-eviction drift (declared transparent, measured vetoed)",
 		);
+	});
+});
+
+describe("driftIssueState", () => {
+	const row = (
+		serverId: string,
+		result: IdleEvictionRow["result"],
+		reason?: string,
+	) => ({ serverId, result, reason }) as IdleEvictionRow;
+	const transparent = new Map([
+		["alpha", "transparent"],
+		["bravo", "transparent"],
+		["charlie", "unmeasured"],
+	]);
+	const state = (rows: IdleEvictionRow[]) => driftIssueState(rows, transparent);
+
+	it("is clean only when every transparent server is eligible, whatever the others did", () => {
+		expect(
+			state([
+				row("alpha", "eligible"),
+				row("bravo", "eligible"),
+				row("charlie", "vetoed", "respawn-failed"),
+			]),
+		).toBe("clean");
+	});
+
+	it("is drift when any transparent server is vetoed, even if the others are eligible", () => {
+		expect(
+			state([
+				row("alpha", "eligible"),
+				row("bravo", "vetoed", "respawn-failed"),
+			]),
+		).toBe("drift");
+	});
+
+	it.each([
+		["unavailable", "tool-unavailable"],
+		["unavailable", "budget-exhausted"],
+		["inconclusive", "client-died"],
+		["inconclusive", "not-evicted"],
+		["inconclusive", "no-baseline"],
+	] as const)(
+		"is unknown, never clean, when a transparent server is %s (%s)",
+		(result, reason) => {
+			expect(
+				state([row("alpha", "eligible"), row("bravo", result, reason)]),
+			).toBe("unknown");
+		},
+	);
+
+	it("is unknown when a transparent server has no row at all, as in a filtered run", () => {
+		expect(state([row("alpha", "eligible")])).toBe("unknown");
+	});
+});
+
+describe("widened disclosure", () => {
+	const eligibleRow = (widened?: number) =>
+		({
+			serverId: "alpha",
+			result: "eligible",
+			coverage: "preserved",
+			...(widened ? { widened } : {}),
+		}) as IdleEvictionRow;
+
+	it("is an info finding for an eligible server that reported extra findings after the respawn", () => {
+		const findings = idleEvictionDrift([eligibleRow(2)], declared).filter(
+			(f) => f.kind === "widened",
+		);
+		expect(findings).toHaveLength(1);
+		expect(findings[0]).toMatchObject({ serverId: "alpha", severity: "info" });
+		expect(findings[0].detail).toContain("2 more finding(s)");
+	});
+
+	it("is absent when nothing widened, and never a drift", () => {
+		expect(
+			idleEvictionDrift([eligibleRow()], declared).filter(
+				(f) => f.kind === "widened",
+			),
+		).toEqual([]);
+		expect(
+			idleEvictionDrift([eligibleRow(3)], declared).some(
+				(f) => f.severity === "drift",
+			),
+		).toBe(false);
+	});
+
+	it("stays out of the committed document, because it flaps between runs", () => {
+		const doc = renderIdleEvictionDoc({
+			rows: [eligibleRow(2)],
+			declared,
+			date: "2026-09-30",
+			platform: "linux",
+		});
+		expect(doc).not.toContain("widened) ");
+		expect(doc).not.toContain("more finding(s)");
+		expect(doc).toContain("`preserved` on\nseveral nights");
 	});
 });

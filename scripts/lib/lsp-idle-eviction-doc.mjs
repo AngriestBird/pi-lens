@@ -5,12 +5,13 @@
 // lsp-idle-eviction-probe.mjs; the script that drives both is
 // scripts/measure-lsp-idle-eviction.mjs.
 //
-// Why the committed document shows BUCKETS and not raw numbers: a nightly
-// refresh PR is opened whenever the document changes by anything but its date
-// (`compareGeneratedDocs`). A raw RSS or millisecond figure differs on every
-// run, so the refresh PR would open every night and say nothing. Buckets keep
-// the artifact reviewable and stable; the raw figures go to the run's step
-// summary and JSON summary, where they are evidence, not diff noise.
+// Why the committed document carries only STABLE columns (result, reason,
+// respawn, coverage): a nightly refresh PR opens whenever the document changes
+// by anything but its date (`compareGeneratedDocs`), and every timing or memory
+// figure differs on every run, bucketed or not (review round 1 F1: two
+// back-to-back local runs flipped 7 of 30 bucket cells). The figures are
+// evidence, not diff noise, so they go to the run's step log, its job summary
+// and the JSON summary.
 
 import { compareStableStrings, parseTable } from "./md-matrix.mjs";
 
@@ -50,36 +51,6 @@ export const RESULT_STATES = [
 ];
 
 const MB = 1024 * 1024;
-const MS_BUCKETS = [
-	[1_000, "<1s"],
-	[3_000, "1-3s"],
-	[10_000, "3-10s"],
-	[30_000, "10-30s"],
-	[60_000, "30-60s"],
-];
-const RSS_BUCKETS = [
-	[100 * MB, "<100 MB"],
-	[250 * MB, "100-250 MB"],
-	[500 * MB, "250-500 MB"],
-	[1024 * MB, "500 MB-1 GB"],
-];
-
-function bucket(value, table, overflow) {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
-		return "n/a";
-	for (const [limit, label] of table) if (value < limit) return label;
-	return overflow;
-}
-
-/** Bucket label for a duration in milliseconds; `n/a` when not measured. */
-export function bucketMs(ms) {
-	return bucket(ms, MS_BUCKETS, ">60s");
-}
-
-/** Bucket label for resident bytes; `n/a` when the platform could not say. */
-export function bucketBytes(bytes) {
-	return bucket(bytes, RSS_BUCKETS, ">1 GB");
-}
 
 /** Count rows by result; `budget` is the subset of unavailable never reached. */
 export function summarizeRows(rows) {
@@ -115,6 +86,14 @@ export function idleEvictionDrift(rows, declared) {
 	)) {
 		const policy = declared.get(row.serverId);
 		const why = row.reason ? ` (${row.reason})` : "";
+		if (row.result === "eligible" && row.widened > 0) {
+			findings.push({
+				serverId: row.serverId,
+				kind: "widened",
+				severity: "info",
+				detail: `reported ${row.widened} more finding(s) after the respawn than before eviction; a policy flip needs "preserved" without widening on several nights`,
+			});
+		}
 		if (policy === "transparent" && row.result === "vetoed") {
 			findings.push({
 				serverId: row.serverId,
@@ -191,6 +170,29 @@ export function buildIdleEvictionDriftBody(findings, options = {}) {
 	return lines.join("\n");
 }
 
+/**
+ * What the tracking issue should do. `drift`: at least one server the registry
+ * declares `transparent` is vetoed. `clean`: EVERY transparent server has an
+ * `eligible` row this run. `unknown`: anything else (a transparent server that
+ * is unavailable, budget-exhausted, client-died, not-evicted, no-baseline, or
+ * absent from a filtered run): no evidence either way, so the issue is left
+ * as it is. Closing on the absence of drift would close it exactly when the
+ * measurement could not see (review round 1 F3).
+ *
+ * @returns {"drift" | "clean" | "unknown"}
+ */
+export function driftIssueState(rows, declared) {
+	const byId = new Map(rows.map((row) => [row.serverId, row]));
+	let clean = true;
+	for (const [serverId, policy] of declared) {
+		if (policy !== "transparent") continue;
+		const row = byId.get(serverId);
+		if (row?.result === "vetoed") return "drift";
+		if (row?.result !== "eligible") clean = false;
+	}
+	return clean ? "clean" : "unknown";
+}
+
 const cell = (value) => (value === undefined || value === null ? "n/a" : value);
 
 function rowCells(row, declared) {
@@ -200,10 +202,7 @@ function rowCells(row, declared) {
 		declared.get(row.serverId) ?? "?",
 		row.result,
 		row.reason ?? "·",
-		row.initMs === undefined ? "n/a" : bucketMs(row.initMs),
-		row.rssBytes === undefined ? "n/a" : bucketBytes(row.rssBytes),
 		cell(row.respawn),
-		row.coldStartMs === undefined ? "n/a" : bucketMs(row.coldStartMs),
 		cell(row.coverage),
 	];
 }
@@ -240,22 +239,31 @@ export function renderIdleEvictionDoc({ rows, declared, date, platform }) {
 		"",
 		"## Per-server rows",
 		"",
-		"Durations and memory are bucketed so the nightly refresh only changes this file",
-		"when a server moves between buckets; the raw figures are in the nightly run's",
-		"step summary. `n/a` means not measured, never zero: **init** is spawn plus",
-		"initialize plus first diagnostics, **rss** is the resident memory of the",
-		"server's process tree after load (`n/a` where the platform cannot report it),",
-		"**respawn** is whether the next request after eviction brought the server back,",
-		"**cold start** is the time from that request to the first diagnostics that",
-		"preserve the baseline findings.",
+		"Only stable columns are committed, so the nightly refresh changes this file",
+		"only when a server's outcome changes. The measured init duration, resident",
+		"memory of the server's process tree and post-eviction cold start are in the",
+		"nightly run's step log and job summary, one row per server. `n/a` means not",
+		"measured, never zero: **respawn** is whether the next request after eviction",
+		"brought the server back, **coverage** is whether the respawned server kept",
+		"every baseline finding.",
 		"",
-		"| server | role | declared | result | reason | init | rss | respawn | cold start | coverage |",
-		"|---|---|---|---|---|---|---|---|---|---|",
+		"A server that reports extra findings after the respawn (`widened`) still reads",
+		"`preserved`, because nothing was lost, but a first scan that grows on respawn",
+		"is a sign the baseline was partial. Any policy flip needs `preserved` on",
+		"several nights, not one; a `widened` disclosure is per run and is shown in the",
+		"step log only, because it flaps.",
+		"",
+		"| server | role | declared | result | reason | respawn | coverage |",
+		"|---|---|---|---|---|---|---|",
 	];
 	for (const row of sorted) {
 		lines.push(`| ${rowCells(row, declared).join(" | ")} |`);
 	}
-	const findings = idleEvictionDrift(sorted, declared);
+	// `widened` is per-run and flaps (it depends on how far the first scan got),
+	// so it stays out of the committed document.
+	const findings = idleEvictionDrift(sorted, declared).filter(
+		(f) => f.kind !== "widened",
+	);
 	lines.push("", "## Declared versus measured", "");
 	if (findings.length === 0) {
 		lines.push(

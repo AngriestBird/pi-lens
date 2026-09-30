@@ -202,6 +202,7 @@ describe("probeServer verdicts (#3645)", () => {
 			rssBytes: 300 * 1024 * 1024,
 		});
 		expect(row.reason).toBeUndefined();
+		expect(row.widened).toBeUndefined();
 	});
 
 	it("times cold start from the eviction, not from arming", async () => {
@@ -299,7 +300,11 @@ describe("probeServer verdicts (#3645)", () => {
 			touches: (_n, generation) =>
 				generation === 0 ? [at(1, "a")] : [at(1, "a"), at(9, "new")],
 		});
-		expect(row).toMatchObject({ result: "eligible", coverage: "preserved" });
+		expect(row).toMatchObject({
+			result: "eligible",
+			coverage: "preserved",
+			widened: 1,
+		});
 	});
 
 	it("vetoes with respawn-failed when the next request never brings the target back", async () => {
