@@ -12,7 +12,9 @@
 // (which would also mask a real build failure).
 //
 // Skipped, not attempted, when:
-//   - PI_LENS_SKIP_HOOKS is set   explicit opt-out (agents/CI set this) —
+//   - PI_LENS_SKIP_HOOKS is set   explicit install opt-out (`PI_LENS_SKIP_HOOKS=1
+//                                  npm ci`; never on git commit/push/merge/
+//                                  rebase, which guard-bash denies, #3778) —
 //                                  any non-empty value, same rule the
 //                                  hooks themselves use (.husky/pre-commit,
 //                                  .husky/pre-push)

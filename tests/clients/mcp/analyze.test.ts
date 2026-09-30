@@ -170,6 +170,60 @@ describe("analyzeFile", () => {
 		expect(typeof result.durationMs).toBe("number");
 	});
 
+	// #3752: the dispatcher appends its synthetic coverage notice to
+	// `DispatchResult.warnings` (and to the rendered `output`) AFTER
+	// `visibleDiagnostics` is finalized, so that entry is a warning-bucket member
+	// without being a member of `result.diagnostics` (#3752, reported on a Go and
+	// a PHP file with no toolchain on the host). The serializer counted it in
+	// `counts.warnings` while listing only `result.diagnostics`, so the surface
+	// reported `counts.warnings: 1` beside `diagnostics: []` with no way to see
+	// what the warning was. Every counted finding must appear in the list.
+	it("lists a warnings-bucket entry the dispatcher left out of diagnostics (#3752)", async () => {
+		const coverageNotice = {
+			id: "coverage-unavailable:go:main.go",
+			message:
+				"Pi-lens go analysis unavailable — language tools are missing or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).",
+			filePath: "main.go",
+			severity: "warning" as const,
+			semantic: "warning" as const,
+			tool: "pi-lens",
+		};
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			warnings: [coverageNotice],
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(result.counts).toEqual({
+			diagnostics: 1,
+			blockers: 0,
+			warnings: 1,
+			advisories: 0,
+			fixed: 0,
+		});
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0]).toMatchObject({
+			severity: "warning",
+			tool: "pi-lens",
+			message: coverageNotice.message,
+		});
+	});
+
+	it("does not duplicate a warnings-bucket entry already listed in diagnostics (#3752)", async () => {
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			diagnostics: [warningDiagnostic],
+			warnings: [warningDiagnostic],
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(result.counts.diagnostics).toBe(1);
+		expect(result.counts.warnings).toBe(1);
+		expect(result.diagnostics).toHaveLength(1);
+	});
+
 	it("counts a deferred LSP runner as ran while preserving its status", async () => {
 		vi.mocked(dispatchForFile).mockResolvedValue({
 			...emptyResult,

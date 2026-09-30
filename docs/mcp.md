@@ -131,6 +131,17 @@ New files:
 | `pilens_symbol_search` | `symbol_search` | search the persisted symbol index. |
 | `pilens_turn_end` | turn lifecycle | settle turn-end work and return findings. |
 
+Every tool's `inputSchema` (from `tools/list`) is also the set of argument keys
+the dispatcher accepts without comment: an undeclared key is reported in the
+result (a leading `Ignored unknown argument(s) ...` line, plus
+`structuredContent.ignoredArguments`). An ignored key that leaves a required
+input missing, or that is a declared parameter the call did not send written
+another way (`pilens_diagnostics {"filePath": ...}` for `path`; predicate in
+[public-api-stability.md](public-api-stability.md)), turns the call into an error
+instead of a run on defaults; a looser "did you mean" stays a warning (#3749;
+details in [agent-tools.md](agent-tools.md)). The check is the one seam in
+`mcp/server.ts` `tools/call`, through `mcp/tool-arguments.ts`.
+
 ## Packaging / wiring
 
 - `package.json`: add `"bin": { "pi-lens-mcp": "./dist/mcp/server.js" }`; add
