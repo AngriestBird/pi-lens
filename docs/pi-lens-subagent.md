@@ -64,3 +64,16 @@ When Git authority is granted, use one logical commit with an imperative,
 conventional-prefix subject of at most 50 characters, a blank line, and a
 72-column body that states what and why. Reference the issue. Open a PR, do not
 merge it, and report its URL.
+
+## Git and test-runner rules
+
+Hooks always run. Never use `--no-verify`, `-n`, `-c core.hooksPath=…`, or
+`HUSKY=0`. If a hook reds on unrelated work, prove it red on the base in the
+same environment, then STOP and hand back the quoted output. Do not push past it.
+Every test run exports `TMPDIR=~/.local/share/pi-lens-orchestrator/tmp/<lane>`;
+write scratch files under a private subdirectory, never loose in a shared one.
+Commits, PR bodies, and comments never carry a `Claude-Session:` trailer or link.
+Until plegma #474 lands, push with `git -c credential.helper= -c
+credential.helper='!gh auth git-credential' push origin HEAD:refs/heads/<branch>`.
+Before `gh pr create` or `gh pr edit`, lint the body with
+`node scripts/check-pr-body.mjs --lint-local <body-file> "<title>"`.
