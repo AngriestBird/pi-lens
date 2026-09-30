@@ -36,6 +36,14 @@ derived facts from another. The model splits the old atomic `Extract` into
 `SharedStore` constant selects the run-local store (`FALSE`, merged #3552,
 PR #3746) or the pre-fix shared store (`TRUE`).
 
+The `SharedStore = FALSE` case is the model's assumption, not a checked fact:
+the model takes as given that `addFileToGraph` extracts on the per-run local
+`FactStore` (#3552), so `ReadFacts` reads back only the version `ReadContent`
+recorded and `mixed` stays FALSE by construction. `NodeSingleVersion`
+therefore passes on the merged config because of that assumption;
+`SharedStore = TRUE` drops it and models the pre-fix shared store that the
+runtime no longer uses.
+
 ## Invariants
 
 - `MemHonest` / `DiskHonest`: when an entry's `sig` or `hash` for a file
@@ -53,13 +61,17 @@ PR #3746) or the pre-fix shared store (`TRUE`).
 |---|---|---|
 | `SweepOnly` (two writers, late losers, no fast path) | pass | 347,835 |
 | `SweepOnlyRegression` | `DiskNoRegression` violated | |
-| `FastpathToday` (shipped code) | pass | 66,570 |
+| `FastpathToday` (shipped code; merged #3552 run-local store) | pass | 66,570 |
 | `FastpathTodayDisk` (shipped code) | pass | 66,570 |
 | `Fix` (two processes, one file) | pass | 671,706 |
 | `FixTwoFiles` (one process, two files) | pass | 567,120 |
 | `FixNoNoop` / `FixNoExtract` (mutants: one fix part undone) | `MemHonest` violated | |
-| `PrivateStore` (merged #3552: run-local store) | pass | 66,570 |
 | `SharedStore` (pre-#3552 shared store) | `NodeSingleVersion` violated | |
+
+The split's `SD` and `mixed` state inflates the pre-split configs'
+distinct-state counts 2–4× (`SweepOnly` 86,095 → 347,835, `Fix` 173,030 →
+671,706, `FastpathToday` 33,367 → 66,570, `FixTwoFiles` 250,730 → 567,120);
+their verdicts are unchanged.
 
 Before #3535, `FastpathToday` violated `NoStaleServedAsCurrent` (a 12-state
 trace), and `FastpathTodayDisk` violated `DiskHonest`. Run by hand, not in
@@ -67,8 +79,9 @@ CI: `FastpathTodayDisk` with both `FixFp*` constants `FALSE` still violates
 `DiskHonest` (9,128 distinct states when the error is found), so its pass is
 not vacuous.
 
-`PrivateStore` passes `NodeSingleVersion`; `SharedStore` violates it on a
-six-state trace, so the merged config's pass is not vacuous:
+`FastpathToday` passes `NodeSingleVersion` by the run-local-store assumption;
+`SharedStore` violates it on a six-state trace, so the invariant is not
+vacuous:
 
 ```text
 StartSweep -> ReadContent (X[f1] = 1) -> Write (c[f1] = 2) ->
@@ -97,7 +110,7 @@ one node spans two versions.
 - **The shared-store mix was structural before #3552.** With one shared
   `FactStore`, the graph's content read and its derived read could straddle a
   dispatch, and one node could record two versions. The run-local store
-  (`PrivateStore`) removes the graph from the shared store's writers, so the
+  (`FastpathToday`) removes the graph from the shared store's writers, so the
   dispatch is invisible. The boundary is pinned by
   `tests/clients/review-graph/dispatch-content-overwrite.test.ts`.
 

@@ -7,12 +7,12 @@
 (* (review-graph.json.gz), carries three per-file maps:                    *)
 (*   content[f]: the version of f the graph's nodes/edges were built from; *)
 (*   sig[f]:     the `size:mtimeMs` stat the entry claims                  *)
-(*               (sourceSignatureEntry ~1240);                             *)
-(*   hash[f]:    the sha256 the entry claims (contentHashEntry ~1288).     *)
+(*               (sourceSignatureEntry);                                   *)
+(*   hash[f]:    the sha256 the entry claims (contentHashEntry).           *)
 (* Readers trust those claims: the sweep path serves the graph unchanged   *)
-(* when every stat matches sig (~5694, ~5749), and the incremental path    *)
+(* when every stat matches sig (_doBuildGraph), and the incremental path   *)
 (* reuses a file's nodes when its current hash matches hash                *)
-(* (confirmContentChanged ~1307).                                          *)
+(* (confirmContentChanged).                                                *)
 (*                                                                         *)
 (* A file on disk has a content version c[f] and a stat st[f]. Edit bumps  *)
 (* both; Touch bumps only the stat (formatter no-op, re-save, checkout).   *)
@@ -20,17 +20,17 @@
 (*                                                                         *)
 (* Build paths, per process p, one build at a time (each step is an       *)
 (* await boundary where edits can land):                                   *)
-(*  - sweep: stat every file (sourceSignatureMapAsync call ~5669) -> base  *)
-(*    is the memory entry, else the disk entry (tier 2, ~5749) -> exact     *)
-(*    match serves the base; a diff goes incremental                        *)
-(*    (tryIncrementalFromCache ~5154): confirm hashes, re-extract truly     *)
+(*  - sweep: stat every file (sourceSignatureMapAsync) -> base             *)
+(*    is the memory entry, else the disk entry (tier 2, _doBuildGraph) ->   *)
+(*    exact match serves the base; a diff goes incremental                  *)
+(*    (tryIncrementalFromCache): confirm hashes, re-extract truly           *)
 (*    changed files, install with the build-start stats; no base -> full    *)
-(*    build (hash = the bytes read, ~5852-5858).                            *)
-(*  - seq fast path (trySeqFastpath ~5289): candidates are the files p     *)
+(*    build (hash = the bytes read, extractFiles).                          *)
+(*  - seq fast path (trySeqFastpath): candidates are the files p           *)
 (*    observed changing since the entry's builtAtProjectSeq; stat them     *)
-(*    (candidateStats ~5386, #3535); confirm hashes; re-extract            *)
+(*    (candidateStats, #3535); confirm hashes; re-extract                  *)
 (*    (updateGraphFiles); install the pre-read stats as the new sig        *)
-(*    (~5405 no-op branch, ~5449 re-extract branch). FixFpNoop /           *)
+(*    (the trySeqFastpath no-op and re-extract branches). FixFpNoop /      *)
 (*    FixFpExtract = FALSE model the pre-#3535 code, which RE-STATTED the  *)
 (*    candidates after the read.                                           *)
 (* Install replaces the memory entry and, when content changed, schedules  *)
@@ -122,7 +122,7 @@ Stale(e) == \E f \in Files : e.content[f] /= c[f]
 \* incremental or fast-path build extracts its content-changed set T.
 ES(b) == IF b.kind = "full" THEN Files ELSE b.T
 
-\* ---- sweep path (_doBuildGraph ~5503-5800) ----
+\* ---- sweep path (_doBuildGraph) ----
 StartSweep(p) ==
     /\ bld[p] = NoBuild
     /\ LET S == st
@@ -137,12 +137,12 @@ StartSweep(p) ==
                      phase |-> "stat", base |-> base, S |-> S,
                      C |-> IF base.ok THEN {f \in Files : base.sig[f] /= S[f]} ELSE Files,
                      T |-> {}, H |-> [f \in Files |-> 0], X |-> [f \in Files |-> 0],
-                     ND |-> [f \in Files |-> 0], SD |-> [f \in Files |-> 0],
+                     SD |-> [f \in Files |-> 0],
                      at |-> At(p)]]
                /\ UNCHANGED <<mem, staleServed, regressed>>
     /\ UNCHANGED <<c, st, writes, seq, lastObs, outbox, disk, mixed>>
 
-\* ---- seq fast path (trySeqFastpath ~5289-5500) ----
+\* ---- seq fast path (trySeqFastpath) ----
 StartFastpath(p) ==
     /\ AllowFastpath /\ p \in Observers /\ bld[p] = NoBuild /\ mem[p].ok
     /\ LET C == {f \in Files : lastObs[p][f] > mem[p].at} IN
@@ -152,11 +152,11 @@ StartFastpath(p) ==
               \* candidateStats (#3535): taken before the hash read
               S |-> st, C |-> C,
               T |-> {}, H |-> [f \in Files |-> 0], X |-> [f \in Files |-> 0],
-              ND |-> [f \in Files |-> 0], SD |-> [f \in Files |-> 0],
+              SD |-> [f \in Files |-> 0],
               at |-> seq[p]]]
     /\ UNCHANGED <<c, st, writes, seq, lastObs, mem, outbox, disk, mixed, staleServed, regressed>>
 
-\* confirmContentChanged (~1307): hash the candidates now.
+\* confirmContentChanged: hash the candidates now.
 Confirm(p) ==
     /\ bld[p].kind \in {"inc", "fp"} /\ bld[p].phase = "stat"
     /\ LET b == bld[p] IN
@@ -201,10 +201,7 @@ MixedHere(p) ==
 ReadFacts(p) ==
     /\ bld[p] /= NoBuild /\ bld[p].phase = "content-read"
     /\ LET b == bld[p] IN
-       /\ bld' = [bld EXCEPT ![p] = [b EXCEPT
-                    !.ND = [f \in Files |-> IF f \in ES(b) /\ SharedStore /\ b.SD[f] > b.X[f]
-                                           THEN b.SD[f] ELSE b.X[f]],
-                    !.phase = "extracted"]]
+       /\ bld' = [bld EXCEPT ![p] = [b EXCEPT !.phase = "extracted"]]
        /\ mixed' = (mixed \/ (SharedStore /\ MixedHere(p)))
     /\ UNCHANGED <<c, st, writes, seq, lastObs, mem, outbox, disk, staleServed, regressed>>
 
