@@ -512,6 +512,10 @@ export const wallClockBudgetInclude = [
 	// #2613: the resolver CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT
 	// write are the subject under test; no in-process double is faithful.
 	"tests/scripts/resolve-newest-in-range-host.test.ts",
+	// #3401: the seed script's default git path (depth-2 fetch, refspec, blob
+	// specs) against real throwaway repos and a depth-1 clone (flake-shape
+	// admission).
+	"tests/scripts/seed-matrix-from-bot-branch-real-git.test.ts",
 	// #3674: real git worktrees and the real hook script (flake-shape admission).
 	"tests/scripts/setup-git-hooks.test.ts",
 	// #2369: the fixture-ordering defect lives in the CLI's own module-load

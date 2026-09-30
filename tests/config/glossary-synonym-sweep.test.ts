@@ -603,7 +603,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/server.ts": 5,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
-		"clients/mcp/analyze.ts": 1,
+		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`
+		// to fold the dispatcher's warnings bucket into the serialized list.
+		"clients/mcp/analyze.ts": 2,
 		"clients/middle-man-analysis.ts": 4,
 		"clients/model-provider.ts": 1,
 		"clients/module-report.ts": 17,
@@ -676,6 +678,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 9,
+		"mcp/tool-arguments.ts": 3,
 		"index.ts": 21,
 	},
 	ignore: {
