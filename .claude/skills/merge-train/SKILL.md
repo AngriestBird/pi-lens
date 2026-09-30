@@ -379,8 +379,28 @@ operator's private notes, so a different orchestrator can run the same train.
     `--state-file ~/.cache/pi-lens-orchestrator/watch-state.json` keeps the
     last seen state across re-arms so the same red is not reported twice. Run
     it with `run_in_background: true`; it replaces the session-local
-    `watch-automerge.sh`.
-  It never approves, reruns or updates a branch: it prints the command.
+    `watch-automerge.sh`. Events also include `dirty` (merge-conflicted) and
+    `cancelled` (a superseded run nobody replaced, with its rerun command),
+    and a `merged` PR lists its closing issues' states.
+  - `--watch-open --stream` — does not exit on an event: it prints one line per
+    event per head (`FAIL #N@sha: ...` plus the failing test names,
+    `DIRTY #N@sha`, `CANCELLED-NOT-REPLACED #N@sha: ... (gh run rerun <id>)`,
+    `MERGED #N` plus `closes #M: <state>`, `CLOSED #N`) until the window ends
+    (exit 0 if any line was printed, 3 if none).
+  - `--rerun-cancelled` (with `--watch-open`) re-runs a cancelled, unreplaced
+    run itself, once per head (`RERUN #N@sha: gh run rerun <id>`).
+  - `--sync-main <path>` (with `--watch-open`) fast-forwards that checkout after
+    a merge (`git pull --ff-only`) and prints `SYNCED <path>: <old> -> <new>`.
+    It refuses, saying why, when the checkout is off master, has modified
+    tracked files, or cannot fast-forward, and prints `LOCKFILE CHANGED: run
+    npm ci when no worker is live` when `package-lock.json` moved. It never
+    runs `npm ci`: live workers share that install.
+  - `--approve-fork <PR>` approves that PR's `action_required` runs on its
+    current head (`gh api -X POST .../actions/runs/<id>/approve`). Explicit,
+    per PR, never part of any watch.
+  Apart from `--approve-fork`, `--rerun-cancelled` and `--sync-main`, which you
+  pass by name, it never approves, reruns or updates a branch: it prints the
+  command.
 - **Read the advisory rows before merging, even though they never gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a

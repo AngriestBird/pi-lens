@@ -165,10 +165,13 @@ function ghFor(w: World) {
 			if (w.approveThrows?.includes(id)) throw new Error("HTTP 403: forbidden");
 			return "";
 		}
-		if (args[0] === "issue" && args[1] === "view")
+		if (args[0] === "issue" && args[1] === "view") {
+			if (args[3] !== "--json" || args[4] !== "state")
+				throw new Error(`unmocked gh call: ${args.join(" ")}`);
 			return JSON.stringify({
 				state: w.issueStates?.[Number(args[2])] ?? "OPEN",
 			});
+		}
 		if (args[0] === "pr" && args[1] === "list") {
 			if (w.listThrows) throw new Error("HTTP 404: not found");
 			if ((w.listTransientFailures ?? 0) > 0) {
