@@ -1192,6 +1192,37 @@ function log(message) {
 }
 
 /**
+ * Parse npm's JSON pack listing even when a lifecycle script writes to stdout.
+ * Npm's JSON document is the first parseable array with the pack-listing
+ * shape; a lifecycle message such as `[setup-git-hooks] skipped ...` is not
+ * JSON and must not determine the slice (#3877).
+ */
+export function parseNpmPackJson(text) {
+	for (
+		let start = text.indexOf("[");
+		start >= 0;
+		start = text.indexOf("[", start + 1)
+	) {
+		try {
+			const parsed = JSON.parse(text.slice(start));
+			const listing = parsed?.[0];
+			if (
+				Array.isArray(parsed) &&
+				listing &&
+				typeof listing === "object" &&
+				typeof listing.filename === "string" &&
+				Array.isArray(listing.files)
+			) {
+				return listing;
+			}
+		} catch {
+			// Try the next `[` in lifecycle output or the JSON document.
+		}
+	}
+	throw new Error("npm pack --json printed no JSON pack listing");
+}
+
+/**
  * Shell-free `npm` with an argv array, under the PINNED env.
  *
  * `env` is required, not optional (#2619 review F1). It used to be absent, so
@@ -2303,17 +2334,14 @@ async function main() {
 				env,
 			);
 			log(`packing the exported ${exported.commit} (npm pack --json)`);
-			// --pack-destination keeps the tarball out of the export too, and the
-			// JSON is sliced from the first `[` because the `prepare` script
-			// legitimately writes progress to stdout ahead of it (#376's break).
+			// --pack-destination keeps the tarball out of the export too. Lifecycle
+			// scripts may write progress to stdout ahead of the JSON (#3877).
 			const packJson = npm(
 				["pack", "--json", "--pack-destination", scratchRoot],
 				exported.dir,
 				env,
 			);
-			const jsonStart = packJson.indexOf("[");
-			if (jsonStart < 0) throw new Error("npm pack --json printed no JSON");
-			packListing = JSON.parse(packJson.slice(jsonStart))[0];
+			packListing = parseNpmPackJson(packJson);
 			installSource = path.join(scratchRoot, packListing.filename);
 		} else if (opts.from.startsWith("npm:")) {
 			installSource = opts.from.slice("npm:".length);

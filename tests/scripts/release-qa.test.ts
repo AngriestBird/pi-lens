@@ -51,6 +51,7 @@ import {
 	dirtyCheckoutRefusal,
 	finalizeRowOutcome,
 	npm,
+	parseNpmPackJson,
 	parseBaselineRows,
 	parseSupplyArgs,
 	PINNED_ENV_KEYS,
@@ -84,6 +85,17 @@ const REPO_ROOT = path.resolve(
 	"../..",
 );
 const BASELINE_PATH = path.join(REPO_ROOT, "docs", "release-qa-baseline.md");
+
+describe("release-QA npm pack output parsing (#3877)", () => {
+	it("finds the npm JSON after lifecycle noise", () => {
+		const listing = parseNpmPackJson(
+			"[setup-git-hooks] skipped (not a checkout).\n" +
+				'[{"filename":"pi-lens-4.3.0.tgz","files":[{"path":"package.json"}]}]\n',
+		);
+		expect(listing.filename).toBe("pi-lens-4.3.0.tgz");
+		expect(listing.files).toEqual([{ path: "package.json" }]);
+	});
+});
 
 /** A throwaway git repo, through the helper the git-fixture governance requires. */
 function gitInit(dir: string): void {
