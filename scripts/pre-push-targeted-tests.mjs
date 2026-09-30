@@ -35,6 +35,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getLockPath } from "./lib/suite-lock.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
@@ -348,16 +349,19 @@ function runInherit(command, args, { needsShimShell = false } = {}) {
 	}
 }
 
-const LOCK_TIMEOUT_RE = /timed out after \d+ms waiting for test-suite lock/;
+// Anchored to the wrapper's own line (`console.error("[with-test-lock] ...")`)
+// so a failing test whose output merely quotes the timeout text is a test
+// failure, not contention (#3717 F5). Groups: waited ms, holder/slot detail.
+const LOCK_TIMEOUT_RE =
+	/^\[with-test-lock\] timed out after (\d+)ms waiting for test-suite lock:? ?(.*)$/m;
 
 // Runs the targeted vitest selection through with-test-lock.mjs, streaming
 // stdout live and mirroring stderr live while also buffering it — the
 // buffer is only needed to tell "the shared machine-wide lock timed out"
 // (with-test-lock.mjs's own message, PI_LENS_TEST_LOCK_TIMEOUT_MS in
 // .husky/pre-push) apart from "the tests actually failed". A lock timeout
-// must let the push proceed (the hook is a convenience layer, CI is
-// authoritative, and a blocked push queue on a shared machine is worse than
-// a skipped local run); a real test failure must still block the push.
+// fails the push unless the named opt-out is explicit; a real test failure
+// always blocks the push.
 function runTargetedTests(selected) {
 	return new Promise((resolve) => {
 		const child = spawn(
@@ -373,11 +377,12 @@ function runTargetedTests(selected) {
 			stderrBuffer += chunk.toString();
 		});
 		child.on("error", (error) => {
-			resolve({ code: 1, timedOut: false, error });
+			resolve({ code: 1, lockTimeout: null, error });
 		});
 		child.on("close", (code) => {
-			const timedOut = code !== 0 && LOCK_TIMEOUT_RE.test(stderrBuffer);
-			resolve({ code: code ?? 1, timedOut });
+			const lockTimeout =
+				code !== 0 ? (stderrBuffer.match(LOCK_TIMEOUT_RE) ?? null) : null;
+			resolve({ code: code ?? 1, lockTimeout });
 		});
 	});
 }
@@ -488,18 +493,35 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
-	const { code, timedOut, error } = await runTargetedTests(selected);
-	if (timedOut) {
-		console.warn(
-			"[pre-push] the shared machine-wide test-suite lock (#1101) timed out; letting the push proceed without the targeted run. CI runs the real gate.",
+	const { code, lockTimeout, error } = await runTargetedTests(selected);
+	if (lockTimeout) {
+		const waitedMs = Number(lockTimeout[1]);
+		const holder = lockTimeout[2];
+		const lockPath = getLockPath();
+		const logPath = path.join(path.dirname(lockPath), "pre-push.log");
+		if (process.env.PI_LENS_PREPUSH_LOCK_SKIP === "1") {
+			// The opt-out is a decision, so it leaves a durable trace beside the
+			// lock (#3717): stderr scrolls away, the push does not. The lock
+			// directory exists: the wrapper just waited on a file inside it.
+			appendFileSync(
+				logPath,
+				`${JSON.stringify({ ts: new Date().toISOString(), event: "lock-skip", waitedMs, holder, lockPath, selected: selected.length })}\n`,
+			);
+			console.error(
+				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 opted out of the targeted test run after ${waitedMs / 1000} s (${holder}); the push is ungated, recorded in ${logPath}, and CI remains the real gate.`,
+			);
+			return 0;
+		}
+		console.error(
+			`[pre-push] test lock busy after ${waitedMs / 1000} s (${holder}); push blocked. Lock file: ${lockPath}. Wait and push again (to wait longer: PI_LENS_TEST_LOCK_TIMEOUT_MS=600000 git push); if it names a PID that is not a test run, delete the lock file. To push without the targeted run: PI_LENS_PREPUSH_LOCK_SKIP=1 git push (recorded in ${logPath}; CI remains the gate).`,
 		);
-		return 0;
+		return 1;
 	}
 	if (error) {
 		console.warn(
-			`[pre-push] could not run targeted tests (${error.message}); letting the push proceed. CI runs the real gate.`,
+			`[pre-push] could not run targeted tests (${error.message}); push blocked.`,
 		);
-		return 0;
+		return 1;
 	}
 	return code;
 }

@@ -244,6 +244,12 @@ const ALLOW_CASES: string[] = [
 	'echo "git stash"',
 	"PI_LENS_HOME=/x node -e \"require('./clients/foo.js')\"",
 	"node scripts/ci-verdict.mjs 1",
+	// #3723: the sanctioned form of the worktree open/close sequence the
+	// hook's worktreeSymlink rule otherwise denies -- a node script, not a
+	// hand-typed `git worktree remove`, and it loads no clients/ or dist/ code.
+	"node scripts/pr-worktree.mjs open 9001 --head --name review-1",
+	"node scripts/pr-worktree.mjs open 9001 --merge",
+	"node scripts/pr-worktree.mjs close /home/dev/Desktop/pi-lens-worktrees/review-1",
 	"npx vitest run tests/clients/foo.test.ts",
 	"npm test",
 	"npm run build",
