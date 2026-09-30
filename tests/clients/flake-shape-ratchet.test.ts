@@ -381,6 +381,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the provider wire roster is produced by a real pi host loading the built extension; an in-process double cannot certify tools.<name>.enabled",
 	},
+	// #3684: the advisory scope is the wrapper's own `git diff` against a real
+	// throwaway fixture repo; an in-process call cannot prove the git boundary
+	// or the wrapper's argv/env (GITHUB_BASE_REF) handling.
+	"real-process-spawn:scripts/astgrep-self-scan.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the wrapper's advisory scope runs a real `git diff` in a throwaway fixture repo and reads argv/env; an in-process double proves neither boundary",
+	},
 	// #2807 review F1/F4: the local CLI's exact argv and a shallow checkout's
 	// missing diff are the subjects; an in-process call cannot prove either.
 	"real-process-spawn:scripts/check-pr-body.test.ts": {
