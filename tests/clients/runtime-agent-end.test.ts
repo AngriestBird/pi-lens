@@ -2510,6 +2510,109 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 			}
 		});
 	}
+
+	// #3521 round-3 verify F-B: onAgentSettled captures the epoch before the
+	// sweep awaits and passes it in. A /tree that lands before the drain starts
+	// must still refuse the quick fix's write; a drain that re-read the current
+	// epoch at its own entry would credit it to the new branch.
+	it("does not credit a quick fix when the /tree landed before the drain started", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-entry-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/app.ts",
+				"const x = 1;\n",
+			);
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			const report: ActionableWarningsReport = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [
+					{
+						filePath,
+						displayPath: "src/app.ts",
+						warnings: [
+							{
+								id: "aw:3521-entry",
+								filePath,
+								displayPath: "src/app.ts",
+								severity: "warning",
+								tool: "typescript",
+								message: "unused var",
+								suppressed: false,
+								origin: "dispatch",
+								actions: [
+									{
+										title: "Remove unused var",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
+				summary: {
+					warnings: 1,
+					unsuppressed: 1,
+					suppressed: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
+				},
+			};
+			applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+				async (args: {
+					mutationContext: {
+						readGuard?: { recordWritten: (filePath: string) => void };
+					};
+				}) => {
+					settle(filePath, "const x = 2;\n");
+					args.mutationContext.readGuard?.recordWritten(filePath);
+					return {
+						considered: 1,
+						applied: 1,
+						changedFiles: [filePath],
+						skipped: [],
+					};
+				},
+			);
+			// The settle captured epoch 0; the /tree lands while the sweep awaits.
+			const settleEpoch = runtime.readGuard.currentBranchEpoch;
+			runtime.readGuard.retainBranch(new Set());
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
+				notify: vi.fn(),
+				dbg: vi.fn(),
+				runtime,
+				cacheManager: {
+					readCache: () => ({ data: report }),
+					addModifiedRange: vi.fn(),
+				} as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				readGuardBranchEpoch: settleEpoch,
+			});
+			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+			expect(zeroRead(runtime, filePath)).toBe("block");
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	});
 });
 
 // #3521 round-2 verify R2-F1 (catalog shape 22): the branch epoch was taken
