@@ -987,6 +987,8 @@ describe("ReadGuard", () => {
 				expect(guard.checkEdit(filePath, [5, 8]).action).toBe("block");
 				expect(lastValidationMetadata()).toMatchObject({
 					status: "mismatch",
+					viewReadCount: 1,
+					checkedLineCount: 2,
 					mismatchedLines: [5],
 					missingLines: [7, 8],
 				});
