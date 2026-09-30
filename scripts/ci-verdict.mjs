@@ -849,7 +849,7 @@ export function fetchActionRequiredRuns(
 			.filter(
 				(run) => run?.head_sha === sha && run?.conclusion === "action_required",
 			)
-			.map((run) => ({ id: run.id, name: run.name ?? "CI" }));
+			.map((run) => ({ id: run.id }));
 	} catch {
 		return [];
 	}

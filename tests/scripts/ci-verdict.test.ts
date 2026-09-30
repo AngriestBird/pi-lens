@@ -2300,6 +2300,7 @@ interface Gh3694Options {
 	workflowRuns?: unknown[];
 	autoMergeRequest?: unknown;
 	committedAt?: string | null;
+	runsThrow?: boolean;
 }
 
 function gh3694({
@@ -2309,6 +2310,7 @@ function gh3694({
 	workflowRuns = FORK_APPROVAL.workflowRuns.workflow_runs,
 	autoMergeRequest = null,
 	committedAt = null,
+	runsThrow = false,
 }: Gh3694Options = {}) {
 	const calls: string[] = [];
 	const ghExec = (args: string[]) => {
@@ -2321,8 +2323,10 @@ function gh3694({
 		if (args[0] === "pr") return JSON.stringify({ headRefOid: sha, mergeable });
 		const endpoint = args[1] ?? "";
 		if (endpoint.includes("/check-runs")) return JSON.stringify(checkRuns);
-		if (endpoint.includes("/actions/runs"))
+		if (endpoint.includes("/actions/runs")) {
+			if (runsThrow) throw new Error("HTTP 502");
 			return JSON.stringify({ workflow_runs: workflowRuns });
+		}
 		if (endpoint.endsWith(`/commits/${sha}`)) {
 			if (committedAt === null) throw new Error("HTTP 404");
 			return JSON.stringify({ commit: { committer: { date: committedAt } } });
@@ -2363,10 +2367,21 @@ describe("run — fork approval from the real workflow-run shape (#3694)", () =>
 			);
 		}
 		expect(reason).not.toContain("<repo>");
+		// One command per run, separated (not fused into one unusable string).
+		expect(reason.match(/gh api -X POST/g)).toHaveLength(6);
+		expect(reason).toContain("/approve, gh api -X POST");
 		// The one non-action_required run (`PR #3443`, success) is not an approval.
 		expect(reason).not.toContain("36566498452");
 		// Report only: no call ever POSTs.
 		expect(calls.some((call) => call.includes("POST"))).toBe(false);
+	});
+
+	it("falls back to the plain absent text, not a transport error, when the runs read fails", async () => {
+		const { exitCode, reason } = await runVerdict(["3443"], {
+			runsThrow: true,
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain("CI likely hasn't registered yet");
 	});
 
 	it("ignores an action_required run that belongs to another head", async () => {

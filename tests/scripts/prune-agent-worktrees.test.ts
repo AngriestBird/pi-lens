@@ -339,7 +339,9 @@ describe.skipIf(process.platform === "win32")(
 		it("returns every cwd it read, as comparable keys, once it has seen itself", () => {
 			addProc("101", os.tmpdir());
 			addProc("102", process.cwd());
-			fs.mkdirSync(path.join(procRoot, "self"));
+			// /proc also holds non-pid entries (self, sys...); only digits are pids.
+			addProc("self", path.join(os.tmpdir(), "decoy-self"));
+			addProc("12x", path.join(os.tmpdir(), "decoy-12x"));
 			const cwds = liveProcessCwds(procRoot);
 			expect(cwds).toEqual(
 				new Set([

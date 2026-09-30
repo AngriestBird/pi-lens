@@ -48,7 +48,7 @@ export interface VerdictRow {
 export interface AbsentContext {
 	repository: string;
 	sha: string;
-	actionRequiredRuns: { id: number; name: string }[];
+	actionRequiredRuns: { id: number }[];
 	autoMerge: boolean;
 	absentMinutes: number | null;
 }
@@ -162,7 +162,7 @@ export declare function fetchActionRequiredRuns(
 	sha: string,
 	ghExec?: GhExec,
 	timeoutMs?: number,
-): { id: number; name: string }[];
+): { id: number }[];
 
 export declare function fetchAutoMergeAge(
 	target: string | number,
