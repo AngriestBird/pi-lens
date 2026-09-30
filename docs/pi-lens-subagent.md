@@ -60,6 +60,8 @@ every live worker died with it. Kill every language server a probe spawns
 before moving on; the previous worker's unkilled servers were part of that
 footprint.
 
+Before calling a hook red unrelated, run scripts/red-on-base.mjs and paste its verdict.
+
 When Git authority is granted, use one logical commit with an imperative,
 conventional-prefix subject of at most 50 characters, a blank line, and a
 72-column body that states what and why. Reference the issue. Open a PR, do not

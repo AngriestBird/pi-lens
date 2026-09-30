@@ -787,6 +787,8 @@ Build after TypeScript changes before tests. The stale-build guard rejects a
 missing or older compiled twin. Run targeted tests while iterating and one
 bounded full suite at the end; CI is authoritative under contention.
 
+Before calling a hook red unrelated, run `scripts/red-on-base.mjs` and paste its verdict.
+
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
