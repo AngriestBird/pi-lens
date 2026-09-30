@@ -3941,16 +3941,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// --- Inject turn-end findings into next agent turn ---
 	// jscpd, madge, and turn-end delta results are cached at turn_end and consumed here
 	// via the context event, which fires before each provider request.
-	// Placement (#1016): splice the ephemeral pi-lens findings in IMMEDIATELY BEFORE
-	// the final message rather than prepending at index 0. Prepending flipped
+	// Placement (#1016, #3693): never prepend at index 0. Prepending flipped
 	// messages[0] every turn, which invalidated the entire prompt-cache prefix on
 	// EVERY prefix-caching provider (Anthropic, Bedrock, AND OpenAI — all key the
-	// cache on the exact token prefix). Inserting before the last message keeps
-	// messages[0] (the real first user turn) byte-stable so the prior conversation
-	// stays cached, AND keeps the real user prompt as the trailing message —
-	// preserving the trailing-`user` cache breakpoint and the historical fe0ed5da
-	// guarantee that input is never empty (existingMessages are always preserved,
-	// never dropped).
+	// cache on the exact token prefix). When the last message is a plain user
+	// prompt, the findings are APPENDED to that prompt's own content (copy on
+	// write), so the prior conversation AND the prompt's text stay a byte-stable
+	// prefix and the transcript keeps a single trailing `user` message — the
+	// cache breakpoint and the historical fe0ed5da guarantee that input is never
+	// empty (existingMessages are always preserved, never dropped). #1016's
+	// earlier splice-before-final placement is retired (#3693).
 	//
 	// The `context` event fires before EVERY provider/LLM call, not just at turn
 	// boundaries (clients/agent-nudge.ts), so mid-agentic-loop the trailing message
