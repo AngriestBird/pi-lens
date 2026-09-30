@@ -1007,6 +1007,21 @@ describe("PR body lint (#1844)", () => {
 		rmSync(fixtureCwd, { recursive: true, force: true });
 	});
 
+	// #3780 (#3688 survivors, check-pr-body.mjs `lintLocalPrBody`): a comma-list
+	// close keyword is rejected WITH the line that holds it. `lintCloseKeywords`
+	// pins the line in isolation; the local preflight (`--lint-local`) is what a
+	// fixer reads before pushing, and dropping the line from its errors kept the
+	// suite green.
+	it("names the offending close-keyword line in the local lint result", () => {
+		const result = lintLocalPrBody(
+			`${body}\nCloses #12, #13\n`,
+			process.cwd(),
+			() => "",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors).toContain("  offending line: Closes #12, #13");
+	});
+
 	it("requires a diff record literal for runtime changes", () => {
 		const runtimeDiff = [
 			"diff --git a/clients/example.ts b/clients/example.ts",

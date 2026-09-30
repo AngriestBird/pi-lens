@@ -29,6 +29,12 @@ instructions say so.
   was red on its own `path` count changes (cue-vet 5→6, dart-analyze 6→4)
   until an orchestrator trailing commit re-pinned.
 
+- Put each core-domain rule in its owning module; every caller asks that owner.
+  Re-deriving an owned rule at a consumer is wrong; extend the owner, or create
+  a new one only with a stated reason, in its domain owner (#3781, #3794, #3796).
+- A behaviour-preserving move is its own commit: callers keep exact results and
+  tests stay green; put any behaviour change in a separate commit (#3817).
+
 ### Failure list before code
 
 Before the first edit of any fix, write the list of ways the change could fail
