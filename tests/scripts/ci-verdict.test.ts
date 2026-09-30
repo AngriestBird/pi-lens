@@ -1160,7 +1160,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		"PR body (advisory)",
 		"Vale prose lint (advisory)",
 		"OSV scan (advisory)",
-		"knip (advisory)",
 		"jscpd (advisory)",
 		"yamllint (advisory)",
 		"typos (advisory)",
@@ -1238,6 +1237,7 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 			"Install test (macos-latest)",
 			"Production install build (--omit=dev, from source)",
 			"oxfmt format check",
+			"knip",
 		]) {
 			expect(isAdvisoryCheck(name)).toBe(false);
 		}

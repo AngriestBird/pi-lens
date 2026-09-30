@@ -16,6 +16,7 @@
 import {
 	existsSync,
 	linkSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
@@ -26,6 +27,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	EXIT_FAILURE,
+	EXIT_USAGE,
 	EXIT_PENDING,
 	EXIT_SUCCESS,
 	EXIT_TRANSPORT,
@@ -112,6 +114,14 @@ interface World {
 	listThrows?: boolean;
 	listTransientFailures?: number;
 	prStateThrows?: boolean;
+	/** closing issues per merged PR number, and each issue's state. */
+	closing?: Record<number, number[]>;
+	issueStates?: Record<number, string>;
+	/** every mutating gh call (`gh run rerun`, `gh api -X POST`), in order. */
+	mutations: string[];
+	rerunThrows?: boolean;
+	approveThrows?: number[];
+	runsThrow?: boolean;
 	calls: string[];
 	logCalls: { args: string[]; options?: Record<string, unknown> }[];
 }
@@ -125,6 +135,7 @@ function world(partial: Partial<World> & { prs: PrFixture[] }): World {
 		master: null,
 		jobs: [],
 		calls: [],
+		mutations: [],
 		logCalls: [],
 		...partial,
 	};
@@ -143,6 +154,24 @@ function ghFor(w: World) {
 	) => {
 		w.calls.push(args.join(" "));
 		if (args[0] === "repo") return `${w.owner}/pi-lens`;
+		if (args[0] === "run" && args[1] === "rerun") {
+			w.mutations.push(args.join(" "));
+			if (w.rerunThrows) throw new Error("HTTP 403: rerun refused");
+			return "";
+		}
+		if (args[0] === "api" && args[1] === "-X" && args[2] === "POST") {
+			w.mutations.push(args.join(" "));
+			const id = Number(/actions\/runs\/(\d+)\/approve/.exec(args[3])?.[1]);
+			if (w.approveThrows?.includes(id)) throw new Error("HTTP 403: forbidden");
+			return "";
+		}
+		if (args[0] === "issue" && args[1] === "view") {
+			if (args[3] !== "--json" || args[4] !== "state")
+				throw new Error(`unmocked gh call: ${args.join(" ")}`);
+			return JSON.stringify({
+				state: w.issueStates?.[Number(args[2])] ?? "OPEN",
+			});
+		}
 		if (args[0] === "pr" && args[1] === "list") {
 			if (w.listThrows) throw new Error("HTTP 404: not found");
 			if ((w.listTransientFailures ?? 0) > 0) {
@@ -163,6 +192,12 @@ function ghFor(w: World) {
 		if (args[0] === "pr" && args[1] === "view") {
 			const p = pr(args[2]);
 			const fields = args[4];
+			if (fields === "closingIssuesReferences")
+				return JSON.stringify({
+					closingIssuesReferences: (w.closing?.[p.number] ?? []).map(
+						(number) => ({ number }),
+					),
+				});
 			if (fields === "state") {
 				if (w.prStateThrows) throw new Error("HTTP 502");
 				return JSON.stringify({ state: p.state ?? "OPEN" });
@@ -202,6 +237,7 @@ function ghFor(w: World) {
 			return JSON.stringify({ total_count: runs.length, check_runs: runs });
 		}
 		m = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(endpoint);
+		if (m && w.runsThrow) throw new Error("HTTP 404: runs unreadable");
 		if (m)
 			return JSON.stringify({
 				workflow_runs: bySha(m[1])?.workflowRuns ?? [],
@@ -254,7 +290,10 @@ function clock(w?: { onSleep?: (index: number) => void }, startMs = NOW) {
 async function cli(
 	argv: string[],
 	w: World,
-	hooks: { onSleep?: (index: number) => void } = {},
+	hooks: {
+		onSleep?: (index: number) => void;
+		gitExec?: (bin: string, args: string[], options?: unknown) => string;
+	} = {},
 ) {
 	const time = clock(hooks);
 	const lines: string[] = [];
@@ -262,6 +301,7 @@ async function cli(
 	const exitCode = await run({
 		argv,
 		ghExec: ghFor(w),
+		...(hooks.gitExec ? { gitExec: hooks.gitExec } : {}),
 		now: time.now,
 		sleepImpl: time.sleepImpl,
 		stdout: (line: string) => lines.push(line),
@@ -278,6 +318,14 @@ async function cli(
 }
 
 const ESC = String.fromCharCode(27);
+
+/** The last seen `<sha>:<kind>` per PR in a saved watch state file. */
+const savedKeys = (file: string) =>
+	Object.fromEntries(
+		Object.entries(JSON.parse(readFileSync(file, "utf8"))).map(
+			([number, entry]) => [number, (entry as { key: string }).key],
+		),
+	);
 
 describe("run — failing-test extraction from the recorded job log (#3700)", () => {
 	// Recurrence: 2026-09-30 the orchestrator read `gh run view --job --log` by
@@ -900,7 +948,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		});
 		const first = await cli(["--watch-open", "--state-file", file], w);
 		expect(first.lines[0]).toContain("#3688 failed");
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		expect(savedKeys(file)).toEqual({
 			"3688": `${shaOf(3688)}:failed`,
 		});
 		const second = await cli(
@@ -1092,7 +1140,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 			);
 			expect(exitCode).toBe(EXIT_SUCCESS);
 			expect(lines[0]).toContain("#3688 failed");
-			expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+			expect(savedKeys(file)).toEqual({
 				"3688": `${shaOf(3688)}:failed`,
 			});
 		}
@@ -1198,7 +1246,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		});
 		await cli(["--watch-open", "--state-file", file], w);
 		expect(existsSync(`${file}.${process.pid}.tmp`)).toBe(false);
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		expect(savedKeys(file)).toEqual({
 			"3688": `${shaOf(3688)}:failed`,
 		});
 	});
@@ -1215,7 +1263,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		});
 		await cli(["--watch-open", "--state-file", file], w);
 		expect(readFileSync(other, "utf8")).toBe("keep");
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		expect(savedKeys(file)).toEqual({
 			"3688": `${shaOf(3688)}:failed`,
 		});
 	});
@@ -1322,5 +1370,973 @@ describe("run --wait — the head's push time and auto-merge are re-read (#3700,
 			const { sleeps } = await cli(["3679", "--wait", "120"], w);
 			expect(suiteCalls(w)).toBe(sleeps.length + 1);
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3722: `--watch-open --stream`, `--rerun-cancelled`, `--approve-fork`,
+// `--sync-main`, and the #3726 round-2 residuals. Same double, same `run()`.
+// ---------------------------------------------------------------------------
+
+/** A main checkout answering the git commands `--sync-main` issues, and
+ * faithful on the axes under test: `status` lists an untracked file unless it
+ * is asked with `--untracked-files=no`, and `pull --ff-only` can refuse. */
+interface Checkout {
+	branch: string;
+	dirtyTracked?: boolean;
+	untracked?: boolean;
+	head: string;
+	remoteHead: string;
+	lockChanged?: boolean;
+	pullFails?: boolean;
+	/** commits on the checkout that origin does not have. */
+	ahead?: number;
+	pullStderr?: string;
+	commands: string[];
+}
+function gitFor(checkout: Checkout) {
+	return (bin: string, args: string[]) => {
+		const [, , ...rest] = args;
+		checkout.commands.push(`${bin} ${rest.join(" ")}`);
+		if (bin !== "git") throw new Error(`unexpected binary ${bin}`);
+		if (rest.join(" ") === "rev-parse --abbrev-ref HEAD")
+			return `${checkout.branch}\n`;
+		if (rest.join(" ") === "rev-parse HEAD") return `${checkout.head}\n`;
+		if (rest[0] === "status") {
+			const lines = [];
+			if (checkout.dirtyTracked) lines.push(" M package.json");
+			if (checkout.untracked && !rest.includes("--untracked-files=no"))
+				lines.push("?? .vitest/");
+			return lines.join("\n");
+		}
+		if (rest.join(" ") === "pull --ff-only") {
+			if (checkout.pullFails)
+				throw Object.assign(new Error("git failed"), {
+					stderr:
+						checkout.pullStderr ??
+						"From /path/origin\n * branch            master     -> FETCH_HEAD\nhint: Diverging branches can't be fast-forwarded.\nfatal: Not possible to fast-forward, aborting.\n",
+				});
+			checkout.head = checkout.remoteHead;
+			return "";
+		}
+		if (rest.join(" ") === "rev-list --count origin/master..HEAD")
+			return `${checkout.ahead ?? 0}\n`;
+		if (rest[0] === "diff")
+			return checkout.lockChanged ? "package-lock.json\n" : "";
+		throw new Error(`unmocked git call: ${rest.join(" ")}`);
+	};
+}
+const OLD_HEAD = "1".repeat(40);
+const NEW_HEAD = "2".repeat(40);
+const checkoutAt = (extra: Partial<Checkout> = {}): Checkout => ({
+	branch: "master",
+	head: OLD_HEAD,
+	remoteHead: NEW_HEAD,
+	commands: [],
+	...extra,
+});
+
+describe("run --watch-open --stream — one line per event, until the window ends (#3722)", () => {
+	let dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+		dirs = [];
+	});
+	const stateFile = () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-stream-"));
+		dirs.push(dir);
+		return join(dir, "state.json");
+	};
+	const failedRuns = () => {
+		const unit = UNIT_FAIL();
+		return { unit, runs: [jobRow(unit), GREEN[1]] };
+	};
+	const cancelled = JSON.parse(
+		readFileSync(join(FIXTURES, "ci-verdict/pr-3382-cancelled.json"), "utf8"),
+	);
+	const cancelledRuns = [GREEN[0], ...cancelled.check_runs];
+
+	it("keeps running after an event, prints it as `FAIL #<pr>@<sha>` with the test names, and reports the head once", async () => {
+		const { unit, runs } = failedRuns();
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+		});
+		const { exitCode, lines, sleeps } = await cli(
+			["--watch-open", "--stream", "--wait", "300"],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(sleeps).toEqual([90_000, 90_000, 90_000, 30_000]);
+		expect(lines[0]).toBe(
+			`FAIL #3688@${sha9(3688)}: gating check(s) completed with a non-success conclusion: Unit tests (failure)`,
+		);
+		expect(lines).toContain(
+			"  Unit tests (job 101554674114): failed step: Run tests",
+		);
+		expect(lines.filter((line) => line.startsWith("FAIL #3688"))).toHaveLength(
+			1,
+		);
+	});
+
+	it("reports a new head of the same PR again while it streams", async () => {
+		const { unit, runs } = failedRuns();
+		const pr: PrFixture = { number: 3688, login: "apmantza", checkRuns: runs };
+		const w = world({ prs: [pr], jobs: [unit] });
+		const newSha = "b".repeat(40);
+		const { lines } = await cli(
+			["--watch-open", "--stream", "--wait", "300"],
+			w,
+			{
+				onSleep: (index) => {
+					if (index === 1) pr.sha = newSha;
+				},
+			},
+		);
+		const fails = lines.filter((line) => line.startsWith("FAIL #3688"));
+		expect(fails).toHaveLength(2);
+		expect(fails[1]).toContain(`@${newSha.slice(0, 9)}`);
+	});
+
+	it("exits 3 with the plain window message when nothing happened", async () => {
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: GREEN }],
+		});
+		const { exitCode, out } = await cli(
+			["--watch-open", "--stream", "--wait", "0"],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(out).toBe("watch window elapsed with no event");
+	});
+
+	it("prints DIRTY for a merge-conflicted PR", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 6,
+					login: "apmantza",
+					mergeable: "CONFLICTING",
+					checkRuns: GREEN,
+				},
+			],
+		});
+		const { lines } = await cli(["--watch-open", "--stream", "--wait", "0"], w);
+		expect(lines[0]).toContain(
+			`DIRTY #6@${sha9(6)}: the PR is merge-conflicted`,
+		);
+	});
+
+	// Recurrence (#3726 verify): GitHub answers UNKNOWN while it recomputes
+	// mergeability, which read as pending and re-armed the same head's report.
+	it("does not report a head dirty again when mergeability flaps CONFLICTING -> UNKNOWN -> CONFLICTING", async () => {
+		const pr: PrFixture = {
+			number: 6,
+			login: "apmantza",
+			mergeable: "CONFLICTING",
+			checkRuns: GREEN,
+		};
+		const w = world({ prs: [pr] });
+		const { lines } = await cli(
+			["--watch-open", "--stream", "--wait", "270"],
+			w,
+			{
+				onSleep: (index) => {
+					pr.mergeable = index === 1 ? "UNKNOWN" : "CONFLICTING";
+				},
+			},
+		);
+		expect(lines.filter((line) => line.startsWith("DIRTY #6"))).toHaveLength(1);
+	});
+
+	it("still reports a real failure on a head that is UNKNOWN after being dirty", async () => {
+		const { unit, runs } = failedRuns();
+		const pr: PrFixture = {
+			number: 6,
+			login: "apmantza",
+			mergeable: "CONFLICTING",
+			checkRuns: GREEN,
+		};
+		const w = world({ prs: [pr], jobs: [unit] });
+		const { lines } = await cli(
+			["--watch-open", "--stream", "--wait", "100"],
+			w,
+			{
+				onSleep: () => {
+					pr.mergeable = "UNKNOWN";
+					pr.checkRuns = runs;
+				},
+			},
+		);
+		expect(lines.some((line) => line.startsWith("FAIL #6"))).toBe(true);
+	});
+
+	it("prints CANCELLED-NOT-REPLACED with the exact rerun command, and re-runs nothing without --rerun-cancelled", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					sha: cancelled.source.head,
+					checkRuns: cancelledRuns,
+				},
+			],
+		});
+		const { lines } = await cli(["--watch-open", "--stream", "--wait", "0"], w);
+		expect(lines[0]).toBe(
+			`CANCELLED-NOT-REPLACED #3382@${cancelled.source.head.slice(0, 9)}: superseded run cancelled and not replaced: rerun 36022234159 (gh run rerun 36022234159)`,
+		);
+		expect(w.mutations).toEqual([]);
+	});
+
+	it("--rerun-cancelled re-runs the cancelled run itself, once per head", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr] });
+		const { lines } = await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"270",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					// queued after the re-run, then cancelled again on the same head
+					pr.checkRuns =
+						index === 1
+							? [
+									GREEN[0],
+									row("Lint & type-check", null, 12, undefined, "queued"),
+								]
+							: cancelledRuns;
+				},
+			},
+		);
+		expect(w.mutations).toEqual(["run rerun 36022234159"]);
+		expect(lines).toContain(
+			`RERUN #3382@${cancelled.source.head.slice(0, 9)}: gh run rerun 36022234159`,
+		);
+		// The second cancellation of the same head is reported but not re-run.
+		expect(
+			lines.filter((line) => line.startsWith("CANCELLED-NOT-REPLACED")),
+		).toHaveLength(2);
+	});
+
+	// Recurrence (review r1, F1): the re-run sat inside the transition gate, so a
+	// refusal on a head that STAYS cancelled was attempted once and never again.
+	it("--rerun-cancelled retries a refused re-run on a steady cancelled head, with a backoff", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const { lines, sleeps } = await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"360",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					// the refusal lifts after the first retry window opens
+					if (index === 2) w.rerunThrows = false;
+				},
+			},
+		);
+		// 5 polls (0, 90, 180, 270, 360 s): attempts at 0 s and, after the 180 s
+		// backoff, at 180 s -- not at every poll.
+		expect(sleeps).toHaveLength(4);
+		expect(w.mutations).toEqual([
+			"run rerun 36022234159",
+			"run rerun 36022234159",
+		]);
+		expect(
+			lines.filter((line) => line.startsWith("RERUN FAILED")),
+		).toHaveLength(1);
+		expect(lines.filter((line) => line.startsWith("RERUN #3382"))).toHaveLength(
+			1,
+		);
+	});
+
+	it("--rerun-cancelled stops after three refused attempts on one head, backing off between them", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const times: number[] = [];
+		const file = stateFile();
+		const gh = ghFor(w);
+		const time = clock();
+		await run({
+			argv: [
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				file,
+				"--wait",
+				"1800",
+			],
+			ghExec: (args: string[], options?: { timeoutMs?: number }) => {
+				if (args[0] === "run") times.push((time.now() - NOW) / 1000);
+				return gh(args, options);
+			},
+			now: time.now,
+			sleepImpl: time.sleepImpl,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		// 0 s, then +180 s, then +360 s: three attempts, none after.
+		expect(times).toEqual([0, 180, 540]);
+		// A re-armed watch long after the last backoff (state file kept) is
+		// still bound by the cap.
+		const later = clock(undefined, NOW + 3 * 3600_000);
+		await run({
+			argv: [
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				file,
+				"--wait",
+				"600",
+			],
+			ghExec: gh,
+			now: later.now,
+			sleepImpl: later.sleepImpl,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		expect(w.mutations).toHaveLength(3);
+	});
+
+	it("--rerun-cancelled starts a new head's attempts from zero", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const newSha = "e".repeat(40);
+		await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"1800",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					// three attempts are spent by 540 s (poll 6); the head then moves
+					if (index === 7) pr.sha = newSha;
+				},
+			},
+		);
+		// 3 on the first head + 3 on the second.
+		expect(w.mutations).toHaveLength(6);
+	});
+
+	it("--rerun-cancelled keeps a successful re-run's mark across a re-armed watch", async () => {
+		const file = stateFile();
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr] });
+		await cli(["--watch-open", "--rerun-cancelled", "--state-file", file], w);
+		const again = await cli(
+			[
+				"--watch-open",
+				"--rerun-cancelled",
+				"--wait",
+				"0",
+				"--state-file",
+				file,
+			],
+			w,
+		);
+		expect(again.exitCode).toBe(EXIT_PENDING);
+		expect(w.mutations).toEqual(["run rerun 36022234159"]);
+	});
+
+	// Recurrence (review r1, F2): re-arming a watch with no state re-ran the same
+	// cancelled head once per re-arm.
+	it("--rerun-cancelled without --state-file is a usage error that reads and re-runs nothing", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					sha: cancelled.source.head,
+					checkRuns: cancelledRuns,
+				},
+			],
+		});
+		for (const argv of [
+			["--watch-open", "--rerun-cancelled"],
+			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
+		]) {
+			const { exitCode, errors, lines } = await cli(argv, w);
+			expect(exitCode).toBe(EXIT_USAGE);
+			expect(errors.join("\n")).toContain(
+				"--rerun-cancelled requires --state-file",
+			);
+			expect(lines).toEqual([]);
+		}
+		expect(w.calls).toEqual([]);
+		expect(w.mutations).toEqual([]);
+	});
+
+	it("--rerun-cancelled keeps the head unmarked when the re-run is refused, so the next poll tries again", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const { lines } = await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"270",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					pr.checkRuns =
+						index === 1
+							? [
+									GREEN[0],
+									row("Lint & type-check", null, 12, undefined, "queued"),
+								]
+							: cancelledRuns;
+					if (index === 2) w.rerunThrows = false;
+				},
+			},
+		);
+		expect(lines.some((line) => line.startsWith("RERUN FAILED #3382"))).toBe(
+			true,
+		);
+		expect(w.mutations).toEqual([
+			"run rerun 36022234159",
+			"run rerun 36022234159",
+		]);
+	});
+
+	it("--rerun-cancelled re-runs a run once even when two of its jobs were cancelled, and skips a check that is not an Actions job", async () => {
+		const run = "https://github.com/apmantza/pi-lens/actions/runs/500";
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					checkRuns: [
+						row("Unit tests", "cancelled", 11, `${run}/job/11`),
+						row("Lint & type-check", "cancelled", 12, `${run}/job/12`),
+						row(
+							"Vendor scan",
+							"cancelled",
+							77,
+							"https://vendor.example/checks/77",
+						),
+					],
+				},
+			],
+		});
+		await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"0",
+			],
+			w,
+		);
+		expect(w.mutations).toEqual(["run rerun 500"]);
+	});
+
+	it("prints MERGED with the closing issues' states, and a plain closed line for a closed PR", async () => {
+		const file = stateFile();
+		writeFileSync(
+			file,
+			JSON.stringify({
+				"7": { key: `${shaOf(7)}:pending` },
+				"8": { key: `${shaOf(8)}:pending` },
+			}),
+		);
+		const w = world({
+			prs: [
+				{ number: 7, state: "MERGED" },
+				{ number: 8, state: "CLOSED" },
+			],
+			closing: { 7: [3700, 3722] },
+			issueStates: { 3700: "CLOSED", 3722: "OPEN" },
+		});
+		const { lines } = await cli(
+			["--watch-open", "--stream", "--wait", "0", "--state-file", file],
+			w,
+		);
+		expect(lines).toEqual([
+			"MERGED #7",
+			"  closes #3700: CLOSED",
+			"  closes #3722: OPEN",
+			"CLOSED #8",
+		]);
+	});
+
+	it("never approves a fork run while watching, whatever the flags", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3443,
+					login: "stranger",
+					autoMerge: true,
+					checkRuns: [],
+					workflowRuns: [
+						{
+							id: 36566476498,
+							name: "CI",
+							head_sha: shaOf(3443),
+							status: "completed",
+							conclusion: "action_required",
+						},
+					],
+				},
+			],
+		});
+		const { lines } = await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"0",
+			],
+			w,
+		);
+		expect(lines[0]).toContain("FORK-APPROVAL #3443");
+		expect(w.mutations).toEqual([]);
+	});
+});
+
+describe("run --approve-fork <PR> — explicit and per PR (#3722)", () => {
+	const actionRequired = (id: number, sha: string) => ({
+		id,
+		name: "CI",
+		head_sha: sha,
+		status: "completed",
+		conclusion: "action_required",
+	});
+
+	it("approves each action_required run of that PR's current head, and nothing else", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3443,
+					checkRuns: [],
+					workflowRuns: [
+						actionRequired(101, shaOf(3443)),
+						actionRequired(102, shaOf(3443)),
+						actionRequired(103, "c".repeat(40)),
+						{ ...actionRequired(104, shaOf(3443)), conclusion: "success" },
+					],
+				},
+				{
+					number: 3444,
+					checkRuns: [],
+					workflowRuns: [actionRequired(201, shaOf(3444))],
+				},
+			],
+		});
+		const { exitCode, lines } = await cli(["--approve-fork", "3443"], w);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(w.mutations).toEqual([
+			"api -X POST repos/apmantza/pi-lens/actions/runs/101/approve",
+			"api -X POST repos/apmantza/pi-lens/actions/runs/102/approve",
+		]);
+		expect(lines).toEqual([
+			`APPROVED run 101 of #3443@${sha9(3443)}`,
+			`APPROVED run 102 of #3443@${sha9(3443)}`,
+		]);
+	});
+
+	it("says so and posts nothing when the head has nothing to approve", async () => {
+		const w = world({
+			prs: [{ number: 3443, checkRuns: [], workflowRuns: [] }],
+		});
+		const { exitCode, out } = await cli(["--approve-fork", "3443"], w);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(out).toBe(`no action_required runs on ${shaOf(3443)} of #3443`);
+		expect(w.mutations).toEqual([]);
+	});
+
+	it("keeps going after one refused approval and exits 1", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3443,
+					checkRuns: [],
+					workflowRuns: [
+						actionRequired(101, shaOf(3443)),
+						actionRequired(102, shaOf(3443)),
+					],
+				},
+			],
+			approveThrows: [101],
+		});
+		const { exitCode, lines, errors } = await cli(
+			["--approve-fork", "3443"],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(errors.join("\n")).toContain("could not approve run 101: HTTP 403");
+		expect(lines).toEqual([`APPROVED run 102 of #3443@${sha9(3443)}`]);
+	});
+
+	it("does not read an unreadable run list as 'nothing to approve'", async () => {
+		const w = world({
+			prs: [{ number: 3443, checkRuns: [] }],
+			runsThrow: true,
+		});
+		const { exitCode, out, errors } = await cli(["--approve-fork", "3443"], w);
+		expect(exitCode).toBe(EXIT_TRANSPORT);
+		expect(out).toBe("");
+		expect(errors.join("\n")).toContain("HTTP 404");
+	});
+
+	it("takes a PR number, not a SHA or nothing", async () => {
+		const w = world({ prs: [{ number: 3443, checkRuns: [] }] });
+		for (const argv of [["--approve-fork", shaOf(3443)], ["--approve-fork"]]) {
+			const { exitCode, errors } = await cli(argv, w);
+			expect(exitCode).toBe(EXIT_USAGE);
+			expect(errors.join("\n")).toContain("--approve-fork takes a PR number");
+		}
+		expect(w.mutations).toEqual([]);
+	});
+});
+
+describe("run --watch-open --sync-main <path> — fast-forward the main checkout on a merge (#3722)", () => {
+	const merged = () =>
+		world({
+			prs: [{ number: 7, state: "MERGED" }],
+		});
+	let dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+		dirs = [];
+	});
+	const mergedState = () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-sync-"));
+		dirs.push(dir);
+		const file = join(dir, "state.json");
+		writeFileSync(
+			file,
+			JSON.stringify({ "7": { key: `${shaOf(7)}:pending` } }),
+		);
+		return file;
+	};
+	const sync = (checkout: Checkout, w: World = merged()) =>
+		cli(
+			[
+				"--watch-open",
+				"--wait",
+				"0",
+				"--state-file",
+				mergedState(),
+				"--sync-main",
+				"/repo/main",
+			],
+			w,
+			{ gitExec: gitFor(checkout) },
+		);
+
+	it("pulls --ff-only, prints the new head, and says nothing about the lockfile when it did not move", async () => {
+		const checkout = checkoutAt();
+		const { lines } = await sync(checkout);
+		expect(lines).toEqual([
+			"#7 merged",
+			"SYNCED /repo/main: 111111111 -> 222222222",
+		]);
+		expect(checkout.commands).toContain("git pull --ff-only");
+		// The head moved, so there is no "ahead of origin" question to ask.
+		expect(checkout.commands.join("\n")).not.toContain("rev-list");
+	});
+
+	it("flags a moved package-lock.json and never runs npm ci", async () => {
+		const checkout = checkoutAt({ lockChanged: true });
+		const { lines } = await sync(checkout);
+		expect(lines).toContain(
+			"LOCKFILE CHANGED: run npm ci when no worker is live",
+		);
+		expect(
+			checkout.commands.every((command) => command.startsWith("git ")),
+		).toBe(true);
+		expect(checkout.commands.join("\n")).not.toContain("npm");
+	});
+
+	it("does not look at the lockfile when the checkout was already up to date", async () => {
+		const checkout = checkoutAt({ remoteHead: OLD_HEAD, lockChanged: true });
+		const { lines } = await sync(checkout);
+		expect(lines).toContain("SYNCED /repo/main: already at 111111111");
+		expect(lines.join("\n")).not.toContain("LOCKFILE");
+	});
+
+	it("refuses, saying why, when the checkout is not on master, and pulls nothing", async () => {
+		const checkout = checkoutAt({ branch: "feat/x" });
+		const { lines } = await sync(checkout);
+		expect(lines).toContain("SYNC REFUSED /repo/main: on feat/x, not master");
+		expect(checkout.commands).not.toContain("git pull --ff-only");
+	});
+
+	it("refuses when tracked files are modified, but not for an untracked file", async () => {
+		const dirty = checkoutAt({ dirtyTracked: true });
+		expect((await sync(dirty)).lines).toContain(
+			"SYNC REFUSED /repo/main: tracked files are modified",
+		);
+		expect(dirty.commands).not.toContain("git pull --ff-only");
+		const untracked = checkoutAt({ untracked: true });
+		expect((await sync(untracked)).lines).toContain(
+			"SYNCED /repo/main: 111111111 -> 222222222",
+		);
+	});
+
+	it("refuses with git's own reason when the pull cannot fast-forward", async () => {
+		const { lines } = await sync(checkoutAt({ pullFails: true }));
+		expect(lines).toContain(
+			"SYNC REFUSED /repo/main: fatal: Not possible to fast-forward, aborting.",
+		);
+	});
+
+	it("names a local-only commit when the checkout is already up to date but ahead of origin", async () => {
+		const one = await sync(checkoutAt({ remoteHead: OLD_HEAD, ahead: 1 }));
+		expect(one.lines).toContain(
+			"SYNCED /repo/main: already at 111111111 (1 local commit not on origin)",
+		);
+		const two = await sync(checkoutAt({ remoteHead: OLD_HEAD, ahead: 2 }));
+		expect(two.lines).toContain(
+			"SYNCED /repo/main: already at 111111111 (2 local commits not on origin)",
+		);
+	});
+
+	it("prints the diverged line of a refusal that says so in other words", async () => {
+		const { lines } = await sync(
+			checkoutAt({
+				pullFails: true,
+				pullStderr:
+					"From /path/origin\nfatal: local and remote have diverged\nhint: reconcile first\n",
+			}),
+		);
+		expect(lines).toContain(
+			"SYNC REFUSED /repo/main: fatal: local and remote have diverged",
+		);
+	});
+
+	it("prints every stderr line of a refusal that names no known cause", async () => {
+		const { lines } = await sync(
+			checkoutAt({
+				pullFails: true,
+				pullStderr:
+					"error: cannot lock ref 'refs/remotes/origin/master'\nfatal: unable to update local ref\n",
+			}),
+		);
+		expect(lines).toContain(
+			"SYNC REFUSED /repo/main: error: cannot lock ref 'refs/remotes/origin/master' | fatal: unable to update local ref",
+		);
+	});
+
+	it("does nothing to the checkout without --sync-main, or without a merge", async () => {
+		const checkout = checkoutAt();
+		await cli(
+			["--watch-open", "--wait", "0", "--state-file", mergedState()],
+			merged(),
+			{ gitExec: gitFor(checkout) },
+		);
+		const idle = checkoutAt();
+		await cli(
+			["--watch-open", "--wait", "0", "--sync-main", "/repo/main"],
+			world({
+				prs: [{ number: 3688, login: "apmantza", checkRuns: GREEN }],
+			}),
+			{ gitExec: gitFor(idle) },
+		);
+		expect(checkout.commands).toEqual([]);
+		expect(idle.commands).toEqual([]);
+	});
+});
+
+describe("run --watch-open — #3726 verify residuals (#3722)", () => {
+	let dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+		dirs = [];
+	});
+	const stateFile = () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-resid-"));
+		dirs.push(dir);
+		return join(dir, "state.json");
+	};
+
+	it("keeps the no-suite absence clock across a re-armed watch (state file)", async () => {
+		const file = stateFile();
+		const pr: PrFixture = {
+			number: 3679,
+			login: "stranger",
+			autoMerge: true,
+			checkRuns: [],
+			workflowRuns: [],
+			suites: [],
+		};
+		// Armed 9 minutes ago by an earlier watch: one 90 s poll reaches 10.
+		writeFileSync(
+			file,
+			JSON.stringify({
+				"3679": {
+					key: `${shaOf(3679)}:pending`,
+					since: { sha: shaOf(3679), ms: NOW - 9 * 60_000 },
+				},
+			}),
+		);
+		const w = world({ prs: [pr] });
+		const { exitCode, lines, sleeps } = await cli(
+			["--watch-open", "--wait", "900", "--state-file", file],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(sleeps).toHaveLength(1);
+		expect(lines[0]).toContain("#3679 absent-rearm");
+		// ...and a clock recorded for another head is not this head's.
+		const other = stateFile();
+		writeFileSync(
+			other,
+			JSON.stringify({
+				"3679": {
+					key: "x:pending",
+					since: { sha: "d".repeat(40), ms: NOW - 9 * 60_000 },
+				},
+			}),
+		);
+		const fresh = await cli(
+			["--watch-open", "--wait", "900", "--state-file", other],
+			world({ prs: [pr] }),
+		);
+		expect(fresh.sleeps).toHaveLength(7);
+	});
+
+	it("saves the absence clock so the next watch inherits it", async () => {
+		const file = stateFile();
+		const w = world({
+			prs: [
+				{
+					number: 3679,
+					login: "stranger",
+					autoMerge: true,
+					checkRuns: [],
+					workflowRuns: [],
+					suites: [],
+				},
+			],
+		});
+		await cli(["--watch-open", "--wait", "0", "--state-file", file], w);
+		expect(JSON.parse(readFileSync(file, "utf8"))["3679"].since).toEqual({
+			sha: shaOf(3679),
+			ms: NOW,
+		});
+	});
+
+	it("loads a first-round state file that kept the bare key string", async () => {
+		const { unit, runs } = {
+			unit: UNIT_FAIL(),
+			runs: [jobRow(UNIT_FAIL()), GREEN[1]],
+		};
+		const file = stateFile();
+		writeFileSync(file, JSON.stringify({ "3688": `${shaOf(3688)}:failed` }));
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
+			jobs: [unit],
+		});
+		const { exitCode } = await cli(
+			["--watch-open", "--wait", "0", "--state-file", file],
+			w,
+		);
+		expect(exitCode).toBe(EXIT_PENDING);
+	});
+
+	it("leaves no temp file behind when the rename fails", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-resid-"));
+		dirs.push(dir);
+		// A directory where the state file should be: rename onto it fails.
+		const target = join(dir, "state.json");
+		mkdirSync(target);
+		const w = world({
+			prs: [{ number: 3688, login: "apmantza", checkRuns: GREEN }],
+		});
+		const { errors } = await cli(
+			["--watch-open", "--wait", "0", "--state-file", target],
+			w,
+		);
+		expect(errors.join("\n")).toContain("could not save the watch state");
+		expect(existsSync(`${target}.${process.pid}.tmp`)).toBe(false);
+	});
+});
+
+describe("run — FAIL and assertion lines beyond vitest's .test.ts (#3722)", () => {
+	// The repo has none of these today (#3726 verify); the shared regexes now
+	// read them so a first `.mjs` / `.spec.ts` / node:assert failure is not blank.
+	it("lists FAIL lines for .spec.ts and .test.mjs files and AssertionError [ERR_ASSERTION], but not a non-test path", async () => {
+		const log = [
+			"2026-09-30T00:00:00.0000000Z  FAIL  scripts/lib/thing.mjs",
+			"2026-09-30T00:00:00.0000000Z  FAIL  default  tests/a.spec.ts > suite > case",
+			"2026-09-30T00:00:00.0000000Z  FAIL  tests/b.test.mjs",
+			"2026-09-30T00:00:00.0000000Z AssertionError [ERR_ASSERTION]: expected 1 to equal 2",
+		].join("\n");
+		const unit = job("unit-tests-fail-101554674114", log);
+		const w = world({
+			prs: [{ number: 5, checkRuns: [jobRow(unit), GREEN[1]] }],
+			jobs: [unit],
+		});
+		const { out } = await cli(["5"], w);
+		// A non-test path after FAIL is not a failing test (it flipped infra logs to real).
+		expect(out).not.toContain("scripts/lib/thing.mjs");
+		expect(out).toContain("  FAIL  default  tests/a.spec.ts > suite > case");
+		expect(out).toContain("  FAIL  tests/b.test.mjs");
+		expect(out).toContain(
+			"  AssertionError [ERR_ASSERTION]: expected 1 to equal 2",
+		);
 	});
 });

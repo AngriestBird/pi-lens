@@ -25,6 +25,12 @@
 // (documented per shape 16, never claimed as verified):
 //   - infra-net-getaddrinfo.unverified.log: no real pi-lens Unit-tests run
 //     with a DNS/network failure was found in the accessible run history.
+//   - infra-net-fail-line-non-test-path.synthetic.log and
+//     infra-kill-fail-line-non-test-path.synthetic.log (#3737 review r1, F4):
+//     an infra log with a line-start `FAIL` that names a NON-test file
+//     (`.../index.js`, `scripts/foo.mjs`). Built from the infra-net-getaddrinfo
+//     and infra-kill-bare-killed-pre-wrapper fixtures plus that one line: a
+//     BARE_FAIL_LINE widened to any script path flipped both to `real`.
 //   - file-level-collection-failure.synthetic.log (F2/P2): a representative
 //     vitest file-level FAIL shape (import/collection error, no ">"
 //     test-name separator) -- not pulled from a real pi-lens run.
@@ -272,6 +278,23 @@ describe("classifyFailureLog (#2103)", () => {
 		);
 		expect(result.kind).toBe("infra-net");
 		expect(result.detail).toContain("ENOTFOUND");
+	});
+
+	// Recurrence (#3737 r1 F4): BARE_FAIL_LINE widened to any .js/.ts path read
+	// `FAIL: could not fetch .../index.js` as a failing test file, so an
+	// infra-net log classified real and its auto-rerun was suppressed.
+	it("keeps infra-net when a FAIL line names a non-test script path", () => {
+		const result = classifyFailureLog(
+			fixture("infra-net-fail-line-non-test-path.synthetic.log"),
+		);
+		expect(result.kind).toBe("infra-net");
+	});
+
+	it("keeps infra-kill when a FAIL line names a non-test script path", () => {
+		const result = classifyFailureLog(
+			fixture("infra-kill-fail-line-non-test-path.synthetic.log"),
+		);
+		expect(result.kind).toBe("infra-kill");
 	});
 
 	// Acceptance criterion: "Real failures are never rerun automatically and
