@@ -251,7 +251,8 @@ the `#3522` block of the same file.
   own-edit read's `stampFileTime: false`, the debounce carrying that
   decision (`_ownWriteStamp`), the partial apply's decision taken at its
   preflight, and the settled sweep. Bash writes, LSP rename and code-action
-  applies and the format service credit authorship and leave FileTime:
+  applies on the direct branch (the no-context bridge fallback still stamps
+  until #3865) and the format service credit authorship and leave FileTime:
   for FileTime and hashes that is the model's "another writer", and the
   `written` they add is not modelled for them. The mutation bridge's other
   producers (`observed`, `ast_grep_replace`, co-process extensions) and the
