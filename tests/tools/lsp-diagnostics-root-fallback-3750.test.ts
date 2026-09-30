@@ -59,10 +59,13 @@ function writeShim(name: string): void {
 
 /**
  * The server's pull answer for the next spawn: `empty` is an answering server
- * with nothing to report (the detached-file shape), `items` a real finding.
+ * with nothing to report (the detached-file shape), `items` a real finding for
+ * every file, `mixed` a finding except for a file whose text carries the fake
+ * server's clean marker.
  */
-function answerWith(pull: "empty" | "items"): void {
-	process.env.FAKE_LSP_RESPOND_PULL_WITH = pull;
+function answerWith(pull: "empty" | "items" | "mixed"): void {
+	if (pull === "mixed") delete process.env.FAKE_LSP_RESPOND_PULL_WITH;
+	else process.env.FAKE_LSP_RESPOND_PULL_WITH = pull;
 }
 
 let counter = 0;
@@ -75,9 +78,9 @@ function workspace(markers: Record<string, string> = {}): string {
 	return dir;
 }
 
-function source(dir: string, name: string): string {
+function source(dir: string, name: string, body = "let x = 1\n"): string {
 	const file = path.join(dir, name);
-	fs.writeFileSync(file, "let x = 1\n");
+	fs.writeFileSync(file, body);
 	return file;
 }
 
@@ -226,6 +229,22 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		);
 		expect(text).not.toContain("silent-on-clean");
 		expect(details.filesChecked).toBe(2);
+	});
+
+	it("names the fallback in a directory scan that also found diagnostics", async () => {
+		answerWith("mixed");
+		const dir = workspace();
+		source(dir, "orphan.rs", "// fake-lsp-clean\n");
+		source(dir, "found.rs");
+
+		const { text } = await runTool(dir, { path: dir });
+
+		expect(text).toContain("Total diagnostics: 1");
+		expect(text).toContain("1 unconfirmed");
+		expect(text).toContain(
+			"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
+		);
+		expect(text).not.toContain("silent-on-clean");
 	});
 
 	it("names the fallback in a directory scan", async () => {
