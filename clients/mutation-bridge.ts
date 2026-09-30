@@ -345,11 +345,12 @@ export function recordMutationThroughSeam(
 			lineage.guardedWrite(filePath, () => true) !== true
 		) {
 			sessionLive = false;
+			// The write's own queue-time epoch is the entry's, when it has one.
 			if (stampReadGuard)
 				recordDroppedRead(
 					lineage,
 					entry.provenance ?? classification.toolName,
-					lineage.branchEpoch,
+					entry.readGuardBranchEpoch ?? lineage.branchEpoch,
 				);
 		}
 		// 1. Staleness stamp: the file changed under pi-lens, so a later edit is

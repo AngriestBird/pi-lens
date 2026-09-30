@@ -897,6 +897,35 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 		});
 	});
 
+	it("counts no false block when the entry was captured on an earlier branch than its handle", () => {
+		// Recurrence: S1's F1 over-count. The write's queue-time epoch is the
+		// entry's, not the handle's: an entry captured before a /tree that its
+		// handle postdates is not on the branch, so its drop is no false block.
+		withScopes("moved", ({ filePath, runtime, deps }) => {
+			runtime.readGuard.retainBranch(new Set());
+			const lineage = runtime.captureSessionGeneration();
+			expect(lineage.branchEpoch).toBe(1);
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: 0,
+					lineage,
+				},
+				deps,
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
 	it("counts no false block under no-read-guard, where no credit was due", () => {
 		withScopes("no-guard", ({ filePath, tmpDir, runtime, cacheManager }) => {
 			const lineage = runtime.captureSessionGeneration();
