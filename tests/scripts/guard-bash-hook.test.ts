@@ -2504,6 +2504,7 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		"git commit -am x -n",
 		"git commit -aF msg.txt -n",
 		"git commit -mx -n", // glued message, so -n is the NEXT flag
+		"git commit -au -n", // -u takes only a glued mode, so -n is a flag
 		// -n means --no-verify on `git commit`, alone or bundled
 		"git commit -n -m x",
 		"git commit -anm x",
