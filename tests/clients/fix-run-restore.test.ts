@@ -35,6 +35,7 @@ import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import {
 	beginFixRun,
+	expectationFromToolInput,
 	FIX_RUN_MAX_FILE_BYTES,
 	runWithFixRestore,
 } from "../../clients/fix-run-restore.js";
@@ -205,7 +206,12 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 	 * `write` is separate from `deliver` so a test can put the fixer's write
 	 * between the two.
 	 */
-	function agentEdit(file: string, newText: string) {
+	function agentEdit(
+		file: string,
+		newText: string,
+		kind: "edit" | "write" = "edit",
+		isError = false,
+	) {
 		return {
 			write: () => fs.writeFileSync(file, `${newText}\n`),
 			deliver: async () => {
@@ -215,15 +221,18 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 				runtime.beginTurn();
 				await handleToolResult({
 					event: {
-						toolName: "edit",
-						input: {
-							path: file,
-							edits: [{ oldText: "let x = 1;", newText }],
-						},
+						toolName: kind,
+						input:
+							kind === "write"
+								? { path: file, content: `${newText}\n` }
+								: { path: file, edits: [{ oldText: "let x = 1;", newText }] },
 						details: {},
 						content: [{ type: "text", text: "ok" }],
+						...(isError && { isError: true }),
 					},
-					getFlag: () => false,
+					// A write runs the immediate autofix, which would start a second
+					// fake clippy inside this delivery.
+					getFlag: (flag: string) => kind === "write" && flag === "no-autofix",
 					dbg: () => {},
 					runtime,
 					cacheManager: new CacheManager(false),
@@ -477,6 +486,54 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		);
 	});
 
+	it("reports a lost write when the tool overwrote it before the capture", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+
+		const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		const write = agentEdit(aRs, "let AGENT = 1;", "write");
+		write.write();
+		// The tool's stale-based bytes contain none of the agent's content.
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		await write.deliver();
+		proceed.open();
+		const result = await run;
+
+		expect(result.output).toContain("a.rs");
+		expect(fs.readFileSync(aRs, "utf-8")).toBe(TOOL_FIXED);
+	});
+
+	it("does not capture or report an edit the host tool failed", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+
+		const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		// The tool fixed a.rs; the agent's edit of it then failed (nothing written).
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		const failed = agentEdit(aRs, "let AGENT = 1;", "edit", true);
+		await failed.deliver();
+		proceed.open();
+		const result = await run;
+
+		expect(result.output ?? "").not.toContain("re-apply");
+		expect(overwrittenCount()).toBe(0);
+		expect(fs.readFileSync(aRs, "utf-8")).toBe(TOOL_FIXED);
+	});
+
 	it("keeps an edit recorded through the mutation bridge that landed during the run", async () => {
 		const aRs = path.join(srcDir, "a.rs");
 		const started = gate();
@@ -610,6 +667,25 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 		expect(fs.readFileSync(aDart, "utf-8")).toBe("int a() => AGENT;\n");
 		expect(overwrittenCount()).toBe(1);
+	});
+});
+
+describe("what a native write or edit says it wrote (#3598)", () => {
+	it("reads a write's content, an edit's non-empty newTexts, and the legacy single-edit shape", () => {
+		expect(expectationFromToolInput({ content: "abc" }, "write")).toEqual({
+			content: "abc",
+		});
+		expect(
+			expectationFromToolInput(
+				{ edits: [{ newText: "one" }, { newText: "" }, { newText: "two" }] },
+				"edit",
+			),
+		).toEqual({ fragments: ["one", "two"] });
+		expect(
+			expectationFromToolInput({ oldText: "a", newText: "legacy" }, "edit"),
+		).toEqual({ fragments: ["legacy"] });
+		expect(expectationFromToolInput({ edits: [] }, "edit")).toBeUndefined();
+		expect(expectationFromToolInput({}, "write")).toBeUndefined();
 	});
 });
 
