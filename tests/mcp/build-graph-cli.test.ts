@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
@@ -17,6 +17,35 @@ const repoRoot = path.resolve(
 	"../..",
 );
 const binJs = path.join(repoRoot, "mcp", "cli.js");
+
+/**
+ * #3678: force a real web-tree-sitter trap in the spawned CLI. The preload
+ * patches the same `Query.prototype.matches` the production extractor calls
+ * (see `tests/clients/review-graph/wasm-trap-containment.test.ts`), so the
+ * child runs the real CLI, real builder, and real grammar. Writes a temp
+ * `.mjs` the child loads through `NODE_OPTIONS=--import`.
+ */
+function writeWasmTrapPreload(dir: string): string {
+	const webTreeSitterUrl = pathToFileURL(
+		path.join(repoRoot, "clients", "deps", "web-tree-sitter.js"),
+	).href;
+	const preload = path.join(dir, "pi-lens-wasm-trap-preload.mjs");
+	fs.writeFileSync(
+		preload,
+		`import { loadWebTreeSitter } from ${JSON.stringify(webTreeSitterUrl)};
+const { Query } = await loadWebTreeSitter();
+const real = Query.prototype.matches;
+Query.prototype.matches = function (...args) {
+\tconst node = args[0];
+\tif (node && typeof node.text === "string" && node.text.includes("trap_here")) {
+\t\tthrow new WebAssembly.RuntimeError("table index is out of bounds");
+\t}
+\treturn real.apply(this, args);
+};
+`,
+	);
+	return pathToFileURL(preload).href;
+}
 
 function runCli(
 	args: string[],
@@ -76,6 +105,50 @@ describe("pi-lens build-graph CLI", () => {
 			.readdirSync(dataDir, { recursive: true })
 			.filter((entry) => String(entry).endsWith("review-graph.json.gz"));
 		expect(snapshots).toHaveLength(1);
+	});
+
+	it("reports a degraded build when a wasm trap costs a file its symbols", async () => {
+		// #3678: the build contains the trap (#3605) and still persists, but the
+		// CLI printed the same clean line a healthy build prints, hiding the lost
+		// file. It must name the count and the re-extraction instead.
+		const trapRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-build-graph-trap-"),
+		);
+		const trapProjectDir = path.join(trapRoot, "project");
+		const trapDataDir = path.join(trapRoot, "data");
+		fs.mkdirSync(path.join(trapProjectDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(trapProjectDir, "src", "a.py"),
+			"def alpha_fn():\n    return 1\n",
+		);
+		fs.writeFileSync(
+			path.join(trapProjectDir, "src", "b.py"),
+			"def trap_here_fn():\n    return 2\n",
+		);
+		fs.writeFileSync(
+			path.join(trapProjectDir, "src", "c.py"),
+			"def gamma_fn():\n    return 3\n",
+		);
+		try {
+			const result = await runCli(
+				["build-graph", "--cwd", trapProjectDir],
+				trapDataDir,
+				{
+					NODE_OPTIONS: `--import=${writeWasmTrapPreload(trapRoot)}`,
+					PI_LENS_HOME: path.join(trapRoot, "home"),
+				},
+			);
+			// Honest-but-successful, matching the over-cap PARTIAL persist (#960):
+			// a nightly cron must not fail over one bad file.
+			expect(result.code).toBe(0);
+			expect(result.stdout).toContain(
+				"review graph degraded — tree-sitter wasm runtime failure in 1 file(s)",
+			);
+			expect(result.stdout).toContain("re-extracted on the next build");
+			expect(result.stdout).not.toMatch(/^pi-lens build-graph: files=/);
+		} finally {
+			removeTempDirSync(trapRoot);
+		}
 	});
 
 	it("re-run on an unchanged project reports snapshot-current and exits 0", async () => {

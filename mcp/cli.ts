@@ -14,8 +14,10 @@ import { FactStore } from "../clients/dispatch/fact-store.js";
 import {
 	buildOrUpdateGraph,
 	flushReviewGraphPersist,
+	getGraphBuildInfoForGraph,
 	getLastGraphBuildInfo,
 	getLastReviewGraphBuildAttempt,
+	graphWasmTrapDetail,
 	reviewGraphCachePath,
 } from "../clients/review-graph/builder.js";
 
@@ -95,6 +97,26 @@ async function buildGraph(): Promise<void> {
 
 	const durationMs = Date.now() - startedAt;
 	const coverage = persisted.coverage;
+	const wasmTrappedFiles =
+		getGraphBuildInfoForGraph(graph).wasmTrappedFiles ?? 0;
+	if (wasmTrappedFiles > 0) {
+		// #3678: the build succeeded and persisted, but a web-tree-sitter trap
+		// cost some files their symbols. Like the over-cap PARTIAL persist (#960),
+		// this is honest-but-successful: exit 0 so a scheduled nightly build is not
+		// failed by one bad file, but never print the clean line. The affected
+		// files re-extract on the next build (#3605 F2).
+		process.stdout.write(
+			`pi-lens build-graph: ${graphWasmTrapDetail(wasmTrappedFiles)}; ` +
+				`those files were skipped and are re-extracted on the next build ` +
+				(coverage?.partial
+					? `PARTIAL persist (cap=${coverage.cap} exceeded) `
+					: "") +
+				`files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
+				`edges=${graph.edges.length} elements=${persisted.elements} ` +
+				`jsonBytes=${persisted.bytes} durationMs=${durationMs}\n`,
+		);
+		return;
+	}
 	if (coverage?.partial) {
 		// #533/#936 honesty: an over-cap build DID succeed and DID persist, but
 		// only a subgraph — say so plainly instead of printing the same line a
