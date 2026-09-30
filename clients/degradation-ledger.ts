@@ -124,6 +124,14 @@ export type DegradationKind =
 	 */
 	| "bash-view-clipped"
 	| "biome-explain-unavailable"
+	/**
+	 * #3594: `acquireBoundedPidFileLock`'s wait (the durable-store sync
+	 * waiter) was skipped because the same top-generation holder an earlier
+	 * wait ran out on is still there. The call falls back at once, same as
+	 * a timed-out wait — throwing, or returning `null` under `skip-log`.
+	 * Once per session; subject is the lock's generation directory.
+	 */
+	| "bounded-pid-lock-wait-skipped"
 	| "bus-stale"
 	| "cache-usage-attribution-stale"
 	| "cascade-budget-override-disarmed"
@@ -527,6 +535,14 @@ export type DegradationKind =
 	 */
 	| "lsp-document-drift"
 	| "lsp-document-send-order"
+	/**
+	 * #3541: an LSP workspace edit computed from a read of a file met other
+	 * bytes on disk when its turn in pi's mutation queue came (an agent edit
+	 * landed in between), so it was refused before any write rather than
+	 * applied at stale positions. Subject is the file path;
+	 * `incrementDegradationCount` keeps one bounded entry per file.
+	 */
+	| "lsp-edit-stale-content"
 	| "lsp-liveness-probe-unsupported"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
@@ -1405,7 +1421,8 @@ export type DegradationKind =
 	 * `tree-sitter-shared.ts`) resolves zero files from a HEALTHY root and
 	 * must never be confused with the root itself being gone.
 	 */
-	| "word-index-orphan-file-id";
+	| "word-index-orphan-file-id"
+	| "workspace-glob-cap";
 
 export interface DegradationRecord {
 	kind: unknown;
