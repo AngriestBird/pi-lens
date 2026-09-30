@@ -153,6 +153,13 @@ Every reviewer **follow-up issue** generalization verdict is filed and assigned
 to a seam group on the tracking queue in the same turn. At each regroup, scan
 merged PRs for subset-shaped changes that lack a generalization verdict.
 
+Before filing a review follow-up, apply the standing fold rule: fold same-seam
+or same-file items that are about one commit and need no maintainer decision
+into the same PR. Contract-only folds are trailing commits with no
+re-verification; small code folds carry a red-first test and return to the same
+reviewer. File only different-seam, blocked, decision-dependent, untouched
+pre-existing, or risk-class-changing items, as one consolidated issue per PR.
+
 ## Round-count rail (orchestrator)
 
 When a verify round reports that a fix round introduced a NEW defect on the

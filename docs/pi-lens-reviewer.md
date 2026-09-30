@@ -57,6 +57,16 @@
   back; the fold's own tests were written when two guards existed (#3064 F1,
   #3065 F3, #3066 F3, #3068 F2).
 
+## Review follow-ups
+
+- Classify every finding as **fold** or **file**, with a one-word reason.
+- Fold same-seam or same-file follow-ups that are about one commit and need no
+  maintainer decision; contract-only items trail the PR without re-verification.
+- Small code folds carry a red-first test and return to the same reviewer.
+- File only for a different seam, another PR's blocker, a maintainer decision,
+  untouched pre-existing work, or a changed risk class (for example lifecycle
+  on a tooling PR); file one consolidated issue per PR for all residuals.
+
 ## Finding format
 
 Order findings: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `NITPICK`.

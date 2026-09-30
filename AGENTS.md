@@ -762,6 +762,7 @@ The four primary host hooks are:
   dispatch, and bounded deferred work.
 - `turn_end`: settle deferred work, deliver findings, persist bounded state, and
   run the test/actionable-warning drains.
+- Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
 Do not pair `bumpFileSeq` and change-log writes at a new call site. The mutation
