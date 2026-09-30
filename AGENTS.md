@@ -799,6 +799,16 @@ the only lock-timeout opt-out (`PI_LENS_SKIP_HOOKS` still skips the whole
 hook): it warns on stderr and appends a `lock-skip` line to `pre-push.log`
 beside the lock. CI stays the real gate.
 
+Before calling a hook or CI red unrelated, run
+`node scripts/red-on-base.mjs <test files…> [--base origin/master] [--repeat 3]`
+from your tree and paste its output. It builds HEAD and the base, then compares
+failing tests one by one (file plus full name). Only `RED-ON-BASE` for every
+failing test (exit 0, with the failing tests listed) justifies "unrelated".
+`CAUSED-BY-CHANGE` (exit 1) means yours, including a test file your change
+adds. `INCONCLUSIVE` (exit 3: a flaky or unreproduced HEAD red, a suite that fails to load for a different reason than on base, or a run with no
+per-test report) and `ALL-GREEN` (exit 0, nothing failed anywhere) are not
+evidence of unrelated; exit 2 is a usage error, 4 a build failure.
+
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
