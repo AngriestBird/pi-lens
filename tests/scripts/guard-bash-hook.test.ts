@@ -3,7 +3,9 @@
 // actually invokes); an in-process call to the exported classify functions
 // cannot see a drift in that contract. Admitted in vitest.config.ts's
 // wallClockBudgetInclude. The transcript harness also pins a bounded
-// end-to-end budget for its 1,122 real hook processes.
+// end-to-end budget for its 1,122 real hook processes. The scoped-pkill
+// cases (#3663 CI round) also spawn real `git` to build a linked-worktree
+// fixture, because F6's allow depends on a real linked worktree.
 //
 // #2699 (refs umbrella #2697): PreToolUse Bash guard hook.
 //
