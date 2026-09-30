@@ -1687,7 +1687,7 @@ describe("index.ts integration", () => {
 	});
 
 	it(
-		"context handler injects guidance immediately before the final user prompt",
+		"context handler appends guidance to the active user prompt (#3693)",
 		async () => {
 			const context = await loadContextHandler();
 
@@ -1699,9 +1699,7 @@ describe("index.ts integration", () => {
 			);
 
 			// A realistic multi-turn transcript: assistant + prior user turns precede
-			// the current user prompt. (With a single-message transcript the old
-			// prepend and the new before-final placement coincide, so a multi-message
-			// transcript is required to actually exercise the #1016 change.)
+			// the current user prompt.
 			const firstUser = { role: "user", content: "Start the task" };
 			const assistant = { role: "assistant", content: "On it." };
 			const finalUser = { role: "user", content: "Fix the bug" };
@@ -1712,38 +1710,31 @@ describe("index.ts integration", () => {
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
-			// Full expected ordering: prior turns, then injected block, then the final
-			// user prompt — [firstUser, assistant, <injected>, finalUser].
-			expect(result).toEqual({
-				messages: [firstUser, assistant, injectedMatcher, finalUser],
-			});
-
-			// (1) #1016 index-0 stability: messages[0] is untouched. This is the
-			// property that FAILS on the old prepend code (injected findings landed at
-			// index 0), and it is the actual prompt-cache win.
+			// Full expected ordering: prior turns, then updated final user prompt
+			// with guidance appended — [firstUser, assistant, updatedFinalUser].
+			expect(result.messages).toHaveLength(3);
 			expect(result.messages[0]).toEqual(firstUser);
+			expect(result.messages[1]).toEqual(assistant);
 
-			// (2) Final message unchanged: same role + content as the incoming prompt.
-			const last = result.messages[result.messages.length - 1];
-			expect(last).toEqual(finalUser);
+			const last = result.messages[2];
 			expect(last.role).toBe("user");
-
-			// (3) Injected block sits at length - 2, immediately before the final msg.
-			expect(result.messages[result.messages.length - 2]).toEqual(
-				injectedMatcher,
+			expect(last.content).toContain(
+				"Fix the bug\n\n[pi-lens automated context — not a user request]",
 			);
+			expect(last.content).toContain("Use pi-lens tools when useful.");
 
-			// (5) Non-empty input preserved (fe0ed5da): every existing message survives.
-			expect(result.messages).toHaveLength(existing.length + 1);
-			for (const msg of existing) {
-				expect(result.messages).toContainEqual(msg);
-			}
+			// Original user message is not mutated in place (#3693 constraint 1)
+			expect(finalUser.content).toBe("Fix the bug");
+			expect(last).not.toBe(finalUser);
+
+			// Non-empty input preserved (fe0ed5da)
+			expect(result.messages.length).toBeGreaterThan(0);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
 
 	it(
-		"context injection keeps the prior-conversation prefix byte-identical across turns (#1016 cache win)",
+		"context injection keeps the prior-conversation prefix byte-identical across turns (#1016 & #3693 cache win)",
 		async () => {
 			const firstUser = { role: "user", content: "Start the task" };
 			const assistant = { role: "assistant", content: "On it." };
@@ -1780,21 +1771,23 @@ describe("index.ts integration", () => {
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
-			// The prior conversation prefix (everything up to but excluding the
-			// injection point at length - 2) is identical between the two turns — this
-			// is exactly what a prefix-caching provider reuses.
-			const prefixA = resultA.messages.slice(0, resultA.messages.length - 2);
-			const prefixB = resultB.messages.slice(0, resultB.messages.length - 2);
+			// The prior conversation prefix (everything up to the trailing user prompt)
+			// is identical between the two turns — this is what prefix-caching providers reuse.
+			const prefixA = resultA.messages.slice(0, -1);
+			const prefixB = resultB.messages.slice(0, -1);
 			expect(prefixA).toEqual(prefixB);
 			expect(prefixA).toEqual([firstUser, assistant]);
 
-			// They diverge only at the injection slot.
-			expect(resultA.messages[resultA.messages.length - 2]).not.toEqual(
-				resultB.messages[resultB.messages.length - 2],
+			// The trailing message starts with the same user prompt text across turns
+			const lastA = resultA.messages[resultA.messages.length - 1];
+			const lastB = resultB.messages[resultB.messages.length - 1];
+			expect((lastA.content as string).startsWith("Fix the bug\n\n")).toBe(
+				true,
 			);
-			// ...and reconverge on the trailing user prompt.
-			expect(resultA.messages[resultA.messages.length - 1]).toEqual(finalUser);
-			expect(resultB.messages[resultB.messages.length - 1]).toEqual(finalUser);
+			expect((lastB.content as string).startsWith("Fix the bug\n\n")).toBe(
+				true,
+			);
+			expect(lastA.content).not.toEqual(lastB.content);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

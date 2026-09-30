@@ -77,6 +77,7 @@ export type InjectedBytes = Record<InjectedByteSource, number>;
 export type CacheContextPlacement =
 	| "prepend"
 	| "insert-before-final"
+	| "append-to-last-user"
 	| "append"
 	| "none";
 export type CachePrefixObservation =

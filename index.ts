@@ -285,6 +285,7 @@ import {
 } from "./clients/situational-tool-telemetry.js";
 import {
 	type CacheContextInjectionSlice,
+	type CacheContextPlacement,
 	clearCachePrefixSession,
 	emitCacheUsageSummaryAtSessionEnd,
 	logCacheUsage,
@@ -3956,7 +3957,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// is often a `tool_result` — which MUST stay immediately adjacent to the
 	// assistant message carrying its matching `tool_use`/`tool_calls`, across all of
 	// Anthropic, Bedrock, and OpenAI (a 400 otherwise). The trailing-role guard
-	// (isPlainUserPrompt) therefore only splices before the last message when it is a
+	// (isPlainUserPrompt) therefore only appends to the last message when it is a
 	// plain user prompt; otherwise it APPENDS after the whole transcript, which both
 	// preserves that adjacency and is still fully cache-friendly (the entire prior
 	// transcript stays an untouched prefix).
@@ -3974,6 +3975,36 @@ function activateExtension(hostPi: ExtensionAPI) {
 				block !== null &&
 				(block as { type?: unknown }).type === "tool_result",
 		);
+	};
+	const extractInjectedText = (
+		messages: ReadonlyArray<{ role: string; content: unknown }>,
+	): string => {
+		const parts: string[] = [];
+		for (const msg of messages) {
+			if (typeof msg.content === "string") {
+				if (msg.content) parts.push(msg.content);
+			} else if (Array.isArray(msg.content)) {
+				for (const block of msg.content) {
+					if (typeof block === "string") {
+						if (block) parts.push(block);
+					} else if (
+						typeof block === "object" &&
+						block !== null &&
+						"type" in block &&
+						block.type === "text" &&
+						"text" in block &&
+						typeof (block as { text: unknown }).text === "string"
+					) {
+						const text = (block as { text: string }).text;
+						if (text) parts.push(text);
+					}
+				}
+			} else if (msg.content != null) {
+				const str = String(msg.content);
+				if (str) parts.push(str);
+			}
+		}
+		return parts.join("\n\n");
 	};
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on("context") overload has TS resolution bug
 	(pi as any).on(
@@ -4016,7 +4047,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				let telemetryLogged = false;
 				const logContextObservation = (
 					resultMessages: Array<{ role: string; content: unknown }>,
-					placement: "prepend" | "insert-before-final" | "append" | "none",
+					placement: CacheContextPlacement,
 					// #1071: the per-source slices ARE the telemetry input. The source
 					// name list and the flat message list are both derived from them
 					// inside observeCacheContext, so this call site cannot report a
@@ -4111,16 +4142,48 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return { messages: resultMessages };
 					}
 
-					// Insert the injected block just before the final message so
-					// messages[0] stays stable and the real user prompt stays trailing.
+					// #3693: Append the injected findings to the active user prompt so
+					// the prior transcript prefix is kept, messages[0] stays stable,
+					// and no consecutive user turns are created (avoiding ChatML/Qwen
+					// GGUF template issues on local runners like llama.cpp).
+					const injectedText = extractInjectedText(injectedMessages);
+					if (!injectedText) {
+						logContextObservation(existingMessages, "none", []);
+						return;
+					}
+
+					let updatedContent: unknown;
+					if (typeof lastMessage.content === "string") {
+						updatedContent =
+							lastMessage.content.length > 0
+								? `${lastMessage.content}\n\n${injectedText}`
+								: injectedText;
+					} else if (Array.isArray(lastMessage.content)) {
+						updatedContent = [
+							...lastMessage.content,
+							{ type: "text", text: injectedText },
+						];
+					} else {
+						const stringContent =
+							lastMessage.content != null ? String(lastMessage.content) : "";
+						updatedContent =
+							stringContent.length > 0
+								? `${stringContent}\n\n${injectedText}`
+								: injectedText;
+					}
+
+					const updatedLastMessage = {
+						...lastMessage,
+						content: updatedContent,
+					};
+
 					const resultMessages = [
 						...existingMessages.slice(0, -1),
-						...injectedMessages,
-						lastMessage,
+						updatedLastMessage,
 					];
 					logContextObservation(
 						resultMessages,
-						"insert-before-final",
+						"append-to-last-user",
 						sourceMessages,
 					);
 					return { messages: resultMessages };
