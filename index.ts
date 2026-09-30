@@ -2459,42 +2459,44 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// session_start_prehandler row. Keep this inside the primary gate so
 					// a concurrent secondary cannot erase the primary's live counter.
 					resetTurnContext(stableSessionId);
-					await bounded(
-						handleSessionStart({
-							ctxCwd: ctx.cwd,
-							sessionStartFiredAt,
-							sessionStartMonotonicAt,
-							extensionLoadedAt: PI_LENS_LOADED_AT_MS,
-							emitHostReadyDelay,
-							sessionReason,
-							handlerEnteredAt,
-							globalConfig,
-							projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
-							// #2129: this call site is only reached for "primary"/
-							// "sequential-replacement" — a declined start returned above.
-							sessionStartClassification: sessionStartDecision.classification,
-							sessionStartSameRoot: sessionStartDecision.sameRoot,
-							getFlag: (name: string) => getLensFlag(name),
-							notify: (msg, level) => notifyUi(ctx, msg, level),
-							dbg,
-							log,
-							runtime,
-							cacheManager,
-							astGrepClient,
-							bootstrap: sessionBootstrapAccess,
-							ensureTool: async (name: string) =>
-								(await import("./clients/installer/index.js")).ensureTool(name),
-							cleanStaleTsBuildInfo,
-							resetDispatchBaselines,
-							resetLSPService,
-						}),
-						{
-							ms: HOOK_WALL_BUDGET_MS.session_start,
-							signal: ctx.signal,
-							hook: "session_start",
-							label: "handleSessionStart",
-						},
-					);
+					const sessionStartWork = handleSessionStart({
+						ctxCwd: ctx.cwd,
+						sessionStartFiredAt,
+						sessionStartMonotonicAt,
+						extensionLoadedAt: PI_LENS_LOADED_AT_MS,
+						emitHostReadyDelay,
+						sessionReason,
+						handlerEnteredAt,
+						globalConfig,
+						projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
+						// #2129: this call site is only reached for "primary"/
+						// "sequential-replacement" — a declined start returned above.
+						sessionStartClassification: sessionStartDecision.classification,
+						sessionStartSameRoot: sessionStartDecision.sameRoot,
+						getFlag: (name: string) => getLensFlag(name),
+						notify: (msg, level) => notifyUi(ctx, msg, level),
+						dbg,
+						log,
+						runtime,
+						cacheManager,
+						astGrepClient,
+						bootstrap: sessionBootstrapAccess,
+						ensureTool: async (name: string) =>
+							(await import("./clients/installer/index.js")).ensureTool(name),
+						cleanStaleTsBuildInfo,
+						resetDispatchBaselines,
+						resetLSPService,
+					});
+					// #3611: handleSessionStart's resetForSession began this session's
+					// scope before its first await. Take it now (#3612): a throw later
+					// in the handler must not leave this activation without its scope.
+					scope = runtime.sessionScope;
+					await bounded(sessionStartWork, {
+						ms: HOOK_WALL_BUDGET_MS.session_start,
+						signal: ctx.signal,
+						hook: "session_start",
+						label: "handleSessionStart",
+					});
 					if (ctx.ui) updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
 
 					// Pin the stable identity + reason AFTER handleSessionStart (which ran
@@ -2503,9 +2505,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionId: stableSessionId,
 						reason: sessionReason,
 					});
-					// #3611: handleSessionStart's resetForSession began this session's
-					// scope before its first await.
-					scope = runtime.sessionScope;
 					// #3612: the coordinator's fresh guard is this scope's read-guard
 					// cell, which the read-guard stores snapshot and restore.
 					scopeCell(scope, READ_GUARD_CELL, () => runtime.readGuard);

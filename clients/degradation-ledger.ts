@@ -1123,6 +1123,12 @@ export type DegradationKind =
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
 	/**
+	 * #3612: a `/fork` or `/reload` start found no hand-off slot left for its
+	 * session file, so it started from a sidecar or from nothing. Once per
+	 * start reason.
+	 */
+	| "session-scope-handoff-missed"
+	/**
 	 * #3611 (#3609 F1, decision A + C): a read-guard write was dropped because
 	 * its session scope retired, and its entry is still on its conversation's
 	 * branch. Subject `<retirement reason>:<site>` (`reload:deferred-format`),
@@ -1130,12 +1136,6 @@ export type DegradationKind =
 	 * blocks. Counted.
 	 */
 	| "session-scope-read-dropped"
-	/**
-	 * #3612: a `/fork` or `/reload` start found no hand-off slot left for its
-	 * session file, so it started from a sidecar or from nothing. Once per
-	 * start reason.
-	 */
-	| "session-scope-handoff-missed"
 	| "session-start-duplicate"
 	/**
 	 * #3662: a primary replacement shutdown left the process with no primary

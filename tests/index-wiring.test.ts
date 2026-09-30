@@ -31,6 +31,7 @@ const handlerCrashInjection = vi.hoisted(() => ({
 	site: undefined as
 		| undefined
 		| "session_start"
+		| "session_start_after_reset"
 		| "observed_settled_sweep"
 		| "observed_ledger_refresh"
 		| "deferred_mutation_drain"
@@ -221,6 +222,8 @@ vi.mock("../clients/runtime-session.js", () => ({
 		// resets the runtime, which begins the new session's scope, at every
 		// primary start before its first await.
 		deps.runtime.resetForSession();
+		if (handlerCrashInjection.site === "session_start_after_reset")
+			throw new Error("probe: session_start boom after reset");
 	},
 }));
 
@@ -285,17 +288,11 @@ const EXPECTED_HOOKS = [
 ];
 
 /**
- * A turn ends after the activation, as every real one does, and turn_end
- * persists the session stores (#3612). The save is fire-and-forget (#2523),
- * so yield (no timer) until its atomic rename is visible.
+ * turn_end and a `/fork` or `/reload` shutdown persist the session stores
+ * (#3612) fire-and-forget (#2523): yield (no timer) until the sidecar's
+ * atomic rename is visible, so it is read, and never lands after cleanup.
  */
-async function endTurnAndPersist(
-	pi: ReturnType<typeof createPiMock>,
-	ctx: unknown,
-	cwd: string,
-	sessionId: string,
-): Promise<void> {
-	await pi.emit("turn_end", {}, ctx);
+async function sidecarWritten(cwd: string, sessionId: string): Promise<void> {
 	const sidecar = path.join(
 		getProjectDataDir(cwd),
 		"sessions",
@@ -304,6 +301,17 @@ async function endTurnAndPersist(
 	for (let i = 0; i < 5000 && !fs.existsSync(sidecar); i++)
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(fs.existsSync(sidecar), sidecar).toBe(true);
+}
+
+/** A turn ends after the activation, as every real one does. */
+async function endTurnAndPersist(
+	pi: ReturnType<typeof createPiMock>,
+	ctx: unknown,
+	cwd: string,
+	sessionId: string,
+): Promise<void> {
+	await pi.emit("turn_end", {}, ctx);
+	await sidecarWritten(cwd, sessionId);
 }
 
 describe("index.ts extension wiring", () => {
@@ -931,6 +939,7 @@ describe("index.ts extension wiring", () => {
 
 				expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
 				expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
+				await sidecarWritten(tmp, "factory-rebuild");
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -989,6 +998,7 @@ describe("index.ts extension wiring", () => {
 				);
 				expect(forked.activeTools.has("ast_grep_search")).toBe(true);
 				expect(forked.activeTools.has("ast_grep_replace")).toBe(false);
+				await sidecarWritten(tmp, "fork-parent");
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -1872,6 +1882,37 @@ describe("hook handler crash surfacing (#2884)", () => {
 		).rejects.toThrow("probe: session_start boom");
 
 		expectCrashRecorded("session_start");
+	});
+
+	// #3612 (scope note on #3612 from the #3757 review): the activation's
+	// scope is the one handleSessionStart's reset began, even when a later step
+	// of that handler throws. The recurrence: `scope` was assigned only after
+	// the awaited handler returned, so a crash left it unset, and the session's
+	// activations (and its advisories, #3757) had no scope to live in.
+	it("keeps the scope a crashed session_start began, so an activation survives /reload", async () => {
+		handlerCrashInjection.site = "session_start_after_reset";
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx({ cwd: tmp });
+		await expect(
+			pi.emit("session_start", { reason: "startup" }, ctx),
+		).rejects.toThrow("probe: session_start boom after reset");
+		handlerCrashInjection.site = undefined;
+		const loader = pi.getTool("pi_lens_activate_tools") as {
+			execute: (...args: unknown[]) => Promise<unknown>;
+		};
+		await loader.execute(
+			"activate",
+			{ tools: ["ast_grep_search"] },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		await pi.simulateSessionShutdownAndRebuild("reload", ctx);
+
+		expect(pi.activeTools.has("ast_grep_search")).toBe(true);
+		expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
 	});
 
 	it("surfaces a crashed observed_settled_sweep under the test runner and records it", async () => {
