@@ -313,11 +313,12 @@ export function describePartialMutationOutcome(
 	budgetMinutes,
 	{ evaluated, total },
 ) {
-	const totalText = total ?? "an unknown total of";
+	const totalText =
+		total === null ? "an unknown number of mutants" : `${total} mutants`;
 	if (result.error?.code === "ETIMEDOUT") {
-		return `mutation diff: budget expired after ${evaluated} of ${totalText} evaluated; M is the measured mutant population`;
+		return `mutation diff: budget expired after ${evaluated} of ${totalText} evaluated (M = measured mutant population)`;
 	}
-	return `mutation diff: partial run interrupted after ${evaluated} of ${totalText} evaluated; M is the measured mutant population; ${strykerFailureCause(result, budgetMinutes)}`;
+	return `mutation diff: partial run interrupted after ${evaluated} of ${totalText} evaluated (M = measured mutant population); ${strykerFailureCause(result, budgetMinutes)}`;
 }
 
 export function formatCapNotice(selectedCount, totalCount, skipped) {

@@ -24,6 +24,7 @@ import {
 	describeZeroMutantOutcome,
 	DEFAULT_MAX_RANGES,
 	DEFAULT_MAX_TESTS,
+	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	estimateAffordableMutants,
 	extractSnippet,
 	formatCapNotice,
@@ -41,6 +42,7 @@ import {
 	planResample,
 	sampleRangesDeterministically,
 } from "../../scripts/lib/stryker-diff.mjs";
+import { stripSource } from "../support/sweep-kit.js";
 import {
 	buildLineIndex,
 	createTracer,
@@ -866,9 +868,21 @@ describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
 	it("pins the fixed-overhead budget through the production driver", () => {
 		// Recurrence #3686 F2: passing a test-only overhead would make the
 		// estimator appear safe while the driver still used zero overhead.
-		expect(driver).toContain(
+		expect(stripSource(driver)).toContain(
 			"fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS",
 		);
+	});
+
+	it("pins the measured overhead constant in the real-number estimate", () => {
+		// Recurrence #3686 F1: a literal-only pin could drift from the driver's
+		// exported fixed-overhead contract without changing the measured verdict.
+		expect(
+			estimateAffordableMutants({
+				remainingMs: 3_560_000,
+				dryRunMs: 17_824,
+				fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
+			}),
+		).toBe(128);
 	});
 
 	it("samples the #3683 run instead of admitting 270 mutants into a 60-minute budget", () => {
@@ -981,7 +995,7 @@ describe("describePartialMutationOutcome (#3531 round 3 R2-4)", () => {
 		);
 
 		expect(verdict).toBe(
-			"mutation diff: budget expired after 221 of 270 evaluated; M is the measured mutant population",
+			"mutation diff: budget expired after 221 of 270 mutants evaluated (M = measured mutant population)",
 		);
 	});
 
@@ -1004,7 +1018,7 @@ describe("describePartialMutationOutcome (#3531 round 3 R2-4)", () => {
 
 		expect(reason).not.toContain("no mutants evaluated");
 		expect(reason).toBe(
-			"mutation diff: budget expired after 8 of 9 evaluated; M is the measured mutant population",
+			"mutation diff: budget expired after 8 of 9 mutants evaluated (M = measured mutant population)",
 		);
 	});
 
