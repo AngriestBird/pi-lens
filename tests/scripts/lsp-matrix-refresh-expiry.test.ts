@@ -507,3 +507,213 @@ describe("#3401 refresh state block", () => {
 		expect(result.reason).toMatch(/capability table/);
 	});
 });
+
+// The cases below pin the writer's edges that the Mutation diff lane reported
+// as surviving on the round-1 head (rows of md-matrix.mjs: the state parser,
+// renderer and section replacer, the observation/src writes, and the hold
+// predicate). Each asserts an observable output of the real refresh entry.
+const STATE_HEADING = "## Capability matrix refresh state (nightly-generated)";
+const stateBlock = (payload: unknown) =>
+	`${STATE_HEADING}\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`\n`;
+
+describe("#3401 state block parsing, rendering and replacement", () => {
+	it("parses a heading with trailing whitespace and a heading on the first line", () => {
+		const payload = { "first-publish": { vue: { firstMissed: day(0) } } };
+		expect(
+			parseRefreshState(
+				`${STATE_HEADING}  \n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`\n`,
+			),
+		).toEqual(payload);
+		expect(parseRefreshState(stateBlock(payload))).toEqual(payload);
+	});
+
+	it("ignores a json fence that is not under the state heading", () => {
+		expect(
+			parseRefreshState(
+				'# Doc\n\n```json\n{"first-publish":{"vue":{"firstMissed":"2026-09-01"}}}\n```\n',
+			),
+		).toEqual({});
+	});
+
+	it("treats a non-object payload as empty", () => {
+		for (const payload of [null, 42, "text", true]) {
+			expect(parseRefreshState(stateBlock(payload)), String(payload)).toEqual(
+				{},
+			);
+		}
+	});
+
+	it("renders keys sorted, whatever the table order", () => {
+		// Table order is vue, ast-grep; the block must read ast-grep, vue so a
+		// settled run is byte-stable and the refresh PR does not open on churn.
+		const out = nightly(FIXTURE, 0, [
+			observation("vue", { cleanBehavior: "silent", tier: "3" }),
+			observation("ast-grep", { cleanBehavior: "silent", tier: "3" }),
+		]).text;
+		const json = out.split("\n").find((l) => l.startsWith("{"))!;
+		expect(Object.keys(JSON.parse(json)["clean-behavior"])).toEqual([
+			"ast-grep",
+			"vue",
+		]);
+		const missed = nightly(FIXTURE, 0)
+			.text.split("\n")
+			.find((l) => l.startsWith("{"))!;
+		expect(Object.keys(JSON.parse(missed)["first-publish"])).toEqual([
+			"ast-grep",
+			"vue",
+		]);
+	});
+
+	it("replaces a state section that sits mid-document without swallowing the next section", () => {
+		const doc = FIXTURE.replace(
+			"## Key findings",
+			`${stateBlock({ "first-publish": { vue: { firstMissed: day(0) } } })}a ## b stray line\n\n### Sub heading\n\n## Key findings`,
+		);
+		const out = nightly(doc, 1).text;
+		expect(out.split(STATE_HEADING).length - 1).toBe(1);
+		expect(out).toContain("Prose after the table must survive the refresh.");
+		expect(out).toContain("## Key findings");
+		expect(out).not.toContain("a ## b stray line");
+		expect(out.indexOf("## Key findings")).toBeLessThan(
+			out.indexOf(STATE_HEADING),
+		);
+	});
+
+	it("replaces a state section that is the very first lines of the doc", () => {
+		const doc = `${stateBlock({ "first-publish": { vue: { firstMissed: day(0) } } })}\n${FIXTURE}`;
+		const out = nightly(doc, 1).text;
+		expect(out.split(STATE_HEADING).length - 1).toBe(1);
+	});
+
+	it("tolerates a null entry and a missing runs field in a hand-edited block", () => {
+		const doc = `${FIXTURE}\n${stateBlock({
+			"first-publish": { vue: null },
+			"clean-behavior": {
+				"ast-grep": { pendingBehavior: "silent", pendingTier: "3" },
+			},
+		})}`;
+		const noCrash = nightly(doc, 3, [
+			observation("vue", { firstPublish: "direct" }),
+		]);
+		expect(cellOf(noCrash.text, "vue", "first-publish")).toBe("direct");
+		// A hold without `runs` counts as one sighting, so the same value commits.
+		const commit = nightly(doc, 3, [measured("ast-grep", "silent", "3")]);
+		expect(commit.committed).toBe(1);
+		expect(cellOf(commit.text, "ast-grep", "clean-behavior")).toBe("silent");
+		// ...and a subset run carries it with `runs` normalised to 1.
+		const carried = nightly(doc, 3, [], { probedLangs: ["rust"] });
+		expect(
+			parseRefreshState(carried.text)["clean-behavior"]?.["ast-grep"]?.runs,
+		).toBe(1);
+	});
+});
+
+describe("#3401 refresh entry edges", () => {
+	it("writes an observed first-publish class at once, in either direction", () => {
+		const toEmptyFirst = nightly(FIXTURE, 0, [
+			observation("vue", { firstPublish: "empty-first" }),
+		]);
+		expect(cellOf(toEmptyFirst.text, "vue", "first-publish")).toBe(
+			"empty-first",
+		);
+		const again = nightly(
+			nightly(FIXTURE, 0).text,
+			FIRST_PUBLISH_EXPIRY_DAYS + 5,
+		).text;
+		expect(cellOf(again, "vue", "first-publish")).toBe("unknown");
+		const back = nightly(again, FIRST_PUBLISH_EXPIRY_DAYS + 6, [
+			observation("vue", { firstPublish: "direct" }),
+		]);
+		expect(cellOf(back.text, "vue", "first-publish")).toBe("direct");
+	});
+
+	it("merges src for an observed lang only, and defaults the source to ci", () => {
+		const out = refreshCapabilityMatrix(
+			FIXTURE,
+			[observation("svelte", { firstPublish: "direct" })],
+			{ now: day(0) },
+		).text;
+		expect(cellOf(out, "svelte", "src")).toBe("dev+ci");
+		expect(cellOf(out, "ast-grep", "src")).toBe("dev+ci");
+		const unobserved = refreshCapabilityMatrix(FIXTURE, [], {
+			now: day(0),
+		}).text;
+		expect(cellOf(unobserved, "svelte", "src")).toBe("dev");
+	});
+
+	it("never appends a lang that is not in the table", () => {
+		const out = nightly(FIXTURE, 0, [
+			measured("not-a-row", "silent", "3"),
+		]).text;
+		expect(cellOf(out, "not-a-row", "clean-behavior")).toBeUndefined();
+		expect(parseTable(out, MARKER)!.rows).toHaveLength(
+			parseTable(FIXTURE, MARKER)!.rows.length,
+		);
+	});
+
+	it("picks the capability table even when another table precedes it", () => {
+		const doc = `| a | b |\n|---|---|\n| 1 | 2 |\n\n${FIXTURE}`;
+		const out = nightly(doc, 0, [
+			observation("vue", { firstPublish: "empty-first" }),
+		]).text;
+		expect(cellOf(out, "vue", "first-publish")).toBe("empty-first");
+		expect(out).toContain("| 1 | 2 |");
+	});
+
+	it("accepts a call without observations", () => {
+		expect(() =>
+			refreshCapabilityMatrix(
+				FIXTURE,
+				undefined as unknown as MatrixObservation[],
+				{
+					now: day(0),
+				},
+			),
+		).not.toThrow();
+	});
+
+	it("holds a change that differs in only one of behavior and tier", () => {
+		// Only the tier differs, then only the behavior: each is a change.
+		const tierOnly = nightly(FIXTURE, 0, [
+			observation("ast-grep", {
+				cleanBehavior: "publishes-versioned",
+				tier: "2*",
+			}),
+		]);
+		expect(tierOnly.pending).toBe(1);
+		expect(cellOf(tierOnly.text, "ast-grep", "tier")).toBe("2");
+		const behaviorOnly = nightly(FIXTURE, 0, [
+			observation("ast-grep", { cleanBehavior: "silent", tier: "2" }),
+		]);
+		expect(behaviorOnly.pending).toBe(1);
+		expect(cellOf(behaviorOnly.text, "ast-grep", "clean-behavior")).toBe(
+			"publishes-versioned",
+		);
+	});
+
+	it("does not treat a hold as agreeing when only its behavior or only its tier matches", () => {
+		const first = nightly(FIXTURE, 0, [
+			observation("ast-grep", { cleanBehavior: "silent", tier: "3" }),
+		]).text;
+		const sameBehaviorOtherTier = nightly(first, 1, [
+			observation("ast-grep", { cleanBehavior: "silent", tier: "2*" }),
+		]);
+		expect(sameBehaviorOtherTier.committed).toBe(0);
+		const otherBehaviorSameTier = nightly(first, 1, [
+			observation("ast-grep", {
+				cleanBehavior: "publishes-unversioned",
+				tier: "3",
+			}),
+		]);
+		expect(otherBehaviorSameTier.committed).toBe(0);
+	});
+
+	it("needs a second sighting even when agreeRuns is 1", () => {
+		const opts = { src: "ci", agreeRuns: 1, now: day(0) } as const;
+		const a = measured("ast-grep", "publishes-unversioned", "2*");
+		const first = refreshCapabilityMatrix(FIXTURE, [a], opts);
+		expect(first.committed).toBe(0);
+		expect(first.pending).toBe(1);
+		expect(refreshCapabilityMatrix(first.text, [a], opts).committed).toBe(1);
+	});
+});
