@@ -34,7 +34,6 @@ import {
 	nodeModulesLockWarning,
 	reportNodeModulesLock,
 	runFreshnessChecks,
-	default as setup,
 } from "./support/check-build-freshness.js";
 
 describe("node_modules lock stamp (#3694)", () => {
@@ -107,25 +106,45 @@ describe("node_modules lock stamp (#3694)", () => {
 		expect(warn).not.toHaveBeenCalled();
 	});
 
-	// setup() is what vitest actually calls. Its root is the real checkout, so
-	// the expected count is derived from the same function on that root: one
-	// warning where the real install is stale/unstamped, none where it is fine.
-	it("setup() prints the warning through console.warn, once across projects", () => {
-		const latchKey = Symbol.for("pi-lens.node-modules-lock-warning");
+	// setup() is what vitest actually calls, against the REAL checkout root. Its
+	// `readFileSync` of the lock and the stamp is answered by a partial node:fs
+	// double (everything else is the real fs, so the freshness checks still run
+	// for real), making the stale-stamp state deterministic on any box.
+	it("setup() prints the warning through console.warn, once across projects", async () => {
 		const g = globalThis as Record<symbol, unknown>;
+		const latchKey = Symbol.for("pi-lens.node-modules-lock-warning");
 		const saved = g[latchKey];
 		delete g[latchKey];
+		vi.resetModules();
+		vi.doMock("node:fs", async (importOriginal) => {
+			const actual = await importOriginal<typeof import("node:fs")>();
+			return {
+				...actual,
+				readFileSync: ((file: unknown, ...rest: unknown[]) => {
+					const name = String(file);
+					if (name.endsWith("package-lock.json")) return "lock";
+					if (name.endsWith(".pi-lens-package-lock-sha256")) return "stale";
+					return (actual.readFileSync as (...a: unknown[]) => unknown)(
+						file,
+						...rest,
+					);
+				}) as typeof actual.readFileSync,
+			};
+		});
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			setup();
-			setup();
-			setup();
-			const expected = nodeModulesLockWarning(join(import.meta.dirname, ".."))
-				? 1
-				: 0;
-			expect(warn).toHaveBeenCalledTimes(expected);
+			const fresh = await import("./support/check-build-freshness.js");
+			fresh.default();
+			fresh.default();
+			fresh.default();
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(String(warn.mock.calls[0][0])).toContain(
+				"node_modules may be stale",
+			);
 		} finally {
 			warn.mockRestore();
+			vi.doUnmock("node:fs");
+			vi.resetModules();
 			if (saved === undefined) delete g[latchKey];
 			else g[latchKey] = saved;
 		}
