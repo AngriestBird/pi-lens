@@ -278,6 +278,7 @@ describe("pr-worktree planner (pure)", () => {
 				/outside/,
 			],
 			["worktrees root itself", { worktreesRoot: WT }, /outside/],
+			["parent of the root", { worktreePath: path.sep }, /outside/],
 			["dirty", { dirty: true }, /uncommitted|untracked/],
 		];
 		for (const [label, override, reason] of rails) {
@@ -593,6 +594,26 @@ describe("pr-worktree CLI close branch safety", () => {
 		expect(() =>
 			fixture.git(["show-ref", "--verify", "refs/heads/pr-worktree/clean-1"]),
 		).toThrow();
+	});
+
+	// Recurrence: the guard's own failure direction -- if git cannot say whether
+	// commits are pushed, the branch must be KEPT (deleting is the irreversible
+	// side), never treated as pushed.
+	it("keeps the branch when it cannot tell whether commits are pushed", () => {
+		const fixture = makeFixture();
+		const worktree = openPrOnly(fixture, "unsure-1");
+		const gitExec = (args: string[], options: { cwd?: string } = {}) => {
+			if (args[0] === "rev-list") throw new Error("simulated rev-list failure");
+			return fixtureGitExec(fixture)(args, options);
+		};
+
+		const result = fixtureRun(fixture, ["close", worktree], { gitExec });
+
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+		expect(fixture.git(["rev-parse", "pr-worktree/unsure-1"]).trim()).toBe(
+			fixture.prOnlyHead,
+		);
 	});
 
 	it("deletes the branch once its trailing commit is on a remote", () => {

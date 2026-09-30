@@ -22,13 +22,7 @@
  * out as-is and left alone.
  */
 
-import {
-	basename,
-	isAbsolute,
-	join,
-	relative as pathRelative,
-	sep,
-} from "node:path";
+import { basename, join, relative as pathRelative, sep } from "node:path";
 
 /** Namespace of the local branches this tool creates and may delete. */
 export const WORKTREE_BRANCH_PREFIX = "pr-worktree/";
@@ -211,12 +205,7 @@ export function deriveClosePlan({
 		};
 	}
 	const relative = pathRelative(worktreesRoot, worktreePath);
-	if (
-		relative === "" ||
-		relative === ".." ||
-		relative.startsWith(`..${sep}`) ||
-		isAbsolute(relative)
-	) {
+	if (relative === "" || relative === ".." || relative.startsWith(`..${sep}`)) {
 		return {
 			ok: false,
 			code: 2,
