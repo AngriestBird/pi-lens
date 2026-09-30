@@ -10,6 +10,10 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	MUTATION_BRIDGE_KEY,
 	getMutationBridge,
 	isValidMutationEntry,
@@ -305,6 +309,417 @@ describe("mutation bridge bookkeeping", () => {
 				false,
 			);
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record", () => {
+	// Recurrence: #3669 taught `deferMutation` to merge epochs with `Math.max`,
+	// and the bridge forwarded a foreign `entry.readGuardBranchEpoch` into that
+	// merge without validation. NaN, a negative, a fraction, and a non-number
+	// all poisoned (or were misread by) the legitimate record. Round 1's upper
+	// bound then misread a genuine prior-session capture as "from the future"
+	// and credited it to the new session (F1, covered below).
+	const malformed: ReadonlyArray<readonly [string, string, unknown]> = [
+		["a NaN", "nan", Number.NaN],
+		["a negative", "negative", -1],
+		["a fractional", "fraction", 1.5],
+		["a string", "string", "5"],
+	];
+
+	for (const [label, slug, value] of malformed) {
+		it(`ignores ${label} epoch and still credits the write`, () => {
+			const env = setupTestEnvironment(`pi-lens-3677-${slug}-`);
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "epoch.ts");
+				fs.writeFileSync(filePath, SOURCE);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: `s-3677-${slug}` });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+				// A legitimate record first, so the foreign value has something to
+				// merge into. Epoch 0 is current on a fresh session.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [1, 2],
+							consumer: "legit",
+							readGuardBranchEpoch: 0,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				// The foreign value arrives on a second touch of the same path.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [2, 3],
+							consumer: "foreign",
+							readGuardBranchEpoch: value as number,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				const [record] = runtime.consumeDeferredFormatFiles();
+				expect(record.readGuardBranchEpoch).toBe(0);
+
+				const summary = getDegradationSummary();
+				// The foreign value is named once, and the read-guard stamp is still
+				// credited: pre-fix the raw value reached `recordWritten`, whose
+				// `!==` check refused the write and recorded the sibling kind.
+				expect(
+					summary.find(
+						(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+					)?.count,
+				).toBe(1);
+				expect(
+					summary.find(
+						(group) => group.kind === "read-guard-write-after-branch-move",
+					),
+				).toBeUndefined();
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+
+	it("does not credit a write whose captured epoch predates a session reset", () => {
+		// #3677 review round 1 F1. `ReadGuard.branchEpoch` lives on the guard
+		// INSTANCE, and `resetForSession` nulls `_readGuard`, so a new session
+		// restarts at 0. Round 1 read "captured 2 > current 0" as a foreign
+		// future value, stripped it to undefined, and credited the dead
+		// session's write to the new one — the exact false credit #3521 exists
+		// to prevent. The captured epoch must stay fail-closed at the stamp.
+		const env = setupTestEnvironment("pi-lens-3677-reset-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "reset.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			// Age the file past the guard's session start, so the
+			// `wasWrittenThisSession` mtime fallback cannot mask a credited
+			// write: only an explicit `recordWritten` credit can make it true.
+			const anHourAgo = new Date(Date.now() - 3_600_000);
+			fs.utimesSync(filePath, anHourAgo, anHourAgo);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-reset" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			runtime.readGuard.retainBranch(new Set());
+			const captured = runtime.readGuard.currentBranchEpoch;
+			expect(captured).toBe(2);
+
+			// The real reset seam: a new session's guard restarts at 0.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: captured,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+
+			// Fail closed: the pre-reset capture is NOT credited to the new session.
+			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
+				false,
+			);
+			// ... and the refusal is observable through the read guard's own record.
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "read-guard-write-after-branch-move",
+				)?.count,
+			).toBe(1);
+			// No bridge record: the epoch is well-formed, just not this guard's.
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+			// Nothing is queued (#3677 round 3, verify r2 V2): round 2 queued the
+			// write at the CURRENT epoch, and the drain's own `recordWritten`
+			// then credited it (tests/clients/runtime-agent-end.test.ts, "drains
+			// nothing a dead session's sweep replay queued after a session reset").
+			expect(runtime.consumeDeferredFormatFiles()).toEqual([]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a null-proto epoch object without dropping the record", () => {
+		// #3677 review round 1 F3. `String(Object.create(null))` throws (no
+		// prototype), and the reason template is built INSIDE the bridge's try,
+		// so the throw dropped the whole record — turn state, receipt, and
+		// deferral — and returned false. `typeof value` closes it.
+		const env = setupTestEnvironment("pi-lens-3677-nullproto-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "nullproto.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-nullproto" });
+			runtime.beginTurn();
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: Object.create(null) as number,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("forwards a legitimately stale epoch captured before a /tree", () => {
+		// The upper bound is `<=`, not `==`: the field exists to carry an epoch
+		// captured before an await, so a `/tree` during that await must not turn
+		// a real epoch into a rejection.
+		const env = setupTestEnvironment("pi-lens-3677-stale-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "stale.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-stale" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 0,
+					},
+					deps,
+				),
+			).toBe(true);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+
+			// The boundary itself (#3677 round 3): an epoch EQUAL to the live one
+			// is this session's and still queues. Only one above it queues
+			// nothing; with `<` there, a current write lost its deferral and
+			// no other test noticed.
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 1,
+					},
+					deps,
+				),
+			).toBe(true);
+			const [current] = runtime.consumeDeferredFormatFiles();
+			expect(current?.readGuardBranchEpoch).toBe(1);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a fraction at or below the current epoch", () => {
+		// `Number.isInteger` is load-bearing on its own: 0.5 passes both the
+		// `>= 0` and `<= currentEpoch` bounds, so only the integer check rejects
+		// it. The guard's 1.5 row is caught by the upper bound instead.
+		const env = setupTestEnvironment("pi-lens-3677-subfraction-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "subfraction.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-subfraction" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const deps = makeDeps({
+				tmpDir: env.tmpDir,
+				runtime,
+				cacheManager: new CacheManager(false),
+			});
+
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: 0,
+				},
+				deps,
+			);
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [2, 3],
+					readGuardBranchEpoch: 0.5,
+				},
+				deps,
+			);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			// Ignoring the field falls back to the CURRENT epoch (1), which is the
+			// same credit a producer that omitted the field would get.
+			expect(record.readGuardBranchEpoch).toBe(1);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records nothing when the entry omits the epoch", () => {
+		const env = setupTestEnvironment("pi-lens-3677-omitted-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "omitted.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-omitted" });
+			runtime.beginTurn();
+			recordMutationThroughSeam(
+				{ filePath, kind: "edit", touchedLines: [1, 2] },
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records ONE bounded degradation for repeated foreign values", () => {
+		const env = setupTestEnvironment("pi-lens-3677-once-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-once" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			for (const [index, value] of [Number.NaN, -1, 1.5, "5"].entries()) {
+				const filePath = path.join(env.tmpDir, `once-${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: value as number,
+					},
+					deps,
+				);
+			}
+
+			const groups = getDegradationSummary().filter(
+				(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+			);
+			expect(groups).toHaveLength(1);
+			expect(groups[0].count).toBe(1);
+			// The one row names the field and the first value's type against the
+			// live epoch (#3677 round 3: Stryker left the subject and the reason
+			// unread by every test).
+			expect(groups[0].latestReasons).toEqual([
+				{
+					subject: "readGuardBranchEpoch",
+					reason:
+						"ignored a foreign readGuardBranchEpoch (typeof number) (current 0)",
+				},
+			]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});

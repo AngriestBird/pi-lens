@@ -8,7 +8,6 @@
 
 import { createRequire } from "node:module";
 import * as fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -52,20 +51,12 @@ describe("tree-sitter-client wasm resolution", () => {
 		expect(path.isAbsolute(deps.resolvePackage("vitest/package.json"))).toBe(
 			true,
 		);
-		// #3409: the grammars dir now comes from the package directory the module
-		// RESOLVER reports, so it is realpath-canonical. Where `node_modules` is a
-		// symlink (a pnpm store layout, a git worktree) that differs textually
-		// from the same directory reached through this file's own path, and both
-		// spellings name one directory — hence realpath on both sides. The pin
-		// that matters is unchanged: not a fixed path relative to import.meta.url.
-		expect(fs.realpathSync(deps.resolveAsset("grammars") as string)).toBe(
-			fs.realpathSync(
-				path.resolve(
-					path.dirname(fileURLToPath(import.meta.url)),
-					"../../node_modules/web-tree-sitter/grammars",
-				),
-			),
-		);
+		// Resolve the exported wasm asset through the same dependency seam. This
+		// preserves the require.resolve contract without depending on the lazy
+		// install side effect that creates web-tree-sitter/grammars (#3708).
+		expect(
+			fs.realpathSync(deps.resolveAsset("tree-sitter.wasm") as string),
+		).toBe(fs.realpathSync(wasmPath));
 		// Must NOT assume the wasm lives nested under pi-lens's own node_modules
 		// relative to import.meta.url — that breaks in hoisted layouts.
 		expect(path.isAbsolute(wasmPath)).toBe(true);

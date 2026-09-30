@@ -87,8 +87,6 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 
 	// --- Not the shape: a generation is compared, but no post-await write
 	// hangs on the answer. ---
-	"mutation-bridge.ts":
-		"#3521: `entry.readGuardBranchEpoch === undefined` is a presence check that decides whether a bridge entry passes a captured branch epoch on to ReadGuard.recordWritten. The compare that guards the write lives in read-guard.ts, registered above",
 	"dispatch/runners/utils/runner-helpers.ts":
 		"#1754 migrated this file's guarded WRITES (the managed-verify verdict memo, both in-flight evictions). What is left is ensureCurrentGeneration and the ast-grep latch, which clear a cache on a staleness transition rather than guard a write — a different shape the primitive deliberately does not model",
 	"dispatch/runners/utils/availability-policy.ts":
