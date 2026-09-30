@@ -46,24 +46,19 @@ interface PersistedSessionStateV1 {
 
 function fromDisk(parsed: unknown): PersistedSessionState | undefined {
 	const state = parsed as Partial<PersistedSessionState> | null;
-	// `savedAt` anchors the widget's disk reconciliation (`dropStaleFiles`).
-	if (typeof state?.savedAt !== "number") return undefined;
 	if (
-		state.version === STATE_VERSION &&
+		state?.version === STATE_VERSION &&
 		typeof state.stores === "object" &&
 		state.stores !== null
 	)
 		return state as PersistedSessionState;
-	const v1 = parsed as Partial<PersistedSessionStateV1>;
-	if (v1.version !== 1 || !v1.widget) return undefined;
+	const v1 = parsed as Partial<PersistedSessionStateV1> | null;
+	if (v1?.version !== 1 || !v1.widget) return undefined;
 	return {
 		version: STATE_VERSION,
 		sessionId: String(v1.sessionId),
-		savedAt: state.savedAt,
-		stores: {
-			widget: v1.widget,
-			...(v1.readGuard ? { "read-guard": v1.readGuard } : {}),
-		},
+		savedAt: Number(v1.savedAt),
+		stores: { widget: v1.widget, "read-guard": v1.readGuard },
 	};
 }
 

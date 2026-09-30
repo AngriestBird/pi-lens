@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getProjectDataDir } from "../clients/file-utils.js";
+import { takeHandoff } from "../clients/session-scope.js";
 import {
 	afterAll,
 	afterEach,
@@ -1913,6 +1914,20 @@ describe("hook handler crash surfacing (#2884)", () => {
 
 		expect(pi.activeTools.has("ast_grep_search")).toBe(true);
 		expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
+	});
+
+	// #3612: an activation whose session_start never ran (a stale ctx skips
+	// the whole handler) has no scope to hand off. The recurrence: the
+	// shutdown snapshotting an undefined scope, which throws into pi's
+	// teardown.
+	it("hands nothing off from a reload shutdown before any session_start", async () => {
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		await expect(
+			pi.emit("session_shutdown", { reason: "reload" }, makeCtx({ cwd: tmp })),
+		).resolves.toBeUndefined();
+		expect(takeHandoff("reload", undefined)).toBeUndefined();
 	});
 
 	it("surfaces a crashed observed_settled_sweep under the test runner and records it", async () => {

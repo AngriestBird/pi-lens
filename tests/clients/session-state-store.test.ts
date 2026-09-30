@@ -33,7 +33,9 @@ import {
 	type PersistedWidgetState,
 	recordDiagnostics,
 	reconcileStaleWidgetFiles,
+	widgetStore,
 } from "../../clients/widget-state.js";
+import { beginScope } from "../../clients/session-scope.js";
 
 let dataDir: string;
 let prevDataDir: string | undefined;
@@ -441,7 +443,7 @@ describe("version-1 sidecars still load (#3612)", () => {
 	it("loads a widget-only version-1 file as the widget store", async () => {
 		const loaded = await loadFixture("v1-widget");
 		expect(loaded?.savedAt).toBe(1759250000000);
-		expect(Object.keys(loaded?.stores ?? {})).toEqual(["widget"]);
+		expect(loaded?.stores["read-guard"]).toBeUndefined();
 		expect(
 			importWidgetState(loaded?.stores.widget as PersistedWidgetState),
 		).toBe(true);
@@ -452,10 +454,7 @@ describe("version-1 sidecars still load (#3612)", () => {
 
 	it("loads a version-1 file's read-set as the read-guard store", async () => {
 		const loaded = await loadFixture("v1-widget-read-guard");
-		expect(Object.keys(loaded?.stores ?? {}).sort()).toEqual([
-			"read-guard",
-			"widget",
-		]);
+		expect(loaded?.stores.widget).toBeDefined();
 		const readGuard = loaded?.stores["read-guard"] as PersistedReadGuardState;
 		expect(readGuard.reads.map(([key]) => key)).toEqual(["/proj/example/a.ts"]);
 		// The record parses: its tool call is on the branch, and only the
@@ -468,6 +467,21 @@ describe("version-1 sidecars still load (#3612)", () => {
 		).toEqual({ imported: 0, dropped: 1 });
 	});
 
+	it("loads a version-2 file whose stores are not an object as nothing", async () => {
+		const sessionsDir = join(getProjectDataDir(cwd), "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		for (const [name, stores] of [
+			["v2-null-stores", null],
+			["v2-string-stores", "widget"],
+		] as const) {
+			writeFileSync(
+				join(sessionsDir, `${name}.json`),
+				JSON.stringify({ version: 2, sessionId: name, savedAt: 1, stores }),
+			);
+			expect(await loadSessionState(cwd, name), name).toBeUndefined();
+		}
+	});
+
 	it("writes version 2 and never version 1", async () => {
 		await saveSessionState(cwd, "v2-written", { widget: exportWidgetState() });
 		const sessionsDir = join(getProjectDataDir(cwd), "sessions");
@@ -477,5 +491,62 @@ describe("version-1 sidecars still load (#3612)", () => {
 		expect(raw.version).toBe(2);
 		expect(raw.widget).toBeUndefined();
 		expect(raw.stores.widget).toBeDefined();
+	});
+});
+
+/**
+ * #3612: the widget as a session store. The recurrences: a fork or resume
+ * that shows a file changed on disk since its sidecar was saved (#180/#190),
+ * a fork whose in-process hand-off is reconciled against a save time it
+ * never had (every file dropped), and a malformed sidecar that crashes the
+ * session start.
+ */
+describe("the widget store's restore (#3612)", () => {
+	function ctxFor(source: "slot" | "own-sidecar", savedAt?: number) {
+		return {
+			reason: "fork" as const,
+			source,
+			savedAt,
+			sessionManager: undefined,
+			cwd,
+		};
+	}
+
+	it("reconciles a sidecar with disk and restores the slot as it was", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-widget-store-"));
+		try {
+			const kept = join(dir, "kept.ts");
+			const changed = join(dir, "changed.ts");
+			for (const file of [kept, changed]) {
+				writeFileSync(file, "x\n");
+				utimesSync(file, new Date(1_000_000), new Date(1_000_000));
+				recordDiagnostics(file, [
+					{ tool: "tsc", severity: "error", message: "boom", line: 1 },
+				]);
+			}
+			const saved = exportWidgetState();
+			utimesSync(changed, new Date(9_000_000), new Date(9_000_000));
+			const scope = beginScope({ role: "primary" });
+			const files = () =>
+				getFileDiagnosticSummaries()
+					.map((f) => f.filePath)
+					.sort();
+
+			await widgetStore.restore(scope, saved, ctxFor("own-sidecar", 2_000_000));
+			expect(files()).toEqual([kept]);
+
+			await widgetStore.restore(scope, saved, ctxFor("slot"));
+			expect(files()).toEqual([changed, kept].sort());
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("restores a payload without files as an empty widget", async () => {
+		seedDiagnostics();
+		const scope = beginScope({ role: "primary" });
+		await widgetStore.restore(scope, { version: 3 }, ctxFor("own-sidecar", 1));
+		await widgetStore.restore(scope, undefined, ctxFor("own-sidecar", 1));
+		expect(getFileDiagnosticSummaries()).toEqual([]);
 	});
 });

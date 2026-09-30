@@ -405,14 +405,12 @@ export function scopeCell<T>(
 	return cells.get(key) as T | undefined;
 }
 
-/** Every declared store's snapshot of `scope`, by store name: the sidecar payload. */
+/** Every declared store's snapshot of `scope`, by store name: the hand-off and sidecar payload. */
 export function snapshotSessionStores(
 	scope: SessionScope,
-	reason?: StartReason,
 ): Record<string, unknown> {
 	const snapshots: Record<string, unknown> = {};
 	for (const spec of sessionStores.values()) {
-		if (reason !== undefined && spec.policy[reason] !== "adopt") continue;
 		const payload = spec.snapshot(scope);
 		if (payload !== undefined) snapshots[spec.name] = payload;
 	}
@@ -461,7 +459,7 @@ export function stashHandoff(
 		reason,
 		sessionFile: args.targetSessionFile ?? args.sessionFile,
 		fromScopeId: scope.scopeId,
-		stores: snapshotSessionStores(scope, reason),
+		stores: snapshotSessionStores(scope),
 	};
 	return true;
 }
@@ -504,32 +502,29 @@ export async function adoptHandoff(
 	},
 ): Promise<StartSource> {
 	const reason = toStartReason(args.reason);
-	const specs = [...sessionStores.values()];
 	let source: StartSource = "none";
 	let found: { savedAt?: number; stores: Record<string, unknown> } | undefined;
-	if (specs.some((spec) => spec.policy[reason] === "adopt")) {
-		for (const candidate of SOURCES[reason]) {
-			if (candidate === "slot") {
-				const stores = takeHandoff(reason, args.sessionFile);
-				found = stores && { stores };
-			} else if (candidate === "own-sidecar") {
-				found = await args.loadOwnSidecar();
-			} else {
-				found = await args.loadParentSidecar();
-			}
-			if (found) {
-				source = candidate;
-				break;
-			}
+	for (const candidate of SOURCES[reason]) {
+		if (candidate === "slot") {
+			const stores = takeHandoff(reason, args.sessionFile);
+			found = stores && { stores };
+		} else if (candidate === "own-sidecar") {
+			found = await args.loadOwnSidecar();
+		} else {
+			found = await args.loadParentSidecar();
 		}
-		if (SOURCES[reason][0] === "slot" && source !== "slot")
-			recordDegradationOnce({
-				kind: "session-scope-handoff-missed",
-				subject: reason,
-				reason: `a ${reason} start found no hand-off slot left for its session file; it started from ${source}`,
-			});
+		if (found) {
+			source = candidate;
+			break;
+		}
 	}
-	for (const spec of specs) {
+	if (SOURCES[reason][0] === "slot" && source !== "slot")
+		recordDegradationOnce({
+			kind: "session-scope-handoff-missed",
+			subject: reason,
+			reason: `a ${reason} start found no hand-off slot left for its session file; it started from ${source}`,
+		});
+	for (const spec of sessionStores.values()) {
 		const action = spec.policy[reason];
 		if (action === "reset") spec.reset?.(scope);
 		if (action !== "adopt") continue;
