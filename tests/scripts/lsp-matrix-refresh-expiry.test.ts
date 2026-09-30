@@ -612,6 +612,29 @@ describe("#3401 state block parsing, rendering and replacement", () => {
 });
 
 describe("#3401 refresh entry edges", () => {
+	it("drops a carried hold that lacks a behavior or a tier", () => {
+		// A hand-edited block must not keep a half hold alive across a subset run.
+		const doc = `${FIXTURE}\n${stateBlock({
+			"clean-behavior": {
+				"ast-grep": { pendingBehavior: "silent" },
+				vue: { pendingTier: "3" },
+			},
+		})}`;
+		const out = nightly(doc, 1, [], { probedLangs: ["rust"] }).text;
+		expect(parseRefreshState(out)["clean-behavior"]).toBeUndefined();
+	});
+
+	it("starts from an empty src when a row has no src cell", () => {
+		const doc = FIXTURE.replace(
+			"| svelte | svelteserver | push-only | unknown | unknown | 3? | dev |",
+			"| svelte | svelteserver | push-only | unknown | unknown | 3? |",
+		);
+		const out = nightly(doc, 0, [
+			observation("svelte", { firstPublish: "direct" }),
+		]).text;
+		expect(cellOf(out, "svelte", "src")).toBe("ci");
+	});
+
 	it("writes an observed first-publish class at once, in either direction", () => {
 		const toEmptyFirst = nightly(FIXTURE, 0, [
 			observation("vue", { firstPublish: "empty-first" }),
