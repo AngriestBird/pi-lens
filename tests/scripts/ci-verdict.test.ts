@@ -244,13 +244,6 @@ describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", 
 // then never bridge with `--wait`. Fixed via `mergeable` threaded from
 // `gh pr view --json headRefOid,mergeable` through to `computeVerdict`.
 describe("computeVerdict — absent-check verdict is mergeable-aware (#2539 round 2, F1)", () => {
-	it("#3847: an empty required-check set cannot turn absent checks into exit 0", () => {
-		const verdict = computeVerdict({ check_runs: [] }, [], "MERGEABLE");
-		expect(verdict.exitCode).toBe(EXIT_PENDING);
-		expect(verdict.reason).toContain("treating as pending");
-		expect(verdict.rows.every((row) => !row.present)).toBe(true);
-	});
-
 	it("A1: exits 3 (pending) when a required check is absent but the PR is MERGEABLE", () => {
 		const payload = {
 			check_runs: [checkRun({ name: "Unit tests", id: 1 })],
@@ -1444,6 +1437,30 @@ describe("isAdvisoryCheck — workflow advisory names stay in policy", () => {
 });
 
 describe("run — prints the gating source and uses a live branch-protection read (#2609)", () => {
+	it("#3847/#2664: an empty branch protection and check-runs response stays pending", async () => {
+		// #3847 and #2664 are the recurrence: a MERGEABLE PR with no live
+		// required-check names and no check runs must remain exit 3, not look
+		// merge-ready. This exercises the real run() CLI entry and pins the
+		// branch-protection fallback already present on master.
+		const ghExec = (args: string[]) => {
+			if (args[0] === "repo") return "acme/repo";
+			if (args[0] === "pr")
+				return JSON.stringify({ headRefOid: "c0ffee", mergeable: "MERGEABLE" });
+			if ((args[1] ?? "").endsWith("/protection"))
+				return JSON.stringify({ required_status_checks: { contexts: [] } });
+			if ((args[1] ?? "").includes("/check-runs"))
+				return JSON.stringify({ check_runs: [] });
+			throw new Error(`unmocked gh call: ${args.join(" ")}`);
+		};
+		const exitCode = await run({
+			argv: ["3847"],
+			ghExec,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+	});
+
 	it("documents the branch-protection source and threads it into the verdict", async () => {
 		const ghExec = (args: string[]) => {
 			if (args[0] === "repo") return "acme/repo";
