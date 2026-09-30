@@ -304,7 +304,10 @@ describe("targeted advisory workflow contract (#3215)", () => {
 	it("runs the selector on every PR with a full checkout and no gating power", () => {
 		const job = readWorkflow().jobs["targeted-tests-advisory"];
 		expect(job?.name).toBe("Targeted tests (advisory)");
-		expect(job?.if).toBe("github.event_name == 'pull_request'");
+		// #3801: a docs-only diff skips it (`changes` job), a code diff runs it.
+		expect(job?.if).toBe(
+			"github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'",
+		);
 		expect(job?.["continue-on-error"]).toBe(true);
 		const checkout = job?.steps?.find((step) =>
 			step.uses?.startsWith("actions/checkout@"),

@@ -52,9 +52,14 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		);
 		expect(named.map(([id]) => id)).toEqual(["unit-tests"]);
 		const aggregate = jobs["unit-tests"];
-		expect(asList(aggregate.needs)).toEqual(["test"]);
+		// #3801 added `changes`: a docs-only diff skips the shards, and the
+		// aggregate passes on that skip only when `changes` proved it.
+		expect(asList(aggregate.needs)).toEqual(["test", "changes"]);
 		expect(aggregate.if).toBe("always()");
 		expect(aggregate.env?.SHARDS_RESULT).toBe("${{ needs.test.result }}");
+		expect(aggregate.env?.CODE_CHANGED).toBe(
+			"${{ needs.changes.outputs.code }}",
+		);
 		const run = String(
 			step(aggregate, "Require every Unit tests shard to succeed").run,
 		);

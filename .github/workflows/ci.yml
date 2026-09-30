@@ -42,6 +42,51 @@ jobs:
           PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
         run: node scripts/lib/merge-train-dispatch-validation.mjs
 
+  # #3801: classify the diff once. `code` is false ONLY for a pull_request whose
+  # every changed path is on the strict docs allowlist (root *.md, docs/**,
+  # .changelog/**; scripts/ci-changed-files.mjs), and then the heavy jobs skip.
+  # `formal` is true when the diff touches formal/ (or what runs it), and then
+  # `TLA+ models` model-checks. Push, repository_dispatch and any other event
+  # get code=true formal=true, so master keeps the full suite, and every doubt
+  # (unreadable or empty file list, API cap) resolves to the full suite too.
+  #
+  # REQUIRED checks never skip at job level: a job `if:` that evaluates false
+  # reports `skipped`, which GitHub counts as passing, but ci-verdict and the
+  # merge train demand a literal `success` on a required row (#2618), and a
+  # skipped MATRIX job reports one check-run under its raw `${{ matrix.os }}`
+  # name, leaving the required `Install test (...)` names absent. So a required
+  # job (`Install test` legs, `TLA+ models`) always starts and skips its STEPS,
+  # and the `Unit tests` aggregate passes on skipped shards only when this job
+  # proved docs-only. The name ends in `(advisory)`: it reports, never gates.
+  changes:
+    name: Changed files (advisory)
+    runs-on: ubuntu-latest
+    # A sparse checkout, one API read and a script: 10 min is the repo's floor
+    # (refs #3123).
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      formal: ${{ steps.classify.outputs.formal }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+      - name: Classify the changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/ci-changed-files.mjs --event "$EVENT_NAME" --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
+
   dependency-boundaries:
     name: Dependency boundaries
     needs: validate-merge-train-dispatch
@@ -144,7 +189,7 @@ jobs:
 
   tla-models:
     name: TLA+ models
-    needs: validate-merge-train-dispatch
+    needs: [validate-merge-train-dispatch, changes]
     runs-on: ubuntu-latest
     # refs #3572, #3517: TLC over formal/*/*.cfg (330 configs as of this
     # change), run through a CPU-sized concurrency pool instead of one at a
@@ -169,7 +214,16 @@ jobs:
       contents: read
 
     steps:
+      # #3801: the models depend only on formal/ and the checker, so a diff that
+      # touches neither (the `changes` job) skips the model check at STEP level
+      # and this required check still concludes success. `!= 'false'`: only a
+      # proven-unchanged formal/ skips; an unreadable classification runs it.
+      - name: Skip the model check (formal/ unchanged)
+        if: needs.changes.outputs.formal == 'false'
+        run: echo "formal/ and scripts/check-tla-models.mjs are unchanged in this diff; model checking skipped (runs on every formal change, on master pushes and on merge-train replays)"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.formal != 'false'
         with:
           ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
@@ -196,12 +250,14 @@ jobs:
           fi
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        if: needs.changes.outputs.formal != 'false'
         with:
           node-version: '22'
 
       # The runner image ships a JDK on PATH; the checker downloads the pinned
       # tla2tools.jar and verifies its sha256 before running it.
       - name: Model-check formal/ against each config's expected verdict
+        if: needs.changes.outputs.formal != 'false'
         run: |
           java -version
           node scripts/check-tla-models.mjs
@@ -293,8 +349,8 @@ jobs:
 
   targeted-tests-advisory:
     name: Targeted tests (advisory)
-    needs: validate-merge-train-dispatch
-    if: github.event_name == 'pull_request'
+    needs: [validate-merge-train-dispatch, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 15
@@ -347,7 +403,12 @@ jobs:
   # slowest shard at 267 s for N=3 and 157 s for N=5, then flat beyond.
   test:
     name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: validate-merge-train-dispatch
+    needs: [validate-merge-train-dispatch, changes]
+    # #3801: a docs-only diff skips the shards. A skipped matrix job reports one
+    # check-run under its raw name, which is fine here: the required check is
+    # the `Unit tests` aggregate below, which passes on this skip only when
+    # `changes` proved the diff docs-only.
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       # One red shard must not cancel its siblings: ci-verdict then names the
@@ -629,7 +690,7 @@ jobs:
   # failure all fail this job.
   unit-tests:
     name: Unit tests
-    needs: test
+    needs: [test, changes]
     if: always()
     runs-on: ubuntu-latest
     # Runs one `echo` and a comparison; 10 min is the repo's floor (refs #3123).
@@ -638,14 +699,64 @@ jobs:
       contents: read
     env:
       SHARDS_RESULT: ${{ needs.test.result }}
+      CODE_CHANGED: ${{ needs.changes.outputs.code }}
     steps:
       - name: Require every Unit tests shard to succeed
         run: |
-          echo "Unit tests shard jobs (test): ${SHARDS_RESULT}"
+          echo "Unit tests shard jobs (test): ${SHARDS_RESULT} (code changed: ${CODE_CHANGED:-unknown})"
+          # #3801: shards skipped because `changes` PROVED a docs-only diff are a
+          # pass. Skipped for any other reason (a failed needs, an empty or
+          # failed classification) falls through to the failure below.
+          if [[ "${SHARDS_RESULT}" == "skipped" && "${CODE_CHANGED}" == "false" ]]; then
+            echo "docs-only diff: the Unit tests shards were skipped on purpose; tests/config and tests/docs run in 'Docs governance tests'"
+            exit 0
+          fi
           if [[ "${SHARDS_RESULT}" != "success" ]]; then
             echo "::error::a Unit tests shard did not succeed (${SHARDS_RESULT}); the failing tests are in that shard's own log, check-run 'Unit tests (shard k/N)'"
             exit 1
           fi
+
+  # #3801: what a docs-only diff still runs of the test suite. The Unit shards
+  # skip for it, but the governance suites read the docs (AGENTS.md catalogs,
+  # generated feature counts, contract copies), so a docs edit that breaks one
+  # must still go red. Runs ONLY when `changes` proved the diff docs-only (a
+  # code diff runs these files inside the shards already). Not a required
+  # check; ci-verdict gates it like any non-advisory job.
+  docs-governance:
+    name: Docs governance tests
+    needs: changes
+    if: needs.changes.outputs.code == 'false'
+    runs-on: ubuntu-latest
+    # Measured: tests/config (86 files) and tests/docs take about 35 s of test
+    # time; install and build add about 1 minute. 15 min is the repo's floor
+    # for a job that can hang (refs #3123).
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Build dist
+        run: npm run build:dist
+
+      - name: Run tests/config and tests/docs
+        env:
+          PI_LENS_TEST_TIMEOUT_SCALE: '3'
+          PI_LENS_TEST_NO_LOCK: '1'
+        run: npm test -- tests/config tests/docs
 
   # #3801: the heavy ADVISORY jobs (mutation, the Windows Vitest subset) start
   # only after every required check passed on this head. A runner-slot pool
@@ -666,11 +777,24 @@ jobs:
   heavy-gate:
     name: Heavy advisory gate (advisory)
     needs:
+      - changes
       - validate-merge-train-dispatch
       - lint-and-typecheck
       - tla-models
       - unit-tests
       - install-test
+    # #3801: a docs-only diff makes `unit-tests` pass on SKIPPED shards, and the
+    # heavy jobs must not start for it. So: run only for a code diff, and only
+    # when every needed job really succeeded (`!cancelled()` so the explicit
+    # result checks, not the implicit skip-if-a-need-skipped rule, decide).
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.code == 'true' &&
+      needs.validate-merge-train-dispatch.result == 'success' &&
+      needs.lint-and-typecheck.result == 'success' &&
+      needs.tla-models.result == 'success' &&
+      needs.unit-tests.result == 'success' &&
+      needs.install-test.result == 'success'
     runs-on: ubuntu-latest
     # Polls at most 300 s (the script's deadline) after a few seconds of setup;
     # 10 min is the repo's floor (refs #3123).
@@ -792,7 +916,8 @@ jobs:
   # ships pre-built dist/, so it never re-runs the build under --omit=dev.
   prod-install-build:
     name: Production install build (--omit=dev, from source)
-    needs: validate-merge-train-dispatch
+    needs: [validate-merge-train-dispatch, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 72s; timeout = floor of
@@ -1053,7 +1178,18 @@ jobs:
     # which is not covered by the measurement above. The value is left alone
     # and re-measured from the first green macOS legs before it is resized.
     timeout-minutes: 15
-    needs: [validate-merge-train-dispatch, lint-and-typecheck, test]
+    needs: [validate-merge-train-dispatch, changes, lint-and-typecheck, test]
+    # #3801: on a docs-only diff `test` is skipped, which would skip this whole
+    # matrix under its raw name and leave the three REQUIRED `Install test (...)`
+    # names absent. So the job starts whenever its real dependencies are fine
+    # (`test` succeeded, or was skipped by a proven docs-only diff) and each
+    # step below skips itself on docs-only: every leg reports success.
+    if: >-
+      !cancelled() &&
+      needs.validate-merge-train-dispatch.result == 'success' &&
+      needs.lint-and-typecheck.result == 'success' &&
+      (needs.test.result == 'success' ||
+        (needs.test.result == 'skipped' && needs.changes.outputs.code == 'false'))
     permissions:
       contents: read
     strategy:
@@ -1063,13 +1199,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.code != 'false'
         with:
           ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
 
 
       - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
+        if: github.event_name == 'repository_dispatch' && needs.changes.outputs.code != 'false'
         env:
           PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
           PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
@@ -1091,10 +1228,12 @@ jobs:
           fi
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        if: needs.changes.outputs.code != 'false'
         with:
           node-version: '22'
 
       - name: Install dependencies
+        if: needs.changes.outputs.code != 'false'
         run: npm install --no-audit --no-fund
 
       # refs #3098: the ONLY case-insensitive POSIX filesystem in CI is this
@@ -1109,7 +1248,7 @@ jobs:
       # flake must not block an unrelated PR on its first outings. Promotion to
       # gating is a separate decision after several green legs (#3159 round 3).
       - name: POSIX case-insensitive anchors (APFS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && needs.changes.outputs.code != 'false'
         continue-on-error: true
         shell: bash
         run: |
@@ -1118,13 +1257,16 @@ jobs:
           node_modules/.bin/vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts --configLoader runner
 
       - name: Rule catalog report (non-blocking)
+        if: needs.changes.outputs.code != 'false'
         continue-on-error: true
         run: npm run audit:rule-catalog
 
       - name: Pack tarball
+        if: needs.changes.outputs.code != 'false'
         run: npm pack
 
       - name: Verify required files in tarball
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           TARBALL=$(ls pi-lens-*.tgz)
@@ -1158,6 +1300,7 @@ jobs:
           fi
 
       - name: Verify package.json entry points exist in tarball
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           TARBALL=$(ls pi-lens-*.tgz)
@@ -1227,12 +1370,14 @@ jobs:
 
       # Intentional: this job verifies the package installs like pi installs it.
       - name: Install from tarball (simulates pi install npm:pi-lens)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: | # zizmor: ignore[adhoc-packages]
           TARBALL=$(ls pi-lens-*.tgz)
           npm install -g "$TARBALL"
 
       - name: Verify bundled core grammars shipped in the tarball
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           # Core grammars ship bundled in pi-lens/grammars (via prepare + files[]);
@@ -1246,6 +1391,7 @@ jobs:
           echo "Bundled core grammar checks passed"
 
       - name: Load each extension entry point (catches missing files)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           INSTALL_DIR=$(npm root -g)/pi-lens
@@ -1255,6 +1401,7 @@ jobs:
       # runs from the checkout against the GLOBAL install the earlier step made,
       # so it inspects what a real `pi install npm:pi-lens` produces.
       - name: Verify no host-provided package shipped in the tarball (#1926)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: node scripts/check-prod-install-shape.mjs "$(npm root -g)/pi-lens"
 
@@ -1266,6 +1413,7 @@ jobs:
       # never hardcoded here. The type-only host SDK is deliberately NOT
       # installed (Windows MAX_PATH, #1334 S6).
       - name: Supply host-provided packages the way pi does (#1926)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: | # zizmor: ignore[adhoc-packages]
           INSTALL_DIR=$(npm root -g)/pi-lens
@@ -1279,6 +1427,7 @@ jobs:
             --prefix "$INSTALL_DIR" "${HOST_PKGS[@]}"
 
       - name: Verify extension entry loads (catches missing node_modules deps)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           # Build the allowlist BEFORE leaving the checkout: the global install
@@ -1304,6 +1453,7 @@ jobs:
           echo "Extension import check passed"
 
       - name: Startup not weakened — entry loads from precompiled dist (#182)
+        if: needs.changes.outputs.code != 'false'
         shell: bash
         run: |
           # Loading the entry above made pi-lens self-report its load source to

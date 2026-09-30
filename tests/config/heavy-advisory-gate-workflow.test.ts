@@ -108,6 +108,24 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		for (const id of ciRequired) expect(needs).toContain(id);
 	});
 
+	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff,
+	// where `unit-tests` passes on SKIPPED shards, would launch mutation and the
+	// Windows run for a change that skipped the whole suite.
+	it("starts only for a code diff, and only when every needed job succeeded", () => {
+		expect(asList(gate.needs)).toContain("changes");
+		expect(gate.if).toContain("needs.changes.outputs.code == 'true'");
+		for (const id of [
+			"validate-merge-train-dispatch",
+			"lint-and-typecheck",
+			"tla-models",
+			"unit-tests",
+			"install-test",
+		]) {
+			expect(gate.if, id).toContain(`needs.${id}.result == 'success'`);
+		}
+		expect(gate.if).toContain("!cancelled()");
+	});
+
 	// Recurrence: `needs:` cannot reach lint.yml, so a required check hosted
 	// there (knip, oxfmt) was simply not waited for. The gate step names each
 	// one; a context hosted by lint.yml but missing from `--require` fails here.

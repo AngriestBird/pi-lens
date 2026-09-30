@@ -375,6 +375,8 @@ const EXEMPTIONS: Readonly<Record<string, string>> = {
 		"workflow_run-triggered classifier: it reads a COMPLETED CI run's log, which by definition does not exist while that run is still going. Its own if: truth table is evaluated pre-merge, row by row, in tests/config/ci-infra-kill-rerun-gate.test.ts",
 	".github/workflows/ci-infra-kill-rerun.yml::finalize-rerun":
 		"workflow_run-triggered terminal-label swap, same lane and same reason as classify above; its if: is evaluated pre-merge in tests/config/ci-infra-kill-rerun-gate.test.ts",
+	".github/workflows/ci.yml::docs-governance":
+		"runs on a DOCS-ONLY pull request (`needs.changes.outputs.code == 'false'`), which a pull request can exercise; it reads unreachable here only because this model reads every `needs.*.outputs.*` as 'true', so a positive `== 'false'` gate is its documented blind spot. Its if: is evaluated for docs-only and code diffs, row by row, in tests/config/docs-only-ci-skip.test.ts (#3801)",
 	".github/workflows/ci.yml::record-post-merge-validation":
 		"repository_dispatch post-merge recorder: the merge-train lane dispatches it AFTER a merge, so a pre-merge run is not a narrower version of this job, it is a contradiction",
 	".github/workflows/close-keyword-verification.yml::verify":

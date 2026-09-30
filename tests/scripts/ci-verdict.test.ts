@@ -1246,6 +1246,9 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		// checks pass; it reports ready=false rather than failing, and must never
 		// gate a merge whatever it concludes.
 		"Heavy advisory gate (advisory)",
+		// #3801: classifies the diff for the docs-only skip; it falls back to the
+		// full suite on any doubt and must never gate a merge.
+		"Changed files (advisory)",
 		"PR body (advisory)",
 		"Vale prose lint (advisory)",
 		"OSV scan (advisory)",
