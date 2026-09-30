@@ -29,6 +29,12 @@ instructions say so.
   was red on its own `path` count changes (cue-vet 5→6, dart-analyze 6→4)
   until an orchestrator trailing commit re-pinned.
 
+- Put each core-domain rule in its owning module; every caller asks that owner.
+  Re-deriving an owned rule at a consumer is wrong; extend the owner, or create
+  a new one only with a stated reason, in its domain owner (#3781, #3794, #3796).
+- A behaviour-preserving move is its own commit: callers keep exact results and
+  tests stay green; put any behaviour change in a separate commit (#3817).
+
 ### Failure list before code
 
 Before the first edit of any fix, write the list of ways the change could fail
@@ -54,43 +60,25 @@ the cost of not doing so.
    AGENTS.md minimalism ladder FIRST: the catalog says what must not break,
    never what to add. A guard/governance test you add names the recurrence
    it prevents in its comment or it does not ship (#2582, 2026-09-04).
-   **Mutation output is quoted, not ticked.** For every new guard, branch,
-   filter, cap or fallback you add, neuter it (delete the line, force the
-   condition) in the built output, run the suite that should catch it, and
-   PASTE the red output into the PR body next to the guard — the same way
-   the red-first rule requires the pre-fix transcript. A checked "mutation-
-   proof" box with no transcript is treated by review as false; in the
-   2026-09-03 wave six of six first-round PRs shipped at least one guard whose
-   removal left the suite green while the box was ticked. If a guard cannot
-   be made to red, it does not need to exist — delete it.
-   Quote the mutation TABLE, one row per direction per new conditional — a
-   single quoted direction proves only that direction, not the guard (#3156
-   r2 and #3168 r1 each shipped a one-directional pin under a ticked box).
-   **Read the PR's Stryker report first, once one exists (#3531).** The
-   `Mutation diff` workflow mutates the PR's changed lines under
-   `scripts/**/*.mjs`, `clients/**/*.ts`, `tools/**/*.ts`, `mcp/**/*.ts`, and
-   `index.ts` (the last four through their compiled `.js`, mapped back to
-   `.ts` file:line) and posts a sticky PR comment listing every survivor. A
-   fixer starting a FRESH round from an issue has no PR yet, so there is no
-   comment to read — the report only exists once you push and the workflow
-   runs. If you're returning to an already-open PR for a fix round, read its
-   sticky comment before hand-mutating anything yourself; otherwise, run the
-   driver locally (`node scripts/stryker-diff.mjs --base origin/master
-   --max-files 6`) and read `reports/mutation/mutation.json` with `node
-   scripts/mutation-report.mjs`, or read a downloaded `mutation-report`
-   artifact the same way. Hand-mutate only what Stryker cannot express or
-   didn't get to: a seam the diff didn't touch, a multi-line or
-   cross-statement mutant, a guard on a line the diff's own hunk doesn't
-   cover, a range the deterministic sampler dropped over budget, a file
-   skipped over `--max-files` or with no covering test, or a mutant a
-   **partial** (budget-killed) run never reached. Every survivor Stryker
-   lists on your diff is either killed by a new test in this round or named
-   and justified in the PR body — a survivor left unaddressed with no comment
-   is a finding the next review round will raise. The lane is advisory and
-   can evaluate 0 mutants (over `--max-files`, no covering test, a
-   type-only/comment-only hunk, or a budget timeout) -- its comment always
-   says which, and neither a 0-mutant nor a partial run is ever grounds to
-   skip the hand-mutation table above for whatever they didn't cover.
+   **Mutation output is quoted, not ticked.** Hand-mutate the NEW guard,
+   branch, filter or cap the PR is about (delete the line, force the condition,
+   both directions) in the built output, run the suite that should catch it,
+   and PASTE the red into the PR body, one table row per direction: a single
+   direction proves only that direction (#3156 r2, #3168 r1), and a checked
+   "mutation-proof" box with no transcript is treated as false (2026-09-03: six
+   of six first-round PRs shipped a guard whose removal left the suite green).
+   If a guard cannot be made to red, delete it. Stryker samples at most 6 files
+   and cannot give the red-first proof, so it does not replace this table.
+   **After the push, read the `Mutation diff` comment for your exact head
+   (#3531, #3779).** Its `Head:` line must match your head; `node
+   scripts/ci-verdict.mjs <pr>` prints a `MUTATION` line (`STALE` or `PENDING`
+   when it does not). Every survivor on a line you added is killed by a test in
+   the PR or shown equivalent with a reason in the PR body. A 0-mutant or
+   partial comment is named in the body, never read as clean; run the driver
+   locally (`node scripts/stryker-diff.mjs --base origin/master --max-files 6`)
+   and read `reports/mutation/mutation.json` with `node
+   scripts/mutation-report.mjs` (or a downloaded `mutation-report` artifact)
+   when the comment has nothing for your diff.
    Platform rule: a test that asserts a Windows-only property runs ONLY on
    Windows dev boxes; the authoritative Unit tests lane is ubuntu. Every
    `skipIf(process.platform …)` names the lane that runs it or reads
@@ -351,7 +339,7 @@ verify brief asked for exactly that judgement).
   still need the named survivor; vacuous ones need nothing but the proof.
 - **Run the reviewer's standing probes on your own branch before you push.**
   Read `.claude/agents/pi-lens-reviewer.md` "Standing probes" and run every
-  one your diff can trip — mutation revert of each new guard, red-proof
+  one your diff can trip — the hand mutation of the guard this PR is about, red-proof
   transcript, changelog front matter, sort comparators — and quote the output
   in the PR body. Every first attempt on 2026-09-02 lost an Opus review round
   to a probe the fixer could have run itself in a minute.
@@ -494,10 +482,10 @@ axis no manifest can reach. #2599 is the positive case — four `omit` entries
 deleted before reporting because the mutation showed they did nothing.
 
 More checks before the report (the first two from the same day):
-- **Re-run every prior round's mutation set on the new head**, not only the
-  new mutations. #2583 r3's home-ceiling test went vacuous the moment the new
-  gate subsumed its fixture; only the re-run caught it. A guard that was live
-  last round is not assumed live this round.
+- **Spot-check one prior round's mutation on the new head**, and read the new
+  head's `Mutation diff` comment. #2583 r3's home-ceiling test went vacuous the
+  moment the new gate subsumed its fixture; a guard that was live last round is
+  not assumed live this round.
 - **The reviewer's first five.** On the evening of 2026-09-06 every one of
   five production PRs (#2642 #2643 #2647 #2649 #2654) went back for a round,
   and each round was made of the same five shapes. Run them on your own diff
