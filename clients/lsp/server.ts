@@ -3205,6 +3205,11 @@ export const KotlinServer: LSPServerInfo = {
 				candidates: ["kotlin-lsp", "kotlin-language-server"],
 				args: [],
 				cwd: root,
+				// #3400: a managed fwcd install when no PATH candidate launches. The
+				// managed shim is consulted first, but only exists once no PATH
+				// candidate answered, so a PATH `kotlin-lsp` still wins on a box
+				// that has one.
+				managedToolId: "kotlin-language-server",
 			},
 			options?.allowInstall,
 		);

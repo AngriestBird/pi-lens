@@ -56,7 +56,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -468,6 +468,24 @@ export interface ArchiveSpec {
 	 * launcher-existence check.
 	 */
 	treeMarker?: string;
+	/**
+	 * Lowercase-hex sha256 of every archive this spec can resolve, KEYED BY THE
+	 * RESOLVED URL (#3400). An archive install has no `--version` verdict, so the
+	 * bytes are checked against this pin before anything is extracted; a missing
+	 * key is a refusal, never an unchecked install. Keying by URL (not by a
+	 * parallel `(platform, arch)` resolver) means bumping a URL without its pin
+	 * reds `tests/clients/installer/tool-registry-consistency.test.ts` offline,
+	 * and a wrong pin reds the nightly tool-smoke row that downloads the archive.
+	 * Refresh a pin from the release: `gh api repos/<o>/<r>/releases/tags/<tag>
+	 * --jq '.assets[]|[.name,.digest]|@tsv'` (GitHub publishes `sha256:<hex>`).
+	 */
+	sha256?: Record<string, string>;
+	/**
+	 * Command the extracted launcher needs at run time (`java` for a JVM launcher
+	 * script), checked spawn-free on PATH BEFORE the download so a box without it
+	 * is `unavailable` rather than holding an 87 MB tree that cannot start.
+	 */
+	runtime?: string;
 }
 
 export interface ToolDefinition {
@@ -510,9 +528,13 @@ export interface ToolDefinition {
 	 * {@link verifyNpmPackageEntry} — for an npm stdio LSP server that has no
 	 * CLI surface at all AND whose transport-required diagnostic cannot be read
 	 * back through a pipe, so neither `checkArgs` nor #208's rescue can produce
-	 * a verdict (#2722).
+	 * a verdict (#2722). `"tree-manifest"` is the same spawn-free stance for an
+	 * ARCHIVE whose launcher starts a JVM/BEAM on any argument: the verdict is the
+	 * pinned archive sha256 plus the launcher/marker found on disk by
+	 * `installArchiveTool`, and no `--version` is ever spawned (#3400). The
+	 * initialize handshake stays in the nightly tool-smoke.
 	 */
-	verification?: "package-entry";
+	verification?: "package-entry" | "tree-manifest";
 }
 
 export interface PlatformPackageSpec {
@@ -1334,6 +1356,39 @@ export const TOOLS: ToolDefinition[] = [
 			url: "https://github.com/spotbugs/spotbugs/releases/download/4.10.2/spotbugs-4.10.2.tgz",
 			kind: "tgz",
 			launcher: "bin/spotbugs",
+			sha256: {
+				"https://github.com/spotbugs/spotbugs/releases/download/4.10.2/spotbugs-4.10.2.tgz":
+					"63d7687c35fba12cbc8e55ec2a889a2bbf1b9be299dea91f2b0d351dc285308a",
+			},
+		},
+	},
+	{
+		// kotlin-language-server (fwcd, #3400) — a platform-agnostic launcher ZIP
+		// (`server/{bin,lib}`, 87 MB) whose `bin/kotlin-language-server` script
+		// starts a JVM on ANY argument and has no stable `--version`, so it is
+		// verified by manifest, not by spawn: the pinned sha256, the launcher on
+		// disk and executable, and `java` on PATH before the download
+		// (`verification: "tree-manifest"`). The initialize handshake is the nightly
+		// tool-smoke `kotlin` row. fwcd 1.3.13 (2025-01-18) rather than JetBrains'
+		// kotlin-lsp (v263.4702.0): its CDN ships the macOS standalone archives as
+		// `.sit`, which this installer's tar/unzip/Expand-Archive paths cannot
+		// extract, and its six per-platform archives would need six pins.
+		id: "kotlin-language-server",
+		name: "Kotlin Language Server",
+		checkCommand: "kotlin-language-server",
+		checkArgs: ["--version"],
+		installStrategy: "archive",
+		binaryName: "kotlin-language-server",
+		verification: "tree-manifest",
+		archive: {
+			url: "https://github.com/fwcd/kotlin-language-server/releases/download/1.3.13/server.zip",
+			kind: "zip",
+			launcher: "bin/kotlin-language-server",
+			runtime: "java",
+			sha256: {
+				"https://github.com/fwcd/kotlin-language-server/releases/download/1.3.13/server.zip":
+					"4fe7d71d087b307c7869036171bd9d8c6a4284cd7c25b89098b0a24eb2d9b6d2",
+			},
 		},
 	},
 	{
@@ -1360,6 +1415,10 @@ export const TOOLS: ToolDefinition[] = [
 			kind: "zip",
 			stripComponents: 0,
 			treeMarker: "PowerShellEditorServices/Start-EditorServices.ps1",
+			sha256: {
+				"https://github.com/PowerShell/PowerShellEditorServices/releases/download/v4.6.0/PowerShellEditorServices.zip":
+					"0d91898f73d4faeb64291336f6386f0c890a933df012827571adf7008480a04a",
+			},
 		},
 	},
 	{
@@ -1394,6 +1453,14 @@ export const TOOLS: ToolDefinition[] = [
 			kind: "zip",
 			stripComponents: 1,
 			treeMarker: "bin",
+			sha256: {
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-linux-22.1.0.zip":
+					"c54e57dbff3ccc9e8352367ddb7030ad3f624073ec58c7477424e7919f578572",
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-mac-22.1.0.zip":
+					"71eddc5303da9a5bc5e8b509488b5b2c5acf45f20e33b8394e71a12a56d67198",
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-windows-22.1.0.zip":
+					"e31e271fe11f6dcd7cf87ca74be4a12788ff8ce5a0b07762583e335c058e939a",
+			},
 		},
 	},
 	{
@@ -1436,6 +1503,18 @@ export const TOOLS: ToolDefinition[] = [
 			kind: (platform) => (platform === "win32" ? "zip" : "tgz"),
 			stripComponents: 0,
 			treeMarker: "bin",
+			sha256: {
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-arm64.tar.gz":
+					"273af33f26f4a1143f27c96d9f9e1188aba619c71e0807042134f66b4bd27f24",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-x64.tar.gz":
+					"ca71415dd19f19e30aaa35a4915aefca9fdb5fec31b98331cc3d77f778d539c5",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-arm64.tar.gz":
+					"cec99d70b1f612acec4a10a79a03664e3aa0c229d4d8a586cb3f928ec37d509e",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-x64.tar.gz":
+					"e26cfefe423dd7326fc7c649539e4d4aaa4f35f34d2fefd8af2ed7090b72c556",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-win32-x64.zip":
+					"a4439a8f5e8e9e6505c11f045a7bf45db602124a1e246371c1dbe34924f3cf71",
+			},
 		},
 	},
 	{
@@ -3308,6 +3387,10 @@ async function getToolPathResolved(
 		// says nothing about the command: this rung keeps the pre-#3311 behaviour
 		// for those entries rather than inventing a verdict from a failed lookup.
 		if (packageEntryVerification(tool) !== undefined) return tool.checkCommand;
+		// #3400: a `tree-manifest` launcher answers any argument by starting a JVM,
+		// so `checkArgs` is no verdict here either — a nonzero exit from that probe
+		// would drop a working PATH install for a managed one.
+		if (tool.verification === "tree-manifest") return tool.checkCommand;
 		let probeStalled = false;
 		const verified = await verifyToolBinary(
 			tool.checkCommand,
@@ -4774,7 +4857,10 @@ async function verifyRefreshedArtifact(
 	tool: ToolDefinition,
 	installedPath: string,
 ): Promise<boolean> {
-	if (tool.installStrategy === "archive" && !tool.archive?.launcher) {
+	if (
+		tool.installStrategy === "archive" &&
+		(!tool.archive?.launcher || tool.verification === "tree-manifest")
+	) {
 		// A tree bundle has no single binary to run — `installArchiveTool` already
 		// confirmed its tree marker — but it still needs its NEW mtime recorded
 		// (#1759 review F7), or the persisted probe entry keeps the pre-refresh
@@ -5208,6 +5294,30 @@ async function installArchiveTool(
 		return undefined;
 	}
 
+	// #3400: an archive has no `--version`, so the pinned sha256 is the only
+	// integrity evidence there is — checked BEFORE a byte reaches the extractor,
+	// and failing closed on a URL with no pin. Its own ledger subject (not the
+	// extraction one): `recordDegradationOnce` keys on kind+subject, so sharing
+	// `${id}:${format}` would let an earlier extraction row swallow this one.
+	const pinned = spec.sha256?.[url];
+	const digest = createHash("sha256").update(archiveBuffer).digest("hex");
+	if (digest !== pinned) {
+		const reason = pinned === undefined ? "sha256-unpinned" : "sha256-mismatch";
+		recordDegradationOnce({
+			kind: "managed-tool-install",
+			subject: `${tool.id}:${archiveKind}:integrity`,
+			reason: `archive integrity ${reason}`,
+		});
+		installFailureReasons.set(
+			tool.id,
+			`archive integrity ${reason} (${archiveBuffer.length} bytes from ${url})`,
+		);
+		logSessionStart(
+			`archive-install ${tool.id}: refused ${reason} (got ${digest}, pinned ${pinned ?? "none"}) — keeping installed version`,
+		);
+		return undefined;
+	}
+
 	// Use basenames + cwd:TOOLS_DIR for the tar spawn so no argument contains a
 	// drive-letter colon — GNU tar (MSYS) otherwise reads `C:\…` as an rsync
 	// `host:path` ("Cannot connect to C:"). Relative paths work for both GNU tar
@@ -5377,6 +5487,32 @@ async function installArchiveTool(
 			return undefined;
 		}
 		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
+		// #3400: "present" is not "runnable" — an empty file, or a launcher on a
+		// filesystem where the chmod above silently did nothing (noexec/FAT), would
+		// otherwise be shimmed and recorded as a successful install.
+		const launcherStat = await fs.stat(tmpResolvedInner).catch(() => undefined);
+		const launcherRunnable =
+			launcherStat?.isFile() === true &&
+			launcherStat.size > 0 &&
+			(isWindows ||
+				(await fs.access(tmpResolvedInner, fs.constants.X_OK).then(
+					() => true,
+					() => false,
+				)));
+		if (!launcherRunnable) {
+			recordArchiveExtractionDegradation(
+				tool.id,
+				archiveKind,
+				"launcher-invalid",
+			);
+			logSessionStart(
+				`archive-install ${tool.id}: ${archiveKind} launcher is empty or not executable — keeping installed version`,
+			);
+			await fs
+				.rm(tmpExtractDir, { recursive: true, force: true })
+				.catch(() => {});
+			return undefined;
+		}
 
 		await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 
@@ -6320,6 +6456,17 @@ export async function installTool(
 				if (!tool.archive) return false;
 				if (!resolveArchiveUrl(tool.archive)) {
 					const reason = `unsupported platform=${process.platform} arch=${process.arch}`;
+					noteInstallAttempt(tool.id, "unavailable", reason);
+					logSessionStart(`auto-install ${tool.id}: ${reason}`);
+					return false;
+				}
+				// #3400: a launcher that needs a runtime (java) is `unavailable`
+				// without it, decided BEFORE the download. PATH walk, no spawn.
+				if (
+					tool.archive.runtime &&
+					!(await isCommandAvailable(tool.archive.runtime))
+				) {
+					const reason = `runtime ${tool.archive.runtime} not found on PATH`;
 					noteInstallAttempt(tool.id, "unavailable", reason);
 					logSessionStart(`auto-install ${tool.id}: ${reason}`);
 					return false;

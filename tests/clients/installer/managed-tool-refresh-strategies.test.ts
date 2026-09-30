@@ -84,6 +84,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { createHash } from "node:crypto";
 import { withEnv } from "../../support/with-env.js";
 
 // #2182: raises this FILE's default test timeout from vitest's 5000ms to
@@ -165,6 +166,7 @@ import {
 	getRefreshableManagedTools,
 	installTool,
 	resetProbeCacheStateForTesting,
+	resolveArchiveUrl,
 	swapExtractedDir,
 	TOOLS,
 	updateProbeCache,
@@ -461,6 +463,25 @@ function freshenAllExcept(
 	writeState({ ...tools, ...extra });
 }
 
+/**
+ * #3400: a registry archive is refused unless its bytes hash to the pinned
+ * sha256, and these tests serve stand-in bytes for the REAL registry entries.
+ * Pin the served body for the test's duration (restored in `afterEach`), so the
+ * extraction and verification steps the test targets are still reached; the
+ * refusal itself is pinned in archive-tree-manifest-3400.test.ts.
+ */
+const restoreArchivePins: Array<() => void> = [];
+function pinArchiveBody(toolId: string, body: Buffer): void {
+	const spec = TOOLS.find((t) => t.id === toolId)?.archive;
+	if (!spec) throw new Error(`no archive spec for ${toolId}`);
+	const url = resolveArchiveUrl(spec) as string;
+	const before = spec.sha256;
+	spec.sha256 = { [url]: createHash("sha256").update(body).digest("hex") };
+	restoreArchivePins.push(() => {
+		spec.sha256 = before;
+	});
+}
+
 let originalPath: string | undefined;
 let fakeBin: string | undefined;
 let restoreDisableToolInstall: () => void;
@@ -500,6 +521,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	for (const restore of restoreArchivePins.splice(0)) restore();
 	if (fakeBin) fs.rmSync(fakeBin, { recursive: true, force: true });
 	fakeBin = undefined;
 	if (originalPath !== undefined) process.env.PATH = originalPath;
@@ -1550,6 +1572,7 @@ describe("verification-budget delivery across non-npm strategies", () => {
 					resolutionId: `${SPOTBUGS_PIN}-old`,
 				},
 			});
+			pinArchiveBody("spotbugs", Buffer.from("archive-bytes"));
 			httpsRoutes.push({
 				match: (url) => url.includes("spotbugs"),
 				respond: () => ({
@@ -1619,6 +1642,7 @@ describe("archive refresh preserves the working install on failure", () => {
 				resolutionId: `${SPOTBUGS_PIN}-old`,
 			},
 		});
+		pinArchiveBody("spotbugs", Buffer.from("truncated-corrupt-archive-bytes"));
 		httpsRoutes.push({
 			match: (url) => url === SPOTBUGS_PIN,
 			respond: () => ({
@@ -1676,6 +1700,7 @@ describe("archive refresh preserves the working install on failure", () => {
 				resolutionId: `${SPOTBUGS_PIN}-old`,
 			},
 		});
+		pinArchiveBody("spotbugs", Buffer.from("wrong-platform-archive-bytes"));
 		httpsRoutes.push({
 			match: (url) => url === SPOTBUGS_PIN,
 			respond: () => ({
@@ -1815,6 +1840,7 @@ describe("archive tree-bundle refresh updates the probe cache", () => {
 
 		const archiveTool = TOOLS.find((t) => t.id === toolId);
 		const pinnedUrl = archiveTool?.archive?.url as string;
+		pinArchiveBody(toolId, Buffer.from("fake-zip-bytes"));
 		httpsRoutes.push({
 			match: (url) => url === pinnedUrl,
 			respond: () => ({
