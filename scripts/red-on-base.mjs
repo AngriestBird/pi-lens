@@ -386,14 +386,20 @@ export async function main(argv = process.argv.slice(2)) {
 			console.log(
 				`${test.verdict}  ${test.id}${test.detail ? ` (${test.detail})` : ""}`,
 			);
-		if (result.verdict === "INCONCLUSIVE")
-			console.log(
+		if (result.verdict === "INCONCLUSIVE") {
+			if (
 				result.tests.some((test) =>
 					test.detail?.startsWith("suite failed to load"),
 				)
-					? LOAD_FAILURE_MESSAGE
-					: HEAD_GREEN_MESSAGE,
-			);
+			)
+				console.log(LOAD_FAILURE_MESSAGE);
+			if (
+				result.tests.some(
+					(test) => !test.detail?.startsWith("suite failed to load"),
+				)
+			)
+				console.log(HEAD_GREEN_MESSAGE);
+		}
 		if (result.verdict === "ALL-GREEN")
 			console.log(
 				"Nothing failed on HEAD or base; the red was not reproduced. Not evidence of unrelated.",

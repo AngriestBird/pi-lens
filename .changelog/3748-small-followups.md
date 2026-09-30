@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- Clarify red-on-base load-failure output and deduplicate cancelled CI rerun hints.
+- Clarify red-on-base inconclusive output (a load-failure reason, plus the concurrency hint when a flaky test is also inconclusive) and deduplicate cancelled CI rerun hints.
