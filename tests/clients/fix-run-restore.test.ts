@@ -531,6 +531,53 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(nudge?.messages[0]?.content).toContain("a.rs");
 	});
 
+	it("does not hand a lost-edit advisory to the session that replaced the drain's own (#3748)", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = tmpDir;
+		runtime.deferMutation(mainRs, tmpDir, "edit", tmpDir, "autofix");
+		const notify = vi.fn();
+
+		const drain = handleAgentEnd({
+			ctxCwd: tmpDir,
+			getFlag: (name: string) => name === "no-lsp",
+			notify,
+			dbg: () => {},
+			runtime,
+			cacheManager: { addModifiedRange: vi.fn() } as never,
+			biomeClient: {} as never,
+			ruffClient: {} as never,
+			getFormatService: () =>
+				({
+					recordRead: () => {},
+					formatFile: async (filePath: string) => ({
+						filePath,
+						formatters: [],
+						anyChanged: false,
+						allSucceeded: true,
+					}),
+				}) as never,
+		});
+		await started.p;
+		const edit = agentEdit(aRs, "let AGENT = 1;");
+		edit.write();
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		await edit.deliver();
+		// `/new` lands while the drain awaits its fixer.
+		runtime.resetForSession();
+		proceed.open();
+		await drain;
+
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	});
+
 	it("reports a lost write when the tool overwrote it before the capture", async () => {
 		const aRs = path.join(srcDir, "a.rs");
 		const started = gate();
