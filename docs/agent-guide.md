@@ -128,6 +128,10 @@ is blocking when `semantic === "blocking"`, else it falls back to severity):
   a blocker does, but it is not "no action required" like an advisory either —
   the finding is unverified, not dismissed. Re-run a secrets scan to confirm
   or clear it.
+- **⏱️ Late runner diagnostics** — a slow (collect-later) runner's findings arrive at
+  turn end on the advisory channel, so they never gate `git commit`/`git push`;
+  when one is blocking it reads "blocking: fix before continuing" instead of
+  "no action required", and a runner that timed out or errored says so separately.
 - **Advisory** — informational (🟡 warnings, 📜 license notes, style/hygiene).
   Address when relevant; they do not gate completion.
 

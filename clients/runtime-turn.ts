@@ -3779,16 +3779,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			pending.writeIndex,
 		);
 		// #3796: a runner whose findings fail its check reports `failed` WITH
-		// diagnostics; only a failed result with none is a broken runner. The
-		// rest goes through the freshness gate and delivery like a success.
-		if (result.status === "failed" && result.diagnostics.length === 0) {
+		// diagnostics and no fault kind (or `blocking_diagnostics`); that goes
+		// through the freshness gate and delivery like a success. A failed result
+		// with no diagnostics, or with a fault kind (timeout, server_error), is a
+		// broken runner: the note is kept and any partial findings still deliver.
+		if (
+			result.status === "failed" &&
+			(result.diagnostics.length === 0 ||
+				(result.failureKind !== undefined &&
+					result.failureKind !== "blocking_diagnostics"))
+		) {
 			runnerFindingsFailed += 1;
 			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
 			// @delivery-surface: runtime-turn:late-runner-findings
 			advisoryParts.push(
 				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
 			);
-			continue;
 		}
 		const findings = result.diagnostics;
 		if (findings.length === 0) continue;
