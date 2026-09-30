@@ -550,8 +550,7 @@ export type DegradationKind =
 	/**
 	 * An idle LSP client was released by the shared idle-eviction timer (a
 	 * server whose registry `idleEviction` is `transparent`); it respawns on the
-	 * next request. Subject is the client key. The nightly idle-eviction probe
-	 * (#3645) reads this kind's count to tell a release from a crash.
+	 * next request. Subject is the client key.
 	 */
 	| "lsp-idle-eviction"
 	| "lsp-liveness-probe-unsupported"

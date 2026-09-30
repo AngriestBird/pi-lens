@@ -242,6 +242,21 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect([...addPaths].sort()).toEqual([...GENERATED_LSP_DOCS].sort());
 	});
 
+	// Review round 1: the script defaulted to 780 s while the workflow passed 600.
+	it("keeps the script's default budget equal to the one the nightly passes", () => {
+		const scriptDefault = /flagValue\("--budget-seconds", "(\d+)"\)/.exec(
+			readFileSync(
+				resolve(REPO_ROOT, "scripts/measure-lsp-idle-eviction.mjs"),
+				"utf8",
+			),
+		)?.[1];
+		const passed = /--budget-seconds (\d+)/.exec(
+			steps[measureAt].run ?? "",
+		)?.[1];
+		expect(scriptDefault).toBeDefined();
+		expect(scriptDefault).toBe(passed);
+	});
+
 	it("regenerates the document before the diff step reads it", () => {
 		expect(measureAt).toBeGreaterThanOrEqual(0);
 		expect(diffAt).toBeGreaterThan(measureAt);

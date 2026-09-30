@@ -41,7 +41,7 @@ function fakeClient(pid: number) {
 		root: "/repo",
 		isAlive: vi.fn(() => true),
 		isBusy: vi.fn(() => false),
-		shutdown: vi.fn(async () => undefined),
+		shutdown: vi.fn(async (_options?: { reason?: string }) => undefined),
 		getProcessPid: () => pid,
 		notify: {
 			open: vi.fn(async () => undefined),
@@ -326,9 +326,12 @@ describe("idle-eviction probe driver over the real LSPService (#3645)", () => {
 		const arm = driver.armEviction.bind(driver);
 		driver.armEviction = async () => {
 			const restore = await arm();
-			// A crash: the client stops being alive and is never shut down by the
-			// idle timer (whose callback bails on a dead client).
-			spawnedClients.at(-1)?.isAlive.mockReturnValue(false);
+			// A crash: the client is torn down for some other reason and stops being
+			// alive; the idle timer's callback bails on a dead client. Only a
+			// shutdown carrying reason "idle_eviction" is an eviction.
+			const client = spawnedClients.at(-1);
+			await client?.shutdown({ reason: "pipeline_crash" });
+			client?.isAlive.mockReturnValue(false);
 			return restore;
 		};
 		const row = await probeServer({
