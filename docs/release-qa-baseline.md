@@ -138,6 +138,24 @@ expired wait is UNTESTED, never PASS. pi does not hold the next request for
 turn_end either, so the check is required on a LATER request (the turn after a
 scripted `bash` that waits for turn_end), not the immediate next one.
 
+## The supported pi window (#2682, #3805)
+
+pi-lens declares both host packages, `@earendil-works/pi-coding-agent` and
+`@earendil-works/pi-tui`, as optional peers with the range `"*"`. That is
+intentional and is pi's own rule for host-provided packages: pi warns when an
+extension lists one any other way, and a narrower pi-tui range turned a raw
+`npm i` with a current pi-tui at the top level into a hard ERESOLVE while
+`pi install` (which runs `--legacy-peer-deps`) showed users nothing.
+
+The window pi-lens actually supports is therefore not in `package.json`. It is
+`PI_HOST_SUPPORTED_RANGE` in `.github/workflows/install-smoke.yml` (the
+newest-in-range lane reads it, bounded above so `"*"` can never mean
+`@latest`), and `tests/packaging.test.ts` pins it against the hosts this
+matrix has passed on. A newer host enters the window in ONE change: run this
+matrix on it, add it to that test's verified list, and move the workflow's
+ceiling together. The window is contiguous, so a ceiling past an unrun minor
+claims that minor too.
+
 ## Why `skills-registered` pins the registrar
 
 pi-lens has **two independent skill registrars**: the `pi.skills` manifest, and
