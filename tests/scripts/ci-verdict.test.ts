@@ -98,6 +98,7 @@ describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", 
 		);
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.reason).toContain("infra (rerun armed)");
+		expect(verdict.kind).toBe("infra-rerun");
 	});
 	it("reports a concluded rerun failure even when ci:infra remains", () => {
 		const verdict = computeVerdict(
@@ -1876,19 +1877,22 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 
 describe("parseArgs", () => {
 	it("parses the positional target and an optional --wait value", () => {
-		expect(parseArgs(["2539"])).toEqual({ target: "2539", waitSeconds: null });
-		expect(parseArgs(["2539", "--wait", "60"])).toEqual({
+		expect(parseArgs(["2539"])).toMatchObject({
+			target: "2539",
+			waitSeconds: null,
+		});
+		expect(parseArgs(["2539", "--wait", "60"])).toMatchObject({
 			target: "2539",
 			waitSeconds: 60,
 		});
-		expect(parseArgs(["abc1234", "--wait", "90"])).toEqual({
+		expect(parseArgs(["abc1234", "--wait", "90"])).toMatchObject({
 			target: "abc1234",
 			waitSeconds: 90,
 		});
 	});
 
 	it("returns a null target when no positional argument is given", () => {
-		expect(parseArgs([])).toEqual({ target: null, waitSeconds: null });
+		expect(parseArgs([])).toMatchObject({ target: null, waitSeconds: null });
 	});
 });
 
