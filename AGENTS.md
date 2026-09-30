@@ -622,6 +622,12 @@ the surface they bite; each block loads only when its trigger applies.
   Every model-facing diagnostic, blocker, advisory, widget, nudge, and snapshot
   either passes the shared freshness/disposition gate or carries an explicit
   bounded age label.
+- The dispatcher coverage notice (`buildCoverageNotice`) latches once per
+  session (`coverageNoticeSeen`) for the pi push surface; pull surfaces
+  (`pilens_analyze`, including its warm PostToolUse hook route) pass
+  `dedupeCoverageNotice: false` so every call carries the notice and the push
+  latch stays untouched (#3791). The warm hook deliberately repeats the notice
+  on every edit, matching its cold hook route.
 - `pilens:files:touched` publishers are `clients/pipeline.ts` and
   `clients/runtime-agent-end.ts`; `clients/agent-nudge.ts` is the subscriber.
   `clients/lsp-mutation.ts` has an optional callback but is not a publisher until
