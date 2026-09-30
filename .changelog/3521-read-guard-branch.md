@@ -11,7 +11,8 @@ section: Fixed
   losing all of them, so those edits are no longer falsely refused. Work
   that pi-lens finishes after a run ends (the settled drift check and the
   format, autofix and quick-fix drain) no longer counts as authored on a
-  branch the user moved to while it ran. Known limits: a provider that
+  branch the user moved to while it ran, including format and autofix work
+  that an interrupted run put back for the next one. Known limits: a provider that
   reuses tool-call ids across branches can let a sibling branch's read
   count; a `/tree` round trip back to a branch needs one re-read; a
   subagent running while the main session moves its tree must re-read its
