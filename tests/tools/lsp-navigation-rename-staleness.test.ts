@@ -313,6 +313,32 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 		expect(staleRows()).toEqual([]);
 	});
 
+	it("a file the edit only deletes is not a text edit and is not refused as untracked", async () => {
+		const doomed = path.join(env.tmpDir, "d.ts");
+		fs.writeFileSync(doomed, "const = 3;\n");
+		lsp.service = makeLspServiceDouble({
+			supportsLSP: () => true,
+			hasLSP: async () => true,
+			getTrackedContentHash: trackedSends({ [fileA]: "const = 1;\n" }),
+			rename: async () => ({
+				documentChanges: [
+					{ kind: "delete", uri: pathToFileURL(doomed).href },
+					{
+						textDocument: { uri: pathToFileURL(fileA).href, version: null },
+						edits: valueEdit(fileA).changes[pathToFileURL(fileA).href],
+					},
+				],
+			}),
+		});
+
+		const result = await runRename();
+
+		expect(result.isError).toBeUndefined();
+		expect(fs.existsSync(doomed)).toBe(false);
+		expect(fs.readFileSync(fileA, "utf8")).toBe("let = 1;\n");
+		expect(staleRows()).toEqual([]);
+	});
+
 	it("an agent edit between an empty first answer and the retry does not refuse a valid edit", async () => {
 		// The cold-server path: the first answer is empty, the tool re-opens the
 		// target (sending the bytes now on disk) and asks again. The retried
