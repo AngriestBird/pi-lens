@@ -5494,11 +5494,7 @@ async function installArchiveTool(
 		const launcherRunnable =
 			launcherStat?.isFile() === true &&
 			launcherStat.size > 0 &&
-			(isWindows ||
-				(await fs.access(tmpResolvedInner, fs.constants.X_OK).then(
-					() => true,
-					() => false,
-				)));
+			(isWindows || (launcherStat.mode & 0o111) !== 0);
 		if (!launcherRunnable) {
 			recordArchiveExtractionDegradation(
 				tool.id,

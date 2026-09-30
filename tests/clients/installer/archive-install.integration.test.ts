@@ -186,7 +186,8 @@ describe("archive installer fixture path (#3020)", () => {
 		let javaDir: string;
 		beforeEach(() => {
 			restorePath = process.env.PATH ?? "";
-			javaDir = fs.mkdtempSync(path.join(HOME, "java-"));
+			javaDir = path.join(HOME, "java-bin");
+			fs.mkdirSync(javaDir, { recursive: true });
 			fs.writeFileSync(path.join(javaDir, "java"), "x");
 			process.env.PATH = `${restorePath}${path.delimiter}${javaDir}`;
 			fs.rmSync(path.join(HOME, "tools", "kotlin-language-server"), {
