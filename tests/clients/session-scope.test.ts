@@ -538,6 +538,33 @@ describe("#3612 adoptHandoff", () => {
 		expect([...getRememberedLazyTools(demotedReload.scope)]).toEqual([]);
 	});
 
+	// #3819 (the L1 verify): a primary start clears the slot before it
+	// awaits a sidecar. Only a primary shutdown stashes, and one can run
+	// while the start awaits. The recurrence: the clear ran after the
+	// awaited load and wiped a slot left meanwhile for another successor.
+	it("keeps a slot that a primary shutdown leaves while a start awaits its sidecar", async () => {
+		const left = scopeWith(["ast_grep_search"]);
+		const resume = await adoptHandoff(beginScope({ role: "primary" }), {
+			reason: "resume",
+			sessionFile: "/s/resumed.jsonl",
+			sessionManager: undefined,
+			cwd: env.tmpDir,
+			loadOwnSidecar: async () => {
+				await Promise.resolve();
+				stashHandoff(left, {
+					reason: "reload",
+					sessionFile: "/s/own.jsonl",
+					targetSessionFile: undefined,
+				});
+				return sidecar(["own"]);
+			},
+			loadParentSidecar: async () => undefined,
+		});
+
+		expect(resume).toBe("own-sidecar");
+		expect(takeHandoff("reload", "/s/own.jsonl")).toBeDefined();
+	});
+
 	it("starts `pi --fork` (a startup with a parent) from the parent's sidecar", async () => {
 		const child = start(
 			"startup",
