@@ -18,6 +18,7 @@
  * through the production `spawn` of `RustServer`/`OCamlServer`/`GoServer`, so
  * the root function, the root fallback and the verdict code are all production.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -280,6 +281,27 @@ describe("#3750 an empty result under a server-root fallback", () => {
 			"Primary LSP (rust): unconfirmed — rust-analyzer: found Cargo.toml for this file but pi-lens did not select it as the project root",
 		);
 		expect(text).not.toContain("no project root found");
+	});
+
+	// Recurrence guarded (F4, round 2 verify): a rust file with no Cargo.toml
+	// inside a real git repo read "found .git ... did not select it as the project
+	// root", because the wording probe's own `.git` fallback marker is not one of
+	// rust's rootMarkers. Nothing was refused; no project root was found.
+	it("names the missing project, not a refused .git, for a rust file in a git repo with no Cargo.toml", async () => {
+		answerWith("empty");
+		const repo = workspace();
+		execFileSync("git", ["init", "--quiet"], { cwd: repo });
+		const file = source(repo, "orphan.rs");
+
+		for (const sessionCwd of [repo, path.dirname(repo)]) {
+			const { text } = await runTool(sessionCwd, { path: file });
+
+			expect(text).toContain(
+				"Primary LSP (rust): unconfirmed — rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
+			);
+			expect(text).not.toContain("did not select");
+			expect(text).not.toContain("found .git");
+		}
 	});
 
 	it("keeps confirmed clean for a server whose root falls back to the file directory by design (gopls)", async () => {

@@ -171,13 +171,19 @@ export async function resolveLspServerCwd(
 	if (!serverRoot || isFileDirFallback) {
 		// A marker the root policy refused (fixture / ignored directory) is worded
 		// differently from no marker at all; `suppressTelemetry`: a wording probe.
-		const refusedMarker =
-			!rootFailed && rootMarkers?.length
+		// The resolver's own `.git` fallback marker only counts when it is one of
+		// this server's markers (#3750 F4); the probe runs only for a listener.
+		const probedMarker =
+			onRootFallback && !rootFailed && rootMarkers?.length
 				? resolveToolCwd("lsp", server.id, filePath, {
 						cwd: sessionCwd,
 						rootMarkers,
 						suppressTelemetry: true,
 					}).marker
+				: undefined;
+		const refusedMarker =
+			probedMarker !== undefined && rootMarkers?.includes(probedMarker)
+				? probedMarker
 				: undefined;
 		const fallbackCwd = rootMarkers?.length
 			? resolveToolCwd("lsp", server.id, filePath, {
