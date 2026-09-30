@@ -592,7 +592,17 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 }
 `;
 
-	function makeFixture(testSource = PASSING_TEST, stubLock = false) {
+	// A wrapper killed by a signal exits with a null code.
+	const KILLED_LOCK = `import path from "node:path";
+import { fileURLToPath } from "node:url";
+export function quoteForWindowsCmd(arg) { return arg; }
+if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.kill(process.pid, "SIGKILL");
+`;
+
+	function makeFixture(
+		testSource = PASSING_TEST,
+		stubLock: string | false = false,
+	) {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-prepush-fx-"));
 		roots.push(root);
 		const put = (rel: string, content: string) => {
@@ -607,7 +617,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 			"scripts/lib/suite-lock.mjs",
 		])
 			put(rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
-		if (stubLock) put("scripts/with-test-lock.mjs", STUB_LOCK);
+		if (stubLock) put("scripts/with-test-lock.mjs", stubLock);
 		put(
 			"package.json",
 			JSON.stringify({
@@ -757,6 +767,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 		expect(result.status).toBe(0);
 		expect(result.stderr).toContain("WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1");
 		expect(result.stderr).toContain(fx.logPath);
+		expect(result.stderr).toContain("after 0.3 s");
 		const lines = fs.readFileSync(fx.logPath, "utf8").trim().split("\n");
 		expect(lines).toHaveLength(1);
 		const record = JSON.parse(lines[0]);
@@ -796,7 +807,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 			// #3717 F2: the hook let an ambient 0/garbage through, which the
 			// wrapper reads as "wait forever". The stub wrapper echoes the bound
 			// it received in the real wrapper's own message shape.
-			const fx = makeFixture(PASSING_TEST, true);
+			const fx = makeFixture(PASSING_TEST, STUB_LOCK);
 			const result = runHook(fx, { PI_LENS_TEST_LOCK_TIMEOUT_MS: value });
 			expect(result.status).toBe(1);
 			expect(result.stderr).toContain(`test lock busy after ${printed}`);
@@ -817,6 +828,24 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 		expect(optedOut.status).toBe(1);
 		expect(optedOut.stderr).not.toContain("WARNING");
 		expect(fs.existsSync(fx.logPath)).toBe(false);
+	}, 60_000);
+
+	it("blocks the push when the locked run is killed by a signal (null exit code)", () => {
+		const fx = makeFixture(PASSING_TEST, KILLED_LOCK);
+		const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
+		expect(result.status).toBe(1);
+		expect(result.stderr).not.toContain("test lock busy");
+	});
+
+	it("a passing run whose output quotes the wrapper's timeout line is not a lock timeout", () => {
+		// The classifier reads the timeout line only from a failed run: a green
+		// run must not be blocked by text it printed itself.
+		const fx = makeFixture(
+			'import { expect, it } from "vitest";\nit("prints", () => { console.error("[with-test-lock] timed out after 5ms waiting for test-suite lock held by PID 1 since x"); expect(1).toBe(1); });\n',
+		);
+		const result = runHook(fx);
+		expect(result.status).toBe(0);
+		expect(busyLine(result)).toBe("");
 	}, 60_000);
 
 	it("blocks the push, with the reason, when the locked test run cannot start", () => {

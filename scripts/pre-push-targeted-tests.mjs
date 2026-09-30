@@ -32,13 +32,7 @@
 // covering test), this builds only and skips the test run — never silently
 // skips the build too.
 import { execFileSync, spawn } from "node:child_process";
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	readdirSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLockPath } from "./lib/suite-lock.mjs";
@@ -499,17 +493,16 @@ export async function main() {
 	const { code, lockTimeout, error } = await runTargetedTests(selected);
 	if (lockTimeout) {
 		const waitedMs = Number(lockTimeout[1]);
-		const holder = lockTimeout[2] || "an unknown owner";
+		const holder = lockTimeout[2];
 		const lockPath = getLockPath();
 		const logPath = path.join(path.dirname(lockPath), "pre-push.log");
 		if (process.env.PI_LENS_PREPUSH_LOCK_SKIP === "1") {
 			// The opt-out is a decision, so it leaves a durable trace beside the
-			// lock (#3717): stderr scrolls away, the push does not.
-			mkdirSync(path.dirname(logPath), { recursive: true });
+			// lock (#3717): stderr scrolls away, the push does not. The lock
+			// directory exists: the wrapper just waited on a file inside it.
 			appendFileSync(
 				logPath,
 				`${JSON.stringify({ ts: new Date().toISOString(), event: "lock-skip", waitedMs, holder, lockPath, selected: selected.length })}\n`,
-				"utf8",
 			);
 			console.error(
 				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 opted out of the targeted test run after ${waitedMs / 1000} s (${holder}); the push is ungated, recorded in ${logPath}, and CI remains the real gate.`,
