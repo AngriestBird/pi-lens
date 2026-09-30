@@ -175,6 +175,12 @@ export interface PersistedReadGuardState {
 	reads: Array<[string, ReadRecord[]]>;
 }
 
+/** A session's authorship ({@link ReadGuard.exportAuthorship}), keys in `normalizeFilePath` form. */
+export interface PersistedReadGuardAuthorship {
+	written: string[];
+	sessionStartMs: number;
+}
+
 /**
  * 2 since #3521: records carry `toolCallId`. A version-1 sidecar has no ids
  * to match against the branch, so it loads as no reads (one re-read).
@@ -1553,6 +1559,28 @@ export class ReadGuard {
 				records.map((record) => ({ ...record })),
 			]),
 		};
+	}
+
+	/**
+	 * The files this session authored (#3612, D5): what `wasWrittenThisSession`
+	 * reads. A `/reload` keeps the conversation and its branch, so the
+	 * reloaded guard keeps them; every other start resets them.
+	 */
+	exportAuthorship(): PersistedReadGuardAuthorship {
+		return {
+			written: [...this.writtenThisSession],
+			sessionStartMs: this.sessionStartMs,
+		};
+	}
+
+	/** Restore {@link exportAuthorship}'s output. Null-safe on a malformed payload. */
+	importAuthorship(state: unknown): void {
+		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
+		if (Array.isArray(authorship?.written))
+			for (const filePath of authorship.written)
+				if (typeof filePath === "string") this.writtenThisSession.add(filePath);
+		if (typeof authorship?.sessionStartMs === "number")
+			this.sessionStartMs = authorship.sessionStartMs;
 	}
 
 	/**

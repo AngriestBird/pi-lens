@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getProjectDataDir } from "../clients/file-utils.js";
+import { takeHandoff } from "../clients/session-scope.js";
 import {
 	afterAll,
 	afterEach,
@@ -30,7 +32,7 @@ const handlerCrashInjection = vi.hoisted(() => ({
 	site: undefined as
 		| undefined
 		| "session_start"
-		| "session_before_fork"
+		| "session_start_after_reset"
 		| "observed_settled_sweep"
 		| "observed_ledger_refresh"
 		| "deferred_mutation_drain"
@@ -93,21 +95,6 @@ vi.mock("../clients/cache-observability.js", async (importOriginal) => {
 			if (handlerCrashInjection.site === "message_end")
 				throw new Error("probe: message_end boom");
 			return actual.logCacheUsage(...args);
-		},
-	};
-});
-
-vi.mock("../clients/widget-state.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../clients/widget-state.js")>();
-	return {
-		...(await importOriginal()),
-		exportWidgetState: (
-			...args: Parameters<typeof actual.exportWidgetState>
-		) => {
-			if (handlerCrashInjection.site === "session_before_fork")
-				throw new Error("probe: session_before_fork boom");
-			return actual.exportWidgetState(...args);
 		},
 	};
 });
@@ -227,9 +214,17 @@ vi.mock("../clients/bootstrap.js", async () => {
 	}));
 });
 vi.mock("../clients/runtime-session.js", () => ({
-	handleSessionStart: async () => {
+	handleSessionStart: async (deps: {
+		runtime: { resetForSession(): void };
+	}) => {
 		if (handlerCrashInjection.site === "session_start")
 			throw new Error("probe: session_start boom");
+		// Production-faithful on the session axis (#3612): the real handler
+		// resets the runtime, which begins the new session's scope, at every
+		// primary start before its first await.
+		deps.runtime.resetForSession();
+		if (handlerCrashInjection.site === "session_start_after_reset")
+			throw new Error("probe: session_start boom after reset");
 	},
 }));
 
@@ -284,7 +279,6 @@ const LAZY_TOOLS = [
 const EXPECTED_HOOKS = [
 	"resources_discover",
 	"session_start",
-	"session_before_fork",
 	"session_tree",
 	"tool_call",
 	"tool_result",
@@ -293,6 +287,33 @@ const EXPECTED_HOOKS = [
 	"turn_end",
 	"context",
 ];
+
+/**
+ * turn_end and a `/fork` or `/reload` shutdown persist the session stores
+ * (#3612) fire-and-forget (#2523): yield (no timer) until the sidecar's
+ * atomic rename is visible, so it is read, and never lands after cleanup.
+ */
+async function sidecarWritten(cwd: string, sessionId: string): Promise<void> {
+	const sidecar = path.join(
+		getProjectDataDir(cwd),
+		"sessions",
+		`${sessionId}.json`,
+	);
+	for (let i = 0; i < 5000 && !fs.existsSync(sidecar); i++)
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(fs.existsSync(sidecar), sidecar).toBe(true);
+}
+
+/** A turn ends after the activation, as every real one does. */
+async function endTurnAndPersist(
+	pi: ReturnType<typeof createPiMock>,
+	ctx: unknown,
+	cwd: string,
+	sessionId: string,
+): Promise<void> {
+	await pi.emit("turn_end", {}, ctx);
+	await sidecarWritten(cwd, sessionId);
+}
 
 describe("index.ts extension wiring", () => {
 	it.each(["reject", "throw"])(
@@ -803,10 +824,14 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
-		// #1453: this mock models the host's all-active handoff, but it does not
-		// re-run the extension factory. Real-pi integration tests cover that
-		// factory boundary; this test covers the restore plan for a live closure.
-		it.each(["fork", "reload", "resume"])(
+		// #1453: the host hands the rebuilt session an all-active tool set.
+		// #3589/#3612: pi re-runs the factory for a fork or a reload, so the
+		// rebuilt session starts in a SECOND activation, as here; one mock
+		// activation receiving both events is the shape that hid #3589. Resume
+		// restores from the session's own sidecar, which a real turn_end writes;
+		// the real-runtime witness "restores a resumed session's activations
+		// after a process restart" covers it.
+		it.each(["fork", "reload"])(
 			"restores the parent's tool posture on %s session_start",
 			async (reason) => {
 				// #3306: these three roots are the ONLY ones in this file that
@@ -848,19 +873,33 @@ describe("index.ts extension wiring", () => {
 					expect(parentPosture.has("ast_grep_search")).toBe(true);
 					expect(parentPosture.has("ast_grep_replace")).toBe(false);
 
-					// The mock re-activates EVERYTHING before the rebuilt session
-					// announces itself.
-					await pi.simulateSessionShutdownAndRebuild(
-						reason as "fork" | "reload" | "resume",
+					// A fork's successor announces itself on the file pi names at
+					// shutdown; a reload keeps its file and names none.
+					await pi.emit(
+						"session_shutdown",
+						{
+							reason,
+							targetSessionFile:
+								reason === "reload"
+									? undefined
+									: ctx.sessionManager.getSessionFile(),
+						},
 						ctx,
 					);
+					const rebuilt = createPiMock();
+					extension(rebuilt.asExtensionAPI());
+					for (const name of rebuilt.tools.keys())
+						rebuilt.activeTools.add(name);
+					await rebuilt.emit("session_start", { reason }, ctx);
 					// Character-for-character the parent's set: the advertised tool
 					// list still matches the cached prompt prefix AND the model's
 					// activation survived.
-					expect([...pi.activeTools].sort()).toEqual([...parentPosture].sort());
-					expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-					expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
-					expect(pi.activeTools.has("lsp_navigation")).toBe(false);
+					expect([...rebuilt.activeTools].sort()).toEqual(
+						[...parentPosture].sort(),
+					);
+					expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
+					expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
+					expect(rebuilt.activeTools.has("lsp_navigation")).toBe(false);
 				} finally {
 					if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 					else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -906,6 +945,8 @@ describe("index.ts extension wiring", () => {
 					ctx,
 				);
 
+				// pi shuts the old activation down before it re-runs the factory.
+				await first.emit("session_shutdown", { reason: "reload" }, ctx);
 				const rebuilt = createPiMock();
 				extension(rebuilt.asExtensionAPI());
 				for (const name of rebuilt.tools.keys()) rebuilt.activeTools.add(name);
@@ -913,6 +954,7 @@ describe("index.ts extension wiring", () => {
 
 				expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
 				expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
+				await sidecarWritten(tmp, "factory-rebuild");
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -971,6 +1013,7 @@ describe("index.ts extension wiring", () => {
 				);
 				expect(forked.activeTools.has("ast_grep_search")).toBe(true);
 				expect(forked.activeTools.has("ast_grep_replace")).toBe(false);
+				await sidecarWritten(tmp, "fork-parent");
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -1009,6 +1052,7 @@ describe("index.ts extension wiring", () => {
 					undefined,
 					departing,
 				);
+				await endTurnAndPersist(pi, departing, tmp, "new-departing");
 
 				await pi.emit(
 					"session_shutdown",
@@ -1213,6 +1257,7 @@ describe("index.ts extension wiring", () => {
 					ctx,
 				);
 				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
+				await endTurnAndPersist(pi, ctx, tmp, "cache-quit");
 
 				await pi.simulateSessionShutdownAndRebuild("quit", ctx);
 
@@ -1223,46 +1268,6 @@ describe("index.ts extension wiring", () => {
 
 				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
 				expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		// #473: the active tool set is process-shared runtime state. A
-		// concurrently-live secondary's session_start must not rewrite it out
-		// from under the still-live primary (last writer would win).
-		it("leaves the tool set alone on a concurrent secondary session_start", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-secondary-tools-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				await pi.emit(
-					"session_start",
-					{ reason: "startup" },
-					makeCtx({ cwd: tmp, sessionId: "primary" }),
-				);
-				// A subagent binds in-process; the host hands it an all-active
-				// runtime just like any other session construction.
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-
-				await pi.emit(
-					"session_start",
-					{ reason: "startup" },
-					makeCtx({ cwd: tmp, sessionId: "secondary" }),
-				);
-
-				// Untouched: the secondary returned at the #473 guard, above the
-				// tool-set mutation.
-				for (const tool of EXPECTED_TOOLS) {
-					expect(pi.activeTools.has(tool), tool).toBe(true);
-				}
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -1894,16 +1899,49 @@ describe("hook handler crash surfacing (#2884)", () => {
 		expectCrashRecorded("session_start");
 	});
 
-	it("surfaces a crashed session_before_fork under the test runner and records it", async () => {
-		handlerCrashInjection.site = "session_before_fork";
+	// #3612 (scope note on #3612 from the #3757 review): the activation's
+	// scope is the one handleSessionStart's reset began, even when a later step
+	// of that handler throws. The recurrence: `scope` was assigned only after
+	// the awaited handler returned, so a crash left it unset, and the session's
+	// activations (and its advisories, #3757) had no scope to live in.
+	it("keeps the scope a crashed session_start began, so an activation survives /reload", async () => {
+		handlerCrashInjection.site = "session_start_after_reset";
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx({ cwd: tmp });
+		await expect(
+			pi.emit("session_start", { reason: "startup" }, ctx),
+		).rejects.toThrow("probe: session_start boom after reset");
+		handlerCrashInjection.site = undefined;
+		const loader = pi.getTool("pi_lens_activate_tools") as {
+			execute: (...args: unknown[]) => Promise<unknown>;
+		};
+		await loader.execute(
+			"activate",
+			{ tools: ["ast_grep_search"] },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		await pi.simulateSessionShutdownAndRebuild("reload", ctx);
+
+		expect(pi.activeTools.has("ast_grep_search")).toBe(true);
+		expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
+	});
+
+	// #3612: an activation whose session_start never ran (a stale ctx skips
+	// the whole handler) has no scope to hand off. The recurrence: the
+	// shutdown snapshotting an undefined scope, which throws into pi's
+	// teardown.
+	it("hands nothing off from a reload shutdown before any session_start", async () => {
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 
 		await expect(
-			pi.emit("session_before_fork", {}, makeCtx({ cwd: tmp })),
-		).rejects.toThrow("probe: session_before_fork boom");
-
-		expectCrashRecorded("session_before_fork");
+			pi.emit("session_shutdown", { reason: "reload" }, makeCtx({ cwd: tmp })),
+		).resolves.toBeUndefined();
+		expect(takeHandoff("reload", undefined)).toBeUndefined();
 	});
 
 	it("surfaces a crashed observed_settled_sweep under the test runner and records it", async () => {
