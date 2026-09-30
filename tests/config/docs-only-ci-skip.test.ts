@@ -21,6 +21,7 @@ type Job = {
 	name?: string;
 	needs?: string | string[];
 	if?: string;
+	env?: Record<string, string>;
 	strategy?: { matrix?: { os?: string[] } };
 	steps?: Step[];
 };
@@ -274,6 +275,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 		// the aggregate is the sharded contract unchanged: only a green shard set passes
 		const run = String(CI["unit-tests"].steps?.[0].run);
 		expect(run).not.toContain("CODE_CHANGED");
+		expect(Object.keys(CI["unit-tests"].env ?? {})).toEqual(["SHARDS_RESULT"]);
 		expect(run.match(/exit 0/g)).toBeNull();
 	});
 
