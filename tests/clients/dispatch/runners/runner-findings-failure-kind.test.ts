@@ -1160,6 +1160,22 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		30_000,
 	);
 
+	// A hand-rolled ternary's other arm: findings below the runner's threshold
+	// stay `succeeded` and carry no kind (Stryker survivor on detekt.ts:203,
+	// `"succeeded"` → `""`, #3800).
+	it("keeps a warning-only detekt run succeeded without failureKind", async () => {
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: ({ filePath }) => ({
+				status: 1,
+				stdout: `${filePath}:4:5: warning: magic number (${MARKER}) [MagicNumber]\n`,
+			}),
+		});
+		expect(observed.result?.status).toBe("succeeded");
+		expect(observed.result?.semantic).toBe("warning");
+		expect(observed.result?.failureKind).toBeUndefined();
+	});
+
 	// The dangerous inverse (F4): a run whose output could not be read is a
 	// runner that produced no usable result. Labelling it blocking_diagnostics
 	// would tell the analyzer and the MCP consumer "the file has problems" when
