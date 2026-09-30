@@ -92,7 +92,8 @@ const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 // elsewhere in the same log under a fake real classification (safe
 // direction, but reimposes the manual-read tax this classifier exists to
 // remove). See the "V4 fabricated FAIL in a passing test title" fixture.
-export const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.[cm]?[jt]sx?)(?=\s|$)/m;
+export const BARE_FAIL_LINE =
+	/^\s*FAIL\b.*?(\S+\.(?:test|spec)\.[cm]?[jt]sx?)(?=\s|$)/m;
 // (real log, same run) "AssertionError: expected false to be true //
 // Object.is equality"
 export const ASSERTION_LINE =

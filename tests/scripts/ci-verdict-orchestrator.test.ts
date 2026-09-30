@@ -1389,6 +1389,9 @@ interface Checkout {
 	remoteHead: string;
 	lockChanged?: boolean;
 	pullFails?: boolean;
+	/** commits on the checkout that origin does not have. */
+	ahead?: number;
+	pullStderr?: string;
 	commands: string[];
 }
 function gitFor(checkout: Checkout) {
@@ -1409,11 +1412,15 @@ function gitFor(checkout: Checkout) {
 		if (rest.join(" ") === "pull --ff-only") {
 			if (checkout.pullFails)
 				throw Object.assign(new Error("git failed"), {
-					stderr: "fatal: Not possible to fast-forward, aborting.",
+					stderr:
+						checkout.pullStderr ??
+						"From /path/origin\n * branch            master     -> FETCH_HEAD\nhint: Diverging branches can't be fast-forwarded.\nfatal: Not possible to fast-forward, aborting.\n",
 				});
 			checkout.head = checkout.remoteHead;
 			return "";
 		}
+		if (rest.join(" ") === "rev-list --count origin/master..HEAD")
+			return `${checkout.ahead ?? 0}\n`;
 		if (rest[0] === "diff")
 			return checkout.lockChanged ? "package-lock.json\n" : "";
 		throw new Error(`unmocked git call: ${rest.join(" ")}`);
@@ -1591,7 +1598,15 @@ describe("run --watch-open --stream — one line per event, until the window end
 		};
 		const w = world({ prs: [pr] });
 		const { lines } = await cli(
-			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "270"],
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"270",
+			],
 			w,
 			{
 				onSleep: (index) => {
@@ -1616,6 +1631,136 @@ describe("run --watch-open --stream — one line per event, until the window end
 		).toHaveLength(2);
 	});
 
+	// Recurrence (review r1, F1): the re-run sat inside the transition gate, so a
+	// refusal on a head that STAYS cancelled was attempted once and never again.
+	it("--rerun-cancelled retries a refused re-run on a steady cancelled head, with a backoff", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const { lines, sleeps } = await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"360",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					// the refusal lifts after the first retry window opens
+					if (index === 2) w.rerunThrows = false;
+				},
+			},
+		);
+		// 5 polls (0, 90, 180, 270, 360 s): attempts at 0 s and, after the 180 s
+		// backoff, at 180 s -- not at every poll.
+		expect(sleeps).toHaveLength(4);
+		expect(w.mutations).toEqual([
+			"run rerun 36022234159",
+			"run rerun 36022234159",
+		]);
+		expect(
+			lines.filter((line) => line.startsWith("RERUN FAILED")),
+		).toHaveLength(1);
+		expect(lines.filter((line) => line.startsWith("RERUN #3382"))).toHaveLength(
+			1,
+		);
+	});
+
+	it("--rerun-cancelled stops after three refused attempts on one head, backing off between them", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const times: number[] = [];
+		const gh = ghFor(w);
+		const time = clock();
+		await run({
+			argv: [
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"1800",
+			],
+			ghExec: (args: string[], options?: { timeoutMs?: number }) => {
+				if (args[0] === "run") times.push((time.now() - NOW) / 1000);
+				return gh(args, options);
+			},
+			now: time.now,
+			sleepImpl: time.sleepImpl,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		// 0 s, then +180 s, then +360 s: three attempts, none after.
+		expect(times).toEqual([0, 180, 540]);
+	});
+
+	it("--rerun-cancelled keeps a successful re-run's mark across a re-armed watch", async () => {
+		const file = stateFile();
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr] });
+		await cli(["--watch-open", "--rerun-cancelled", "--state-file", file], w);
+		const again = await cli(
+			[
+				"--watch-open",
+				"--rerun-cancelled",
+				"--wait",
+				"0",
+				"--state-file",
+				file,
+			],
+			w,
+		);
+		expect(again.exitCode).toBe(EXIT_PENDING);
+		expect(w.mutations).toEqual(["run rerun 36022234159"]);
+	});
+
+	// Recurrence (review r1, F2): re-arming a watch with no state re-ran the same
+	// cancelled head once per re-arm.
+	it("--rerun-cancelled without --state-file is a usage error that reads and re-runs nothing", async () => {
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					sha: cancelled.source.head,
+					checkRuns: cancelledRuns,
+				},
+			],
+		});
+		for (const argv of [
+			["--watch-open", "--rerun-cancelled"],
+			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
+		]) {
+			const { exitCode, errors, lines } = await cli(argv, w);
+			expect(exitCode).toBe(EXIT_USAGE);
+			expect(errors.join("\n")).toContain(
+				"--rerun-cancelled requires --state-file",
+			);
+			expect(lines).toEqual([]);
+		}
+		expect(w.calls).toEqual([]);
+		expect(w.mutations).toEqual([]);
+	});
+
 	it("--rerun-cancelled keeps the head unmarked when the re-run is refused, so the next poll tries again", async () => {
 		const pr: PrFixture = {
 			number: 3382,
@@ -1625,7 +1770,15 @@ describe("run --watch-open --stream — one line per event, until the window end
 		};
 		const w = world({ prs: [pr], rerunThrows: true });
 		const { lines } = await cli(
-			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "270"],
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"270",
+			],
 			w,
 			{
 				onSleep: (index) => {
@@ -1670,7 +1823,15 @@ describe("run --watch-open --stream — one line per event, until the window end
 			],
 		});
 		await cli(
-			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"0",
+			],
 			w,
 		);
 		expect(w.mutations).toEqual(["run rerun 500"]);
@@ -1726,7 +1887,15 @@ describe("run --watch-open --stream — one line per event, until the window end
 			],
 		});
 		const { lines } = await cli(
-			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"0",
+			],
 			w,
 		);
 		expect(lines[0]).toContain("FORK-APPROVAL #3443");
@@ -1920,6 +2089,30 @@ describe("run --watch-open --sync-main <path> — fast-forward the main checkout
 		);
 	});
 
+	it("names a local-only commit when the checkout is already up to date but ahead of origin", async () => {
+		const one = await sync(checkoutAt({ remoteHead: OLD_HEAD, ahead: 1 }));
+		expect(one.lines).toContain(
+			"SYNCED /repo/main: already at 111111111 (1 local commit not on origin)",
+		);
+		const two = await sync(checkoutAt({ remoteHead: OLD_HEAD, ahead: 2 }));
+		expect(two.lines).toContain(
+			"SYNCED /repo/main: already at 111111111 (2 local commits not on origin)",
+		);
+	});
+
+	it("prints every stderr line of a refusal that names no known cause", async () => {
+		const { lines } = await sync(
+			checkoutAt({
+				pullFails: true,
+				pullStderr:
+					"error: cannot lock ref 'refs/remotes/origin/master'\nfatal: unable to update local ref\n",
+			}),
+		);
+		expect(lines).toContain(
+			"SYNC REFUSED /repo/main: error: cannot lock ref 'refs/remotes/origin/master' | fatal: unable to update local ref",
+		);
+	});
+
 	it("does nothing to the checkout without --sync-main, or without a merge", async () => {
 		const checkout = checkoutAt();
 		await cli(
@@ -2058,7 +2251,7 @@ describe("run --watch-open — #3726 verify residuals (#3722)", () => {
 describe("run — FAIL and assertion lines beyond vitest's .test.ts (#3722)", () => {
 	// The repo has none of these today (#3726 verify); the shared regexes now
 	// read them so a first `.mjs` / `.spec.ts` / node:assert failure is not blank.
-	it("lists FAIL lines for .mjs, .spec.ts and .test.mjs files and AssertionError [ERR_ASSERTION]", async () => {
+	it("lists FAIL lines for .spec.ts and .test.mjs files and AssertionError [ERR_ASSERTION], but not a non-test path", async () => {
 		const log = [
 			"2026-09-30T00:00:00.0000000Z  FAIL  scripts/lib/thing.mjs",
 			"2026-09-30T00:00:00.0000000Z  FAIL  default  tests/a.spec.ts > suite > case",
@@ -2071,7 +2264,8 @@ describe("run — FAIL and assertion lines beyond vitest's .test.ts (#3722)", ()
 			jobs: [unit],
 		});
 		const { out } = await cli(["5"], w);
-		expect(out).toContain("  FAIL  scripts/lib/thing.mjs");
+		// A non-test path after FAIL is not a failing test (it flipped infra logs to real).
+		expect(out).not.toContain("scripts/lib/thing.mjs");
 		expect(out).toContain("  FAIL  default  tests/a.spec.ts > suite > case");
 		expect(out).toContain("  FAIL  tests/b.test.mjs");
 		expect(out).toContain(

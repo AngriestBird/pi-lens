@@ -1672,6 +1672,12 @@ const WATCH_EVENT_KINDS = new Set([
 	"cancelled",
 ]);
 
+// `--rerun-cancelled` tries a head at most this many times, waiting twice as
+// long after each refusal (180 s, 360 s): a run GitHub keeps refusing is left
+// to the human, not hammered every poll.
+export const RERUN_MAX_ATTEMPTS = 3;
+export const RERUN_BACKOFF_SECONDS = 180;
+
 // `--stream` names an event the way the orchestrator reads it: `FAIL #N@sha`.
 const STREAM_EVENT_NAMES = {
 	failed: "FAIL",
@@ -1763,7 +1769,8 @@ export async function snapshotOpenPrs({
 
 /** One PR's state: `key` is the last seen `<sha>:<kind>`, `since` when the
  * watch first saw the head (`{ sha, ms }`: the absence clock of a head with no
- * check suite), `rerun` the head a cancelled run was already re-run for. The
+ * check suite), `rerun` the re-run attempts on the head (`{ sha, attempts,
+ * nextMs, done }`). The
  * first round kept the bare key string; it still loads. */
 function normalizeWatchEntry(value) {
 	if (typeof value === "string") return { key: value };
@@ -1867,9 +1874,13 @@ export function syncMainCheckout(checkout, gitExec = execFileSync) {
 		const before = git("rev-parse", "HEAD");
 		git("pull", "--ff-only");
 		const after = git("rev-parse", "HEAD");
+		const ahead =
+			before === after
+				? Number(git("rev-list", "--count", `origin/${PROTECTED_BRANCH}..HEAD`))
+				: 0;
 		const lines = [
 			before === after
-				? `SYNCED ${checkout}: already at ${after.slice(0, 9)}`
+				? `SYNCED ${checkout}: already at ${after.slice(0, 9)}${ahead > 0 ? ` (${ahead} local commit${ahead === 1 ? "" : "s"} not on origin)` : ""}`
 				: `SYNCED ${checkout}: ${before.slice(0, 9)} -> ${after.slice(0, 9)}`,
 		];
 		if (
@@ -1880,8 +1891,23 @@ export function syncMainCheckout(checkout, gitExec = execFileSync) {
 			lines.push("LOCKFILE CHANGED: run npm ci when no worker is live");
 		return lines;
 	} catch (error) {
-		return [`SYNC REFUSED ${checkout}: ${firstLine(error)}`];
+		return [`SYNC REFUSED ${checkout}: ${gitReason(error)}`];
 	}
+}
+
+/** Why a git command refused: the line that says so (`Not possible to
+ * fast-forward`, `diverged`), else every stderr line -- git leads with a
+ * `From <url>` progress line that says nothing. */
+function gitReason(error) {
+	const stderr = error?.stderr == null ? "" : String(error.stderr);
+	const lines = stderr
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+	return (
+		lines.find((line) => /Not possible to fast-forward|diverged/.test(line)) ??
+		(lines.length > 0 ? lines.join(" | ") : firstLine(error))
+	);
 }
 
 /** `--approve-fork <PR>`: approve that PR's `action_required` runs on its
@@ -2029,20 +2055,31 @@ export async function watchOpenPrs({
 					),
 					...formatFailureLines(info.verdict).map((line) => `  ${line}`),
 				]);
+			}
+			// Decided every poll, not only on the transition: a refused re-run of
+			// a head that stays cancelled must be tried again.
+			if (kind === "cancelled" && rerunCancelled) {
+				const attempt = entry.rerun?.sha === info.sha ? entry.rerun : null;
+				const state = attempt ?? { sha: info.sha, attempts: 0, nextMs: 0 };
 				if (
-					kind === "cancelled" &&
-					rerunCancelled &&
-					entry.rerun !== info.sha
+					!state.done &&
+					state.attempts < RERUN_MAX_ATTEMPTS &&
+					now() >= state.nextMs
 				) {
-					const lines = rerunCancelledRows({
+					const rerun = rerunCancelledRows({
 						number: pr.number,
 						sha: info.sha,
 						rows: info.verdict.cancelledRows,
 						ghExec,
 					});
-					if (lines.ok) entry.rerun = info.sha;
-					events.push(lines.lines);
+					state.attempts += 1;
+					if (rerun.ok) state.done = true;
+					else
+						state.nextMs =
+							now() + RERUN_BACKOFF_SECONDS * 1000 * 2 ** (state.attempts - 1);
+					events.push(rerun.lines);
 				}
+				entry.rerun = state;
 			}
 			entry.key = key;
 		}
@@ -2203,6 +2240,12 @@ export async function run({
 			stderr(error instanceof Error ? error.message : String(error));
 			return EXIT_TRANSPORT;
 		}
+	}
+	if (watchOpen && rerunCancelled && !stateFile) {
+		// Without the state a re-armed watch (the normal shape: a non-stream
+		// watch exits at its first event) re-runs the same head every time.
+		stderr("--rerun-cancelled requires --state-file");
+		return EXIT_USAGE;
 	}
 	if (all || watchOpen) {
 		try {

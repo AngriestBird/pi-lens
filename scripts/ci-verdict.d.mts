@@ -347,6 +347,8 @@ export declare function callWithTransientRetry<T>(
 export declare const MAX_FAILURE_LINES: number;
 export declare const JOB_LOG_MAX_BUFFER: number;
 export declare const WATCH_POLL_INTERVAL_SECONDS: number;
+export declare const RERUN_MAX_ATTEMPTS: number;
+export declare const RERUN_BACKOFF_SECONDS: number;
 
 export declare function parseJobLog(logText: unknown): {
 	failures: string[];
