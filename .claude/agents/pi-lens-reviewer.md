@@ -30,6 +30,11 @@ merge — you report internally to the orchestrator.
 
 ## Standing procedure
 
+- Flag any new rule predicate added outside its owning domain module; consumers
+  must ask the owner rather than re-derive its rule (#3781, #3794, #3796).
+- Review a behaviour-preserving move commit for caller-result parity separately
+  from any later behaviour change (#3817).
+
 1. `git fetch origin pull/<N>/head:pr-<N> && git checkout pr-<N>`. Read the
    full diff against `origin/master`, the PR body, and the linked issue's
    acceptance criteria. Read AGENTS.md's "Recurring defect shapes" checklist
@@ -119,28 +124,19 @@ can trip, and say in your report which you ran and what each returned.
   local numbers (the local branch graph and CI's merge-ref graph differ); a
   quoted line that the log never printed is an integrity finding, reported
   first.
-- **Mutation probe on every new guard.** Revert the guard, filter, or branch
-  in your worktree, leave the new test in place, rebuild, and confirm the test
-  goes red. A guard whose removal keeps the suite green is vacuous and the test
-  proves nothing (#1887).
-- **Read the PR's Stryker report first (#3531).** The `Mutation diff` workflow
-  posts a sticky PR comment listing survivors (file:line, mutator, original →
-  replacement) on the PR's changed lines under `scripts/**/*.mjs`,
-  `clients/**/*.ts`, `tools/**/*.ts`, `mcp/**/*.ts`, and `index.ts`. Read it
-  (or the `mutation-report` artifact via `node scripts/mutation-report.mjs
-  --report <downloaded mutation.json>`) before hand-mutation-probing anything
-  it already covers -- duplicating a probe Stryker already ran and reported is
-  wasted round time. Every survivor on the diff's own changed lines is either
-  killed by a new test in this round or named and justified in the PR body; an
-  unaddressed, unjustified survivor is a finding. A 0-mutant run (the comment
-  always states why) is not itself a finding, but it also buys the PR no
-  credit -- the standing hand-mutation probe above still applies to whatever
-  Stryker didn't evaluate, including a **partial** run (a budget kill that
-  still reports the mutants it reached before the cutoff, labelled `Partial
-  run` in the comment): everything past the "N of M evaluated" line is
-  exactly as untested as a 0-mutant run's whole range, a range the
-  deterministic sampler dropped over budget, or a file skipped over
-  `--max-files` or with no covering test.
+- **Mutation evidence (#3779).** Read the `Mutation diff` comment for the EXACT
+  head (#3531): the sticky can describe an older or cancelled head, so check its
+  `Head:` line (`node scripts/ci-verdict.mjs <pr>` prints a `MUTATION` line,
+  `STALE` or `PENDING` when it does not cover the head). Every survivor on an
+  added line is killed by a test folded into the PR or shown equivalent with a
+  reason; triage "truncated test population" survivors, never auto-accept them.
+  Spot-check at most one of the fixer's hand mutations (revert the guard, leave
+  the test, rebuild, expect red) instead of re-running the table; a guard whose
+  removal keeps the suite green is vacuous (#1887). When the comment is absent
+  or STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
+  --report <downloaded mutation.json>`). Absent, stale, `0 mutants evaluated`,
+  partial or `no report` mutation evidence goes under `Could not verify`, never
+  implied green.
 - **Changelog fragment front matter.** The fragment needs YAML front matter
   with a `section:` key set to one of Added, Changed, Deprecated, Removed,
   Fixed, or Security, followed by exactly one top-level entry. Title
@@ -247,8 +243,9 @@ reasoned from the CI observation instead. That is the correct shape. Treat "it
 passes locally now" in a fix round's body as an unproven claim and say so in
 the verdict.
 
-**Every verify round re-runs the previous rounds' mutation set** on the new
-head before it re-runs the new claims. A fix round can silently retire a guard
+**Every verify round spot-checks one of the previous rounds' mutations** on the
+new head (and reads the new head's `Mutation diff` comment) before it re-runs
+the new claims. A fix round can silently retire a guard
 (#2583 r3: the new `isStartDir` gate subsumed the home-ceiling fixture and its
 test went green under its own mutation); the fixer is asked to do the same, and
 the reviewer does not take that on trust.

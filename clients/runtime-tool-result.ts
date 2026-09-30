@@ -25,7 +25,6 @@ import {
 } from "./search-read-registration.js";
 import type { CacheManager } from "./cache-manager.js";
 import type { GenerationHandle } from "./generation-guard.js";
-import { createFileTime } from "./file-time.js";
 import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	invalidateProjectIgnoreMatcherForPath,
@@ -1607,8 +1606,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
 		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
+			// #3525: the command is in the conversation, the bytes it wrote
+			// are not: authorship, not FileTime.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
-				deps.readGuard?.recordWritten(wp);
+				deps.readGuard?.recordWritten(wp, { stampFileTime: false });
 			else if (!getFlag("no-read-guard") && recognizedWritten.includes(wp))
 				deps.readGuard?.recordUnchanged?.(wp);
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
@@ -1642,6 +1643,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_attachmentBudget: syntheticAttachmentBudget,
 				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
 				_readGuardAuthorship: recognizedAuthoredSet.has(wp),
+				_ownWriteStamp: { stampFileTime: false },
 				// Opaque recovery is mutation evidence only. The synthetic call still
 				// records freshness and runs diagnostics, but it cannot format/autofix
 				// or issue an edit-directed blocker/actionable instruction.
@@ -2528,10 +2530,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// turn-state worklist, and dispatches nothing; the change-log receipt below
 	// stays, because the edit did land on disk.
 	const entryLive = writeSession.guardedWrite(filePath, () => true) === true;
-	const sessionFileTime = createFileTime("default");
-	// tool_result is emitted after write/edit has already been applied.
-	// Asserting pre-write stamps here produces false positives on rapid edits.
-	sessionFileTime.read(filePath);
 	if (!getFlag("no-read-guard") && bashAuthorshipConfirmed) {
 		const readGuard = (
 			runtime as {
