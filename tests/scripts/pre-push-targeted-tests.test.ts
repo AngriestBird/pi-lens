@@ -757,7 +757,12 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 		const result = runHook(fx);
 		expect(result.status).toBe(1);
 		expect(busyLine(result)).toContain("(all 2 shared slot(s) busy)");
-		expect(busyLine(result)).toContain(fx.lockPath);
+		// #3839 review B: a slot block names no PID, and the stuck file to delete
+		// is a slot file, not the exclusive lock the old hint pointed at.
+		expect(busyLine(result)).toContain(
+			path.join(fx.home, "test-suite.slot-N.lock"),
+		);
+		expect(busyLine(result)).not.toContain(fx.lockPath);
 		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
 	});
 

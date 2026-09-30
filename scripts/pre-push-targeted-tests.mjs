@@ -35,7 +35,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getLockPath } from "./lib/suite-lock.mjs";
+import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
@@ -369,10 +369,10 @@ function matchLockTimeout(stderr) {
 
 // Runs the targeted vitest selection through with-test-lock.mjs in SHARED
 // mode (#3839): it is always a batch of named files, which is what a shared
-// slot is for, and the exclusive lock stays with full-suite runs. The slot
-// count is deliberately not passed here: the exclusive holder drains the
-// DEFAULT_SHARED_SLOTS (scripts/lib/suite-lock.mjs), so a hook-side count above
-// it would let a slot run beside a full suite. Streaming
+// slot is for, and the exclusive lock stays with full-suite runs. No slot
+// count is passed, so the ceiling stays the one DEFAULT_SHARED_SLOTS
+// (scripts/lib/suite-lock.mjs); the exclusive holder drains every possible
+// slot, so a hook-side count could not hide a slot from a full suite either. Streaming
 // stdout live and mirroring stderr live while also buffering it — the
 // buffer is only needed to tell "the shared machine-wide lock timed out"
 // (with-test-lock.mjs's own message, PI_LENS_TEST_LOCK_TIMEOUT_MS in
@@ -535,8 +535,13 @@ export async function main() {
 			);
 			return 0;
 		}
+		// A slot block names no PID and its stuck file is a slot file, not the
+		// exclusive lock (#3839 review B).
+		const blockedFile = /shared slot\(s\)/.test(holder)
+			? getSlotPath(lockPath, "N")
+			: lockPath;
 		console.error(
-			`[pre-push] test lock busy after ${waitedMs / 1000} s (${holder}); push blocked. Lock file: ${lockPath}. Wait and push again (to wait longer: PI_LENS_TEST_LOCK_TIMEOUT_MS=600000 git push); if it names a PID that is not a test run, delete the lock file. To push without the targeted run: PI_LENS_PREPUSH_LOCK_SKIP=1 git push (recorded in ${logPath}; CI remains the gate).`,
+			`[pre-push] test lock busy after ${waitedMs / 1000} s (${holder}); push blocked. Lock file: ${blockedFile}. Wait and push again (to wait longer: PI_LENS_TEST_LOCK_TIMEOUT_MS=600000 git push); if it names a PID that is not a test run, delete the lock file. To push without the targeted run: PI_LENS_PREPUSH_LOCK_SKIP=1 git push (recorded in ${logPath}; CI remains the gate).`,
 		);
 		return 1;
 	}

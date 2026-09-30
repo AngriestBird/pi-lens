@@ -160,10 +160,19 @@ function describeOwner(owner) {
  * (50% of cores, scripts/lib/worker-budget.mjs) and the box already sits at
  * load 100+, so the hook takes one of the same two slots instead of the
  * machine, and the ceiling on lock-managed fork pools does not rise. The
- * exclusive holder drains this same count, so it is the one number the ceiling
- * and the drain share.
+ * exclusive holder drains every slot up to MAX_SHARED_SLOTS, whatever count its
+ * own env resolved, so a differing `--shared=N` elsewhere cannot hide a holder
+ * from a full suite; this count only sizes the shared ceiling.
  */
 export const DEFAULT_SHARED_SLOTS = 2;
+
+/**
+ * Highest slot count an acquirer can ask for (`resolveSharedSlots` clamps to
+ * it), so slot files `0..MAX_SHARED_SLOTS-1` are every file that can exist.
+ * The exclusive drain scans all of them (#3839): its own slot count only sizes
+ * the shared ceiling, never the set of holders a full suite must wait for.
+ */
+export const MAX_SHARED_SLOTS = 32;
 
 /**
  * Path of shared slot `index`, derived from the exclusive lock path so a
@@ -195,7 +204,7 @@ export function resolveSharedSlots(raw) {
 	if (!Number.isFinite(value)) return DEFAULT_SHARED_SLOTS;
 	const floored = Math.floor(value);
 	if (floored < 1) return DEFAULT_SHARED_SLOTS;
-	return Math.min(floored, 32);
+	return Math.min(floored, MAX_SHARED_SLOTS);
 }
 
 /**
@@ -432,7 +441,10 @@ async function drainSharedSlots({
 	let lastHeartbeat = 0;
 	for (;;) {
 		let busy = 0;
-		for (let index = 0; index < slots; index++) {
+		// Every slot file that can exist, not just this process's own `slots`:
+		// an acquirer started with a larger `--shared=N` or
+		// PI_LENS_TEST_SHARED_SLOTS may hold an index above it (#3839).
+		for (let index = 0; index < MAX_SHARED_SLOTS; index++) {
 			const slotPath = getSlotPath(lockPath, index);
 			const { state } = await inspectLock(slotPath, staleMaxAgeMs);
 			if (state === "free") continue;
@@ -457,13 +469,13 @@ async function drainSharedSlots({
 			// real test failure. Keep the prefix when rewording.
 			throw new Error(
 				`timed out after ${timeoutMs}ms waiting for test-suite lock: ` +
-					`${busy} of ${slots} shared slot(s) still busy`,
+					`${busy} of ${Math.max(slots, busy)} shared slot(s) still busy`,
 			);
 		}
 		if (now - lastHeartbeat >= heartbeatIntervalMs) {
 			lastHeartbeat = now;
 			log(
-				`waiting for test-suite lock: draining ${busy} of ${slots} shared slot(s)`,
+				`waiting for test-suite lock: draining ${busy} of ${Math.max(slots, busy)} shared slot(s)`,
 			);
 		}
 		await sleep(pollIntervalMs);
