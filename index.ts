@@ -4136,7 +4136,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cacheManager,
 						runtime,
 					});
-					const agentNudge = consumeAgentNudge(dbg);
+					const agentNudge = consumeAgentNudge(dbg, scope);
 					const sourceMessages = [
 						{
 							source: "session-guidance" as const,
