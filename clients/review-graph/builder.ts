@@ -4134,6 +4134,7 @@ async function extractTreeSitterSymbols(
 		languageId,
 		content,
 		(tree) => extractor.extract(tree, filePath, content),
+		"review-graph",
 	);
 	return extracted.parsed
 		? extracted.value
@@ -4163,7 +4164,12 @@ export async function captureReviewGraphStructuralIr(
 		) {
 			await ensureReviewGraphFacts(filePath, cwd, facts, content);
 		}
-		const parsed = await withTreeSitterRoot(filePath, content, () => true);
+		const parsed = await withTreeSitterRoot(
+			filePath,
+			content,
+			() => true,
+			"review-graph-ir",
+		);
 		if (!parsed.parsed) return { complete: false };
 		const functionCoverage: ReviewGraphExtractionStatus =
 			(facts.getFileFact<string>(filePath, "file.functionFactsCoverage") as
@@ -4212,6 +4218,7 @@ export async function captureReviewGraphStructuralIr(
 		languageId,
 		content,
 		(tree) => extractor.extract(tree, filePath, content),
+		"review-graph",
 	);
 	if (!result.parsed) return { complete: false };
 	return {
