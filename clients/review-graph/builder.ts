@@ -421,6 +421,16 @@ function wasmTrappedFileCount(graph: ReviewGraph): number {
 	return count;
 }
 
+/**
+ * #3678: the one wording source for a review graph degraded by a
+ * web-tree-sitter trap. Shared by the per-edit cascade advisory
+ * (`dispatch/integration.ts`) and the standalone `build-graph` CLI, so the two
+ * model-facing surfaces cannot drift apart.
+ */
+export function graphWasmTrapDetail(wasmTrappedFiles: number): string {
+	return `review graph degraded — tree-sitter wasm runtime failure in ${wasmTrappedFiles} file(s)`;
+}
+
 function setWorkspaceGraph(
 	key: string,
 	entry: Omit<WorkspaceGraphCacheEntry, "lastUsedAt" | "idleTimer">,

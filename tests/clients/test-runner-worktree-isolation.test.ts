@@ -310,6 +310,63 @@ for (const row of runners) {
 			});
 		}
 
+		it("retires a deleted failed-first target as retired-missing without an identity record", async () => {
+			// Recurrence (#3691 F1): an ordinary deletion recorded
+			// test-checkout-identity-unavailable through foreignGitRoot's realpath
+			// catch, on top of the retired-missing outcome that already owns it.
+			const f = fixture();
+			const client = new TestRunnerClient(false);
+			await client.runTestFileAsync(
+				f.parentFailure,
+				f.project,
+				row.runner,
+				RUNNERS[row.runner],
+			);
+			fs.rmSync(f.parentFailure);
+			expect(client.getTestRunTarget(f.source, f.project)).toMatchObject({
+				testFile: f.companion,
+				strategy: "related",
+			});
+			await flushLatencyLog();
+			const log = fs.readFileSync(getLatencyLogPath(), "utf8");
+			expect(log).toContain('"outcome":"retired-missing"');
+			expect(log).not.toContain('"kind":"test-checkout-identity-unavailable"');
+		});
+
+		it.each(["ENOENT", "ENOTDIR"] as const)(
+			"keeps a real identity failure visible after many ordinary %s lookups",
+			async (code) => {
+				// Recurrence (#3691 F1): 20 ordinary rows filled the per-kind cap, so the
+				// next EACCES was counted but never reached the durable log.
+				const f = fixture();
+				for (let index = 0; index < 25; index++) {
+					// A missing leaf gives ENOENT; a path below a regular file, ENOTDIR.
+					const candidate =
+						code === "ENOENT"
+							? path.join(f.project, `gone-${index}-${row.failed}`)
+							: path.join(f.source, `below-${index}-${row.failed}`);
+					expect(isExcludedTestTarget(candidate, f.project)).toBe(false);
+				}
+				const native = vi.spyOn(fs.realpathSync, "native");
+				native.mockImplementationOnce(() => {
+					throw Object.assign(new Error("ownership lookup denied"), {
+						code: "EACCES",
+					});
+				});
+				try {
+					expect(isExcludedTestTarget(f.parentFailure, f.project)).toBe(false);
+				} finally {
+					native.mockRestore();
+				}
+				await flushLatencyLog();
+				const log = fs.readFileSync(getLatencyLogPath(), "utf8");
+				expect(
+					log.match(/"kind":"test-checkout-identity-unavailable"/g),
+				).toHaveLength(1);
+				expect(log).toContain('"errorCode":"EACCES"');
+			},
+		);
+
 		it("keeps a nested checkout's own failures eligible and rejects only the parent's copy", async () => {
 			const f = fixture();
 			markCheckout(f.nested, "file");
@@ -1218,7 +1275,7 @@ for (const row of discoveryRows) {
 				break;
 			}
 		}
-		return { project, source, foreign, eligible };
+		return { project, nested, source, foreign, eligible };
 	}
 
 	describe(`${row.name} automatic discovery checkout eligibility`, () => {
@@ -1248,6 +1305,19 @@ for (const row of discoveryRows) {
 			expect(
 				log.match(/"kind":"test-discovery-foreign-checkout"/g),
 			).toHaveLength(1);
+			// #3691 F4: the row must name everything needed to find the exclusion.
+			const [excluded] = log
+				.split("\n")
+				.filter((line) =>
+					line.includes('"kind":"test-discovery-foreign-checkout"'),
+				)
+				.map((line) => JSON.parse(line));
+			expect(excluded.metadata).toMatchObject({
+				cwd: f.project,
+				candidate: f.foreign,
+				checkoutRoot: fs.realpathSync.native(f.nested),
+				runner: row.runner,
+			});
 		});
 
 		it("keeps distinct discovery exclusions when their cwd spelling exceeds the ledger field bound", async () => {
