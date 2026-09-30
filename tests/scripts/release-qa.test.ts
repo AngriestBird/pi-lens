@@ -79,6 +79,7 @@ import {
 	parsePiVersion,
 	planCodemodeRow,
 	runCodemodeNestedProbe,
+	summarizeToolEnds,
 } from "../../scripts/release-qa.mjs";
 import { effectiveConfig } from "../../clients/effective-config.js";
 import { renderToolText } from "../../tools/render-compact.js";
@@ -1813,6 +1814,47 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 		expect(classifyCodemodeNested(w).detail).toContain(
 			"no provider requests recorded",
 		);
+	});
+
+	describe("reading pi's RPC event stream", () => {
+		// Real `tool_execution_*` events from pi 0.99.2 (nested calls carry
+		// `parentToolCallId`; the codemode call that made them does not).
+		const events = fs
+			.readFileSync(
+				path.join(
+					REPO_ROOT,
+					"tests",
+					"fixtures",
+					"release-qa",
+					"codemode-tool-execution-events-pi-0.99.2.ndjson",
+				),
+				"utf8",
+			)
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
+
+		it("keeps pi's parentToolCallId as the nested marker", () => {
+			const { nested, topLevel } = summarizeToolEnds(events);
+			expect(nested.map((c) => c.id)).toEqual(["c1/1", "c1/4"]);
+			expect(topLevel.map((c) => c.id)).toEqual(["c1"]);
+			expect(nested.find((c) => c.id === "c1/4")).toMatchObject({
+				toolName: "edit",
+				isError: true,
+			});
+			expect(nested.find((c) => c.id === "c1/4")?.text).toContain(
+				"Edit without read",
+			);
+		});
+
+		it("ignores events that are not tool_execution_end", () => {
+			const all = summarizeToolEnds(events);
+			expect(all.nested.length + all.topLevel.length).toBe(3);
+		});
+
+		it("reads an empty stream as no calls", () => {
+			expect(summarizeToolEnds([])).toEqual({ nested: [], topLevel: [] });
+		});
 	});
 
 	describe("reachability is decided before the run", () => {

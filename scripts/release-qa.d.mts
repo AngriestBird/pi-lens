@@ -86,6 +86,12 @@ export function classifyCodemodeNested(observed: {
 	providerRows?: Array<{ turn?: number; userMessages?: string[] }>;
 	files?: { b?: string | null; c?: string | null };
 }): { status: string; detail: string; shows?: string };
+export function summarizeToolEnds(
+	events: ReadonlyArray<Record<string, unknown>>,
+): {
+	nested: Array<CodemodeCall & { nested: boolean }>;
+	topLevel: Array<CodemodeCall & { nested: boolean }>;
+};
 export function parsePiVersion(text: string): [number, number, number] | null;
 export function planCodemodeRow(plan: {
 	piVersionText?: string;

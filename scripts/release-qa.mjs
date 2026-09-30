@@ -1200,6 +1200,33 @@ export function classifyCodemodeNested(observed) {
 }
 
 /**
+ * Split an RPC event stream's `tool_execution_end` events into the calls a
+ * script made (pi marks them with `parentToolCallId`) and the top-level ones,
+ * each reduced to the fields the classifier reads. The marker is the row's
+ * whole notion of "nested": a stream where it moved would leave `nested`
+ * empty and the row FAILED, never PASSED.
+ *
+ * @param {Array<Record<string, any>>} events
+ */
+export function summarizeToolEnds(events) {
+	const ends = (events ?? [])
+		.filter((event) => event?.type === "tool_execution_end")
+		.map((event) => ({
+			id: event.toolCallId,
+			nested: typeof event.parentToolCallId === "string",
+			toolName: event.toolName,
+			isError: event.isError === true,
+			text: (event.result?.content ?? [])
+				.map((block) => block?.text ?? "")
+				.join("\n"),
+		}));
+	return {
+		nested: ends.filter((call) => call.nested),
+		topLevel: ends.filter((call) => !call.nested),
+	};
+}
+
+/**
  * Drive one scripted turn through a real `pi --mode rpc` and return its event
  * stream. Bounded: the wait for `agent_settled` has a cap, and expiry is
  * reported rather than read as a finished run.
@@ -1384,19 +1411,7 @@ export async function runCodemodeNestedProbe(ctx) {
 				return [];
 			}
 		});
-	const ends = run.events
-		.filter((event) => event.type === "tool_execution_end")
-		.map((event) => ({
-			id: event.toolCallId,
-			nested: typeof event.parentToolCallId === "string",
-			toolName: event.toolName,
-			isError: event.isError === true,
-			text: (event.result?.content ?? [])
-				.map((block) => block?.text ?? "")
-				.join("\n"),
-		}));
-	const nested = ends.filter((call) => call.nested);
-	const topLevel = ends.filter((call) => !call.nested);
+	const { nested, topLevel } = summarizeToolEnds(run.events);
 	const files = {
 		b: read(path.join(projectDir, "b.ts")),
 		c: read(path.join(projectDir, "c.ts")),
