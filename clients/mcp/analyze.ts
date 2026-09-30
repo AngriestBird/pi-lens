@@ -461,6 +461,12 @@ export async function analyzeFile(
 		undefined,
 		{
 			blockingOnly: options.blockingOnly ?? false,
+			// #3791: this is a pull surface. Each call is an independent question,
+			// so the synthetic coverage notice must come back on every call rather
+			// than being latched once per session by the dispatcher — otherwise a
+			// second pull of an unanalysable file reads as a false clean. The pi
+			// push surface keeps its once-per-session latch (the default).
+			dedupeCoverageNotice: false,
 		},
 	);
 	const durationMs = Date.now() - start;

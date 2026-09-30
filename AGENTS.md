@@ -680,6 +680,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
   Every model-facing diagnostic, blocker, advisory, widget, nudge, and snapshot
   either passes the shared freshness/disposition gate or carries an explicit
   bounded age label.
+- The dispatcher coverage notice (`buildCoverageNotice`) latches once per
+  session (`coverageNoticeSeen`) for the pi push surface; a pull surface
+  (`pilens_analyze`) passes `dedupeCoverageNotice: false` so every call carries
+  the notice and the push latch stays untouched (#3791).
 - `pilens:files:touched` publishers are `clients/pipeline.ts` and
   `clients/runtime-agent-end.ts`; `clients/agent-nudge.ts` is the subscriber.
   `clients/lsp-mutation.ts` has an optional callback but is not a publisher until
