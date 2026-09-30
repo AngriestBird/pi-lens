@@ -1149,6 +1149,59 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			}
 		});
 
+		for (const over of [0, 1]) {
+			it(
+				over === 0
+					? "fills exactly the chars the blockers leave"
+					: "holds the last resolved line one char past what the blockers leave",
+				async () => {
+					// The blockers' share is their text plus the `\n\n` that joins
+					// them to the section; the section gets the rest, less room for
+					// the widest overflow tail.
+					const pad = ` ${"w".repeat(200)}`;
+					const blocker = blockerSection("wide.ts", 3, pad);
+					const budget =
+						1000 - (blocker.length + 2) - "… and 9007199254740991 more".length;
+					const env = setupTestEnvironment("pi-lens-3218-wedge-");
+					try {
+						const { runtime, cacheManager } = newTurn();
+						const stems = [0, 1, 2].map((index) => `w${index}-`);
+						const fixed = stems.reduce(
+							(sum, stem) => sum + line(`${stem}.ts`).length + 1,
+							0,
+						);
+						const room = budget - fixed;
+						const names = stems.map((stem, index) => {
+							const share = Math.floor(room / 3) + (index < room % 3 ? 1 : 0);
+							const extra = index === 2 ? over : 0;
+							return `${stem}${"z".repeat(share + extra)}.ts`;
+						});
+						expect(
+							names.reduce((sum, name) => sum + line(name).length + 1, 0),
+						).toBe(budget + over);
+						for (const name of names) retire(runtime, env.tmpDir, name);
+						recordUnresolvedBlocker(
+							runtime,
+							cacheManager,
+							env.tmpDir,
+							"wide.ts",
+							3,
+							pad,
+						);
+
+						const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+						expect(content).not.toContain("(truncated)");
+						expect(content).toContain(blocker);
+						expect(content.includes(line(names[2]!))).toBe(over === 0);
+						expect(runtime.hasResolvedBlockerFiles()).toBe(over === 1);
+					} finally {
+						env.cleanup();
+					}
+				},
+			);
+		}
+
 		it("sizes the resolved lines to the lines the blockers leave", async () => {
 			// Two short five-row blockers take 15 of the 20 lines (plus the
 			// blank that joins them to the section), so lines, not chars, bound
