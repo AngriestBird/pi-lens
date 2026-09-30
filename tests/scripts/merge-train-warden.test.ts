@@ -54,7 +54,7 @@ import {
 	stalledRunCommentMarker,
 } from "../../scripts/lib/warden-run-health.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
-import { evaluateExpression } from "../support/workflow-expression.js";
+import { evaluateCancelInProgress } from "../support/workflow-expression.js";
 
 const REPO_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
@@ -4209,35 +4209,24 @@ describe("merge-lane sweep (#2185)", () => {
 				recordValue(triggers.push).branches,
 				`${name} master trigger`,
 			).toContain("master");
-			const cancelInProgress = recordValue(document.concurrency)[
-				"cancel-in-progress"
-			];
-			expect(typeof cancelInProgress, `${name} concurrency type`).toBe(
-				"string",
-			);
-			const expression = String(cancelInProgress).replace(
-				/^\$\{\{\s*([\s\S]*?)\s*\}\}$/,
-				"$1",
-			);
 			expect(
-				Boolean(evaluateExpression(expression, "opened", "run", "push", true)),
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"push",
+				),
 				`${name} push cancellation`,
 			).toBe(false);
 			expect(
-				Boolean(
-					evaluateExpression(expression, "opened", "run", "pull_request", true),
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"pull_request",
 				),
 				`${name} PR cancellation`,
 			).toBe(true);
 			expect(
-				Boolean(
-					evaluateExpression(
-						expression,
-						"opened",
-						"run",
-						"repository_dispatch",
-						true,
-					),
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"repository_dispatch",
 				),
 				`${name} dispatch cancellation`,
 			).toBe(true);

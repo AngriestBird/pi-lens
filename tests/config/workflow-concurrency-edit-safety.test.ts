@@ -4,15 +4,16 @@ import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
-	evaluateExpression,
+	evaluateCancelInProgress,
 	evaluateGroup,
 } from "../support/workflow-expression.js";
+import { minimatch } from "minimatch";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
 
 type PullRequestTrigger = { types?: string[] };
-type PushTrigger = { branches?: string[] } | null;
+type PushTrigger = { branches?: string[]; paths?: string[] } | null;
 type Workflow = {
 	on?:
 		| string
@@ -20,6 +21,7 @@ type Workflow = {
 		| null
 		| { pull_request?: PullRequestTrigger; push?: PushTrigger };
 	concurrency?: { group?: unknown; "cancel-in-progress"?: unknown };
+	jobs?: Record<string, { concurrency?: Workflow["concurrency"] }>;
 };
 
 function loadWorkflow(file: string): Workflow {
@@ -34,12 +36,21 @@ function pushTrigger(on: Workflow["on"]): PushTrigger | undefined {
 }
 
 function cancelInProgressOn(eventName: string, value: unknown): boolean {
-	if (typeof value === "boolean") return value;
-	if (typeof value !== "string")
-		throw new Error("cancel-in-progress must be boolean or expression");
-	const expression = value.trim().replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
-	return Boolean(
-		evaluateExpression(expression, "opened", "run", eventName, true),
+	return evaluateCancelInProgress(value, eventName);
+}
+
+function pushRunsOnMaster(push: PushTrigger | undefined): boolean {
+	if (push === undefined) return false;
+	if (push === null || push.branches === undefined) return true;
+	return push.branches.some((pattern) => minimatch("master", pattern));
+}
+
+function cancelsMasterPush(workflow: Workflow): boolean {
+	if (!pushRunsOnMaster(pushTrigger(workflow.on))) return false;
+	if (cancelInProgressOn("push", workflow.concurrency?.["cancel-in-progress"]))
+		return true;
+	return Object.values(workflow.jobs ?? {}).some((job) =>
+		cancelInProgressOn("push", job.concurrency?.["cancel-in-progress"]),
 	);
 }
 
@@ -52,13 +63,9 @@ describe("workflow concurrency edit safety", () => {
 		for (const file of readdirSync(WORKFLOWS)) {
 			if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
 			const workflow = loadWorkflow(file);
-			const push = pushTrigger(workflow.on);
-			if (push === undefined) continue;
-			if (push !== null && !push.branches?.includes("master")) continue;
+			if (!pushRunsOnMaster(pushTrigger(workflow.on))) continue;
 			scanned++;
-			if (
-				cancelInProgressOn("push", workflow.concurrency?.["cancel-in-progress"])
-			) {
+			if (cancelsMasterPush(workflow)) {
 				findings.push(file);
 			}
 		}
@@ -147,5 +154,37 @@ describe("workflow concurrency edit safety", () => {
 		expect(pushTrigger("push")).toBeNull();
 		expect(pushTrigger(["push", "pull_request"])).toBeNull();
 		expect(pushTrigger({ push: null })).toBeNull();
+	});
+
+	it("treats absent concurrency controls as GitHub's non-cancelling default", () => {
+		// Probe A/A2: adding a master-push workflow without a concurrency block or
+		// cancel-in-progress key must not create a false review finding.
+		expect(cancelsMasterPush({ on: "push" })).toBe(false);
+		expect(cancelsMasterPush({ on: "push", concurrency: {} })).toBe(false);
+	});
+
+	it("checks path-only and globbed master push triggers", () => {
+		// Probe B/B2: a paths-only push and a glob matching master both run there.
+		expect(
+			cancelsMasterPush({
+				on: { push: { paths: ["src/**"] } },
+				concurrency: { "cancel-in-progress": true },
+			}),
+		).toBe(true);
+		expect(
+			cancelsMasterPush({
+				on: { push: { branches: ["**"] } },
+				concurrency: { "cancel-in-progress": true },
+			}),
+		).toBe(true);
+	});
+
+	it("checks job-level concurrency for master push workflows", () => {
+		expect(
+			cancelsMasterPush({
+				on: "push",
+				jobs: { build: { concurrency: { "cancel-in-progress": true } } },
+			}),
+		).toBe(true);
 	});
 });

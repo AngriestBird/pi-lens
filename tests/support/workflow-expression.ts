@@ -1,4 +1,4 @@
-export function resolveValue(
+function resolveValue(
 	value: string,
 	action: string,
 	runId: string,
@@ -21,7 +21,7 @@ export function resolveValue(
 	return false;
 }
 
-export function evaluateTerm(
+function evaluateTerm(
 	term: string,
 	action: string,
 	runId: string,
@@ -76,5 +76,19 @@ export function evaluateGroup(
 ): string {
 	return group.replace(/\$\{\{\s*([\s\S]*?)\s*\}\}/g, (_, expression: string) =>
 		String(evaluateExpression(expression, action, runId, eventName)),
+	);
+}
+
+export function evaluateCancelInProgress(
+	value: unknown,
+	eventName: string,
+): boolean {
+	if (value === undefined) return false;
+	if (typeof value === "boolean") return value;
+	if (typeof value !== "string")
+		throw new Error("cancel-in-progress must be boolean or expression");
+	const expression = value.trim().replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
+	return Boolean(
+		evaluateExpression(expression, "opened", "run", eventName, true),
 	);
 }
