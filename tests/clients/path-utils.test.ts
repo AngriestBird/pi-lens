@@ -25,8 +25,7 @@ import {
 	findLocalToolConfig,
 	findNearestContaining,
 	findNearestMarkerRoot,
-	type FindNearestMarkerRootDetailedOptions,
-	type GitMarkerResult,
+	findNearestMarkerRootDetailed,
 	isRealGitMarker,
 	homeRelativePath,
 	matchesWorkspaceMemberPattern,
@@ -898,84 +897,6 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 		},
 	);
 
-	it.each([false, undefined])(
-		"keeps root-or-null results for structural options with details=%s",
-		(details) => {
-			const env = setupTestEnvironment("pi-lens-marker-legacy-options-");
-			try {
-				const project = path.join(env.tmpDir, "project");
-				fs.mkdirSync(project);
-				fs.writeFileSync(path.join(project, "present"), "marker\n");
-				const observed: string[] = [];
-				// These are structural legacy options, not excess-property literals
-				// forced through the API with a cast or a type-check suppression.
-				const options = {
-					details,
-					homeDir: env.tmpDir,
-					markerPredicate: (file: string) => {
-						observed.push(file);
-						return true;
-					},
-				};
-				const found: string | null = findNearestMarkerRoot(
-					project,
-					["missing", "present"],
-					options,
-				);
-				expect(found).toBe(project);
-				expect(observed).toEqual([path.join(project, "present")]);
-				expect(
-					findNearestMarkerRoot(env.tmpDir, ["present"], options),
-				).toBeNull();
-			} finally {
-				env.cleanup();
-			}
-		},
-	);
-
-	it.each([false, undefined])(
-		"does not invent an absent marker for structural details=%s",
-		(details) => {
-			const env = setupTestEnvironment("pi-lens-marker-legacy-absent-");
-			try {
-				const project = path.join(env.tmpDir, "project");
-				fs.mkdirSync(project);
-				const observed: string[] = [];
-				const options = {
-					details,
-					homeDir: env.tmpDir,
-					markerPredicate: (file: string) => {
-						observed.push(file);
-						return true;
-					},
-				};
-				expect(findNearestMarkerRoot(project, ["missing"], options)).toBeNull();
-				expect(observed).toEqual([]);
-			} finally {
-				env.cleanup();
-			}
-		},
-	);
-
-	it.each([false, undefined])(
-		"keeps the legacy predicate optional with structural details=%s",
-		(details) => {
-			const env = setupTestEnvironment("pi-lens-marker-legacy-optional-");
-			try {
-				const project = path.join(env.tmpDir, "project");
-				fs.mkdirSync(project);
-				fs.writeFileSync(path.join(project, "present"), "marker\n");
-				const options = { details, homeDir: env.tmpDir };
-				expect(findNearestMarkerRoot(project, ["present"], options)).toBe(
-					project,
-				);
-				expect(findNearestMarkerRoot(project, ["missing"], options)).toBeNull();
-			} finally {
-				env.cleanup();
-			}
-		},
-	);
-
 	it.each(["ENOENT", "ENOTDIR", "EACCES", "ESTALE"])(
 		"keeps %s distinct from a successful marker validation",
 		(code) => {
@@ -1001,8 +922,7 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 				} else {
 					expect(detailed).toEqual({ kind: "unavailable", cause: failure });
 					expect(
-						findNearestMarkerRoot(env.tmpDir, [".git"], {
-							details: true,
+						findNearestMarkerRootDetailed(env.tmpDir, [".git"], {
 							markerPredicate: (file) => isRealGitMarker(file, true),
 						}),
 					).toEqual({
@@ -1071,102 +991,49 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 		}
 	});
 
-	it("reads each detailed predicate lazily with its options receiver", () => {
-		// refs #3644: extracting the per-directory scan must not freeze the
-		// detailed accessor or give it the legacy callback's unbound receiver.
-		const env = setupTestEnvironment("pi-lens-marker-detailed-receiver-");
+	it("does not probe a detailed marker at or above the home ceiling", () => {
+		const env = setupTestEnvironment("pi-lens-marker-detailed-ceiling-");
+		try {
+			// Recurrence: a detailed walk that probes before the ceiling would read
+			// a marker at or above $HOME and report an escaped owner.
+			const probed: string[] = [];
+			expect(
+				findNearestMarkerRootDetailed(env.tmpDir, ["present"], {
+					homeDir: env.tmpDir,
+					markerPredicate: (file) => {
+						probed.push(file);
+						return { kind: "valid" };
+					},
+				}),
+			).toEqual({ kind: "not-found", reason: "home-ceiling" });
+			expect(probed).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("probes markers in order per directory and climbs past an absent one", () => {
+		const env = setupTestEnvironment("pi-lens-marker-detailed-order-");
 		try {
 			const project = path.join(env.tmpDir, "project");
 			const nested = path.join(project, "src");
 			fs.mkdirSync(nested, { recursive: true });
 			fs.writeFileSync(path.join(project, ".git"), "gitdir: ../metadata\n");
-			let predicateReads = 0;
 			const visited: string[] = [];
-			const options: FindNearestMarkerRootDetailedOptions = {
-				details: true,
-				homeDir: env.tmpDir,
-				get markerPredicate() {
-					predicateReads++;
-					return function (
-						this: FindNearestMarkerRootDetailedOptions | undefined,
-						file: string,
-					): GitMarkerResult {
-						visited.push(file);
-						if (this?.homeDir !== env.tmpDir) return { kind: "absent" };
-						return isRealGitMarker(file, true);
-					};
-				},
-			};
 			expect(
-				findNearestMarkerRoot(nested, [".git", "missing"], options),
-			).toEqual({
-				kind: "found",
-				root: project,
-			});
+				findNearestMarkerRootDetailed(nested, [".git", "missing"], {
+					homeDir: env.tmpDir,
+					markerPredicate: (file) => {
+						visited.push(file);
+						return isRealGitMarker(file, true);
+					},
+				}),
+			).toEqual({ kind: "found", root: project });
 			expect(visited).toEqual([
 				path.join(nested, ".git"),
 				path.join(nested, "missing"),
 				path.join(project, ".git"),
 			]);
-			expect(predicateReads).toBe(3);
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("captures a legacy predicate once and invokes it without an options receiver", () => {
-		const env = setupTestEnvironment("pi-lens-marker-legacy-receiver-");
-		try {
-			const project = path.join(env.tmpDir, "project");
-			const nested = path.join(project, "src");
-			fs.mkdirSync(nested, { recursive: true });
-			const rejected = path.join(nested, "ignored-marker");
-			const accepted = path.join(project, "package.json");
-			fs.writeFileSync(rejected, "marker\n");
-			fs.writeFileSync(accepted, "{}");
-			let predicateReads = 0;
-			const visited: string[] = [];
-			const options = {
-				homeDir: env.tmpDir,
-				get markerPredicate() {
-					predicateReads++;
-					// R8: a method call silently replaces the legacy undefined receiver.
-					return function (this: undefined, file: string): boolean {
-						visited.push(file);
-						return this === undefined && file === accepted;
-					};
-				},
-			};
-			expect(
-				findNearestMarkerRoot(
-					nested,
-					["missing", "ignored-marker", "package.json"],
-					options,
-				),
-			).toBe(project);
-			expect(visited).toEqual([rejected, accepted]);
-			expect(predicateReads).toBe(1);
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("does not read a detailed predicate before the home ceiling", () => {
-		const env = setupTestEnvironment("pi-lens-marker-detailed-lazy-");
-		try {
-			// Restoring legacy capture must not make detailed lookup eager.
-			let predicateReads = 0;
-			expect(
-				findNearestMarkerRoot(env.tmpDir, ["present"], {
-					details: true,
-					homeDir: env.tmpDir,
-					get markerPredicate() {
-						predicateReads++;
-						return (file: string) => isRealGitMarker(file, true);
-					},
-				}),
-			).toEqual({ kind: "not-found", reason: "home-ceiling" });
-			expect(predicateReads).toBe(0);
 		} finally {
 			env.cleanup();
 		}
@@ -1183,25 +1050,58 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 			const nested = path.join(env.tmpDir, ...Array<string>(64).fill("d"));
 			fs.mkdirSync(nested, { recursive: true });
 			const options = {
-				details: true,
 				markerPredicate: (file: string) => isRealGitMarker(file, true),
 			} as const;
 			expect(
-				findNearestMarkerRoot(path.dirname(nested), [".git"], options),
+				findNearestMarkerRootDetailed(path.dirname(nested), [".git"], options),
 			).toEqual({ kind: "found", root: env.tmpDir });
-			expect(findNearestMarkerRoot(nested, [".git"], options)).toEqual({
+			expect(findNearestMarkerRootDetailed(nested, [".git"], options)).toEqual({
 				kind: "not-found",
 				reason: "depth-limit",
 			});
 			expect(findNearestMarkerRoot(nested, [".git"])).toBeNull();
 			expect(
-				findNearestMarkerRoot(env.tmpDir, [".git"], {
+				findNearestMarkerRootDetailed(env.tmpDir, [".git"], {
 					...options,
 					homeDir: env.tmpDir,
 				}),
 			).toEqual({ kind: "not-found", reason: "home-ceiling" });
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	it("reports reason root when the walk reaches the filesystem root below an unrelated home", async () => {
+		// Recurrence (#3691 F4): `parent === current` was never exercised. On posix
+		// "/" is an ancestor of every home, so the ceiling always fires first; a
+		// win32 project on another drive from home reaches the root. Load the real
+		// walker under win32 path semantics so every lane runs the same branch.
+		vi.resetModules();
+		vi.doMock("node:path", () => ({
+			...path.win32,
+			default: path.win32,
+		}));
+		try {
+			const win = await import("../../clients/path-utils.js");
+			const probed: string[] = [];
+			expect(
+				win.findNearestMarkerRootDetailed("C:\\work\\proj\\src", [".git"], {
+					homeDir: "D:\\home\\user",
+					markerPredicate: (file) => {
+						probed.push(file);
+						return { kind: "absent" };
+					},
+				}),
+			).toEqual({ kind: "not-found", reason: "root" });
+			expect(probed).toEqual([
+				"C:\\work\\proj\\src\\.git",
+				"C:\\work\\proj\\.git",
+				"C:\\work\\.git",
+				"C:\\.git",
+			]);
+		} finally {
+			vi.doUnmock("node:path");
+			vi.resetModules();
 		}
 	});
 });
