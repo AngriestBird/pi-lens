@@ -52,6 +52,7 @@ import {
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
+	targetLangForFixture,
 } from "./lib/clean-signal.mjs";
 import {
 	bootstrapFixtureWorkspace,
@@ -398,7 +399,7 @@ function resolveTargetLangRows(measuredRows) {
 	);
 	const byTargetLang = new Map();
 	for (const r of measurable) {
-		const targetLang = r.cleanFixture ? r.lang.replace(/-clean$/, "") : r.lang;
+		const targetLang = targetLangForFixture(r.lang, r.cleanFixture);
 		const prev = byTargetLang.get(targetLang);
 		if (prev && prev.cleanFixture && !r.cleanFixture) continue; // clean fixture wins
 		byTargetLang.set(targetLang, { ...r, lang: targetLang, targetLang });
@@ -406,7 +407,9 @@ function resolveTargetLangRows(measuredRows) {
 	return [...byTargetLang.values()];
 }
 
-const nameList = (langs) => (langs.length ? langs.join(", ") : "none");
+function nameList(langs) {
+	return langs.length ? langs.join(", ") : "none";
+}
 
 function updateMatrix(measuredRows) {
 	const docPath = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
@@ -440,7 +443,7 @@ function updateMatrix(measuredRows) {
 			...(langs.length
 				? {
 						probedLangs: fixtures.map((f) =>
-							f.clean ? f.lang.replace(/-clean$/, "") : f.lang,
+							targetLangForFixture(f.lang, f.clean),
 						),
 					}
 				: {}),

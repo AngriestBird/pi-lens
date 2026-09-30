@@ -27,6 +27,7 @@ import {
 	findCleanSignalDrift,
 	resolveProbeServerId,
 	strategyKeyForLang,
+	targetLangForFixture,
 } from "../../scripts/lib/clean-signal.mjs";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -781,5 +782,19 @@ describe("buildMatrixObservations (#3401, review F3)", () => {
 		expect(
 			buildMatrixObservations([row({ tierLabel: "", tier: 3 })])[0].tier,
 		).toBe("3");
+	});
+});
+
+describe("targetLangForFixture (#3401)", () => {
+	// Recurrence: a subset probe scopes its bookkeeping to the langs it probed;
+	// `typescript-clean` writes the `typescript` row, so scoping it by the raw
+	// fixture lang would leave the row it just measured outside the scope.
+	it("maps a clean fixture onto its base lang and leaves other langs alone", () => {
+		expect(targetLangForFixture("typescript-clean", true)).toBe("typescript");
+		expect(targetLangForFixture("typescript", false)).toBe("typescript");
+		expect(targetLangForFixture("typescript7-clean", true)).toBe("typescript7");
+		expect(targetLangForFixture("ast-grep-baseline")).toBe("ast-grep-baseline");
+		// Only a clean fixture is renamed: a dirty fixture keeps its own name.
+		expect(targetLangForFixture("x-clean", false)).toBe("x-clean");
 	});
 });

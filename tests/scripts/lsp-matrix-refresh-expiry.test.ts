@@ -407,6 +407,25 @@ describe("#3401 clean-behavior hysteresis", () => {
 		);
 	});
 
+	it("counts agreeing runs from the first sighting of the new value (agreeRuns 3)", () => {
+		// A differing observation starts its own count at 1: A, B, B is two runs of
+		// B, which is below three and must not commit.
+		const a = measured("ast-grep", "publishes-unversioned", "2*");
+		const b = measured("ast-grep", "silent", "3");
+		const opts = { src: "ci", agreeRuns: 3 } as const;
+		let text = refreshCapabilityMatrix(FIXTURE, [a], opts).text;
+		text = refreshCapabilityMatrix(text, [b], opts).text;
+		text = refreshCapabilityMatrix(text, [b], opts).text;
+		expect(cellOf(text, "ast-grep", "clean-behavior")).toBe(
+			"publishes-versioned",
+		);
+		expect(parseRefreshState(text)["clean-behavior"]?.["ast-grep"]?.runs).toBe(
+			2,
+		);
+		const third = refreshCapabilityMatrix(text, [b], opts);
+		expect(cellOf(third.text, "ast-grep", "clean-behavior")).toBe("silent");
+	});
+
 	it("resets the hold on a probed night that measured nothing for the lang", () => {
 		// Pins the skip semantics (review mutation M13): A, a night with no
 		// comparable observation, A again is two NON-consecutive runs, so the

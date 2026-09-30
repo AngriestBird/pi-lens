@@ -446,6 +446,20 @@ export const MEASURED_CLEAN_BEHAVIORS = new Set([
 ]);
 
 /**
+ * The matrix lang a probe fixture writes to: a `clean: true` fixture
+ * (`typescript-clean`) resolves onto its base lang's row (`typescript`). One
+ * spelling for the row resolution and for scoping a subset probe (#3401), so a
+ * `probe-clean-signal.mjs typescript-clean` run scopes to the row it writes.
+ *
+ * @param {string} lang
+ * @param {boolean} [clean]
+ * @returns {string}
+ */
+export function targetLangForFixture(lang, clean) {
+	return clean ? lang.replace(/-clean$/, "") : lang;
+}
+
+/**
  * Map the probe's resolved per-lang rows onto the observations
  * `refreshCapabilityMatrix` consumes (#3401). Only a COMPARABLE axis is passed
  * through; every other value is `null`, so an `empty-only`/`unknown` run can
