@@ -343,6 +343,19 @@ provenance map alone and never reads the resolved value, so no un-redacted view
 exists. Validation records are bounded and structural — a reason names a key, a
 type, and a count, never a value or a source snippet.
 
+### The MCP tool input contract
+
+The MCP tool mirror's input contract is: a tool reads the keys its advertised
+`inputSchema` declares. Since #3749 a call carrying undeclared keys is answered
+with a report (leading `Ignored unknown argument(s) for <tool>: ...` line,
+`structuredContent.ignoredArguments`, and the `mcp-ignored-arguments`
+degradation row), and an ignored key that leaves a schema-`required` input
+missing is an error. The match key for the line is its
+`Ignored unknown argument(s)` prefix; the prose after it may change. **Rejecting
+every unknown key outright is deliberately not done:** callers that pass extra
+keys today would break, so it needs a major, through the removal checklist in
+section 4.
+
 ## Where each policy point is enforced
 
 | Policy point | Data | Test |

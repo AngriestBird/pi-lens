@@ -39,6 +39,35 @@ actually sent: `usage tokens=<n> elapsed-ms=<n> bytes=<n> truncated=<true|false>
 A rejected call (e.g. MCP's "Unknown or disabled tool") is rendered through the
 same gate rather than bypassing it.
 
+**MCP argument handling (#3749).** The MCP `tools/call` dispatcher compares the
+call's argument keys with the `inputSchema` the tool advertises in `tools/list`
+(`findIgnoredArguments`, `mcp/tool-arguments.ts`), once, for every tool. An
+undeclared key is never silently dropped:
+
+- the result's first line is ``Ignored unknown argument(s) for <tool>: `key`
+  (did you mean `nearest`?). They had no effect on this call.`` (the suggestion
+  appears only when a declared key is near), followed by the tool's own result;
+- the result carries `structuredContent: { ignoredArguments: [...],
+  ignoredArgumentCount: N }` (at most 8 keys, each cut at 64 characters; the
+  count is exact);
+- when an ignored key leaves a schema-`required` input missing (`filePath` sent
+  where `file` is required), the tool does not run: the result is an error whose
+  first line is the same sentence, followed by `Not run: required argument(s)
+  ... missing.`;
+- each such call adds one count to the `mcp-ignored-arguments` degradation
+  group (subject: the tool name), visible in `pilens_health`.
+
+Unknown keys are still not rejected outright: a caller that passes an extra key
+alongside every required one keeps getting its answer, with the report above.
+Hard rejection is a change to the public MCP input contract and is owned by the
+stability policy ([public-api-stability.md](public-api-stability.md)).
+A schema declares only what the tool reads, so a key the dispatcher itself
+consumes (`cwd` on a tool whose schema omits it, such as `pilens_health`) is
+reported too. The retired `pilens_lsp_diagnostics` name is checked against
+`pilens_diagnostics`'s schema; the retired `pilens_ast_grep_dump` name has no
+schema and is not checked. `pilens_diagnostics` declares no required key (`path`
+is needed only for `source=lsp`), so `filePath` there is a report, not a refusal.
+
 ## Per-edit
 
 - **`lens_diagnostics`** — Session-cache or LSP-probe diagnostic state, selected

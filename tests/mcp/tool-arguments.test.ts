@@ -49,6 +49,16 @@ describe("findIgnoredArguments", () => {
 		expect(findIgnoredArguments(ANALYZE, { FILE: "a.ts" })?.ignored).toEqual([
 			{ key: "FILE", suggestion: "file" },
 		]);
+		// One character dropped, added or replaced; two edits is not a typo.
+		expect(findIgnoredArguments(ANALYZE, { modee: 1 })?.ignored).toEqual([
+			{ key: "modee", suggestion: "mode" },
+		]);
+		expect(findIgnoredArguments(DIAGNOSTICS, { sourse: 1 })?.ignored).toEqual([
+			{ key: "sourse", suggestion: "source" },
+		]);
+		expect(findIgnoredArguments(ANALYZE, { moed: 1 })?.ignored).toEqual([
+			{ key: "moed" },
+		]);
 	});
 
 	it("suggests nothing for a key that is near nothing", () => {

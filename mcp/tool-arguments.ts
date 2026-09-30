@@ -42,30 +42,23 @@ export const MAX_REPORTED_KEYS = 8;
 /** A reported key is cut here so one huge key cannot make a huge line. */
 export const MAX_REPORTED_KEY_CHARS = 64;
 
-function levenshtein(a: string, b: string): number {
-	let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
-	for (let i = 1; i <= a.length; i++) {
-		const current = [i];
-		for (let j = 1; j <= b.length; j++) {
-			current.push(
-				Math.min(
-					previous[j] + 1,
-					current[j - 1] + 1,
-					previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-				),
-			);
-		}
-		previous = current;
-	}
-	return previous[b.length];
+/** Equal, or one character inserted, dropped or replaced. */
+function withinOneEdit(a: string, b: string): boolean {
+	if (Math.abs(a.length - b.length) > 1) return false;
+	let i = 0;
+	while (i < a.length && i < b.length && a[i] === b[i]) i++;
+	if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+	return a.length < b.length
+		? a.slice(i) === b.slice(i + 1)
+		: b.slice(i) === a.slice(i + 1);
 }
 
 /**
  * The declared key a caller most plausibly meant by `key`: one containing
  * (or contained in) the other once case and punctuation are folded away
- * (`filePath` for `path` or `file`; `FILE` for `file`), then a one-or-two-
- * character typo. `undefined` when
- * nothing is near: a wrong suggestion is worse than none.
+ * (`filePath` for `path` or `file`; `FILE` for `file`), then a one-character
+ * typo. `undefined` when nothing is near: a wrong suggestion is worse than
+ * none.
  */
 function nearestDeclaredKey(
 	key: string,
@@ -82,11 +75,7 @@ function nearestDeclaredKey(
 			(folded.includes(other) || other.includes(folded))
 		)
 			score = 100 + Math.abs(folded.length - other.length);
-		else {
-			const distance = levenshtein(folded, other);
-			if (distance <= Math.max(1, Math.floor(other.length / 3)))
-				score = 200 + distance;
-		}
+		else if (withinOneEdit(folded, other)) score = 200;
 		if (score !== undefined && (!best || score < best.score))
 			best = { key: candidate, score };
 	}
