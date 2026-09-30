@@ -15,10 +15,12 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { loadWebTreeSitter } from "../../clients/deps/web-tree-sitter.js";
 import {
 	TreeSitterClient,
 	WASM_TRAP_BUDGET,
 } from "../../clients/tree-sitter-client.js";
+import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
 import { TreeSitterSymbolExtractor } from "../../clients/tree-sitter-symbol-extractor.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -54,6 +56,21 @@ function wasmTrapReasons(): string[] {
 			.find((group) => group.kind === "wasm-trap")
 			?.latestReasons.map((row) => row.reason) ?? []
 	);
+}
+
+function pythonRule(id: string): TreeSitterQuery {
+	return {
+		id,
+		name: id,
+		severity: "warning",
+		category: "test",
+		language: "python",
+		message: id,
+		query: "(function_definition) @fn",
+		metavars: ["fn"],
+		has_fix: false,
+		filePath: "",
+	};
 }
 
 /**
@@ -182,6 +199,65 @@ describe("trap entry decay (#3678 F-A)", () => {
 	});
 });
 
+describe("swallowing consumers (#3678 F1, F2)", () => {
+	/** A batched compile whose `matches` traps deterministically on the marker. */
+	async function trapBatchedMatches() {
+		const { Query } = await loadWebTreeSitter();
+		const realMatches = Query.prototype.matches;
+		let matchCalls = 0;
+		vi.spyOn(Query.prototype, "matches").mockImplementation(function (
+			this: InstanceType<typeof Query>,
+			...args: Parameters<typeof realMatches>
+		) {
+			matchCalls++;
+			if (args[0].text.includes("boom_marker")) throw trap();
+			return realMatches.apply(this, args);
+		});
+		return { matchCalls: () => matchCalls };
+	}
+
+	it("charges a file whose batched match traps instead of spending budget every call", async () => {
+		const { client, onAbort } = await liveClient();
+		const calls = await trapBatchedMatches();
+		const file = pythonFile("def boom_fn():\n    return 1  # boom_marker\n");
+		const rule = pythonRule("trap-rule");
+
+		const outcomes = [];
+		for (let i = 0; i < 6; i++) {
+			outcomes.push(await client.runQueriesOnFile([rule], file, "python"));
+		}
+
+		// `runQueriesOnFile` swallows the trap and returns normally, so the
+		// success path must not clear the entry the trap just set. The file is
+		// charged on the second call and the later ones never walk the tree.
+		expect(onAbort).not.toHaveBeenCalled();
+		expect(calls.matchCalls()).toBe(2);
+		expect(outcomes).toEqual([[], [], [], [], [], []]);
+	});
+
+	it("does not let a healthy consumer clear another consumer's charged entry", async () => {
+		const { client, onAbort } = await liveClient();
+		await trapBatchedMatches();
+		const content = "def boom_fn():\n    return 1  # boom_marker\n";
+		const trapped = pythonFile(content);
+		const healthyTwin = pythonFile(content);
+		const rule = pythonRule("trap-rule");
+
+		for (let round = 0; round < 5; round++) {
+			await client.runQueriesOnFile([rule], trapped, "python");
+			expect(
+				(await client.withParsedTree(healthyTwin, "python", undefined, () => 1))
+					.parsed,
+			).toBe(true);
+		}
+
+		// Consumer A's entry stays charged; consumer B's healthy parses of the
+		// same language and content must not re-arm it, so the fourth trap that
+		// would abort the runtime never happens.
+		expect(onAbort).not.toHaveBeenCalled();
+	});
+});
+
 describe("query-compile keying (#3678 F-C)", () => {
 	it("charges a repeated compile trap to its query source instead of the budget", () => {
 		const onAbort = vi.fn();
@@ -214,5 +290,46 @@ describe("query-compile keying (#3678 F-C)", () => {
 		// still returns the documented null.
 		expect(outcomes).toEqual([null, null, null, null, null]);
 		expect(onAbort).not.toHaveBeenCalled();
+	});
+
+	it("spends budget per distinct query source, not one constant key", () => {
+		const onAbort = vi.fn();
+		const client = new TreeSitterClient(false, onAbort);
+		const extractor = new TreeSitterSymbolExtractor("python", client);
+		const compileQuery = (
+			extractor as unknown as {
+				compileQuery: (
+					Query: new () => never,
+					language: unknown,
+					src: string,
+					label: string,
+				) => unknown;
+			}
+		).compileQuery.bind(extractor);
+		class TrappingQuery {
+			constructor() {
+				throw trap();
+			}
+		}
+
+		for (let i = 0; i < WASM_TRAP_BUDGET; i++) {
+			expect(
+				compileQuery(
+					TrappingQuery as never,
+					{},
+					`(function_definition) @f${i}`,
+					"defs",
+				),
+			).toBeNull();
+		}
+		expect(onAbort).not.toHaveBeenCalled();
+
+		// Each distinct source's first trap spent one unit, so the next distinct
+		// source crosses the budget. With a constant key the earlier sources
+		// collide, charge, and leave budget for this one — no abort.
+		expect(() =>
+			compileQuery(TrappingQuery as never, {}, "(class_definition) @c", "defs"),
+		).toThrow();
+		expect(onAbort).toHaveBeenCalledTimes(1);
 	});
 });

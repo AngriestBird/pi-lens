@@ -4134,6 +4134,7 @@ async function extractTreeSitterSymbols(
 		languageId,
 		content,
 		(tree) => extractor.extract(tree, filePath, content),
+		"review-graph",
 	);
 	return extracted.parsed
 		? extracted.value
@@ -4212,6 +4213,7 @@ export async function captureReviewGraphStructuralIr(
 		languageId,
 		content,
 		(tree) => extractor.extract(tree, filePath, content),
+		"review-graph",
 	);
 	if (!result.parsed) return { complete: false };
 	return {

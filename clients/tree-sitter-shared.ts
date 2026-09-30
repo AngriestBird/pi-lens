@@ -182,8 +182,12 @@ export async function withTreeSitterRoot<T>(
 	const client = getSharedTreeSitterClient();
 	if (!languageId || !client || !(await client.init()))
 		return { parsed: false };
-	return client.withParsedTree(filePath, languageId, content, (tree) =>
-		consume(tree.rootNode as TsNode),
+	return client.withParsedTree(
+		filePath,
+		languageId,
+		content,
+		(tree) => consume(tree.rootNode as TsNode),
+		"tree-sitter-shared",
 	);
 }
 

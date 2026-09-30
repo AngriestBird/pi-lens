@@ -178,11 +178,17 @@ export type ParsedTreeOutcome<T> =
 export type WasmTrapState = "retry" | "charged";
 
 /** What a trap is charged to (#3605): a file's language and content, or a
- * query's cache key. `key` is its hash, computed on first need. */
+ * query's cache key. `key` is its hash, computed on first need.
+ *
+ * `caller` scopes the entry to the parsing surface (#3678 F2): the same
+ * language and content parsed by two different callers get two entries, so
+ * a healthy caller cannot decay — and cannot un-skip — a trapping one. It
+ * defaults to the empty label, so a query compile does not need one. */
 export interface WasmInput {
 	languageId: string;
 	source: string;
 	key?: string;
+	caller?: string;
 }
 
 /**
@@ -712,6 +718,8 @@ export class TreeSitterClient {
 			.update(input.languageId)
 			.update("\0")
 			.update(input.source)
+			.update("\0")
+			.update(input.caller ?? "")
 			.digest("hex");
 		return input.key;
 	}
@@ -1770,6 +1778,7 @@ export class TreeSitterClient {
 			languageId,
 			contentOverride,
 			(tree) => tree,
+			"parseFile",
 		);
 		return outcome.parsed ? outcome.value : null;
 	}
@@ -1779,8 +1788,15 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller = "withParsedTree",
 	): Promise<ParsedTreeOutcome<T>> {
-		return this.parseFileAndUse(filePath, languageId, contentOverride, consume);
+		return this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			consume,
+			caller,
+		);
 	}
 
 	private async parseFileAndUse<T>(
@@ -1788,6 +1804,7 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller: string,
 	): Promise<ParsedTreeOutcome<T>> {
 		this.dbg(`Parsing ${filePath} with language ${languageId}`);
 		const parser = await this.getParser(languageId);
@@ -1801,7 +1818,7 @@ export class TreeSitterClient {
 		try {
 			const content = contentOverride ?? fs.readFileSync(filePath, "utf-8");
 			this.dbg(`File content length: ${content.length}`);
-			input = { languageId, source: content };
+			input = { languageId, source: content, caller };
 			// #3605: an input that trapped twice is not parsed again.
 			if (this.wasmInputTraps(input) > 1) {
 				return { parsed: false, wasmTrap: "charged" };
@@ -1835,10 +1852,17 @@ export class TreeSitterClient {
 		}
 		try {
 			this.activeWasmInput = input;
+			// #3678 F1: an entry a trap sets inside `consume` must survive the
+			// success path. A swallowing consumer returns normally after it
+			// reports the trap, so snapshot the count and clear only when this
+			// call did not charge the input itself.
+			const trapsBefore = this.wasmInputTraps(input);
 			const value = consume(tree);
-			// #3678 F-A: a healthy parse of an input that once trapped drops its
-			// entry, so a later one-off trap starts from `retry`, not `charged`.
-			this.clearWasmInput(input);
+			if (this.wasmInputTraps(input) <= trapsBefore) {
+				// #3678 F-A: a healthy parse of an input that once trapped drops
+				// its entry, so a later one-off trap starts from `retry`.
+				this.clearWasmInput(input);
+			}
 			return { parsed: true, value };
 		} catch (thrown) {
 			// #3605: a wasm abort or trap while querying the tree degrades this
@@ -2153,6 +2177,7 @@ export class TreeSitterClient {
 					this.dbg(`Batched query matching error: ${err}`);
 				}
 			},
+			"runQueriesOnFile",
 		);
 
 		const results: Array<{
@@ -4953,6 +4978,7 @@ export class TreeSitterClient {
 					this.dbg(`Query matching error: ${err}`);
 				}
 			},
+			"runQueryOnFile",
 		);
 
 		return matches;

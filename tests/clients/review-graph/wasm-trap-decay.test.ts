@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe("a one-off trap's entry decays after a healthy parse (#3678 F-A)", () => {
-	it("does not charge a second one-off trap on the same unchanged content", async () => {
+	it("decays when the SAME consumer parses the same unchanged content", async () => {
 		const env = setupTestEnvironment("pi-lens-wasm-decay-");
 		cleanups.push(env.cleanup);
 		const content = "def trap_here_fn():\n    return 41\n";
@@ -88,10 +88,18 @@ describe("a one-off trap's entry decays after a healthy parse (#3678 F-A)", () =
 		);
 		expect(getGraphBuildInfoForGraph(first).wasmTrappedFiles).toBe(1);
 
-		// The healthy parse of the SAME input. In production this is any other
-		// surface that parses the file's unchanged content.
+		// The healthy parse of the SAME input by the SAME consumer (the review
+		// graph) is the decay event the builder itself would provide.
 		expect(
-			(await client.withParsedTree(twin, "python", content, () => 1)).parsed,
+			(
+				await client.withParsedTree(
+					twin,
+					"python",
+					content,
+					() => 1,
+					"review-graph",
+				)
+			).parsed,
 		).toBe(true);
 
 		// Build 2: a.py is retried (its in-memory signature was stamped), and its
@@ -107,5 +115,77 @@ describe("a one-off trap's entry decays after a healthy parse (#3678 F-A)", () =
 			new FactStore(),
 		);
 		expect(getGraphBuildInfoForGraph(third).wasmTrappedFiles).toBeUndefined();
+	});
+
+	it("does not decay when a DIFFERENT consumer parses the same content (#3678 F2)", async () => {
+		const env = setupTestEnvironment("pi-lens-wasm-decay-x-");
+		cleanups.push(env.cleanup);
+		const content = "def trap_here_fn():\n    return 42\n";
+		const trapped = createTempFile(env.tmpDir, "a.py", content);
+		const other = createTempFile(
+			env.tmpDir,
+			"c.py",
+			"def gamma_fn():\n    return 4\n",
+		);
+		const twinEnv = setupTestEnvironment("pi-lens-wasm-decay-x-twin-");
+		cleanups.push(twinEnv.cleanup);
+		const twin = createTempFile(twinEnv.tmpDir, "twin.py", content);
+
+		const client = getSharedTreeSitterClient()!;
+		expect(await client.init()).toBe(true);
+		const realExtract = TreeSitterSymbolExtractor.prototype.extract;
+		let trappedExtractions = 2;
+		vi.spyOn(TreeSitterSymbolExtractor.prototype, "extract").mockImplementation(
+			function (
+				this: TreeSitterSymbolExtractor,
+				tree: Parameters<typeof realExtract>[0],
+				filePath: string,
+				fileContent: string,
+			) {
+				if (path.basename(filePath) === "a.py" && trappedExtractions-- > 0) {
+					throw trap();
+				}
+				return realExtract.call(this, tree, filePath, fileContent);
+			},
+		);
+
+		const first = await buildOrUpdateGraph(
+			env.tmpDir,
+			[trapped, other],
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(first).wasmTrappedFiles).toBe(1);
+
+		// A different surface parses the same language and content. It must not
+		// clear the review graph's entry, or a.py would retry forever and spend
+		// budget on every build.
+		expect(
+			(
+				await client.withParsedTree(
+					twin,
+					"python",
+					content,
+					() => 1,
+					"other-surface",
+				)
+			).parsed,
+		).toBe(true);
+
+		// Build 2 traps a second time, and the untouched entry charges it.
+		const second = await buildOrUpdateGraph(
+			env.tmpDir,
+			[trapped],
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(second).wasmTrappedFiles).toBe(1);
+
+		// A charged file stays degraded: a third build skips it rather than
+		// retrying. With cross-consumer decay this build re-extracts and recovers.
+		const third = await buildOrUpdateGraph(
+			env.tmpDir,
+			[trapped],
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(third).wasmTrappedFiles).toBe(1);
 	});
 });
