@@ -374,7 +374,17 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"5 fixes, with no time bound at all.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#2c74f108~6fe808c3": {
+	"clients/runtime-agent-end.ts#3595d62d~d453dc5f": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`resyncLspFile` after a deferred write: the LSP touch has its " +
+			"own wait bound, the resync above it does not. #3528 r1 F1 and " +
+			"#3576 run it through the drain's session and LSP-service guard " +
+			"(`syncDrainWrite`, same await).",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-agent-end.ts#458b366b~893f7563": {
 		family: "hook-await",
 		site: "off-hook",
 		reason:
@@ -385,16 +395,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"phase). The resync races its own touch against the LSP sync " +
 			"budget. #3576 re-keyed it: the same await, through `syncDrainWrite`.",
 		owner: "#3529",
-	},
-	"clients/runtime-agent-end.ts#3595d62d~d453dc5f": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`resyncLspFile` after a deferred write: the LSP touch has its " +
-			"own wait bound, the resync above it does not. #3528 r1 F1 and " +
-			"#3576 run it through the drain's session and LSP-service guard " +
-			"(`syncDrainWrite`, same await).",
-		owner: "#2523 slice 2",
 	},
 	"clients/runtime-agent-end.ts#846909f2~82252dcb": {
 		family: "hook-await",
@@ -408,7 +408,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#ea90513b~041e11c5": {
+	"clients/runtime-agent-end.ts#b8100bef~546c64c4": {
 		family: "hook-await",
 		site: "off-hook",
 		reason:
@@ -416,9 +416,8 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"settlement, chained after the post-exit wait gave up. It parks no " +
 			"awaiting task and holds no queue entry or timer, so a formatter that " +
 			"never settles leaves it inert. It reaches the LSP only through " +
-			"`syncDrainWrite`, the drain's session and LSP-service guard, and " +
-			"`resyncLspFile` races its own touch against the LSP sync budget; a " +
-			"replaced session takes the held-only path, one bounded notify write.",
+			"`resyncHeldLspDocument`: a document a live client of the current " +
+			"service already holds, one bounded notify write each, never a spawn.",
 		owner: "#3828",
 	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {

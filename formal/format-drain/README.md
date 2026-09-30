@@ -76,7 +76,7 @@ bit. So a formatter that writes back stale bytes shows up as a missing edit.
 | `EnterAfterResolve` | #3610 (#3558): `formatFile` calls `enter` after `resolveCommand`, so an install holds no queue entry; without it the hold is taken before the resolution |
 | `FixOrphanSync` | #3529: once an abandoned phase and its abandoned formatters have settled, a fresh stamped read of F is resynced (`handleAgentEnd`, the post-exit resync). The read and the send are separate steps, as in the code |
 | `OrphanSyncBound` | not a fix: #3599/#3728 bound that wait by `DEFERRED_FORMAT_BUDGET_MS`, so it can give up while the run is alive |
-| `OrphanLateSync` | #3828: a give-up chains the same fresh stamped read and `syncDrainWrite` onto the abandoned run's settlement (`handleAgentEnd`, `deferred_format_late_resync`); it needs `FixOrphanSync` |
+| `OrphanLateSync` | #3828: a give-up chains a resync onto the abandoned run's settlement (`handleAgentEnd`, `deferred_format_late_resync`); it needs `FixOrphanSync`. In the code it is held-only in every case (`resyncHeldLspDocument`, #3828 r2): the model has no action that closes a document, so a current-session send to a held F and a held-only one are the same step here, and the no-spawn half is pinned by the replays, not by TLC |
 | `LspGen` | #3528 r1 F1: the drain's LSP sends (the in-hook format and autofix resyncs and the post-exit resync) run only while its session is current |
 | `StartGen` | #3528 r1 F1: after `/new`, the format worker and the autofix loop start no new file; that write's sync would be skipped |
 | `ServiceGen` | #3576: the drain's LSP sends also check the LSP service generation it captured (`captureLspServiceGeneration`), so a retire without a session bump stops them too |

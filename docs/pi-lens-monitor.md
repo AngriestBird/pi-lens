@@ -49,7 +49,13 @@ inherits. This contract adds the standing readout.
 6. **Backlogs**: `lsp_document_drift` rows by disposition, files affected,
    `driftAgeMs` p50/p95/max; `agent_end_deferred_mutation_drain` durations and
    coalesced path counts; `deferred_format_file` runs with `changed:true`
-   versus total.
+   versus total. A formatter that never settles is visible only as an
+   anti-join (#3828): a `deferred_format_post_exit_resync` row with
+   `outcome:"abandoned"` (beside the `hook-await-exceeded` degradation
+   `off_hook:deferred-format-post-exit-resync`) and no
+   `deferred_format_late_resync` row on the same `filePath` afterwards. Report
+   the count of such files; a late row with `outcome:"held-only"` is the
+   healthy end of the same chain.
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,

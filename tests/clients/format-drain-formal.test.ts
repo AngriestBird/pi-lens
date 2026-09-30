@@ -1510,8 +1510,24 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			runtime.resetForSession(Date.now());
 			resetLSPService({ reason: "session_start" });
 		}
+		/**
+		 * The drain is served the real `getLSPService()` singleton, and a read-warm
+		 * touch of the unformatted F leaves a live client of it holding F: the
+		 * one document the late resync may bring to the disk.
+		 */
+		async function currentServiceHoldsF() {
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			await getLSPService().touchFile(filePath, "const x=1\n", {
+				diagnostics: "none",
+				source: "read-warm",
+				readStamp: performance.now(),
+			});
+		}
 
 		it("OrphanGiveUp (#3828): the LSP document equals the disk once the child settles", async () => {
+			await currentServiceHoldsF();
 			const { c, install } = await giveUpBeforeTheChildRuns();
 			// The wait gave up: one abandoned row, and the LSP still has the bytes
 			// from before the format.
@@ -1531,7 +1547,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			expect(lateRows()).toEqual([
 				expect.objectContaining({
 					filePath,
-					metadata: { outcome: "synced" },
+					metadata: { outcome: "held-only" },
 				}),
 			]);
 			// The give-up row stays the only post-exit row: nothing re-reported it.
@@ -1543,6 +1559,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 		});
 
 		it("OrphanGiveUp (#3828): an Escape that ends the wait early, with no ledger record, still chains the late resync", async () => {
+			await currentServiceHoldsF();
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			const controller = new AbortController();
 			const resolving = gate();
@@ -1574,8 +1591,43 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			expect(disk()).toBe("const x = 1\n");
 		});
 
-		it("OrphanGiveUp (#3828): after session_shutdown retired the service the late resync spawns no server", async () => {
+		it("OrphanGiveUp (#3828 r2 F1): in the current session, a file no live client holds is neither opened nor spawned for", async () => {
+			// The session and the service are both current, and the service holds
+			// nothing: the client was idle-evicted during the install, or F was
+			// never opened in it. `service` (the harness's own) holds F; the
+			// drain's real singleton does not.
 			lsp.realService = getLSPService;
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			const spawnsBefore = spawns();
+			const wireBefore = wire.length;
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(wire.length).toBe(wireBefore);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "held-only" } }),
+			]);
+		});
+
+		it("OrphanGiveUp (#3828 r2 F3): another turn's aborted signal at the settle does not stop the late sync", async () => {
+			await currentServiceHoldsF();
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			// A later turn is running when the formatter settles, and the user
+			// has pressed Escape in it: the ambient signal is that turn's.
+			const foreign = new AbortController();
+			foreign.abort();
+			setAmbientAbortSignal(foreign.signal);
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+		});
+
+		it("OrphanGiveUp (#3828): after session_shutdown retired the service the late resync spawns no server", async () => {
+			await currentServiceHoldsF();
 			const { c, install } = await giveUpBeforeTheChildRuns();
 			resetLSPService({ reason: "session_shutdown" });
 			const spawnsBefore = spawns();
@@ -1584,11 +1636,11 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			await lateSettled();
 			expect(spawns() - spawnsBefore).toBe(0);
 			expect(lateRows()).toEqual([
-				expect.objectContaining({ metadata: { outcome: "stale-session" } }),
+				expect.objectContaining({ metadata: { outcome: "held-only" } }),
 			]);
 		});
 
-		it("OrphanGiveUp (#3828): after /new the late resync spawns no server and is recorded stale-session", async () => {
+		it("OrphanGiveUp (#3828): after /new the late resync spawns no server", async () => {
 			lsp.realService = getLSPService;
 			const { c, install } = await giveUpBeforeTheChildRuns();
 			newSession();
@@ -1598,9 +1650,8 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			await lateSettled();
 			expect(spawns() - spawnsBefore).toBe(0);
 			expect(lateRows()).toEqual([
-				expect.objectContaining({ metadata: { outcome: "stale-session" } }),
+				expect.objectContaining({ metadata: { outcome: "held-only" } }),
 			]);
-			expect(staleWriteSubjects()).toContain(`runtime-session:${filePath}`);
 		});
 
 		it("OrphanGiveUp (#3828, #3576 R1): after /new the late resync brings only a document the next session already holds to the bytes on disk, without a spawn", async () => {
@@ -1625,17 +1676,19 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			expect(spawns() - spawnsBefore).toBe(1);
 		});
 
-		it("OrphanGiveUp (#3828): a late resync of a file the child removed records one failure and rejects nothing", async () => {
+		it("OrphanGiveUp (#3828 r2 F2): a file the child removed is a quiet late resync: no crash row, no rejection", async () => {
 			const rejections: unknown[] = [];
 			const onRejection = (reason: unknown) => rejections.push(reason);
 			process.on("unhandledRejection", onRejection);
 			try {
+				await currentServiceHoldsF();
 				child.removeAfterWrite = true;
 				const { c, install } = await giveUpBeforeTheChildRuns();
 				install();
 				await c.wrote;
-				// Either the failure row lands or, without the catch, a rejection
-				// does; unhandled rejections surface after the microtask queue drains.
+				expect(fs.existsSync(filePath)).toBe(false);
+				// Either the row lands or, without a catch, a rejection does;
+				// unhandled rejections surface after the microtask queue drains.
 				await waitFor(
 					() => rejections.length + lateRows().length,
 					(count) => count > 0,
@@ -1644,14 +1697,15 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				await tick();
 				await tick();
 				expect(rejections).toEqual([]);
-				expect(lateRows()).toEqual([
-					expect.objectContaining({ metadata: { outcome: "read-failed" } }),
-				]);
+				// An ordinary event (F removed during a long install), not a crash.
 				expect(
-					getDegradationSummary()
-						.filter((group) => group.kind === "hook-handler-crash")
-						.flatMap((group) => group.latestReasons.map((r) => r.subject)),
-				).toEqual(["deferred-format-late-resync"]);
+					getDegradationSummary().filter(
+						(group) => group.kind === "hook-handler-crash",
+					),
+				).toEqual([]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "held-only" } }),
+				]);
 			} finally {
 				process.off("unhandledRejection", onRejection);
 			}

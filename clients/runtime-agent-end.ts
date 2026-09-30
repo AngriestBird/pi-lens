@@ -734,18 +734,6 @@ export async function handleAgentEnd({
 						void (async () => {
 							let outcome: LspResyncOutcome | "stale-session" | "read-failed" =
 								"stale-session";
-							// The post-exit resync and, once its wait gave up, the late one
-							// (#3828): a fresh stamped read of F, sent through the drain's
-							// session and LSP-service guard (`syncDrainWrite`), so a
-							// replaced session or a retired service spawns nothing.
-							const resyncFromDisk = () =>
-								syncDrainWrite(filePath, () => {
-									const readStamp = performance.now();
-									return {
-										readStamp,
-										content: nodeFs.readFileSync(filePath, "utf-8"),
-									};
-								});
 							try {
 								// #3599: the abandoned formatter's command resolution can outlive
 								// every leaf bound (an auto-install has none), so wait for the
@@ -779,22 +767,36 @@ export async function handleAgentEnd({
 											metadata: { outcome: lateOutcome },
 										});
 									void formatterSettling
-										.then(async () =>
-											logLate((await resyncFromDisk()) ?? "stale-session"),
-										)
+										.then(async () => {
+											// Held-only in every case, current session or not: the
+											// install can outlive the client (idle eviction), and
+											// this must never open a file or spawn for it. The drift
+											// read is its own stamped read of the disk, takes no
+											// ambient abort signal (another turn's Escape must not
+											// stop it), and a removed file is a quiet `vanished`.
+											await resyncHeldLspDocument(filePath);
+											logLate("held-only");
+										})
 										.catch((err) => {
-											// One bounded `hook-handler-crash` row per session, and
-											// no rethrow: nothing awaits this continuation.
+											// A throw: one bounded `hook-handler-crash` row per
+											// session, and no rethrow: nothing awaits this.
 											surfaceHandlerCrash("deferred-format-late-resync", err, {
 												dbg,
 												rethrow: false,
 											});
-											logLate("read-failed");
+											logLate("failed");
 										});
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
 									// service gets no touch that would spawn a server.
-									outcome = (await resyncFromDisk()) ?? "stale-session";
+									outcome =
+										(await syncDrainWrite(filePath, () => {
+											const readStamp = performance.now();
+											return {
+												readStamp,
+												content: nodeFs.readFileSync(filePath, "utf-8"),
+											};
+										})) ?? "stale-session";
 								}
 							} catch (err) {
 								outcome = "read-failed";
