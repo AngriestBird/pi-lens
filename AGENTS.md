@@ -436,6 +436,17 @@ ADR: docs/adr/0009-reported-path-attribution.md
     and the stale-read drop discarded the close). No model composes the two
     fixes yet; that is #3495.
 
+56. **Subset without a population verdict:** when a mechanism, policy, guard,
+    or optimisation targets N of M members, name the excluded default and a
+    generalization verdict; see `docs/pi-lens-reviewer.md` (recurrence: #3622).
+
+57. **Released-writer input shapes:** property-test generators include the
+    input shapes produced by older released writers (#3594 R2-F1).
+
+58. **Known identity carried forward:** when a producer knows an identity,
+    carry it through asynchronous stages instead of re-deriving it downstream
+    (#3643 F3).
+
 </important>
 
 <important if="availability policy or installer">
@@ -505,6 +516,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
   `PI_LENS_HOME` under `os.tmpdir()`, so a `TMPDIR` aimed at `.probe-home` moves
   the harness home into a git-ignored directory inside the checkout and reds
   unrelated suites (#3026). `scripts/hooks/guard-bash.mjs` denies it.
+- A review/merge scratch checkout or `mktemp -d` never lands under `/tmp`:
+  it is tmpfs (RAM + swap) on the maintainer host, and ~20 accumulated
+  review/merge trees there filled swap to 8/8 GB (#3526). Use
+  `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator/reviewer
+  scratch, `<worktree>/../probes-<pr>` for probe files, or
+  `.claude/worktrees/` for a fixer's own worktree. `scripts/hooks/guard-bash.mjs`
+  denies a `git worktree add`/`git clone`/`mktemp -d` destination under `/tmp`.
 - Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
   orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
   per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
@@ -570,6 +588,8 @@ ADR: docs/adr/0009-reported-path-attribution.md
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
+- Automatic tests do not cross a Git checkout boundary, including through filesystem aliases. Use `foreignGitRoot` in `clients/test-runner-client.ts` before failed-first cache admission, during bounded retirement, before automatic discovery accepts its first eligible match, and at the turn-end gate. Resolve filesystem identities without changing cache keys or display paths; indeterminate ownership is not a foreign verdict. Ownership walks use `isRealGitMarker(…, true)` with `findNearestMarkerRootDetailed` (a separate walker; `findNearestMarkerRoot` keeps its legacy `string | null` contract): marker/HEAD/read failures must not become an enclosing owner, and capped walks disclose uncertainty. A deleted or renamed target (`ENOENT`/`ENOTDIR` on the realpath) is not an identity gap: it reaches `retired-missing`, and recording it would fill the per-kind ledger cap ahead of a real `EACCES`. An alias-containment exception derives an in-root relative spelling for integration/e2e policy, without changing display paths. Final foreign rejections emit `test-target-foreign-checkout`, including self/deferred targets with debug output disabled. A checkout's own failures and ordinary nested packages remain eligible. `tests/clients/test-runner-worktree-isolation.test.ts` proves admission, retirement, all four discovery paths, no-drop controls, and bounded decision records.
+- By design, a session whose cwd is a plain folder with no `.git` that holds several repositories, a submodule, or a nested linked worktree gets no automatic tests for the files inside them: any nested `.git` is a foreign checkout, and there is no per-project opt-in (maintainer decision, #3649/#3691). Run them explicitly.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.
@@ -588,6 +608,7 @@ ADR: docs/adr/0009-reported-path-attribution.md
   unreadable, unparseable, unsupported, or unregistered evidence; callers emit
   bounded degradation records. Ktlint's standalone-CLI exception still
   declines Gradle-owned projects without guessing a CLI version.
+- Node tool agreement in `nodeAgreement` is established from the project's lockfile evidence in the deterministic order npm (`package-lock.json`) → pnpm (`pnpm-lock.yaml`, v9 `importers` and v6 top-level maps) → yarn (`yarn.lock`, v1 blocks and Berry `npm:` descriptors); the decision names the supplying lockfile, and missing, unreadable, unparseable, or shape-unsupported evidence declines.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
@@ -935,13 +956,34 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 
 Every `Bash` call an agent makes under Claude Code runs through the
 `PreToolUse` hook `scripts/hooks/guard-bash.mjs` (`.claude/settings.json`),
-mechanically enforcing six non-negotiables that used to live only as prose:
+mechanically enforcing nine non-negotiables that used to live only as prose:
 no `git stash` in any form; no `git reset --soft`/`--hard`; no hand-typed
 `git worktree remove` with two force flags (use
 `node scripts/prune-agent-worktrees.mjs`); no `git worktree remove` at all on
 a worktree whose `node_modules` is a symlink pointing outside it; no unpinned
 `node` probe loading built runtime code from `clients/`/`dist/` without a
-`PI_LENS_HOME` pin; and no `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's
-own home. See `CONTRIBUTING.md` "Local git hooks" for the human-facing
-version and `docs/pi-lens-subagent.md` for the fuller worktree/probe-hygiene
-contract.
+`PI_LENS_HOME` pin; no `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's
+own home; no `pkill`/`killall` with a bare, unscoped pattern -- it matches
+machine-wide and can kill another concurrent session's TLC/vitest/etc run
+(#3556; kill the recorded PID of your own job instead, or scope `pkill -f`
+with a pattern that includes your worktree's absolute path -- that scoped
+form only allows when run FROM a linked worktree: the shared main checkout's
+own path is a prefix of every worktree's path, so a pattern scoped to it
+would still match every worktree's TLC, and is denied there. `kill $(pgrep -f
+…)` and `pgrep -f … | xargs kill` carry the same machine-wide-match risk
+through a shape this hook does not recognize as killing anything at all --
+a documented blind spot, never scoped by this guard); no `git
+worktree add`/`git clone`/`mktemp -d` landing under `/tmp` -- tmpfs on the
+maintainer host, filled to 8/8 GB swap by review scratch checkouts (#3526;
+see "Paths, data, and operating systems" for where those belong); and no
+`git commit`/`git push` chained after a check (`npm run
+lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node
+scripts/check-*.mjs`) through `;` or a pipe rather than `&&` -- the check's
+exit code gates nothing that way (#3471; gate with `&&`, or read the
+check's result in its own call). Concretely: `npm run build >log 2>&1;
+echo build=$?; test "$(git rev-parse HEAD)" = SHA && git push …` is denied
+(the build's real exit code is thrown away by `;`); rewrite it as `npm run
+build >log 2>&1 && test "$(git rev-parse HEAD)" = SHA && git push …`, or
+split the build and the push into two calls. See `CONTRIBUTING.md` "Local
+git hooks" for the human-facing version and `docs/pi-lens-subagent.md` for
+the fuller worktree/probe-hygiene contract.

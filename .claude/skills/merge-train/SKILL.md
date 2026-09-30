@@ -149,6 +149,10 @@ exactly one `priority:p1|p2|p3` (AGENTS.md #1676 rubric). The priority labels
 were found deleted from the repo on 2026-09-03 and recreated (#2553); an
 issue filed without one is a triage defect, not a shortcut.
 
+Every reviewer **follow-up issue** generalization verdict is filed and assigned
+to a seam group on the tracking queue in the same turn. At each regroup, scan
+merged PRs for subset-shaped changes that lack a generalization verdict.
+
 ## Round-count rail (orchestrator)
 
 When a verify round reports that a fix round introduced a NEW defect on the
@@ -541,7 +545,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | `npx <tool>@latest` inside the repo to measure something | It rewrote package-lock.json (108 deletions) on 2026-09-07; run one-off tools from a scratch prefix, and `git diff --stat` before every commit |
 | `git add -A` in a worktree that links `node_modules` | The ignore rule `node_modules/` does not match a SYMLINK; #2703 committed one and broke the clean-clone install and the tracked-shadow test. `git add <paths>`, and `.gitignore` now says `node_modules` without the slash |
 | `git worktree remove --force` on a tree whose `node_modules` is a symlink | Git follows the link and empties the shared checkout's install (twice on 2026-09-16, #2704 class; every other lane's build broke). `rm node_modules` first (unlink, never `rm -r`), then remove; mechanisation in the Bash hook is filed |
-| Checking a branch out in the shared main tree for your own fix | Reviewers saw the checkout switch under them three times on 2026-09-07; use a throwaway `git worktree add` under the scratchpad, remove it after the push |
+| Checking a branch out in the shared main tree for your own fix | Reviewers saw the checkout switch under them three times on 2026-09-07; use a throwaway `git worktree add` under `~/.local/share/pi-lens-orchestrator/tmp/<lane>` (never the scratchpad -- #3526: it is `/tmp` on this launcher, tmpfs, and `guard-bash.mjs` denies a checkout landing there), remove it after the push |
 | `gh run rerun --failed` while the run is still in progress | GitHub refuses it; wait for the run to complete (poll `gh run view --json status`), then rerun, then re-read the verdict |
 | Reading a failed job's log before its run completes | Empty output; the log is withheld until the whole run finishes |
 | Treating a reviewer's prescription as the fix | It is a hypothesis: #2693 r2's blanked-slice remedy stayed green on `env: { PWD: cwd }`; the fixer's AST rule replaced it and the reviewer withdrew the prescription |
@@ -556,6 +560,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Accepting a lifecycle round on `-t`-only mutation reds | #2853 r6/r7 quoted reds that only reproduced under `-t`; nine awaits never returned whole-file (#2859). Whole-file mutation runs are the acceptance shape (AGENTS.md round-routing) |
 | Sending a scope `note` to a worker about to finish | The #2854 r2 worker settled before the note was read; the round shipped without H2/M1. Check `plegma_status` first; a worker with no turns left gets a new round, not a note |
 | Chaining a check and a commit or push with `;` or a pipe | Three times on 2026-09-25: a commit with `lint=1`, a push with the flake-shape ratchet red, and a push reported done by `echo $?` of a later `grep`. Gate with `&&`, or read the check in its own call; the guard is #3471. Recurred 2026-09-26 on #3492's pushes (a commit piped to `grep` then `;` push piped to `tail -1`, and a mutation `vitest` run `;`-chained to a commit) |
+| Pushing with `npm run build >log 2>&1; echo build=$?; test "$(git rev-parse HEAD)" = SHA && git push …` | `guard-bash.mjs`'s `checkUngated` rule (#3471, landed in G12) denies this: the build's real exit code is thrown away by `;`, so a failed build still reaches the `git push` (case 1's own shape). Rewrite as `npm run build >log 2>&1 && test "$(git rev-parse HEAD)" = SHA && git push …`, or split the build and the push into two calls — never exempt `build` from the check |
 | Opening a PR without `npm run preflight` | #3468 opened with a `build:` title that the title gate rejects; a hand-picked subset of checks (body lint only) left it out. Write `PR_BODY.md` and `COMMIT_MSG.txt` and run the preflight, which lints both |
 | Adding real spawns or waits to a test without running the flake-shape ratchet | #3464's `git init` fixture raised a spawn count and pushed red (#3472); #3492's 60 s `setTimeout` reddened CI the next day, and that push's `clients/lsp/client.ts` change (it alone matches 71 test files) had capped the hook to build-only. `scripts/pre-push-targeted-tests.mjs` now arms `TEST_TREE_GOVERNANCE_TESTS` (the ratchet) on any `tests/` change and runs the armed registries past the cap |
 | Carrying a field from a replaced queue entry into an entry of another kind | #3481 r1 kept the pending read stamp on an unstamped replacement; the queued rename close inherited a stale stamp and was dropped, reopening #3477 inside its own PR (#3491 verify round, fixed in `b937ff0a9`). Probe a review-round fix on every entry kind that shares the queue; AGENTS.md shape 55, model composition #3495 |
@@ -565,4 +570,15 @@ Each row cost a lane at least once; the prose above carries the record.
 | Reading a `check_suite.completed` wake as a green head | The wake excludes cancelled suites; #3491's run on `a16fb1f82` was cancelled and was reported "finished green" (2026-09-26). Read the run's conclusion on the exact SHA; `ci-verdict` needs `gh`, which cloud sessions lack (#3497) |
 | Describing a guard in a contract line as if it runs | AGENTS.md shape 52 said stores were "pinned by name in the #1894 registry ratchet"; no such ratchet existed (2026-09-25 catalog retro). Name a guard by its path, and a planned one by its open issue |
 | Rewriting a PR body's narrative without re-reading the `.changelog/` fragment | The fragment kept the retracted round-1 story after the body moved on to a different remedy (#3155 r2); re-read the fragment on every body rework, not just the body |
+| Accepting a subset-shaped change without a generalization verdict | #3622 applied idle eviction to 4 of ~44 LSP servers; the maintainer caught the missing population screen by reading the PR. At each regroup, scan merged PRs and require the verdict. |
+| Filing an issue mid-session without a seam group | Issues filed mid-session must be assigned to a seam group at filing (2026-09-30); do not leave the follow-up queue ungrouped. |
 | Filing follow-up issues through the GitHub API without a TYPE or priority label | The orchestrator filed about a dozen issues this way on 2026-09-26 (#3543-#3546, #3548, #3549, #3552, #3556, #3558-#3560); the issue templates that would force a label are bypassed by API creation, and they stayed untriaged until the maintainer noticed by hand. `.github/workflows/untriaged-issues.yml` now fails a daily job listing any open issue still missing either (#3563) |
+| Issuing a mid-flight order without naming the overridden brief clause | State which part of the original brief it overrides and post the order on the issue (#3695 handoff 6) |
+| Explaining why an agent stopped without checking its status | Check the agent's status before attributing its stop (#3695 handoff 7) |
+| Starting agents against an ambiguous target | Confirm the target before dispatching agents (#3695 handoff 8) |
+| Letting strictness-ratchet and glossary pins collide on one change | Run both pin sweeps before pushing (#3455/#3643) |
+| Re-running a `pull_request` job against the old merge SHA | Use `gh pr update-branch` to rebuild the merge ref (#3660; 2026-09-30) |
+| Fixing a hooks or lint gate without sweeping older open branches | Sweep open branches committed before the fix (#3675; 2026-09-30) |
+| Enabling auto-merge before local HEAD equals the pushed SHA | Verify the pushed SHA before enabling auto-merge (#3671) |
+| Waiting for CI after retargeting a base without a push | Push after a base retarget to re-arm CI (#3679) |
+| Leaving fork-PR `action_required` runs unapproved | Approve the runs after pushing to a fork PR (#3656) |

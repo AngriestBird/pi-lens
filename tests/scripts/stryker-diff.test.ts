@@ -15,20 +15,26 @@ import {
 	augmentAndSummarize,
 	buildRunConfig,
 	capMutationFiles,
+	capRelatedTests,
 	compiledJsPath,
 	decideMutationOutcome,
 	dedupePatterns,
-	describePartialInterruptCause,
+	describePartialMutationOutcome,
 	describeStrykerFailure,
 	describeZeroMutantOutcome,
 	DEFAULT_MAX_RANGES,
+	DEFAULT_MAX_TESTS,
+	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	estimateAffordableMutants,
 	extractSnippet,
 	formatCapNotice,
+	formatTestCapNotice,
 	isCompiledMutationSource,
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
+	mutationLaneExclusion,
+	MutationLaneExclusionError,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
@@ -36,6 +42,7 @@ import {
 	planResample,
 	sampleRangesDeterministically,
 } from "../../scripts/lib/stryker-diff.mjs";
+import { stripSource } from "../support/sweep-kit.js";
 import {
 	buildLineIndex,
 	createTracer,
@@ -208,6 +215,95 @@ describe("stryker diff selection", () => {
 		expect(formatCapNotice(2, 3, result.skipped)).toBe(
 			"capped: 2 of 3 changed files mutated; skipped: scripts/z.mjs",
 		);
+	});
+
+	it("caps related tests with sibling and direct-import priority", () => {
+		// Recurrence: a widely-imported source handed the entire related-test
+		// population to every Stryker mutant, exhausting the advisory budget in
+		// dry-run. The cap must retain the conventional sibling before importers,
+		// and the notice must disclose the dropped population.
+		const tests = [
+			"tests/clients/incidental.test.ts",
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		];
+		const result = mapRelatedTests(["clients/server.ts"], {
+			testFiles: [
+				"tests/clients/server.test.ts",
+				"tests/clients/direct.test.ts",
+			],
+			readFile: (file) =>
+				file.includes("direct") ? 'import "../../clients/server.js"' : "",
+		});
+		expect(result.tests).toEqual([
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		]);
+		const capped = capRelatedTests(
+			[...tests],
+			2,
+			new Map([
+				["tests/clients/server.test.ts", 0],
+				["tests/clients/direct.test.ts", 1],
+				["tests/clients/incidental.test.ts", 2],
+			]),
+		);
+		expect(capped.selected).toEqual([
+			"tests/clients/server.test.ts",
+			"tests/clients/direct.test.ts",
+		]);
+		expect(capped.dropped).toEqual(["tests/clients/incidental.test.ts"]);
+		expect(formatTestCapNotice(2, tests.length)).toBe(
+			"capped: 2 of 3 related tests selected; dropped: 1",
+		);
+		const measurement = JSON.parse(
+			readFileSync("tests/fixtures/mutation-test-cap-measurement.json", "utf8"),
+		);
+		expect(measurement.proxy.projectedElapsedSeconds).toBe(
+			measurement.proxy.meanElapsedSeconds * measurement.proxy.projectedSuites,
+		);
+		expect(measurement.proxy.remainingHeadroomSeconds).toBe(
+			measurement.proxy.budgetSeconds -
+				measurement.proxy.projectedElapsedSeconds,
+		);
+		// Recurrence M3648-3: the measured cap must remain checked against the
+		// evidence it cites, or the constant can silently drift from the budget.
+		expect(DEFAULT_MAX_TESTS).toBe(measurement.recommendedMaxTests);
+	});
+
+	it("keeps equal-priority selection stable when the input order is reversed", () => {
+		// Recurrence M3648-1: recursive readdirSync order must not decide which
+		// equal-priority related test consumes the cap.
+		const priorities = new Map([
+			["tests/z.test.ts", 1],
+			["tests/a.test.ts", 1],
+		]);
+		const forward = capRelatedTests(
+			["tests/z.test.ts", "tests/a.test.ts"],
+			1,
+			priorities,
+		);
+		const reversed = capRelatedTests(
+			["tests/a.test.ts", "tests/z.test.ts"],
+			1,
+			priorities,
+		);
+		expect(forward.selected).toEqual(["tests/a.test.ts"]);
+		expect(reversed.selected).toEqual(forward.selected);
+	});
+
+	it("leaves an under-cap related-test selection byte-for-byte unchanged", () => {
+		// Recurrence: narrow diffs must keep the same test order and score inputs.
+		const result = mapRelatedTests(["clients/server.ts"], {
+			testFiles: ["tests/clients/direct.test.ts"],
+			readFile: () => 'import "../../clients/server.js"',
+		});
+		expect(
+			capRelatedTests(result.tests, DEFAULT_MAX_TESTS, result.priorities),
+		).toEqual({
+			selected: result.tests,
+			dropped: [],
+		});
 	});
 
 	it("keeps the mutation population on scripts mjs files", () => {
@@ -463,6 +559,109 @@ describe("compiled-source mutation targets (#3531 rescope)", () => {
 });
 
 describe("mapRelatedTests generalized to compiled sources", () => {
+	it("excludes only source-marked tests with a checked reason", () => {
+		// Recurrence: #3625 admitted grammar, real-stdio, and host-witness tests
+		// into a dry run because they imported a widely-used module. The marker
+		// is source-derived; the reason is independently checked and an unmarked
+		// importer remains in the population.
+		const result = mapRelatedTests(["clients/degradation-ledger.ts"], {
+			testFiles: ["tests/marked.test.ts", "tests/plain.test.ts"],
+			readFile: (file) =>
+				file.includes("marked")
+					? '// mutation-lane: exclude\nimport "../clients/degradation-ledger.js";'
+					: 'import "../clients/degradation-ledger.js";',
+			exclusions: {
+				"tests/marked.test.ts": { reason: "fixture boundary" },
+			},
+		});
+
+		expect(result.tests).toEqual(["tests/plain.test.ts"]);
+		expect(result.excluded).toEqual([
+			{ file: "tests/marked.test.ts", reason: "fixture boundary" },
+		]);
+	});
+
+	it("rejects an exclusion marker without a checked reason", () => {
+		// Recurrence: a marker without an independently reviewed reason would be
+		// silent coverage loss rather than a bounded admission.
+		expect(() =>
+			mutationLaneExclusion("tests/marked.test.ts", {
+				readFile: () => "// mutation-lane: exclude",
+				exclusions: {},
+			}),
+		).toThrowError(
+			expect.objectContaining({
+				name: "MutationLaneExclusionError",
+				message: expect.stringContaining("no checked reason"),
+			}),
+		);
+	});
+
+	it("keeps an excluded sole importer uncovered", () => {
+		// Recurrence: an exclusion is not coverage. If it is the only importer,
+		// the source must retain the no-covering-test verdict rather than becoming
+		// a falsely covered mutation target.
+		const result = mapRelatedTests(["clients/degradation-ledger.ts"], {
+			testFiles: ["tests/marked.test.ts"],
+			readFile: () =>
+				'// mutation-lane: exclude\nimport "../clients/degradation-ledger.js";',
+			exclusions: {
+				"tests/marked.test.ts": { reason: "fixture boundary" },
+			},
+		});
+		expect(result.covered).toEqual([]);
+		expect(result.uncovered).toEqual(["clients/degradation-ledger.ts"]);
+		expect(result.tests).toEqual([]);
+		expect(result.excluded).toEqual([
+			{ file: "tests/marked.test.ts", reason: "fixture boundary" },
+		]);
+	});
+
+	it("parses failing test names from Stryker output before falling back", () => {
+		// Recurrence: the dry-run failure branch must preserve the child output's
+		// named failing tests, not discard it and report only the selected list.
+		const reason = describeStrykerFailure(
+			{ status: 1, signal: null, error: undefined },
+			60,
+			{
+				tests: ["tests/fallback.test.ts"],
+				output: "FAIL tests/first.test.ts:12\n❯ tests/second.test.ts:4",
+			},
+		);
+		expect(reason).toContain("tests/first.test.ts, tests/second.test.ts");
+		expect(reason).not.toContain("tests/fallback.test.ts");
+	});
+
+	it("uses a bounded named error for an unregistered marker", () => {
+		// Recurrence: a malformed checked registry used to escape the driver as
+		// an anonymous uncaught Error before it could write a bounded report.
+		try {
+			mutationLaneExclusion("tests/marked.test.ts", {
+				readFile: () => "// mutation-lane: exclude",
+				exclusions: {},
+			});
+		} catch (error) {
+			expect(error).toBeInstanceOf(MutationLaneExclusionError);
+			if (!(error instanceof Error)) throw error;
+			expect(error.name).toBe("MutationLaneExclusionError");
+			return;
+		}
+		throw new Error("expected the marker admission to fail");
+	});
+
+	it("names the related tests when the dry run fails", () => {
+		const reason = describeStrykerFailure(
+			{ status: 1, signal: null, error: undefined },
+			60,
+			{ tests: ["tests/mcp/server.smoke.test.ts"] },
+		);
+		expect(reason).toContain("dry run failed");
+		expect(reason).toContain("tests/mcp/server.smoke.test.ts");
+		expect(reason).not.toContain(
+			"mutation diff: no mutants evaluated; dry run or",
+		);
+	});
+
 	it("matches a compiled source's test import even though tests import the .js specifier", () => {
 		// Recurrence: TypeScript's nodenext resolution (and this repo's own
 		// tests, e.g. tests/index-wiring.test.ts importing "../index.js")
@@ -666,28 +865,62 @@ describe("parseDryRunCost (#3531 round 2 S2)", () => {
 });
 
 describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
-	it("implements the reviewer's formula: budget × concurrency ÷ dry-run seconds, safety-factored", () => {
-		// 3600s remaining, concurrency 2, 2s dry run, safetyFactor 1 (isolate
-		// the arithmetic from the safety margin): 3600 * 2 / 2 = 3600.
+	it("pins the fixed-overhead budget through the production driver", () => {
+		// Recurrence #3686 F2: passing a test-only overhead would make the
+		// estimator appear safe while the driver still used zero overhead.
+		expect(stripSource(driver)).toContain(
+			"fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS",
+		);
+	});
+
+	it("pins the measured overhead constant in the real-number estimate", () => {
+		// Recurrence #3686 F1: a literal-only pin could drift from the driver's
+		// exported fixed-overhead contract without changing the measured verdict.
+		expect(
+			estimateAffordableMutants({
+				remainingMs: 3_560_000,
+				dryRunMs: 17_824,
+				fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
+			}),
+		).toBe(128);
+	});
+
+	it("samples the #3683 run instead of admitting 270 mutants into a 60-minute budget", () => {
+		// Recurrence #3683: 270 measured mutants at 17,824ms per mutant were
+		// admitted as "within the remaining budget" even though the projected
+		// mutation run plus fixed overhead and safety margin did not fit.
+		const allowed = estimateAffordableMutants({
+			remainingMs: 3_560_000,
+			dryRunMs: 17_824,
+			fixedOverheadMs: 300_000,
+			safetyFactor: 0.7,
+		});
+
+		expect(allowed).toBeLessThan(270);
+		expect(allowed).toBe(128);
+		expect(allowed * 16_050 + 300_000).toBeLessThanOrEqual(3_560_000);
+	});
+
+	it("models CPU-bound vitest runners as serial even when Stryker concurrency is 2", () => {
+		// Recurrence #3649: concurrency 2 achieved only 1.11x wall-clock
+		// speedup (16.05s per mutant), so multiplying by 2 over-admitted work.
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 3_600_000,
-				concurrency: 2,
 				dryRunMs: 2_000,
 				safetyFactor: 1,
 			}),
-		).toBe(3600);
+		).toBe(1800);
 	});
 
 	it("applies the safety factor as a multiplier on the raw estimate", () => {
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 3_600_000,
-				concurrency: 2,
 				dryRunMs: 2_000,
 				safetyFactor: 0.5,
 			}),
-		).toBe(1800);
+		).toBe(900);
 	});
 
 	it("reproduces the #3579 replay's real blowup: 290 mutants against ~85s dry runs vastly exceeds a 60-minute budget", () => {
@@ -695,7 +928,6 @@ describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
 		// this exact measured cost, needing ~3.4h against a 60-minute budget.
 		const allowed = estimateAffordableMutants({
 			remainingMs: 55 * 60_000,
-			concurrency: 2,
 			dryRunMs: 85_000,
 			safetyFactor: 0.7,
 		});
@@ -703,21 +935,20 @@ describe("estimateAffordableMutants (#3531 round 2 S2)", () => {
 		expect(allowed).toBeGreaterThan(0);
 	});
 
-	it("never returns fewer than 1, even against a dry run that alone exceeds the remaining budget", () => {
+	it("returns zero when fixed overhead consumes the remaining budget", () => {
 		expect(
 			estimateAffordableMutants({
-				remainingMs: 1000,
-				concurrency: 2,
-				dryRunMs: 999_999,
+				remainingMs: 240_000,
+				dryRunMs: 2_000,
+				fixedOverheadMs: 300_000,
 			}),
-		).toBe(1);
+		).toBe(0);
 	});
 
-	it("never returns fewer than 1 for a degenerate (zero or negative) dry-run duration", () => {
+	it("keeps a degenerate dry-run duration bounded", () => {
 		expect(
 			estimateAffordableMutants({
 				remainingMs: 60_000,
-				concurrency: 2,
 				dryRunMs: 0,
 			}),
 		).toBe(1);
@@ -746,13 +977,9 @@ describe("dedupePatterns (#3531 round 2 S3)", () => {
 	});
 });
 
-describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
-	it("never says 'no mutants evaluated' -- some mutants WERE, which is why a partial report exists", () => {
-		// Recurrence: the review found the partial reason quoting
-		// describeStrykerFailure's "no mutants evaluated" prefix directly under
-		// the render's own "Partial run -- 8 of 9 evaluated" banner --
-		// self-contradictory.
-		const reason = describePartialInterruptCause(
+describe("describePartialMutationOutcome (#3531 round 3 R2-4)", () => {
+	it("classifies a timed-out partial report with a bounded measured-population verdict (#3683)", () => {
+		const verdict = describePartialMutationOutcome(
 			{
 				status: 143,
 				signal: null,
@@ -761,16 +988,45 @@ describe("describePartialInterruptCause (#3531 round 3 R2-4)", () => {
 				}),
 			},
 			60,
+			{
+				evaluated: 221,
+				total: 270,
+			},
+		);
+
+		expect(verdict).toBe(
+			"mutation diff: budget expired after 221 of 270 mutants evaluated (M = measured mutant population)",
+		);
+	});
+
+	it("bounds the timeout reason instead of duplicating the score and survivor table", () => {
+		// Recurrence: the review found the partial reason quoting
+		// describeStrykerFailure's "no mutants evaluated" prefix directly under
+		// the render's own "Partial run -- 8 of 9 evaluated" banner --
+		// self-contradictory.
+		const reason = describePartialMutationOutcome(
+			{
+				status: 143,
+				signal: null,
+				error: Object.assign(new Error("spawnSync ETIMEDOUT"), {
+					code: "ETIMEDOUT",
+				}),
+			},
+			60,
+			{ evaluated: 8, total: 9 },
 		);
 
 		expect(reason).not.toContain("no mutants evaluated");
-		expect(reason).toContain("60-minute mutation budget expired");
+		expect(reason).toBe(
+			"mutation diff: budget expired after 8 of 9 mutants evaluated (M = measured mutant population)",
+		);
 	});
 
 	it("still names Stryker's own status for a non-timeout interrupt", () => {
-		const reason = describePartialInterruptCause(
+		const reason = describePartialMutationOutcome(
 			{ status: 1, signal: null, error: undefined },
 			60,
+			{ evaluated: 8, total: 9 },
 		);
 
 		expect(reason).not.toContain("no mutants evaluated");
