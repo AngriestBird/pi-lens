@@ -63,9 +63,11 @@ const OWN_MARKER_MTIME_AT_LOAD = fs.statSync(OWN_MARKER_PATH).mtimeMs;
 // entries there; each file's afterAll reports additions, and this file, the
 // serialized governance owner that runs after every other project, reds on
 // new unadmitted entries in its afterAll and removes them after the
-// assertion. Per-file teardown is the ONLY containment: a raw mkdtempSync
-// root is contained solely by its owning file's teardown, and a deferred
-// producer that writes after teardown recreates it. The admission baseline in
+// assertion. Containment is per file: a raw mkdtempSync root is removed by its
+// owning file's teardown, and since #2912 the worker's own setup also removes a
+// setupTestEnvironment root at afterAll/SIGTERM and a raw root a deferred write
+// recreated (tests/support/tmp-root-registry.ts). A root its file never removed
+// stays for this owner to red. The admission baseline in
 // tests/config/tmp-fixture-hygiene-baseline.json is a shrink-only ratchet
 // over the entries that outlive their owning file. This sweep keeps the
 // mkdtemp population observable: each site's parent must derive from the real
