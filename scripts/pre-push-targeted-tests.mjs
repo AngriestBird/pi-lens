@@ -354,6 +354,16 @@ function runInherit(command, args, { needsShimShell = false } = {}) {
 // failure, not contention (#3717 F5). Groups: waited ms, holder/slot detail.
 const LOCK_TIMEOUT_RE =
 	/^\[with-test-lock\] timed out after (\d+)ms waiting for test-suite lock:? ?(.*)$/m;
+const WRAPPER_LINE_PREFIX = "[with-test-lock] ";
+
+// A lock timeout throws before the wrapped command runs, so its stderr is
+// wrapper lines only. Any other non-empty line means a test ran and printed
+// (even the exact prefix at a line start, #3738), so it is not contention.
+function matchLockTimeout(stderr) {
+	const lines = stderr.split(/\r?\n/).filter((line) => line !== "");
+	if (!lines.every((line) => line.startsWith(WRAPPER_LINE_PREFIX))) return null;
+	return stderr.match(LOCK_TIMEOUT_RE);
+}
 
 // Runs the targeted vitest selection through with-test-lock.mjs, streaming
 // stdout live and mirroring stderr live while also buffering it — the
@@ -380,8 +390,7 @@ function runTargetedTests(selected) {
 			resolve({ code: 1, lockTimeout: null, error });
 		});
 		child.on("close", (code) => {
-			const lockTimeout =
-				code !== 0 ? (stderrBuffer.match(LOCK_TIMEOUT_RE) ?? null) : null;
+			const lockTimeout = code !== 0 ? matchLockTimeout(stderrBuffer) : null;
 			resolve({ code: code ?? 1, lockTimeout });
 		});
 	});
