@@ -484,8 +484,9 @@ export interface ArchiveSpec {
 	 * Command the extracted launcher needs at run time (`java` for a JVM launcher
 	 * script), checked spawn-free BEFORE the download so a box without it is
 	 * `unavailable` rather than holding an 87 MB tree that cannot start. The
-	 * check is "a non-empty file named `runtime` on PATH, or under the runtime's
-	 * home env var" (`ARCHIVE_RUNTIME_HOMES`). It is a presence check, not a
+	 * check is "the executable under the runtime's home env var when that is set
+	 * and non-empty (it decides alone, as the launcher's own does), else a
+	 * non-empty file named `runtime` on PATH" (`ARCHIVE_RUNTIME_HOMES`). It is a presence check, not a
 	 * working-JDK check: stock macOS ships `/usr/bin/java` as a stub, so there the
 	 * precheck passes and the download still happens.
 	 */
@@ -5287,16 +5288,26 @@ const ARCHIVE_RUNTIME_HOMES: Record<string, { env: string; dir: string }> = {
 	java: { env: "JAVA_HOME", dir: "bin" },
 };
 
-function runtimeFoundInHome(runtime: string): boolean {
+/**
+ * The runtime's home-env verdict, or `undefined` when that env var is unset or
+ * empty (fall back to PATH). A NON-EMPTY home decides ALONE: fwcd's launcher
+ * treats a set JAVA_HOME as authoritative and dies with "JAVA_HOME is set to an
+ * invalid directory" when `$JAVA_HOME/bin/java` is not executable, whatever
+ * `java` PATH would have found. So the verdict is "a non-empty regular file,
+ * with an exec bit on POSIX" at that one path (#3400).
+ */
+function runtimeHomeVerdict(runtime: string): boolean | undefined {
 	const home = ARCHIVE_RUNTIME_HOMES[runtime];
 	const root = home ? process.env[home.env] : undefined;
-	if (!home || !root) return false;
-	const names =
-		installerPlatform() === "win32" ? [`${runtime}.exe`, runtime] : [runtime];
+	if (!home || !root) return undefined;
+	const windows = installerPlatform() === "win32";
+	const names = windows ? [`${runtime}.exe`, runtime] : [runtime];
 	return names.some((name) => {
 		try {
 			const stat = statSync(path.join(root, home.dir, name));
-			return stat.isFile() && stat.size > 0;
+			return (
+				stat.isFile() && stat.size > 0 && (windows || (stat.mode & 0o111) !== 0)
+			);
 		} catch {
 			return false;
 		}
@@ -6499,14 +6510,15 @@ export async function installTool(
 					return false;
 				}
 				// #3400: a launcher that needs a runtime (java) is `unavailable`
-				// without it, decided BEFORE the download. PATH walk plus the
-				// runtime's home env var, no spawn.
-				if (
-					tool.archive.runtime &&
-					!(await isCommandAvailable(tool.archive.runtime)) &&
-					!runtimeFoundInHome(tool.archive.runtime)
-				) {
-					const reason = `runtime ${tool.archive.runtime} not found on PATH or its home`;
+				// without it, decided BEFORE the download, no spawn. A set home env
+				// var (JAVA_HOME) decides alone; otherwise a PATH walk.
+				const runtime = tool.archive.runtime;
+				const viaHome = runtime ? runtimeHomeVerdict(runtime) : undefined;
+				if (runtime && !(viaHome ?? (await isCommandAvailable(runtime)))) {
+					const reason =
+						viaHome === undefined
+							? `runtime ${runtime} not found on PATH`
+							: `runtime ${runtime} is not an executable file under ${ARCHIVE_RUNTIME_HOMES[runtime]?.env}`;
 					noteInstallAttempt(tool.id, "unavailable", reason);
 					logSessionStart(`auto-install ${tool.id}: ${reason}`);
 					return false;

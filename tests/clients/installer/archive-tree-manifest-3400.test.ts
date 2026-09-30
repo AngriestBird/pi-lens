@@ -501,10 +501,10 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 		expect(httpsGetMock).not.toHaveBeenCalled();
 		expect(getInstallAttempt("kotlin-language-server")).toMatchObject({
 			outcome: "unavailable",
-			reason: "runtime java not found on PATH or its home",
+			reason: "runtime java not found on PATH",
 		});
 		expect(logRows()).toContain(
-			"auto-install kotlin-language-server: runtime java not found on PATH or its home",
+			"auto-install kotlin-language-server: runtime java not found on PATH",
 		);
 	});
 
@@ -526,6 +526,7 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 		fs.writeFileSync(
 			path.join(jdk, "bin", isWindows ? "java.exe" : "java"),
 			"x",
+			{ mode: 0o755 },
 		);
 		process.env.JAVA_HOME = jdk;
 
@@ -533,6 +534,85 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 
 		expect(ok).toBe(true);
 		expect(httpsGetMock).toHaveBeenCalledTimes(1);
+	});
+
+	// Round 3 R-A: fwcd's launcher treats a NON-EMPTY JAVA_HOME as authoritative
+	// and dies "JAVA_HOME is set to an invalid directory" when
+	// $JAVA_HOME/bin/java is not executable, whatever PATH has. A gate that ORs
+	// PATH java with JAVA_HOME java downloads 87 MB for a launcher that cannot
+	// start. PATH has a good java in every test below (beforeEach).
+	it("refuses a stale JAVA_HOME even though PATH has a java, before any download", async () => {
+		route("kotlin-language-server", GOOD, {});
+		stubExtractor({});
+		process.env.JAVA_HOME = path.join(fakeBin, "deleted-jdk");
+
+		const ok = await installTool("kotlin-language-server");
+
+		expect(ok).toBe(false);
+		expect(httpsGetMock).not.toHaveBeenCalled();
+		expect(getInstallAttempt("kotlin-language-server")).toMatchObject({
+			outcome: "unavailable",
+			reason: "runtime java is not an executable file under JAVA_HOME",
+		});
+	});
+
+	// lane: Unit tests (ubuntu) — the exec bit is a POSIX mode property.
+	it.skipIf(isWindows)(
+		"refuses a mode-644 JAVA_HOME java even though PATH has a java",
+		async () => {
+			route("kotlin-language-server", GOOD, {});
+			stubExtractor({});
+			const jdk = path.join(fakeBin, "noexec-jdk");
+			fs.mkdirSync(path.join(jdk, "bin"), { recursive: true });
+			fs.writeFileSync(path.join(jdk, "bin", "java"), "x", { mode: 0o644 });
+			process.env.JAVA_HOME = jdk;
+
+			const ok = await installTool("kotlin-language-server");
+
+			expect(ok).toBe(false);
+			expect(httpsGetMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("falls back to PATH java when JAVA_HOME is empty", async () => {
+		route("kotlin-language-server", GOOD, {});
+		stubExtractor(
+			{
+				[`bin/kotlin-language-server${LAUNCHER}`]: {
+					content: "#!/bin/sh\nexit 0\n",
+				},
+			},
+			"server",
+		);
+		process.env.JAVA_HOME = "";
+
+		const ok = await installTool("kotlin-language-server");
+
+		expect(ok).toBe(true);
+		expect(httpsGetMock).toHaveBeenCalledTimes(1);
+	});
+
+	// Round 3 S-1: on win32 the JDK's executable is bin/java.exe. The platform
+	// override is the installer's own test seam, so the ubuntu lane covers the
+	// name selection. The gate is what is under test: the download is attempted
+	// (the later extract step is the POSIX stub's and is not asserted).
+	it("accepts a win32 JAVA_HOME whose only java is bin/java.exe", async () => {
+		const restore = withEnv({ PI_LENS_TEST_PLATFORM: "win32" });
+		try {
+			route("kotlin-language-server", GOOD, {});
+			stubExtractor({});
+			process.env.PATH = path.join(fakeBin, "no-java-here");
+			const jdk = path.join(fakeBin, "win-jdk");
+			fs.mkdirSync(path.join(jdk, "bin"), { recursive: true });
+			fs.writeFileSync(path.join(jdk, "bin", "java.exe"), "x", { mode: 0o644 });
+			process.env.JAVA_HOME = jdk;
+
+			await installTool("kotlin-language-server");
+
+			expect(httpsGetMock).toHaveBeenCalledTimes(1);
+		} finally {
+			restore();
+		}
 	});
 
 	it.each([
