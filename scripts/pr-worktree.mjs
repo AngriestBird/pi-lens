@@ -238,6 +238,27 @@ function executeOpen(options, io) {
 }
 
 /**
+ * The commit `open` recorded for `branch`, or null (none recorded, or not a
+ * commit id): with no base every commit counts, which keeps the branch.
+ *
+ * @param {(args: string[], options?: {cwd?: string}) => string} gitExec
+ * @param {string} cwd
+ * @param {string} branch
+ * @returns {string|null}
+ */
+function openBase(gitExec, cwd, branch) {
+	try {
+		const base = gitExec(
+			["config", "--get", `branch.${branch}.${OPEN_BASE_KEY}`],
+			{ cwd },
+		).trim();
+		return /^[0-9a-f]{40,64}$/.test(base) ? base : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Commits on `branch` that no remote has, excluding the commit `open` created
  * it at. Any failure counts as unpushed: the dangerous direction is deleting
  * a branch whose commits nothing else holds.
@@ -250,18 +271,40 @@ function executeOpen(options, io) {
 function hasUnpushedCommits(gitExec, cwd, branch) {
 	try {
 		const args = ["rev-list", "--count", branch, "--not", "--remotes"];
-		try {
-			const base = gitExec(
-				["config", "--get", `branch.${branch}.${OPEN_BASE_KEY}`],
-				{ cwd },
-			).trim();
-			if (/^[0-9a-f]{40,64}$/.test(base)) args.push(base);
-		} catch {
-			// No recorded base: every commit counts, which keeps the branch.
-		}
+		const base = openBase(gitExec, cwd, branch);
+		if (base) args.push(base);
 		return gitExec(args, { cwd }).trim() !== "0";
 	} catch {
 		return true;
+	}
+}
+
+/**
+ * Unpushed commits on the tree's own HEAD when it is DETACHED (a named HEAD is
+ * covered by the branch check). `failed` is true when git could not say, which
+ * the planner treats as a refusal: a detached commit has no ref to keep it.
+ *
+ * @param {(args: string[], options?: {cwd?: string}) => string} gitExec
+ * @param {string} worktreePath
+ * @param {string} branch
+ * @returns {{ commits: string[], failed: boolean }}
+ */
+function detachedHeadCommits(gitExec, worktreePath, branch) {
+	try {
+		gitExec(["symbolic-ref", "-q", "HEAD"], { cwd: worktreePath });
+		return { commits: [], failed: false };
+	} catch {
+		// Exit 1 is a detached HEAD (any other failure also falls through to
+		// the rev-list below, which then fails closed).
+	}
+	try {
+		const args = ["rev-list", "--oneline", "HEAD", "--not", "--remotes"];
+		const base = openBase(gitExec, worktreePath, branch);
+		if (base) args.push(base);
+		const out = gitExec(args, { cwd: worktreePath }).trim();
+		return { commits: out === "" ? [] : out.split(/\r?\n/), failed: false };
+	} catch {
+		return { commits: [], failed: true };
 	}
 }
 
@@ -297,13 +340,16 @@ function executeClose(options, io) {
 			return 1;
 		}
 	}
+	const branch = worktreeBranchName(worktreePath);
+	const detached = registered
+		? detachedHeadCommits(gitExec, worktreePath, branch)
+		: { commits: [], failed: false };
 	let entry = null;
 	try {
 		entry = fs.lstatSync(path.join(worktreePath, "node_modules"));
 	} catch {
 		entry = null;
 	}
-	const branch = worktreeBranchName(worktreePath);
 	let branchExists = false;
 	try {
 		gitExec(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
@@ -319,6 +365,8 @@ function executeClose(options, io) {
 		mainRoot: rows[0] ? canonicalPath(rows[0].path) : null,
 		registered,
 		dirty,
+		detachedCommits: detached.commits,
+		detachedCheckFailed: detached.failed,
 		nodeModulesKind: classifyNodeModules(entry),
 		branchExists,
 		branchUnpushed: branchExists && hasUnpushedCommits(gitExec, cwd, branch),

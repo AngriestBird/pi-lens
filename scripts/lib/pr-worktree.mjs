@@ -171,10 +171,14 @@ export function worktreeBranchName(worktreePath) {
  * from {@link classifyNodeModules} and a real directory is a refusal -- never
  * `rm -rf` -- so the shared install cannot be deleted through a copied tree.
  * `branchUnpushed` keeps the local branch when it holds commits no remote has.
+ * A DETACHED HEAD has no branch to keep, so its unpushed commits
+ * (`detachedCommits`, oneline) refuse the close instead, and a HEAD that could
+ * not be read (`detachedCheckFailed`) refuses too (fail closed).
  * Paths are expected canonical (the CLI realpaths them).
  *
  * @param {{ worktreePath: string, worktreesRoot: string, mainRoot: string|null,
- *   registered: boolean, dirty: boolean,
+ *   registered: boolean, dirty: boolean, detachedCommits: string[],
+ *   detachedCheckFailed: boolean,
  *   nodeModulesKind: "missing"|"symlink"|"directory"|"other",
  *   branchExists: boolean, branchUnpushed: boolean }} input
  * @returns {{ ok: true, unlinkNodeModules: boolean, branchToDelete: string|null,
@@ -186,6 +190,8 @@ export function deriveClosePlan({
 	mainRoot,
 	registered,
 	dirty,
+	detachedCommits,
+	detachedCheckFailed,
 	nodeModulesKind,
 	branchExists,
 	branchUnpushed,
@@ -217,6 +223,23 @@ export function deriveClosePlan({
 			ok: false,
 			code: 1,
 			error: `refusing ${worktreePath}: uncommitted or untracked changes; commit or discard them first`,
+		};
+	}
+	if (detachedCheckFailed) {
+		return {
+			ok: false,
+			code: 1,
+			error: `refusing ${worktreePath}: could not verify that its detached HEAD holds no unpushed commits`,
+		};
+	}
+	if (detachedCommits.length > 0) {
+		return {
+			ok: false,
+			code: 1,
+			error:
+				`refusing ${worktreePath}: detached HEAD holds commits no remote has:\n` +
+				`${detachedCommits.join("\n")}\n` +
+				"keep them with `git branch <name> HEAD` inside the tree, or push them",
 		};
 	}
 	if (nodeModulesKind === "directory") {

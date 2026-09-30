@@ -205,6 +205,13 @@ function expectLinkIntact(link: string, target: string): void {
 	expect(fs.existsSync(path.join(target, "sentinel.txt"))).toBe(true);
 }
 
+/** A tree `open` linked to the fixture's real main install is still linked. */
+function expectOpenLinkIntact(worktree: string): void {
+	const link = path.join(worktree, "node_modules");
+	expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+	expect(fs.existsSync(path.join(link, "shared-sentinel.txt"))).toBe(true);
+}
+
 /** A registered worktree at `worktree` whose node_modules links to `target`. */
 function addLinkedWorktree(
 	fixture: Fixture,
@@ -228,6 +235,8 @@ function closeInput(
 		mainRoot: path.join(path.sep, "main"),
 		registered: true,
 		dirty: false,
+		detachedCommits: [] as string[],
+		detachedCheckFailed: false,
 		nodeModulesKind: "missing" as const,
 		branchExists: true,
 		branchUnpushed: false,
@@ -280,6 +289,16 @@ describe("pr-worktree planner (pure)", () => {
 			["worktrees root itself", { worktreesRoot: WT }, /outside/],
 			["parent of the root", { worktreePath: path.sep }, /outside/],
 			["dirty", { dirty: true }, /uncommitted|untracked/],
+			[
+				"detached commits",
+				{ detachedCommits: ["abc1234 lost work"] },
+				/detached HEAD[^]*abc1234 lost work[^]*git branch <name> HEAD/,
+			],
+			[
+				"detached check failed",
+				{ detachedCheckFailed: true },
+				/could not verify/,
+			],
 		];
 		for (const [label, override, reason] of rails) {
 			const plan = deriveClosePlan(
@@ -532,6 +551,26 @@ describe("pr-worktree CLI close rails", () => {
 		).toContain("pr-worktree/dirty-1");
 	});
 
+	// Recurrence: PR #3730 verify r2 R12 -- canonicalising the root and the
+	// target was untested: a worktrees root reached through a symlink (macOS
+	// /tmp, a linked ~/Desktop) must still accept its own trees.
+	it("accepts a worktree reached through a symlinked worktrees root", () => {
+		const fixture = makeFixture();
+		const worktree = path.join(fixture.worktreesRoot, "sym-1");
+		fixture.git(["worktree", "add", "-b", "pr-worktree/sym-1", worktree]);
+		const linkRoot = path.join(fixture.root, "linked-root");
+		fs.symlinkSync(fixture.worktreesRoot, linkRoot);
+
+		const result = runCliResult(
+			fixture,
+			["close", path.join(linkRoot, "sym-1")],
+			{ PI_LENS_WORKTREES_ROOT: linkRoot },
+		);
+
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+	});
+
 	// Recurrence: PR #3730 r1 S2 -- a relative target resolved against the repo
 	// toplevel, not the caller's cwd.
 	it("resolves a relative close target against the caller's cwd", () => {
@@ -671,5 +710,90 @@ describe("pr-worktree CLI arguments and lookup", () => {
 		const result = fixtureRun(fixture, ["open", "9001", "--head"], { ghExec });
 		expect(result.status).toBe(0);
 		expect(ghCalls).toEqual([["pr", "view", "9001", "--json", "headRefName"]]);
+	});
+});
+
+describe("pr-worktree CLI close detached HEAD", () => {
+	// Recurrence: PR #3730 verify r2 residual -- close checked only the
+	// `pr-worktree/<dir>` branch, so a commit made on a DETACHED HEAD inside the
+	// tree (no ref) became unreachable (fsck: 3 objects) with no warning.
+	function openDetached(fixture: Fixture, name: string): string {
+		runCli(fixture, ["open", "9002", "--head", "--name", name], {
+			PI_LENS_GH_JSON: PR_HEAD_JSON,
+		});
+		const worktree = path.join(fixture.worktreesRoot, name);
+		fixture.git(["checkout", "-q", "--detach"], worktree);
+		expectOpenLinkIntact(worktree);
+		return worktree;
+	}
+
+	function unreachable(fixture: Fixture): string[] {
+		return fixture
+			.git(["fsck", "--unreachable", "--no-reflogs"])
+			.split("\n")
+			.filter((line) => line.startsWith("unreachable"));
+	}
+
+	it("refuses a detached-HEAD commit no remote has and leaves everything in place", () => {
+		const fixture = makeFixture();
+		const worktree = openDetached(fixture, "det-1");
+		fs.writeFileSync(path.join(worktree, "lost.txt"), "detached\n");
+		fixture.git(["add", "lost.txt"], worktree);
+		fixture.git(["commit", "-qm", "detached work"], worktree);
+
+		const result = fixtureRun(fixture, ["close", worktree]);
+
+		expectOpenLinkIntact(worktree);
+		expect(result.status).toBe(1);
+		const stderr = result.stderr.join("\n");
+		expect(stderr).toContain("detached work");
+		expect(stderr).toContain("git branch <name> HEAD");
+		expect(fixture.git(["worktree", "list", "--porcelain"])).toContain(
+			worktree,
+		);
+		expect(unreachable(fixture)).toEqual([]);
+	});
+
+	it("closes a detached tree that holds only the PR head it was opened at", () => {
+		const fixture = makeFixture();
+		const worktree = openDetached(fixture, "det-2");
+
+		const result = fixtureRun(fixture, ["close", worktree]);
+
+		expect(result.stderr).toEqual([]);
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+	});
+
+	it("closes a detached tree whose commit is on a remote", () => {
+		const fixture = makeFixture();
+		const worktree = openDetached(fixture, "det-3");
+		fs.writeFileSync(path.join(worktree, "kept.txt"), "pushed\n");
+		fixture.git(["add", "kept.txt"], worktree);
+		fixture.git(["commit", "-qm", "pushed work"], worktree);
+		fixture.git(["push", "-q", "origin", "HEAD:refs/heads/det-3"], worktree);
+
+		const result = fixtureRun(fixture, ["close", worktree]);
+
+		expect(result.stderr).toEqual([]);
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+	});
+
+	it("refuses a detached tree when git cannot list its commits", () => {
+		const fixture = makeFixture();
+		const worktree = openDetached(fixture, "det-4");
+		const gitExec = (args: string[], options: { cwd?: string } = {}) => {
+			if (args[0] === "rev-list" && args.includes("HEAD"))
+				throw new Error("simulated rev-list failure");
+			return fixtureGitExec(fixture)(args, options);
+		};
+
+		const result = fixtureRun(fixture, ["close", worktree], { gitExec });
+
+		expectOpenLinkIntact(worktree);
+		expect(result.status).toBe(1);
+		expect(result.stderr.join("\n")).toContain("could not verify");
+		expect(fs.existsSync(worktree)).toBe(true);
 	});
 });

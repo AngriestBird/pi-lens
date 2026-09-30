@@ -52,6 +52,8 @@ export interface ClosePlanInput {
 	mainRoot: string | null;
 	registered: boolean;
 	dirty: boolean;
+	detachedCommits: string[];
+	detachedCheckFailed: boolean;
 	nodeModulesKind: NodeModulesKind;
 	branchExists: boolean;
 	branchUnpushed: boolean;
