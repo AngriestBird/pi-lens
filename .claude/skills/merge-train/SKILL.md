@@ -149,6 +149,10 @@ exactly one `priority:p1|p2|p3` (AGENTS.md #1676 rubric). The priority labels
 were found deleted from the repo on 2026-09-03 and recreated (#2553); an
 issue filed without one is a triage defect, not a shortcut.
 
+Every reviewer **follow-up issue** generalization verdict is filed and assigned
+to a seam group on the tracking queue in the same turn. At each regroup, scan
+merged PRs for subset-shaped changes that lack a generalization verdict.
+
 ## Round-count rail (orchestrator)
 
 When a verify round reports that a fix round introduced a NEW defect on the
@@ -566,4 +570,6 @@ Each row cost a lane at least once; the prose above carries the record.
 | Reading a `check_suite.completed` wake as a green head | The wake excludes cancelled suites; #3491's run on `a16fb1f82` was cancelled and was reported "finished green" (2026-09-26). Read the run's conclusion on the exact SHA; `ci-verdict` needs `gh`, which cloud sessions lack (#3497) |
 | Describing a guard in a contract line as if it runs | AGENTS.md shape 52 said stores were "pinned by name in the #1894 registry ratchet"; no such ratchet existed (2026-09-25 catalog retro). Name a guard by its path, and a planned one by its open issue |
 | Rewriting a PR body's narrative without re-reading the `.changelog/` fragment | The fragment kept the retracted round-1 story after the body moved on to a different remedy (#3155 r2); re-read the fragment on every body rework, not just the body |
+| Accepting a subset-shaped change without a generalization verdict | #3622 applied idle eviction to 4 of ~44 LSP servers; the maintainer caught the missing population screen by reading the PR. At each regroup, scan merged PRs and require the verdict. |
+| Filing an issue mid-session without a seam group | Issues filed mid-session must be assigned to a seam group at filing (2026-09-30); do not leave the follow-up queue ungrouped. |
 | Filing follow-up issues through the GitHub API without a TYPE or priority label | The orchestrator filed about a dozen issues this way on 2026-09-26 (#3543-#3546, #3548, #3549, #3552, #3556, #3558-#3560); the issue templates that would force a label are bypassed by API creation, and they stayed untriaged until the maintainer noticed by hand. `.github/workflows/untriaged-issues.yml` now fails a daily job listing any open issue still missing either (#3563) |

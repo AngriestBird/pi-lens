@@ -436,6 +436,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
     and the stale-read drop discarded the close). No model composes the two
     fixes yet; that is #3495.
 
+56. **Subset without a population verdict:** when a mechanism, policy, guard,
+    or optimisation targets N of M members, name the excluded default and a
+    generalization verdict; see `docs/pi-lens-reviewer.md` (recurrence: #3622).
+
 </important>
 
 <important if="availability policy or installer">
