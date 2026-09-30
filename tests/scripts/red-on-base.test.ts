@@ -305,6 +305,9 @@ describe("red-on-base CLI verdicts", () => {
 		expect(result.stdout).toContain(
 			`INCONCLUSIVE  ${A} > (suite failed to run) (suite failed to load on both sides with different errors)`,
 		);
+		expect(result.stdout).toContain(
+			"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.",
+		);
 		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
 	});
 

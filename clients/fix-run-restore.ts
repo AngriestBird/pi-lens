@@ -68,7 +68,8 @@
  * - "In flight" is known only for calls that pass pi-lens's tool_call seam with
  *   a correlation id. A bash or bridged producer whose write lands during the
  *   run and whose bytes were never captured, on a file the tool did not touch,
- *   is neither seen nor restored over; on a file the tool DID touch it is the
+ *   is neither seen nor restored over when no native capture exists; on a
+ *   file the tool DID touch it is the
  *   unverifiable case above.
  */
 import { createHash } from "node:crypto";
