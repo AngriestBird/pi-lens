@@ -1074,11 +1074,12 @@ NoForeignFact ==
 NoForeignActivation ==
     \A t \in Tickets : st[t] = "live" => act[t] \subseteq lin[sess[t]]
 
-\* #3604: a live primary holds every activation its conversation made
-\* (/tree keeps them, D7; /new starts a conversation of its own).
+\* #3604: a live scope holds every activation its conversation made
+\* (/tree keeps them, D7; /new starts a conversation of its own). A demoted
+\* real successor is a secondary, so the check covers every role.
 NoLostActivation ==
     \A t \in Tickets :
-        (st[t] = "live" /\ role[t] = "primary") =>
+        st[t] = "live" =>
             \A o \in acts : o \in lin[sess[t]] => o \in act[t]
 
 \* #3748: an advisory reaches only a context call of its own conversation.

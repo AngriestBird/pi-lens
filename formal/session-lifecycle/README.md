@@ -191,7 +191,7 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
 | `OneResetPerScope` | One `session_start` mutation pass per scope. |
 | `NoForeignFact` | A live scope's cell holds only facts of its own conversation lineage, on its current branch. |
 | `NoForeignActivation` | A live scope holds only activations of its own conversation lineage. |
-| `NoLostActivation` | A live primary holds every activation its conversation made (`/tree` keeps them, D7). |
+| `NoLostActivation` | A live scope, primary or secondary, holds every activation its conversation made (`/tree` keeps them, D7). |
 | `NoCrossSessionDelivery` | An advisory reaches only a context call of its own conversation lineage. |
 | `NoLostAdvisory` | An advisory still queued when its scope retired by `/reload` is queued again once the successor started. One queued after its scope retired is an accepted, recorded drop. |
 
@@ -228,10 +228,10 @@ counterexample.
 | `MergedStores` | merged master: activations and advisories across every transition that moves them, with a subagent | pass | 65248 |
 | `H3FileBacked` | merged slot: a subagent's own `/reload` or `/fork` in the primary's gap, file-backed sessions | pass | 445 |
 | `H3FileLess` | the same, file-less sessions: #3819 | violated `NoCrossSessionAdoption` | 29 |
-| `H3StaleSlot` | file-backed, five transitions: a demoted session takes a stale slot: #3819 | violated `HandoffOnce` | 319 |
+| `H3StaleSlot` | file-backed, five transitions with `/new` and resume: a demoted session takes a stale slot: #3819 | violated `HandoffOnce` | 413 |
 | `H3DemoteCarry` | file-backed row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
 | `H3DemoteAdvisory` | file-backed row 17: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
-| `H3DemoteActivation` | file-backed row 17: the subagent-turned-primary loses its activations | violated `NoLostActivation` | 43 |
+| `H3DemoteActivation` | file-backed: a subagent's own replacement starts without its activations; row 17's demoted successor loses the conversation's | violated `NoLostActivation` | 28 |
 | `Current` | merged master, every transition: N2, #3613 | violated `SecondaryIsolation` | 54 |
 | `Fix` | adopted design: every transition, a primary and a subagent reader, one turn | pass | 71419 |
 | `FixProcess` | adopted design: heartbeat and LSP work across `/new`, resume, `/reload`, idle reset, quit, `pi --fork` | pass | 24771 |
@@ -270,10 +270,10 @@ alternative" is a shape the adopted design rejects, never shipped.
 | Config | Issue | Provenance | Shortest counterexample |
 |---|---|---|---|
 | `H3FileLess` | #3819 | master: the file-less key `(reason, undefined)` (`clients/session-scope.ts`) and #3668's row 17 (`clients/session-lifecycle.ts`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
-| `H3StaleSlot` | #3819 (review S1 on #3835) | master: `stashHandoff` returns early for `/new` (`SOURCES.new` is empty), so the slot survives it, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
-| `H3DemoteCarry` | #3668 row 17 (#3819's open question) | master: `classifySessionStart` in `clients/session-lifecycle.ts` declines only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
-| `H3DemoteAdvisory` | #3668 row 17 | master, as `H3DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
-| `H3DemoteActivation` | #3668 row 17 | master, as `H3DemoteCarry` | The subagent activates a tool; the primary's `/reload`; the subagent's own `/reload` classifies primary and adopts nothing (a secondary never stashes or saves a sidecar). |
+| `H3StaleSlot` | #3819 (review S1 on #3835) | master: `stashHandoff` returns early for `/new` and resume (their `SOURCES` hold no slot), so the slot survives them, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` (or resume) keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
+| `H3DemoteCarry` | #3855 (#3668 row 17) | master: `classifySessionStart` in `clients/session-lifecycle.ts` declines only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
+| `H3DemoteAdvisory` | #3855 (#3668 row 17) | master, as `H3DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
+| `H3DemoteActivation` | #3855 (#3668 row 17) | master: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. The same invariant catches row 17's demoted real successor without the primary's activations (113 states in the #3835 r1 review), after a longer trace. |
 | `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
 | `PreS1OrderTurn` | N3; #3540 case A | pre-S1 (b456ff89c): `_writeOrderTurn += 1`, a coordinator field | A turn draws token 1, `/reload` re-evaluates the entry, and the next turn draws token 1 again. |
 | `MutWidgetDropAfterReEval` | N3's harm; #3540 | pre-S1 (b456ff89c), as above | Two turns and a widget write at token 2; after `/reload` with re-evaluation, a turn draws token 1, and the widget guard drops the live session's own write as older. |
@@ -337,17 +337,19 @@ classifies primary. Three consequences follow.
 - *A stale take, file-backed too.* The unmatched slot is not harmless.
   After row 17 demotes the real successor, `/new` keeps the slot, and the
   demoted session's own `/reload` later takes its predecessor's stale
-  snapshot (`H3StaleSlot`, `HandoffOnce`). Clearing the slot at `/new`, or
+  snapshot (`H3StaleSlot`, `HandoffOnce`). Clearing the slot at `/new`
+  alone leaves the same path through the new primary's resume, while
   clearing it at every primary start after the take attempt (the audit's
-  option (a)), makes `H3StaleSlot` pass; keying a file-less slot by ticket
-  alone does not (the #3835 review ran #3819's ticket-key model at five
-  steps). So "file-backed sessions are protected" holds for
+  option (a)) closes it: `H3StaleSlot` passes (2322 states in the #3835 r1
+  review). Keying a file-less slot by ticket alone does not close it (the
+  #3835 review ran #3819's ticket-key model at five steps). So "file-backed sessions are protected" holds for
   adoption across sessions only.
 - *Loss.* The demoted real successor adopts nothing, so the conversation
   loses its reads and its queued advisory (`H3DemoteCarry`,
-  `H3DemoteAdvisory`), and the subagent-turned-primary loses its own
-  activations (`H3DemoteActivation`). This is the cost of #3668's stated
-  residual, whether sessions have files or not.
+  `H3DemoteAdvisory`), and its activations (`H3DemoteActivation`, whose
+  shortest trace is a subagent's own replacement, which never adopts). This
+  is the cost of #3668's stated residual (#3855), whether sessions have
+  files or not.
 
 **F4. Today, a subagent's read authorises the primary's edit** (#3613). The
 shared read guard puts a subagent's read in the primary's cell
