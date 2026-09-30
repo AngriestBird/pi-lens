@@ -55,6 +55,10 @@ describe("findIgnoredArguments", () => {
 		expect(findIgnoredArguments(ANALYZE, { zzzzzz: 1 })?.ignored).toEqual([
 			{ key: "zzzzzz" },
 		]);
+		// A one-letter key sits inside `flags` but is not a hint for it.
+		expect(findIgnoredArguments(ANALYZE, { a: 1 })?.ignored).toEqual([
+			{ key: "a" },
+		]);
 	});
 
 	it("reports a required key as missing only when a key was ignored", () => {
