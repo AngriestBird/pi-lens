@@ -513,6 +513,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT side effect are unobservable from an in-process stub",
 	},
+	// #3401: the seed script's default git argv (depth-2 fetch, refspec, blob
+	// specs) only means something against a real repo and a depth-1 clone.
+	"real-process-spawn:scripts/seed-matrix-from-bot-branch-real-git.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the fetch depth, refspec and rev-parse specs are the subject; an in-memory git restates them instead of proving them against real git",
+	},
 	// #3674: git's own per-worktree resolution of core.hooksPath and the real
 	// husky binary are the subject; a double would restate the path it wrote.
 	"real-process-spawn:scripts/setup-git-hooks.test.ts": {
