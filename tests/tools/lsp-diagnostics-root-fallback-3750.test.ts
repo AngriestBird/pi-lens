@@ -165,6 +165,31 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		expect(second.text).not.toContain("confirmed clean");
 	});
 
+	it("reaches the pilens_diagnostics / lens_diagnostics source=lsp route unchanged", async () => {
+		// The reported entry point folds into the same probe (tools/lens-diagnostics.ts).
+		answerWith("empty");
+		const dir = workspace();
+		const file = source(dir, "viaLens.rs");
+		const config = await import("../../clients/lsp/config.js");
+		await config.initLSPConfig(dir);
+		const { createLensDiagnosticsTool } =
+			await import("../../tools/lens-diagnostics.js");
+		const lens = createLensDiagnosticsTool({} as never, () => dir);
+
+		const result = (await lens.execute(
+			"probe-3750-lens",
+			{ source: "lsp", scope: "paths", paths: [file], serverScope: "primary" },
+			undefined,
+			null,
+			{ cwd: dir },
+		)) as { content: Array<{ text?: string }> };
+
+		const text = String(result.content[0]?.text);
+		expect(text).toContain("rust-analyzer: no project root found");
+		expect(text).toContain("0 files confirmed clean, 1 unconfirmed");
+		expect(text).not.toContain("No diagnostics found");
+	});
+
 	it("keeps confirmed clean for a rust file inside a Cargo project", async () => {
 		answerWith("empty");
 		const dir = workspace({ "Cargo.toml": '[package]\nname = "x"\n' });
