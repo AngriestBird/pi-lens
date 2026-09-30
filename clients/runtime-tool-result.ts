@@ -1770,7 +1770,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (nodeFs.existsSync(deliveredFilePath)) {
 			const nativeReadToolCallId = resolveToolCallCorrelationId(event);
 			const input = event.input as { offset?: number; limit?: number };
-			const requestedOffset = input.offset ?? 1;
+			const requestedOffset = Math.max(1, input.offset ?? 1);
 			const requestedLimit = input.limit;
 			const truncation = (
 				event.details as

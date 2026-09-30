@@ -171,6 +171,9 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 			{},
 			makeCtx({ cwd: tempWorktree, sessionId: "sibling-session" }),
 		);
+		// The removal is queued on the registry tail and uses async fs (#3618),
+		// so it lands after the shutdown handler returns: join it first.
+		await settleRegistryWrites();
 
 		const roots = await rootsForThisPid();
 		expect(roots).toHaveLength(1);
@@ -188,6 +191,9 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 			{},
 			makeCtx({ cwd: hostRoot, sessionId: "sibling-session" }),
 		);
+		// Without the join, a wrongly queued removal would land after this read
+		// and the assertion below could not fail (#3703).
+		await settleRegistryWrites();
 
 		expect(await rootsForThisPid()).toHaveLength(2);
 	}, 30_000);

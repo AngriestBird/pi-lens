@@ -43,6 +43,17 @@ describe("#2706 advisory tooling workflow contracts", () => {
 		expect(isAdvisoryCheck("oxfmt format check")).toBe(false);
 	});
 
+	// Recurrence: #2837 -- master went red after #2827/#2829 merged unused
+	// exports while knip was advisory. Once gating, a rename back to
+	// "(advisory)", a continue-on-error, or an ADVISORY_CHECKS entry would
+	// silently let that class merge again.
+	it("keeps knip as a gating, named job", () => {
+		const job = workflow.jobs.knip;
+		expect(job?.name).toBe("knip");
+		expect(job?.["continue-on-error"]).not.toBe(true);
+		expect(isAdvisoryCheck("knip")).toBe(false);
+	});
+
 	it("keeps the mutation lane advisory and named", () => {
 		const job = mutationWorkflow.jobs.mutation;
 		expect(job?.name).toBe("mutation (advisory)");

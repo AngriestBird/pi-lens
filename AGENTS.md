@@ -554,6 +554,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
   timers on every removal path.
+- Idle-eviction policy is the registry's `idleEviction` field, declared per
+  server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
+  registry server's eviction cost and respawn safety into
+  `docs/lsp-idle-eviction.md` and changes no policy; a declaration change is a
+  follow-up that cites its row. `tests/config/lsp-idle-eviction-measurement.test.ts`
+  fails when a registry server can go unmeasured without an admission or when
+  the committed measurement vetoes a server declared `transparent`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
@@ -761,6 +768,7 @@ npm run build:dist                    build the published dist bundle
 npm run lint                          tsc plus oxlint
 npm run lint:js:tests                 required type-aware oxlint rules over tests
 npm run fmt:check                     oxfmt gate
+npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
 npm run test:unit                     serialized unit suite
@@ -785,7 +793,11 @@ registered there with the reason a pull request cannot exercise it.
 
 Build after TypeScript changes before tests. The stale-build guard rejects a
 missing or older compiled twin. Run targeted tests while iterating and one
-bounded full suite at the end; CI is authoritative under contention.
+bounded full suite at the end. Pre-push fails the push when its bounded
+machine-wide test-lock wait times out (#3717). `PI_LENS_PREPUSH_LOCK_SKIP=1` is
+the only lock-timeout opt-out (`PI_LENS_SKIP_HOOKS` still skips the whole
+hook): it warns on stderr and appends a `lock-skip` line to `pre-push.log`
+beside the lock. CI stays the real gate.
 
 Before calling a hook or CI red unrelated, run
 `node scripts/red-on-base.mjs <test files…> [--base origin/master] [--repeat 3]`
@@ -800,7 +812,11 @@ evidence of unrelated; exit 2 is a usage error, 4 a build failure.
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
-forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
+forced remove follows the link into the shared install (#2704 class).
+`node scripts/pr-worktree.mjs open <PR|branch> [--merge|--head] [--name NAME]`
+and `close <path>` run that sequence in one command, unlinking only a
+symlinked `node_modules` and refusing a real directory, the main checkout, a
+tree outside the worktrees root, or a dirty tree. The Bash hook enforces the
 mechanically classifiable subset of these rules.
 
 <important if="relocating project data, machine state, or telemetry">

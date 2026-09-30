@@ -1,5 +1,7 @@
 // Type declarations for md-matrix.mjs (untyped .mjs imported from .ts tests).
 
+export const GENERATED_LSP_DOCS: readonly string[];
+
 export interface ParsedTable {
 	start: number;
 	end: number;

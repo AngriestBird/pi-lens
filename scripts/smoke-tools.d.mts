@@ -299,3 +299,15 @@ export const LSP_FIXTURES: LspFixture[];
 export const LSP_DIAGNOSTICS_WAIT_MS: number;
 export const FORMAT_FIXTURES: FormatFixture[];
 export const AUTOFIX_FIXTURES: AutofixFixture[];
+
+/** Run a fixture's `setup` step in its copied workspace (#530); bounded. */
+export function runFixtureSetup(
+	setup: string | string[],
+	cwd: string,
+	verbose: boolean,
+): { ok: boolean; detail?: string };
+/** Copy the cached lombok.jar into a fixture workspace, downloading it once. */
+export function ensureSmokeLombokJar(
+	workspace: string,
+	verbose: boolean,
+): Promise<string>;

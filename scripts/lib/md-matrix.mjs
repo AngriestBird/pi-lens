@@ -7,6 +7,18 @@
 // docs/lsp-capability-matrix.md) and server-capabilities.mjs. #460/#390.
 
 /**
+ * The generated LSP docs the nightly regenerates and `check-generated-docs-diff`
+ * compares against HEAD. One list, so a doc added to the nightly cannot be
+ * regenerated without being compared (#3645 added the idle-eviction document);
+ * the refresh PR's `add-paths` in tool-smoke.yml must carry the same paths.
+ */
+export const GENERATED_LSP_DOCS = [
+	"docs/lsp-capability-matrix.md",
+	"docs/servercapabilities.md",
+	"docs/lsp-idle-eviction.md",
+];
+
+/**
  * Parse a GitHub-flavoured Markdown table into { header, aligns, rows } where
  * rows is an array of cell-string arrays. Only the FIRST table after `afterLine`
  * (a line whose text includes the marker) is parsed. Returns null if not found.

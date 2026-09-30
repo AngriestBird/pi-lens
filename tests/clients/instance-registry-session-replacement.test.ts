@@ -257,18 +257,17 @@ describe("instance registry across a session replacement (#3498)", () => {
 	// mutation table (PR #3593/#3587's R1) exercises via a peer instead below.
 	// Now `updateHeartbeat` is queued through the SAME tail as
 	// `deregisterInstanceRoot`, so the two can never hold the lock at once:
-	// the removal simply waits its turn and its first sync attempt succeeds
-	// uncontended, once it is the removal's turn.
+	// the removal simply waits its turn and takes the single async lock path
+	// once it is the removal's turn.
 	it("queues a secondary root's removal behind an in-flight heartbeat instead of racing it for the lock", async () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 		await rootRemovalDuringHeartbeat(ROOT_SECONDARY);
 
 		// Queued behind the heartbeat's own tail slot, not contended for the
-		// lock: none of the own-hold retry machinery fires.
+		// lock: the single async lock path lands without a retry or timeout.
 		expect(degradationCount("instance-registry-lock-timeout")).toBe(0);
-		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
-		expect(degradationCount("instance-registry-deregister-landed")).toBe(0);
+		expect(degradationCount("instance-registry-deregister-landed")).toBe(1);
 		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
 	});
 
@@ -279,8 +278,6 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstance(ROOT_B);
 		await registry.deregisterInstanceRoot(ROOT_B);
-		// The sync attempt took the lock uncontended (#3587): nothing was queued.
-		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
 		fs.writeFileSync(registryFilePath(), JSON.stringify({ instances: [] }));
 
 		await registry.updateHeartbeat();
@@ -357,13 +354,16 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 		// Same shape as the whole-entry case above: the peer's lock ages out of
-		// the 5 s lease about 2 s from now, past the 500 ms sync wait and one
-		// ordinary 500 ms async wait, but inside `LOCK_WAIT_THROUGH_LEASE_MS`.
+		// the 5 s lease about 2 s from now, but inside
+		// `LOCK_WAIT_THROUGH_LEASE_MS`.
 		peerHolds(3_000);
 		const removal = registry.deregisterInstanceRoot(ROOT_SECONDARY);
 		await removal;
 		await registry._settleRegistryMutationsForTests();
 
 		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
+		// #3618 recurrence: scoped removal must not perform a discarded
+		// synchronous lock spin before its lease-waiting lock.
+		expect(degradationCount("instance-registry-lock-timeout")).toBe(0);
 	}, 15_000);
 });

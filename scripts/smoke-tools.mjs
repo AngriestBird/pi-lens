@@ -3255,4 +3255,11 @@ if (invokedDirectly) {
 	});
 }
 
-export { AUTOFIX_FIXTURES, FIXTURES, FORMAT_FIXTURES, LSP_FIXTURES };
+export {
+	AUTOFIX_FIXTURES,
+	ensureSmokeLombokJar,
+	FIXTURES,
+	FORMAT_FIXTURES,
+	LSP_FIXTURES,
+	runFixtureSetup,
+};

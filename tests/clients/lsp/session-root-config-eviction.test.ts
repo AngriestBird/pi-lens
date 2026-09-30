@@ -235,6 +235,22 @@ describe("#2518 a live session root's denial survives foreign cwd traffic", () =
 		expect(evictions[0]?.latestReasons[0]?.reason).toContain("(count: 2)");
 	}, 120_000);
 
+	it("keeps the reload remedy when the evicted root path is long (#3712)", async () => {
+		const longRoot = path.join(foreignRoot(0), "root-" + "x".repeat(150));
+		fs.mkdirSync(longRoot, { recursive: true });
+		await initLSPConfig(longRoot);
+		for (let index = 1; index <= 128; index++) {
+			await initLSPConfig(foreignRoot(index));
+		}
+		const reason =
+			getDegradationSummary().find(
+				(group) => group.kind === "lsp-session-root-evicted",
+			)?.latestReasons[0]?.reason ?? "";
+		// #3712: put the unbounded root after the operator-facing remedy.
+		expect(reason).toContain("will load the dropped root again");
+		expect(reason).toContain("next session start");
+	});
+
 	// `initLSPConfig`'s cwd is NOT canonical in production: `analysisRoot` comes
 	// out of `.pi-lens.json` verbatim and `clients/runtime-session.ts` hands the
 	// session cwd straight to the warm paths, so a trailing slash reaches here.
