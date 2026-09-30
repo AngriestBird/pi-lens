@@ -179,6 +179,20 @@ describe("#3694 live cwd safety rail (planners)", () => {
 		expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
 	});
 
+	// Containment, not string prefix: `agent-ab`'s process must not protect
+	// `agent-a`, and a process sitting exactly at the tree root must.
+	it("matches a cwd at or under the tree, never a sibling sharing its name prefix", () => {
+		const plan = (cwd: string) =>
+			planWorktreePrune({
+				worktrees: [agentRow],
+				nowMs: 10_000_000,
+				minAgeMs: 1,
+				liveProcessCwds: new Set([cwd]),
+			});
+		expect(plan(`${AGENT}b/src`).remove).toHaveLength(1);
+		expect(plan(AGENT).keep[0]).toMatchObject({ reason: "live-cwd" });
+	});
+
 	// F5 (orchestrator decision, PR #3697 round 2): the tree a caller NAMES --
 	// the SubagentStop hook's stopped agent, or a human's `--only` -- is the
 	// one whose leftover processes the sweep exists to reap, exactly as it was
