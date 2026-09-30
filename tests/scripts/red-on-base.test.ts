@@ -25,7 +25,10 @@ type TestSpec = {
 	failOnRuns?: number[];
 };
 type Scenario = {
-	files: Record<string, { tests: TestSpec[] } | { suiteFailure: true }>;
+	files: Record<
+		string,
+		{ tests: TestSpec[] } | { suiteFailure: true | string }
+	>;
 	buildExit?: number;
 	noReport?: boolean;
 	failExit?: boolean;
@@ -288,6 +291,33 @@ describe("red-on-base CLI verdicts", () => {
 		expect(onBaseResult.stdout).toContain(
 			`RED-ON-BASE  ${A} > (suite failed to run)`,
 		);
+	});
+
+	it("INCONCLUSIVE: a suite that fails to load on both sides with different causes is not red-on-base", () => {
+		// The verifier's probe (verify-3729-r2 6a): base cannot load the file for
+		// cause A, HEAD for cause B; one id per file made that RED-ON-BASE, exit 0.
+		const repo = makeRepo(
+			{ files: { [A]: { suiteFailure: "Cannot find module './a'" } } },
+			{ files: { [A]: { suiteFailure: "SyntaxError: cause B" } } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(3);
+		expect(result.stdout).toContain(
+			`INCONCLUSIVE  ${A} > (suite failed to run) (suite failed to load on both sides with different errors)`,
+		);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+	});
+
+	it("a suite load error that differs only by the tree path is the same cause: RED-ON-BASE", () => {
+		const message =
+			"Cannot find module './x' imported from %CWD%/tests/a.test.mjs";
+		const repo = makeRepo(
+			{ files: { [A]: { suiteFailure: message } } },
+			{ files: { [A]: { suiteFailure: message } } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"]);
+		expect(result.status).toBe(0);
+		expect(verdictLine(result.stdout)).toBe("VERDICT: RED-ON-BASE");
 	});
 
 	it("ALL-GREEN: nothing fails anywhere, exit 0, and says it is not evidence of unrelated", () => {

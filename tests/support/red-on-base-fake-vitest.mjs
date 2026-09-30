@@ -72,6 +72,10 @@ if (scenario.signalParent && process.env.FAKE_SIGNAL_PARENT) {
 			return {
 				name: resolve(cwd, file),
 				status: "failed",
+				message:
+					typeof spec.suiteFailure === "string"
+						? spec.suiteFailure.replaceAll("%CWD%", cwd)
+						: "",
 				assertionResults: [],
 			};
 		}

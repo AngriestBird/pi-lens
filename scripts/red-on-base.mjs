@@ -54,12 +54,29 @@ export function decideVerdict({ head, base }) {
 		for (const id of new Set(run.failed))
 			redCounts.set(id, (redCounts.get(id) ?? 0) + 1);
 	const baseFailed = new Set(base.failed);
+	// A suite-load failure has one id per file whatever the cause, so "red on
+	// both sides" only means "same cause" when the load error text matches.
+	const headLoadErrors = new Map();
+	for (const run of head)
+		for (const [id, message] of Object.entries(run.loadErrors ?? {}))
+			headLoadErrors.set(id, [...(headLoadErrors.get(id) ?? []), message]);
 	const tests = [...redCounts].map(([id, count]) => {
 		if (count < runs)
 			return {
 				id,
 				verdict: "INCONCLUSIVE",
 				detail: `red in ${count}/${runs} HEAD runs`,
+			};
+		if (
+			baseFailed.has(id) &&
+			(headLoadErrors.get(id) ?? []).some(
+				(message) => message !== base.loadErrors?.[id],
+			)
+		)
+			return {
+				id,
+				verdict: "INCONCLUSIVE",
+				detail: "suite failed to load on both sides with different errors",
 			};
 		return {
 			id,
@@ -89,6 +106,23 @@ export function failedTestIds(report, cwd) {
 			ids.push(`${rel} > (suite failed to run)`);
 	}
 	return [...new Set(ids)];
+}
+
+/** Load-error text per suite-load failure id, tree root replaced so the HEAD
+ *  and base worktree paths compare equal. */
+export function suiteLoadErrors(report, cwd) {
+	const errors = {};
+	for (const file of report.testResults ?? []) {
+		const failedTests = (file.assertionResults ?? []).some(
+			(assertion) => assertion.status === "failed",
+		);
+		if (file.status !== "failed" || failedTests) continue;
+		const rel = relative(cwd, file.name).split(sep).join("/");
+		errors[`${rel} > (suite failed to run)`] = (file.message ?? "")
+			.split(cwd)
+			.join("<root>");
+	}
+	return errors;
 }
 
 function parseArgs(argv) {
@@ -283,10 +317,17 @@ export async function main(argv = process.argv.slice(2)) {
 				);
 		const report = readReport(outputFile);
 		const failed = report ? failedTestIds(report, cwdOfTree) : [];
+		const loadErrors = report ? suiteLoadErrors(report, cwdOfTree) : {};
 		// A red with no failing test to name (no report, a signal, an unhandled
 		// error) cannot be attributed to either side.
 		const broken = !report || (result.status !== 0 && !failed.length);
-		return { failed, broken, status: result.status, output: result.output };
+		return {
+			failed,
+			loadErrors,
+			broken,
+			status: result.status,
+			output: result.output,
+		};
 	}
 
 	try {

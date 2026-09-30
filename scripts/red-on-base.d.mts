@@ -17,8 +17,8 @@ export const EXIT: {
 };
 export const HEAD_GREEN_MESSAGE: string;
 export function decideVerdict(runs: {
-	head: { failed: string[] }[];
-	base: { failed: string[] };
+	head: { failed: string[]; loadErrors?: Record<string, string> }[];
+	base: { failed: string[]; loadErrors?: Record<string, string> };
 }): { verdict: Verdict; tests: TestVerdict[] };
 export function failedTestIds(
 	report: {
@@ -31,3 +31,14 @@ export function failedTestIds(
 	cwd: string,
 ): string[];
 export function main(argv?: string[]): Promise<number>;
+export function suiteLoadErrors(
+	report: {
+		testResults?: {
+			name: string;
+			status?: string;
+			message?: string;
+			assertionResults?: { status: string }[];
+		}[];
+	},
+	cwd: string,
+): Record<string, string>;
