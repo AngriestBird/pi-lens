@@ -80,15 +80,10 @@ function compareStrings(a: string, b: string) {
 }
 
 describe("TLA+ coverage map (#3802)", () => {
-	it("keeps the checked-in population consistent with the tree", () => {
-		// Derived, never pinned: a count pin reds every legitimate map edit.
-		const formalDirs = fs
-			.readdirSync(path.join(REPO_ROOT, "formal"), { withFileTypes: true })
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => entry.name);
-		expect([...(map.families ?? [])].sort(compareStrings)).toEqual(
-			formalDirs.sort(compareStrings),
-		);
+	it("names every listed family in at least one map row", () => {
+		// Derived from the map, never pinned: a count pin reds every legitimate
+		// map edit. The tree-to-map half (every formal/<dir> is listed) is the
+		// validateCoverageMap case below, run against the real tree.
 		const named = new Set(
 			Object.values(map.map ?? {}).flatMap((value) =>
 				Array.isArray(value) ? value : [],
@@ -112,7 +107,9 @@ describe("TLA+ coverage map (#3802)", () => {
 		});
 
 		function fixtureTree() {
-			root = fs.mkdtempSync(path.join(os.tmpdir(), "tla-coverage-tree-"));
+			root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-tla-coverage-tree-"),
+			);
 			fs.mkdirSync(path.join(root, "clients"));
 			fs.writeFileSync(path.join(root, "clients", "a.ts"), "");
 			fs.mkdirSync(path.join(root, "formal"));

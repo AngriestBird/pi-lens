@@ -7,7 +7,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
 import {
@@ -67,10 +67,15 @@ const motivatingFlattenedBodies = [
 	flattenedBody,
 ].map((candidate) => candidate.replaceAll("\\n", " "));
 
-function createOriginMasterFixture() {
+function createOriginMasterFixture(mappedFile?: string) {
 	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	// `mappedFile` (#3802 F3) commits one extra repo-relative file in the same
+	// shell command, so a mapped-path diff costs no additional git spawn.
+	const mapped = mappedFile
+		? ` && mkdir -p '${directory}/${dirname(mappedFile)}' && printf 'touched\\n' > '${directory}/${mappedFile}' && git -C '${directory}' add '${mappedFile}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-mapped`
+		: "";
 	gitExecSync(
-		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head`,
+		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}`,
 	);
 	return directory;
 }
@@ -2852,23 +2857,7 @@ describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
 	let fixtureCwd: string;
 	beforeEach(() => {
 		previousCwd = process.cwd();
-		fixtureCwd = createOriginMasterFixture();
-		mkdirSync(join(fixtureCwd, "clients"));
-		writeFileSync(join(fixtureCwd, "clients", "read-guard.ts"), "// touched\n");
-		gitExecFileSync(["add", "clients/read-guard.ts"], { cwd: fixtureCwd });
-		gitExecFileSync(
-			[
-				"-c",
-				"user.name=pi-lens-test",
-				"-c",
-				"user.email=pi-lens-test@example.com",
-				"commit",
-				"--quiet",
-				"-m",
-				"fixture-mapped",
-			],
-			{ cwd: fixtureCwd },
-		);
+		fixtureCwd = createOriginMasterFixture("clients/read-guard.ts");
 		process.chdir(fixtureCwd);
 		vi.stubEnv("GITHUB_TOKEN", "t");
 		vi.stubEnv("GITHUB_API_URL", "https://api.example");
