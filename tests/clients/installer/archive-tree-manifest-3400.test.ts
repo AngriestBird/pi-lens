@@ -35,6 +35,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { createArchivePinScope } from "../../support/archive-pin.js";
 import { withEnv } from "../../support/with-env.js";
 
 vi.unmock("../../../clients/installer/index.js");
@@ -99,6 +100,7 @@ import {
 	getInstallAttempt,
 	getInstallFailureReason,
 	getToolPath,
+	getAllToolStatuses,
 	installTool,
 	resetProbeCacheStateForTesting,
 	resolveArchiveUrl,
@@ -154,6 +156,8 @@ httpsGetMock.mockImplementation(
 interface FixtureFile {
 	content: string;
 	mode?: number;
+	/** Materialise a DIRECTORY at this path (a launcher that is not a file). */
+	dir?: boolean;
 }
 
 /**
@@ -178,6 +182,10 @@ function stubExtractor(
 		for (const [rel, file] of Object.entries(files)) {
 			const abs = path.join(root, ...rel.split("/"));
 			fs.mkdirSync(path.dirname(abs), { recursive: true });
+			if (file.dir) {
+				fs.mkdirSync(abs);
+				continue;
+			}
 			fs.writeFileSync(abs, file.content, { mode: file.mode ?? 0o755 });
 		}
 		return { stdout: "", stderr: "", status: 0 };
@@ -191,22 +199,15 @@ const extractorCalls = (): string[] =>
 
 // --- registry pin fixture -------------------------------------------------
 
-const restorePins: Array<() => void> = [];
+const pins = createArchivePinScope({ TOOLS, resolveArchiveUrl });
 
-/** Serve `served` bytes for the tool's pinned URL, pinned to `pinnedBody`. */
+/** Serve `served_` for the tool's archive URL, pinned to `pin.body ?? served_`. */
 function route(
 	toolId: string,
 	served_: Buffer,
 	pin: { body?: Buffer; omit?: boolean },
 ): string {
-	const spec = TOOLS.find((t) => t.id === toolId)?.archive;
-	if (!spec) throw new Error(`no archive spec for ${toolId}`);
-	const url = resolveArchiveUrl(spec) as string;
-	const before = spec.sha256;
-	spec.sha256 = pin.omit ? {} : { [url]: sha256(pin.body ?? served_) };
-	restorePins.push(() => {
-		spec.sha256 = before;
-	});
+	const url = pins.pin(toolId, pin.omit ? null : (pin.body ?? served_));
 	served.set(url, served_);
 	return url;
 }
@@ -235,6 +236,7 @@ const LAUNCHER = `${isWindows ? ".bat" : ""}`;
 let originalPath: string | undefined;
 let fakeBin: string;
 let restoreEnv: () => void;
+let restoreJavaHome: () => void;
 
 beforeEach(() => {
 	fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
@@ -261,13 +263,16 @@ beforeEach(() => {
 	}
 	process.env.PATH = fakeBin;
 	restoreEnv = withEnv({ PI_LENS_DISABLE_TOOL_INSTALL: "0" });
+	// An ambient JAVA_HOME on the dev box must not satisfy the runtime gate.
+	restoreJavaHome = withEnv({ JAVA_HOME: undefined });
 });
 
 afterEach(() => {
-	for (const restore of restorePins.splice(0)) restore();
+	pins.restoreAll();
 	fs.rmSync(fakeBin, { recursive: true, force: true });
 	if (originalPath !== undefined) process.env.PATH = originalPath;
 	restoreEnv();
+	restoreJavaHome();
 	vi.unstubAllEnvs();
 });
 
@@ -351,6 +356,14 @@ describe.each(SHAPES)("archive install integrity: $label", (shape) => {
 
 		expect(ok).toBe(true);
 		expect(ledgerRows()).toEqual([]);
+		// Review F7: the success row names the digest that was verified.
+		expect(
+			logRows().some(
+				(l) =>
+					l.includes(`archive-install ${shape.toolId}: installed`) &&
+					l.includes(`sha256 verified ${sha256(GOOD)}`),
+			),
+		).toBe(true);
 		expect(
 			fs.existsSync(
 				path.join(TOOLS_DIR, shape.toolId, ...shape.liveRel.split("/")),
@@ -390,6 +403,21 @@ describe("archive launcher must be runnable, not merely present", () => {
 		expect(fs.existsSync(path.join(BIN_DIR, "spotbugs"))).toBe(false);
 	});
 
+	// Review F3: size and mode alone would pass a directory (non-zero size, 0755).
+	it("refuses a launcher path that is a directory", async () => {
+		const live = liveLauncher("spotbugs", "bin/spotbugs");
+		route("spotbugs", GOOD, {});
+		stubExtractor({ "bin/spotbugs": { content: "", dir: true } });
+
+		const ok = await installTool("spotbugs");
+
+		expect(ok).toBe(false);
+		expect(fs.readFileSync(live, "utf-8")).toBe("WORKING-LAUNCHER");
+		expect(ledgerRows().map((r) => r.reason)).toEqual([
+			"archive extraction launcher-invalid",
+		]);
+	});
+
 	// lane: Unit tests (ubuntu) — X_OK is a POSIX mode property; Windows has no
 	// executable bit to lose, and the installer skips the check there.
 	it.skipIf(isWindows)(
@@ -400,7 +428,8 @@ describe("archive launcher must be runnable, not merely present", () => {
 			stubExtractor({
 				"bin/spotbugs": { content: "#!/bin/sh\nexit 0\n", mode: 0o644 },
 			});
-			// The noexec/FAT case: chmod "succeeds" and changes nothing.
+			// A chmod that "succeeds" and changes nothing (FAT, or a zip entry that
+			// never carried the exec bit).
 			chmodMock.mockImplementation(async () => {});
 
 			const ok = await installTool("spotbugs");
@@ -472,8 +501,74 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 		expect(httpsGetMock).not.toHaveBeenCalled();
 		expect(getInstallAttempt("kotlin-language-server")).toMatchObject({
 			outcome: "unavailable",
-			reason: "runtime java not found on PATH",
+			reason: "runtime java not found on PATH or its home",
 		});
+	});
+
+	// Review F2: fwcd's launcher resolves $JAVA_HOME/bin/java, so a box whose
+	// JDK is reachable only through JAVA_HOME can run it and must not be refused.
+	it("accepts a JAVA_HOME-only java and installs", async () => {
+		route("kotlin-language-server", GOOD, {});
+		stubExtractor(
+			{
+				[`bin/kotlin-language-server${LAUNCHER}`]: {
+					content: "#!/bin/sh\nexit 0\n",
+				},
+			},
+			"server",
+		);
+		process.env.PATH = path.join(fakeBin, "no-java-here");
+		const jdk = path.join(fakeBin, "jdk");
+		fs.mkdirSync(path.join(jdk, "bin"), { recursive: true });
+		fs.writeFileSync(
+			path.join(jdk, "bin", isWindows ? "java.exe" : "java"),
+			"x",
+		);
+		process.env.JAVA_HOME = jdk;
+
+		const ok = await installTool("kotlin-language-server");
+
+		expect(ok).toBe(true);
+		expect(httpsGetMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("still refuses when JAVA_HOME points at a directory with no java", async () => {
+		route("kotlin-language-server", GOOD, {});
+		stubExtractor({});
+		process.env.PATH = path.join(fakeBin, "no-java-here");
+		process.env.JAVA_HOME = path.join(fakeBin, "empty-jdk");
+
+		const ok = await installTool("kotlin-language-server");
+
+		expect(ok).toBe(false);
+		expect(httpsGetMock).not.toHaveBeenCalled();
+		expect(getInstallAttempt("kotlin-language-server")).toMatchObject({
+			outcome: "unavailable",
+		});
+	});
+
+	// Review F1: the /lens-tools listing (getAllToolStatuses, awaited by the
+	// command handler) probed a PATH copy with --version, starting a JVM.
+	it("lists a PATH kotlin-language-server without spawning it, but still probes other PATH tools", async () => {
+		for (const name of ["kotlin-language-server", "actionlint"]) {
+			fs.writeFileSync(path.join(fakeBin, name), "#!/bin/sh\nexit 0\n", {
+				mode: 0o755,
+			});
+			if (isWindows) fs.writeFileSync(path.join(fakeBin, `${name}.exe`), "x");
+		}
+
+		const statuses = await getAllToolStatuses();
+
+		const kotlin = statuses.find((t) => t.id === "kotlin-language-server");
+		expect(kotlin).toMatchObject({ installed: true, source: "global-path" });
+		expect(kotlin?.version).toBeUndefined();
+		expect(
+			spawnMock.mock.calls.filter(([command]) =>
+				String(command).includes("kotlin-language-server"),
+			),
+		).toEqual([]);
+		// Control: a tool that is not `tree-manifest` still gets its version probe.
+		expect(statuses.find((t) => t.id === "actionlint")?.version).toBe("1.2.3");
 	});
 
 	it("refresh does not spawn the JVM launcher to verify the new tree", async () => {

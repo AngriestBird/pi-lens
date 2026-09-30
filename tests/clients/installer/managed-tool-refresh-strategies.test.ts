@@ -84,7 +84,7 @@ import {
 	it,
 	vi,
 } from "vitest";
-import { createHash } from "node:crypto";
+import { createArchivePinScope } from "../../support/archive-pin.js";
 import { withEnv } from "../../support/with-env.js";
 
 // #2182: raises this FILE's default test timeout from vitest's 5000ms to
@@ -463,24 +463,10 @@ function freshenAllExcept(
 	writeState({ ...tools, ...extra });
 }
 
-/**
- * #3400: a registry archive is refused unless its bytes hash to the pinned
- * sha256, and these tests serve stand-in bytes for the REAL registry entries.
- * Pin the served body for the test's duration (restored in `afterEach`), so the
- * extraction and verification steps the test targets are still reached; the
- * refusal itself is pinned in archive-tree-manifest-3400.test.ts.
- */
-const restoreArchivePins: Array<() => void> = [];
-function pinArchiveBody(toolId: string, body: Buffer): void {
-	const spec = TOOLS.find((t) => t.id === toolId)?.archive;
-	if (!spec) throw new Error(`no archive spec for ${toolId}`);
-	const url = resolveArchiveUrl(spec) as string;
-	const before = spec.sha256;
-	spec.sha256 = { [url]: createHash("sha256").update(body).digest("hex") };
-	restoreArchivePins.push(() => {
-		spec.sha256 = before;
-	});
-}
+const archivePins = createArchivePinScope({ TOOLS, resolveArchiveUrl });
+const pinArchiveBody = (toolId: string, body: Buffer): void => {
+	archivePins.pin(toolId, body);
+};
 
 let originalPath: string | undefined;
 let fakeBin: string | undefined;
@@ -521,7 +507,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	for (const restore of restoreArchivePins.splice(0)) restore();
+	archivePins.restoreAll();
 	if (fakeBin) fs.rmSync(fakeBin, { recursive: true, force: true });
 	fakeBin = undefined;
 	if (originalPath !== undefined) process.env.PATH = originalPath;

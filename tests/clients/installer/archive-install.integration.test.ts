@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -11,6 +10,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { createArchivePinScope } from "../../support/archive-pin.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const HOME = vi.hoisted(() => {
@@ -95,19 +95,12 @@ import {
 // hand-built fixture archives are pinned for the test, the same way the test
 // supplies the bytes: the assertion (installed / refused) is the production
 // check's, not the fixture's.
-const restorePins: Array<() => void> = [];
+const pins = createArchivePinScope({ TOOLS, resolveArchiveUrl });
 function pinFixture(toolId: string, body: Buffer): void {
-	const spec = TOOLS.find((t) => t.id === toolId)?.archive;
-	if (!spec) throw new Error(`no archive spec for ${toolId}`);
-	const url = resolveArchiveUrl(spec, "linux", process.arch) as string;
-	const before = spec.sha256;
-	spec.sha256 = { [url]: createHash("sha256").update(body).digest("hex") };
-	restorePins.push(() => {
-		spec.sha256 = before;
-	});
+	pins.pin(toolId, body, { platform: "linux" });
 }
 afterEach(() => {
-	for (const restore of restorePins.splice(0)) restore();
+	pins.restoreAll();
 });
 
 afterAll(() => {

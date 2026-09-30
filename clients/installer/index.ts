@@ -482,8 +482,12 @@ export interface ArchiveSpec {
 	sha256?: Record<string, string>;
 	/**
 	 * Command the extracted launcher needs at run time (`java` for a JVM launcher
-	 * script), checked spawn-free on PATH BEFORE the download so a box without it
-	 * is `unavailable` rather than holding an 87 MB tree that cannot start.
+	 * script), checked spawn-free BEFORE the download so a box without it is
+	 * `unavailable` rather than holding an 87 MB tree that cannot start. The
+	 * check is "a non-empty file named `runtime` on PATH, or under the runtime's
+	 * home env var" (`ARCHIVE_RUNTIME_HOMES`). It is a presence check, not a
+	 * working-JDK check: stock macOS ships `/usr/bin/java` as a stub, so there the
+	 * precheck passes and the download still happens.
 	 */
 	runtime?: string;
 }
@@ -529,9 +533,11 @@ export interface ToolDefinition {
 	 * CLI surface at all AND whose transport-required diagnostic cannot be read
 	 * back through a pipe, so neither `checkArgs` nor #208's rescue can produce
 	 * a verdict (#2722). `"tree-manifest"` is the same spawn-free stance for an
-	 * ARCHIVE whose launcher starts a JVM/BEAM on any argument: the verdict is the
-	 * pinned archive sha256 plus the launcher/marker found on disk by
-	 * `installArchiveTool`, and no `--version` is ever spawned (#3400). The
+	 * ARCHIVE whose launcher starts a JVM/BEAM on any argument: it is verified AT
+	 * INSTALL by the pinned archive sha256 plus the launcher/marker found on disk
+	 * by `installArchiveTool` (later resolution only checks the shim exists), and
+	 * no `--version` is ever spawned: not after a refresh, not on the PATH rung,
+	 * not in the `/lens-tools` listing (#3400). The
 	 * initialize handshake stays in the nightly tool-smoke.
 	 */
 	verification?: "package-entry" | "tree-manifest";
@@ -1366,9 +1372,10 @@ export const TOOLS: ToolDefinition[] = [
 		// kotlin-language-server (fwcd, #3400) — a platform-agnostic launcher ZIP
 		// (`server/{bin,lib}`, 87 MB) whose `bin/kotlin-language-server` script
 		// starts a JVM on ANY argument and has no stable `--version`, so it is
-		// verified by manifest, not by spawn: the pinned sha256, the launcher on
-		// disk and executable, and `java` on PATH before the download
-		// (`verification: "tree-manifest"`). The initialize handshake is the nightly
+		// verified at install by manifest, not by spawn: the pinned sha256, the
+		// launcher on disk with an exec bit, and `java` on PATH or JAVA_HOME before
+		// the download (`verification: "tree-manifest"`). The 2025 release publishes
+		// no digest, so its pin is trust-on-first-use (the hash of the download). The initialize handshake is the nightly
 		// tool-smoke `kotlin` row. fwcd 1.3.13 (2025-01-18) rather than JetBrains'
 		// kotlin-lsp (v263.4702.0): its CDN ships the macOS standalone archives as
 		// `.sit`, which this installer's tar/unzip/Expand-Archive paths cannot
@@ -2974,12 +2981,18 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 			// Try to get version — through the probe seam (#2894), which owns the
 			// synchronous-throw case (#533) and the timeout tree-kill that a bare
 			// `spawn({ timeout })` promise did not do.
-			const probe = await probeToolAsync(tool.checkCommand, ["--version"], {
-				timeout: 5000,
-			});
-			status.version =
-				`${probe.stdout}${probe.stderr}`.trim().split("\n")[0]?.slice(0, 30) ||
-				undefined;
+			// #3400: a `tree-manifest` launcher answers any argument by starting a
+			// JVM, so `--version` is no probe there; the listing shows no version.
+			if (tool.verification !== "tree-manifest") {
+				const probe = await probeToolAsync(tool.checkCommand, ["--version"], {
+					timeout: 5000,
+				});
+				status.version =
+					`${probe.stdout}${probe.stderr}`
+						.trim()
+						.split("\n")[0]
+						?.slice(0, 30) || undefined;
+			}
 			statuses.push(status);
 			continue;
 		}
@@ -5263,6 +5276,33 @@ export async function swapExtractedDir(
 	}
 }
 
+/**
+ * Where a launcher's runtime lives when it is not on PATH: the home env var the
+ * launcher itself honours and the dir under it that holds the executable (#3400).
+ * fwcd's Gradle launcher resolves `$JAVA_HOME/bin/java`, so a JAVA_HOME-only box
+ * can run it and must not be refused. A new runtime (OmniSharp's dotnet) adds a
+ * row here, not a branch.
+ */
+const ARCHIVE_RUNTIME_HOMES: Record<string, { env: string; dir: string }> = {
+	java: { env: "JAVA_HOME", dir: "bin" },
+};
+
+function runtimeFoundInHome(runtime: string): boolean {
+	const home = ARCHIVE_RUNTIME_HOMES[runtime];
+	const root = home ? process.env[home.env] : undefined;
+	if (!home || !root) return false;
+	const names =
+		installerPlatform() === "win32" ? [`${runtime}.exe`, runtime] : [runtime];
+	return names.some((name) => {
+		try {
+			const stat = statSync(path.join(root, home.dir, name));
+			return stat.isFile() && stat.size > 0;
+		} catch {
+			return false;
+		}
+	});
+}
+
 async function installArchiveTool(
 	tool: ToolDefinition,
 ): Promise<string | undefined> {
@@ -5457,7 +5497,7 @@ async function installArchiveTool(
 			}
 			await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 			logSessionStart(
-				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes)`,
+				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes, sha256 verified ${digest})`,
 			);
 			debugLog(`[archive] installed ${tool.name} bundle → ${extractDir}`);
 			return extractDir;
@@ -5487,9 +5527,11 @@ async function installArchiveTool(
 			return undefined;
 		}
 		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
-		// #3400: "present" is not "runnable" — an empty file, or a launcher on a
-		// filesystem where the chmod above silently did nothing (noexec/FAT), would
-		// otherwise be shimmed and recorded as a successful install.
+		// #3400: "present" is not "runnable" — an empty file, a directory, or a
+		// launcher whose exec bit did not stick (a zip entry extracted without it,
+		// or a chmod that silently did nothing, e.g. FAT) would otherwise be shimmed
+		// and recorded as a successful install. This reads the mode bits: it cannot
+		// see a noexec mount.
 		const launcherStat = await fs.stat(tmpResolvedInner).catch(() => undefined);
 		const launcherRunnable =
 			launcherStat?.isFile() === true &&
@@ -5538,7 +5580,7 @@ async function installArchiveTool(
 			);
 		}
 		logSessionStart(
-			`archive-install ${tool.id}: installed → ${shimPath} (extracted ${archiveBuffer.length} bytes)`,
+			`archive-install ${tool.id}: installed → ${shimPath} (extracted ${archiveBuffer.length} bytes, sha256 verified ${digest})`,
 		);
 		debugLog(`[archive] installed ${tool.name} → ${shimPath}`);
 		return shimPath;
@@ -6457,12 +6499,14 @@ export async function installTool(
 					return false;
 				}
 				// #3400: a launcher that needs a runtime (java) is `unavailable`
-				// without it, decided BEFORE the download. PATH walk, no spawn.
+				// without it, decided BEFORE the download. PATH walk plus the
+				// runtime's home env var, no spawn.
 				if (
 					tool.archive.runtime &&
-					!(await isCommandAvailable(tool.archive.runtime))
+					!(await isCommandAvailable(tool.archive.runtime)) &&
+					!runtimeFoundInHome(tool.archive.runtime)
 				) {
-					const reason = `runtime ${tool.archive.runtime} not found on PATH`;
+					const reason = `runtime ${tool.archive.runtime} not found on PATH or its home`;
 					noteInstallAttempt(tool.id, "unavailable", reason);
 					logSessionStart(`auto-install ${tool.id}: ${reason}`);
 					return false;
