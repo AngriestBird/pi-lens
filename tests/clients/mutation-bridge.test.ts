@@ -897,6 +897,34 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 		});
 	});
 
+	it("counts no false block under no-read-guard, where no credit was due", () => {
+		withScopes("no-guard", ({ filePath, tmpDir, runtime, cacheManager }) => {
+			const lineage = runtime.captureSessionGeneration();
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					lineage,
+				},
+				makeDeps({
+					tmpDir,
+					runtime,
+					cacheManager,
+					shouldStampReadGuard: () => false,
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
 	it("never lets a non-handle lineage escape to the producer", () => {
 		withScopes("foreign", ({ filePath, runtime, deps }) => {
 			const entry = {
