@@ -13,7 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BiomeClient } from "../../clients/biome-client.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
@@ -1438,6 +1438,25 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 		writeNow(file, v.join("\n"));
 	};
 	const RANGE_STALE = "Edit range changed since read";
+	// Reads land in the same millisecond on a fast box, and the pre-fix guard
+	// broke that tie by timestamp (`lastUnavailableTimestamp <= lastMismatch
+	// Timestamp`), so the same replay flipped between allow and block. A fake
+	// Date that moves between reads makes the pre-fix red deterministic; the
+	// fix does not look at timestamps.
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	const read = (
+		runtime: RuntimeCoordinator,
+		file: string,
+		input: { offset?: number; limit?: number },
+	) => {
+		vi.advanceTimersByTime(10);
+		return piRead(runtime, file, input);
+	};
 	const setup = (name: string) => {
 		const env = setupTestEnvironment(`rg-3522-${name}-`);
 		const file = fixture(env.tmpDir, "s.ts", `${lines(12).join("\n")}\n`);
@@ -1447,10 +1466,10 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("does not let a newer context-only read cancel a stale line (ContextSuppress)", async () => {
 		const { env, file, runtime } = setup("ctx-suppress");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			foreignWrite(file, 4, "EXTERNAL4");
 			// Delivers 5-8; line 4 is only in its context zone.
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
 			expect(edit.blocked).toBe(true);
 			expect(edit.reason).toContain(RANGE_STALE);
@@ -1462,9 +1481,9 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("hash-checks an edit that spans two reads (SpanAcrossReads)", async () => {
 		const { env, file, runtime } = setup("span");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			foreignWrite(file, 4, "EXTERNAL4");
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [
 				[4, 5, "agent4\nagent5"],
 			]);
@@ -1480,11 +1499,11 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("blocks a spanning edit when the SECOND read's line went stale", async () => {
 		const { env, file, runtime } = setup("span-second");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			foreignWrite(file, 5, "EXTERNAL5");
 			// Re-stamps FileTime; delivers 8-11, so line 5 is only in its context zone.
-			await piRead(runtime, file, { offset: 8, limit: 4 });
+			await read(runtime, file, { offset: 8, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [
 				[4, 5, "agent4\nagent5"],
 			]);
@@ -1498,11 +1517,11 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("blocks a spanning edit when both lines went stale, and does not relocate it", async () => {
 		const { env, file, runtime } = setup("span-both");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			foreignWrite(file, 4, "EXTERNAL4");
 			foreignWrite(file, 5, "EXTERNAL5");
-			await piRead(runtime, file, { offset: 8, limit: 4 });
+			await read(runtime, file, { offset: 8, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [
 				[4, 5, "agent4\nagent5"],
 			]);
@@ -1517,8 +1536,8 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("allows a spanning edit when each line still matches the read that delivered it", async () => {
 		const { env, file, runtime } = setup("span-fresh");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [
 				[4, 5, "agent4\nagent5"],
 			]);
@@ -1532,9 +1551,9 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("allows the line a newer read re-delivered after the other writer (no false block)", async () => {
 		const { env, file, runtime } = setup("reread");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			foreignWrite(file, 4, "EXTERNAL4");
-			await piRead(runtime, file, { offset: 4, limit: 1 });
+			await read(runtime, file, { offset: 4, limit: 1 });
 			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
 			expect(edit.reason).toBeUndefined();
 			expect(edit.blocked).toBe(false);
@@ -1546,10 +1565,10 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("allows a two-line edit whose lines each match their own newest read, though an older read is stale on one", async () => {
 		const { env, file, runtime } = setup("mixed");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 8 });
+			await read(runtime, file, { offset: 1, limit: 8 });
 			foreignWrite(file, 4, "EXTERNAL4");
 			// Delivers only line 4; line 5 stays the first read's view.
-			await piRead(runtime, file, { offset: 4, limit: 1 });
+			await read(runtime, file, { offset: 4, limit: 1 });
 			const edit = await positionalEdit(runtime, file, [
 				[4, 5, "agent4\nagent5"],
 			]);
@@ -1563,9 +1582,9 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("does not let an older read that matches the disk vouch for a line a newer read saw differently", async () => {
 		const { env, file, runtime } = setup("revert");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			foreignWrite(file, 4, "EXTERNAL4");
-			await piRead(runtime, file, { offset: 4, limit: 1 });
+			await read(runtime, file, { offset: 4, limit: 1 });
 			// The writer puts line 4 back: the disk equals the OLD read again,
 			// but the agent's latest view of line 4 is EXTERNAL4.
 			foreignWrite(file, 4, "line4");
@@ -1580,7 +1599,7 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("rescues a touched file whose delivered lines still match", async () => {
 		const { env, file, runtime } = setup("rescue");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			// Same bytes, new mtime: FileTime moves, the hashes do not.
 			writeNow(file, fs.readFileSync(file, "utf8"));
 			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
@@ -1594,7 +1613,7 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("does not rescue a touched file for a line no read delivered", async () => {
 		const { env, file, runtime } = setup("rescue-ctx");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 1, limit: 4 });
 			writeNow(file, fs.readFileSync(file, "utf8"));
 			// Line 6 is inside the read's context zone but was never delivered.
 			const edit = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
@@ -1608,7 +1627,7 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("still admits the context zone for a line no read delivered (ContextSlack)", async () => {
 		const { env, file, runtime } = setup("slack");
 		try {
-			await piRead(runtime, file, { offset: 5, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
 			const edit = await positionalEdit(runtime, file, [[3, 3, "agent3"]]);
 			expect(edit.reason).toBeUndefined();
 			expect(edit.blocked).toBe(false);
@@ -1620,11 +1639,11 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("does not relocate a spanning edit from a read that is not the newest view of every line (SpanSnapshotFixAnyReloc)", async () => {
 		const { env, file, runtime } = setup("any-reloc");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 2 });
+			await read(runtime, file, { offset: 1, limit: 2 });
 			// Another writer inserts a line on top: line1,line2 now sit at 2-3.
 			writeNow(file, ["EXTERNAL0", ...diskLines(file)].join("\n"));
 			// The agent's newest view of line 1 is EXTERNAL0.
-			await piRead(runtime, file, { offset: 1, limit: 1 });
+			await read(runtime, file, { offset: 1, limit: 1 });
 			// It believes lines 1-2 are EXTERNAL0/line2. The older read's run
 			// (line1, line2) is unique at 2-3, but relocating there would
 			// overwrite line1, which the agent's newest view contradicts.
@@ -1648,9 +1667,9 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 	it("relocates a shifted two-line edit from the read that is the newest view of both lines", async () => {
 		const { env, file, runtime } = setup("reloc");
 		try {
-			await piRead(runtime, file, { offset: 1, limit: 6 });
+			await read(runtime, file, { offset: 1, limit: 6 });
 			writeNow(file, ["INS1", "INS2", ...diskLines(file)].join("\n"));
-			await piRead(runtime, file, { offset: 9, limit: 2 });
+			await read(runtime, file, { offset: 9, limit: 2 });
 			// The agent means line3-line4, now at 5-6.
 			const edit = await positionalEdit(runtime, file, [
 				[3, 4, "agent3\nagent4"],
