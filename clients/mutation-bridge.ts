@@ -84,7 +84,12 @@ export interface MutationBridgeDeps {
 	getRuntime(): {
 		turnIndex: number;
 		telemetrySessionId?: string;
-		readGuard?: { recordWritten?: (filePath: string) => void };
+		readGuard?: {
+			recordWritten?: (
+				filePath: string,
+				opts?: { branchEpoch?: number },
+			) => void;
+		};
 		recordProjectMutation?: (args: {
 			filePath: string;
 			source: ProjectChangeSource;
@@ -100,6 +105,7 @@ export interface MutationBridgeDeps {
 			kind: "autofix" | "format",
 			ownerSessionId?: string,
 			originCwd?: string,
+			readGuardBranchEpoch?: number,
 		) => boolean;
 	};
 	getCacheManager(): {
@@ -264,7 +270,12 @@ export function recordMutationThroughSeam(
 		//    `isRecordable` check above already passed, so the write itself is
 		//    still bookkept below whether or not the stamp fires.
 		if (deps.shouldStampReadGuard?.() ?? true) {
-			runtime.readGuard?.recordWritten?.(filePath);
+			runtime.readGuard?.recordWritten?.(
+				filePath,
+				entry.readGuardBranchEpoch === undefined
+					? undefined
+					: { branchEpoch: entry.readGuardBranchEpoch },
+			);
 		}
 
 		// 2. Turn state: this is the insert that leaves `turn-state.json` `files`
@@ -328,6 +339,9 @@ export function recordMutationThroughSeam(
 					kind,
 					runtime.telemetrySessionId,
 					projectRoot,
+					// #3521: the settled sweep's epoch, so a record it queues after
+					// a /tree is not credited to the new branch.
+					entry.readGuardBranchEpoch,
 				);
 			}
 		}
