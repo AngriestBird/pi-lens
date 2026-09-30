@@ -378,17 +378,18 @@ export interface AnalyzeFileOptions {
  * `counts.warnings`/`counts.advisories` while `result.diagnostics` never
  * carries it. A Go/PHP file with no toolchain on the host therefore reported
  * `counts.warnings: 1` beside `diagnostics: []`, with no way to see what the
- * warning was. Merge the warnings bucket in, deduping by the dispatch `id`
- * (Diagnostic.id is unique per dispatch), so `counts.diagnostics` and the
- * listed entries agree in both directions.
+ * warning was. Merge the warnings bucket in, deduping by the dispatch `id`,
+ * so `counts.diagnostics` and the
+ * listed entries agree in both directions. Every warnings entry except the
+ * coverage notice is the same object as one in `result.diagnostics`, so an
+ * id-based merge only adds the notice.
  */
 function listDiagnosticsForCounts(result: DispatchResult): Diagnostic[] {
-	if (result.warnings.length === 0) return result.diagnostics;
 	const listedIds = new Set(result.diagnostics.map((d) => d.id));
-	const extras = result.warnings.filter((w) => !listedIds.has(w.id));
-	return extras.length === 0
-		? result.diagnostics
-		: [...result.diagnostics, ...extras];
+	return [
+		...result.diagnostics,
+		...result.warnings.filter((w) => !listedIds.has(w.id)),
+	];
 }
 
 function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
