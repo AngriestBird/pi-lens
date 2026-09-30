@@ -532,6 +532,24 @@ describe("kotlin-language-server registry entry (#3400)", () => {
 		expect(httpsGetMock).toHaveBeenCalledTimes(1);
 	});
 
+	it.each([
+		["an empty file", (javaPath: string) => fs.writeFileSync(javaPath, "")],
+		["a directory", (javaPath: string) => fs.mkdirSync(javaPath)],
+	])("does not count a JAVA_HOME java that is %s", async (_label, makeJava) => {
+		route("kotlin-language-server", GOOD, {});
+		stubExtractor({});
+		process.env.PATH = path.join(fakeBin, "no-java-here");
+		const jdk = path.join(fakeBin, "broken-jdk");
+		fs.mkdirSync(path.join(jdk, "bin"), { recursive: true });
+		makeJava(path.join(jdk, "bin", isWindows ? "java.exe" : "java"));
+		process.env.JAVA_HOME = jdk;
+
+		const ok = await installTool("kotlin-language-server");
+
+		expect(ok).toBe(false);
+		expect(httpsGetMock).not.toHaveBeenCalled();
+	});
+
 	it("still refuses when JAVA_HOME points at a directory with no java", async () => {
 		route("kotlin-language-server", GOOD, {});
 		stubExtractor({});
