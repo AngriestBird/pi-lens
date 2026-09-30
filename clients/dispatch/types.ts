@@ -103,6 +103,14 @@ export interface Diagnostic {
 	 * diagnostics.
 	 */
 	scanOrigin?: string;
+	/**
+	 * #3218: the one-line rationale for a finding the delta-mode promotion seam
+	 * (`promoteDeltaUnusedToBlockers`) raised from hint/advisory to `blocking`.
+	 * Set only by that seam; the STOP renderers emit each distinct note once
+	 * beneath the banner so the agent is told WHY a hint-severity finding
+	 * blocks. Absent on every other diagnostic.
+	 */
+	promotionNote?: string;
 }
 
 export interface DispatchResult {

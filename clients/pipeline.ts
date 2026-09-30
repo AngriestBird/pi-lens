@@ -54,7 +54,10 @@ import {
 } from "./dispatch/runners/utils/runner-helpers.js";
 import { findDetektConfig } from "./dispatch/runners/detekt.js";
 import type { Diagnostic, PiAgentAPI } from "./dispatch/types.js";
-import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
+import {
+	formatDiagnostics,
+	formatPromotionNotes,
+} from "./dispatch/utils/format-utils.js";
 import { detectFileKind, getFileKindLabel } from "./file-kinds.js";
 import {
 	detectFileChangedAfterCommand,
@@ -1640,6 +1643,8 @@ function buildEnrichedBlockerOutput(
 	if (blockers.length > 10) {
 		out += `  ... and ${blockers.length - 10} more\n`;
 	}
+
+	out += formatPromotionNotes(blockers);
 
 	return out;
 }
