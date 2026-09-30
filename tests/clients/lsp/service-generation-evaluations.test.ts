@@ -83,14 +83,31 @@ describe("#3733 LSP service generation is per process", () => {
 		expect(server.captureLspServiceGeneration().generation).toBe(8);
 	});
 
-	it("starts at 0 when the other build's cell carries no usable count", async () => {
+	it.each(["seven", -3, 1.5])(
+		"starts at 0 when the other build's cell carries %j as its count",
+		async (count) => {
+			_seedProcessSingletonCellForTests("lsp.service.generation", {
+				schema: "pi-lens.process-singletons",
+				version: 99,
+				value: { generation: count },
+			});
+			const server = await evaluateServerModule();
+
+			expect(server.captureLspServiceGeneration().generation).toBe(0);
+		},
+	);
+
+	it("reads the cell another build replaced after a handle was captured", async () => {
+		const first = await evaluateServerModule();
+		const captured = first.captureLspServiceGeneration();
 		_seedProcessSingletonCellForTests("lsp.service.generation", {
 			schema: "pi-lens.process-singletons",
 			version: 99,
-			value: { generation: "seven" },
+			value: { generation: 7 },
 		});
-		const server = await evaluateServerModule();
+		const second = await evaluateServerModule();
+		second.resetLspLaunchAvailabilityGeneration();
 
-		expect(server.captureLspServiceGeneration().generation).toBe(0);
+		expect(captured.isCurrent()).toBe(false);
 	});
 });
