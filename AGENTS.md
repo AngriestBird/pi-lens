@@ -790,7 +790,10 @@ bounded full suite at the end; CI is authoritative under contention.
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
-forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
+forced remove follows the link into the shared install (#2704 class).
+`node scripts/pr-worktree.mjs open <PR|branch> [--merge|--head] [--name NAME]`
+and `close <path>` run that sequence in one command, unlinking only a
+symlinked `node_modules` and refusing a real directory. The Bash hook enforces the
 mechanically classifiable subset of these rules.
 
 <important if="relocating project data, machine state, or telemetry">
