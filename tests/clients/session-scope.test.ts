@@ -158,7 +158,7 @@ describe("#3611 the lineage handle", () => {
 		expect(handle.isCurrent()).toBe(true);
 		expect(handle.generation).toBe(runtime.sessionGeneration);
 
-		expect(retireScope(runtime.sessionScope, "reload")).toBe(true);
+		retireScope(runtime.sessionScope, "reload");
 
 		expect(handle.isCurrent()).toBe(false);
 		expect(runtime.isCurrentSession(handle.generation)).toBe(false);
@@ -216,10 +216,21 @@ describe("#3611 the lineage handle", () => {
 		expect(runtime.sessionScope.isLive()).toBe(true);
 	});
 
-	it("keeps the first retirement reason and reports a second retire as a no-op", () => {
+	it("ends a scope whose shutdown carried no reason", () => {
+		// An older host or an RPC shutdown can omit the reason; the scope must
+		// still stop being current.
 		const scope = beginScope({ role: "primary" });
-		expect(retireScope(scope, "reload")).toBe(true);
-		expect(retireScope(scope, "superseded")).toBe(false);
+		const handle = scope.capture();
+		retireScope(scope, undefined);
+		expect(scope.isLive()).toBe(false);
+		expect(scope.retiredBy()).toBe("shutdown");
+		expect(handle.isCurrent()).toBe(false);
+	});
+
+	it("keeps the first retirement reason when a scope is retired twice", () => {
+		const scope = beginScope({ role: "primary" });
+		retireScope(scope, "reload");
+		retireScope(scope, "superseded");
 		expect(scope.retiredBy()).toBe("reload");
 	});
 });

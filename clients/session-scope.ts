@@ -59,7 +59,7 @@ export interface SessionScope {
 	readonly coordinatorId: number | undefined;
 	branchEpoch(): number;
 	isLive(): boolean;
-	/** Why the scope stopped being live: pi's shutdown reason or "superseded". */
+	/** Why the scope stopped being live: pi's shutdown reason, "shutdown" when pi sent none, or "superseded". */
 	retiredBy(): string | undefined;
 	capture(): LineageHandle;
 }
@@ -125,12 +125,12 @@ class Scope implements SessionScope {
 		return this.retiredReason;
 	}
 
-	/** The first reason wins; returns false when the scope was already retired. */
-	retire(reason: string): boolean {
-		if (this.retiredReason !== undefined) return false;
-		this.retiredReason = reason;
+	/** The first reason wins. */
+	retire(reason: string | undefined): void {
+		if (this.retiredReason !== undefined) return;
+		// A host that sends no reason still ends the scope.
+		this.retiredReason = reason ?? "shutdown";
 		this.life.bump();
-		return true;
 	}
 
 	moveBranch(): void {
@@ -166,10 +166,13 @@ export function beginScope(args: {
 
 /**
  * Retire a scope. Every handle it issued stops being current. Idempotent:
- * the first reason wins and only the first call is reported.
+ * the first reason wins.
  */
-export function retireScope(scope: SessionScope, reason: string): boolean {
-	return (scope as Scope).retire(reason);
+export function retireScope(
+	scope: SessionScope,
+	reason: string | undefined,
+): void {
+	(scope as Scope).retire(reason);
 }
 
 /** `/tree`: the scope's branch epoch moves once; its handles go branch-stale. */
@@ -239,9 +242,10 @@ export function recordDroppedRead(handle: LineageHandle, site: string): void {
 	const captured = (handle as unknown as Record<symbol, unknown>)[
 		CAPTURED_SCOPE
 	] as CapturedScope | undefined;
-	if (!captured || !captured.branch.isCurrent()) return;
+	if (!captured?.branch.isCurrent()) return;
+	// A handle whose scope is live and whose branch did not move is current,
+	// so its guard never drops: a caller reaches here only after a retire.
 	const reason = captured.scope.retiredBy();
-	if (reason === undefined) return;
 	incrementDegradationCount({
 		kind: "session-scope-read-dropped",
 		subject: `${reason}:${site}`,

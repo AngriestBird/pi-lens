@@ -3761,7 +3761,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		reason: string | undefined,
 		sessionId: string | undefined,
 	): void => {
-		if (!scope || !retireScope(scope, reason ?? "shutdown")) return;
+		if (!scope) return;
+		retireScope(scope, reason);
 		logScopeTransition(scope, {
 			transition: "shutdown",
 			reason: scope.retiredBy(),
