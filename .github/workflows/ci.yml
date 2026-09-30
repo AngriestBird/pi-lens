@@ -390,6 +390,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      # #3684: the advisory registry-subset rule reports only in files the PR
+      # changed. The checkout is the PR merge commit at depth 1, so fetch the
+      # base tip; the wrapper diffs the working tree against origin/<base ref>
+      # (GITHUB_BASE_REF is set on pull_request runs). Advisory never gates.
+      - name: Fetch PR base for advisory self-scan
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" || true
+
       # #1718: dogfoods the pi-lens-self-scan ast-grep rule subset (recurring
       # AI-authorship defect shapes from #1158) against pi-lens's own
       # clients/ + tests/ trees. ~3.5s on 1073 files — cheap enough for every

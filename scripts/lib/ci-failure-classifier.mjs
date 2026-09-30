@@ -19,9 +19,11 @@
  * both wrap every line in. Every pattern below matches against the stripped
  * text -- matching raw escape-coded text is what makes log heuristics
  * brittle across reporter versions. */
+// Every CSI sequence (colour, cursor), not only `m`: `scripts/ci-verdict.mjs`
+// reads job logs through this same helper (#3700).
 // oxlint-disable-next-line no-control-regex -- ESC (\x1b) is the literal ANSI escape-sequence lead byte this pattern strips, not accidental input.
-const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
-function stripAnsi(text) {
+const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+export function stripAnsi(text) {
 	return text.replace(ANSI_PATTERN, "");
 }
 
@@ -38,7 +40,7 @@ function stripAnsi(text) {
  * line".
  */
 const LINE_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z ?/gm;
-function stripLineTimestamps(text) {
+export function stripLineTimestamps(text) {
 	return text.replace(LINE_TIMESTAMP_PREFIX, "");
 }
 
@@ -90,10 +92,12 @@ const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 // elsewhere in the same log under a fake real classification (safe
 // direction, but reimposes the manual-read tax this classifier exists to
 // remove). See the "V4 fabricated FAIL in a passing test title" fixture.
-const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.test\.tsx?)(?=\s|$)/m;
+export const BARE_FAIL_LINE =
+	/^\s*FAIL\b.*?(\S+\.(?:test|spec)\.[cm]?[jt]sx?)(?=\s|$)/m;
 // (real log, same run) "AssertionError: expected false to be true //
 // Object.is equality"
-const ASSERTION_LINE = /^\s*AssertionError:\s*(.+)$/m;
+export const ASSERTION_LINE =
+	/^\s*AssertionError(?: \[ERR_ASSERTION\])?:\s*(.+)$/m;
 // vitest prints this inline, AS EACH FILE FINISHES, before the end-of-run
 // "Failed Tests" summary block ever gets a chance to print (real log, run
 // 32913518938, job 98012237782, line 536): " ❯  default

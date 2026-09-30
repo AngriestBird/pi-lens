@@ -42,6 +42,13 @@
  * check still in flight, not one that failed.
  *
  *   node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>]
+ *   node scripts/ci-verdict.mjs --all
+ *   node scripts/ci-verdict.mjs --watch-open [--wait <seconds>] [--state-file <path>]
+ *
+ * #3700: `--all` and `--watch-open` (a notifying wait: exit 0 on the first poll
+ * with a per-PR event, 3 when the window ends with none) read every PR through
+ * `run()` itself, and a FAILED verdict now names the failed step, the failing
+ * test lines and a remedy hint -- see `readFailureDetails` and `watchOpenPrs`.
  *
  * Exit codes:
  *   0  -- every gating check-run concluded "success", or (discovered rows
@@ -169,7 +176,21 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
+import {
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	ASSERTION_LINE,
+	BARE_FAIL_LINE,
+	stripAnsi,
+	stripLineTimestamps,
+} from "./lib/ci-failure-classifier.mjs";
 import {
 	isAdvisoryCheck,
 	isBlockingConclusion,
@@ -367,6 +388,7 @@ export function computeVerdict(
 	classification = null,
 	rerunState = null,
 	absentContext = null,
+	noiseRowIds = null,
 ) {
 	const checkRuns = Array.isArray(checkRunsPayload?.check_runs)
 		? checkRunsPayload.check_runs
@@ -442,13 +464,19 @@ export function computeVerdict(
 			row.status === "completed" &&
 			isUncertainConclusion(row.conclusion),
 	);
+	// #3700: a row the caller proved is post-merge noise (its job could not
+	// fetch `refs/pull/N/merge` after the PR merged) is not a failure. The proof
+	// needs the job log, which this pure function never reads.
+	const isNoiseRow = (row) => noiseRowIds?.has(row.id) === true;
 	const failingGatingRows = rows.filter((row) => {
 		if (!row.gating || !row.present || row.status !== "completed") return false;
 		if (isUncertainConclusion(row.conclusion)) return false;
+		if (isNoiseRow(row)) return false;
 		if (infraRerunPending && row.name === "Unit tests") return false;
 		if (requiredNameSet.has(row.name)) return row.conclusion !== "success";
 		return isBlockingConclusion(row.conclusion);
 	});
+	const noiseRows = rows.filter((row) => row.gating && isNoiseRow(row));
 	const pendingGatingRows = rows.filter((row) => {
 		if (!row.gating) return false;
 		if (row.status !== "completed") return true;
@@ -457,25 +485,33 @@ export function computeVerdict(
 
 	let exitCode;
 	let reason;
+	// #3700: the machine-readable state `--watch-open` and `--all` key on, so
+	// neither has to text-match `reason`.
+	let kind;
 	if (mergeable === "CONFLICTING") {
 		exitCode = EXIT_DIRTY;
+		kind = "dirty";
 		reason = anyAbsent
 			? "one or more required checks are absent and the PR is merge-conflicted (mergeable=CONFLICTING): a merge-conflicted PR can't build its merge-ref, so the real gates are skipped, not failed -- AGENTS.md shape 11"
 			: "the PR is merge-conflicted (mergeable=CONFLICTING) even though the required checks show present -- that's stale evidence from before the head turned conflicting, not proof it can merge (round 3, F1)";
 	} else if (infraRerunPending) {
 		exitCode = EXIT_PENDING;
+		kind = "infra-rerun";
 		reason =
 			"infra (rerun armed): Unit tests was classified as infrastructure and is awaiting its one permitted rerun";
 	} else if (cancelledLatestRows.length > 0) {
 		exitCode = EXIT_PENDING;
+		kind = "cancelled";
 		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
 			.map(formatRerunHint)
 			.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
+		kind = "failed";
 		reason = `gating check(s) completed with a non-success conclusion: ${failingGatingRows.map((row) => `${row.name} (${row.conclusion})`).join(", ")}`;
 	} else if (pendingGatingRows.length > 0) {
 		exitCode = EXIT_PENDING;
+		kind = "pending";
 		if (anyAbsent) {
 			// Both messages below are reachable only here: CONFLICTING was
 			// answered above (its reason must never be rewritten), and a
@@ -486,11 +522,13 @@ export function computeVerdict(
 				? context.actionRequiredRuns
 				: [];
 			if (approvalRuns.length > 0) {
+				kind = "fork-approval";
 				reason = formatForkApprovalReason(context.repository, approvalRuns);
 			} else if (
 				context?.autoMerge === true &&
 				context.absentMinutes >= ABSENT_REQUIRED_REARM_MINUTES
 			) {
+				kind = "absent-rearm";
 				reason = formatAbsentRequiredReason(context.sha, context.absentMinutes);
 			} else {
 				reason =
@@ -514,9 +552,21 @@ export function computeVerdict(
 		}
 	} else {
 		exitCode = EXIT_SUCCESS;
-		reason = "every gating check concluded success";
+		kind = "success";
+		reason =
+			noiseRows.length > 0
+				? `post-merge noise, not a failure: ${noiseRows.map((row) => row.name).join(", ")} could not fetch refs/pull/N/merge after the PR merged; every other gating check concluded success`
+				: "every gating check concluded success";
 	}
-	return { exitCode, rows, reason, mergeState };
+	return {
+		exitCode,
+		rows,
+		reason,
+		mergeState,
+		kind,
+		failingRows: failingGatingRows,
+		cancelledRows: cancelledLatestRows,
+	};
 }
 
 /**
@@ -526,14 +576,21 @@ export function computeVerdict(
  * fallback is admitted only when that same URL proves its job segment matches
  * the check-run id.
  */
-export function formatRerunHint(row) {
+export function rerunArgsFor(row) {
 	const detailsUrl = typeof row?.detailsUrl === "string" ? row.detailsUrl : "";
 	const runId = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1];
-	if (runId) return `rerun ${runId} (gh run rerun ${runId})`;
+	if (runId) return ["run", "rerun", runId];
 
 	const jobId = detailsUrl.match(/\/job\/(\d+)(?:\/|$)/)?.[1];
 	if (jobId && String(row?.id) === jobId)
-		return `rerun ${jobId} (gh run rerun --job ${jobId})`;
+		return ["run", "rerun", "--job", jobId];
+	return null;
+}
+
+export function formatRerunHint(row) {
+	const detailsUrl = typeof row?.detailsUrl === "string" ? row.detailsUrl : "";
+	const rerun = rerunArgsFor(row);
+	if (rerun) return `rerun ${rerun.at(-1)} (gh ${rerun.join(" ")})`;
 
 	return `${row?.name ?? "unknown check"} cannot be rerun via gh (not a GitHub Actions job; details: ${detailsUrl || "unavailable"})`;
 }
@@ -700,7 +757,7 @@ function firstLine(error) {
 // an injectable `ghExec` so the CLI orchestration stays testable too.
 // ---------------------------------------------------------------------------
 
-function gh(args, { timeoutMs = DEFAULT_GH_TIMEOUT_MS } = {}) {
+function gh(args, { timeoutMs = DEFAULT_GH_TIMEOUT_MS, maxBuffer } = {}) {
 	// `timeout` + `killSignal` (F4): with neither, a hung `gh` process parks
 	// this call -- and everything waiting on it, including `--wait`'s own
 	// budget -- indefinitely. A probe measured a hung `gh` blocking 51s past
@@ -710,6 +767,7 @@ function gh(args, { timeoutMs = DEFAULT_GH_TIMEOUT_MS } = {}) {
 		stdio: ["ignore", "pipe", "pipe"],
 		timeout: timeoutMs,
 		killSignal: "SIGTERM",
+		...(maxBuffer ? { maxBuffer } : {}),
 	});
 }
 
@@ -834,6 +892,7 @@ export function fetchActionRequiredRuns(
 	sha,
 	ghExec = gh,
 	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+	failOpen = true,
 ) {
 	try {
 		const payload = JSON.parse(
@@ -850,7 +909,9 @@ export function fetchActionRequiredRuns(
 				(run) => run?.head_sha === sha && run?.conclusion === "action_required",
 			)
 			.map((run) => ({ id: run.id }));
-	} catch {
+	} catch (error) {
+		// The verdict text fails open to "none"; an approval must not.
+		if (!failOpen) throw error;
 		return [];
 	}
 }
@@ -864,7 +925,10 @@ export function fetchActionRequiredRuns(
  * earliest is the push clock. The commit date is not: an old commit pushed
  * just now would read as long-absent at once (PR #3697 round 2, finding A).
  * Every read fails open to "unknown" -- no auto-merge, no push time -- which
- * selects the original, quieter text.
+ * selects the original, quieter text. A caller polling under `--wait` reads
+ * again every poll and passes the push time back once it is finite
+ * (`knownPushedMs`), so a first poll before any check suite exists cannot pin
+ * the whole window on the quiet text (#3700, the #3697 round-3 verify).
  */
 export function fetchAutoMergeAge(
 	target,
@@ -872,6 +936,7 @@ export function fetchAutoMergeAge(
 	sha,
 	ghExec = gh,
 	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+	knownPushedMs = null,
 ) {
 	let autoMerge = false;
 	if (isPrNumber(target)) {
@@ -889,21 +954,25 @@ export function fetchAutoMergeAge(
 	}
 	// No suite yet (`Math.min()` is Infinity) or an undated one (NaN) never
 	// reaches the threshold, so both read as the quiet text, like a failed read.
-	let pushedMs = null;
-	try {
-		pushedMs = Math.min(
-			...JSON.parse(
-				ghExec(
-					[
-						"api",
-						`repos/${repository}/commits/${sha}/check-suites?per_page=100`,
-					],
-					{ timeoutMs },
-				),
-			).check_suites.map((suite) => Date.parse(suite.created_at)),
-		);
-	} catch {
-		/* unknown => no age */
+	// A push time the caller already holds is final (#3700): only an unknown one
+	// is read again.
+	let pushedMs = Number.isFinite(knownPushedMs) ? knownPushedMs : null;
+	if (pushedMs === null) {
+		try {
+			pushedMs = Math.min(
+				...JSON.parse(
+					ghExec(
+						[
+							"api",
+							`repos/${repository}/commits/${sha}/check-suites?per_page=100`,
+						],
+						{ timeoutMs },
+					),
+				).check_suites.map((suite) => Date.parse(suite.created_at)),
+			);
+		} catch {
+			/* unknown => no age */
+		}
 	}
 	return { autoMerge, pushedMs };
 }
@@ -1023,6 +1092,239 @@ export function resolveRequiredCheckNames(
 	} catch {
 		return null;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// #3700: what the orchestrator used to read by hand once a gating job failed:
+// the failed STEP, the failing test lines, and whether a rerun can help. All
+// of it reads through the same `ghExec` seam as everything above.
+// ---------------------------------------------------------------------------
+
+/** Most FAIL / AssertionError lines one failed job prints; the rest are
+ * counted, not listed (a mass failure would otherwise print the whole log). */
+export const MAX_FAILURE_LINES = 20;
+
+/** `execFileSync` defaults to a 1 MiB buffer and a Unit tests log is ~450 KB
+ * on a good day: without this a big red log ENOBUFS and prints no failure. */
+export const JOB_LOG_MAX_BUFFER = 64 * 1024 * 1024;
+
+/**
+ * What one job log says (the lines the orchestrator pulled out by hand from
+ * `gh api --allow-escape-sequences .../jobs/<id>/logs`): the vitest `FAIL`
+ * lines and `AssertionError` lines (the `##[error]` annotation vitest repeats
+ * the message in starts with `#`, so it never matches), the `Test Files` /
+ * `Tests` summary, the merge
+ * commit's base from the checkout's `HEAD is now at <sha> Merge <head> into
+ * <base>` line, and whether the checkout could not fetch the PR's merge ref.
+ * `FAIL` must START the line: a passing test titled "does not FAIL when ..."
+ * is not a failure (fabricated-fail-in-passing-title.composite.log).
+ */
+export function parseJobLog(logText) {
+	const failures = [];
+	const summary = [];
+	let mergeBase = null;
+	let missingMergeRefPr = null;
+	for (const raw of String(logText ?? "").split("\n")) {
+		const line = stripLineTimestamps(stripAnsi(raw)).trimEnd();
+		const text = line.trim();
+		if (BARE_FAIL_LINE.test(line) || ASSERTION_LINE.test(line)) {
+			failures.push(text);
+		} else if (/^(?:Test Files|Tests)\s+\d/.test(text)) {
+			summary.push(text);
+		}
+		const base =
+			/HEAD is now at \S+ Merge [0-9a-f]{40} into ([0-9a-f]{40})$/.exec(line);
+		if (base) mergeBase = base[1];
+		missingMergeRefPr =
+			/couldn't find remote ref refs\/pull\/(\d+)\/merge/.exec(line)?.[1] ??
+			missingMergeRefPr;
+	}
+	return {
+		failures: failures.slice(0, MAX_FAILURE_LINES),
+		extraFailures: Math.max(0, failures.length - MAX_FAILURE_LINES),
+		summary,
+		mergeBase,
+		missingMergeRefPr,
+	};
+}
+
+/**
+ * One failed gating row's job: the failed step names (`gh api
+ * repos/<r>/actions/jobs/<id>`) plus its parsed log. The job id comes from the
+ * check-run's own details URL (a check-run id is a job id only for Actions
+ * jobs; a third-party check has neither). Every read fails open to a `note`,
+ * never a throw: a missing log must not turn a red verdict into exit 70.
+ */
+export function readFailedJob(
+	repository,
+	row,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+) {
+	const detail = {
+		name: row.name,
+		rowId: row.id,
+		jobId: null,
+		steps: [],
+		...parseJobLog(""),
+		note: null,
+	};
+	detail.jobId =
+		(typeof row.detailsUrl === "string"
+			? row.detailsUrl.match(/\/job\/(\d+)(?:\/|$)/)?.[1]
+			: null) ?? null;
+	if (!detail.jobId) {
+		detail.note = "not a GitHub Actions job: no log to read";
+		return detail;
+	}
+	try {
+		const job = JSON.parse(
+			ghExec(["api", `repos/${repository}/actions/jobs/${detail.jobId}`], {
+				timeoutMs,
+			}),
+		);
+		detail.steps = (Array.isArray(job?.steps) ? job.steps : [])
+			.filter((step) => step?.conclusion === "failure")
+			.map((step) => String(step.name));
+		Object.assign(
+			detail,
+			parseJobLog(
+				ghExec(
+					[
+						"api",
+						"--allow-escape-sequences",
+						`repos/${repository}/actions/jobs/${detail.jobId}/logs`,
+					],
+					{ timeoutMs, maxBuffer: JOB_LOG_MAX_BUFFER },
+				),
+			),
+		);
+	} catch (error) {
+		detail.note = `could not read the job: ${firstLine(error)}`;
+	}
+	return detail;
+}
+
+function readPrState(target, ghExec, timeoutMs) {
+	try {
+		return (
+			JSON.parse(
+				ghExec(["pr", "view", String(target), "--json", "state"], {
+					timeoutMs,
+				}),
+			)?.state ?? null
+		);
+	} catch {
+		return null;
+	}
+}
+
+function readMasterSha(repository, ghExec, timeoutMs) {
+	try {
+		return (
+			JSON.parse(
+				ghExec(["api", `repos/${repository}/branches/${PROTECTED_BRANCH}`], {
+					timeoutMs,
+				}),
+			)?.commit?.sha ?? null
+		);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Failure detail plus remedy hints for a FAILED verdict's rows (#3700):
+ *  - post-merge noise: a job whose checkout step could not fetch this PR's
+ *    `refs/pull/N/merge`, with no failing test line, on a PR that is MERGED
+ *    (the ref is gone; the job never ran). Only MERGED excuses it: on an open PR the same line means the PR is
+ *    conflicted, which is real. The ids come back so the caller recomputes the
+ *    verdict without them.
+ *  - update-branch: the failed run's merge commit was built on a base that is
+ *    no longer master's head. `gh run rerun` replays that old merge commit
+ *    (#3660), so a rerun cannot pick up anything master gained since.
+ */
+export function readFailureDetails({
+	rows,
+	target,
+	repository,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+}) {
+	const details = rows.map((row) =>
+		readFailedJob(repository, row, ghExec, timeoutMs),
+	);
+	const hints = [];
+	let noiseRowIds = null;
+	if (isPrNumber(target)) {
+		// The excuse is tied to the failure it excuses: the job's own failed step
+		// is the checkout, it printed no failing test line, and the ref it could
+		// not fetch is THIS PR's. A test that quotes the ref text in its output
+		// (this repo's own fixtures do) must not turn a red run green.
+		const noisy = details.filter(
+			(detail) =>
+				detail.missingMergeRefPr === String(target).trim() &&
+				detail.failures.length === 0 &&
+				detail.steps.length > 0 &&
+				detail.steps.every((step) => step.startsWith("Run actions/checkout")),
+		);
+		if (
+			noisy.length > 0 &&
+			readPrState(target, ghExec, timeoutMs) === "MERGED"
+		) {
+			noiseRowIds = new Set(noisy.map((detail) => detail.rowId));
+		}
+		const mergeBase = details.find((detail) => detail.mergeBase)?.mergeBase;
+		const masterSha = mergeBase
+			? readMasterSha(repository, ghExec, timeoutMs)
+			: null;
+		if (mergeBase && masterSha && masterSha !== mergeBase) {
+			hints.push(
+				`master moved since this failure's merge base (${mergeBase.slice(0, 9)} -> ${masterSha.slice(0, 9)}): gh run rerun replays the old merge commit and cannot pick up what master gained -- use gh pr update-branch ${target}`,
+			);
+		}
+	}
+	return { details, hints, noiseRowIds };
+}
+
+/** The lines `run()` prints for a failed verdict's `details` and `hints`, and
+ * `--watch-open` repeats under its event line. */
+export function formatFailureLines(verdict) {
+	const lines = [];
+	for (const detail of verdict.details ?? []) {
+		if (detail.note && !detail.jobId) {
+			lines.push(`${detail.name}: ${detail.note}`);
+			continue;
+		}
+		lines.push(
+			`${detail.name} (job ${detail.jobId}): failed step: ${detail.steps.length > 0 ? detail.steps.join(", ") : "unknown"}${detail.note ? ` (${detail.note})` : ""}`,
+		);
+		for (const failure of detail.failures) lines.push(`  ${failure}`);
+		if (detail.extraFailures > 0)
+			lines.push(`  ... and ${detail.extraFailures} more failing lines`);
+		for (const line of detail.summary) lines.push(`  ${line}`);
+	}
+	for (const hint of verdict.hints ?? []) lines.push(`hint: ${hint}`);
+	return lines;
+}
+
+/** Gating rows and advisory rows reported apart (#3700): an advisory red
+ * (mutation, OSV, PR body) is information that never gates, and it must not
+ * read as the reason a verdict is red -- nor vanish into the table. */
+export function formatGatingSplit(rows, failingRows = []) {
+	const label = (row) => `${row.name} (${row.conclusion})`;
+	const gating = rows.filter((row) => row.gating);
+	const advisory = rows.filter((row) => !row.gating);
+	const reds = advisory.filter(
+		(row) =>
+			row.present &&
+			row.status === "completed" &&
+			isBlockingConclusion(row.conclusion),
+	);
+	return [
+		`Gating: ${gating.length} checks, ${failingRows.length} failing${failingRows.length > 0 ? `: ${failingRows.map(label).join(", ")}` : ""}`,
+		`Advisory (never gates): ${advisory.length} checks, ${reds.length} red${reds.length > 0 ? `: ${reds.map(label).join(", ")}` : ""}`,
+	];
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,17 +1653,539 @@ export function resolveReexecPlan({
 		: REEXEC_VERSION_TOO_OLD;
 }
 
+// ---------------------------------------------------------------------------
+// #3700: `--all` and `--watch-open`. Both read every PR through `run()` itself
+// (its `onVerdict` seam), so a PR's state here is the verdict a one-PR read
+// prints -- never a second CI reader that could disagree with it.
+// ---------------------------------------------------------------------------
+
+/** Seconds between `--watch-open` polls: each poll costs about five `gh`
+ * reads per watched PR, so this stays well above `POLL_INTERVAL_SECONDS`. */
+export const WATCH_POLL_INTERVAL_SECONDS = 90;
+
+// The verdict kinds `--watch-open` reports; every other kind is progress.
+const WATCH_EVENT_KINDS = new Set([
+	"failed",
+	"fork-approval",
+	"absent-rearm",
+	"dirty",
+	"cancelled",
+]);
+
+// `--rerun-cancelled` tries a head at most this many times, waiting twice as
+// long after each refusal (180 s, 360 s): a run GitHub keeps refusing is left
+// to the human, not hammered every poll.
+export const RERUN_MAX_ATTEMPTS = 3;
+export const RERUN_BACKOFF_SECONDS = 180;
+
+// `--stream` names an event the way the orchestrator reads it: `FAIL #N@sha`.
+const STREAM_EVENT_NAMES = {
+	failed: "FAIL",
+	dirty: "DIRTY",
+	cancelled: "CANCELLED-NOT-REPLACED",
+	"fork-approval": "FORK-APPROVAL",
+	"absent-rearm": "ABSENT-REARM",
+};
+
+function formatEventLine(stream, number, kind, sha, reason) {
+	const head = sha ? `@${sha.slice(0, 9)}` : "";
+	if (!stream)
+		return `#${number} ${kind}${head ? ` ${head}` : ""}${reason ? `: ${reason}` : ""}`;
+	const name = STREAM_EVENT_NAMES[kind] ?? kind.toUpperCase();
+	return `${name} #${number}${head}${reason ? `: ${reason}` : ""}`;
+}
+
+export function readOpenPrs(ghExec = gh, timeoutMs = DEFAULT_GH_TIMEOUT_MS) {
+	return JSON.parse(
+		ghExec(
+			[
+				"pr",
+				"list",
+				"--state",
+				"open",
+				"--limit",
+				"100",
+				"--json",
+				"number,author,headRefOid,autoMergeRequest",
+			],
+			{ timeoutMs },
+		),
+	);
+}
+
+function readViewerLogin(ghExec, timeoutMs) {
+	try {
+		return JSON.parse(ghExec(["api", "user"], { timeoutMs }))?.login ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** One PR's `{ repository, sha, verdict }`, or `null` when its read failed
+ * (`run()` already said why on `stderr`). */
+async function readPrVerdict(
+	pr,
+	{ ghExec, stderr, sleepImpl, now, absentSinceMs },
+) {
+	let captured = null;
+	const exitCode = await run({
+		argv: [String(pr)],
+		ghExec,
+		stdout: () => {},
+		stderr,
+		...(sleepImpl ? { sleepImpl } : {}),
+		...(now ? { now } : {}),
+		absentSinceMs,
+		onVerdict: (info) => {
+			captured = info;
+		},
+	});
+	return exitCode === EXIT_TRANSPORT ? null : captured;
+}
+
+/** `--all`: one line per open PR -- author, auto-merge, head, verdict kind,
+ * and the first failing gating check. Always exits 0: it is a snapshot. */
+export async function snapshotOpenPrs({
+	ghExec = gh,
+	stdout = console.log,
+	stderr = console.error,
+	sleepImpl,
+	now,
+}) {
+	for (const pr of readOpenPrs(ghExec)) {
+		const info = await readPrVerdict(pr.number, {
+			ghExec,
+			stderr,
+			sleepImpl,
+			now,
+		});
+		const first = info?.verdict.failingRows[0];
+		stdout(
+			`#${pr.number} ${pr.author?.login ?? "?"} auto-merge=${pr.autoMergeRequest ? "on" : "off"} head=${String(pr.headRefOid ?? "").slice(0, 9)} gating=${info ? info.verdict.kind : "unreadable"}${first ? ` first-failure=${first.name}` : ""}`,
+		);
+	}
+	return EXIT_SUCCESS;
+}
+
+/** One PR's state: `key` is the last seen `<sha>:<kind>`, `since` when the
+ * watch first saw the head (`{ sha, ms }`: the absence clock of a head with no
+ * check suite), `rerun` the re-run attempts on the head (`{ sha, attempts,
+ * nextMs, done }`). The
+ * first round kept the bare key string; it still loads. */
+function normalizeWatchEntry(value) {
+	if (typeof value === "string") return { key: value };
+	return value && typeof value === "object" && !Array.isArray(value)
+		? value
+		: {};
+}
+
+function loadWatchState(stateFile) {
+	if (!stateFile) return {};
+	try {
+		const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? Object.fromEntries(
+					Object.entries(parsed).map(([number, value]) => [
+						number,
+						normalizeWatchEntry(value),
+					]),
+				)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
+/** Temp file then rename, directory created: a kill mid-write leaves the old
+ * state, never a truncated one (which the loader would read as empty and every
+ * PR would report again). A failure is a note, not an exit: the poll's events
+ * are already printed. */
+function saveWatchState(stateFile, seen, stderr) {
+	if (!stateFile) return;
+	const temporary = `${stateFile}.${process.pid}.tmp`;
+	try {
+		mkdirSync(dirname(stateFile), { recursive: true });
+		writeFileSync(temporary, `${JSON.stringify(seen, null, 2)}\n`);
+		renameSync(temporary, stateFile);
+	} catch (error) {
+		stderr(`could not save the watch state: ${firstLine(error)}`);
+		try {
+			rmSync(temporary, { force: true });
+		} catch {
+			/* nothing more to clean */
+		}
+	}
+}
+
+/** Closing issues of a merged PR with their states: `closes #3700: CLOSED`.
+ * Fails open to none: the merge is reported either way. */
+function readClosingIssues(number, ghExec, timeoutMs) {
+	try {
+		const refs = JSON.parse(
+			ghExec(
+				["pr", "view", String(number), "--json", "closingIssuesReferences"],
+				{ timeoutMs },
+			),
+		)?.closingIssuesReferences;
+		return (Array.isArray(refs) ? refs : []).map((ref) => {
+			let state = "unknown";
+			try {
+				state =
+					JSON.parse(
+						ghExec(["issue", "view", String(ref.number), "--json", "state"], {
+							timeoutMs,
+						}),
+					)?.state ?? state;
+			} catch {
+				/* state stays unknown */
+			}
+			return `closes #${ref.number}: ${state}`;
+		});
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * `--sync-main <path>`: fast-forward the main checkout after a merge, because
+ * every worktree symlinks its node_modules (a checkout 5 days behind fed a
+ * fixer an old dependency, 2026-09-30). Refuses -- with the reason -- when the
+ * checkout is not on the protected branch or has modified tracked files, and
+ * says when `package-lock.json` moved. It NEVER runs `npm ci`: live workers
+ * share that install.
+ */
+export function syncMainCheckout(checkout, gitExec = execFileSync) {
+	const git = (...args) =>
+		String(
+			gitExec("git", ["-C", checkout, ...args], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+				timeout: 120_000,
+			}),
+		).trim();
+	try {
+		const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+		if (branch !== PROTECTED_BRANCH)
+			return [
+				`SYNC REFUSED ${checkout}: on ${branch}, not ${PROTECTED_BRANCH}`,
+			];
+		if (git("status", "--porcelain", "--untracked-files=no") !== "")
+			return [`SYNC REFUSED ${checkout}: tracked files are modified`];
+		const before = git("rev-parse", "HEAD");
+		git("pull", "--ff-only");
+		const after = git("rev-parse", "HEAD");
+		const ahead =
+			before === after
+				? Number(git("rev-list", "--count", `origin/${PROTECTED_BRANCH}..HEAD`))
+				: 0;
+		const lines = [
+			before === after
+				? `SYNCED ${checkout}: already at ${after.slice(0, 9)}${ahead > 0 ? ` (${ahead} local commit${ahead === 1 ? "" : "s"} not on origin)` : ""}`
+				: `SYNCED ${checkout}: ${before.slice(0, 9)} -> ${after.slice(0, 9)}`,
+		];
+		if (
+			before !== after &&
+			git("diff", "--name-only", before, after, "--", "package-lock.json") !==
+				""
+		)
+			lines.push("LOCKFILE CHANGED: run npm ci when no worker is live");
+		return lines;
+	} catch (error) {
+		return [`SYNC REFUSED ${checkout}: ${gitReason(error)}`];
+	}
+}
+
+/** Why a git command refused: the line that says so (`Not possible to
+ * fast-forward`, `diverged`), else every stderr line -- git leads with a
+ * `From <url>` progress line that says nothing. */
+function gitReason(error) {
+	const stderr = error?.stderr == null ? "" : String(error.stderr);
+	const lines = stderr
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+	return (
+		lines.find((line) => /Not possible to fast-forward|diverged/.test(line)) ??
+		(lines.length > 0 ? lines.join(" | ") : firstLine(error))
+	);
+}
+
+/** `--approve-fork <PR>`: approve that PR's `action_required` runs on its
+ * current head. Explicit and per PR; nothing else in this file calls it. */
+export async function approveForkRuns({
+	target,
+	ghExec = gh,
+	stdout = console.log,
+	stderr = console.error,
+}) {
+	if (!isPrNumber(target)) {
+		stderr("--approve-fork takes a PR number");
+		return EXIT_USAGE;
+	}
+	const repository = resolveRepository(ghExec);
+	const { sha } = resolveHeadSha(target, ghExec);
+	const runs = fetchActionRequiredRuns(
+		repository,
+		sha,
+		ghExec,
+		DEFAULT_GH_TIMEOUT_MS,
+		false,
+	);
+	if (runs.length === 0) {
+		stdout(`no action_required runs on ${sha} of #${target}`);
+		return EXIT_SUCCESS;
+	}
+	let failed = false;
+	for (const { id } of runs) {
+		try {
+			ghExec(
+				["api", "-X", "POST", `repos/${repository}/actions/runs/${id}/approve`],
+				{ timeoutMs: DEFAULT_GH_TIMEOUT_MS },
+			);
+			stdout(`APPROVED run ${id} of #${target}@${sha.slice(0, 9)}`);
+		} catch (error) {
+			failed = true;
+			stderr(`could not approve run ${id}: ${firstLine(error)}`);
+		}
+	}
+	return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/**
+ * `--watch-open [--stream] [--rerun-cancelled] [--sync-main <path>]
+ * [--wait <seconds>] [--state-file <path>]`: every open PR that
+ * has auto-merge armed OR is authored by the repository owner (the maintainer)
+ * or the `gh` viewer (the orchestrator) -- a PR in a fix round has no
+ * auto-merge and still must not go red unseen (#3688). Per PR, an event is a
+ * TRANSITION from its last seen state: a failed gating check, a merge conflict
+ * (`dirty`), a cancelled run nobody replaced, fork approval awaited, required
+ * checks absent past the re-arm threshold (all verdict kinds, keyed by head
+ * SHA so a new push re-arms), or the PR merging or closing. A merged PR also
+ * lists its closing issues' states.
+ *
+ * Without `--stream` it exits 0 on the first poll that has events
+ * (`#<pr> <event> @<sha>: <reason>`, then the failure detail) and 3 when the
+ * window ends with none. With `--stream` it never exits on an event: each poll
+ * prints its events as `FAIL #<pr>@<sha>: <reason>` and the watch runs to the
+ * end of the window (0 if any event was printed, 3 if none).
+ * `--state-file` keeps the last seen state, the no-suite absence clock and the
+ * re-run marks between invocations. `--rerun-cancelled` re-runs a cancelled,
+ * unreplaced run once per head (`gh run rerun`); `--sync-main <path>`
+ * fast-forwards that checkout after a merge (see `syncMainCheckout`).
+ */
+export async function watchOpenPrs({
+	ghExec = gh,
+	gitExec = execFileSync,
+	waitSeconds = null,
+	stateFile = null,
+	stream = false,
+	rerunCancelled = false,
+	syncMain = null,
+	stdout = console.log,
+	stderr = console.error,
+	sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	now = () => Date.now(),
+}) {
+	const capSeconds =
+		waitSeconds === null
+			? HARD_CAP_SECONDS
+			: resolveWaitCapSeconds(waitSeconds);
+	const deadline = now() + capSeconds * 1000;
+	const retry = (call) =>
+		callWithTransientRetry(call, {
+			deadline: capSeconds > 0 ? deadline : undefined,
+			now,
+			sleepImpl,
+			onRetry: stderr,
+		});
+	const owner = (
+		await retry((remainingMs) =>
+			resolveRepository(ghExec, resolveGhTimeoutMs(remainingMs)),
+		)
+	).split("/")[0];
+	const viewer = readViewerLogin(ghExec, DEFAULT_GH_TIMEOUT_MS);
+	const seen = loadWatchState(stateFile);
+	let printed = 0;
+	for (;;) {
+		const events = [];
+		let merged = false;
+		const open = await retry((remainingMs) =>
+			readOpenPrs(ghExec, resolveGhTimeoutMs(remainingMs)),
+		);
+		const watched = open.filter(
+			(pr) =>
+				pr.autoMergeRequest ||
+				pr.author?.login === owner ||
+				pr.author?.login === viewer,
+		);
+		for (const pr of watched) {
+			const entry = normalizeWatchEntry(seen[pr.number]);
+			// The head's first sighting is its absence clock when no check suite
+			// exists; it survives a re-armed watch through the state file.
+			if (entry.since?.sha !== pr.headRefOid)
+				entry.since = { sha: pr.headRefOid, ms: now() };
+			seen[pr.number] = entry;
+			const info = await readPrVerdict(pr.number, {
+				ghExec,
+				stderr,
+				sleepImpl,
+				now,
+				absentSinceMs: entry.since.ms,
+			});
+			if (!info) continue;
+			const { kind, mergeState } = info.verdict;
+			const key = `${info.sha}:${kind}`;
+			// GitHub answers UNKNOWN while it recomputes mergeability; with nothing
+			// else to report that is no news about a head already reported
+			// conflicted (a real failure on it still is).
+			if (
+				mergeState === "UNKNOWN" &&
+				!WATCH_EVENT_KINDS.has(kind) &&
+				entry.key === `${info.sha}:dirty`
+			)
+				continue;
+			if (WATCH_EVENT_KINDS.has(kind) && entry.key !== key) {
+				events.push([
+					formatEventLine(
+						stream,
+						pr.number,
+						kind,
+						info.sha,
+						info.verdict.reason,
+					),
+					...formatFailureLines(info.verdict).map((line) => `  ${line}`),
+				]);
+			}
+			// Decided every poll, not only on the transition: a refused re-run of
+			// a head that stays cancelled must be tried again.
+			if (kind === "cancelled" && rerunCancelled) {
+				const attempt = entry.rerun?.sha === info.sha ? entry.rerun : null;
+				const state = attempt ?? { sha: info.sha, attempts: 0, nextMs: 0 };
+				if (
+					!state.done &&
+					state.attempts < RERUN_MAX_ATTEMPTS &&
+					now() >= state.nextMs
+				) {
+					const rerun = rerunCancelledRows({
+						number: pr.number,
+						sha: info.sha,
+						rows: info.verdict.cancelledRows,
+						ghExec,
+					});
+					state.attempts += 1;
+					if (rerun.ok) state.done = true;
+					else
+						state.nextMs =
+							now() + RERUN_BACKOFF_SECONDS * 1000 * 2 ** (state.attempts - 1);
+					events.push(rerun.lines);
+				}
+				entry.rerun = state;
+			}
+			entry.key = key;
+		}
+		const watchedNumbers = new Set(watched.map((pr) => String(pr.number)));
+		for (const number of Object.keys(seen)) {
+			if (watchedNumbers.has(number)) continue;
+			const state = readPrState(number, ghExec, DEFAULT_GH_TIMEOUT_MS);
+			if (state === "MERGED" || state === "CLOSED") {
+				merged ||= state === "MERGED";
+				events.push([
+					formatEventLine(stream, number, state.toLowerCase()),
+					...(state === "MERGED"
+						? readClosingIssues(number, ghExec, DEFAULT_GH_TIMEOUT_MS).map(
+								(line) => `  ${line}`,
+							)
+						: []),
+				]);
+				delete seen[number];
+			} else if (state === "OPEN") {
+				// Left the watch set (auto-merge disarmed, not the maintainer's).
+				delete seen[number];
+			}
+		}
+		if (merged && syncMain) events.push(syncMainCheckout(syncMain, gitExec));
+		// Events first: a state file that cannot be written must not swallow the
+		// report the poll just produced.
+		for (const lines of events) for (const line of lines) stdout(line);
+		printed += events.length;
+		saveWatchState(stateFile, seen, stderr);
+		if (events.length > 0 && !stream) return EXIT_SUCCESS;
+		if (now() >= deadline) break;
+		await sleepImpl(
+			Math.min(WATCH_POLL_INTERVAL_SECONDS * 1000, deadline - now()),
+		);
+	}
+	if (printed > 0) return EXIT_SUCCESS;
+	stdout("watch window elapsed with no event");
+	return EXIT_PENDING;
+}
+
+/** Re-runs each cancelled, unreplaced gating run of one head through `gh run
+ * rerun`; `ok` is false when any could not be, so the head stays unmarked. */
+function rerunCancelledRows({ number, sha, rows, ghExec }) {
+	const lines = [];
+	let ok = true;
+	const done = new Set();
+	for (const row of rows) {
+		const args = rerunArgsFor(row);
+		if (!args || done.has(args.join(" "))) continue;
+		const label = args.join(" ");
+		done.add(label);
+		try {
+			ghExec(args, { timeoutMs: DEFAULT_GH_TIMEOUT_MS });
+			lines.push(`RERUN #${number}@${sha.slice(0, 9)}: gh ${label}`);
+		} catch (error) {
+			ok = false;
+			lines.push(
+				`RERUN FAILED #${number}@${sha.slice(0, 9)}: gh ${label}: ${firstLine(error)}`,
+			);
+		}
+	}
+	return { ok, lines };
+}
+
 export function parseArgs(argv) {
 	const rest = [];
 	let waitSeconds = null;
+	let all = false;
+	let watchOpen = false;
+	let stateFile = null;
+	let stream = false;
+	let rerunCancelled = false;
+	let syncMain = null;
+	let approveFork = null;
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--wait") {
 			waitSeconds = Number(argv[++i]);
+		} else if (argv[i] === "--all") {
+			all = true;
+		} else if (argv[i] === "--watch-open") {
+			watchOpen = true;
+		} else if (argv[i] === "--state-file") {
+			stateFile = argv[++i] ?? null;
+		} else if (argv[i] === "--stream") {
+			stream = true;
+		} else if (argv[i] === "--rerun-cancelled") {
+			rerunCancelled = true;
+		} else if (argv[i] === "--sync-main") {
+			syncMain = argv[++i] ?? null;
+		} else if (argv[i] === "--approve-fork") {
+			approveFork = argv[++i] ?? "";
 		} else {
 			rest.push(argv[i]);
 		}
 	}
-	return { target: rest[0] ?? null, waitSeconds };
+	return {
+		target: rest[0] ?? null,
+		waitSeconds,
+		all,
+		watchOpen,
+		stateFile,
+		stream,
+		rerunCancelled,
+		syncMain,
+		approveFork,
+	};
 }
 
 /**
@@ -1386,11 +2210,68 @@ export async function run({
 	stderr = console.error,
 	sleepImpl,
 	now,
+	// #3700: receives `{ repository, sha, verdict }` just before the report
+	// prints; `--all` and `--watch-open` read every PR through it.
+	onVerdict = () => {},
+	// #3700: when `--watch-open` first saw this head; the absence clock of a
+	// head with no check suite.
+	absentSinceMs = null,
 } = {}) {
-	const { target, waitSeconds } = parseArgs(argv);
+	const {
+		target,
+		waitSeconds,
+		all,
+		watchOpen,
+		stateFile,
+		stream,
+		rerunCancelled,
+		syncMain,
+		approveFork,
+	} = parseArgs(argv);
+	if (approveFork !== null) {
+		try {
+			return await approveForkRuns({
+				target: approveFork,
+				ghExec,
+				stdout,
+				stderr,
+			});
+		} catch (error) {
+			stderr(error instanceof Error ? error.message : String(error));
+			return EXIT_TRANSPORT;
+		}
+	}
+	if (watchOpen && rerunCancelled && !stateFile) {
+		// Without the state a re-armed watch (the normal shape: a non-stream
+		// watch exits at its first event) re-runs the same head every time.
+		stderr("--rerun-cancelled requires --state-file");
+		return EXIT_USAGE;
+	}
+	if (all || watchOpen) {
+		try {
+			return watchOpen
+				? await watchOpenPrs({
+						ghExec,
+						gitExec,
+						waitSeconds,
+						stateFile,
+						stream,
+						rerunCancelled,
+						syncMain,
+						stdout,
+						stderr,
+						...(sleepImpl ? { sleepImpl } : {}),
+						...(now ? { now } : {}),
+					})
+				: await snapshotOpenPrs({ ghExec, stdout, stderr, sleepImpl, now });
+		} catch (error) {
+			stderr(error instanceof Error ? error.message : String(error));
+			return EXIT_TRANSPORT;
+		}
+	}
 	if (!target) {
 		stderr(
-			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>]",
+			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>] | --all | --approve-fork <pr> | --watch-open [--stream] [--rerun-cancelled] [--sync-main <path>] [--wait <seconds>] [--state-file <path>]",
 		);
 		return EXIT_USAGE;
 	}
@@ -1461,20 +2342,27 @@ export async function run({
 				? () => fetchRerunState(repository, sha, ghExec, initialTimeoutMs)
 				: null;
 		// #3694: read lazily, only when computeVerdict reaches its absent-required
-		// branch, so a healthy head costs no extra API call. The head's auto-merge
-		// state and push time are read once; the age is recomputed and approval
-		// runs are re-read every poll (a maintainer approving mid-`--wait` must
-		// clear the message).
-		let headInfo;
+		// branch, so a healthy head costs no extra API call. The push time is
+		// kept once it is known; auto-merge is read again every poll (armed
+		// mid-`--wait`), the push time too while no check suite exists yet, and
+		// approval runs every poll (a maintainer approving mid-`--wait` must
+		// clear the message). #3700: the first poll before any suite exists must
+		// not pin the whole window on the quiet text.
+		let headInfo = { autoMerge: false, pushedMs: null };
+		// #3700: a head with no check suite has no push clock (GitHub never opened
+		// one), so absence is measured from when this read -- or the watch that
+		// passed `absentSinceMs` -- first saw it absent.
+		let firstAbsentMs = null;
 		const absentContext =
 			transport === TRANSPORT_GH
 				? () => {
-						headInfo ??= fetchAutoMergeAge(
+						headInfo = fetchAutoMergeAge(
 							target,
 							repository,
 							sha,
 							ghExec,
 							initialTimeoutMs,
+							headInfo.pushedMs,
 						);
 						return {
 							repository,
@@ -1486,13 +2374,16 @@ export async function run({
 								initialTimeoutMs,
 							),
 							autoMerge: headInfo.autoMerge,
-							absentMinutes:
-								headInfo.pushedMs === null
-									? null
-									: Math.max(
-											0,
-											Math.floor((clock() - headInfo.pushedMs) / 60_000),
-										),
+							absentMinutes: Math.max(
+								0,
+								Math.floor(
+									(clock() -
+										(Number.isFinite(headInfo.pushedMs)
+											? headInfo.pushedMs
+											: (absentSinceMs ?? (firstAbsentMs ??= clock())))) /
+										60_000,
+								),
+							),
 						};
 					}
 				: null;
@@ -1513,9 +2404,10 @@ export async function run({
 			? `branch protection required_status_checks on ${PROTECTED_BRANCH} (${liveRequiredChecks.join(", ")}) -- every other check-run gates unless it is on the advisory allowlist`
 			: `advisory allowlist only -- branch protection on ${PROTECTED_BRANCH} was unreadable, falling back to the constant required-check list (${REQUIRED_CHECKS.join(", ")})`;
 
-		const { verdict, polls } = await pollVerdict({
-			fetchPayload: (remainingMs) =>
-				transport === TRANSPORT_REST
+		let lastPayload = null;
+		let { verdict, polls } = await pollVerdict({
+			fetchPayload: async (remainingMs) => {
+				lastPayload = await (transport === TRANSPORT_REST
 					? restFetchCheckRunsPayload(repository, sha, {
 							...restOptions,
 							timeoutMs: resolveGhTimeoutMs(remainingMs),
@@ -1525,7 +2417,9 @@ export async function run({
 							sha,
 							ghExec,
 							resolveGhTimeoutMs(remainingMs),
-						),
+						));
+				return lastPayload;
+			},
 			waitSeconds:
 				deadline === undefined
 					? waitSeconds
@@ -1540,10 +2434,41 @@ export async function run({
 			...(now ? { now } : {}),
 		});
 
+		// #3700: failing gating rows are named (step, test lines), the rows that
+		// are post-merge noise are dropped, and the right remedy is hinted -- also
+		// under a DIRTY or rerun-pending verdict that outranks the failure. gh
+		// only: the REST transport has no `gh api --allow-escape-sequences` read.
+		if (verdict.failingRows.length > 0 && transport === TRANSPORT_GH) {
+			const found = readFailureDetails({
+				rows: verdict.failingRows,
+				target,
+				repository,
+				ghExec,
+				timeoutMs: initialTimeoutMs,
+			});
+			if (found.noiseRowIds) {
+				verdict = computeVerdict(
+					lastPayload,
+					requiredChecks,
+					mergeable,
+					ciClassification,
+					typeof rerunState === "function" ? rerunState() : rerunState,
+					absentContext,
+					found.noiseRowIds,
+				);
+			}
+			verdict = { ...verdict, details: found.details, hints: found.hints };
+		}
+		onVerdict({ repository, sha, verdict });
+
 		stdout(
 			`CI verdict for ${repository}@${sha}${polls > 1 ? ` (${polls} reads)` : ""}`,
 		);
 		stdout(formatVerdictTable(verdict.rows));
+		for (const line of formatGatingSplit(verdict.rows, verdict.failingRows)) {
+			stdout(line);
+		}
+		for (const line of formatFailureLines(verdict)) stdout(line);
 		// Merge state is always printed, not just when it drives the verdict
 		// (round 3, F1) -- a reviewer reading the report should never have to
 		// infer it from `reason` text alone. `"n/a"` for a bare-SHA target

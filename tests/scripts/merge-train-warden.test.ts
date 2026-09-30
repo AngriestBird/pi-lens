@@ -2931,6 +2931,24 @@ describe("merge-lane gate (#2185)", () => {
 		expect(isAdvisoryCheck("Unit tests")).toBe(false);
 	});
 
+	// Recurrence: #2837 -- unused exports merged red while knip was advisory.
+	// knip is gating now: a FAILURE on it must hold the merge, where the
+	// advisory rows above must not.
+	it("holds the merge on a failed knip check (gating since #2837)", () => {
+		expect(isAdvisoryCheck("knip")).toBe(false);
+		expect(
+			gateOf(
+				approved({
+					mergeStateStatus: "UNSTABLE",
+					checkRuns: [
+						...greenChecks(),
+						{ name: "knip", status: "COMPLETED", conclusion: "FAILURE" },
+					],
+				}),
+			),
+		).toMatchObject({ merge: false });
+	});
+
 	// Review round 1, F4: the live rollup carries duplicate names, and PR
 	// #2190 carried `Unit tests` as both IN_PROGRESS and COMPLETED/SUCCESS.
 	// Last-wins on array order called that green.
