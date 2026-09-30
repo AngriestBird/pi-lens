@@ -247,6 +247,8 @@ async function applyEdit(
 	file: string,
 	edit: Awaited<ReturnType<typeof positionalEdit>>,
 	gate?: () => void,
+	/** The lines a host writes for `newText`; a raw split writes a trailing "\n" as a blank line. */
+	hostLines: (newText: string) => string[] = (newText) => newText.split("\n"),
 ): Promise<void> {
 	const current = diskLines(file);
 	const ordered = [...edit.input.edits].sort(
@@ -256,7 +258,7 @@ async function applyEdit(
 		current.splice(
 			range.start.line - 1,
 			range.end.line - range.start.line + 1,
-			...newText.split("\n"),
+			...hostLines(newText),
 		);
 	}
 	writeNow(file, current.join("\n"));
@@ -608,6 +610,79 @@ describe("#3523: the agent's own positional edit is a read", () => {
 			);
 		} finally {
 			vi.mocked(logLatency).mockImplementation(realLogLatency);
+			env.cleanup();
+		}
+	});
+
+	// #3739 F1: `deliveredLineEvidence("agent5\n", 5)` covers lines 5-6, the
+	// second an empty line. A host that takes the "\n" as line 5's terminator
+	// writes no such line, and the own-edit record must not claim it: it would
+	// shadow the agent's good read of the real line 6. No installed package
+	// implements `edits[].range` (pi 0.87.1's edit is oldText-only), so both
+	// host semantics are replayed.
+	it("allows the next line after an own edit whose newText ends in a newline the host takes as a terminator", async () => {
+		const env = setupTestEnvironment("rg-3739-terminator-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			expect(first.blocked).toBe(false);
+			await applyEdit(runtime, file, first, undefined, (text) =>
+				text.replace(/\n$/, "").split("\n"),
+			);
+			expect(diskLines(file)[5]).toBe("line6");
+			// The record covers exactly the line the host wrote.
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5") },
+			);
+			const next = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
+			expect(next.reason).toBeUndefined();
+			expect(next.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("claims no trailing empty line when the file cannot be read back after the edit", async () => {
+		const env = setupTestEnvironment("rg-3739-unreadable-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			await applyEdit(
+				runtime,
+				file,
+				first,
+				() => fs.rmSync(file),
+				(text) => text.split("\n"),
+			);
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5") },
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows the blank line the agent wrote when the host writes a newText's trailing newline as one", async () => {
+		const env = setupTestEnvironment("rg-3739-blank-line-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			expect(first.blocked).toBe(false);
+			await applyEdit(runtime, file, first);
+			expect(diskLines(file).slice(4, 7)).toEqual(["agent5", "", "line6"]);
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5"), 6: lineContentHash("") },
+			);
+			const next = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
+			expect(next.reason).toBeUndefined();
+			expect(next.blocked).toBe(false);
+		} finally {
 			env.cleanup();
 		}
 	});

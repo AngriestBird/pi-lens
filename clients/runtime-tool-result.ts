@@ -1143,6 +1143,30 @@ function singlePositionalEdit(
 }
 
 /**
+ * The evidence for an own edit's `newText`. `deliveredLineEvidence("a\n", n)`
+ * counts a trailing empty line, but a host may take that "\n" as line n's
+ * terminator and write none; a record that claims it would shadow the agent's
+ * read of the real next line (#3739 F1). Keep the empty line only when the
+ * file holds one right after the lines the edit certainly wrote.
+ */
+function ownEditEvidence(
+	filePath: string,
+	edit: { start: number; newText: string },
+): ReturnType<typeof deliveredLineEvidence> {
+	const full = deliveredLineEvidence(edit.newText, edit.start);
+	if (!edit.newText.endsWith("\n")) return full;
+	const certain = deliveredLineEvidence(edit.newText.slice(0, -1), edit.start);
+	try {
+		const next = nodeFs.readFileSync(filePath, "utf-8").split(/\r?\n/)[
+			edit.start + certain.lineCount - 1
+		];
+		return next !== undefined && next.trim() === "" ? full : certain;
+	} catch {
+		return certain;
+	}
+}
+
+/**
  * pi's `read` output less the continuation notice pi appends after the
  * delivered lines (`@earendil-works/pi-coding-agent` `dist/core/tools/read.js`:
  * `[Showing lines A-B of T. …]`, `[Showing lines A-B of T (50.0KB limit). …]`,
@@ -2340,7 +2364,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		? singlePositionalEdit(event.input)
 		: undefined;
 	if (ownEdit) {
-		const evidence = deliveredLineEvidence(ownEdit.newText, ownEdit.start);
+		const evidence = ownEditEvidence(filePath, ownEdit);
 		deps.readGuard?.recordRead({
 			filePath,
 			requestedOffset: ownEdit.start,

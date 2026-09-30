@@ -849,7 +849,7 @@ describe("ReadGuard", () => {
 
 				expect(validationEntry?.metadata).toMatchObject({
 					status: "mismatch",
-					viewReadCount: 1,
+					viewRunCount: 1,
 					checkedLineCount: 1,
 					missingLineCount: 0,
 					mismatchedLineCount: 1,
@@ -957,7 +957,7 @@ describe("ReadGuard", () => {
 				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
 				expect(lastValidationMetadata()).toMatchObject({
 					status: "match",
-					viewReadCount: 3,
+					viewRunCount: 3,
 					checkedLineCount: 3,
 					enforced: true,
 				});
@@ -987,7 +987,7 @@ describe("ReadGuard", () => {
 				expect(guard.checkEdit(filePath, [5, 8]).action).toBe("block");
 				expect(lastValidationMetadata()).toMatchObject({
 					status: "mismatch",
-					viewReadCount: 1,
+					viewRunCount: 1,
 					checkedLineCount: 2,
 					mismatchedLines: [5],
 					missingLines: [7, 8],
@@ -1026,7 +1026,7 @@ describe("ReadGuard", () => {
 				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
 				expect(lastValidationMetadata()).toMatchObject({
 					status: "unavailable",
-					viewReadCount: 2,
+					viewRunCount: 2,
 					checkedLineCount: 2,
 					missingLines: [5],
 					enforced: false,

@@ -1818,7 +1818,7 @@ export class ReadGuard {
 			metadata: {
 				range: [startLine, endLine],
 				status,
-				viewReadCount: runs.length,
+				viewRunCount: runs.length,
 				checkedLineCount,
 				missingLineCount: missingLines.length,
 				mismatchedLineCount: mismatchedLines.length,
