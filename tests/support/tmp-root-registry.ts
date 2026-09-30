@@ -174,7 +174,7 @@ export function installTmpRootInterposer(
 	};
 	const sync = target.mkdtempSync as (...args: unknown[]) => unknown;
 	target.mkdtempSync = function (this: unknown, ...args: unknown[]) {
-		const dir = Reflect.apply(sync, this, args);
+		const dir = sync.apply(this, args);
 		note(dir);
 		return dir;
 	} as MkdtempTarget["mkdtempSync"];
@@ -187,13 +187,13 @@ export function installTmpRootInterposer(
 				if (!error) note(dir);
 				(done as (...cbArgs: unknown[]) => void)(error, dir);
 			};
-		return Reflect.apply(callback, this, args);
+		return callback.apply(this, args);
 	} as MkdtempTarget["mkdtemp"];
 	const promised = target.promises.mkdtemp as (
 		...args: unknown[]
 	) => Promise<unknown>;
 	target.promises.mkdtemp = async function (this: unknown, ...args: unknown[]) {
-		const dir = await Reflect.apply(promised, this, args);
+		const dir = await promised.apply(this, args);
 		note(dir);
 		return dir;
 	} as MkdtempTarget["promises"]["mkdtemp"];
