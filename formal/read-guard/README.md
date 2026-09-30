@@ -228,12 +228,16 @@ the `#3522` block of the same file.
   tie, #3523) and the range-stale 60 s grace it enabled are deleted (#3525);
   `OwnEditRescue = TRUE` models the rescue with its window always open.
 - An own edit's `recordWritten` stamps FileTime here (`EditRW`). Since #3525
-  the code skips that stamp when the edit passed a moved FileTime on other
-  evidence (hashes, or a resolved oldText: `ReadGuardVerdict.fileTimeStale`).
-  With `Hashes` global that stamp decides no verdict here; oldText edits are
-  out of scope (above). `tests/clients/read-guard-conversation-evidence.test.ts`
-  replays it ("keeps another writer's change stale after an oldText edit
-  passed it (R4)").
+  the code skips that stamp when FileTime had moved at the edit's check
+  (`ReadGuard.fileTimeMoved`, carried as `ToolCallAttribution.fileTimeStale`),
+  so the model explores more fresh-FileTime states than the code reaches.
+  With `Hashes` global the stamp only decides whether a later edit meets the
+  FileTime gate or the per-line gate, and those agree on every allow; it can
+  make a relocation reachable, which is content-verified. OldText edits, where
+  it decides an allow, are out of scope (above);
+  `tests/clients/read-guard-conversation-evidence.test.ts` replays that case
+  ("keeps another writer's change stale after an oldText edit passed it
+  (R4)").
 - The immediate autofix's `recordWritten` still stamps FileTime (`WriteRW2`),
   including when the attachment was withheld (the agent never saw the
   post-fix bytes). Its unhashed stale allow is a named residual of #3525.
