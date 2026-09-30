@@ -133,9 +133,7 @@ describe("a file a one-off trap cost is re-extracted (#3605 F2)", () => {
 		const { tmpDir, files } = pythonProject(23);
 		let traps = 1;
 		await trapWhile(() => traps-- > 0);
-		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(
-			files.length,
-		);
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(files.length);
 		await expect(
 			buildOrUpdateGraph(tmpDir, files, new FactStore()),
 		).rejects.toThrow(/checkpoint_test_abort/);

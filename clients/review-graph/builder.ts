@@ -392,10 +392,13 @@ function stampWasmTrappedFiles<
 	T extends {
 		signature: string;
 		fileSignatures: Map<string, string>;
-		fileHashes?: Map<string, string>;
+		fileHashes?: Map<string, string> | undefined;
 	},
 >(stored: T, includeCharged: boolean): T {
-	const fileSignatures = stampWasmTrapped(stored.fileSignatures, includeCharged);
+	const fileSignatures = stampWasmTrapped(
+		stored.fileSignatures,
+		includeCharged,
+	);
 	if (fileSignatures === stored.fileSignatures) return stored;
 	return {
 		...stored,
@@ -4094,7 +4097,7 @@ async function extractTreeSitterSymbols(
 	filePath: string,
 	languageId: string,
 	contentOverride?: string | null,
-): Promise<ExtractedSymbols & { wasmTrap?: WasmTrapState }> {
+): Promise<ExtractedSymbols & { wasmTrap?: WasmTrapState | undefined }> {
 	const empty: ExtractedSymbols = {
 		symbols: [],
 		refs: [],
@@ -4716,7 +4719,7 @@ async function addFileToGraph(
 		sharedIr?.kind === "tree-sitter" && sharedIr.languageId === languageId
 			? sharedIr.extracted
 			: undefined;
-	const extracted: ExtractedSymbols & { wasmTrap?: WasmTrapState } =
+	const extracted: ExtractedSymbols & { wasmTrap?: WasmTrapState | undefined } =
 		irExtracted ??
 		(await extractTreeSitterSymbols(file, languageId, contentOverride));
 	// #3605: remember a file a wasm trap cost, so a later build retries it.

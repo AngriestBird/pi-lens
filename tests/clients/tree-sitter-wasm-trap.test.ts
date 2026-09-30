@@ -22,6 +22,7 @@ import {
 	TreeSitterClient,
 	WASM_TRAP_BUDGET,
 } from "../../clients/tree-sitter-client.js";
+import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
 import { TreeSitterSymbolExtractor } from "../../clients/tree-sitter-symbol-extractor.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -256,8 +257,9 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 			).toBe(true);
 		}
 
-		expect(outcomes.map((outcome) => !outcome.parsed && outcome.wasmTrap))
-			.toEqual(["retry", "charged", "charged", "charged", "charged"]);
+		expect(
+			outcomes.map((outcome) => !outcome.parsed && outcome.wasmTrap),
+		).toEqual(["retry", "charged", "charged", "charged", "charged"]);
 		// One retry, then the charged input is skipped, not parsed again.
 		expect(boomParses).toBe(2);
 		// Two records: the first trap and the charge.
@@ -333,20 +335,7 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 		for (let i = 0; i < 3; i++) {
 			await client.withParsedTree(file, "python", undefined, () => 1);
 		}
-		await client.runQueryOnFile(
-			{
-				id: "healthy-rule",
-				name: "healthy",
-				severity: "warning",
-				category: "test",
-				language: "python",
-				message: "healthy",
-				query: "(function_definition) @fn",
-				metavars: ["fn"],
-			},
-			file,
-			"python",
-		);
+		await client.runQueryOnFile(pythonRule("healthy-rule"), file, "python");
 
 		expect(key).not.toHaveBeenCalled();
 	});
@@ -374,7 +363,11 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 		for (let round = 0; round < 5; round++) {
 			trapping.on = true;
 			expect(
-				await client.structuralSearch("print($X)", "python", path.dirname(file)),
+				await client.structuralSearch(
+					"print($X)",
+					"python",
+					path.dirname(file),
+				),
 			).toEqual([]);
 			trapping.on = false;
 			expect(
@@ -392,16 +385,7 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 		const file = pythonFile();
 		let compiles = 0;
 		const trapping = trappingLanguage(client, () => compiles++);
-		const rule = {
-			id: "boom-rule",
-			name: "boom",
-			severity: "warning" as const,
-			category: "test",
-			language: "python",
-			message: "boom",
-			query: "(function_definition) @fn",
-			metavars: ["fn"],
-		};
+		const rule = pythonRule("boom-rule");
 
 		for (let round = 0; round < 5; round++) {
 			trapping.on = true;
@@ -417,6 +401,21 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 		expect(onAbort).not.toHaveBeenCalled();
 	});
 });
+
+function pythonRule(id: string): TreeSitterQuery {
+	return {
+		id,
+		name: id,
+		severity: "warning",
+		category: "test",
+		language: "python",
+		message: id,
+		query: "(function_definition) @fn",
+		metavars: ["fn"],
+		has_fix: false,
+		filePath: "",
+	};
+}
 
 /**
  * While `on`, the client's language handle traps when a query compile reads

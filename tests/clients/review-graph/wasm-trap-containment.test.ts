@@ -255,9 +255,7 @@ describe("review graph after a contained trap (#3605 F2, F3)", () => {
 		flushReviewGraphPersistsForTests();
 		fs.rmSync(reviewGraphCachePath(tmpDir), { force: true });
 		clearReviewGraphWorkspaceCache();
-		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(
-			files.length,
-		);
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(files.length);
 		try {
 			await expect(
 				buildOrUpdateGraph(tmpDir, [], new FactStore()),
