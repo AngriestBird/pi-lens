@@ -1708,6 +1708,37 @@ describe("run --watch-open --stream — one line per event, until the window end
 		expect(times).toEqual([0, 180, 540]);
 	});
 
+	it("--rerun-cancelled starts a new head's attempts from zero", async () => {
+		const pr: PrFixture = {
+			number: 3382,
+			login: "apmantza",
+			sha: cancelled.source.head,
+			checkRuns: cancelledRuns,
+		};
+		const w = world({ prs: [pr], rerunThrows: true });
+		const newSha = "e".repeat(40);
+		await cli(
+			[
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				stateFile(),
+				"--wait",
+				"1800",
+			],
+			w,
+			{
+				onSleep: (index) => {
+					// three attempts are spent by 540 s (poll 6); the head then moves
+					if (index === 7) pr.sha = newSha;
+				},
+			},
+		);
+		// 3 on the first head + 3 on the second.
+		expect(w.mutations).toHaveLength(6);
+	});
+
 	it("--rerun-cancelled keeps a successful re-run's mark across a re-armed watch", async () => {
 		const file = stateFile();
 		const pr: PrFixture = {
@@ -2042,6 +2073,8 @@ describe("run --watch-open --sync-main <path> — fast-forward the main checkout
 			"SYNCED /repo/main: 111111111 -> 222222222",
 		]);
 		expect(checkout.commands).toContain("git pull --ff-only");
+		// The head moved, so there is no "ahead of origin" question to ask.
+		expect(checkout.commands.join("\n")).not.toContain("rev-list");
 	});
 
 	it("flags a moved package-lock.json and never runs npm ci", async () => {
