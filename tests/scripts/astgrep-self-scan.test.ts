@@ -169,6 +169,34 @@ d("pi-lens self-scan (#1718)", () => {
 		}
 	});
 
+	// #3684 r2: the registry-subset rule declares `severity: info` and the
+	// spec says it must never gate. Recurrence guarded: a self-scan-tagged
+	// advisory rule silently becoming a CI gate (r1: any unbaselined hit
+	// exited 1 because the wrapper never consulted severity).
+	it("reports an info-severity rule hit as advisory, not as a gating finding", () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-pilens-selfscan-advisory-"),
+		);
+		try {
+			fs.writeFileSync(
+				path.join(dir, "subset.ts"),
+				'export const s = ["typescript", "python"];\n',
+				"utf-8",
+			);
+			const result = runSelfScan({
+				root: repoRoot(),
+				scanPaths: [dir],
+				ruleIds: ["advisory-registry-subset"],
+			});
+			expect(result.findings).toEqual([]);
+			expect(result.advisoryFindings.map((f) => f.ruleId)).toEqual([
+				"advisory-registry-subset",
+			]);
+		} finally {
+			removeTempDirSync(dir);
+		}
+	});
+
 	it("throws (never reads as a clean 0-finding scan) when ruleIds resolves empty", () => {
 		expect(() => runSelfScan({ ruleIds: [] })).toThrow(/nothing to run/);
 	});
@@ -208,6 +236,59 @@ d("pi-lens self-scan (#1718)", () => {
 				const run = runWrapper([dir]);
 				expect(run.status).not.toBe(0);
 				expect(run.stderr).toMatch(/no-raw-json-store-write/);
+			} finally {
+				removeTempDirSync(dir);
+			}
+		});
+
+		// #3684 r2: an advisory (info) hit is printed and never fails the run.
+		it("exits 0 and still prints an advisory registry-subset hit", () => {
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-pilens-selfscan-wrapper-adv-"),
+			);
+			try {
+				fs.writeFileSync(
+					path.join(dir, "subset.ts"),
+					'export const s = ["typescript", "python"];\n',
+					"utf-8",
+				);
+				const run = runWrapper([dir]);
+				expect(run.status, run.stdout + run.stderr).toBe(0);
+				expect(run.stdout).toMatch(/advisory.*advisory-registry-subset/s);
+				expect(run.stderr).not.toMatch(/NEW finding/);
+			} finally {
+				removeTempDirSync(dir);
+			}
+		});
+
+		// #3684 r2: the advisory carve-out must not swallow a gating rule that
+		// fires in the same scan.
+		it("still exits NONZERO for a gating rule hit next to an advisory hit", () => {
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-pilens-selfscan-wrapper-mixed-"),
+			);
+			try {
+				fs.writeFileSync(
+					path.join(dir, "subset.ts"),
+					'export const s = ["typescript", "python"];\n',
+					"utf-8",
+				);
+				fs.writeFileSync(
+					path.join(dir, "violation.ts"),
+					[
+						'import { writeFileSync } from "node:fs";',
+						"function f(file: string, data: unknown) {",
+						"  writeFileSync(file, JSON.stringify(data));",
+						"}",
+						"",
+					].join("\n"),
+					"utf-8",
+				);
+				const run = runWrapper([dir]);
+				expect(run.status).not.toBe(0);
+				expect(run.stderr).toMatch(/1 NEW finding/);
+				expect(run.stderr).toMatch(/no-raw-json-store-write/);
+				expect(run.stderr).not.toMatch(/advisory-registry-subset/);
 			} finally {
 				removeTempDirSync(dir);
 			}

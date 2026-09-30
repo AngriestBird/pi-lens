@@ -11,7 +11,7 @@
 // rules/ast-grep-rules/.sgconfig.yml.
 //
 // Usage:
-//   node scripts/run-astgrep-pi-lens.mjs                 # scan and report; exit 1 on an untriaged hit
+//   node scripts/run-astgrep-pi-lens.mjs                 # scan and report; exit 1 on an untriaged hit (severity: info rules are advisory: printed, never gate)
 //   node scripts/run-astgrep-pi-lens.mjs --update-baseline # regenerate the baseline from the current scan
 //   node scripts/run-astgrep-pi-lens.mjs <path> [<path> ...] # scan explicit path(s) instead of clients/+tests/
 //
@@ -64,8 +64,15 @@ function main() {
 		process.exit(1);
 	}
 	console.log(
-		`[astgrep-self-scan] scanned ${result.scannedFileCount} file(s) with ${result.effectiveRuleCount ?? "?"} effective rule(s); ${result.findings.length} raw finding(s)`,
+		`[astgrep-self-scan] scanned ${result.scannedFileCount} file(s) with ${result.effectiveRuleCount ?? "?"} effective rule(s); ${result.findings.length} raw finding(s), ${result.advisoryFindings.length} advisory`,
 	);
+	// #3684: advisory (severity: info) hits are printed for the reader and
+	// never gate, never baselined.
+	for (const f of result.advisoryFindings) {
+		const file = String(f.file ?? "?").replace(/\\/g, "/");
+		const line = (f.range?.start?.line ?? 0) + 1;
+		console.log(`[astgrep-self-scan] advisory ${f.ruleId} ${file}:${line}`);
+	}
 
 	if (updateBaseline) {
 		const signatures = result.findings.map(findingSignature);

@@ -23,6 +23,11 @@ import { escapeRegExp } from "../../clients/string-utils.js";
 
 const SELF_SCAN_CATEGORY = "pi-lens-self-scan";
 
+/** A self-scan rule that declares `severity: info` is advisory (#3684): its
+ * hits are reported but never gate and never enter the baseline. The rule's
+ * own declared severity is the single source of truth -- no parallel list. */
+const ADVISORY_SEVERITY = "info";
+
 /** Repo root, derived from this file's own on-disk location -- never a
  * hardcoded machine path (the #1718 defect). */
 export function repoRoot() {
@@ -147,7 +152,8 @@ export function runSelfScan({
 
 	return {
 		ruleIds: ids,
-		findings,
+		findings: findings.filter((f) => f.severity !== ADVISORY_SEVERITY),
+		advisoryFindings: findings.filter((f) => f.severity === ADVISORY_SEVERITY),
 		// undefined (not 0) when ast-grep's --inspect output shape changes
 		// underneath us -- an unparsed count must not silently read as
 		// "scanned zero files" and trip the dead-scan guard for the wrong

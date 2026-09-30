@@ -13,6 +13,7 @@ export interface SelfScanFinding {
 export interface SelfScanResult {
 	ruleIds: string[];
 	findings: SelfScanFinding[];
+	advisoryFindings: SelfScanFinding[];
 	scannedFileCount: number | undefined;
 	effectiveRuleCount: number | undefined;
 	stderr: string;
