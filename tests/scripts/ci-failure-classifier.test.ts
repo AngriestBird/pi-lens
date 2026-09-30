@@ -1297,6 +1297,16 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			{ id: 5, name: "Unit tests", conclusion: "success" },
 			{ id: 6, name: "Install test (ubuntu-latest)", conclusion: "timed_out" },
 		]);
+		// No blocking job at all (every job green or skipped, the run failed for
+		// another reason): vacuous truth of `every` must not read advisory-only.
+		const green = await run([
+			{ id: 9, name: "Unit tests", conclusion: "success" },
+			{ id: 10, name: "Heavy advisory gate (advisory)", conclusion: "skipped" },
+		]);
+		expect(green).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
 		expect(none).toEqual({
 			skipped: true,
 			reason: 'run 999 has no failed job named "Unit tests"',
