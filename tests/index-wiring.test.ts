@@ -824,13 +824,13 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
-		// #1453: this mock models the host's all-active handoff, but it does not
-		// re-run the extension factory. Real-pi integration tests cover that
-		// factory boundary; this test covers the restore plan for a live closure.
-		// #3612: resume restores from the session's own sidecar, which a real
-		// turn_end writes; the real-runtime witness
-		// "restores a resumed session's activations after a process restart"
-		// covers it.
+		// #1453: the host hands the rebuilt session an all-active tool set.
+		// #3589/#3612: pi re-runs the factory for a fork or a reload, so the
+		// rebuilt session starts in a SECOND activation, as here; one mock
+		// activation receiving both events is the shape that hid #3589. Resume
+		// restores from the session's own sidecar, which a real turn_end writes;
+		// the real-runtime witness "restores a resumed session's activations
+		// after a process restart" covers it.
 		it.each(["fork", "reload"])(
 			"restores the parent's tool posture on %s session_start",
 			async (reason) => {
@@ -873,19 +873,33 @@ describe("index.ts extension wiring", () => {
 					expect(parentPosture.has("ast_grep_search")).toBe(true);
 					expect(parentPosture.has("ast_grep_replace")).toBe(false);
 
-					// The mock re-activates EVERYTHING before the rebuilt session
-					// announces itself.
-					await pi.simulateSessionShutdownAndRebuild(
-						reason as "fork" | "reload",
+					// A fork's successor announces itself on the file pi names at
+					// shutdown; a reload keeps its file and names none.
+					await pi.emit(
+						"session_shutdown",
+						{
+							reason,
+							targetSessionFile:
+								reason === "reload"
+									? undefined
+									: ctx.sessionManager.getSessionFile(),
+						},
 						ctx,
 					);
+					const rebuilt = createPiMock();
+					extension(rebuilt.asExtensionAPI());
+					for (const name of rebuilt.tools.keys())
+						rebuilt.activeTools.add(name);
+					await rebuilt.emit("session_start", { reason }, ctx);
 					// Character-for-character the parent's set: the advertised tool
 					// list still matches the cached prompt prefix AND the model's
 					// activation survived.
-					expect([...pi.activeTools].sort()).toEqual([...parentPosture].sort());
-					expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-					expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
-					expect(pi.activeTools.has("lsp_navigation")).toBe(false);
+					expect([...rebuilt.activeTools].sort()).toEqual(
+						[...parentPosture].sort(),
+					);
+					expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
+					expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
+					expect(rebuilt.activeTools.has("lsp_navigation")).toBe(false);
 				} finally {
 					if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 					else process.env.PILENS_DATA_DIR = prevDataDir;
