@@ -239,9 +239,9 @@ export function logScopeTransition(
  * own stale-write record stays.
  */
 export function recordDroppedRead(handle: LineageHandle, site: string): void {
-	const captured = (handle as unknown as Record<symbol, unknown>)[
-		CAPTURED_SCOPE
-	] as CapturedScope | undefined;
+	const captured = (
+		handle as LineageHandle & { [CAPTURED_SCOPE]?: CapturedScope }
+	)[CAPTURED_SCOPE];
 	if (!captured?.branch.isCurrent()) return;
 	// A handle whose scope is live and whose branch did not move is current,
 	// so its guard never drops: a caller reaches here only after a retire.
