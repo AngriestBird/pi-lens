@@ -77,7 +77,10 @@ import { updateHeartbeat } from "./instance-registry.js";
 import { emitLensTurnFindings } from "./lens-events.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { isSubagentSession } from "./subagent-mode.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type {
+	ResolvedBlockerFile,
+	RuntimeCoordinator,
+} from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
 import type { LensToolHost } from "./tool-config.js";
 import { formatRunDurationMs } from "./run-duration.js";
@@ -4326,13 +4329,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// turn_end, not dropped: a retire that landed after the snapshot above
 	// (the awaits between it and here) is real, and discarding it leaves the
 	// agent holding a STOP block for a file that is clean.
-	const {
-		files: resolvedBlockerFileList,
-		dropped: resolvedBlockerFilesDropped,
-	} = runtime.consumeResolvedBlockerFiles((filePath) =>
-		unresolvedKeys.has(normalizeMapKey(path.resolve(filePath))),
-	);
-	const resolvedLines = resolvedBlockerFileList.map((entry) => {
+	const formatResolvedLine = (entry: ResolvedBlockerFile): string => {
 		const clause = entry.confirmedClean
 			? " confirmed clean"
 			: entry.writeIndex === undefined
@@ -4345,9 +4342,33 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				? "Resolved this turn"
 				: "Resolved since the last report";
 		return `${label}: ${toRunnerDisplayPath(cwd, entry.filePath)} (${entry.blockerCount} blocker(s)${clause})`;
+	};
+	const formatResolvedTail = (dropped: number) => `… and ${dropped} more`;
+	// review-3776-verify V1: the section rides FIRST in the message and is
+	// sized to `capTurnEndMessage`'s char cap BEFORE anything is consumed, less
+	// room for the widest tail, so the cap can never cut a line (or the tail)
+	// whose entry this call removes. A line that does not fit is HELD for the
+	// next turn_end; the first is always taken so a lone long path drains.
+	// (The line cap cannot bite: 10 files + the tail is 11 of 20 lines.)
+	const resolvedCharBudget =
+		RUNTIME_CONFIG.turnEnd.maxChars -
+		formatResolvedTail(Number.MAX_SAFE_INTEGER).length;
+	let resolvedChars = 0;
+	const {
+		files: resolvedBlockerFileList,
+		dropped: resolvedBlockerFilesDropped,
+	} = runtime.consumeResolvedBlockerFiles((entry) => {
+		if (unresolvedKeys.has(normalizeMapKey(path.resolve(entry.filePath))))
+			return true;
+		const cost = formatResolvedLine(entry).length + 1;
+		if (resolvedChars > 0 && resolvedChars + cost > resolvedCharBudget)
+			return true;
+		resolvedChars += cost;
+		return false;
 	});
+	const resolvedLines = resolvedBlockerFileList.map(formatResolvedLine);
 	if (resolvedBlockerFilesDropped > 0) {
-		resolvedLines.push(`… and ${resolvedBlockerFilesDropped} more`);
+		resolvedLines.push(formatResolvedTail(resolvedBlockerFilesDropped));
 	}
 	// ONE section, `\n`-joined: ten separate `\n\n`-separated sections would
 	// spend 19 of the turn-end message's 20-line budget on blank separators
@@ -4361,14 +4382,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
 	const findingParts = [
+		// #3218 criterion 2: the resolution lines ride FIRST, so the cap cuts
+		// unresolved detail the agent was already shown inline, never a
+		// consumed retirement (review-3776-verify V1). They are not a finding
+		// tier (no gate applies to a just-cleared verdict), only a status line,
+		// and they are part of the block content so an otherwise empty turn
+		// still delivers them ONCE (the coordinator consumed them).
+		...resolvedParts,
 		...blockerParts,
 		...staleSecretParts,
 		...labeledAdvisoryParts,
-		// #3218 criterion 2: the resolution lines ride last. They are not a
-		// finding tier (no gate applies to a just-cleared verdict), only a
-		// status line, and they are part of the block content so an otherwise
-		// empty turn still delivers them ONCE (the coordinator consumed them).
-		...resolvedParts,
 	];
 	if (findingParts.length > 0) {
 		dbg(

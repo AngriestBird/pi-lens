@@ -332,7 +332,7 @@ const MAX_RESOLVED_BLOCKER_FILES = 10;
  * `writeIndex`); the turn-end composer only formats these rows, it never
  * re-derives which files were resolved from counts.
  */
-interface ResolvedBlockerFile {
+export interface ResolvedBlockerFile {
 	/** The path as the blocker was recorded, for the composer to display. */
 	filePath: string;
 	/** How many blocking diagnostics the retired record carried. */
@@ -1797,18 +1797,21 @@ export class RuntimeCoordinator {
 	 * deliver, and remove exactly those, so a retire is delivered once. An entry
 	 * `holdBack` names STAYS for the next turn_end: the composer holds back a
 	 * file its own message still lists as unresolved (a retire that landed after
-	 * the blockers were snapshotted), because one message must never say both.
+	 * the blockers were snapshotted), because one message must never say both,
+	 * and a line that would not fit the message cap (called in list order).
 	 * The "… and N more" overflow count rides with a batch that lists files and
 	 * is otherwise kept, so a bare tail is never delivered.
 	 */
-	consumeResolvedBlockerFiles(holdBack: (filePath: string) => boolean): {
+	consumeResolvedBlockerFiles(
+		holdBack: (entry: ResolvedBlockerFile) => boolean,
+	): {
 		files: ResolvedBlockerFile[];
 		dropped: number;
 	} {
 		const files: ResolvedBlockerFile[] = [];
 		const held: ResolvedBlockerFile[] = [];
 		for (const entry of this._resolvedBlockerFilesThisTurn.values()) {
-			(holdBack(entry.filePath) ? held : files).push(entry);
+			(holdBack(entry) ? held : files).push(entry);
 		}
 		// Rebuild, never delete-in-place (see `reconcileInlineBlockers`).
 		this._resolvedBlockerFilesThisTurn.clear();
