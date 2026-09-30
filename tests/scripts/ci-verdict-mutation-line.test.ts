@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	EXIT_FAILURE,
+	JOB_LOG_MAX_BUFFER,
 	EXIT_PENDING,
 	EXIT_SUCCESS,
 	run,
@@ -77,12 +78,16 @@ interface World {
 	comments: unknown[] | "throws";
 	mergeable?: string;
 	calls: string[];
+	commentOptions: { timeoutMs?: number; maxBuffer?: number }[];
 	prs?: { number: number }[];
 }
 
 /** A `gh` that answers from a World and refuses anything unrecorded. */
 function ghFor(w: World) {
-	return (args: string[]) => {
+	return (
+		args: string[],
+		options: { timeoutMs?: number; maxBuffer?: number } = {},
+	) => {
 		w.calls.push(args.join(" "));
 		if (args[0] === "repo") return "apmantza/pi-lens";
 		if (args[0] === "pr" && args[1] === "list")
@@ -113,6 +118,7 @@ function ghFor(w: World) {
 		if (/\/issues\/\d+\/comments$/.test(endpoint)) {
 			if (!args.includes("--paginate"))
 				throw new Error("comment read without --paginate");
+			w.commentOptions.push(options);
 			if (w.comments === "throws") throw new Error("HTTP 502: Bad Gateway");
 			return JSON.stringify(w.comments);
 		}
@@ -123,6 +129,7 @@ const world = (partial: Partial<World> & Pick<World, "sha">): World => ({
 	checkRuns: GREEN,
 	comments: [],
 	calls: [],
+	commentOptions: [],
 	...partial,
 });
 const commentCalls = (w: World) =>
@@ -260,6 +267,10 @@ describe("run — the MUTATION line over recorded Mutation diff comments (#3779)
 		await cli(["3755"], pr);
 		expect(commentCalls(pr)).toEqual([
 			"api repos/apmantza/pi-lens/issues/3755/comments --paginate",
+		]);
+		// A PR with long review comments overflows execFileSync's 1 MB default.
+		expect(pr.commentOptions).toEqual([
+			{ timeoutMs: expect.any(Number), maxBuffer: JOB_LOG_MAX_BUFFER },
 		]);
 		const bare = world({ sha: HEAD_3755, comments: recorded(3755) });
 		await cli([HEAD_3755], bare);

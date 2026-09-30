@@ -1375,7 +1375,7 @@ function readStickyBody(body) {
  * @param {Array<{name: string, present: boolean, status: string|null}>} rows
  */
 export function formatMutationLine(comments, prHead, rows = []) {
-	const job = rows.find((row) => row.name === MUTATION_CHECK && row.present);
+	const job = rows.find((row) => row.name === MUTATION_CHECK);
 	const inFlight = job && job.status !== "completed";
 	const id = findStickyCommentId(comments, STICKY_MARKER);
 	if (id === null)
@@ -1384,7 +1384,7 @@ export function formatMutationLine(comments, prHead, rows = []) {
 		comments.find((comment) => comment.id === id)?.body ?? "",
 	);
 	const covers = head ?? "unknown";
-	if (head !== null && prHead.startsWith(head))
+	if (prHead.startsWith(covers))
 		return `${MUTATION_PREFIX} ${count}, head ${covers}`;
 	const prShort = prHead.slice(0, 12);
 	if (inFlight)
