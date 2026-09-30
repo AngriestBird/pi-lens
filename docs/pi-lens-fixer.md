@@ -63,6 +63,17 @@ beyond the fix's own lines; deepening is its own slice under the owning
 umbrella. #3254 and #3256 stayed inside their briefs; #3178's four rounds show
 the cost of not doing so.
 
+### Review follow-ups
+
+- Apply folded follow-ups in the same PR when they share the seam or files, are
+  about one commit, and need no separate maintainer decision.
+- Contract-only folds (body, comments, wording) are trailing commits with no
+  re-verification; small code folds carry a red-first test and return to the
+  same reviewer.
+- File only different-seam, blocked, decision-dependent, untouched pre-existing,
+  or risk-class-changing residuals; list all filed residuals in one **Residuals**
+  section of the PR body, consolidated as one issue per PR.
+
 ## Evidence
 
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
