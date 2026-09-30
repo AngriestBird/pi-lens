@@ -17,21 +17,23 @@
  * that is also on this branch. An empty id is never recorded
  * (`resolveToolCallCorrelationId` returns undefined), so it never matches.
  *
- * The fork hand-off. pi re-runs the extension factory for the forked runtime,
- * so a closure-local stash dies with the parent's activation. The parent's
- * `session_before_fork` leaves its read-set in a PROCESS-wide slot
- * ({@link stashForkHandoff}): an in-process `/fork` always runs in the same
- * process, and `getProcessSingleton` keys on `globalThis`, so the slot also
- * survives a module re-import. The hook's budget is 0 ms (#2523), so the
- * parent's sidecar is saved fire-and-forget; it is the fallback, and the only
- * channel for `pi --fork <path>`, which starts a new process.
+ * The hand-off. pi re-runs the extension factory for every conversation move
+ * except `/tree`, so the read-set crosses to the next activation as the
+ * `read-guard` session store (#3612): the hand-off slot for an in-process
+ * `/fork`, `/clone` or `/reload`, the sidecar for resume and `pi --fork`.
  */
 
 import { promises as fs } from "node:fs";
 import { logLatency } from "./latency-logger.js";
-import { getProcessSingleton } from "./process-singletons.js";
-import type { PersistedReadGuardState } from "./read-guard.js";
+import type { PersistedReadGuardState, ReadGuard } from "./read-guard.js";
 import { sanitizeCorrelationId } from "./read-guard-logger.js";
+import {
+	type AdoptContext,
+	defineSessionStore,
+	type SessionScope,
+	scopeCell,
+	type StartSource,
+} from "./session-scope.js";
 
 export interface BranchToolResults {
 	/** `toolResult` tool-call ids on the branch, in record (`sanitizeCorrelationId`) form. */
@@ -76,35 +78,6 @@ export function branchToolResultIds(
 	}
 }
 
-/** What a parent's `session_before_fork` hands to the forked activation. */
-export interface ForkHandoff {
-	sourceSessionFile: string | undefined;
-	readGuard: PersistedReadGuardState;
-}
-
-const FORK_HANDOFF_FAMILY = "read-guard.fork-handoff";
-/** Bump when {@link ForkHandoff}'s shape changes. */
-const FORK_HANDOFF_VERSION = 1;
-
-function forkHandoffSlot(): { handoff: ForkHandoff | undefined } {
-	return getProcessSingleton(FORK_HANDOFF_FAMILY, FORK_HANDOFF_VERSION, () => ({
-		handoff: undefined,
-	}));
-}
-
-/** One slot: a later `session_before_fork` replaces an unconsumed one. */
-export function stashForkHandoff(handoff: ForkHandoff): void {
-	forkHandoffSlot().handoff = handoff;
-}
-
-/** Take and clear the slot. Every primary session start consumes it. */
-export function takeForkHandoff(): ForkHandoff | undefined {
-	const slot = forkHandoffSlot();
-	const handoff = slot.handoff;
-	slot.handoff = undefined;
-	return handoff;
-}
-
 /** A session header line is small; this bounds a corrupt first line. */
 const SESSION_HEADER_MAX_BYTES = 64 * 1024;
 
@@ -132,54 +105,6 @@ export async function readSessionHeaderId(
 	}
 }
 
-export type ReadGuardStartSource =
-	| "fork-slot"
-	| "parent-sidecar"
-	| "own-sidecar"
-	| "none";
-
-/**
- * Which persisted read-set a primary `session_start` (other than `/new` and
- * reload, which import nothing) takes, before the branch filter. Consumes
- * the fork slot, so a hand-off never outlives the start it was left for.
- *
- * - `fork`: the slot, when it came from this fork's parent; otherwise the
- *   parent's sidecar.
- * - anything else (resume, startup): this session's own sidecar; without
- *   one, the parent's (`pi --fork <path>` starts as `startup` with
- *   `header.parentSession` set).
- */
-export async function resolveReadGuardStartState(args: {
-	reason: string | undefined;
-	ownState: PersistedReadGuardState | undefined;
-	parentSessionFile: string | undefined;
-	loadParentState: (
-		parentSessionId: string,
-	) => Promise<PersistedReadGuardState | undefined>;
-}): Promise<{
-	state: PersistedReadGuardState | undefined;
-	source: ReadGuardStartSource;
-}> {
-	const handoff = takeForkHandoff();
-	// Same parent: both files match, or both are unknown (an in-memory
-	// session has no file, and neither does its fork).
-	if (
-		args.reason === "fork" &&
-		handoff &&
-		handoff.sourceSessionFile === args.parentSessionFile
-	)
-		return { state: handoff.readGuard, source: "fork-slot" };
-	if (args.ownState) return { state: args.ownState, source: "own-sidecar" };
-	if (args.parentSessionFile) {
-		const parentId = await readSessionHeaderId(args.parentSessionFile);
-		const parentState = parentId
-			? await args.loadParentState(parentId)
-			: undefined;
-		if (parentState) return { state: parentState, source: "parent-sidecar" };
-	}
-	return { state: undefined, source: "none" };
-}
-
 /**
  * One `read_guard_branch_retained` latency row per conversation move: which
  * move, where the read-set came from, and how many records the branch kept.
@@ -188,7 +113,7 @@ export async function resolveReadGuardStartState(args: {
  */
 export function logReadGuardBranchMove(args: {
 	trigger: string;
-	source: ReadGuardStartSource | "live";
+	source: StartSource | "live";
 	kept: number;
 	dropped: number;
 	branch: BranchToolResults;
@@ -209,3 +134,69 @@ export function logReadGuardBranchMove(args: {
 		},
 	});
 }
+
+/**
+ * The key under which a scope holds its read guard. The coordinator's guard is
+ * bound to its scope at the primary `session_start` (#3612).
+ */
+export const READ_GUARD_CELL = "read-guard";
+
+function guardOf(scope: SessionScope): ReadGuard | undefined {
+	return scopeCell<ReadGuard>(scope, READ_GUARD_CELL);
+}
+
+/**
+ * The read-set (#3521, #3612). Every adopted record passes the branch filter
+ * (`importBranch`), so a record whose tool result is not on the starting
+ * branch never crosses, on a `/reload` either.
+ */
+export const readGuardStore = defineSessionStore<PersistedReadGuardState>({
+	name: "read-guard",
+	policy: {
+		startup: "adopt",
+		new: "reset",
+		resume: "adopt",
+		fork: "adopt",
+		reload: "adopt",
+	},
+	snapshot: (scope) => guardOf(scope)?.exportState(),
+	restore: (scope, payload, ctx: AdoptContext) => {
+		const guard = guardOf(scope);
+		if (!guard) return;
+		const branch = branchToolResultIds(ctx.sessionManager);
+		const imported = guard.importBranch(
+			payload as PersistedReadGuardState | undefined,
+			branch.ids,
+		);
+		logReadGuardBranchMove({
+			trigger: ctx.reason,
+			source: ctx.source,
+			kept: imported.imported,
+			dropped: imported.dropped,
+			branch,
+			cwd: ctx.cwd,
+		});
+	},
+	reason:
+		"the reads the conversation shows the agent; a move keeps exactly those whose tool result is on the new branch",
+});
+
+/**
+ * The files the session authored (D5): carried across `/reload`, which keeps
+ * the conversation; reset by every other start, as `/tree` resets it
+ * (`retainBranch`).
+ */
+export const readGuardAuthorshipStore = defineSessionStore({
+	name: "read-guard-authorship",
+	policy: {
+		startup: "reset",
+		new: "reset",
+		resume: "reset",
+		fork: "reset",
+		reload: "adopt",
+	},
+	snapshot: (scope) => guardOf(scope)?.exportAuthorship(),
+	restore: (scope, payload) => guardOf(scope)?.importAuthorship(payload),
+	reason:
+		"the files this session wrote; a reload keeps the conversation, so they stay authored",
+});

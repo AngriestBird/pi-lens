@@ -1130,6 +1130,12 @@ export type DegradationKind =
 	 * blocks. Counted.
 	 */
 	| "session-scope-read-dropped"
+	/**
+	 * #3612: a `/fork` or `/reload` start found no hand-off slot left for its
+	 * session file, so it started from a sidecar or from nothing. Once per
+	 * start reason.
+	 */
+	| "session-scope-handoff-missed"
 	| "session-start-duplicate"
 	/**
 	 * #3662: a primary replacement shutdown left the process with no primary
@@ -1339,8 +1345,8 @@ export type DegradationKind =
 	| "tool-cwd-resolution"
 	/** A loader request named a configured-disabled tool. */
 	| "tool-disabled"
-	/** Activation memory cannot key itself because the host supplied no session file. */
-	| "tool-set-session-file-unavailable"
+	/** #3612: a lazy-tool activation arrived before its activation's session scope began. */
+	| "tool-set-scope-unavailable"
 	/**
 	 * A config file location or root key the user wrote is DEPRECATED and was
 	 * still honored (#2426). The deliberate opposite of `config-ignored`: the

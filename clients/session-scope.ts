@@ -25,7 +25,10 @@
  * that grows.
  */
 
-import { incrementDegradationCount } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import {
 	createGenerationSource,
 	type GenerationHandle,
@@ -127,6 +130,8 @@ class Scope implements SessionScope {
 	readonly parentScopeId: number | undefined;
 	readonly coordinatorId: number | undefined;
 	private retiredReason: string | undefined;
+	/** The scope's store cells, by key (#3612); see {@link scopeCell}. */
+	readonly cells = new Map<string, unknown>();
 	// The stale-write record keeps its `runtime-session:<subject>` subject.
 	private readonly life = createGenerationSource("runtime-session");
 	private readonly branch = createGenerationSource("session-branch");
@@ -237,6 +242,8 @@ export function logScopeTransition(
 		reason: string | undefined;
 		sessionId?: string;
 		cwd: string;
+		/** A primary start's hand-off source (#3612); see {@link adoptHandoff}. */
+		handoffSource?: StartSource;
 	},
 ): void {
 	logLatency({
@@ -254,6 +261,7 @@ export function logScopeTransition(
 			sessionId: args.sessionId,
 			evaluationOrdinal: PI_LENS_EVALUATION_ORDINAL,
 			coordinatorId: scope.coordinatorId,
+			handoffSource: args.handoffSource,
 		},
 	});
 }
@@ -290,4 +298,248 @@ export function recordDroppedRead(
 		subject: `${reason}:${site}`,
 		reason: `a ${site} read-guard write of scope ${captured.scope.scopeId} was dropped after the scope retired (${reason}); its entry is still on its conversation's branch`,
 	});
+}
+
+// --- Session stores and the hand-off (#3612, slice S2 of the #3609 design) ---
+//
+// pi re-runs the factory for every transition except `/tree`, so a store's
+// state crosses to the next activation only through the hand-off: a sync
+// snapshot at the primary's `session_shutdown` (D3), taken by the successor's
+// `session_start`, or the sidecar when no in-process successor exists.
+
+/** The `session_start` reasons pi sends. A missing or unknown reason is a `startup`. */
+export type StartReason = "startup" | "new" | "resume" | "fork" | "reload";
+
+/**
+ * What a store does at a primary `session_start` (design §4). `adopt` restores
+ * the start's hand-off source: carry on `/reload`, import-parent on `/fork`,
+ * `/clone` and `pi --fork`, rehydrate on resume and launch.
+ */
+export type StartAction = "adopt" | "reset" | "none";
+
+export type HandoffSource = "slot" | "own-sidecar" | "parent-sidecar";
+export type StartSource = HandoffSource | "none";
+
+/**
+ * Where each start reason looks for the state it adopts, in order; the first
+ * source that exists wins for every store. Only a successor that continues
+ * the same conversation reads the slot: the reloaded session, or the fork
+ * that copied it. A resume's slot would hold the session it left.
+ */
+const SOURCES: Readonly<Record<StartReason, readonly HandoffSource[]>> = {
+	startup: ["own-sidecar", "parent-sidecar"],
+	resume: ["own-sidecar", "parent-sidecar"],
+	fork: ["slot", "parent-sidecar"],
+	reload: ["slot", "own-sidecar"],
+	new: [],
+};
+
+export function toStartReason(reason: string | undefined): StartReason {
+	return reason !== undefined && Object.hasOwn(SOURCES, reason)
+		? (reason as StartReason)
+		: "startup";
+}
+
+export interface AdoptContext {
+	reason: StartReason;
+	source: StartSource;
+	/** A sidecar source's save time, for a store that reconciles with disk. */
+	savedAt: number | undefined;
+	/** The starting session's live session manager. */
+	sessionManager: unknown;
+	cwd: string;
+}
+
+export interface SessionStoreSpec<P> {
+	/** Unique; the sidecar key and the governance registry's row name. */
+	name: string;
+	policy: Readonly<Record<StartReason, StartAction>>;
+	/**
+	 * Sync and bounded: it runs in `session_shutdown`, whose budget is 0 ms
+	 * (#2523). `undefined` hands nothing off.
+	 */
+	snapshot(scope: SessionScope): P | undefined;
+	/**
+	 * `payload` is untrusted (a sidecar is JSON from disk) and `undefined`
+	 * when the source held none, or no source existed.
+	 */
+	restore(
+		scope: SessionScope,
+		payload: unknown,
+		ctx: AdoptContext,
+	): void | Promise<void>;
+	reset?(scope: SessionScope): void;
+	/** One sentence: why this state is a store. */
+	reason: string;
+}
+
+/** Declared stores, in declaration order: a store exists only by being declared. */
+const sessionStores = new Map<string, SessionStoreSpec<unknown>>();
+
+export function defineSessionStore<P>(
+	spec: SessionStoreSpec<P>,
+): SessionStoreSpec<P> {
+	if (sessionStores.has(spec.name))
+		throw new Error(`session store ${spec.name} is declared twice`);
+	sessionStores.set(spec.name, spec as SessionStoreSpec<unknown>);
+	return spec;
+}
+
+/** For the governance sweep (§3.8 items 1 and 2.6). */
+export function listSessionStores(): readonly SessionStoreSpec<unknown>[] {
+	return [...sessionStores.values()];
+}
+
+/**
+ * The cell a scope holds under `key`, created by `init` on first use. Cells
+ * live on the scope, so a module re-evaluation cannot fork them, and a
+ * secondary's scope has cells of its own.
+ */
+export function scopeCell<T>(
+	scope: SessionScope,
+	key: string,
+	init?: () => T,
+): T | undefined {
+	const cells = (scope as Scope).cells;
+	if (!cells.has(key) && init) cells.set(key, init());
+	return cells.get(key) as T | undefined;
+}
+
+/** Every declared store's snapshot of `scope`, by store name: the sidecar payload. */
+export function snapshotSessionStores(
+	scope: SessionScope,
+	reason?: StartReason,
+): Record<string, unknown> {
+	const snapshots: Record<string, unknown> = {};
+	for (const spec of sessionStores.values()) {
+		if (reason !== undefined && spec.policy[reason] !== "adopt") continue;
+		const payload = spec.snapshot(scope);
+		if (payload !== undefined) snapshots[spec.name] = payload;
+	}
+	return snapshots;
+}
+
+/**
+ * The slot is keyed by the transition it was left for: the start reason and
+ * the successor's session file (F2). A file-less session keys on `undefined`,
+ * so its reason carries the match.
+ */
+interface Handoff {
+	reason: StartReason;
+	sessionFile: string | undefined;
+	fromScopeId: number;
+	stores: Record<string, unknown>;
+}
+
+const HANDOFF_FAMILY = "session-scope.handoff";
+/** Bump when {@link Handoff}'s shape changes. */
+const HANDOFF_VERSION = 1;
+
+function handoffSlot(): { handoff: Handoff | undefined } {
+	return getProcessSingleton(HANDOFF_FAMILY, HANDOFF_VERSION, () => ({
+		handoff: undefined,
+	}));
+}
+
+/**
+ * At a primary `session_shutdown` (sync): leave the scope's snapshot for a
+ * successor that continues its conversation. pi sends `targetSessionFile`
+ * for a fork; a reload keeps its own file and sends none. One slot, replaced.
+ * True when a slot was left.
+ */
+export function stashHandoff(
+	scope: SessionScope,
+	args: {
+		reason: string | undefined;
+		sessionFile: string | undefined;
+		targetSessionFile: string | undefined;
+	},
+): boolean {
+	const reason = args.reason as StartReason;
+	if (!SOURCES[reason]?.includes("slot")) return false;
+	handoffSlot().handoff = {
+		reason,
+		sessionFile: args.targetSessionFile ?? args.sessionFile,
+		fromScopeId: scope.scopeId,
+		stores: snapshotSessionStores(scope, reason),
+	};
+	return true;
+}
+
+/**
+ * Consume the slot only when its key equals this start's (F2); a slot left
+ * for another start stays in place.
+ */
+export function takeHandoff(
+	reason: StartReason,
+	sessionFile: string | undefined,
+): Record<string, unknown> | undefined {
+	const slot = handoffSlot();
+	const handoff = slot.handoff;
+	if (handoff?.reason !== reason || handoff.sessionFile !== sessionFile)
+		return undefined;
+	slot.handoff = undefined;
+	return handoff.stores;
+}
+
+export interface PersistedStores {
+	savedAt: number;
+	stores: Record<string, unknown>;
+}
+
+/**
+ * A primary `session_start`, after its scope began: resolve the hand-off
+ * source once, then run every store's action for the reason. A secondary
+ * never adopts: its scope's cells start empty (#473).
+ */
+export async function adoptHandoff(
+	scope: SessionScope,
+	args: {
+		reason: string | undefined;
+		sessionFile: string | undefined;
+		sessionManager: unknown;
+		cwd: string;
+		loadOwnSidecar(): Promise<PersistedStores | undefined>;
+		loadParentSidecar(): Promise<PersistedStores | undefined>;
+	},
+): Promise<StartSource> {
+	const reason = toStartReason(args.reason);
+	const specs = [...sessionStores.values()];
+	let source: StartSource = "none";
+	let found: { savedAt?: number; stores: Record<string, unknown> } | undefined;
+	if (specs.some((spec) => spec.policy[reason] === "adopt")) {
+		for (const candidate of SOURCES[reason]) {
+			if (candidate === "slot") {
+				const stores = takeHandoff(reason, args.sessionFile);
+				found = stores && { stores };
+			} else if (candidate === "own-sidecar") {
+				found = await args.loadOwnSidecar();
+			} else {
+				found = await args.loadParentSidecar();
+			}
+			if (found) {
+				source = candidate;
+				break;
+			}
+		}
+		if (SOURCES[reason][0] === "slot" && source !== "slot")
+			recordDegradationOnce({
+				kind: "session-scope-handoff-missed",
+				subject: reason,
+				reason: `a ${reason} start found no hand-off slot left for its session file; it started from ${source}`,
+			});
+	}
+	for (const spec of specs) {
+		const action = spec.policy[reason];
+		if (action === "reset") spec.reset?.(scope);
+		if (action !== "adopt") continue;
+		await spec.restore(scope, found?.stores[spec.name], {
+			reason,
+			source,
+			savedAt: found?.savedAt,
+			sessionManager: args.sessionManager,
+			cwd: args.cwd,
+		});
+	}
+	return source;
 }

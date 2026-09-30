@@ -124,6 +124,13 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 		});
 		// #3521: every primary session_start imports the branch's reads.
 		importBranch = () => ({ imported: 0, dropped: 0 });
+		// #3612: a /reload hands the guard's authorship to the reloaded one.
+		exportAuthorship = () => ({
+			written: [],
+			unchanged: [],
+			sessionStartMs: 0,
+		});
+		importAuthorship = () => {};
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,
@@ -604,7 +611,13 @@ describe("index.ts integration", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const { mock, pi, handlers } = createMockPi();
 			registerExtension(pi as any);
-			const ctx = makeCtx({ cwd: tmpDir, sessionId: "pi-reload-dead-weight" });
+			// A session file: the mock names it as the replacement's at shutdown
+			// (#3612), and a file switch is what ends a telemetry set.
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "pi-reload-dead-weight",
+				sessionFile: path.join(tmpDir, "pi-reload-dead-weight.jsonl"),
+			});
 
 			await handlers.session_start?.[0]?.({}, ctx);
 			const activation = mock.getTool("pi_lens_activate_tools") as {
@@ -830,7 +843,11 @@ describe("index.ts integration", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const { mock, pi, handlers } = createMockPi();
 			registerExtension(pi as any);
-			const ctx = makeCtx({ cwd: tmpDir, sessionId: "pi-new-replacement" });
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "pi-new-replacement",
+				sessionFile: path.join(tmpDir, "pi-new-replacement.jsonl"),
+			});
 
 			await handlers.session_start?.[0]?.({}, ctx);
 			const activation = mock.getTool("pi_lens_activate_tools") as {
