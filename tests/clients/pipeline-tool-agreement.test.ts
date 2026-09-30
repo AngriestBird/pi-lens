@@ -9,6 +9,7 @@ import { runAutofix } from "../../clients/pipeline.js";
 import {
 	_getAgreementResolutionCountForTests,
 	establishToolAgreement,
+	NODE_LOCKFILE_MAX_BYTES,
 	TOOL_AGREEMENT_POLICIES,
 } from "../../clients/tool-agreement.js";
 import { listSafePipelineAutofixTools } from "../../clients/tool-policy.js";
@@ -668,5 +669,257 @@ describe("runAutofix tool agreement seam (#3005)", () => {
 			expect(agreement.reason).toContain("unsupported");
 			expect(agreement.reason).toContain("pnpm-lock.yaml");
 		}
+	});
+
+	// Review round on #3656. Contract: @pnpm/dependency-path@1001.1.10
+	// (https://github.com/pnpm/pnpm/tree/main/packages/dependency-path),
+	// `indexOfDepPathSuffix`/`parse`: a dependency reference is the version
+	// followed by balanced `(...)` peer/patch groups, e.g.
+	// `16.4.0(less@4.2.0)(postcss@8.4.0(foo@1.0.0))`.
+	function writeNodeProject(
+		name: string,
+		lockName: string,
+		lock: string,
+	): string {
+		const dir = path.join(env.tmpDir, name);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(path.join(dir, lockName), lock);
+		return dir;
+	}
+
+	function pnpmV9(version: string): string {
+		return (
+			"lockfileVersion: '9.0'\n" +
+			"importers:\n" +
+			"  .:\n" +
+			"    devDependencies:\n" +
+			"      stylelint:\n" +
+			"        specifier: ^16.0.0\n" +
+			`        version: ${version}\n`
+		);
+	}
+
+	it("establishes agreement from a pnpm v9 version carrying a peer suffix", () => {
+		const dir = writeNodeProject(
+			"pnpm-v9-peer",
+			"pnpm-lock.yaml",
+			pnpmV9("16.4.0(less@4.2.0)"),
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("establishes agreement from nested and repeated pnpm peer groups", () => {
+		const dir = writeNodeProject(
+			"pnpm-v9-peer-nested",
+			"pnpm-lock.yaml",
+			pnpmV9("16.4.0(less@4.2.0)(postcss@8.4.0(foo@1.0.0))"),
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("establishes agreement from a pnpm v6 top-level version carrying a peer suffix", () => {
+		const dir = writeNodeProject(
+			"pnpm-v6-peer",
+			"pnpm-lock.yaml",
+			"lockfileVersion: '6.0'\n" +
+				"devDependencies:\n" +
+				"  stylelint:\n" +
+				"    specifier: ^16.0.0\n" +
+				"    version: 16.4.0(less@4.2.0)\n",
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "pnpm-lock.yaml",
+		});
+	});
+
+	it("still declines a peer-suffixed pnpm version that disagrees with the declared range", () => {
+		// The suffix strip must compare the core version, not wave it through.
+		const dir = writeNodeProject(
+			"pnpm-v9-peer-disagree",
+			"pnpm-lock.yaml",
+			pnpmV9("15.11.0(less@4.2.0)"),
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unparseable",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("stylelint@15.11.0");
+			expect(agreement.reason).not.toContain("less@4.2.0");
+			expect(agreement.reason).toContain("agreement disagrees");
+		}
+	});
+
+	it.each([
+		["an unbalanced group", "16.4.0(less@4.2.0"],
+		["text after the last group", "16.4.0(less@4.2.0)extra"],
+		["an empty group", "16.4.0()"],
+		["a group with no core version", "(less@4.2.0)"],
+		["a stray closing paren", "16.4.0)(less@4.2.0)"],
+	])(
+		"declines a pnpm version that cannot be normalised: %s",
+		(_label, version) => {
+			const dir = writeNodeProject(
+				`pnpm-bad-suffix-${_label.replace(/\W+/g, "-")}`,
+				"pnpm-lock.yaml",
+				pnpmV9(`'${version}'`),
+			);
+			expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+				decision: "decline",
+				reasonCode: "evidence-unparseable",
+			});
+		},
+	);
+
+	const CLASSIC_HEADER_LF =
+		"# yarn lockfile v1\n" +
+		"\n" +
+		'"stylelint@^16.0.0", stylelint@^16.1.0:\n' +
+		'  version "16.4.0"\n' +
+		'  resolved "https://registry.yarnpkg.com/stylelint/-/stylelint-16.4.0.tgz#abc"\n' +
+		"\n" +
+		'other@^1.0.0:\n  version "1.0.0"\n';
+
+	it("establishes agreement from a CRLF yarn Classic lockfile with a quoted multi-descriptor header", () => {
+		const dir = writeNodeProject(
+			"yarn-v1-crlf",
+			"yarn.lock",
+			CLASSIC_HEADER_LF.replace(/\n/g, "\r\n"),
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "yarn.lock",
+		});
+	});
+
+	it("establishes agreement from a lone-CR yarn Classic lockfile", () => {
+		const dir = writeNodeProject(
+			"yarn-v1-cr",
+			"yarn.lock",
+			CLASSIC_HEADER_LF.replace(/\n/g, "\r"),
+		);
+		expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+			decision: "established",
+			lockfile: "yarn.lock",
+		});
+	});
+
+	it("reads the resolved version from a CRLF yarn Classic lockfile rather than waving it through", () => {
+		const dir = writeNodeProject(
+			"yarn-v1-crlf-disagree",
+			"yarn.lock",
+			CLASSIC_HEADER_LF.replace("16.4.0", "15.11.0").replace(/\n/g, "\r\n"),
+		);
+		const agreement = establishToolAgreement("stylelint", dir);
+		expect(agreement).toMatchObject({
+			decision: "decline",
+			reasonCode: "evidence-unparseable",
+		});
+		if (agreement.decision === "decline") {
+			expect(agreement.reason).toContain("stylelint@15.11.0");
+			expect(agreement.reason).toContain("agreement disagrees");
+		}
+	});
+
+	// Shape: a size bound on a new filesystem input (#3656 review). The reader
+	// declines with a distinct code instead of reading and parsing the file.
+	function padTo(base: string, bytes: number): string {
+		return `${base}\n#${"x".repeat(bytes - Buffer.byteLength(base) - 2)}`;
+	}
+	const PNPM_OK = pnpmV9("16.4.0");
+	const YARN_OK = CLASSIC_HEADER_LF;
+
+	describe.each([
+		["pnpm-lock.yaml", PNPM_OK],
+		["yarn.lock", YARN_OK],
+	])("%s read bound", (lockName, base) => {
+		it("establishes agreement one byte below the cap", () => {
+			const dir = writeNodeProject(
+				`cap-below-${lockName}`,
+				lockName,
+				padTo(base, NODE_LOCKFILE_MAX_BYTES - 1),
+			);
+			expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+				decision: "established",
+				lockfile: lockName,
+			});
+		});
+
+		it("establishes agreement at exactly the cap", () => {
+			const text = padTo(base, NODE_LOCKFILE_MAX_BYTES);
+			expect(Buffer.byteLength(text)).toBe(NODE_LOCKFILE_MAX_BYTES);
+			const dir = writeNodeProject(`cap-at-${lockName}`, lockName, text);
+			expect(establishToolAgreement("stylelint", dir)).toMatchObject({
+				decision: "established",
+				lockfile: lockName,
+			});
+		});
+
+		it("declines with evidence-too-large one byte over the cap", () => {
+			const dir = writeNodeProject(
+				`cap-over-${lockName}`,
+				lockName,
+				padTo(base, NODE_LOCKFILE_MAX_BYTES + 1),
+			);
+			const agreement = establishToolAgreement("stylelint", dir);
+			expect(agreement).toMatchObject({
+				decision: "decline",
+				subject: "node:stylelint",
+				reasonCode: "evidence-too-large",
+			});
+			if (agreement.decision === "decline") {
+				expect(agreement.reason).toContain(lockName);
+				expect(agreement.reason).toContain(String(NODE_LOCKFILE_MAX_BYTES));
+			}
+		});
+	});
+
+	it("records one bounded degradation row when an oversized lockfile declines autofix", async () => {
+		fs.writeFileSync(
+			path.join(env.tmpDir, "package.json"),
+			JSON.stringify({ devDependencies: { stylelint: "^16.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(env.tmpDir, "yarn.lock"),
+			padTo(YARN_OK, NODE_LOCKFILE_MAX_BYTES + 1),
+		);
+		fs.writeFileSync(path.join(env.tmpDir, ".stylelintrc.json"), "{}\n");
+		const file = path.join(env.tmpDir, "style.css");
+		fs.writeFileSync(file, "a { color: red; }\n");
+
+		const result = await runAutofix(
+			file,
+			env.tmpDir,
+			() => undefined,
+			() => {},
+			deps(),
+		);
+
+		expect(result.fixedCount).toBe(0);
+		expect(detectFileChangedAfterCommand).not.toHaveBeenCalled();
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({
+				kind: "autofix-agreement-unavailable",
+				count: 1,
+				latestReasons: [
+					expect.objectContaining({
+						subject: "node:stylelint",
+						reason: expect.stringContaining("yarn.lock"),
+					}),
+				],
+			}),
+		]);
 	});
 });

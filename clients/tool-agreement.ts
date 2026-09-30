@@ -36,7 +36,8 @@ export type ToolAgreementDeclineReason =
 	| "evidence-absent"
 	| "evidence-unreadable"
 	| "evidence-unparseable"
-	| "evidence-unsupported";
+	| "evidence-unsupported"
+	| "evidence-too-large";
 
 export type ToolAgreement =
 	| { decision: "established"; lockfile?: string }
@@ -65,6 +66,14 @@ const NODE_LOCKFILE_PRECEDENCE = [
 	"pnpm-lock.yaml",
 	"yarn.lock",
 ] as const;
+
+/**
+ * Read bound for `pnpm-lock.yaml` and `yarn.lock` (#3656 review). The parse is
+ * synchronous on the autofix path: js-yaml measured ~0.5 s at 16 MiB and ~1 s
+ * at 32 MiB, and the decision is cached per session generation. A file over
+ * the bound is declined with `evidence-too-large`, never read in full.
+ */
+export const NODE_LOCKFILE_MAX_BYTES = 16 * 1024 * 1024;
 
 type NodeLockfileName = (typeof NODE_LOCKFILE_PRECEDENCE)[number];
 
