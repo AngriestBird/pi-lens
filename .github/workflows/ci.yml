@@ -398,7 +398,7 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" || true
 
       # #1718: dogfoods the pi-lens-self-scan ast-grep rule subset (recurring
       # AI-authorship defect shapes from #1158) against pi-lens's own
