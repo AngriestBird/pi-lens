@@ -1,0 +1,9 @@
+[2026-09-30T11:00:00.000Z] session_start fired
+[2026-09-22T19:43:54.695Z] turn_end: .worktrees/435-home-reap/src/state-reaper.ts → test vitest .worktrees/243-ref-ownership/tests/unit/workspace.test.ts (failed-first)
+[2026-09-28T20:53:19.840Z] turn_end: .worktrees/454-npm-cache/src/backends/confined-home.ts → test vitest .worktrees/463-stall-seat/tests/unit/stall-open-tool-call.test.ts (failed-first)
+[2026-09-28T20:54:17.855Z] turn_end: .worktrees/454-npm-cache/src/state-reaper.ts → test vitest .worktrees/463-stall-seat/tests/unit/stall-open-tool-call.test.ts (failed-first)
+[2026-09-28T20:54:32.983Z] turn_end: .worktrees/454-npm-cache/src/state-reaper.ts → test vitest .worktrees/463-stall-seat/tests/unit/stall-open-tool-call.test.ts (failed-first)
+[2026-09-28T20:55:24.098Z] turn_end: .worktrees/454-npm-cache/src/state-reaper.ts → test vitest .worktrees/463-stall-seat/tests/unit/stall-open-tool-call.test.ts (failed-first)
+[2026-09-28T20:57:23.390Z] turn_end: .worktrees/454-npm-cache/src/workspace.ts → test vitest .worktrees/463-stall-seat/tests/unit/stall-open-tool-call.test.ts (failed-first)
+[2026-09-20T22:45:11.576Z] turn_end: .worktrees/425-resume-pin/tests/unit/probe-425-resume-refusal.test.ts → test vitest .worktrees/425-resume-pin/tests/unit/probe-425-resume-refusal.test.ts (failed-first)
+[2026-09-21T00:28:04.389Z] turn_end: .worktrees/427-quota-flight/tests/contract/codex.contract.test.ts → test vitest .worktrees/427-quota-flight/tests/contract/codex.contract.test.ts (failed-first)
