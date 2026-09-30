@@ -289,6 +289,20 @@ function staleWriteSubjects(): string[] {
 		.flatMap((group) => group.latestReasons.map((r) => r.subject));
 }
 
+/**
+ * The post-exit resync's OWN `hook-await-exceeded` rows (#3599) — the
+ * abandoned-formatter wait, not the in-hook `deferred-format` bound it runs
+ * after. Subject is `<hook>:<label>`, so the off-hook label is the filter.
+ */
+function postExitResyncSubjects(): string[] {
+	return getDegradationSummary()
+		.filter((group) => group.kind === "hook-await-exceeded")
+		.flatMap((group) => group.latestReasons.map((r) => r.subject))
+		.filter(
+			(subject) => subject === "off_hook:deferred-format-post-exit-resync",
+		);
+}
+
 beforeEach(() => {
 	logLatency.mockClear();
 	setHostFileMutationQueueLoader(async () => ({ withFileMutationQueue }));
@@ -441,6 +455,47 @@ describe("#3558: the drain's formatter resolves its command outside pi's queue",
 			"const x = 1\nconst y = 2\nconst z=3\n",
 		);
 		await postExitSettled();
+	});
+});
+
+/**
+ * #3599: after `agent_settled`'s bound gives up on the phase, the post-exit
+ * resync waited forever on the abandoned formatter — its command resolution
+ * auto-installs and has no leaf bound. It now waits under the drain's own
+ * budget, and a wait that expires records one `hook-await-exceeded`
+ * degradation and abandons the resync instead of publishing bytes the
+ * formatter is about to replace.
+ */
+describe("#3599: an abandoned formatter's resync wait is bounded", () => {
+	it("AbandonedInstall (#3599): a formatter whose install never finishes no longer parks the post-exit resync", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const resolving = gate();
+		child.resolving = resolving.open;
+		// The install never finishes: `resolveCommand` (the auto-install step)
+		// returns a promise that never settles.
+		child.resolved = new Promise<void>(() => {});
+		armChild();
+		const drain = handleAgentEnd(drainDeps());
+		await resolving.p;
+		// The hook bound (10 s) gives up on the phase; the formatter service's
+		// own aggregate then marks the formatter abandoned; the post-exit wait
+		// is bounded by that same budget. Advance just past all three.
+		await vi.advanceTimersByTimeAsync(
+			HOOK_WALL_BUDGET_MS.agent_settled + 30_000 + 1,
+		);
+		await drain;
+		await postExitSettled();
+		expect(postExitRows()).toEqual([
+			expect.objectContaining({
+				filePath,
+				metadata: { outcome: "abandoned" },
+			}),
+		]);
+		// `bounded()` records `hook-await-exceeded` once per (hook, label); the
+		// off-hook label is this wait's own, so it appears exactly once.
+		expect(postExitResyncSubjects()).toEqual([
+			"off_hook:deferred-format-post-exit-resync",
+		]);
 	});
 });
 
