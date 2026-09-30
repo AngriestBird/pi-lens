@@ -607,6 +607,10 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-probe-reason-"),
 		);
+		// #3696: keep the trigger ahead of the cwd because a deep agent
+		// worktree/TMPDIR must not consume the ledger's 200-character field cap.
+		const longCwd = path.join(root, `cwd-${"x".repeat(220)}`);
+		fs.mkdirSync(longCwd, { recursive: true });
 		const savedHome = process.env.PI_LENS_HOME;
 		const savedProbe = process.env.PILENS_PROBE;
 		const savedCwd = process.cwd();
@@ -614,7 +618,7 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 			delete process.env.PI_LENS_HOME;
 			process.env.PILENS_PROBE = "1";
 			_resetProbeHomeRedirectStateForTests();
-			process.chdir(root);
+			process.chdir(longCwd);
 			getGlobalPiLensLogDir();
 
 			const group = getDegradationSummary().find(
@@ -623,6 +627,7 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 			const reason = group?.latestReasons[0]?.reason ?? "";
 			expect(reason).not.toContain("outside test mode");
 			expect(reason).toContain("PILENS_PROBE=1");
+			expect(reason.length).toBeLessThanOrEqual(201);
 		} finally {
 			process.chdir(savedCwd);
 			if (savedHome === undefined) delete process.env.PI_LENS_HOME;
