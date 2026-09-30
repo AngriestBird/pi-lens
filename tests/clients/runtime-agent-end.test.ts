@@ -2777,7 +2777,8 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 				await acrossSettles({
 					onX: async () => {},
 					moved,
-					onY: (runtime, filePath, cwd) => sweepReplay(runtime, filePath, cwd, 0),
+					onY: (runtime, filePath, cwd) =>
+						sweepReplay(runtime, filePath, cwd, 0),
 					secondSettle: { readGuardBranchEpoch: 0 },
 				}),
 			).toBe(moved ? "block" : "allow");

@@ -538,7 +538,9 @@ export async function handleAgentEnd({
 					});
 					if (!getFlag("no-read-guard"))
 						runtime.readGuard.recordWritten(changedPath, {
-							branchEpoch: record.readGuardBranchEpoch,
+							// The loop index is in range; `!` keeps the strict-indexed
+							// spike count flat (tests/config/strictness-baseline.json).
+							branchEpoch: record!.readGuardBranchEpoch,
 						});
 					const content = nodeFs.readFileSync(changedPath, "utf-8");
 					cacheManager.addModifiedRange(
