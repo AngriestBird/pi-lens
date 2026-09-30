@@ -1749,6 +1749,14 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 		expect(classifyCodemodeNested(w).status).toBe("fail");
 	});
 
+	it("does not read another error on c.ts as read-guard's block", () => {
+		const w = real();
+		callAt(w, "c1/4").text = "EACCES: permission denied, open c.ts";
+		const verdict = classifyCodemodeNested(w);
+		expect(verdict.status).toBe("fail");
+		expect(verdict.detail).toContain("no nested edit was blocked");
+	});
+
 	it("fails when the licensed nested edit of b.ts was blocked too", () => {
 		const w = real();
 		Object.assign(callAt(w, "c1/6"), {
@@ -1778,6 +1786,12 @@ describe("release-QA codemode nested guard row (#3805)", () => {
 		["the nested dispatch wait expired", "c1/7", "POLL_EXPIRED b.ts\n"],
 		["the turn_end wait expired", "t1", "POLL_EXPIRED turn_end\n"],
 		["the turn_end wait never ran", "t1", ""],
+		["the b.ts dispatch wait never ran", "c1/7", "POLL_COMPLETE d.ts\n"],
+		[
+			"the warm-up wait expired while b.ts completed",
+			"c1/7",
+			"POLL_EXPIRED d.ts\nPOLL_COMPLETE b.ts\n",
+		],
 	])("is UNTESTED, never PASS, when %s", (_name, id, text) => {
 		const w = real();
 		callAt(w, id).text = text;
