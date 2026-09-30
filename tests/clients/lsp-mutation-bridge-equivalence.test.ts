@@ -330,6 +330,9 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 			context: Omit<LspMutationContext, "session">,
 		) => {
 			const filePath = writeFixture(dir, "dead.ts");
+			// Aged, so only an explicit read-guard credit can allow an edit.
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
 			const session = runtime.captureSessionGeneration();
 			runtime.resetForSession();
 			recordLspMutation(
@@ -369,13 +372,16 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 			inTurnState: Object.keys(
 				cacheManager.readTurnState(dir).files ?? {},
 			).some((key) => key.endsWith("dead.ts")),
+			// The live session's read guard: the bridge stamps it through its
+			// live getter, so only the lineage keeps the dead edit out.
+			verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
 		});
 		expect([
 			facts(dirDirect, direct, runtimeDirect, cacheManagerDirect),
 			facts(dirBridge, bridge, runtimeBridge, cacheManagerBridge),
 		]).toEqual([
-			{ receipt: true, fileSeq: 1, inTurnState: false },
-			{ receipt: true, fileSeq: 1, inTurnState: false },
+			{ receipt: true, fileSeq: 1, inTurnState: false, verdict: "block" },
+			{ receipt: true, fileSeq: 1, inTurnState: false, verdict: "block" },
 		]);
 		expect(stamp).not.toHaveBeenCalled();
 	});
