@@ -516,6 +516,12 @@ export async function handleAgentEnd({
 				getFlagSource,
 				fixHold,
 			);
+			if (result.lostFiles?.length) {
+				notify(
+					`pi-lens: an auto-fix run overwrote an edit to ${result.lostFiles.join(", ")} and could not restore it; re-read and re-apply`,
+					"warning",
+				);
+			}
 			const tools = result.autofixTools.map((label) => label.split(":")[0]);
 			for (const changed of result.changedFiles) {
 				const changedPath = path.resolve(changed);

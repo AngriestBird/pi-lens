@@ -82,6 +82,11 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import type { WordIndex } from "./word-index.js";
 import { getAmbientAbortSignal, safeSpawnAsync } from "./safe-spawn.js";
 import { probeToolAsync } from "./tool-probe.js";
+import {
+	type FixRunReport,
+	renderFixRunLoss,
+	runWithFixRestore,
+} from "./fix-run-restore.js";
 import { bounded } from "./deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
@@ -764,50 +769,87 @@ async function tryOxlintFix(
 	);
 }
 
+interface WholePackageFixOutcome {
+	changedFiles: string[];
+	/** Files whose agent edit the fixer overwrote and pi-lens could not restore (#3598). */
+	lostFiles: string[];
+}
+
+/**
+ * What a whole-package fixer changed, minus the agent's own edits (#3598). An
+ * agent-edited file is the agent's change, restored or not; counting it would
+ * report a restored file as an autofix result.
+ */
+async function wholePackageFixOutcome(
+	root: string,
+	before: FileSnapshot,
+	result: Awaited<ReturnType<typeof safeSpawnAsync>>,
+	report: FixRunReport,
+): Promise<WholePackageFixOutcome> {
+	if (result.error || result.status !== 0)
+		return { changedFiles: [], lostFiles: report.lost };
+	const agentEdited = new Set(report.agentEdited);
+	const changed = await diffProjectSnapshot(root, before);
+	return {
+		changedFiles: changed.flatMap((file) =>
+			agentEdited.has(file) ? [] : [file],
+		),
+		lostFiles: report.lost,
+	};
+}
+
 async function tryRustClippyFix(
 	filePath: string,
 	writeHold?: FileMutationHold,
-): Promise<string[]> {
+): Promise<WholePackageFixOutcome> {
+	const none = { changedFiles: [], lostFiles: [] };
 	const check = await probeToolAsync("cargo", ["--version"], { timeout: 5000 });
-	if (check.error || check.status !== 0) return [];
+	if (check.error || check.status !== 0) return none;
 
 	const cargoDir = findNearestContaining(path.dirname(path.resolve(filePath)), [
 		"Cargo.toml",
 	]);
-	if (!cargoDir) return [];
+	if (!cargoDir) return none;
 	if (writeHold) await writeHold.acquire();
 
 	const before = await snapshotProjectFiles(cargoDir);
-	const result = await safeSpawnAsync(
-		"cargo",
-		["clippy", "--fix", "--allow-dirty", "--allow-staged", "-q"],
-		{ timeout: 30000, cwd: cargoDir },
+	const { value: result, report } = await runWithFixRestore(
+		{ tool: "rust-clippy", extension: ".rs", candidates: before.keys() },
+		() =>
+			safeSpawnAsync(
+				"cargo",
+				["clippy", "--fix", "--allow-dirty", "--allow-staged", "-q"],
+				{ timeout: 30000, cwd: cargoDir },
+			),
 	);
-	if (result.error || result.status !== 0) return [];
-	return diffProjectSnapshot(cargoDir, before);
+	return wholePackageFixOutcome(cargoDir, before, result, report);
 }
 
 async function tryDartFix(
 	filePath: string,
 	writeHold?: FileMutationHold,
-): Promise<string[]> {
+): Promise<WholePackageFixOutcome> {
+	const none = { changedFiles: [], lostFiles: [] };
 	const check = await probeToolAsync("dart", ["--version"], { timeout: 5000 });
-	if (check.error || check.status !== 0) return [];
+	if (check.error || check.status !== 0) return none;
 
 	const pubspecDir = findNearestContaining(
 		path.dirname(path.resolve(filePath)),
 		["pubspec.yaml"],
 	);
-	if (!pubspecDir) return [];
+	if (!pubspecDir) return none;
 	if (writeHold) await writeHold.acquire();
 
 	const before = await snapshotProjectFiles(pubspecDir);
-	const result = await safeSpawnAsync("dart", ["fix", "--apply"], {
-		timeout: 30000,
-		cwd: pubspecDir,
-	});
-	if (result.error || result.status !== 0) return [];
-	return diffProjectSnapshot(pubspecDir, before);
+	const { value: result, report } = await runWithFixRestore(
+		{ tool: "dart-analyze", extension: ".dart", candidates: before.keys() },
+		() =>
+			safeSpawnAsync("dart", ["fix", "--apply"], {
+				timeout: 30000,
+				cwd: pubspecDir,
+			}),
+	);
+	return wholePackageFixOutcome(pubspecDir, before, result, report);
 }
 
 // --- Pipeline phase helpers ---
@@ -826,6 +868,8 @@ export async function runAutofix(
 	attemptedTools: string[];
 	changedFiles: string[];
 	needsContentRefresh: boolean;
+	/** Files a whole-package fixer overwrote an agent edit of, unrestorable (#3598). */
+	lostFiles?: string[];
 	skipReason?: string;
 }> {
 	const { biomeClient, ruffClient, fixedThisTurn } = deps;
@@ -834,6 +878,7 @@ export async function runAutofix(
 	const autofixTools: string[] = [];
 	const attemptedTools: string[] = [];
 	const changedFiles = new Set<string>();
+	const lostFiles: string[] = [];
 	const markTargetChanged = () => changedFiles.add(path.resolve(filePath));
 	let needsContentRefresh = false;
 
@@ -1038,7 +1083,9 @@ export async function runAutofix(
 		}
 
 		if (toolName === "rust-clippy") {
-			const clippyChangedFiles = await tryRustClippyFix(filePath, writeHold);
+			const clippy = await tryRustClippyFix(filePath, writeHold);
+			const clippyChangedFiles = clippy.changedFiles;
+			lostFiles.push(...clippy.lostFiles);
 			if (clippyChangedFiles.length > 0) {
 				fixedCount += clippyChangedFiles.length;
 				autofixTools.push(`rust-clippy:${clippyChangedFiles.length}`);
@@ -1054,7 +1101,9 @@ export async function runAutofix(
 		}
 
 		if (toolName === "dart-analyze") {
-			const dartChangedFiles = await tryDartFix(filePath, writeHold);
+			const dart = await tryDartFix(filePath, writeHold);
+			const dartChangedFiles = dart.changedFiles;
+			lostFiles.push(...dart.lostFiles);
 			if (dartChangedFiles.length > 0) {
 				fixedCount += dartChangedFiles.length;
 				autofixTools.push(`dart-analyze:${dartChangedFiles.length}`);
@@ -1146,6 +1195,7 @@ export async function runAutofix(
 		attemptedTools,
 		changedFiles: [...changedFiles],
 		needsContentRefresh,
+		lostFiles,
 	};
 }
 
@@ -1714,6 +1764,7 @@ async function analysePipeline(
 	let autofixTools: string[] = [];
 	let attemptedTools: string[] = [];
 	let autofixChangedFiles: string[] = [];
+	let autofixLostFiles: string[] = [];
 	let fixRefresh = false;
 	let autofixSkipReason: string | undefined;
 	if (!allowAutonomousWriters) {
@@ -1729,6 +1780,7 @@ async function analysePipeline(
 			attemptedTools,
 			changedFiles: autofixChangedFiles,
 			needsContentRefresh: fixRefresh,
+			lostFiles: autofixLostFiles = [],
 			skipReason: autofixSkipReason,
 		} = await runAutofix(
 			filePath,
@@ -2027,6 +2079,11 @@ async function analysePipeline(
 		const detail =
 			autofixTools.length > 0 ? ` (${autofixTools.join(", ")})` : "";
 		output += `\n\n✅ Auto-fixed ${fixedCount} issue(s)${detail}`;
+	}
+	if (autofixLostFiles.length > 0) {
+		output += `\n\n${renderFixRunLoss(
+			autofixLostFiles.map((lost) => toRunnerDisplayPath(cwd, lost)),
+		)}`;
 	}
 	if (formatFailures.length > 0) {
 		const details = formatFailures.slice(0, 3).join("; ");

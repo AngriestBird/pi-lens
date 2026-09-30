@@ -57,6 +57,7 @@ import {
 	type BridgeMutationEntry,
 	type MutatingToolClassification,
 } from "./mutating-tool.js";
+import { noteAgentMutation } from "./fix-run-restore.js";
 import { noteMutationHandled } from "./observed-mutation.js";
 import type { ProjectChangeSource } from "./project-changes.js";
 import { getProcessBridge, registerProcessBridge } from "./process-bridge.js";
@@ -311,6 +312,10 @@ export function recordMutationThroughSeam(
 		deps.dbg?.(`mutation_bridge: out of scope ${entry.filePath}`);
 		return false;
 	}
+
+	// #3598: an observed or bridged producer's write is an agent mutation a
+	// running whole-package fixer must not erase. Read it before the bookkeeping.
+	noteAgentMutation(entry.filePath);
 
 	const classification = classifyBridgeMutation(entry);
 	const filePath = entry.filePath;

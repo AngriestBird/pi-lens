@@ -2253,6 +2253,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/file-mutation-queue.ts": 1,
 	"clients/file-time.ts": 1,
 	"clients/file-utils.ts": 1,
+	// #3598: the pre-run hash of a whole-package fixer's files (stat and read per
+	// file, batched), the settle's compare-and-restore, and the wrapper's
+	// awaits. Each is a local file operation on a file of at most 1 MiB, inside a
+	// run that already waits on the fixer's own spawn; none can take the hook's
+	// signal until #2523 AC4 threads it, so this records the increase.
+	"clients/fix-run-restore.ts": 9,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
@@ -2414,7 +2420,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// 63 -> 62 (#3558): `runFormatPhase` no longer enters the queue before the
 	// formatter; `formatters.formatFile` enters it after the command
 	// resolution (formatters.ts above gains that await).
-	"clients/pipeline.ts": 62,
+	// 62 -> 63 (#3598): each whole-package fixer awaits its restore-wrapped
+	// spawn, and the outcome helper awaits the project diff once where the two
+	// branches awaited it separately (net +1). The fixer's spawn was already
+	// awaited under the same hold and the restore is bounded local file work.
+	"clients/pipeline.ts": 63,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
