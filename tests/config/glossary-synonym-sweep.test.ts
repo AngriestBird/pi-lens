@@ -1253,7 +1253,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// supplier's resolved `version` (params, `.version` fields, and the
 		// shared version verdict) through the same agreement comparison.
 		// Same sense — lockfile resolved versions, not generations.
-		"clients/tool-agreement.ts": 52,
+		// 52 -> 64 (#3656 review): `stripPnpmPeerSuffix` scans a lockfile
+		// resolved version string for its peer-context suffix; same sense.
+		"clients/tool-agreement.ts": 64,
 		"clients/turn-summary.ts": 2,
 		"clients/warm-attach.ts": 4,
 		"clients/widget-state.ts": 5,
