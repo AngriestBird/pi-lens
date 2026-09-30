@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- `lsp_diagnostics` no longer reports "confirmed clean" for an empty result from a language server whose project root fell back (`lsp:server-root-fallback`, for example rust-analyzer on a `.rs` file with no `Cargo.toml`). The verdict is now unconfirmed and names the missing project marker, in single-file, batch and directory output; files whose root resolved normally, and servers that fall back to the file directory by design (gopls, tsserver), keep their clean verdict (closes #3750).
+- `lsp_diagnostics` no longer reports "confirmed clean" for an empty result from a language server that needs a project and was given none (rust-analyzer on a `.rs` file with no `Cargo.toml`; csharp-ls, OmniSharp and FSAutocomplete likewise). The verdict is now unconfirmed and names why, in single-file, batch and directory output. Servers whose root markers are optional (lua-language-server, nixd, deno, and the rest), and files whose root resolved normally, keep their clean verdict (closes #3750).
