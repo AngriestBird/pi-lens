@@ -774,7 +774,10 @@ OrderMonotone == lastTok = 0 \/ prevMax < lastTok
 OneResetPerScope == \A t \in Tickets : resets[t] <= 1
 
 \* A live scope's cell holds only facts of its own conversation lineage, on
-\* its current branch (the review's invariant).
+\* its current branch (proposed in the S9 review). The invariants above take
+\* `x.o \in lin[...]` as a premise, so a lineage truth that omits a scope
+\* makes them vacuous for its facts: a /fork that does not copy its parent's
+\* lineage passes every other invariant of Fix, and violates this one.
 NoForeignFact ==
     \A t \in Tickets :
         st[t] = "live" =>
