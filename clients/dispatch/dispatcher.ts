@@ -1109,7 +1109,9 @@ async function runGroup(
 			status: result.status,
 			diagnosticCount: result.diagnostics.length,
 			semantic: result.semantic ?? semantic,
-			failureKind: result.failureKind,
+			...(result.failureKind !== undefined && {
+				failureKind: result.failureKind,
+			}),
 			...(skipReason !== undefined && {
 				skipReason,
 			}),
