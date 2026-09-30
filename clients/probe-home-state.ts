@@ -68,7 +68,6 @@ const RESOLUTION_SLOT = Symbol.for("pi-lens.probe-home-state.resolution");
 
 export interface ProbeHomeRedirectEvent {
 	probeHome: string;
-	cwd: string;
 }
 
 export interface ProbeHomeResolution {
@@ -176,7 +175,7 @@ function resolveProbeHomeDir(): string | undefined {
 	const probeHome = computeProbeHomeDir(cwd);
 	slot[RESOLUTION_SLOT] = {
 		probeHome,
-		event: probeHome ? { probeHome, cwd } : undefined,
+		event: probeHome ? { probeHome } : undefined,
 	};
 	return probeHome;
 }
