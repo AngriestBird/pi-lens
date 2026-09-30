@@ -204,7 +204,7 @@ function getEffectiveReadLimit(
 	readInput: ReadToolInput | undefined,
 ): number | undefined {
 	if (!filePath || !readInput) return undefined;
-	const requestedOffset = readInput.offset ?? 1;
+	const requestedOffset = Math.max(1, readInput.offset ?? 1);
 	const requestedLimit = readInput.limit;
 	return (
 		requestedLimit ??
@@ -869,7 +869,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	}
 
 	const readInput = getReadToolInput(toolName, event.input);
-	const requestedReadOffset = readInput?.offset ?? 1;
+	const requestedReadOffset = Math.max(1, readInput?.offset ?? 1);
 	const requestedReadLimit = readInput?.limit;
 	let effectiveReadOffset = requestedReadOffset;
 	let effectiveReadLimit = getEffectiveReadLimit(filePath, readInput);
