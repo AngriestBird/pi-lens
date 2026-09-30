@@ -50,7 +50,7 @@ jobs:
           # unexpired for up to 90 days. The shard list mirrors ci.yml's
           # matrix; tests/config/test-history-workflow.test.ts pins the two.
           : > "$RUNNER_TEMP/test-history-artifact-ids"
-          for artifact_name in unit-test-results-linux unit-test-results-linux-shard-1 unit-test-results-linux-shard-2 unit-test-results-linux-shard-3; do
+          for artifact_name in unit-test-results-linux unit-test-results-linux-shard-1 unit-test-results-linux-shard-2 unit-test-results-linux-shard-3 unit-test-results-linux-shard-4 unit-test-results-linux-shard-5; do
             gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \
               --jq '.artifacts[] | select(.expired == false) | .id' >> "$RUNNER_TEMP/test-history-artifact-ids"
           done
