@@ -2339,6 +2339,8 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 							},
 						}) as any,
 				});
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
 				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
 				// The refused write leaves one counted, discriminating record.
 				expect(
@@ -2408,6 +2410,8 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 					getFormatService: () =>
 						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
 				});
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
 				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
 			} finally {
 				env.cleanup();
@@ -2503,6 +2507,8 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
 				});
 				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
 				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
 			} finally {
 				applyConservativeActionableWarningFixesMock.mockReset();
