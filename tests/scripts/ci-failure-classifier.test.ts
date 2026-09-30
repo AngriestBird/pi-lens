@@ -1293,6 +1293,35 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			expect(api.rerunCallCount).toBe(0);
 		});
 
+		// Recurrence (Stryker survivor on the `jobName === UNIT_TESTS` guard,
+		// #3756 review): the shard filter is for the `Unit tests` aggregate ONLY.
+		// Without the guard any `--job-name` would be answered with the failed
+		// shard rows instead of the job it names.
+		it("selects only the named job for a non-Unit-tests --job-name, even with a failed shard present", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": fixture("infra-kill-wrapper-killed.real.log"),
+						"222": fixture("real-assertion-failure.real.log"),
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "failure" },
+						{ id: 222, name: "Lint & type-check", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Lint & type-check",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.jobName).toBe("Lint & type-check");
+			expect(result.classification.kind).toBe("real");
+			expect(api.rerunCallCount).toBe(0);
+		});
+
 		it("falls back to the exact-name job when no shard failed (a pre-sharding run)", async () => {
 			const api = makeStatefulApi();
 			const result = await runClassifier({
