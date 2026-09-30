@@ -268,6 +268,12 @@ interface McpRunnerLatency {
 	durationMs: number;
 	status: string;
 	diagnosticCount: number;
+	/**
+	 * Present when the runner set one (#3781). With `status: "failed"`,
+	 * `"blocking_diagnostics"` means the check ran and its findings failed it;
+	 * any other kind, or none, means the runner produced no usable result.
+	 */
+	failureKind?: string;
 }
 
 export interface McpAnalyzeResult {
@@ -618,6 +624,7 @@ export async function analyzeFile(
 						durationMs: runner.durationMs,
 						status: runner.status,
 						diagnosticCount: runner.diagnosticCount,
+						failureKind: runner.failureKind,
 					})),
 				}
 			: undefined,

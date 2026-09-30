@@ -8,6 +8,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
+import { findingsResult } from "../types.js";
 import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
 
 function parsePrismaValidateOutput(
@@ -78,11 +79,10 @@ const prismaValidateRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		return {
+		return findingsResult(diagnostics, {
 			status: "failed",
-			diagnostics,
 			semantic: "blocking",
-		};
+		});
 	},
 };
 

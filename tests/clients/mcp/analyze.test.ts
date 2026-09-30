@@ -247,6 +247,58 @@ describe("analyzeFile", () => {
 		});
 	});
 
+	// #3781: the row names why a runner failed. Before, `status` alone could not
+	// tell an agent a broken runner from a run that found blocking problems.
+	it("surfaces each runner's failureKind so findings are not read as a broken runner (#3781)", async () => {
+		const row = (
+			runnerId: string,
+			status: "succeeded" | "failed",
+			failureKind?: string,
+		) => ({
+			runnerId,
+			startTime: 0,
+			endTime: 10,
+			durationMs: 10,
+			status,
+			diagnosticCount: status === "failed" ? 1 : 0,
+			semantic: "warning",
+			...(failureKind !== undefined && { failureKind }),
+		});
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			latencyReport: {
+				filePath: tsFile,
+				fileKind: "jsts",
+				overallStartMs: 0,
+				overallEndMs: 10,
+				totalDurationMs: 10,
+				runners: [
+					row("eslint", "failed", "blocking_diagnostics"),
+					row("oxlint", "failed", "timeout"),
+					row("tree-sitter", "succeeded"),
+				],
+				stoppedEarly: false,
+				totalDiagnostics: 2,
+				blockers: 1,
+				warnings: 1,
+			},
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(
+			result.latency?.runners.map((runner) => [
+				runner.runnerId,
+				runner.status,
+				runner.failureKind,
+			]),
+		).toEqual([
+			["eslint", "failed", "blocking_diagnostics"],
+			["oxlint", "failed", "timeout"],
+			["tree-sitter", "succeeded", undefined],
+		]);
+	});
+
 	it("attaches the latency report even when the ring is already at its 100-entry cap (#3642)", async () => {
 		// dispatcher.ts:1444-1449 pushes then shifts once length > 100, so a
 		// full ring's length is UNCHANGED by this dispatch's push (100 -> 100).

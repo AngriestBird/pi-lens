@@ -589,6 +589,8 @@ export interface RunnerLatency {
 		| "pending";
 	diagnosticCount: number;
 	semantic: string;
+	/** The runner's own `failureKind`, when it set one (#3781). */
+	failureKind?: string;
 	skipReason?: RunnerSkipReason;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
@@ -1107,6 +1109,7 @@ async function runGroup(
 			status: result.status,
 			diagnosticCount: result.diagnostics.length,
 			semantic: result.semantic ?? semantic,
+			failureKind: result.failureKind,
 			...(skipReason !== undefined && {
 				skipReason,
 			}),
