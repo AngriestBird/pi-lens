@@ -13,7 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BiomeClient } from "../../clients/biome-client.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
@@ -247,6 +247,8 @@ async function applyEdit(
 	file: string,
 	edit: Awaited<ReturnType<typeof positionalEdit>>,
 	gate?: () => void,
+	/** The lines a host writes for `newText`; a raw split writes a trailing "\n" as a blank line. */
+	hostLines: (newText: string) => string[] = (newText) => newText.split("\n"),
 ): Promise<void> {
 	const current = diskLines(file);
 	const ordered = [...edit.input.edits].sort(
@@ -256,7 +258,7 @@ async function applyEdit(
 		current.splice(
 			range.start.line - 1,
 			range.end.line - range.start.line + 1,
-			...newText.split("\n"),
+			...hostLines(newText),
 		);
 	}
 	writeNow(file, current.join("\n"));
@@ -608,6 +610,79 @@ describe("#3523: the agent's own positional edit is a read", () => {
 			);
 		} finally {
 			vi.mocked(logLatency).mockImplementation(realLogLatency);
+			env.cleanup();
+		}
+	});
+
+	// #3739 F1: `deliveredLineEvidence("agent5\n", 5)` covers lines 5-6, the
+	// second an empty line. A host that takes the "\n" as line 5's terminator
+	// writes no such line, and the own-edit record must not claim it: it would
+	// shadow the agent's good read of the real line 6. No installed package
+	// implements `edits[].range` (pi 0.87.1's edit is oldText-only), so both
+	// host semantics are replayed.
+	it("allows the next line after an own edit whose newText ends in a newline the host takes as a terminator", async () => {
+		const env = setupTestEnvironment("rg-3739-terminator-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			expect(first.blocked).toBe(false);
+			await applyEdit(runtime, file, first, undefined, (text) =>
+				text.replace(/\n$/, "").split("\n"),
+			);
+			expect(diskLines(file)[5]).toBe("line6");
+			// The record covers exactly the line the host wrote.
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5") },
+			);
+			const next = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
+			expect(next.reason).toBeUndefined();
+			expect(next.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("claims no trailing empty line when the file cannot be read back after the edit", async () => {
+		const env = setupTestEnvironment("rg-3739-unreadable-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			await applyEdit(
+				runtime,
+				file,
+				first,
+				() => fs.rmSync(file),
+				(text) => text.split("\n"),
+			);
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5") },
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows the blank line the agent wrote when the host writes a newText's trailing newline as one", async () => {
+		const env = setupTestEnvironment("rg-3739-blank-line-");
+		try {
+			const file = fixture(env.tmpDir, "t.ts", `${lines(12).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, {});
+			const first = await positionalEdit(runtime, file, [[5, 5, "agent5\n"]]);
+			expect(first.blocked).toBe(false);
+			await applyEdit(runtime, file, first);
+			expect(diskLines(file).slice(4, 7)).toEqual(["agent5", "", "line6"]);
+			expect(runtime.readGuard.getReadHistory(file).at(-1)?.lineHashes).toEqual(
+				{ 5: lineContentHash("agent5"), 6: lineContentHash("") },
+			);
+			const next = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
+			expect(next.reason).toBeUndefined();
+			expect(next.blocked).toBe(false);
+		} finally {
 			env.cleanup();
 		}
 	});
@@ -1414,6 +1489,316 @@ describe("#3524: a native read's evidence is the delivered text", () => {
 			const edit = await positionalEdit(runtime, file, [[10, 10, "agent10"]]);
 			expect(edit.blocked).toBe(true);
 			expect(edit.reason).toContain("Edit outside read range");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #3522: an edit line is judged by the newest read that DELIVERED it, never by
+ * a read that only context-covers it, and never by "some read covers the whole
+ * range". Recurrence: `validateRangeSnapshot` let a newer context-only read
+ * cancel a real mismatch (ContextSuppress) and let a two-line edit spanning two
+ * reads skip the hash check (SpanAcrossReads); the FileTime hash rescue and
+ * relocation asked the same wrong question. Each case replays a
+ * `formal/read-guard` trace through the real handlers; contextLines is the
+ * default 3.
+ */
+describe("#3522: a stale line is judged by the newest read that delivered it", () => {
+	/** Another writer replaces line `n` (1-based) with `text`. */
+	const foreignWrite = (file: string, n: number, text: string) => {
+		const v = diskLines(file);
+		v[n - 1] = text;
+		writeNow(file, v.join("\n"));
+	};
+	const RANGE_STALE = "Edit range changed since read";
+	// Reads land in the same millisecond on a fast box, and the pre-fix guard
+	// broke that tie by timestamp (`lastUnavailableTimestamp <= lastMismatch
+	// Timestamp`), so the same replay flipped between allow and block. A fake
+	// Date that moves between reads makes the pre-fix red deterministic; the
+	// fix does not look at timestamps.
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	const read = (
+		runtime: RuntimeCoordinator,
+		file: string,
+		input: { offset?: number; limit?: number },
+	) => {
+		vi.advanceTimersByTime(10);
+		return piRead(runtime, file, input);
+	};
+	const setup = (name: string) => {
+		const env = setupTestEnvironment(`rg-3522-${name}-`);
+		const file = fixture(env.tmpDir, "s.ts", `${lines(12).join("\n")}\n`);
+		return { env, file, runtime: newRuntime(env.tmpDir) };
+	};
+
+	it("does not let a newer context-only read cancel a stale line (ContextSuppress)", async () => {
+		const { env, file, runtime } = setup("ctx-suppress");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			// Delivers 5-8; line 4 is only in its context zone.
+			await read(runtime, file, { offset: 5, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain(RANGE_STALE);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("hash-checks an edit that spans two reads (SpanAcrossReads)", async () => {
+		const { env, file, runtime } = setup("span");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			await read(runtime, file, { offset: 5, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain(RANGE_STALE);
+			expect(edit.ranges).toEqual([[4, 5]]);
+			expect(diskLines(file)[3]).toBe("EXTERNAL4");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("blocks a spanning edit when the SECOND read's line went stale", async () => {
+		const { env, file, runtime } = setup("span-second");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
+			foreignWrite(file, 5, "EXTERNAL5");
+			// Re-stamps FileTime; delivers 8-11, so line 5 is only in its context zone.
+			await read(runtime, file, { offset: 8, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain(RANGE_STALE);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("blocks a spanning edit when both lines went stale, and does not relocate it", async () => {
+		const { env, file, runtime } = setup("span-both");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			foreignWrite(file, 5, "EXTERNAL5");
+			await read(runtime, file, { offset: 8, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[4, 5]]);
+			expect(edit.reason).not.toContain("Re-target");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows a spanning edit when each line still matches the read that delivered it", async () => {
+		const { env, file, runtime } = setup("span-fresh");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			await read(runtime, file, { offset: 5, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows the line a newer read re-delivered after the other writer (no false block)", async () => {
+		const { env, file, runtime } = setup("reread");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			await read(runtime, file, { offset: 4, limit: 1 });
+			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows a two-line edit whose lines each match their own newest read, though an older read is stale on one", async () => {
+		const { env, file, runtime } = setup("mixed");
+		try {
+			await read(runtime, file, { offset: 1, limit: 8 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			// Delivers only line 4; line 5 stays the first read's view.
+			await read(runtime, file, { offset: 4, limit: 1 });
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let an older read that matches the disk vouch for a line a newer read saw differently", async () => {
+		const { env, file, runtime } = setup("revert");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			foreignWrite(file, 4, "EXTERNAL4");
+			await read(runtime, file, { offset: 4, limit: 1 });
+			// The writer puts line 4 back: the disk equals the OLD read again,
+			// but the agent's latest view of line 4 is EXTERNAL4.
+			foreignWrite(file, 4, "line4");
+			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("rescues a touched file whose delivered lines still match", async () => {
+		const { env, file, runtime } = setup("rescue");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			// Same bytes, new mtime: FileTime moves, the hashes do not.
+			writeNow(file, fs.readFileSync(file, "utf8"));
+			const edit = await positionalEdit(runtime, file, [[4, 4, "agent4"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not rescue a touched file for a line no read delivered", async () => {
+		const { env, file, runtime } = setup("rescue-ctx");
+		try {
+			await read(runtime, file, { offset: 1, limit: 4 });
+			writeNow(file, fs.readFileSync(file, "utf8"));
+			// Line 6 is inside the read's context zone but was never delivered.
+			const edit = await positionalEdit(runtime, file, [[6, 6, "agent6"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("still admits the context zone for a line no read delivered (ContextSlack)", async () => {
+		const { env, file, runtime } = setup("slack");
+		try {
+			await read(runtime, file, { offset: 5, limit: 4 });
+			const edit = await positionalEdit(runtime, file, [[3, 3, "agent3"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not relocate a spanning edit from a read that is not the newest view of every line (SpanSnapshotFixAnyReloc)", async () => {
+		const { env, file, runtime } = setup("any-reloc");
+		try {
+			await read(runtime, file, { offset: 1, limit: 2 });
+			// Another writer inserts a line on top: line1,line2 now sit at 2-3.
+			writeNow(file, ["EXTERNAL0", ...diskLines(file)].join("\n"));
+			// The agent's newest view of line 1 is EXTERNAL0.
+			await read(runtime, file, { offset: 1, limit: 1 });
+			// It believes lines 1-2 are EXTERNAL0/line2. The older read's run
+			// (line1, line2) is unique at 2-3, but relocating there would
+			// overwrite line1, which the agent's newest view contradicts.
+			const edit = await positionalEdit(runtime, file, [
+				[1, 2, "agent1\nagent2"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[1, 2]]);
+			expect(edit.reason).toContain(RANGE_STALE);
+			expect(edit.reason).not.toContain("Re-target");
+			expect(diskLines(file).slice(0, 3)).toEqual([
+				"EXTERNAL0",
+				"line1",
+				"line2",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not relocate or allow an edit onto the line past the attachment's end (AutofixPastEnd)", async () => {
+		const env = setupTestEnvironment("rg-3522-past-end-");
+		try {
+			biomeProject(env.tmpDir);
+			const file = fixture(env.tmpDir, "b.ts", "old\n");
+			const runtime = newRuntime(env.tmpDir);
+			// The write's creation read covers 5 lines; the autofix drops line 1,
+			// so the attachment (the agent's newest view) has 4.
+			await writeWithAutofix(runtime, file, WRITTEN);
+			expect(diskLines(file)).toHaveLength(4);
+			// Line 5 exists only in the older creation read.
+			const edit = await positionalEdit(runtime, file, [
+				[4, 5, "agent4\nagent5"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[4, 5]]);
+			expect(diskLines(file)).toEqual([
+				"const a = 1;",
+				"const b = 2;",
+				"const c = 3;",
+				"const d = 4;",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not relocate from the read that delivered the first line when a newer read delivered the last (SpanSnapshotFixAnyReloc)", async () => {
+		const { env, file, runtime } = setup("any-reloc-last");
+		try {
+			await read(runtime, file, { offset: 1, limit: 6 });
+			writeNow(file, ["INS1", "INS2", ...diskLines(file)].join("\n"));
+			// The agent's newest view of line 4 is now the shifted "line2".
+			await read(runtime, file, { offset: 4, limit: 1 });
+			// The first read's run (line3, line4) is unique at 5-6, but its line4
+			// is not what the agent last saw at line 4.
+			const edit = await positionalEdit(runtime, file, [
+				[3, 4, "agent3\nagent4"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.ranges).toEqual([[3, 4]]);
+			expect(edit.reason).toContain(RANGE_STALE);
+			expect(edit.reason).not.toContain("Re-target");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("relocates a shifted two-line edit from the read that is the newest view of both lines", async () => {
+		const { env, file, runtime } = setup("reloc");
+		try {
+			await read(runtime, file, { offset: 1, limit: 6 });
+			writeNow(file, ["INS1", "INS2", ...diskLines(file)].join("\n"));
+			await read(runtime, file, { offset: 9, limit: 2 });
+			// The agent means line3-line4, now at 5-6.
+			const edit = await positionalEdit(runtime, file, [
+				[3, 4, "agent3\nagent4"],
+			]);
+			expect(edit.blocked).toBe(false);
+			expect(edit.ranges).toEqual([[5, 6]]);
 		} finally {
 			env.cleanup();
 		}

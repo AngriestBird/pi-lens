@@ -7,9 +7,9 @@ session boundaries. The `TLA+ models` CI job
 (`node scripts/check-tla-models.mjs`) checks every config here against its
 `\* expect:` line.
 
-Issues: #3519, #3521, #3523 and #3524 are fixed in the code and modelled as
-such. The configs for #3520, #3522 and #3525 still document their bugs
-against the current code (`violated`).
+Issues: #3519, #3521, #3522, #3523 and #3524 are fixed in the code and modelled
+as such. The configs for #3520 and #3525 still document their bugs against the
+current code (`violated`).
 
 ## Scope
 
@@ -81,16 +81,20 @@ edits and writes, and the authoritative attachment.
 The current code is `HandlerEvidence = FALSE`, `CreationHandlerEvidence =
 TRUE`, `RecordAuthoritative = TRUE`, `RecordOwnEdit = TRUE`,
 `OwnEditSkipsReloc = TRUE`, `MtimeAuthored = TRUE`, `OwnEditRescue = TRUE`,
-`BranchFilter = TRUE`, `SuppressByNewerContext = TRUE`, `FormatStamp = TRUE`,
-`SpanSnapshot = FALSE`, `RelocFromLatest = FALSE`, `ForkAtBoundary = FALSE`,
+`BranchFilter = TRUE`, `FormatStamp = TRUE`, `SpanSnapshot = TRUE`,
+`RelocFromLatest = TRUE`, `WholeVouchesPastEnd = FALSE`, `ForkAtBoundary = FALSE`,
 `DrainMode = "fenced"` (every config before #3521 round 2 keeps `"atomic"`,
 its old shape). `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
 was `ForkImport = FALSE` (the fork imported nothing), not `TRUE` as this file
-used to say.
+used to say. `SuppressByNewerContext` (`TRUE` before #3522) is read only when
+`SpanSnapshot = FALSE`, so every config sets `SpanSnapshot = TRUE` and its value
+is inert. `WholeVouchesPastEnd` (#3522 part 3, a whole-file view also vouching
+that lines past its end do not exist) is not in the code, and no invariant
+needs it.
 A config that turns one of these off either names the bug it isolates (for
 example `MtimeAuthored = FALSE` in `Guarded`, so bug 2 does not mask the rest)
-or is a mutant of this PR's fixes (`*NoRecord`, `EvidenceAtResultHandler`,
-`OwnEditRelocRecorded`).
+or is a mutant of a fix (`*NoRecord`, `EvidenceAtResultHandler`,
+`OwnEditRelocRecorded`, `SpanSnapshotFixAnyReloc`, `SpanSnapshotFixNoOwnRecord`).
 
 ## Guard (as coded)
 
@@ -102,11 +106,17 @@ The model follows `checkEdit` step by step:
   `canTreatStalenessAsOwnPriorEdit` and `canIgnoreStalenessByHashes`.
 - **Coverage.** `checkCoverage`: the union of non-provisional ranges, widened
   by `contextLines`.
-- **Snapshot.** `validateRangeSnapshot`: context-widened candidates,
-  checked/unavailable, and the "a newer unavailable candidate cancels the
-  mismatch" rule.
-- **Relocation.** `findRelocation`: the newest read with hashes for the whole
-  range, which must match uniquely.
+- **Snapshot.** `validateRangeSnapshot`: each line of the range against the
+  newest non-provisional read that delivered it (`newestViewOfLine`, the
+  effective range, never the `contextLines` zone). Since #3522, before it a
+  context-widened candidate that covered the whole range, and the "a newer
+  unavailable candidate cancels the mismatch" rule. The model treats a read
+  without hashes as delivering nothing, and the code as delivering a line it
+  cannot check; the two agree because `Hashes` is global here.
+- **FileTime rescue.** `canIgnoreStalenessByHashes` asks the same per-line
+  question (`HashRescue`).
+- **Relocation.** `findRelocation`: only from the read that is the newest view
+  of every line of the range (`RelocFromLatest`), which must match uniquely.
 
 ## Invariants
 
@@ -145,11 +155,11 @@ head that added this model. It is not checked in CI.
 | `AutofixRelocateNoRecord` | the same without the attachment record | violated `NoStaleAllow` | 13 |
 | `AutofixRecorded` | #3519 fixed, another writer anywhere, 1- and 2-line edits | pass | 334 |
 | `AutofixRecordedNoRecord` | the same without the attachment record | violated `NoFalseBlock` | 105 |
-| `AutofixPastEnd` | remainder (#3522 part 3): an older whole-file read still covers a line past the attachment's end | violated `NoBlindAllow` | 22 |
+| `AutofixPastEnd` | an older creation read still covers a line past the attachment's end: the per-line rule refuses it (#3522 part 3 needs no code) | pass | 23 |
 | `OwnReEdit` | #3523 fixed: the agent re-edits a line it just wrote | pass | 2,036 |
 | `OwnReEditNoRecord` | the same without the own-edit record (the code before #3523) | violated `NoFalseBlock` | 327 |
 | `OwnEditReloc` | #3523 fixed: a relocated edit is not recorded; write + autofix, an other-writer insert, a relocated edit, then an edit | pass | 1,608 |
-| `OwnEditRelocRecorded` | the same with a relocated edit recorded | violated `NoStaleAllow` | 535 |
+| `OwnEditRelocRecorded` | the same with a relocated edit recorded: the #3522 rule now refuses that stale allow itself | pass | 1,592 |
 | `EvidenceAtResult` | #3524 fixed: another writer lands between the host read and the tool_result | pass | 23,571 |
 | `EvidenceAtResultHandler` | the same with the read taken from disk at tool_result (the code before #3524) | violated `NoStaleAllow` | 316 |
 | `EvidenceFromDelivered` | #3524 fixed, another writer anywhere, replace/delete/insert | pass | 93,904 |
@@ -172,18 +182,22 @@ head that added this model. It is not checked in CI.
 | `TreeDrainRequeue` | the same with the epoch taken at the settle that dequeues it (round 2): requeued work is credited to the new branch | violated `NoBlindAllow` | 15,534 |
 | `TreeDrainUnfenced` | the same, stamp credited (the code before round 2) | violated `NoBlindAllow` | 2,529 |
 | `TreeDrainFencedMtime` | the fenced drain with the #3520 mtime fallback: the formatter write postdates the re-anchor (residual until #3520) | violated `NoBlindAllow` | 2,528 |
-| `ContextSuppress`, `SpanAcrossReads` | #3522 | violated `NoStaleAllow` | 2,905 / 2,964 |
+| `ContextSuppress`, `SpanAcrossReads` | #3522 fixed: a newer context-only read, and an edit spanning two reads | pass | 232,543 / 146,000 |
+| `SpanSnapshotFix` | #3522 fixed, one- and two-line edits, contextLines 1, another writer (replace/delete/insert), three agent ops | pass | 98,195 |
+| `SpanSnapshotFixAnyReloc` | the same relocating from any read that hashes the range | violated `NoStaleAllow` | 24,987 |
+| `SpanSnapshotFixNoOwnRecord` | the same without the own-edit read record (the code before #3523) | violated `NoStaleAllow` | 6,945 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 | violated `NoStaleAllow` | 449 / 160 |
 
 `OwnEditReloc` and `OwnEditRelocRecorded` set `CreationHandlerEvidence =
 FALSE`, so the creation-read race `CreationAtResult` documents cannot mask the
 relocation check.
 
-The investigation's configs for the candidate fixes of #3520, #3522
-and #3525 (`AllFixes`, `AllFixesCtx`, `SpanSnapshotFix*`, `UnhashedFix`,
-`NoMtimeAuthored`, `ForkAtBoundary`, `ForkImportWholeRecord`,
-`OwnEditRecorded*`, `OwnEditRescueContext`) are not here; each arrives with its
-fix. All of them keep their verdicts under this version of the model.
+The investigation's configs for the candidate fixes of #3520 and #3525
+(`AllFixes`, `AllFixesCtx`, `UnhashedFix`, `NoMtimeAuthored`, `ForkAtBoundary`,
+`ForkImportWholeRecord`, `OwnEditRecorded*`, `OwnEditRescueContext`) are not
+here; each arrives with its fix. The four-op `SpanSnapshotFix` (1,676,422
+distinct states, 42 s) was checked once, at the head that added it, and is not
+in CI. All of them keep their verdicts under this version of the model.
 `OwnEditRescueContext` (#3525's hashed case, a hybrid with the #3522 fix on)
 passes once #3523's own-edit record is on.
 
@@ -192,7 +206,9 @@ passes once #3523's own-edit record is on.
 `tests/clients/read-guard-conversation-evidence.test.ts` replays the fixed
 configs through the real `handleToolCall` / `handleToolResult`, with pi's real
 `read` tool. The case names end with the config they replay, for example
-"allows re-editing the line the agent just wrote (OwnReEdit)".
+"allows re-editing the line the agent just wrote (OwnReEdit)". The #3522
+replays (`ContextSuppress`, `SpanAcrossReads`, `SpanSnapshotFixAnyReloc`) are in
+the `#3522` block of the same file.
 
 ## Limits
 

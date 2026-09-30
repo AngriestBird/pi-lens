@@ -456,13 +456,26 @@ function readRangeCoversLine(read: ReadRecord, lineNo: number): boolean {
 	);
 }
 
-function readEffectiveRangeCoversRange(
-	read: ReadRecord,
-	[startLine, endLine]: [number, number],
-): boolean {
-	return (
-		readRangeCoversLine(read, startLine) && readRangeCoversLine(read, endLine)
-	);
+/**
+ * The newest non-provisional read that DELIVERED `lineNo` (its effective
+ * range, never the `contextLines` zone): the agent's latest view of that line
+ * (#3522). A provisional record was never delivered, and a context-only read
+ * never showed the line again, so neither can stand for it. `reads` is in
+ * arrival order.
+ */
+function newestViewOfLine(
+	reads: readonly ReadRecord[],
+	lineNo: number,
+): ReadRecord | undefined {
+	for (let i = reads.length - 1; i >= 0; i -= 1) {
+		if (
+			reads[i].provisional !== true &&
+			readRangeCoversLine(reads[i], lineNo)
+		) {
+			return reads[i];
+		}
+	}
+	return undefined;
 }
 
 /** Hash `lines` as file lines `firstLine`, `firstLine + 1`, ... */
@@ -1140,11 +1153,6 @@ export class ReadGuard {
 
 		let viaSymbol = false;
 		for (const range of rangesToCheck) {
-			const snapshotValidation = this.validateRangeSnapshot(
-				filePath,
-				range,
-				!!options?.skipSnapshotCheck,
-			);
 			const coverage = this.checkCoverage(filePath, range);
 			if (!coverage.covered) {
 				const lastRead = fileReads[fileReads.length - 1];
@@ -1182,6 +1190,13 @@ export class ReadGuard {
 				});
 				return verdict;
 			}
+			// After the coverage gate, so the per-line check below only ever walks
+			// a range some read covers, never an arbitrary caller-supplied one.
+			const snapshotValidation = this.validateRangeSnapshot(
+				filePath,
+				range,
+				!!options?.skipSnapshotCheck,
+			);
 			if (snapshotValidation.shouldBlock && !options?.skipSnapshotCheck) {
 				const [editStart, editEnd] = range;
 				// Grace period: when the snapshot is stale because THIS session's own
@@ -1714,36 +1729,27 @@ export class ReadGuard {
 			return !!lastRead && this.readHashesStillMatch(lastRead, lines);
 		}
 
-		return rangesToCheck.every((range) =>
-			reads.some(
-				(read) =>
-					this.readCoversRange(read, range) &&
-					this.readRangeHashesStillMatch(read, lines, range),
-			),
-		);
-	}
-
-	private readCoversRange(
-		read: ReadRecord,
-		[editStart, editEnd]: [number, number],
-	): boolean {
-		const readStart = Math.max(
-			1,
-			read.effectiveOffset - this.config.contextLines,
-		);
-		const readEnd =
-			read.effectiveOffset + read.effectiveLimit - 1 + this.config.contextLines;
-		if (editStart >= readStart && editEnd <= readEnd) return true;
-		if (!read.enclosingSymbol) return false;
-		return (
-			read.enclosingSymbol.startLine <= editStart &&
-			read.enclosingSymbol.endLine >= editEnd
-		);
+		// The same per-line question as `validateRangeSnapshot` (#3522): every
+		// line must still match the newest read that delivered it. "Some read
+		// covers the whole range" vouched from an older read for a line a newer
+		// read saw differently.
+		return rangesToCheck.every(([startLine, endLine]) => {
+			for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+				const view = newestViewOfLine(reads, lineNo);
+				if (
+					!view ||
+					!this.readRangeHashesStillMatch(view, lines, [lineNo, lineNo])
+				) {
+					return false;
+				}
+			}
+			return true;
+		});
 	}
 
 	private validateRangeSnapshot(
 		filePath: string,
-		range: [number, number],
+		[startLine, endLine]: [number, number],
 		/**
 		 * What the CALLER will do with the verdict. `checkEdit` honours
 		 * `skipSnapshotCheck` for content-validated (oldText) edits, so a
@@ -1752,75 +1758,46 @@ export class ReadGuard {
 		snapshotCheckSkipped: boolean,
 	): {
 		status: "match" | "mismatch" | "unavailable";
-		matchingReadIndex: number;
 		missingLines: number[];
 		mismatchedLines: number[];
-		candidateReadCount: number;
-		checkedCandidateCount: number;
-		unavailableCandidateCount: number;
 		shouldBlock: boolean;
 	} {
 		const reads = this.reads.get(filePath) ?? [];
-		const candidates = reads.filter((read) =>
-			this.readCoversRange(read, range),
-		);
-		let status: "match" | "mismatch" | "unavailable" = "unavailable";
-		let matchingReadIndex = -1;
-		let missingLines: number[] = [];
-		let mismatchedLines: number[] = [];
-		let checkedCandidateCount = 0;
-		let unavailableCandidateCount = 0;
-		let hashUnavailableCandidateCount = 0;
-		let lastMismatchTimestamp = -Infinity;
-		let lastUnavailableTimestamp = -Infinity;
-		for (let i = 0; i < candidates.length; i += 1) {
-			const validation = currentLinesMatchReadSnapshot(
-				filePath,
-				candidates[i],
-				range,
-			);
-			if (!validation.checked) {
-				unavailableCandidateCount += 1;
-				if (readEffectiveRangeCoversRange(candidates[i], range)) {
-					hashUnavailableCandidateCount += 1;
-				}
-				if (status === "unavailable") {
-					missingLines = validation.missingLines;
-				}
-				lastUnavailableTimestamp = Math.max(
-					lastUnavailableTimestamp,
-					candidates[i].timestamp,
-				);
+		// Judge each line by the newest read that delivered it (#3522), in runs
+		// that share one read. A line no read delivered (only in a context zone)
+		// or whose newest view carries no hash for it cannot be checked and is
+		// reported missing; it never blocks and never lets an older read speak
+		// for it.
+		const runs: Array<{ read: ReadRecord; range: [number, number] }> = [];
+		const missingLines: number[] = [];
+		for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+			const view = newestViewOfLine(reads, lineNo);
+			if (!view || view.lineHashes?.[lineNo] === undefined) {
+				missingLines.push(lineNo);
 				continue;
 			}
-			checkedCandidateCount += 1;
-			if (validation.matches) {
-				status = "match";
-				matchingReadIndex = i;
-				missingLines = [];
-				mismatchedLines = [];
-				break;
+			const last = runs.at(-1);
+			if (last?.read === view && last.range[1] === lineNo - 1) {
+				last.range[1] = lineNo;
+			} else {
+				runs.push({ read: view, range: [lineNo, lineNo] });
 			}
-			status = "mismatch";
-			missingLines = [];
-			mismatchedLines = validation.mismatchedLines;
-			lastMismatchTimestamp = Math.max(
-				lastMismatchTimestamp,
-				candidates[i].timestamp,
+		}
+		const mismatchedLines: number[] = [];
+		let checkedLineCount = 0;
+		for (const { read, range } of runs) {
+			checkedLineCount += range[1] - range[0] + 1;
+			mismatchedLines.push(
+				...currentLinesMatchReadSnapshot(filePath, read, range).mismatchedLines,
 			);
 		}
-
-		// Enforce only when no candidate that actually delivered the target range
-		// lacks hashes. Context-only/symbol-only coverage may be unavailable without
-		// weakening enforcement from another hash-checkable read of the same range.
-		// Also suppress when a re-read (unavailable only due to context-zone boundary)
-		// is more recent than the stale read that triggered the mismatch — the agent
-		// refreshed their view, and the re-read's edge lines fall within contextLines.
-		const shouldBlock =
-			status === "mismatch" &&
-			lastUnavailableTimestamp <= lastMismatchTimestamp &&
-			checkedCandidateCount > 0 &&
-			hashUnavailableCandidateCount === 0;
+		const status: "match" | "mismatch" | "unavailable" =
+			mismatchedLines.length > 0
+				? "mismatch"
+				: missingLines.length === 0
+					? "match"
+					: "unavailable";
+		const shouldBlock = status === "mismatch";
 
 		// `enforced` below states INTENT — whether this validation reached a
 		// decidable verdict. It says nothing about what the caller did with it.
@@ -1839,13 +1816,10 @@ export class ReadGuard {
 			sessionId: this.sessionId,
 			filePath,
 			metadata: {
-				range,
+				range: [startLine, endLine],
 				status,
-				candidateReadCount: candidates.length,
-				checkedCandidateCount,
-				unavailableCandidateCount,
-				hashUnavailableCandidateCount,
-				matchingReadIndex,
+				viewRunCount: runs.length,
+				checkedLineCount,
 				missingLineCount: missingLines.length,
 				mismatchedLineCount: mismatchedLines.length,
 				missingLines: missingLines.slice(0, 20),
@@ -1855,16 +1829,7 @@ export class ReadGuard {
 			},
 		});
 
-		return {
-			status,
-			matchingReadIndex,
-			missingLines,
-			mismatchedLines,
-			candidateReadCount: candidates.length,
-			checkedCandidateCount,
-			unavailableCandidateCount,
-			shouldBlock,
-		};
+		return { status, missingLines, mismatchedLines, shouldBlock };
 	}
 
 	private readRangeHashesStillMatch(
@@ -1902,27 +1867,19 @@ export class ReadGuard {
 		// A single line's hash collides too easily to relocate on confidently.
 		if (span < 2) return undefined;
 
-		// Newest read that captured hashes for the entire target range wins.
-		let wanted: string[] | undefined;
-		for (let i = reads.length - 1; i >= 0; i -= 1) {
-			const hashes = reads[i].lineHashes;
-			if (!hashes) continue;
-			const seq: string[] = [];
-			let complete = true;
-			for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
-				const h = hashes[lineNo];
-				if (h === undefined) {
-					complete = false;
-					break;
-				}
-				seq.push(h);
+		// Relocate only from the read that is the agent's newest view of EVERY
+		// line of the range (#3522). A run taken from an older read would
+		// overwrite lines a newer read showed the agent differently.
+		const source = newestViewOfLine(reads, startLine);
+		if (!source?.lineHashes) return undefined;
+		const wanted: string[] = [];
+		for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+			const hash = source.lineHashes[lineNo];
+			if (hash === undefined || newestViewOfLine(reads, lineNo) !== source) {
+				return undefined;
 			}
-			if (complete) {
-				wanted = seq;
-				break;
-			}
+			wanted.push(hash);
 		}
-		if (!wanted) return undefined;
 
 		let lines: string[];
 		try {
