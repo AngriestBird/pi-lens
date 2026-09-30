@@ -242,6 +242,11 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			expect(measure.run, `measurement writes ${path}`).toContain(path);
 			expect(notify.run, `notifier reads ${path}`).toContain(path);
 		}
+		// The body handed to the issue CLI is the file the measurement wrote, not
+		// merely a path the script happens to mention.
+		expect(notify.run).toContain(
+			'--body-file "$RUNNER_TEMP/lsp-idle-eviction-drift.md"',
+		);
 		expect(notify.run).toContain("scripts/upsert-tracking-issue.mjs");
 		expect(notify.run).toContain(IDLE_EVICTION_DRIFT_TITLE);
 	});
