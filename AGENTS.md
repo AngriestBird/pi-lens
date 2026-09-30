@@ -616,6 +616,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
   bounded degradation records. Ktlint's standalone-CLI exception still
   declines Gradle-owned projects without guessing a CLI version.
 - Node tool agreement in `nodeAgreement` is established from the project's lockfile evidence in the deterministic order npm (`package-lock.json`) → pnpm (`pnpm-lock.yaml`, v9 `importers` and v6 top-level maps) → yarn (`yarn.lock`, v1 blocks and Berry `npm:` descriptors); the decision names the supplying lockfile, and missing, unreadable, unparseable, or shape-unsupported evidence declines.
+- A whole-package fixer (`cargo clippy --fix`, `dart fix --apply`) rewrites
+  files pi's mutation queue does not hold, so it runs through
+  `runWithFixRestore` (`clients/fix-run-restore.ts`, #3598): hash the tool's
+  source files, capture agent mutations pi-lens observes during the run (the
+  tool_result seam and the mutation bridge), write them back after, one
+  degradation per run, and name any edit that cannot be restored. Do not add a
+  second whole-package fixer without it.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.

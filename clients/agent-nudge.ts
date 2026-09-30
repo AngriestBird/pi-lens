@@ -107,8 +107,25 @@ const _touched = new Map<string, AccumulatedFile>();
 // "only nudge for files the session saw" rule.
 let _relevanceFilteredCount = 0;
 
+// #3598: model-facing advisories a producer cannot put in a tool result because
+// its tool result was already delivered (the deferred agent_end drain). Same
+// `context` channel and the same drain-on-injection rule as `_touched`; bounded
+// so a wedged producer cannot grow it.
+const MAX_QUEUED_ADVISORIES = 8;
+const _advisories: string[] = [];
+
+/**
+ * Queue one advisory for the model's next `context` call. Not gated by the
+ * nudge kill switch: it reports that an edit of the agent's may be gone, which
+ * is a correctness signal, not a formatting nudge.
+ */
+export function queueAgentAdvisory(text: string): void {
+	if (_advisories.length < MAX_QUEUED_ADVISORIES) _advisories.push(text);
+}
+
 /** Test-only: clear accumulator state between test files/cases. */
 export function _resetAgentNudgeForTests(): void {
+	_advisories.length = 0;
 	_touched.clear();
 	_relevanceFilteredCount = 0;
 	_enabledCache = undefined;
@@ -349,6 +366,18 @@ export function wireAgentNudgeSubscriber(
  * batch that is ENTIRELY such paths injects nothing.
  */
 export function consumeAgentNudge(
+	dbg?: (msg: string) => void,
+): { messages: Array<{ role: "user"; content: string }> } | undefined {
+	const touched = consumeTouchedNudge(dbg);
+	const advisories = _advisories.splice(0).map((text) => ({
+		role: "user" as const,
+		content: `[pi-lens automated context — not a user request] ${text}`,
+	}));
+	const messages = [...(touched?.messages ?? []), ...advisories];
+	return messages.length > 0 ? { messages } : undefined;
+}
+
+function consumeTouchedNudge(
 	dbg?: (msg: string) => void,
 ): { messages: Array<{ role: "user"; content: string }> } | undefined {
 	const drained = Array.from(_touched.values());

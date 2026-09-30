@@ -237,6 +237,19 @@ export type DegradationKind =
 	 * every call, so only the FIRST occurrence per (verdict, cwd) also writes a
 	 * record; the count here is the exact total.
 	 */
+	/**
+	 * #3598: `cargo clippy --fix` or `dart fix --apply` rewrote a sibling file an
+	 * agent edited during the run. Recorded ONCE per run, however many files:
+	 * the reason carries the restored and lost counts and the first file names.
+	 * Subject is the tool.
+	 */
+	| "fix-run-agent-edit-overwritten"
+	/**
+	 * #3598: the pre-run hash set for a whole-package fixer was cut (unreadable
+	 * file, file over the size cap, or the byte budget), so an agent edit to an
+	 * uncovered file during the run is not protected. Subject is the tool.
+	 */
+	| "fix-run-scope-truncated"
 	/** A formatter write was declined because project/tool agreement was not provable. */
 	| "formatter-agreement-unavailable"
 	| "formatter-failure"

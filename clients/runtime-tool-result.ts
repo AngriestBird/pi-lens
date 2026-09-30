@@ -33,6 +33,11 @@ import {
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
 import { deliveredLineEvidence, type ReadGuard } from "./read-guard.js";
+import {
+	expectationFromToolInput,
+	noteAgentCallEnd,
+	noteAgentMutation,
+} from "./fix-run-restore.js";
 import { getFormatService } from "./format-service.js";
 import {
 	isExternalOrVendorFile,
@@ -1262,6 +1267,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// `rawFilePath` against that basis, rather than trusting a call-time path
 	// that a later handler may have superseded.
 	const toolCallId = resolveToolCallCorrelationId(event);
+	// #3598: the host tool for this call has finished, whatever it did. Before
+	// any return below, so a call that exits early is still no longer in flight.
+	noteAgentCallEnd(toolCallId);
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
@@ -1968,6 +1976,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		sessionId: deps.sessionId,
 		recognizeOnly: true,
 	});
+	// #3598: a whole-package fixer (clippy --fix, dart fix) may be running over
+	// this file. Read its bytes NOW, before any await, so the fixer's later
+	// write cannot pass for the agent's content.
+	if (mutation && filePath && event.isError !== true) {
+		noteAgentMutation(
+			filePath,
+			expectationFromToolInput(event.input, mutation.kind),
+		);
+	}
 	// #2430: settle the observational baseline BEFORE the classification gate
 	// returns. On the FIRST call of an unknown tool nothing below this line will
 	// run — that is the bug — so the disk diff is the only thing that can put
