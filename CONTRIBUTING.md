@@ -55,12 +55,16 @@ checkout that is not pi-lens's own (package name `pi-lens`, and Git's toplevel
 equal to the script's package root): an `npm link`, a workspace or a package
 nested in another repo is never rewritten.
 
-Skip either hook with `PI_LENS_SKIP_HOOKS=<anything> git commit ...` /
-`git push ...` (any non-empty value works). Agents and CI should set this —
-their commit cadence across concurrent worktrees is too high for a lint pass
-on every commit, and CI runs the real gates anyway. Humans committing
-directly should leave hooks on; they catch the exact class of failure
-(unused vars, changelog-format violations) that used to slip through to CI.
+`PI_LENS_SKIP_HOOKS=<anything>` (any non-empty value) makes either hook exit
+0 and also skips the hook wiring at install, so `PI_LENS_SKIP_HOOKS=1 npm ci`
+is fine. It is not a way to commit, push, merge or rebase: hooks always run
+there, for agents and humans alike, because they catch the exact class of
+failure (unused vars, changelog-format violations) that used to slip through
+to CI (#3703: a `--no-verify` push put 56 red files into CI). Under Claude
+Code, `guard-bash` denies `PI_LENS_SKIP_HOOKS=`, `HUSKY=0`, `--no-verify`,
+`git commit -n` and `-c core.hooksPath=` on those four commands (#3778). For a
+red that looks unrelated, prove it with `node scripts/red-on-base.mjs`; to
+repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.
 
 An agent driven through Claude Code also runs under a `PreToolUse` hook on
 every `Bash` call, `scripts/hooks/guard-bash.mjs` (wired in
