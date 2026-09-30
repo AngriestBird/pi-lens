@@ -4,6 +4,7 @@
 // the base commit and the HEAD commit of a fixture repo can disagree. The
 // report shape is vitest's JSON reporter (checked against a real run):
 // testResults[].{name, status, assertionResults[].{fullName, status}}.
+import { spawn } from "node:child_process";
 import {
 	appendFileSync,
 	existsSync,
@@ -18,7 +19,7 @@ const scenario = JSON.parse(readFileSync(join(cwd, "scenario.json"), "utf8"));
 const probe = (entry) =>
 	appendFileSync(
 		process.env.PROBE_LOG,
-		`${JSON.stringify({ ...entry, cwd, pid: process.pid, home: process.env.PI_LENS_HOME, tmp: process.env.TMPDIR })}\n`,
+		`${JSON.stringify({ cwd, pid: process.pid, home: process.env.PI_LENS_HOME, tmp: process.env.TMPDIR, ...entry })}\n`,
 	);
 
 if (args.includes("--build")) {
@@ -39,9 +40,29 @@ probe({ phase: "test", files, run });
 
 // The tool signals ITSELF from inside the run so the tests need no timers.
 if (scenario.signalParent && process.env.FAKE_SIGNAL_PARENT) {
+	// A grandchild sharing our pipes: it only writes its marker if the tool's
+	// group kill did not reach it (the tool waits for the pipes to close).
+	spawn(
+		process.execPath,
+		[
+			"-e",
+			"setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 1500)",
+			`${process.env.PROBE_LOG}.grandchild`,
+		],
+		{ stdio: "inherit" },
+	);
+	// A runner that ignores SIGTERM must still be ended by the tool's SIGKILL.
+	const ignore = process.env.FAKE_IGNORE_SIGTERM;
+	if (ignore) process.on("SIGTERM", () => {});
 	process.kill(process.ppid, process.env.FAKE_SIGNAL_PARENT);
 	// A SIGKILLed tool orphans this child; it must end on its own soon.
-	setTimeout(() => process.exit(3), 4_000);
+	setTimeout(
+		() => {
+			if (ignore) writeFileSync(`${process.env.PROBE_LOG}.survived`, "x");
+			process.exit(3);
+		},
+		ignore ? 8_000 : 4_000,
+	);
 } else {
 	let failed = false;
 	const testResults = files.map((file) => {

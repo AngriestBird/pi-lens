@@ -438,8 +438,22 @@ describe("red-on-base interruption", () => {
 			expect(cleanupLines(repo)).toEqual(["unlink-before-remove"]);
 			const [child] = baseTests(repo);
 			expect(() => process.kill(child.pid, 0)).toThrow(/ESRCH/);
+			// The runner's own child died with the process group (no marker).
+			expect(fs.existsSync(`${repo.probeLog}.grandchild`)).toBe(false);
 		},
 	);
+
+	it("a runner that ignores SIGTERM is SIGKILLed rather than waited out", () => {
+		const repo = makeRepo(interrupted, green);
+		const result = run(repo, [A, "--base", "HEAD~1"], {
+			FAKE_SIGNAL_PARENT: "SIGTERM",
+			FAKE_IGNORE_SIGTERM: "1",
+		});
+		expect(result.status).toBe(143);
+		// Waited out, the ignoring runner would reach its own 8s exit and write this.
+		expect(fs.existsSync(`${repo.probeLog}.survived`)).toBe(false);
+		expectCleanedUp(repo);
+	});
 
 	it("a SIGKILLed run leaves a worktree that the next run reaps, unlinking first", () => {
 		const repo = makeRepo(interrupted, green);
