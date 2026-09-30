@@ -184,7 +184,9 @@ describe("pytest project environment", () => {
 
 	it("records capped member globs through the UV consumer and real sink", async () => {
 		// F7 recurrence: a consumer test that stopped at the in-memory summary
-		// stayed green when the durable degradation sink was suppressed.
+		// stayed green when the durable degradation sink was suppressed. #3880
+		// The sink is shared with the Cargo/LSP consumer, so assert this test's
+		// own workspace-glob-cap records instead of counting unrelated phases.
 		const previousTestMode = process.env.PI_LENS_TEST_MODE;
 		process.env.PI_LENS_TEST_MODE = "0";
 		clearLatencyLog();
@@ -230,7 +232,11 @@ describe("pytest project environment", () => {
 							metadata?: Record<string, unknown>;
 						},
 				)
-				.filter((row) => row.phase === "degradation_ledger");
+				.filter(
+					(row) =>
+						row.phase === "degradation_ledger" &&
+						row.metadata?.kind === "workspace-glob-cap",
+				);
 			expect(rows).toHaveLength(3);
 			expect(rows.map((row) => row.metadata)).toEqual(
 				expect.arrayContaining([
