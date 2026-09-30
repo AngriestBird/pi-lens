@@ -115,7 +115,7 @@ function ghFor(w: World) {
 				total_count: w.checkRuns.length,
 				check_runs: w.checkRuns,
 			});
-		if (/\/issues\/\d+\/comments$/.test(endpoint)) {
+		if (/\/issues\/[^/]+\/comments$/.test(endpoint)) {
 			if (!args.includes("--paginate"))
 				throw new Error("comment read without --paginate");
 			w.commentOptions.push(options);
@@ -133,7 +133,7 @@ const world = (partial: Partial<World> & Pick<World, "sha">): World => ({
 	...partial,
 });
 const commentCalls = (w: World) =>
-	w.calls.filter((call) => /issues\/\d+\/comments/.test(call));
+	w.calls.filter((call) => /issues\/[^/]+\/comments/.test(call));
 
 async function cli(argv: string[], w: World) {
 	const lines: string[] = [];
