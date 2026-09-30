@@ -225,6 +225,38 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		expect(service.getAliveClientCount()).toBe(0);
 	});
 
+	// Review round 1 item 7: the `clientLastUsedAt !== lastUsedAt` re-arm guard is
+	// live. A timer that fired and queued behind the spawn gate must not release
+	// a client that was used while it waited; without the guard this evicted a
+	// client one tick after its own use ("expected shutdown to not be called,
+	// called 1 times").
+	it("does not evict a client used between the timer firing and the spawn gate admitting it", async () => {
+		vi.useFakeTimers();
+		const client = fakeClient("used-while-queued");
+		createLSPClient.mockResolvedValue(client);
+		configureServer();
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		await service.getClientForFile("/repo/main.ts");
+		const gateHolder = service as unknown as {
+			withClientSpawnGate<T>(op: () => Promise<T>): Promise<T>;
+		};
+		let open!: () => void;
+		const held = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		const gate = gateHolder.withClientSpawnGate(() => held);
+		await vi.advanceTimersByTimeAsync(20); // the timer fires; its callback queues behind the gate
+		await vi.advanceTimersByTimeAsync(5);
+		await service.getClientForFile("/repo/main.ts"); // a fresh use refreshes clientLastUsedAt
+		open();
+		await gate;
+		await vi.advanceTimersByTimeAsync(1);
+		expect(client.shutdown).not.toHaveBeenCalled();
+		expect(service.getAliveClientCount()).toBe(1);
+		await service.shutdown();
+	});
+
 	it("lease-guards the acquire/use gap while didOpen is suspended", async () => {
 		vi.useFakeTimers();
 		const client = fakeClient("leased");

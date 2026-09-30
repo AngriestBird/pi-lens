@@ -91,7 +91,7 @@ async function harness(
 	getServersForFileWithConfig.mockReturnValue([server]);
 	const { LSPService } = await import("../../../clients/lsp/index.js");
 	// Same module registry as the service, so these are the ledger it writes to.
-	const { getDegradationSummary } =
+	const { recordDegradation } =
 		await import("../../../clients/degradation-ledger.js");
 	const service = new LSPService();
 	const isAux = server.role === "auxiliary";
@@ -123,9 +123,6 @@ async function harness(
 		target: { absFile: "/repo/main.go", content: "package main" },
 		windowMs: 20,
 		touchBudgets: { maxClientWaitMs: 1_000, maxDiagnosticsWaitMs: 1_000 },
-		evictionsRecorded: () =>
-			getDegradationSummary().find((g) => g.kind === "lsp-idle-eviction")
-				?.count ?? 0,
 		residentBytesOf: async (pid) => {
 			measured.push(pid);
 			return pid * 1_000_000;
@@ -137,8 +134,10 @@ async function harness(
 			await vi.advanceTimersByTimeAsync(ms);
 		},
 	});
-	return { service, driver, measured };
+	return { service, driver, measured, recordDegradation };
 }
+
+const spawnedClients: Array<ReturnType<typeof fakeClient>> = [];
 
 const budgets = {
 	baselineAttempts: 2,
@@ -158,7 +157,12 @@ describe("idle-eviction probe driver over the real LSPService (#3645)", () => {
 		delete process.env.PI_LENS_LSP_IDLE_EVICT_MS;
 		delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
 		let pid = 100;
-		createLSPClient.mockImplementation(async () => fakeClient(pid++));
+		spawnedClients.length = 0;
+		createLSPClient.mockImplementation(async () => {
+			const client = fakeClient(pid++);
+			spawnedClients.push(client);
+			return client;
+		});
 	});
 
 	afterEach(() => {
@@ -283,6 +287,61 @@ describe("idle-eviction probe driver over the real LSPService (#3645)", () => {
 			rssBytes: 100_000_000,
 		});
 		expect(server.idleEviction).toBe("unmeasured");
+		await service.shutdown();
+	});
+
+	// Review round 1 F4: the probe used to read the degradation ledger's count to
+	// tell a release from a crash. The ledger keeps at most 32 distinct kinds and
+	// folds later ones into `other`, so with the ledger full every eviction read
+	// `client-died` and every server nightly went `inconclusive`. The eviction is
+	// now observed on the client's own shutdown, which nothing can crowd out.
+	it("still recognises an eviction when the degradation ledger is saturated", async () => {
+		const server = registryServer();
+		const { service, driver, recordDegradation } = await harness(server, () => [
+			finding(1),
+			finding(2),
+		]);
+		for (let i = 0; i < 60; i++)
+			recordDegradation({
+				kind: `saturating-kind-${i}` as never,
+				subject: "s",
+				reason: "r",
+			});
+		const row = await probeServer({
+			server,
+			fixture: { lang: "go", file: "main.go" },
+			createDriver: () => driver,
+			budgets,
+		});
+		expect(row).toMatchObject({ result: "eligible", respawn: "ok" });
+		await service.shutdown();
+	});
+
+	it("reports a client that dies while armed as client-died, not as evicted", async () => {
+		const server = registryServer();
+		const { service, driver } = await harness(server, () => [
+			finding(1),
+			finding(2),
+		]);
+		const arm = driver.armEviction.bind(driver);
+		driver.armEviction = async () => {
+			const restore = await arm();
+			// A crash: the client stops being alive and is never shut down by the
+			// idle timer (whose callback bails on a dead client).
+			spawnedClients.at(-1)?.isAlive.mockReturnValue(false);
+			return restore;
+		};
+		const row = await probeServer({
+			server,
+			fixture: { lang: "go", file: "main.go" },
+			createDriver: () => driver,
+			budgets,
+		});
+		expect(row).toMatchObject({
+			result: "inconclusive",
+			reason: "client-died",
+			respawn: "not-evicted",
+		});
 		await service.shutdown();
 	});
 });

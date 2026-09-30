@@ -21,8 +21,11 @@
  * `GITHUB_STEP_SUMMARY` is set, and optionally writes them as JSON.
  *
  * `--drift-body` writes the tracking-issue body when a server is in hard drift
- * and removes the file otherwise; the nightly's notify step files, refreshes or
- * closes the single tracking issue from it (scripts/upsert-tracking-issue.mjs).
+ * and removes the file otherwise; `--drift-state` writes `drift`, `clean` or
+ * `unknown`. The nightly's notify step files or refreshes the single tracking
+ * issue on `drift`, closes it only on `clean` (every transparent server
+ * eligible), and leaves it alone on `unknown`
+ * (scripts/upsert-tracking-issue.mjs).
  *
  * Exit code: 1 only for drift (a server the registry declares `transparent`
  * that the measurement vetoes). The nightly step is `continue-on-error`, so
@@ -34,6 +37,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	buildIdleEvictionDriftBody,
+	driftIssueState,
 	idleEvictionDrift,
 	renderIdleEvictionDoc,
 	renderRawTable,
@@ -64,6 +68,7 @@ const flagNames = new Set([
 	"--doc",
 	"--summary",
 	"--drift-body",
+	"--drift-state",
 	"--budget-seconds",
 	"--window-ms",
 ]);
@@ -77,10 +82,13 @@ const docPath = path.resolve(
 const summaryPath = flagValue("--summary", undefined);
 // The job cap is 35 minutes; earlier steps have measured ~14. Stopping here
 // leaves a disclosed `budget-exhausted` row for every server not reached
-// instead of letting the job timeout discard the whole artifact.
-const budgetMs = Number(flagValue("--budget-seconds", "780")) * 1000;
+// instead of letting the job timeout discard the whole artifact. The default is
+// the nightly's value (tool-smoke.yml passes the same 600), so a local run and
+// the nightly stop at the same point.
+const budgetMs = Number(flagValue("--budget-seconds", "600")) * 1000;
 const windowMs = Number(flagValue("--window-ms", "3000"));
 const driftBodyPath = flagValue("--drift-body", undefined);
+const driftStatePath = flagValue("--drift-state", undefined);
 
 // #2670/#2506-shape: pin PI_LENS_HOME/PILENS_DATA_DIR to a scratch dir BEFORE
 // the first dist/ import below; the latency logger reads its directory at
@@ -97,13 +105,11 @@ const {
 const { getLSPService, resetLSPService } = await imp(
 	"dist/clients/lsp/index.js",
 );
-const { LSP_SERVERS } = await imp("dist/clients/lsp/server.js");
+const serverModule = await imp("dist/clients/lsp/server.js");
+const { LSP_SERVERS } = serverModule;
 const { initLSPConfig } = await imp("dist/clients/lsp/config.js");
 const { sampleProcesses, walkDescendantPids } = await imp(
 	"dist/clients/resource-sampler.js",
-);
-const { getDegradationSummary } = await imp(
-	"dist/clients/degradation-ledger.js",
 );
 let ensureTool;
 let getInstallAttempt;
@@ -144,7 +150,7 @@ const budgets = {
 
 let lsp;
 const rows = await measureRegistry({
-	servers: LSP_SERVERS,
+	registry: serverModule,
 	fixtures: LSP_FIXTURES,
 	filter: serverFilter,
 	budgetMs,
@@ -177,12 +183,6 @@ const rows = await measureRegistry({
 						maxDiagnosticsWaitMs: 8_000,
 					},
 					residentBytesOf,
-					// The count is process-wide, not per server: only the target is
-					// re-armed with the short window, so no other client's timer can
-					// add a record inside the probe's bounded wait.
-					evictionsRecorded: () =>
-						getDegradationSummary().find((g) => g.kind === "lsp-idle-eviction")
-							?.count ?? 0,
 					now: () => Date.now(),
 					sleep,
 					async prepare() {
@@ -243,24 +243,30 @@ const drift = idleEvictionDrift(rows, declared);
 // A filtered run measured a slice; overwriting the document with it would
 // drop every other server's row, so only a full run writes the artifact.
 if (serverFilter.length === 0) {
-	fs.writeFileSync(
-		docPath,
-		renderIdleEvictionDoc({
-			rows,
-			declared,
-			date: new Date().toISOString().slice(0, 10),
-			platform: process.platform,
-		}),
+	const doc = renderIdleEvictionDoc({
+		rows,
+		declared,
+		date: new Date().toISOString().slice(0, 10),
+		platform: process.platform,
+	});
+	fs.writeFileSync(docPath, doc);
+	console.error(
+		`\nWrote ${path.relative(repoRoot, docPath)}. Its stable rows:`,
 	);
-	console.error(`\nWrote ${path.relative(repoRoot, docPath)}.`);
+	console.error(
+		doc
+			.split("\n")
+			.filter((l) => l.startsWith("|"))
+			.join("\n"),
+	);
 } else {
 	console.error("\nFiltered run: document not written.");
 }
 console.error(
 	`${counts.total} registry servers: ${counts.eligible} eligible, ${counts.vetoed} vetoed, ${counts.inconclusive} inconclusive, ${counts.unavailable} unavailable (${counts.budget} not reached: budget).`,
 );
-// The raw figures the bucketed document omits, in the log as well as the job
-// summary: a step log is what a reviewer of one run can fetch.
+// The timings and memory the committed document omits, in the log as well as
+// the job summary: a step log is what a reviewer of one run can fetch.
 console.error(`\n${renderRawTable(rows)}`);
 for (const f of drift) {
 	const line = `${f.serverId} [${f.severity}] ${f.detail}`;
@@ -282,6 +288,10 @@ if (driftBodyPath) {
 	if (body) fs.writeFileSync(driftBodyPath, body);
 	else fs.rmSync(driftBodyPath, { force: true });
 }
+// drift | clean | unknown: the tracking issue closes only on `clean` (every
+// transparent server eligible), never on the mere absence of drift.
+if (driftStatePath)
+	fs.writeFileSync(driftStatePath, driftIssueState(rows, declared));
 if (process.env.GITHUB_STEP_SUMMARY) {
 	fs.appendFileSync(
 		process.env.GITHUB_STEP_SUMMARY,

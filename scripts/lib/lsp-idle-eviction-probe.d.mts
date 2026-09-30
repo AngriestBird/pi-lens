@@ -74,7 +74,7 @@ export function measureRegistry<
 	},
 	F extends Record<string, any>,
 >(args: {
-	servers: readonly S[];
+	registry: { LSP_SERVERS: readonly S[] };
 	fixtures: readonly F[];
 	filter?: readonly string[];
 	budgetMs: number;
@@ -108,7 +108,6 @@ export function createServiceDriver(args: {
 	windowMs: number;
 	touchBudgets: { maxClientWaitMs: number; maxDiagnosticsWaitMs: number };
 	residentBytesOf: (pid: number) => Promise<number | null>;
-	evictionsRecorded: () => number;
 	prepare: () => Promise<string | undefined>;
 	dispose: () => Promise<void>;
 	now: () => number;

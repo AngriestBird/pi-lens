@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import * as serverModule from "../../clients/lsp/server.js";
 import { LSP_SERVERS } from "../../clients/lsp/server.js";
 import {
 	IDLE_EVICTION_DRIFT_TITLE,
@@ -31,7 +32,7 @@ import {
 } from "../../scripts/lib/lsp-idle-eviction-probe.mjs";
 import { GENERATED_LSP_DOCS } from "../../scripts/lib/md-matrix.mjs";
 import { LSP_FIXTURES } from "../../scripts/smoke-tools.mjs";
-import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { assertNonEmptyScan, stripSource } from "../support/sweep-kit.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const DOC = "docs/lsp-idle-eviction.md";
@@ -60,7 +61,7 @@ const stubProbe = async ({
 describe("idle-eviction probe population (#3645)", () => {
 	it("yields a row for every exported LSPServerInfo, in registry order", async () => {
 		const rows = await measureRegistry({
-			servers: LSP_SERVERS,
+			registry: serverModule,
 			fixtures: LSP_FIXTURES,
 			budgetMs: Number.POSITIVE_INFINITY,
 			now: () => 0,
@@ -85,7 +86,7 @@ describe("idle-eviction probe population (#3645)", () => {
 			extensions: [".brandnew"],
 		};
 		const rows = await measureRegistry({
-			servers: [...LSP_SERVERS, added],
+			registry: { LSP_SERVERS: [...LSP_SERVERS, added] },
 			fixtures: LSP_FIXTURES,
 			budgetMs: Number.POSITIVE_INFINITY,
 			now: () => 0,
@@ -98,7 +99,7 @@ describe("idle-eviction probe population (#3645)", () => {
 	it("discloses a server reached after the budget as a row, never omits it", async () => {
 		let clock = 0;
 		const rows = await measureRegistry({
-			servers: LSP_SERVERS,
+			registry: serverModule,
 			fixtures: LSP_FIXTURES,
 			budgetMs: 10,
 			now: () => clock,
@@ -119,7 +120,7 @@ describe("idle-eviction probe population (#3645)", () => {
 
 	it("limits a filtered run to the named servers", async () => {
 		const rows = await measureRegistry({
-			servers: LSP_SERVERS,
+			registry: serverModule,
 			fixtures: LSP_FIXTURES,
 			filter: ["typescript", "python"],
 			budgetMs: Number.POSITIVE_INFINITY,
@@ -127,6 +128,31 @@ describe("idle-eviction probe population (#3645)", () => {
 			probe: stubProbe,
 		});
 		expect(rows.map((r) => r.serverId)).toEqual(["typescript", "python"]);
+	});
+
+	// Review round 1 F2: every test above hands `measureRegistry` the registry, so
+	// a script that sliced its own argument (`LSP_SERVERS.slice(0, 4)`) stayed
+	// green while measuring four servers. The script cannot be imported (it runs
+	// on load and spawns), so its population expression is pinned on
+	// comment-and-string-blanked source: the walk is handed the registry module,
+	// and the registry array is read in exactly two places, neither a slice.
+	it("hands the nightly script's measurement the whole registry module, with no narrowed copy", () => {
+		const blanked = stripSource(
+			readFileSync(
+				resolve(REPO_ROOT, "scripts/measure-lsp-idle-eviction.mjs"),
+				"utf8",
+			),
+		);
+		expect(blanked).toMatch(
+			/measureRegistry\(\{\s*registry:\s*serverModule,\s*fixtures:\s*LSP_FIXTURES,/,
+		);
+		const uses = (blanked.match(/[^\n]*\bLSP_SERVERS\b[^\n]*/g) ?? []).map(
+			(line) => line.trim(),
+		);
+		expect(uses).toEqual([
+			"const { LSP_SERVERS } = serverModule;",
+			"const declared = new Map(LSP_SERVERS.map((s) => [s.id, s.idleEviction]));",
+		]);
 	});
 
 	it("admits exactly the servers no fixture reaches, each with a reason", () => {
@@ -237,7 +263,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect(notify.if).toBe(driftSibling?.if);
 		for (const path of [
 			"$RUNNER_TEMP/lsp-idle-eviction-drift.md",
-			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
+			"$RUNNER_TEMP/lsp-idle-eviction-drift-state",
 		]) {
 			expect(measure.run, `measurement writes ${path}`).toContain(path);
 			expect(notify.run, `notifier reads ${path}`).toContain(path);
@@ -248,6 +274,12 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			'--body-file "$RUNNER_TEMP/lsp-idle-eviction-drift.md"',
 		);
 		expect(notify.run).toContain("scripts/upsert-tracking-issue.mjs");
+		// Review round 1 F3: the issue closes on `clean` only (every transparent
+		// server eligible), never on the mere absence of drift.
+		expect((notify.run ?? "").match(/--clean\b/g)).toHaveLength(1);
+		expect(notify.run).toMatch(
+			/elif \[ "\$STATE" = clean \]; then\n\s*node scripts\/upsert-tracking-issue\.mjs[^\n]*--clean --close-when-clean/,
+		);
 		expect(notify.run).toContain(IDLE_EVICTION_DRIFT_TITLE);
 	});
 

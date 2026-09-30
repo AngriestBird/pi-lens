@@ -73,7 +73,7 @@ export function probePopulation(servers, fixtures) {
  * non-empty, limits the run to those ids.
  */
 export async function measureRegistry({
-	servers,
+	registry,
 	fixtures,
 	filter = [],
 	budgetMs,
@@ -81,6 +81,9 @@ export async function measureRegistry({
 	probe,
 	beforeEach,
 }) {
+	// The registry module itself, not an array the caller could slice: the only
+	// population this walks is `registry.LSP_SERVERS` (review round 1 F2).
+	const servers = registry.LSP_SERVERS;
 	const startedAt = now();
 	const rows = [];
 	for (const { server, fixture } of probePopulation(servers, fixtures)) {
@@ -162,7 +165,7 @@ const unavailable = (base, reason) => ({
  * @property {() => Promise<string | undefined>} prepare  an unavailable reason code, or undefined when ready
  * @property {() => Promise<Record<string, any>[] | undefined>} touch  findings; undefined when no client became ready
  * @property {() => boolean} isTargetAlive
- * @property {() => number} evictionsRecorded  idle-eviction records the service has written so far
+ * @property {() => number} evictionsRecorded  idle evictions observed on the armed client so far
  * @property {() => Promise<number | null>} rssBytes
  * @property {() => Promise<() => void>} armEviction  makes the target evictable, returns the restore
  * @property {() => Promise<void>} dispose
@@ -337,7 +340,6 @@ export async function probeServer({ server, fixture, createDriver, budgets }) {
  *   windowMs: number,
  *   touchBudgets: { maxClientWaitMs: number, maxDiagnosticsWaitMs: number },
  *   residentBytesOf: (pid: number) => Promise<number | null>,
- *   evictionsRecorded: () => number,
  *   prepare: () => Promise<string | undefined>,
  *   dispose: () => Promise<void>,
  *   now: () => number,
@@ -349,8 +351,8 @@ export async function probeServer({ server, fixture, createDriver, budgets }) {
 export function createServiceDriver(args) {
 	const { lsp, server, target } = args;
 	const env = args.env ?? process.env;
-	// The registry, not the fixture, says whether this is a scanner: marksman is
-	// auxiliary yet rides a plain language fixture. Only the target is attached,
+	// The registry, not the fixture, says whether this is a scanner (`role`;
+	// opengrep, ast-grep, zizmor and typos today). Only the target is attached,
 	// so another scanner's spawn and eviction never enter the row.
 	const isAuxiliary = server.role === "auxiliary";
 	const auxIds = isAuxiliary ? [server.id] : [];
@@ -363,6 +365,13 @@ export function createServiceDriver(args) {
 		maxDiagnosticsWaitMs: args.touchBudgets.maxDiagnosticsWaitMs,
 		source: "lsp-idle-eviction-probe",
 	};
+	// Idle evictions observed on the armed client's own shutdown. The service's
+	// eviction path calls `client.shutdown({ reason: "idle_eviction" })`, which no
+	// other retirement does, so a release counted here is an eviction and a client
+	// that merely stopped being alive is not. The degradation ledger records the
+	// same event but caps at 32 distinct kinds and folds later ones into `other`,
+	// so it cannot be the witness (review round 1 F4).
+	let evictions = 0;
 	// One ordinary request for the target's client: the spawned entry when it is
 	// warm, and the use that (re)schedules its idle timer.
 	const acquire = async () =>
@@ -389,7 +398,7 @@ export function createServiceDriver(args) {
 			return diags === undefined ? undefined : [...diags];
 		},
 		isTargetAlive: () => lsp.getAliveServerIds().includes(server.id),
-		evictionsRecorded: args.evictionsRecorded,
+		evictionsRecorded: () => evictions,
 		async rssBytes() {
 			const pid = (await acquire())?.client?.getProcessPid?.();
 			return pid === undefined ? null : args.residentBytesOf(pid);
@@ -399,7 +408,7 @@ export function createServiceDriver(args) {
 			const hadWindow = Object.hasOwn(env, "PI_LENS_LSP_IDLE_EVICT_MS");
 			const priorWindow = env.PI_LENS_LSP_IDLE_EVICT_MS;
 			let restored = false;
-			const restore = () => {
+			let restore = () => {
 				if (restored) return;
 				restored = true;
 				server.idleEviction = policy;
@@ -409,7 +418,26 @@ export function createServiceDriver(args) {
 			server.idleEviction = "transparent";
 			env.PI_LENS_LSP_IDLE_EVICT_MS = String(args.windowMs);
 			try {
-				await acquire();
+				const client = (await acquire())?.client;
+				if (client && typeof client.shutdown === "function") {
+					const original = client.shutdown;
+					const observed = async function (...shutdownArgs) {
+						try {
+							return await original.apply(this, shutdownArgs);
+						} finally {
+							if (shutdownArgs[0]?.reason === "idle_eviction") evictions += 1;
+						}
+					};
+					client.shutdown = observed;
+					const unwrap = () => {
+						if (client.shutdown === observed) client.shutdown = original;
+					};
+					const restoreAll = restore;
+					restore = () => {
+						restoreAll();
+						unwrap();
+					};
+				}
 			} catch (err) {
 				restore();
 				throw err;
