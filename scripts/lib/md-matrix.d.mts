@@ -129,4 +129,8 @@ export function refreshCapabilityMatrix(
 	expired: number;
 	pending: number;
 	committed: number;
+	/** The langs behind each count, in table order (named in the step log). */
+	expiredLangs: string[];
+	pendingLangs: string[];
+	committedLangs: string[];
 };

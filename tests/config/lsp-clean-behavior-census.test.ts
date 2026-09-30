@@ -46,12 +46,6 @@ const repoRoot = path.resolve(
 const MATRIX_PATH = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
 
 /**
- * The only `clean-behavior` values that are a measurement of anything, shared
- * with the writer (`scripts/lib/md-matrix.mjs`) so the census and the refresh
- * expiry/hysteresis population cannot drift (#3401).
- */
-
-/**
  * Named admissions for a push-only row the clean-signal probe has not yet
  * classified: `lang` → why. `unknown`/`TBD` is evidence in neither direction
  * (the #240 doctrine), but it has to be admitted BY NAME rather than filtered

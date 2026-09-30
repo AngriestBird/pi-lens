@@ -687,7 +687,7 @@ function replaceRefreshStateSection(text, section) {
  *   `now` is the injected clock (default: the real one); `probedLangs` scopes a
  *   subset probe: a lang outside it keeps its bookkeeping untouched. Omitted
  *   means a full run.
- * @returns {{ text: string, changed: boolean, reason?: string, expired: number, pending: number, committed: number }}
+ * @returns {{ text: string, changed: boolean, reason?: string, expired: number, pending: number, committed: number, expiredLangs: string[], pendingLangs: string[], committedLangs: string[] }}
  */
 export function refreshCapabilityMatrix(text, observations, opts = {}) {
 	const marker = opts.marker ?? "| lang | server |";
@@ -711,6 +711,9 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 			expired: 0,
 			pending: 0,
 			committed: 0,
+			expiredLangs: [],
+			pendingLangs: [],
+			committedLangs: [],
 		};
 	}
 	const idx = (name) => tbl.header.indexOf(name);
@@ -724,9 +727,9 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 	const priorFp = prior["first-publish"] ?? {};
 	const priorCb = prior["clean-behavior"] ?? {};
 	const nextState = { "first-publish": {}, "clean-behavior": {} };
-	let expired = 0;
-	let pending = 0;
-	let committed = 0;
+	const expiredLangs = [];
+	const pendingLangs = [];
+	const committedLangs = [];
 	const measured = [];
 	for (const cells of tbl.rows) {
 		const lang = cells[langIdx];
@@ -755,7 +758,7 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 			if (elapsed !== null && elapsed >= 0) {
 				if (elapsed >= expireDays) {
 					cell["first-publish"] = "unknown";
-					expired++;
+					expiredLangs.push(lang);
 				} else {
 					nextState["first-publish"][lang] = priorFp[lang];
 				}
@@ -778,14 +781,14 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 				if (sameHeld && runs >= agreeRuns) {
 					cell["clean-behavior"] = observedCb;
 					cell.tier = observedTier;
-					committed++;
+					committedLangs.push(lang);
 				} else {
 					nextState["clean-behavior"][lang] = {
 						pendingBehavior: observedCb,
 						pendingTier: observedTier,
 						runs,
 					};
-					pending++;
+					pendingLangs.push(lang);
 				}
 			}
 		}
@@ -802,5 +805,14 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 	let out = replaceTable(text, marker, tbl.header, tbl.sep, merged);
 	if (!out) out = text;
 	out = replaceRefreshStateSection(out, renderRefreshStateSection(nextState));
-	return { text: out, changed: out !== text, expired, pending, committed };
+	return {
+		text: out,
+		changed: out !== text,
+		expired: expiredLangs.length,
+		pending: pendingLangs.length,
+		committed: committedLangs.length,
+		expiredLangs,
+		pendingLangs,
+		committedLangs,
+	};
 }

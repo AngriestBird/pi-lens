@@ -171,6 +171,7 @@ describe("#3401 first-publish expiry (date-based)", () => {
 		expect(cellOf(final.text, "vue", "first-publish")).toBe("unknown");
 		expect(cellOf(final.text, "ast-grep", "first-publish")).toBe("unknown");
 		expect(final.expired).toBe(2);
+		expect(final.expiredLangs).toEqual(["vue", "ast-grep"]);
 		// The expired cell's bookkeeping is gone, so a settled doc is stable.
 		expect(parseRefreshState(final.text)["first-publish"]).toBeUndefined();
 	});
@@ -360,6 +361,7 @@ describe("#3401 clean-behavior hysteresis", () => {
 			"publishes-versioned",
 		);
 		expect(first.pending).toBe(1);
+		expect(first.pendingLangs).toEqual(["ast-grep"]);
 		expect(first.committed).toBe(0);
 		const second = refreshCapabilityMatrix(first.text, rows, { src: "ci" });
 		expect(cellOf(second.text, "ast-grep", "clean-behavior")).toBe(
@@ -367,6 +369,7 @@ describe("#3401 clean-behavior hysteresis", () => {
 		);
 		expect(cellOf(second.text, "ast-grep", "tier")).toBe("2*");
 		expect(second.committed).toBe(1);
+		expect(second.committedLangs).toEqual(["ast-grep"]);
 	});
 
 	it("holds the ast-grep 2 -> 2* -> 3 -> 2* flap without a single-run rewrite", () => {

@@ -108,13 +108,25 @@ Merges never blank a prior good value, so a CI non-result leaves the dev
 classification standing.
 
 Two bounded guards keep that preservation from hiding a dead instrument
-(#3401). A `first-publish` cell carrying a measurement (`direct`/`empty-first`)
-whose axis is not re-observed for five consecutive nightly runs degrades to
-`unknown`; and a `clean-behavior`/`tier` change is written only after two
-consecutive runs observe the same new value, so one flapping nightly (ast-grep
-went 2 → 2* → 3 → 2* across four runs) cannot rewrite a cell. The counters live
-in the generated `## Capability matrix refresh state` section at the end of this
-doc, the only state the refresh persists across runs.
+(#3401). A `direct` `first-publish` cell whose axis the nightly probe does not
+re-observe is stamped once with the date of its first miss and degrades to
+`unknown` once five calendar days have elapsed since it (skipped nights do not
+stall it, and a re-observation clears the stamp). `empty-first` cells are never
+expired: they back the live `emptyFirstPublish` markers (php, terraform) and
+expiring one would erase the measurement behind a marker. A `clean-behavior`/
+`tier` change is written only after two consecutive nightly runs observe the
+same new value, so one flapping nightly (ast-grep went 2 → 2* → 3 → 2* across
+four runs) cannot rewrite a cell; a night that measured nothing for the lang
+resets the hold. A subset probe (`probe-clean-signal.mjs <langs>`) leaves the
+bookkeeping of the langs it did not probe untouched.
+
+The bookkeeping lives in the generated `## Capability matrix refresh state`
+section at the end of this doc, the only state the refresh persists. The clock
+is the nightly run, not the bot PR's merge: each nightly starts from the last
+`bot/lsp-docs-refresh` doc when that branch is ahead of master and was built on
+master's current doc (`scripts/seed-matrix-from-bot-branch.mjs`), and from
+master's doc otherwise (branch absent, squash-merged, or master edited the doc
+since).
 
 `vue`'s `clean-behavior` was hand-reset to `unknown` (#3390): its
 `publishes-unversioned` cell came from 58/45 publishes that the shared

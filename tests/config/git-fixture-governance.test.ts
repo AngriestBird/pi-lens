@@ -50,6 +50,12 @@ const NOT_A_FIXTURE = [
 	// alias config a real checkout needs. Its tests drive it against a
 	// throwaway repo through gitFixtureEnv, so the fixture side is covered.
 	"scripts/pr-worktree.mjs",
+	// #3401: the nightly's seed step fetches `bot/lsp-docs-refresh` into THIS
+	// CI checkout and reads one doc blob from it. The fixture env would pin
+	// GIT_CONFIG_GLOBAL at `<cwd>/gitconfig` and scrub the checkout's own remote
+	// and safe.directory config that the fetch needs. Its tests drive an
+	// in-memory git seam, so no throwaway repo is involved.
+	"scripts/seed-matrix-from-bot-branch.mjs",
 ] as const;
 
 const REPO_ROOT = path.resolve(__dirname, "../..");

@@ -48,6 +48,7 @@ import {
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
 	MEASURED_CLEAN_BEHAVIORS,
+	buildMatrixObservations,
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
@@ -405,6 +406,8 @@ function resolveTargetLangRows(measuredRows) {
 	return [...byTargetLang.values()];
 }
 
+const nameList = (langs) => (langs.length ? langs.join(", ") : "none");
+
 function updateMatrix(measuredRows) {
 	const docPath = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
 	if (!fs.existsSync(docPath)) {
@@ -427,15 +430,22 @@ function updateMatrix(measuredRows) {
 	// #3401: the table merge, the `first-publish` expiry, and the
 	// clean-behavior/tier hysteresis all live in the shared refresh entry so
 	// they can be driven with recorded run inputs in tests (no LSP spawn).
-	const observations = targetLangRows.map((r) => ({
-		lang: r.targetLang,
-		firstPublish: COMPARABLE_FIRST_PUBLISH.has(r.firstPublish)
-			? r.firstPublish
-			: null,
-		cleanBehavior: MEASURED_CLEAN_BEHAVIORS.has(r.behavior) ? r.behavior : null,
-		tier: r.tierLabel || String(r.tier),
-	}));
-	const result = refreshCapabilityMatrix(out, observations, { src });
+	const result = refreshCapabilityMatrix(
+		out,
+		buildMatrixObservations(targetLangRows),
+		{
+			src,
+			// A subset run (`probe-clean-signal.mjs typescript`) says nothing about
+			// the langs it did not probe: their expiry clock and tier holds stand.
+			...(langs.length
+				? {
+						probedLangs: fixtures.map((f) =>
+							f.clean ? f.lang.replace(/-clean$/, "") : f.lang,
+						),
+					}
+				: {}),
+		},
+	);
 	if (result.reason) {
 		console.error(`matrix update skipped: ${result.reason}`);
 		return;
@@ -444,7 +454,7 @@ function updateMatrix(measuredRows) {
 	if (out !== text) {
 		fs.writeFileSync(docPath, out);
 		console.error(
-			`Updated docs/lsp-capability-matrix.md (${result.committed} committed, ${result.pending} pending, ${result.expired} expired).`,
+			`Updated docs/lsp-capability-matrix.md (committed: ${nameList(result.committedLangs)}; pending: ${nameList(result.pendingLangs)}; expired: ${nameList(result.expiredLangs)}).`,
 		);
 	} else {
 		console.error("matrix clean-behavior column: no changes.");
