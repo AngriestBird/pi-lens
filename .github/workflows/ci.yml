@@ -7,6 +7,14 @@ on:
     types: [merge-train-post-merge]
   pull_request:
     branches: [master]
+  # #3754: the merge queue tests each queued PR merged onto the latest master
+  # in a `gh-readonly-queue/master/pr-N-<sha>` ref and waits for the required
+  # checks to report on THAT commit. Every workflow that produces a required
+  # check must therefore also run on `merge_group`, or the queue waits forever
+  # (tests/config/merge-queue-workflows.test.ts pins the list). PR-only jobs
+  # carry `if: github.event_name == 'pull_request'` and are skipped there.
+  merge_group:
+    types: [checks_requested]
 
 # A merge made with GITHUB_TOKEN suppresses its push event. Replayed
 # repository_dispatch runs must validate the exact merge commit, and duplicate

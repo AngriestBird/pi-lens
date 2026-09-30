@@ -18,6 +18,12 @@ on:
     # "opened" event instead of re-running against the new title (#1917
     # review F3).
     types: [opened, synchronize, reopened, edited]
+  # #3754: `knip` and `oxfmt format check` are required checks; the merge queue
+  # waits for them on the queue's own merge commit, so this workflow must run
+  # on `merge_group` (tests/config/merge-queue-workflows.test.ts). The PR title
+  # and body jobs are `pull_request`-only and are skipped there.
+  merge_group:
+    types: [checks_requested]
 
 # A merge made with GITHUB_TOKEN suppresses its push event. Replayed
 # repository_dispatch runs validate the exact merge commit, and duplicate

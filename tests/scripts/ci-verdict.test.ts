@@ -22,6 +22,7 @@ import {
 	POLL_INTERVAL_SECONDS,
 	parseArgs,
 	pollVerdict,
+	readMergeQueueState,
 	resolveClassification,
 	resolveGhTimeoutMs,
 	resolveHeadSha,
@@ -2008,6 +2009,16 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 					comments: [],
 				});
 			if (String(args[1]).endsWith("/protection")) throw ghError("HTTP 404");
+			// #3754: the green head's one merge-queue read (a repository with no queue).
+			if (args[1] === "graphql")
+				return JSON.stringify({
+					data: {
+						repository: {
+							mergeQueue: null,
+							pullRequest: { isInMergeQueue: false, mergeQueueEntry: null },
+						},
+					},
+				});
 			checkRunsCalls += 1;
 			const failure = failures[checkRunsCalls - 1];
 			if (failure) throw failure;
@@ -2695,5 +2706,276 @@ describe("run — absent-required re-arm message (#3694)", () => {
 		expect(calls.some((call) => call.includes("/actions/runs"))).toBe(false);
 		expect(calls.some((call) => call.includes("autoMergeRequest"))).toBe(false);
 		expect(calls.some((call) => call.includes("/check-suites"))).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3754: the GitHub merge queue. The fixture is REAL: the `merge_group` runs
+// and jobs of github/docs (a public repo with a queue on `main`), fetched
+// 2026-09-30, so `head_branch` is the real `gh-readonly-queue/<base>/pr-<N>-<sha>`
+// shape and `mergeQueue{id}` is the real GraphQL answer. The queue was empty
+// when fetched, so the entry's `state`/`position` come from schema
+// introspection of MergeQueueEntry (see the fixture's own `graphqlNote`).
+// ---------------------------------------------------------------------------
+const MERGE_GROUP = JSON.parse(
+	readFileSync(
+		join(process.cwd(), "tests/fixtures/ci-verdict/merge-group-runs.real.json"),
+		"utf8",
+	),
+);
+const QUEUE_PR = "43130";
+const QUEUE_SHA = "c0ffee".padEnd(40, "0");
+const FAILED_JOB = MERGE_GROUP.failedRunJobs.find(
+	(job: { conclusion: string }) => job.conclusion === "failure",
+);
+// github/docs queues onto `main`; this repository's queue is on `master`, so
+// only the base segment of the real branch name is rewritten.
+const QUEUE_RUNS = MERGE_GROUP.workflow_runs.map(
+	(candidate: { head_branch: string }) => ({
+		...candidate,
+		head_branch: candidate.head_branch.replace(
+			"gh-readonly-queue/main/",
+			"gh-readonly-queue/master/",
+		),
+	}),
+);
+
+interface QueueFake {
+	enabled?: boolean;
+	entry?: { state: string; position: number } | null;
+	runs?: unknown[];
+	pushedAt?: string;
+	checkRuns?: unknown;
+}
+function ghQueue({
+	enabled = true,
+	entry = null,
+	runs = [],
+	pushedAt = "2026-02-26T20:00:00Z",
+	checkRuns = BOTH_SUCCESS,
+}: QueueFake = {}) {
+	const calls: string[] = [];
+	const ghExec = (args: string[]) => {
+		calls.push(args.join(" "));
+		if (args[0] === "repo") return "acme/repo";
+		if (args[0] === "pr" && args.includes("autoMergeRequest"))
+			return JSON.stringify({ autoMergeRequest: {} });
+		if (args[0] === "pr" && args.includes("headRefOid,labels,comments"))
+			return JSON.stringify({
+				headRefOid: QUEUE_SHA,
+				labels: [],
+				comments: [],
+			});
+		if (args[0] === "pr")
+			return JSON.stringify({ headRefOid: QUEUE_SHA, mergeable: "MERGEABLE" });
+		if (args[1] === "graphql")
+			return JSON.stringify({
+				data: {
+					repository: {
+						mergeQueue: enabled ? { id: "MQ_kwDOC01lZ80xjw" } : null,
+						pullRequest: {
+							isInMergeQueue: entry !== null,
+							mergeQueueEntry: entry,
+						},
+					},
+				},
+			});
+		const endpoint = String(args.at(-1));
+		if (endpoint.endsWith("/protection")) throw new Error("HTTP 404");
+		if (endpoint.includes("/check-runs")) return JSON.stringify(checkRuns);
+		if (endpoint.includes("/check-suites"))
+			return JSON.stringify({ check_suites: [{ created_at: pushedAt }] });
+		if (endpoint.includes("/actions/runs?event=merge_group"))
+			return JSON.stringify({ workflow_runs: runs });
+		if (
+			endpoint.endsWith(`/actions/runs/${QUEUE_RUNS[0].id}/jobs?per_page=100`)
+		)
+			return JSON.stringify({ jobs: MERGE_GROUP.failedRunJobs });
+		if (/\/actions\/runs\/\d+\/jobs/.test(endpoint))
+			return JSON.stringify({ jobs: [] });
+		if (endpoint.endsWith(`/actions/jobs/${FAILED_JOB.id}`))
+			return JSON.stringify({
+				steps: [{ name: "Run content linter", conclusion: "failure" }],
+			});
+		if (endpoint.endsWith(`/actions/jobs/${FAILED_JOB.id}/logs`))
+			return " FAIL  default  tests/content/linter.test.ts > flags a broken link\n";
+		throw new Error(`unmocked gh call: ${args.join(" ")}`);
+	};
+	return { ghExec, calls };
+}
+async function runQueue(options: QueueFake = {}) {
+	const { ghExec, calls } = ghQueue(options);
+	const lines: string[] = [];
+	const exitCode = await run({
+		argv: [QUEUE_PR],
+		ghExec,
+		stdout: (line: string) => lines.push(line),
+		stderr: () => {},
+	});
+	return { exitCode, out: lines.join("\n"), reason: lines.at(-1) ?? "", calls };
+}
+const graphqlCalls = (calls: string[]) =>
+	calls.filter((call) => call.startsWith("api graphql")).length;
+
+describe("run — merge queue states (#3754)", () => {
+	// Recurrence it prevents: with the queue on, a PR that was enqueued still
+	// shows a green head, so a reader concluded "done" (exit 0) while the
+	// merge_group run, the thing that actually merges it, was still running.
+	it("reports a PR in the queue as pending with its queue state, not as success", async () => {
+		const { exitCode, reason } = await runQueue({
+			entry: { state: "AWAITING_CHECKS", position: 2 },
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain(
+			"in the merge queue (awaiting_checks, position 2)",
+		);
+		expect(reason).toContain("neither absent nor done");
+	});
+
+	// Recurrence: a failed queue run ejects the PR, leaving a green head and no
+	// queue entry -- indistinguishable from "eligible" without reading the
+	// merge_group run. It must be a FAIL event that names the failing job and
+	// test, like any red PR run.
+	it("reports a failed queue run of this head as FAIL, naming the failing job and test", async () => {
+		const { exitCode, out, reason } = await runQueue({
+			runs: QUEUE_RUNS.filter(
+				(candidate: { conclusion: string }) =>
+					candidate.conclusion === "failure",
+			),
+		});
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(reason).toContain("merge queue run failed and ejected the PR");
+		expect(reason).toContain(QUEUE_RUNS[0].html_url);
+		expect(out).toContain(
+			`${FAILED_JOB.name} (job ${FAILED_JOB.id}): failed step: Run content linter`,
+		);
+		expect(out).toContain("  FAIL  default  tests/content/linter.test.ts");
+	});
+
+	// Recurrence: a queue failure from BEFORE the head's last push belongs to an
+	// earlier head; counting it would fail every PR that was ever ejected.
+	it("ignores a failed queue run that began before this head was pushed", async () => {
+		const { exitCode } = await runQueue({
+			runs: QUEUE_RUNS,
+			pushedAt: "2026-09-30T00:00:00Z",
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+	});
+
+	// Recurrence: a PR queued twice (ejected, fixed, re-queued) has failed runs
+	// on TWO queue branches; naming the older attempt's run as current sends the
+	// reader to a log the latest head never produced.
+	it("names only the latest queue attempt's failed runs", async () => {
+		const older = {
+			...QUEUE_RUNS[1],
+			id: 1,
+			html_url: "https://github.com/acme/repo/actions/runs/1",
+			head_branch: "gh-readonly-queue/master/pr-43130-aaaaaaaa",
+			created_at: "2026-02-26T20:10:00Z",
+		};
+		const { exitCode, reason } = await runQueue({
+			runs: [older, QUEUE_RUNS[0]],
+		});
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(reason).toContain(QUEUE_RUNS[0].html_url);
+		expect(reason).not.toContain(older.html_url);
+	});
+
+	// Recurrence: branch-prefix matching by bare `pr-<N>`: `pr-4313` must not
+	// claim PR 43130's queue run.
+	it("does not claim another PR's queue run (pr-4313 vs pr-43130)", async () => {
+		const { ghExec } = ghQueue({ runs: QUEUE_RUNS });
+		const lines: string[] = [];
+		const exitCode = await run({
+			argv: ["4313"],
+			ghExec: (args: string[]) =>
+				args[0] === "pr" && args.includes("headRefOid,labels,comments")
+					? JSON.stringify({ headRefOid: QUEUE_SHA, labels: [], comments: [] })
+					: ghExec(args),
+			stdout: (line: string) => lines.push(line),
+			stderr: () => {},
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+	});
+
+	// #3694's cost guard, kept: a repository with no queue pays exactly the one
+	// GraphQL read on a green head, and nothing on a red or pending one.
+	it("costs one GraphQL read on a green head without a queue, and none on a red or pending head", async () => {
+		const green = await runQueue({ enabled: false });
+		expect(green.exitCode).toBe(EXIT_SUCCESS);
+		expect(graphqlCalls(green.calls)).toBe(1);
+		expect(green.calls.some((call) => call.includes("/actions/runs"))).toBe(
+			false,
+		);
+		expect(green.calls.some((call) => call.includes("/check-suites"))).toBe(
+			false,
+		);
+		const red = await runQueue({
+			checkRuns: {
+				check_runs: [
+					checkRun({ name: "Unit tests", conclusion: "failure", id: 1 }),
+					checkRun({ name: "Lint & type-check", id: 2 }),
+				],
+			},
+		});
+		expect(red.exitCode).toBe(EXIT_FAILURE);
+		expect(graphqlCalls(red.calls)).toBe(0);
+		const pending = await runQueue({
+			checkRuns: {
+				check_runs: [
+					checkRun({
+						name: "Unit tests",
+						status: "in_progress",
+						conclusion: null,
+					}),
+					checkRun({ name: "Lint & type-check", id: 2 }),
+				],
+			},
+		});
+		expect(pending.exitCode).toBe(EXIT_PENDING);
+		expect(graphqlCalls(pending.calls)).toBe(0);
+	});
+
+	// Recurrence: an unreadable queue answer must not turn a green head red or
+	// pending: every queue read fails open to the pre-queue verdict.
+	it("fails open to success when the queue read is unreadable", async () => {
+		const { ghExec } = ghQueue();
+		const exitCode = await run({
+			argv: [QUEUE_PR],
+			ghExec: (args: string[]) => {
+				if (args[1] === "graphql") throw new Error("HTTP 502");
+				return ghExec(args);
+			},
+			stdout: () => {},
+			stderr: () => {},
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+	});
+
+	// Same guard for the second queue read: a failed `merge_group` runs lookup
+	// must not turn a green head into a transport error (exit 70).
+	it("fails open to success when the merge_group runs read fails", async () => {
+		const { ghExec } = ghQueue({ runs: QUEUE_RUNS });
+		const exitCode = await run({
+			argv: [QUEUE_PR],
+			ghExec: (args: string[]) => {
+				if (String(args.at(-1)).includes("event=merge_group"))
+					throw new Error("HTTP 502");
+				return ghExec(args);
+			},
+			stdout: () => {},
+			stderr: () => {},
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+	});
+
+	// The real GraphQL answer of a repository whose queue is empty must parse to
+	// "enabled, not in the queue".
+	it("parses the real GraphQL mergeQueue answer", () => {
+		const state = readMergeQueueState(QUEUE_PR, "acme/repo", () =>
+			JSON.stringify(MERGE_GROUP.graphqlMergeQueue),
+		);
+		expect(state).toEqual({ enabled: true, entry: null });
+		expect(readMergeQueueState("abc1234", "acme/repo", () => "{}")).toBeNull();
 	});
 });
