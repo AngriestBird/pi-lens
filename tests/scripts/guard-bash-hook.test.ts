@@ -2577,7 +2577,7 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		"git config --local --get core.hooksPath",
 		"git config get core.hooksPath",
 		"git config core.hooksPath --local",
-		"git config user.name x",
+		"git config core.editor vim",
 		// env that is not the bypass, or not on a hook-running git command
 		"HUSKY=1 git commit -m x",
 		"HUSKY=0 npm install",
