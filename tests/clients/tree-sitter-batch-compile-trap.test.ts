@@ -458,4 +458,39 @@ describe("a single-rule consumer is keyed by rule id and query text (#3678 F4)",
 		);
 		expect(remainingBudget(client)).toBe(2);
 	});
+
+	// Recurrence (#3780 verify F2): reducing the consumer key to the bare query
+	// text stayed green because the first test shares a capture name, not a
+	// query. Two rules with one query text still consume differently when one
+	// carries a post_filter: its `applyPostFilter` can trap where the plain
+	// rule's consume cannot, and a shared identity lets the plain rule's success
+	// decay that trap entry.
+	it("does not let a plain rule decay the trap entry of a same-query rule with a post_filter", async () => {
+		const { client, onAbort } = await liveClient();
+		vi.spyOn(
+			client as unknown as { applyPostFilter: () => boolean },
+			"applyPostFilter",
+		).mockImplementation(() => {
+			throw trap();
+		});
+		const file = pythonFile();
+		const filtered = {
+			...rule("filtered-id", "fn"),
+			post_filter: "any_filter",
+		};
+		const plain = rule("plain-id", "fn");
+
+		expect(await client.runQueryOnFile(filtered, file, "python")).toEqual([]);
+		expect(await client.runQueryOnFile(plain, file, "python")).toHaveLength(1);
+		for (let round = 1; round < 6; round++) {
+			await client.runQueryOnFile(filtered, file, "python");
+			await client.runQueryOnFile(plain, file, "python");
+		}
+
+		expect(onAbort).not.toHaveBeenCalled();
+		expect(wasmTrapReasons().some((r) => r.startsWith("input charged:"))).toBe(
+			true,
+		);
+		expect(remainingBudget(client)).toBe(2);
+	});
 });

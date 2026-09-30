@@ -345,7 +345,10 @@ describe("importFactProvider — inputs that yield no import or re-export (#3780
 		["a parenthesised require", `(require)("x");`],
 		["require of a non-literal", `const name = "x"; require(name);`],
 	])("does not read %s as an import", async (_label, source) => {
-		const { imports, reexports } = await runProvider("f.ts", source);
+		const { imports, reexports, coverage } = await runProvider("f.ts", source);
+		// "complete": the file parsed, so the empty result is a verdict, not a
+		// degrade (an unavailable grammar also leaves both lists empty).
+		expect(coverage).toBe("complete");
 		expect(imports).toEqual([]);
 		expect(reexports).toEqual([]);
 	});
