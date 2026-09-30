@@ -989,10 +989,9 @@ function withoutOwnEntry(
  * host itself keeps running.
  *
  * The operation runs on the registry tail and uses async filesystem calls.
- * Removing the
- * LAST root removes the whole entry — a host serving no root is not a peer any
- * caller should find. Removing the primary promotes the next root to
- * `projectRoot` rather than leaving a stale scalar behind.
+ * Removing the LAST root removes the whole entry — a host serving no root is
+ * not a peer any caller should find. Removing the primary promotes the next
+ * root to `projectRoot` rather than leaving a stale scalar behind.
  *
  * QUEUED, unlike `deregisterInstance` (#2130 round 2). The two look alike but
  * run at opposite ends of a process's life. `deregisterInstance` runs as the

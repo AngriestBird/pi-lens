@@ -267,7 +267,6 @@ describe("instance registry across a session replacement (#3498)", () => {
 		// Queued behind the heartbeat's own tail slot, not contended for the
 		// lock: the single async lock path lands without a retry or timeout.
 		expect(degradationCount("instance-registry-lock-timeout")).toBe(0);
-		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
 		expect(degradationCount("instance-registry-deregister-landed")).toBe(1);
 		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
 	});
@@ -279,8 +278,6 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstance(ROOT_B);
 		await registry.deregisterInstanceRoot(ROOT_B);
-		// The sync attempt took the lock uncontended (#3587): nothing was queued.
-		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
 		fs.writeFileSync(registryFilePath(), JSON.stringify({ instances: [] }));
 
 		await registry.updateHeartbeat();

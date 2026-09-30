@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- Test teardown drains fire-and-forget registry mutations before worker termination, and scoped root deregistration waits through the lock lease. Closes #3617. Closes #3618.
+- Scoped root deregistration now takes one lease-waiting registry lock instead of a discarded synchronous attempt followed by a queued fallback (#3618), and the shared test teardown joins pending registry mutations, for a bounded time, before Vitest terminates the worker (refs #3617).
