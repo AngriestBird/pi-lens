@@ -22,8 +22,11 @@ const workflow = yaml.load(
 	>;
 	on?: { pull_request?: { types?: string[] } };
 };
+// #3801: the mutation lane lives in ci.yml (behind `heavy-gate`), not in a
+// separate workflow, because only a same-workflow `needs:` can hold it until
+// the required checks pass.
 const mutationWorkflow = yaml.load(
-	readFileSync(resolve(ROOT, ".github/workflows/mutation.yml"), "utf8"),
+	readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8"),
 ) as { jobs: Record<string, { name?: string; "continue-on-error"?: boolean }> };
 
 const tools = [
@@ -61,10 +64,7 @@ describe("#2706 advisory tooling workflow contracts", () => {
 	});
 
 	it("pins the mutation report upload action by SHA and keeps the report path explicit", () => {
-		const raw = readFileSync(
-			resolve(ROOT, ".github/workflows/mutation.yml"),
-			"utf8",
-		);
+		const raw = readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8");
 		// Recurrence: PR #2751 round 1 and PR #2758 round 1 both shipped a test
 		// asserting the offline `<SHA-TO-PIN>` placeholder; the pin must be a
 		// full commit SHA with the release comment.

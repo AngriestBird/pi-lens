@@ -89,7 +89,9 @@ the cost of not doing so.
 - After the push, read the `Mutation diff` comment for your exact head (its
   `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
   `MUTATION` line). Kill every survivor on a line you added with a test in the
-  PR, or show it equivalent with a reason in the PR body.
+  PR, or show it equivalent with a reason in the PR body. The `mutation` job
+  starts only after every required check passed on the head (#3801), so a red
+  required check leaves it skipped (`STALE`) and a running one `PENDING`.
 - Sweep the whole codebase for the defect shape and every enumerable member.
 - Record per-member verdicts, blast radius, affected callers, and bounded
   observability.

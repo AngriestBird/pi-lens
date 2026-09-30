@@ -86,6 +86,18 @@ export const ADVISORY_CHECKS = new Set([
 	"greeting",
 ]);
 
+// #3801: the heavy ADVISORY jobs ci.yml starts only after every required check
+// passed (`heavy-gate`, which `needs:` them). Until then GitHub has no
+// check-run for them at all, so a reader cannot tell "deferred" from "never
+// existed". ci-verdict lists each of these as PENDING while the verdict is
+// still pending. They stay advisory (suffix match above); this list never
+// makes one gate. tests/config/heavy-advisory-gate-workflow.test.ts derives the
+// same set from ci.yml, so a job added behind the gate cannot be missing here.
+export const DEFERRED_ADVISORY_CHECKS = Object.freeze([
+	"mutation (advisory)",
+	"Unit tests Windows (advisory)",
+]);
+
 export function isAdvisoryCheck(name) {
 	return (
 		ADVISORY_CHECKS.has(name) || String(name ?? "").endsWith(ADVISORY_SUFFIX)

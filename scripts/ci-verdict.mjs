@@ -197,6 +197,7 @@ import {
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
 import {
+	DEFERRED_ADVISORY_CHECKS,
 	isAdvisoryCheck,
 	isBlockingConclusion,
 	isUncertainConclusion,
@@ -576,9 +577,21 @@ export function computeVerdict(
 				? `post-merge noise, not a failure: ${noiseRows.map((row) => row.name).join(", ")} could not fetch refs/pull/N/merge after the PR merged; every other gating check concluded success`
 				: "every gating check concluded success";
 	}
+	// #3801: the heavy advisory jobs do not exist as check-runs until the
+	// required checks passed (ci.yml's `heavy-gate`). While this verdict is
+	// still pending, name each absent one as PENDING instead of leaving it out;
+	// once the verdict is terminal an absent row is a head that never ran the
+	// lane (an older workflow), which this must not relabel as pending. The
+	// rows are advisory (`gating: false`), so no exit code reads them.
+	const deferredRows =
+		kind === "pending"
+			? DEFERRED_ADVISORY_CHECKS.filter((name) => !byName.has(name)).map(
+					(name) => ({ ...buildRow(name), deferred: true }),
+				)
+			: [];
 	return {
 		exitCode,
-		rows,
+		rows: [...rows, ...deferredRows],
 		reason,
 		mergeState,
 		kind,
@@ -619,7 +632,11 @@ export function formatVerdictTable(rows) {
 	const header = ["CHECK", "STATUS", "CONCLUSION", "URL"];
 	const data = rows.map((row) => [
 		row.name,
-		row.present ? (row.status ?? "unknown") : "absent",
+		row.present
+			? (row.status ?? "unknown")
+			: row.deferred
+				? "PENDING"
+				: "absent",
 		row.present ? (row.conclusion ?? "-") : "-",
 		row.present ? (row.url ?? "-") : "-",
 	]);
@@ -1403,7 +1420,7 @@ export function formatMutationLine(comments, prHead, rows = []) {
 		return `${MUTATION_PREFIX} ${count}, head ${covers}`;
 	const prShort = prHead.slice(0, 12);
 	if (inFlight)
-		return `${MUTATION_PREFIX} PENDING -- the mutation job is ${job.status} on PR head ${prShort}; the last comment covers ${covers}`;
+		return `${MUTATION_PREFIX} PENDING -- the mutation job is ${job.deferred ? "waiting for the required checks" : job.status} on PR head ${prShort}; the last comment covers ${covers}`;
 	return `${MUTATION_PREFIX} ${count}, head ${covers}, STALE (PR head is ${prShort})`;
 }
 

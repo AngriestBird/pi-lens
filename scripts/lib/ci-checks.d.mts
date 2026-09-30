@@ -8,6 +8,7 @@ export declare const CI_JOB_NAMES: Readonly<{
 export declare function isUnitTestsJobName(name: unknown): boolean;
 export declare function isUnitTestsShardJobName(name: unknown): boolean;
 export declare const ADVISORY_CHECKS: Set<string>;
+export declare const DEFERRED_ADVISORY_CHECKS: readonly string[];
 export declare function isAdvisoryCheck(name: string): boolean;
 export declare function isBlockingConclusion(
 	conclusion: string | null | undefined,
