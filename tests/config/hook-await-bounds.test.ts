@@ -408,7 +408,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#b8100bef~546c64c4": {
+	"clients/runtime-agent-end.ts#9cc1f7d8~651bdb1c": {
 		family: "hook-await",
 		site: "off-hook",
 		reason:
@@ -417,7 +417,8 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"awaiting task and holds no queue entry or timer, so a formatter that " +
 			"never settles leaves it inert. It reaches the LSP only through " +
 			"`resyncHeldLspDocument`: a document a live client of the current " +
-			"service already holds, one bounded notify write each, never a spawn.",
+			"service already holds, one bounded notify write each (a save, " +
+			"#3828 r3), never a spawn; its answer is the late row's outcome.",
 		owner: "#3828",
 	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {

@@ -774,8 +774,8 @@ export async function handleAgentEnd({
 											// read is its own stamped read of the disk, takes no
 											// ambient abort signal (another turn's Escape must not
 											// stop it), and a removed file is a quiet `vanished`.
-											await resyncHeldLspDocument(filePath);
-											logLate("held-only");
+											// The row names what happened to F (#3828 r3).
+											logLate(await resyncHeldLspDocument(filePath));
 										})
 										.catch((err) => {
 											// A throw: one bounded `hook-handler-crash` row per

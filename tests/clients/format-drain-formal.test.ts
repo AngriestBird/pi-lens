@@ -1547,7 +1547,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			expect(lateRows()).toEqual([
 				expect.objectContaining({
 					filePath,
-					metadata: { outcome: "held-only" },
+					metadata: { outcome: "resynced" },
 				}),
 			]);
 			// The give-up row stays the only post-exit row: nothing re-reported it.
@@ -1595,7 +1595,8 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			// The session and the service are both current, and the service holds
 			// nothing: the client was idle-evicted during the install, or F was
 			// never opened in it. `service` (the harness's own) holds F; the
-			// drain's real singleton does not.
+			// drain's real singleton was never built, so the row is `no-service`
+			// (#3828 r3: the live-service case is `late, not held, same session`).
 			lsp.realService = getLSPService;
 			const { c, install } = await giveUpBeforeTheChildRuns();
 			const spawnsBefore = spawns();
@@ -1607,7 +1608,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			expect(spawns() - spawnsBefore).toBe(0);
 			expect(wire.length).toBe(wireBefore);
 			expect(lateRows()).toEqual([
-				expect.objectContaining({ metadata: { outcome: "held-only" } }),
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
 			]);
 		});
 
@@ -1636,7 +1637,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			await lateSettled();
 			expect(spawns() - spawnsBefore).toBe(0);
 			expect(lateRows()).toEqual([
-				expect.objectContaining({ metadata: { outcome: "held-only" } }),
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
 			]);
 		});
 
@@ -1650,7 +1651,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			await lateSettled();
 			expect(spawns() - spawnsBefore).toBe(0);
 			expect(lateRows()).toEqual([
-				expect.objectContaining({ metadata: { outcome: "held-only" } }),
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
 			]);
 		});
 
@@ -1704,7 +1705,7 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 					),
 				).toEqual([]);
 				expect(lateRows()).toEqual([
-					expect.objectContaining({ metadata: { outcome: "held-only" } }),
+					expect.objectContaining({ metadata: { outcome: "vanished" } }),
 				]);
 			} finally {
 				process.off("unhandledRejection", onRejection);
@@ -1739,6 +1740,335 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				).toEqual(["deferred-format-late-resync"]);
 			} finally {
 				process.off("unhandledRejection", onRejection);
+			}
+		});
+
+		/**
+		 * #3828 r3: the whole state space, {settled, late} x {held, not held,
+		 * vanished} x {same session, /new, session_shutdown, idle reset}, one
+		 * case per cell with the wire, spawn, `saved` and row it must produce.
+		 * Recurrences: VERIFY r2 F6 (the late resync, and #3576 R1's held-only
+		 * branch of `syncDrainWrite`, synced the bytes without the didSave a
+		 * save-triggered server recompiles on, #3405) and F7 (the late row read
+		 * `held-only` whether it synced F or did nothing). The r2 cases asserted
+		 * `wire.at(-1) === disk()` only, which sees neither.
+		 *
+		 * `held`: a live client of the service current at the settle holds F (the
+		 * successor's, after a retire). `not held`: in the same session the
+		 * service holds a sibling file but not F; after a retire no successor was
+		 * built. `vanished`: held, and the child removes F after its write.
+		 */
+		const STATE_SPACE: ReadonlyArray<{
+			cell: string;
+			wire: "disk" | "none";
+			spawn: number;
+			saved: boolean[];
+			didSave: number;
+			row: string;
+		}> = [
+			{
+				cell: "settled, held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "synced",
+			},
+			{
+				cell: "settled, not held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "synced",
+			},
+			{
+				cell: "settled, vanished, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "read-failed",
+			},
+			{
+				cell: "settled, held, /new",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, held, session_shutdown",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, held, idle reset",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "late, held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "unheld",
+			},
+			{
+				cell: "late, vanished, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, /new",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, session_shutdown",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, idle reset",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+		];
+
+		it.each(STATE_SPACE)("state space (#3828 r3): $cell", async (expected) => {
+			const [settle, held, session] = expected.cell.split(", ");
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			// A save-triggered server: it declared `textDocumentSync.save`.
+			lspState.saveOptions = { includeText: false };
+			const didSaves: string[] = [];
+			const send = vi.mocked(lspState.connection.sendNotification);
+			const wireOf = send.getMockImplementation();
+			send.mockImplementation(async (method: string, params: unknown) => {
+				if (method === "textDocument/didSave") {
+					didSaves.push(
+						String(
+							(params as { textDocument: { uri: string } }).textDocument.uri,
+						),
+					);
+				}
+				return wireOf?.(method, params);
+			});
+			const notify = lspClient.notify as {
+				open: (...args: unknown[]) => Promise<unknown>;
+			};
+			const opens = vi.spyOn(notify, "open");
+			const readWarm = (target: string, content: string) =>
+				getLSPService().touchFile(target, content, {
+					diagnostics: "none",
+					source: "read-warm",
+					readStamp: performance.now(),
+				});
+			if (session === "same session") {
+				if (held === "not held") {
+					// The harness's own `service` opened F on this shared mock
+					// client in `beforeEach`; the singleton's client must not.
+					lspState.openDocuments.delete(normalizeMapKey(filePath));
+					const sibling = path.join(env.tmpDir, "g.ts");
+					fs.writeFileSync(sibling, "let y=1\n");
+					await readWarm(sibling, "let y=1\n");
+				} else {
+					await readWarm(filePath, disk());
+				}
+			}
+			if (held === "vanished") child.removeAfterWrite = true;
+
+			let write: () => void;
+			let wrote: Promise<void>;
+			if (settle === "settled") {
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				const c = armChild({ write: true });
+				const drain = handleAgentEnd(drainDeps());
+				await c.didRead;
+				await vi.advanceTimersByTimeAsync(
+					HOOK_WALL_BUDGET_MS.agent_settled + 1,
+				);
+				await drain;
+				write = c.openWrite;
+				wrote = c.wrote;
+			} else {
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				write = install;
+				wrote = c.wrote;
+			}
+			if (session === "/new") newSession();
+			else if (session === "session_shutdown")
+				resetLSPService({ reason: "session_shutdown" });
+			else if (session === "idle reset") resetLSPService({ reason: "idle" });
+			if (session !== "same session" && held !== "not held") {
+				await readWarm(filePath, disk());
+			}
+
+			const spawnsBefore = spawns();
+			const wireBefore = wire.length;
+			const opensBefore = opens.mock.calls.length;
+			const didSavesBefore = didSaves.length;
+			write();
+			await wrote;
+			if (settle === "settled") await postExitSettled();
+			else await lateSettled();
+
+			expect(fs.existsSync(filePath)).toBe(held !== "vanished");
+			if (expected.wire === "disk") {
+				expect(wire.slice(wireBefore).at(-1)).toBe("const x = 1\n");
+			} else {
+				expect(wire.slice(wireBefore)).toEqual([]);
+			}
+			expect(spawns() - spawnsBefore).toBe(expected.spawn);
+			expect(
+				opens.mock.calls
+					.slice(opensBefore)
+					.filter(
+						([fp]) => normalizeMapKey(String(fp)) === normalizeMapKey(filePath),
+					)
+					.map((call) => call[5]),
+			).toEqual(expected.saved);
+			expect(didSaves.length - didSavesBefore).toBe(expected.didSave);
+			if (settle === "settled") {
+				expect(postExitRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: expected.row } }),
+				]);
+			} else {
+				expect(postExitRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+				]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({
+						filePath,
+						metadata: { outcome: expected.row },
+					}),
+				]);
 			}
 		});
 	});

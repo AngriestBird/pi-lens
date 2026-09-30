@@ -54,8 +54,10 @@ inherits. This contract adds the standing readout.
    `outcome:"abandoned"` (beside the `hook-await-exceeded` degradation
    `off_hook:deferred-format-post-exit-resync`) and no
    `deferred_format_late_resync` row on the same `filePath` afterwards. Report
-   the count of such files; a late row with `outcome:"held-only"` is the
-   healthy end of the same chain.
+   the count of such files. A late row names what happened to the file
+   (#3828 r3): `resynced` is the healthy end of the chain; `unheld`,
+   `no-service` and `vanished` had nothing to sync; `deferred` is still queued
+   for the next drift pass; `failed` did not land.
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,
