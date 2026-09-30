@@ -282,17 +282,29 @@ describe("TLA+ coverage rule", () => {
 		expect(declared).toEqual({ errors: [], advisories: [] });
 	});
 
-	it("still errors on an unknown family in a hub row", () => {
-		const map = {
-			families: ["alpha"],
-			map: { "clients/hub.ts": hubMap(4).families },
-		};
-		const result = evaluateTlaCoverage({
-			map,
+	it("reports only the unknown family, not an unmet-row error, for a corrupt row", () => {
+		const hub = evaluateTlaCoverage({
+			map: {
+				families: ["alpha"],
+				map: { "clients/hub.ts": hubMap(4).families },
+			},
 			changedFiles: ["clients/hub.ts"],
 			body: "",
 		});
-		expect(result.errors.join(" ")).toContain("unknown family");
+		expect(hub.errors).toHaveLength(3);
+		expect(hub.errors.join(" ")).toContain("unknown family beta");
+		expect(hub.advisories).toEqual([]);
+		const pair = evaluateTlaCoverage({
+			map: {
+				families: ["alpha"],
+				map: { "clients/hub.ts": ["alpha", "ghost"] },
+			},
+			changedFiles: ["clients/hub.ts"],
+			body: "",
+		});
+		expect(pair.errors).toEqual([
+			"coverage map row clients/hub.ts names unknown family ghost",
+		]);
 	});
 
 	it("does not count a non-model file under the family directory", () => {

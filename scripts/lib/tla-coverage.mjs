@@ -295,9 +295,7 @@ export function evaluateTlaCoverage({ map, changedFiles = [], body = "" }) {
 		}
 		const target = list.map((family) => `formal/${family}/`).join(", ");
 		errors.add(
-			list.length === 1
-				? `Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg there, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" to the PR body.`
-				: `Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg under any one of them, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" (any one listed family) to the PR body.`,
+			`Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg under any listed family, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" (naming any listed family) to the PR body.`,
 		);
 	}
 	return {
