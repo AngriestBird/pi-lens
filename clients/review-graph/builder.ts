@@ -3780,13 +3780,23 @@ async function ensureReviewGraphFacts(
 	cwd: string,
 	facts: FactStore,
 	contentOverride?: string | null,
-): Promise<void> {
+): Promise<string | null> {
 	const ctx = makeCtx(filePath, cwd, facts);
 	if (contentOverride === undefined) {
 		await fileContentProvider.run(ctx, facts);
 	} else {
 		facts.setFileFact(filePath, "file.content", contentOverride);
 	}
+	// #3552: bind this run's extraction to the bytes IT read. The store is
+	// shared with the live dispatch (and with a fire-and-forget blast-radius
+	// build), so a concurrent same-file writer can replace `file.content`
+	// during the awaits below — the import provider reads after the
+	// dynamic-import await, the function provider after the tree-sitter parse.
+	// Each provider reads the store synchronously on entry, so re-asserting
+	// the snapshot immediately before the call pins both to one version
+	// instead of extracting imports and functions from two different writes.
+	const content =
+		facts.getFileFact<string | null>(filePath, "file.content") ?? null;
 	// The import/function fact providers parse via the shared tree-sitter client
 	// (#419/#402 — no `typescript` compiler). Loaded on demand + run here so
 	// file.imports / file.reexports / file.functionSummaries are populated before
@@ -3801,7 +3811,9 @@ async function ensureReviewGraphFacts(
 			]);
 		// Both providers are async (tree-sitter parse) — await so the facts are
 		// populated before the graph reads them.
+		facts.setFileFact(filePath, "file.content", content);
 		await importFactProvider.run(ctx, facts);
+		facts.setFileFact(filePath, "file.content", content);
 		await functionFactProvider.run(ctx, facts);
 		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
@@ -3812,6 +3824,7 @@ async function ensureReviewGraphFacts(
 			error: (err as Error)?.message ?? String(err),
 		});
 	}
+	return content;
 }
 
 function addJsTsFile(
@@ -3820,10 +3833,14 @@ function addJsTsFile(
 	filePath: string,
 	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
+	contentSnapshot?: string | null,
 ): void {
 	const normalized = normalizeMapKey(filePath);
 	const hintPath = toProjectRelativePath(normalized, cwd);
-	const content = facts.getFileFact<string>(normalized, "file.content") ?? "";
+	const content =
+		contentSnapshot !== undefined
+			? (contentSnapshot ?? "")
+			: (facts.getFileFact<string>(normalized, "file.content") ?? "");
 	const fileNodeId = `file:${normalized}`;
 	// The function-facts provider uses the shared tree-sitter integration for
 	// both TypeScript and JavaScript-family grammars. Do not suppress JS call
@@ -4703,8 +4720,10 @@ async function addFileToGraph(
 			facts.getFileFact<string>(file, "file.content") !== undefined &&
 			contentOverride == null;
 		try {
+			let content: string | null;
 			if (sharedIr?.kind === "jsts") {
-				facts.setFileFact(file, "file.content", contentOverride ?? "");
+				content = contentOverride ?? "";
+				facts.setFileFact(file, "file.content", content);
 				facts.setFileFact(file, "file.imports", sharedIr.imports);
 				facts.setFileFact(file, "file.reexports", sharedIr.reexports);
 				facts.setFileFact(
@@ -4723,9 +4742,14 @@ async function addFileToGraph(
 					sharedIr.coverage.imports,
 				);
 			} else {
-				await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
+				content = await ensureReviewGraphFacts(
+					file,
+					cwd,
+					facts,
+					contentOverride,
+				);
 			}
-			addJsTsFile(graph, cwd, file, facts, ignoredIds);
+			addJsTsFile(graph, cwd, file, facts, ignoredIds, content);
 		} finally {
 			// The graph has copied every durable value it needs. Keep derived facts
 			// available to callers, but do not retain full source in a shared store.
