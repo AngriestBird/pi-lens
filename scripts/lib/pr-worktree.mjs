@@ -22,7 +22,13 @@
  * out as-is and left alone.
  */
 
-import { basename, join } from "node:path";
+import {
+	basename,
+	isAbsolute,
+	join,
+	relative as pathRelative,
+	sep,
+} from "node:path";
 
 /** Namespace of the local branches this tool creates and may delete. */
 export const WORKTREE_BRANCH_PREFIX = "pr-worktree/";
@@ -161,33 +167,86 @@ export function worktreeBranchName(worktreePath) {
 }
 
 /**
- * Decide what `close` may remove. `nodeModulesKind` comes from
- * {@link classifyNodeModules}; `branchExists` is whether the namespaced local
- * branch exists. A real directory is a refusal -- never `rm -rf` -- so the
- * shared install cannot be deleted through a copied worktree.
+ * Decide what `close` may remove. Every fact is gathered by the CLI BEFORE
+ * this runs and every refusal here happens BEFORE the CLI unlinks anything, so
+ * a refused close never leaves a half-closed tree (#3730 r1 S1/T2/T3).
  *
- * @param {{ worktreePath: string, nodeModulesKind: "missing"|"symlink"|"directory"|"other",
- *   branchExists: boolean }} input
- * @returns {{ ok: true, unlinkNodeModules: boolean, removeWorktree: boolean,
- *   branchToDelete: string|null }|{ ok: false, error: string }}
+ * The rails, in order: the path must be a registered worktree (`registered`),
+ * must not be the main checkout (`mainRoot`), must sit inside the review
+ * root (`worktreesRoot`), and must be clean (`dirty`); `nodeModulesKind` comes
+ * from {@link classifyNodeModules} and a real directory is a refusal -- never
+ * `rm -rf` -- so the shared install cannot be deleted through a copied tree.
+ * `branchUnpushed` keeps the local branch when it holds commits no remote has.
+ * Paths are expected canonical (the CLI realpaths them).
+ *
+ * @param {{ worktreePath: string, worktreesRoot: string, mainRoot: string|null,
+ *   registered: boolean, dirty: boolean,
+ *   nodeModulesKind: "missing"|"symlink"|"directory"|"other",
+ *   branchExists: boolean, branchUnpushed: boolean }} input
+ * @returns {{ ok: true, unlinkNodeModules: boolean, branchToDelete: string|null,
+ *   branchKept: string|null }|{ ok: false, code: number, error: string }}
  */
 export function deriveClosePlan({
 	worktreePath,
+	worktreesRoot,
+	mainRoot,
+	registered,
+	dirty,
 	nodeModulesKind,
 	branchExists,
+	branchUnpushed,
 }) {
+	if (!registered) {
+		return {
+			ok: false,
+			code: 2,
+			error: `not a registered worktree: ${worktreePath}`,
+		};
+	}
+	if (worktreePath === mainRoot) {
+		return {
+			ok: false,
+			code: 2,
+			error: `refusing to close the main checkout: ${worktreePath}`,
+		};
+	}
+	const relative = pathRelative(worktreesRoot, worktreePath);
+	if (
+		relative === "" ||
+		relative === ".." ||
+		relative.startsWith(`..${sep}`) ||
+		isAbsolute(relative)
+	) {
+		return {
+			ok: false,
+			code: 2,
+			error: `refusing ${worktreePath}: outside the worktrees root ${worktreesRoot}`,
+		};
+	}
+	if (dirty) {
+		return {
+			ok: false,
+			code: 1,
+			error: `refusing ${worktreePath}: uncommitted or untracked changes; commit or discard them first`,
+		};
+	}
 	if (nodeModulesKind === "directory") {
 		return {
 			ok: false,
+			code: 1,
 			error:
 				`refusing to remove ${worktreePath}: node_modules is a real directory, ` +
 				"not a symlink -- remove only that worktree copy after confirming the shared install is intact",
 		};
 	}
+	const branch = worktreeBranchName(worktreePath);
+	const keep = branchExists && branchUnpushed;
 	return {
 		ok: true,
 		unlinkNodeModules: nodeModulesKind === "symlink",
-		removeWorktree: true,
-		branchToDelete: branchExists ? worktreeBranchName(worktreePath) : null,
+		branchToDelete: branchExists && !branchUnpushed ? branch : null,
+		branchKept: keep
+			? `kept branch ${branch}: it has commits no remote has (push it, or delete it with git branch -D ${branch})`
+			: null,
 	};
 }

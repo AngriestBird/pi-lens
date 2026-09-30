@@ -48,17 +48,22 @@ export function worktreeBranchName(worktreePath: string): string;
 
 export interface ClosePlanInput {
 	worktreePath: string;
+	worktreesRoot: string;
+	mainRoot: string | null;
+	registered: boolean;
+	dirty: boolean;
 	nodeModulesKind: NodeModulesKind;
 	branchExists: boolean;
+	branchUnpushed: boolean;
 }
 
 export type ClosePlan =
 	| {
 			ok: true;
 			unlinkNodeModules: boolean;
-			removeWorktree: boolean;
 			branchToDelete: string | null;
+			branchKept: string | null;
 	  }
-	| { ok: false; error: string };
+	| { ok: false; code: number; error: string };
 
 export function deriveClosePlan(input: ClosePlanInput): ClosePlan;

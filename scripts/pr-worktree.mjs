@@ -8,23 +8,27 @@
  *   node scripts/pr-worktree.mjs open <PR|branch> [--merge|--head] [--name NAME]
  *   node scripts/pr-worktree.mjs close <path>
  *
- * `open` resolves a PR head via `gh pr view --json
- * headRefName,headRepositoryOwner,isCrossRepository`, fetches `pull/<n>/head`
+ * `open` resolves a PR head via `gh pr view --json headRefName` (only when
+ * the default name needs it), fetches `pull/<n>/head`
  * (or `pull/<n>/merge` under `--merge`) from `origin`, creates a worktree
  * under `~/Desktop/pi-lens-worktrees/<name>`, and symlinks the main
  * checkout's `node_modules`. It prints the absolute path.
  *
- * `close` lstat's the worktree's `node_modules`: a symlink is unlinked, a
- * real directory is a refusal (never `rm -rf`, the #2704 class), and only
- * then does `git worktree remove` run; finally the local branch `open`
- * created is deleted. A branch the caller already owned is left in place.
+ * `close` first checks every rail (registered worktree, not the main
+ * checkout, inside the worktrees root, clean tree), all before touching
+ * anything. Then it lstat's the worktree's `node_modules`: a symlink is
+ * unlinked, a real directory is a refusal (never `rm -rf`, the #2704 class),
+ * and only then does `git worktree remove` run; finally the local branch
+ * `open` created is deleted -- unless it holds commits no remote has, in
+ * which case it is kept and a hint is printed. A branch the caller already
+ * owned is left in place.
  *
  * The close decision is a pure function of a table in
  * scripts/lib/pr-worktree.mjs; this file owns only the I/O. `run()` is
  * exported with injectable `gitExec`/`ghExec`/sinks so the process boundary
  * is observable; `main()` is the real entry point. `PI_LENS_GH_JSON` injects
  * the `gh` lookup's JSON for tests and CI, and `PI_LENS_WORKTREES_ROOT`
- * overrides the destination root -- both unset in normal use.
+ * overrides the destination and close-rail root -- both unset in normal use.
  *
  * The Bash guard (scripts/hooks/guard-bash.mjs) denies a hand-typed `git
  * worktree remove` on a tree whose `node_modules` is an outside symlink; this
@@ -43,6 +47,7 @@ import {
 	deriveOpenPlan,
 	worktreeBranchName,
 } from "./lib/pr-worktree.mjs";
+import { parseWorktreeList } from "./lib/worktree-hygiene.mjs";
 
 const USAGE = [
 	"usage:",
@@ -82,21 +87,19 @@ export function resolveWorktreesRoot(env = process.env) {
 }
 
 /**
- * The repository's MAIN worktree root -- the first `worktree <path>` line of
- * `git worktree list --porcelain`, which is where the shared `node_modules`
- * lives. A linked worktree's own root is never a source for the symlink.
- *
- * @param {(args: string[], options?: {cwd?: string}) => string} gitExec
- * @param {string} cwd
- * @returns {string|null}
+ * git config suffix under `branch.<name>.` recording the commit `open` created
+ * the branch at, so `close` can tell "the PR head, never touched" from "commits
+ * made here that no remote has" (a PR head lives only under `refs/pull`).
  */
-function mainWorktreeRoot(gitExec, cwd) {
-	const out = gitExec(["worktree", "list", "--porcelain"], { cwd });
-	for (const line of out.split(/\r?\n/)) {
-		if (line.startsWith("worktree "))
-			return line.slice("worktree ".length).trim();
+const OPEN_BASE_KEY = "pilensbase";
+
+/** @param {string} p @returns {string} */
+function canonicalPath(p) {
+	try {
+		return fs.realpathSync(p);
+	} catch {
+		return path.resolve(p);
 	}
-	return null;
 }
 
 /**
@@ -128,7 +131,7 @@ export function parseArgs(argv) {
 			options.help = true;
 			continue;
 		}
-		if (arg.startsWith("--")) {
+		if (arg.startsWith("-")) {
 			options.errors.push(`unknown option ${arg}`);
 			continue;
 		}
@@ -152,16 +155,7 @@ function resolvePrHead(prNumber, env, ghExec, cwd) {
 	const injected = env.PI_LENS_GH_JSON?.trim();
 	const raw =
 		injected ??
-		ghExec(
-			[
-				"pr",
-				"view",
-				prNumber,
-				"--json",
-				"headRefName,headRepositoryOwner,isCrossRepository",
-			],
-			{ cwd },
-		);
+		ghExec(["pr", "view", prNumber, "--json", "headRefName"], { cwd });
 	try {
 		return JSON.parse(raw);
 	} catch {
@@ -178,7 +172,9 @@ function executeOpen(options, io) {
 	const { gitExec, ghExec, env, cwd, stdout, stderr, worktreesRoot } = io;
 	const numeric = /^\d+$/.test(options.target);
 	let prHead = null;
-	if (numeric) {
+	// The head branch only names the default worktree; --merge and --name
+	// make it unused, so they must not pay a `gh` round trip.
+	if (numeric && !options.name && options.mode !== "merge") {
 		try {
 			prHead = resolvePrHead(options.target, env, ghExec, cwd);
 		} catch (error) {
@@ -206,11 +202,19 @@ function executeOpen(options, io) {
 		if (plan.branch) addArgs.push("-b", plan.branch);
 		addArgs.push(plan.path, plan.commitish);
 		gitExec(addArgs, { cwd });
+		if (plan.branch) {
+			const base = gitExec(["rev-parse", plan.branch], { cwd }).trim();
+			gitExec(["config", `branch.${plan.branch}.${OPEN_BASE_KEY}`, base], {
+				cwd,
+			});
+		}
 	} catch (error) {
 		stderr(`failed to create worktree ${plan.path}: ${error.message}`);
 		return 1;
 	}
-	const mainRoot = mainWorktreeRoot(gitExec, cwd);
+	const mainRoot = parseWorktreeList(
+		gitExec(["worktree", "list", "--porcelain"], { cwd }),
+	)[0]?.path;
 	if (mainRoot) {
 		const source = path.join(mainRoot, "node_modules");
 		const link = path.join(plan.path, "node_modules");
@@ -234,28 +238,68 @@ function executeOpen(options, io) {
 }
 
 /**
+ * Commits on `branch` that no remote has, excluding the commit `open` created
+ * it at. Any failure counts as unpushed: the dangerous direction is deleting
+ * a branch whose commits nothing else holds.
+ *
+ * @param {(args: string[], options?: {cwd?: string}) => string} gitExec
+ * @param {string} cwd
+ * @param {string} branch
+ * @returns {boolean}
+ */
+function hasUnpushedCommits(gitExec, cwd, branch) {
+	try {
+		const args = ["rev-list", "--count", branch, "--not", "--remotes"];
+		try {
+			const base = gitExec(
+				["config", "--get", `branch.${branch}.${OPEN_BASE_KEY}`],
+				{ cwd },
+			).trim();
+			if (/^[0-9a-f]{40,64}$/.test(base)) args.push(base);
+		} catch {
+			// No recorded base: every commit counts, which keeps the branch.
+		}
+		return gitExec(args, { cwd }).trim() !== "0";
+	} catch {
+		return true;
+	}
+}
+
+/**
  * @param {{ target: string }} options
  * @param {object} io
  * @returns {number}
  */
 function executeClose(options, io) {
-	const { gitExec, cwd, stdout, stderr } = io;
-	const worktreePath = path.resolve(cwd, options.target);
-	let registered;
+	const { gitExec, cwd, callerCwd, stdout, stderr, worktreesRoot } = io;
+	let rows;
 	try {
-		registered = mainWorktreeRoots(gitExec, cwd);
+		rows = parseWorktreeList(
+			gitExec(["worktree", "list", "--porcelain"], { cwd }),
+		);
 	} catch (error) {
 		stderr(`failed to list worktrees: ${error.message}`);
 		return 1;
 	}
-	if (!registered.some((entry) => path.resolve(entry) === worktreePath)) {
-		stderr(`not a registered worktree: ${worktreePath}`);
-		return 2;
+	// Every fact below is read-only; nothing is unlinked until the plan, which
+	// holds every refusal, has accepted them all.
+	const worktreePath = canonicalPath(path.resolve(callerCwd, options.target));
+	const registered = rows.some(
+		(row) => canonicalPath(row.path) === worktreePath,
+	);
+	let dirty = false;
+	if (registered) {
+		try {
+			dirty =
+				gitExec(["status", "--porcelain"], { cwd: worktreePath }).trim() !== "";
+		} catch (error) {
+			stderr(`failed to read status of ${worktreePath}: ${error.message}`);
+			return 1;
+		}
 	}
-	const nodeModulesPath = path.join(worktreePath, "node_modules");
 	let entry = null;
 	try {
-		entry = fs.lstatSync(nodeModulesPath);
+		entry = fs.lstatSync(path.join(worktreePath, "node_modules"));
 	} catch {
 		entry = null;
 	}
@@ -271,16 +315,21 @@ function executeClose(options, io) {
 	}
 	const plan = deriveClosePlan({
 		worktreePath,
+		worktreesRoot: canonicalPath(worktreesRoot),
+		mainRoot: rows[0] ? canonicalPath(rows[0].path) : null,
+		registered,
+		dirty,
 		nodeModulesKind: classifyNodeModules(entry),
 		branchExists,
+		branchUnpushed: branchExists && hasUnpushedCommits(gitExec, cwd, branch),
 	});
 	if (!plan.ok) {
 		stderr(plan.error);
-		return 1;
+		return plan.code;
 	}
 	if (plan.unlinkNodeModules) {
 		try {
-			fs.unlinkSync(nodeModulesPath);
+			fs.unlinkSync(path.join(worktreePath, "node_modules"));
 		} catch (error) {
 			stderr(`failed to unlink symlinked node_modules: ${error.message}`);
 			return 1;
@@ -301,25 +350,9 @@ function executeClose(options, io) {
 			);
 		}
 	}
+	if (plan.branchKept) stderr(plan.branchKept);
 	stdout(worktreePath);
 	return 0;
-}
-
-/**
- * Every registered worktree root, in `git worktree list --porcelain` order.
- *
- * @param {(args: string[], options?: {cwd?: string}) => string} gitExec
- * @param {string} cwd
- * @returns {string[]}
- */
-function mainWorktreeRoots(gitExec, cwd) {
-	const out = gitExec(["worktree", "list", "--porcelain"], { cwd });
-	const roots = [];
-	for (const line of out.split(/\r?\n/)) {
-		if (line.startsWith("worktree "))
-			roots.push(line.slice("worktree ".length).trim());
-	}
-	return roots;
 }
 
 /**
@@ -373,6 +406,7 @@ export function run({
 		ghExec,
 		env,
 		cwd: repoRoot,
+		callerCwd: cwd,
 		stdout,
 		stderr,
 		worktreesRoot: resolveWorktreesRoot(env),

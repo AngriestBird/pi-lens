@@ -20,6 +20,7 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -48,13 +49,13 @@ interface Fixture {
 	origin: string;
 	worktreesRoot: string;
 	head: string;
+	/** Tip of `refs/pull/9002/head`: a commit no branch on origin contains. */
+	prOnlyHead: string;
 	git: (args: string[], cwd?: string) => string;
 }
 
 function makeFixture(): Fixture {
-	const probeHome = path.join(process.cwd(), ".probe-home");
-	fs.mkdirSync(probeHome, { recursive: true });
-	const root = fs.mkdtempSync(path.join(probeHome, "pr-worktree-"));
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pr-worktree-"));
 	createdRoots.push(root);
 	const repo = path.join(root, "main");
 	const origin = path.join(root, "origin.git");
@@ -88,7 +89,17 @@ function makeFixture(): Fixture {
 	// so the fetch path is exercised with no network.
 	git(["-C", origin, "update-ref", "refs/pull/9001/head", head]);
 	git(["-C", origin, "update-ref", "refs/pull/9001/merge", head]);
-	return { root, repo, origin, worktreesRoot, head, git };
+	// A PR whose head lives ONLY under refs/pull (no branch on origin holds it),
+	// as a real PR head does after `open` fetches just `pull/<n>/head`.
+	git(["checkout", "-q", "-b", "pr9002"]);
+	fs.writeFileSync(path.join(repo, "pr.txt"), "pr only\n");
+	git(["add", "pr.txt"]);
+	git(["commit", "-qm", "pr only commit"]);
+	const prOnlyHead = git(["rev-parse", "HEAD"]).trim();
+	git(["push", "-q", "origin", "pr9002:refs/pull/9002/head"]);
+	git(["checkout", "-q", "master"]);
+	git(["branch", "-q", "-D", "pr9002"]);
+	return { root, repo, origin, worktreesRoot, head, prOnlyHead, git };
 }
 
 function runCli(
@@ -136,6 +147,94 @@ const PR_HEAD_JSON = JSON.stringify({
 	isCrossRepository: false,
 });
 
+/** `gitExec` for `run()`: the real git, pinned to the fixture's env. */
+function fixtureGitExec(fixture: Fixture) {
+	return (args: string[], options: { cwd?: string } = {}) =>
+		execFileSync(GIT, args, {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			env: gitFixtureEnv(fixture.root),
+			...options,
+		});
+}
+
+function fixtureRun(
+	fixture: Fixture,
+	argv: string[],
+	options: {
+		cwd?: string;
+		ghExec?: (args: string[]) => string;
+		gitExec?: (args: string[], options?: { cwd?: string }) => string;
+	} = {},
+) {
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	const status = run({
+		argv,
+		cwd: options.cwd ?? fixture.repo,
+		env: {
+			...gitFixtureEnv(fixture.root),
+			PI_LENS_WORKTREES_ROOT: fixture.worktreesRoot,
+		} as NodeJS.ProcessEnv,
+		gitExec: options.gitExec ?? fixtureGitExec(fixture),
+		ghExec: options.ghExec,
+		stdout: (message) => stdout.push(message),
+		stderr: (message) => stderr.push(message),
+	});
+	return { status, stdout, stderr };
+}
+
+/**
+ * Make the main checkout's `node_modules` a SYMLINK to an outside directory
+ * (as a shared install often is), so a close that reaches the main checkout
+ * has a link to wrongly unlink.
+ */
+function linkMainNodeModules(fixture: Fixture): string {
+	const shared = path.join(fixture.root, "shared-install");
+	fs.mkdirSync(shared, { recursive: true });
+	fs.writeFileSync(path.join(shared, "sentinel.txt"), "shared\n");
+	const link = path.join(fixture.repo, "node_modules");
+	fs.rmSync(link, { recursive: true, force: true });
+	fs.symlinkSync(shared, link);
+	return shared;
+}
+
+function expectLinkIntact(link: string, target: string): void {
+	expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+	expect(fs.readlinkSync(link)).toBe(target);
+	expect(fs.existsSync(path.join(target, "sentinel.txt"))).toBe(true);
+}
+
+/** A registered worktree at `worktree` whose node_modules links to `target`. */
+function addLinkedWorktree(
+	fixture: Fixture,
+	worktree: string,
+	branch: string,
+	target: string,
+): void {
+	fixture.git(["worktree", "add", "-b", branch, worktree]);
+	fs.symlinkSync(target, path.join(worktree, "node_modules"));
+}
+
+const WORKTREES_ROOT = path.join(path.sep, "trees");
+const WT = path.join(WORKTREES_ROOT, "review-1");
+
+function closeInput(
+	override: Partial<Parameters<typeof deriveClosePlan>[0]> = {},
+) {
+	return {
+		worktreePath: WT,
+		worktreesRoot: WORKTREES_ROOT,
+		mainRoot: path.join(path.sep, "main"),
+		registered: true,
+		dirty: false,
+		nodeModulesKind: "missing" as const,
+		branchExists: true,
+		branchUnpushed: false,
+		...override,
+	};
+}
+
 describe("pr-worktree planner (pure)", () => {
 	it("classifies a missing, symlinked, and real node_modules distinctly", () => {
 		expect(classifyNodeModules(null)).toBe("missing");
@@ -154,22 +253,51 @@ describe("pr-worktree planner (pure)", () => {
 	});
 
 	it("refuses close on a real directory and unlinks only a symlink", () => {
-		const refused = deriveClosePlan({
-			worktreePath: path.join("w", "review-1"),
-			nodeModulesKind: "directory",
-			branchExists: true,
-		});
+		const refused = deriveClosePlan(
+			closeInput({ nodeModulesKind: "directory" }),
+		);
 		expect(refused.ok).toBe(false);
-		const allowed = deriveClosePlan({
-			worktreePath: path.join("w", "review-1"),
-			nodeModulesKind: "symlink",
-			branchExists: true,
-		});
+		const allowed = deriveClosePlan(closeInput({ nodeModulesKind: "symlink" }));
 		expect(allowed).toMatchObject({
 			ok: true,
 			unlinkNodeModules: true,
 			branchToDelete: "pr-worktree/review-1",
 		});
+	});
+
+	// Recurrence: #2704 / #3173 (a close reaching a tree it must never touch)
+	// and PR #3730 r1 S1/T2/T3 -- each rail is a distinct refusal, decided
+	// BEFORE the CLI performs any unlink.
+	it("refuses each close rail with its own reason before anything is unlinked", () => {
+		const rails: [string, Partial<ReturnType<typeof closeInput>>, RegExp][] = [
+			["unregistered", { registered: false }, /not a registered worktree/],
+			["main checkout", { mainRoot: WT }, /main checkout/],
+			[
+				"outside root",
+				{ worktreesRoot: path.join("/other", "root") },
+				/outside/,
+			],
+			["worktrees root itself", { worktreesRoot: WT }, /outside/],
+			["dirty", { dirty: true }, /uncommitted|untracked/],
+		];
+		for (const [label, override, reason] of rails) {
+			const plan = deriveClosePlan(
+				closeInput({ nodeModulesKind: "symlink", ...override }),
+			);
+			expect(plan.ok, label).toBe(false);
+			expect((plan as { error: string }).error, label).toMatch(reason);
+		}
+	});
+
+	it("keeps a branch with unpushed commits and says so", () => {
+		const plan = deriveClosePlan(closeInput({ branchUnpushed: true }));
+		expect(plan).toMatchObject({ ok: true, branchToDelete: null });
+		expect((plan as { branchKept: string }).branchKept).toContain(
+			"pr-worktree/review-1",
+		);
+		expect(
+			deriveClosePlan(closeInput({ branchUnpushed: false })),
+		).toMatchObject({ ok: true, branchToDelete: "pr-worktree/review-1" });
 	});
 
 	it("derives PR-head, PR-merge, and branch open plans", () => {
@@ -311,11 +439,7 @@ describe("pr-worktree CLI close", () => {
 					path.join(worktree, "node_modules"),
 				);
 			}
-			return execFileSync(GIT, args, {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "pipe"],
-				...options,
-			});
+			return fixtureGitExec(fixture)(args, options);
 		};
 		const status = run({
 			argv: ["close", worktree],
@@ -331,5 +455,200 @@ describe("pr-worktree CLI close", () => {
 
 		expect(status).toBe(0);
 		expect(nodeModulesPresentAtRemove).toBe(false);
+	});
+});
+
+describe("pr-worktree CLI close rails", () => {
+	// Recurrence: PR #3730 r1 S1 -- `close <main>` unlinked the MAIN checkout's
+	// own node_modules symlink before git refused, emptying the shared install
+	// path the whole tool exists to protect.
+	it("refuses the main checkout and leaves its node_modules symlink untouched", () => {
+		const fixture = makeFixture();
+		const shared = linkMainNodeModules(fixture);
+		const result = runCliResult(fixture, ["close", fixture.repo]);
+		expectLinkIntact(path.join(fixture.repo, "node_modules"), shared);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("main checkout");
+		expect(fs.existsSync(path.join(fixture.repo, "README.md"))).toBe(true);
+	});
+
+	// Recurrence: PR #3730 r1 S1 -- any registered worktree anywhere (plegma,
+	// .claude/worktrees) was closable; only trees under the review root are ours.
+	it("refuses a registered worktree outside the worktrees root", () => {
+		const fixture = makeFixture();
+		const shared = linkMainNodeModules(fixture);
+		const elsewhere = path.join(fixture.root, "elsewhere", "o1");
+		addLinkedWorktree(fixture, elsewhere, "pr-worktree/o1", shared);
+
+		const result = runCliResult(fixture, ["close", elsewhere]);
+
+		expectLinkIntact(path.join(elsewhere, "node_modules"), shared);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("outside");
+		expect(fixture.git(["worktree", "list", "--porcelain"])).toContain(
+			elsewhere,
+		);
+		expect(
+			fixture.git(["show-ref", "--verify", "refs/heads/pr-worktree/o1"]),
+		).toContain("pr-worktree/o1");
+	});
+
+	// Recurrence: PR #3730 r1 T2 -- the registration check was the only thing
+	// stopping `close <any dir>` from unlinking that directory's node_modules
+	// symlink, and deleting it left the suite green. The directory sits INSIDE
+	// the root so no other rail can be what refuses it.
+	it("refuses a directory that is not a registered worktree without unlinking", () => {
+		const fixture = makeFixture();
+		const shared = linkMainNodeModules(fixture);
+		const project = path.join(fixture.worktreesRoot, "someproject");
+		fs.mkdirSync(project, { recursive: true });
+		fs.symlinkSync(shared, path.join(project, "node_modules"));
+
+		const result = runCliResult(fixture, ["close", project]);
+
+		expectLinkIntact(path.join(project, "node_modules"), shared);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("not a registered worktree");
+	});
+
+	// Recurrence: PR #3730 r1 T3 -- a dirty tree had its node_modules unlinked
+	// and THEN git refused, leaving a half-closed tree.
+	it("refuses a dirty worktree before unlinking node_modules", () => {
+		const fixture = makeFixture();
+		const shared = linkMainNodeModules(fixture);
+		const worktree = path.join(fixture.worktreesRoot, "dirty-1");
+		addLinkedWorktree(fixture, worktree, "pr-worktree/dirty-1", shared);
+		fs.writeFileSync(path.join(worktree, "scratch.txt"), "uncommitted\n");
+
+		const result = runCliResult(fixture, ["close", worktree]);
+
+		expectLinkIntact(path.join(worktree, "node_modules"), shared);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toMatch(/uncommitted|untracked/);
+		expect(fs.existsSync(path.join(worktree, "scratch.txt"))).toBe(true);
+		expect(
+			fixture.git(["show-ref", "--verify", "refs/heads/pr-worktree/dirty-1"]),
+		).toContain("pr-worktree/dirty-1");
+	});
+
+	// Recurrence: PR #3730 r1 S2 -- a relative target resolved against the repo
+	// toplevel, not the caller's cwd.
+	it("resolves a relative close target against the caller's cwd", () => {
+		const fixture = makeFixture();
+		const worktree = path.join(fixture.worktreesRoot, "rel-1");
+		fixture.git(["worktree", "add", "-b", "pr-worktree/rel-1", worktree]);
+		const sub = path.join(fixture.repo, "sub");
+		fs.mkdirSync(sub);
+
+		const result = fixtureRun(fixture, ["close", "../../worktrees/rel-1"], {
+			cwd: sub,
+		});
+
+		expect(result.stderr).toEqual([]);
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+	});
+});
+
+describe("pr-worktree CLI close branch safety", () => {
+	function openPrOnly(fixture: Fixture, name: string): string {
+		runCli(fixture, ["open", "9002", "--head", "--name", name], {
+			PI_LENS_GH_JSON: PR_HEAD_JSON,
+		});
+		return path.join(fixture.worktreesRoot, name);
+	}
+
+	// Recurrence: PR #3730 r1 T3 -- `git branch -D` ran unconditionally, so a
+	// trailing commit made in the tree became unreachable (fsck-only).
+	it("keeps a branch holding a commit no remote has and prints a hint", () => {
+		const fixture = makeFixture();
+		const worktree = openPrOnly(fixture, "trail-1");
+		fs.writeFileSync(path.join(worktree, "fix.txt"), "trailing\n");
+		fixture.git(["add", "fix.txt"], worktree);
+		fixture.git(["commit", "-qm", "trailing commit"], worktree);
+		const tip = fixture.git(["rev-parse", "HEAD"], worktree).trim();
+
+		const result = fixtureRun(fixture, ["close", worktree]);
+
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(worktree)).toBe(false);
+		expect(result.stderr.join("\n")).toContain("pr-worktree/trail-1");
+		expect(fixture.git(["rev-parse", "pr-worktree/trail-1"]).trim()).toBe(tip);
+	});
+
+	// The inverse: a PR head that only ever lived under refs/pull is NOT
+	// "unpushed" -- keeping it would leave one stale branch per review.
+	it("deletes the branch of an untouched PR-head tree", () => {
+		const fixture = makeFixture();
+		const worktree = openPrOnly(fixture, "clean-1");
+		expect(fixture.git(["rev-parse", "pr-worktree/clean-1"]).trim()).toBe(
+			fixture.prOnlyHead,
+		);
+
+		const result = fixtureRun(fixture, ["close", worktree]);
+
+		expect(result.status).toBe(0);
+		expect(result.stderr).toEqual([]);
+		expect(fs.existsSync(worktree)).toBe(false);
+		expect(() =>
+			fixture.git(["show-ref", "--verify", "refs/heads/pr-worktree/clean-1"]),
+		).toThrow();
+	});
+
+	it("deletes the branch once its trailing commit is on a remote", () => {
+		const fixture = makeFixture();
+		const worktree = openPrOnly(fixture, "pushed-1");
+		fs.writeFileSync(path.join(worktree, "fix.txt"), "trailing\n");
+		fixture.git(["add", "fix.txt"], worktree);
+		fixture.git(["commit", "-qm", "trailing commit"], worktree);
+		fixture.git(
+			["push", "-q", "origin", "HEAD:refs/heads/pr9002-fix"],
+			worktree,
+		);
+
+		const result = runCliResult(fixture, ["close", worktree]);
+
+		expect(result.status).toBe(0);
+		expect(() =>
+			fixture.git(["show-ref", "--verify", "refs/heads/pr-worktree/pushed-1"]),
+		).toThrow();
+	});
+});
+
+describe("pr-worktree CLI arguments and lookup", () => {
+	it("rejects an unknown short flag instead of treating it as a commitish", () => {
+		const fixture = makeFixture();
+		const calls: string[][] = [];
+		const gitExec = (args: string[], options: { cwd?: string } = {}) => {
+			calls.push(args);
+			return fixtureGitExec(fixture)(args, options);
+		};
+		const result = fixtureRun(fixture, ["open", "9001", "-x"], { gitExec });
+		expect(result.status).toBe(2);
+		expect(result.stderr.join("\n")).toContain("unknown option -x");
+		expect(calls.filter((args) => args[0] === "worktree")).toEqual([]);
+	});
+
+	// Recurrence: PR #3730 r1 S3 -- a numeric open always paid a `gh` round trip
+	// (and its network failure mode) even when --merge or --name made the
+	// headRefName unused.
+	it("calls gh only when the head branch name is needed", () => {
+		const fixture = makeFixture();
+		const ghCalls: string[][] = [];
+		const ghExec = (args: string[]) => {
+			ghCalls.push(args);
+			return PR_HEAD_JSON;
+		};
+		expect(
+			fixtureRun(fixture, ["open", "9001", "--merge"], { ghExec }).status,
+		).toBe(0);
+		expect(
+			fixtureRun(fixture, ["open", "9001", "--name", "named-1"], { ghExec })
+				.status,
+		).toBe(0);
+		expect(ghCalls).toEqual([]);
+		const result = fixtureRun(fixture, ["open", "9001", "--head"], { ghExec });
+		expect(result.status).toBe(0);
+		expect(ghCalls).toEqual([["pr", "view", "9001", "--json", "headRefName"]]);
 	});
 });
