@@ -1589,6 +1589,28 @@ describe("run --watch-open --stream — one line per event, until the window end
 		expect(w.mutations).toEqual([]);
 	});
 
+	it("deduplicates one CANCELLED-NOT-REPLACED hint per Actions run", async () => {
+		const run = "https://github.com/apmantza/pi-lens/actions/runs/500";
+		const w = world({
+			prs: [
+				{
+					number: 3382,
+					login: "apmantza",
+					sha: cancelled.source.head,
+					checkRuns: [
+						GREEN[0],
+						row("Unit tests", "cancelled", 11, `${run}/job/11`),
+						row("Lint & type-check", "cancelled", 12, `${run}/job/12`),
+					],
+				},
+			],
+		});
+		const { lines } = await cli(["--watch-open", "--stream", "--wait", "0"], w);
+		expect(lines).toEqual([
+			`CANCELLED-NOT-REPLACED #3382@${cancelled.source.head.slice(0, 9)}: superseded run cancelled and not replaced: rerun 500 (gh run rerun 500)`,
+		]);
+	});
+
 	it("--rerun-cancelled re-runs the cancelled run itself, once per head", async () => {
 		const pr: PrFixture = {
 			number: 3382,
