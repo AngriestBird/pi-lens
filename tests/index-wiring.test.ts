@@ -1520,7 +1520,7 @@ describe("index.ts extension wiring", () => {
 
 			// Now the same hook injects the cached findings into the transcript.
 			// The lone existing message is a `system` message (not a plain user
-			// prompt), so the #1016 placement guard appends the findings after it
+			// prompt), so the #1016/#3693 placement guard appends the findings after it
 			// rather than prepending — the original message stays first (so a real
 			// user prompt / system preamble keeps its position and the prompt-cache
 			// prefix), and the findings land at the tail.
