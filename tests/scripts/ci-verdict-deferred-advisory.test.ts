@@ -307,6 +307,28 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 			);
 		});
 
+		// The reinterpretation is for a SKIPPED mutation row only: a mutation job
+		// that ran keeps its own wording whatever the gate's row says.
+		it("leaves a mutation job that ran alone", () => {
+			const ran = base.map((run) =>
+				run.name === "mutation (advisory)"
+					? checkRun(run.name, "completed", "success", 5)
+					: run,
+			);
+			const verdict = computeVerdict({
+				check_runs: [
+					...ran,
+					checkRun(HEAVY_GATE_CHECK, "completed", "success", 4),
+				],
+			});
+			expect(formatMutationLine([], head, verdict.rows)).toBe(
+				"MUTATION (advisory, never gates): no report (job success) -- no Mutation diff comment on this PR",
+			);
+			expect(formatMutationLine([comment], head, verdict.rows)).toMatch(
+				/STALE \(PR head is b{12}\)$/,
+			);
+		});
+
 		// Without a gate row (an older workflow) the line keeps its old wording.
 		it("keeps the old wording when there is no gate row", () => {
 			expect(line(null, false)).toBe(

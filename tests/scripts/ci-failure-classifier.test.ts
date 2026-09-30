@@ -1271,6 +1271,17 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			skipped: true,
 			reason: 'run 999 has no failed job named "Unit tests"',
 		});
+		// A run that failed with NO job concluding `failure` (a timed-out or
+		// cancelled job) is not "only advisory jobs failed": vacuous truth of
+		// `every` over an empty list must not read as advisory-only.
+		const none = await run([
+			{ id: 5, name: "Unit tests", conclusion: "success" },
+			{ id: 6, name: "Install test (ubuntu-latest)", conclusion: "timed_out" },
+		]);
+		expect(none).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
 		expect(api.comments).toHaveLength(0);
 		expect(api.rerunCallCount).toBe(0);
 	});
