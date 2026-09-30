@@ -240,7 +240,7 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			write: () => fs.writeFileSync(file, opts.bytes ?? `${newText}\n`),
 			/** pi's tool_call for this edit: the host tool is about to run. */
 			start: async () => {
-				await handleToolCall({
+				return handleToolCall({
 					event: {
 						toolCallId: opts.toolCallId,
 						toolName: kind,
@@ -709,6 +709,63 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 		expect(fs.readFileSync(aRs, "utf-8")).toBe("let TWO = 1;\n");
 		expect(result.output).toContain("a.rs");
+	});
+
+	it("restores after a second edit whose tool_result was delivered", async () => {
+		// The in-flight mark ends at the tool_result: a delivered edit is captured.
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			return 0;
+		};
+
+		const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		const second = agentEdit(aRs, "let TWO = 1;", "write", false, {
+			toolCallId: "delivered-2",
+		});
+		await second.start();
+		second.write();
+		await second.deliver();
+		proceed.open();
+		await run;
+
+		expect(fs.readFileSync(aRs, "utf-8")).toBe("let TWO = 1;\n");
+		expect(overwrittenCount()).toBe(1);
+	});
+
+	it("does not treat a blocked edit as in flight", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			return 0;
+		};
+
+		const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		const first = agentEdit(aRs, "let ONE = 1;");
+		first.write();
+		await first.deliver();
+		// pi-lens's read guard refuses an edit of a file this session never read:
+		// the host tool never runs and no tool_result follows.
+		const blocked = agentEdit(aRs, "let TWO = 1;", "edit", false, {
+			toolCallId: "blocked-2",
+		});
+		const verdict = await blocked.start();
+		expect(verdict).toMatchObject({ block: true });
+		proceed.open();
+		const result = await run;
+
+		expect(fs.readFileSync(aRs, "utf-8")).toBe("let ONE = 1;\n");
+		expect(result.output ?? "").not.toContain("cannot confirm");
 	});
 
 	it("does not write over a newer edit that lands while the restore is reading", async () => {
