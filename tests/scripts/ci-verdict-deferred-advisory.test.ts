@@ -181,7 +181,9 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 			};
 		};
 
-		it.each([
+		const gateStates: Array<
+			[string, ReturnType<typeof checkRun> | null, string, RegExp]
+		> = [
 			[
 				"no gate row yet",
 				null,
@@ -218,7 +220,15 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 				"NOT RUN",
 				/NOT RUN -- the heavy gate concluded failure .*lint\.yml required check was red or unfinished/,
 			],
-		])("%s -> %s", (_label, gate, state, mutationLine) => {
+		];
+		it.each(
+			gateStates.map(([label, gate, state, mutationLine]) => ({
+				label,
+				gate,
+				state,
+				mutationLine,
+			})),
+		)("$label -> $state", ({ gate, state, mutationLine }) => {
 			const { verdict, status, line } = read(gate);
 			expect(verdict.exitCode).toBe(EXIT_SUCCESS);
 			expect(verdict.kind).toBe("success");
