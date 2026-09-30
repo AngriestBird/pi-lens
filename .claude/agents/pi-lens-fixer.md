@@ -333,7 +333,7 @@ verify brief asked for exactly that judgement).
   still need the named survivor; vacuous ones need nothing but the proof.
 - **Run the reviewer's standing probes on your own branch before you push.**
   Read `.claude/agents/pi-lens-reviewer.md` "Standing probes" and run every
-  one your diff can trip — mutation revert of each new guard, red-proof
+  one your diff can trip — the hand mutation of the guard this PR is about, red-proof
   transcript, changelog front matter, sort comparators — and quote the output
   in the PR body. Every first attempt on 2026-09-02 lost an Opus review round
   to a probe the fixer could have run itself in a minute.

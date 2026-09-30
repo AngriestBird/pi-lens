@@ -53,8 +53,9 @@
   survivors, never auto-accept them. Spot-check at most one of the fixer's hand
   mutations instead of re-running the table. When the comment is absent or
   STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
-  --report <downloaded mutation.json>`). Absent or stale mutation evidence goes
-  under `Could not verify`, never implied green.
+  --report <downloaded mutation.json>`). Absent, stale, `0 mutants evaluated`,
+  partial or `no report` mutation evidence goes under `Could not verify`, never
+  implied green.
 - Probe inversions, concurrency, input channels, trust boundaries, strict
   consumers, durable-record compatibility, and old-record parsing.
 - Repeat the pattern and population sweeps.
