@@ -266,10 +266,10 @@ function grammarFileStamp(filePath: string): string | undefined {
 }
 
 /**
- * V8's WebAssembly trap messages (#3605), for a trap that reaches us on
- * something other than a `WebAssembly.RuntimeError` — rewrapped, or from
- * another realm. The `instanceof` check below is the primary test; this list
- * is only its fallback.
+ * V8's messages for the three traps the #3605 log shows, as a fallback for
+ * one rewrapped on a plain `Error`. The `instanceof` check below is the
+ * primary test: any other trap (`unreachable`, `divide by zero`, ...) is
+ * classified only while it is still a `WebAssembly.RuntimeError`.
  */
 const WASM_TRAP_MESSAGES = [
 	"memory access out of bounds",
