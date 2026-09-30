@@ -1181,6 +1181,39 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 		expect(await c.editLine("post_new", file, 2, "Y", false)).toBe("ALLOW");
 	});
 
+	it("keeps the session's mtime anchor across /reload, so a file changed after the session began stays authored (D5)", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		c.done();
+		// Written after the session began, by nothing the guard records.
+		const file = path.join(cwd, "late.conf");
+		fs.writeFileSync(file, "l1\nl2\nl3");
+		expect(await c.editLine("pre_late", file, 2, "Y", false)).toBe("ALLOW");
+
+		await reload(runtime);
+
+		expect(await c.editLine("post_late", file, 2, "Y", false)).toBe("ALLOW");
+	});
+
+	it("does not carry the parent's authorship into a /fork", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		const file = path.join(cwd, "new.conf");
+		c.user("prompt 1");
+		expect(await c.write("call_write_new", file, "n1\nn2\nn3")).toBe("ALLOW");
+		const u2 = c.user("prompt 2");
+		c.done();
+
+		await runtime.fork(u2);
+
+		// The same rule as /tree (G10): the write's creation read carried no
+		// tool call, so only the parent's authorship vouched for it.
+		expect(await c.editLine("post_new", file, 2, "Y", false)).toEqual(
+			ZERO_READ,
+		);
+	});
+
 	it("drops a read whose tool result never reached the branch at /reload", async () => {
 		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
 		const c = conversation(runtime);
