@@ -3833,6 +3833,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	/** #3248: bounded per-turn on this lane's own row, never per finding. */
 	let runnerFindingsDispositionSuppressed = 0;
 	const runnerFindingsDeliveredIds: string[] = [];
+	/** #3796: late parts carrying a blocking finding — never "no action required". */
+	const unlabeledAdvisoryParts = new Set<string>();
 	for (const pending of pendingRunnerFindings) {
 		const result = pending.result;
 		if (!result) continue;
@@ -3844,14 +3846,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			Date.now() - pending.markedAtMs,
 			pending.writeIndex,
 		);
-		if (result.status === "failed") {
+		// #3796: a runner whose findings fail its check reports `failed` WITH
+		// diagnostics and no fault kind (or `blocking_diagnostics`); that goes
+		// through the freshness gate and delivery like a success. A failed result
+		// with no diagnostics, or with a fault kind (timeout, server_error), is a
+		// broken runner: the note is kept and any partial findings still deliver.
+		if (
+			result.status === "failed" &&
+			(result.diagnostics.length === 0 ||
+				(result.failureKind !== undefined &&
+					result.failureKind !== "blocking_diagnostics"))
+		) {
 			runnerFindingsFailed += 1;
 			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
 			// @delivery-surface: runtime-turn:late-runner-findings
 			advisoryParts.push(
 				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
 			);
-			continue;
 		}
 		const findings = result.diagnostics;
 		if (findings.length === 0) continue;
@@ -3917,10 +3928,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			runnerSuppressedHere > 0
 				? `; suppressed by disposition: ${runnerSuppressedHere} finding(s)`
 				: "";
-		// @delivery-surface: runtime-turn:late-runner-findings
-		advisoryParts.push(
-			`⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit${runnerSuppressedNote}):\n${lines.join("\n")}`,
+		const lateBlocking = runnerKept.some(
+			(finding) => finding.semantic === "blocking",
 		);
+		const lateRunnerPart = `⏱️ Late runner diagnostics (${pending.runnerId} completed after the edit${runnerSuppressedNote}${lateBlocking ? "; blocking: fix before continuing" : ""}):\n${lines.join("\n")}`;
+		if (lateBlocking) unlabeledAdvisoryParts.add(lateRunnerPart);
+		// @delivery-surface: runtime-turn:late-runner-findings
+		advisoryParts.push(lateRunnerPart);
 	}
 	logLatency({
 		type: "phase",
@@ -4450,8 +4464,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const resolvedParts =
 		resolvedLines.length > 0 ? [resolvedLines.join("\n")] : [];
 
-	const labeledAdvisoryParts = advisoryParts.map(
-		(p) => `ℹ️ Advisory — no action required this turn:\n${p}`,
+	const labeledAdvisoryParts = advisoryParts.map((p) =>
+		unlabeledAdvisoryParts.has(p)
+			? p
+			: `ℹ️ Advisory — no action required this turn:\n${p}`,
 	);
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
