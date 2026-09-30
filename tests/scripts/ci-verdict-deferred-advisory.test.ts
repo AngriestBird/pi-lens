@@ -247,4 +247,71 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 			expect(deferred(verdict.rows)).toEqual([]);
 		});
 	});
+
+	// Recurrence (verify r2 V2): once the heavy gate is red or skipped, GitHub
+	// writes a completed `skipped` check-run for the mutation job, so it is a
+	// PRESENT row and the NOT RUN branch (written for absent rows) never fired in
+	// production: the line read "STALE" or "no report (job skipped)" without the
+	// cause. The line must name the gate's state when the mutation row is skipped.
+	describe("when the mutation job has a completed skipped check-run", () => {
+		const base = [
+			checkRun("Unit tests", "completed", "success", 1),
+			checkRun("Lint & type-check", "completed", "success", 2),
+			checkRun(CHANGES_CHECK, "completed", "success", 3),
+			checkRun("mutation (advisory)", "completed", "skipped", 5),
+			checkRun("Unit tests Windows (advisory)", "completed", "skipped", 6),
+		];
+		const head = "b".repeat(40);
+		const comment = {
+			id: 9,
+			user: { login: "github-actions[bot]" },
+			body: `<!-- pi-lens-mutation-diff -->\n### Mutation diff (advisory)\n\n- **Head:** \`${"a".repeat(40)}\`\n\nNo survivors.`,
+		};
+		const line = (
+			gate: ReturnType<typeof checkRun> | null,
+			withComment = true,
+		) => {
+			const verdict = computeVerdict({
+				check_runs: gate ? [...base, gate] : base,
+			});
+			return formatMutationLine(
+				withComment ? [comment] : [],
+				head,
+				verdict.rows,
+			);
+		};
+
+		it("names a red gate as the cause, with the stale comment's head", () => {
+			expect(
+				line(checkRun(HEAVY_GATE_CHECK, "completed", "failure", 4)),
+			).toMatch(
+				/NOT RUN -- the heavy gate concluded failure .*lint\.yml required check was red or unfinished.*STALE \(PR head is b{12}\)/,
+			);
+		});
+
+		it("names a skipped gate as the cause, with and without a sticky comment", () => {
+			const gate = checkRun(HEAVY_GATE_CHECK, "completed", "skipped", 4);
+			expect(line(gate)).toMatch(
+				/NOT RUN -- the heavy gate was skipped .*STALE/,
+			);
+			expect(line(gate, false)).toMatch(
+				/NOT RUN -- the heavy gate was skipped .*; no Mutation diff comment on this PR$/,
+			);
+		});
+
+		it("says so when the job was skipped although the gate passed", () => {
+			expect(
+				line(checkRun(HEAVY_GATE_CHECK, "completed", "success", 4)),
+			).toMatch(
+				/NOT RUN -- the job was skipped although the heavy gate passed/,
+			);
+		});
+
+		// Without a gate row (an older workflow) the line keeps its old wording.
+		it("keeps the old wording when there is no gate row", () => {
+			expect(line(null, false)).toBe(
+				"MUTATION (advisory, never gates): no report (job skipped) -- no Mutation diff comment on this PR",
+			);
+		});
+	});
 });

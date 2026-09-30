@@ -62,6 +62,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	ADVISORY_ONLY_MARKER,
 	buildCommentBody,
 	buildMarker,
 	classifyFailureLog,
@@ -1209,6 +1210,64 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			skipMissingJob: true,
 		});
 		expect(result).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		expect(api.comments).toHaveLength(0);
+		expect(api.rerunCallCount).toBe(0);
+	});
+
+	// #3801 recurrence (verify r2 V3): a not-ready `Heavy advisory gate` exits 1,
+	// which fails the CI run even with every required check green. The label
+	// step read "skipped" as "not infra" and put `ci:real` on a green PR. A run
+	// whose failed jobs are ALL advisory is marked so the caller labels nothing;
+	// one non-advisory failure alongside keeps the plain skip (Lint red stays
+	// `ci:real` through the workflow's else branch).
+	it("marks a skipped run advisory-only when every failed job is advisory", async () => {
+		const api = makeStatefulApi();
+		const jobsFetcher =
+			(jobs: Array<{ id: number; name: string; conclusion: string }>) =>
+			async (url: string, init?: RequestInit) => {
+				if (url.endsWith("/actions/runs/999/jobs"))
+					return jsonResponse({ jobs });
+				return api.fetcher(url, init);
+			};
+		const run = (
+			jobs: Array<{ id: number; name: string; conclusion: string }>,
+		) =>
+			runClassifier({
+				fetcher: jobsFetcher(jobs),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+				skipMissingJob: true,
+			});
+		const gate = {
+			id: 1,
+			name: "Heavy advisory gate (advisory)",
+			conclusion: "failure",
+		};
+		const windows = {
+			id: 2,
+			name: "Unit tests Windows (advisory)",
+			conclusion: "failure",
+		};
+		const advisory = await run([
+			{ id: 3, name: "Unit tests", conclusion: "success" },
+			gate,
+			windows,
+		]);
+		expect(advisory).toEqual({
+			skipped: true,
+			advisoryOnly: true,
+			reason: `run 999 has no failed job named "Unit tests"; ${ADVISORY_ONLY_MARKER} (Heavy advisory gate (advisory), Unit tests Windows (advisory))`,
+		});
+		const mixed = await run([
+			gate,
+			{ id: 4, name: "Lint & type-check", conclusion: "failure" },
+		]);
+		expect(mixed).toEqual({
 			skipped: true,
 			reason: 'run 999 has no failed job named "Unit tests"',
 		});

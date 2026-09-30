@@ -46,7 +46,11 @@ type Ctx = {
 	matrixOs?: string;
 };
 
-function evaluate(expression: string, ctx: Ctx): boolean {
+function evaluate(rawExpression: string, ctx: Ctx): boolean {
+	// `${{ ... }}` is optional around a job `if:` and REQUIRED when it starts with `!`.
+	const expression = rawExpression
+		.trim()
+		.replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
 	const tokens = expression.match(
 		/'[^']*'|&&|\|\||==|!=|!|\(|\)|[A-Za-z_][\w.-]*\(\)|[A-Za-z_][\w.-]*/g,
 	);
@@ -398,15 +402,28 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 	});
 
 	// Recurrence: a FAILED classification reading as docs-only or as code. The
-	// heavy jobs and TLA+ depend on `changes`, so a failed one skips them (a
-	// visible red `Changed files` row); the test jobs never depended on it and
-	// still run.
-	it("never reads a failed classification as docs-only: heavy jobs skip, test jobs still run", () => {
-		const { results } = simulate("pull_request", DOCS_ONLY, "true", true);
+	// heavy jobs depend on `changes`, so a failed one skips them (a visible red
+	// `Changed files` row; they are advisory); the test jobs never depended on
+	// it and still run. `TLA+ models` is REQUIRED and is the exception that must
+	// not skip (verify r2 V1): GitHub reads a needs-skipped required check as
+	// passing, so it starts anyway, and with no `formal` output its steps run the
+	// FULL model check (an empty output is not 'false').
+	it("never reads a failed classification as docs-only: heavy jobs skip, test jobs still run, TLA+ runs in full", () => {
+		const { changes, results } = simulate(
+			"pull_request",
+			DOCS_ONLY,
+			"true",
+			true,
+		);
 		expect(results.changes).toBe("failure");
 		for (const id of HEAVY_ADVISORY) expect(results[id], id).toBe("skipped");
-		for (const id of ["test", "unit-tests", "install-test"])
+		for (const id of ["test", "unit-tests", "install-test", "tla-models"])
 			expect(results[id], id).toBe("success");
+		const steps = stepsRun("tla-models", "pull_request", changes, results)["-"];
+		expect(steps).toContain(
+			"Model-check formal/ against each config's expected verdict",
+		);
+		expect(steps).not.toContain("Skip the model check (formal/ unchanged)");
 	});
 
 	// Recurrence: a new job gated on `changes` without being a heavy advisory or

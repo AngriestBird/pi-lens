@@ -191,6 +191,13 @@ jobs:
   tla-models:
     name: TLA+ models
     needs: [validate-merge-train-dispatch, changes]
+    # #3801 (verify r2 V1): a REQUIRED check must not skip at job level, and a
+    # failed, cancelled or skipped `changes` job would skip this one through its
+    # `needs:` (GitHub reads a skipped required check as passing, so the model
+    # check would be treated as satisfied without having run). `!cancelled()`
+    # starts it anyway; the steps read `formal != 'false'`, and an empty output
+    # is not 'false', so a failed classification runs the full model check.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # refs #3572, #3517: TLC over formal/*/*.cfg (330 configs as of this
     # change), run through a CPU-sized concurrency pool instead of one at a

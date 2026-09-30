@@ -1443,7 +1443,29 @@ function readStickyBody(body) {
  * @param {Array<{name: string, status: string|null, conclusion?: string|null}>} rows
  */
 export function formatMutationLine(comments, prHead, rows = []) {
-	const job = rows.find((row) => row.name === MUTATION_CHECK);
+	const found = rows.find((row) => row.name === MUTATION_CHECK);
+	// #3801 (verify r2 V2): once the heavy gate is red or skipped, GitHub writes a
+	// completed `skipped` check-run for the mutation job, so it is never an absent
+	// row. Name the cause from the gate's row the way an absent row does.
+	const gate = rows.find((row) => row.name === HEAVY_GATE_CHECK);
+	const job =
+		found?.present === true &&
+		found.status === "completed" &&
+		found.conclusion === "skipped" &&
+		gate?.present === true &&
+		gate.status === "completed"
+			? {
+					...found,
+					deferred: true,
+					...(gate.conclusion === "success"
+						? {
+								deferredState: "NOT RUN",
+								deferredWhy:
+									"the job was skipped although the heavy gate passed",
+							}
+						: deferredStateFor(gate)),
+				}
+			: found;
 	const notRun = job?.deferred === true && job.deferredState === "NOT RUN";
 	const inFlight = job && job.status !== "completed" && !notRun;
 	const id = findStickyCommentId(comments, STICKY_MARKER);
