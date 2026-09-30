@@ -83,6 +83,8 @@ Three more constants cover the secondary's root and the test worker's exit
   that keeps winning the lock).
 - `Reaper`: the reaper's `pruneDeadInstances` may take the lock directly, off
   the tail, in this process.
+- `SharedSec`: a second declined secondary per session on the same root as the
+  first, which never shuts down inside the model (#3849).
 
 ## Invariants
 
@@ -97,7 +99,7 @@ Three more constants cover the secondary's root and the test worker's exit
   So a live session is never dropped for good.
 - `NoGhostRoot` also covers a secondary's own root: a root of a secondary
   whose shutdown ran is in the entry only while its removal is still queued or
-  in flight. A removal that gave up leaves the root behind for the rest of the
+  in flight, or a second secondary on the same root still holds it. A removal that gave up leaves the root behind for the rest of the
   session (#3587).
 - `NoExitWhileHeld`: the worker never exits while this process holds the
   registry lock. A killed holder leaves a lock generation of a dead pid behind
@@ -109,6 +111,11 @@ Three more constants cover the secondary's root and the test worker's exit
 - `RootRemovedOnce`: a secondary's root removal runs under a lock at most
   once. The second run is a no-op on the file (the root is gone), but each
   run records `instance-registry-deregister-landed`.
+- `SharedRootHeld`: a root a landed add put in the entry stays in it while a
+  secondary that holds it is live. With `SharedSec`, the second secondary
+  never shuts down, so its root must be in the entry until the session ends.
+  The entry has no holder count, so on the merged behaviour it is violated
+  (#3849).
 
 ## Results
 
@@ -132,6 +139,7 @@ Three more constants cover the secondary's root and the test worker's exit
 | `TeardownKill` | violated `NoExitWhileHeld` | the worker before #3703 |
 | `TeardownUnbounded` | violated `TeardownProgress` | #3703 round 1 |
 | `ReaperPruneResidue` (stated residual) | violated `NoExitWhileHeld` | |
+| `SecRootSharedTwo` (open defect #3849) | violated `SharedRootHeld` | |
 
 The counterexamples before the fix:
 
@@ -177,6 +185,12 @@ The secondary root and the worker's exit (`SecRoot*`, `Teardown*`,
 - **Unbounded join (`TeardownUnbounded`):** the other process holds the lock
   forever, session 1's queued deregistration waits behind it, and the join
   never ends.
+- **Two secondaries on one root (`SecRootSharedTwo`, #3849):** `reg A` lands,
+  a secondary's `radd T1` lands, a second secondary's `radx T1` lands (the
+  entry is a set, so it is a no-op), the first secondary's removal lands, and
+  the entry drops `T1` while the second still serves it, for the rest of the
+  session. The config is red on the merged behaviour and flips to `pass` when
+  the fix for #3849 adds a holder count.
 - **The reaper's hold (`ReaperPruneResidue`):** `pruneDeadInstances` takes the
   lock off the tail and the tail is empty, so the join ends and the worker
   exits holding it. #3703's own body states this: #3617 is only partly
@@ -205,7 +219,18 @@ The secondary root and the worker's exit (`SecRoot*`, `Teardown*`,
   5.5 s), not forever. A generation or an older writer's lock file past the
   5 s lease is taken over, so a single hold cannot outlast it; a filesystem
   error, or a stream of other writers that keeps winning the lock, still can.
-  The lock records `instance-registry-lock-timeout` when it does.
+  The lock records `instance-registry-lock-timeout` when it does. The model
+  lets the removal wait for a stuck holder forever (`PeerStuck`), so
+  `NoGhostRoot` holds there only because the removal is pending; on the code
+  the removal drops after 5.5 s and the root stays (a review probe on the real
+  registry with a live non-self holder refreshing the lock: removal settled
+  after 5506 ms, root kept). A lease-drop witness config is not included.
+- **`planRootRemoval` re-arms the intent to the entry's first remaining
+  root**, and only when the secondary's root was in the entry. The model
+  re-arms to the session's root whenever that root is in the entry, which
+  over-approximates: it adds intent writes and cannot hide a violation. The
+  code's branch for removing the last root (`withoutOwnEntry`) is unreachable
+  in the model, since no op removes the primary root.
 - A heartbeat's own lock hold is milliseconds, and the model lets it last
   arbitrarily long. The replay forces the overlap by running shutdown while
   the heartbeat's read of the registry is in flight.
@@ -214,11 +239,9 @@ The secondary root and the worker's exit (`SecRoot*`, `Teardown*`,
 
 Not modelled:
 
-- two live secondaries on one root. The entry holds roots as a set, with no
-  count, so the first shutdown drops a root the second still serves; the
-  model gives each session one secondary with its own root and does not
-  check this. On the real registry, two `registerInstanceRoot` calls for one
-  root and one `deregisterInstanceRoot` leave the root absent;
+- more than two secondaries on one root, and a second secondary that shuts
+  down. One extra secondary per session (`SharedSec`) is enough to show the
+  missing holder count of #3849 (`SecRootSharedTwo`);
 - `removeLspChild`, which never creates an entry or writes the intent;
 - the reaper and dead-pid pruning, except as the off-tail lock holder of
   `Reaper`. A process that exits after the ghost write is pruned by readers,
