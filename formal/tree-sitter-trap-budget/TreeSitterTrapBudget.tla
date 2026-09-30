@@ -135,6 +135,7 @@ VARIABLES
     hits,       \* ghost: traps per culprit input (saturates at 2)
     poisonHit,  \* ghost: inputs that trapped deterministically
     stale,      \* ghost: keys whose entry survived its trapper's clean success
+    attempted,  \* ghost: keys a checked site ran while they were charged
     lost,       \* ghost: <<file, input>> pairs whose extraction a call lost
     poison,     \* the environment: poisoned sites
     extDone,    \* owners whose extractor init ran
@@ -143,17 +144,18 @@ VARIABLES
     cache,      \* queryBatchCache, per rule set
     pendB       \* compileQueryBatch builds past their batch-key check
 
-vars == <<content, entry, spent, heap, hits, poisonHit, stale, lost, poison,
-          extDone, rawCached, pendRaw, cache, pendB>>
+vars == <<content, entry, spent, heap, hits, poisonHit, stale, attempted, lost,
+          poison, extDone, rawCached, pendRaw, cache, pendB>>
 
 Aborted == spent > Budget
 
 (* The mutable trap state as one record, so a synchronous region can be     *)
 (* written as a chain of steps.                                             *)
 Cur == [e |-> entry, sp |-> spent, hp |-> heap, hi |-> hits,
-        ph |-> poisonHit, stl |-> stale]
+        ph |-> poisonHit, stl |-> stale, at |-> attempted]
 SetSt(s) == /\ entry' = s.e /\ spent' = s.sp /\ heap' = s.hp
             /\ hits' = s.hi /\ poisonHit' = s.ph /\ stale' = s.stl
+            /\ attempted' = s.at
 
 Outs == {"ok", "poison", "heap"}
 Allowed(site, o, hp) ==
@@ -176,16 +178,23 @@ Rep(s, i, k, id, o, keyed) ==
                                   ELSE s1.e,
                             !.sp = @ + 1]
 
-(* clearWasmInput after a clean success on key k by identity id. `stl`      *)
-(* records an entry that survives its own trapper's clean success.          *)
+(* clearWasmInput after a clean success on key k by identity id.            *)
 (* `ownOnly` is FALSE only for a consume-phase clear under mutant F2.       *)
 Clr(s, k, id, ownOnly) ==
-    LET own == s.e[k].traps > 0 /\ s.e[k].by = id
-        s2 == IF Decay /\ s.e[k].traps > 0
-                  /\ (~ownOnly \/ SameId(s.e[k].by, id))
-              THEN [s EXCEPT !.e[k] = Empty]
-              ELSE s
-    IN IF own /\ s2.e[k].traps > 0 THEN [s2 EXCEPT !.stl = @ \cup {k}] ELSE s2
+    IF Decay /\ s.e[k].traps > 0 /\ (~ownOnly \/ SameId(s.e[k].by, id))
+    THEN [s EXCEPT !.e[k] = Empty]
+    ELSE s
+
+(* The two ghosts are written by each action at its own site, never inside  *)
+(* Clr or the skip test, so a site that omits its heal or its skip is still *)
+(* seen (review F1 on #3829).                                               *)
+(* Mark: after a clean success by id on key k, an entry by id that is still *)
+(* there survived its trapper's success.                                    *)
+Mark(s, k, id) ==
+    IF s.e[k].traps > 0 /\ s.e[k].by = id
+    THEN [s EXCEPT !.stl = @ \cup {k}] ELSE s
+(* Try: a checked site is about to run on key k.                            *)
+Try(s, k) == IF s.e[k].traps > 1 THEN [s EXCEPT !.at = @ \cup {k}] ELSE s
 
 ChargedKey(k) == entry[k].traps > 1
 
@@ -197,6 +206,7 @@ TypeOK ==
     /\ hits \in [Inputs -> 0..2]
     /\ poisonHit \subseteq Inputs
     /\ stale \subseteq AllKeys
+    /\ attempted \subseteq AllKeys
     /\ lost \subseteq (Files \X Inputs)
     /\ poison \subseteq PoisonCandidates
     /\ extDone \subseteq Owners
@@ -213,6 +223,7 @@ Init ==
     /\ hits = [i \in Inputs |-> 0]
     /\ poisonHit = {}
     /\ stale = {}
+    /\ attempted = {}
     /\ lost = {}
     /\ poison \in SUBSET PoisonCandidates
     /\ extDone = {}
@@ -231,21 +242,22 @@ Parse(f, id) ==
            kp == IF ParseNoCaller THEN FKey(c, NoId) ELSE FKey(c, id)
            kc == IF ConsumeSharedKey THEN kp ELSE FKey(c, id)
            s0 == Cur
+           sr == Try(s0, kp)                  \* the run branch's own record
        IN \/ /\ s0.e[kp].traps > 1              \* charged: skipped (D1)
              /\ lost' = lost \cup {<<f, i>>}
-             /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale>>
+             /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted>>
           \/ /\ s0.e[kp].traps <= 1
              /\ \E o1 \in Outs, o2 \in Outs :
-                  /\ Allowed(ParseSite(c), o1, s0.hp)
+                  /\ Allowed(ParseSite(c), o1, sr.hp)
                   /\ IF o1 # "ok"
                      THEN \* the parse traps: `reportWasmAbort(err, input)`
-                          /\ SetSt(Rep(s0, i, kp, NoId, o1, KeyInputs))
+                          /\ SetSt(Rep(sr, i, kp, NoId, o1, KeyInputs))
                           /\ lost' = lost \cup {<<f, i>>}
                      ELSE \* a clean parse heals a parse-phase entry (#3706 F-A)
-                          LET s1 == Clr(s0, kp, NoId, TRUE) IN
+                          LET s1 == Mark(Clr(sr, kp, NoId, TRUE), kp, NoId) IN
                           /\ Allowed(ConsumeSite(c, id), o2, s1.hp)
                           /\ IF o2 = "ok"
-                             THEN /\ SetSt(Clr(s1, kc, id, OwnHealOnly))
+                             THEN /\ SetSt(Mark(Clr(s1, kc, id, OwnHealOnly), kc, id))
                                   /\ UNCHANGED lost
                              ELSE LET s2 == Rep(s1, i, kc, id, o2, KeyInputs) IN
                                   IF id \in Swallowers
@@ -267,8 +279,8 @@ Parse(f, id) ==
 Edit(f) ==
     /\ EnableFiles
     /\ \E c \in Contents \ {content[f]} : content' = [content EXCEPT ![f] = c]
-    /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, lost, poison,
-                   extDone, rawCached, pendRaw, cache, pendB>>
+    /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted, lost,
+                   poison, extDone, rawCached, pendRaw, cache, pendB>>
 
 (* TreeSitterSymbolExtractor.init -> compileQuery, once per owner. *)
 ExtInit(o) ==
@@ -279,7 +291,7 @@ ExtInit(o) ==
     /\ \E oc \in Outs :
          /\ Allowed(ExtSite, oc, heap)
          /\ IF oc = "ok"
-            THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale>>
+            THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted>>
             ELSE SetSt(Rep(Cur, <<"ext", "q">>, EKey, NoId, oc,
                            KeyInputs /\ KeyExtractor))
     /\ UNCHANGED <<content, lost, poison, rawCached, pendRaw, cache, pendB>>
@@ -292,6 +304,7 @@ RawCheck(r) ==
     /\ ~ChargedKey(PKey(r))
     /\ pendRaw[r] < MaxPend
     /\ pendRaw' = [pendRaw EXCEPT ![r] = @ + 1]
+    /\ attempted' = Try(Cur, PKey(r)).at
     /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, lost,
                    poison, extDone, rawCached, cache, pendB>>
 
@@ -299,11 +312,11 @@ RawDo(r) ==
     /\ pendRaw[r] > 0
     /\ pendRaw' = [pendRaw EXCEPT ![r] = @ - 1]
     /\ IF Aborted
-       THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, rawCached>>
+       THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted, rawCached>>
        ELSE \E oc \in Outs :
               /\ Allowed(ProbeSite(r), oc, heap)
               /\ IF oc = "ok"
-                 THEN /\ SetSt(Clr(Cur, PKey(r), NoId, TRUE))
+                 THEN /\ SetSt(Mark(Clr(Cur, PKey(r), NoId, TRUE), PKey(r), NoId))
                       /\ rawCached' = [rawCached EXCEPT ![r] = TRUE]
                  ELSE /\ SetSt(Rep(Cur, <<"probe", r>>, PKey(r), NoId, oc, KeyInputs))
                       /\ UNCHANGED rawCached
@@ -312,8 +325,8 @@ RawDo(r) ==
 RawEvict(r) ==
     /\ rawCached[r]
     /\ rawCached' = [rawCached EXCEPT ![r] = FALSE]
-    /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, lost,
-                   poison, extDone, pendRaw, cache, pendB>>
+    /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, attempted,
+                   lost, poison, extDone, pendRaw, cache, pendB>>
 
 (* compileQueryBatch: cache miss and the batch-key check (a charged batch   *)
 (* key builds a null without trapping, and that null is cached).            *)
@@ -324,8 +337,9 @@ BatchCheck(n) ==
     /\ pendB[n] < MaxPend
     /\ IF KeyBatch /\ ChargedKey(BKey(n))
        THEN /\ cache' = [cache EXCEPT ![n] = NullCache]
-            /\ UNCHANGED pendB
+            /\ UNCHANGED <<pendB, attempted>>
        ELSE /\ pendB' = [pendB EXCEPT ![n] = @ + 1]
+            /\ attempted' = Try(Cur, BKey(n)).at
             /\ UNCHANGED cache
     /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, lost,
                    poison, extDone, rawCached, pendRaw>>
@@ -336,14 +350,15 @@ RECURSIVE Probe(_, _, _)
 Probe(seq, oc, acc) ==
     IF seq = <<>> \/ acc.dead \/ ~acc.ok THEN acc
     ELSE LET r == Head(seq)
-             s == acc.s
-         IN IF KeyBatch /\ s.e[PKey(r)].traps > 1
+             s == Try(acc.s, PKey(r))        \* the compile branch's own record
+         IN IF KeyBatch /\ acc.s.e[PKey(r)].traps > 1
             THEN Probe(Tail(seq), oc, acc)                 \* charged: skipped
             ELSE IF ~Allowed(ProbeSite(r), oc[r], s.hp)
             THEN [acc EXCEPT !.ok = FALSE]
             ELSE IF oc[r] = "ok"
             THEN Probe(Tail(seq), oc,
-                       [acc EXCEPT !.s = (IF KeyBatch THEN Clr(s, PKey(r), NoId, TRUE) ELSE s),
+                       [acc EXCEPT !.s = Mark(IF KeyBatch THEN Clr(s, PKey(r), NoId, TRUE) ELSE s,
+                                              PKey(r), NoId),
                                    !.inc = @ \cup {r}])
             ELSE LET s2 == Rep(s, <<"probe", r>>, PKey(r), NoId, oc[r],
                                KeyBatch /\ KeyInputs)
@@ -358,7 +373,8 @@ Combine(n, occ, acc) ==
     ELSE IF acc.inc = {} THEN [acc EXCEPT !.val = NullCache]
     ELSE IF ~Allowed(CombSite(n), occ, acc.s.hp) THEN [acc EXCEPT !.ok = FALSE]
     ELSE IF occ = "ok"
-    THEN [acc EXCEPT !.s = (IF KeyBatch THEN Clr(acc.s, BKey(n), NoId, TRUE) ELSE acc.s),
+    THEN [acc EXCEPT !.s = Mark(IF KeyBatch THEN Clr(acc.s, BKey(n), NoId, TRUE) ELSE acc.s,
+                                BKey(n), NoId),
                      !.val = [st |-> "ok", rules |-> acc.inc]]
     ELSE LET s2 == Rep(acc.s, <<"batch", n>>, BKey(n), NoId, occ, KeyBatch /\ KeyInputs)
          IN IF s2.sp > Budget
@@ -371,7 +387,7 @@ BatchBuild(n) ==
     /\ IF Aborted
        THEN \* a compile on a poisoned runtime returns null; B13 caches it
             /\ cache' = [cache EXCEPT ![n] = NullCache]
-            /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale>>
+            /\ UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted>>
        ELSE \E oc \in [Rules -> Outs], occ \in Outs :
               LET acc0 == [s |-> Cur, inc |-> {}, trapped |-> FALSE,
                            dead |-> FALSE, ok |-> TRUE, val |-> NullCache]
@@ -387,8 +403,8 @@ BatchBuild(n) ==
 BatchEvict(n) ==
     /\ cache[n].st # "none"
     /\ cache' = [cache EXCEPT ![n] = NoCache]
-    /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, lost,
-                   poison, extDone, rawCached, pendRaw, pendB>>
+    /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, attempted,
+                   lost, poison, extDone, rawCached, pendRaw, pendB>>
 
 Next ==
     \/ \E f \in Files, id \in Consumers : Parse(f, id)
@@ -424,6 +440,12 @@ NoKeyLeak == \A k \in AllKeys :
 \* trapped (a one-off trap decays instead of charging the input later). The
 \* extractor's compile key is exempt: it has no clear and no charged skip.
 DecayOnOwnSuccess == stale = {}
+
+\* #3605 K4: a site that checks the charge never runs a charged key: the
+\* parse, the batch probe, the batch key and compileRawQuery. The extractor
+\* compile has no check. A compile past a check that passed (RawDo, the
+\* combined compile in BatchBuild) is the race window, not a skip miss.
+NoRunWhenCharged == attempted = {}
 
 \* #3731: a cached batch is degraded only by a permanent cause: each rule it
 \* lacks has a charged probe key, and a cached null has a charged batch key
