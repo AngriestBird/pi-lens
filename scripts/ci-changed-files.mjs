@@ -45,11 +45,12 @@ const FORMAL_TRIGGERS = [
 	(path) => path === ".github/workflows/ci.yml",
 ];
 
-/** A path is docs only if it is a clean repo-relative path on the allowlist. */
+/**
+ * A path is docs only if it is on the allowlist and does not walk back out of
+ * its prefix (`docs/../clients/x.ts` starts with `docs/` and is code).
+ */
 function isDocsPath(path) {
-	if (path.includes("\\") || path.startsWith("/")) return false;
-	if (path.split("/").some((segment) => segment === ".." || segment === "."))
-		return false;
+	if (path.split("/").includes("..")) return false;
 	return DOCS_ALLOWLIST.some((matches) => matches(path));
 }
 
