@@ -535,7 +535,7 @@ export async function handleAgentEnd({
 					lost: result.lostFiles ?? [],
 					possiblyLost: result.possiblyLostFiles ?? [],
 				});
-				queueAgentAdvisory(loss);
+				queueAgentAdvisory(loss, session);
 				notify(`pi-lens: ${loss}`, "warning");
 			}
 			const tools = result.autofixTools.map((label) => label.split(":")[0]);
