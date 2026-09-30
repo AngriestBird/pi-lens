@@ -215,13 +215,19 @@ describe("tmp-root registry wiring in the shared setup (#2912)", () => {
 	const spelled = (dir: string) => getTmpRootRegistry().roots.get(dir)?.kind;
 
 	it("publishes the interposer to every way a test file spells mkdtemp", async () => {
-		const prefix = path.join(os.tmpdir(), "pi-lens-2912-live-");
-		const viaNamespace = fs.mkdtempSync(`${prefix}ns-`);
-		const viaNamed = mkdtempSync(`${prefix}named-`);
-		const viaPromises = await fsp.mkdtemp(`${prefix}promises-`);
+		const viaNamespace = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-2912-live-ns-"),
+		);
+		const viaNamed = mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-2912-live-named-"),
+		);
+		const viaPromises = await fsp.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-2912-live-promises-"),
+		);
 		const viaCallback = await new Promise<string>((resolve, reject) =>
-			fs.mkdtemp(`${prefix}cb-`, (error, dir) =>
-				error ? reject(error) : resolve(dir),
+			fs.mkdtemp(
+				path.join(os.tmpdir(), "pi-lens-2912-live-cb-"),
+				(error, dir) => (error ? reject(error) : resolve(dir)),
 			),
 		);
 		try {

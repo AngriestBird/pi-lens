@@ -26,7 +26,11 @@ const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const FIXTURE_DIR = "tests/fixtures/tmp-teardown";
 
 interface FixtureReport {
-	testResults: Array<{ name: string; status: string; message?: string }>;
+	testResults: Array<{
+		name: string;
+		status: string;
+		assertionResults: Array<{ status: string }>;
+	}>;
 }
 
 const env = setupTestEnvironment("pi-lens-tmp-root-teardown-");
@@ -39,6 +43,14 @@ function outcomeOf(fixture: string): string | undefined {
 	return report.testResults.find((entry) =>
 		entry.name.replace(/\\/g, "/").endsWith(`${FIXTURE_DIR}/${fixture}`),
 	)?.status;
+}
+
+/** Status of the fixture file's first test as the JSON reporter saw it. A test
+ *  whose worker died before it reported stays "pending". */
+function firstTestStatusOf(fixture: string): string | undefined {
+	return report.testResults.find((entry) =>
+		entry.name.replace(/\\/g, "/").endsWith(`${FIXTURE_DIR}/${fixture}`),
+	)?.assertionResults[0]?.status;
 }
 
 /** What the child's forks left in its private tmpdir. */
@@ -123,6 +135,9 @@ describe("shared setup tmp-root sweep, through the real hooks (#2912)", () => {
 	});
 
 	it("removes a registered root when the worker is SIGTERM'd mid-file", () => {
+		// The handler re-raises, so the fork really dies and its one test never
+		// reports ("pending"); a swallowed signal would let the 10 s wait end and it would.
+		expect(firstTestStatusOf("killed-mid-file.fixture.ts")).toBe("pending");
 		expect(leftovers("pi-lens-2912-killed-")).toEqual([]);
 		expect(sweepLine("killed-mid-file.fixture.ts", "SIGTERM")).toContain(
 			"registered=1",
