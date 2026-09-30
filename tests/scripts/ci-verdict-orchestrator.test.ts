@@ -1683,6 +1683,7 @@ describe("run --watch-open --stream — one line per event, until the window end
 		};
 		const w = world({ prs: [pr], rerunThrows: true });
 		const times: number[] = [];
+		const file = stateFile();
 		const gh = ghFor(w);
 		const time = clock();
 		await run({
@@ -1691,7 +1692,7 @@ describe("run --watch-open --stream — one line per event, until the window end
 				"--stream",
 				"--rerun-cancelled",
 				"--state-file",
-				stateFile(),
+				file,
 				"--wait",
 				"1800",
 			],
@@ -1706,6 +1707,26 @@ describe("run --watch-open --stream — one line per event, until the window end
 		});
 		// 0 s, then +180 s, then +360 s: three attempts, none after.
 		expect(times).toEqual([0, 180, 540]);
+		// A re-armed watch long after the last backoff (state file kept) is
+		// still bound by the cap.
+		const later = clock(undefined, NOW + 3 * 3600_000);
+		await run({
+			argv: [
+				"--watch-open",
+				"--stream",
+				"--rerun-cancelled",
+				"--state-file",
+				file,
+				"--wait",
+				"600",
+			],
+			ghExec: gh,
+			now: later.now,
+			sleepImpl: later.sleepImpl,
+			stdout: () => {},
+			stderr: () => {},
+		});
+		expect(w.mutations).toHaveLength(3);
 	});
 
 	it("--rerun-cancelled starts a new head's attempts from zero", async () => {
@@ -2130,6 +2151,19 @@ describe("run --watch-open --sync-main <path> — fast-forward the main checkout
 		const two = await sync(checkoutAt({ remoteHead: OLD_HEAD, ahead: 2 }));
 		expect(two.lines).toContain(
 			"SYNCED /repo/main: already at 111111111 (2 local commits not on origin)",
+		);
+	});
+
+	it("prints the diverged line of a refusal that says so in other words", async () => {
+		const { lines } = await sync(
+			checkoutAt({
+				pullFails: true,
+				pullStderr:
+					"From /path/origin\nfatal: local and remote have diverged\nhint: reconcile first\n",
+			}),
+		);
+		expect(lines).toContain(
+			"SYNC REFUSED /repo/main: fatal: local and remote have diverged",
 		);
 	});
 

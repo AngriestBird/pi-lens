@@ -387,12 +387,17 @@ operator's private notes, so a different orchestrator can run the same train.
     `DIRTY #N@sha`, `CANCELLED-NOT-REPLACED #N@sha: ... (gh run rerun <id>)`,
     `MERGED #N` plus `closes #M: <state>`, `CLOSED #N`) until the window ends
     (exit 0 if any line was printed, 3 if none).
-  - `--rerun-cancelled` (with `--watch-open`) re-runs a cancelled, unreplaced
-    run itself, once per head (`RERUN #N@sha: gh run rerun <id>`).
+  - `--rerun-cancelled` (with `--watch-open`, and REQUIRING `--state-file`:
+    without it every re-armed watch would re-run the same head, so it is a
+    usage error) re-runs a cancelled, unreplaced run itself
+    (`RERUN #N@sha: gh run rerun <id>`), once per head. A refused re-run is
+    retried on the next poll after a backoff (180 s, then 360 s), at most
+    three attempts per head, then left to you.
   - `--sync-main <path>` (with `--watch-open`) fast-forwards that checkout after
     a merge (`git pull --ff-only`) and prints `SYNCED <path>: <old> -> <new>`.
-    It refuses, saying why, when the checkout is off master, has modified
-    tracked files, or cannot fast-forward, and prints `LOCKFILE CHANGED: run
+    It refuses, saying why (git's own line, such as `Not possible to
+    fast-forward`), when the checkout is off master, has modified tracked
+    files, or cannot fast-forward, notes local commits not on origin, and prints `LOCKFILE CHANGED: run
     npm ci when no worker is live` when `package-lock.json` moved. It never
     runs `npm ci`: live workers share that install.
   - `--approve-fork <PR>` approves that PR's `action_required` runs on its
