@@ -185,6 +185,78 @@ describe("a deterministic compile trap on a rebuilt batch (#3707)", () => {
 	});
 });
 
+describe("a charged compile is skipped, and its batch cached (#3707)", () => {
+	it("stops recompiling a poisoned rule once its probe is charged", async () => {
+		const { client } = await liveClient();
+		const compiles = await trapPatternCount({
+			on: (names) => names.includes("trap_me"),
+		});
+		const file = pythonFile();
+		const set = [rule("ok", "fn"), rule("poisoned", "trap_me")];
+
+		// Build 1 traps (a unit), build 2 traps (charged), build 3 skips the
+		// rule without compiling and is the first one cached.
+		for (let call = 0; call < 3; call++) {
+			await client.runQueriesOnFile(set, file, "python");
+		}
+		const settled = compiles.calls();
+		for (let call = 0; call < 3; call++) {
+			await client.runQueriesOnFile(set, file, "python");
+		}
+
+		expect(compiles.calls()).toBe(settled);
+	});
+
+	it("stops recompiling a combined batch once its compile is charged", async () => {
+		const { client } = await liveClient();
+		const compiles = await trapPatternCount({
+			on: (names) => names.includes("a_cap") && names.includes("b_cap"),
+		});
+		const file = pythonFile();
+		const set = [rule("a", "a_cap"), rule("b", "b_cap")];
+
+		for (let call = 0; call < 3; call++) {
+			await client.runQueriesOnFile(set, file, "python");
+		}
+		const settled = compiles.calls();
+		for (let call = 0; call < 3; call++) {
+			await client.runQueriesOnFile(set, file, "python");
+		}
+
+		expect(compiles.calls()).toBe(settled);
+	});
+});
+
+describe("a charged batch key belongs to its rule set alone (#3707)", () => {
+	it("keeps building the combined batch of a different rule set", async () => {
+		const { client, onAbort, evict } = await liveClient();
+		await trapPatternCount({
+			on: (names) => names.includes("a_cap") && names.includes("b_cap"),
+		});
+		const walks = await countWalks();
+		const file = pythonFile();
+		const poisoned = [rule("a", "a_cap"), rule("b", "b_cap")];
+		const healthy = [rule("c", "c_cap"), rule("d", "d_cap")];
+
+		// Two traps charge the poisoned set's batch key.
+		for (let round = 0; round < 3; round++) {
+			evict();
+			await client.runQueriesOnFile(poisoned, file, "python");
+		}
+		const before = walks.walks();
+		expect(ids(await client.runQueriesOnFile(healthy, file, "python"))).toEqual(
+			["c", "d"],
+		);
+
+		// One combined walk: the healthy set's key is its own, so it was not
+		// skipped into the two-walk per-rule fallback.
+		expect(walks.walks() - before).toBe(1);
+		expect(onAbort).not.toHaveBeenCalled();
+		// The healthy set's compile did not trap, so it spent nothing.
+		expect(remainingBudget(client)).toBe(2);
+	});
+});
+
 describe("a transient compile trap does not degrade the batch for the process (#3707)", () => {
 	it("runs a rule again after a one-off probe trap", async () => {
 		const { client, onAbort, evict } = await liveClient();
@@ -224,7 +296,7 @@ describe("a transient compile trap does not degrade the batch for the process (#
 	});
 
 	it("builds the combined batch again after a one-off compile trap", async () => {
-		const { client, onAbort } = await liveClient();
+		const { client, onAbort, evict } = await liveClient();
 		const state = { trapping: true };
 		await trapPatternCount({
 			on: (names) =>
@@ -242,6 +314,19 @@ describe("a transient compile trap does not degrade the batch for the process (#
 		await client.runQueriesOnFile(set, file, "python");
 		await client.runQueriesOnFile(set, file, "python");
 		expect(walks.walks()).toBe(2 + 1 + 1);
+
+		// A success decayed the batch key's entry: the next one-off trap is not
+		// charged (it would be on a stale entry), so the batch builds again.
+		state.trapping = true;
+		evict();
+		await client.runQueriesOnFile(set, file, "python");
+		state.trapping = false;
+		const before = walks.walks();
+		await client.runQueriesOnFile(set, file, "python");
+		expect(walks.walks() - before).toBe(1);
+		expect(wasmTrapReasons().some((r) => r.startsWith("input charged:"))).toBe(
+			false,
+		);
 		expect(onAbort).not.toHaveBeenCalled();
 	});
 });
