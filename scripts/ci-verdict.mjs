@@ -887,10 +887,12 @@ export function fetchAutoMergeAge(
 			/* unknown => not armed */
 		}
 	}
+	// No suite yet (`Math.min()` is Infinity) or an undated one (NaN) never
+	// reaches the threshold, so both read as the quiet text, like a failed read.
 	let pushedMs = null;
 	try {
-		const created = (
-			JSON.parse(
+		pushedMs = Math.min(
+			...JSON.parse(
 				ghExec(
 					[
 						"api",
@@ -898,11 +900,8 @@ export function fetchAutoMergeAge(
 					],
 					{ timeoutMs },
 				),
-			)?.check_suites ?? []
-		)
-			.map((suite) => Date.parse(suite?.created_at))
-			.filter(Number.isFinite);
-		if (created.length > 0) pushedMs = Math.min(...created);
+			).check_suites.map((suite) => Date.parse(suite.created_at)),
+		);
 	} catch {
 		/* unknown => no age */
 	}
