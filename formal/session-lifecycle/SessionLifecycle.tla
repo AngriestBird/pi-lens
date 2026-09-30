@@ -564,6 +564,8 @@ WidgetWrite ==
 
 \* "read": a read-guard write of the primary: a tool_result handler's read
 \* record or recordWritten (#3596), or the agent_settled drain's (G10 F1).
+\* Uncaptured, it is recordWritten, which resolves the runtime when it
+\* lands; today's native read record captures the guard at hook entry.
 \* "secRead": the same in a secondary. "heartbeat": the registry heartbeat's
 \* repair. "lsp": LSP work that can spawn a server (#3576).
 \* The entry a writer holds. A handler that has not outlived a later entry
