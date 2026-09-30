@@ -350,7 +350,7 @@ The MCP tool mirror's input contract is: a tool reads the keys its advertised
 with a report (leading `Ignored unknown argument(s) for <tool>: ...` line,
 `structuredContent.ignoredArguments`, and the `mcp-ignored-arguments`
 degradation row), and an ignored key that leaves a schema-`required` input
-missing is an error. The match key for the line is its
+missing, or whose nearest declared key was not sent, is an error. The match key for the line is its
 `Ignored unknown argument(s)` prefix; the prose after it may change. **Rejecting
 every unknown key outright is deliberately not done:** callers that pass extra
 keys today would break, so it needs a major, through the removal checklist in

@@ -50,23 +50,31 @@ undeclared key is never silently dropped:
 - the result carries `structuredContent: { ignoredArguments: [...],
   ignoredArgumentCount: N }` (at most 8 keys, each cut at 64 characters; the
   count is exact);
-- when an ignored key leaves a schema-`required` input missing (`filePath` sent
-  where `file` is required), the tool does not run: the result is an error whose
-  first line is the same sentence, followed by `Not run: required argument(s)
-  ... missing.`;
+- when an ignored key leaves the call without something it needed, the tool
+  does not run and the result is an error whose first line is the same
+  sentence, followed by `Not run: ...`. That is the case when a
+  schema-`required` input is missing (`filePath` sent where `file` is
+  required: ``Not run: required argument(s) `file` missing.``), or when the
+  ignored key's "did you mean" match is a declared parameter the call did not
+  send (`filePath` where `pilens_diagnostics` takes the optional `path`: ``Not
+  run: `filePath` looks like a mistyped `path`, which was not sent.``). An
+  ignored key with no near match, or whose match was also sent, stays a
+  warning;
 - each such call adds one count to the `mcp-ignored-arguments` degradation
   group (subject: the tool name), visible in `pilens_health`.
 
 Unknown keys are still not rejected outright: a caller that passes an extra key
-alongside every required one keeps getting its answer, with the report above.
-Hard rejection is a change to the public MCP input contract and is owned by the
-stability policy ([public-api-stability.md](public-api-stability.md)).
-A schema declares only what the tool reads, so a key the dispatcher itself
-consumes (`cwd` on a tool whose schema omits it, such as `pilens_health`) is
-reported too. The retired `pilens_lsp_diagnostics` name is checked against
-`pilens_diagnostics`'s schema; the retired `pilens_ast_grep_dump` name has no
-schema and is not checked. `pilens_diagnostics` declares no required key (`path`
-is needed only for `source=lsp`), so `filePath` there is a report, not a refusal.
+that is near nothing missing (or alongside the parameter it resembles) keeps
+getting its answer, with the report above. Hard rejection is a change to the
+public MCP input contract and is owned by the stability policy
+([public-api-stability.md](public-api-stability.md)). A schema declares only
+what the tool reads, so `cwd` on a tool whose handler never reads it
+(`pilens_health`, `pilens_latency`, `pilens_session_end`, `pilens_rebuild`;
+the dispatcher uses it only to decide whether the tool is enabled) is reported
+as an ignored key, a warning, because nothing it resembles is missing. The
+retired `pilens_lsp_diagnostics` name is checked against `pilens_diagnostics`'s
+schema; the retired `pilens_ast_grep_dump` name has no schema and is not
+checked.
 
 ## Per-edit
 
