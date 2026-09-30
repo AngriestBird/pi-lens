@@ -36,7 +36,7 @@
  * "skipped"/"neutral" conclusion is a genuine non-failure (a job-level
  * `if:` that evaluated false -- see computeVerdict's own doc comment), and
  * its "cancelled" conclusion is UNCERTAIN rather than failing: this repo's
- * `cancel-in-progress: true` (ci.yml:15-16) leaves a stale cancelled row as
+ * event-scoped `cancel-in-progress` leaves a stale cancelled row as
  * the only entry for its name for several minutes before a replacement
  * posts, and reading that window as a hard failure is a false positive on a
  * check still in flight, not one that failed.

@@ -3,14 +3,22 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import {
+	evaluateExpression,
+	evaluateGroup,
+} from "../support/workflow-expression.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
 
 type PullRequestTrigger = { types?: string[] };
-type PushTrigger = { branches?: string[] };
+type PushTrigger = { branches?: string[] } | null;
 type Workflow = {
-	on?: { pull_request?: PullRequestTrigger; push?: PushTrigger };
+	on?:
+		| string
+		| string[]
+		| null
+		| { pull_request?: PullRequestTrigger; push?: PushTrigger };
 	concurrency?: { group?: unknown; "cancel-in-progress"?: unknown };
 };
 
@@ -18,86 +26,20 @@ function loadWorkflow(file: string): Workflow {
 	return yaml.load(readFileSync(resolve(WORKFLOWS, file), "utf8")) as Workflow;
 }
 
-function resolveValue(
-	value: string,
-	action: string,
-	runId: string,
-): string | boolean {
-	const trimmed = value.trim();
-	if (trimmed === "'edited'" || trimmed === '"edited"') return "edited";
-	if (trimmed === "'pull_request'" || trimmed === '"pull_request"') {
-		return "pull_request";
-	}
-	if (trimmed === "'default'" || trimmed === '"default"') return "default";
-	if (trimmed === "''" || trimmed === '""') return "";
-	const quoted = trimmed.match(/^(?:'([^']*)'|"([^"]*)")$/);
-	if (quoted) return quoted[1] ?? quoted[2] ?? "";
-	if (trimmed === "github.event.action") return action;
-	if (trimmed === "github.event_name") return "pull_request";
-	if (trimmed === "github.event.pull_request.number") return "42";
-	if (trimmed === "github.ref") return "refs/pull/42/merge";
-	if (trimmed === "github.event.client_payload.sha") return "dispatch-sha";
-	if (trimmed === "github.run_id") return runId;
-	return false;
-}
-
-function evaluateTerm(
-	term: string,
-	action: string,
-	runId: string,
-): string | boolean {
-	const equality = term.split("==").map((part) => part.trim());
-	if (equality.length === 2) {
-		return (
-			resolveValue(equality[0], action, runId) ===
-			resolveValue(equality[1], action, runId)
-		);
-	}
-	return resolveValue(term, action, runId);
-}
-
-function evaluateExpression(
-	expression: string,
-	action: string,
-	runId: string,
-): string | boolean {
-	for (const alternative of expression.split("||")) {
-		const conjunction = alternative
-			.split("&&")
-			.map((term) => evaluateTerm(term, action, runId));
-		const value = conjunction.reduce<string | boolean>(
-			(left, right) => (left ? right : left),
-			true,
-		);
-		if (value) return value;
-	}
-	return "";
-}
-
-function evaluateGroup(group: string, action: string, runId: string): string {
-	return group.replace(/\$\{\{\s*([\s\S]*?)\s*\}\}/g, (_, expression: string) =>
-		String(evaluateExpression(expression, action, runId)),
-	);
+function pushTrigger(on: Workflow["on"]): PushTrigger | undefined {
+	if (on === "push") return null;
+	if (Array.isArray(on)) return on.includes("push") ? null : undefined;
+	if (on && typeof on === "object") return on.push;
+	return undefined;
 }
 
 function cancelInProgressOn(eventName: string, value: unknown): boolean {
 	if (typeof value === "boolean") return value;
-	if (typeof value !== "string") return false;
+	if (typeof value !== "string")
+		throw new Error("cancel-in-progress must be boolean or expression");
 	const expression = value.trim().replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
-	return expression.split("||").some((alternative) =>
-		alternative
-			.split("&&")
-			.map((term) => term.trim())
-			.every((term) => {
-				const equality = term.split("==").map((part) => part.trim());
-				if (equality.length !== 2) return term === "true";
-				const [left, right] = equality;
-				const resolve = (operand: string) =>
-					operand.replace(/^['\"]|['\"]$/g, "") === "github.event_name"
-						? eventName
-						: operand.replace(/^['\"]|['\"]$/g, "");
-				return resolve(left) === resolve(right);
-			}),
+	return Boolean(
+		evaluateExpression(expression, "opened", "run", eventName, true),
 	);
 }
 
@@ -106,16 +48,21 @@ describe("workflow concurrency edit safety", () => {
 		// Recurrence #3798: every merge cancelled the master CI run before it
 		// could finish, hiding the post-merge result behind the next merge.
 		const findings: string[] = [];
+		let scanned = 0;
 		for (const file of readdirSync(WORKFLOWS)) {
 			if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
 			const workflow = loadWorkflow(file);
-			if (!workflow.on?.push?.branches?.includes("master")) continue;
+			const push = pushTrigger(workflow.on);
+			if (push === undefined) continue;
+			if (push !== null && !push.branches?.includes("master")) continue;
+			scanned++;
 			if (
 				cancelInProgressOn("push", workflow.concurrency?.["cancel-in-progress"])
 			) {
 				findings.push(file);
 			}
 		}
+		assertNonEmptyScan("master-push concurrency workflows", scanned, 4);
 		expect(
 			findings,
 			"master-push workflows must let their runs finish",
@@ -129,7 +76,12 @@ describe("workflow concurrency edit safety", () => {
 		for (const file of readdirSync(WORKFLOWS)) {
 			if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
 			const workflow = loadWorkflow(file);
-			const trigger = workflow.on?.pull_request;
+			const trigger =
+				workflow.on &&
+				typeof workflow.on === "object" &&
+				!Array.isArray(workflow.on)
+					? workflow.on.pull_request
+					: undefined;
 			if (
 				!trigger?.types?.includes("edited") ||
 				!cancelInProgressOn(
@@ -167,5 +119,33 @@ describe("workflow concurrency edit safety", () => {
 		expect(findings, "edited groups must preserve push cancellation").toEqual(
 			[],
 		);
+	});
+
+	it("keeps PR and dispatch cancellation for every post-merge workflow", () => {
+		for (const file of [
+			"ci.yml",
+			"lint.yml",
+			"install-smoke.yml",
+			"labels.yml",
+		]) {
+			const value = loadWorkflow(file).concurrency?.["cancel-in-progress"];
+			expect(cancelInProgressOn("pull_request", value)).toBe(true);
+			expect(cancelInProgressOn("repository_dispatch", value)).toBe(true);
+		}
+	});
+
+	it("fails closed on unsupported cancellation expression terms", () => {
+		expect(
+			cancelInProgressOn("push", "${{ github.event_name != 'pull_request' }}"),
+		).toBe(true);
+		expect(() =>
+			cancelInProgressOn("push", "${{ github.ref == 'refs/heads/master' }}"),
+		).toThrow(/unsupported workflow expression term/);
+		expect(() =>
+			cancelInProgressOn("push", "${{ startsWith(github.ref, 'refs/heads') }}"),
+		).toThrow(/unsupported workflow expression term/);
+		expect(pushTrigger("push")).toBeNull();
+		expect(pushTrigger(["push", "pull_request"])).toBeNull();
+		expect(pushTrigger({ push: null })).toBeNull();
 	});
 });
