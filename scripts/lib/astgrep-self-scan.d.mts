@@ -34,3 +34,11 @@ export function writeBaseline(
 	signatures: Iterable<string>,
 	root?: string,
 ): string;
+
+export function changedFilesSince(base: string, cwd?: string): Set<string>;
+
+export function findingsInChangedFiles(
+	findings: SelfScanFinding[],
+	changed: Set<string>,
+	root?: string,
+): SelfScanFinding[];

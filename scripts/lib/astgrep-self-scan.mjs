@@ -20,6 +20,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { safeSpawn } from "../../clients/safe-spawn.js";
 import { escapeRegExp } from "../../clients/string-utils.js";
+import { gitExecFileSync } from "./git-fixture-env.mjs";
 
 const SELF_SCAN_CATEGORY = "pi-lens-self-scan";
 
@@ -194,4 +195,39 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	};
 	fs.writeFileSync(p, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 	return p;
+}
+
+/** Absolute (real) paths of files added/copied/modified/renamed between
+ * `base` and the working tree, from `git diff` run in `cwd`. Throws when git
+ * cannot resolve `base` -- the caller decides how loud that is. (#3684) */
+export function changedFilesSince(base, cwd = process.cwd()) {
+	const out = String(
+		gitExecFileSync(
+			["diff", "--name-only", "--relative", "--diff-filter=ACMR", base],
+			{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+		),
+	);
+	return new Set(
+		out
+			.split("\n")
+			.filter(Boolean)
+			.map((name) => realPathOrResolved(path.resolve(cwd, name))),
+	);
+}
+
+/** The subset of `findings` whose file is in `changed` (a set from
+ * `changedFilesSince`); finding paths are resolved against `root`, where
+ * ast-grep ran. (#3684) */
+export function findingsInChangedFiles(findings, changed, root = repoRoot()) {
+	return findings.filter((f) =>
+		changed.has(realPathOrResolved(path.resolve(root, String(f.file ?? "")))),
+	);
+}
+
+function realPathOrResolved(p) {
+	try {
+		return fs.realpathSync(p);
+	} catch {
+		return p;
+	}
 }

@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { safeSpawn } from "../../clients/safe-spawn.js";
+import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import {
 	findingSignature,
@@ -51,10 +52,14 @@ interface WrapperRun {
  * production/CI, so a regression in the wrapper's exit-code plumbing can
  * only be caught here.
  */
-function runWrapper(args: string[], env?: Record<string, string>): WrapperRun {
+function runWrapper(
+	args: string[],
+	env?: Record<string, string>,
+	cwd: string = repoRoot(),
+): WrapperRun {
 	try {
 		const stdout = execFileSync(process.execPath, [WRAPPER_PATH, ...args], {
-			cwd: repoRoot(),
+			cwd,
 			encoding: "utf-8",
 			env: { ...process.env, ...env },
 		});
@@ -254,57 +259,152 @@ d("pi-lens self-scan (#1718)", () => {
 			}
 		});
 
-		// #3684 r2: an advisory (info) hit is printed and never fails the run.
-		it("exits 0 and still prints an advisory registry-subset hit", () => {
-			const dir = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-pilens-selfscan-wrapper-adv-"),
-			);
-			try {
-				fs.writeFileSync(
-					path.join(dir, "subset.ts"),
-					'export const s = ["typescript", "python"];\n',
-					"utf-8",
-				);
-				const run = runWrapper([dir]);
-				expect(run.status, run.stdout + run.stderr).toBe(0);
-				expect(run.stdout).toMatch(/advisory.*advisory-registry-subset/s);
-				expect(run.stderr).not.toMatch(/NEW finding/);
-			} finally {
-				removeTempDirSync(dir);
-			}
-		});
+		// #3684 option B (maintainer decision): the advisory registry-subset rule
+		// reports only in files changed relative to a diff base. Recurrence
+		// guarded: 26 pre-existing hits printing on every CI run (r2 head) and
+		// burying the one hit a PR introduced.
+		describe("advisory scope: files changed against a base", () => {
+			const SUBSET = 'export const s = ["typescript", "python"];\n';
+			const VIOLATION = [
+				'import { writeFileSync } from "node:fs";',
+				"function f(file: string, data: unknown) {",
+				"  writeFileSync(file, JSON.stringify(data));",
+				"}",
+				"",
+			].join("\n");
+			// No inherited base: CI pull_request runs export GITHUB_BASE_REF.
+			const NO_BASE_ENV = { GITHUB_BASE_REF: "" };
 
-		// #3684 r2: the advisory carve-out must not swallow a gating rule that
-		// fires in the same scan.
-		it("still exits NONZERO for a gating rule hit next to an advisory hit", () => {
-			const dir = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-pilens-selfscan-wrapper-mixed-"),
-			);
-			try {
-				fs.writeFileSync(
-					path.join(dir, "subset.ts"),
-					'export const s = ["typescript", "python"];\n',
-					"utf-8",
-				);
-				fs.writeFileSync(
-					path.join(dir, "violation.ts"),
+			function commit(dir: string, message: string): string {
+				gitExecFileSync(["add", "-A"], { cwd: dir });
+				gitExecFileSync(
 					[
-						'import { writeFileSync } from "node:fs";',
-						"function f(file: string, data: unknown) {",
-						"  writeFileSync(file, JSON.stringify(data));",
-						"}",
-						"",
-					].join("\n"),
-					"utf-8",
+						"-c",
+						"user.email=pi-lens-test@example.com",
+						"-c",
+						"user.name=pi-lens-test",
+						"commit",
+						"-qm",
+						message,
+					],
+					{ cwd: dir },
 				);
-				const run = runWrapper([dir]);
-				expect(run.status).not.toBe(0);
-				expect(run.stderr).toMatch(/1 NEW finding/);
-				expect(run.stderr).toMatch(/no-raw-json-store-write/);
-				expect(run.stderr).not.toMatch(/advisory-registry-subset/);
-			} finally {
-				removeTempDirSync(dir);
+				return String(
+					gitExecFileSync(["rev-parse", "HEAD"], { cwd: dir }),
+				).trim();
 			}
+
+			/** Base commit holds subset hits in changed.ts and unchanged.ts (plus
+			 * a gating violation in gating.ts when asked); the head commit
+			 * edits only changed.ts. Returns the temp repo and the base sha. */
+			function makeRepo(withGating: boolean): { dir: string; base: string } {
+				const dir = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-pilens-selfscan-diff-"),
+				);
+				gitExecFileSync(["init", "-q"], { cwd: dir });
+				fs.writeFileSync(path.join(dir, "changed.ts"), SUBSET, "utf-8");
+				fs.writeFileSync(path.join(dir, "unchanged.ts"), SUBSET, "utf-8");
+				if (withGating) {
+					fs.writeFileSync(path.join(dir, "gating.ts"), VIOLATION, "utf-8");
+				}
+				const base = commit(dir, "base");
+				fs.appendFileSync(path.join(dir, "changed.ts"), "// touched\n");
+				commit(dir, "head");
+				return { dir, base };
+			}
+
+			it("prints an advisory hit in a changed file and exits 0", () => {
+				const { dir, base } = makeRepo(false);
+				try {
+					const run = runWrapper(["--base", base, dir], NO_BASE_ENV, dir);
+					expect(run.status, run.stdout + run.stderr).toBe(0);
+					expect(run.stdout).toMatch(
+						/advisory advisory-registry-subset .*changed\.ts:1/,
+					);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("stays silent for an advisory hit in an unchanged file", () => {
+				const { dir, base } = makeRepo(false);
+				try {
+					const run = runWrapper(["--base", base, dir], NO_BASE_ENV, dir);
+					expect(run.status, run.stdout + run.stderr).toBe(0);
+					// The scan ran (not a vacuous pass on a failed run) ...
+					expect(run.stdout).toMatch(/scanned \d+ file\(s\)/);
+					// ... and the unchanged file's hit is not reported.
+					expect(run.stdout).not.toMatch(/unchanged\.ts/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("reports every advisory hit with --all-advisory and no base", () => {
+				const { dir } = makeRepo(false);
+				try {
+					const run = runWrapper(["--all-advisory", dir], NO_BASE_ENV, dir);
+					expect(run.status, run.stdout + run.stderr).toBe(0);
+					expect(run.stdout).toMatch(/advisory .*changed\.ts:1/);
+					expect(run.stdout).toMatch(/advisory .*unchanged\.ts:1/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("reports nothing, and says why, when there is no diff base", () => {
+				const { dir } = makeRepo(false);
+				try {
+					const run = runWrapper([dir], NO_BASE_ENV, dir);
+					expect(run.status, run.stdout + run.stderr).toBe(0);
+					expect(run.stdout).not.toMatch(/advisory advisory-registry-subset/);
+					expect(run.stdout).toMatch(/advisory hit\(s\) not reported/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("takes the base from GITHUB_BASE_REF as origin/<ref>", () => {
+				const { dir, base } = makeRepo(false);
+				try {
+					gitExecFileSync(["update-ref", "refs/remotes/origin/main", base], {
+						cwd: dir,
+					});
+					const run = runWrapper([dir], { GITHUB_BASE_REF: "main" }, dir);
+					expect(run.stdout).toMatch(/advisory .*changed\.ts:1/);
+					expect(run.stdout).not.toMatch(/unchanged\.ts/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("warns and still exits 0 when the base cannot be diffed", () => {
+				const { dir } = makeRepo(false);
+				try {
+					const run = runWrapper(
+						["--base", "no-such-ref", dir],
+						NO_BASE_ENV,
+						dir,
+					);
+					expect(run.status, run.stdout + run.stderr).toBe(0);
+					expect(run.stdout + run.stderr).toMatch(/could not diff against/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
+
+			it("still exits NONZERO for a gating hit in an unchanged file", () => {
+				const { dir, base } = makeRepo(true);
+				try {
+					const run = runWrapper(["--base", base, dir], NO_BASE_ENV, dir);
+					expect(run.status).not.toBe(0);
+					expect(run.stderr).toMatch(/1 NEW finding/);
+					expect(run.stderr).toMatch(/gating\.ts/);
+					expect(run.stderr).not.toMatch(/advisory-registry-subset/);
+				} finally {
+					removeTempDirSync(dir);
+				}
+			});
 		});
 	});
 });
