@@ -2514,6 +2514,7 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		"git config --add core.hooksPath /x",
 		"git config set core.hooksPath /x",
 		"git config unset core.hooksPath",
+		"git config core.hookspath /x",
 		// the bypass variables the repo's hook runner honours
 		"HUSKY=0 git commit -m x",
 		'HUSKY="0" git push origin y',
@@ -2547,6 +2548,10 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		'git commit -m "drop --no-verify from the runbook"',
 		'git commit -m "--no-verify"',
 		'git commit -m "-n"',
+		'git commit --message "--no-verify"',
+		'git commit -F "-n"',
+		'git commit --file "--no-verify"',
+		'git merge -m "--no-verify" origin/master',
 		"git commit -F msg.txt",
 		"git commit -am x",
 		"git commit -mn",
@@ -2588,6 +2593,11 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		const result = runHook(command);
 		expect(result.status).toBe(0);
 		expect(result.stderr).toBe("");
+	});
+
+	// -<letter>n... with a value-taking letter first is a value, not `-n`.
+	it.each([..."mFCctuS"])("commit -%s<value with n> is not a bypass", (l) => {
+		expect(findDeny(`git commit -${l}nx`)).toBeNull();
 	});
 
 	it("declares hookBypass in the DenyRule union the .d.mts exports", () => {

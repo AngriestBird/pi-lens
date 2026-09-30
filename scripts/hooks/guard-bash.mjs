@@ -1044,66 +1044,19 @@ function collectPositionals(args, valueFlags) {
 /** The git subcommands whose hooks `--no-verify` and friends skip (#3778). */
 const HOOK_SUBCOMMANDS = new Set(["commit", "push", "merge", "rebase"]);
 
-/** Flags whose SEPARATE next token is a value, per subcommand -- so a
- *  `-m "--no-verify"` message is never read as the flag it quotes. Short
- *  letters differ by subcommand (`-o` is `--only` on commit but a push
- *  option on push), hence one set each. */
-const HOOK_SUBCOMMAND_VALUE_FLAGS = {
-	commit: new Set([
-		"-m",
-		"-F",
-		"-C",
-		"-c",
-		"-t",
-		"--message",
-		"--file",
-		"--author",
-		"--date",
-		"--reuse-message",
-		"--reedit-message",
-		"--fixup",
-		"--squash",
-		"--template",
-		"--trailer",
-		"--cleanup",
-		"--pathspec-from-file",
-	]),
-	push: new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec"]),
-	merge: new Set([
-		"-m",
-		"-F",
-		"-s",
-		"-X",
-		"--message",
-		"--file",
-		"--strategy",
-		"--strategy-option",
-		"--into-name",
-	]),
-	rebase: new Set([
-		"-s",
-		"-X",
-		"-x",
-		"--exec",
-		"--onto",
-		"--strategy",
-		"--strategy-option",
-	]),
-};
+/** Message flags whose SEPARATE next token is text, not a flag -- so a
+ *  `git commit -m "--no-verify"` is never read as the flag it quotes. Applies
+ *  to `commit` and `merge` only: on `rebase` `-m` takes no value, and no
+ *  `push` flag carries message text. */
+const MESSAGE_VALUE_FLAGS = new Set(["-m", "-F", "--message", "--file"]);
 
 /** `git commit` short options that take a value (the rest of the bundle, or
  *  the next token), so a bundle such as `-mn` stops being flags at `m`. */
 const COMMIT_VALUE_LETTERS = "mFCctuS";
 
-/** `git config` flags that write or remove a key without a trailing value. */
-const CONFIG_WRITE_FLAGS = new Set([
-	"--unset",
-	"--unset-all",
-	"--add",
-	"--replace-all",
-	"set",
-	"unset",
-]);
+/** `git config` words that remove a key, leaving no trailing value to see
+ *  (a SET always has a value after the key). */
+const CONFIG_UNSET_WORDS = new Set(["--unset", "--unset-all", "unset"]);
 
 /**
  * Does the env carry a variable the repo's husky hooks honour as an opt-out
@@ -1157,21 +1110,18 @@ function classifyHookBypass(args, i, env) {
 		const key = rest.findIndex((a) => /^core\.hookspath$/i.test(a));
 		if (key === -1) return false;
 		return (
-			rest.some((a) => CONFIG_WRITE_FLAGS.has(a)) ||
+			rest.some((a) => CONFIG_UNSET_WORDS.has(a)) ||
 			(rest[key + 1] !== undefined && !rest[key + 1].startsWith("-"))
 		);
 	}
 	if (!HOOK_SUBCOMMANDS.has(subcommand)) return false;
 	if (hasHookSkipEnv(env)) return true;
 	if (args.slice(0, i).some((a) => /core\.hookspath/i.test(a))) return true;
-	const valueFlags =
-		HOOK_SUBCOMMAND_VALUE_FLAGS[
-			/** @type {"commit" | "push" | "merge" | "rebase"} */ (subcommand)
-		];
+	const skipsMessageValues = subcommand === "commit" || subcommand === "merge";
 	for (let j = i + 1; j < args.length; j++) {
 		const a = args[j];
 		if (a === "--") break;
-		if (valueFlags.has(a)) {
+		if (skipsMessageValues && MESSAGE_VALUE_FLAGS.has(a)) {
 			j++;
 			continue;
 		}
