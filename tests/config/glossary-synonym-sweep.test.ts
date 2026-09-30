@@ -907,7 +907,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/package-manager.ts": 20,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
-		"clients/path-utils.ts": 30,
+		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
+		// path locals; the legacy walker body is back to its pre-#3649 text.
+		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 7,
@@ -964,7 +966,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/source-walker.ts": 3,
 		"clients/spawn-timeout-cooldown.ts": 3,
 		"clients/startup-scan.ts": 11,
-		"clients/test-runner-client.ts": 61,
+		// 61 -> 66: filesystem ownership/discovery operations plus the alias
+		// exception's physical policy-relative path (R4). These remain filesystem
+		// operations, not delivery lanes; the census measures every use.
+		"clients/test-runner-client.ts": 66,
 		"clients/todo-scanner.ts": 3,
 		"clients/tool-agreement.ts": 4,
 		"clients/tool-cwd.ts": 13,
@@ -1022,10 +1027,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-snapshot.ts": 10,
 		"clients/read-bridge.ts": 1,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 22,
-		"clients/runtime-agent-end.ts": 54,
+		"clients/read-guard.ts": 20,
+		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
-		"clients/runtime-coordinator.ts": 16,
+		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		"clients/runtime-turn.ts": 6,

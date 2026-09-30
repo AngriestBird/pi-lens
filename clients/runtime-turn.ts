@@ -2632,24 +2632,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					);
 					continue;
 				}
-				// #2522: built-in exclusion for turn-end SELECTION — a resolved
-				// target under an integration/e2e directory or naming convention
-				// is never auto-fired, whichever strategy (failed-first/related/
-				// self) produced it. No per-project config knob (maintainer
-				// decision); see `TURN_END_EXCLUDED_TEST_GLOBS`.
-				// LATENT HAZARD, deliberately left as-is: this `continue` skips the
-				// candidate entirely, including `retireMissingFailedTargets`. If an
-				// excluded target were ever seeded into the persisted failed set
-				// (it cannot be today — nothing writes that set except a runner
-				// RESULT, and an excluded target is never run, so it can never
-				// produce one), it would sit there unretired forever, chosen by
-				// the failed-first strategy on every turn and dropped here on
-				// every turn. Any future writer of the failed set must retire
-				// excluded entries at the write site, not here.
+				// #2522: the shared turn-end gate excludes integration/e2e targets,
+				// out-of-tree files, and foreign Git checkouts, whichever strategy
+				// (failed-first/related/self) produced the target. No project knob.
+				// Cache admission and retirement reject foreign-checkout failures;
+				// this gate still covers self/related discovery and deferred targets.
+				// The log must not claim a specific cause from a boolean verdict.
 				if (isExcludedTestTarget(target.testFile, cwd)) {
 					excludedTargets++;
 					dbg(
-						`turn_end: ${display} → test target excluded (integration/e2e), skipping spawn (${path.relative(cwd, target.testFile)})`,
+						`turn_end: ${display} → test target excluded by the built-in turn-end policy, skipping spawn (${path.relative(cwd, target.testFile)})`,
 					);
 					continue;
 				}
@@ -2681,7 +2673,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		if (excludedTargets > 0) {
 			dbg(
-				`turn_end: excluded ${excludedTargets} test target(s) under the built-in integration/e2e exclusion list`,
+				`turn_end: excluded ${excludedTargets} test target(s) by the built-in turn-end policy`,
 			);
 		}
 		if (retiredSkips > 0) {

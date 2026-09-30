@@ -1565,13 +1565,24 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would add a second timer per target.",
 		owner: "#2523 slice 3",
 	},
-	"index.ts#0aa50b6e~d0186439": {
+	"index.ts#037ff762~80c6c04d": {
 		family: "hook-await",
 		site: "agent_settled",
 		reason:
 			"`onAgentSettled` awaits its three phases in sequence with no " +
 			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance.",
+			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
+			"the settle's branch epoch.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#03f9a37d~c085098b": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
+			"the settle's branch epoch.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#1946ceb9~8beff560": {
@@ -1600,15 +1611,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(index.ts:3138). Its `getAutofixClients` closure is the " +
 			"`loadBootstrapClients()` #2523 names under agent_settled; " +
 			"runtime-agent-end.ts:347 is the consumer.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#2c2d49c9~adf2e1af": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#2ccc914e~d8df7429": {
@@ -1717,6 +1719,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"module load and resolution above it have none.",
 		owner: "#2523 slice 2",
 	},
+	"index.ts#89b9a0a7~d16b873d": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`loadSessionState` — #2523's session_start list " +
+			"(index.ts:2245); #3521 moved it above the read-guard restore, " +
+			"which reads the same sidecar.",
+		owner: "#2523 slice 2",
+	},
 	"index.ts#a5c3de37~231f1f06": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1737,6 +1748,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"runtime-agent-end.ts:347 is the consumer.",
 		owner: "#2523 slice 2",
 	},
+	"index.ts#c9a30431~39590b7b": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`resolveReadGuardStartState` (#3521): the parent session file's " +
+			"header line and the parent's sidecar, the same sidecar I/O as the " +
+			"`loadSessionState` entry above, unbounded for the same reason.",
+		owner: "#2523 slice 2",
+	},
 	"index.ts#d628f09d~02fe26af": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1755,13 +1775,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"up to 1024 concurrent `fs.stat` with no wall bound. On a " +
 			"9p/slow filesystem (#462 measured 1.3ms per stat) that is " +
 			"seconds of unbounded startup.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#e3e3db09~8a678173": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`loadSessionState` — #2523's session_start list " + "(index.ts:2245).",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#e40e5ae4~44b2f503": {
@@ -2403,6 +2416,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
+	"clients/read-guard-branch.ts": 5,
 	"clients/recent-touches.ts": 8,
 	"clients/review-graph/builder.ts": 41,
 	"clients/safe-spawn.ts": 9,
