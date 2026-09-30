@@ -68,6 +68,9 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 - A fold verdict tables the ordered stages each site passes through and the
   count each stage sees, not only the participants: moving a filter one stage
   late can starve it of its population (#3166 r1).
+- A core-domain rule lives in its owning module; every other caller asks that
+  owner. A fix that re-derives an owned rule at a consumer is wrong: extend the
+  owner, or create a new one only with a stated reason (#3781, #3794, #3796).
 
 <important if="delegating work or coordinating a lane">
 
