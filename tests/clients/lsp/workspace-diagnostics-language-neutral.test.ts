@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setupTestEnvironment } from "../test-utils.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
@@ -18,7 +19,8 @@ import { CacheManager } from "../../../clients/cache-manager.js";
 import { importFactsApplyTo } from "../../../clients/dispatch/facts/import-facts.js";
 import { LANGUAGES } from "../../../clients/language-registry.js";
 
-const root = fs.mkdtempSync(path.join(process.cwd(), ".probe-lsp-language-"));
+const probe = setupTestEnvironment("pi-lens-lsp-language-");
+const root = probe.tmpDir;
 const workspace = path.join(root, "workspace");
 const fakeServer = fileURLToPath(
 	new URL("../../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -118,8 +120,8 @@ describe("language-neutral workspace resync (#2817)", () => {
 	afterAll(async () => {
 		const { resetLSPService } = await import("../../../clients/lsp/index.js");
 		resetLSPService({ reason: "test" });
-		fs.rmSync(root, { recursive: true, force: true });
 		delete process.env.FAKE_LSP_TRACE_FILE;
+		probe.cleanup();
 	});
 
 	it("resyncs one facts and one no-facts registry language via the real server", async () => {
