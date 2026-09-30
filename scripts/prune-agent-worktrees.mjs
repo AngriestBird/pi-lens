@@ -1681,7 +1681,13 @@ async function main(argv) {
 
 	// #3694: ONE snapshot for both planners -- the age sweep and the merged
 	// sweep each remove trees and kill what is inside them.
-	const liveCwds = liveProcessCwds();
+	// PI_LENS_PRUNE_PROC_ROOT is the tests' handle on the "scan unknowable"
+	// path (a nonexistent root reads as null), which no Linux run can reach
+	// through the real /proc. An unreadable root only ever makes the sweep MORE
+	// conservative (the age rails), never less.
+	const liveCwds = liveProcessCwds(
+		process.env.PI_LENS_PRUNE_PROC_ROOT || undefined,
+	);
 	const plan = planWorktreePrune({
 		worktrees: candidates,
 		nowMs,

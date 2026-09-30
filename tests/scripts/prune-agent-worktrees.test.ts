@@ -1710,6 +1710,36 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		},
 	);
 
+	// F6 through main(): when the cwd scan is unknowable (macOS, Windows, a
+	// hidden pid namespace -- forced here with a proc root that does not exist)
+	// prune must not become a no-op. A recently active merged tree is kept; a
+	// quiet one (`--min-age 0`) is removed. Kills main() dropping `minAgeMs`
+	// from the merged call (M27) and the null-means-keep-everything regression.
+	it(
+		"with an unknowable cwd scan, keeps recently active merged trees and removes quiet ones (#3694 F6)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "unknown-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9302", merged], repo);
+			const unknownScan = {
+				PI_LENS_PRUNE_PROC_ROOT: path.join(root, "no-proc"),
+			};
+			const run = (...extra: string[]) =>
+				JSON.parse(
+					runCli(
+						["--dry-run", "--no-orphan-sweep", "--json", ...extra],
+						"",
+						unknownScan,
+					),
+				) as Dry;
+			const recent = run();
+			expect(planned(recent, merged)).toBe(false);
+			expect(keptAs(recent.mergedKeep, merged)).toBe("live-cwd-unknown");
+			expect(planned(run("--min-age", "0"), merged)).toBe(true);
+		},
+	);
+
 	// The age planner's own signature: a pushed-but-UNMERGED agent tree is
 	// invisible to the merged pass ("unmerged"), so only main()'s call into
 	// planWorktreePrune can keep it (mutation M10a).
