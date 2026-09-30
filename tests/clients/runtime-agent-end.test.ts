@@ -2784,6 +2784,34 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 		});
 	}
 
+	// The inverse merge: X's record is requeued into one that branch Y queued
+	// while X's drain awaited its formatter (the /tree landed in between).
+	it("credits an older requeued format merged into a record branch Y queued meanwhile", async () => {
+		expect(
+			await acrossSettles({
+				onX: async (runtime, filePath, base, cwd) => {
+					runtime.deferFormat(filePath, cwd, "edit", cwd);
+					await handleAgentEnd({
+						...base,
+						runtime,
+						readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
+						getFormatService: () =>
+							({
+								recordRead: () => {},
+								formatFile: async () => {
+									runtime.readGuard.retainBranch(new Set());
+									runtime.deferFormat(filePath, cwd, "edit", cwd);
+									throw new Error("formatter crashed");
+								},
+							}) as any,
+					});
+					expect(runtime.pendingDeferredMutationCount).toBe(1);
+				},
+				moved: false,
+			}),
+		).toBe("allow");
+	});
+
 	// T7: a record the drain requeues merges into one that a stale sweep entry
 	// created while the drain awaited its formatter; the merged record keeps the
 	// newer epoch.
