@@ -981,44 +981,50 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 	// carries its own), and a producer without one cannot hold an epoch at
 	// all, so the value is ignored like a malformed one. The recurrence: a
 	// forward epoch that silently loses its write's format pass.
-	for (const readGuardOn of [true, false]) {
-		it(`ignores an epoch above the live one from a producer without a lineage, and queues its write (read guard ${readGuardOn ? "on" : "off"})`, () => {
-			withScopes(
-				`forward-${readGuardOn ? "on" : "off"}`,
-				({ filePath, tmpDir, runtime, cacheManager }) => {
-					expect(runtime.readGuard.currentBranchEpoch).toBe(0);
-					recordMutationThroughSeam(
-						{
-							filePath,
-							kind: "edit",
-							touchedLines: [1, 2],
-							consumer: "third-party",
-							readGuardBranchEpoch: 5,
-						},
-						makeDeps({
-							tmpDir,
-							runtime,
-							cacheManager,
-							shouldStampReadGuard: () => readGuardOn,
-						}),
-					);
-					expect({
-						verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
-						queued: runtime
-							.consumeDeferredFormatFiles()
-							.map((record) => record.readGuardBranchEpoch),
-						recorded: getDegradationSummary().find(
-							(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
-						)?.count,
-					}).toEqual({
-						verdict: readGuardOn ? "allow" : "block",
-						queued: [0],
-						recorded: 1,
-					});
-				},
-			);
-		});
+	function forwardEpochCase(readGuardOn: boolean): void {
+		withScopes(
+			`forward-${readGuardOn ? "on" : "off"}`,
+			({ filePath, tmpDir, runtime, cacheManager }) => {
+				expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						consumer: "third-party",
+						readGuardBranchEpoch: 5,
+					},
+					makeDeps({
+						tmpDir,
+						runtime,
+						cacheManager,
+						shouldStampReadGuard: () => readGuardOn,
+					}),
+				);
+				expect({
+					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+					queued: runtime
+						.consumeDeferredFormatFiles()
+						.map((record) => record.readGuardBranchEpoch),
+					recorded: getDegradationSummary().find(
+						(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+					)?.count,
+				}).toEqual({
+					verdict: readGuardOn ? "allow" : "block",
+					queued: [0],
+					recorded: 1,
+				});
+			},
+		);
 	}
+
+	it("ignores an epoch above the live one from a producer without a lineage, and queues its write (read guard on)", () => {
+		forwardEpochCase(true);
+	});
+
+	it("ignores an epoch above the live one from a producer without a lineage, and queues its write (read guard off)", () => {
+		forwardEpochCase(false);
+	});
 });
 
 describe("mutation bridge registration", () => {
