@@ -15,6 +15,8 @@
 // module turns "read the log, decide" into a function a human or an
 // orchestrator can call on a run id.
 
+import { CI_JOB_NAMES, isUnitTestsShardJobName } from "./ci-checks.mjs";
+
 /** Strips the ANSI color/cursor codes vitest's reporter and GitHub Actions
  * both wrap every line in. Every pattern below matches against the stripped
  * text -- matching raw escape-coded text is what makes log heuristics
@@ -755,9 +757,10 @@ async function fetchRunAndFailedJob({ fetcher, owner, repo, runId, jobName }) {
 		`${base}/actions/runs/${runId}/jobs`,
 	);
 	const jobs = jobsResponse.jobs ?? [];
-	const failedJob = jobName
-		? jobs.find((job) => job.conclusion === "failure" && job.name === jobName)
-		: jobs.find((job) => job.conclusion === "failure");
+	const failedJobs = jobName
+		? failedJobsNamed(jobs, jobName)
+		: jobs.filter((job) => job.conclusion === "failure").slice(0, 1);
+	const failedJob = failedJobs[0];
 	if (!failedJob) {
 		throw new Error(
 			`run ${runId} has no failed job${jobName ? ` named "${jobName}"` : ""}`,
@@ -773,8 +776,28 @@ async function fetchRunAndFailedJob({ fetcher, owner, repo, runId, jobName }) {
 		// (or a hand-rolled fixture) reads as attempt 1.
 		runAttempt: Number(run.run_attempt) || 1,
 		jobId: failedJob.id,
-		jobName: failedJob.name,
+		jobName: failedJobs.map((job) => job.name).join(", "),
+		jobIds: failedJobs.map((job) => job.id),
 	};
+}
+
+/**
+ * The failed jobs a `--job-name` selects. #3753: `Unit tests` is an aggregate
+ * check-run over `Unit tests (shard k/N)` matrix jobs, and the log the
+ * classifier must read (the failing test names, the exit-137 kill) is the
+ * shard's, not the aggregate's. Failed shard rows win when any exist; with
+ * none, an exact-name failure is the pre-sharding shape (a run from before
+ * #3753, or the aggregate failing on its own).
+ */
+function failedJobsNamed(jobs, jobName) {
+	const failed = jobs.filter((job) => job.conclusion === "failure");
+	const shards =
+		jobName === CI_JOB_NAMES.UNIT_TESTS
+			? failed.filter((job) => isUnitTestsShardJobName(job.name))
+			: [];
+	return shards.length > 0
+		? shards
+		: failed.filter((job) => job.name === jobName);
 }
 
 async function fetchJobLog({ fetcher, owner, repo, jobId }) {
@@ -972,6 +995,7 @@ export async function runClassifier({
 		prNumber: resolvedPrNumber,
 		runAttempt,
 		jobId,
+		jobIds,
 		jobName: resolvedJobName,
 	} = runAndJob;
 	const prNumber = prNumberOverride ?? resolvedPrNumber;
@@ -981,9 +1005,12 @@ export async function runClassifier({
 		);
 	}
 
-	let rawLog;
+	let rawLogs;
 	try {
-		rawLog = await fetchJobLog({ fetcher, owner, repo, jobId });
+		rawLogs = [];
+		for (const id of jobIds) {
+			rawLogs.push(await fetchJobLog({ fetcher, owner, repo, jobId: id }));
+		}
 	} catch (error) {
 		await commentClassificationFailure({
 			fetcher,
@@ -1008,7 +1035,12 @@ export async function runClassifier({
 		: null;
 	let classification;
 	try {
-		classification = classifyFailureLog(rawLog);
+		// One log per failed job (several failed shards, #3753). A real failure
+		// in ANY of them wins: a rerun that would only replay the infra-killed
+		// shard cannot fix a shard that is genuinely red.
+		const classified = rawLogs.map((rawLog) => classifyFailureLog(rawLog));
+		classification =
+			classified.find((entry) => entry.kind === "real") ?? classified[0];
 	} catch (error) {
 		await commentClassificationFailure({
 			fetcher,
