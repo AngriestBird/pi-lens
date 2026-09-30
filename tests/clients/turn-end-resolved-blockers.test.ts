@@ -490,6 +490,55 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 		}
 	});
 
+	it("keeps the overflow tail with the files it describes", () => {
+		// Recurrence (review-3776 F1 design): a batch that held every listed
+		// file back must not deliver a bare "… and N more", and must not lose
+		// the count the held files' own delivery will need.
+		const env = setupTestEnvironment("pi-lens-3218-tail-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			for (let index = 0; index < 11; index += 1) {
+				const file = path.join(env.tmpDir, `file-${index}.ts`);
+				fs.writeFileSync(file, "const a = 1;\n");
+				runtime.recordInlineBlockers(file, SUMMARY, 1, ["lsp"], [1, 2]);
+				runtime.clearInlineBlockers(file, 2);
+			}
+
+			expect(runtime.consumeResolvedBlockerFiles(() => true)).toEqual({
+				files: [],
+				dropped: 0,
+			});
+			const delivered = runtime.consumeResolvedBlockerFiles(() => false);
+			expect(delivered.files).toHaveLength(10);
+			expect(delivered.dropped).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("takes the read-only early return when nothing was retired", async () => {
+		// Recurrence guard for the read-only fall-through: a quiet turn (no
+		// modified files, nothing retired) must still return before the
+		// composer, which would emit a `turn_end` row and re-serve pending
+		// blockers on every read-only turn.
+		const env = setupTestEnvironment("pi-lens-3218-quiet-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+
+			const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toBe("");
+			expect(resolvedBlockerFileCounts()).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("drops a resolved entry when the file is blocking again", () => {
 		// Recurrence (review-3776 F1 design): a retained entry for a file that
 		// blocks again must not linger and turn into a false claim once the new
