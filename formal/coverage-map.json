@@ -20,7 +20,8 @@
     "session-straddle",
     "snapshot-freshness",
     "snapshot-promotion",
-    "store-freshness"
+    "store-freshness",
+    "tree-sitter-trap-budget"
   ],
   "map": {
     "clients/read-guard.ts": [
@@ -273,9 +274,13 @@
     "clients/dispatch/fact-store.ts": [
       "review-graph-signatures"
     ],
-    "clients/tree-sitter-client.ts": "unmodelled",
+    "clients/tree-sitter-client.ts": [
+      "tree-sitter-trap-budget"
+    ],
     "clients/tree-sitter-shared.ts": "unmodelled",
-    "clients/tree-sitter-symbol-extractor.ts": "unmodelled",
+    "clients/tree-sitter-symbol-extractor.ts": [
+      "tree-sitter-trap-budget"
+    ],
     "clients/workspace-topology.ts": "unmodelled",
     "clients/test-runner-client.ts": "unmodelled",
     "index.ts": [
@@ -296,7 +301,7 @@
     "clients/agent-nudge.ts": "The agent-advisories store (#3757, carried on /reload by #3777) belongs to session-lifecycle, which does not model it yet. The `_touched` accumulator is unscoped (#3758 class).",
     "clients/session-lifecycle.ts": "Primary/secondary classification. session-lifecycle's SecStart assumes a correct classifier; the #3662 gap classification (#3668, successor-pending marker, 60 s TTL) is not modelled.",
     "clients/dispatch/fact-store.ts": "review-graph-signatures' Extract is atomic, which assumes the #3746 private-store property; the pre-#3746 shared store is below its abstraction.",
-    "clients/tree-sitter-client.ts": "Wasm trap budget, per-input trap entries with first-trap identity, decay on success, batch-compile keys (#3673, #3706, #3731). Proposed new family: tree-sitter-trap-budget.",
+    "clients/tree-sitter-client.ts": "Wasm trap budget, per-input trap entries with first-trap identity, decay on success, batch-compile keys (#3673, #3706, #3731). Modelled by tree-sitter-trap-budget (#3829).",
     "clients/fix-run-restore.ts": "Whole-package fixer vs concurrent agent sibling edits, capture and compare-then-write restore outside pi's queue (#3741). Proposed: extend dispatch-pipeline.",
     "clients/lsp/edits.ts": "applyWorkspaceEdit under every path's queue (#3610) and the rename staleness capture (#3736, #3747, #3734). Proposed: new family lsp-rename-edit, or extend lsp-server-content.",
     "tools/lsp-navigation.ts": "See clients/lsp/edits.ts.",
