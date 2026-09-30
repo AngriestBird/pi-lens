@@ -109,7 +109,7 @@ describe("#3585 sweep pre-open backlog accounting", () => {
 	}
 
 	it("does not count a pre-open write the client refused", async () => {
-		const { ledgerAtWrite, aux } = await sweep(false);
+		const { ledgerAtWrite } = await sweep(false);
 		expect(ledgerAtWrite.length).toBeGreaterThan(1);
 		// The write after the refused pre-open sees an EMPTY ledger.
 		expect(ledgerAtWrite[1]).toBeUndefined();

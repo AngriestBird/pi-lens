@@ -146,7 +146,7 @@ describe("#3585 retireClient — one retirement for every path", () => {
 	let raw: Raw;
 	let key: string;
 	let first: Fake;
-	let resolveSettled: ReturnType<typeof vi.fn>;
+	let resolveSettled: ReturnType<typeof vi.fn<() => void>>;
 
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -162,7 +162,7 @@ describe("#3585 retireClient — one retirement for every path", () => {
 		raw = new LSPService() as unknown as Raw;
 		await raw.getClientForFile("/repo/main.ts");
 		key = [...raw.state.clients.keys()][0] as string;
-		resolveSettled = vi.fn();
+		resolveSettled = vi.fn<() => void>();
 		seedLifetimeState(raw, key, first, resolveSettled);
 	});
 
