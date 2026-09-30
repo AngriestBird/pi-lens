@@ -2491,6 +2491,7 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		// the other three subcommands the issue names
 		"git merge --no-verify origin/master",
 		"git rebase --no-verify origin/master",
+		"git rebase -m --no-verify origin/master", // rebase -m takes no value
 		// -n means --no-verify on `git commit`, alone or bundled
 		"git commit -n -m x",
 		"git commit -anm x",
@@ -2575,11 +2576,13 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		"git config --get core.hooksPath",
 		"git config --local --get core.hooksPath",
 		"git config get core.hooksPath",
+		"git config core.hooksPath --local",
 		"git config user.name x",
 		// env that is not the bypass, or not on a hook-running git command
 		"HUSKY=1 git commit -m x",
 		"HUSKY=0 npm install",
 		"PI_LENS_SKIP_HOOKS= git commit -m x",
+		"HUSKY=0 git status",
 		"echo HUSKY=0",
 		"export HUSKY=0",
 		// the sanctioned, recorded pre-push lock opt-out (#3717)
