@@ -1630,5 +1630,69 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 				expect.soft(missedSubjects()).toEqual([kind]);
 			});
 		}
+
+		/**
+		 * TLC's 5-step `HandoffOnce` trace (the #3835 review): the ticket key
+		 * alone left the primary's reload slot in place, because the gap
+		 * subagent's own fork took nothing. That subagent, now primary, runs
+		 * /new; in its gap the session it demoted reloads itself, classifies
+		 * primary, and took the stale slot its own predecessor never left.
+		 */
+		for (const store of ["file-backed", "in-memory"] as const) {
+			it(`never lets a later reload of the demoted ${store} session take its predecessor's slot`, async () => {
+				let primary: AgentSessionRuntime | undefined;
+				let subagent: AgentSessionRuntime | undefined;
+				let demotedReloaded = false;
+				const reloadDemotedInNewGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== "new") return;
+						if (demotedReloaded) return;
+						demotedReloaded = true;
+						await reload(primary!);
+					});
+				};
+				const forkInGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== "reload") return;
+						if (subagent) return;
+						subagent = await startRuntime(SessionManager.inMemory(cwd), [
+							reloadDemotedInNewGap,
+						]);
+						const s = conversation(subagent);
+						s.user("subagent prompt 1");
+						s.done();
+						const su2 = s.user("subagent prompt 2");
+						s.done();
+						await subagent.fork(su2);
+					});
+				};
+				primary = await startRuntime(
+					store === "file-backed"
+						? SessionManager.create(cwd, sessionsDir)
+						: SessionManager.inMemory(cwd),
+					[forkInGap],
+				);
+
+				// The reload leaves its slot; in its gap the subagent's own fork
+				// classifies primary and the real successor is demoted.
+				await reload(primary);
+				// The subagent's /new leaves no slot; in its gap the demoted
+				// session reloads itself and classifies primary.
+				await subagent!.newSession();
+
+				expect(demotedReloaded).toBe(true);
+				const reloadStarts = (await scopeTransitionRows()).filter(
+					(row) => row.transition === "start" && row.reason === "reload",
+				);
+				expect(
+					reloadStarts.map((row) => [row.role, row.handoffSource]),
+				).toEqual([
+					["secondary", undefined],
+					// The sidecar the first reload's shutdown saved, not the slot
+					// that shutdown left for the start it demoted.
+					["primary", "own-sidecar"],
+				]);
+			});
+		}
 	});
 });

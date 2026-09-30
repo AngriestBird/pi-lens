@@ -76,6 +76,10 @@
 (*                       ticket bound to the manager pi hands it           *)
 (*                       (Carrier); without it, both keys are undefined    *)
 (*                       and the reason alone matches                      *)
+(*   "clearOnStart"      #3819 (audit option a): every primary start       *)
+(*                       clears the slot after its take attempt, matched   *)
+(*                       or not, so no later start takes a slot left for   *)
+(*                       an earlier one                                    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -515,7 +519,7 @@ Begin ==
        /\ cell' = [cell EXCEPT ![t] = kept]
        /\ imp' = [imp EXCEPT ![t] = kept]
        /\ lin' = NewLin(k, t)
-       /\ slot' = IF takes THEN NoSlot ELSE slot
+       /\ slot' = IF takes \/ Has("clearOnStart") THEN NoSlot ELSE slot
        /\ taken' = IF takes THEN taken \cup {[by |-> t, from |-> slot.from]}
                    ELSE taken
        /\ act' = [act EXCEPT ![t] = abase]
@@ -730,7 +734,8 @@ SecReplace(k) ==
                        ELSE [lin EXCEPT ![f] = @ \cup {t}]
              /\ cell' = [cell EXCEPT ![s] = {}, ![t] = kept]
              /\ imp' = [imp EXCEPT ![t] = kept]
-             /\ slot' = IF takes THEN NoSlot ELSE slot
+             /\ slot' = IF takes \/ (asPrimary /\ Has("clearOnStart"))
+                        THEN NoSlot ELSE slot
              /\ taken' = IF takes
                          THEN taken \cup {[by |-> t, from |-> slot.from]}
                          ELSE taken

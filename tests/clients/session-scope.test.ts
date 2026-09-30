@@ -464,7 +464,7 @@ describe("#3612 adoptHandoff", () => {
 		expect(missedSubjects()).toEqual(["reload"]);
 	});
 
-	it("resumes from the session's own sidecar before its parent's, and never takes the slot", async () => {
+	it("resumes from the session's own sidecar before its parent's, and clears the slot without adopting it", async () => {
 		const manager = {};
 		const left = scopeWith(["ast_grep_search"]);
 		stashHandoff(left, {
@@ -483,7 +483,8 @@ describe("#3612 adoptHandoff", () => {
 
 		expect(await resume.source).toBe("own-sidecar");
 		expect([...getRememberedLazyTools(resume.scope)]).toEqual(["own"]);
-		expect(takeHandoff("fork", left.scopeId)).toBeDefined();
+		// #3819 (option a): no slot outlives a primary start.
+		expect(takeHandoff("fork", left.scopeId)).toBeUndefined();
 		expect(missedSubjects()).toEqual([]);
 	});
 
@@ -492,17 +493,20 @@ describe("#3612 adoptHandoff", () => {
 	// subagent's own start carries another manager.
 	it("takes a file-less slot only through the session manager it was left from", async () => {
 		const primaryManager = {};
-		stashHandoff(scopeWith(["ast_grep_search"]), {
-			reason: "reload",
-			sessionFile: undefined,
-			targetSessionFile: undefined,
-			sessionManager: primaryManager,
-		});
+		const leave = () =>
+			stashHandoff(scopeWith(["ast_grep_search"]), {
+				reason: "reload",
+				sessionFile: undefined,
+				targetSessionFile: undefined,
+				sessionManager: primaryManager,
+			});
+		leave();
 
 		const subagent = start("reload", undefined, undefined, undefined, {});
 		expect(await subagent.source).toBe("none");
 		expect([...getRememberedLazyTools(subagent.scope)]).toEqual([]);
 
+		leave();
 		const successor = start(
 			"reload",
 			undefined,
@@ -515,6 +519,23 @@ describe("#3612 adoptHandoff", () => {
 			"ast_grep_search",
 		]);
 		expect(missedSubjects()).toEqual(["reload"]);
+	});
+
+	// #3819 (option a, TLC's 5-step HandoffOnce trace): a gap subagent's own
+	// fork classifies primary and leaves the reload slot; the session it
+	// demoted later reloads and took that stale slot.
+	it("clears the slot at a primary start it was not left for, so no later start takes it", async () => {
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "reload",
+			sessionFile: "/s/own.jsonl",
+			targetSessionFile: undefined,
+		});
+
+		const subagentFork = start("fork", "/s/subagent-fork.jsonl");
+		expect(await subagentFork.source).toBe("none");
+		const demotedReload = start("reload", "/s/own.jsonl");
+		expect(await demotedReload.source).toBe("none");
+		expect([...getRememberedLazyTools(demotedReload.scope)]).toEqual([]);
 	});
 
 	it("starts `pi --fork` (a startup with a parent) from the parent's sidecar", async () => {

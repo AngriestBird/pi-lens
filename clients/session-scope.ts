@@ -544,6 +544,11 @@ export async function adoptHandoff(
 			break;
 		}
 	}
+	// #3819 (option a): no slot outlives a primary start. The start it was
+	// left for took it above; any other one (a gap subagent's own reload or
+	// fork, #3668 row 17) must not leave it for a later start of the session
+	// that start demoted.
+	handoffSlot().handoff = undefined;
 	if (SOURCES[reason][0] === "slot" && source !== "slot")
 		recordDegradationOnce({
 			kind: "session-scope-handoff-missed",
