@@ -36,9 +36,10 @@ export interface ArgumentReport {
 	/** Schema-required keys the caller did not send. */
 	missingRequired: string[];
 	/**
-	 * Ignored keys whose suggestion is a declared key the call did NOT send
-	 * (`filePath` where `path` was meant): the caller's intent is lost, not
-	 * merely decorated with an extra key.
+	 * Ignored keys that are a declared key the call did NOT send, written
+	 * another way (`filePath` for `path`): the caller's intent is lost, not
+	 * merely decorated with an extra key. Decided by `refusalMatches` only,
+	 * never by the loose hint.
 	 */
 	unsentSuggestions: { key: string; suggestion: string }[];
 }
@@ -85,6 +86,47 @@ function nearestDeclaredKey(
 	return best?.key;
 }
 
+/** Lower-cased camelCase / snake_case / kebab tokens, each without a plural `s`. */
+function tokensOf(key: string): string[] {
+	return key
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.map((token) => token.replace(/s$/, ""))
+		.filter(Boolean);
+}
+
+/**
+ * The REFUSAL predicate (#3749, named in docs/public-api-stability.md): the
+ * declared keys that `key` is, exactly, written another way. A declared key
+ * matches when its tokens (a) equal the ignored key's tokens joined (case and
+ * punctuation folded: `Path`, `PATH`, `Server_Scope` for `serverScope`), or (b)
+ * are the TRAILING tokens of the ignored key, its head noun (`filePath` and
+ * `file_path` end in the token `path`; `pathName` and `sourcePath` do not end
+ * in `path` / `source`). A plural `s` is ignored on either side (`paths` for
+ * `path`). Reverse containment, abbreviations, typos, leading or middle tokens
+ * and substrings (`files` for `maxLspFiles`, `file` for `path`) never match:
+ * those stay a warning, because refusing on them sent callers to the wrong
+ * parameter. A folded-equal match decides alone; suffix matches count only when none exists.
+ */
+export function refusalMatches(
+	key: string,
+	declared: readonly string[],
+): string[] {
+	const tokens = tokensOf(key);
+	const folded = tokens.join("");
+	const equal: string[] = [];
+	const suffix: string[] = [];
+	for (const candidate of declared) {
+		const wanted = tokensOf(candidate);
+		if (wanted.length === 0) continue;
+		if (folded === wanted.join("")) equal.push(candidate);
+		else if (tokens.slice(-wanted.length).join(" ") === wanted.join(" "))
+			suffix.push(candidate);
+	}
+	return equal.length > 0 ? equal : suffix;
+}
+
 /**
  * Compare a call's arguments with the tool's declared schema. `undefined`
  * when every key is declared (the call is untouched). An own-property test,
@@ -96,25 +138,29 @@ export function findIgnoredArguments(
 ): ArgumentReport | undefined {
 	const properties = schema.properties ?? {};
 	const declared = Object.keys(properties);
+	const unsentSuggestions: ArgumentReport["unsentSuggestions"] = [];
 	const ignored = Object.keys(args)
 		.filter((key) => !Object.hasOwn(properties, key))
 		.map((key): IgnoredArgument => {
-			const suggestion = nearestDeclaredKey(key, declared);
+			const matches = refusalMatches(key, declared);
+			// Sending any one spelling of the parameter (`path` or `paths`) settles it.
+			const unsent = matches.some((match) => Object.hasOwn(args, match))
+				? undefined
+				: matches[0];
+			if (
+				unsent !== undefined &&
+				!unsentSuggestions.some((entry) => entry.suggestion === unsent)
+			)
+				unsentSuggestions.push({ key, suggestion: unsent });
+			// The hint prefers the refusal match, so the line and the refusal agree.
+			const suggestion =
+				unsent ?? matches[0] ?? nearestDeclaredKey(key, declared);
 			return suggestion === undefined ? { key } : { key, suggestion };
 		});
 	if (ignored.length === 0) return undefined;
 	const missingRequired = (schema.required ?? []).filter(
 		(key) => !Object.hasOwn(args, key),
 	);
-	const unsentSuggestions: ArgumentReport["unsentSuggestions"] = [];
-	for (const { key, suggestion } of ignored) {
-		if (
-			suggestion !== undefined &&
-			!Object.hasOwn(args, suggestion) &&
-			!unsentSuggestions.some((entry) => entry.suggestion === suggestion)
-		)
-			unsentSuggestions.push({ key, suggestion });
-	}
 	return { ignored, missingRequired, unsentSuggestions };
 }
 

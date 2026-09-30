@@ -1929,12 +1929,33 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 			return;
 		case "tools/call": {
 			const name = params?.name;
-			const args =
-				params?.arguments && typeof params.arguments === "object"
-					? (params.arguments as Record<string, unknown>)
-					: {};
+			// #3749: `arguments` is an object. Absent, null and an empty array (what
+			// some clients send for "no arguments") mean none; any other non-object
+			// used to be read as `{}` (or, for a non-empty array, as keys "0", "1"),
+			// dropping what the caller sent.
+			const rawArguments: unknown = params?.arguments;
+			const argumentsAreObject =
+				typeof rawArguments === "object" &&
+				rawArguments !== null &&
+				!Array.isArray(rawArguments);
+			const args = argumentsAreObject
+				? (rawArguments as Record<string, unknown>)
+				: {};
 			if (typeof name !== "string") {
 				sendError(id ?? null, -32602, "tools/call requires a string 'name'");
+				return;
+			}
+			if (
+				!argumentsAreObject &&
+				rawArguments !== undefined &&
+				rawArguments !== null &&
+				!(Array.isArray(rawArguments) && rawArguments.length === 0)
+			) {
+				sendError(
+					id ?? null,
+					-32602,
+					"tools/call 'arguments' must be an object",
+				);
 				return;
 			}
 			const enabledName =

@@ -15,6 +15,7 @@ import {
 	ignoredArgumentsStructured,
 	MAX_REPORTED_KEY_CHARS,
 	MAX_REPORTED_KEYS,
+	refusalMatches,
 	refusalResult,
 	withIgnoredArguments,
 } from "../../mcp/tool-arguments.js";
@@ -39,7 +40,9 @@ describe("findIgnoredArguments", () => {
 		expect(findIgnoredArguments(ANALYZE, { filePath: "a.ts" })).toEqual({
 			ignored: [{ key: "filePath", suggestion: "file" }],
 			missingRequired: ["file"],
-			unsentSuggestions: [{ key: "filePath", suggestion: "file" }],
+			// `file` leads `filePath`; it is not its head noun, so the call is refused
+			// by the required key alone, never by the refusal predicate.
+			unsentSuggestions: [],
 		});
 		expect(
 			findIgnoredArguments(DIAGNOSTICS, { filePath: "a.ts" })?.ignored,
@@ -53,22 +56,18 @@ describe("findIgnoredArguments", () => {
 		// Several candidates: the closest in length wins, a tie keeps the first.
 		expect(
 			findIgnoredArguments(
-				{ properties: { path: {}, filepath: {} } },
-				{ filePaths: 1 },
+				{ properties: { pathway: {}, pathwaya: {} } },
+				{ pathwayx: 1 },
 			)?.ignored,
-		).toEqual([{ key: "filePaths", suggestion: "filepath" }]);
+		).toEqual([{ key: "pathwayx", suggestion: "pathwaya" }]);
 		expect(
-			findIgnoredArguments(
-				{ properties: { file: {}, path: {} } },
-				{ filePath: 1 },
-			)?.ignored,
-		).toEqual([{ key: "filePath", suggestion: "file" }]);
+			findIgnoredArguments({ properties: { abce: {}, abcf: {} } }, { abcd: 1 })
+				?.ignored,
+		).toEqual([{ key: "abcd", suggestion: "abce" }]);
 		expect(
-			findIgnoredArguments(
-				{ properties: { path: {}, file: {} } },
-				{ filePath: 1 },
-			)?.ignored,
-		).toEqual([{ key: "filePath", suggestion: "path" }]);
+			findIgnoredArguments({ properties: { abcf: {}, abce: {} } }, { abcd: 1 })
+				?.ignored,
+		).toEqual([{ key: "abcd", suggestion: "abcf" }]);
 		// One character dropped, added or replaced; two edits is not a typo.
 		expect(findIgnoredArguments(ANALYZE, { modee: 1 })?.ignored).toEqual([
 			{ key: "modee", suggestion: "mode" },
@@ -225,18 +224,18 @@ describe("refusalResult", () => {
 		);
 	});
 
-	it("names both reasons when a required key and a different suggested key are unsent", () => {
+	it("names both reasons when a required key and a different spelled-out key are unsent", () => {
 		const report = reportFor(
 			{ properties: { file: {}, path: {} }, required: ["file"] },
-			{ pth: 1 },
+			{ Path: 1 },
 		);
 		expect(refusalResult("t", report)?.content[0].text).toContain(
-			"\nNot run: required argument(s) `file` missing; `pth` looks like a mistyped `path`, which was not sent.",
+			"\nNot run: required argument(s) `file` missing; `Path` looks like a mistyped `path`, which was not sent.",
 		);
 	});
 
 	it("lists an unsent suggestion once however many ignored keys point at it", () => {
-		const report = reportFor(DIAGNOSTICS, { filePath: 1, pathName: 2 });
+		const report = reportFor(DIAGNOSTICS, { filePath: 1, dir_path: 2 });
 		expect(report.unsentSuggestions).toEqual([
 			{ key: "filePath", suggestion: "path" },
 		]);
@@ -261,5 +260,77 @@ describe("refusalResult", () => {
 				reportFor(DIAGNOSTICS, { zzzzzz: 1 }),
 			),
 		).toBeUndefined();
+	});
+});
+
+// Recurrence (#3749 review F1): the refusal gate reused the loose hint scorer and
+// refused calls on WRONG matches (`files` -> `maxLspFiles`, `filePath` ->
+// `newFilePath` on lsp_navigation), a call master ran. The gate is this
+// predicate alone; the live-schema table is in tests/mcp/server.smoke.test.ts.
+describe("refusalMatches", () => {
+	it("matches a declared key written another way: case, punctuation, plural, head noun", () => {
+		const rows: [string, string[], string[]][] = [
+			["filePath", ["path"], ["path"]],
+			["file_path", ["path"], ["path"]],
+			["file-path", ["path"], ["path"]],
+			["Path", ["path"], ["path"]],
+			["PATH", ["path"], ["path"]],
+			["paths", ["path"], ["path"]],
+			["path", ["paths"], ["paths"]],
+			["kind", ["kinds"], ["kinds"]],
+			["Server_Scope", ["scope", "serverScope"], ["serverScope"]],
+			["MaxLspFiles", ["maxLspFiles"], ["maxLspFiles"]],
+			["dirPath", ["file", "path"], ["path"]],
+		];
+		for (const [key, declared, expected] of rows)
+			expect(refusalMatches(key, declared), key).toEqual(expected);
+	});
+
+	it("never matches a typo, an abbreviation, a substring, a leading word or the reverse containment", () => {
+		const rows: [string, string[]][] = [
+			["files", ["maxLspFiles", "path"]],
+			["file", ["path", "newFilePath"]],
+			["pathName", ["path"]],
+			["sourcePath", ["source"]],
+			["modee", ["mode"]],
+			["pth", ["path"]],
+			["max", ["maxLspFiles"]],
+			["symbol", ["maxRefsPerSymbol"]],
+			["newPath", ["newFilePath"]],
+			["name", ["newName"]],
+			["file", ["groupByFile"]],
+			["filePath", ["newFilePath"]],
+		];
+		for (const [key, declared] of rows)
+			expect(refusalMatches(key, declared), key).toEqual([]);
+	});
+});
+
+describe("refusal versus hint", () => {
+	it("keeps the hint and runs when the loose scorer finds a key the predicate does not", () => {
+		const report = findIgnoredArguments(
+			{ properties: { maxLspFiles: {}, path: {} } },
+			{ files: 1 },
+		);
+		expect(report?.ignored).toEqual([
+			{ key: "files", suggestion: "maxLspFiles" },
+		]);
+		expect(report?.unsentSuggestions).toEqual([]);
+	});
+
+	it("points the hint at the refusal match, so the line and the refusal agree", () => {
+		const report = findIgnoredArguments(
+			{ properties: { newFilePath: {}, path: {} } },
+			{ filePath: 1 },
+		);
+		expect(report?.ignored).toEqual([{ key: "filePath", suggestion: "path" }]);
+	});
+
+	it("does not refuse when any spelling of the parameter was sent", () => {
+		const report = findIgnoredArguments(
+			{ properties: { path: {}, paths: {} } },
+			{ filePath: 1, paths: ["a"] },
+		);
+		expect(report?.unsentSuggestions).toEqual([]);
 	});
 });
