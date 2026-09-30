@@ -31,10 +31,13 @@ let root = "";
 let stderr = "";
 let report: FixtureReport = { testResults: [] };
 
-function statusOf(fixture: string): string | undefined {
-	return report.testResults.find((result) =>
-		result.name.replace(/\\/g, "/").endsWith(`${FIXTURE_DIR}/${fixture}`),
-	)?.status;
+/** "passed", or the status with the child's failure message so a red names it. */
+function outcomeOf(fixture: string): string | undefined {
+	const result = report.testResults.find((entry) =>
+		entry.name.replace(/\\/g, "/").endsWith(`${FIXTURE_DIR}/${fixture}`),
+	);
+	if (!result || result.status === "passed") return result?.status;
+	return `${result.status}: ${result.message ?? ""}`;
 }
 
 beforeAll(async () => {
@@ -75,7 +78,7 @@ afterAll(() => {
 
 describe("shared setup registry settle, through the real afterAll (#3617)", () => {
 	it("lands a root removal still waiting on a peer's lease before the fork is killed", () => {
-		expect(statusOf("lease-wait.fixture.ts")).toBe("passed");
+		expect(outcomeOf("lease-wait.fixture.ts")).toBe("passed");
 		const registry = JSON.parse(
 			fs.readFileSync(path.join(root, "lease-wait", "instances.json"), "utf8"),
 		) as { instances: Array<{ projectRoots?: string[] }> };
@@ -85,7 +88,7 @@ describe("shared setup registry settle, through the real afterAll (#3617)", () =
 	});
 
 	it("gives up on a write frozen by fake timers, reports it, and still runs the teardown checks", () => {
-		expect(statusOf("fake-timers.fixture.ts")).toBe("passed");
+		expect(outcomeOf("fake-timers.fixture.ts")).toBe("passed");
 		expect(stderr).toContain(
 			`[registry-settle] a registry mutation was still pending after ${REGISTRY_SETTLE_BOUND_MS}ms`,
 		);
