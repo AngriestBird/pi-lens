@@ -1542,6 +1542,38 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			]);
 		});
 
+		it("OrphanGiveUp (#3828): an Escape that ends the wait early, with no ledger record, still chains the late resync", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const controller = new AbortController();
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const drain = handleAgentEnd(drainDeps({ signal: controller.signal }));
+			await resolving.p;
+			// Only the hook's 10 s bound has fired; the post-exit wait is still
+			// inside its 30 s budget when the user presses Escape.
+			await vi.advanceTimersByTimeAsync(HOOK_WALL_BUDGET_MS.agent_settled + 1);
+			await drain;
+			controller.abort();
+			await postExitSettled();
+			expect(postExitRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+			]);
+			// A cancel is deliberate, not a degradation: `bounded()` records nothing.
+			expect(postExitResyncSubjects()).toEqual([]);
+			resolution.open();
+			await c.wrote;
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+		});
+
 		it("OrphanGiveUp (#3828): after session_shutdown retired the service the late resync spawns no server", async () => {
 			lsp.realService = getLSPService;
 			const { c, install } = await giveUpBeforeTheChildRuns();
