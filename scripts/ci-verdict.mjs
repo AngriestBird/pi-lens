@@ -1243,9 +1243,7 @@ export function readFailureDetails({
 		) {
 			noiseRowIds = new Set(noisy.map((detail) => detail.rowId));
 		}
-		const mergeBase = details.find(
-			(detail) => detail.mergeBase && !noiseRowIds?.has(detail.rowId),
-		)?.mergeBase;
+		const mergeBase = details.find((detail) => detail.mergeBase)?.mergeBase;
 		const masterSha = mergeBase
 			? readMasterSha(repository, ghExec, timeoutMs)
 			: null;
@@ -2039,10 +2037,11 @@ export async function run({
 			...(now ? { now } : {}),
 		});
 
-		// #3700: a FAILED verdict names what failed (step, test lines), drops the
-		// rows that are post-merge noise, and hints the right remedy. gh only: the
-		// REST transport has no `gh api --allow-escape-sequences` log read.
-		if (verdict.exitCode === EXIT_FAILURE && transport === TRANSPORT_GH) {
+		// #3700: failing gating rows are named (step, test lines), the rows that
+		// are post-merge noise are dropped, and the right remedy is hinted -- also
+		// under a DIRTY or rerun-pending verdict that outranks the failure. gh
+		// only: the REST transport has no `gh api --allow-escape-sequences` read.
+		if (verdict.failingRows.length > 0 && transport === TRANSPORT_GH) {
 			const found = readFailureDetails({
 				rows: verdict.failingRows,
 				target,
