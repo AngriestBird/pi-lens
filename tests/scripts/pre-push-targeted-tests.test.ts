@@ -180,8 +180,8 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		const git = (args: string[]) =>
 			gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" });
 		git(["init", "--quiet", "--initial-branch=main"]);
-		git(["config", "user.name", "pi-lens-test"]);
-		git(["config", "user.email", "pi-lens-test@example.com"]);
+		git(["config", "user.name", "pi-lens test"]);
+		git(["config", "user.email", "test@example.com"]);
 		git(["add", "."]);
 		git(["commit", "--quiet", "-m", "base"]);
 		const base = git(["rev-parse", "HEAD"]).trim();
