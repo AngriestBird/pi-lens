@@ -40,6 +40,11 @@ code. This week's evidence: #3252 r1 shipped an exit table whose inverse
 direction (nonzero WITH findings) was never listed and was caught by the
 reviewer.
 
+For a change that targets a subset of a larger population, the failure list
+also names the population M, the excluded M−N set's default, and the planned
+generalization verdict: *widen in this PR* / *follow-up issue* with its seam
+group / *stay specific* with the reason. Recurrence: #3622.
+
 Seams are named in the brief before the round; no test is written at an
 unconfirmed seam — a fixer that needs a new seam stops and reports it as a
 finding, not as a test.
