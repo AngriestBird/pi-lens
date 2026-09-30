@@ -92,10 +92,11 @@ const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 // elsewhere in the same log under a fake real classification (safe
 // direction, but reimposes the manual-read tax this classifier exists to
 // remove). See the "V4 fabricated FAIL in a passing test title" fixture.
-export const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.test\.tsx?)(?=\s|$)/m;
+export const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.[cm]?[jt]sx?)(?=\s|$)/m;
 // (real log, same run) "AssertionError: expected false to be true //
 // Object.is equality"
-export const ASSERTION_LINE = /^\s*AssertionError:\s*(.+)$/m;
+export const ASSERTION_LINE =
+	/^\s*AssertionError(?: \[ERR_ASSERTION\])?:\s*(.+)$/m;
 // vitest prints this inline, AS EACH FILE FINISHES, before the end-of-run
 // "Failed Tests" summary block ever gets a chance to print (real log, run
 // 32913518938, job 98012237782, line 536): " ❯  default

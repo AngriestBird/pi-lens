@@ -74,6 +74,7 @@ export interface Verdict {
 	mergeState: string;
 	kind: string;
 	failingRows: VerdictRow[];
+	cancelledRows: VerdictRow[];
 	details?: FailedJobDetail[];
 	hints?: string[];
 }
@@ -99,6 +100,11 @@ export declare function computeVerdict(
 ): Verdict;
 
 export declare function formatVerdictTable(rows: VerdictRow[]): string;
+
+export declare function rerunArgsFor(row: {
+	detailsUrl?: string | null;
+	id?: number | null;
+}): string[] | null;
 
 export declare function formatRerunHint(row: {
 	name?: string;
@@ -181,6 +187,7 @@ export declare function fetchActionRequiredRuns(
 	sha: string,
 	ghExec?: GhExec,
 	timeoutMs?: number,
+	failOpen?: boolean,
 ): { id: number }[];
 
 export declare function fetchAutoMergeAge(
@@ -305,6 +312,10 @@ export declare function parseArgs(argv: string[]): {
 	all: boolean;
 	watchOpen: boolean;
 	stateFile: string | null;
+	stream: boolean;
+	rerunCancelled: boolean;
+	syncMain: string | null;
+	approveFork: string | null;
 };
 
 export declare function run(args?: {
@@ -393,8 +404,24 @@ export declare function snapshotOpenPrs(args: {
 	now?: () => number;
 }): Promise<number>;
 
+export declare function syncMainCheckout(
+	checkout: string,
+	gitExec?: GitExec,
+): string[];
+
+export declare function approveForkRuns(args: {
+	target: string;
+	ghExec?: GhExec;
+	stdout?: (line: string) => void;
+	stderr?: (line: string) => void;
+}): Promise<number>;
+
 export declare function watchOpenPrs(args: {
 	ghExec?: GhExec;
+	gitExec?: GitExec;
+	stream?: boolean;
+	rerunCancelled?: boolean;
+	syncMain?: string | null;
 	waitSeconds?: number | null;
 	stateFile?: string | null;
 	stdout?: (line: string) => void;

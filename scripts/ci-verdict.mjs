@@ -176,7 +176,13 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -559,6 +565,7 @@ export function computeVerdict(
 		mergeState,
 		kind,
 		failingRows: failingGatingRows,
+		cancelledRows: cancelledLatestRows,
 	};
 }
 
@@ -569,14 +576,21 @@ export function computeVerdict(
  * fallback is admitted only when that same URL proves its job segment matches
  * the check-run id.
  */
-export function formatRerunHint(row) {
+export function rerunArgsFor(row) {
 	const detailsUrl = typeof row?.detailsUrl === "string" ? row.detailsUrl : "";
 	const runId = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1];
-	if (runId) return `rerun ${runId} (gh run rerun ${runId})`;
+	if (runId) return ["run", "rerun", runId];
 
 	const jobId = detailsUrl.match(/\/job\/(\d+)(?:\/|$)/)?.[1];
 	if (jobId && String(row?.id) === jobId)
-		return `rerun ${jobId} (gh run rerun --job ${jobId})`;
+		return ["run", "rerun", "--job", jobId];
+	return null;
+}
+
+export function formatRerunHint(row) {
+	const detailsUrl = typeof row?.detailsUrl === "string" ? row.detailsUrl : "";
+	const rerun = rerunArgsFor(row);
+	if (rerun) return `rerun ${rerun.at(-1)} (gh ${rerun.join(" ")})`;
 
 	return `${row?.name ?? "unknown check"} cannot be rerun via gh (not a GitHub Actions job; details: ${detailsUrl || "unavailable"})`;
 }
@@ -878,6 +892,7 @@ export function fetchActionRequiredRuns(
 	sha,
 	ghExec = gh,
 	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+	failOpen = true,
 ) {
 	try {
 		const payload = JSON.parse(
@@ -894,7 +909,9 @@ export function fetchActionRequiredRuns(
 				(run) => run?.head_sha === sha && run?.conclusion === "action_required",
 			)
 			.map((run) => ({ id: run.id }));
-	} catch {
+	} catch (error) {
+		// The verdict text fails open to "none"; an approval must not.
+		if (!failOpen) throw error;
 		return [];
 	}
 }
@@ -1652,7 +1669,25 @@ const WATCH_EVENT_KINDS = new Set([
 	"fork-approval",
 	"absent-rearm",
 	"dirty",
+	"cancelled",
 ]);
+
+// `--stream` names an event the way the orchestrator reads it: `FAIL #N@sha`.
+const STREAM_EVENT_NAMES = {
+	failed: "FAIL",
+	dirty: "DIRTY",
+	cancelled: "CANCELLED-NOT-REPLACED",
+	"fork-approval": "FORK-APPROVAL",
+	"absent-rearm": "ABSENT-REARM",
+};
+
+function formatEventLine(stream, number, kind, sha, reason) {
+	const head = sha ? `@${sha.slice(0, 9)}` : "";
+	if (!stream)
+		return `#${number} ${kind}${head ? ` ${head}` : ""}${reason ? `: ${reason}` : ""}`;
+	const name = STREAM_EVENT_NAMES[kind] ?? kind.toUpperCase();
+	return `${name} #${number}${head}${reason ? `: ${reason}` : ""}`;
+}
 
 export function readOpenPrs(ghExec = gh, timeoutMs = DEFAULT_GH_TIMEOUT_MS) {
 	return JSON.parse(
@@ -1726,12 +1761,28 @@ export async function snapshotOpenPrs({
 	return EXIT_SUCCESS;
 }
 
+/** One PR's state: `key` is the last seen `<sha>:<kind>`, `since` when the
+ * watch first saw the head (`{ sha, ms }`: the absence clock of a head with no
+ * check suite), `rerun` the head a cancelled run was already re-run for. The
+ * first round kept the bare key string; it still loads. */
+function normalizeWatchEntry(value) {
+	if (typeof value === "string") return { key: value };
+	return value && typeof value === "object" && !Array.isArray(value)
+		? value
+		: {};
+}
+
 function loadWatchState(stateFile) {
 	if (!stateFile) return {};
 	try {
 		const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-			? parsed
+			? Object.fromEntries(
+					Object.entries(parsed).map(([number, value]) => [
+						number,
+						normalizeWatchEntry(value),
+					]),
+				)
 			: {};
 	} catch {
 		return {};
@@ -1751,26 +1802,159 @@ function saveWatchState(stateFile, seen, stderr) {
 		renameSync(temporary, stateFile);
 	} catch (error) {
 		stderr(`could not save the watch state: ${firstLine(error)}`);
+		try {
+			rmSync(temporary, { force: true });
+		} catch {
+			/* nothing more to clean */
+		}
+	}
+}
+
+/** Closing issues of a merged PR with their states: `closes #3700: CLOSED`.
+ * Fails open to none: the merge is reported either way. */
+function readClosingIssues(number, ghExec, timeoutMs) {
+	try {
+		const refs = JSON.parse(
+			ghExec(
+				["pr", "view", String(number), "--json", "closingIssuesReferences"],
+				{ timeoutMs },
+			),
+		)?.closingIssuesReferences;
+		return (Array.isArray(refs) ? refs : []).map((ref) => {
+			let state = "unknown";
+			try {
+				state =
+					JSON.parse(
+						ghExec(["issue", "view", String(ref.number), "--json", "state"], {
+							timeoutMs,
+						}),
+					)?.state ?? state;
+			} catch {
+				/* state stays unknown */
+			}
+			return `closes #${ref.number}: ${state}`;
+		});
+	} catch {
+		return [];
 	}
 }
 
 /**
- * `--watch-open [--wait <seconds>] [--state-file <path>]`: every open PR that
+ * `--sync-main <path>`: fast-forward the main checkout after a merge, because
+ * every worktree symlinks its node_modules (a checkout 5 days behind fed a
+ * fixer an old dependency, 2026-09-30). Refuses -- with the reason -- when the
+ * checkout is not on the protected branch or has modified tracked files, and
+ * says when `package-lock.json` moved. It NEVER runs `npm ci`: live workers
+ * share that install.
+ */
+export function syncMainCheckout(checkout, gitExec = execFileSync) {
+	const git = (...args) =>
+		String(
+			gitExec("git", ["-C", checkout, ...args], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+				timeout: 120_000,
+			}),
+		).trim();
+	try {
+		const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+		if (branch !== PROTECTED_BRANCH)
+			return [
+				`SYNC REFUSED ${checkout}: on ${branch}, not ${PROTECTED_BRANCH}`,
+			];
+		if (git("status", "--porcelain", "--untracked-files=no") !== "")
+			return [`SYNC REFUSED ${checkout}: tracked files are modified`];
+		const before = git("rev-parse", "HEAD");
+		git("pull", "--ff-only");
+		const after = git("rev-parse", "HEAD");
+		const lines = [
+			before === after
+				? `SYNCED ${checkout}: already at ${after.slice(0, 9)}`
+				: `SYNCED ${checkout}: ${before.slice(0, 9)} -> ${after.slice(0, 9)}`,
+		];
+		if (
+			before !== after &&
+			git("diff", "--name-only", before, after, "--", "package-lock.json") !==
+				""
+		)
+			lines.push("LOCKFILE CHANGED: run npm ci when no worker is live");
+		return lines;
+	} catch (error) {
+		return [`SYNC REFUSED ${checkout}: ${firstLine(error)}`];
+	}
+}
+
+/** `--approve-fork <PR>`: approve that PR's `action_required` runs on its
+ * current head. Explicit and per PR; nothing else in this file calls it. */
+export async function approveForkRuns({
+	target,
+	ghExec = gh,
+	stdout = console.log,
+	stderr = console.error,
+}) {
+	if (!isPrNumber(target)) {
+		stderr("--approve-fork takes a PR number");
+		return EXIT_USAGE;
+	}
+	const repository = resolveRepository(ghExec);
+	const { sha } = resolveHeadSha(target, ghExec);
+	const runs = fetchActionRequiredRuns(
+		repository,
+		sha,
+		ghExec,
+		DEFAULT_GH_TIMEOUT_MS,
+		false,
+	);
+	if (runs.length === 0) {
+		stdout(`no action_required runs on ${sha} of #${target}`);
+		return EXIT_SUCCESS;
+	}
+	let failed = false;
+	for (const { id } of runs) {
+		try {
+			ghExec(
+				["api", "-X", "POST", `repos/${repository}/actions/runs/${id}/approve`],
+				{ timeoutMs: DEFAULT_GH_TIMEOUT_MS },
+			);
+			stdout(`APPROVED run ${id} of #${target}@${sha.slice(0, 9)}`);
+		} catch (error) {
+			failed = true;
+			stderr(`could not approve run ${id}: ${firstLine(error)}`);
+		}
+	}
+	return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/**
+ * `--watch-open [--stream] [--rerun-cancelled] [--sync-main <path>]
+ * [--wait <seconds>] [--state-file <path>]`: every open PR that
  * has auto-merge armed OR is authored by the repository owner (the maintainer)
  * or the `gh` viewer (the orchestrator) -- a PR in a fix round has no
  * auto-merge and still must not go red unseen (#3688). Per PR, an event is a
- * TRANSITION from its last seen state: a failed gating check, fork approval
- * awaited, required checks absent past the re-arm threshold (all verdict
- * kinds, keyed by head SHA so a new push re-arms), or the PR merging or
- * closing. Exits 0 on the first poll that has events (one line each,
- * `#<pr> <event> @<sha>: <reason>`, then the failure detail), 3 when the
- * window ends with none. `--state-file` keeps the last seen state between
- * invocations, so re-arming after a report does not report it again.
+ * TRANSITION from its last seen state: a failed gating check, a merge conflict
+ * (`dirty`), a cancelled run nobody replaced, fork approval awaited, required
+ * checks absent past the re-arm threshold (all verdict kinds, keyed by head
+ * SHA so a new push re-arms), or the PR merging or closing. A merged PR also
+ * lists its closing issues' states.
+ *
+ * Without `--stream` it exits 0 on the first poll that has events
+ * (`#<pr> <event> @<sha>: <reason>`, then the failure detail) and 3 when the
+ * window ends with none. With `--stream` it never exits on an event: each poll
+ * prints its events as `FAIL #<pr>@<sha>: <reason>` and the watch runs to the
+ * end of the window (0 if any event was printed, 3 if none).
+ * `--state-file` keeps the last seen state, the no-suite absence clock and the
+ * re-run marks between invocations. `--rerun-cancelled` re-runs a cancelled,
+ * unreplaced run once per head (`gh run rerun`); `--sync-main <path>`
+ * fast-forwards that checkout after a merge (see `syncMainCheckout`).
  */
 export async function watchOpenPrs({
 	ghExec = gh,
+	gitExec = execFileSync,
 	waitSeconds = null,
 	stateFile = null,
+	stream = false,
+	rerunCancelled = false,
+	syncMain = null,
 	stdout = console.log,
 	stderr = console.error,
 	sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -1795,9 +1979,10 @@ export async function watchOpenPrs({
 	).split("/")[0];
 	const viewer = readViewerLogin(ghExec, DEFAULT_GH_TIMEOUT_MS);
 	const seen = loadWatchState(stateFile);
-	const firstSeenMs = new Map();
+	let printed = 0;
 	for (;;) {
 		const events = [];
+		let merged = false;
 		const open = await retry((remainingMs) =>
 			readOpenPrs(ghExec, resolveGhTimeoutMs(remainingMs)),
 		);
@@ -1808,50 +1993,121 @@ export async function watchOpenPrs({
 				pr.author?.login === viewer,
 		);
 		for (const pr of watched) {
-			const headKey = `${pr.number}:${pr.headRefOid}`;
-			if (!firstSeenMs.has(headKey)) firstSeenMs.set(headKey, now());
+			const entry = normalizeWatchEntry(seen[pr.number]);
+			// The head's first sighting is its absence clock when no check suite
+			// exists; it survives a re-armed watch through the state file.
+			if (entry.since?.sha !== pr.headRefOid)
+				entry.since = { sha: pr.headRefOid, ms: now() };
+			seen[pr.number] = entry;
 			const info = await readPrVerdict(pr.number, {
 				ghExec,
 				stderr,
 				sleepImpl,
 				now,
-				absentSinceMs: firstSeenMs.get(headKey),
+				absentSinceMs: entry.since.ms,
 			});
 			if (!info) continue;
-			const { kind } = info.verdict;
+			const { kind, mergeState } = info.verdict;
 			const key = `${info.sha}:${kind}`;
-			if (WATCH_EVENT_KINDS.has(kind) && seen[pr.number] !== key) {
+			// GitHub answers UNKNOWN while it recomputes mergeability; with nothing
+			// else to report that is no news about a head already reported
+			// conflicted (a real failure on it still is).
+			if (
+				mergeState === "UNKNOWN" &&
+				!WATCH_EVENT_KINDS.has(kind) &&
+				entry.key === `${info.sha}:dirty`
+			)
+				continue;
+			if (WATCH_EVENT_KINDS.has(kind) && entry.key !== key) {
 				events.push([
-					`#${pr.number} ${kind} @${info.sha.slice(0, 9)}: ${info.verdict.reason}`,
+					formatEventLine(
+						stream,
+						pr.number,
+						kind,
+						info.sha,
+						info.verdict.reason,
+					),
 					...formatFailureLines(info.verdict).map((line) => `  ${line}`),
 				]);
+				if (
+					kind === "cancelled" &&
+					rerunCancelled &&
+					entry.rerun !== info.sha
+				) {
+					const lines = rerunCancelledRows({
+						number: pr.number,
+						sha: info.sha,
+						rows: info.verdict.cancelledRows,
+						ghExec,
+					});
+					if (lines.ok) entry.rerun = info.sha;
+					events.push(lines.lines);
+				}
 			}
-			seen[pr.number] = key;
+			entry.key = key;
 		}
 		const watchedNumbers = new Set(watched.map((pr) => String(pr.number)));
 		for (const number of Object.keys(seen)) {
 			if (watchedNumbers.has(number)) continue;
 			const state = readPrState(number, ghExec, DEFAULT_GH_TIMEOUT_MS);
 			if (state === "MERGED" || state === "CLOSED") {
-				events.push([`#${number} ${state.toLowerCase()}`]);
+				merged ||= state === "MERGED";
+				events.push([
+					formatEventLine(stream, number, state.toLowerCase()),
+					...(state === "MERGED"
+						? readClosingIssues(number, ghExec, DEFAULT_GH_TIMEOUT_MS).map(
+								(line) => `  ${line}`,
+							)
+						: []),
+				]);
 				delete seen[number];
 			} else if (state === "OPEN") {
 				// Left the watch set (auto-merge disarmed, not the maintainer's).
 				delete seen[number];
 			}
 		}
+		if (merged && syncMain) events.push(syncMainCheckout(syncMain, gitExec));
 		// Events first: a state file that cannot be written must not swallow the
 		// report the poll just produced.
 		for (const lines of events) for (const line of lines) stdout(line);
+		printed += events.length;
 		saveWatchState(stateFile, seen, stderr);
-		if (events.length > 0) return EXIT_SUCCESS;
+		if (events.length > 0 && !stream) return EXIT_SUCCESS;
 		if (now() >= deadline) break;
 		await sleepImpl(
 			Math.min(WATCH_POLL_INTERVAL_SECONDS * 1000, deadline - now()),
 		);
 	}
+	if (printed > 0) return EXIT_SUCCESS;
 	stdout("watch window elapsed with no event");
 	return EXIT_PENDING;
+}
+
+/** Re-runs each cancelled, unreplaced gating run of one head through `gh run
+ * rerun`; `ok` is false when any could not be, so the head stays unmarked. */
+function rerunCancelledRows({ number, sha, rows, ghExec }) {
+	const lines = [];
+	let ok = true;
+	const done = new Set();
+	for (const row of rows) {
+		const args = rerunArgsFor(row);
+		const label = args ? args.join(" ") : null;
+		if (!args || done.has(label)) {
+			if (!args) ok = false;
+			continue;
+		}
+		done.add(label);
+		try {
+			ghExec(args, { timeoutMs: DEFAULT_GH_TIMEOUT_MS });
+			lines.push(`RERUN #${number}@${sha.slice(0, 9)}: gh ${label}`);
+		} catch (error) {
+			ok = false;
+			lines.push(
+				`RERUN FAILED #${number}@${sha.slice(0, 9)}: gh ${label}: ${firstLine(error)}`,
+			);
+		}
+	}
+	return { ok, lines };
 }
 
 export function parseArgs(argv) {
@@ -1860,6 +2116,10 @@ export function parseArgs(argv) {
 	let all = false;
 	let watchOpen = false;
 	let stateFile = null;
+	let stream = false;
+	let rerunCancelled = false;
+	let syncMain = null;
+	let approveFork = null;
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--wait") {
 			waitSeconds = Number(argv[++i]);
@@ -1869,11 +2129,29 @@ export function parseArgs(argv) {
 			watchOpen = true;
 		} else if (argv[i] === "--state-file") {
 			stateFile = argv[++i] ?? null;
+		} else if (argv[i] === "--stream") {
+			stream = true;
+		} else if (argv[i] === "--rerun-cancelled") {
+			rerunCancelled = true;
+		} else if (argv[i] === "--sync-main") {
+			syncMain = argv[++i] ?? null;
+		} else if (argv[i] === "--approve-fork") {
+			approveFork = argv[++i] ?? "";
 		} else {
 			rest.push(argv[i]);
 		}
 	}
-	return { target: rest[0] ?? null, waitSeconds, all, watchOpen, stateFile };
+	return {
+		target: rest[0] ?? null,
+		waitSeconds,
+		all,
+		watchOpen,
+		stateFile,
+		stream,
+		rerunCancelled,
+		syncMain,
+		approveFork,
+	};
 }
 
 /**
@@ -1905,14 +2183,41 @@ export async function run({
 	// head with no check suite.
 	absentSinceMs = null,
 } = {}) {
-	const { target, waitSeconds, all, watchOpen, stateFile } = parseArgs(argv);
+	const {
+		target,
+		waitSeconds,
+		all,
+		watchOpen,
+		stateFile,
+		stream,
+		rerunCancelled,
+		syncMain,
+		approveFork,
+	} = parseArgs(argv);
+	if (approveFork !== null) {
+		try {
+			return await approveForkRuns({
+				target: approveFork,
+				ghExec,
+				stdout,
+				stderr,
+			});
+		} catch (error) {
+			stderr(error instanceof Error ? error.message : String(error));
+			return EXIT_TRANSPORT;
+		}
+	}
 	if (all || watchOpen) {
 		try {
 			return watchOpen
 				? await watchOpenPrs({
 						ghExec,
+						gitExec,
 						waitSeconds,
 						stateFile,
+						stream,
+						rerunCancelled,
+						syncMain,
 						stdout,
 						stderr,
 						...(sleepImpl ? { sleepImpl } : {}),
@@ -1926,7 +2231,7 @@ export async function run({
 	}
 	if (!target) {
 		stderr(
-			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>] | --all | --watch-open [--wait <seconds>] [--state-file <path>]",
+			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>] | --all | --approve-fork <pr> | --watch-open [--stream] [--rerun-cancelled] [--sync-main <path>] [--wait <seconds>] [--state-file <path>]",
 		);
 		return EXIT_USAGE;
 	}
