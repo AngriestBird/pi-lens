@@ -54,6 +54,7 @@ import {
 	stalledRunCommentMarker,
 } from "../../scripts/lib/warden-run-health.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { evaluateCancelInProgress } from "../support/workflow-expression.js";
 
 const REPO_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
@@ -4209,8 +4210,25 @@ describe("merge-lane sweep (#2185)", () => {
 				`${name} master trigger`,
 			).toContain("master");
 			expect(
-				recordValue(document.concurrency)["cancel-in-progress"],
-				`${name} concurrency`,
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"push",
+				),
+				`${name} push cancellation`,
+			).toBe(false);
+			expect(
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"pull_request",
+				),
+				`${name} PR cancellation`,
+			).toBe(true);
+			expect(
+				evaluateCancelInProgress(
+					recordValue(document.concurrency)["cancel-in-progress"],
+					"repository_dispatch",
+				),
+				`${name} dispatch cancellation`,
 			).toBe(true);
 			const jobs = recordValue(document.jobs);
 			const validatorJob = jobs["validate-merge-train-dispatch"];
