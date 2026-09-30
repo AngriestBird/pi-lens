@@ -1776,7 +1776,7 @@ export function publishActionableWarningsReport(
 		incrementDegradationCount({
 			kind: "actionable-warnings-inband-superseded",
 			subject: `${path.resolve(cwd)}:inband-carry-superseded`,
-			reason: `${merged.droppedFiles.length} carried-forward deferred file entry/entries ${cause} (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""}); their earlier findings are LOST on this channel rather than published against content that has since moved`,
+			reason: `${merged.droppedFiles.length} carried-forward entries: findings are LOST on this channel; ${cause} (files: ${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,
 		});
 		opts.dbg?.(
 			`actionable_warnings: in-band publish dropped ${merged.droppedFiles.length} superseded carried-forward file entry/entries (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,
@@ -1853,7 +1853,7 @@ export function writeDeferredActionableWarningsReport(args: {
 		incrementDegradationCount({
 			kind: "actionable-warnings-deferred-superseded",
 			subject: `${path.resolve(args.cwd)}:deferred-file-superseded`,
-			reason: `${droppedFiles.length} file(s) changed while the deferred LSP pull was reading them (${droppedFiles.slice(0, 3).join(", ")}${droppedFiles.length > 3 ? ", ..." : ""}); their warnings are LOST on this channel rather than published against content that has since moved. Every file that did NOT change was merged into the persisted report`,
+			reason: `${droppedFiles.length} changed file(s): warnings are LOST; unchanged files were merged into the persisted report (files: ${droppedFiles.slice(0, 3).join(", ")}${droppedFiles.length > 3 ? ", ..." : ""})`,
 		});
 		args.dbg?.(
 			`turn_end: deferred actionable-warnings dropped ${droppedFiles.length} superseded file entry/entries`,

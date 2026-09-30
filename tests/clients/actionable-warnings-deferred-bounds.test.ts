@@ -1031,6 +1031,28 @@ describe("#2504 r4 F1 — the deferred report merges into the persisted one", ()
 		expect(superseded[0].latestReasons[0].reason).toContain(path.basename(a));
 	});
 
+	it("keeps the deferred-loss diagnostic with a long dropped path (#3712)", async () => {
+		const { writeDeferredActionableWarningsReport } = await loadWarnings();
+		const cacheManager = new CacheManager(false);
+		const dropped = path.join(env.tmpDir, `${"dropped-".repeat(35)}.ts`);
+		const result = writeDeferredActionableWarningsReport({
+			cacheManager,
+			cwd: env.tmpDir,
+			report: baseReport({
+				files: [fileEntry(dropped, "dropped", 1, "2020-01-01")],
+			}),
+			getFileSeq: () => 2,
+		});
+		expect(result.droppedFiles).toBe(1);
+		const reason =
+			getDegradationSummary().find(
+				(group) => group.kind === "actionable-warnings-deferred-superseded",
+			)?.latestReasons[0]?.reason ?? "";
+		// #3712: keep LOST ahead of the unbounded path in this real writer path.
+		expect(reason).toContain("LOST");
+		expect(reason).toContain("persisted report");
+	});
+
 	it("unions the warnings when both halves hold the same file", async () => {
 		const { writeDeferredActionableWarningsReport } = await loadWarnings();
 		const cacheManager = new CacheManager(false);
@@ -2088,6 +2110,42 @@ describe("#2504 r7 F4 — a foreign session's zero-seq entry no longer passes th
 		const reason = group?.latestReasons.at(-1)?.reason ?? "";
 		expect(reason).not.toContain("changed before this turn's in-band publish");
 		expect(reason.toLowerCase()).toContain("session");
+	});
+
+	it("keeps the in-band LOSS diagnostic with long dropped paths (#3712)", async () => {
+		const { publishActionableWarningsReport } = await loadWarnings();
+		const cacheManager = new CacheManager(false);
+		const dropped = path.join(env.tmpDir, `${"foreign-".repeat(35)}.ts`);
+		cacheManager.writeCache(
+			"actionable-warnings",
+			baseReport({
+				sessionId: "foreign-session",
+				files: [
+					{
+						filePath: dropped,
+						displayPath: path.basename(dropped),
+						fileSeq: 1,
+						generatedAt: "2020-01-01",
+						warnings: [{ id: "foreign", message: "foreign" } as any],
+						origin: "deferred" as const,
+					},
+				],
+			}),
+			env.tmpDir,
+		);
+		publishActionableWarningsReport(
+			cacheManager,
+			env.tmpDir,
+			baseReport({ sessionId: "current-session", files: [] }),
+			{ origin: "in-band", getFileSeq: () => 0 },
+		);
+		const reason =
+			getDegradationSummary().find(
+				(group) => group.kind === "actionable-warnings-inband-superseded",
+			)?.latestReasons[0]?.reason ?? "";
+		// #3712: the fixed diagnostic must precede the path list.
+		expect(reason).toContain("LOST");
+		expect(reason).toContain("findings are LOST");
 	});
 });
 

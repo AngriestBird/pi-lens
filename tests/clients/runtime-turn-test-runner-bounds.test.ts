@@ -1185,7 +1185,7 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 	 * `related` strategy on every turn that touches its source) and `fresh.ts` +
 	 * `fresh.test.ts` (an ordinary target that must keep running).
 	 */
-	function seedRetirementProject(): {
+	function seedRetirementProject(longTarget = false): {
 		fresh: string;
 		freshTest: string;
 		foreverSource: string;
@@ -1199,7 +1199,13 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 		const fresh = path.join(env.tmpDir, "src", "fresh.ts");
 		const freshTest = path.join(env.tmpDir, "src", "fresh.test.ts");
 		const foreverSource = path.join(env.tmpDir, "src", "forever.ts");
-		const forever = path.join(env.tmpDir, "src", "forever.test.ts");
+		const forever = path.join(
+			env.tmpDir,
+			"src",
+			longTarget
+				? `forever.test.ts${"x".repeat(70)}.test.ts`
+				: "forever.test.ts",
+		);
 		fs.writeFileSync(fresh, "export const fresh = 1;\n");
 		fs.writeFileSync(freshTest, "export {};\n");
 		fs.writeFileSync(foreverSource, "export const forever = 1;\n");
@@ -1311,16 +1317,13 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 		// Never silent: the agent is told which target was retired and why...
 		expect(
 			dbgLines.some(
-				(l) => l.includes("forever.test.ts") && l.includes("retiring deferred"),
+				(l) =>
+					l.includes(path.basename(forever)) && l.includes("retiring deferred"),
 			),
 		).toBe(true);
 		// ...and told again when the candidate loop tries to re-select it.
 		expect(
-			dbgLines.some(
-				(l) =>
-					l.includes("forever.test.ts") &&
-					l.includes("retired earlier this session"),
-			),
+			dbgLines.some((l) => l.includes("retired earlier this session")),
 		).toBe(true);
 		// The retirement is PERSISTED, stamped with the session that made it, so
 		// the next turn honours it instead of resetting the counter to zero.
@@ -1394,6 +1397,40 @@ describe("#2522 R2/R3 — a target that never fits the budget is retired, not ca
 					request.signal?.addEventListener("abort", () => resolve(), {
 						once: true,
 					});
+				});
+
+				it("keeps the retirement remedy with a long test target path (#3712)", async () => {
+					const runtime = new RuntimeCoordinator();
+					const cacheManager = new CacheManager(false);
+					const { fresh, foreverSource, forever } = seedRetirementProject(true);
+					markEdited(cacheManager, runtime, [fresh, foreverSource]);
+					cacheManager.writeCache(
+						"test-runner-findings",
+						{
+							content: "1 test target(s) deferred to the next turn",
+							deferredTargets: [
+								{
+									testFile: forever,
+									runner: "vitest",
+									attempts: TEST_RUNNER_MAX_DEFERRALS,
+									sessionId: runtime.telemetrySessionId,
+								},
+							],
+						},
+						env.tmpDir,
+					);
+					await runTurn({
+						cacheManager,
+						runtime,
+						client: recordingClient([]),
+						dbgLines: [],
+					});
+					const reason =
+						getDegradationSummary().find(
+							(group) => group.kind === "test-runner-batch-capped",
+						)?.latestReasons[0]?.reason ?? "";
+					// #3712: the remedy must precede the long relative target path.
+					expect(reason).toContain("run it explicitly");
 				});
 				return {
 					file: testFile,
