@@ -1,146 +1,240 @@
 /**
- * #3552: the shared dispatch FactStore lets a concurrent same-file content read
- * overwrite `file.content` between the review graph's content read and its
- * import/function provider reads, so the graph extracts structural facts from
- * bytes other than the ones it hashed.
+ * #3552: the review graph and the live dispatch used to share one FactStore
+ * for per-file extraction state (`file.content` and the facts derived from it).
+ * The graph's providers await (dynamic import, tree-sitter parse), so a
+ * same-file dispatch that started during those awaits replaced the shared
+ * record and the graph extracted imports from one version and symbols from
+ * another. Round 1 re-asserted the graph's snapshot into the shared store, which
+ * only moved the race onto the dispatch: it then finished with the graph's
+ * STALE `file.content` and `file.functionSummaries` (review F1, F2), and the
+ * graph still read derived facts back from the shared store (F3).
  *
- * The gate is the graph's own tier-3 `readFileSync`: once it returns the read
- * bytes, the test starts a real concurrent dispatch fact-derivation run for the
- * same file presenting different bytes. `clearFileFactsFor` + `runProviders` is
- * the exact fact seam `dispatchLintWithResult` wraps; the second case uses only
- * the synchronous dispatch prefix (the clear) to exercise the import-read
- * window, which a macrotask-bound writer cannot reach.
+ * The invariant pinned here is the private-store boundary: the graph reads and
+ * writes a run-local store and never touches the shared one, so
+ *   - a graph node is single-version (imports, symbols, lineCount, exported),
+ *   - dispatch's facts end on dispatch's version, exactly as with no graph.
+ *
+ * Gate: the graph dynamic-imports `import-facts.js`, so the module is wrapped
+ * with `vi.mock` (original spread in) and the import provider's `run` awaits a
+ * test hook either before or after delegating. The hook writes version B to disk
+ * and runs a real dispatch fact derivation (`clearFileFactsFor` + `runProviders`,
+ * the seam `dispatchLintWithResult` wraps) to completion. That derivation does
+ * real `fs/promises` reads and a real tree-sitter parse, so the graph is
+ * suspended across genuine macrotasks — a stand-in for a cold grammar load, not
+ * a hand-shaped microtask interleave.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const gate = vi.hoisted(() => ({
-	arm: undefined as { file: string; trigger: () => void } | undefined,
-	writer: Promise.resolve() as Promise<void>,
+	armed: undefined as
+		| { window: "before-import" | "after-import"; hook: () => Promise<void> }
+		| undefined,
 }));
 
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
-	const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
-		const out = actual.readFileSync(...args);
-		const arm = gate.arm;
-		if (arm && String(args[0]) === arm.file) {
-			gate.arm = undefined;
-			arm.trigger();
-		}
-		return out;
-	}) as typeof actual.readFileSync;
-	return { ...actual, readFileSync };
-});
+vi.mock(
+	"../../../clients/dispatch/facts/import-facts.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../../clients/dispatch/facts/import-facts.js")
+			>();
+		const inner = actual.importFactProvider;
+		return {
+			...actual,
+			importFactProvider: {
+				...inner,
+				async run(...args: Parameters<typeof inner.run>) {
+					// Consume the arm so the dispatch the hook starts (which re-enters
+					// this wrapper through runProviders) runs the provider unmodified.
+					const armed = gate.armed;
+					gate.armed = undefined;
+					if (armed?.window === "before-import") await armed.hook();
+					await inner.run(...args);
+					if (armed?.window === "after-import") await armed.hook();
+				},
+			},
+		};
+	},
+);
 
-import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import { createDispatchContext } from "../../../clients/dispatch/dispatcher.js";
 import { runProviders } from "../../../clients/dispatch/fact-runner.js";
+import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import type { FunctionSummary } from "../../../clients/dispatch/facts/function-facts.js";
+import type { ImportEntry } from "../../../clients/dispatch/facts/import-facts.js";
 import "../../../clients/dispatch/integration.js"; // registers providers
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 import {
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
+	getLastGraphBuildInfo,
 } from "../../../clients/review-graph/builder.js";
-import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
+// Version A is what the graph reads: 3 `split("\n")` lines, `beta` exported.
 const V_A =
 	'import { alpha } from "./alpha.js";\nexport function beta() { return alpha(); }\n';
+// Version B is what the racing dispatch reads. It differs from A in imports,
+// symbol names, line count (7) and export status (`delta` is module-private),
+// so lineCount and `exported` are each distinguishable from version A's (F4).
 const V_B =
-	'import { gamma } from "./gamma.js";\nexport function delta() { return gamma(); }\n';
+	'import { gamma } from "./gamma.js";\n\n// delta is module-private\nfunction delta() {\n\treturn gamma();\n}\n';
+// Version SEED only exists to give the incremental path a cached graph and a
+// dispatch-owned `file.content` before the edit under test.
+const V_SEED = "export function seed() { return 1; }\n";
 
-/** Symbol names and import targets the graph recorded for one file. */
-function graphFacts(
-	graph: Awaited<ReturnType<typeof buildOrUpdateGraph>>,
-	file: string,
-): { symbolNames: string[]; importTargets: string[] } {
-	const normalized = normalizeMapKey(file);
-	return {
-		symbolNames: [...graph.nodes.values()]
-			.filter((node) => node.kind === "symbol" && node.filePath === normalized)
-			.map((node) => node.symbolName ?? ""),
-		importTargets: graph.edges
-			.filter(
-				(edge) => edge.from === `file:${normalized}` && edge.kind === "imports",
-			)
-			.map((edge) => edge.to),
+const GRAPH_A = {
+	symbols: [{ name: "beta", exported: true }],
+	importTargets: ["module:./alpha.js"],
+	lineCount: 3,
+};
+const DISPATCH_B = {
+	content: V_B,
+	summaryNames: ["delta"],
+	importSources: ["./gamma.js"],
+};
+
+type RaceOutcome = {
+	mode: string | undefined;
+	fired: boolean;
+	graph: typeof GRAPH_A;
+	dispatch: {
+		content: string | undefined;
+		summaryNames: string[];
+		importSources: string[];
 	};
+};
+
+/**
+ * One real race: the graph reads version A, then a same-file dispatch that
+ * reads version B runs to completion inside the graph's import-provider await.
+ * `pathKind` picks how the graph gets its bytes: "full" is the tier-3 build
+ * (the caller hands the graph its read bytes), "incremental" is the
+ * cached-graph update where the graph re-reads disk while a first dispatch
+ * already owns `file.content` in the shared store.
+ */
+async function race(
+	pathKind: "full" | "incremental",
+	window: "before-import" | "after-import",
+): Promise<RaceOutcome> {
+	const env = setupTestEnvironment("pi-lens-3552-");
+	try {
+		const file = path.join(env.tmpDir, "a.ts");
+		const store = new FactStore("3552-race");
+		const ctx = createDispatchContext(
+			file,
+			env.tmpDir,
+			{ getFlag: () => false },
+			store,
+		);
+		if (pathKind === "incremental") {
+			fs.writeFileSync(file, V_SEED);
+			await buildOrUpdateGraph(env.tmpDir, [file], store);
+			// The dispatch runs AFTER the seeding build: a graph-seeded record is
+			// released by the build itself, and this record must be dispatch-owned.
+			store.clearFileFactsFor(ctx.filePath);
+			await runProviders(ctx);
+			store.endDispatchFor(ctx.filePath);
+		}
+		fs.writeFileSync(file, V_A);
+		gate.armed = {
+			window,
+			hook: async () => {
+				fs.writeFileSync(file, V_B);
+				store.clearFileFactsFor(ctx.filePath);
+				await runProviders(ctx);
+				store.endDispatchFor(ctx.filePath);
+			},
+		};
+
+		const graph = await buildOrUpdateGraph(env.tmpDir, [file], store);
+
+		const normalized = normalizeMapKey(file);
+		const fileNode = graph.nodes.get(`file:${normalized}`);
+		return {
+			mode: getLastGraphBuildInfo().mode,
+			fired: gate.armed === undefined,
+			graph: {
+				symbols: [...graph.nodes.values()]
+					.filter(
+						(node) => node.kind === "symbol" && node.filePath === normalized,
+					)
+					.map((node) => ({
+						name: node.symbolName ?? "",
+						exported: node.exported === true,
+					})),
+				importTargets: graph.edges
+					.filter(
+						(edge) =>
+							edge.from === `file:${normalized}` && edge.kind === "imports",
+					)
+					.map((edge) => edge.to),
+				lineCount: fileNode?.metadata?.lineCount as number,
+			},
+			dispatch: {
+				content: store.getFileFact<string>(file, "file.content"),
+				summaryNames: (
+					store.getFileFact<FunctionSummary[]>(
+						file,
+						"file.functionSummaries",
+					) ?? []
+				).map((fn) => fn.name),
+				importSources: (
+					store.getFileFact<ImportEntry[]>(file, "file.imports") ?? []
+				).map((entry) => entry.source),
+			},
+		};
+	} finally {
+		env.cleanup();
+	}
 }
 
-describe("review-graph vs concurrent dispatch file.content (#3552)", () => {
+const CASES = [
+	["full", "before-import"],
+	["full", "after-import"],
+	["incremental", "before-import"],
+	["incremental", "after-import"],
+] as const;
+
+describe("review-graph vs a concurrent same-file dispatch (#3552)", () => {
 	afterEach(() => {
-		gate.arm = undefined;
-		gate.writer = Promise.resolve();
+		gate.armed = undefined;
 		clearReviewGraphWorkspaceCache();
 	});
 
-	it("keeps imports and functions on one version when a concurrent dispatch replaces file.content mid-parse", async () => {
-		const env = setupTestEnvironment("pi-lens-3552-");
-		try {
-			const file = path.join(env.tmpDir, "a.ts");
-			fs.writeFileSync(file, V_A);
-			const store = new FactStore("3552-parse-race");
-			const ctx = createDispatchContext(
-				file,
-				env.tmpDir,
-				{ getFlag: () => false },
-				store,
-			);
-			gate.arm = {
-				file: normalizeMapKey(file),
-				trigger: () => {
-					fs.writeFileSync(file, V_B);
-					// A real second dispatch resume: its sync prefix runs now, its
-					// async fact derivation lands while the graph is in tree-sitter.
-					gate.writer = (async () => {
-						store.clearFileFactsFor(ctx.filePath);
-						await runProviders(ctx);
-						store.endDispatchFor(ctx.filePath);
-					})();
-				},
-			};
+	it.each(CASES)(
+		"%s build, dispatch starts %s: the graph node is single-version (imports, symbols, lineCount, exported)",
+		async (pathKind, window) => {
+			const out = await race(pathKind, window);
+			expect(out.fired).toBe(true); // the gate fired
+			expect(out.mode).toBe(pathKind === "full" ? "full" : "incremental");
+			expect(out.graph).toEqual(GRAPH_A);
+		},
+	);
 
-			const graph = await buildOrUpdateGraph(env.tmpDir, [file], store);
-			await gate.writer;
+	it.each(CASES)(
+		"%s build, dispatch starts %s: dispatch's file.content stays the bytes dispatch read",
+		async (pathKind, window) => {
+			const out = await race(pathKind, window);
+			expect(out.fired).toBe(true);
+			expect(out.dispatch.content).toBe(DISPATCH_B.content);
+		},
+	);
 
-			expect(gate.arm).toBeUndefined(); // the gate fired
-			expect(graphFacts(graph, file)).toEqual({
-				symbolNames: ["beta"],
-				importTargets: ["module:./alpha.js"],
+	it.each(CASES)(
+		"%s build, dispatch starts %s: dispatch's derived facts stay on dispatch's version",
+		async (pathKind, window) => {
+			const out = await race(pathKind, window);
+			expect(out.fired).toBe(true);
+			expect({
+				summaryNames: out.dispatch.summaryNames,
+				importSources: out.dispatch.importSources,
+			}).toEqual({
+				summaryNames: DISPATCH_B.summaryNames,
+				importSources: DISPATCH_B.importSources,
 			});
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("keeps imports when a concurrent dispatch clears file.content before the import read", async () => {
-		const env = setupTestEnvironment("pi-lens-3552-");
-		try {
-			const file = path.join(env.tmpDir, "a.ts");
-			fs.writeFileSync(file, V_A);
-			const store = new FactStore("3552-import-race");
-			gate.arm = {
-				file: normalizeMapKey(file),
-				trigger: () => {
-					// The dispatch's synchronous start (clear + pin) resumed as a
-					// microtask lands before the graph's dynamic-import continuation.
-					queueMicrotask(() => {
-						store.clearFileFactsFor(normalizeMapKey(file));
-					});
-				},
-			};
-
-			const graph = await buildOrUpdateGraph(env.tmpDir, [file], store);
-			store.endDispatchFor(normalizeMapKey(file));
-
-			expect(gate.arm).toBeUndefined(); // the gate fired
-			expect(graphFacts(graph, file)).toEqual({
-				symbolNames: ["beta"],
-				importTargets: ["module:./alpha.js"],
-			});
-		} finally {
-			env.cleanup();
-		}
-	});
+		},
+	);
 });
