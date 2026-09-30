@@ -118,7 +118,9 @@ describe("ci-verdict deferred advisory rows (#3801)", () => {
 				(row: { name: string }) => row.name === "mutation (advisory)",
 			),
 		).toHaveLength(1);
-		expect(deferred(verdict.rows)).toEqual(["Unit tests Windows (advisory)"]);
+		expect(deferred(verdict.rows)).toEqual(
+			DEFERRED_ADVISORY_CHECKS.filter((name) => name !== "mutation (advisory)"),
+		);
 	});
 
 	// Recurrence: the MUTATION line read a deferred job as "not running" and
