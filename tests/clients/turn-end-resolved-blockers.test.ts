@@ -764,4 +764,252 @@ describe("turn-end resolved blockers (#3218 criterion 2)", () => {
 			}
 		});
 	});
+
+	describe("the turn-end cap never swallows a consumed resolved line (review-3776-verify V1)", () => {
+		// Recurrence (probe C1): the Resolved section rode LAST and
+		// `capTurnEndMessage` (20 lines, then 1000 chars) cut it after
+		// `consumeResolvedBlockerFiles` had already removed its entries, so a
+		// retired file was never named and the agent kept its STOP block.
+
+		/** One unresolved blocker whose rendered section is `rows` + 2 lines. */
+		function recordUnresolvedBlocker(
+			runtime: RuntimeCoordinator,
+			cacheManager: CacheManager,
+			cwd: string,
+			name: string,
+			rows = 5,
+		): void {
+			const file = path.join(cwd, name);
+			fs.writeFileSync(file, "const a = 1;\n".repeat(rows));
+			runtime.bumpFileSeq(file);
+			const body = Array.from(
+				{ length: rows },
+				(_, index) => `  L${index + 1}: blocker ${index}`,
+			).join("\n");
+			runtime.recordInlineBlockers(
+				file,
+				`🔴 STOP — ${rows} issue(s) must be fixed:\n${body}`,
+				1,
+				["lsp"],
+				Array.from({ length: rows }, (_, index) => index + 1),
+			);
+			cacheManager.addModifiedRange(
+				file,
+				{ start: 1, end: 1 },
+				false,
+				cwd,
+				"session-3218",
+			);
+		}
+
+		/** Record and clear a blocker on `name` (2 blockers, the 2nd write). */
+		function retire(runtime: RuntimeCoordinator, cwd: string, name: string) {
+			const file = path.join(cwd, name);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "const a = 1;\n");
+			runtime.recordInlineBlockers(file, SUMMARY, 1, ["lsp"], [1, 2]);
+			expect(runtime.clearInlineBlockers(file, 2)).toBe(true);
+		}
+
+		const line = (name: string, label = "Resolved this turn") =>
+			`${label}: ${name} (2 blocker(s) cleared by the 2nd write)`;
+
+		function newTurn() {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "session-3218" });
+			runtime.beginTurn();
+			return { runtime, cacheManager: new CacheManager(false) };
+		}
+
+		for (const lensGuard of [false, true]) {
+			it(
+				lensGuard
+					? "keeps the resolved line when the cap truncates the unresolved detail under lens-guard"
+					: "keeps the resolved line when the cap truncates the unresolved detail",
+				async () => {
+					logLatency.mockClear();
+					const env = setupTestEnvironment("pi-lens-3218-c1-");
+					try {
+						const { runtime, cacheManager } = newTurn();
+						const target = path.join(env.tmpDir, "a.ts");
+						seedResolvedBlocker(runtime, cacheManager, env.tmpDir, target);
+						for (let index = 0; index < 4; index += 1) {
+							recordUnresolvedBlocker(
+								runtime,
+								cacheManager,
+								env.tmpDir,
+								`b${index}.ts`,
+							);
+						}
+
+						const content = await runTurnEnd(
+							runtime,
+							cacheManager,
+							env.tmpDir,
+							lensGuard,
+						);
+
+						// The cap did fire: this is the V1 shape, not a message that fit.
+						expect(content).toContain("... (truncated)");
+						expect(content).toContain("Unresolved from this turn — b0.ts");
+						expect(content).toContain(
+							"Resolved this turn: a.ts (2 blocker(s) cleared by the 5th write)",
+						);
+						expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+						expect(resolvedBlockerFileCounts()).toEqual([1]);
+					} finally {
+						env.cleanup();
+					}
+				},
+			);
+		}
+
+		it("keeps the overflow tail when the cap truncates the message", async () => {
+			const env = setupTestEnvironment("pi-lens-3218-tailcap-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				for (let index = 0; index < 11; index += 1) {
+					retire(runtime, env.tmpDir, `file-${index}.ts`);
+				}
+				for (let index = 0; index < 4; index += 1) {
+					recordUnresolvedBlocker(
+						runtime,
+						cacheManager,
+						env.tmpDir,
+						`b${index}.ts`,
+					);
+				}
+
+				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+				expect(content).toContain("... (truncated)");
+				for (let index = 0; index < 10; index += 1) {
+					expect(content).toContain(line(`file-${index}.ts`));
+				}
+				expect(content).toContain("… and 1 more");
+				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+				expect(resolvedBlockerFileCounts()).toEqual([10]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("holds the resolved lines that do not fit the cap for the next turn_end", async () => {
+			// Ten 160-char lines are ~1600 chars: the section alone passes the
+			// 1000-char cap, so putting it first is not enough on its own.
+			const env = setupTestEnvironment("pi-lens-3218-hold-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				const names = Array.from(
+					{ length: 11 },
+					(_, index) =>
+						`${String(index).padStart(2, "0")}-${"x".repeat(94)}.ts`,
+				);
+				for (const name of names) retire(runtime, env.tmpDir, name);
+				cacheManager.addModifiedRange(
+					path.join(env.tmpDir, names[0]!),
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+					"session-3218",
+				);
+
+				const first = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+				runtime.beginTurn();
+				const second = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+				// Nothing the first message consumed was cut by the cap.
+				expect(first).not.toContain("(truncated)");
+				expect(first).toContain("… and 1 more");
+				const listedFirst = names
+					.slice(0, 10)
+					.filter((name) => first.includes(line(name)));
+				const listedSecond = names
+					.slice(0, 10)
+					.filter((name) =>
+						second.includes(line(name, "Resolved since the last report")),
+					);
+				expect(listedFirst.length).toBeGreaterThan(0);
+				expect(listedFirst.length).toBeLessThan(10);
+				// Every one of the ten listed files is named exactly once, in order.
+				expect([...listedFirst, ...listedSecond]).toEqual(names.slice(0, 10));
+				expect(resolvedBlockerFileCounts()).toEqual([
+					listedFirst.length,
+					listedSecond.length,
+				]);
+				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		for (const over of [0, 1]) {
+			it(
+				over === 0
+					? "fills the resolved budget exactly and holds nothing"
+					: "holds the last resolved line one char over the budget",
+				async () => {
+					// The budget is the 1000-char cap less room for the widest
+					// overflow tail, so the tail can never be the part the cap cuts.
+					const budget = 1000 - "… and 9007199254740991 more".length;
+					const env = setupTestEnvironment("pi-lens-3218-edge-");
+					try {
+						const { runtime, cacheManager } = newTurn();
+						// Five lines whose `line.length + 1` sum to the budget exactly.
+						const stems = [0, 1, 2, 3, 4].map((index) => `n${index}-`);
+						const fixed = stems.reduce(
+							(sum, stem) => sum + line(`${stem}.ts`).length + 1,
+							0,
+						);
+						const pad = budget - fixed;
+						const names = stems.map((stem, index) => {
+							const share = Math.floor(pad / 5) + (index < pad % 5 ? 1 : 0);
+							const extra = index === 4 ? over : 0;
+							return `${stem}${"y".repeat(share + extra)}.ts`;
+						});
+						expect(
+							names.reduce((sum, name) => sum + line(name).length + 1, 0),
+						).toBe(budget + over);
+						for (const name of names) retire(runtime, env.tmpDir, name);
+
+						const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+						for (const name of names.slice(0, 4)) {
+							expect(content).toContain(line(name));
+						}
+						expect(content.includes(line(names[4]!))).toBe(over === 0);
+						expect(runtime.hasResolvedBlockerFiles()).toBe(over === 1);
+						expect(resolvedBlockerFileCounts()).toEqual([5 - over]);
+					} finally {
+						env.cleanup();
+					}
+				},
+			);
+		}
+
+		it("delivers a lone over-budget line instead of holding it forever", async () => {
+			// A hold for budget must still drain: were the first line held too,
+			// a single long path would stay pending and every read-only turn
+			// would fall through to the composer again.
+			const env = setupTestEnvironment("pi-lens-3218-long-");
+			try {
+				const { runtime, cacheManager } = newTurn();
+				const name = [
+					"d".repeat(250),
+					"e".repeat(250),
+					"f".repeat(250),
+					`${"g".repeat(250)}.ts`,
+				].join("/");
+				retire(runtime, env.tmpDir, name);
+
+				const content = await runTurnEnd(runtime, cacheManager, env.tmpDir);
+
+				expect(content).toContain(`Resolved this turn: ${"d".repeat(250)}/`);
+				expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+				expect(resolvedBlockerFileCounts()).toEqual([1]);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
 });
