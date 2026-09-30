@@ -38,7 +38,7 @@ function fakeClient(label: string, busy = false) {
 	};
 }
 
-function configureTypeScriptServer(id = "typescript") {
+function configureServer(id = "typescript", policy = "transparent") {
 	const spawn = vi.fn(async () => ({
 		process: {
 			process: { killed: false },
@@ -53,11 +53,7 @@ function configureTypeScriptServer(id = "typescript") {
 			id,
 			name: id,
 			extensions: [".ts"],
-			idleEviction: ["typescript", "python", "marksman", "opengrep"].includes(
-				id,
-			)
-				? "transparent"
-				: "unmeasured",
+			idleEviction: policy,
 			root: async () => "/repo",
 			spawn,
 		},
@@ -126,7 +122,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "20";
 			const client = fakeClient("generic-window");
 			createLSPClient.mockResolvedValue(client);
-			configureTypeScriptServer();
+			configureServer();
 			const { LSPService } = await import("../../../clients/lsp/index.js");
 			const service = new LSPService();
 			await service.getClientForFile("/repo/main.ts");
@@ -141,7 +137,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		const first = fakeClient("first");
 		const rebuilt = fakeClient("rebuilt");
 		createLSPClient.mockResolvedValueOnce(first).mockResolvedValueOnce(rebuilt);
-		const spawn = configureTypeScriptServer();
+		const spawn = configureServer();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
@@ -170,35 +166,34 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		await service.shutdown();
 	});
 
-	it.each(["python", "marksman", "opengrep"])(
-		"also releases an idle %s client and rebuilds it on demand",
-		async (id) => {
-			vi.useFakeTimers();
-			const first = fakeClient("first");
-			const rebuilt = fakeClient("rebuilt");
-			createLSPClient
-				.mockResolvedValueOnce(first)
-				.mockResolvedValueOnce(rebuilt);
-			configureTypeScriptServer(id);
-			const { LSPService } = await import("../../../clients/lsp/index.js");
-			const service = new LSPService();
+	// #3645 recurrence: #3622 widened a key-prefix regex (`typescript|python|...`)
+	// one server at a time. The registry declaration is the only gate now, so a
+	// server id no list has ever heard of is evicted when it declares
+	// `transparent`.
+	it("releases an idle transparent server whatever its id and rebuilds it on demand", async () => {
+		vi.useFakeTimers();
+		const first = fakeClient("first");
+		const rebuilt = fakeClient("rebuilt");
+		createLSPClient.mockResolvedValueOnce(first).mockResolvedValueOnce(rebuilt);
+		configureServer("brand-new-server");
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
 
-			await service.getClientForFile("/repo/main.ts");
-			await vi.advanceTimersByTimeAsync(20);
-			expect(first.shutdown).toHaveBeenCalledTimes(1);
-			expect(service.getAliveClientCount()).toBe(0);
-			expect((await service.getClientForFile("/repo/main.ts"))?.client).toBe(
-				rebuilt,
-			);
-			await service.shutdown();
-		},
-	);
+		await service.getClientForFile("/repo/main.ts");
+		await vi.advanceTimersByTimeAsync(20);
+		expect(first.shutdown).toHaveBeenCalledTimes(1);
+		expect(service.getAliveClientCount()).toBe(0);
+		expect((await service.getClientForFile("/repo/main.ts"))?.client).toBe(
+			rebuilt,
+		);
+		await service.shutdown();
+	});
 
 	it("keeps an unmeasured server resident", async () => {
 		vi.useFakeTimers();
 		const client = fakeClient("unmeasured");
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer("go");
+		configureServer("go", "unmeasured");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
@@ -213,7 +208,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		vi.useFakeTimers();
 		const client = fakeClient("busy", true);
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer();
+		configureServer();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		await service.getClientForFile("/repo/main.ts");
@@ -234,7 +229,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		vi.useFakeTimers();
 		const client = fakeClient("leased");
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer();
+		configureServer();
 		const notification = suspendAt(client.notify.open);
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
@@ -257,7 +252,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		vi.useFakeTimers();
 		const client = fakeClient("backpressured");
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer();
+		configureServer();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const harness = service as unknown as {
@@ -292,7 +287,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		const predecessor = fakeClient("predecessor");
 		const replacement = fakeClient("replacement");
 		createLSPClient.mockResolvedValue(predecessor);
-		configureTypeScriptServer();
+		configureServer();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const entry = await service.getClientForFile("/repo/main.ts");
@@ -321,7 +316,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		vi.useFakeTimers();
 		const client = fakeClient("same-client");
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer();
+		configureServer();
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const entry = await service.getClientForFile("/repo/main.ts");
@@ -387,7 +382,7 @@ describe("LSP idle eviction (#1332 b2)", () => {
 	it("unrefs the timer and clears it on service disposal", async () => {
 		const client = fakeClient("lifecycle");
 		createLSPClient.mockResolvedValue(client);
-		configureTypeScriptServer();
+		configureServer();
 		const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();

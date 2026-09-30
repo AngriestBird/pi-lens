@@ -543,6 +543,13 @@ ADR: docs/adr/0009-reported-path-attribution.md
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
   timers on every removal path.
+- Idle-eviction policy is the registry's `idleEviction` field, declared per
+  server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
+  registry server's eviction cost and respawn safety into
+  `docs/lsp-idle-eviction.md` and changes no policy; a declaration change is a
+  follow-up that cites its row. `tests/config/lsp-idle-eviction-measurement.test.ts`
+  fails when a registry server can go unmeasured without an admission or when
+  the committed measurement vetoes a server declared `transparent`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
