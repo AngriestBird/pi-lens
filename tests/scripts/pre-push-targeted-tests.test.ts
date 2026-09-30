@@ -685,6 +685,16 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 		});
 	}
 
+	// The wrapper's own mirrored stderr already carries the holder text, so the
+	// message under test is the hook's `[pre-push]` line alone.
+	function busyLine(result: { stderr: string }) {
+		return (
+			result.stderr
+				.split("\n")
+				.find((line) => line.startsWith("[pre-push] test lock busy")) ?? ""
+		);
+	}
+
 	function holdExclusiveLock(fx: ReturnType<typeof makeFixture>) {
 		// This test process is alive, so the lock is a live holder without a
 		// second process or a scheduling wait.
@@ -711,12 +721,13 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 		holdExclusiveLock(fx);
 		const result = runHook(fx);
 		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("test lock busy after 0.3 s");
-		expect(result.stderr).toContain(
+		expect(busyLine(result)).toContain("test lock busy after 0.3 s");
+		expect(busyLine(result)).toContain(
 			`PID ${process.pid} since 2026-01-01T00:00:00.000Z`,
 		);
-		expect(result.stderr).toContain(fx.lockPath);
-		expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
+		expect(busyLine(result)).toContain(fx.lockPath);
+		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1 git push");
+		expect(busyLine(result)).toContain("PI_LENS_TEST_LOCK_TIMEOUT_MS=");
 		expect(fs.existsSync(fx.logPath)).toBe(false);
 	});
 
@@ -734,9 +745,9 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 			);
 		const result = runHook(fx);
 		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("2 of 2 shared slot(s) still busy");
-		expect(result.stderr).toContain(fx.lockPath);
-		expect(result.stderr).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
+		expect(busyLine(result)).toContain("2 of 2 shared slot(s) still busy");
+		expect(busyLine(result)).toContain(fx.lockPath);
+		expect(busyLine(result)).toContain("PI_LENS_PREPUSH_LOCK_SKIP=1");
 	});
 
 	it("PI_LENS_PREPUSH_LOCK_SKIP=1 exits 0 with a warning and appends one durable record", () => {
@@ -745,6 +756,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 		const result = runHook(fx, { PI_LENS_PREPUSH_LOCK_SKIP: "1" });
 		expect(result.status).toBe(0);
 		expect(result.stderr).toContain("WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1");
+		expect(result.stderr).toContain(fx.logPath);
 		const lines = fs.readFileSync(fx.logPath, "utf8").trim().split("\n");
 		expect(lines).toHaveLength(1);
 		const record = JSON.parse(lines[0]);
