@@ -768,6 +768,7 @@ npm run build:dist                    build the published dist bundle
 npm run lint                          tsc plus oxlint
 npm run lint:js:tests                 required type-aware oxlint rules over tests
 npm run fmt:check                     oxfmt gate
+npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
 npm run test:unit                     serialized unit suite
