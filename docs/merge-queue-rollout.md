@@ -73,4 +73,4 @@ the ci-verdict queue reads are inert without a queue.
 ## Known remainder
 
 The `train:approved` merge-train lane merges through the REST merge API, which
-a queue refuses. Until it enqueues, merge by hand while the queue is on.
+a queue refuses. Until it enqueues (#3761), merge by hand while the queue is on.

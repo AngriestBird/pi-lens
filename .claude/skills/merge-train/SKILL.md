@@ -135,7 +135,7 @@ unchanged. With the queue on:
 - **Not covered here.** The `train:approved` lane workflow
   (`scripts/lib/merge-train-lane.mjs`) still merges through the REST merge
   API, which a queue refuses; until it enqueues, label-driven merges are
-  manual while the queue is on (follow-up issue named in the PR).
+  manual while the queue is on (#3761).
 
 ## Queue ordering
 
