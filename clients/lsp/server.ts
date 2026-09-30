@@ -113,12 +113,28 @@ function withRootMarkers(
 	return root;
 }
 
+/**
+ * #3750: the server could not name a project root for a file, so its client is
+ * hosted at the file's own directory. A server in that state may analyse
+ * nothing for the file (rust-analyzer answers an empty result for a detached
+ * file), so an empty answer from it is not evidence of clean.
+ */
+export type LspRootFallback = {
+	serverId: string;
+	serverName: string;
+	rootMarkers: readonly string[];
+	/** `failed`: `server.root` threw. `fallback`: it found no marker. */
+	cause: "failed" | "fallback";
+};
+
 /** Resolve a server identity cwd through the shared tool-cwd seam. */
 export async function resolveLspServerCwd(
-	server: Pick<LSPServerInfo, "id" | "root" | "rootMarkers">,
+	server: Pick<LSPServerInfo, "id" | "root" | "rootMarkers"> &
+		Partial<Pick<LSPServerInfo, "name">>,
 	filePath: string,
 	sessionCwd: string,
 	onRootFailure?: (reason: string) => void,
+	onRootFallback?: (fallback: LspRootFallback) => void,
 ): Promise<string | undefined> {
 	const rootMarkers = server.rootMarkers ?? server.root.rootMarkers;
 	let serverRoot: string | undefined;
@@ -140,6 +156,14 @@ export async function resolveLspServerCwd(
 				kind: "tool-cwd-resolution",
 				subject: server.id,
 				reason: `lsp:server-root-${rootFailed ? "failed" : "fallback"}:${filePath}`,
+			});
+			// Not gated by the once-only record above: every caller that asks
+			// learns the verdict, not only the first one per file.
+			onRootFallback?.({
+				serverId: server.id,
+				serverName: server.name ?? server.id,
+				rootMarkers: rootMarkers ?? [],
+				cause: rootFailed ? "failed" : "fallback",
 			});
 		}
 		if (!rootMarkers?.length) return undefined;

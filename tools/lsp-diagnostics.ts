@@ -24,7 +24,9 @@ import {
 import {
 	getServersForFileWithConfig,
 	primaryServerId,
+	resolveLspCwdForFile,
 } from "../clients/lsp/config.js";
+import type { LspRootFallback } from "../clients/lsp/server.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import {
 	combineAbortSignals,
@@ -161,6 +163,12 @@ type FileDiagnosticResult = {
 	 * purposes, but the reason differs and the rendered text should say so.
 	 */
 	timedOut?: boolean;
+	/**
+	 * #3750: set when `confirmation === "unconfirmed"` because the primary
+	 * server's root fell back (`lsp:server-root-fallback`) and its empty answer
+	 * would otherwise have read as clean.
+	 */
+	rootFallback?: LspRootFallback;
 	/**
 	 * The file's actual language server (e.g. "typescript"), as opposed to a
 	 * cross-cutting auxiliary scanner (ast-grep, opengrep, ...). Used to split
@@ -830,6 +838,30 @@ async function classifyEmptyResult(
 	}
 }
 
+/**
+ * #3750: did the primary server's project root fall back for this file? The
+ * answer comes from `resolveLspServerCwd`, the seam that records the
+ * `lsp:server-root-fallback` degradation, not from a second marker check. A
+ * server in that state is hosted at the file's own directory and may analyse
+ * nothing, so its empty answer cannot be reported as clean.
+ */
+async function primaryRootFallback(
+	file: string,
+	cwd: string,
+): Promise<LspRootFallback | undefined> {
+	const seen: LspRootFallback[] = [];
+	await resolveLspCwdForFile(file, cwd, (fallback) => seen.push(fallback));
+	return seen[0];
+}
+
+function rootFallbackReason(fallback: LspRootFallback): string {
+	const named =
+		fallback.cause === "failed"
+			? "project root resolution failed for this file"
+			: `no ${fallback.rootMarkers.join(" / ") || "project marker"} found for this file`;
+	return `${fallback.serverName}: ${named}; the server was started at the file's directory and may not have analysed it`;
+}
+
 // --- #611/#707: tier-3 silent escape hatch (typescript.tsserverRequest sync
 // commands) — implementation extracted to clients/lsp/tsserver-sync.ts and
 // re-used from there by the per-edit dispatch path (#707). ---
@@ -1350,6 +1382,11 @@ async function collectFileDiagnosticResult(
 	// re-cementing path). "unknown"/true bindings leave the verdict untouched.
 	const boundMismatch = binding?.boundToCurrentDisk === false;
 	if (boundMismatch) confirmation = "unconfirmed";
+	// #3750: a clean verdict from a server whose root fell back is unconfirmed.
+	// Before the aux-gap demotion below so the primary's reason is the one named.
+	const rootFallback =
+		confirmation === "clean" ? await primaryRootFallback(file, cwd) : undefined;
+	if (rootFallback) confirmation = "unconfirmed";
 	// #1470/#1493: an auxiliary that never reported — cut off by the aux grace timer,
 	// or silent with nothing published for this content — contributed no evidence
 	// about this file, so a "clean" verdict computed from the merged result would
@@ -1439,6 +1476,7 @@ async function collectFileDiagnosticResult(
 		unavailable: lspUnavailableMessage(file, health),
 		confirmation,
 		timedOut: confirmation === "unconfirmed" ? timedOut : undefined,
+		...(rootFallback && { rootFallback }),
 		...(skipReason !== undefined && { skipReason }),
 		primaryServerId: primaryServerId(file),
 		diagnosticsUnsupported: diagnosticsUnsupportedServerIds.length > 0,
@@ -1542,6 +1580,13 @@ async function runFileDiagnostics(
 	// longer "definitionally confirmed". "unknown"/true bindings are unchanged.
 	const boundMismatch = binding?.boundToCurrentDisk === false;
 	if (boundMismatch) confirmation = "unconfirmed";
+	// #3750: a clean verdict from a server whose root fell back is unconfirmed.
+	// Before the aux-gap narrowing below so the primary's reason is the one named.
+	const rootFallback =
+		confirmation === "clean"
+			? await primaryRootFallback(absPath, cwd)
+			: undefined;
+	if (rootFallback) confirmation = "unconfirmed";
 	// #1470/#1493: NARROWED, not collapsed. An auxiliary that never reported — the aux
 	// grace timer cut it off, or it stayed silent with nothing published for this
 	// content — makes the FILE-level verdict unconfirmed. The merged result is missing
@@ -1622,6 +1667,13 @@ async function runFileDiagnostics(
 		// the silent-on-clean text — the primary did confirm, and saying otherwise is
 		// the same overclaim in the opposite direction. The coverage line below names
 		// what is actually missing.
+		if (rootFallback) {
+			return (
+				`Primary LSP${primaryId ? ` (${primaryId})` : ""}: unconfirmed — ` +
+				`${rootFallbackReason(rootFallback)}. NOT the same as 0 diagnostics; ` +
+				"check the file from inside its project and re-run."
+			);
+		}
 		if (unconfirmed && !primaryCoverageGapOnly) {
 			return (
 				`Primary LSP${primaryId ? ` (${primaryId})` : ""}: unconfirmed — ` +
@@ -1708,6 +1760,9 @@ async function runFileDiagnostics(
 			navigationOnlyFiles:
 				diagnosticsUnsupportedServerIds.length > 0 ? 1 : undefined,
 			...(skipReason !== undefined && { skipReason }),
+			...(rootFallback && {
+				rootFallbackReason: rootFallbackReason(rootFallback),
+			}),
 			// #1470: which servers this result does NOT speak for. Absent when it
 			// speaks for all of them.
 			...(unconfirmedServerIds.length > 0 && {
@@ -1731,12 +1786,14 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	clean: number;
 	unconfirmed: number;
 	timedOut: number;
+	rootFallbackReasons: string[];
 	navigationOnly: number;
 	tooLarge: number;
 } {
 	let clean = 0;
 	let unconfirmed = 0;
 	let timedOut = 0;
+	const rootFallbackReasons = new Set<string>();
 	let navigationOnly = 0;
 	let tooLarge = 0;
 	for (const result of results) {
@@ -1754,11 +1811,21 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 			// #570: timed-out checks are a subset of "unconfirmed" — tallied
 			// separately so the aggregate text can say WHY, not just THAT.
 			if (result.timedOut) timedOut += 1;
+			if (result.rootFallback) {
+				rootFallbackReasons.add(rootFallbackReason(result.rootFallback));
+			}
 		} else {
 			clean += 1;
 		}
 	}
-	return { clean, unconfirmed, timedOut, navigationOnly, tooLarge };
+	return {
+		clean,
+		unconfirmed,
+		timedOut,
+		rootFallbackReasons: [...rootFallbackReasons],
+		navigationOnly,
+		tooLarge,
+	};
 }
 
 function classifyBatchFileOutcome(
@@ -1805,7 +1872,13 @@ function inconclusiveBatchResult(
 function unconfirmedReasonClause(
 	unconfirmed: number,
 	timedOut: number,
+	rootFallbackReasons: readonly string[] = [],
 ): string {
+	// #3750: a third, disjoint reason — the file's server root fell back, so its
+	// empty answer was demoted (`primaryRootFallback`). Named per server.
+	if (rootFallbackReasons.length > 0) {
+		return `${rootFallbackReasons.join("; ")} (${unconfirmed} unconfirmed in all).`;
+	}
 	const silent = unconfirmed - timedOut;
 	if (timedOut > 0 && silent > 0) {
 		return (
@@ -1855,6 +1928,7 @@ async function collectBatchDiagnostics(
 	clean: number;
 	unconfirmed: number;
 	timedOut: number;
+	rootFallbackReasons: string[];
 	outcomeCounts: Record<BatchFileOutcome, number>;
 	incompleteFiles: number;
 }> {
@@ -1973,7 +2047,8 @@ async function collectBatchDiagnostics(
 	const total = allDiags.length;
 	const truncated = total > MAX_DIAGNOSTICS;
 	const display = truncated ? allDiags.slice(0, MAX_DIAGNOSTICS) : allDiags;
-	const { clean, unconfirmed, timedOut } = tallyConfirmation(results);
+	const { clean, unconfirmed, timedOut, rootFallbackReasons } =
+		tallyConfirmation(results);
 	for (const result of results) {
 		result.outcome = classifyBatchFileOutcome(result);
 	}
@@ -2018,6 +2093,7 @@ async function collectBatchDiagnostics(
 		clean,
 		unconfirmed,
 		timedOut,
+		rootFallbackReasons,
 		outcomeCounts,
 		incompleteFiles: Math.max(0, files.length - results.length),
 	};
@@ -2049,6 +2125,7 @@ async function runBatchFileDiagnostics(
 		clean,
 		unconfirmed,
 		timedOut,
+		rootFallbackReasons,
 		outcomeCounts,
 		incompleteFiles,
 	} = await collectBatchDiagnostics(absPaths, severity, lspService, options);
@@ -2120,7 +2197,7 @@ async function runBatchFileDiagnostics(
 		lines.push(
 			"",
 			`${clean} file${clean === 1 ? "" : "s"} confirmed clean, ${unconfirmed} unconfirmed: ` +
-				`${unconfirmedReasonClause(unconfirmed, timedOut)} NOT the same as 0 diagnostics.`,
+				`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons)} NOT the same as 0 diagnostics.`,
 		);
 	}
 	if (display.length === 0) {
@@ -2272,6 +2349,7 @@ async function runDirectoryDiagnostics(
 		clean,
 		unconfirmed,
 		timedOut,
+		rootFallbackReasons,
 		outcomeCounts,
 	} = await collectBatchDiagnostics(
 		filesToProcess,
@@ -2309,7 +2387,7 @@ async function runDirectoryDiagnostics(
 		const cleanLine =
 			unconfirmed > 0
 				? `${clean} clean · ${unconfirmed} unconfirmed: ` +
-					`${unconfirmedReasonClause(unconfirmed, timedOut)} NOT the same as 0 diagnostics.`
+					`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons)} NOT the same as 0 diagnostics.`
 				: "No diagnostics found.";
 		text = [
 			`Directory: ${absPath}`,
@@ -2343,7 +2421,11 @@ async function runDirectoryDiagnostics(
 				? [
 						"",
 						`${clean} other file${clean === 1 ? "" : "s"} confirmed clean, ${unconfirmed} unconfirmed: ` +
-							unconfirmedReasonClause(unconfirmed, timedOut),
+							unconfirmedReasonClause(
+								unconfirmed,
+								timedOut,
+								rootFallbackReasons,
+							),
 					]
 				: []),
 			"",
