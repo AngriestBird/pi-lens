@@ -466,6 +466,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real hook pipes git through xargs into the pinned oxfmt; the exit-123 refusal is a process-boundary fact",
 	},
+	"real-process-spawn:scripts/pre-push-targeted-tests.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"git's pre-push stdin and the hook script's exit/skip contract are the subject; the union witness needs a real git fixture",
+	},
 	"real-process-spawn:scripts/prune-agent-worktrees.test.ts": {
 		detector: "real-process-spawn",
 		reason:
