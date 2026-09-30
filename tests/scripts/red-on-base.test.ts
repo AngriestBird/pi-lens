@@ -376,6 +376,24 @@ describe("red-on-base usage and build failures", () => {
 		expect(probes(repo)).toEqual([]);
 	});
 
+	it.each([
+		[[], "no test files given"],
+		[[A, "--repeat", "0"], "--repeat must be a positive integer"],
+		[[A, "--bogus"], "unknown flag --bogus"],
+	])(
+		"bad arguments %j are a usage error (exit 2) before anything runs",
+		(argv, message) => {
+			const repo = makeRepo(
+				{ files: { [A]: file(pass("t")) } },
+				{ files: { [A]: file(pass("t")) } },
+			);
+			const result = run(repo, argv);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain(message);
+			expect(probes(repo)).toEqual([]);
+		},
+	);
+
 	it("a --base that is not a commit is a usage error (exit 2)", () => {
 		const repo = makeRepo(
 			{ files: { [A]: file(pass("t")) } },

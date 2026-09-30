@@ -60,7 +60,15 @@ every live worker died with it. Kill every language server a probe spawns
 before moving on; the previous worker's unkilled servers were part of that
 footprint.
 
-Before calling a hook red unrelated, run scripts/red-on-base.mjs and paste its verdict.
+Before calling a hook or CI red unrelated, run
+`node scripts/red-on-base.mjs <test files…> [--base origin/master] [--repeat 3]`
+from your tree and paste its output. It builds HEAD and the base, then compares
+failing tests one by one (file plus full name). Only `RED-ON-BASE` for every
+failing test (exit 0, with the failing tests listed) justifies "unrelated".
+`CAUSED-BY-CHANGE` (exit 1) means yours, including a test file your change
+adds. `INCONCLUSIVE` (exit 3: a flaky or unreproduced HEAD red, or a run with no
+per-test report) and `ALL-GREEN` (exit 0, nothing failed anywhere) are not
+evidence of unrelated; exit 2 is a usage error, 4 a build failure.
 
 When Git authority is granted, use one logical commit with an imperative,
 conventional-prefix subject of at most 50 characters, a blank line, and a

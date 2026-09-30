@@ -96,16 +96,11 @@ function parseArgs(argv) {
 	let base = "origin/master";
 	let repeat = 1;
 	let testCommand;
-	const value = (index, flag) => {
-		if (argv[index] === undefined)
-			throw new UsageError(`${flag} needs a value`);
-		return argv[index];
-	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
-		if (arg === "--base") base = value(++index, arg);
-		else if (arg === "--repeat") repeat = Number(value(++index, arg));
-		else if (arg === "--test-command") testCommand = value(++index, arg);
+		if (arg === "--base") base = argv[++index];
+		else if (arg === "--repeat") repeat = Number(argv[++index]);
+		else if (arg === "--test-command") testCommand = argv[++index];
 		else if (arg.startsWith("--")) throw new UsageError(`unknown flag ${arg}`);
 		else files.push(arg);
 	}
