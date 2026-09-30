@@ -94,6 +94,7 @@ import {
 	getGraphBuildInfoForGraph,
 	getGraphImportChanges,
 	graphBuildInfoIsTrustworthy,
+	graphWasmTrapDetail,
 } from "../review-graph/builder.js";
 import {
 	buildReverseDependencyIndexFromGraph,
@@ -1390,7 +1391,7 @@ export async function computeCascadeForFile(
 							: isTreeSitterWasmAborted()
 								? "review graph degraded — tree-sitter is disabled for this process until restart"
 								: graphBuildInfo.wasmTrappedFiles
-									? `review graph degraded — tree-sitter wasm runtime failure in ${graphBuildInfo.wasmTrappedFiles} file(s)`
+									? graphWasmTrapDetail(graphBuildInfo.wasmTrappedFiles)
 									: coverage?.sourceFilesTruncated
 										? "review graph partial — source walk stopped at its visited-entry budget"
 										: "review graph partial — persisted graph coverage is incomplete",
