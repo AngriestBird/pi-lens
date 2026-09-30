@@ -34,8 +34,10 @@ Pull requests must pass `npm run lint`. Run targeted test files for touched seam
 - **pre-push** — a build, then targeted `vitest` runs for the changed `.ts`
   files (never the full suite; see `scripts/pre-push-targeted-tests.mjs`).
   Waits at most 2 minutes on the shared machine-wide test-suite lock
-  (#1101); if that times out, the push proceeds anyway with a warning —
-  CI runs the real gate either way.
+  (#1101); if that times out, the push is blocked (#3717) with the holder,
+  the lock path and the retry options. `PI_LENS_PREPUSH_LOCK_SKIP=1 git push`
+  is the explicit opt-out: it warns and appends a line to `pre-push.log` beside
+  the lock, and CI remains the real gate.
 
 `core.hooksPath` is `git config` — shared by every worktree of the same
 clone — and `.husky/_` (the directory husky installs at that path) is

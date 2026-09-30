@@ -20,8 +20,14 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { safeSpawn } from "../../clients/safe-spawn.js";
 import { escapeRegExp } from "../../clients/string-utils.js";
+import { gitExecFileSync } from "./git-fixture-env.mjs";
 
 const SELF_SCAN_CATEGORY = "pi-lens-self-scan";
+
+/** A self-scan rule that declares `severity: info` is advisory (#3684): its
+ * hits are reported but never gate and never enter the baseline. The rule's
+ * own declared severity is the single source of truth -- no parallel list. */
+const ADVISORY_SEVERITY = "info";
 
 /** Repo root, derived from this file's own on-disk location -- never a
  * hardcoded machine path (the #1718 defect). */
@@ -147,7 +153,8 @@ export function runSelfScan({
 
 	return {
 		ruleIds: ids,
-		findings,
+		findings: findings.filter((f) => f.severity !== ADVISORY_SEVERITY),
+		advisoryFindings: findings.filter((f) => f.severity === ADVISORY_SEVERITY),
 		// undefined (not 0) when ast-grep's --inspect output shape changes
 		// underneath us -- an unparsed count must not silently read as
 		// "scanned zero files" and trip the dead-scan guard for the wrong
@@ -188,4 +195,40 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	};
 	fs.writeFileSync(p, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 	return p;
+}
+
+/** Absolute (real) paths of files changed between
+ * `base` and the working tree, from `git diff` run in `cwd` (the repo root). Throws when git
+ * cannot resolve `base` -- the caller decides how loud that is. (#3684) */
+export function changedFilesSince(base, cwd = process.cwd()) {
+	const out = String(
+		gitExecFileSync(["diff", "--name-only", base], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}),
+	);
+	return new Set(
+		out
+			.split("\n")
+			.filter(Boolean)
+			.map((name) => realPathOrResolved(path.resolve(cwd, name))),
+	);
+}
+
+/** The subset of `findings` whose file is in `changed` (a set from
+ * `changedFilesSince`); finding paths are resolved against `root`, where
+ * ast-grep ran. (#3684) */
+export function findingsInChangedFiles(findings, changed, root = repoRoot()) {
+	return findings.filter((f) =>
+		changed.has(realPathOrResolved(path.resolve(root, String(f.file ?? "")))),
+	);
+}
+
+function realPathOrResolved(p) {
+	try {
+		return fs.realpathSync(p);
+	} catch {
+		return p;
+	}
 }
