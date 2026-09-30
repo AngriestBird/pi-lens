@@ -620,7 +620,9 @@ export async function analyzeFile(
 					lspRunner.status !== "when_skipped" &&
 					lspRunner.status !== "test_file_skipped",
 				status: lspRunner.status,
-				failureKind: lspRunner.failureKind,
+				...(lspRunner.failureKind !== undefined && {
+					failureKind: lspRunner.failureKind,
+				}),
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,
 			}
