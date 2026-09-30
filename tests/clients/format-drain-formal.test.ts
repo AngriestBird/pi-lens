@@ -1602,14 +1602,19 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				const { c, install } = await giveUpBeforeTheChildRuns();
 				install();
 				await c.wrote;
-				await lateSettled();
-				// Unhandled rejections surface after the microtask queue drains.
+				// Either the failure row lands or, without the catch, a rejection
+				// does; unhandled rejections surface after the microtask queue drains.
+				await waitFor(
+					() => rejections.length + lateRows().length,
+					(count) => count > 0,
+					{ yieldControl: tick, timeoutMs: 2_000 },
+				);
 				await tick();
 				await tick();
+				expect(rejections).toEqual([]);
 				expect(lateRows()).toEqual([
 					expect.objectContaining({ metadata: { outcome: "read-failed" } }),
 				]);
-				expect(rejections).toEqual([]);
 				expect(
 					getDegradationSummary()
 						.filter((group) => group.kind === "hook-handler-crash")

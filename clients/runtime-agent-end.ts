@@ -72,7 +72,8 @@ const DEFERRED_FORMAT_CONCURRENCY = 3;
  * post-exit resync waits for the formatter the hook bound gave up on under
  * this same budget, so a command resolution that outlives it (an auto-install
  * has no leaf bound) settles as an abandoned resync instead of parking the
- * detached task forever (#3599).
+ * detached task forever (#3599). The formatter's later write is then synced by
+ * a continuation chained onto its settlement (#3828).
  */
 const DEFERRED_FORMAT_BUDGET_MS = 30_000;
 
