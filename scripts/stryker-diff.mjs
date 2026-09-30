@@ -17,7 +17,7 @@ import {
 	dedupePatterns,
 	DEFAULT_MAX_FILES,
 	DEFAULT_MAX_RANGES,
-	describePartialInterruptCause,
+	describePartialMutationOutcome,
 	describeStrykerFailure,
 	estimateAffordableMutants,
 	formatCapNotice,
@@ -27,6 +27,7 @@ import {
 	isScriptMutationFile,
 	mapRelatedTests,
 	DEFAULT_MAX_TESTS,
+	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
@@ -56,12 +57,6 @@ const MUTATION_TEST_TIMEOUT_MS = 30_000;
 const MUTATION_TSCONFIG = "tsconfig.mutation.json";
 const REPORT_PATH = "reports/mutation/mutation.json";
 const INCREMENTAL_PATH = ".stryker/incremental.json";
-// stryker.config.mjs's own concurrency, read from the live import rather than
-// duplicated here (single-source-of-truth): round 2 S2's budget arithmetic
-// needs it, and a future change to the base config must not silently drift
-// the two apart.
-const CONCURRENCY = base.concurrency;
-
 function argumentValue(name, fallback) {
 	let value = fallback;
 	for (let index = 0; index < process.argv.length - 1; index += 1) {
@@ -495,9 +490,25 @@ if (!cost) {
 	}
 	const allowedMutants = estimateAffordableMutants({
 		remainingMs: remainingBudgetMs(),
-		concurrency: CONCURRENCY,
 		dryRunMs: cost.dryRunMs,
+		fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	});
+	if (allowedMutants === 0) {
+		const reason =
+			"the remaining mutation budget is smaller than the fixed run overhead; no mutant could be evaluated safely";
+		console.log(`mutation diff: no mutants evaluated; ${reason}`);
+		writeReport(
+			null,
+			baseMeta({
+				zeroMutants: { reason },
+				filesSkippedOverCap: skipped,
+				filesUncovered: uncovered,
+				rangesTotal: allPatterns.length,
+				testsRun: tests,
+			}),
+		);
+		process.exit(0);
+	}
 	if (cost.totalMutants > allowedMutants) {
 		const keepRangeCount = Math.max(
 			1,
@@ -605,10 +616,13 @@ for (;;) {
 			rangesTotal: allPatterns.length,
 			totalMutants: costEstimate?.totalMutants ?? null,
 			failureReason: describeStrykerFailure(result, budgetMinutes, { tests }),
-			partialReason: describePartialInterruptCause(result, budgetMinutes),
+			partialReason: describePartialMutationOutcome(result, budgetMinutes, {
+				evaluated: partialMutants.length,
+				total: costEstimate?.totalMutants ?? null,
+			}),
 		});
-		console.error(describeStrykerFailure(result, budgetMinutes, { tests }));
 		if (outcome.partial) {
+			console.error(outcome.partial.reason);
 			console.log(
 				`mutation diff: partial report -- ${outcome.partial.evaluated} of ${outcome.partial.total ?? "an unknown total of"} mutant(s) evaluated before the interrupt`,
 			);
@@ -629,6 +643,7 @@ for (;;) {
 				}),
 			);
 		} else {
+			console.error(describeStrykerFailure(result, budgetMinutes, { tests }));
 			writeReport(
 				null,
 				baseMeta({

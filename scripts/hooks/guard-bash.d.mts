@@ -44,6 +44,7 @@ export function classifySegment(
 	rawSegment: string,
 	sharedEnv?: Record<string, string>,
 	cwd?: string,
+	originCwd?: string,
 ): DenyRule | null;
 
 export function findDeny(commandText: string, cwd?: string): DenyRule | null;

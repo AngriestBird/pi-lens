@@ -833,7 +833,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/tree-sitter.ts": 2,
 		"clients/dispatch/runners/trivy-config.ts": 4,
 		"clients/dispatch/runners/utils/diagnostic-parsers.ts": 3,
-		"clients/dispatch/runners/utils/runner-helpers.ts": 23,
+		// 23 -> 30 (#2660): the resolver now carries its selected `path` and
+		// `resolution.path` through the evidence seam, adding seven same-sense
+		// path identifiers while preserving the four-rung lookup ladder.
+		"clients/dispatch/runners/utils/runner-helpers.ts": 30,
 		"clients/dispatch/runners/vale.ts": 7,
 		"clients/dispatch/runners/yaml-rule-parser.ts": 7,
 		"clients/dispatch/runners/yamllint.ts": 3,
@@ -971,7 +974,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// operations, not delivery lanes; the census measures every use.
 		"clients/test-runner-client.ts": 66,
 		"clients/todo-scanner.ts": 3,
-		"clients/tool-agreement.ts": 4,
+		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
+		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
+		// and `path.resolve` — six more `path` operations, same sense
+		// (a path operation).
+		"clients/tool-agreement.ts": 10,
 		"clients/tool-cwd.ts": 13,
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
@@ -1255,7 +1262,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
 		"clients/session-state-store.ts": 3,
-		"clients/tool-agreement.ts": 19,
+		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
+		// supplier's resolved `version` (params, `.version` fields, and the
+		// shared version verdict) through the same agreement comparison.
+		// Same sense — lockfile resolved versions, not generations.
+		// 52 -> 64 (#3656 review): `stripPnpmPeerSuffix` scans a lockfile
+		// resolved version string for its peer-context suffix; same sense.
+		"clients/tool-agreement.ts": 64,
 		"clients/turn-summary.ts": 2,
 		"clients/warm-attach.ts": 4,
 		"clients/widget-state.ts": 5,

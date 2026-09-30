@@ -45,6 +45,15 @@ also names the population M, the excluded M−N set's default, and the planned
 generalization verdict: *widen in this PR* / *follow-up issue* with its seam
 group / *stay specific* with the reason. Recurrence: #3622.
 
+When a gate becomes fail-closed, sweep every construction site that reaches it,
+including test doubles, and prove the sweep with the behaviour suites (#3622).
+
+Run `git check-ignore -v` on every new artifact path before citing it (#3648;
+the linter half landed in #3464).
+
+A measured constant names its measuring command and keeps raw output as a
+tracked artifact pinned by a test (#3648 M3648-3).
+
 Seams are named in the brief before the round; no test is written at an
 unconfirmed seam — a fixer that needs a new seam stops and reports it as a
 finding, not as a test.

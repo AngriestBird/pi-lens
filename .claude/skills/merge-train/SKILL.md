@@ -338,16 +338,18 @@ operator's private notes, so a different orchestrator can run the same train.
   whole catalog. This prevents concurrent lanes from colliding without
   shipping a gap.
 - **On a CROSS-REPOSITORY PR, `action_required` is not `absent` (2026-09-12).**
-  A fork PR's workflow runs sit unstarted until a maintainer approves them, and
-  `ci-verdict` correctly reports the required checks as absent and therefore
-  pending. Absent because CI has not registered yet and absent because nobody
-  approved the run look identical in the verdict table and are hours apart in
-  remedy. Before treating a fork PR as "CI still coming", read the runs
-  directly:
-  `gh api "repos/<owner>/<repo>/actions/runs?head_sha=<sha>" --jq '.workflow_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion)"'`
-  and approve each `action_required` run with
-  `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`. #2983 sat
-  unapproved while the lane read it as a slow queue.
+  A fork PR's workflow runs sit unapproved until a maintainer approves them
+  (GitHub reports them as `status: completed`, `conclusion: action_required`,
+  with no CI check-run rows), so the required checks read as absent and the
+  verdict is pending. Absent because CI has not registered yet and absent
+  because nobody approved the run look identical in the verdict table and are
+  hours apart in remedy. `node scripts/ci-verdict.mjs <pr>` now tells them
+  apart (#3694): when the verdict is otherwise pending and required checks
+  are absent, it prints `awaiting fork approval` with one
+  `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve` per run. It
+  never approves; approving is the maintainer's call. A head that is green or
+  failing keeps that verdict whatever stale `action_required` runs it carries.
+  #2983 sat unapproved while the lane read it as a slow queue.
 - **Read the advisory rows before merging, even though they never gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a
@@ -573,3 +575,12 @@ Each row cost a lane at least once; the prose above carries the record.
 | Accepting a subset-shaped change without a generalization verdict | #3622 applied idle eviction to 4 of ~44 LSP servers; the maintainer caught the missing population screen by reading the PR. At each regroup, scan merged PRs and require the verdict. |
 | Filing an issue mid-session without a seam group | Issues filed mid-session must be assigned to a seam group at filing (2026-09-30); do not leave the follow-up queue ungrouped. |
 | Filing follow-up issues through the GitHub API without a TYPE or priority label | The orchestrator filed about a dozen issues this way on 2026-09-26 (#3543-#3546, #3548, #3549, #3552, #3556, #3558-#3560); the issue templates that would force a label are bypassed by API creation, and they stayed untriaged until the maintainer noticed by hand. `.github/workflows/untriaged-issues.yml` now fails a daily job listing any open issue still missing either (#3563) |
+| Issuing a mid-flight order without naming the overridden brief clause | State which part of the original brief it overrides and post the order on the issue (#3695 handoff 6) |
+| Explaining why an agent stopped without checking its status | Check the agent's status before attributing its stop (#3695 handoff 7) |
+| Starting agents against an ambiguous target | Confirm the target before dispatching agents (#3695 handoff 8) |
+| Letting strictness-ratchet and glossary pins collide on one change | Run both pin sweeps before pushing (#3455/#3643) |
+| Re-running a `pull_request` job against the old merge SHA | Use `gh pr update-branch` to rebuild the merge ref (#3660; 2026-09-30) |
+| Fixing a hooks or lint gate without sweeping older open branches | Sweep open branches committed before the fix (#3675; 2026-09-30) |
+| Enabling auto-merge before local HEAD equals the pushed SHA | Verify the pushed SHA before enabling auto-merge (#3671) |
+| Waiting for CI after retargeting a base without a push | Push after a base retarget to re-arm CI (#3679) |
+| Leaving fork-PR `action_required` runs unapproved | Approve the runs after pushing to a fork PR (#3656) |
