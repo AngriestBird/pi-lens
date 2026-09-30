@@ -399,6 +399,11 @@ ADR: docs/adr/0009-reported-path-attribution.md
     range. Pids are enforced by `tests/support/kill-guard.ts`; screen the
     other identifier kinds by hand.
 
+57. **Production import in the global test setup:** `tests/support/vitest-setup.ts`
+    loads before every file's `vi.mock`, so a production module it imports
+    reaches the file unmocked (#3703: 56 files red). Enforced by
+    `tests/config/vitest-setup-import-closure.test.ts` (leaf allowlist).
+
 </important>
 
 <important if="session, turn or generation lifecycle">

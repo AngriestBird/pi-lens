@@ -63,7 +63,7 @@ function resolveSpecifier(
 }
 
 /** Repo-relative modules `source` imports, from code only. */
-export function importEdges(file: string, source: string): string[] {
+function importEdges(file: string, source: string): string[] {
 	// Specifiers are string literals, so they are read from the keep-strings
 	// text; the keyword must survive the blank-strings text, which drops any
 	// `from "…"` that is itself inside a comment or a string.
