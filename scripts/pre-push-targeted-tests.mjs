@@ -161,10 +161,13 @@ export function resolveDiffRange(input = readStdin()) {
 			if (/^0+$/.test(localSha)) continue;
 			if (/^0+$/.test(remoteSha)) {
 				// New branch (no remote tracking ref yet): retain the baseline
-				// used by CI.
-				return ["origin/master...HEAD"];
+				// used by CI, while continuing to retain other pushed updates.
+				if (!ranges.includes("origin/master...HEAD"))
+					ranges.push("origin/master...HEAD");
+				continue;
 			}
-			ranges.push(`${remoteSha}...${localSha}`);
+			const range = `${remoteSha}...${localSha}`;
+			if (!ranges.includes(range)) ranges.push(range);
 		}
 		return ranges.length > 0 ? ranges : null;
 	}

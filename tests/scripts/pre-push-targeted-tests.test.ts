@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	CI_ONLY_PRE_PUSH_TESTS,
 	collectTestFiles,
@@ -75,7 +76,10 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		// build entry point, not merely avoid selecting tests afterward.
 		const result = spawnSync(
 			process.execPath,
-			[path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"), "--skip-build"],
+			[
+				path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
+				"--skip-build",
+			],
 			{
 				cwd: repoRoot,
 				encoding: "utf8",
@@ -83,7 +87,9 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			},
 		);
 		expect(result.status).toBe(0);
-		expect(result.stdout).toContain("deletion-only push; skipping build and tests");
+		expect(result.stdout).toContain(
+			"deletion-only push; skipping build and tests",
+		);
 	});
 
 	it.each([
@@ -95,11 +101,14 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			"update first",
 			`refs/heads/topic localsha refs/heads/topic remotesha\n(delete) ${zero} refs/heads/removed abc123\n`,
 		],
-	])("ignores deletion lines regardless of their order (%s)", (_name, stdin) => {
-		// #3661 recurrence: reading only the first line made mixed pushes
-		// depend on ref ordering and could select a deletion range.
-		expect(resolveDiffRange(stdin)).toEqual(["remotesha...localsha"]);
-	});
+	])(
+		"ignores deletion lines regardless of their order (%s)",
+		(_name, stdin) => {
+			// #3661 recurrence: reading only the first line made mixed pushes
+			// depend on ref ordering and could select a deletion range.
+			expect(resolveDiffRange(stdin)).toEqual(["remotesha...localsha"]);
+		},
+	);
 
 	it("keeps the origin/master fallback for a new branch", () => {
 		// #3661 recurrence: a non-deletion line with an all-zero remote sha is
@@ -107,6 +116,100 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(
 			resolveDiffRange(`refs/heads/topic localsha refs/heads/topic ${zero}\n`),
 		).toEqual(["origin/master...HEAD"]);
+	});
+
+	it("deduplicates repeated update and new-branch ranges", () => {
+		// F3664-1 recurrence: multiple ref lines can describe the same range;
+		// main must not run the same diff and target twice.
+		expect(
+			resolveDiffRange(
+				`refs/heads/topic localsha refs/heads/topic remotesha\n` +
+					`refs/heads/topic localsha refs/heads/topic remotesha\n` +
+					`refs/heads/new newlocal refs/heads/new ${zero}\n` +
+					`refs/heads/new newerlocal refs/heads/new ${zero}\n`,
+			),
+		).toEqual(["remotesha...localsha", "origin/master...HEAD"]);
+	});
+
+	it.each([
+		[
+			"update first",
+			"refs/heads/updated localsha refs/heads/updated remotesha\n" +
+				`refs/heads/new-branch newlocal refs/heads/new-branch ${zero}\n`,
+			["remotesha...localsha", "origin/master...HEAD"],
+		],
+		[
+			"new branch first",
+			`refs/heads/new-branch newlocal refs/heads/new-branch ${zero}\n` +
+				"refs/heads/updated localsha refs/heads/updated remotesha\n",
+			["origin/master...HEAD", "remotesha...localsha"],
+		],
+	])(
+		"unions an update with a new-branch fallback (%s)",
+		(_name, stdin, expected) => {
+			// F3664-1 recurrence: a mixed push must not lose the normal update when
+			// the new-branch fallback appears before or after it.
+			expect(resolveDiffRange(stdin)).toEqual(expected);
+		},
+	);
+
+	it("passes changed files from both mixed-push ranges to selection", () => {
+		// F3664-1 witness: main must call changedFiles for both ranges; a
+		// ranges.slice(0, 1) mutation must leave one target out of this output.
+		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-pre-push-test-"));
+		process.chdir(fixtureDir);
+		const scriptDir = path.join(fixtureDir as string, "scripts");
+		fs.symlinkSync(path.join(repoRoot, "scripts"), scriptDir, "dir");
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(fixtureDir as string, "node_modules"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "vitest.config.ts"),
+			path.join(fixtureDir as string, "vitest.config.ts"),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "package.json"),
+			path.join(fixtureDir as string, "package.json"),
+		);
+		write("clients/first.ts", "export const first = true;\n");
+		write("tests/clients/first.test.ts", "it('first', () => {});\n");
+		write("clients/second.ts", "export const second = true;\n");
+		write("tests/clients/second.test.ts", "it('second', () => {});\n");
+		const git = (args: string[]) =>
+			gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" });
+		git(["init", "--quiet", "--initial-branch=main"]);
+		git(["config", "user.name", "pi-lens-test"]);
+		git(["config", "user.email", "pi-lens-test@example.com"]);
+		git(["add", "."]);
+		git(["commit", "--quiet", "-m", "base"]);
+		const base = git(["rev-parse", "HEAD"]).trim();
+		git(["update-ref", "refs/remotes/origin/master", base]);
+		write("clients/first.ts", "export const first = false;\n");
+		git(["add", "clients/first.ts"]);
+		git(["commit", "--quiet", "-m", "first"]);
+		const first = git(["rev-parse", "HEAD"]).trim();
+		write("clients/second.ts", "export const second = false;\n");
+		git(["add", "clients/second.ts"]);
+		git(["commit", "--quiet", "-m", "second"]);
+		const second = git(["rev-parse", "HEAD"]).trim();
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
+				"--skip-build",
+			],
+			{
+				cwd: fixtureDir,
+				encoding: "utf8",
+				input: `refs/heads/first ${first} refs/heads/first ${base}\nrefs/heads/new ${second} refs/heads/new ${zero}\n`,
+			},
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("tests/clients/first.test.ts");
+		expect(result.stdout).toContain("tests/clients/second.test.ts");
 	});
 });
 
