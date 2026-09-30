@@ -98,6 +98,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"runtime seam behavior cases; filesystem counters verify re-detection, not a population sweep",
 	"tests/clients/sg-runner.test.ts":
 		"fault-injection cases enumerate one real temporary namespace seam; the test asserts cleanup for each setup operation, not a source population sweep",
+	"tests/support/tmp-root-teardown.test.ts":
+		"lists the private tmpdir of one child Vitest run to assert what its forks left behind; a fixture-behaviour check, not a registered-or-fail source population sweep (#2912)",
 	"tests/clients/language-policy.test.ts":
 		"policy unit cases over synthetic language definitions, not a production walk",
 	"tests/clients/lsp/lsp-primary-reachability.test.ts":
