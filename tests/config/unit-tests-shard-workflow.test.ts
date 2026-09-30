@@ -65,9 +65,11 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		);
 	});
 
-	// Recurrence: a matrix edit (4 shards) without the `--shard=i/N`
-	// denominator would silently run a quarter of the suite nowhere.
-	it("runs every matrix shard against the same denominator", () => {
+	// Recurrence: a literal shard count beside a matrix edit (`--shard=k/3` with
+	// four matrix entries) silently runs a fraction of the suite nowhere. The
+	// count has ONE source, `strategy.job-total` (the matrix length), in both
+	// the job name and the `--shard` denominator.
+	it("derives the shard denominator from the matrix, never a literal", () => {
 		const shard = CI().test;
 		const shards = shard.strategy?.matrix?.shard ?? [];
 		expect(shards).toEqual(
@@ -76,10 +78,12 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		expect(shards.length).toBeGreaterThan(1);
 		expect(shard.strategy?.["fail-fast"]).toBe(false);
 		expect(shard.name).toBe(
-			`Unit tests (shard \${{ matrix.shard }}/${shards.length})`,
+			"Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
 		);
 		const run = String(step(shard, "Run tests").run);
-		expect(run).toContain(`--shard=\${{ matrix.shard }}/${shards.length}`);
+		expect(run).toContain(
+			"--shard=${{ matrix.shard }}/${{ strategy.job-total }}",
+		);
 	});
 
 	// Recurrence: `--shard` hands tests/config/tmp-fixture-hygiene (the

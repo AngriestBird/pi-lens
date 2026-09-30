@@ -339,13 +339,22 @@ jobs:
         # pre-push budget (#3426 H3432-1); this job is their CI row.
         run: node scripts/pre-push-targeted-tests.mjs --skip-build --include-ci-only
 
-  # #3753: the suite runs as three parallel `vitest --shard=i/3` jobs. This job
+  # #3753: the suite runs as parallel `vitest --shard=k/N` jobs, N being the
+  # matrix length (`strategy.job-total`, so the count has ONE source). This job
   # id stays `test` (install-test and record-post-merge-validation `needs:` it,
   # and a matrix job's `needs.test.result` is success only when EVERY shard
   # succeeded). The check-run the ruleset requires is the `unit-tests`
   # aggregate below, named exactly `Unit tests`.
+  #
+  # Why five: vitest assigns files to shards by sha1 of the path in equal COUNTS,
+  # not equal duration, and the serialized projects (wall-clock-budget,
+  # real-harness, lsp-spawn-heavy) are a fixed per-shard floor. Measured on this
+  # PR's own run with three shards: 150 s / 333 s / 400 s for `Run tests`, so
+  # the slowest shard barely beat the old single job. A model over those
+  # per-file durations (every file's real sha1 shard for N = 2..9) put the
+  # slowest shard at 267 s for N=3 and 157 s for N=5, then flat beyond.
   test:
-    name: Unit tests (shard ${{ matrix.shard }}/3)
+    name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     strategy:
@@ -353,7 +362,7 @@ jobs:
       # failing tests of every red shard, not just the first to finish.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     # Bounds the job so a reader that is alive but never drains (e.g. an
     # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
     # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
@@ -492,7 +501,7 @@ jobs:
         # mark and a verdict line, so the next `Killed npm test` / exit 137 —
         # which carries no failing assertion and reads as infrastructure noise —
         # arrives with a number attached.
-        run: node scripts/with-memory-watch.mjs -- npm test -- --shard=${{ matrix.shard }}/3 --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
+        run: node scripts/with-memory-watch.mjs -- npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }} --reporter=default --reporter=json --outputFile=${{ runner.temp }}/vitest-results.json
 
       # #3753: tmp-fixture-hygiene is the serialized owner that reds on tmp
       # entries any OTHER file leaked during the run. `--shard` hands it to
@@ -642,7 +651,7 @@ jobs:
         run: |
           echo "Unit tests shard jobs (test): ${SHARDS_RESULT}"
           if [[ "${SHARDS_RESULT}" != "success" ]]; then
-            echo "::error::a Unit tests shard did not succeed (${SHARDS_RESULT}); the failing tests are in that shard's own log, check-run 'Unit tests (shard k/3)'"
+            echo "::error::a Unit tests shard did not succeed (${SHARDS_RESULT}); the failing tests are in that shard's own log, check-run 'Unit tests (shard k/N)'"
             exit 1
           fi
 
