@@ -2456,8 +2456,11 @@ describe("run — absent-required re-arm message (#3694)", () => {
 	});
 
 	it("keeps the bare-SHA text for a SHA target", async () => {
+		// A SHA target has no PR to ask: even a gh that would answer an
+		// auto-merge query must not turn it into a re-arm message.
 		const { exitCode, reason } = await runVerdict([FORK_APPROVAL.sha], {
 			...noRuns,
+			autoMergeRequest: {},
 			committedAt: minutesBefore(600),
 		});
 		expect(exitCode).toBe(EXIT_PENDING);
