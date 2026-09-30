@@ -74,6 +74,12 @@ import {
 	resolveReadGuardStartState,
 	stashForkHandoff,
 } from "./clients/read-guard-branch.js";
+import {
+	beginScope,
+	logScopeTransition,
+	retireScope,
+	type SessionScope,
+} from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import { registerMutationBridge } from "./clients/mutation-bridge.js";
 import {
@@ -758,6 +764,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// misclassify its context/message_end/shutdown as primary. Closure ownership
 	// avoids a shared mutable "last session" race between sibling activations.
 	let ownedSessionRole: "primary" | "concurrent-secondary" | undefined;
+	// #3611: the session scope THIS activation serves, set once at its
+	// session_start and retired at its session_shutdown. Activation equals
+	// session (pi re-runs this factory on every transition except /tree).
+	let scope: SessionScope | undefined;
 	const classifyOwnedSessionEmission = (
 		ctx: unknown,
 		sessionId: string | undefined,
@@ -2236,6 +2246,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 								// best-effort observability — never fail session_start
 							});
 						}
+						// #3611: a secondary's own scope. The coordinator, and so the
+						// primary's generation, stays untouched (#473).
+						scope = beginScope({ role: "secondary" });
+						logScopeTransition(scope, {
+							transition: "start",
+							reason: sessionReason,
+							sessionId: stableSessionId,
+							cwd: sessionStartCwd ?? runtime.projectRoot,
+						});
 						return;
 					}
 
@@ -2513,6 +2532,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionId: stableSessionId,
 						reason: sessionReason,
 					});
+					// #3611: handleSessionStart's resetForSession began this session's
+					// scope before its first await.
+					scope = runtime.sessionScope;
+					logScopeTransition(scope, {
+						transition: "start",
+						reason: sessionReason,
+						sessionId: stableSessionId,
+						cwd: ctx.cwd ?? process.cwd(),
+					});
 
 					// Lifecycle-aware widget state (#190). The "should I rehydrate" signal is
 					// NOT the reason — it's whether a persisted snapshot exists for this
@@ -2731,6 +2759,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 						kept: retained.kept,
 						dropped: retained.dropped,
 						branch,
+						cwd: ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
+					});
+					// #3611: retainBranch moved the scope's branch epoch.
+					logScopeTransition(runtime.sessionScope, {
+						transition: "tree",
+						reason: "tree",
+						sessionId: runtime.telemetrySessionId,
 						cwd: ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
 					});
 				} catch (treeErr) {
@@ -3721,6 +3756,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 		dbg(`agent_settled registration failed (older pi host?): ${registerErr}`);
 	}
 
+	// #3611: retire this activation's scope once, with pi's shutdown reason.
+	const retireOwnScope = (
+		reason: string | undefined,
+		sessionId: string | undefined,
+	): void => {
+		if (!scope) return;
+		retireScope(scope, reason);
+		logScopeTransition(scope, {
+			transition: "shutdown",
+			reason: scope.retiredBy(),
+			sessionId,
+			cwd: runtime.projectRoot,
+		});
+	};
+
 	// --- Session shutdown: release all handles so subagent processes exit cleanly ---
 	// The LSP idle-reset timer (240s) is unref'd but we cancel it explicitly here
 	// so it does not fire after shutdown. resetLSPService shuts down any live clients.
@@ -3793,6 +3843,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// Best-effort observability bookkeeping — a stale ctx or an
 				// unresolvable path must never break teardown.
 			}
+			// #3611: only this secondary's own scope retires.
+			retireOwnScope(
+				(event as { reason?: string } | undefined)?.reason,
+				stableSessionId,
+			);
 			dbg(
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);
@@ -3802,76 +3857,85 @@ function activateExtension(hostPi: ExtensionAPI) {
 			| { reason?: string; targetSessionFile?: string }
 			| undefined;
 		const shutdownReason = shutdownEvent?.reason;
-		const switchesSessionFile =
-			typeof shutdownEvent?.targetSessionFile === "string" &&
-			shutdownEvent.targetSessionFile.length > 0;
-		if (
-			switchesSessionFile ||
-			shutdownReason === "quit" ||
-			shutdownReason === undefined
-		) {
-			endSituationalToolTelemetry();
+		// #3611 r2: the retire runs in `finally`. After a /reload that
+		// re-evaluated the entry nothing else ever ends this scope, so a throw
+		// from a teardown step below must not skip it.
+		try {
+			const switchesSessionFile =
+				typeof shutdownEvent?.targetSessionFile === "string" &&
+				shutdownEvent.targetSessionFile.length > 0;
+			if (
+				switchesSessionFile ||
+				shutdownReason === "quit" ||
+				shutdownReason === undefined
+			) {
+				endSituationalToolTelemetry();
+			}
+
+			// #1654: no drain runs here — see the module comment above
+			// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
+			// session_shutdown-based safety net was deliberately dropped rather
+			// than kept.
+
+			// #1018/#1996: emit the bounded primary cache summary, then drop this
+			// session's prefix/attribution state. The secondary path did the same for
+			// its role-local bucket before returning above.
+			emitCacheUsageSummaryAtSessionEnd(stableSessionId, "primary");
+			clearCachePrefixSession(stableSessionId, "primary");
+
+			cancelLSPIdleReset();
+			// #449 slice 1: SYNC-only deregistration (no child spawns — see the
+			// processExiting note below); safe to call unconditionally here.
+			deregisterInstance();
+			// #2129 review F3: release the primary registration at the same boundary
+			// the registry entry is released. Root identity made a stale `activeRoot`
+			// decisive: without this, once root A's primary ended, every later start
+			// in root B would classify `secondary-root` forever — never primary,
+			// never a full start, no re-arm. This is the process-lifetime-latch shape
+			// the catalog names. Only the PRIMARY path reaches here; a secondary
+			// returned above precisely because the primary is still live.
+			// #3662: a replacement reason leaves the slot pending for its successor.
+			releasePrimarySession(shutdownReason);
+			// #2467: no analyzer bootstrap may START loading from here on. A demand
+			// already in flight keeps its promise and still settles — the gate is
+			// checked only when no flight exists. Nothing is spawned, which is what
+			// AGENTS.md's #234 teardown rule requires of a session_shutdown-time
+			// call; a replacement session re-arms the gate at its session_start.
+			markAnalyzerBootstrapShutdown();
+			// processExiting: the loop is closing here — killing LSP servers must NOT
+			// spawn taskkill, or libuv aborts on uv_async_send to the closing loop
+			// (Assertion !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c) — seen
+			// on `pi update`. Direct handle-kill only. Grandchildren behind a
+			// shell/.cmd wrapper are NOT reaped by the OS (Windows does not kill
+			// children when a parent dies) — they rely on stdin EOF, LSP
+			// `initialize.processId` self-watchdog compliance, and the #449/#472
+			// cross-process instance registry's orphan reaper as the backstop (#472).
+			resetLSPService({
+				fast: true,
+				processExiting: true,
+				reason: "session_shutdown",
+			});
+			// S2d (gap 5, #1432 review): one session_end_bus_rollup row per event
+			// name with any activity this session — same primary-only placement as
+			// the shared-infra teardown above (a concurrent secondary already
+			// returned before reaching here), since the rollup counters are
+			// process-wide module state a live secondary would still need.
+			emitBusEventRollupAtSessionEnd(runtime.projectRoot);
+			emitVerifiedPathAttributionRollup(runtime.projectRoot);
+			// #2249: same primary-only placement — one concurrent_session_bind_rollup
+			// row summarizing this session's declined binds by classification, a
+			// no-op when none occurred.
+			emitConcurrentSessionBindRollupAtSessionEnd(runtime.projectRoot);
+			// #1123 item 4: dump active handles AFTER teardown — whatever is still
+			// alive at this point is exactly what would keep a --print/--no-session
+			// process from exiting (the #1097 lesson: what survives IS the leak).
+			// No-op unless PI_LENS_DEBUG_HANDLES=1.
+			dumpActiveHandles("session_shutdown");
+		} finally {
+			// #3611: last, so nothing above runs under a retired scope. Every
+			// handle this session issued stops being current (design §3.4).
+			retireOwnScope(shutdownReason, stableSessionId);
 		}
-
-		// #1654: no drain runs here — see the module comment above
-		// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
-		// session_shutdown-based safety net was deliberately dropped rather
-		// than kept.
-
-		// #1018/#1996: emit the bounded primary cache summary, then drop this
-		// session's prefix/attribution state. The secondary path did the same for
-		// its role-local bucket before returning above.
-		emitCacheUsageSummaryAtSessionEnd(stableSessionId, "primary");
-		clearCachePrefixSession(stableSessionId, "primary");
-
-		cancelLSPIdleReset();
-		// #449 slice 1: SYNC-only deregistration (no child spawns — see the
-		// processExiting note below); safe to call unconditionally here.
-		deregisterInstance();
-		// #2129 review F3: release the primary registration at the same boundary
-		// the registry entry is released. Root identity made a stale `activeRoot`
-		// decisive: without this, once root A's primary ended, every later start
-		// in root B would classify `secondary-root` forever — never primary,
-		// never a full start, no re-arm. This is the process-lifetime-latch shape
-		// the catalog names. Only the PRIMARY path reaches here; a secondary
-		// returned above precisely because the primary is still live.
-		// #3662: a replacement reason leaves the slot pending for its successor.
-		releasePrimarySession(shutdownReason);
-		// #2467: no analyzer bootstrap may START loading from here on. A demand
-		// already in flight keeps its promise and still settles — the gate is
-		// checked only when no flight exists. Nothing is spawned, which is what
-		// AGENTS.md's #234 teardown rule requires of a session_shutdown-time
-		// call; a replacement session re-arms the gate at its session_start.
-		markAnalyzerBootstrapShutdown();
-		// processExiting: the loop is closing here — killing LSP servers must NOT
-		// spawn taskkill, or libuv aborts on uv_async_send to the closing loop
-		// (Assertion !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c) — seen
-		// on `pi update`. Direct handle-kill only. Grandchildren behind a
-		// shell/.cmd wrapper are NOT reaped by the OS (Windows does not kill
-		// children when a parent dies) — they rely on stdin EOF, LSP
-		// `initialize.processId` self-watchdog compliance, and the #449/#472
-		// cross-process instance registry's orphan reaper as the backstop (#472).
-		resetLSPService({
-			fast: true,
-			processExiting: true,
-			reason: "session_shutdown",
-		});
-		// S2d (gap 5, #1432 review): one session_end_bus_rollup row per event
-		// name with any activity this session — same primary-only placement as
-		// the shared-infra teardown above (a concurrent secondary already
-		// returned before reaching here), since the rollup counters are
-		// process-wide module state a live secondary would still need.
-		emitBusEventRollupAtSessionEnd(runtime.projectRoot);
-		emitVerifiedPathAttributionRollup(runtime.projectRoot);
-		// #2249: same primary-only placement — one concurrent_session_bind_rollup
-		// row summarizing this session's declined binds by classification, a
-		// no-op when none occurred.
-		emitConcurrentSessionBindRollupAtSessionEnd(runtime.projectRoot);
-		// #1123 item 4: dump active handles AFTER teardown — whatever is still
-		// alive at this point is exactly what would keep a --print/--no-session
-		// process from exiting (the #1097 lesson: what survives IS the leak).
-		// No-op unless PI_LENS_DEBUG_HANDLES=1.
-		dumpActiveHandles("session_shutdown");
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

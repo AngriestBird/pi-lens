@@ -75,6 +75,7 @@
   "./clients/safe-spawn.js",
   "./clients/session-event-guard.js",
   "./clients/session-lifecycle.js",
+  "./clients/session-scope.js",
   "./clients/session-start-observability.js",
   "./clients/session-state-store.js",
   "./clients/sessionstart-logger.js",

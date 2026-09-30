@@ -39,6 +39,7 @@ import { holdFileMutationQueue } from "./file-mutation-queue.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
+import { recordDroppedRead } from "./session-scope.js";
 import {
 	getAutofixPolicyForFile,
 	hasBiomeConfig,
@@ -535,8 +536,11 @@ export async function handleAgentEnd({
 						kind: "autofix",
 					});
 				if (!nodeFs.existsSync(changedPath)) continue;
+				// The loop index is in range; `!` keeps the strict-indexed spike
+				// count flat (tests/config/strictness-baseline.json).
+				const queuedBranchEpoch = record!.readGuardBranchEpoch;
 				// #3528: this session's change log, read guard and turn state only.
-				session.guardedWrite(changedPath, () => {
+				const landed = session.guardedWrite(changedPath, () => {
 					recordProjectChange({
 						runtime,
 						cwd: record.turnStateCwd,
@@ -546,9 +550,7 @@ export async function handleAgentEnd({
 					});
 					if (!getFlag("no-read-guard"))
 						runtime.readGuard.recordWritten(changedPath, {
-							// The loop index is in range; `!` keeps the strict-indexed
-							// spike count flat (tests/config/strictness-baseline.json).
-							branchEpoch: record!.readGuardBranchEpoch,
+							branchEpoch: queuedBranchEpoch,
 						});
 					const content = nodeFs.readFileSync(changedPath, "utf-8");
 					cacheManager.addModifiedRange(
@@ -559,7 +561,11 @@ export async function handleAgentEnd({
 						currentSessionId ?? runtime.telemetrySessionId,
 						"pi",
 					);
+					return true;
 				});
+				// #3611 F1: the read guard lost this authorship; count it by reason.
+				if (landed === undefined && !getFlag("no-read-guard"))
+					recordDroppedRead(session, "deferred-autofix", queuedBranchEpoch);
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -881,9 +887,10 @@ export async function handleAgentEnd({
 				// previous fallback chain through ctxCwd / projectRoot / record.cwd
 				// could silently regress the monorepo cwd-mismatch fix from PR #105.
 				const bookkeepingCwd = record.turnStateCwd;
+				const queuedBranchEpoch = record.readGuardBranchEpoch;
 				// #3528: this session's change log, read guard, turn state and turn
 				// summary only.
-				session.guardedWrite(filePath, () => {
+				const landed = session.guardedWrite(filePath, () => {
 					recordProjectChange({
 						runtime,
 						cwd: bookkeepingCwd,
@@ -893,7 +900,7 @@ export async function handleAgentEnd({
 					});
 					if (!getFlag("no-read-guard")) {
 						runtime.readGuard.recordWritten(filePath, {
-							branchEpoch: record.readGuardBranchEpoch,
+							branchEpoch: queuedBranchEpoch,
 						});
 					}
 					try {
@@ -923,7 +930,11 @@ export async function handleAgentEnd({
 							runtime.turnSummary.recordFormat(filePath, { tool });
 						}
 					}
+					return true;
 				});
+				// #3611 F1: the read guard lost this authorship; count it by reason.
+				if (landed === undefined && !getFlag("no-read-guard"))
+					recordDroppedRead(session, "deferred-format", queuedBranchEpoch);
 			}
 
 			if (result.fileContent) {

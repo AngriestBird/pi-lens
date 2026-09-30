@@ -27,10 +27,14 @@ import { deriveProviderFromModelId } from "./model-provider.js";
 import { beginTurnContext, setTurnContextSession } from "./turn-context.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { WriteOrderingGuard, writeOrderToken } from "./write-ordering-guard.js";
+import type { GenerationHandle } from "./generation-guard.js";
 import {
-	createGenerationSource,
-	type GenerationHandle,
-} from "./generation-guard.js";
+	beginScope,
+	type LineageHandle,
+	nextOrderTurn,
+	retireScope,
+	type SessionScope,
+} from "./session-scope.js";
 
 /** Keep deferred cascade admission bounded without dropping late findings. */
 export const MAX_PENDING_CASCADE_RUNS = 32;
@@ -394,8 +398,12 @@ const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
 
 export class RuntimeCoordinator {
 	private _projectRoot = normalizeMapKey(process.cwd());
-	private readonly _sessionGeneration =
-		createGenerationSource("runtime-session");
+	// #3611: the session generation is this scope's ticket, drawn from one
+	// process counter, so two coordinators (two entry evaluations) never hold
+	// the same number (N4). The construction scope's ticket is the
+	// coordinator's id on the `session_scope_transition` row.
+	private _scope: SessionScope = beginScope({ role: "primary" });
+	private readonly _coordinatorId = this._scope.scopeId;
 	private _sessionStartedAt = Date.now();
 	private _errorDebtBaseline: ErrorDebtBaseline | null = null;
 	private _pipelineCrashCounts = new Map<string, number>();
@@ -450,6 +458,9 @@ export class RuntimeCoordinator {
 	 * widget's write guards outlive a session reset (`/reload` keeps them),
 	 * so a later turn's token must outrank every earlier one in the process.
 	 * `_turnIndex` restarts per session for telemetry.
+	 * #3611 (N3): drawn from the process counter (`nextOrderTurn`), because a
+	 * `/reload` that re-evaluates the entry builds a new coordinator while the
+	 * widget module keeps its guards.
 	 */
 	private _writeOrderTurn = 0;
 	private _writeIndex = 0;
@@ -529,7 +540,13 @@ export class RuntimeCoordinator {
 	readonly partialApplyRecords = new PartialApplyRecordStore();
 
 	resetForSession(startedAt = Date.now()): void {
-		this._sessionGeneration.bump();
+		const previous = this._scope;
+		retireScope(previous, "superseded");
+		this._scope = beginScope({
+			role: "primary",
+			parentScopeId: previous.scopeId,
+			coordinatorId: this._coordinatorId,
+		});
 		this._sessionStartedAt = startedAt;
 		this._complexityBaselines.clear();
 		this._pipelineCrashCounts.clear();
@@ -728,7 +745,7 @@ export class RuntimeCoordinator {
 		// by resetForSession().
 		this._turnStartProjectSeq = this._projectSeq;
 		this._turnIndex += 1;
-		this._writeOrderTurn += 1;
+		this._writeOrderTurn = nextOrderTurn();
 		beginTurnContext(this._telemetrySessionId);
 		this._writeIndex = 0;
 		this._reportedThisTurn.clear();
@@ -1077,19 +1094,25 @@ export class RuntimeCoordinator {
 	}
 
 	get sessionGeneration(): number {
-		return this._sessionGeneration.current();
+		return this._scope.scopeId;
+	}
+
+	/** #3611: the session scope this coordinator serves. */
+	get sessionScope(): SessionScope {
+		return this._scope;
 	}
 
 	/**
 	 * #3499: a handle on the current session, for a write that lands after an
 	 * await which can outlive the session (a fire-and-forget quiet window).
+	 * #3611: a `LineageHandle` on the current scope.
 	 */
-	captureSessionGeneration(): GenerationHandle {
-		return this._sessionGeneration.capture();
+	captureSessionGeneration(): LineageHandle {
+		return this._scope.capture();
 	}
 
 	isCurrentSession(generation: number): boolean {
-		return this._sessionGeneration.current() === generation;
+		return this._scope.scopeId === generation && this._scope.isLive();
 	}
 
 	markStartupScanInFlight(name: string, generation: number): void {
@@ -1769,7 +1792,11 @@ export class RuntimeCoordinator {
 	}
 
 	get readGuard(): ReadGuard {
-		this._readGuard ??= new ReadGuard(this._telemetrySessionId);
+		this._readGuard ??= new ReadGuard(
+			this._telemetrySessionId,
+			{},
+			this._scope,
+		);
 		return this._readGuard;
 	}
 

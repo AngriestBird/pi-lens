@@ -16,6 +16,7 @@ import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import { normalizeEphemeralMapKey, normalizeFilePath } from "./path-utils.js";
 import { logReadGuardEvent } from "./read-guard-logger.js";
+import { beginScope, moveBranch, type SessionScope } from "./session-scope.js";
 
 // --- Types ---
 
@@ -643,13 +644,20 @@ export class ReadGuard {
 	/** Re-anchored at every conversation move (#3521); see `retainBranch`. */
 	private sessionStartMs: number;
 	/**
-	 * Bumped by every `retainBranch` (#3521). A deferred writer captures it
+	 * The scope whose branch epoch this guard reads (#3611). Every
+	 * `retainBranch` moves it (#3521). A deferred writer captures the epoch
 	 * before it awaits, and `recordWritten` refuses the write when a `/tree`
-	 * moved the conversation in between (catalog shape 22).
+	 * moved the conversation in between (catalog shape 22). A guard built
+	 * outside a coordinator owns a scope of its own.
 	 */
-	private branchEpoch = 0;
+	private readonly scope: SessionScope;
 
-	constructor(sessionId: string, config: Partial<ReadGuardConfig> = {}) {
+	constructor(
+		sessionId: string,
+		config: Partial<ReadGuardConfig> = {},
+		scope: SessionScope = beginScope({ role: "primary" }),
+	) {
+		this.scope = scope;
 		this.sessionId = sessionId;
 		this.sessionStartMs = Date.now();
 		this.config = { ...DEFAULT_CONFIG, ...config };
@@ -1396,12 +1404,12 @@ export class ReadGuard {
 	recordWritten(rawFilePath: string, opts?: { branchEpoch?: number }): void {
 		if (
 			opts?.branchEpoch !== undefined &&
-			opts.branchEpoch !== this.branchEpoch
+			opts.branchEpoch !== this.currentBranchEpoch
 		) {
 			incrementDegradationCount({
 				kind: "read-guard-write-after-branch-move",
 				subject: "recordWritten",
-				reason: `a write captured at branch epoch ${opts.branchEpoch} landed at ${this.branchEpoch}; not credited to the new branch`,
+				reason: `a write captured at branch epoch ${opts.branchEpoch} landed at ${this.currentBranchEpoch}; not credited to the new branch`,
 			});
 			return;
 		}
@@ -1586,13 +1594,13 @@ export class ReadGuard {
 		// #3520 owns deleting this fallback; until then a write made on the
 		// abandoned branch must not read as authored on this one.
 		this.sessionStartMs = Date.now();
-		this.branchEpoch += 1;
+		moveBranch(this.scope);
 		return result;
 	}
 
 	/** The epoch a deferred writer captures before it awaits (#3521). */
 	get currentBranchEpoch(): number {
-		return this.branchEpoch;
+		return this.scope.branchEpoch();
 	}
 
 	/**

@@ -1102,6 +1102,14 @@ export type DegradationKind =
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
+	/**
+	 * #3611 (#3609 F1, decision A + C): a read-guard write was dropped because
+	 * its session scope retired, and its entry is still on its conversation's
+	 * branch. Subject `<retirement reason>:<site>` (`reload:deferred-format`),
+	 * so correct `/new` drops can be told from `/reload` and resume false
+	 * blocks. Counted.
+	 */
+	| "session-scope-read-dropped"
 	| "session-start-duplicate"
 	/**
 	 * #3662: a primary replacement shutdown left the process with no primary

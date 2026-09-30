@@ -1408,6 +1408,9 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 			});
 			const { runtime, cacheManager } = newSession(env.tmpDir);
 			for (let turn = 0; turn < 3; turn += 1) runtime.beginTurn();
+			// #3611: the order turn is a process counter, so its value depends on
+			// every coordinator this file ran; the pin is that it did not restart.
+			const orderTurnBeforeReload = runtime.writeOrderTurn;
 			runtime.resetForSession();
 			runtime.beginTurn();
 			const event = {
@@ -1444,7 +1447,7 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 				[1, runtime.writeOrderTurn],
 				[1, runtime.writeOrderTurn],
 			]);
-			expect(runtime.writeOrderTurn).toBe(5);
+			expect(runtime.writeOrderTurn).toBeGreaterThan(orderTurnBeforeReload);
 		} finally {
 			ungatePipeline(vi.mocked(runPipeline) as never);
 			_setObservedTimeBoundsForTests({});

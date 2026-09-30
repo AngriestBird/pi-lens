@@ -36,6 +36,7 @@ import { normalizeMapKey } from "../../clients/path-utils.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
+import { retireScope } from "../../clients/session-scope.js";
 import { waitFor } from "./interleaving-kit.js";
 import { createMockState } from "./lsp/mock-client-state.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -1457,5 +1458,101 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				metadata: expect.objectContaining({ outcome: "read-failed" }),
 			}),
 		]);
+	});
+});
+
+/**
+ * #3611, the #3609 F1 decision (A + C): a drain write that its session's
+ * lineage dropped is counted by the scope's retirement reason, so the
+ * correct `/new` drops can be told from the `/reload` and resume false
+ * blocks (`formal/session-lifecycle` `recordDrop`, `NoUnrecordedFalseBlock`).
+ * `retireScope` is what `index.ts`'s `session_shutdown` runs.
+ */
+describe("#3611 F1: a drain write dropped by its retired scope is counted by reason", () => {
+	function readDrops(): Array<{ subject: string; count: number }> {
+		return getDegradationSummary()
+			.filter((group) => group.kind === "session-scope-read-dropped")
+			.flatMap((group) =>
+				group.latestReasons.map((r) => ({
+					subject: r.subject,
+					count: group.count,
+				})),
+			);
+	}
+
+	it("a format drain dropped by /reload leaves one record with the reason reload", async () => {
+		const c = armChild({ write: true });
+		const drain = handleAgentEnd(drainDeps());
+		await c.didRead;
+		retireScope(runtime.sessionScope, "reload");
+		c.openWrite();
+		await drain;
+		expect(staleWriteSubjects()).toEqual([`runtime-session:${filePath}`]);
+		expect(readDrops()).toEqual([
+			{ subject: "reload:deferred-format", count: 1 },
+		]);
+	});
+
+	it("an autofix drain dropped by /new leaves one record with the reason new", async () => {
+		const { fixer, parked, resume } = gatedBiome();
+		writeBiomeAgreement();
+		runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "autofix");
+		flags.add("no-autoformat");
+		const drain = handleAgentEnd(
+			drainDeps({ biomeClient: fixer, ruffClient: noRuff }),
+		);
+		await parked.p;
+		retireScope(runtime.sessionScope, "new");
+		runtime.resetForSession(Date.now());
+		resume.open();
+		await drain;
+		expect(readDrops()).toEqual([
+			{ subject: "new:deferred-autofix", count: 1 },
+		]);
+	});
+
+	it("records nothing when a /tree moved the branch before the scope retired (the entry may be gone)", async () => {
+		const c = armChild({ write: true });
+		const drain = handleAgentEnd(drainDeps());
+		await c.didRead;
+		runtime.readGuard.retainBranch(new Set());
+		retireScope(runtime.sessionScope, "reload");
+		c.openWrite();
+		await drain;
+		expect(staleWriteSubjects()).toEqual([`runtime-session:${filePath}`]);
+		expect(readDrops()).toEqual([]);
+	});
+
+	it("records nothing for a write queued before a /tree and dropped by /reload after it", async () => {
+		// #3611 r2 F1 (review probe A): the record was queued at epoch 0; the
+		// live read guard would refuse its write as a branch move, so its drop
+		// is no false block and must not count as one.
+		runtime.readGuard.retainBranch(new Set());
+		const c = armChild({ write: true });
+		const drain = handleAgentEnd(drainDeps());
+		await c.didRead;
+		retireScope(runtime.sessionScope, "reload");
+		c.openWrite();
+		await drain;
+		expect(staleWriteSubjects()).toEqual([`runtime-session:${filePath}`]);
+		expect(readDrops()).toEqual([]);
+	});
+
+	it("records nothing when the read guard is off", async () => {
+		flags.add("no-read-guard");
+		const c = armChild({ write: true });
+		const drain = handleAgentEnd(drainDeps());
+		await c.didRead;
+		retireScope(runtime.sessionScope, "reload");
+		c.openWrite();
+		await drain;
+		expect(readDrops()).toEqual([]);
+	});
+
+	it("records nothing for a drain that stays in its live scope (no drop)", async () => {
+		armChild();
+		await handleAgentEnd(drainDeps());
+		expect(blindEditVerdict()).toBe("allow");
+		expect(readDrops()).toEqual([]);
 	});
 });
