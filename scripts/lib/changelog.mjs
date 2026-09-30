@@ -80,7 +80,6 @@ export function summarizeSection(body, opts = {}) {
 		const h = line.match(/^#{2,4}\s+(.*)$/);
 		if (h) {
 			heading = h[1].trim();
-			if (heading === INTERNAL_HEADING) continue;
 			if (!buckets.has(heading)) {
 				buckets.set(heading, []);
 				order.push(heading);
