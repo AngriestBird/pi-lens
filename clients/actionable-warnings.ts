@@ -31,6 +31,7 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
+import { LEDGER_FIELD_MAX } from "./ledger-bounds.js";
 import {
 	recordLspMutationBatch,
 	type LspMutationContext,
@@ -1771,12 +1772,20 @@ export function publishActionableWarningsReport(
 		// without any file having moved -- name the actual cause instead of
 		// asserting a change that may not have happened.
 		const cause = merged.droppedForSessionMismatch
-			? "the publish crossed a session boundary (a different session's write, or a resumed process) before this turn's in-band publish could keep them"
+			? "the publish crossed a session boundary"
 			: "changed before this turn's in-band publish could keep them";
+		const reason = `${merged.droppedFiles.length} carried-forward entries: findings are LOST on this channel; ${cause} (files: ${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`;
+		// incrementDegradationCount appends `(count: N)` after its bounded reason.
+		// Leave room for that suffix so this diagnostic stays within the ledger's
+		// 200-character field cap while retaining the files list and its cause.
+		const boundedReason =
+			reason.length > LEDGER_FIELD_MAX - 12
+				? `${reason.slice(0, LEDGER_FIELD_MAX - 13)}…`
+				: reason;
 		incrementDegradationCount({
 			kind: "actionable-warnings-inband-superseded",
 			subject: `${path.resolve(cwd)}:inband-carry-superseded`,
-			reason: `${merged.droppedFiles.length} carried-forward entries: findings are LOST on this channel; ${cause} (files: ${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,
+			reason: boundedReason,
 		});
 		opts.dbg?.(
 			`actionable_warnings: in-band publish dropped ${merged.droppedFiles.length} superseded carried-forward file entry/entries (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,
