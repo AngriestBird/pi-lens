@@ -381,6 +381,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the provider wire roster is produced by a real pi host loading the built extension; an in-process double cannot certify tools.<name>.enabled",
 	},
+	// #3684: the advisory scope is the wrapper's own `git diff` against a real
+	// throwaway fixture repo; an in-process call cannot prove the git boundary
+	// or the wrapper's argv/env (GITHUB_BASE_REF) handling.
+	"real-process-spawn:scripts/astgrep-self-scan.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the wrapper's advisory scope runs a real `git diff` in a throwaway fixture repo and reads argv/env; an in-process double proves neither boundary",
+	},
 	// #2807 review F1/F4: the local CLI's exact argv and a shallow checkout's
 	// missing diff are the subjects; an in-process call cannot prove either.
 	"real-process-spawn:scripts/check-pr-body.test.ts": {
@@ -458,6 +466,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the CLI's real exit code and distinct infra label on exhaustion are unobservable from an in-process stub",
 	},
+	// #3723: the open/close CLI's own process entry against a real git
+	// fixture -- the worktree registry, the on-disk node_modules symlink, the
+	// #3173 unlink-before-remove ordering, and the exit code decide the run;
+	// no in-process double reaches those command boundaries.
+	"real-process-spawn:scripts/pr-worktree.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the CLI's real git fixture, node_modules symlink state, unlink-before-remove ordering, and exit code are the subject; an in-process double restates none of them",
+	},
 	// #3451: the hook's format step is a shell pipeline (git diff | xargs
 	// oxfmt); the bug was xargs turning oxfmt's exit 2 into 123 at the process
 	// boundary, which only the real hook run shows.
@@ -469,7 +486,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/pre-push-targeted-tests.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"git's pre-push stdin and the hook script's exit/skip contract are the subject; the union witness needs a real git fixture",
+			"git's pre-push stdin and the hook script's exit/skip/lock-timeout contract are the subject; the union and lock-admission witnesses need a real git fixture and the real hook chain",
 	},
 	"real-process-spawn:scripts/prune-agent-worktrees.test.ts": {
 		detector: "real-process-spawn",

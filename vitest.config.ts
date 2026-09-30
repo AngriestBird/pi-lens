@@ -443,6 +443,9 @@ export const wallClockBudgetInclude = [
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
+	// #3684: the wrapper's advisory scope is a real `git diff` against a real
+	// fixture repo, spawned through the real CLI (flake-shape admission).
+	"tests/scripts/astgrep-self-scan.test.ts",
 	// #2807 review F1/F4: the checker must be exercised through its real local
 	// CLI and a real shallow clone, not an in-process substitute.
 	"tests/scripts/check-pr-body.test.ts",
@@ -485,6 +488,12 @@ export const wallClockBudgetInclude = [
 	// #2613 review S3a: the retry wrapper's real exit code and distinct
 	// `::error::infra:` label on exhaustion are the subject under test.
 	"tests/scripts/npm-retry.test.ts",
+	// #3723: the open/close CLI's own process entry against a real git
+	// fixture -- the worktree registry, the on-disk node_modules symlink, the
+	// #3173 unlink-before-remove ordering, and the exit code are the subject;
+	// no in-process double exposes those command boundaries (flake-shape
+	// admission).
+	"tests/scripts/pr-worktree.test.ts",
 	// #3451: runs the real pre-commit hook through git and xargs (flake-shape
 	// admission).
 	"tests/scripts/pre-commit-hook.test.ts",
