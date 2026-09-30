@@ -458,6 +458,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the CLI's real exit code and distinct infra label on exhaustion are unobservable from an in-process stub",
 	},
+	// #3723: the open/close CLI's own process entry against a real git
+	// fixture -- the worktree registry, the on-disk node_modules symlink, the
+	// #3173 unlink-before-remove ordering, and the exit code decide the run;
+	// no in-process double reaches those command boundaries.
+	"real-process-spawn:scripts/pr-worktree.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the CLI's real git fixture, node_modules symlink state, unlink-before-remove ordering, and exit code are the subject; an in-process double restates none of them",
+	},
 	// #3451: the hook's format step is a shell pipeline (git diff | xargs
 	// oxfmt); the bug was xargs turning oxfmt's exit 2 into 123 at the process
 	// boundary, which only the real hook run shows.
