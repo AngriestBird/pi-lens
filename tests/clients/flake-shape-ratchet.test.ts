@@ -476,6 +476,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git worktree commands own pruning locks and exit status beyond in-process filesystem state",
 	},
+	// #3724: the real CLI and Git worktree lifecycle are the behavior under test;
+	// an in-process substitute cannot prove child argv, cwd, or cleanup ordering.
+	"real-process-spawn:scripts/red-on-base.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real CLI and Git worktree lifecycle are the behavior under test; an in-process substitute cannot prove child argv, cwd, or cleanup ordering",
+	},
 	"real-process-spawn:scripts/release-qa.test.ts": {
 		detector: "real-process-spawn",
 		reason:

@@ -13,6 +13,9 @@ import { delimiter, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { decideVerdict } from "../../scripts/red-on-base.mjs";
 
+// flake-shape: real-process-spawn — the real CLI, Git worktree lifecycle, and
+// child-process cleanup ordering are the contract; in-process stubs cannot prove it.
+
 const CLI = resolve("scripts/red-on-base.mjs");
 
 describe("red-on-base verdict", () => {

@@ -493,6 +493,7 @@ export const wallClockBudgetInclude = [
 	// fixture (flake-shape admission).
 	"tests/scripts/pre-push-targeted-tests.test.ts",
 	"tests/scripts/prune-agent-worktrees.test.ts",
+	"tests/scripts/red-on-base.test.ts",
 	// #2619 review F1: the release-QA hermeticity canary spawns a REAL child
 	// under scratchEnv() and reads back what that child resolved. The defect it
 	// pins is a child inheriting the ambient environment, which an in-process
