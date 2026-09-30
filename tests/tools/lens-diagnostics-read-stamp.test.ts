@@ -609,5 +609,21 @@ describe("lens_diagnostics mode=full stamps a swept row at its read (#3573)", ()
 			},
 			CASE_MS,
 		);
+
+		it(
+			"a fold with no delta report records no unparseable-generatedAt row (#3600)",
+			async () => {
+				// The record's guard is `deltaDiagnostics.length > 0`: with no report
+				// (or an empty one) there are no rows to widen, and `String(undefined)`
+				// would otherwise fabricate a record whose subject is "undefined".
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				const group = getDegradationSummary().find(
+					({ kind }) => kind === "project-delta-generatedat-unparseable",
+				);
+				expect(group).toBeUndefined();
+			},
+			CASE_MS,
+		);
 	});
 });

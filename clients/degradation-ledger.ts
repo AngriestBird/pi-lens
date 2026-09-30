@@ -847,7 +847,8 @@ export type DegradationKind =
 	/**
 	 * #3600: the projectDelta report carried diagnostics but its `generatedAt`
 	 * could not be parsed, so those rows fell back to the fold's `Date.now()`
-	 * instead of the report's own observation time. Recorded once per fold so
+	 * instead of the report's own observation time. Recorded once per distinct
+	 * unparseable value (`recordDegradationOnce` keys on kind and subject), so
 	 * the fallback is visible rather than a silent freshness widening. Subject
 	 * is the unparseable raw value.
 	 */
