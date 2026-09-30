@@ -158,10 +158,6 @@ function pruneRetiredAdvisories(): void {
  */
 export function queueAgentAdvisory(text: string, scope: LineageHandle): void {
 	pruneRetiredAdvisories();
-	if (!scope.isCurrent()) {
-		countDroppedAdvisory("scope-retired", scope.scopeId);
-		return;
-	}
 	if (_advisories.length >= MAX_QUEUED_ADVISORIES) {
 		countDroppedAdvisory("cap", scope.scopeId);
 		return;
