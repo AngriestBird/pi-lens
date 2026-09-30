@@ -1576,7 +1576,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					isExistingFile,
 				},
 			});
-			// #3525: read before the verdict, which does not move FileTime.
+			// #3525: read before the verdict, whose session_authored path stamps.
 			const fileTimeMoved = readGuard.fileTimeMoved?.(filePath) === true;
 			const verdict =
 				typeof readGuard.checkEdit === "function"
