@@ -250,6 +250,7 @@ describe("ReadGuard authorship export/import (#3612)", () => {
 	});
 
 	it("skips a malformed payload instead of throwing", () => {
+		const c = oldFile("c.ts", 3);
 		const guard = createReadGuard("authorship-malformed");
 		for (const payload of [
 			undefined,
@@ -260,6 +261,8 @@ describe("ReadGuard authorship export/import (#3612)", () => {
 		])
 			expect(() => guard.importAuthorship(payload)).not.toThrow();
 		expect(guard.exportAuthorship().written).toEqual([]);
+		// A non-numeric anchor is ignored: an old file is still not authored.
+		expect(verdict(guard, c, 2)).toMatch(/^block: .*Edit without read/);
 	});
 });
 
