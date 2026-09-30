@@ -90,7 +90,10 @@ the cost of not doing so.
    can evaluate 0 mutants (over `--max-files`, no covering test, a
    type-only/comment-only hunk, or a budget timeout) -- its comment always
    says which, and neither a 0-mutant nor a partial run is ever grounds to
-   skip the hand-mutation table above for whatever they didn't cover.
+   skip the hand-mutation table above for whatever they didn't cover. The
+   hand table is for the NEW guard, branch, filter or cap the PR is about (#3779);
+   after the push, read the comment for your exact head (`Head:` line;
+   `ci-verdict` prints a `MUTATION` line).
    Platform rule: a test that asserts a Windows-only property runs ONLY on
    Windows dev boxes; the authoritative Unit tests lane is ubuntu. Every
    `skipIf(process.platform …)` names the lane that runs it or reads
