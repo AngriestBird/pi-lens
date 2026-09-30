@@ -85,7 +85,7 @@ on:
 # repository_dispatch runs validate the exact merge commit, and duplicate
 # events for that commit must not run concurrently.
 concurrency:
-  group: install-smoke-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action || 'default' }}
+  group: install-smoke-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
   cancel-in-progress: true
 
 permissions: {}
