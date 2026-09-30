@@ -15,14 +15,17 @@ first line (see `formal/file-locks/README.md`), and the `TLA+ models` CI job
 Four kinds of config:
 
 - **Merged behaviour** (`Merged`, `MergedStores`, `H3FileBacked`) must pass.
-  `Current` is merged master with every transition, and violates
-  `SecondaryIsolation` through N2 (#3613, open). `H3FileLess` is merged master
-  with file-less sessions, and violates `NoCrossSessionAdoption` (#3819,
-  open). Both register the violation until their fix flips them to `pass`.
+  The rest register a known violation of merged master until its fix flips
+  the config to `pass`: `Current` violates `SecondaryIsolation` through N2
+  (#3613); `H3FileLess` violates `NoCrossSessionAdoption` and `H3StaleSlot`
+  violates `HandoffOnce` (#3819); the `H3Demote*` configs record the cost of
+  #3668's row-17 residual (`NoLostCarry`, `NoLostAdvisory`,
+  `NoLostActivation`).
 - **Design** (`Fix`, `FixProcess`, `FixOrder`, `NewestReadTreeFork`) is the
   adopted #3609 design, S4 included (a subagent gets its own read guard and
-  turn counter). The `AcceptedLateRead*` configs pin the false block the
-  design accepts (F1).
+  turn counter). It is not #3819's fix: with `FileLess = {}` and no subagent
+  replacement, `Fix` cannot reach either #3819 path. The `AcceptedLateRead*`
+  configs pin the false block the design accepts (F1).
 - **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`) restores the shape a
   merged fix removed, and must violate the invariant that fix established.
 - **Mut** configs remove one mechanism or restore one table row: older
@@ -35,10 +38,10 @@ Four kinds of config:
 recorded something about the tool result at conversation entry `e`". The read
 guard (`RG`) is the fact store. `RG` conflates read records and authorship
 (`recordWritten`). The two differ on `/tree` (authorship is reset there,
-#3603), on fork (the authorship store resets,
-`clients/read-guard-branch.ts:199`), and in the branch filter: only the
+#3603), on fork (the `read-guard-authorship` store resets,
+`clients/read-guard-branch.ts`), and in the branch filter: only the
 read-set passes through `importBranch`, while authorship restores unfiltered
-(`clients/read-guard-branch.ts:204`). Beside it:
+(`clients/read-guard-branch.ts`). Beside it:
 
 - the turn counter (`TC`);
 - the widget's write-order guard (`WG`), which lives in a `clients/` module
@@ -47,13 +50,13 @@ read-set passes through `importBranch`, while authorship restores unfiltered
   counter since #3755;
 - the registry entry (`RE`) and its re-registration intent;
 - the lazy-tool activations (`LZ`, #3604): origin scopes, with no entry and no
-  branch filter (`lazyToolMemoryStore`, `clients/tool-set-policy.ts:40`);
+  branch filter (`lazyToolMemoryStore`, `clients/tool-set-policy.ts`);
 - the agent advisory queue (`AD`, #3757): one advisory per producer, tagged
   with the scope that queued it (`queueAgentAdvisory`,
-  `clients/agent-nudge.ts:163`).
+  `clients/agent-nudge.ts`).
 
 **Scopes.** Each activation gets a scope: a ticket drawn from one process
-counter (S1, `clients/session-scope.ts:145`), with a role (primary or
+counter (S1, `clients/session-scope.ts`), with a role (primary or
 secondary), a session file and a branch epoch. A handle is current while its
 scope is live and, at branch level, while its branch epoch is unchanged. That
 is the only identity. The module-level `runtime` is modelled as `last`, the
@@ -69,31 +72,31 @@ scope the most recent primary `session_start` served.
 | quit, `pi --fork` | Quit ends the process, and in-flight work dies with it. `pi --fork` then starts a new process whose only channel is the parent's sidecar. |
 | `/tree` | The same activation. The branch loses its last entry and the scope's branch epoch bumps (`moveBranch`, from `retainBranch`). |
 | LSP idle reset | pi-lens' own timer. It resets the LSP service only. |
-| subagent start/stop | An in-process subagent binds with reason `startup` while the primary is live, or in its replacement gap, where #3668 declines it. It skips `handleSessionStart` (#473), begins its own scope (`index.ts:2302`) and never adopts. |
+| subagent start/stop | An in-process subagent binds with reason `startup` while the primary is live, or in its replacement gap, where #3668 declines it. It skips `handleSessionStart` (#473), begins its own scope (`beginScope` in the `session_start` handler, `index.ts`) and never adopts. |
 | subagent `/reload`, `/fork` | Its own replacement. Its shutdown takes the secondary path (no stash). With no primary registered (the primary's replacement gap), its start is the successor by #3668's rule (a reason other than `startup`), so it classifies primary and adopts; the primary's real successor is then demoted to a secondary (`BeginDemoted`). This is #3668's stated residual, row 17. |
 | duplicate start | A second `session_start` for the same replacement (I5, #2890). |
 
-**The hand-off (S2).** `stashHandoff` (`clients/session-scope.ts:447`)
+**The hand-off (S2).** `stashHandoff` (`clients/session-scope.ts`)
 replaces the one process slot at a primary shutdown whose successor reads it:
 `/reload` (key: `reload` and the session's own file) and `/fork` or `/clone`
 (key: `fork` and pi's `targetSessionFile`). `/new`, resume and quit leave the
 slot as it is. A file-less session keys on `undefined`
-(`clients/session-scope.ts:460`; the model's `FileLess` constant).
-`takeHandoff` (`clients/session-scope.ts:470`) is called only by a primary
+(`clients/session-scope.ts`; the model's `FileLess` constant).
+`takeHandoff` (`clients/session-scope.ts`) is called only by a primary
 fork or reload start; it takes the slot on an equal key and leaves an
-unmatched slot in place with no expiry (`clients/session-scope.ts:476`). A
+unmatched slot in place with no expiry (`clients/session-scope.ts`). A
 start's source is fixed by its reason (`SOURCES`,
-`clients/session-scope.ts:329`): a fork reads the slot, else the parent's
+`clients/session-scope.ts`): a fork reads the slot, else the parent's
 sidecar; a reload the slot, else its own sidecar; a resume and a launch their
 own sidecar, else the parent's; `/new` nothing. The first source that exists
-wins for every store (`adoptHandoff`, `clients/session-scope.ts:492`).
+wins for every store (`adoptHandoff`, `clients/session-scope.ts`).
 
 **The sidecar is abstracted.** The model saves a scope's sidecar at every
 primary shutdown. The code saves it at `turn_end` and at a `/reload` or
-`/fork` shutdown that left a slot (`index.ts:3733`). The two differ only for a
+`/fork` shutdown that left a slot (`persistScope` in the `session_shutdown` handler, `index.ts`). The two differ only for a
 write that lands after the last `turn_end` and before a `/new`, resume or quit
 shutdown: the `agent_settled` drain's authorship credit, which every start
-but `/reload` resets anyway (`clients/read-guard-branch.ts:196`).
+but `/reload` resets anyway (`clients/read-guard-branch.ts`).
 
 **Writers.** Each writer begins once in a live scope and lands at any later
 step. pi refuses `/tree` and `/reload` while streaming, but `agent_settled`
@@ -102,8 +105,8 @@ abandoned without being cancelled (I2). This over-approximation hides nothing
 the host allows.
 
 - `read`: a primary read-guard write after an await: a late read producer or
-  `recordWritten` in `handleToolResult` (`clients/runtime-tool-result.ts:2489`),
-  a bridge replay (`clients/mutation-bridge.ts:341`), or the `agent_settled`
+  `recordWritten` in `handleToolResult` (`clients/runtime-tool-result.ts`),
+  a bridge replay (`clients/mutation-bridge.ts`), or the `agent_settled`
   drain's credit. S3 fences them all by the handle captured at hook entry
   (`entryCapture`); without it, the write resolves the module-level runtime
   when it lands, as `recordWritten` did before S3. The native read record of a
@@ -112,15 +115,15 @@ the host allows.
 - `secRead`: the same in a subagent.
 - `heartbeat`: the registry heartbeat's repair.
 - `lsp`: LSP work that can spawn a server (#3576), fenced by
-  `captureLspServiceGeneration` (`clients/lsp/server.ts:578`).
+  `captureLspServiceGeneration` (`clients/lsp/server.ts`).
 - `widget`: a pipeline verdict write to the widget in the current turn.
 - `advisory`: the `agent_end` drain's lost-edit notice, tagged with the
   drain's captured scope (#3757).
 - `activate`: `pi_lens_activate_tools` in a live scope (`rememberLazyTools`,
-  `index.ts:1859`), atomic.
+  `index.ts`), atomic.
 
 A `Context` action is a context call of a live scope (`consumeAgentNudge`,
-`clients/agent-nudge.ts:454`): under #3757 it prunes the retired scopes'
+`clients/agent-nudge.ts`): under #3757 it prunes the retired scopes'
 advisories, each with a counted record, and takes its own.
 
 **Which entry a read-guard writer holds** is the constant `LateHandlers`.
@@ -163,11 +166,11 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   start takes the slot and discards it when unmatched (design section 3.4 as
   written).
 - `processOrderTurn` (S1, N3): the write-order turn is a process counter
-  (`nextOrderTurn`, `clients/runtime-coordinator.ts:748`).
+  (`nextOrderTurn` in `clients/session-scope.ts`, drawn by `RuntimeCoordinator.beginTurn`).
 - `dedupe`: the #2890 duplicate-start gate.
 - `recordDrop` (S1, F1): a dropped read-guard write whose entry is still on
   its conversation's branch leaves a record (`recordDroppedRead`,
-  `clients/session-scope.ts:281`).
+  `clients/session-scope.ts`).
 - `advisoryScope` (#3757): a context call takes only its own scope's
   advisories, and a retired scope's are dropped with a record.
 
@@ -225,6 +228,10 @@ counterexample.
 | `MergedStores` | merged master: activations and advisories across every transition that moves them, with a subagent | pass | 65248 |
 | `H3FileBacked` | merged slot: a subagent's own `/reload` or `/fork` in the primary's gap, file-backed sessions | pass | 445 |
 | `H3FileLess` | the same, file-less sessions: #3819 | violated `NoCrossSessionAdoption` | 29 |
+| `H3StaleSlot` | file-backed, five transitions: a demoted session takes a stale slot: #3819 | violated `HandoffOnce` | 319 |
+| `H3DemoteCarry` | file-backed row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
+| `H3DemoteAdvisory` | file-backed row 17: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
+| `H3DemoteActivation` | file-backed row 17: the subagent-turned-primary loses its activations | violated `NoLostActivation` | 43 |
 | `Current` | merged master, every transition: N2, #3613 | violated `SecondaryIsolation` | 54 |
 | `Fix` | adopted design: every transition, a primary and a subagent reader, one turn | pass | 71419 |
 | `FixProcess` | adopted design: heartbeat and LSP work across `/new`, resume, `/reload`, idle reset, quit, `pi --fork` | pass | 24771 |
@@ -262,8 +269,12 @@ alternative" is a shape the adopted design rejects, never shipped.
 
 | Config | Issue | Provenance | Shortest counterexample |
 |---|---|---|---|
-| `H3FileLess` | #3819 | master: the file-less key `(reason, undefined)` (`clients/session-scope.ts:460`) and #3668's row 17 (`clients/session-lifecycle.ts:214`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
-| `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts:2792`-`2804`) | The subagent starts, and its `turn_start` moves the primary's turn. |
+| `H3FileLess` | #3819 | master: the file-less key `(reason, undefined)` (`clients/session-scope.ts`) and #3668's row 17 (`clients/session-lifecycle.ts`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
+| `H3StaleSlot` | #3819 (review S1 on #3835) | master: `stashHandoff` returns early for `/new` (`SOURCES.new` is empty), so the slot survives it, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
+| `H3DemoteCarry` | #3668 row 17 (#3819's open question) | master: `classifySessionStart` in `clients/session-lifecycle.ts` declines only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
+| `H3DemoteAdvisory` | #3668 row 17 | master, as `H3DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
+| `H3DemoteActivation` | #3668 row 17 | master, as `H3DemoteCarry` | The subagent activates a tool; the primary's `/reload`; the subagent's own `/reload` classifies primary and adopts nothing (a secondary never stashes or saves a sidecar). |
+| `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
 | `PreS1OrderTurn` | N3; #3540 case A | pre-S1 (b456ff89c): `_writeOrderTurn += 1`, a coordinator field | A turn draws token 1, `/reload` re-evaluates the entry, and the next turn draws token 1 again. |
 | `MutWidgetDropAfterReEval` | N3's harm; #3540 | pre-S1 (b456ff89c), as above | Two turns and a widget write at token 2; after `/reload` with re-evaluation, a turn draws token 1, and the widget guard drops the live session's own write as older. |
 | `PreS2ReloadReset` | N1, under D5 | pre-S2 (ae5396e46): `resetForSession` on every primary start, no reload hand-off | A read lands, and `/reload` starts clean. |
@@ -275,14 +286,14 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Pre3757AdvisoryShared` | #3748 | pre-#3757 (61c6ee644): an untagged queue | The drain queues an advisory, and the subagent's context call takes it. |
 | `MutForkClosureStash` | #3521 fork half; the #3589 shape | pre-#3669 (df5fb8abb): `pendingForkReadGuard`, an activation-closure `let` | A read lands, then `/fork`: the fork starts clean. |
 | `MutTreeCarries` | #3521 tree half | pre-#3669 (df5fb8abb): no `session_tree` handler | A read of entry 2 lands, then `/tree` drops entry 2 and the read stays. |
-| `MutLspAfterIdleReset` | #3576 | pre-fix: before G5's `captureLspServiceGeneration` (#3602) | LSP work begins, the idle reset runs, and the work spawns a server. |
-| `MutHeartbeatBeforeRegistration` | #3498 | pre-fix: the pre-#3498 heartbeat; the lock-level detail is `formal/session-registry` | A heartbeat begins, session 1 shuts down, and the heartbeat re-registers session 1's root before session 2's registration lands. |
+| `MutLspAfterIdleReset` | #3576 | pre-#3602 (7101a6766): before G5's `captureLspServiceGeneration` | LSP work begins, the idle reset runs, and the work spawns a server. |
+| `MutHeartbeatBeforeRegistration` | #3498 | pre-#3593 (f2c880012): the heartbeat before #3498's fix; the lock-level detail is `formal/session-registry` | A heartbeat begins, session 1 shuts down, and the heartbeat re-registers session 1's root before session 2's registration lands. |
 | `MutSecondaryTurnStart` | N2 | master (#3613), as `Current` | As `Current`. |
 | `MutSecondaryReadShared` | F4, #3613 | master: a subagent's handlers reach the module-level `runtime.readGuard` | The subagent's read lands in the primary's cell. |
-| `MutTreeWipesSecondary` | #3607 | master, the accepted residual #3521 F2 (`index.ts:2590`-`2594`) | The subagent's read lands, and the primary's `/tree` filters it away. |
+| `MutTreeWipesSecondary` | #3607 | master, the accepted residual #3521 F2 (the comment on the `session_tree` handler, `index.ts`) | The subagent's read lands, and the primary's `/tree` filters it away. |
 | `MutSettleDuringTree` | #3521 (the G10 F1 review race) | design alternative: fenced at session level with no branch epoch | A read of entry 2 begins, `/tree` drops entry 2, and the read lands. |
 | `MutSecondaryTakesHandoff` | design finding F2 | design alternative: section 3.4 as written | `/reload`'s shutdown fills the slot, and a subagent's `session_start` takes it. |
-| `MutDuplicateStart` | #2890 | pre-fix (guard mutant) | A duplicate start re-runs the reset. |
+| `MutDuplicateStart` | #2890 | pre-#2895 (745020083): no duplicate-start gate | A duplicate start re-runs the reset. |
 
 `Current` with `SecondaryIsolation` removed from its invariant list violates
 `NoCrossSessionState` (257 states): F4, the other half of #3613.
@@ -308,19 +319,35 @@ had every start take the slot and discard it when unmatched
 and leave an unmatched slot (`consumeOnMatch`). In the code a subagent's
 start never calls `takeHandoff` at all.
 
-**F3. The key is load-bearing, and the file-less key is not enough
-(#3819).** With the code's key, a subagent's own `/reload` or `/fork` that
-#3668 classifies primary in the primary's replacement gap cannot take a
-file-backed primary's slot, because the files differ (`H3FileBacked`
-passes; making `SlotMatch` ignore the file reds it). A file-less session keys
-on `undefined`, so that start takes the primary's slot (`H3FileLess`). The
-branch filter keeps foreign reads out (`NoForeignFact` holds, since tool-call
-ids differ), but activations and advisories cross, and authorship restores
-without the filter. A file-less primary's own chain of transitions stays
-safe: each fork or reload start is preceded by its own shutdown's stash.
-Whether `Begin` keeps or discards an unmatched slot, and whether `/new`,
-resume and quit clear it, does not change this verdict: the take happens in
-the gap, before the real successor starts.
+**F3. #3668's row 17 opens the slot to the wrong start (#3819).** A
+subagent's own `/reload` or `/fork` in the primary's replacement gap
+classifies primary. Three consequences follow.
+
+- *Cross-session adoption, file-less only.* With the code's key, that start
+  cannot take a file-backed primary's slot, because the files differ
+  (`H3FileBacked` passes; making `SlotMatch` ignore the file reds it). A
+  file-less session keys on `undefined`, so it takes the primary's slot
+  (`H3FileLess`). The branch filter keeps foreign reads out (`NoForeignFact`
+  holds, since tool-call ids differ), but activations and advisories cross,
+  and authorship restores without the filter. A file-less primary's own
+  chain of transitions stays safe: each fork or reload start is preceded by
+  its own shutdown's stash. For adoption across sessions it does not matter
+  whether `Begin` keeps an unmatched slot or whether `/new` clears it: the
+  take happens in the gap, before the real successor starts.
+- *A stale take, file-backed too.* The unmatched slot is not harmless.
+  After row 17 demotes the real successor, `/new` keeps the slot, and the
+  demoted session's own `/reload` later takes its predecessor's stale
+  snapshot (`H3StaleSlot`, `HandoffOnce`). Clearing the slot at `/new`, or
+  clearing it at every primary start after the take attempt (the audit's
+  option (a)), makes `H3StaleSlot` pass; keying a file-less slot by ticket
+  alone does not (the #3835 review ran #3819's ticket-key model at five
+  steps). So "file-backed sessions are protected" holds for
+  adoption across sessions only.
+- *Loss.* The demoted real successor adopts nothing, so the conversation
+  loses its reads and its queued advisory (`H3DemoteCarry`,
+  `H3DemoteAdvisory`), and the subagent-turned-primary loses its own
+  activations (`H3DemoteActivation`). This is the cost of #3668's stated
+  residual, whether sessions have files or not.
 
 **F4. Today, a subagent's read authorises the primary's edit** (#3613). The
 shared read guard puts a subagent's read in the primary's cell
@@ -342,13 +369,22 @@ Not modelled:
   above), so the model does not show authorship crossing under #3819.
 - **S3's non-read-guard writers** (turn-state ranges, the turn summary, the
   git-guard latch, the debounce re-entry) and the fail-open external bridge
-  producer (#3763); the deferral queue's two-hop credit (#3705); a pre-#3755
-  per-evaluation LSP generation. `svc` is one process counter, which is the
-  merged behaviour.
+  producer (#3763); the deferral queue's two-hop credit (#3705). `svc` is
+  one process counter, which is the merged behaviour (#3755).
 - **#3668's successor marker and its expiry.** A replacement whose successor
   never starts (row 15), and a `session_start` that crashed before its scope
   was set, are not modelled; either leaves an untaken slot that only a start
-  without its own stash could adopt, as in #3819.
+  without its own stash could adopt, as in #3819. Row 17 is modelled for a
+  subagent's own `/reload` and `/fork` only: its own `/new` or resume in the
+  gap also classifies primary and demotes the real successor (the
+  `H3Demote*` loss), without taking the slot, and is not modelled.
+- **`MutGenPerEval` (#3755).** A follow-up needs its own discriminator:
+  in the #3835 review, `NoCrossSessionState` could not see a
+  per-evaluation LSP generation (the mutant passed, 291 states), while
+  `\A srv \in fleet : st[srv.o] = "live"` redded it (77 states) and held on
+  the unmutated model (161).
+- **`formal/session-straddle`** is not re-baselined here; its generation is
+  still an equality counter bumped at `resetForSession`.
 - **#3587** (a shutdown that meets this process's own registry lock skips
   the deregistration), and secondary registry roots.
 - **The ALS hazard of D2**, **D4** (tool-call id reuse across branches), and

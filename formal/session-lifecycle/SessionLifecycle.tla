@@ -742,7 +742,7 @@ TurnStart ==
                    used>>
 
 \* A subagent's turn_start. onTurnStart calls runtime.beginTurn() with no
-\* role gate (index.ts:2792-2804), which advances the primary's turn (N2).
+\* role gate (onTurnStart in index.ts), which advances the primary's turn (N2).
 SecTurn ==
     /\ "SecTurn" \in Transitions /\ turns < MaxTurns
     /\ \E s \in Tickets :
