@@ -886,6 +886,25 @@ describe("runAutofix tool agreement seam (#3005)", () => {
 		});
 	});
 
+	it.each(["pnpm-lock.yaml", "yarn.lock"])(
+		"declines with evidence-unreadable when %s cannot be read as a file",
+		(lockName) => {
+			// A directory opens but cannot be read: pins the unreadable branch of
+			// the bounded reader apart from the too-large branch.
+			const dir = writeNodeProject(`unreadable-${lockName}`, "unused.txt", "");
+			fs.mkdirSync(path.join(dir, lockName));
+			const agreement = establishToolAgreement("stylelint", dir);
+			expect(agreement).toMatchObject({
+				decision: "decline",
+				reasonCode: "evidence-unreadable",
+			});
+			if (agreement.decision === "decline") {
+				expect(agreement.reason).toContain(lockName);
+				expect(agreement.reason).toContain("unreadable");
+			}
+		},
+	);
+
 	it("records one bounded degradation row when an oversized lockfile declines autofix", async () => {
 		fs.writeFileSync(
 			path.join(env.tmpDir, "package.json"),

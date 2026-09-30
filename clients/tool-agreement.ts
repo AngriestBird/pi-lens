@@ -473,6 +473,86 @@ function decideNodeVersionAgreement(
 	return { decision: "established", lockfile: supplier };
 }
 
+type LockfileRead =
+	| { kind: "text"; text: string }
+	| { kind: "too-large" }
+	| { kind: "unreadable" };
+
+/** Read a lockfile without ever holding more than the bound plus one byte. */
+function readLockfileBounded(filePath: string): LockfileRead {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buffer = Buffer.allocUnsafe(
+			Math.min(fs.fstatSync(fd).size, NODE_LOCKFILE_MAX_BYTES) + 1,
+		);
+		let total = 0;
+		while (total < buffer.length) {
+			const read = fs.readSync(fd, buffer, total, buffer.length - total, null);
+			if (read === 0) break;
+			total += read;
+		}
+		return total > NODE_LOCKFILE_MAX_BYTES
+			? { kind: "too-large" }
+			: { kind: "text", text: buffer.toString("utf8", 0, total) };
+	} catch {
+		return { kind: "unreadable" };
+	} finally {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// A failed close cannot change what was already read.
+			}
+		}
+	}
+}
+
+function lockfileReadDecline(
+	tool: string,
+	lockfile: "pnpm-lock.yaml" | "yarn.lock",
+	read: Exclude<LockfileRead, { kind: "text" }>,
+): ToolAgreement {
+	return read.kind === "too-large"
+		? {
+				decision: "decline",
+				subject: `node:${tool}`,
+				reason: `the project ${lockfile} exceeds the ${NODE_LOCKFILE_MAX_BYTES}-byte lockfile read bound; tool agreement cannot be established`,
+				reasonCode: "evidence-too-large",
+			}
+		: {
+				decision: "decline",
+				subject: `node:${tool}`,
+				reason: `the project ${lockfile} is unreadable; tool agreement cannot be established`,
+				reasonCode: "evidence-unreadable",
+			};
+}
+
+/**
+ * pnpm writes a resolved dependency as the version followed by balanced
+ * `(...)` peer-context groups, e.g. `16.4.0(less@4.2.0)(postcss@8.4.0(x@1.0.0))`
+ * (`indexOfDepPathSuffix` in @pnpm/dependency-path@1001.1.10). Return the core
+ * version when the whole suffix fits that grammar; any other shape is returned
+ * unchanged so it still declines as unparseable.
+ */
+function stripPnpmPeerSuffix(version: string): string {
+	const core = /^\d+\.\d+\.\d+/.exec(version)?.[0];
+	if (!core || core.length === version.length) return version;
+	let depth = 0;
+	for (let i = core.length; i < version.length; i += 1) {
+		const char = version[i];
+		if (char === "(") {
+			depth += 1;
+		} else if (char === ")") {
+			if (depth === 0 || version[i - 1] === "(") return version;
+			depth -= 1;
+		} else if (depth === 0) {
+			return version;
+		}
+	}
+	return depth === 0 ? core : version;
+}
+
 function pnpmAgreement(
 	tool: string,
 	packageName: string,
@@ -481,21 +561,13 @@ function pnpmAgreement(
 	lockDir: string,
 ): ToolAgreement {
 	const filePath = path.join(lockDir, "pnpm-lock.yaml");
-	let raw: string;
-	try {
-		raw = fs.readFileSync(filePath, "utf8");
-	} catch {
-		return {
-			decision: "decline",
-			subject: `node:${tool}`,
-			reason:
-				"the project pnpm-lock.yaml is unreadable; tool agreement cannot be established",
-			reasonCode: "evidence-unreadable",
-		};
+	const read = readLockfileBounded(filePath);
+	if (read.kind !== "text") {
+		return lockfileReadDecline(tool, "pnpm-lock.yaml", read);
 	}
 	let doc: unknown;
 	try {
-		doc = loadYaml(raw);
+		doc = loadYaml(read.text);
 	} catch {
 		return {
 			decision: "decline",
@@ -523,7 +595,9 @@ function pnpmAgreement(
 		tool,
 		packageName,
 		range,
-		evidence.version,
+		typeof evidence.version === "string"
+			? stripPnpmPeerSuffix(evidence.version)
+			: evidence.version,
 		"pnpm-lock.yaml",
 	);
 }
@@ -610,18 +684,11 @@ function yarnAgreement(
 	range: string,
 	filePath: string,
 ): ToolAgreement {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(filePath, "utf8");
-	} catch {
-		return {
-			decision: "decline",
-			subject: `node:${tool}`,
-			reason:
-				"the project yarn.lock is unreadable; tool agreement cannot be established",
-			reasonCode: "evidence-unreadable",
-		};
-	}
+	const read = readLockfileBounded(filePath);
+	if (read.kind !== "text") return lockfileReadDecline(tool, "yarn.lock", read);
+	// Yarn writes CRLF or lone CR on some platforms; Classic block splitting is
+	// LF-only, so fold line endings once before either parse.
+	const raw = read.text.replace(/\r\n?/g, "\n");
 	let doc: unknown;
 	let yamlOk = true;
 	try {
