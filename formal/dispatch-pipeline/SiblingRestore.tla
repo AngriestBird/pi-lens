@@ -4,7 +4,9 @@
 (* `dart fix --apply`), and the restore that puts the agent's edits of S   *)
 (* back over the tool's write (clients/fix-run-restore.ts, #3598, #3741).  *)
 (* The pipeline's hold on pi's mutation queue covers only the edit's own   *)
-(* target, so the tool reads and writes S outside the queue.               *)
+(* target, so the tool reads and writes S outside the queue. settle runs   *)
+(* inside that hold (pipeline.ts tryRustClippyFix, tryDartFix); the model  *)
+(* has no target hold, so it cannot see a lock-order cycle (#3830).        *)
 (*                                                                         *)
 (* Actors:                                                                 *)
 (*  - the agent: edits 1..SEdits of S, in order, each a read-modify-write  *)
@@ -24,8 +26,10 @@
 (*                                                                         *)
 (* A content is the set of agent edits it holds plus a "fixed" bit, so a   *)
 (* stale write by the tool shows as a missing edit. Identity is a version  *)
-(* counter bumped by every write (mtime, size and inode change on an       *)
-(* atomic rewrite). The report is one set for the file.                    *)
+(* counter bumped by every write: a perfect identity. The code's identity  *)
+(* is mtime + size + inode, and an in-place agent edit keeps the inode, so *)
+(* a same-size edit inside one mtime tick is invisible to it; the model    *)
+(* does not see that. The report is one set for the file.                  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -36,9 +40,10 @@ CONSTANTS
     SCallInRun,     \* TRUE: the tool_call of every agent edit of S reaches pi-lens while the run is open (none is called before beginFixRun)
     SRestore,       \* FALSE: the code before #3598 (no capture, no restore)
     SettleCapture,  \* candidate fix: the run stays registered (captures and in-flight calls tracked) until its restore has settled
+    RestoreNoCapInFlight, \* candidate fix for finding B: a file with no capture and a call in flight is named possibly lost
     RestoreInFlight,\* TRUE: settle leaves a file with a call in flight alone (#3741 round 2)
     RestoreRecheck, \* TRUE: the re-stat before the write (#3741 round 2)
-    RestoreQueue    \* candidate fix: the recheck and the write run inside pi's queue for S (a per-sibling entry taken only for the restore)
+    RestoreQueue    \* candidate fix: the recheck and the write run inside pi's queue for S (a per-sibling entry taken only for the restore). The model has no hold on the target, so it cannot check the lock order: settle runs inside that hold (#3830)
 
 SIds == 1..SEdits
 C0 == [e |-> {}, f |-> FALSE]
@@ -172,7 +177,8 @@ RRead ==
              ELSE IF sdisk = cap.b THEN "done"
              ELSE IF RestoreQueue THEN "rlock" ELSE "rrecheck"
            named ==
-             IF cap.has /\ cap.v = "overwritten" THEN {"lost"}
+             IF ~cap.has /\ RestoreNoCapInFlight /\ InFl # {} THEN {"possibly"}
+             ELSE IF cap.has /\ cap.v = "overwritten" THEN {"lost"}
              ELSE IF cap.has /\ RestoreInFlight /\ InFl # {} /\ sdisk # cap.b THEN {"possibly"}
              ELSE {}
        IN /\ rpc' = next
@@ -213,6 +219,7 @@ RWrite ==
     /\ wk' = (IF rbuf.e \ rcap.b.e # {} THEN {"read"} ELSE {})
              \cup (IF rc # rv THEN {"pre"} ELSE {})
              \cup (IF sver # rc THEN {"gap"} ELSE {})
+             \cup (IF rbuf = rcap.b THEN {"noop"} ELSE {})
     /\ sq' = IF RestoreQueue THEN "none" ELSE sq
     /\ rpc' = "done"
     /\ UNCHANGED <<sapplied, sa, sabuf, infl, cap, tpc, tbuf,
@@ -243,8 +250,14 @@ EveryEditSurvives == SQuiescent => \A i \in sapplied : i \in sdisk.e
 \* header's "restore invariant"). Its three windows: an edit already on disk
 \* at the restore's read but not in the capture; one that landed between the
 \* read and the re-stat; one that landed after the re-stat.
-NoRestoreOverNewer == wk = {}
+NoRestoreOverNewer == wk \ {"noop"} = {}
 NoRestoreOverReadEdit == "read" \notin wk
 NoRestoreOverPreCheckEdit == "pre" \notin wk
 NoRestoreOverGapEdit == "gap" \notin wk
+
+\* The restore writes nothing when S already holds the capture's bytes
+\* (fix-run-restore.ts `if (unchanged) continue`). Without that skip it rewrites
+\* identical bytes, reports `restored` for a file the tool never erased, and
+\* opens the gap window for nothing.
+NoNoopRestore == "noop" \notin wk
 =============================================================================
