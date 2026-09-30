@@ -289,8 +289,8 @@ export function renderIdleEvictionDoc({ rows, declared, date, platform }) {
 }
 
 /**
- * Raw per-server figures for the run's step summary: the evidence the bucketed
- * document deliberately does not carry.
+ * Per-server timing and memory figures for the run's step log and job summary:
+ * the evidence the committed document deliberately does not carry.
  */
 export function renderRawTable(rows) {
 	const sorted = [...rows].sort((a, b) =>

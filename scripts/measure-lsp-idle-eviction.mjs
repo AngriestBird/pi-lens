@@ -15,9 +15,9 @@
  *       [--doc <path>] [--summary <path>] [--drift-body <path>]
  *       [--budget-seconds <n>] [--window-ms <n>]
  *
- * Requires `npm run build:dist`. Writes docs/lsp-idle-eviction.md (bucketed,
- * regenerated from scratch each run so an absent server reads `unavailable`,
- * never a stale or zero row), appends the raw figures to the job summary when
+ * Requires `npm run build:dist`. Writes docs/lsp-idle-eviction.md (stable
+ * columns only, regenerated from scratch each run so an absent server reads `unavailable`,
+ * never a stale or zero row), appends the timing and memory figures to the job summary when
  * `GITHUB_STEP_SUMMARY` is set, and optionally writes them as JSON.
  *
  * `--drift-body` writes the tracking-issue body when a server is in hard drift

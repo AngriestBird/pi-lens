@@ -144,7 +144,7 @@ describe("idle-eviction probe population (#3645)", () => {
 			),
 		);
 		expect(blanked).toMatch(
-			/measureRegistry\(\{\s*registry:\s*serverModule,\s*fixtures:\s*LSP_FIXTURES,/,
+			/measureRegistry\(\{\s*registry:\s*serverModule,\s*fixtures:\s*LSP_FIXTURES,\s*filter:\s*serverFilter,/,
 		);
 		const uses = (blanked.match(/[^\n]*\bLSP_SERVERS\b[^\n]*/g) ?? []).map(
 			(line) => line.trim(),
