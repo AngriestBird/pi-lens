@@ -77,6 +77,7 @@ import {
 	logReadGuardEvent,
 	type ReadGuardEditBatchSummary,
 } from "./read-guard-logger.js";
+import type { LineageHandle } from "./session-scope.js";
 
 /**
  * What the mutation does to the file, independent of the tool's name.
@@ -895,6 +896,13 @@ export interface BridgeMutationEntry {
 	 * is not credited to the new branch. Absent: the write is current.
 	 */
 	readGuardBranchEpoch?: number;
+	/**
+	 * #3620/#3709: the lineage handle an in-process producer captured before it
+	 * awaited (the settled sweep, the tool_result settle). Once its scope has
+	 * retired, the bridge writes none of the live session's state. External
+	 * producers omit it and are handled as before.
+	 */
+	lineage?: LineageHandle;
 }
 
 /**

@@ -61,6 +61,7 @@ import { noteAgentMutation } from "./fix-run-restore.js";
 import { noteMutationHandled } from "./observed-mutation.js";
 import type { ProjectChangeSource } from "./project-changes.js";
 import { getProcessBridge, registerProcessBridge } from "./process-bridge.js";
+import { recordDroppedRead } from "./session-scope.js";
 
 /** Stable Symbol key — identical across module reloads in the same process. */
 export const MUTATION_BRIDGE_KEY: unique symbol = Symbol.for(
@@ -331,12 +332,32 @@ export function recordMutationThroughSeam(
 			entry.readGuardBranchEpoch,
 			runtime.readGuard.currentBranchEpoch,
 		);
+		const stampReadGuard = deps.shouldStampReadGuard?.() ?? true;
+		// #3620/#3709: once the producer's scope has retired, the replay writes
+		// none of the live session's state (the stamp, turn state and deferral
+		// below); the receipt and the handled mark are disk facts and stay. The
+		// epoch alone cannot refuse it: it restarts at 0 in every scope. No
+		// lineage (every external producer): fail-open, as before.
+		const lineage = entry.lineage;
+		let sessionLive = true;
+		if (
+			lineage !== undefined &&
+			lineage.guardedWrite(filePath, () => true) !== true
+		) {
+			sessionLive = false;
+			if (stampReadGuard)
+				recordDroppedRead(
+					lineage,
+					entry.provenance ?? classification.toolName,
+					lineage.branchEpoch,
+				);
+		}
 		// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 		//    judged by read coverage rather than by this write. #2465: gated on
 		//    `shouldStampReadGuard` (the `no-read-guard` flag) ALONE — the
 		//    `isRecordable` check above already passed, so the write itself is
 		//    still bookkept below whether or not the stamp fires.
-		if (deps.shouldStampReadGuard?.() ?? true) {
+		if (sessionLive && stampReadGuard) {
 			runtime.readGuard.recordWritten?.(
 				filePath,
 				resolvedEpoch.stamp === undefined
@@ -352,15 +373,16 @@ export function recordMutationThroughSeam(
 		//    that DOES know the real value threads it through the entry instead
 		//    of this seam silently understating it (#2450 review round 2, F1).
 		const changedRange = resolveChangedRange(classification, deps, filePath);
-		deps
-			.getCacheManager()
-			.addModifiedRange?.(
-				filePath,
-				changedRange,
-				entry.importsChanged ?? false,
-				projectRoot,
-				runtime.telemetrySessionId,
-			);
+		if (sessionLive)
+			deps
+				.getCacheManager()
+				.addModifiedRange?.(
+					filePath,
+					changedRange,
+					entry.importsChanged ?? false,
+					projectRoot,
+					runtime.telemetrySessionId,
+				);
 
 		// 3. Attributed change-log receipt. The source carries the producer's
 		//    identity instead of collapsing onto `agent-edit`, so a report can
@@ -397,7 +419,11 @@ export function recordMutationThroughSeam(
 		//    (ast_grep_replace, a third-party extension) omits the field and
 		//    keeps deferring, unchanged.
 		//    #3677 round 3: nothing is queued for an epoch above the live one.
-		if (entry.deferAutofix !== false && resolvedEpoch.queueable) {
+		if (
+			sessionLive &&
+			entry.deferAutofix !== false &&
+			resolvedEpoch.queueable
+		) {
 			for (const kind of ["autofix", "format"] as const) {
 				runtime.deferMutation?.(
 					filePath,
