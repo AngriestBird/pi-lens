@@ -649,22 +649,49 @@ describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
 		harness.dispose();
 	});
 
-	it("reports a mistyped diagnostics key instead of a clean-looking result", async () => {
+	// The reporter's exact call (#3749 round 2): `path` is optional for
+	// pilens_diagnostics, yet `filePath` is plainly a mistyped `path` that was
+	// not sent, so running on the session default and answering "No issues"
+	// would read as a clean file.
+	it("refuses the reporter's mistyped diagnostics key instead of answering No issues", async () => {
 		const result = await call("pilens_diagnostics", {
 			filePath: "/tmp/x/bad.ts",
 		});
+		expect(result.isError).toBe(true);
 		expect(firstLine(result)).toBe(
 			"Ignored unknown argument(s) for pilens_diagnostics: `filePath` (did you mean `path`?). They had no effect on this call.",
 		);
-		expect(result.content[0]?.text).toContain("No issues");
-		expect(result.isError).toBe(false);
+		expect(result.content[0]?.text).toContain(
+			"Not run: `filePath` looks like a mistyped `path`, which was not sent.",
+		);
+		expect(result.content[0]?.text).not.toContain("No issues");
 		expect(result.structuredContent).toEqual({
 			ignoredArguments: ["filePath"],
 			ignoredArgumentCount: 1,
 		});
 		expect(result.content[0]?.text).toMatch(
-			/result ok\nusage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=false$/,
+			/result error\nusage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=false$/,
 		);
+	}, 25_000);
+
+	it("keeps a warning and runs when the near match was also sent", async () => {
+		const result = await call("pilens_diagnostics", {
+			filePath: "/tmp/x/bad.ts",
+			path: "/tmp/x/bad.ts",
+		});
+		expect(result.isError).toBe(false);
+		expect(firstLine(result)).toContain("Ignored unknown argument(s)");
+		expect(result.content[0]?.text).toContain("No issues");
+		expect(result.content[0]?.text).not.toContain("Not run");
+	}, 25_000);
+
+	it("keeps a warning for cwd on a tool whose handler never reads it", async () => {
+		const result = await call("pilens_health", { cwd: "/tmp" });
+		expect(result.isError).toBe(false);
+		expect(firstLine(result)).toBe(
+			"Ignored unknown argument(s) for pilens_health: `cwd`. They had no effect on this call.",
+		);
+		expect(result.content[0]?.text).toContain("LSP:");
 	}, 25_000);
 
 	it("turns an ignored key that leaves a required input missing into an error", async () => {
@@ -715,7 +742,12 @@ describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
 		expect(firstLine(result)).toBe(
 			"Ignored unknown argument(s) for pilens_lsp_diagnostics: `pth` (did you mean `path`?). They had no effect on this call.",
 		);
-		expect(result.content[0]?.text).toContain("Checks not confirmed");
+		// `pth` is a mistyped `path` that was not sent, so the folded tool is
+		// refused exactly as `pilens_diagnostics` is.
+		expect(result.isError).toBe(true);
+		expect(result.content[0]?.text).toContain(
+			"Not run: `pth` looks like a mistyped `path`, which was not sent.",
+		);
 	}, 25_000);
 
 	it("does not change the answer for an unknown tool", async () => {

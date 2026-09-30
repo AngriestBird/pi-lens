@@ -15,7 +15,7 @@ import {
 	ignoredArgumentsStructured,
 	MAX_REPORTED_KEY_CHARS,
 	MAX_REPORTED_KEYS,
-	missingRequiredResult,
+	refusalResult,
 	withIgnoredArguments,
 } from "../../mcp/tool-arguments.js";
 
@@ -39,6 +39,7 @@ describe("findIgnoredArguments", () => {
 		expect(findIgnoredArguments(ANALYZE, { filePath: "a.ts" })).toEqual({
 			ignored: [{ key: "filePath", suggestion: "file" }],
 			missingRequired: ["file"],
+			unsentSuggestions: [{ key: "filePath", suggestion: "file" }],
 		});
 		expect(
 			findIgnoredArguments(DIAGNOSTICS, { filePath: "a.ts" })?.ignored,
@@ -189,14 +190,22 @@ describe("withIgnoredArguments", () => {
 	});
 });
 
-describe("missingRequiredResult", () => {
+describe("refusalResult", () => {
+	const reportFor = (
+		schema: Parameters<typeof findIgnoredArguments>[0],
+		args: Record<string, unknown>,
+	) => {
+		const report = findIgnoredArguments(schema, args);
+		if (!report) throw new Error("expected a report");
+		return report;
+	};
+
 	it("is an error naming every missing required key when an ignored key left one missing", () => {
-		const report = findIgnoredArguments(
+		const report = reportFor(
 			{ properties: { file: {}, symbol: {} }, required: ["file", "symbol"] },
 			{ filePath: "a.ts" },
 		);
-		if (!report) throw new Error("expected a report");
-		const result = missingRequiredResult("pilens_read_symbol", report);
+		const result = refusalResult("pilens_read_symbol", report);
 		expect(result?.isError).toBe(true);
 		expect(result?.content[0].text).toBe(
 			`${ignoredArgumentsLine("pilens_read_symbol", report)}\nNot run: required argument(s) \`file\`, \`symbol\` missing.`,
@@ -204,9 +213,53 @@ describe("missingRequiredResult", () => {
 		expect(result?.structuredContent.ignoredArguments).toEqual(["filePath"]);
 	});
 
-	it("is undefined when nothing required is missing", () => {
-		const report = findIgnoredArguments(ANALYZE, { file: "a.ts", bogus: 1 });
-		if (!report) throw new Error("expected a report");
-		expect(missingRequiredResult("pilens_analyze", report)).toBeUndefined();
+	it("is an error when the ignored key's near match is a declared key the call did not send", () => {
+		const report = reportFor(DIAGNOSTICS, { filePath: "a.ts" });
+		expect(report.unsentSuggestions).toEqual([
+			{ key: "filePath", suggestion: "path" },
+		]);
+		const result = refusalResult("pilens_diagnostics", report);
+		expect(result?.isError).toBe(true);
+		expect(result?.content[0].text).toBe(
+			`${ignoredArgumentsLine("pilens_diagnostics", report)}\nNot run: \`filePath\` looks like a mistyped \`path\`, which was not sent.`,
+		);
+	});
+
+	it("names both reasons when a required key and a different suggested key are unsent", () => {
+		const report = reportFor(
+			{ properties: { file: {}, path: {} }, required: ["file"] },
+			{ pth: 1 },
+		);
+		expect(refusalResult("t", report)?.content[0].text).toContain(
+			"\nNot run: required argument(s) `file` missing; `pth` looks like a mistyped `path`, which was not sent.",
+		);
+	});
+
+	it("lists an unsent suggestion once however many ignored keys point at it", () => {
+		const report = reportFor(DIAGNOSTICS, { filePath: 1, pathName: 2 });
+		expect(report.unsentSuggestions).toEqual([
+			{ key: "filePath", suggestion: "path" },
+		]);
+	});
+
+	it("is undefined when the near match was also sent", () => {
+		const report = reportFor(DIAGNOSTICS, { filePath: "a.ts", path: "a.ts" });
+		expect(report.unsentSuggestions).toEqual([]);
+		expect(refusalResult("pilens_diagnostics", report)).toBeUndefined();
+	});
+
+	it("is undefined when nothing required is missing and the key has no near match", () => {
+		expect(
+			refusalResult(
+				"pilens_analyze",
+				reportFor(ANALYZE, { file: "a.ts", bogus: 1 }),
+			),
+		).toBeUndefined();
+		expect(
+			refusalResult(
+				"pilens_diagnostics",
+				reportFor(DIAGNOSTICS, { zzzzzz: 1 }),
+			),
+		).toBeUndefined();
 	});
 });

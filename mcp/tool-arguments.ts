@@ -35,6 +35,12 @@ export interface ArgumentReport {
 	ignored: IgnoredArgument[];
 	/** Schema-required keys the caller did not send. */
 	missingRequired: string[];
+	/**
+	 * Ignored keys whose suggestion is a declared key the call did NOT send
+	 * (`filePath` where `path` was meant): the caller's intent is lost, not
+	 * merely decorated with an extra key.
+	 */
+	unsentSuggestions: { key: string; suggestion: string }[];
 }
 
 /** Keys named in the line / structured list; the rest are counted. */
@@ -100,7 +106,16 @@ export function findIgnoredArguments(
 	const missingRequired = (schema.required ?? []).filter(
 		(key) => !Object.hasOwn(args, key),
 	);
-	return { ignored, missingRequired };
+	const unsentSuggestions: ArgumentReport["unsentSuggestions"] = [];
+	for (const { key, suggestion } of ignored) {
+		if (
+			suggestion !== undefined &&
+			!Object.hasOwn(args, suggestion) &&
+			!unsentSuggestions.some((entry) => entry.suggestion === suggestion)
+		)
+			unsentSuggestions.push({ key, suggestion });
+	}
+	return { ignored, missingRequired, unsentSuggestions };
 }
 
 function shown(key: string): string {
@@ -160,10 +175,12 @@ export function withIgnoredArguments<T extends TextContentResult>(
 }
 
 /**
- * The error that replaces a run on defaults when an ignored key leaves a
- * required input missing. `undefined` when nothing required is missing.
+ * The error that replaces a run on defaults when an ignored key leaves the
+ * call without something it needed: a schema-required input, or the declared
+ * key the ignored key was plainly a mistyped form of. `undefined` when
+ * neither is missing (the call runs, with the warning).
  */
-export function missingRequiredResult(
+export function refusalResult(
 	tool: string,
 	report: ArgumentReport,
 ):
@@ -172,13 +189,23 @@ export function missingRequiredResult(
 			structuredContent: ReturnType<typeof ignoredArgumentsStructured>;
 	  })
 	| undefined {
-	if (report.missingRequired.length === 0) return undefined;
-	const missing = report.missingRequired.map((key) => `\`${key}\``).join(", ");
+	const reasons: string[] = [];
+	if (report.missingRequired.length > 0)
+		reasons.push(
+			`required argument(s) ${report.missingRequired.map((key) => `\`${key}\``).join(", ")} missing`,
+		);
+	for (const { key, suggestion } of report.unsentSuggestions) {
+		if (report.missingRequired.includes(suggestion)) continue;
+		reasons.push(
+			`\`${shown(key)}\` looks like a mistyped \`${suggestion}\`, which was not sent`,
+		);
+	}
+	if (reasons.length === 0) return undefined;
 	return {
 		content: [
 			{
 				type: "text",
-				text: `${ignoredArgumentsLine(tool, report)}\nNot run: required argument(s) ${missing} missing.`,
+				text: `${ignoredArgumentsLine(tool, report)}\nNot run: ${reasons.join("; ")}.`,
 			},
 		],
 		isError: true,

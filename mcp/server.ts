@@ -105,7 +105,7 @@ import { shouldInitializeSessionRoot } from "../clients/lsp/session-roots.js";
 import {
 	findIgnoredArguments,
 	ignoredArgumentsStructured,
-	missingRequiredResult,
+	refusalResult,
 	withIgnoredArguments,
 } from "./tool-arguments.js";
 import {
@@ -1971,7 +1971,7 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 					subject: name,
 					reason: `ignored argument(s): ${ignoredArgumentsStructured(argumentReport).ignoredArguments.join(", ")}`,
 				});
-				const refused = missingRequiredResult(name, argumentReport);
+				const refused = refusalResult(name, argumentReport);
 				if (refused) {
 					sendResult(
 						id ?? null,
