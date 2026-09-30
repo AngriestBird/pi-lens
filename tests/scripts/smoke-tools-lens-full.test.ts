@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyLensFullResult,
 	lensFullPopulation,
+	report,
 	runLensFull,
 } from "../../scripts/smoke-tools.mjs";
 
@@ -211,5 +212,43 @@ describe("smoke-tools --lens-full entry (#2780)", () => {
 		expect(execute).not.toHaveBeenCalled();
 		expect(output).toContain("⚠  typescript");
 		expect(output).toContain("0 passed · 0 failed");
+	});
+
+	it("returns a nonzero skip-only result for the gated lane and prints SKIPPED", async () => {
+		const output: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...args) =>
+			output.push(args.join(" ")),
+		);
+		const result = await runLensFull({
+			langs: ["typescript"],
+			install: false,
+			verbose: false,
+			deps: lensDeps(vi.fn()),
+		});
+
+		expect(result).toBe(1);
+		expect(output.join("\n")).toContain("SKIPPED: 0 passed · 0 failed");
+	});
+
+	it("keeps a non-gated skip-only lane at zero", () => {
+		const output: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...args) =>
+			output.push(args.join(" ")),
+		);
+		const result = report(
+			[
+				{
+					lang: "typescript",
+					runner: "typescript-language-server",
+					state: "skip",
+					detail: "server unavailable",
+					diags: 0,
+				},
+			],
+			"LSP handshake (install → spawn → initialize)",
+		);
+
+		expect(result).toBe(0);
+		expect(output.join("\n")).toContain("SKIPPED: 0 passed · 0 failed");
 	});
 });

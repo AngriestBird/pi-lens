@@ -166,8 +166,7 @@ export function lensFullPopulation(fixtures?: LspFixture[]): LspFixture[];
 export function classifyLensFullResult(
 	result: unknown,
 	fixture: Pick<LspFixture, "serverHint">,
-	unavailable?: boolean,
-): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+): { state: "pass" | "fail"; detail: string; diags: number };
 /** Run the nightly `lens_diagnostics mode=full` row, optionally with test seams. */
 export function runLensFull(options?: {
 	langs?: string[];
@@ -177,8 +176,18 @@ export function runLensFull(options?: {
 }): Promise<number>;
 /** One reported row from a smoke lane, as far as the pass floor is concerned. */
 export interface SmokeRow {
+	lang?: string;
+	runner?: string;
 	state: "pass" | "fail" | "skip" | "setup-failed";
+	detail?: string;
+	diags?: number;
 }
+/** Render a smoke lane report and return its failure count. */
+export function report(
+	rows: SmokeRow[],
+	title: string,
+	options?: { failOnSkipOnly?: boolean },
+): number;
 /**
  * The message for a run that passed fewer than `minPass` rows, or null when the
  * floor holds. Exported so the floor is testable without a live tool install.

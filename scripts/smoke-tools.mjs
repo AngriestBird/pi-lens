@@ -194,7 +194,7 @@ export function classifyLensFullResult(result, fx) {
 	}
 	return {
 		state: "fail",
-		detail: `lens_diagnostics mode=full returned ${projectFindings} finding(s) but ${primary} primary LSP findings (auxiliary=${auxiliary}, lspFilesUnconfirmed=${details.lspFilesUnconfirmed ?? 0}, partial=${details.lspFilesPartiallyCovered ?? 0}${renderedMessageMissing ? `, rendered text missing expected message "${renderedMessage}"` : ""})`,
+		detail: `lens_diagnostics mode=full returned ${projectFindings} finding(s) but ${primary} primary LSP findings (auxiliary=${auxiliary}, lspFilesUnconfirmed=${details.lspFilesUnconfirmed ?? 0}, auxPartial=${details.lspFilesPartiallyCovered ?? 0}${renderedMessageMissing ? `, rendered text missing expected message "${renderedMessage}"` : ""})`,
 		diags: primary + auxiliary,
 	};
 }
@@ -2243,7 +2243,7 @@ export function fixtureDispatchCwd(fixture, workspace) {
 // toward the failure exit code so it can't silently pass the nightly.
 const ICON = { pass: "✓", fail: "✗", skip: "⚠", "setup-failed": "✗" };
 
-function report(rows, title) {
+export function report(rows, title, { failOnSkipOnly = false } = {}) {
 	const pad = (s, n) => String(s).padEnd(n);
 	console.log(`\nLive tool-smoke (#209) — ${title}\n`);
 	console.log(
@@ -2266,7 +2266,9 @@ function report(rows, title) {
 	console.log(
 		"Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)\n",
 	);
-	return skippedOnly ? 1 : counts.fail + counts["setup-failed"];
+	return failOnSkipOnly && skippedOnly
+		? 1
+		: counts.fail + counts["setup-failed"];
 }
 
 /**
@@ -2418,6 +2420,7 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	const failures = report(
 		rows,
 		"LSP clean-gate (lsp_diagnostics primary findings)",
+		{ failOnSkipOnly: true },
 	);
 	console.log(formatGateCensus(population, rows, langs));
 	return failures;
@@ -2614,6 +2617,7 @@ export async function runLensFull({ langs = [], install, verbose, deps } = {}) {
 	const failures = report(
 		rows,
 		"lens_diagnostics mode=full (LSP primary findings)",
+		{ failOnSkipOnly: true },
 	);
 	return failures;
 }

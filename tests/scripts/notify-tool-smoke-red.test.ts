@@ -176,7 +176,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LENS_FULL_LOG: writeLog(
 				dir,
 				"lens-full.log",
-				"✗  typescript   typescript-language-server   0     lens_diagnostics mode=full returned 0 finding(s) but 0 primary LSP findings (auxiliary=0, lspFilesUnconfirmed=1, partial=1)\n0 passed · 1 failed · 0 setup-failed · 0 skipped\n",
+				"✗  typescript   typescript-language-server   0     lens_diagnostics mode=full returned 0 finding(s) but 0 primary LSP findings (auxiliary=0, lspFilesUnconfirmed=1, auxPartial=1)\n0 passed · 1 failed · 0 setup-failed · 0 skipped\n",
 			),
 			FORMAT_LAYER_OUTCOME: "success",
 			FORMAT_LAYER_LOG: writeLog(
@@ -186,7 +186,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			),
 		});
 		expect(out).toContain("Failing layer: **lens_diagnostics mode=full row**");
-		expect(out).toContain("lspFilesUnconfirmed=1, partial=1");
+		expect(out).toContain("lspFilesUnconfirmed=1, auxPartial=1");
 	});
 
 	// Acceptance #3, the green-path-only regression this file's own module
