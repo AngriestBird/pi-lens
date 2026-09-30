@@ -1079,6 +1079,14 @@ export type DegradationKind =
 	| "self-drift-unverifiable"
 	| "session-start-duplicate"
 	/**
+	 * #3662: a primary replacement shutdown left the process with no primary
+	 * and a successor pending. Subject `declined`: a `startup` start in that
+	 * gap was classified `concurrent-secondary` instead of taking the primary
+	 * slot. Subject `expired`: no successor started within
+	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 */
+	| "session-successor-pending"
+	/**
 	 * #3071: `clients/sgconfig.ts` evicted the oldest sg-config baseline
 	 * entries over its retained-entry cap. Subject is the baseline directory;
 	 * reason carries the evicted count.
@@ -1375,6 +1383,14 @@ export type DegradationKind =
 	 * re-observes the file.
 	 */
 	| "wasm-abort"
+	/**
+	 * #3605: web-tree-sitter trapped (`memory access out of bounds`, `table
+	 * index is out of bounds`, ...) while parsing or querying one file. That
+	 * file degrades to not-parsed, and the parsers and tree cache are
+	 * recycled. Counted; past `WASM_TRAP_BUDGET` the next trap becomes a
+	 * `wasm-abort`. Subject is always `web-tree-sitter`.
+	 */
+	| "wasm-trap"
 	/**
 	 * #2626: `resources_discover` (#205) resolved `<packageRoot>/skills` to a
 	 * directory that is absent, unreadable, or holds no `SKILL.md` — pi then
