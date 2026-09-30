@@ -12,12 +12,10 @@ import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
 import { finishParsedRun } from "./utils/tool-failure.js";
 
 /**
- * Markers of prisma's own validation report, measured on prisma 6.16.2:
- * `Error code: P1012` and `Validation Error Count: N` frame every schema
- * error it prints (#3781).
+ * The trailer of prisma's own validation report, measured on prisma 6.16.2:
+ * every schema-error run ends with `Validation Error Count: N` (#3781).
  */
-const PRISMA_VALIDATION_REPORT =
-	/\bValidation Error Count:\s*\d+|\bError code:\s*P\d{4}\b/;
+const PRISMA_VALIDATION_REPORT = /\bValidation Error Count:\s*\d+/;
 
 function parsePrismaValidateOutput(
 	raw: string,
