@@ -664,6 +664,25 @@ function capTurnEndMessage(content: string): string {
 	return out;
 }
 
+/**
+ * #3218 criterion 2: "1st", "2nd", "3rd", "4th" … for a retiring write's
+ * index in the "Resolved this turn" line. A bare `${n}th` reads as "1th".
+ */
+function formatWriteOrdinal(n: number): string {
+	const mod100 = n % 100;
+	if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+	switch (n % 10) {
+		case 1:
+			return `${n}st`;
+		case 2:
+			return `${n}nd`;
+		case 3:
+			return `${n}rd`;
+		default:
+			return `${n}th`;
+	}
+}
+
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -4289,6 +4308,44 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 
+	// #3218 criterion 2: files whose inline blocker a fresh clean verdict
+	// retired during the turn. The coordinator's retire seam recorded which
+	// file, how many blockers, and the retiring write; this composer only
+	// formats them. Consumed HERE, once, so a retire is delivered exactly once
+	// (the coordinator clears its list and the line cannot re-serve).
+	const {
+		files: resolvedBlockerFileList,
+		dropped: resolvedBlockerFilesDropped,
+	} = runtime.consumeResolvedBlockerFiles();
+	const unresolvedKeys = new Set(
+		unresolvedBlockers.map((record) =>
+			normalizeMapKey(path.resolve(record.filePath)),
+		),
+	);
+	const resolvedLines = resolvedBlockerFileList
+		// A file that is blocking AGAIN by the time this turn ends is not
+		// resolved now; its live `Unresolved from this turn` section is the
+		// current truth, and a "Resolved" line beside it would contradict.
+		.filter(
+			(entry) =>
+				!unresolvedKeys.has(normalizeMapKey(path.resolve(entry.filePath))),
+		)
+		.map((entry) => {
+			const writeClause =
+				entry.writeIndex === undefined
+					? ""
+					: ` cleared by the ${formatWriteOrdinal(entry.writeIndex)} write`;
+			return `Resolved this turn: ${toRunnerDisplayPath(cwd, entry.filePath)} (${entry.blockerCount} blocker(s)${writeClause})`;
+		});
+	if (resolvedBlockerFilesDropped > 0) {
+		resolvedLines.push(`… and ${resolvedBlockerFilesDropped} more`);
+	}
+	// ONE section, `\n`-joined: ten separate `\n\n`-separated sections would
+	// spend 19 of the turn-end message's 20-line budget on blank separators
+	// and let `capTurnEndMessage` truncate the overflow line away.
+	const resolvedParts =
+		resolvedLines.length > 0 ? [resolvedLines.join("\n")] : [];
+
 	const labeledAdvisoryParts = advisoryParts.map(
 		(p) => `ℹ️ Advisory — no action required this turn:\n${p}`,
 	);
@@ -4298,6 +4355,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		...blockerParts,
 		...staleSecretParts,
 		...labeledAdvisoryParts,
+		// #3218 criterion 2: the resolution lines ride last. They are not a
+		// finding tier (no gate applies to a just-cleared verdict), only a
+		// status line, and they are part of the block content so an otherwise
+		// empty turn still delivers them ONCE (the coordinator consumed them).
+		...resolvedParts,
 	];
 	if (findingParts.length > 0) {
 		dbg(
@@ -4462,6 +4524,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			getFlag("lens-guard") &&
 			advisoryParts.length === 0 &&
 			staleSecretParts.length === 0 &&
+			// #3218 criterion 2: a resolved line is content worth delivering,
+			// so it must not be erased by the no-blockers clean-up. The
+			// reader clears it after delivery because `hasBlockers` is false.
+			resolvedParts.length === 0 &&
 			!runtime.gitGuardHasBlockers
 		) {
 			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
@@ -4511,6 +4577,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			blockerSections: blockerParts.length,
 			staleSecretSections: staleSecretParts.length,
 			advisorySections: advisoryParts.length,
+			// #3218 criterion 2: how many files this turn named as resolved.
+			// The line itself is in the delivered content; this counter makes
+			// the feature visible in latency.log even when the block is
+			// suppressed or the agent reads only telemetry.
+			resolvedBlockerFiles: resolvedBlockerFileList.length,
 			// #1944 AC3: an empty advisory section on its own cannot say whether
 			// the turn had nothing to report or dropped something. This counter
 			// answers that from latency.log even when the payload is empty, and

@@ -87,7 +87,10 @@ import type {
 	RunnerResult,
 	RunnerSkipReason,
 } from "./types.js";
-import { formatDiagnostics } from "./utils/format-utils.js";
+import {
+	DELTA_UNUSED_PROMOTION_NOTE,
+	formatDiagnostics,
+} from "./utils/format-utils.js";
 
 // --- Runner Registry ---
 
@@ -536,14 +539,6 @@ function isUnusedValueDiagnostic(d: Diagnostic): boolean {
 		message.includes("unused")
 	);
 }
-
-/**
- * #3218: why a delta-promoted unused finding blocks. Carried on the promoted
- * diagnostic so the STOP renderers print the reason once beneath the banner
- * instead of each re-deriving why the tier changed.
- */
-const DELTA_UNUSED_PROMOTION_NOTE =
-	"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
 
 function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map((d) => {
