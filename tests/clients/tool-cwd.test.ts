@@ -404,13 +404,11 @@ describe("resolveToolCwd (#2777)", () => {
 			rootMarkers: ["missing.marker"],
 			spawn: vi.fn(),
 		};
-		const seen: unknown[] = [];
+		const onFallback = vi.fn();
 
-		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
-			seen.push(fallback),
-		);
+		await resolveLspServerCwd(server, file, project, undefined, onFallback);
 
-		expect(seen).toEqual([]);
+		expect(onFallback).not.toHaveBeenCalled();
 	});
 
 	it("matches glob root markers against files in the directory", () => {
