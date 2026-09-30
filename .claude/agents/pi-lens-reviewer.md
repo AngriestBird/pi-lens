@@ -134,7 +134,9 @@ can trip, and say in your report which you ran and what each returned.
   implied green.
 - **Changelog fragment front matter.** The fragment needs YAML front matter
   with a `section:` key set to one of Added, Changed, Deprecated, Removed,
-  Fixed, or Security, followed by exactly one top-level entry. Title
+  Fixed, or Security, and an `audience:` key set to `user` or `internal`
+  (`user` = a pi-lens user or agent can observe it), followed by exactly one
+  top-level entry. Title
   formatting is the author's choice: `.changelog/README.md` permits a `-` or
   `*` bullet and a bold or plain title, and
   `scripts/check-changelog-fragments.mjs` accepts both. Do not flag a plain

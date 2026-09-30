@@ -102,8 +102,9 @@ the cost of not doing so.
 - Add `tests/config/` and spawn-heavy lanes for real child or LSP tests.
 - Reproduce CI-only failures in the CI command shape.
 - Use the exact npm pin in `package.json` for lockfile changes.
-- Add one `.changelog/<slug>.md` fragment for code changes. Never edit
-  `CHANGELOG.md`.
+- Add one `.changelog/<slug>.md` fragment for code changes, with
+  `audience: user` (a pi-lens user or agent can observe it) or
+  `audience: internal` (CI, tests, tooling, refactors). Never edit `CHANGELOG.md`.
 - Run release-QA end to end when a release-QA row changes.
 
 ## Test screens
@@ -133,7 +134,7 @@ the cost of not doing so.
   `node scripts/check-changelog-fragments.mjs` before the hand-back; both
   must pass, and the hand-back quotes them. A changelog fragment is
   `---` / `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
-  `---` / blank / one `- ` bullet. (Four of six Luna PRs on 2026-09-23
+  `audience: <user|internal>` / `---` / blank / one `- ` bullet. (Four of six Luna PRs on 2026-09-23
   redded the PR-body and changelog gates on the first head; the fixes were
   all mechanical.)
 - Every code fact in the PR body is a `` `path:line` `` citation the check

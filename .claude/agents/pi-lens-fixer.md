@@ -211,7 +211,7 @@ the cost of not doing so.
    the sweep had only looked in `clients/`.
 7. Ship: changelog fragment in `.changelog/` — validate it with
    `node scripts/check-changelog-fragments.mjs` (the CI gate: YAML front
-   matter with one `section:`, exactly ONE top-level entry per file);
+   matter with one `section:` and one `audience: user|internal`, exactly ONE top-level entry per file);
    `npm run changelog:check` is a DIFFERENT, weaker script and passing it
    proves nothing about the fragment (#2456 round 4 shipped red on this); tpope-style commit (conventional
    prefix, imperative ≤50-char subject, 72-col what+why body) ending with
