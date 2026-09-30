@@ -469,7 +469,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/pre-push-targeted-tests.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"git's pre-push stdin and the hook script's exit/skip contract are the subject; the union witness needs a real git fixture",
+			"git's pre-push stdin and the hook script's exit/skip/lock-timeout contract are the subject; the union and lock-admission witnesses need a real git fixture and the real hook chain",
 	},
 	"real-process-spawn:scripts/prune-agent-worktrees.test.ts": {
 		detector: "real-process-spawn",
