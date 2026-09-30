@@ -18,7 +18,7 @@ close-triggered publish).
   sends v, unless the #1459 gate defers the write. The aux-grace wait then
   looks for publication evidence: any publish for the path since the
   pre-notify baseline counts as "answered". With no evidence it marks the pair
-  with `markedAtMs = Date.now()` (index.ts ~6025), which is after the wait.
+  with `markedAtMs = Date.now()` (index.ts), which is after the wait.
   If the pair is already marked, the producer re-mark moves the baseline
   forward (#2027).
 - **External edits** (another session, a shell write). The disk changes;
@@ -115,8 +115,8 @@ can land between any two steps.
 
 `NoStaleFindings`: every finding the drain delivers was computed on the
 content that was on disk when the drain checked the file. This is what
-runtime-turn.ts promises at ~4070 ("a changed file cannot resurrect stale
-data") and at ~4131. The model does not check delivery time: the advisory
+runtime-turn.ts promises it in two places ("a changed file cannot
+resurrect stale data"). The model does not check delivery time: the advisory
 is assembled after further awaits, so an edit after the gate is an
 unavoidable TOCTOU window.
 
