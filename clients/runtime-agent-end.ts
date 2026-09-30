@@ -91,9 +91,10 @@ interface AgentEndDeps {
 	currentSessionId?: string;
 	/**
 	 * #3521: the read guard's branch epoch captured while the run was still
-	 * active. A `/tree` can run while this drain awaits, and a write credited
-	 * after it would vouch for a file the new branch never showed. Omitted:
-	 * captured here, before the first await.
+	 * active, for the actionable-warning quick fix. A `/tree` can run while
+	 * this drain awaits, and a write credited after it would vouch for a file
+	 * the new branch never showed. Omitted: captured here, before the first
+	 * await. A deferred record's own writes use the epoch it was queued with.
 	 */
 	readGuardBranchEpoch?: number;
 	/** Test/override hook for {@link DEFERRED_FORMAT_STALE_AFTER_MS}. */
@@ -536,7 +537,9 @@ export async function handleAgentEnd({
 						dbg,
 					});
 					if (!getFlag("no-read-guard"))
-						runtime.readGuard.recordWritten(changedPath, { branchEpoch });
+						runtime.readGuard.recordWritten(changedPath, {
+							branchEpoch: record.readGuardBranchEpoch,
+						});
 					const content = nodeFs.readFileSync(changedPath, "utf-8");
 					cacheManager.addModifiedRange(
 						changedPath,
@@ -859,7 +862,9 @@ export async function handleAgentEnd({
 						dbg,
 					});
 					if (!getFlag("no-read-guard")) {
-						runtime.readGuard.recordWritten(filePath, { branchEpoch });
+						runtime.readGuard.recordWritten(filePath, {
+							branchEpoch: record.readGuardBranchEpoch,
+						});
 					}
 					try {
 						const content = nodeFs.readFileSync(filePath, "utf-8");

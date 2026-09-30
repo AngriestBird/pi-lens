@@ -105,6 +105,7 @@ export interface MutationBridgeDeps {
 			kind: "autofix" | "format",
 			ownerSessionId?: string,
 			originCwd?: string,
+			readGuardBranchEpoch?: number,
 		) => boolean;
 	};
 	getCacheManager(): {
@@ -338,6 +339,9 @@ export function recordMutationThroughSeam(
 					kind,
 					runtime.telemetrySessionId,
 					projectRoot,
+					// #3521: the settled sweep's epoch, so a record it queues after
+					// a /tree is not credited to the new branch.
+					entry.readGuardBranchEpoch,
 				);
 			}
 		}

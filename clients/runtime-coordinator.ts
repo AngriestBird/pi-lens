@@ -163,6 +163,14 @@ export interface DeferredMutationRecord {
 	 * the orphan fallback instead of `tool_result`'s path resolution.
 	 */
 	originCwd: string;
+	/**
+	 * #3521: the read guard's branch epoch when this record was queued. The
+	 * drain credits its write only while the epoch is unchanged, so a record
+	 * requeued before a `/tree` is not credited to the new branch. A merge
+	 * keeps the newer epoch: that branch touched the file after every older
+	 * branch's write to it.
+	 */
+	readGuardBranchEpoch: number;
 }
 
 /** @deprecated Use DeferredMutationRecord. */
@@ -1833,12 +1841,18 @@ export class RuntimeCoordinator {
 		kind: DeferredMutationKind,
 		ownerSessionId?: string,
 		originCwd?: string,
+		/** #3521: a producer that awaited since it captured the epoch passes it. */
+		readGuardBranchEpoch = this.readGuard.currentBranchEpoch,
 	): boolean {
 		const key = path.resolve(filePath);
 		const now = Date.now();
 		const resolvedOriginCwd = originCwd ?? turnStateCwd;
 		const existing = this._pendingDeferredMutations.get(key);
 		if (existing) {
+			existing.readGuardBranchEpoch = Math.max(
+				existing.readGuardBranchEpoch,
+				readGuardBranchEpoch,
+			);
 			const addedKind = !existing.kinds.has(kind);
 			existing.lastTouchedAt = now;
 			existing.cwd = cwd;
@@ -1863,6 +1877,7 @@ export class RuntimeCoordinator {
 			queuedTurnId: `${this._telemetrySessionId}:${this._turnIndex}`,
 			ownerSessionId,
 			originCwd: resolvedOriginCwd,
+			readGuardBranchEpoch,
 		});
 		return true;
 	}
@@ -1997,6 +2012,10 @@ export class RuntimeCoordinator {
 				for (const kind of record.kinds) existing.kinds.add(kind);
 				for (const toolName of record.toolNames)
 					existing.toolNames.add(toolName);
+				existing.readGuardBranchEpoch = Math.max(
+					existing.readGuardBranchEpoch,
+					record.readGuardBranchEpoch,
+				);
 				continue;
 			}
 			this._pendingDeferredMutations.set(key, {
