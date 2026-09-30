@@ -249,11 +249,13 @@ function pushUnique(list: string[], id: string): void {
 
 /**
  * #3600: the time a heavyweight lane observed the bytes its rows were computed
- * from. Prefer the result's own `scannedAt` (taken before the scan's read, and
- * the stamp a joined in-flight run was already given); fall back to the moment
- * this lane started for the clients whose results carry no stamp. Either is
- * at-or-before the read, so an edit landing while the analyzer is still
- * reading is NEWER than the row and the widget's stale gate demotes it.
+ * from. Prefer the result's own `scannedAt`, stamped at the top of each
+ * client's run body BEFORE it reads anything: when this lane JOINS another
+ * caller's in-flight run, the initiator's stamp is the real read time, not
+ * this lane's later start. The lane start is only the fallback for a result
+ * that carries no stamp at all (a hand-rolled double, or an early shape that
+ * returned before its run body) — for a JOINED run that fallback would be
+ * LATER than the read, which is why every real client run body stamps.
  */
 function laneObservedAtMs(
 	scannedAt: string | number | undefined,
@@ -548,7 +550,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
-				startMs,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -596,7 +598,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
-				startMs,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -623,7 +625,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
-				startMs,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -875,7 +877,7 @@ export async function fetchFreshProjectDiagnostics(
 						Date.now() - startMs,
 						result.analyzed === true,
 						result,
-						startMs,
+						laneObservedAtMs(result.scannedAt, startMs),
 					);
 				}),
 			);
@@ -941,8 +943,18 @@ export async function fetchFreshProjectDiagnostics(
 				// it never runs a suite over the root this call (#2154).
 				false,
 				undefined,
-				// #3600: the cache entry's own write time, not this read.
-				laneObservedAtMs(cached.meta.timestamp, startMs),
+				// #3600: the batch's own launch stamp (`launchedFrom`), taken at
+				// turn_end BEFORE the suite ran — the safe (at-or-before the read)
+				// direction. `meta.timestamp` is the cache WRITE time, i.e. AFTER
+				// the suite read its files, so an edit during the run would look
+				// older than the row and escape the widget gate. A legacy entry
+				// with no `launchedFrom` falls back to its write time, then to the
+				// lane start, rather than dropping the row.
+				laneObservedAtMs(
+					cached.data.launchedFrom?.revision.capturedAt ??
+						cached.meta.timestamp,
+					startMs,
+				),
 			);
 		}),
 	];

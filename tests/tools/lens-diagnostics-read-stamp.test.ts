@@ -25,6 +25,10 @@ import {
 	reconcileStaleWidgetFiles,
 } from "../../clients/widget-state.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
@@ -186,6 +190,7 @@ describe("lens_diagnostics mode=full stamps a swept row at its read (#3573)", ()
 
 	beforeEach(() => {
 		clearWidgetState();
+		resetDegradationLedger();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tmp = fs.realpathSync(setupTestEnvironment(PREFIX).tmpDir);
@@ -527,6 +532,80 @@ describe("lens_diagnostics mode=full stamps a swept row at its read (#3573)", ()
 				expect(widgetRows(other)).toHaveLength(1);
 				expect(await reconcileStaleWidgetFiles()).toBe(1);
 				expect(widgetRows(other)).toEqual([]);
+			},
+			CASE_MS,
+		);
+
+		it(
+			"a projectDelta row keeps its OWN observedAt over the report's generatedAt (#3600)",
+			async () => {
+				const rowRead = T_READ - 1_000;
+				writeProjectDiagnosticsDeltaReport(tmp, {
+					version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
+					cwd: tmp,
+					generatedAt: new Date(T_READ).toISOString(),
+					sessionId: "session",
+					turnIndex: 1,
+					diagnostics: [
+						{
+							filePath: other,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "madge",
+							runner: "madge",
+							rule: "madge:circular",
+							message: "DELTA ROW carrying its own read stamp",
+							source: "project-scan",
+							observedAt: rowRead,
+						},
+					],
+					sources: ["madge"],
+				});
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				// The report stamp is a FALLBACK for rows the delta writer did not
+				// stamp; it must not overwrite a row's own read time.
+				expect(widgetRows(other)[0]?.observedAt).toBe(rowRead);
+			},
+			CASE_MS,
+		);
+
+		it(
+			"an unparseable generatedAt is recorded rather than silently widened to the fold clock (#3600)",
+			async () => {
+				writeProjectDiagnosticsDeltaReport(tmp, {
+					version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
+					cwd: tmp,
+					generatedAt: "not-a-timestamp",
+					sessionId: "session",
+					turnIndex: 1,
+					diagnostics: [
+						{
+							filePath: other,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "madge",
+							runner: "madge",
+							rule: "madge:circular",
+							message: "DELTA ROW with an unparseable report stamp",
+							source: "project-scan",
+						},
+					],
+					sources: ["madge"],
+				});
+				vi.setSystemTime(T_REC);
+				await fullScan({ refreshRunners: "cheap" });
+				const group = getDegradationSummary().find(
+					({ kind }) => kind === "project-delta-generatedat-unparseable",
+				);
+				expect(group?.count).toBe(1);
+				// The row still lands, stamped at the fold: the fallback is deliberate
+				// and now visible, not a silent freshness widening.
+				expect(widgetRows(other)[0]?.observedAt).toBe(T_REC);
 			},
 			CASE_MS,
 		);
