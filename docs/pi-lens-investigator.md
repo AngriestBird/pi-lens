@@ -65,8 +65,9 @@ issue and the requested evidence surface.
 When the symptom reproduces, the loop comes before the reading. Build the
 tightest loop that goes red on the symptom (a failing test, a minimal driver, a
 differential run), confirm it matches the reporter's exact symptom, and
-minimize it; raise the reproduction rate of a nondeterministic symptom by
-looping or stress. Write three to five falsifiable hypotheses with predictions
+minimize it until every element is load-bearing. Tighten it for speed, signal,
+and determinism; raise the reproduction rate of a nondeterministic symptom by
+looping, parallel drivers, or stress. Write three to five falsifiable hypotheses with predictions
 before testing any. Instrument surgically, tag the instrumentation, and remove
 all of it before reporting; loops live in your worktree and are reverted. The
 report recommends the regression test's seam: the one that captures the bug's

@@ -33,22 +33,17 @@ issue's acceptance criteria, the full merge-base diff
 4. Attack with probes and quote the output. Probe scripts live outside the
    worktree (`<worktree>/../probes-<pr>` or
    `~/.local/share/pi-lens-orchestrator/tmp/<lane>`): an untracked `.mjs`
-   inside it reds `tests/scripts/lint-js.test.ts` (#2865). Attack classes:
-   - inversions: real failures downgraded, healthy paths narrowed, legitimate
-     results dropped;
-   - concurrency: two callers, shared state, retained settled promises,
-     check-then-act split by an await;
-   - session boundaries: once-only state after `resetDegradationLedger()` or
-     `session_start`, probed with the SAME cached object;
-   - cadence: cooldown ladders against the caller's real retry interval, both
-     directions;
-   - input channels, trust boundaries, strict consumers, durable-record
-     compatibility, and old-record parsing;
-   - doubles: production fidelity, including the same double in sibling test
-     files.
+   inside it reds `tests/scripts/lint-js.test.ts` (#2865). Attack inversions
+   (real failures downgraded, healthy paths narrowed); concurrency (shared
+   state, retained settled promises, check-then-act across an await); session
+   boundaries (once-only state after `resetDegradationLedger()` or
+   `session_start`, probed with the SAME cached object); cadence (cooldowns
+   against the caller's real retry interval, both directions); input channels,
+   trust boundaries, strict consumers, and old-record parsing; and doubles'
+   fidelity, including the same double in sibling test files.
 5. Run the targeted suites, every test file that references a touched symbol,
-   and the governance selection in `docs/pi-lens-subagent.md`. `npm run build`
-   first.
+   and the governance selection in `docs/pi-lens-subagent.md`, after
+   `npm run build`.
 6. Read CI once (`docs/pi-lens-subagent.md`), confirm Unit tests executed, and
    read the log of every failing check to judge infra against code.
 7. Clean up: revert mutations, delete probes, and leave
@@ -56,41 +51,34 @@ issue's acceptance criteria, the full merge-base diff
 
 ## Verification
 
-- **Name the behaviour population; never clear a seam from a curated list.**
-  When a change replaces, moves, or widens a lifecycle, dispatch, or ownership
-  seam, enumerate EVERY suite that exercises the behaviour the seam governs,
-  run them all, and name the list in the review. A hand-picked file set cannot
-  clear the behaviour it omits (#3622: a seven-file run omitted the two
-  idle-eviction suites, both red on the required Unit tests).
-- **Population screen (generalization verdict).** When a PR applies a mechanism,
-  policy, guard, or optimisation to a named subset of a larger set (registry
-  entries, servers, tools, languages, stores), name the population M, state why
-  the other M−N are excluded and what their default is, and end with a
-  **Generalization verdict**: *widen in this PR* / *follow-up issue* (with its
-  seam group) / *stay specific* (with the reason). A missing verdict is a
-  finding. Recurrence: #3622. The optional ast-grep assist is #3684.
-- For a change to the pinned retired-synonym population, run
-  `tests/config/glossary-synonym-sweep.test.ts` on the MERGE of `origin/master`
-  and the head, and require same-PR re-pinning from its `UNPINNED`/`STALE`
-  output (#3279, #3284, #3288).
-- Mutation evidence: read the `Mutation diff` comment for the EXACT head. The
-  sticky can describe an older or cancelled head, so check its `Head:` line
+- **Name the behaviour population.** When a change replaces, moves, or widens
+  a lifecycle, dispatch, or ownership seam, run EVERY suite that exercises the
+  behaviour the seam governs and name the list; a curated file set cannot
+  clear what it omits (#3622).
+- **Generalization verdict.** When a mechanism, policy, guard, or optimisation
+  targets N of M members (registry entries, servers, tools, languages,
+  stores), name M, why the others are excluded, and their default, and end
+  with *widen in this PR*, *follow-up issue* (with its seam group), or *stay
+  specific* (with the reason). A missing verdict is a finding (#3622; the
+  optional ast-grep assist is #3684).
+- Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
+  `origin/master` and the head.
+- Read the `Mutation diff` comment for the EXACT head: check its `Head:` line
   (`node scripts/ci-verdict.mjs <pr>` prints `MUTATION` with `STALE` or
-  `PENDING`). Every survivor on an added line is killed by a test folded into
-  the PR or shown equivalent with a reason; triage "truncated test population"
-  survivors, never auto-accept them. Spot-check at most one of the fixer's hand
-  mutations instead of re-running the table. When the comment is absent or
-  STALE, read the `mutation-report` artifact (`node scripts/mutation-report.mjs
-  --report <downloaded mutation.json>`). Absent, stale, `0 mutants evaluated`,
-  partial or `no report` mutation evidence goes under `Could not verify`, never
-  implied green.
+  `PENDING`). Every survivor on an added line is killed by a folded test or
+  shown equivalent with a reason; triage "truncated test population"
+  survivors, never auto-accept them. Spot-check at most one of the fixer's
+  hand mutations. When the comment is absent or stale, read the
+  `mutation-report` artifact (`node scripts/mutation-report.mjs --report
+  <mutation.json>`). Absent, stale, `0 mutants evaluated`, partial, or
+  `no report` evidence goes under `Could not verify`.
 - Repeat the pattern and population sweeps. Check blast radius, bounded
   observability, changelog, commit, and PR-body requirements.
 - For LSP, dispatch, cache, runner, or tool changes, test one non-TypeScript
   registry entry through the same seam.
 - On a net-count fold, mutate every predicate the deleted sibling used to
-  back; the fold's own tests were written when two guards existed (#3064 F1,
-  #3065 F3, #3066 F3, #3068 F2).
+  back; the fold's own tests were written when two guards existed (#3064,
+  #3065, #3066, #3068).
 - Flag any new rule predicate added outside its owning domain module (#3781,
   #3794, #3796). Review a behaviour-preserving move commit for caller-result
   parity separately from any later behaviour change (#3817).
@@ -105,12 +93,13 @@ Run every probe the diff can trip and say which ran and what each returned.
   causes a needless fix round is a review defect.
 - **Duplication and over-build.** Re-implemented machinery (a second warn-once
   latch, a private extension-to-language table, a hand-rolled walker) is a
-  finding even when SonarCloud is green. A new shared helper with surviving
-  siblings is a finding unless the body carries the sibling list, the
-  unsafe-to-fold reason, and the issue link. Plumbing with no consumer is a
-  finding unless the PR names its forcing function. Name the skipped rung.
+  finding even when SonarCloud is green. So is a new shared helper with
+  surviving siblings, unless the body carries the sibling list, the
+  unsafe-to-fold reason, and the issue link, and plumbing with no consumer,
+  unless the PR names its forcing function. Name the skipped rung; some seams
+  are wide on purpose (`HISTORY.md` "SDK-reuse boundaries").
 - **Red-proof audit.** A claimed red without its quoted transcript is a finding
-  of its own; reproduce it (procedure step 3).
+  of its own; reproduce it (step 3).
 - **Quoted-evidence audit.** Diff every CI line the body quotes against the job
   log on the exact head. A line the log never printed is an integrity finding,
   reported first.
@@ -122,43 +111,40 @@ Run every probe the diff can trip and say which ran and what each returned.
 - **Changelog fragment.** Front matter `section:` is one of Added, Changed,
   Deprecated, Removed, Fixed, or Security, followed by exactly one top-level
   entry. Bullet style and a bold or plain title are the author's choice
-  (`.changelog/README.md`); do not flag them. `CHANGELOG.md` changes only in
-  the rollups `npm run changelog:release` generates.
+  (`.changelog/README.md`). `CHANGELOG.md` changes only in the rollups
+  `npm run changelog:release` generates.
 - **Sort comparators.** Every new `.sort()` or `.toSorted()` has an explicit
-  comparator (SonarCloud S2871). Where the order feeds an identity (a dedupe
-  key, a cache key, a hash input), compare code units, not `localeCompare`.
-- **Flake shapes.** A new real spawn, elapsed-time assertion, raw
-  `setTimeout`/`setInterval` wait, or `vi.waitFor(` outside
-  `vi.useFakeTimers()` needs a `// flake-shape: <detector> — <reason>` header
-  and `wallClockBudgetInclude` membership (#2547). A pinned file whose live
-  count falls below its pin needs its baseline tightened; a stale ceiling
-  re-admits regrowth.
+  comparator (SonarCloud S2871); an order that feeds an identity (dedupe key,
+  cache key, hash input) compares code units, not `localeCompare`.
+- **Flake shapes.** A new real spawn, elapsed-time assertion, raw timer wait,
+  or `vi.waitFor(` outside `vi.useFakeTimers()` needs a
+  `// flake-shape: <detector> — <reason>` header and `wallClockBudgetInclude`
+  membership (#2547). A pinned file whose count falls below its pin needs its
+  baseline tightened; a stale ceiling re-admits regrowth.
 - **Platform skips and session-start resets.** Apply the `AGENTS.md` test
-  screen for platform skips and the session-start reset invariant under
-  "Session, telemetry, and delivery".
+  screens and the `SessionStartClassification` invariant.
 
 ## Verification rounds
 
 On `VERIFY <head-sha>` with a claims list: fetch the head, rebuild, re-run YOUR
 original probes for every claimed fix (the fixer's tests are not proof), probe
 each claim's edge, re-run the targeted suites, and read CI on that head. Attack
-the round's changed lines as a fresh PR, and attack a remedy you prescribed as
-a rival's. Fix rounds introduce defects at about the rate they remove them.
+the round's changed lines as a fresh PR; fix rounds introduce defects at about
+the rate they remove them.
 
 - First spot-check one previous round's mutation on the new head and read its
   `Mutation diff` comment (#2583).
-- When a round retunes a threshold, tier, or predicate, build the boundary
-  input the new condition cannot separate and drive it through the real seam:
-  a cure for over-triggering tends to ship under-triggering, which is silent
-  (#2983).
-- "Passes locally now" is not evidence for a defect that involves a deferred
-  producer or another worker; it shows only that the defect did not reproduce
-  (#2955). Say so in the verdict.
+- When a round retunes a threshold, tier, or predicate, drive the boundary
+  input the new condition cannot separate through the real seam: a cure for
+  over-triggering tends to ship silent under-triggering (#2983).
+- "Passes locally now" does not prove a fix for a defect that involves a
+  deferred producer or another worker; it shows only non-reproduction (#2955).
+  Say so in the verdict.
 - A prescription you write carries its own sweep of sibling call sites, or is
   marked "shape, not verified across callers" (#2642). A prescription that
-  narrows a guard names its residual family and the measured incidence it
-  leaves (#3155). A fixer who proves your prescription insufficient with a red
-  is right; verify the override on its merits.
+  narrows a guard names its residual family and measured incidence (#3155). A
+  fixer who proves your prescription insufficient with a red is right; verify
+  the override on its merits.
 - Judge every exemption a round adds (`DECLARED_EXCEPTIONS`,
   `EXEMPT_SESSION_STATE_FILES`, a hook-await pin, a generation-guard exemption)
   as silencing or registration, per entry, with the reason quoted (#2654).
@@ -176,50 +162,31 @@ a rival's. Fix rounds introduce defects at about the rate they remove them.
   fix-round demand.
 - Security-class findings (injection, path traversal, secrets, unsafe
   deserialization, redaction, trust boundary) need a demonstrated exploit
-  through a real input path. Theoretical DoS, regex DoS, log spoofing, and rate
-  limiting count only when the PR claims them. An undemonstrated security
-  finding goes under `Could not verify` with what would have been needed.
+  through a real input path; theoretical DoS, regex DoS, log spoofing, and rate
+  limiting count only when the PR claims them. Put an undemonstrated one under
+  `Could not verify` with what would have been needed.
 
-## Review follow-ups
+## Findings and verdict
 
-- Classify every finding as **fold** or **file**, with a one-word reason.
-- Fold same-seam or same-file follow-ups that are about one commit and need no
-  maintainer decision; contract-only items trail the PR without re-verification.
-- Small code folds carry a red-first test and are routed per principles §3.
-- File only for a different seam, another PR's blocker, a maintainer decision,
-  untouched pre-existing work, or a changed risk class (for example lifecycle
-  on a tooling PR); file one consolidated issue per PR for all residuals.
-
-## Finding format
-
-Order findings: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `NITPICK`.
-
-Each actionable finding contains:
-
-1. Severity and stable id.
-2. File/symbol anchor.
-3. Reproduction command or probe output.
-4. Expected and observed behavior.
-5. Root cause, cost, and concrete remedy.
-6. Issue-acceptance or repository-standard classification.
-
-Severity requires a reproduced failure. A high-severity hypothesis without a
-failure scenario is at most medium.
-
-## Verdict
+Classify every finding as **fold** or **file** with a one-word reason
+(`docs/pi-lens-subagent.md` "Follow-ups"). Order findings `CRITICAL`, `HIGH`,
+`MEDIUM`, `LOW`, `NITPICK`. Each carries a stable id, a file or symbol anchor,
+the reproduction command or probe output, expected and observed behaviour, the
+root cause, cost, and a concrete remedy, and whether it is an
+issue-acceptance or a repository-standard finding. Severity requires a
+reproduced failure; a high-severity hypothesis without a failure scenario is
+at most medium.
 
 Start with one verdict: `merge-ready`, `needs changes`, `redesign`, or
-`conflicted`. Then give spec-compliance findings (the issue's acceptance
-criteria) and standards-compliance findings (`AGENTS.md` conventions) under
+`conflicted`. Then give spec-compliance and standards-compliance findings under
 separate headings, red-run verification, test totals, CI judgement, and
 merge-order interactions with other open PRs, plus:
 
 - `Could not verify`: every blocked or environment-limited check.
 - `Named output`: structural insight not closed by the probes.
-- `Generalization verdict`: the population, excluded defaults, and one of the
-  three required verdicts above.
-- `Disposition table`: each prior finding as `fixed`, `not fixed`, `new defect`,
-  or `withdrawn (reason)`.
+- `Generalization verdict`: the population, excluded defaults, and verdict.
+- `Disposition table`: each prior finding as `fixed`, `not fixed`,
+  `new defect`, or `withdrawn (reason)`.
 - Cleared categories (one compact list) and exact-head identity.
 
 Use short, active, plain prose.

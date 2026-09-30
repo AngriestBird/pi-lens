@@ -24,9 +24,10 @@ scripts, PR bodies, and TLC logs go under `$TMPDIR`
 `<worktree>/../probes-<lane>`.
 
 The Bash-hook rules in `AGENTS.md` "Contributing" bind every runner, hooked or
-not. Hooks always run. If a hook reds on unrelated work, prove it with
-`scripts/red-on-base.mjs` (`AGENTS.md` "Commands and gates"), then STOP and hand
-back the quoted output. Never bypass or push past it.
+not. Hooks always run. A hook or CI red is unrelated only when
+`scripts/red-on-base.mjs` reports `RED-ON-BASE` for every failing test
+(`AGENTS.md` "Commands and gates"); for a hook, then STOP and hand back the
+quoted output. Never bypass or push past it.
 
 Git authority is separate from the role. Commit, push, or open a PR only when
 the delegation explicitly grants that authority after worktree verification.
@@ -72,6 +73,11 @@ Select governance suites mechanically, never from memory (#2107, #2438, #2470,
 #2511):
 `ls tests/clients/*{sweep,ratchet,conformance,coverage,gate,governance,silence,hermeticity,invariant,contract}*.test.ts`
 plus every `tests/config/*.test.ts`. Quote the file count you ran.
+`tests/config/glossary-synonym-sweep.test.ts` pins the retired-synonym
+identifier population per (term, file) in both directions (#3279): when a
+change adds or removes a pinned use, run it on the head and on the merge of
+`origin/master` and the head before pushing, and re-pin in the same PR from its
+`UNPINNED`/`STALE` output (#3284, #3288).
 
 Never park a turn behind a background command. When a run cannot finish in the
 foreground, push with the targeted and governance suites green and say that
@@ -79,7 +85,8 @@ the full suite was delegated to CI.
 
 Pin `PI_LENS_HOME` and `PILENS_DATA_DIR` to `<worktree>/.probe-home` for
 probes, smoke scripts, and `npm install`/`npm ci` (`AGENTS.md` "Paths, data,
-and operating systems"). Never export them for a Vitest run: the setup keeps
+and operating systems"); a test that inspects the install record also pins
+`PI_LENS_INSTALL_LOG`. Never export them for a Vitest run: the setup keeps
 the real home on purpose (#3178). Kill every language server a probe spawns
 before moving on; the plegma daemon's cgroup holds every worker's children
 (the 2026-09-19 OOM). Never run a full in-place Stryker run in a shared or
@@ -93,8 +100,15 @@ runner's own notes say which mode lifts it). Run Vitest as
 tree-sitter grammar prefetch hangs offline, verify through direct probes of the
 built code and say so; the orchestrator re-runs the files outside the sandbox.
 
-A red is unrelated only when `scripts/red-on-base.mjs` reports `RED-ON-BASE`
-for every failing test (`AGENTS.md` "Commands and gates").
+## Follow-ups
+
+Fold a review follow-up into the same PR when it shares the seam or files, is
+about one commit, and needs no maintainer decision. Contract-only folds (body,
+comments, wording) are trailing commits; small code folds carry a red-first
+test and are routed per principles §3 "Round routing". File only
+different-seam, blocked, decision-dependent, untouched pre-existing, or
+risk-class-changing residuals (for example lifecycle work on a tooling PR), as
+one consolidated issue per PR.
 
 ## Evidence and reporting
 

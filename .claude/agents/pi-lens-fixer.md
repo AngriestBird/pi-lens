@@ -18,8 +18,10 @@ specific to the Claude Code harness.
   as `.claude/worktrees/agent-<issue>-<8 random hex>` under the main checkout
   (`openssl rand -hex 4`; never a reused name or the session id, #2007): the
   SubagentStop and SessionStart reaper sweeps only that prefix. Link
-  `node_modules` from the main checkout before the first test run, and tear
-  down as `AGENTS.md` "Commands and gates" says.
+  `node_modules` from the main checkout before the first test run. Tear down
+  as `AGENTS.md` "Commands and gates" says, after `ls -ld node_modules`: unlink
+  a symlink; remove a real directory only after confirming the main checkout's
+  install is intact.
 - Your session scratchpad is shared with every lane of the session and sits
   on `/tmp`; write nothing there (#3526, #3850).
 - Relayed `SendMessage` notes follow the issue-mirror rule in

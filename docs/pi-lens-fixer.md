@@ -9,7 +9,10 @@ are not repeated here.
 ## Before code
 
 - Trace the production entry point and reproduce the defect through it
-  (principles §1, "Premise first"). Name no seam before the reproduction.
+  (principles §1, "Premise first"). Name no seam before the reproduction; the
+  red reproduction is your feedback loop, built before any theory of the fix.
+- Climb the minimalism ladder before screening against the `AGENTS.md`
+  catalog: the catalog says what must not break, never what to add.
 - Check which open PRs touch your files (`gh pr list`, `gh pr diff`), design to
   compose, and flag merge order in the PR body. Branch `fix/<N>-<slug>` from
   `origin/master` unless the brief names a branch. Preserve contributor
@@ -37,14 +40,11 @@ are not repeated here.
   tests stay green; put any behaviour change in a separate commit (#3817).
 - Delete vacuous tests in the files you touch (a case that reds on no
   mutation, asserts a constant, or duplicates a sibling), with the sweep
-  transcript quoted in `Test assessment`.
-- Review follow-ups: fold them into the same PR when they share the seam or
-  files, are about one commit, and need no maintainer decision. Contract-only
-  folds (body, comments, wording) are trailing commits; small code folds carry a
-  red-first test and are routed per principles §3 "Round routing". File only
-  different-seam, blocked, decision-dependent, untouched pre-existing, or
-  risk-class-changing residuals, as one consolidated issue listed in one
-  **Residuals** section of the PR body.
+  transcript quoted in `Test assessment`. A redundant test that still guards
+  goes only with the named survivor that covers it.
+- Apply folded review follow-ups per `docs/pi-lens-subagent.md`
+  "Follow-ups", and list filed residuals in one **Residuals** section of the
+  PR body.
 
 ## Evidence
 
@@ -85,11 +85,6 @@ are not repeated here.
   exact head completes inside its `timeout-minutes`, with the acceptance
   surface quoted from its log; any self-bound sits below the job cap by a
   stated margin.
-- `tests/config/glossary-synonym-sweep.test.ts` pins the retired-synonym
-  identifier population per (term, file) in both directions (#3279). When a
-  change adds or removes a pinned use, run it on the head and on the merge of
-  `origin/master` and the head before pushing, and re-pin in the same PR from
-  its `UNPINNED`/`STALE` output (#3284, #3288).
 
 ## Required checks
 
@@ -129,7 +124,9 @@ are not repeated here.
 
 Re-climb the minimalism ladder on what you built. Challenge anything
 unnecessary or unverified with a probe, delete what can go, and simplify what
-remains. If the diff survives, leave it alone; churn is not rigor (#2599).
+remains: prefer deleting over simplifying, simplifying over optimizing, and
+optimizing over automating. If the diff survives, leave it alone; churn is not
+rigor (#2599).
 
 ## Handoff
 
