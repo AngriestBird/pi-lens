@@ -244,6 +244,13 @@ describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", 
 // then never bridge with `--wait`. Fixed via `mergeable` threaded from
 // `gh pr view --json headRefOid,mergeable` through to `computeVerdict`.
 describe("computeVerdict — absent-check verdict is mergeable-aware (#2539 round 2, F1)", () => {
+	it("#3847: an empty required-check set cannot turn absent checks into exit 0", () => {
+		const verdict = computeVerdict({ check_runs: [] }, [], "MERGEABLE");
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toContain("treating as pending");
+		expect(verdict.rows.every((row) => !row.present)).toBe(true);
+	});
+
 	it("A1: exits 3 (pending) when a required check is absent but the PR is MERGEABLE", () => {
 		const payload = {
 			check_runs: [checkRun({ name: "Unit tests", id: 1 })],

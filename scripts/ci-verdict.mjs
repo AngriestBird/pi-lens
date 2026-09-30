@@ -402,7 +402,15 @@ export function computeVerdict(
 		? checkRunsPayload.check_runs
 		: [];
 	const byName = resolveLatestByName(checkRuns);
-	const requiredNameSet = new Set(requiredChecks);
+	// An empty live required-check response is not evidence that this repository
+	// has no required checks. Keep the repository's required set as the
+	// fail-closed fallback; otherwise an empty check-runs payload has no rows,
+	// reaches the success branch, and makes absent checks look merge-ready.
+	const effectiveRequiredChecks =
+		Array.isArray(requiredChecks) && requiredChecks.length > 0
+			? requiredChecks
+			: REQUIRED_CHECKS;
+	const requiredNameSet = new Set(effectiveRequiredChecks);
 
 	const buildRow = (name) => {
 		const run = byName.get(name);
@@ -433,7 +441,7 @@ export function computeVerdict(
 		};
 	};
 
-	const requiredRows = requiredChecks.map(buildRow);
+	const requiredRows = effectiveRequiredChecks.map(buildRow);
 	const discoveredNames = [...byName.keys()]
 		.filter((name) => !requiredNameSet.has(name))
 		.sort();
