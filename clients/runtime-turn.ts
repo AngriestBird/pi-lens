@@ -668,6 +668,16 @@ function capTurnEndMessage(content: string): string {
 }
 
 /**
+ * #3218 criterion 2: the turn-end "Resolved" section's share of the message
+ * cap. It rides first (the cap must never cut a consumed line) but is never
+ * the whole cap: a cleanup report must not crowd the live blockers out
+ * (review-3776-r3 W1). At most 40% of the chars and 5 lines, one of them kept
+ * for the "… and N more" tail.
+ */
+const RESOLVED_SHARE_OF_CHARS = 0.4;
+const RESOLVED_MAX_LINES = 5;
+
+/**
  * #3218 criterion 2: "1st", "2nd", "3rd", "4th" … for a retiring write's
  * index in the "Resolved this turn" line. A bare `${n}th` reads as "1th".
  */
@@ -4329,6 +4339,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// turn_end, not dropped: a retire that landed after the snapshot above
 	// (the awaits between it and here) is real, and discarding it leaves the
 	// agent holding a STOP block for a file that is clean.
+	const formatResolvedTail = (dropped: number) => `… and ${dropped} more`;
+	const resolvedTailMax = formatResolvedTail(Number.MAX_SAFE_INTEGER).length;
+	const resolvedShareChars =
+		Math.floor(RUNTIME_CONFIG.turnEnd.maxChars * RESOLVED_SHARE_OF_CHARS) -
+		resolvedTailMax;
 	const formatResolvedLine = (entry: ResolvedBlockerFile): string => {
 		const clause = entry.confirmedClean
 			? " confirmed clean"
@@ -4341,19 +4356,41 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			entry.turnIndex === runtime.turnIndex
 				? "Resolved this turn"
 				: "Resolved since the last report";
-		return `${label}: ${toRunnerDisplayPath(cwd, entry.filePath)} (${entry.blockerCount} blocker(s)${clause})`;
+		const head = `${label}: `;
+		const tail = ` (${entry.blockerCount} blocker(s)${clause})`;
+		let display = toRunnerDisplayPath(cwd, entry.filePath);
+		// review-3776-r3 W2: no line is wider than the share, so the one line
+		// the floor below always takes can never be the part the cap cuts. The
+		// path loses its middle; both ends (root and file name) stay.
+		const room = resolvedShareChars - 1 - head.length - tail.length;
+		if (display.length > room) {
+			const keepHead = Math.ceil((room - 1) / 2);
+			display = `${display.slice(0, keepHead)}…${display.slice(display.length - (room - 1 - keepHead))}`;
+		}
+		return `${head}${display}${tail}`;
 	};
-	const formatResolvedTail = (dropped: number) => `… and ${dropped} more`;
-	// review-3776-verify V1: the section rides FIRST in the message and is
-	// sized to `capTurnEndMessage`'s char cap BEFORE anything is consumed, less
-	// room for the widest tail, so the cap can never cut a line (or the tail)
-	// whose entry this call removes. A line that does not fit is HELD for the
-	// next turn_end; the first is always taken so a lone long path drains.
-	// (The line cap cannot bite: 10 files + the tail is 11 of 20 lines.)
-	const resolvedCharBudget =
-		RUNTIME_CONFIG.turnEnd.maxChars -
-		formatResolvedTail(Number.MAX_SAFE_INTEGER).length;
+	// review-3776-verify V1 + review-3776-r3 W1: the section rides FIRST in
+	// the message and is sized BEFORE anything is consumed, on both of
+	// `capTurnEndMessage`'s axes, to what the live blockers after it leave
+	// (their text plus the `\n\n` joining them), never past its share. Room
+	// for the widest tail is kept on both axes. So the cap cuts neither a
+	// consumed line nor a blocker. A line that does not fit is HELD for the
+	// next turn_end; the first is always taken, so the held list drains.
+	const blockerText = blockerParts.join("\n\n");
+	const blockerChars = blockerParts.length > 0 ? blockerText.length + 2 : 0;
+	const blockerLines =
+		blockerParts.length > 0 ? blockerText.split("\n").length + 1 : 0;
+	const resolvedCharBudget = Math.min(
+		resolvedShareChars,
+		RUNTIME_CONFIG.turnEnd.maxChars - blockerChars - resolvedTailMax,
+	);
+	const resolvedLineBudget =
+		Math.min(
+			RESOLVED_MAX_LINES,
+			RUNTIME_CONFIG.turnEnd.maxLines - blockerLines,
+		) - 1;
 	let resolvedChars = 0;
+	let resolvedCount = 0;
 	const {
 		files: resolvedBlockerFileList,
 		dropped: resolvedBlockerFilesDropped,
@@ -4361,9 +4398,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (unresolvedKeys.has(normalizeMapKey(path.resolve(entry.filePath))))
 			return true;
 		const cost = formatResolvedLine(entry).length + 1;
-		if (resolvedChars > 0 && resolvedChars + cost > resolvedCharBudget)
+		if (
+			resolvedCount > 0 &&
+			(resolvedCount >= resolvedLineBudget ||
+				resolvedChars + cost > resolvedCharBudget)
+		)
 			return true;
 		resolvedChars += cost;
+		resolvedCount += 1;
 		return false;
 	});
 	const resolvedLines = resolvedBlockerFileList.map(formatResolvedLine);
@@ -4382,12 +4424,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
 	const findingParts = [
-		// #3218 criterion 2: the resolution lines ride FIRST, so the cap cuts
-		// unresolved detail the agent was already shown inline, never a
-		// consumed retirement (review-3776-verify V1). They are not a finding
-		// tier (no gate applies to a just-cleared verdict), only a status line,
-		// and they are part of the block content so an otherwise empty turn
-		// still delivers them ONCE (the coordinator consumed them).
+		// #3218 criterion 2: the resolution lines ride FIRST, inside their
+		// sized share, so the cap cuts neither a consumed retirement
+		// (review-3776-verify V1) nor a live blocker (review-3776-r3 W1).
+		// They are not a finding tier (no gate applies to a just-cleared
+		// verdict), only a status line, and they are part of the block content
+		// so an otherwise empty turn still delivers them ONCE (the coordinator
+		// consumed them).
 		...resolvedParts,
 		...blockerParts,
 		...staleSecretParts,
