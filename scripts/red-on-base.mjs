@@ -35,7 +35,7 @@ export const EXIT = {
 
 export const HEAD_GREEN_MESSAGE =
 	"HEAD green when run alone; the red may be concurrency OR a flaky change. Not evidence of unrelated.";
-export const LOAD_FAILURE_MESSAGE =
+const LOAD_FAILURE_MESSAGE =
 	"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.";
 
 const RUN_PREFIX = "pi-lens-red-on-base-";
