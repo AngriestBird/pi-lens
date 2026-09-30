@@ -16,11 +16,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setupTestEnvironment } from "../clients/test-utils.js";
 
 const fixture = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
 );
-const root = fs.mkdtempSync(path.join(process.cwd(), ".probe-2776-"));
+const probe = setupTestEnvironment("pi-lens-2776-");
+const root = probe.tmpDir;
 const probeFixture = path.join(root, "fake-lsp-server.mjs");
 const fixtureSource = fs.readFileSync(fixture, "utf8");
 fs.writeFileSync(
@@ -71,7 +73,7 @@ describe("#2776 custom primary diagnostic provenance", () => {
 
 	afterAll(async () => {
 		await service?.shutdown();
-		fs.rmSync(root, { recursive: true, force: true });
+		probe.cleanup();
 	});
 
 	it("reports a pushed primary diagnostic even when source is server-authored", async () => {
