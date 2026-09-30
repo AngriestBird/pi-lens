@@ -16,6 +16,9 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { loadWebTreeSitter } from "../../clients/deps/web-tree-sitter.js";
+import { FactStore } from "../../clients/dispatch/fact-store.js";
+import { extractFactsFromTree } from "../../clients/dispatch/facts/tree-sitter-facts.js";
+import type { DispatchContext } from "../../clients/dispatch/types.js";
 import {
 	TreeSitterClient,
 	WASM_TRAP_BUDGET,
@@ -303,6 +306,39 @@ describe("swallowing consumers (#3678 F1, F2)", () => {
 		expect(onAbort).not.toHaveBeenCalled();
 		expect(bMatches).toEqual([1, 0, 0, 0, 0, 0]);
 	});
+
+	it("keys a runQueryOnFile decay to the rule, not only the label (#3678 F4)", async () => {
+		const { client, onAbort } = await liveClient();
+		const { Query } = await loadWebTreeSitter();
+		const realMatches = Query.prototype.matches;
+		vi.spyOn(Query.prototype, "matches").mockImplementation(function (
+			this: InstanceType<typeof Query>,
+			...args: Parameters<typeof realMatches>
+		) {
+			if (this.captureNames.includes("trap_me")) throw trap();
+			return realMatches.apply(this, args);
+		});
+		const file = pythonFile();
+		const ruleA = {
+			...pythonRule("rule-a"),
+			query: "(function_definition) @trap_me",
+			metavars: ["trap_me"],
+		};
+		const ruleB = pythonRule("rule-b");
+
+		const bMatches: number[] = [];
+		for (let round = 0; round < 6; round++) {
+			await client.runQueryOnFile(ruleA, file, "python");
+			bMatches.push(
+				(await client.runQueryOnFile(ruleB, file, "python")).length,
+			);
+		}
+
+		// The dispatch runner's per-rule path: rule B's clean walk must not clear
+		// rule A's entry, or A's deterministic trap aborts on the fourth round.
+		expect(onAbort).not.toHaveBeenCalled();
+		expect(bMatches).toEqual([1, 0, 0, 0, 0, 0]);
+	});
 });
 
 describe("one budget unit per poisoned content, whatever the caller (#3678 F5, F6)", () => {
@@ -456,6 +492,49 @@ describe("withTreeSitterRoot callers keep their own identity (#3678 F4)", () => 
 			"charged",
 			"charged",
 			"charged",
+		]);
+	});
+
+	it("keeps each fact provider's identity through extractFactsFromTree", async () => {
+		_resetSharedTreeSitterClientForTests();
+		const content = "def h():\n    return 3\n";
+		const file = pythonFile(content);
+		const store = new FactStore();
+		store.setFileFact(file, "file.content", content);
+		const ctx = { filePath: file } as DispatchContext;
+
+		const healthy: unknown[] = [];
+		for (let round = 0; round < 5; round++) {
+			await extractFactsFromTree(
+				ctx,
+				store,
+				"fact.trapping",
+				{ "file.trapping": [] },
+				() => {
+					throw trap();
+				},
+			);
+			await extractFactsFromTree(
+				ctx,
+				store,
+				"fact.healthy",
+				{ "file.healthy": [] },
+				() => ({ "file.healthy": [] }),
+				"file.healthyCoverage",
+			);
+			healthy.push(store.getFileFact(file, "file.healthyCoverage"));
+		}
+
+		// Two providers on one file: the healthy one must not heal the trapping
+		// one's entry, or the fourth trap aborts the runtime. The trapping
+		// provider's second trap charges the content for every provider.
+		expect(isTreeSitterWasmAborted()).toBe(false);
+		expect(healthy).toEqual([
+			"complete",
+			"unavailable",
+			"unavailable",
+			"unavailable",
+			"unavailable",
 		]);
 	});
 });
