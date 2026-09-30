@@ -7,6 +7,7 @@ import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { _settleRegistryMutationsForTests } from "../../clients/instance-registry.js";
 import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
@@ -1090,8 +1091,18 @@ export function runTeardownWithMemReport(
 	}
 }
 
-afterAll(() => {
+/** Join the real registry tail before a worker teardown can be interrupted. */
+export async function settleRegistryMutationsBeforeTeardown(): Promise<void> {
+	await _settleRegistryMutationsForTests();
+}
+
+afterAll(async () => {
 	try {
+		// #3617: Vitest SIGTERMs fork workers without a Node `exit` event. Join
+		// the real registry mutation tail before teardown, including the quiet-
+		// window heartbeat's queued updateHeartbeat, so no live worker's lock
+		// generation is left behind for the next file to take over.
+		await settleRegistryMutationsBeforeTeardown();
 		runTeardownWithMemReport(
 			[checkKillGuard, checkTmpHygiene, checkBackstop],
 			emitMemReport,

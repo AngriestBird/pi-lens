@@ -1043,8 +1043,8 @@ function withoutOwnEntry(
  * {@link deregisterInstance}, for a worktree this host stops serving while the
  * host itself keeps running.
  *
- * SYNC fs inside, matching `deregisterInstance`'s `session_shutdown` contract
- * (#234: no child spawns at teardown; this function spawns none). Removing the
+ * The operation runs on the registry tail and uses async filesystem calls.
+ * Removing the
  * LAST root removes the whole entry — a host serving no root is not a peer any
  * caller should find. Removing the primary promotes the next root to
  * `projectRoot` rather than leaving a stale scalar behind.
@@ -1065,11 +1065,8 @@ function withoutOwnEntry(
  * but they can no longer read the file straight afterwards and expect the
  * removal to be visible.
  *
- * The sync attempt below can meet this process's OWN hold, the same shape
- * #3498 fixed for `deregisterInstance` (#3587): this op already runs on the
- * tail, so unlike `deregisterInstance` it never needs to bypass the tail to
- * retry — it just waits through the lock lease in place, on the same tail
- * slot, before giving the next queued op its turn.
+ * The single lock below waits through the lease for a peer or own prior
+ * holder, on this tail slot, before giving the next queued op its turn.
  */
 export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
 	const generation = registrationGeneration().capture();
@@ -1080,9 +1077,9 @@ export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
 
 /**
  * The write this root removal must make (or none), plus the intent-cell side
- * effect, from a fresh read (#3587). Shared by the sync attempt and its
- * queued fallback so a holder that outlasts the sync wait gets the identical
- * decision, not a second, possibly-stale one. Keys the entry through
+ * effect, from a fresh read (#3587). The single lease-waiting lock path calls
+ * this once under the lock, so a holder cannot force a second, stale decision.
+ * Keys the entry through
  * `isOwnEntry`, and the whole-entry removal through `withoutOwnEntry`, exactly
  * as `deregisterInstance` does (#3498).
  */
@@ -1130,49 +1127,12 @@ function planRootRemoval(
 	};
 }
 
-function deregisterInstanceRootNow(
+async function deregisterInstanceRootNow(
 	projectRoot: string,
 	generation: GenerationHandle,
-): Promise<void> | void {
+): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const normalizedRoot = normalizeFilePath(projectRoot);
-	const selfStart = ownProcessStartIfKnown();
-	const applied = withInstanceRegistryLockSync(registryPath(), () => {
-		const next = planRootRemoval(
-			readRegistrySync(),
-			normalizedRoot,
-			selfStart,
-			generation,
-		);
-		if (next) writeRegistrySync(next);
-		return true;
-	});
-	if (applied) return;
-	// #3587: the sync wait can meet this process's own hold (the heartbeat, or
-	// a registration under the lock) or a peer past 500ms, exactly as #3498
-	// found for `deregisterInstance`. This op already runs on the registry
-	// tail, so there is nothing to bypass: queue the same op behind the
-	// holder, on this tail slot, waiting through the lock lease instead of
-	// leaking the root for the rest of the session.
-	incrementDegradationCount({
-		kind: "instance-registry-deregister-queued",
-		subject: String(process.pid),
-		reason:
-			"the sync removal could not take the registry lock; queued behind the holder",
-	});
-	return deregisterInstanceRootAfterHolder(normalizedRoot, generation);
-}
-
-/**
- * The removal `deregisterInstanceRootNow` could not make in its sync wait
- * (#3587), mirroring `deregisterInstanceAfterHolder` (#3498): waits through
- * the lock lease, so a holder that outlives the sync wait and one ordinary
- * async wait still cannot make it drop.
- */
-async function deregisterInstanceRootAfterHolder(
-	normalizedRoot: string,
-	generation: GenerationHandle,
-): Promise<void> {
 	const selfStart = await ownProcessStart(startReadOptions());
 	await withInstanceRegistryLock(
 		registryPath(),
