@@ -1097,7 +1097,6 @@ export function runTeardownWithMemReport(
 // Captured when the worker loads this file, before the test file can install
 // fake timers: the bound below must still fire in a file that leaves them on.
 const realSetTimeout = globalThis.setTimeout;
-const realClearTimeout = globalThis.clearTimeout;
 
 /**
  * How long the teardown waits for the registry tail (#3703 round 2): one
@@ -1115,22 +1114,18 @@ export const REGISTRY_SETTLE_BOUND_MS = 6_500;
  * give-up it writes one stderr line and returns.
  */
 async function settleRegistryMutationsBeforeTeardown(): Promise<void> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	// Not cleared on success: the pool kills the fork right after this hook.
 	const gaveUp = new Promise<true>((resolve) => {
-		timer = realSetTimeout(() => resolve(true), REGISTRY_SETTLE_BOUND_MS);
+		realSetTimeout(() => resolve(true), REGISTRY_SETTLE_BOUND_MS);
 	});
-	try {
-		const timedOut = await Promise.race([
-			_settleRegistryMutationsForTests().then(() => false),
-			gaveUp,
-		]);
-		if (timedOut) {
-			process.stderr.write(
-				`[registry-settle] a registry mutation was still pending after ${REGISTRY_SETTLE_BOUND_MS}ms (fake timers left on, or a write that never settles); teardown continues without it (#3617)\n`,
-			);
-		}
-	} finally {
-		realClearTimeout(timer);
+	const timedOut = await Promise.race([
+		_settleRegistryMutationsForTests().then(() => false),
+		gaveUp,
+	]);
+	if (timedOut) {
+		process.stderr.write(
+			`[registry-settle] a registry mutation was still pending after ${REGISTRY_SETTLE_BOUND_MS}ms (fake timers left on, or a write that never settles); teardown continues without it (#3617)\n`,
+		);
 	}
 }
 
