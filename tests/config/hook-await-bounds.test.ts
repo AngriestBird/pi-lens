@@ -1610,6 +1610,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"enforces it today.",
 		owner: "#2523 slice 2",
 	},
+	"index.ts#3e43f4ed~4e890232": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`adoptHandoff` (#3612): the session stores' hand-off, which " +
+			"reads this session's or its parent's sidecar and reconciles the " +
+			"widget with disk (`dropStaleFiles`, up to 1024 concurrent " +
+			"`fs.stat`). The same sidecar I/O as #2523's session_start list " +
+			"(`loadSessionState`, `dropStaleFiles`), moved here from the " +
+			"read-guard and widget restore blocks, unbounded for the same reason.",
+		owner: "#2523 slice 2",
+	},
 	"index.ts#41d6e96f~455b59f1": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -1649,6 +1661,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
 			"the settle's branch epoch. #3620 re-keyed it: the sweep also " +
 			"takes the settle's lineage handle.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#6222076d~12152939": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSessionHeaderId` (#3521, moved by #3612): the parent session " +
+			"file's header line, read only when the hand-off falls back to the " +
+			"parent's sidecar; the same file I/O as the `adoptHandoff` entry.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#65b51dab~a327124f": {
@@ -1698,15 +1719,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"module load and resolution above it have none.",
 		owner: "#2523 slice 2",
 	},
-	"index.ts#89b9a0a7~d16b873d": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`loadSessionState` — #2523's session_start list " +
-			"(index.ts:2245); #3521 moved it above the read-guard restore, " +
-			"which reads the same sidecar.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#a5c3de37~231f1f06": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1727,15 +1739,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"runtime-agent-end.ts:347 is the consumer.",
 		owner: "#2523 slice 2",
 	},
-	"index.ts#c9a30431~39590b7b": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`resolveReadGuardStartState` (#3521): the parent session file's " +
-			"header line and the parent's sidecar, the same sidecar I/O as the " +
-			"`loadSessionState` entry above, unbounded for the same reason.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#d628f09d~02fe26af": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1744,16 +1747,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"is waiting for its answer, so no hook budget applies. Flagged " +
 			"only because the await scan covers whole files rather than " +
 			"walking reachability.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#dd06eafe~0055eaad": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`dropStaleFiles` — #2523's session_start list (index.ts:2252): " +
-			"up to 1024 concurrent `fs.stat` with no wall bound. On a " +
-			"9p/slow filesystem (#462 measured 1.3ms per stat) that is " +
-			"seconds of unbounded startup.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#e40e5ae4~44b2f503": {
@@ -2417,10 +2410,16 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
-	"clients/read-guard-branch.ts": 5,
+	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved
+	// to the session-scope hand-off (`adoptHandoff`, below).
+	"clients/read-guard-branch.ts": 3,
 	"clients/recent-touches.ts": 8,
 	"clients/review-graph/builder.ts": 41,
 	"clients/safe-spawn.ts": 9,
+	// #3612: `adoptHandoff` awaits the own and parent sidecar loads and each
+	// store's restore: the session_start sidecar I/O that read-guard-branch.ts
+	// and index.ts held before.
+	"clients/session-scope.ts": 3,
 	"clients/session-state-store.ts": 4,
 	"clients/shared-checkout-guard.ts": 7,
 	"clients/source-filter.ts": 2,
@@ -2436,7 +2435,9 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/tree-sitter-shared.ts": 1,
 	"clients/trivy-client.ts": 2,
 	"clients/warm-attach.ts": 9,
-	"clients/widget-state.ts": 3,
+	// 3 -> 4 (#3612): the widget store's restore awaits `dropStaleFiles` for a
+	// sidecar source, the reconciliation index.ts's rehydrate block awaited.
+	"clients/widget-state.ts": 4,
 	"clients/word-index.ts": 24,
 	"clients/zizmor-config.ts": 2,
 	"tools/ast-grep-outline.ts": 2,
