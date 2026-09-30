@@ -41,6 +41,10 @@ import {
 	vi,
 } from "vitest";
 import extension from "../index.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../clients/degradation-ledger.js";
 import { getProjectDataDir } from "../clients/file-utils.js";
 import {
 	clearLatencyLog,
@@ -1540,5 +1544,91 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 		await runtime.newSession();
 
 		expect(await contextText(runtime)).not.toContain("lost edit in a.rs");
+	});
+
+	/**
+	 * #3819 (TLC `H3FileLess`): a file-less slot matched on its reason alone.
+	 * An in-process subagent that binds in the primary's replacement gap
+	 * (declined, #3662) and then reloads or forks itself sends a non-startup
+	 * start with no primary registered, so it classifies primary (#3668 row
+	 * 17). The recurrence: that start took the primary's slot and adopted its
+	 * lazy-tool activations, its queued advisory and its authorship.
+	 */
+	describe("#3819 a gap subagent's own /reload or /fork takes nothing of the primary's", () => {
+		async function gapSubagentReplaces(kind: "reload" | "fork") {
+			const seen = coordinators();
+			let subagent: AgentSessionRuntime | undefined;
+			const replaceInGap = (pi: ExtensionAPI) => {
+				pi.on("session_shutdown", async (event) => {
+					if ((event as { reason?: string }).reason !== kind || subagent)
+						return;
+					subagent = await startRuntime(SessionManager.inMemory(cwd));
+					if (kind === "reload") {
+						await reload(subagent);
+						return;
+					}
+					const s = conversation(subagent);
+					s.user("subagent prompt 1");
+					s.done();
+					const su2 = s.user("subagent prompt 2");
+					s.done();
+					await subagent.fork(su2);
+				});
+			};
+			const primary = await startRuntime(SessionManager.inMemory(cwd), [
+				replaceInGap,
+			]);
+			const c = conversation(primary);
+			const written = path.join(cwd, "authored.conf");
+			const a = fixture("a.conf", 6);
+			c.user("prompt 1");
+			expect(await c.write("call_write", written, "w1\nw2\nw3")).toBe("ALLOW");
+			await c.read("call_read_a", a);
+			c.done();
+			await activateTools(primary, "act", ["ast_grep_search"]);
+			queueAgentAdvisory(
+				"lost edit in a.rs",
+				seen[0]!.captureSessionGeneration(),
+			);
+			const u2 = c.user("prompt 2");
+			c.done();
+			resetDegradationLedger();
+
+			if (kind === "reload") await reload(primary);
+			else await primary.fork(u2);
+
+			expect(subagent).toBeDefined();
+			return { subagent: subagent!, written, a };
+		}
+
+		function missedSubjects(): string[] {
+			return getDegradationSummary()
+				.filter((group) => group.kind === "session-scope-handoff-missed")
+				.flatMap((group) => group.latestReasons.map((r) => r.subject));
+		}
+
+		for (const kind of ["reload", "fork"] as const) {
+			it(`gives a subagent's own ${kind} in the gap none of the primary's activations, advisories or authorship`, async () => {
+				const { subagent, written, a } = await gapSubagentReplaces(kind);
+				const s = conversation(subagent);
+
+				expect.soft(activeSituational(subagent)).toEqual([]);
+				expect
+					.soft(await contextText(subagent))
+					.not.toContain("lost edit in a.rs");
+				expect
+					.soft(await s.editLine("sub_written", written, 2, "Y", false))
+					.toEqual(ZERO_READ);
+				// Reads never crossed: the read guard imports only the records
+				// whose tool call is on the adopting session's branch.
+				expect
+					.soft(await s.editLine("sub_a", a, 2, "Y", false))
+					.toEqual(ZERO_READ);
+				// Each crossing is its own soft assertion, so a red names every
+				// store that crossed. The subagent's start found no slot of its
+				// own and recorded it.
+				expect.soft(missedSubjects()).toEqual([kind]);
+			});
+		}
 	});
 });

@@ -71,10 +71,11 @@
 (*                       scope's advisories are dropped with a record;     *)
 (*                       without it, the first context call takes them all *)
 (*   "ticketKey"         #3819: a file-less slot is keyed by the S1 ticket *)
-(*                       of the scope that left it, and a start's key is   *)
-(*                       the ticket last bound, by a primary start, to its *)
-(*                       pi session manager (Carrier); without it, both    *)
-(*                       keys are undefined and the reason alone matches   *)
+(*                       of the scope that left it, bound to the session   *)
+(*                       manager it left from, and a start's key is the    *)
+(*                       ticket bound to the manager pi hands it           *)
+(*                       (Carrier); without it, both keys are undefined    *)
+(*                       and the reason alone matches                      *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -321,13 +322,15 @@ SameMgr(s) ==
     /\ why[predOf[s]] \in {"reload", "fork", "clone"}
     /\ why[predOf[s]] = "reload" \/ sess[s] \in FileLess
 
-\* #3819 (adoptHandoff's binding): the ticket last bound to scope s's session
-\* manager. Every primary start binds its own ticket (Init, Begin, a
-\* SecReplace classified primary, PiFork); a secondary start binds nothing.
+\* #3819 (stashHandoff's binding): the ticket of the last slot left from
+\* scope s's session manager. A primary shutdown that stashes (Retire with a
+\* slot reason) binds its ticket; a secondary's shutdown stashes nothing, so
+\* it binds nothing.
 RECURSIVE Carrier(_)
 Carrier(s) ==
     IF s = 0 THEN 0
-    ELSE IF role[s] = "primary" THEN s
+    ELSE IF role[s] = "primary" /\ Has("handoffAtShutdown")
+            /\ why[s] \in {"reload", "fork", "clone"} THEN s
     ELSE IF SameMgr(s) THEN Carrier(predOf[s])
     ELSE 0
 

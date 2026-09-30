@@ -3734,6 +3734,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 					reason: shutdownReason,
 					sessionFile: getSessionFile(ctx),
 					targetSessionFile: shutdownEvent?.targetSessionFile,
+					// #3819: a file-less successor finds this slot's ticket through
+					// the session manager pi hands it. A stale ctx throws here.
+					sessionManager: (() => {
+						try {
+							return (ctx as { sessionManager?: unknown })?.sessionManager;
+						} catch {
+							return undefined;
+						}
+					})(),
 				}) &&
 				runtime.hasStableSessionId
 			) {

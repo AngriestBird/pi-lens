@@ -419,22 +419,41 @@ export function snapshotSessionStores(
 
 /**
  * The slot is keyed by the transition it was left for: the start reason and
- * the successor's session file (F2). A file-less session keys on `undefined`,
- * so its reason carries the match.
+ * the successor's session file (F2). A file-less session has no file, so its
+ * key is the ticket of the scope that left the slot (#3819), bound to the
+ * session manager it left from. pi hands a file-less `/reload` or in-memory
+ * `/fork` successor that same manager, so the successor finds the ticket; a
+ * subagent's own start, on a manager no primary shutdown left a slot from,
+ * does not.
  */
 interface Handoff {
 	reason: StartReason;
-	sessionFile: string | undefined;
+	/** The successor's session file; file-less, the stashing scope's ticket. */
+	key: string | number;
 	stores: Record<string, unknown>;
 }
 
 const HANDOFF_FAMILY = "session-scope.handoff";
-/** Bump when {@link Handoff}'s shape changes. */
-const HANDOFF_VERSION = 1;
+/** Bump when {@link Handoff}'s or the cell's shape changes. */
+const HANDOFF_VERSION = 2;
 
-function handoffSlot(): { handoff: Handoff | undefined } {
+interface HandoffCell {
+	handoff: Handoff | undefined;
+	/** A pi session manager to the ticket of the last slot left from it. */
+	left: WeakMap<object, number>;
+}
+
+/** A session manager is a WeakMap key only when it is an object. */
+function asManager(sessionManager: unknown): object | undefined {
+	return typeof sessionManager === "object" && sessionManager !== null
+		? sessionManager
+		: undefined;
+}
+
+function handoffSlot(): HandoffCell {
 	return getProcessSingleton(HANDOFF_FAMILY, HANDOFF_VERSION, () => ({
 		handoff: undefined,
+		left: new WeakMap<object, number>(),
 	}));
 }
 
@@ -450,31 +469,36 @@ export function stashHandoff(
 		reason: string | undefined;
 		sessionFile: string | undefined;
 		targetSessionFile: string | undefined;
+		/** The session's pi session manager, which binds a file-less slot's ticket. */
+		sessionManager?: unknown;
 	},
 ): boolean {
 	// `quit` and a missing reason have no successor: they read as `startup`.
 	const reason = toStartReason(args.reason);
 	if (!SOURCES[reason].includes("slot")) return false;
-	handoffSlot().handoff = {
+	const cell = handoffSlot();
+	const manager = asManager(args.sessionManager);
+	if (manager) cell.left.set(manager, scope.scopeId);
+	cell.handoff = {
 		reason,
-		sessionFile: args.targetSessionFile ?? args.sessionFile,
+		key: args.targetSessionFile ?? args.sessionFile ?? scope.scopeId,
 		stores: snapshotSessionStores(scope),
 	};
 	return true;
 }
 
 /**
- * Consume the slot only when its key equals this start's (F2); a slot left
- * for another start stays in place.
+ * Consume the slot only when its key equals this start's (F2): its session
+ * file, or, file-less, its predecessor's ticket. A slot left for another
+ * start stays in place.
  */
 export function takeHandoff(
 	reason: StartReason,
-	sessionFile: string | undefined,
+	key: string | number | undefined,
 ): Record<string, unknown> | undefined {
 	const slot = handoffSlot();
 	const handoff = slot.handoff;
-	if (handoff?.reason !== reason || handoff.sessionFile !== sessionFile)
-		return undefined;
+	if (handoff?.reason !== reason || handoff.key !== key) return undefined;
 	slot.handoff = undefined;
 	return handoff.stores;
 }
@@ -501,11 +525,14 @@ export async function adoptHandoff(
 	},
 ): Promise<StartSource> {
 	const reason = toStartReason(args.reason);
+	// #3819: a file-less start's key is the ticket its session manager left.
+	const manager = asManager(args.sessionManager);
+	const predecessor = manager && handoffSlot().left.get(manager);
 	let source: StartSource = "none";
 	let found: { savedAt?: number; stores: Record<string, unknown> } | undefined;
 	for (const candidate of SOURCES[reason]) {
 		if (candidate === "slot") {
-			const stores = takeHandoff(reason, args.sessionFile);
+			const stores = takeHandoff(reason, args.sessionFile ?? predecessor);
 			found = stores && { stores };
 		} else if (candidate === "own-sidecar") {
 			found = await args.loadOwnSidecar();
