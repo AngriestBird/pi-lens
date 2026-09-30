@@ -18,6 +18,7 @@
 import {
 	CI_JOB_NAMES,
 	isAdvisoryCheck,
+	isBlockingConclusion,
 	isUnitTestsShardJobName,
 } from "./ci-checks.mjs";
 
@@ -769,12 +770,14 @@ async function fetchRunAndFailedJob({ fetcher, owner, repo, runId, jobName }) {
 		// #3801 (verify r2 V3): a CI run that failed ONLY on advisory jobs (a
 		// not-ready `Heavy advisory gate`, the Windows run) is not a `real`
 		// failure of the change; the caller must not label the PR `ci:real`.
-		const failedAll = jobs.filter((job) => job.conclusion === "failure");
+		// Every job with a BLOCKING conclusion (failure, timed_out, cancelled, ...)
+		// must be advisory: a required job that timed out beside a red gate is
+		// not "only advisory" (verify r3 V6).
+		const blocking = jobs.filter((job) => isBlockingConclusion(job.conclusion));
 		const advisoryOnly =
-			failedAll.length > 0 &&
-			failedAll.every((job) => isAdvisoryCheck(job.name));
+			blocking.length > 0 && blocking.every((job) => isAdvisoryCheck(job.name));
 		const error = new Error(
-			`run ${runId} has no failed job${jobName ? ` named "${jobName}"` : ""}${advisoryOnly ? `; ${ADVISORY_ONLY_MARKER} (${failedAll.map((job) => job.name).join(", ")})` : ""}`,
+			`run ${runId} has no failed job${jobName ? ` named "${jobName}"` : ""}${advisoryOnly ? `; ${ADVISORY_ONLY_MARKER} (${blocking.map((job) => job.name).join(", ")})` : ""}`,
 		);
 		error.advisoryOnly = advisoryOnly;
 		throw error;

@@ -1271,6 +1271,25 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 			skipped: true,
 			reason: 'run 999 has no failed job named "Unit tests"',
 		});
+		// Verify r3 V6: a required job that ended `timed_out` (or cancelled)
+		// beside a red advisory job is not advisory-only; an ADVISORY job with a
+		// non-`failure` blocking conclusion still is.
+		const required = await run([
+			{ id: 7, name: "Dependency boundaries", conclusion: "timed_out" },
+			gate,
+		]);
+		expect(required).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		const advisoryCancelled = await run([
+			{ id: 8, name: "Unit tests Windows (advisory)", conclusion: "cancelled" },
+			gate,
+		]);
+		expect(advisoryCancelled).toMatchObject({
+			skipped: true,
+			advisoryOnly: true,
+		});
 		// A run that failed with NO job concluding `failure` (a timed-out or
 		// cancelled job) is not "only advisory jobs failed": vacuous truth of
 		// `every` over an empty list must not read as advisory-only.
@@ -1284,6 +1303,45 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		});
 		expect(api.comments).toHaveLength(0);
 		expect(api.rerunCallCount).toBe(0);
+	});
+
+	// Verify r3 V5: log text that happens to contain the advisory-only phrase
+	// must not make a REAL failing shard read as skipped/advisory (the workflow
+	// label step keys on the CLI's skip line; this pins the classifier side: a
+	// failing shard is classified, never skipped, whatever its log says).
+	it("classifies a failing shard whose log carries the advisory-only phrase as a real failure", async () => {
+		const api = makeStatefulApi();
+		const fetcher = async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/actions/runs/999/jobs"))
+				return jsonResponse({
+					jobs: [
+						{ id: 301, name: "Unit tests (shard 2/4)", conclusion: "failure" },
+						{
+							id: 302,
+							name: "Heavy advisory gate (advisory)",
+							conclusion: "failure",
+						},
+					],
+				});
+			if (/\/actions\/jobs\/301\/logs$/.test(url))
+				return textResponse(
+					`AssertionError: expected "${ADVISORY_ONLY_MARKER}" to be logged\n`,
+				);
+			return api.fetcher(url, init);
+		};
+		const result = await runClassifier({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+			jobName: "Unit tests",
+			skipMissingJob: true,
+			prNumber: 42,
+			sha: "deadbeef",
+		});
+		expect("skipped" in result).toBe(false);
+		if ("skipped" in result) return;
+		expect(result.classification.kind).toBe("real");
 	});
 
 	// #3753 recurrence: `Unit tests` is an aggregate over `Unit tests (shard

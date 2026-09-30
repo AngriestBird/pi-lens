@@ -316,15 +316,40 @@ describe("ci-infra-kill-rerun.yml classify label step for an advisory-only failu
 	};
 	it("greps the classifier's own advisory-only phrase and adds no label in that branch", () => {
 		const text = run();
-		expect(text).toContain(`grep -q -- '${ADVISORY_ONLY_MARKER}'`);
+		expect(text).toContain(ADVISORY_ONLY_MARKER);
 		const branch =
-			/elif grep -q -- 'only advisory jobs failed' <<<"\$output"; then([\s\S]*?)\n\s*else/.exec(
+			/elif grep -q -- '[^']*only advisory jobs failed' <<<"\$output"; then([\s\S]*?)\n\s*else/.exec(
 				text,
 			)?.[1];
 		expect(branch).toBeDefined();
 		expect(branch).toContain("--remove-label 'ci:real'");
 		expect(branch).toContain("--remove-label 'ci:infra'");
 		expect(branch).not.toContain("--add-label");
+	});
+
+	// Recurrence (verify r3 V5): the grep read the WHOLE CLI stdout, which on the
+	// real-failure path carries log-derived text (the first failing assertion
+	// line). A genuine red `Unit tests` shard whose assertion text contained the
+	// phrase lost its `ci:real` label. The pattern is anchored to the CLI's own
+	// skip line, and this evaluates the pattern the workflow really uses.
+	it("anchors the phrase to the classifier's skip line, so log text cannot trigger it", () => {
+		const pattern =
+			/grep -q -- '([^']*only advisory jobs failed)' <<<"\$output"/.exec(
+				run(),
+			)?.[1];
+		expect(pattern).toBeDefined();
+		const regex = new RegExp(pattern as string, "m");
+		const skipLine = `CI failure classifier skipped: run 9 has no failed job named "Unit tests"; ${ADVISORY_ONLY_MARKER} (Heavy advisory gate (advisory))`;
+		expect(regex.test(skipLine)).toBe(true);
+		// a real failure: the CLI's result line, then the sticky comment body
+		// carrying the failing assertion line verbatim
+		const realFailure = [
+			"PR #42 sha=abc job=Unit tests (shard 2/4) -> real",
+			"<!-- ci-classifier -->",
+			`AssertionError: expected "${ADVISORY_ONLY_MARKER}" to be logged`,
+			`  ${skipLine}`,
+		].join("\n");
+		expect(regex.test(realFailure)).toBe(false);
 	});
 
 	it("keeps ci:infra first and ci:real as the fall-through", () => {
