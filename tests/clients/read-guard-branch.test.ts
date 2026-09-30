@@ -256,8 +256,9 @@ describe("ReadGuard authorship export/import (#3612)", () => {
 			undefined,
 			null,
 			{},
-			{ written: "c.ts", sessionStartMs: "0" },
 			{ written: [42, null] },
+			// Last, so nothing after it can overwrite the anchor it carries.
+			{ written: "c.ts", sessionStartMs: "0" },
 		])
 			expect(() => guard.importAuthorship(payload)).not.toThrow();
 		expect(guard.exportAuthorship().written).toEqual([]);

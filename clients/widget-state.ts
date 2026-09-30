@@ -751,9 +751,11 @@ export function importWidgetState(
 /**
  * The widget's per-file diagnostics as a session store (#190, #3589). The
  * widget is shared by every live session in the process, so it has one cell,
- * this module's state. A fork imports the parent's files; a sidecar source is
- * reconciled with disk first, so a file changed since the save re-scans. A
- * `/reload` does not touch it: this module outlives the factory re-run.
+ * this module's state, which outlives the factory re-run: an in-process
+ * `/fork`, `/clone` or `/reload` keeps it as the parent left it (#3589 was the
+ * fork start clearing it). A resume, a launch and `pi --fork` adopt a
+ * sidecar, reconciled with disk first, so a file changed since the save
+ * re-scans.
  */
 export const widgetStore = defineSessionStore<PersistedWidgetState>({
 	name: "widget",
@@ -761,7 +763,7 @@ export const widgetStore = defineSessionStore<PersistedWidgetState>({
 		startup: "adopt",
 		new: "reset",
 		resume: "adopt",
-		fork: "adopt",
+		fork: "none",
 		reload: "none",
 	},
 	snapshot: () => exportWidgetState(),
