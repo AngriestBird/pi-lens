@@ -775,6 +775,7 @@ npm run build:dist                    build the published dist bundle
 npm run lint                          tsc plus oxlint
 npm run lint:js:tests                 required type-aware oxlint rules over tests
 npm run fmt:check                     oxfmt gate
+npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
 npm run test:unit                     serialized unit suite
@@ -808,7 +809,11 @@ beside the lock. CI stays the real gate.
 Never hand-edit generated `.js` or `dist/`. Never use `git stash`, destructive
 resets, or ad hoc double-force worktree removal. A worktree whose `node_modules`
 is a symlink is unlinked (`rm node_modules`) before `git worktree remove`; the
-forced remove follows the link into the shared install (#2704 class). The Bash hook enforces the
+forced remove follows the link into the shared install (#2704 class).
+`node scripts/pr-worktree.mjs open <PR|branch> [--merge|--head] [--name NAME]`
+and `close <path>` run that sequence in one command, unlinking only a
+symlinked `node_modules` and refusing a real directory, the main checkout, a
+tree outside the worktrees root, or a dirty tree. The Bash hook enforces the
 mechanically classifiable subset of these rules.
 
 <important if="relocating project data, machine state, or telemetry">
