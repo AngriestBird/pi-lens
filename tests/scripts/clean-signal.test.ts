@@ -159,7 +159,9 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 				};
 			},
 		});
-		const dst = fs.mkdtempSync(path.join(os.tmpdir(), "probe-fixture-"));
+		const dst = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-probe-fixture-"),
+		);
 		try {
 			const absFile = path.join(dst, "sample.ts");
 			fs.writeFileSync(absFile, "export const x = 1;\n");
