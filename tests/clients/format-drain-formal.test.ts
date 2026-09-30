@@ -1710,6 +1710,37 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				process.off("unhandledRejection", onRejection);
 			}
 		});
+
+		it("OrphanGiveUp (#3828 r2 F2): any other throw in the late resync is one hook-handler-crash row and a failed late row, and rejects nothing", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				await currentServiceHoldsF();
+				// The real service's held-only resync fails (a server root that
+				// cannot be resolved, say): nothing awaits the continuation.
+				vi.spyOn(getLSPService(), "resyncGitChangedFiles").mockRejectedValue(
+					new Error("root resolution failed"),
+				);
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				install();
+				await c.wrote;
+				await lateSettled();
+				await tick();
+				await tick();
+				expect(rejections).toEqual([]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "failed" } }),
+				]);
+				expect(
+					getDegradationSummary()
+						.filter((group) => group.kind === "hook-handler-crash")
+						.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+				).toEqual(["deferred-format-late-resync"]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
 	});
 });
 
