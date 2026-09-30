@@ -3,7 +3,7 @@
  * lifetime, through the one `retireClient`.
  *
  * Recurrence this file prevents: each of the four retirement paths (capacity
- * eviction, TypeScript idle eviction, notify-stall demotion, the dead-client
+ * eviction, idle eviction, notify-stall demotion, the dead-client
  * respawn) repeated its own cleanup block, and a path that missed one entry
  * leaked it into the replacement (#3502 readiness, #3537 timeout streak, and
  * #3585 `auxNotifyDrainLatencyEwma` — a replacement inherited its
@@ -76,7 +76,7 @@ type Raw = {
 		demonstratedCold: Set<string>;
 	};
 	clientLastUsedAt: Map<string, number>;
-	typeScriptIdleTimers: Map<string, unknown>;
+	idleEvictionTimers: Map<string, unknown>;
 	auxNotifyInflight: Map<string, { client: unknown; unacked: number }>;
 	auxNotifyDrainLatencyEwma: Map<string, number>;
 	notifyWriteBackpressureStreak: Map<string, number>;
@@ -135,7 +135,7 @@ function expectRetired(raw: Raw, key: string): void {
 	expect(raw.state.demonstratedReady.has(key)).toBe(false);
 	expect(raw.state.demonstratedCold.has(key)).toBe(false);
 	expect(raw.notifyWriteBackpressureStreak.has(key)).toBe(false);
-	expect(raw.typeScriptIdleTimers.has(key)).toBe(false);
+	expect(raw.idleEvictionTimers.has(key)).toBe(false);
 	expect(raw.outstandingAuxNotifyWrites.has(key)).toBe(false);
 	// #3585: the two entries the paths disagreed on.
 	expect(raw.auxNotifyInflight.has(key)).toBe(false);
@@ -200,7 +200,7 @@ describe("#3585 retireClient — one retirement for every path", () => {
 			async () => {
 				// `seedLifetimeState` bypassed the warm-reuse that arms the timer.
 				await raw.getClientForFile("/repo/main.ts");
-				expect(raw.typeScriptIdleTimers.has(key)).toBe(true);
+				expect(raw.idleEvictionTimers.has(key)).toBe(true);
 				await vi.advanceTimersByTimeAsync(20);
 			},
 		],
