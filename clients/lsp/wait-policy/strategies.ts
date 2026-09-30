@@ -504,8 +504,10 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		//   provisional pre-index publish
 		//
 		// The first empty, unversioned publish is the cold-index artifact, so hold
-		// it once and let terraform-ls's next publish resolve the wait. The marker
-		// is measured policy, not a blanket rule for Tier 2* push servers.
+		// it once and let terraform-ls's next publish resolve the wait. A held
+		// clean-only trace therefore reaches the caller as unanswered/indeterminate
+		// at the wait ceiling rather than a false clean, by design (#3310). The
+		// marker is measured policy, not a blanket rule for Tier 2* push servers.
 		terraform: {
 			seedFirstPush: false,
 			pullRetryBudgetMs: 0,
