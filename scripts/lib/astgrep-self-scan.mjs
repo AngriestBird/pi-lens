@@ -197,15 +197,16 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	return p;
 }
 
-/** Absolute (real) paths of files added/copied/modified/renamed between
- * `base` and the working tree, from `git diff` run in `cwd`. Throws when git
+/** Absolute (real) paths of files changed between
+ * `base` and the working tree, from `git diff` run in `cwd` (the repo root). Throws when git
  * cannot resolve `base` -- the caller decides how loud that is. (#3684) */
 export function changedFilesSince(base, cwd = process.cwd()) {
 	const out = String(
-		gitExecFileSync(
-			["diff", "--name-only", "--relative", "--diff-filter=ACMR", base],
-			{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-		),
+		gitExecFileSync(["diff", "--name-only", base], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}),
 	);
 	return new Set(
 		out

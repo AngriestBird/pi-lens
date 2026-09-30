@@ -1,3 +1,4 @@
+// flake-shape: real-process-spawn — the advisory scope (#3684) is the wrapper's own `git diff` against a real throwaway fixture repo, reached through its real argv/env; an in-process call cannot prove either boundary.
 // #1718: the self-scan (scripts/run-astgrep-pi-lens.mjs) used to hardcode a
 // single author's nonexistent machine paths as both scan target and rule
 // source, so it silently scanned nothing in CI, ever. This is the
@@ -275,23 +276,23 @@ d("pi-lens self-scan (#1718)", () => {
 			// No inherited base: CI pull_request runs export GITHUB_BASE_REF.
 			const NO_BASE_ENV = { GITHUB_BASE_REF: "" };
 
+			function git(dir: string, ...args: string[]): string {
+				return String(gitExecFileSync(args, { cwd: dir })).trim();
+			}
+
 			function commit(dir: string, message: string): string {
-				gitExecFileSync(["add", "-A"], { cwd: dir });
-				gitExecFileSync(
-					[
-						"-c",
-						"user.email=pi-lens-test@example.com",
-						"-c",
-						"user.name=pi-lens-test",
-						"commit",
-						"-qm",
-						message,
-					],
-					{ cwd: dir },
+				git(dir, "add", "-A");
+				git(
+					dir,
+					"-c",
+					"user.email=pi-lens-test@example.com",
+					"-c",
+					"user.name=pi-lens-test",
+					"commit",
+					"-qm",
+					message,
 				);
-				return String(
-					gitExecFileSync(["rev-parse", "HEAD"], { cwd: dir }),
-				).trim();
+				return git(dir, "rev-parse", "HEAD");
 			}
 
 			/** Base commit holds subset hits in changed.ts and unchanged.ts (plus
@@ -301,7 +302,7 @@ d("pi-lens self-scan (#1718)", () => {
 				const dir = fs.mkdtempSync(
 					path.join(os.tmpdir(), "pi-lens-pilens-selfscan-diff-"),
 				);
-				gitExecFileSync(["init", "-q"], { cwd: dir });
+				git(dir, "init", "-q");
 				fs.writeFileSync(path.join(dir, "changed.ts"), SUBSET, "utf-8");
 				fs.writeFileSync(path.join(dir, "unchanged.ts"), SUBSET, "utf-8");
 				if (withGating) {
@@ -364,12 +365,26 @@ d("pi-lens self-scan (#1718)", () => {
 				}
 			});
 
+			// Recurrence guarded: macOS tmpdirs (/var -> /private/var) make the
+			// scanned path and git's cwd-relative path differ as strings.
+			it("matches a changed file scanned through a symlinked path", () => {
+				const { dir, base } = makeRepo(false);
+				const alias = `${dir}-alias`;
+				try {
+					fs.symlinkSync(dir, alias, "dir");
+					const run = runWrapper(["--base", base, alias], NO_BASE_ENV, dir);
+					expect(run.stdout).toMatch(/advisory .*changed\.ts:1/);
+					expect(run.stdout).not.toMatch(/unchanged\.ts/);
+				} finally {
+					fs.rmSync(alias, { force: true });
+					removeTempDirSync(dir);
+				}
+			});
+
 			it("takes the base from GITHUB_BASE_REF as origin/<ref>", () => {
 				const { dir, base } = makeRepo(false);
 				try {
-					gitExecFileSync(["update-ref", "refs/remotes/origin/main", base], {
-						cwd: dir,
-					});
+					git(dir, "update-ref", "refs/remotes/origin/main", base);
 					const run = runWrapper([dir], { GITHUB_BASE_REF: "main" }, dir);
 					expect(run.stdout).toMatch(/advisory .*changed\.ts:1/);
 					expect(run.stdout).not.toMatch(/unchanged\.ts/);

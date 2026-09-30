@@ -9,7 +9,9 @@ ignores:
 note: |
   Advisory only: `severity: info` self-scan rules are printed by
   `npm run astgrep:self-scan` and never gate or enter the baseline
-  (scripts/lib/astgrep-self-scan.mjs). This is a population-screening
+  (scripts/lib/astgrep-self-scan.mjs), and are reported only in files
+  changed against a diff base (`--base <ref>`, CI's GITHUB_BASE_REF), or
+  everywhere with `--all-advisory`. This is a population-screening
   prompt: two or more LSP server ids from clients/lsp/server.ts in a regex
   alternation (any branch position) or in a string array (any position,
   either quote style). The AST matcher does not scan comments or ordinary
