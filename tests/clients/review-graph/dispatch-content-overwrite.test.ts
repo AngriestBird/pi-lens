@@ -96,6 +96,29 @@ const DISPATCH_B = {
 	importSources: ["./gamma.js"],
 };
 
+/** What one graph recorded for `file`: symbols, import targets, line count. */
+function graphSummary(
+	graph: Awaited<ReturnType<typeof buildOrUpdateGraph>>,
+	file: string,
+): typeof GRAPH_A {
+	const normalized = normalizeMapKey(file);
+	const fileNode = graph.nodes.get(`file:${normalized}`);
+	return {
+		symbols: [...graph.nodes.values()]
+			.filter((node) => node.kind === "symbol" && node.filePath === normalized)
+			.map((node) => ({
+				name: node.symbolName ?? "",
+				exported: node.exported === true,
+			})),
+		importTargets: graph.edges
+			.filter(
+				(edge) => edge.from === `file:${normalized}` && edge.kind === "imports",
+			)
+			.map((edge) => edge.to),
+		lineCount: fileNode?.metadata?.lineCount as number,
+	};
+}
+
 type RaceOutcome = {
 	mode: string | undefined;
 	fired: boolean;
@@ -151,28 +174,10 @@ async function race(
 
 		const graph = await buildOrUpdateGraph(env.tmpDir, [file], store);
 
-		const normalized = normalizeMapKey(file);
-		const fileNode = graph.nodes.get(`file:${normalized}`);
 		return {
 			mode: getLastGraphBuildInfo().mode,
 			fired: gate.armed === undefined,
-			graph: {
-				symbols: [...graph.nodes.values()]
-					.filter(
-						(node) => node.kind === "symbol" && node.filePath === normalized,
-					)
-					.map((node) => ({
-						name: node.symbolName ?? "",
-						exported: node.exported === true,
-					})),
-				importTargets: graph.edges
-					.filter(
-						(edge) =>
-							edge.from === `file:${normalized}` && edge.kind === "imports",
-					)
-					.map((edge) => edge.to),
-				lineCount: fileNode?.metadata?.lineCount as number,
-			},
+			graph: graphSummary(graph, file),
 			dispatch: {
 				content: store.getFileFact<string>(file, "file.content"),
 				summaryNames: (
@@ -237,4 +242,45 @@ describe("review-graph vs a concurrent same-file dispatch (#3552)", () => {
 			});
 		},
 	);
+
+	// Recurrence guarded: the run store must be per RUN. A module-level or
+	// per-process run store (verify r2, mutation M5) would let two overlapping
+	// graph runs on the same file overwrite each other's `file.content` and
+	// derived facts across their awaits, exactly the mixed-version node of #3552.
+	// Two workspaces (cwd `tmp` and `tmp/sub`) contain the same file, so their
+	// builds are distinct (no in-flight dedupe) yet touch one path.
+	it("two overlapping graph runs on the same file each stay single-version", async () => {
+		const env = setupTestEnvironment("pi-lens-3552-overlap-");
+		try {
+			const sub = path.join(env.tmpDir, "sub");
+			fs.mkdirSync(sub);
+			const file = path.join(sub, "a.ts");
+			fs.writeFileSync(file, V_A);
+			const store = new FactStore("3552-overlap");
+			let second: ReturnType<typeof buildOrUpdateGraph> | undefined;
+			gate.armed = {
+				window: "after-import",
+				hook: async () => {
+					// Run 1 has read version A and finished its import provider. A
+					// second graph run over the same file now reads version B and
+					// completes both providers before run 1 resumes.
+					fs.writeFileSync(file, V_B);
+					second = buildOrUpdateGraph(sub, [file], store);
+					await second;
+				},
+			};
+
+			const first = await buildOrUpdateGraph(env.tmpDir, [file], store);
+
+			expect(gate.armed).toBeUndefined(); // the gate fired
+			expect(graphSummary(first, file)).toEqual(GRAPH_A);
+			expect(graphSummary(await second!, file)).toEqual({
+				symbols: [{ name: "delta", exported: false }],
+				importTargets: ["module:./gamma.js"],
+				lineCount: 7,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
 });
