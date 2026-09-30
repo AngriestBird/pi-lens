@@ -155,7 +155,7 @@ function guardOf(scope: SessionScope): ReadGuard | undefined {
  * (`importBranch`), so a record whose tool result is not on the starting
  * branch never crosses, on a `/reload` either.
  */
-export const readGuardStore = defineSessionStore<PersistedReadGuardState>({
+defineSessionStore<PersistedReadGuardState>({
 	name: "read-guard",
 	policy: {
 		startup: "adopt",
@@ -190,7 +190,7 @@ export const readGuardStore = defineSessionStore<PersistedReadGuardState>({
  * the conversation; reset by every other start, as `/tree` resets it
  * (`retainBranch`).
  */
-export const readGuardAuthorshipStore = defineSessionStore({
+defineSessionStore({
 	name: "read-guard-authorship",
 	policy: {
 		startup: "reset",
