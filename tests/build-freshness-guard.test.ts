@@ -8,48 +8,150 @@
 
 import { createHash } from "node:crypto";
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	rmSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+import { stampPackageLock } from "../scripts/stamp-package-lock.mjs";
 import {
 	findResidueCompiledTestSources,
 	findStaleCompiledSources,
 	nodeModulesLockWarning,
+	reportNodeModulesLock,
 	runFreshnessChecks,
+	default as setup,
 } from "./support/check-build-freshness.js";
 
 describe("node_modules lock stamp (#3694)", () => {
+	const made: string[] = [];
+	function fixture(lock: string | null, stamp: string | null): string {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-lock-stamp-"));
+		made.push(dir);
+		mkdirSync(join(dir, "node_modules"));
+		if (lock !== null) writeFileSync(join(dir, "package-lock.json"), lock);
+		if (stamp !== null)
+			writeFileSync(
+				join(dir, "node_modules", ".pi-lens-package-lock-sha256"),
+				stamp,
+			);
+		return dir;
+	}
+	const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+	afterEach(() => {
+		for (const dir of made.splice(0))
+			rmSync(dir, { recursive: true, force: true });
+	});
+
 	it("warns without failing for a stale shared install", () => {
-		const fixture = mkdtempSync(join(tmpdir(), "pi-lens-lock-warning-"));
-		mkdirSync(join(fixture, "node_modules"));
-		writeFileSync(join(fixture, "package-lock.json"), "current");
-		writeFileSync(
-			join(fixture, "node_modules", ".pi-lens-package-lock-sha256"),
-			"stale\n",
-		);
-		expect(nodeModulesLockWarning(fixture)).toContain(
-			"node_modules may be stale",
-		);
-		rmSync(fixture, { recursive: true, force: true });
+		const warning = nodeModulesLockWarning(fixture("current", "stale\n"), {});
+		expect(warning).toContain("node_modules may be stale");
+		expect(warning).toContain("npm ci");
 	});
 
 	it("accepts a matching install stamp", () => {
-		const fixture = mkdtempSync(join(tmpdir(), "pi-lens-lock-match-"));
-		mkdirSync(join(fixture, "node_modules"));
-		const lock = "current";
-		writeFileSync(join(fixture, "package-lock.json"), lock);
-		writeFileSync(
-			join(fixture, "node_modules", ".pi-lens-package-lock-sha256"),
-			createHash("sha256").update(lock).digest("hex"),
+		expect(
+			nodeModulesLockWarning(fixture("current", `${sha("current")}\n`), {}),
+		).toBeNull();
+	});
+
+	// A MISSING stamp is the common stale case (an install older than the
+	// stamp, or `prepare` skipped), so it warns; CI installs with
+	// `npm ci --ignore-scripts` and never has one, so CI stays quiet.
+	it("warns when the stamp is missing, except on CI", () => {
+		const dir = fixture("current", null);
+		expect(nodeModulesLockWarning(dir, {})).toContain(
+			"no install stamp; run `npm ci`",
 		);
-		expect(nodeModulesLockWarning(fixture)).toBeNull();
-		rmSync(fixture, { recursive: true, force: true });
+		expect(nodeModulesLockWarning(dir, { CI: "true" })).toBeNull();
+	});
+
+	it("stays silent when there is no lockfile to compare against", () => {
+		expect(nodeModulesLockWarning(fixture(null, "stale"), {})).toBeNull();
+	});
+
+	// Recurrence: seven vitest projects list sharedGlobalSetup, so an unguarded
+	// warning printed seven times per run (measured: two projects, two prints
+	// with a module-level flag -- the latch is run-scoped).
+	it("reports once per run however many projects call setup", () => {
+		const dir = fixture("current", "stale");
+		const warn = vi.fn();
+		const latch: Record<symbol, unknown> = {};
+		for (let project = 0; project < 7; project++)
+			reportNodeModulesLock(dir, warn, latch);
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0][0]).toContain("node_modules may be stale");
+		// A new run (a fresh latch) reports again.
+		reportNodeModulesLock(dir, warn, latch);
+		reportNodeModulesLock(dir, warn, {});
+		expect(warn).toHaveBeenCalledTimes(2);
+	});
+
+	it("reports nothing for an up-to-date install", () => {
+		const warn = vi.fn();
+		reportNodeModulesLock(fixture("current", sha("current")), warn, {});
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	// setup() is what vitest actually calls. Its root is the real checkout, so
+	// the expected count is derived from the same function on that root: one
+	// warning where the real install is stale/unstamped, none where it is fine.
+	it("setup() prints the warning through console.warn, once across projects", () => {
+		const latchKey = Symbol.for("pi-lens.node-modules-lock-warning");
+		const g = globalThis as Record<symbol, unknown>;
+		const saved = g[latchKey];
+		delete g[latchKey];
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			setup();
+			setup();
+			setup();
+			const expected = nodeModulesLockWarning(join(import.meta.dirname, ".."))
+				? 1
+				: 0;
+			expect(warn).toHaveBeenCalledTimes(expected);
+		} finally {
+			warn.mockRestore();
+			if (saved === undefined) delete g[latchKey];
+			else g[latchKey] = saved;
+		}
+	});
+
+	it("the stamp script and the check agree on the hash", () => {
+		const dir = fixture("current", null);
+		expect(stampPackageLock(dir)).toBe("stamped");
+		expect(nodeModulesLockWarning(dir, {})).toBeNull();
+		expect(
+			readFileSync(
+				join(dir, "node_modules", ".pi-lens-package-lock-sha256"),
+				"utf8",
+			),
+		).toBe(`${sha("current")}\n`);
+	});
+
+	// `prepare` runs this after every install, including installs where there
+	// is no node_modules to stamp; a stamp is a hint and must not fail it.
+	it("the stamp script does not fail, or invent node_modules, when there is none", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-lock-stamp-none-"));
+		made.push(dir);
+		writeFileSync(join(dir, "package-lock.json"), "current");
+		expect(stampPackageLock(dir)).toBe("no-node-modules");
+		expect(existsSync(join(dir, "node_modules"))).toBe(false);
+		expect(stampPackageLock(fixture(null, null))).toBe("failed");
 	});
 });
 

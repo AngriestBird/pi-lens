@@ -43,7 +43,9 @@ import {
 } from "../../scripts/prune-agent-worktrees.mjs";
 import {
 	DEFAULT_MIN_AGE_MS,
+	planMergedWorktreeRemovals,
 	planWorktreePrune,
+	toComparablePath,
 } from "../../scripts/lib/worktree-hygiene.mjs";
 import { gitExecFileSync, gitFixtureEnv } from "../support/git-fixture-env.js";
 
@@ -149,48 +151,191 @@ describe("parseArgs", () => {
 	});
 });
 
-describe("#3694 live cwd safety rail", () => {
-	it("keeps a worktree containing a live process cwd", () => {
+describe("#3694 live cwd safety rail (planners)", () => {
+	const AGENT = "/repo/.claude/worktrees/agent-a";
+	const agentRow = {
+		path: AGENT,
+		branch: "refs/heads/agent-a",
+		mtimeMs: 0,
+		dirty: false,
+		pushed: true,
+	};
+	const mergedRow = {
+		path: "/repo/elsewhere/merged-a",
+		branch: "refs/heads/merged-a",
+		mtimeMs: 0,
+		clean: true,
+		mergedIntoMaster: true,
+	};
+
+	it("keeps an unselected tree containing a live process cwd", () => {
 		const result = planWorktreePrune({
-			worktrees: [
-				{
-					path: "/repo/.claude/worktrees/agent-a",
-					branch: "refs/heads/agent-a",
-					mtimeMs: 0,
-					dirty: false,
-					pushed: true,
-				},
-			],
+			worktrees: [agentRow],
 			nowMs: 10_000_000,
 			minAgeMs: 1,
-			liveProcessCwds: new Set(["/repo/.claude/worktrees/agent-a/src"]),
+			liveProcessCwds: new Set([`${AGENT}/src`]),
 		});
 		expect(result.remove).toHaveLength(0);
 		expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
 	});
 
-	it("keeps with an explicit reason when cwd inspection is unsupported", () => {
+	// F5 (orchestrator decision, PR #3697 round 2): the tree a caller NAMES --
+	// the SubagentStop hook's stopped agent, or a human's `--only` -- is the
+	// one whose leftover processes the sweep exists to reap, exactly as it was
+	// before this rail. The rail protects OTHER trees. Recurrence: round 1 kept
+	// the stopped agent's own tree, so the hook stopped reaping.
+	it("does not protect a tree the caller named from its own leftover processes", () => {
 		const result = planWorktreePrune({
-			worktrees: [
-				{
-					path: "/repo/.claude/worktrees/agent-a",
-					mtimeMs: 0,
-					dirty: false,
-					pushed: true,
-				},
-			],
+			worktrees: [agentRow],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			only: [AGENT],
+			liveProcessCwds: new Set([`${AGENT}/src`]),
+		});
+		expect(result.keep).toHaveLength(0);
+		expect(result.remove).toHaveLength(1);
+	});
+
+	it("adds no rail of its own when the cwd scan is unknowable: the age rail decides", () => {
+		const old = planWorktreePrune({
+			worktrees: [agentRow],
 			nowMs: 10_000_000,
 			minAgeMs: 1,
 			liveProcessCwds: null,
 		});
-		expect(result.keep[0]).toMatchObject({ reason: "live-cwd-unsupported" });
+		expect(old.remove).toHaveLength(1);
+		const young = planWorktreePrune({
+			worktrees: [{ ...agentRow, mtimeMs: 9_999_999 }],
+			nowMs: 10_000_000,
+			minAgeMs: 1_000_000,
+			liveProcessCwds: null,
+		});
+		expect(young.remove).toHaveLength(0);
+		expect(young.keep[0]).toMatchObject({ reason: "too-young" });
 	});
 
-	it("reads Linux process cwd entries when procfs is available", () => {
-		const cwds = liveProcessCwds();
-		if (process.platform === "linux") expect(cwds).toBeInstanceOf(Set);
+	// F1 (PR #3697 round 2): the merged-branch sweep is the DEFAULT sweep and
+	// had neither the live-cwd rail nor any age rail; its probe killed a live
+	// `sleep` and removed the directory under it, agent-shaped or not.
+	describe("planMergedWorktreeRemovals", () => {
+		it("keeps a merged clean tree that holds a live process cwd", () => {
+			const result = planMergedWorktreeRemovals({
+				candidates: [mergedRow],
+				nowMs: 10_000_000,
+				liveProcessCwds: new Set(["/repo/elsewhere/merged-a/src"]),
+			});
+			expect(result.remove).toHaveLength(0);
+			expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
+		});
+
+		it("does not add an age rail while liveness is known", () => {
+			const result = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				liveProcessCwds: new Set(["/somewhere/else"]),
+			});
+			expect(result.remove).toHaveLength(1);
+		});
+
+		it("still removes a merged tree when the caller supplies no scan", () => {
+			const result = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+			});
+			expect(result.remove).toHaveLength(1);
+		});
+
+		// F6: an unknowable scan (macOS, Windows, hidden pid namespace) used to be
+		// "keep everything" -- prune became a no-op. Now only a recently active
+		// tree is kept; a quiet merged tree is removable.
+		it("keeps only recently active trees when the scan is unknowable", () => {
+			const recent = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				liveProcessCwds: null,
+			});
+			expect(recent.remove).toHaveLength(0);
+			expect(recent.keep[0]).toMatchObject({ reason: "live-cwd-unknown" });
+			const quiet = planMergedWorktreeRemovals({
+				candidates: [mergedRow],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				liveProcessCwds: null,
+			});
+			expect(quiet.remove).toHaveLength(1);
+		});
+
+		it("does not protect a named tree from its own leftover processes", () => {
+			const named = new Set(["/repo/elsewhere/merged-a"]);
+			const result = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				selectedKeys: named,
+				liveProcessCwds: new Set(["/repo/elsewhere/merged-a/src"]),
+			});
+			expect(result.remove).toHaveLength(1);
+			const unknown = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				selectedKeys: named,
+				liveProcessCwds: null,
+			});
+			expect(unknown.remove).toHaveLength(1);
+		});
 	});
 });
+
+// lane: ubuntu Unit tests (a /proc fixture built from symlinks); dev-box-only
+// on Windows, where the function returns null before reading anything.
+describe.skipIf(process.platform === "win32")(
+	"liveProcessCwds (#3694 F6)",
+	() => {
+		let procRoot = "";
+		beforeEach(() => {
+			procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-proc-"));
+		});
+		afterEach(() => {
+			fs.rmSync(procRoot, { recursive: true, force: true });
+		});
+		const addProc = (pid: string, cwd: string) => {
+			fs.mkdirSync(path.join(procRoot, pid));
+			fs.symlinkSync(cwd, path.join(procRoot, pid, "cwd"), "dir");
+		};
+
+		it.skipIf(process.platform !== "linux")(
+			"sees this very process through the real /proc",
+			() => {
+				const cwds = liveProcessCwds();
+				expect(cwds).toBeInstanceOf(Set);
+				expect(cwds?.has(toComparablePath(process.cwd()))).toBe(true);
+			},
+		);
+
+		it("returns null when the scan cannot see its own cwd (hidepid, foreign pid namespace, EACCES)", () => {
+			addProc("101", os.tmpdir());
+			expect(liveProcessCwds(procRoot)).toBeNull();
+			expect(liveProcessCwds(path.join(procRoot, "absent"))).toBeNull();
+		});
+
+		it("returns every cwd it read, as comparable keys, once it has seen itself", () => {
+			addProc("101", os.tmpdir());
+			addProc("102", process.cwd());
+			fs.mkdirSync(path.join(procRoot, "self"));
+			const cwds = liveProcessCwds(procRoot);
+			expect(cwds).toEqual(
+				new Set([
+					toComparablePath(os.tmpdir()),
+					toComparablePath(process.cwd()),
+				]),
+			);
+		});
+	},
+);
 
 describe("worktreePathFromHookPayload", () => {
 	const repoRoot = path.resolve("/repo");
@@ -1480,6 +1625,130 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		},
 	);
 
+	/**
+	 * A live process whose cwd is `dir` (#3694). ONE spawn site for every case
+	 * below. libuv's spawn returns only after the child has exec'd, so its cwd
+	 * is already `dir` when this returns.
+	 */
+	function holdCwd(dir: string) {
+		return spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+			cwd: dir,
+			stdio: "ignore",
+		});
+	}
+	const isAlive = (pid: number | undefined) => {
+		try {
+			process.kill(pid as number, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	type Dry = {
+		remove: { path: string }[];
+		keep: { path: string; reason: string }[];
+		mergedKeep: { path: string; reason: string }[];
+	};
+	const dryRun = (...extra: string[]) =>
+		JSON.parse(
+			runCli(["--dry-run", "--no-orphan-sweep", "--json", ...extra], ""),
+		) as Dry;
+	const planned = (dry: Dry, target: string) =>
+		dry.remove.some(
+			(entry) => toComparablePath(entry.path) === toComparablePath(target),
+		);
+	const keptAs = (list: Dry["keep"], target: string) =>
+		list.find(
+			(entry) => toComparablePath(entry.path) === toComparablePath(target),
+		)?.reason;
+	// Linux reads /proc; elsewhere the scan is unknowable and the (fresh) tree
+	// is kept by the recently-active fallback instead -- never removed.
+	const LIVE_REASON =
+		process.platform === "linux" ? "live-cwd" : "live-cwd-unknown";
+
+	// F1 (PR #3697 round 2). The DEFAULT sweep is the merged-branch pass, and
+	// round 1 put the live-cwd rail only in the age planner. The reviewer's
+	// probe: a merged clean tree with a live process inside it was planned for
+	// removal and the process was killed. Drives the whole CLI so that dropping
+	// `liveProcessCwds` from main()'s merged call (mutation M10b) reds.
+	it(
+		"keeps a merged clean tree that a live process is using, and never kills that process (#3694 F1)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "live-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9300", merged], repo);
+			// Positive control: with nothing inside it, this exact tree IS removable,
+			// so the keep below is the rail and not some other rule.
+			expect(planned(dryRun(), merged)).toBe(true);
+
+			const holder = holdCwd(merged);
+			try {
+				const dry = dryRun();
+				expect(planned(dry, merged)).toBe(false);
+				expect(keptAs(dry.mergedKeep, merged)).toBe(LIVE_REASON);
+				runCli(["--no-orphan-sweep", "--json"], "");
+				expect(fs.existsSync(merged)).toBe(true);
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
+		},
+	);
+
+	// The age planner's own signature: a pushed-but-UNMERGED agent tree is
+	// invisible to the merged pass ("unmerged"), so only main()'s call into
+	// planWorktreePrune can keep it (mutation M10a).
+	it(
+		"keeps a pushed, unmerged agent tree that a live process is using (#3694 F1)",
+		{ timeout: 90_000 },
+		() => {
+			const other = fixture.addSiblingWorktree("a0000000000000002", "pr-9301");
+			fs.writeFileSync(path.join(other, "work.txt"), "committed work\n");
+			git(["add", "work.txt"], other);
+			git(["commit", "-qm", "work"], other);
+			git(["push", "-q", "-u", "origin", "pr-9301"], other);
+			expect(planned(dryRun("--min-age", "0"), other)).toBe(true);
+
+			const holder = holdCwd(other);
+			try {
+				const dry = dryRun("--min-age", "0");
+				expect(planned(dry, other)).toBe(false);
+				expect(keptAs(dry.keep, other)).toBe(LIVE_REASON);
+				runCli(["--no-orphan-sweep", "--json", "--min-age", "0"], "");
+				expect(fs.existsSync(other)).toBe(true);
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
+		},
+	);
+
+	// F5 (orchestrator decision): the live-cwd rail protects OTHER trees. The
+	// stopped agent's own tree is reaped WITH its leftover process, as before
+	// #3694 -- a hook that refuses to reap its own agent is the #2486 regression.
+	it(
+		"still reaps the stopped agent's own tree, and its leftover process, on SubagentStop (#3694 F5)",
+		{ timeout: 90_000 },
+		async () => {
+			const sibling = fixture.addSiblingWorktree("a0000000000000003");
+			const bystander = holdCwd(sibling);
+			const leftover = holdCwd(worktree);
+			try {
+				const exited = new Promise((resolve) => leftover.once("exit", resolve));
+				runCli(registeredArgv(), subagentStopPayload(AGENT_ID));
+				expect(fs.existsSync(worktree)).toBe(false);
+				await exited;
+				// ...and the sibling agent's tree, with its own live process, is untouched.
+				expect(fs.existsSync(sibling)).toBe(true);
+				expect(isAlive(bystander.pid)).toBe(true);
+			} finally {
+				leftover.kill();
+				bystander.kill();
+			}
+		},
+	);
+
 	// lane: windows-vitest
 	it.skipIf(process.platform !== "win32")(
 		"reaps under the registered argv when the listing itself fails (#2486's own reason)",
@@ -1681,10 +1950,7 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 
 			const helperScript = path.join(worktree, "keepalive.mjs");
 			const helper = spawn(process.execPath, [helperScript], {
-				// Keep the delayed-write helper outside the candidate. The #3694
-				// live-cwd rail must be exercised by dedicated planner cases, while
-				// this case remains the independent late-write recheck witness.
-				cwd: repo,
+				cwd: worktree,
 				stdio: "ignore",
 			});
 			try {

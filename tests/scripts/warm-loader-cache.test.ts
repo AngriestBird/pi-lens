@@ -361,6 +361,51 @@ describe("prepare chain keeps load-bearing steps load-bearing (#1926)", () => {
 		).toBe(false);
 	});
 
+	// #3694: the install stamp Vitest's globalSetup compares against
+	// package-lock.json is written by `prepare`. Recurrence: round 1 appended it
+	// AFTER the warm (red on the test above) and indented it with spaces.
+	it("stamps the lockfile hash in prepare, after the installs and before the warm", () => {
+		const hooks = prepare.indexOf("setup-git-hooks.mjs");
+		const stamp = prepare.indexOf("scripts/stamp-package-lock.mjs");
+		const warm = prepare.indexOf("warm-loader-cache.mjs");
+		expect(hooks).toBeGreaterThanOrEqual(0);
+		expect(stamp).toBeGreaterThan(hooks);
+		expect(warm).toBeGreaterThan(stamp);
+		const raw = fs.readFileSync(path.join(root, "package.json"), "utf8");
+		expect(raw, "package.json is tab-indented").not.toMatch(/^ +"/m);
+	});
+
+	it("the stamp step never fails prepare: no node_modules is a no-op, a present one is stamped", () => {
+		const scratch = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-stamp-cli-"),
+		);
+		try {
+			fs.mkdirSync(path.join(scratch, "scripts"));
+			fs.copyFileSync(
+				path.join(root, "scripts", "stamp-package-lock.mjs"),
+				path.join(scratch, "scripts", "stamp-package-lock.mjs"),
+			);
+			fs.writeFileSync(path.join(scratch, "package-lock.json"), "lock");
+			const script = path.join(scratch, "scripts", "stamp-package-lock.mjs");
+			const stamped = () =>
+				fs.existsSync(
+					path.join(scratch, "node_modules", ".pi-lens-package-lock-sha256"),
+				);
+			// One spawn site (flake-shape budget): the same child, run without and
+			// then with a node_modules directory.
+			for (const withNodeModules of [false, true]) {
+				if (withNodeModules) fs.mkdirSync(path.join(scratch, "node_modules"));
+				execFileSync(process.execPath, [script], { stdio: "ignore" });
+				expect(fs.existsSync(path.join(scratch, "node_modules"))).toBe(
+					withNodeModules,
+				);
+				expect(stamped()).toBe(withNodeModules);
+			}
+		} finally {
+			fs.rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+
 	it("never masks a real prepare failure with `|| true`", () => {
 		// `|| true` on the chain would swallow a build:dist failure too. The
 		// script owns its own errors instead — the setup-git-hooks split (#1804).
