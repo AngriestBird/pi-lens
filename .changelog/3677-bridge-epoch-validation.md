@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- Validate a foreign mutation-bridge `readGuardBranchEpoch` before it merges into a deferred record, and record ignored values once per session.
+- Keep a mutation-bridge `readGuardBranchEpoch` captured before a session reset from being credited to the new session, and record an ignored malformed value once per session.

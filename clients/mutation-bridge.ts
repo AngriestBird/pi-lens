@@ -85,9 +85,14 @@ export interface MutationBridgeDeps {
 	getRuntime(): {
 		turnIndex: number;
 		telemetrySessionId?: string;
-		readGuard?: {
-			/** #3677: the upper bound a forwarded epoch is validated against. */
-			currentBranchEpoch?: number;
+		/**
+		 * The live read guard. Required: the real `RuntimeCoordinator` always
+		 * exposes it (a lazily-built getter), and #3677's bound needs its
+		 * `currentBranchEpoch` on every call.
+		 */
+		readGuard: {
+			/** #3677: the live epoch a forwarded epoch is validated against. */
+			currentBranchEpoch: number;
 			recordWritten?: (
 				filePath: string,
 				opts?: { branchEpoch?: number },
@@ -219,36 +224,46 @@ export function isValidMutationEntry(
 
 /**
  * #3677: a foreign producer may pass the read guard's branch epoch it captured
- * before it awaited. Only a finite, non-negative integer no greater than the
- * guard's CURRENT epoch is a real epoch — the upper bound is `<=`, not `==`,
- * because the field exists to carry an epoch captured before an await, and a
- * `/tree` during that await legitimately makes it older. NaN, a negative, a
- * fraction, an epoch from the future, and a non-number are all ignored
- * (`undefined`), which makes `recordWritten` skip its staleness check and
- * `deferMutation` fall back to the current epoch, exactly as before the field
- * was forwarded. Without this, `Math.max` merged a foreign value into a
- * legitimate deferred record and the later drain saw a bogus epoch (a false
- * block only, since `Math.max` can only raise it). Recorded once per session:
+ * before it awaited. Resolve it into the two epochs the bridge forwards.
+ *
+ * `stamp` reaches `ReadGuard.recordWritten`. A concrete epoch makes the guard
+ * refuse to credit a write that landed on a different branch (#3521). A
+ * well-formed epoch ABOVE the live guard's `currentBranchEpoch` is not this
+ * guard's: `branchEpoch` only counts up, and a new `ReadGuard` restarts at 0
+ * after `resetForSession` (#3521 review round 2 F1), so a capture from a dead
+ * session lands here. It is still handed to the stamp so the guard fails
+ * closed rather than crediting a dead session's write to the new one.
+ *
+ * `defer` reaches `RuntimeCoordinator.deferMutation`, whose `Math.max` merge
+ * must never keep a dead session's epoch. A value at or below the current
+ * epoch is forwarded unchanged; one above it is dropped so the queue falls
+ * back to the current epoch instead of poisoning the merge.
+ *
+ * Only a value that is not an integer `>= 0` at all (NaN, a negative, a
+ * fraction, a string, a null-proto object) is ignored for BOTH consumers, with
+ * one bounded degradation record per session — the same fail-open-to-current
+ * treatment a producer that omits the field gets. Recorded once per session:
  * the count is not the signal, the producer bug is.
  */
 function resolveReadGuardBranchEpoch(
 	value: unknown,
-	currentEpoch: number | undefined,
-): number | undefined {
-	if (value === undefined) return undefined;
-	if (
-		typeof value === "number" &&
-		Number.isInteger(value) &&
-		value >= 0 &&
-		(currentEpoch === undefined || value <= currentEpoch)
-	)
-		return value;
+	currentEpoch: number,
+): { stamp: number | undefined; defer: number | undefined } {
+	if (value === undefined) return { stamp: undefined, defer: undefined };
+	if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+		return value <= currentEpoch
+			? { stamp: value, defer: value }
+			: { stamp: value, defer: undefined };
+	}
 	recordDegradationOnce({
 		kind: "mutation-bridge-invalid-branch-epoch",
 		subject: "readGuardBranchEpoch",
-		reason: `ignored a foreign readGuardBranchEpoch ${String(value)} (current ${String(currentEpoch)})`,
+		// #3677 review round 1 F3: `typeof`, never `String(value)` — a
+		// null-proto object has no `toString`, and the throw dropped the whole
+		// record (turn state, receipt, deferral) out of the bridge's try.
+		reason: `ignored a foreign readGuardBranchEpoch (typeof ${typeof value}) (current ${currentEpoch})`,
 	});
-	return undefined;
+	return { stamp: undefined, defer: undefined };
 }
 
 /**
@@ -301,11 +316,12 @@ export function recordMutationThroughSeam(
 	const dispatchCwd = deps.getDispatchCwd(filePath);
 
 	try {
-		// #3677: sanitize the foreign epoch BEFORE either consumer sees it, so
-		// the read-guard stamp and the deferred queue both get the same value.
-		const branchEpoch = resolveReadGuardBranchEpoch(
+		// #3677: resolve the foreign epoch BEFORE either consumer sees it. The
+		// stamp keeps a captured epoch fail-closed; the deferred queue only gets
+		// a value the `Math.max` merge cannot poison.
+		const resolvedEpoch = resolveReadGuardBranchEpoch(
 			entry.readGuardBranchEpoch,
-			runtime.readGuard?.currentBranchEpoch,
+			runtime.readGuard.currentBranchEpoch,
 		);
 		// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 		//    judged by read coverage rather than by this write. #2465: gated on
@@ -313,9 +329,11 @@ export function recordMutationThroughSeam(
 		//    `isRecordable` check above already passed, so the write itself is
 		//    still bookkept below whether or not the stamp fires.
 		if (deps.shouldStampReadGuard?.() ?? true) {
-			runtime.readGuard?.recordWritten?.(
+			runtime.readGuard.recordWritten?.(
 				filePath,
-				branchEpoch === undefined ? undefined : { branchEpoch },
+				resolvedEpoch.stamp === undefined
+					? undefined
+					: { branchEpoch: resolvedEpoch.stamp },
 			);
 		}
 
@@ -381,8 +399,10 @@ export function recordMutationThroughSeam(
 					runtime.telemetrySessionId,
 					projectRoot,
 					// #3521: the settled sweep's epoch, so a record it queues after
-					// a /tree is not credited to the new branch.
-					branchEpoch,
+					// a /tree is not credited to the new branch. #3677 F1: a value
+					// above the live epoch is dropped (undefined) so the merge uses
+					// the current epoch rather than keeping a dead session's.
+					resolvedEpoch.defer,
 				);
 			}
 		}

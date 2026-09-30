@@ -317,13 +317,14 @@ describe("mutation bridge bookkeeping", () => {
 describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record", () => {
 	// Recurrence: #3669 taught `deferMutation` to merge epochs with `Math.max`,
 	// and the bridge forwarded a foreign `entry.readGuardBranchEpoch` into that
-	// merge without validation. NaN, a negative, a fraction, a future epoch, and
-	// a non-number all poisoned (or were misread by) the legitimate record.
+	// merge without validation. NaN, a negative, a fraction, and a non-number
+	// all poisoned (or were misread by) the legitimate record. Round 1's upper
+	// bound then misread a genuine prior-session capture as "from the future"
+	// and credited it to the new session (F1, covered below).
 	const malformed: ReadonlyArray<readonly [string, string, unknown]> = [
 		["a NaN", "nan", Number.NaN],
 		["a negative", "negative", -1],
 		["a fractional", "fraction", 1.5],
-		["a future", "future", Number.MAX_SAFE_INTEGER],
 		["a string", "string", "5"],
 	];
 
@@ -396,6 +397,128 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 			}
 		});
 	}
+
+	it("does not credit a write whose captured epoch predates a session reset", () => {
+		// #3677 review round 1 F1. `ReadGuard.branchEpoch` lives on the guard
+		// INSTANCE, and `resetForSession` nulls `_readGuard`, so a new session
+		// restarts at 0. Round 1 read "captured 2 > current 0" as a foreign
+		// future value, stripped it to undefined, and credited the dead
+		// session's write to the new one — the exact false credit #3521 exists
+		// to prevent. The captured epoch must stay fail-closed at the stamp.
+		const env = setupTestEnvironment("pi-lens-3677-reset-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "reset.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			// Age the file past the guard's session start, so the
+			// `wasWrittenThisSession` mtime fallback cannot mask a credited
+			// write: only an explicit `recordWritten` credit can make it true.
+			const anHourAgo = new Date(Date.now() - 3_600_000);
+			fs.utimesSync(filePath, anHourAgo, anHourAgo);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-reset" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			runtime.readGuard.retainBranch(new Set());
+			const captured = runtime.readGuard.currentBranchEpoch;
+			expect(captured).toBe(2);
+
+			// The real reset seam: a new session's guard restarts at 0.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: captured,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+
+			// Fail closed: the pre-reset capture is NOT credited to the new session.
+			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
+				false,
+			);
+			// ... and the refusal is observable through the read guard's own record.
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "read-guard-write-after-branch-move",
+				)?.count,
+			).toBe(1);
+			// No bridge record: the epoch is well-formed, just not this guard's.
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+			// The deferred record takes the CURRENT epoch, so `Math.max` cannot
+			// keep the dead session's number.
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a null-proto epoch object without dropping the record", () => {
+		// #3677 review round 1 F3. `String(Object.create(null))` throws (no
+		// prototype), and the reason template is built INSIDE the bridge's try,
+		// so the throw dropped the whole record — turn state, receipt, and
+		// deferral — and returned false. `typeof value` closes it.
+		const env = setupTestEnvironment("pi-lens-3677-nullproto-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "nullproto.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-nullproto" });
+			runtime.beginTurn();
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: Object.create(null) as number,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
 
 	it("forwards a legitimately stale epoch captured before a /tree", () => {
 		// The upper bound is `<=`, not `==`: the field exists to carry an epoch
@@ -545,13 +668,7 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 			const cacheManager = new CacheManager(false);
 			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
 
-			for (const [index, value] of [
-				Number.NaN,
-				-1,
-				1.5,
-				Number.MAX_SAFE_INTEGER,
-				"5",
-			].entries()) {
+			for (const [index, value] of [Number.NaN, -1, 1.5, "5"].entries()) {
 				const filePath = path.join(env.tmpDir, `once-${index}.ts`);
 				fs.writeFileSync(filePath, SOURCE);
 				recordMutationThroughSeam(
