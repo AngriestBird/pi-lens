@@ -402,9 +402,9 @@ export function noteAgentCallEnd(toolCallId: string | undefined): void {
 	for (const run of active) run.calls.delete(toolCallId);
 }
 
-/** Line endings and a BOM are the host's to preserve, not the agent's to state. */
+/** Line endings are the host's to preserve, not the agent's to state. */
 function normalized(text: string): string {
-	return text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+	return text.replace(/\r\n/g, "\n");
 }
 
 function verdictFor(
