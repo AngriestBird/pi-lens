@@ -64,11 +64,12 @@ one same-shape sibling in the same change, or the brief must name every sibling,
 explain why folding is unsafe, and link the follow-up.
 
 Every bug fix has a regression test that fails on the pre-fix production path.
-Read the failure and preserve its transcript. Every new guard, branch, filter,
-cap, or fallback gets a compile-valid mutation that turns at least one test
-red. A test that passes before the fix, or remains green after the guard is
-neutered, is not evidence. For a behaviour-preserving refactor declared in the
-PR, the red-first proof is instead an old-vs-new probe table through the built
+Read the failure and preserve its transcript. The new guard, branch, filter,
+or cap the PR is about gets a compile-valid mutation that turns at least one
+test red, and every `Mutation diff` survivor on an added line is killed or
+shown equivalent. A test that passes before the fix, or remains green after the
+guard is neutered, is not evidence. For a behaviour-preserving refactor declared
+in the PR, the red-first proof is instead an old-vs-new probe table through the built
 seam plus a shared-seam mutation that reds a caller-side witness; a passing
 pre-fix run is expected and is not a finding.
 
@@ -998,7 +999,7 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 
 Every `Bash` call an agent makes under Claude Code runs through the
 `PreToolUse` hook `scripts/hooks/guard-bash.mjs` (`.claude/settings.json`),
-mechanically enforcing nine non-negotiables that used to live only as prose:
+mechanically enforcing ten non-negotiables that used to live only as prose:
 no `git stash` in any form; no `git reset --soft`/`--hard`; no hand-typed
 `git worktree remove` with two force flags (use
 `node scripts/prune-agent-worktrees.mjs`); no `git worktree remove` at all on
@@ -1022,7 +1023,14 @@ see "Paths, data, and operating systems" for where those belong); and no
 lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node
 scripts/check-*.mjs`) through `;` or a pipe rather than `&&` -- the check's
 exit code gates nothing that way (#3471; gate with `&&`, or read the
-check's result in its own call). Concretely: `npm run build >log 2>&1;
+check's result in its own call); and no git hook bypass on `git
+commit`/`push`/`merge`/`rebase` -- `--no-verify`, `-n` (commit only; on
+`push` it is `--dry-run`), `-c core.hooksPath=…`, a `git config
+core.hooksPath` write, or a `HUSKY=0` / `PI_LENS_SKIP_HOOKS=` env prefix, the
+skips this repo's husky hooks honour (#3778, the #3703 class: a
+`--no-verify` push put 56 red files into CI; for a red that looks unrelated,
+prove it with `node scripts/red-on-base.mjs` and stop, never bypass the
+hook). Concretely: `npm run build >log 2>&1;
 echo build=$?; test "$(git rev-parse HEAD)" = SHA && git push …` is denied
 (the build's real exit code is thrown away by `;`); rewrite it as `npm run
 build >log 2>&1 && test "$(git rev-parse HEAD)" = SHA && git push …`, or

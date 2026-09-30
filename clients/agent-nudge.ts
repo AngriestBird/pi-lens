@@ -50,7 +50,11 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import type { ReadGuard } from "./read-guard.js";
-import type { LineageHandle, SessionScope } from "./session-scope.js";
+import {
+	defineSessionStore,
+	type LineageHandle,
+	type SessionScope,
+} from "./session-scope.js";
 
 const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 const MAX_NAMES_SHOWN = 5;
@@ -164,6 +168,46 @@ export function queueAgentAdvisory(text: string, scope: LineageHandle): void {
 	}
 	_advisories.push({ scope, text });
 }
+
+/**
+ * #3612: a scope's undelivered advisories, as a session store. A `/reload`
+ * continues the conversation under a new scope, so they move to it; every
+ * other start leaves them to the session that queued them (#3748).
+ */
+export const agentAdvisoryStore = defineSessionStore<string[]>({
+	name: "agent-advisories",
+	policy: {
+		startup: "none",
+		new: "none",
+		resume: "none",
+		fork: "none",
+		reload: "adopt",
+	},
+	snapshot: (scope) => {
+		const texts: string[] = [];
+		for (const entry of _advisories)
+			if (entry.scope.scopeId === scope.scopeId) texts.push(entry.text);
+		return texts;
+	},
+	restore: (scope, payload, ctx) => {
+		// Only the slot is the queue as the predecessor's shutdown left it; a
+		// sidecar is a past turn's, whose advisories may have been delivered.
+		if (ctx.source !== "slot" || !Array.isArray(payload)) return;
+		const handle = scope.capture();
+		for (const text of payload) {
+			if (typeof text !== "string") continue;
+			// Re-tag the predecessor's entry, so the prune does not count a
+			// carried advisory as dropped.
+			const at = _advisories.findIndex(
+				(entry) => !entry.scope.isCurrent() && entry.text === text,
+			);
+			if (at === -1) queueAgentAdvisory(text, handle);
+			else _advisories[at] = { scope: handle, text };
+		}
+	},
+	reason:
+		"the advisories a session queued and has not seen; a reload keeps the conversation, so they reach its next context call",
+});
 
 /** Test-only: clear accumulator state between test files/cases. */
 export function _resetAgentNudgeForTests(): void {
