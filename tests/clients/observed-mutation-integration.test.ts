@@ -1606,6 +1606,8 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 			await handleToolCall(
 				toolCallDeps({ event: second, cwd: tmpDir, runtime, cacheManager }),
 			);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			const dispatchedBefore = vi.mocked(runPipeline).mock.calls.length;
 			const handler = handleToolResult(
 				toolResultDeps({ event: second, runtime, cacheManager }),
 			);
@@ -1614,6 +1616,9 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 			sessionTwoWriteMode(runtime, filePath);
 			await handler;
 			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
+			// The dead handler dispatches nothing, so the autofix mode its
+			// dropped receipt falls back to never reaches a pipeline.
+			expect(vi.mocked(runPipeline).mock.calls.length).toBe(dispatchedBefore);
 		});
 	});
 });
