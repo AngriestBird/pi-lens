@@ -109,6 +109,7 @@ migrate-*.js
 !docs/lsp-capability-matrix.md
 !docs/lsp-latency-benchmark.md
 !docs/servercapabilities.md
+!docs/lsp-idle-eviction.md
 !docs/mcp.md
 !docs/module-report-read-symbol.md
 !docs/environment-variables.md

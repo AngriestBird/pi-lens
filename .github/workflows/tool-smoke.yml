@@ -102,7 +102,7 @@ jobs:
     # The auto-provided token raises this to 5000 req/hr; the installer sends it
     # ONLY to api.github.com, never the asset CDN.
     #
-    # PI_LENS_HOME/PILENS_DATA_DIR (#2670 review F1): job-level, so the SEVEN
+    # PI_LENS_HOME/PILENS_DATA_DIR (#2670 review F1): job-level, so the EIGHT
     # `--install` steps below share one tool tree/bin dir across the job
     # instead of each `withScratchHome()` pin minting its own empty one per
     # step — without this, each script re-pulls every managed tool from
@@ -280,6 +280,24 @@ jobs:
         continue-on-error: true
         run: node scripts/server-capabilities.mjs --install
 
+      # #3645: per-server idle-eviction cost and safety, so each server's
+      # `idleEviction` declaration in clients/lsp/server.ts is made from
+      # evidence. Spawns every registry server on its smoke fixture, lets the
+      # real idle timer release it, respawns it, and regenerates
+      # docs/lsp-idle-eviction.md (bucketed, so the refresh PR below does not
+      # open nightly on measurement noise). Changes no server's policy. The
+      # script stops starting servers after 10 minutes and marks the rest
+      # `budget-exhausted`; its own worst case (10 min + one slow server) sits
+      # under this 15-minute step bound, and both under the job's 35.
+      # continue-on-error: an absent toolchain is `unavailable` and never red;
+      # the step exits 1 only when the registry declares `transparent` a
+      # server this run vetoes, which shows as a failed step and an
+      # `::error::` annotation without failing the job.
+      - name: LSP idle-eviction measurement (regenerate docs/lsp-idle-eviction.md)
+        continue-on-error: true
+        timeout-minutes: 15
+        run: node scripts/measure-lsp-idle-eviction.mjs --install --budget-seconds 600 --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json"
+
       - name: Check LSP docs refresh diff
         id: docs_diff
         run: node scripts/check-generated-docs-diff.mjs
@@ -300,6 +318,7 @@ jobs:
           add-paths: |
             docs/lsp-capability-matrix.md
             docs/servercapabilities.md
+            docs/lsp-idle-eviction.md
           commit-message: 'docs(nightly): refresh LSP capability docs'
           title: 'docs(nightly): refresh LSP capability docs (refs #3217)'
           body: |
@@ -307,6 +326,7 @@ jobs:
 
             - `docs/lsp-capability-matrix.md` — `mode` (characterize-lsp) + `clean-behavior` (probe-clean-signal, Tier 2 vs 3) columns (#460) + a `## silentOnClean drift` footnote (#529, telemetry only — never a gate)
             - `docs/servercapabilities.md` — advertised capability inventory incl. ws-pull (#389)
+            - `docs/lsp-idle-eviction.md` — per-server idle-eviction cost and safety, bucketed (#3645), regenerated in full each night (a server the runner cannot spawn reads `unavailable`); a declared-versus-measured finding there is for a maintainer to act on in a follow-up, this refresh changes no policy
 
             Rows are **merged**, never blind-overwritten: a server this ubuntu host
             couldn't spawn keeps its prior (dev-box) classification, so the nightly
