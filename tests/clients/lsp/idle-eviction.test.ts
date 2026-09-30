@@ -65,7 +65,7 @@ function configureTypeScriptServer(id = "typescript") {
 	return spawn;
 }
 
-describe("TypeScript language-service idle eviction (#1332 b2)", () => {
+describe("LSP idle eviction (#1332 b2)", () => {
 	beforeEach(() => {
 		recordDegradation.mockClear();
 		vi.resetModules();
@@ -76,8 +76,64 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 
 	afterEach(() => {
 		delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
+		delete process.env.PI_LENS_LSP_IDLE_EVICT_MS;
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	// #3645 recurrence: the window was named for one server family
+	// (`PI_LENS_TS_IDLE_EVICT_MS`) although it governs every transparent server.
+	// The generic spelling must win, the legacy one must keep its meaning, and
+	// the 20-minute default must not move.
+	describe("idle window env spellings (#3645)", () => {
+		const twentyMinutes = 20 * 60_000;
+
+		it("keeps the 20-minute default when neither spelling is set", async () => {
+			delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
+			const { getLspIdleEvictMs } =
+				await import("../../../clients/lsp/index.js");
+			expect(getLspIdleEvictMs()).toBe(twentyMinutes);
+		});
+
+		it("still honors the legacy PI_LENS_TS_IDLE_EVICT_MS on its own", async () => {
+			process.env.PI_LENS_TS_IDLE_EVICT_MS = "1500";
+			const { getLspIdleEvictMs } =
+				await import("../../../clients/lsp/index.js");
+			expect(getLspIdleEvictMs()).toBe(1500);
+		});
+
+		it("lets PI_LENS_LSP_IDLE_EVICT_MS win over the legacy spelling", async () => {
+			process.env.PI_LENS_TS_IDLE_EVICT_MS = "1500";
+			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "2500";
+			const { getLspIdleEvictMs } =
+				await import("../../../clients/lsp/index.js");
+			expect(getLspIdleEvictMs()).toBe(2500);
+		});
+
+		it("falls through an invalid generic value to the legacy one, then the default", async () => {
+			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "soon";
+			process.env.PI_LENS_TS_IDLE_EVICT_MS = "1500";
+			const { getLspIdleEvictMs } =
+				await import("../../../clients/lsp/index.js");
+			expect(getLspIdleEvictMs()).toBe(1500);
+			process.env.PI_LENS_TS_IDLE_EVICT_MS = "-4";
+			expect(getLspIdleEvictMs()).toBe(twentyMinutes);
+		});
+
+		it("evicts on the generic window through the service timer", async () => {
+			vi.useFakeTimers();
+			delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
+			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "20";
+			const client = fakeClient("generic-window");
+			createLSPClient.mockResolvedValue(client);
+			configureTypeScriptServer();
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			await service.getClientForFile("/repo/main.ts");
+			await vi.advanceTimersByTimeAsync(20);
+			expect(client.shutdown).toHaveBeenCalledWith({ reason: "idle_eviction" });
+			expect(service.getAliveClientCount()).toBe(0);
+		});
 	});
 
 	it("releases the idle client and transparently rebuilds on the next request", async () => {
@@ -98,12 +154,12 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		// client reference and completed the server-owned registry/program teardown.
 		expect(service.getAliveClientCount()).toBe(0);
 		expect(first.shutdown).toHaveBeenCalledWith({
-			reason: "typescript_idle_eviction",
+			reason: "idle_eviction",
 		});
 		expect(recordDegradation).toHaveBeenCalledWith({
-			kind: "ts-idle-eviction",
+			kind: "lsp-idle-eviction",
 			subject: expect.stringMatching(/^typescript:.*repo$/),
-			reason: "idle TypeScript client released to bound memory",
+			reason: "idle LSP client released to bound memory",
 		});
 
 		expect((await service.getClientForFile("/repo/main.ts"))?.client).toBe(
@@ -169,7 +225,7 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		client.isBusy.mockReturnValue(false);
 		await vi.advanceTimersByTimeAsync(20);
 		expect(client.shutdown).toHaveBeenCalledWith({
-			reason: "typescript_idle_eviction",
+			reason: "idle_eviction",
 		});
 		expect(service.getAliveClientCount()).toBe(0);
 	});
@@ -197,7 +253,7 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		notification.restore();
 	});
 
-	it("clears TypeScript timer ownership on notify-backpressure eviction", async () => {
+	it("clears idle-timer ownership on notify-backpressure eviction", async () => {
 		vi.useFakeTimers();
 		const client = fakeClient("backpressured");
 		createLSPClient.mockResolvedValue(client);
@@ -206,7 +262,7 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		const service = new LSPService();
 		const harness = service as unknown as {
 			state: { clients: Map<string, typeof client> };
-			typeScriptIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
+			idleEvictionTimers: Map<string, ReturnType<typeof setTimeout>>;
 			recordNotifyWriteBackpressure(
 				key: string,
 				entry: unknown,
@@ -215,7 +271,7 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		};
 		const entry = await service.getClientForFile("/repo/main.ts");
 		expect(entry).toBeDefined();
-		expect(harness.typeScriptIdleTimers.size).toBe(1);
+		expect(harness.idleEvictionTimers.size).toBe(1);
 		const key = [...harness.state.clients.keys()][0];
 		expect(key).toBeDefined();
 
@@ -227,7 +283,7 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 			);
 		}
 
-		expect(harness.typeScriptIdleTimers.size).toBe(0);
+		expect(harness.idleEvictionTimers.size).toBe(0);
 		await vi.advanceTimersByTimeAsync(20);
 		expect(client.shutdown).toHaveBeenCalledTimes(1);
 	});
@@ -336,16 +392,16 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const harness = service as unknown as {
-			typeScriptIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
+			idleEvictionTimers: Map<string, ReturnType<typeof setTimeout>>;
 		};
 		await service.getClientForFile("/repo/main.ts");
 
-		const timer = [...harness.typeScriptIdleTimers.values()][0];
+		const timer = [...harness.idleEvictionTimers.values()][0];
 		expect(timer).toBeDefined();
 		expect(timer.hasRef?.()).toBe(false);
 		await service.shutdown();
 
 		expect(clearTimeoutSpy).toHaveBeenCalledWith(timer);
-		expect(harness.typeScriptIdleTimers.size).toBe(0);
+		expect(harness.idleEvictionTimers.size).toBe(0);
 	});
 });

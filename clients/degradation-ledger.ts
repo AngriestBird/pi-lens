@@ -1330,7 +1330,7 @@ export type DegradationKind =
 	 * every cycle is the resolver's whole correctness argument. See
 	 * `probe-home-state.ts`'s doc comment.
 	 */
-	| "ts-idle-eviction"
+	| "lsp-idle-eviction"
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
