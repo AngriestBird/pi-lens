@@ -386,6 +386,21 @@ export declare function formatGatingSplit(
 	failingRows?: VerdictRow[],
 ): string[];
 
+export declare function formatMutationLine(
+	comments: Array<{ id: number; body?: string; user?: { login?: string } }>,
+	prHead: string,
+	rows?: Array<{ name: string; present: boolean; status: string | null }>,
+): string;
+
+export declare function readMutationLine(options: {
+	repository: string;
+	target: string | number;
+	sha: string;
+	rows?: Array<{ name: string; present: boolean; status: string | null }>;
+	ghExec?: (args: string[], options?: Record<string, unknown>) => string;
+	timeoutMs?: number;
+}): string;
+
 export interface OpenPr {
 	number: number;
 	author?: { login?: string } | null;

@@ -85,6 +85,11 @@
  *         instead (#2935); exit 70 then means the budget ran out while
  *         GitHub was still unreachable
  *
+ * #3779: a PR-number target on the `gh` transport also prints one advisory
+ * `MUTATION` line (the Mutation diff comment's survivor count and covered head;
+ * STALE / PENDING, see `formatMutationLine`). It is read after the verdict and
+ * is never an input to it: no exit code above depends on it.
+ *
  * Absent is not automatically DIRTY (#2539 round 2, F1): the common cause of
  * an absent required check is CI not yet registered on a fresh push or a
  * push that just landed (partial registration), not a merge conflict.
@@ -198,6 +203,8 @@ import {
 	REQUIRED_CHECKS,
 	resolveLatestByName,
 } from "./lib/ci-checks.mjs";
+import { findStickyCommentId } from "./lib/mutation-pr-comment.mjs";
+import { STICKY_MARKER } from "./lib/mutation-report-render.mjs";
 
 export { REQUIRED_CHECKS };
 
@@ -1327,6 +1334,90 @@ export function formatGatingSplit(rows, failingRows = []) {
 	];
 }
 
+const MUTATION_CHECK = "mutation (advisory)";
+const MUTATION_PREFIX = "MUTATION (advisory, never gates):";
+
+/** The Mutation diff sticky comment's own lines (scripts/lib/
+ * mutation-report-render.mjs): the head it covers, and what it says about it. */
+function readStickyBody(body) {
+	const head =
+		/\*\*Head:\*\* `([0-9a-f]{7,40})`/.exec(body)?.[1] ??
+		/\*\*Stale\.\*\* This head \(`([0-9a-f]{7,40})`\)/.exec(body)?.[1] ??
+		null;
+	let count = "unparsed comment";
+	if (body.includes("**Stale.**"))
+		count = "no report for that head (crash, cancel or time cap)";
+	else if (body.includes("**0 mutants evaluated.**"))
+		count = "0 mutants evaluated (not a clean pass)";
+	else if (body.includes("**Incomplete run.**"))
+		count = "incomplete run (not a clean pass)";
+	else if (/^#### Survivors \(\d+\)$/m.test(body))
+		count = `${/^#### Survivors \((\d+)\)$/m.exec(body)[1]} survivors`;
+	else if (body.includes("No survivors.")) count = "0 survivors";
+	const flags = [
+		body.includes("**Partial run**") ? ", partial run" : "",
+		body.includes("truncated test population")
+			? ", truncated test population"
+			: "",
+	].join("");
+	return { head, count: `${count}${flags}` };
+}
+
+/**
+ * The one advisory `MUTATION` line (#3779): the Mutation diff comment's
+ * survivor count and the head it covers; STALE when that head is not the PR's
+ * head, PENDING when there is no comment or the job has not reported on this
+ * head. Information only -- `computeVerdict` never sees it, so it cannot move
+ * an exit code (the advisory split above, #3700).
+ *
+ * @param {Array<{id: number, body?: string, user?: {login?: string}}>} comments
+ * @param {string} prHead
+ * @param {Array<{name: string, present: boolean, status: string|null}>} rows
+ */
+export function formatMutationLine(comments, prHead, rows = []) {
+	const job = rows.find((row) => row.name === MUTATION_CHECK && row.present);
+	const inFlight = job && job.status !== "completed";
+	const id = findStickyCommentId(comments, STICKY_MARKER);
+	if (id === null)
+		return `${MUTATION_PREFIX} PENDING -- no Mutation diff comment on this PR yet`;
+	const { head, count } = readStickyBody(
+		comments.find((comment) => comment.id === id)?.body ?? "",
+	);
+	const covers = head ?? "unknown";
+	if (head !== null && prHead.startsWith(head))
+		return `${MUTATION_PREFIX} ${count}, head ${covers}`;
+	const prShort = prHead.slice(0, 12);
+	if (inFlight)
+		return `${MUTATION_PREFIX} PENDING -- the mutation job is ${job.status} on PR head ${prShort}; the last comment covers ${covers}`;
+	return `${MUTATION_PREFIX} ${count}, head ${covers}, STALE (PR head is ${prShort})`;
+}
+
+/** The PR's comments through the same `ghExec` seam as every read above; one
+ * call, only for a `gh`-transport PR target, and never part of a poll. */
+export function readMutationLine({
+	repository,
+	target,
+	sha,
+	rows,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+}) {
+	try {
+		const comments = JSON.parse(
+			ghExec(
+				["api", `repos/${repository}/issues/${target}/comments`, "--paginate"],
+				{
+					timeoutMs,
+					maxBuffer: JOB_LOG_MAX_BUFFER,
+				},
+			),
+		);
+		return formatMutationLine(comments, sha, rows);
+	} catch (error) {
+		return `${MUTATION_PREFIX} unreadable -- ${firstLine(error)}`;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #3497: the REST transport. Used only when the real `gh` binary is not on
 // PATH (the Claude Code cloud container's own shape -- `GH_TOKEN`/
@@ -1736,6 +1827,7 @@ async function readPrVerdict(
 		...(sleepImpl ? { sleepImpl } : {}),
 		...(now ? { now } : {}),
 		absentSinceMs,
+		mutation: false,
 		onVerdict: (info) => {
 			captured = info;
 		},
@@ -2054,6 +2146,13 @@ export async function watchOpenPrs({
 						info.verdict.reason,
 					),
 					...formatFailureLines(info.verdict).map((line) => `  ${line}`),
+					`  ${readMutationLine({
+						repository: info.repository,
+						target: pr.number,
+						sha: info.sha,
+						rows: info.verdict.rows,
+						ghExec,
+					})}`,
 				]);
 			}
 			// Decided every poll, not only on the transition: a refused re-run of
@@ -2216,6 +2315,9 @@ export async function run({
 	// #3700: when `--watch-open` first saw this head; the absence clock of a
 	// head with no check suite.
 	absentSinceMs = null,
+	// #3779: false for a poll (`readPrVerdict`): the MUTATION line is read once
+	// per report, never once per `--watch-open` poll.
+	mutation = true,
 } = {}) {
 	const {
 		target,
@@ -2478,6 +2580,17 @@ export async function run({
 		// reading the output never has to infer it from context.
 		stdout(`Transport: ${transport}`);
 		stdout(`Gating source: ${gatingSource}`);
+		if (mutation && transport === TRANSPORT_GH && isPrNumber(target))
+			stdout(
+				readMutationLine({
+					repository,
+					target,
+					sha,
+					rows: verdict.rows,
+					ghExec,
+					timeoutMs: initialTimeoutMs,
+				}),
+			);
 		stdout(verdict.reason);
 		return verdict.exitCode;
 	} catch (error) {

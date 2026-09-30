@@ -1923,6 +1923,8 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 					comments: [],
 				});
 			if (String(args[1]).endsWith("/protection")) throw ghError("HTTP 404");
+			// #3779: the advisory MUTATION read is not a check-runs call.
+			if (String(args[1]).endsWith("/comments")) return "[]";
 			checkRunsCalls += 1;
 			const failure = failures[checkRunsCalls - 1];
 			if (failure) throw failure;
