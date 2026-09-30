@@ -333,34 +333,39 @@ for (const row of runners) {
 			expect(log).not.toContain('"kind":"test-checkout-identity-unavailable"');
 		});
 
-		it("keeps a real identity failure visible after many ordinary deletions", async () => {
-			// Recurrence (#3691 F1): 20 ENOENT rows filled the per-kind cap, so the
-			// next EACCES was counted but never reached the durable log.
-			const f = fixture();
-			for (let index = 0; index < 25; index++)
-				expect(
-					isExcludedTestTarget(
-						path.join(f.project, `gone-${index}-${row.failed}`),
-						f.project,
-					),
-				).toBe(false);
-			const native = vi.spyOn(fs.realpathSync, "native");
-			native.mockImplementationOnce(() => {
-				throw Object.assign(new Error("ownership lookup denied"), {
-					code: "EACCES",
+		it.each(["ENOENT", "ENOTDIR"] as const)(
+			"keeps a real identity failure visible after many ordinary %s lookups",
+			async (code) => {
+				// Recurrence (#3691 F1): 20 ordinary rows filled the per-kind cap, so the
+				// next EACCES was counted but never reached the durable log.
+				const f = fixture();
+				for (let index = 0; index < 25; index++) {
+					// A missing leaf gives ENOENT; a path below a regular file, ENOTDIR.
+					const candidate =
+						code === "ENOENT"
+							? path.join(f.project, `gone-${index}-${row.failed}`)
+							: path.join(f.source, `below-${index}-${row.failed}`);
+					expect(isExcludedTestTarget(candidate, f.project)).toBe(false);
+				}
+				const native = vi.spyOn(fs.realpathSync, "native");
+				native.mockImplementationOnce(() => {
+					throw Object.assign(new Error("ownership lookup denied"), {
+						code: "EACCES",
+					});
 				});
-			});
-			try {
-				expect(isExcludedTestTarget(f.parentFailure, f.project)).toBe(false);
-			} finally {
-				native.mockRestore();
-			}
-			await flushLatencyLog();
-			const log = fs.readFileSync(getLatencyLogPath(), "utf8");
-			expect(log.match(/"errorCode":"ENOENT"/g) ?? []).toHaveLength(0);
-			expect(log).toContain('"kind":"test-checkout-identity-unavailable"');
-			expect(log).toContain('"errorCode":"EACCES"');
-		});
+				try {
+					expect(isExcludedTestTarget(f.parentFailure, f.project)).toBe(false);
+				} finally {
+					native.mockRestore();
+				}
+				await flushLatencyLog();
+				const log = fs.readFileSync(getLatencyLogPath(), "utf8");
+				expect(
+					log.match(/"kind":"test-checkout-identity-unavailable"/g),
+				).toHaveLength(1);
+				expect(log).toContain('"errorCode":"EACCES"');
+			},
+		);
 
 		it("keeps a nested checkout's own failures eligible and rejects only the parent's copy", async () => {
 			const f = fixture();
