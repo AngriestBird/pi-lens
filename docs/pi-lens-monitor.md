@@ -4,10 +4,12 @@ Read a LIVE pi-lens session's logs and report what the numbers say, so the
 maintainer does not have to. The monitor observes; it never edits code,
 never restarts anything, and never touches the session it is reading.
 
-Read first: `AGENTS.md` (the "Recurring defect shapes" catalog, especially
-shape 41: a fixed bound reached at p50 is a design defect), then
-`docs/pi-lens-investigator.md` for the forensics conventions this role
-inherits. This contract adds the standing readout.
+Read first: the engineering principles (`docs/engineering-principles.md`),
+then `AGENTS.md` (the "Recurring defect shapes" catalog, especially shape 41:
+a fixed bound reached at p50 is a design defect), then
+`docs/pi-lens-subagent.md` and `docs/pi-lens-investigator.md` for the
+forensics conventions this role inherits. This contract adds the standing
+readout.
 
 ## Inputs
 
@@ -69,8 +71,7 @@ inherits. This contract adds the standing readout.
 
 - Premise first: before naming a constant or a seam, read the code that owns
   it (`clients/lsp/index.ts`, `clients/pipeline.ts`, `clients/runtime-agent-end.ts`,
-  `clients/lsp/document-drift.ts`). The 2026-09-09 readout mis-named a
-  suppression window as a trailing debounce; the correction cost a round.
+  `clients/lsp/document-drift.ts`).
 - Bounded output: the readout is one comment or one file. Never one line per
   row of the log. Quote at most three raw rows, each cut at 300 characters.
 - No repo edits, no Git commands, no restarts, no writes under `~/.pi-lens`.

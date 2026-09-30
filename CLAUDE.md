@@ -1,8 +1,10 @@
 # CLAUDE.md
 
-Deliberately thin. The canonical engineering contract for this repo lives in
-[AGENTS.md](AGENTS.md) — read it before writing code, especially
-"Recurring defect shapes — screen against these BEFORE you write code".
+Deliberately thin. Reading order: the engineering principles (in your global
+instructions; vendored at `docs/engineering-principles.md`), then
+[AGENTS.md](AGENTS.md), the canonical contract for this repo — read it before
+writing code, especially "Recurring defect shapes" — then the role contract
+for the task.
 
 ## Non-negotiables (the short list)
 
@@ -29,14 +31,10 @@ Deliberately thin. The canonical engineering contract for this repo lives in
 
 ## Orchestration assets
 
-- `.claude/agents/pi-lens-fixer.md` — role playbook for implementing a fix
-  from an issue spec.
-- `.claude/agents/pi-lens-reviewer.md` — role playbook for adversarial
-  pre-merge review.
-- `.claude/agents/pi-lens-investigator.md` — role playbook for log forensics
-  and root-causing runtime behavior.
-- `docs/pi-lens-monitor.md` — role contract for the live-session readout
-  (observe only; the standing numbers a maintainer would otherwise read by hand).
+- `docs/pi-lens-subagent.md` plus one of `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden,retro}.md`
+  — the role contracts, the only home of role rules.
+- `.claude/agents/pi-lens-{fixer,reviewer,investigator}.md` — thin Claude Code
+  wrappers: frontmatter, a pointer to the contracts, and harness-only lines.
 - `.claude/skills/merge-train/SKILL.md` — the review → verify → merge policy.
 - `.claude/skills/retro/SKILL.md` — the retrospective: environment changes,
   not advice (contract in `docs/pi-lens-retro.md`).

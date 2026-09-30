@@ -20,7 +20,7 @@ Task routing:
   review-graph, Git-guard, or rule work: read the matching **Standing
   invariants** subsection and the relevant source tests.
 - Delegated work: read `docs/pi-lens-subagent.md` and exactly one role contract
-  from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden}.md`.
+  from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden,retro}.md`.
 - Pi documentation work: read the installed pi documentation named by the
   global instructions. Do not infer SDK behavior from memory.
 
@@ -47,7 +47,9 @@ claims enforcement names its guard by path; a guard that is only planned is
 named by its open issue, never described as if it runs.
 
 Keep project instructions consistent with `CLAUDE.md`, role contracts, skills,
-and tests. The repository wins when a runner-side copy differs.
+and tests. The repository wins when a runner-side copy differs. Role rules live
+only in `docs/pi-lens-*.md`; `.claude/agents/*.md` are thin Claude Code
+wrappers that point there and hold only harness-specific lines.
 
 ## Issue and PR design contract
 
@@ -55,7 +57,8 @@ Every issue and PR states the outcome first, then evidence, root cause or a
 labeled hypothesis, acceptance criteria, non-goals, failure semantics, test
 matrix, observability, and class-sweep coverage. Use `refs #N` unless every
 acceptance criterion is complete; use `closes #N` only for a complete fix.
-Issue references belong in PR titles.
+Issue references belong in PR titles; the closing keyword belongs in the body,
+because GitHub ignores it in a title.
 
 Before coding, trace the production entry point and write the invariants and
 state-space table for stateful, ordered, resource-mutating, or security work.
@@ -333,7 +336,10 @@ ADR: docs/adr/0009-reported-path-attribution.md
     evidence; preserve the classifier and evidence when a caller asserts a fact.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
-    exit codes, output shapes, severity names, or fixtures.
+    exit codes, output shapes, severity names, or fixtures. For a third-party
+    extension, server, or file format, read its source or schema at a pinned
+    SHA and pin a test vector generated from it, citing the SHA; a double
+    built from an issue's description encodes the same guess (#2432).
 
 40. **Tool root drift:** all runner, formatter, and LSP child spawns use
     `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
@@ -677,7 +683,11 @@ ADR: docs/adr/0009-reported-path-attribution.md
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
 - Session degradation uses the ledger's bounded once/count APIs and resets at
-  the correct primary session boundary. A process-lifetime latch cannot store a
+  the correct primary session boundary. `SessionStartClassification`
+  (`clients/session-lifecycle.ts`): `primary` and `sequential-replacement`
+  (resume and reload) both run the full start and reset; only
+  `concurrent-secondary` skips the reset, since a subagent reset tears down the
+  primary's warm state. `secondary` belongs to the shutdown classification. A process-lifetime latch cannot store a
   session fact without an explicit reset.
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
@@ -797,7 +807,7 @@ npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
 npm run check:lockfile                lockfile consistency
-npm run changelog:check               changelog validation
+npm run changelog:check               rollup check; fragments use check-changelog-fragments.mjs
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
@@ -900,8 +910,16 @@ Test authoring screens:
 
 - Enter through the production entry point, not a parallel helper path.
 - Make unavailable prerequisites visible with `skipIf`, never a bare return.
+  Every `skipIf(process.platform …)` names the lane that runs it or reads
+  `// lane: dev-box-only`; prefer a cross-platform variant through the test's
+  own seam when the divergence is a technique artifact.
+- Measure a platform skip for a case-variant fixture: probe the real
+  filesystem for the collision first, and create the sibling fixture only
+  after the probe confirms it (#3159).
 - Pin the seam that broke, not a value supplied by the test.
-- Make doubles depend on explicit arguments, never stack or caller inspection.
+- Make doubles depend on explicit arguments, never stack or caller inspection,
+  and honour every input the production seam honours on the axis under test (a
+  timeout, a budget, a generation).
 - Restore env, timers, cwd, and module state; run the case in isolation.
 - Keep performance bounds close to measured fixed and regressed values.
 - Assert real behavior, not only mock calls or `not.toThrow`.

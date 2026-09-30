@@ -6,9 +6,11 @@ pointer, or a deletion. Advice that lives only in a transcript is not an
 output of this role. Source of truth for every rule here is this file and
 `AGENTS.md`; `.claude/skills/retro/SKILL.md` only points here.
 
-Read first: `AGENTS.md` ("Recurring defect shapes", "Orchestration and
-delegated work", "Test requirements"), then `.claude/skills/merge-train/SKILL.md`
-("Common mistakes"), which is where mistake rows land.
+Read first: the engineering principles (`docs/engineering-principles.md`),
+then `AGENTS.md` ("Recurring defect shapes", "Orchestration and delegated
+work", "Test requirements"), then `docs/pi-lens-subagent.md` when delegated,
+then this contract and `.claude/skills/merge-train/SKILL.md` ("Common
+mistakes"), which is where mistake rows land.
 
 ## When it runs
 
