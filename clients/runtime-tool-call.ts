@@ -1449,6 +1449,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			);
 			if (preflightError) {
 				if (partiallyApplicable && partiallyApplicable.length > 0) {
+					// #3525: the same fresh-at-check rule as a whole edit.
+					const partialStamp = {
+						stampFileTime: readGuard.fileTimeMoved?.(filePath) !== true,
+					};
 					try {
 						const partial = await applyPartiallyApplicableEdits({
 							filePath,
@@ -1491,6 +1495,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 									metricsClient,
 									resetLSPService,
 									readGuard: runtime.readGuard,
+									_ownWriteStamp: partialStamp,
 									agentBehaviorRecord: (toolName, analyzedPath) =>
 										agentBehaviorClient.recordToolCall(toolName, analyzedPath),
 									formatBehaviorWarnings: (warnings) =>
