@@ -22,19 +22,27 @@
 (* installer's 180 s lease), so the holder heartbeats the generation's     *)
 (* mtime every heartbeatIntervalMs(lease) = lease/4                        *)
 (* (`startGenerationHeartbeat`, clients/generation-lock.ts). The model has *)
-(* no clock, so `Heartbeat` rides the renewal and `HeartbeatStall` is one  *)
-(* interval in which it misses; a renewal that lands keeps a live holder   *)
-(* fresh, so only a stalled interval lets the lease lapse under a live     *)
-(* holder.                                                                 *)
+(* no clock, so `Heartbeat` rides the renewal and `HeartbeatStall` is the  *)
+(* stall in which the renewal fails to land long enough for the lease to   *)
+(* lapse (the interval is lease/4, so a single miss is not enough; the     *)
+(* model collapses the consecutive misses into the flag). A renewal that   *)
+(* lands keeps a live holder fresh, so without a stall `Expire` never      *)
+(* fires.                                                                  *)
 (*                                                                         *)
 (* Ownership re-check (#3515). A taker that judged a generation stale      *)
 (* before a renewal still creates the next generation, so a superseded     *)
 (* but live holder must not write beside it: `ownsTopGeneration`           *)
 (* (clients/generation-lock.ts) is read right before the critical write    *)
 (* (`assertOwnsLock`, clients/installer/index.ts). `OwnsTop` gates that    *)
-(* re-check; without it two live holders overlap. The model collapses the  *)
-(* re-check, its spawn and the write into `CsWrite`; the real check and    *)
-(* the spawn it guards are separate steps, which the stall cases record.   *)
+(* re-check, and it gates only `CsWrite`: a superseded holder can still be *)
+(* in `cs_read` when the taker enters, so `MutualExclusion`, which counts  *)
+(* the read, is violated under a stall and the re-check does not restore   *)
+(* it. What the re-check protects is `NoLostRegistration`: the superseded  *)
+(* holder does not overwrite the taker's `reg` with its stale `snap`.      *)
+(* The model collapses the re-check, the spawn it guards and the write     *)
+(* into `CsWrite`, so it does not explore a taker landing during the spawn *)
+(* itself; the check is a point in time, and the spawn runs for up to      *)
+(* 120 s after it (review r1 F5), the real-code residual on #3553.         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -48,7 +56,7 @@ CONSTANTS
     Rounds,         \* acquisitions per writer
     ListedMarker,   \* judge as clients/generation-lock.ts does (see Free)
     Heartbeat,      \* the #3515 lease renewal is wired
-    HeartbeatStall, \* one renewal interval is missed, so the lease can lapse
+    HeartbeatStall, \* the renewal misses long enough that the lease lapses
     OwnsTop         \* the #3515 ownership re-check before the critical write
 
 Gens == 1..MaxGen
@@ -216,8 +224,10 @@ Crash(p) ==
 \* The lease renewal (#3515), the `startGenerationHeartbeat` mtime touch: a
 \* live holder refreshes its generation, clearing a stale judgement so no
 \* contender can take it over. The real interval is a quarter of the lease
-\* (`heartbeatIntervalMs`), so a renewal lands well inside it; TLC has no
-\* clock, so `Expire` is enabled only in a `HeartbeatStall` interval.
+\* (`heartbeatIntervalMs`), so several consecutive misses are needed to let
+\* the lease lapse; TLC has no clock, so `Expire` is enabled only in a
+\* `HeartbeatStall` interval. The merged config sets `HeartbeatStall = TRUE`
+\* so both `Expire` and this action are reached (review r1 F2).
 HeartbeatTick(p) ==
     /\ Heartbeat
     /\ alive[p]
@@ -267,7 +277,10 @@ NoOrphanLock ==
 \* released, and is owned by a live process is never judged stale. The lease
 \* (`AllowExpiry`) is the only way a live holder's generation reads as free
 \* to `tryAcquireGeneration`'s stale judgement, so the heartbeat that keeps
-\* the lease from lapsing is what makes this hold (#3515).
+\* the lease from lapsing is what makes this hold (#3515). A stalled
+\* heartbeat breaks it (`GenerationHeartbeatStall.cfg`); the ownership
+\* re-check that follows protects `NoLostRegistration`, not this invariant
+\* (review r1 F1).
 NoLiveTakeover ==
     \A g \in Gens :
         (exists[g] /\ ~released[g] /\ alive[owner[g]]) => ~expired[g]
