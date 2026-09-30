@@ -344,6 +344,59 @@ describe("Dispatch Flow", () => {
 			expect(pushThird.output).not.toContain(notice);
 		}, 30000);
 
+		it("does not let pull dispatches consume a fresh push notice (#3791 F2)", async () => {
+			registerRunner({
+				id: "lsp",
+				appliesTo: ["go"],
+				priority: 4,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "go-vet",
+				appliesTo: ["go"],
+				priority: 12,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "golangci-lint",
+				appliesTo: ["go"],
+				priority: 14,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "tree-sitter",
+				appliesTo: ["go"],
+				priority: 20,
+				async run() {
+					return { status: "succeeded", diagnostics: [], semantic: "none" };
+				},
+			});
+
+			const ctx = createMockContext("main.go");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["lsp", "go-vet", "golangci-lint", "tree-sitter"],
+				},
+			];
+			const notice = "Pi-lens go analysis unavailable";
+			const pull = () =>
+				runDispatchForFile(ctx, groups, registry, undefined, {
+					dedupeCoverageNotice: false,
+				});
+
+			expect((await pull()).output).toContain(notice);
+			expect((await pull()).output).toContain(notice);
+			const firstPush = await runDispatchForFile(ctx, groups, registry);
+			expect(firstPush.output).toContain(notice);
+		});
+
 		it("does not let unrelated runner coverage suppress missing-tool notices", async () => {
 			registerRunner({
 				id: "lsp",
