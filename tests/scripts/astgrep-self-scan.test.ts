@@ -183,12 +183,25 @@ d("pi-lens self-scan (#1718)", () => {
 				'export const s = ["typescript", "python"];\n',
 				"utf-8",
 			);
+			fs.writeFileSync(
+				path.join(dir, "violation.ts"),
+				[
+					'import { writeFileSync } from "node:fs";',
+					"function f(file: string, data: unknown) {",
+					"  writeFileSync(file, JSON.stringify(data));",
+					"}",
+					"",
+				].join("\n"),
+				"utf-8",
+			);
 			const result = runSelfScan({
 				root: repoRoot(),
 				scanPaths: [dir],
-				ruleIds: ["advisory-registry-subset"],
+				ruleIds: ["advisory-registry-subset", "no-raw-json-store-write"],
 			});
-			expect(result.findings).toEqual([]);
+			expect(result.findings.map((f) => f.ruleId)).toEqual([
+				"no-raw-json-store-write",
+			]);
 			expect(result.advisoryFindings.map((f) => f.ruleId)).toEqual([
 				"advisory-registry-subset",
 			]);
