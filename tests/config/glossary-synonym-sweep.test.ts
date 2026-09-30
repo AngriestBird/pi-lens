@@ -474,7 +474,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/test-runner-delivery.ts": 6,
 		"clients/tool-agreement.ts": 2,
 		"clients/tree-sitter-cache.ts": 4,
-		"clients/tree-sitter-client.ts": 18,
+		// #3605: 18 -> 6. The rewritten wasm classifier, `reportWasmAbort` and
+		// the `parseFileAndUse` consume catch name their parameter `thrown`.
+		"clients/tree-sitter-client.ts": 6,
 		"clients/tree-sitter-logger.ts": 1,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
 		"clients/trivy-client.ts": 3,
@@ -908,7 +910,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/package-manager.ts": 20,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
-		"clients/path-utils.ts": 30,
+		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
+		// path locals; the legacy walker body is back to its pre-#3649 text.
+		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 7,
@@ -965,9 +969,16 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/source-walker.ts": 3,
 		"clients/spawn-timeout-cooldown.ts": 3,
 		"clients/startup-scan.ts": 11,
-		"clients/test-runner-client.ts": 61,
+		// 61 -> 66: filesystem ownership/discovery operations plus the alias
+		// exception's physical policy-relative path (R4). These remain filesystem
+		// operations, not delivery lanes; the census measures every use.
+		"clients/test-runner-client.ts": 66,
 		"clients/todo-scanner.ts": 3,
-		"clients/tool-agreement.ts": 4,
+		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
+		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
+		// and `path.resolve` — six more `path` operations, same sense
+		// (a path operation).
+		"clients/tool-agreement.ts": 10,
 		"clients/tool-cwd.ts": 13,
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
@@ -1023,10 +1034,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-snapshot.ts": 10,
 		"clients/read-bridge.ts": 1,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 22,
-		"clients/runtime-agent-end.ts": 54,
+		"clients/read-guard.ts": 20,
+		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
-		"clients/runtime-coordinator.ts": 16,
+		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		"clients/runtime-turn.ts": 6,
@@ -1251,7 +1262,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
 		"clients/session-state-store.ts": 3,
-		"clients/tool-agreement.ts": 19,
+		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
+		// supplier's resolved `version` (params, `.version` fields, and the
+		// shared version verdict) through the same agreement comparison.
+		// Same sense — lockfile resolved versions, not generations.
+		// 52 -> 64 (#3656 review): `stripPnpmPeerSuffix` scans a lockfile
+		// resolved version string for its peer-context suffix; same sense.
+		"clients/tool-agreement.ts": 64,
 		"clients/turn-summary.ts": 2,
 		"clients/warm-attach.ts": 4,
 		"clients/widget-state.ts": 5,

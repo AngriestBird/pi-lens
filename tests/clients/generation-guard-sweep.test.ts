@@ -82,8 +82,13 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 	"observed-mutation.ts":
 		"the settle rejects a baseline whose sessionGeneration no longer matches the one the tool_result carries. This IS the capture-before/check-after shape, but the counter is RuntimeCoordinator.sessionGeneration — captured at tool_call, handed back at tool_result, and owned by runtime-coordinator.ts, whose own migration is deferred above. Declaring a GenerationSource here would mint a SECOND counter mirroring the session's, which is the single-source-of-truth defect the ratchet exists to prevent. Since #3499 that counter IS a GenerationSource (RuntimeCoordinator.captureSessionGeneration), but this file carries the captured value as a plain number on the pending baseline across tool_call -> tool_result and compares it there; moving that record to a handle is its own migration, not yet filed",
 
+	"read-guard.ts":
+		"#3521's branch epoch: retainBranch bumps it, the agent_settled writers capture it before they await, and recordWritten refuses a write whose captured epoch is stale, with a counted read-guard-write-after-branch-move record. This IS the capture-before/check-after shape. The captured value travels as a plain number on BridgeMutationEntry.readGuardBranchEpoch (a field of the versioned cross-extension mutation bridge) and on DeferredMutationRecord (queued in one settle, drained in a later one), so a GenerationSource handle cannot carry it; the same position as observed-mutation.ts above. Moving the in-process writers to a handle is its own migration",
+
 	// --- Not the shape: a generation is compared, but no post-await write
 	// hangs on the answer. ---
+	"mutation-bridge.ts":
+		"#3521: `entry.readGuardBranchEpoch === undefined` is a presence check that decides whether a bridge entry passes a captured branch epoch on to ReadGuard.recordWritten. The compare that guards the write lives in read-guard.ts, registered above",
 	"dispatch/runners/utils/runner-helpers.ts":
 		"#1754 migrated this file's guarded WRITES (the managed-verify verdict memo, both in-flight evictions). What is left is ensureCurrentGeneration and the ast-grep latch, which clear a cache on a staleness transition rather than guard a write — a different shape the primitive deliberately does not model",
 	"dispatch/runners/utils/availability-policy.ts":

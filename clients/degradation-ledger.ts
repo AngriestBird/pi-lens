@@ -845,6 +845,15 @@ export type DegradationKind =
 	 */
 	| "process-singleton-reset"
 	/**
+	 * #3600: the projectDelta report carried diagnostics but its `generatedAt`
+	 * could not be parsed, so those rows fell back to the fold's `Date.now()`
+	 * instead of the report's own observation time. Recorded once per distinct
+	 * unparseable value (`recordDegradationOnce` keys on kind and subject), so
+	 * the fallback is visible rather than a silent freshness widening. Subject
+	 * is the unparseable raw value.
+	 */
+	| "project-delta-generatedat-unparseable"
+	/**
 	 * #3509: the project snapshot's cache-dir lock stayed held past its bounded
 	 * wait (or its directory failed), so an admission meta write was skipped or
 	 * a body promotion was dropped as a failed persist. Subject is the gz body
@@ -903,6 +912,13 @@ export type DegradationKind =
 	 * mismatch) is diagnosable from the ledger alone.
 	 */
 	| "read-guard-record-cap-trim"
+	/**
+	 * #3521: a deferred writer (the agent_settled sweep or the format, autofix
+	 * or LSP quick-fix drain) captured the read guard's branch epoch before a
+	 * `/tree`, and its `recordWritten` landed after it. The write is not
+	 * credited to the new branch, which never showed it. One subject, counted.
+	 */
+	| "read-guard-write-after-branch-move"
 	/**
 	 * The tier-3 cascade's outstanding-touch registry
 	 * (`clients/lsp/cascade-tier.ts`) reached its cap before a quiet-window
@@ -1072,6 +1088,14 @@ export type DegradationKind =
 	| "self-drift-unverifiable"
 	| "session-start-duplicate"
 	/**
+	 * #3662: a primary replacement shutdown left the process with no primary
+	 * and a successor pending. Subject `declined`: a `startup` start in that
+	 * gap was classified `concurrent-secondary` instead of taking the primary
+	 * slot. Subject `expired`: no successor started within
+	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 */
+	| "session-successor-pending"
+	/**
 	 * #3071: `clients/sgconfig.ts` evicted the oldest sg-config baseline
 	 * entries over its retained-entry cap. Subject is the baseline directory;
 	 * reason carries the evicted count.
@@ -1191,6 +1215,19 @@ export type DegradationKind =
 	 */
 	| "startup-analyzer-disabled"
 	/**
+	 * Automatic test ownership is indeterminate: filesystem identity or marker
+	 * I/O failed, a target walk hit its depth bound, or the dispatch walk missed.
+	 * Retain eligibility, once per complete hashed candidate/lookup identity;
+	 * metadata carries bounded display paths, the side, and the miss/error reason.
+	 */
+	| "test-checkout-identity-unavailable"
+	/**
+	 * Automatic discovery rejected a foreign-checkout candidate before its
+	 * first-match return. Once per hashed cwd/candidate/checkout identity;
+	 * eligible alternatives remain discoverable in the existing order/limits.
+	 */
+	| "test-discovery-foreign-checkout"
+	/**
 	 * #3071: a deferred turn-end test target hit `TEST_RUNNER_MAX_DEFERRALS`
 	 * and was retired from turn-end selection for the rest of the session —
 	 * `runtime-turn.ts`, subject `<cwd>:deferral-exhausted`. Counted, not
@@ -1224,6 +1261,12 @@ export type DegradationKind =
 	 * analyzer finding nothing read identically (AGENTS.md shape 10).
 	 */
 	| "test-runner-failed-target-state"
+	/**
+	 * The final automatic-test gate rejected a positively foreign checkout.
+	 * Self and deferred targets may have no discovery/cache record; keep this
+	 * decision visible even with dbg disabled, once per hashed cwd/target/owner.
+	 */
+	| "test-target-foreign-checkout"
 	/**
 	 * The analyzer bootstrap stopped rebuilding after
 	 * `BOOTSTRAP_FAILURE_STRIKE_LIMIT` consecutive failed loads (#2467 review).
@@ -1368,6 +1411,14 @@ export type DegradationKind =
 	 * re-observes the file.
 	 */
 	| "wasm-abort"
+	/**
+	 * #3605: web-tree-sitter trapped (`memory access out of bounds`, `table
+	 * index is out of bounds`, ...) while parsing or querying one file. That
+	 * file degrades to not-parsed, and the parsers and tree cache are
+	 * recycled. Counted; past `WASM_TRAP_BUDGET` the next trap becomes a
+	 * `wasm-abort`. Subject is always `web-tree-sitter`.
+	 */
+	| "wasm-trap"
 	/**
 	 * #2626: `resources_discover` (#205) resolved `<packageRoot>/skills` to a
 	 * directory that is absent, unreadable, or holds no `SKILL.md` — pi then
