@@ -63,6 +63,11 @@ Prefer the smallest existing seam. A new shared helper must remove at least
 one same-shape sibling in the same change, or the brief must name every sibling,
 explain why folding is unsafe, and link the follow-up.
 
+A core-domain rule lives in its owning module; every other caller asks that owner.
+A fix that re-derives an owned rule at a consumer is wrong. Extend the owner;
+create a new one only with a stated reason, and put new rules in their domain
+owner (#3781, #3794, #3796).
+
 Every bug fix has a regression test that fails on the pre-fix production path.
 Read the failure and preserve its transcript. The new guard, branch, filter,
 or cap the PR is about gets a compile-valid mutation that turns at least one
