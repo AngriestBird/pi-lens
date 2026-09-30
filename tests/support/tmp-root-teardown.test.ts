@@ -134,15 +134,19 @@ describe("shared setup tmp-root sweep, through the real hooks (#2912)", () => {
 		).toContain("registered=1");
 	});
 
-	it("removes a registered root when the worker is SIGTERM'd mid-file", () => {
-		// The handler re-raises, so the fork really dies and its one test never
-		// reports ("pending"); a swallowed signal would let the 10 s wait end and it would.
-		expect(firstTestStatusOf("killed-mid-file.fixture.ts")).toBe("pending");
-		expect(leftovers("pi-lens-2912-killed-")).toEqual([]);
-		expect(sweepLine("killed-mid-file.fixture.ts", "SIGTERM")).toContain(
-			"registered=1",
-		);
-	});
+	it.skipIf(process.platform === "win32")(
+		// lane: Unit tests (ubuntu). Windows cannot deliver SIGTERM to a JS handler (a kill there is TerminateProcess), so only the afterAll sweep applies on that platform.
+		"removes a registered root when the worker is SIGTERM'd mid-file",
+		() => {
+			// The handler re-raises, so the fork really dies and its one test never
+			// reports ("pending"); a swallowed signal would let the 10 s wait end and it would.
+			expect(firstTestStatusOf("killed-mid-file.fixture.ts")).toBe("pending");
+			expect(leftovers("pi-lens-2912-killed-")).toEqual([]);
+			expect(sweepLine("killed-mid-file.fixture.ts", "SIGTERM")).toContain(
+				"registered=1",
+			);
+		},
+	);
 
 	it("removes a registered root created through a re-evaluated test-utils", () => {
 		expect(outcomeOf("reset-modules.fixture.ts")).toBe("passed");
@@ -160,13 +164,17 @@ describe("shared setup tmp-root sweep, through the real hooks (#2912)", () => {
 		).toContain("stragglers=1");
 	});
 
-	it("removes a raw root a deferred write recreated after the file's afterAll, on SIGTERM", () => {
-		expect(outcomeOf("straggler-after-afterall.fixture.ts")).toBe("passed");
-		expect(leftovers("pi-lens-2912-straggler-late-")).toEqual([]);
-		expect(
-			sweepLine("straggler-after-afterall.fixture.ts", "SIGTERM"),
-		).toContain("stragglers=1");
-	});
+	it.skipIf(process.platform === "win32")(
+		// lane: Unit tests (ubuntu). Windows cannot deliver SIGTERM to a JS handler (a kill there is TerminateProcess), so only the afterAll sweep applies on that platform.
+		"removes a raw root a deferred write recreated after the file's afterAll, on SIGTERM",
+		() => {
+			expect(outcomeOf("straggler-after-afterall.fixture.ts")).toBe("passed");
+			expect(leftovers("pi-lens-2912-straggler-late-")).toEqual([]);
+			expect(
+				sweepLine("straggler-after-afterall.fixture.ts", "SIGTERM"),
+			).toContain("stragglers=1");
+		},
+	);
 
 	it("leaves a forgotten raw root and a root it did not create for the hygiene owner", () => {
 		expect(outcomeOf("genuine-leak.fixture.ts")).toBe("passed");
