@@ -2333,7 +2333,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// 225 → 216 (#3476): acquireInstallLock takes the install lock with the
 	// synchronous generation lock, so its awaited mkdir, open, write, close,
 	// read, stat and removes are gone; only its 100 ms retry wait remains.
-	"clients/installer/index.ts": 216,
+	// 216 → 219 (#3400): installArchiveTool awaits one `fs.stat` of the extracted
+	// launcher and, on the refusal branch, one `fs.rm` of the scratch tree (local
+	// disk, ms); installTool awaits `isCommandAvailable` for an archive's
+	// `runtime` (a PATH walk of statSync calls, no spawn, before the download).
+	// All three are intrinsically bounded local work on the install path; none
+	// can take the hook's signal until #2523 AC4 threads it, so this records the
+	// measured increase rather than hiding it.
+	"clients/installer/index.ts": 219,
 	"clients/installer/managed-tool-refresh.ts": 29,
 	// #3538/#3539 add five in each. The reaper reads start times and owner
 	// tags before its backstop decision and asks again before every signal
