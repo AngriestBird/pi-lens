@@ -123,8 +123,6 @@ export type LspRootFallback = {
 	serverId: string;
 	serverName: string;
 	rootMarkers: readonly string[];
-	/** `failed`: `server.root` threw. `fallback`: it found no marker. */
-	cause: "failed" | "fallback";
 };
 
 /** Resolve a server identity cwd through the shared tool-cwd seam. */
@@ -163,7 +161,6 @@ export async function resolveLspServerCwd(
 				serverId: server.id,
 				serverName: server.name ?? server.id,
 				rootMarkers: rootMarkers ?? [],
-				cause: rootFailed ? "failed" : "fallback",
 			});
 		}
 		if (!rootMarkers?.length) return undefined;

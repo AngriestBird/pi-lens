@@ -350,6 +350,69 @@ describe("resolveToolCwd (#2777)", () => {
 		expect(group?.count).toBe(1);
 	});
 
+	it("tells its caller about a root fallback on every call, not once per file (#3750)", async () => {
+		// Recurrence guarded: the verdict in tools/lsp-diagnostics.ts is derived
+		// from this callback while the degradation row is once-only; a signal
+		// gated by the row would confirm the file clean on the second check.
+		const project = path.join(home, "repo");
+		const file = path.join(project, "src", "main.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const failing = vi.fn(async () => {
+			throw new Error("root probe failed");
+		});
+		const server: LSPServerInfo = {
+			id: "fallback-callback-test-server",
+			name: "Fallback callback test server",
+			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			root: failing,
+			rootMarkers: ["missing.marker"],
+			spawn: vi.fn(),
+		};
+		const seen: unknown[] = [];
+
+		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
+			seen.push(fallback),
+		);
+		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
+			seen.push(fallback),
+		);
+		expect(seen).toEqual([
+			{
+				serverId: "fallback-callback-test-server",
+				serverName: "Fallback callback test server",
+				rootMarkers: ["missing.marker"],
+			},
+			{
+				serverId: "fallback-callback-test-server",
+				serverName: "Fallback callback test server",
+				rootMarkers: ["missing.marker"],
+			},
+		]);
+	});
+
+	it("does not report a fallback when the server resolved its own root (#3750)", async () => {
+		const project = path.join(home, "repo");
+		const file = path.join(project, "src", "main.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const server: LSPServerInfo = {
+			id: "resolved-root-test-server",
+			name: "Resolved root test server",
+			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			root: async () => project,
+			rootMarkers: ["missing.marker"],
+			spawn: vi.fn(),
+		};
+		const seen: unknown[] = [];
+
+		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
+			seen.push(fallback),
+		);
+
+		expect(seen).toEqual([]);
+	});
+
 	it("matches glob root markers against files in the directory", () => {
 		const project = path.join(home, "repo");
 		const nested = path.join(project, "packages", "app");

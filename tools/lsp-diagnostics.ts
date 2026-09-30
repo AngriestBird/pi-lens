@@ -855,11 +855,8 @@ async function primaryRootFallback(
 }
 
 function rootFallbackReason(fallback: LspRootFallback): string {
-	const named =
-		fallback.cause === "failed"
-			? "project root resolution failed for this file"
-			: `no ${fallback.rootMarkers.join(" / ") || "project marker"} found for this file`;
-	return `${fallback.serverName}: ${named}; the server was started at the file's directory and may not have analysed it`;
+	const looked = fallback.rootMarkers.join(" / ") || "a project marker";
+	return `${fallback.serverName}: no project root found for this file (looked for ${looked}); the server was started at the file's directory and may not have analysed it`;
 }
 
 // --- #611/#707: tier-3 silent escape hatch (typescript.tsserverRequest sync

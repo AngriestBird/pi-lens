@@ -135,7 +135,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text, details } = await runTool(dir, { path: file });
 
 		expect(text).toContain(
-			"Primary LSP (rust): unconfirmed — rust-analyzer: no Cargo.toml / Cargo.lock found for this file",
+			"Primary LSP (rust): unconfirmed — rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
 		);
 		expect(text).toContain("NOT the same as 0 diagnostics");
 		expect(text).not.toContain("confirmed clean");
@@ -195,7 +195,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text } = await runTool(dir, { path: file });
 
 		expect(text).toContain(
-			"Primary LSP (ocaml): unconfirmed — ocamllsp: no dune-project / opam found for this file",
+			"Primary LSP (ocaml): unconfirmed — ocamllsp: no project root found for this file (looked for dune-project / opam)",
 		);
 		expect(text).not.toContain("confirmed clean");
 	});
@@ -221,7 +221,9 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		});
 
 		expect(text).toContain("1 file confirmed clean, 1 unconfirmed");
-		expect(text).toContain("rust-analyzer: no Cargo.toml / Cargo.lock found");
+		expect(text).toContain(
+			"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
+		);
 		expect(text).not.toContain("silent-on-clean");
 		expect(details.filesChecked).toBe(2);
 	});
@@ -234,7 +236,9 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text } = await runTool(dir, { path: dir });
 
 		expect(text).toContain("1 unconfirmed");
-		expect(text).toContain("rust-analyzer: no Cargo.toml / Cargo.lock found");
+		expect(text).toContain(
+			"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
+		);
 		expect(text).not.toContain("silent-on-clean");
 	});
 });
