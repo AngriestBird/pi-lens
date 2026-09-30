@@ -389,18 +389,31 @@ jobs:
 
   # #3753: the suite runs as parallel `vitest --shard=k/N` jobs, N being the
   # matrix length (`strategy.job-total`, so the count has ONE source). This job
-  # id stays `test` (install-test and record-post-merge-validation `needs:` it,
-  # and a matrix job's `needs.test.result` is success only when EVERY shard
+  # id stays `test` (record-post-merge-validation `needs:` it, and a matrix
+  # job's `needs.test.result` is success only when EVERY shard
   # succeeded). The check-run the ruleset requires is the `unit-tests`
   # aggregate below, named exactly `Unit tests`.
   #
-  # Why five: vitest assigns files to shards by sha1 of the path in equal COUNTS,
-  # not equal duration, and the serialized projects (wall-clock-budget,
-  # real-harness, lsp-spawn-heavy) are a fixed per-shard floor. Measured on this
-  # PR's own run with three shards: 150 s / 333 s / 400 s for `Run tests`, so
-  # the slowest shard barely beat the old single job. A model over those
-  # per-file durations (every file's real sha1 shard for N = 2..9) put the
-  # slowest shard at 267 s for N=3 and 157 s for N=5, then flat beyond.
+  # Why four, and why balanced (#3771, #3801): vitest's own `--shard` assigns
+  # files by sha1 of the path in equal COUNTS, not equal duration, and the
+  # serialized projects (wall-clock-budget, real-harness, lsp-spawn-heavy) are a
+  # per-shard floor, so #3756's five shards ran `Run tests` from 107 s to 252 s
+  # (max/mean 1.4). vitest.config.ts now installs a sequencer that packs the
+  # files by recorded per-file seconds (scripts/test-shard-weights.json,
+  # scripts/lib/test-shard-assignment.mjs). Measured on the same runner pool
+  # (scratch run 36776021055 of branch ci/3801-exp-shards, the `test` job
+  # copied at N = 3, 4, 5; slowest shard job / max over mean of `Run tests` /
+  # total runner-minutes):
+  #
+  #   N=3  390 s  1.10  17.8 min
+  #   N=4  301 s  1.09  18.4 min
+  #   N=5  248 s  1.07  19.2 min   (hash-count N=5 before: 274-292 s, 1.4, 19.2 min)
+  #
+  # Four is the fewest shards that put the slowest job at the 5-minute bar the
+  # sharding was opened for (#3753): three misses it by 90 s. The repo sits at
+  # the 20-concurrent-job cap, where every extra job is its own queue wait, so
+  # the count stays as low as that bar allows. Raising it to five buys 53 s of
+  # critical path for one more job and 0.8 more runner-minutes per push.
   test:
     name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [validate-merge-train-dispatch, changes]
@@ -415,7 +428,7 @@ jobs:
       # failing tests of every red shard, not just the first to finish.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4]
     # Bounds the job so a reader that is alive but never drains (e.g. an
     # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
     # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
