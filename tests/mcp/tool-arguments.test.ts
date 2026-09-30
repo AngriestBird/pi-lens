@@ -69,11 +69,15 @@ describe("findIgnoredArguments", () => {
 				?.ignored,
 		).toEqual([{ key: "abcd", suggestion: "abcf" }]);
 		// One character dropped, added or replaced; two edits is not a typo.
-		expect(findIgnoredArguments(ANALYZE, { modee: 1 })?.ignored).toEqual([
-			{ key: "modee", suggestion: "mode" },
+		expect(
+			findIgnoredArguments(ANALYZE, { modee: 1 })?.ignored, // spellchecker:disable-line
+		).toEqual([
+			{ key: "modee", suggestion: "mode" }, // spellchecker:disable-line
 		]);
-		expect(findIgnoredArguments(DIAGNOSTICS, { sourse: 1 })?.ignored).toEqual([
-			{ key: "sourse", suggestion: "source" },
+		expect(
+			findIgnoredArguments(DIAGNOSTICS, { sourse: 1 })?.ignored, // spellchecker:disable-line
+		).toEqual([
+			{ key: "sourse", suggestion: "source" }, // spellchecker:disable-line
 		]);
 		expect(findIgnoredArguments(ANALYZE, { moed: 1 })?.ignored).toEqual([
 			{ key: "moed" },
@@ -302,7 +306,7 @@ describe("refusalMatches", () => {
 			["file", ["path", "newFilePath"]],
 			["pathName", ["path"]],
 			["sourcePath", ["source"]],
-			["modee", ["mode"]],
+			["modee", ["mode"]], // spellchecker:disable-line
 			["pth", ["path"]],
 			["max", ["maxLspFiles"]],
 			["symbol", ["maxRefsPerSymbol"]],
