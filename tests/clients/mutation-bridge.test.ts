@@ -10,6 +10,10 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	MUTATION_BRIDGE_KEY,
 	getMutationBridge,
 	isValidMutationEntry,
@@ -305,6 +309,270 @@ describe("mutation bridge bookkeeping", () => {
 				false,
 			);
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record", () => {
+	// Recurrence: #3669 taught `deferMutation` to merge epochs with `Math.max`,
+	// and the bridge forwarded a foreign `entry.readGuardBranchEpoch` into that
+	// merge without validation. NaN, a negative, a fraction, a future epoch, and
+	// a non-number all poisoned (or were misread by) the legitimate record.
+	const malformed: ReadonlyArray<readonly [string, string, unknown]> = [
+		["a NaN", "nan", Number.NaN],
+		["a negative", "negative", -1],
+		["a fractional", "fraction", 1.5],
+		["a future", "future", Number.MAX_SAFE_INTEGER],
+		["a string", "string", "5"],
+	];
+
+	for (const [label, slug, value] of malformed) {
+		it(`ignores ${label} epoch and still credits the write`, () => {
+			const env = setupTestEnvironment(`pi-lens-3677-${slug}-`);
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "epoch.ts");
+				fs.writeFileSync(filePath, SOURCE);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: `s-3677-${slug}` });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+				// A legitimate record first, so the foreign value has something to
+				// merge into. Epoch 0 is current on a fresh session.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [1, 2],
+							consumer: "legit",
+							readGuardBranchEpoch: 0,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				// The foreign value arrives on a second touch of the same path.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [2, 3],
+							consumer: "foreign",
+							readGuardBranchEpoch: value as number,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				const [record] = runtime.consumeDeferredFormatFiles();
+				expect(record.readGuardBranchEpoch).toBe(0);
+
+				const summary = getDegradationSummary();
+				// The foreign value is named once, and the read-guard stamp is still
+				// credited: pre-fix the raw value reached `recordWritten`, whose
+				// `!==` check refused the write and recorded the sibling kind.
+				expect(
+					summary.find(
+						(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+					)?.count,
+				).toBe(1);
+				expect(
+					summary.find(
+						(group) => group.kind === "read-guard-write-after-branch-move",
+					),
+				).toBeUndefined();
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+
+	it("forwards a legitimately stale epoch captured before a /tree", () => {
+		// The upper bound is `<=`, not `==`: the field exists to carry an epoch
+		// captured before an await, so a `/tree` during that await must not turn
+		// a real epoch into a rejection.
+		const env = setupTestEnvironment("pi-lens-3677-stale-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "stale.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-stale" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const cacheManager = new CacheManager(false);
+
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 0,
+					},
+					makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager }),
+				),
+			).toBe(true);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a fraction at or below the current epoch", () => {
+		// `Number.isInteger` is load-bearing on its own: 0.5 passes both the
+		// `>= 0` and `<= currentEpoch` bounds, so only the integer check rejects
+		// it. The guard's 1.5 row is caught by the upper bound instead.
+		const env = setupTestEnvironment("pi-lens-3677-subfraction-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "subfraction.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-subfraction" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const deps = makeDeps({
+				tmpDir: env.tmpDir,
+				runtime,
+				cacheManager: new CacheManager(false),
+			});
+
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: 0,
+				},
+				deps,
+			);
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [2, 3],
+					readGuardBranchEpoch: 0.5,
+				},
+				deps,
+			);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			// Ignoring the field falls back to the CURRENT epoch (1), which is the
+			// same credit a producer that omitted the field would get.
+			expect(record.readGuardBranchEpoch).toBe(1);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records nothing when the entry omits the epoch", () => {
+		const env = setupTestEnvironment("pi-lens-3677-omitted-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "omitted.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-omitted" });
+			runtime.beginTurn();
+			recordMutationThroughSeam(
+				{ filePath, kind: "edit", touchedLines: [1, 2] },
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records ONE bounded degradation for repeated foreign values", () => {
+		const env = setupTestEnvironment("pi-lens-3677-once-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-once" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			for (const [index, value] of [
+				Number.NaN,
+				-1,
+				1.5,
+				Number.MAX_SAFE_INTEGER,
+				"5",
+			].entries()) {
+				const filePath = path.join(env.tmpDir, `once-${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: value as number,
+					},
+					deps,
+				);
+			}
+
+			const groups = getDegradationSummary().filter(
+				(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+			);
+			expect(groups).toHaveLength(1);
+			expect(groups[0].count).toBe(1);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});

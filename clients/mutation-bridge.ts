@@ -51,6 +51,7 @@
  * at call time, so a replaced runtime or cache manager is picked up without
  * re-registration — the same live-getter discipline the read bridge uses.
  */
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import {
 	classifyBridgeMutation,
 	type BridgeMutationEntry,
@@ -85,6 +86,8 @@ export interface MutationBridgeDeps {
 		turnIndex: number;
 		telemetrySessionId?: string;
 		readGuard?: {
+			/** #3677: the upper bound a forwarded epoch is validated against. */
+			currentBranchEpoch?: number;
 			recordWritten?: (
 				filePath: string,
 				opts?: { branchEpoch?: number },
@@ -215,6 +218,40 @@ export function isValidMutationEntry(
 }
 
 /**
+ * #3677: a foreign producer may pass the read guard's branch epoch it captured
+ * before it awaited. Only a finite, non-negative integer no greater than the
+ * guard's CURRENT epoch is a real epoch — the upper bound is `<=`, not `==`,
+ * because the field exists to carry an epoch captured before an await, and a
+ * `/tree` during that await legitimately makes it older. NaN, a negative, a
+ * fraction, an epoch from the future, and a non-number are all ignored
+ * (`undefined`), which makes `recordWritten` skip its staleness check and
+ * `deferMutation` fall back to the current epoch, exactly as before the field
+ * was forwarded. Without this, `Math.max` merged a foreign value into a
+ * legitimate deferred record and the later drain saw a bogus epoch (a false
+ * block only, since `Math.max` can only raise it). Recorded once per session:
+ * the count is not the signal, the producer bug is.
+ */
+function resolveReadGuardBranchEpoch(
+	value: unknown,
+	currentEpoch: number | undefined,
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= 0 &&
+		(currentEpoch === undefined || value <= currentEpoch)
+	)
+		return value;
+	recordDegradationOnce({
+		kind: "mutation-bridge-invalid-branch-epoch",
+		subject: "readGuardBranchEpoch",
+		reason: `ignored a foreign readGuardBranchEpoch ${String(value)} (current ${String(currentEpoch)})`,
+	});
+	return undefined;
+}
+
+/**
  * The one range the change log records for this mutation. A multi-range edit
  * records its bounding box, matching how `runtime-tool-result.ts` collapses a
  * multi-hunk diff (`singleRange`) — the change log carries one range per entry.
@@ -264,6 +301,12 @@ export function recordMutationThroughSeam(
 	const dispatchCwd = deps.getDispatchCwd(filePath);
 
 	try {
+		// #3677: sanitize the foreign epoch BEFORE either consumer sees it, so
+		// the read-guard stamp and the deferred queue both get the same value.
+		const branchEpoch = resolveReadGuardBranchEpoch(
+			entry.readGuardBranchEpoch,
+			runtime.readGuard?.currentBranchEpoch,
+		);
 		// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 		//    judged by read coverage rather than by this write. #2465: gated on
 		//    `shouldStampReadGuard` (the `no-read-guard` flag) ALONE — the
@@ -272,9 +315,7 @@ export function recordMutationThroughSeam(
 		if (deps.shouldStampReadGuard?.() ?? true) {
 			runtime.readGuard?.recordWritten?.(
 				filePath,
-				entry.readGuardBranchEpoch === undefined
-					? undefined
-					: { branchEpoch: entry.readGuardBranchEpoch },
+				branchEpoch === undefined ? undefined : { branchEpoch },
 			);
 		}
 
@@ -341,7 +382,7 @@ export function recordMutationThroughSeam(
 					projectRoot,
 					// #3521: the settled sweep's epoch, so a record it queues after
 					// a /tree is not credited to the new branch.
-					entry.readGuardBranchEpoch,
+					branchEpoch,
 				);
 			}
 		}

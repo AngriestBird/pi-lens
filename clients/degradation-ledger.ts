@@ -743,6 +743,16 @@ export type DegradationKind =
 	 * from the ledger alone.
 	 */
 	| "mode-suppression"
+	/**
+	 * #3677: the mutation bridge received a foreign `readGuardBranchEpoch` that
+	 * was not a finite integer in `[0, currentBranchEpoch]` — NaN, a negative,
+	 * a fraction, an epoch from the future, or not a number. It is ignored so
+	 * the `Math.max` merge cannot poison a legitimate deferred record with a
+	 * bogus epoch (a false block, since `Math.max` can only raise it), and the
+	 * ignored value is named. Once per session: a producer that sends one bad
+	 * epoch sends it on every call, and one row is the signal.
+	 */
+	| "mutation-bridge-invalid-branch-epoch"
 	| "native-read-clipped"
 	/**
 	 * #3524: the file moved between a native read's tool_call and its
