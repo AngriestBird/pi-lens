@@ -207,18 +207,7 @@ interface ToolResultEvent {
 	input: unknown;
 	details?: unknown;
 	content: Array<{ type: string; text?: string }>;
-}
-
-/**
- * pi 0.99 codemode sets `structuredContent` on the tool_result event and drops
- * it from any rewritten result that omits it (#3832). It is deliberately NOT a
- * `ToolResultEvent` field: the pinned dev baseline (pi 0.87.1) never assigns
- * it, and `tests/clients/pi-host-contract.test.ts` rejects a declared field the
- * host build does not assign (#1655). One narrow read, every rewrite forwards it.
- */
-function hostStructuredContent(event: ToolResultEvent): unknown {
-	return (event as ToolResultEvent & { structuredContent?: unknown })
-		.structuredContent;
+	structuredContent?: unknown;
 }
 
 interface ToolResultDeps {
@@ -1035,7 +1024,7 @@ async function dispatchPipelineAnalysis(args: {
 					? [...event.content, { type: "text", text: notice }]
 					: event.content,
 				isError: true,
-				structuredContent: hostStructuredContent(event),
+				structuredContent: event.structuredContent,
 			},
 		};
 	} finally {
@@ -1370,7 +1359,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return readNote.length > 0
 			? {
 					content: [...readNote, ...event.content],
-					structuredContent: hostStructuredContent(event),
+					structuredContent: event.structuredContent,
 				}
 			: undefined;
 	} else {
@@ -2307,7 +2296,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return syntheticWriteContent.length > 0
 			? {
 					content: [...event.content, ...syntheticWriteContent],
-					structuredContent: hostStructuredContent(event),
+					structuredContent: event.structuredContent,
 				}
 			: undefined;
 	}
@@ -2318,7 +2307,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return syntheticWriteContent.length > 0 || readNote.length > 0
 			? {
 					content: [...readNote, ...event.content, ...syntheticWriteContent],
-					structuredContent: hostStructuredContent(event),
+					structuredContent: event.structuredContent,
 				}
 			: undefined;
 	}
@@ -2378,7 +2367,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return {
 			content: event.content,
 			isError: true,
-			structuredContent: hostStructuredContent(event),
+			structuredContent: event.structuredContent,
 		};
 	}
 
@@ -2961,7 +2950,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return {
 			content: [...event.content, { type: "text", text: result.output }],
 			isError: true,
-			structuredContent: hostStructuredContent(event),
+			structuredContent: event.structuredContent,
 		};
 	}
 
@@ -3087,6 +3076,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		content: output
 			? [...returnedContent, { type: "text", text: output }]
 			: returnedContent,
-		structuredContent: hostStructuredContent(event),
+		structuredContent: event.structuredContent,
 	};
 }
