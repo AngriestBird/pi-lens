@@ -259,6 +259,9 @@ if (serverFilter.length === 0) {
 console.error(
 	`${counts.total} registry servers: ${counts.eligible} eligible, ${counts.vetoed} vetoed, ${counts.inconclusive} inconclusive, ${counts.unavailable} unavailable (${counts.budget} not reached: budget).`,
 );
+// The raw figures the bucketed document omits, in the log as well as the job
+// summary: a step log is what a reviewer of one run can fetch.
+console.error(`\n${renderRawTable(rows)}`);
 for (const f of drift) {
 	const line = `${f.serverId} [${f.severity}] ${f.detail}`;
 	console.error(f.severity === "drift" ? `::error::${line}` : line);
