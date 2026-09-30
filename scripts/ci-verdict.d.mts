@@ -5,9 +5,14 @@ export declare const EXIT_DIRTY: number;
 export declare const EXIT_PENDING: number;
 export declare const EXIT_USAGE: number;
 export declare const EXIT_TRANSPORT: number;
+export declare const ABSENT_REQUIRED_REARM_MINUTES: number;
 export declare function formatAbsentRequiredReason(
 	sha: string,
 	minutes?: number,
+): string;
+export declare function formatForkApprovalReason(
+	repository: string,
+	runs: { id: number }[],
 ): string;
 export declare const POLL_INTERVAL_SECONDS: number;
 export declare const HARD_CAP_SECONDS: number;
@@ -40,6 +45,14 @@ export interface VerdictRow {
 	gating: boolean;
 }
 
+export interface AbsentContext {
+	repository: string;
+	sha: string;
+	actionRequiredRuns: { id: number; name: string }[];
+	autoMerge: boolean;
+	absentMinutes: number | null;
+}
+
 export interface Verdict {
 	exitCode: number;
 	rows: VerdictRow[];
@@ -63,6 +76,7 @@ export declare function computeVerdict(
 			run_attempt: number;
 		} | null;
 	} | null,
+	absentContext?: AbsentContext | (() => AbsentContext | null) | null,
 ): Verdict;
 
 export declare function formatVerdictTable(rows: VerdictRow[]): string;
@@ -108,6 +122,7 @@ export declare function pollVerdict(args: {
 				} | null;
 		  })
 		| null;
+	absentContext?: AbsentContext | (() => AbsentContext | null) | null;
 	sleepImpl?: (ms: number) => Promise<void>;
 	now?: () => number;
 	onRetry?: (line: string) => void;
@@ -148,6 +163,14 @@ export declare function fetchActionRequiredRuns(
 	ghExec?: GhExec,
 	timeoutMs?: number,
 ): { id: number; name: string }[];
+
+export declare function fetchAutoMergeAge(
+	target: string | number,
+	repository: string,
+	sha: string,
+	ghExec?: GhExec,
+	timeoutMs?: number,
+): { autoMerge: boolean; committedMs: number | null };
 
 export declare function fetchRerunState(
 	repository: string,

@@ -3,8 +3,8 @@ import { join, resolve } from "node:path";
 import * as yaml from "js-yaml";
 import { describe, expect, it } from "vitest";
 import {
+	ABSENT_REQUIRED_REARM_MINUTES,
 	computeVerdict,
-	formatAbsentRequiredReason,
 	DEFAULT_GH_TIMEOUT_MS,
 	EXIT_DIRTY,
 	EXIT_FAILURE,
@@ -13,6 +13,7 @@ import {
 	EXIT_TRANSPORT,
 	EXIT_USAGE,
 	fetchCheckRunsPayload,
+	formatAbsentRequiredReason,
 	formatVerdictTable,
 	HARD_CAP_SECONDS,
 	isPrNumber,
@@ -75,20 +76,6 @@ const PR_3382_CANCELLED = JSON.parse(
 );
 
 describe("computeVerdict — the four exit codes (#2539 acceptance criterion)", () => {
-	it("#3694 reports fork approval with the non-approving command", () => {
-		const verdict = computeVerdict({
-			check_runs: [
-				checkRun({ name: "Unit tests", status: "action_required", id: 77 }),
-				checkRun({ name: "Lint & type-check", id: 2 }),
-			],
-		});
-		expect(verdict.exitCode).toBe(EXIT_PENDING);
-		expect(verdict.reason).toContain("awaiting fork approval");
-		expect(verdict.reason).toContain(
-			"gh api -X POST repos/<repo>/actions/runs/77/approve",
-		);
-	});
-
 	it("#3694 formats the absent-required auto-merge re-arm message", () => {
 		expect(formatAbsentRequiredReason("abc123", 12)).toBe(
 			"required checks absent for 12 min on abc123 (auto-merge on) — push or merge master to re-arm",
@@ -2289,5 +2276,221 @@ describe("isTransientGhError (#2935)", () => {
 		["undefined", undefined],
 	])("%s is not transient", (_label, error) => {
 		expect(isTransientGhError(error)).toBe(false);
+	});
+});
+
+// #3694: fork approval and the absent-required message, driven through run()
+// with the REAL GitHub shapes. Round 1 matched `status === "action_required"`
+// and shipped green against a hand-shaped check-run row; the real API reports
+// `status: "completed", conclusion: "action_required"` on a WORKFLOW RUN, and
+// that head has no CI check-run rows at all. The fixture below is the live
+// payload of apmantza/pi-lens PR #3443's head, fetched 2026-09-30.
+const FORK_APPROVAL = JSON.parse(
+	readFileSync(
+		join(process.cwd(), "tests/fixtures/ci-verdict/pr-3443-fork-approval.json"),
+		"utf8",
+	),
+);
+const NO_CI_ROWS = FORK_APPROVAL.checkRuns;
+
+interface Gh3694Options {
+	sha?: string;
+	mergeable?: string;
+	checkRuns?: { total_count?: number; check_runs: unknown[] };
+	workflowRuns?: unknown[];
+	autoMergeRequest?: unknown;
+	committedAt?: string | null;
+}
+
+function gh3694({
+	sha = FORK_APPROVAL.sha,
+	mergeable = "MERGEABLE",
+	checkRuns = NO_CI_ROWS,
+	workflowRuns = FORK_APPROVAL.workflowRuns.workflow_runs,
+	autoMergeRequest = null,
+	committedAt = null,
+}: Gh3694Options = {}) {
+	const calls: string[] = [];
+	const ghExec = (args: string[]) => {
+		calls.push(args.join(" "));
+		if (args[0] === "repo") return "acme/repo";
+		if (args[0] === "pr" && args.includes("autoMergeRequest"))
+			return JSON.stringify({ autoMergeRequest });
+		if (args[0] === "pr" && args.includes("headRefOid,labels,comments"))
+			return JSON.stringify({ headRefOid: sha, labels: [], comments: [] });
+		if (args[0] === "pr") return JSON.stringify({ headRefOid: sha, mergeable });
+		const endpoint = args[1] ?? "";
+		if (endpoint.includes("/check-runs")) return JSON.stringify(checkRuns);
+		if (endpoint.includes("/actions/runs"))
+			return JSON.stringify({ workflow_runs: workflowRuns });
+		if (endpoint.endsWith(`/commits/${sha}`)) {
+			if (committedAt === null) throw new Error("HTTP 404");
+			return JSON.stringify({ commit: { committer: { date: committedAt } } });
+		}
+		throw new Error(`unmocked gh call: ${args.join(" ")}`);
+	};
+	return { ghExec, calls };
+}
+
+const NOW = Date.parse("2026-09-30T12:00:00Z");
+const minutesBefore = (minutes: number) =>
+	new Date(NOW - minutes * 60_000).toISOString();
+
+async function runVerdict(argv: string[], options: Gh3694Options = {}) {
+	const { ghExec, calls } = gh3694(options);
+	const lines: string[] = [];
+	const exitCode = await run({
+		argv,
+		ghExec,
+		now: () => NOW,
+		stdout: (line: string) => lines.push(line),
+		stderr: () => {},
+	});
+	return { exitCode, out: lines.join("\n"), reason: lines.at(-1) ?? "", calls };
+}
+
+describe("run — fork approval from the real workflow-run shape (#3694)", () => {
+	it("reports the six action_required runs of a real fork head, with the real owner/repo, and never approves", async () => {
+		const { exitCode, reason, calls } = await runVerdict(["3443"]);
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain("awaiting fork approval");
+		for (const id of [
+			36566476498, 36566476511, 36566476557, 36566476485, 36566476600,
+			36566477020,
+		]) {
+			expect(reason).toContain(
+				`gh api -X POST repos/acme/repo/actions/runs/${id}/approve`,
+			);
+		}
+		expect(reason).not.toContain("<repo>");
+		// The one non-action_required run (`PR #3443`, success) is not an approval.
+		expect(reason).not.toContain("36566498452");
+		// Report only: no call ever POSTs.
+		expect(calls.some((call) => call.includes("POST"))).toBe(false);
+	});
+
+	it("keeps a head green when a success run coexists with stale action_required runs", async () => {
+		const { exitCode, out } = await runVerdict(["3443"], {
+			checkRuns: BOTH_SUCCESS,
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(out).not.toContain("awaiting fork approval");
+	});
+
+	it("does not let an approval message hide a real failure", async () => {
+		const { exitCode, reason } = await runVerdict(["3443"], {
+			checkRuns: {
+				check_runs: [
+					checkRun({ name: "Unit tests", conclusion: "failure", id: 1 }),
+					checkRun({ name: "Lint & type-check", id: 2 }),
+				],
+			},
+		});
+		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(reason).toContain("non-success conclusion");
+	});
+
+	it("keeps the merge-conflict reason when the PR is CONFLICTING, even with action_required runs", async () => {
+		const { exitCode, reason } = await runVerdict(["3443"], {
+			mergeable: "CONFLICTING",
+			autoMergeRequest: { enabledAt: minutesBefore(60) },
+			committedAt: minutesBefore(60),
+		});
+		expect(exitCode).toBe(EXIT_DIRTY);
+		expect(reason).toContain("merge-conflicted");
+		expect(reason).not.toContain("awaiting fork approval");
+		expect(reason).not.toContain("re-arm");
+	});
+});
+
+describe("run — absent-required re-arm message (#3694)", () => {
+	const noRuns = { workflowRuns: [], checkRuns: { check_runs: [] } };
+
+	it("reports the real elapsed minutes and armed auto-merge, not a constant", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...noRuns,
+			autoMergeRequest: { enabledAt: minutesBefore(45) },
+			committedAt: minutesBefore(45),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(formatAbsentRequiredReason(FORK_APPROVAL.sha, 45));
+		expect(reason).toContain("absent for 45 min");
+	});
+
+	it("switches to the re-arm text exactly at the threshold", async () => {
+		const at = await runVerdict(["3679"], {
+			...noRuns,
+			autoMergeRequest: {},
+			committedAt: minutesBefore(ABSENT_REQUIRED_REARM_MINUTES),
+		});
+		expect(at.reason).toContain("push or merge master to re-arm");
+		const below = await runVerdict(["3679"], {
+			...noRuns,
+			autoMergeRequest: {},
+			committedAt: minutesBefore(ABSENT_REQUIRED_REARM_MINUTES - 1),
+		});
+		expect(below.reason).toContain("CI likely hasn't registered yet");
+		expect(below.reason).not.toContain("(auto-merge on)");
+	});
+
+	it("keeps the original text when auto-merge is not armed, however old the head", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...noRuns,
+			autoMergeRequest: null,
+			committedAt: minutesBefore(600),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain(
+			"the PR is not merge-conflicted (mergeable=MERGEABLE)",
+		);
+		expect(reason).not.toContain("(auto-merge on)");
+	});
+
+	it("keeps the original text when the head commit time cannot be read", async () => {
+		const { reason } = await runVerdict(["3679"], {
+			...noRuns,
+			autoMergeRequest: {},
+			committedAt: null,
+		});
+		expect(reason).toContain("CI likely hasn't registered yet");
+	});
+
+	it("keeps the bare-SHA text for a SHA target", async () => {
+		const { exitCode, reason } = await runVerdict([FORK_APPROVAL.sha], {
+			...noRuns,
+			committedAt: minutesBefore(600),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain("no PR context (bare-SHA target)");
+	});
+
+	it("keeps the merge-conflict reason for an absent-required CONFLICTING PR", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...noRuns,
+			mergeable: "CONFLICTING",
+			autoMergeRequest: {},
+			committedAt: minutesBefore(600),
+		});
+		expect(exitCode).toBe(EXIT_DIRTY);
+		expect(reason).toContain("merge-conflicted (mergeable=CONFLICTING)");
+		expect(reason).not.toContain("re-arm");
+	});
+
+	it("names fork approval, not re-arm, when both apply", async () => {
+		const { reason } = await runVerdict(["3443"], {
+			autoMergeRequest: {},
+			committedAt: minutesBefore(600),
+		});
+		expect(reason).toContain("awaiting fork approval");
+		expect(reason).not.toContain("re-arm");
+	});
+
+	it("reads neither the approval runs nor the head commit for a healthy head", async () => {
+		const { exitCode, calls } = await runVerdict(["3679"], {
+			checkRuns: BOTH_SUCCESS,
+		});
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(calls.some((call) => call.includes("/actions/runs"))).toBe(false);
+		expect(calls.some((call) => call.includes("autoMergeRequest"))).toBe(false);
 	});
 });
