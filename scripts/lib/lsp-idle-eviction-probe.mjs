@@ -363,8 +363,8 @@ export function createServiceDriver(args) {
 	};
 	// One ordinary request for the target's client: the spawned entry when it is
 	// warm, and the use that (re)schedules its idle timer.
-	const acquire = async () => {
-		const entry = isAuxiliary
+	const acquire = async () =>
+		isAuxiliary
 			? (
 					await lsp.getAuxiliaryClientsForFile(
 						target.absFile,
@@ -372,8 +372,6 @@ export function createServiceDriver(args) {
 					)
 				)[0]
 			: await lsp.getClientForFile(target.absFile);
-		return entry?.info?.id === server.id ? entry : undefined;
-	};
 	return {
 		now: args.now,
 		sleep: args.sleep,

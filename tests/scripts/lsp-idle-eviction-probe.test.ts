@@ -62,6 +62,8 @@ type Script = {
 	recordLagMs?: number;
 	touchThrowsAfterEviction?: boolean;
 	baselineThrows?: boolean;
+	/** the touch reports findings, but the target is never among the live clients */
+	targetNeverAlive?: boolean;
 };
 
 function virtualDriver(script: Script = {}) {
@@ -140,7 +142,7 @@ function virtualDriver(script: Script = {}) {
 			}
 			return found;
 		},
-		isTargetAlive: () => alive,
+		isTargetAlive: () => alive && !script.targetNeverAlive,
 		evictionsRecorded: () => recorded,
 		rssBytes: async () => {
 			if (script.rss === "throw") throw new Error("no process table");
@@ -245,6 +247,18 @@ describe("probeServer verdicts (#3645)", () => {
 			reason: "server-not-started",
 		});
 		expect(row.rssBytes).toBeUndefined();
+	});
+
+	it("reports unavailable/server-not-started when findings arrive but the target is not a live client", async () => {
+		// A fixture that routes to another server can still hand back unattributed
+		// findings; measuring eviction of a server that never ran would be a lie.
+		const { row, log } = await run({ targetNeverAlive: true });
+		expect(row).toMatchObject({
+			result: "unavailable",
+			reason: "server-not-started",
+		});
+		expect(row.rssBytes).toBeUndefined();
+		expect(log.armCalls).toBe(0);
 	});
 
 	it("reports inconclusive/no-baseline with coverage unproven when the server reports nothing", async () => {
