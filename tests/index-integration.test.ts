@@ -167,6 +167,7 @@ afterEach(() => {
 	vi.doUnmock("../clients/quiet-window.js");
 	vi.doUnmock("../clients/runtime-agent-end.js");
 	vi.doUnmock("../clients/runtime-turn.js");
+	vi.doUnmock("../clients/session-scope.js");
 });
 
 /**
@@ -1008,7 +1009,6 @@ describe("index.ts integration", () => {
 			];
 			expect(scope.isLive()).toBe(false);
 			expect(scope.retiredBy()).toBe("quit");
-			vi.doUnmock("../clients/session-scope.js");
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);

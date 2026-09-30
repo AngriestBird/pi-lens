@@ -65,7 +65,12 @@ export interface SessionScope {
 }
 
 const REGISTRY_FAMILY = "session-scope.registry";
-/** Bump when the registry's shape changes. */
+/**
+ * The counter names `nextTicket` and `orderTurn` are frozen: a cell of
+ * another version hands them over by name (`carriedCounter`), so a renamed
+ * or nested counter would restart its sequence within the process. Add a
+ * field beside them; never rename or move them.
+ */
 const REGISTRY_VERSION = 1;
 
 interface RegistryCounters {
