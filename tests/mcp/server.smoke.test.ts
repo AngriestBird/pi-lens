@@ -1301,6 +1301,10 @@ describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
 				JSON.stringify(value),
 			).toBe(-32602);
 		}
+		const omitted = await harness.request(nextId++, "tools/call", {
+			name: "pilens_health",
+		});
+		expect(omitted.error, "omitted").toBeUndefined();
 		for (const value of [null, [], {}]) {
 			const response = await raw(value);
 			expect(response.error, JSON.stringify(value)).toBeUndefined();

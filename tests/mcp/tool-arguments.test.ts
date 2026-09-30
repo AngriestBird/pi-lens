@@ -234,6 +234,16 @@ describe("refusalResult", () => {
 		);
 	});
 
+	it("names a required key once when it is also the spelled-out match", () => {
+		const report = reportFor(
+			{ properties: { path: {} }, required: ["path"] },
+			{ filePath: 1 },
+		);
+		expect(refusalResult("t", report)?.content[0].text).toContain(
+			"\nNot run: required argument(s) `path` missing.",
+		);
+	});
+
 	it("lists an unsent suggestion once however many ignored keys point at it", () => {
 		const report = reportFor(DIAGNOSTICS, { filePath: 1, dir_path: 2 });
 		expect(report.unsentSuggestions).toEqual([
@@ -300,6 +310,7 @@ describe("refusalMatches", () => {
 			["name", ["newName"]],
 			["file", ["groupByFile"]],
 			["filePath", ["newFilePath"]],
+			["__", ["_"]],
 		];
 		for (const [key, declared] of rows)
 			expect(refusalMatches(key, declared), key).toEqual([]);
