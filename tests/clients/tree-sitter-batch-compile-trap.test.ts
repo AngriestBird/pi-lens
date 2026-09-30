@@ -140,7 +140,11 @@ describe("a deterministic compile trap on a rebuilt batch (#3707)", () => {
 		// Master: every rebuild's probe trap spends a unit; the 4th aborts.
 		expect(onAbort).not.toHaveBeenCalled();
 		expect(seen).toEqual(Array.from({ length: 6 }, () => ["ok"]));
-		// One unit for the whole poisoned rule, however often its batch rebuilt.
+		// One unit for the whole poisoned rule, however often its batch rebuilt;
+		// the second trap is recorded as charged to the input.
+		expect(wasmTrapReasons().some((r) => r.startsWith("input charged:"))).toBe(
+			true,
+		);
 		expect(remainingBudget(client)).toBe(2);
 	});
 
