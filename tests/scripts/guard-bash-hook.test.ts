@@ -2474,3 +2474,148 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 		}
 	});
 });
+
+// #3778: the "hooks always run" rule (docs/pi-lens-subagent.md: never
+// `--no-verify`, `-n`, `-c core.hooksPath=…`, `HUSKY=0`) lived only as prose.
+// Recurrences this block names, so it does not ship as a speculative guard:
+//   - #3703: a worker pushed with `--no-verify` and 56 files were red in CI.
+//   - 2026-09-30 (orchestrator): `git commit --no-verify -m x` was used for a
+//     scratch probe commit and guard-bash let it through with rc=0.
+// False positives cost more than misses here (every Bash call runs this
+// hook), so the allow rows below are the half of the contract that matters.
+describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
+	const DENY: string[] = [
+		// the two incident shapes, verbatim
+		"git commit --no-verify -m x",
+		"git push --no-verify origin fix/3703-x",
+		// the other three subcommands the issue names
+		"git merge --no-verify origin/master",
+		"git rebase --no-verify origin/master",
+		// -n means --no-verify on `git commit`, alone or bundled
+		"git commit -n -m x",
+		"git commit -anm x",
+		"git commit -m x -n",
+		// global options before the subcommand do not hide it
+		"git -C /some/worktree commit --no-verify -m x",
+		'git -C "/some dir" push --no-verify',
+		"git -c x=y commit --no-verify -m x",
+		"git -c user.name=a -C /w push --no-verify",
+		// a core.hooksPath override on the command line
+		"git -c core.hooksPath=/dev/null commit -m x",
+		"git -c core.hookspath=/dev/null push origin y",
+		"git -c core.hooksPath= commit -m x",
+		"git --config-env=core.hooksPath=NOHOOKS commit -m x",
+		// a core.hooksPath WRITE, in every spelling a write can take
+		"git config core.hooksPath /dev/null",
+		"git config --local core.hooksPath /dev/null",
+		"git config --global core.hooksPath ''",
+		"git config --unset core.hooksPath",
+		"git config --unset-all core.hooksPath",
+		"git config --add core.hooksPath /x",
+		"git config set core.hooksPath /x",
+		"git config unset core.hooksPath",
+		// the bypass variables the repo's hook runner honours
+		"HUSKY=0 git commit -m x",
+		'HUSKY="0" git push origin y',
+		"env HUSKY=0 git commit -m x",
+		"PI_LENS_SKIP_HOOKS=1 git push origin y",
+		"PI_LENS_SKIP_HOOKS=0 git commit -m x",
+		"export HUSKY=0; git commit -m x",
+		// inside a substitution, and after a chain
+		'echo "$(git commit --no-verify -m x)"',
+		"git add -A && git commit --no-verify -m x",
+	];
+
+	it.each(DENY)("denies %j through the real hook entry", (command) => {
+		const result = runHook(command);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("hook");
+		// the one-line teaching message names the sanctioned path
+		expect(result.stderr).toContain("scripts/red-on-base.mjs");
+		expect(result.stderr.trim().split("\n")).toHaveLength(1);
+	});
+
+	const ALLOW: string[] = [
+		// -n is not a bypass outside `git commit`
+		"git log -n 5",
+		"head -n 5 file.txt",
+		"git push -n origin y", // --dry-run, not --no-verify
+		"git push --dry-run origin y",
+		"git merge -n origin/master", // --no-stat
+		"git diff -n",
+		// flag text that is a message/body, not a flag
+		'git commit -m "drop --no-verify from the runbook"',
+		'git commit -m "--no-verify"',
+		'git commit -m "-n"',
+		"git commit -F msg.txt",
+		"git commit -am x",
+		"git commit -mn",
+		"git commit -unormal -m x",
+		"git commit --no-edit --amend",
+		"git commit -m x -- -n",
+		// heredoc, quoted PR body, --body-file: inert
+		"git commit -F - <<'EOF'\nsubject\n\nmentions --no-verify and HUSKY=0\nEOF",
+		"git commit -m \"$(cat <<'EOF'\nbody with git commit --no-verify\nEOF\n)\"",
+		'gh pr create --title t --body "never use --no-verify or -n"',
+		"gh pr create --title t --body-file PR_BODY.md",
+		"gh pr edit 1 --body-file PR_BODY.md",
+		"echo git commit --no-verify # a comment about it",
+		"git commit -m x # --no-verify",
+		// global options without a bypass
+		"git -c x=y commit -m x",
+		"git -C /some/worktree commit -m x",
+		"git -c user.name=a push origin y",
+		// core.hooksPath READS, which setup-git-hooks.mjs itself does
+		"git config core.hooksPath",
+		"git config --get core.hooksPath",
+		"git config --local --get core.hooksPath",
+		"git config get core.hooksPath",
+		"git config user.name x",
+		// env that is not the bypass, or not on a hook-running git command
+		"HUSKY=1 git commit -m x",
+		"HUSKY=0 npm install",
+		"PI_LENS_SKIP_HOOKS= git commit -m x",
+		"echo HUSKY=0",
+		"export HUSKY=0",
+		// the sanctioned, recorded pre-push lock opt-out (#3717)
+		"PI_LENS_PREPUSH_LOCK_SKIP=1 git push origin y",
+		// subcommands the rule does not cover
+		"git -c core.hooksPath=/x status",
+		"git log --no-verify",
+	];
+
+	it.each(ALLOW)("allows %j through the real hook entry", (command) => {
+		const result = runHook(command);
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("declares hookBypass in the DenyRule union the .d.mts exports", () => {
+		// Same guard as the sibling rule declarations: remove "hookBypass" from
+		// the union and `npm run lint` fails with TS2322 before the suite runs.
+		const rule: DenyRule = "hookBypass";
+		expect(RULE_MESSAGES[rule]).toContain("red-on-base");
+	});
+
+	// Recurrence this prevents: a fourth skip variable added to a husky hook
+	// that this guard never learns about (the same hand-list-mirroring-a-
+	// -registry drift the repo's single-source rule names). The names are read
+	// from the hooks' own `if [ -n "$NAME" ]` opt-outs and from husky's own
+	// dispatcher, so a new opt-out reds here instead of shipping unguarded.
+	it("denies every skip variable the repo's hook runner honours", () => {
+		const names = new Set<string>();
+		for (const hookFile of ["pre-commit", "pre-push"]) {
+			const text = readFileSync(join(repoRoot, ".husky", hookFile), "utf8");
+			for (const m of text.matchAll(/\[ -n "\$([A-Z_]+)" \]/g)) names.add(m[1]);
+		}
+		expect([...names]).toContain("PI_LENS_SKIP_HOOKS");
+		for (const name of names)
+			expect(findDeny(`${name}=1 git commit -m x`), name).toBe("hookBypass");
+		const dispatcher = readFileSync(
+			join(repoRoot, "node_modules", "husky", "husky"),
+			"utf8",
+		);
+		expect(dispatcher).toContain('[ "${HUSKY-}" = "0" ] && exit 0');
+		expect(findDeny("HUSKY=0 git commit -m x")).toBe("hookBypass");
+	});
+});
