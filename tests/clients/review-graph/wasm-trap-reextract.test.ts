@@ -62,16 +62,15 @@ function pythonProject(tag: number): { tmpDir: string; files: string[] } {
 	return { tmpDir: env.tmpDir, files };
 }
 
-/** Trap b.py's first symbol query once, at the production throw site. */
-async function trapOnce(): Promise<void> {
+/** Trap a b.py symbol query at the production throw site while `shouldTrap()`. */
+async function trapWhile(shouldTrap: () => boolean): Promise<void> {
 	const { Query } = await loadWebTreeSitter();
 	const realMatches = Query.prototype.matches;
-	let traps = 1;
 	vi.spyOn(Query.prototype, "matches").mockImplementation(function (
 		this: InstanceType<typeof Query>,
 		...args: Parameters<typeof realMatches>
 	) {
-		if (args[0].text.includes("trap_here") && traps-- > 0) {
+		if (args[0].text.includes("trap_here") && shouldTrap()) {
 			throw new WebAssembly.RuntimeError("table index is out of bounds");
 		}
 		return realMatches.apply(this, args);
@@ -84,44 +83,56 @@ function symbolNames(graph: Awaited<ReturnType<typeof buildOrUpdateGraph>>) {
 		.filter((name): name is string => name !== undefined);
 }
 
-describe("a one-off trap is retried on every build path (#3605 F2)", () => {
-	it("re-extracts the file after a restart from the persisted graph", async () => {
-		const { tmpDir, files } = pythonProject(21);
-		await trapOnce();
-		const trapped = await buildOrUpdateGraph(tmpDir, files, new FactStore());
-		expect(symbolNames(trapped)).not.toContain("trap_here_fn");
-
-		flushReviewGraphPersistsForTests();
-		clearReviewGraphWorkspaceCache();
-		const restarted = await buildOrUpdateGraph(tmpDir, [], new FactStore());
-
-		expect(getGraphBuildInfoForGraph(restarted).mode).toBe("incremental");
-		expect(symbolNames(restarted)).toContain("trap_here_fn");
-	});
-
-	it("re-extracts the file on a seq fast-path build that names no change", async () => {
-		const { tmpDir, files } = pythonProject(22);
+describe("a file a one-off trap cost is re-extracted (#3605 F2)", () => {
+	it("re-extracts it on a seq fast-path build that names no change, and after a restart", async () => {
+		// Two workspaces, each with a one-off trapped file: `seqRoot` is built
+		// with a seq hint, `restartRoot` is retried after a restart.
+		const seqRoot = pythonProject(22);
+		const restartRoot = pythonProject(21);
 		const seqHint = {
 			projectSeq: () => 0,
 			getFilesChangedSince: (): string[] => [],
 		};
-		await trapOnce();
-		await buildOrUpdateGraph(tmpDir, files, new FactStore(), seqHint);
-
-		const next = await buildOrUpdateGraph(
-			tmpDir,
-			[],
+		let traps = 2;
+		await trapWhile(() => traps-- > 0);
+		await buildOrUpdateGraph(
+			restartRoot.tmpDir,
+			restartRoot.files,
+			new FactStore(),
+		);
+		await buildOrUpdateGraph(
+			seqRoot.tmpDir,
+			seqRoot.files,
 			new FactStore(),
 			seqHint,
 		);
 
+		const next = await buildOrUpdateGraph(
+			seqRoot.tmpDir,
+			[],
+			new FactStore(),
+			seqHint,
+		);
 		expect(getGraphBuildInfoForGraph(next).mode).toBe("seq-fastpath");
 		expect(symbolNames(next)).toContain("trap_here_fn");
+		// The other workspace's trapped file is not pulled into this graph.
+		expect(next.fileNodes.size).toBe(seqRoot.files.length);
+
+		flushReviewGraphPersistsForTests();
+		clearReviewGraphWorkspaceCache();
+		const restarted = await buildOrUpdateGraph(
+			restartRoot.tmpDir,
+			[],
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(restarted).mode).toBe("incremental");
+		expect(symbolNames(restarted)).toContain("trap_here_fn");
 	});
 
-	it("re-extracts the file when a killed build resumes from its checkpoint", async () => {
+	it("re-extracts it when a killed build resumes from its checkpoint", async () => {
 		const { tmpDir, files } = pythonProject(23);
-		await trapOnce();
+		let traps = 1;
+		await trapWhile(() => traps-- > 0);
 		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(
 			files.length,
 		);

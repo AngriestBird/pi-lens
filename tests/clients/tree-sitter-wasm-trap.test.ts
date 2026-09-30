@@ -311,6 +311,37 @@ describe("TreeSitterClient trap keying by input (#3605 F1)", () => {
 		expect(onAbort).not.toHaveBeenCalled();
 	});
 
+	it("hashes no input while nothing has trapped", async () => {
+		// Keying must cost the healthy path nothing: a content hash per parse
+		// is the price only after a trap.
+		const { client } = await liveClient();
+		const key = vi.spyOn(
+			client as unknown as { wasmInputKey: (input: unknown) => string },
+			"wasmInputKey",
+		);
+		const file = pythonFile();
+
+		for (let i = 0; i < 3; i++) {
+			await client.withParsedTree(file, "python", undefined, () => 1);
+		}
+		await client.runQueryOnFile(
+			{
+				id: "healthy-rule",
+				name: "healthy",
+				severity: "warning",
+				category: "test",
+				language: "python",
+				message: "healthy",
+				query: "(function_definition) @fn",
+				metavars: ["fn"],
+			},
+			file,
+			"python",
+		);
+
+		expect(key).not.toHaveBeenCalled();
+	});
+
 	it("charges nothing to the last consumed file once its consumer returns", async () => {
 		const { client } = await liveClient();
 		await client.withParsedTree(pythonFile(), "python", undefined, () => {

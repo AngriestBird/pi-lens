@@ -5307,11 +5307,10 @@ async function trySeqFastpath(
 			.map((file) => normalizeMapKey(file)),
 	);
 	for (const file of normalizedChanged) changedSet.add(file);
-	// #3605: retry a file a one-off wasm trap cost (its stored hash is stamped).
-	for (const [file, state] of _wasmTrappedFiles) {
-		if (state === "retry" && cached.fileSignatures.has(file)) {
-			changedSet.add(file);
-		}
+	// #3605: a trapped file of this workspace is a candidate. A `retry` file's
+	// stored hash is stamped, so it re-extracts; a `charged` one costs a hash.
+	for (const file of _wasmTrappedFiles.keys()) {
+		if (cached.fileSignatures.has(file)) changedSet.add(file);
 	}
 	const changed = [...changedSet];
 	if (changed.length > SEQ_FASTPATH_MAX_CHANGES) {

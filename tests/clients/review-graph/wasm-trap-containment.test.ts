@@ -7,7 +7,8 @@
  * (`queryMatches` in the symbol extractor), and the build is the real
  * `buildOrUpdateGraph` over real python files and real grammars.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDegradationSummary } from "../../../clients/degradation-ledger.js";
 import { loadWebTreeSitter } from "../../../clients/deps/web-tree-sitter.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
@@ -17,6 +18,7 @@ import {
 	clearReviewGraphWorkspaceCache,
 	flushReviewGraphPersistsForTests,
 	getGraphBuildInfoForGraph,
+	reviewGraphCachePath,
 } from "../../../clients/review-graph/builder.js";
 import { logReviewGraph } from "../../../clients/review-graph-logger.js";
 import { getSharedTreeSitterClient } from "../../../clients/tree-sitter-shared.js";
@@ -179,6 +181,14 @@ describe("review-graph build contains a web-tree-sitter trap to its file (#3605)
  * the first `describe` spends one.
  */
 describe("review graph after a contained trap (#3605 F2, F3)", () => {
+	// Persist only when a test flushes, on the main thread.
+	beforeEach(() => {
+		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "3600000";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS;
+	});
+
 	it("re-extracts a file a one-off trap cost on the next build", async () => {
 		const { tmpDir, files } = pythonProject(
 			"def trap_here_fn():\n    return 11\n",
@@ -189,6 +199,21 @@ describe("review graph after a contained trap (#3605 F2, F3)", () => {
 		const trapped = await buildOrUpdateGraph(tmpDir, files, new FactStore());
 		expect(symbolNames(trapped)).not.toContain("trap_here_fn");
 		expect(getGraphBuildInfoForGraph(trapped).wasmTrappedFiles).toBe(1);
+
+		// Another workspace neither counts nor stores the trapped file.
+		const other = pythonProject("def beta_fn():\n    return 11\n");
+		const clean = await buildOrUpdateGraph(
+			other.tmpDir,
+			other.files,
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(clean).wasmTrappedFiles).toBeUndefined();
+		const cleanAgain = await buildOrUpdateGraph(
+			other.tmpDir,
+			[],
+			new FactStore(),
+		);
+		expect(getGraphBuildInfoForGraph(cleanAgain).mode).toBe("cached");
 
 		const next = await buildOrUpdateGraph(tmpDir, [], new FactStore());
 		expect(getGraphBuildInfoForGraph(next).mode).toBe("incremental");
@@ -218,15 +243,6 @@ describe("review graph after a contained trap (#3605 F2, F3)", () => {
 		// One unit of budget and one charge.
 		expect(wasmTrapCount()).toBe(trappedBefore + 2);
 
-		// A graph that does not hold the charged file is not degraded by it.
-		const other = pythonProject("def beta_fn():\n    return 12\n");
-		const clean = await buildOrUpdateGraph(
-			other.tmpDir,
-			other.files,
-			new FactStore(),
-		);
-		expect(getGraphBuildInfoForGraph(clean).wasmTrappedFiles).toBeUndefined();
-
 		// A restart reads the persisted graph, which marks the charged file, so
 		// the new process tries it again.
 		flushReviewGraphPersistsForTests();
@@ -234,5 +250,29 @@ describe("review graph after a contained trap (#3605 F2, F3)", () => {
 		const restarted = await buildOrUpdateGraph(tmpDir, [], new FactStore());
 		expect(getGraphBuildInfoForGraph(restarted).mode).toBe("incremental");
 		expect(getGraphBuildInfoForGraph(restarted).wasmTrappedFiles).toBe(1);
+
+		// So does a checkpoint a killed full build left behind.
+		flushReviewGraphPersistsForTests();
+		fs.rmSync(reviewGraphCachePath(tmpDir), { force: true });
+		clearReviewGraphWorkspaceCache();
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = String(
+			files.length,
+		);
+		try {
+			await expect(
+				buildOrUpdateGraph(tmpDir, [], new FactStore()),
+			).rejects.toThrow(/checkpoint_test_abort/);
+		} finally {
+			delete process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER;
+		}
+		clearReviewGraphWorkspaceCache();
+		await buildOrUpdateGraph(tmpDir, [], new FactStore());
+		const resumedRows = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.filter((entry) => entry.phase === "checkpoint_resumed");
+		expect(resumedRows).toEqual([
+			expect.objectContaining({ reused: 2, stale: 1, remaining: 1 }),
+		]);
 	});
 });
