@@ -50,6 +50,11 @@ import type { TrivyResult } from "./trivy-client.js";
 import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
 import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
 import { secretsLane } from "./turn-end/lanes/secrets.js";
+import {
+	type ComposedPart,
+	type DeliveryHold,
+	planDeliveryHolds,
+} from "./turn-end/delivery-holds.js";
 import type { TurnEndLaneContext } from "./turn-end/lane.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
@@ -134,6 +139,7 @@ import {
 	drainPendingRunnerFindings,
 	dropStaleRunnerFindings,
 	pendingRunnerFindingsSize,
+	requeueRunnerFindings,
 } from "./dispatch/pending-runner-findings.js";
 // #1631 review V2: moved to its own leaf module so a low-level store
 // (widget-state.ts) can use the marker without importing this orchestrator —
@@ -651,20 +657,45 @@ export function cancelLSPIdleReset(): void {
 	}
 }
 
-function capTurnEndMessage(content: string): string {
+function capTurnEndMessage(content: string, held = 0): string {
 	const maxLines = RUNTIME_CONFIG.turnEnd.maxLines;
 	const maxChars = RUNTIME_CONFIG.turnEnd.maxChars;
+	// #3813: when the cap cuts a part a producer is holding for the next turn,
+	// the marker says how many, in the one line the cap already appends.
+	const marker =
+		held > 0
+			? `... (truncated; ${held} held for the next turn)`
+			: "... (truncated)";
 
 	let out = content;
 	const lines = out.split("\n");
 	if (lines.length > maxLines) {
-		out = `${lines.slice(0, maxLines).join("\n")}\n... (truncated)`;
+		out = `${lines.slice(0, maxLines).join("\n")}\n${marker}`;
 	}
 	if (out.length > maxChars) {
-		out = `${sliceAtCodePointBoundaries(out, 0, maxChars)}\n... (truncated)`;
+		out = `${sliceAtCodePointBoundaries(out, 0, maxChars)}\n${marker}`;
 	}
 
 	return out;
+}
+
+/**
+ * #3813: how many chars of `content` `capTurnEndMessage` keeps (all of it when
+ * nothing is cut). The same two axes as the cap, so what a hold is judged
+ * against is exactly what the agent receives.
+ */
+function turnEndKeptChars(content: string): number {
+	const maxLines = RUNTIME_CONFIG.turnEnd.maxLines;
+	const maxChars = RUNTIME_CONFIG.turnEnd.maxChars;
+	const lines = content.split("\n");
+	const kept =
+		lines.length > maxLines
+			? lines.slice(0, maxLines).join("\n").length
+			: content.length;
+	return Math.min(
+		kept,
+		sliceAtCodePointBoundaries(content, 0, maxChars).length,
+	);
 }
 
 function sliceAtCodePointBoundaries(
@@ -993,6 +1024,50 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		},
 	});
 
+	/** #1944/#1950: demotions retired after their delivery limit. */
+	let demotedFindingsRetired = 0;
+	/**
+	 * #3813: one-shot state a producer consumes for a part of this message,
+	 * held until the cap has said what the message kept (see
+	 * `clients/turn-end/delivery-holds.ts`). It folds in #1950 fix-round F1's
+	 * deferred dependency-drift commits: that dedupe silences a turn whose
+	 * rendered content is byte-identical to the last one delivered, so a
+	 * counter must not advance for it (`skipOnSuppressed`).
+	 */
+	const deliveryHolds: DeliveryHold[] = [];
+	/** A session replaced mid-turn owns none of the held state any more. */
+	const holdGeneration = runtime.sessionGeneration;
+	/**
+	 * The two inline-blocker commits a hold runs once its advisory reached the
+	 * message. The past-EOF retire is #1944's "after this ONE delivery"; the
+	 * drift count is #1950's `DEPENDENCY_DRIFT_MAX_DELIVERIES` cap.
+	 */
+	const retirePastEofOnDelivery =
+		(bPath: string, deadLines: readonly number[], displayPath: string) =>
+		(): void => {
+			if (!runtime.retireDemotedPastEofBlocker(bPath, deadLines)) return;
+			demotedFindingsRetired += 1;
+			// Bounded by the ledger's own per-kind/subject tally, and the subject
+			// keeps the discriminating identity (which store, which file).
+			incrementDegradationCount({
+				kind: "demoted-finding-retired",
+				subject: `inline-blocker:${displayPath}`,
+				reason: `file shrank past cited line(s) ${deadLines.join(", ")}; retired after one degraded delivery`,
+			});
+		};
+	const countDriftDeliveryOnDelivery =
+		(bPath: string, displayPath: string) => (): void => {
+			const deliveryCount = runtime.incrementInlineBlockerStaleDelivery(bPath);
+			if (deliveryCount < DEPENDENCY_DRIFT_MAX_DELIVERIES) return;
+			if (!runtime.retireDemotedDependencyDriftBlocker(bPath)) return;
+			demotedFindingsRetired += 1;
+			incrementDegradationCount({
+				kind: "demoted-finding-retired",
+				subject: `inline-blocker:${displayPath}`,
+				reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
+			});
+		};
+
 	// #1631: freshness gate. A cached blocker is a verdict about the file AND
 	// everything it imports; before re-serving it, sweep for out-of-band drift of
 	// the file or its forward imports and demote drifted entries to a
@@ -1035,19 +1110,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Re-surface inline blockers from this turn that the agent didn't fix.
 	// These were shown inline during write/edit but the agent moved on without resolving them.
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
-	/** #1944/#1950: demotions retired after their delivery limit. */
-	let demotedFindingsRetired = 0;
-	/**
-	 * #1950 fix-round F1: dependency-drift delivery-count commits, deferred
-	 * until this turn's content is confirmed NOT suppressed by the
-	 * `turn-end-findings-last` signature dedupe further down. That dedupe
-	 * silences a turn whose rendered content is byte-identical to the last
-	 * one actually delivered — the agent never sees a suppressed turn, so
-	 * committing the counter for it would count a delivery that didn't
-	 * happen. Each entry here is invoked only from the "not suppressed"
-	 * branch below.
-	 */
-	const pendingDependencyDriftDeliveries: Array<() => void> = [];
 	/** #3246: one bounded record per TURN for the policy pass, never per finding. */
 	const inlinePolicyEntries: InlineBlockerPolicyTallyEntry[] = [];
 	/**
@@ -1076,17 +1138,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// session.
 			const deadLines = blockerPastEof.deadLinesByPath.get(bPath) ?? [];
 			const degraded = degradeDemotedFindingBody(summary, { deadLines });
-			const retired = runtime.retireDemotedPastEofBlocker(bPath, deadLines);
+			// #3813: asked, not retired. The retire runs once the cap has let
+			// this part through (the hold below); a cut part leaves it pending.
+			const retires = runtime.wouldRetireDemotedPastEofBlocker(
+				bPath,
+				deadLines,
+			);
 			let retirementNote: string | undefined;
-			if (retired) {
-				demotedFindingsRetired += 1;
-				// Bounded by the ledger's own per-kind/subject tally, and the subject
-				// keeps the discriminating identity (which store, which file).
-				incrementDegradationCount({
-					kind: "demoted-finding-retired",
-					subject: `inline-blocker:${displayPath}`,
-					reason: `file shrank past cited line(s) ${deadLines.join(", ")}; retired after one degraded delivery`,
-				});
+			if (retires) {
 				retirementNote = formatRetirementNote(deadLines);
 			} else if (staleReason === "dependency-drift") {
 				// #1950: a dependency-drift demotion is recoverable (its coordinates
@@ -1097,37 +1156,33 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// first. Cap it at DEPENDENCY_DRIFT_MAX_DELIVERIES instead.
 				//
 				// The count driving THIS render is a peek (fix-round F1): the actual
-				// increment is deferred to `pendingDependencyDriftDeliveries` below,
-				// committed only once this turn's content is known to reach the
-				// agent, so a suppressed turn's tentative render never advances the
-				// stored count.
+				// increment is the hold's `onDelivered`, committed only once this
+				// turn's content is known to reach the agent, so neither a
+				// suppressed turn's tentative render nor a part the cap cut ever
+				// advances the stored count.
 				const tentativeCount =
 					runtime.peekInlineBlockerStaleDeliveryCount(bPath) + 1;
 				if (tentativeCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
 					retirementNote = formatDeliveryCapNote(tentativeCount);
 				}
-				pendingDependencyDriftDeliveries.push(() => {
-					const deliveryCount =
-						runtime.incrementInlineBlockerStaleDelivery(bPath);
-					if (deliveryCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
-						const capRetired =
-							runtime.retireDemotedDependencyDriftBlocker(bPath);
-						if (capRetired) {
-							demotedFindingsRetired += 1;
-							incrementDegradationCount({
-								kind: "demoted-finding-retired",
-								subject: `inline-blocker:${displayPath}`,
-								reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
-							});
-						}
-					}
+			}
+			const advisoryPart =
+				`${STALE_LINE_MARKER} ${displayPath}:\n${degraded.body}` +
+				(retirementNote ? `\n${retirementNote}` : "");
+			// @delivery-surface: runtime-turn:unresolved-inline-blocker
+			advisoryParts.push(advisoryPart);
+			if (retires) {
+				deliveryHolds.push({
+					part: advisoryPart,
+					onDelivered: retirePastEofOnDelivery(bPath, deadLines, displayPath),
+				});
+			} else if (staleReason === "dependency-drift") {
+				deliveryHolds.push({
+					part: advisoryPart,
+					onDelivered: countDriftDeliveryOnDelivery(bPath, displayPath),
+					skipOnSuppressed: true,
 				});
 			}
-			// @delivery-surface: runtime-turn:unresolved-inline-blocker
-			advisoryParts.push(
-				`${STALE_LINE_MARKER} ${displayPath}:\n${degraded.body}` +
-					(retirementNote ? `\n${retirementNote}` : ""),
-			);
 		} else {
 			// #3246: the agent may have marked one of these blockers
 			// `false-positive` AFTER the record was written, via
@@ -1288,7 +1343,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		NonNullable<(typeof cascadeRuns)[number]["result"]>,
 		{ carriedTurns: number; observedAt: number | undefined }
 	>();
+	// #3813: the run behind each result, so a section the cap cuts can hand
+	// exactly the runs it rendered back to the coordinator.
+	const runByResult = new Map<
+		NonNullable<(typeof cascadeRuns)[number]["result"]>,
+		(typeof cascadeRuns)[number]
+	>();
 	for (const r of cascadeRuns) {
+		if (r.result) runByResult.set(r.result, r);
 		if (r.result && (r.carriedTurns ?? 0) > 0 && r.carriedTurns !== undefined) {
 			carriedMetaByResult.set(r.result, {
 				carriedTurns: r.carriedTurns,
@@ -1296,6 +1358,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		}
 	}
+	// #3813: `consumeCascadeRuns` drained every run before the cap runs. A run
+	// whose rendering the cap cuts goes back through `appendCascadeRun`, so
+	// `beginTurn` carries it to the next turn_end within its existing one-turn
+	// carry bound. A coverage advisory hands back the run WITHOUT its result:
+	// the section rides ahead of every advisory, so a run whose advisory is cut
+	// may have had its section delivered, and must not deliver it twice.
 	// #1550 class sweep: every cascade record below summarises `cascadeResults`
 	// — runs, which carry their own paths and can be carried across turns
 	// (#1443) — so labelling them with the turn's first EDITED file is the same
@@ -1320,6 +1388,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 		}
 		const parts: string[] = [];
+		const sectionRuns: Array<(typeof cascadeRuns)[number]> = [];
 		// #1446 item 1: track what actually gets injected — a suppressed result
 		// (real formatted cascade text, but every one of its neighbors was claimed
 		// by a LATER result — see the reverse-iteration ownership pass above) was
@@ -1348,6 +1417,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						: result.formatted,
 				);
 				if (carrySuffix) carriedRunsRendered += 1;
+				const sectionRun = runByResult.get(result);
+				if (sectionRun) sectionRuns.push(sectionRun);
 				injectedNeighborCount += result.neighbors.length;
 				injectedDiagnosticCount += result.neighbors.reduce(
 					(s, n) => s + n.diagnostics.length,
@@ -1408,6 +1479,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const section = parts.join("\n\n");
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
+			deliveryHolds.push({
+				part: section,
+				onHeld: () => {
+					for (const run of sectionRuns) runtime.appendCascadeRun(run);
+				},
+			});
 			// #1446 item 1: proves the cascade section reached `blockerParts` —
 			// i.e. it was QUEUED for persistence into the turn-end advisory — not
 			// that it reached the agent. The counters alone (cascade_result,
@@ -1559,6 +1636,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// so the carry label read as a property of that one file.
 			return `${advisory}\n${suffix}`;
 		};
+		const holdAdvisory = (
+			advisory: string | undefined,
+			runs: typeof indeterminateRuns,
+		): void => {
+			if (advisory === undefined) return;
+			deliveryHolds.push({
+				part: advisory,
+				onHeld: () => {
+					for (const run of runs)
+						runtime.appendCascadeRun({ ...run, result: undefined });
+				},
+			});
+		};
 		const graphAdvisory = withCarryLabel(
 			buildAdvisory(graphRuns, {
 				lead: (fileCount, reasons) =>
@@ -1574,6 +1664,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (graphAdvisory) advisoryParts.push(graphAdvisory);
+		holdAdvisory(graphAdvisory, graphRuns);
 
 		const bindingAdvisory = withCarryLabel(
 			buildAdvisory(bindingRuns, {
@@ -1587,6 +1678,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
+		holdAdvisory(bindingAdvisory, bindingRuns);
 
 		const budgetAdvisory = withCarryLabel(
 			buildAdvisory(budgetRuns, {
@@ -1607,6 +1699,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
+		holdAdvisory(budgetAdvisory, budgetRuns);
 
 		const fileCount = new Set(
 			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
@@ -3859,10 +3952,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		) {
 			runnerFindingsFailed += 1;
 			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
+			const failedNote = `❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`;
+			// #3813: the drain above removed this settled entry for good. If the
+			// cap cuts the note, hand back the failure alone (the findings, if
+			// any, are judged on their own part below).
+			deliveryHolds.push({
+				part: failedNote,
+				onHeld: () =>
+					requeueRunnerFindings({
+						...pending,
+						result: { ...result, diagnostics: [] },
+					}),
+			});
 			// @delivery-surface: runtime-turn:late-runner-findings
-			advisoryParts.push(
-				`❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`,
-			);
+			advisoryParts.push(failedNote);
 		}
 		const findings = result.diagnostics;
 		if (findings.length === 0) continue;
@@ -3935,6 +4038,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (lateBlocking) unlabeledAdvisoryParts.add(lateRunnerPart);
 		// @delivery-surface: runtime-turn:late-runner-findings
 		advisoryParts.push(lateRunnerPart);
+		// #3813: handed back as the findings alone, still pre-policy so a mark
+		// made in the meantime applies, and the stale half already counted
+		// above is not carried (it would be dropped and recorded twice).
+		const {
+			failureKind: _kind,
+			failureMessage: _message,
+			...findingsOnly
+		} = result;
+		deliveryHolds.push({
+			part: lateRunnerPart,
+			onHeld: () =>
+				requeueRunnerFindings({
+					...pending,
+					result: { ...findingsOnly, diagnostics: gate.live },
+				}),
+		});
 	}
 	logLatency({
 		type: "phase",
@@ -4298,10 +4417,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						lateAuxSuppressedHere > 0
 							? `; suppressed by disposition: ${lateAuxSuppressedHere} finding(s)`
 							: "";
+					const lateAuxPart = `🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window${lateAuxSuppressedNote}):\n${lines.join("\n")}`;
 					// @delivery-surface: runtime-turn:late-auxiliary-findings
-					advisoryParts.push(
-						`🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window${lateAuxSuppressedNote}):\n${lines.join("\n")}`,
-					);
+					advisoryParts.push(lateAuxPart);
+					// #3813: the drain cleared the pair. A cut part re-arms it under
+					// the pair's own TTL and ceiling, with its baseline unmoved, so
+					// the scanner's findings are probed and re-gated next turn.
+					deliveryHolds.push({
+						part: lateAuxPart,
+						onHeld: () => {
+							if (
+								!isPendingAuxiliaryPastRearmTtl(pair) &&
+								(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
+							) {
+								rearmPendingAuxiliaryCoverage(pair);
+							}
+						},
+					});
 				}
 			}
 		} catch (err) {
@@ -4464,14 +4596,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const resolvedParts =
 		resolvedLines.length > 0 ? [resolvedLines.join("\n")] : [];
 
-	const labeledAdvisoryParts = advisoryParts.map((p) =>
-		unlabeledAdvisoryParts.has(p)
-			? p
-			: `ℹ️ Advisory — no action required this turn:\n${p}`,
-	);
+	const asIs = (raw: string): ComposedPart => ({ raw, text: raw });
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
-	const findingParts = [
+	// `raw` is the entry as the producer pushed it, which is what a delivery
+	// hold names (#3813); `text` is what the message carries.
+	const composedParts: ComposedPart[] = [
 		// #3218 criterion 2: the resolution lines ride FIRST, inside their
 		// sized share, so the cap cuts neither a consumed retirement
 		// (review-3776-verify V1) nor a live blocker (review-3776-r3 W1).
@@ -4479,16 +4609,49 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// verdict), only a status line, and they are part of the block content
 		// so an otherwise empty turn still delivers them ONCE (the coordinator
 		// consumed them).
-		...resolvedParts,
-		...blockerParts,
-		...staleSecretParts,
-		...labeledAdvisoryParts,
+		...resolvedParts.map(asIs),
+		...blockerParts.map(asIs),
+		...staleSecretParts.map(asIs),
+		...advisoryParts.map((raw) => ({
+			raw,
+			text: unlabeledAdvisoryParts.has(raw)
+				? raw
+				: `ℹ️ Advisory — no action required this turn:\n${raw}`,
+		})),
 	];
+	const findingParts = composedParts.map((part) => part.text);
+	let heldSections = 0;
 	if (findingParts.length > 0) {
 		dbg(
 			`turn_end: ${blockerParts.length} blocker section(s), ${advisoryParts.length} advisory section(s) found, persisting for next context`,
 		);
-		const content = capTurnEndMessage(findingParts.join("\n\n"));
+		// #3813: judge every hold against what the cap keeps, before the
+		// message is final: the marker names how many parts were held.
+		const joined = findingParts.join("\n\n");
+		const holdPlan = planDeliveryHolds({
+			holds: deliveryHolds,
+			parts: composedParts,
+			keptChars: turnEndKeptChars(joined),
+			separatorLength: "\n\n".length,
+			fitsAlone: (text) => capTurnEndMessage(text) === text,
+		});
+		const settleHolds = (suppressed: boolean): void => {
+			const outcome = holdPlan.settle({
+				suppressed,
+				isCurrentSession: () => runtime.isCurrentSession(holdGeneration),
+				onFault: (cause) => dbg(`turn_end: delivery hold failed: ${cause}`),
+			});
+			heldSections = outcome.held;
+			if (outcome.held > 0) {
+				// One counted row per turn, never one per held part.
+				incrementDegradationCount({
+					kind: "turn-end-sections-held",
+					subject: "turn-end",
+					reason: `${outcome.held} one-shot section(s) cut by the turn-end cap, kept pending for the next turn`,
+				});
+			}
+		};
+		const content = capTurnEndMessage(joined, holdPlan.heldCount);
 		const signature = `${files
 			.slice()
 			.sort((a, b) => compareOrdinal(a, b))
@@ -4499,7 +4662,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}>("turn-end-findings-last", cwd);
 		if (
 			last?.data?.signature === signature &&
-			last?.data?.sessionId === runtime.telemetrySessionId
+			last?.data?.sessionId === runtime.telemetrySessionId &&
+			// #3813: a retirement is an event, not a persisting finding. The
+			// coordinator already consumed these entries, so an identical
+			// second retirement on consecutive turns (same file, count and
+			// ordinal) would be consumed and never shown (#3776 verify r3 F6).
+			resolvedBlockerFileList.length === 0
 		) {
 			dbg(
 				"turn_end: duplicate findings detected (same session), suppressing re-prompt",
@@ -4535,15 +4703,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					});
 				}
 			}
+			settleHolds(true);
 			clearOwnedTurnState();
 			runtime.fixedThisTurn.clear();
 			resetFormatService();
 			return;
 		}
 		// #1950 fix-round F1: this turn's content is confirmed NOT suppressed —
-		// it is about to reach the agent — so NOW commit the delivery-count
-		// increments the per-blocker loop above only tentatively computed.
-		for (const commit of pendingDependencyDriftDeliveries) commit();
+		// it is about to reach the agent — so NOW settle the holds: commit the
+		// delivery-count increments the per-blocker loop above only tentatively
+		// computed, and hand back whatever the cap cut (#3813).
+		settleHolds(false);
 		const fileSeqByPath: Record<string, number> = {};
 		for (const [filePath, seq] of runtime.getFileSeqEntries()) {
 			fileSeqByPath[normalizeMapKey(path.resolve(filePath))] = seq;
@@ -4707,6 +4877,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// is suppressed or the agent reads only telemetry.
 			resolvedBlockerFiles: resolvedBlockerFileList.length,
 			resolvedBlockerFilesDropped,
+			// #3813: one-shot parts the cap cut that stay pending for the next turn.
+			heldSections,
 			// #1944 AC3: an empty advisory section on its own cannot say whether
 			// the turn had nothing to report or dropped something. This counter
 			// answers that from latency.log even when the payload is empty, and

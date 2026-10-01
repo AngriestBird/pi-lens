@@ -721,7 +721,10 @@ The four primary host hooks are:
   `RuntimeCoordinator.recordProjectMutation`, then run format, autofix, LSP,
   dispatch, and bounded deferred work.
 - `turn_end`: settle deferred work, deliver findings, persist bounded state, and
-  run the test/actionable-warning drains.
+  run the test/actionable-warning drains. One-shot state a producer consumes
+  for a part of the message (a retirement, a delivery count, a drained run)
+  commits only when that part reaches the capped message; a cut part stays
+  pending for the next turn (`clients/turn-end/delivery-holds.ts`, #3813).
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
