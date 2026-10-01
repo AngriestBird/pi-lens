@@ -2,4 +2,8 @@
 section: Fixed
 ---
 
-- After a `/tree`, the actionable-warning quick fix no longer lets the new branch edit a file it never read: the fix is credited with the branch epoch its report entries were built on, not the settle's own.
+---
+section: Fixed
+---
+
+- After a `/tree`, `/fork`, `/new` or a resume, the actionable-warning quick fix no longer lets the new branch edit a file it never read: the fix is credited only with the read-guard epoch and lineage its report entries were built under.
