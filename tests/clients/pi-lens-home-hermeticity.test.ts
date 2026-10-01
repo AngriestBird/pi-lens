@@ -1531,8 +1531,11 @@ describe("every test file that drives a real session_start pins a private PI_LEN
 			'\t(await import("../support/private-lens-home.js")).pinPrivateLensHome("t");',
 			"});",
 		].join("\n");
+		// Same shape as the pin, run after the imports instead of hoisted above them.
+		const notHoisted = pinned.replace("vi.hoisted", "runAfterImports");
 		expect(pinsPrivateLensHome(noRelease)).toBe(false);
 		expect(pinsPrivateLensHome(outsideHoisted)).toBe(false);
+		expect(pinsPrivateLensHome(notHoisted)).toBe(false);
 		// A raw hoisted assignment cannot tell a private home from the shared one.
 		const rawAssignment = [
 			"const lensHome = vi.hoisted(() => {",
