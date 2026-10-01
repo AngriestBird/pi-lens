@@ -486,7 +486,7 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 		expect(smell(report, "read-guard-stale-ranges")?.count).toBe(1);
 	});
 
-	it("E4 session starts count from `session_start fired` with build attribution", () => {
+	it("E4 session starts count from session_start fired with build attribution", () => {
 		// [2026-09-30T20:51:33.141Z] session_start fired
 		// [2026-09-30T20:51:33.142Z] session_start: build identity — commit=cf1b548e ...
 		// A real config_resolution_pending line whose root= sits under the
