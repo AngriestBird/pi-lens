@@ -792,6 +792,21 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		const result = runHook(fx.root, fx.refs);
 		expect(result.status).toBe(0);
 	});
+
+	it("--skip-build skips the build and the self-scan", () => {
+		const fx = makeOrderingFixture();
+		// The scan stub refuses to run before `built.marker` exists, so a scan
+		// that leaks out of the build branch reds here instead of staying a
+		// vacuous "skipped under --skip-build" claim.
+		const result = spawnSync(
+			process.execPath,
+			["scripts/pre-push-targeted-tests.mjs", "--skip-build"],
+			{ cwd: fx.root, encoding: "utf8", input: fx.refs, env: envFor(fx.root) },
+		);
+		expect(result.status).toBe(0);
+		expect(`${result.stdout}\n${result.stderr}`).not.toContain("[scan]");
+		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(false);
+	});
 });
 
 // #3717 recurrence: a busy machine-wide test lock made pre-push exit 0 without

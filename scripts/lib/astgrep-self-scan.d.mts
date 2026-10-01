@@ -43,4 +43,12 @@ export function findingsInChangedFiles(
 	root?: string,
 ): SelfScanFinding[];
 
-export function trackedSelfScanPaths(root?: string, roots?: string[]): string[];
+export function trackedSelfScanFileSet(
+	root?: string,
+	roots?: string[],
+): Set<string> | undefined;
+
+export function findingsInTrackedFiles(
+	findings: SelfScanFinding[],
+	tracked: Set<string> | undefined,
+): SelfScanFinding[];

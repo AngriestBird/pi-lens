@@ -207,11 +207,14 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	return p;
 }
 
-/** Tracked files under the scan roots, from `git ls-files`, so an untracked
- * working-tree scratch file cannot gate a local scan CI would never run it in
- * (#3886). Falls back to the directory roots when git cannot list them (not a
- * work tree, or no tracked file under the roots). */
-export function trackedSelfScanPaths(
+/** The set of tracked files under the scan roots, from `git ls-files`, or
+ * `undefined` when git cannot list them (not a work tree, git unavailable).
+ * The self-scan still runs over the directory roots -- the same argv CI uses --
+ * and drops findings outside this set, so an untracked working-tree scratch file
+ * cannot gate a push CI would never run it in and no file list reaches
+ * ast-grep's argv (Windows cmd.exe/CreateProcess line limits, #3886 r3). A
+ * caller that sees `undefined` keeps the whole directory result. */
+export function trackedSelfScanFileSet(
 	root = repoRoot(),
 	roots = ["clients", "tests"],
 ) {
@@ -226,14 +229,27 @@ export function trackedSelfScanPaths(
 		const files = out
 			.split("\0")
 			.map((line) => line.trim())
-			// A tracked file deleted in the working tree (not yet staged) is not
-			// on disk to scan; `git ls-files` still lists it.
-			.filter((file) => file && fs.existsSync(path.join(root, file)));
-		if (files.length > 0) return files;
+			.filter(Boolean)
+			.map(normalizeFindingPath);
+		return new Set(files);
 	} catch {
-		// Not a git work tree (or git unavailable): fall back to the roots.
+		// Not a git work tree (or git unavailable): fall back to no filter.
+		return undefined;
 	}
-	return roots;
+}
+
+/** Drops findings whose file is not in `tracked` (a set from
+ * `trackedSelfScanFileSet`); an undefined set is a no-op, so a scan that
+ * cannot enumerate tracked files keeps its whole directory result. (#3886) */
+export function findingsInTrackedFiles(findings, tracked) {
+	if (!tracked) return findings;
+	return findings.filter((f) =>
+		tracked.has(normalizeFindingPath(String(f.file ?? ""))),
+	);
+}
+
+function normalizeFindingPath(file) {
+	return file.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
 /** Absolute (real) paths of files changed between
