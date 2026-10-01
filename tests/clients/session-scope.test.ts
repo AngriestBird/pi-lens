@@ -38,12 +38,23 @@ import {
 import { _seedProcessSingletonCellForTests } from "../../clients/process-singletons.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
+	adoptHandoff,
 	beginScope,
+	discardHandoff,
+	forwardHandoff,
 	nextOrderTurn,
+	type PersistedStores,
 	retireScope,
+	stashHandoff,
+	takeHandoff,
 } from "../../clients/session-scope.js";
 import {
+	getRememberedLazyTools,
+	rememberLazyTools,
+} from "../../clients/tool-set-policy.js";
+import {
 	clearWidgetState,
+	exportWidgetState,
 	getFileDiagnostics,
 	recordDiagnostics,
 } from "../../clients/widget-state.js";
@@ -75,6 +86,14 @@ beforeEach(() => {
 
 afterEach(() => {
 	clearWidgetState();
+	// The hand-off slot is a process singleton; leave none behind. A
+	// file-less slot is keyed by a ticket, so replace it with a known one.
+	stashHandoff(beginScope({ role: "primary" }), {
+		reason: "reload",
+		sessionFile: "/s/own.jsonl",
+		targetSessionFile: undefined,
+	});
+	takeHandoff("reload", "/s/own.jsonl");
 	env.cleanup();
 });
 
@@ -276,5 +295,397 @@ describe("#3611 the lineage handle", () => {
 		retireScope(scope, "reload");
 		retireScope(scope, "superseded");
 		expect(scope.retiredBy()).toBe("reload");
+	});
+});
+
+/** A primary scope whose conversation activated `tools`. */
+function scopeWith(tools: string[]) {
+	const scope = beginScope({ role: "primary" });
+	rememberLazyTools(scope, tools);
+	return scope;
+}
+
+/**
+ * #3612 (F2, maintainer decision on #3609): the slot is consumed only by the
+ * start it was left for. The recurrences: a start for another session file
+ * (or a subagent's `startup` in a file-less process) takes the primary's
+ * hand-off, and the real successor starts empty; or a mismatching start
+ * discards a slot its real successor still needs. The S9 model cannot
+ * witness either direction (mutations c05 and c06 survive there).
+ */
+describe("#3612 the hand-off slot (F2)", () => {
+	it("is taken by the start whose reason and session file equal its key, once", () => {
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "fork",
+			sessionFile: "/s/parent.jsonl",
+			targetSessionFile: "/s/child.jsonl",
+		});
+
+		expect(takeHandoff("fork", "/s/child.jsonl")).toEqual(
+			expect.objectContaining({ "lazy-tool-memory": ["ast_grep_search"] }),
+		);
+		expect(takeHandoff("fork", "/s/child.jsonl")).toBeUndefined();
+	});
+
+	it("stays in place for a start with another file, then goes to the matching start", () => {
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "fork",
+			sessionFile: "/s/parent.jsonl",
+			targetSessionFile: "/s/child.jsonl",
+		});
+
+		expect(takeHandoff("fork", "/s/other.jsonl")).toBeUndefined();
+		expect(takeHandoff("fork", undefined)).toBeUndefined();
+		expect(takeHandoff("fork", "/s/child.jsonl")).toBeDefined();
+	});
+
+	// #3819: a file-less slot matched on its reason alone, so a gap
+	// subagent's own reload took the primary's hand-off.
+	it("keys a file-less session on the ticket of the scope that left it", () => {
+		const left = scopeWith(["ast_grep_search"]);
+		// A host without a session manager object leaves an unbound slot; a
+		// WeakMap key that is not an object would throw into the shutdown.
+		for (const sessionManager of ["manager", null])
+			stashHandoff(left, {
+				reason: "reload",
+				sessionFile: undefined,
+				targetSessionFile: undefined,
+				sessionManager,
+			});
+
+		expect(takeHandoff("reload", undefined)).toBeUndefined();
+		expect(takeHandoff("reload", left.scopeId + 1)).toBeUndefined();
+		expect(takeHandoff("startup", left.scopeId)).toBeUndefined();
+		expect(takeHandoff("fork", left.scopeId)).toBeUndefined();
+		expect(takeHandoff("reload", left.scopeId)).toBeDefined();
+	});
+
+	it("is left only for a successor that continues the conversation, keyed by its file", () => {
+		const scope = scopeWith(["ast_grep_search"]);
+		for (const reason of ["new", "resume", "quit", undefined])
+			expect(
+				stashHandoff(scope, {
+					reason,
+					sessionFile: "/s/own.jsonl",
+					targetSessionFile: "/s/child.jsonl",
+				}),
+				String(reason),
+			).toBe(false);
+		expect(takeHandoff("fork", "/s/child.jsonl")).toBeUndefined();
+
+		// pi's reload keeps the session and names no target: the own file keys it.
+		expect(
+			stashHandoff(scope, {
+				reason: "reload",
+				sessionFile: "/s/own.jsonl",
+				targetSessionFile: undefined,
+			}),
+		).toBe(true);
+		expect(takeHandoff("reload", "/s/own.jsonl")).toBeDefined();
+	});
+});
+
+/**
+ * #3612: which source a start adopts, per reason, through the real stores.
+ * The recurrences: a fork or reload that ignores the slot, a resume that
+ * adopts the session it left, and a `/new` that inherits anything.
+ */
+describe("#3612 adoptHandoff", () => {
+	const sidecar = (tools: string[]): PersistedStores => ({
+		savedAt: Date.now(),
+		stores: { "lazy-tool-memory": tools },
+	});
+
+	function start(
+		reason: string | undefined,
+		sessionFile: string | undefined,
+		own?: PersistedStores,
+		parent?: PersistedStores,
+		sessionManager?: Record<string, unknown>,
+	) {
+		const scope = beginScope({ role: "primary" });
+		const loadOwnSidecar = vi.fn(async () => own);
+		const loadParentSidecar = vi.fn(async () => parent);
+		const source = adoptHandoff(scope, {
+			reason,
+			sessionFile,
+			sessionManager,
+			cwd: env.tmpDir,
+			loadOwnSidecar,
+			loadParentSidecar,
+		});
+		return { scope, source, loadOwnSidecar, loadParentSidecar };
+	}
+
+	function missedSubjects(): string[] {
+		return getDegradationSummary()
+			.filter((group) => group.kind === "session-scope-handoff-missed")
+			.flatMap((group) => group.latestReasons.map((r) => r.subject));
+	}
+
+	it("adopts a fork's slot without reading the parent's sidecar", async () => {
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "fork",
+			sessionFile: "/s/parent.jsonl",
+			targetSessionFile: "/s/child.jsonl",
+		});
+		const fork = start("fork", "/s/child.jsonl", undefined, sidecar(["x"]));
+
+		expect(await fork.source).toBe("slot");
+		expect([...getRememberedLazyTools(fork.scope)]).toEqual([
+			"ast_grep_search",
+		]);
+		expect(fork.loadParentSidecar).not.toHaveBeenCalled();
+		expect(missedSubjects()).toEqual([]);
+	});
+
+	it("falls back to the parent's sidecar when no slot was left for the fork, and records the miss", async () => {
+		const fork = start(
+			"fork",
+			"/s/child.jsonl",
+			sidecar(["own"]),
+			sidecar(["lsp_navigation"]),
+		);
+
+		expect(await fork.source).toBe("parent-sidecar");
+		expect([...getRememberedLazyTools(fork.scope)]).toEqual(["lsp_navigation"]);
+		expect(fork.loadOwnSidecar).not.toHaveBeenCalled();
+		expect(missedSubjects()).toEqual(["fork"]);
+	});
+
+	it("falls back to the session's own sidecar when no slot was left for the reload", async () => {
+		const reload = start(
+			"reload",
+			"/s/own.jsonl",
+			sidecar(["ast_grep_outline"]),
+		);
+
+		expect(await reload.source).toBe("own-sidecar");
+		expect([...getRememberedLazyTools(reload.scope)]).toEqual([
+			"ast_grep_outline",
+		]);
+		expect(reload.loadParentSidecar).not.toHaveBeenCalled();
+		expect(missedSubjects()).toEqual(["reload"]);
+	});
+
+	it("resumes from the session's own sidecar before its parent's, and never takes the slot", async () => {
+		const manager = {};
+		const left = scopeWith(["ast_grep_search"]);
+		stashHandoff(left, {
+			reason: "fork",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: manager,
+		});
+		const resume = start(
+			"resume",
+			undefined,
+			sidecar(["own"]),
+			sidecar(["parent"]),
+			manager,
+		);
+
+		expect(await resume.source).toBe("own-sidecar");
+		expect([...getRememberedLazyTools(resume.scope)]).toEqual(["own"]);
+		expect(takeHandoff("fork", left.scopeId)).toBeDefined();
+		expect(missedSubjects()).toEqual([]);
+	});
+
+	// #3819: pi hands a file-less /reload or in-memory /fork successor the
+	// session manager its predecessor's shutdown left the slot from; a gap
+	// subagent's own start carries another manager.
+	it("takes a file-less slot only through the session manager it was left from", async () => {
+		const primaryManager = {};
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: primaryManager,
+		});
+
+		const subagent = start("reload", undefined, undefined, undefined, {});
+		expect(await subagent.source).toBe("none");
+		expect([...getRememberedLazyTools(subagent.scope)]).toEqual([]);
+
+		// #3819 r2 (the r1 review's F1): the subagent's start took nothing
+		// and left the slot for the successor.
+		const successor = start(
+			"reload",
+			undefined,
+			undefined,
+			undefined,
+			primaryManager,
+		);
+		expect(await successor.source).toBe("slot");
+		expect([...getRememberedLazyTools(successor.scope)]).toEqual([
+			"ast_grep_search",
+		]);
+		expect(missedSubjects()).toEqual(["reload"]);
+	});
+
+	// #3819 r2 (TLC's 5-step HandoffOnce trace): a row-17 start demotes the
+	// real successor, which later returns as a primary start of the same
+	// conversation. The recurrence: that start took the stale slot.
+	it("discards the slot at the demoted start it was left for, and records the discard", async () => {
+		const primaryManager = {};
+		for (const [sessionFile, sessionManager] of [
+			["/s/own.jsonl", undefined],
+			[undefined, primaryManager],
+		] as const) {
+			const left = scopeWith(["ast_grep_search"]);
+			stashHandoff(left, {
+				reason: "reload",
+				sessionFile,
+				targetSessionFile: undefined,
+				sessionManager,
+			});
+
+			// Another session's demoted start, or another reason: not its slot.
+			expect(
+				discardHandoff({
+					reason: "reload",
+					sessionFile: "/s/other.jsonl",
+					sessionManager: {},
+				}),
+			).toBe(false);
+			expect(
+				discardHandoff({ reason: "fork", sessionFile, sessionManager }),
+			).toBe(false);
+			expect(
+				discardHandoff({ reason: "reload", sessionFile, sessionManager }),
+			).toBe(true);
+			const later = start(
+				"reload",
+				sessionFile,
+				undefined,
+				undefined,
+				sessionManager,
+			);
+			expect(await later.source).toBe("none");
+			expect([...getRememberedLazyTools(later.scope)]).toEqual([]);
+		}
+		expect(
+			getDegradationSummary()
+				.filter((group) => group.kind === "session-scope-handoff-discarded")
+				.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+		).toEqual(["reload"]);
+	});
+
+	// #3881: a primary shutdown that lands while its own start is still in
+	// flight hands on the slot left for that start, re-keyed to its own
+	// transition. The recurrence: it stashed its empty scope over that slot,
+	// and the next start took the empty one.
+	it("forwards the slot left for an interrupted start to that session's next start, and no other slot", async () => {
+		const manager = {};
+		const cases = [
+			// [stash reason, stash file, stash target, manager, start's file]
+			["reload", "/s/a.jsonl", undefined, undefined, "/s/a.jsonl"],
+			["fork", "/s/a.jsonl", "/s/f.jsonl", undefined, "/s/f.jsonl"],
+			["reload", undefined, undefined, manager, undefined],
+			["fork", undefined, undefined, manager, undefined],
+		] as const;
+		for (const [reason, sessionFile, target, sessionManager, file] of cases) {
+			stashHandoff(scopeWith(["ast_grep_search"]), {
+				reason,
+				sessionFile,
+				targetSessionFile: target,
+				sessionManager,
+			});
+			const interrupted = (shutdown: string, startReason: string) => ({
+				startReason,
+				reason: shutdown,
+				sessionFile: file,
+				targetSessionFile: undefined,
+				sessionManager,
+			});
+
+			// Not the slot left for this start, or a shutdown no start reads
+			// a slot after: the slot stays as it was.
+			expect(forwardHandoff(interrupted("reload", "new"))).toBe(false);
+			expect(forwardHandoff(interrupted("quit", reason))).toBe(false);
+			expect(
+				forwardHandoff({
+					...interrupted("reload", reason),
+					sessionFile: file && "/s/other.jsonl",
+					sessionManager: sessionManager && {},
+				}),
+			).toBe(false);
+			expect(forwardHandoff(interrupted("reload", reason))).toBe(true);
+
+			const next = start("reload", file, undefined, undefined, sessionManager);
+			expect(await next.source).toBe("slot");
+			expect([...getRememberedLazyTools(next.scope)]).toEqual([
+				"ast_grep_search",
+			]);
+		}
+		// An inner fork re-keys to pi's target file.
+		stashHandoff(scopeWith(["ast_grep_search"]), {
+			reason: "reload",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: undefined,
+		});
+		expect(
+			forwardHandoff({
+				startReason: "reload",
+				reason: "fork",
+				sessionFile: "/s/a.jsonl",
+				targetSessionFile: "/s/g.jsonl",
+				sessionManager: undefined,
+			}),
+		).toBe(true);
+		expect(takeHandoff("fork", "/s/g.jsonl")).toMatchObject({
+			"lazy-tool-memory": ["ast_grep_search"],
+		});
+		expect(
+			getDegradationSummary()
+				.filter((group) => group.kind === "session-scope-handoff-interrupted")
+				.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+		).toEqual(["new", "reload", "fork"]);
+	});
+
+	it("starts `pi --fork` (a startup with a parent) from the parent's sidecar", async () => {
+		const child = start(
+			"startup",
+			"/s/child.jsonl",
+			undefined,
+			sidecar(["parent"]),
+		);
+
+		expect(await child.source).toBe("parent-sidecar");
+		expect([...getRememberedLazyTools(child.scope)]).toEqual(["parent"]);
+	});
+
+	it("reads no source for /new and resets the widget", async () => {
+		recordDiagnostics(path.join(env.tmpDir, "a.ts"), [
+			{ tool: "tsc", severity: "error", message: "boom", line: 1 },
+		]);
+		const fresh = start(
+			"new",
+			"/s/new.jsonl",
+			sidecar(["own"]),
+			sidecar(["parent"]),
+		);
+
+		expect(await fresh.source).toBe("none");
+		expect(fresh.loadOwnSidecar).not.toHaveBeenCalled();
+		expect(fresh.loadParentSidecar).not.toHaveBeenCalled();
+		expect([...getRememberedLazyTools(fresh.scope)]).toEqual([]);
+		expect(exportWidgetState().files).toEqual([]);
+	});
+
+	it("leaves the widget alone on /reload: its module outlives the factory re-run", async () => {
+		const file = path.join(env.tmpDir, "a.ts");
+		recordDiagnostics(file, [
+			{ tool: "tsc", severity: "error", message: "boom", line: 1 },
+		]);
+		stashHandoff(scopeWith([]), {
+			reason: "reload",
+			sessionFile: "/s/own.jsonl",
+			targetSessionFile: undefined,
+		});
+		const reload = start("reload", "/s/own.jsonl");
+
+		expect(await reload.source).toBe("slot");
+		expect(exportWidgetState().files.map((f) => f.filePath)).toEqual([file]);
 	});
 });

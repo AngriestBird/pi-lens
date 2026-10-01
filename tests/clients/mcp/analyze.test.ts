@@ -170,6 +170,60 @@ describe("analyzeFile", () => {
 		expect(typeof result.durationMs).toBe("number");
 	});
 
+	// #3752: the dispatcher appends its synthetic coverage notice to
+	// `DispatchResult.warnings` (and to the rendered `output`) AFTER
+	// `visibleDiagnostics` is finalized, so that entry is a warning-bucket member
+	// without being a member of `result.diagnostics` (#3752, reported on a Go and
+	// a PHP file with no toolchain on the host). The serializer counted it in
+	// `counts.warnings` while listing only `result.diagnostics`, so the surface
+	// reported `counts.warnings: 1` beside `diagnostics: []` with no way to see
+	// what the warning was. Every counted finding must appear in the list.
+	it("lists a warnings-bucket entry the dispatcher left out of diagnostics (#3752)", async () => {
+		const coverageNotice = {
+			id: "coverage-unavailable:go:main.go",
+			message:
+				"Pi-lens go analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).",
+			filePath: "main.go",
+			severity: "warning" as const,
+			semantic: "warning" as const,
+			tool: "pi-lens",
+		};
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			warnings: [coverageNotice],
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(result.counts).toEqual({
+			diagnostics: 1,
+			blockers: 0,
+			warnings: 1,
+			advisories: 0,
+			fixed: 0,
+		});
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0]).toMatchObject({
+			severity: "warning",
+			tool: "pi-lens",
+			message: coverageNotice.message,
+		});
+	});
+
+	it("does not duplicate a warnings-bucket entry already listed in diagnostics (#3752)", async () => {
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			diagnostics: [warningDiagnostic],
+			warnings: [warningDiagnostic],
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(result.counts.diagnostics).toBe(1);
+		expect(result.counts.warnings).toBe(1);
+		expect(result.diagnostics).toHaveLength(1);
+	});
+
 	it("counts a deferred LSP runner as ran while preserving its status", async () => {
 		vi.mocked(dispatchForFile).mockResolvedValue({
 			...emptyResult,
@@ -244,6 +298,65 @@ describe("analyzeFile", () => {
 					diagnosticCount: 0,
 				},
 			],
+		});
+	});
+
+	// #3781: the row names why a runner failed. Before, `status` alone could not
+	// tell an agent a broken runner from a run that found blocking problems.
+	it("surfaces each runner's failureKind so findings are not read as a broken runner (#3781)", async () => {
+		const row = (
+			runnerId: string,
+			status: "succeeded" | "failed",
+			failureKind?: string,
+		) => ({
+			runnerId,
+			startTime: 0,
+			endTime: 10,
+			durationMs: 10,
+			status,
+			diagnosticCount: status === "failed" ? 1 : 0,
+			semantic: "warning",
+			...(failureKind !== undefined && { failureKind }),
+		});
+		vi.mocked(dispatchForFile).mockResolvedValue({
+			...emptyResult,
+			latencyReport: {
+				filePath: tsFile,
+				fileKind: "jsts",
+				overallStartMs: 0,
+				overallEndMs: 10,
+				totalDurationMs: 10,
+				runners: [
+					row("lsp", "failed", "blocking_diagnostics"),
+					row("eslint", "failed", "blocking_diagnostics"),
+					row("oxlint", "failed", "timeout"),
+					row("tree-sitter", "succeeded"),
+				],
+				stoppedEarly: false,
+				totalDiagnostics: 2,
+				blockers: 1,
+				warnings: 1,
+			},
+		});
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(
+			result.latency?.runners.map((runner) => [
+				runner.runnerId,
+				runner.status,
+				runner.failureKind,
+			]),
+		).toEqual([
+			["lsp", "failed", "blocking_diagnostics"],
+			["eslint", "failed", "blocking_diagnostics"],
+			["oxlint", "failed", "timeout"],
+			["tree-sitter", "succeeded", undefined],
+		]);
+		// The headline `lsp` summary carries the same answer (#3800 review F3).
+		expect(result.lsp).toMatchObject({
+			status: "failed",
+			failureKind: "blocking_diagnostics",
 		});
 	});
 

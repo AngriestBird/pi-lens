@@ -399,6 +399,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/oxlint.ts": 3,
 		"clients/dispatch/runners/prisma-validate.ts": 1,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
+		"clients/dispatch/runners/rust-clippy.ts": 1,
 		"clients/dispatch/runners/pyright.ts": 1,
 		"clients/dispatch/runners/rubocop.ts": 1,
 		"clients/dispatch/runners/shellcheck.ts": 1,
@@ -519,6 +520,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/debug-handles.ts": 1,
 		"clients/debug-heap.ts": 1,
 		"clients/degradation-ledger.ts": 2,
+		// 0 -> 1 (#3218): the demotion path now drops the promotion-note row as
+		// part of degrading a demoted body, one `Array.prototype.filter` use.
+		"clients/demoted-finding-render.ts": 1,
 		// 9 -> 7 (#3436): deleting `parseMadgeSkips` removed its two
 		// `Array.prototype.filter` uses; `localSkips`/the skip channel it served
 		// were structurally always zero under `--json`.
@@ -590,7 +594,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/config.ts": 3,
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 1,
-		"clients/lsp/index.ts": 48,
+		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
+		// into the changed paths (queued as a save) and their importers (not).
+		"clients/lsp/index.ts": 50,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
@@ -599,7 +605,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/server.ts": 5,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
-		"clients/mcp/analyze.ts": 1,
+		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`
+		// to fold the dispatcher's warnings bucket into the serialized list.
+		"clients/mcp/analyze.ts": 2,
 		"clients/middle-man-analysis.ts": 4,
 		"clients/model-provider.ts": 1,
 		"clients/module-report.ts": 17,
@@ -672,6 +680,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 9,
+		"mcp/tool-arguments.ts": 3,
 		"index.ts": 21,
 	},
 	ignore: {
@@ -865,7 +874,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
 		"clients/install-diagnostics.ts": 12,
-		"clients/installer/index.ts": 106,
+		"clients/installer/index.ts": 107,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
 		"clients/instance-registry-lock.ts": 8,
@@ -915,7 +924,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
-		"clients/probe-home-state.ts": 7,
+		"clients/probe-home-state.ts": 10,
 		"clients/project-changes.ts": 5,
 		"clients/project-conventions.ts": 5,
 		"clients/project-diagnostics/cache.ts": 4,
@@ -948,11 +957,15 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ruff-client.ts": 4,
 		"clients/rules-scanner.ts": 8,
 		"clients/runtime-agent-end.ts": 12,
-		"clients/runtime-coordinator.ts": 27,
+		// 27 -> 28 (#3218): the retire seam reads the removed record with
+		// `path.resolve(filePath)` before naming it resolved.
+		"clients/runtime-coordinator.ts": 28,
 		"clients/runtime-session.ts": 15,
 		"clients/runtime-tool-call.ts": 22,
 		"clients/runtime-tool-result.ts": 22,
-		"clients/runtime-turn.ts": 25,
+		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
+		// blocker set and each resolved entry with `path.resolve`.
+		"clients/runtime-turn.ts": 27,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/sanitize.ts": 2,
@@ -1037,10 +1050,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/read-guard.ts": 20,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
-		"clients/runtime-coordinator.ts": 17,
+		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
+		// `InlineBlockerRecord` (param, path, count, write index).
+		"clients/runtime-coordinator.ts": 23,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
-		"clients/runtime-turn.ts": 6,
+		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker
+		// record.
+		"clients/runtime-turn.ts": 8,
 		"clients/search-read-registration.ts": 1,
 		"clients/test-runner-client.ts": 4,
 		"clients/test-runner-delivery.ts": 15,
@@ -1053,6 +1070,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"index.ts": 3,
 	},
 	snapshot: {
+		"clients/agent-nudge.ts": 1,
 		"clients/dispatch/runners/tree-sitter.ts": 5,
 		"clients/file-utils.ts": 3,
 		"clients/lens-engine.ts": 11,
@@ -1068,21 +1086,28 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/cache.ts": 16,
 		"clients/project-diagnostics/scanner.ts": 10,
 		"clients/project-report.ts": 3,
-		"clients/project-snapshot.ts": 125,
+		"clients/project-snapshot.ts": 128,
+		"clients/read-guard-branch.ts": 2,
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,
 		"clients/reverse-deps.ts": 14,
 		"clients/runtime-session.ts": 45,
 		"clients/runtime-tool-call.ts": 2,
 		"clients/runtime-tool-result.ts": 2,
+		"clients/session-scope.ts": 2,
 		"clients/sgconfig.ts": 3,
 		"clients/tool-policy.ts": 2,
+		"clients/tool-set-policy.ts": 1,
+		"clients/widget-state.ts": 1,
 		"clients/word-index.ts": 8,
 		"tools/lens-diagnostics.ts": 12,
 		"tools/lsp-navigation.ts": 9,
 		"mcp/server.ts": 22,
 	},
 	status: {
+		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
+		// no longer compares the bare `status` field at four sites (37 -> 32), and
+		// the predicate that owns the rule names it once in types.ts (2 -> 5).
 		"clients/actionable-warnings.ts": 5,
 		"clients/advisory-provenance.ts": 5,
 		"clients/ast-grep-client.ts": 7,
@@ -1094,7 +1119,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 6,
 		"clients/config-resolve.ts": 11,
 		"clients/dead-code-client.ts": 3,
-		"clients/dispatch/dispatcher.ts": 37,
+		"clients/dispatch/dispatcher.ts": 32,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
@@ -1130,7 +1155,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/pyright.ts": 4,
 		"clients/dispatch/runners/rubocop.ts": 2,
 		"clients/dispatch/runners/ruff.ts": 2,
-		"clients/dispatch/runners/rust-clippy.ts": 8,
+		"clients/dispatch/runners/rust-clippy.ts": 10,
 		"clients/dispatch/runners/shellcheck.ts": 4,
 		"clients/dispatch/runners/shfmt.ts": 8,
 		"clients/dispatch/runners/spellcheck.ts": 3,
@@ -1152,7 +1177,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 3,
-		"clients/dispatch/types.ts": 1,
+		"clients/dispatch/types.ts": 5,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,
@@ -1261,7 +1286,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/review-graph/types.ts": 1,
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
-		"clients/session-state-store.ts": 3,
+		"clients/session-state-store.ts": 6,
 		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
 		// supplier's resolved `version` (params, `.version` fields, and the
 		// shared version verdict) through the same agreement comparison.

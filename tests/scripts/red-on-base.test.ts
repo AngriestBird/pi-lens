@@ -2,7 +2,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { failedTestIds } from "../../scripts/red-on-base.mjs";
+import {
+	failedTestIds,
+	HEAD_GREEN_MESSAGE,
+} from "../../scripts/red-on-base.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import { gitExecFileSync, gitFixtureEnv } from "../support/git-fixture-env.js";
 
@@ -305,6 +308,38 @@ describe("red-on-base CLI verdicts", () => {
 		expect(result.stdout).toContain(
 			`INCONCLUSIVE  ${A} > (suite failed to run) (suite failed to load on both sides with different errors)`,
 		);
+		expect(result.stdout).toContain(
+			"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.",
+		);
+		// #3748 item 4: the concurrency hint misattributes a load failure.
+		expect(result.stdout).not.toContain("HEAD green when run alone");
+		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
+	});
+
+	it("INCONCLUSIVE: mixed load failure and flaky test print both applicable messages", () => {
+		// #3748 F1: a load failure must not suppress the concurrency hint for a
+		// separate flaky test in the same CLI run.
+		const B = "tests/b.test.mjs";
+		const repo = makeRepo(
+			{
+				files: {
+					[A]: { suiteFailure: "Cannot find module './a'" },
+					[B]: file(pass("flaky")),
+				},
+			},
+			{
+				files: {
+					[A]: { suiteFailure: "SyntaxError: cause B" },
+					[B]: file(red("flaky", [1])),
+				},
+			},
+		);
+		const result = run(repo, [A, B, "--base", "HEAD~1", "--repeat", "3"]);
+		expect(result.status).toBe(3);
+		expect(result.stdout).toContain(
+			"The suite failed to load on both HEAD and base with different errors. Not evidence of unrelated.",
+		);
+		expect(result.stdout).toContain(HEAD_GREEN_MESSAGE);
 		expect(verdictLine(result.stdout)).toBe("VERDICT: INCONCLUSIVE");
 	});
 

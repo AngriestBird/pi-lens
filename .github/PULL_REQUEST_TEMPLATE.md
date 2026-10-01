@@ -58,7 +58,7 @@ pre-existing-red claims carry the
 - [ ] The change has tests (happy path, edge cases, regression test for bugs)
 - [ ] Targeted test files for the touched seams pass locally after `npm run build`; the full suite is CI's job.
 - [ ] Every NEW regression test is proven RED on pre-fix code; the red output is quoted in this PR
-- [ ] Every new guard/branch/filter is mutation-proof: deleting or neutering it reds at least one test
+- [ ] The new guard/branch/filter/cap the PR is about is mutation-proof (deleting or neutering it reds at least one test), and every `Mutation diff` survivor on an added line is killed or shown equivalent
 - [ ] PR title carries the conventional prefix and the issue ref
 - [ ] `npm run lint` passes
 - [ ] `npm run build:dist` succeeds if I changed code under `clients/`, `commands/`, `tools/`, or `index.ts`
@@ -94,7 +94,9 @@ explicitly with why.
 
 ## Observability
 
-The `PR body` check accepts exactly three forms here, nothing else:
+Each new failure path or decision branch (adopt/reset/skip, fence, classify,
+select) names its record as sink plus kind, or says `none: <reason>`. The
+`PR body` check accepts exactly four forms here, nothing else:
 
 1. the literal record kind this diff ADDS in runtime code (a `kind: "..."`
    passed to `recordDegradationOnce` / `incrementDegradationCount` / a
@@ -103,9 +105,15 @@ The `PR body` check accepts exactly three forms here, nothing else:
    the new failure path is observed by a record an existing seam already
    emits (the cited line must sit within 20 lines of that literal, in a
    runtime file, no `..` in the path);
-3. the exact sentence `No new failure path; no record added.` — valid ONLY
+3. `none: <reason>` — a reason of at least three words that is not the
+   template's `<reason>` or placeholder words, valid ONLY when the diff adds
+   no `catch`, `throw`, `return null` or degradation branch in runtime code.
+   When the diff adds a decision branch on a seam, the `none:` lines must
+   name each flagged file by basename (#3875);
+4. the exact sentence `No new failure path; no record added.` — valid ONLY
    when the diff adds no `catch`, `throw`, `return null` or degradation
-   branch in runtime code.
+   branch, AND no `if` / `else` / `switch` / `case` in a runtime file mapped
+   by `formal/coverage-map.json` (the session, lifecycle and delivery seams).
 
 "name the gap" / "not applicable" are refused. One `## Observability`
 section per PR: fix rounds append under `## Round N` and never repeat this

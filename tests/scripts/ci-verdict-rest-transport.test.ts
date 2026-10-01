@@ -745,9 +745,9 @@ describe("run() — REST transport end to end (#3497)", () => {
 			);
 		};
 		const stdoutLines: string[] = [];
-		let exitCode: number | undefined;
+		let result: { code: number; kind: string } | undefined;
 		await withEmptyPathAndToken(async () => {
-			exitCode = await run({
+			result = await run({
 				argv: ["2539"],
 				gitExec,
 				fetchImpl,
@@ -755,7 +755,7 @@ describe("run() — REST transport end to end (#3497)", () => {
 				stderr: () => {},
 			});
 		});
-		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(result?.code).toBe(EXIT_SUCCESS);
 		expect(stdoutLines).toContain("Transport: rest");
 		expect(stdoutLines.join("\n")).toContain("acme/repo@c0ffee");
 	});
@@ -790,9 +790,9 @@ describe("run() — REST transport end to end (#3497)", () => {
 			);
 		};
 		const stdoutLines: string[] = [];
-		let exitCode: number | undefined;
+		let result: { code: number; kind: string } | undefined;
 		await withEmptyPathAndToken(async () => {
-			exitCode = await run({
+			result = await run({
 				argv: ["2539"],
 				gitExec,
 				fetchImpl,
@@ -800,10 +800,14 @@ describe("run() — REST transport end to end (#3497)", () => {
 				stderr: () => {},
 			});
 		});
-		expect(exitCode).toBe(EXIT_FAILURE);
+		expect(result?.code).toBe(EXIT_FAILURE);
+		expect(result?.kind).toBe("red");
 		expect(stdoutLines).toContain("Transport: rest");
 		expect(stdoutLines.join("\n")).not.toContain("failed step");
 		expect(stdoutLines.join("\n")).not.toContain("could not read the job");
+		// #3779: the MUTATION line reads a PR comment through `gh` only; the REST
+		// transport adds no network path for it.
+		expect(stdoutLines.join("\n")).not.toContain("MUTATION");
 	});
 
 	it("still exits 70 when gh is missing and NO token is set (unchanged acceptance case)", async () => {
@@ -813,9 +817,9 @@ describe("run() — REST transport end to end (#3497)", () => {
 		process.env.PATH = "";
 		delete process.env.GH_TOKEN;
 		delete process.env.GITHUB_TOKEN;
-		let exitCode: number | undefined;
+		let result: { code: number; kind: string } | undefined;
 		try {
-			exitCode = await run({
+			result = await run({
 				argv: ["2539"],
 				stdout: () => {},
 				stderr: () => {},
@@ -827,7 +831,7 @@ describe("run() — REST transport end to end (#3497)", () => {
 			if (originalGithubToken === undefined) delete process.env.GITHUB_TOKEN;
 			else process.env.GITHUB_TOKEN = originalGithubToken;
 		}
-		expect(exitCode).toBe(EXIT_TRANSPORT);
+		expect(result?.code).toBe(EXIT_TRANSPORT);
 	});
 
 	function fakeClock(start = 0) {
@@ -859,9 +863,9 @@ describe("run() — REST transport end to end (#3497)", () => {
 				status: 401,
 			});
 		const stderrLines: string[] = [];
-		let exitCode: number | undefined;
+		let result: { code: number; kind: string } | undefined;
 		await withEmptyPathAndToken(async () => {
-			exitCode = await run({
+			result = await run({
 				argv: ["2539"],
 				gitExec,
 				fetchImpl,
@@ -869,8 +873,8 @@ describe("run() — REST transport end to end (#3497)", () => {
 				stderr: (line: string) => stderrLines.push(line),
 			});
 		});
-		expect(exitCode).toBe(EXIT_TRANSPORT);
-		expect(exitCode).not.toBe(EXIT_PENDING);
+		expect(result?.code).toBe(EXIT_TRANSPORT);
+		expect(result?.code).not.toBe(EXIT_PENDING);
 		expect(stderrLines.join("\n")).toContain("401");
 	});
 
@@ -893,9 +897,9 @@ describe("run() — REST transport end to end (#3497)", () => {
 			}
 			return new Response("Bad Gateway", { status: 502 });
 		};
-		let exitCode: number | undefined;
+		let result: { code: number; kind: string } | undefined;
 		await withEmptyPathAndToken(async () => {
-			exitCode = await run({
+			result = await run({
 				argv: ["2539", "--wait", "65"],
 				gitExec,
 				fetchImpl,
@@ -905,7 +909,7 @@ describe("run() — REST transport end to end (#3497)", () => {
 				sleepImpl: clock.sleepImpl,
 			});
 		});
-		expect(exitCode).toBe(EXIT_TRANSPORT);
+		expect(result?.code).toBe(EXIT_TRANSPORT);
 		expect(stderrLines.some((line) => /transient/i.test(line))).toBe(true);
 		expect(stderrLines.some((line) => /HTTP 502/.test(line))).toBe(true);
 		expect(clock.sleeps.length).toBeGreaterThan(0);

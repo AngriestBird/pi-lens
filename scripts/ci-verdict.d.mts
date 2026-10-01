@@ -5,6 +5,12 @@ export declare const EXIT_DIRTY: number;
 export declare const EXIT_PENDING: number;
 export declare const EXIT_USAGE: number;
 export declare const EXIT_TRANSPORT: number;
+export declare function formatExitLine(result: {
+	code: number;
+	kind: string;
+}): string;
+export declare function transportExit(): { code: number; kind: string };
+export declare function crashExit(): { code: number; kind: string };
 export declare const ABSENT_REQUIRED_REARM_MINUTES: number;
 export declare function formatAbsentRequiredReason(
 	sha: string,
@@ -360,7 +366,7 @@ export declare function run(args?: {
 		sha: string;
 		verdict: Verdict;
 	}) => void;
-}): Promise<number>;
+}): Promise<{ code: number; kind: string }>;
 
 export declare function callWithTransientRetry<T>(
 	call: (remainingMs: number | undefined) => T | Promise<T>,
@@ -413,6 +419,29 @@ export declare function formatGatingSplit(
 	rows: VerdictRow[],
 	failingRows?: VerdictRow[],
 ): string[];
+
+export declare function formatMutationLine(
+	comments: Array<{ id: number; body?: string; user?: { login?: string } }>,
+	prHead: string,
+	rows?: Array<{
+		name: string;
+		status: string | null;
+		conclusion?: string | null;
+	}>,
+): string;
+
+export declare function readMutationLine(options: {
+	repository: string;
+	target: string | number;
+	sha: string;
+	rows?: Array<{
+		name: string;
+		status: string | null;
+		conclusion?: string | null;
+	}>;
+	ghExec?: (args: string[], options?: Record<string, unknown>) => string;
+	timeoutMs?: number;
+}): string;
 
 export interface OpenPr {
 	number: number;

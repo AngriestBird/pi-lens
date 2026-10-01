@@ -98,6 +98,40 @@ function runHook(
 // name (the acceptance criterion: "assert exit code AND the message names
 // the rule").
 const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
+	["git push --force origin branch", "force"],
+	["git push -f origin branch", "force"],
+	// review round 2 F1: an explicit lease must not mask an unconditional
+	// force or a +refspec in the same push.
+	["git push --force --force-with-lease=b:0123abcd origin HEAD:b", "force"],
+	["git push --force-with-lease=b:0123abcd origin +HEAD:b", "force"],
+	// review round 2 F4: mirror can delete and overwrite every remote ref.
+	["git push --mirror origin", "force"],
+	// review round 2 F5: both bundled force spellings and -C must remain
+	// visible to the force-push rule.
+	["git push -fu origin branch", "force"],
+	["git push -uf origin branch", "force"],
+	["git -C /tmp/worktree push -f origin branch", "force"],
+	["git push --force-with-lease=b:012 origin HEAD:b", "force"],
+	["git push --force-with-lease origin branch", "force"],
+	["git push --force-with-lease=branch origin branch", "force"],
+	["git push --force-w origin branch", "force"],
+	["git push --force-with origin branch", "force"],
+	["git push --mirr origin", "force"],
+	["git push origin +HEAD:branch", "force"],
+	["git rebase origin/master", "rebase"],
+	// review round 2 F2: every pull/config spelling that enables rebase is
+	// denied; explicit false remains an allowed opt-out.
+	["git pull --rebase", "rebase"],
+	["git pull -r", "rebase"],
+	["git pull -vr", "rebase"],
+	["git pull --rebase=true", "rebase"],
+	["git -c pull.rebase=true pull", "rebase"],
+	["git config pull.rebase true", "rebase"],
+	["git config branch.main.rebase true", "rebase"],
+	// review round 2 F3: finishing a rebase is denied, while abort/quit
+	// remain available as recovery exits.
+	["git rebase --continue", "rebase"],
+	["git rebase --skip", "rebase"],
 	["git stash", "stash"],
 	["git stash list", "stash"],
 	["git stash pop", "stash"],
@@ -231,10 +265,62 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 		"npx vitest run tests/foo.test.ts 2>&1 | grep -iE 'error|fail'; git add -A && git commit -m x && git push origin y",
 		"chained",
 	],
+	// #3883: a pipeline reads the pipe's status, not ci-verdict's status;
+	// the final `ci-verdict: exit` line is the authoritative status instead.
+	["node scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
+	// #3883 F6: wrappers and spellings the round-1 rule missed.
+	["timeout 600 node scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
+	[
+		"timeout --foreground 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
+	["node --no-warnings scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
+	["node scripts/ci-verdict.mjs 1 | tail; echo ${?}", "ci-verdict"],
+	["node scripts/ci-verdict.mjs 1 |& tail; echo $?", "ci-verdict"],
+	// #3883 R2: `timeout`'s own options take arguments (`-s KILL`, `-k 5`), so
+	// the duration read must not land on the signal.
+	[
+		"timeout -s KILL 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
+	[
+		"timeout -k 5 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
+	// #3883 R2: the single-quote stripper must not treat an apostrophe inside a
+	// double-quoted string as opening a single-quote span that hides `$?`.
+	[
+		"node scripts/ci-verdict.mjs 1 | tail; echo \"it's $? ok it's\"",
+		"ci-verdict",
+	],
+	// #3883 R2: `set +o pipefail` DISABLES pipefail, so the pipeline's `$?` is
+	// the filter's status again.
+	[
+		"set +o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
 ];
 
 // Every allow string the issue lists, which must stay green.
 const ALLOW_CASES: string[] = [
+	"git push",
+	"git push origin HEAD:branch",
+	"git push --force-with-lease=branch:0123456789abcdef0123456789abcdef01234567 origin HEAD:branch",
+	"git rebase --abort",
+	"git rebase --quit",
+	"git pull --rebase=false",
+	"git pull --rebase=no",
+	"git pull --rebase=0",
+	"git pull --rebase=off",
+	"git -c pull.rebase=false pull",
+	"git -c pull.rebase=no pull",
+	"git -c pull.rebase=0 pull",
+	"git -c pull.rebase=off pull",
+	"git config pull.rebase false",
+	"git config pull.rebase no",
+	"git config pull.rebase 0",
+	"git config pull.rebase off",
+	"git config branch.main.rebase false",
 	"git diff > fix.patch",
 	"git checkout HEAD -- x",
 	"git worktree remove -f /tmp/tree",
@@ -244,6 +330,22 @@ const ALLOW_CASES: string[] = [
 	'echo "git stash"',
 	"PI_LENS_HOME=/x node -e \"require('./clients/foo.js')\"",
 	"node scripts/ci-verdict.mjs 1",
+	// #3883: piping output without reading `$?` is a valid way to inspect the
+	// command's output; only `| tail` shows the final `ci-verdict: exit`
+	// line, and this `| head` form reads no status either way.
+	"node scripts/ci-verdict.mjs 1 | head",
+	// #3883: capture `$?` before sending the captured status through a pipe.
+	"node scripts/ci-verdict.mjs 1; echo $? | tail",
+	// #3883 F5: a `;`-separated segment between ci-verdict and the `$?` read is
+	// not a pipe, so the status is still ci-verdict's own.
+	"node scripts/ci-verdict.mjs 1; git status; echo $?",
+	// #3883 F6: `set -o pipefail` makes the pipeline's status the real one.
+	"set -o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
+	// #3883 R2: a later `set +o pipefail` disables it, and re-enabling after a
+	// disable still makes the pipeline's status the real one.
+	"set +o pipefail; set -o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
+	// #3883 F6: a single-quoted `'$?'` is literal text, not the status.
+	"node scripts/ci-verdict.mjs 1 | tail; echo '$?'",
 	// #3723: the sanctioned form of the worktree open/close sequence the
 	// hook's worktreeSymlink rule otherwise denies -- a node script, not a
 	// hand-typed `git worktree remove`, and it loads no clients/ or dist/ code.
@@ -450,6 +552,9 @@ function commandHash(command: string): string {
 //     set entirely (the `timeout` word was an unrecognized command, not
 //     stripped).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
+	// #3888 audit: no executable historical `git push --force`, `+refspec`,
+	// or `git rebase` rows were present; prose and commit-message mentions are
+	// inert and remain correctly allowed by the corpus test.
 	"21def4efd19e12fd4fcb3f0cfcbc7f000814ed54d6ecdb39701e74b08288811f",
 	"22441661595314c7a8207f7cb04bee63c81882c05e64e5325d7245ffcb3ec5d7",
 	// #3471 checkUngated -- audited true positives, round 1 (20):
@@ -494,6 +599,15 @@ const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"830516326aef8a7961d80c8b2ebcf53243a6c3408a2120f4bb6dcfc3386b3650",
 	"f8e25082d8aab77f62006719b1a214b65cb87af7faeb8d5baf12574d9480c366",
 	"cad4314ec40a34fb85ae43f865f96b5862397f363e26003cc814e87dfafceebf",
+	// #3883 (round 2): six real historical `ci-verdict … | tail; echo "exit=$?"`
+	// reads the new rule flags. Each was read in full; the `$?` is the tail's
+	// status, not ci-verdict's verdict, and none enables `pipefail` first.
+	"71eeb73974cf43c002ee51e46d0ad68a98243e20ded231956f12bf8948c547ab",
+	"c9d112f10e0bc11cad5f0fdf866da6237cb90a92d0c8dbf70fcf189cbfb6e870",
+	"e2cc62fdb1cd8355b95d36151544d43a77e35678b98007dddd206c77fe5cedf2",
+	"a22ad5af048cb1448818b448f7c18287dbfeea08df29e05b0bf05e254ca0eaba",
+	"94854ee02d361bd93e7e8b4020fb49cb30573937b576e435abffb6a1734827dd",
+	"6ffdccbc34f482d728a5d85c70a93409ce0fd45ebf315a0fb8c931ef2aa4d4d5",
 ]);
 
 const EXPECTED_TRANSCRIPT_ALLOWS = new Set([
@@ -506,6 +620,13 @@ describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
 		const result = runHook(command);
 		expect(result.status).toBe(2);
 		expect(result.stderr.toLowerCase()).toContain(ruleNeedle);
+	});
+
+	it("explains the pipe-safe final line for #3883", () => {
+		const result = runHook("node scripts/ci-verdict.mjs 1 | tail; echo $?");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("final `ci-verdict: exit <N> (<kind>)`");
+		expect(result.stderr).toContain("; echo $?` before the pipe");
 	});
 });
 
@@ -551,6 +672,13 @@ describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)"
 		// Same guard, for #3471's ninth rule.
 		const rule: DenyRule = "checkUngated";
 		expect(RULE_MESSAGES[rule]).toContain("&&");
+	});
+
+	it("declares ciVerdictStatus in the DenyRule union", () => {
+		const rule: DenyRule = "ciVerdictStatus";
+		expect(RULE_MESSAGES[rule]).toContain(
+			"final `ci-verdict: exit <N> (<kind>)`",
+		);
 	});
 });
 
@@ -720,7 +848,7 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 			} else {
 				expect(result.status, command).toBe(2);
 				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained/,
+					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained|ci-verdict|force|rebase/,
 				);
 			}
 		},
@@ -2472,5 +2600,210 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 			if (previous === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previous;
 		}
+	});
+});
+
+// #3778: the "hooks always run" rule (docs/pi-lens-subagent.md: never
+// `--no-verify`, `-n`, `-c core.hooksPath=…`, `HUSKY=0`) lived only as prose.
+// Recurrences this block names, so it does not ship as a speculative guard:
+//   - #3703: a worker pushed with `--no-verify` and 56 files were red in CI.
+//   - 2026-09-30 (orchestrator): `git commit --no-verify -m x` was used for a
+//     scratch probe commit and guard-bash let it through with rc=0.
+// False positives cost more than misses here (every Bash call runs this
+// hook), so the allow rows below are the half of the contract that matters.
+describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
+	const DENY: string[] = [
+		// the two incident shapes, verbatim
+		"git commit --no-verify -m x",
+		"git push --no-verify origin fix/3703-x",
+		// the other three subcommands the issue names
+		"git merge --no-verify origin/master",
+		"git rebase --no-verify origin/master",
+		"git rebase -m --no-verify origin/master", // rebase -m takes no value
+		// git accepts the unambiguous abbreviations (r1 F3)
+		"git commit --no-veri -m x",
+		"git commit --no-verif -m x",
+		"git push --no-veri origin y",
+		"git push --no-verif origin y",
+		"git rebase --no-veri origin/master",
+		"git merge --no-verif origin/master",
+		// a bundle ending on -m/-F takes the NEXT token as its value, and a
+		// later -n is still a flag
+		"git commit -am x -n",
+		"git commit -aF msg.txt -n",
+		"git commit -mx -n", // glued message, so -n is the NEXT flag
+		"git commit -au -n", // -u takes only a glued mode, so -n is a flag
+		// -n means --no-verify on `git commit`, alone or bundled
+		"git commit -n -m x",
+		"git commit -anm x",
+		"git commit -m x -n",
+		// global options before the subcommand do not hide it
+		"git -C /some/worktree commit --no-verify -m x",
+		'git -C "/some dir" push --no-verify',
+		"git -c x=y commit --no-verify -m x",
+		"git -c user.name=a -C /w push --no-verify",
+		// a core.hooksPath override on the command line
+		"git -c core.hooksPath=/dev/null commit -m x",
+		"git -c core.hookspath=/dev/null push origin y",
+		"git -c core.hooksPath= commit -m x",
+		"git --config-env=core.hooksPath=NOHOOKS commit -m x",
+		// a core.hooksPath WRITE, in every spelling a write can take
+		"git config core.hooksPath /dev/null",
+		"git config --local core.hooksPath /dev/null",
+		"git config --global core.hooksPath ''",
+		"git config --unset core.hooksPath",
+		"git config --unset-all core.hooksPath",
+		"git config --add core.hooksPath /x",
+		"git config set core.hooksPath /x",
+		"git config unset core.hooksPath",
+		"git config core.hookspath /x",
+		// the bypass variables the repo's hook runner honours
+		"HUSKY=0 git commit -m x",
+		'HUSKY="0" git push origin y',
+		"env HUSKY=0 git commit -m x",
+		"PI_LENS_SKIP_HOOKS=1 git push origin y",
+		"PI_LENS_SKIP_HOOKS=0 git commit -m x",
+		"export HUSKY=0; git commit -m x",
+		// inside a substitution, and after a chain
+		'echo "$(git commit --no-verify -m x)"',
+		"git add -A && git commit --no-verify -m x",
+	];
+
+	it.each(DENY)("denies %j through the real hook entry", (command) => {
+		const result = runHook(command);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("hook");
+		// the one-line teaching message names the sanctioned path
+		expect(result.stderr).toContain("scripts/red-on-base.mjs");
+		expect(result.stderr.trim().split("\n")).toHaveLength(1);
+	});
+
+	const ALLOW: string[] = [
+		// -n is not a bypass outside `git commit`
+		"git log -n 5",
+		"head -n 5 file.txt",
+		"git push -n origin y", // --dry-run, not --no-verify
+		"git push --dry-run origin y",
+		"git merge -n origin/master", // --no-stat
+		"git diff -n",
+		// flag text that is a message/body, not a flag
+		'git commit -m "drop --no-verify from the runbook"',
+		'git commit -m "--no-verify"',
+		'git commit -m "-n"',
+		// a bundle ending on -m/-F: the detached value is text (r1 F4)
+		'git commit -am "-n"',
+		'git commit -sm "-n"',
+		'git commit -am "--no-verify"',
+		"git commit -aF -n",
+		"git commit --no-ver -m x", // ambiguous: git itself rejects it
+		'git commit --message "--no-verify"',
+		'git commit -F "-n"',
+		'git commit --file "--no-verify"',
+		'git merge -m "--no-verify" origin/master',
+		'git merge -F "--no-verify" origin/master',
+		"git commit -F msg.txt",
+		"git commit -am x",
+		"git commit -mn",
+		"git commit -unormal -m x",
+		"git commit --no-edit --amend",
+		"git commit -m x -- -n",
+		// heredoc, quoted PR body, --body-file: inert
+		"git commit -F - <<'EOF'\nsubject\n\nmentions --no-verify and HUSKY=0\nEOF",
+		"git commit -m \"$(cat <<'EOF'\nbody with git commit --no-verify\nEOF\n)\"",
+		'gh pr create --title t --body "never use --no-verify or -n"',
+		"gh pr create --title t --body-file PR_BODY.md",
+		"gh pr edit 1 --body-file PR_BODY.md",
+		"echo git commit --no-verify # a comment about it",
+		"git commit -m x # --no-verify",
+		// global options without a bypass
+		"git -c x=y commit -m x",
+		"git -C /some/worktree commit -m x",
+		"git -c user.name=a push origin y",
+		// core.hooksPath READS, which setup-git-hooks.mjs itself does
+		"git config core.hooksPath",
+		"git config --get core.hooksPath",
+		"git config --local --get core.hooksPath",
+		"git config get core.hooksPath",
+		"git config core.hooksPath --local",
+		"git config core.editor vim",
+		// env that is not the bypass, or not on a hook-running git command
+		"HUSKY=1 git commit -m x",
+		"HUSKY=0 npm install",
+		"PI_LENS_SKIP_HOOKS= git commit -m x",
+		"HUSKY=0 git status",
+		"echo HUSKY=0",
+		"export HUSKY=0",
+		// the sanctioned, recorded pre-push lock opt-out (#3717)
+		"PI_LENS_PREPUSH_LOCK_SKIP=1 git push origin y",
+		// subcommands the rule does not cover
+		"git -c core.hooksPath=/x status",
+		"git log --no-verify",
+	];
+
+	it.each(ALLOW)("allows %j through the real hook entry", (command) => {
+		const result = runHook(command);
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	// -<letter>n... with a value-taking letter first is a value, not `-n`.
+	it.each([..."mFCctuS"])("commit -%s<value with n> is not a bypass", (l) => {
+		expect(findDeny(`git commit -${l}nx`)).toBeNull();
+	});
+
+	// r1 F1: a core.hooksPath write is denied whatever the value (the repair
+	// `git config core.hooksPath .husky/_` is in the maintainer's transcripts),
+	// so the message must name the sanctioned repair instead.
+	it("a core.hooksPath write names setup-git-hooks as the repair", () => {
+		const result = runHook("git config core.hooksPath /x/.husky/_");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("node scripts/setup-git-hooks.mjs");
+	});
+
+	it("declares hookBypass in the DenyRule union the .d.mts exports", () => {
+		// Same guard as the sibling rule declarations: remove "hookBypass" from
+		// the union and `npm run lint` fails with TS2322 before the suite runs.
+		const rule: DenyRule = "hookBypass";
+		expect(RULE_MESSAGES[rule]).toContain("red-on-base");
+	});
+
+	// Recurrence this prevents: a fourth skip variable added to a husky hook
+	// that this guard never learns about (the same hand-list-mirroring-a-
+	// -registry drift the repo's single-source rule names). The names are read
+	// from the hooks' own `if [ -n "$NAME" ]` opt-outs and from husky's own
+	// dispatcher, so a new opt-out reds here instead of shipping unguarded.
+	it("denies every skip variable the repo's hook runner honours", () => {
+		const names = new Set<string>();
+		for (const hookFile of ["pre-commit", "pre-push"]) {
+			const text = readFileSync(join(repoRoot, ".husky", hookFile), "utf8");
+			for (const m of text.matchAll(/\[ -n "\$([A-Z_]+)" \]/g)) names.add(m[1]);
+		}
+		expect([...names]).toContain("PI_LENS_SKIP_HOOKS");
+		for (const name of names)
+			expect(findDeny(`${name}=1 git commit -m x`), name).toBe("hookBypass");
+		const dispatcher = readFileSync(
+			join(repoRoot, "node_modules", "husky", "husky"),
+			"utf8",
+		);
+		expect(dispatcher).toContain('[ "${HUSKY-}" = "0" ] && exit 0');
+		expect(findDeny("HUSKY=0 git commit -m x")).toBe("hookBypass");
+	});
+});
+
+describe("scripts/hooks/guard-bash.mjs -- branch history guard (#3888)", () => {
+	it("teaches merge-over-rebase and explicit lease authorization", () => {
+		const rebase = runHook("git rebase origin/master");
+		expect(rebase.status).toBe(2);
+		expect(rebase.stderr).toContain("merge `origin/master`");
+		const force = runHook("git push --force origin branch");
+		expect(force.status).toBe(2);
+		expect(force.stderr).toContain("explicit orchestrator authorization");
+	});
+
+	it("declares the new rules in the typed export", () => {
+		const force: DenyRule = "forcePush";
+		const rebase: DenyRule = "rebase";
+		expect(RULE_MESSAGES[force]).toContain("origin/master");
+		expect(RULE_MESSAGES[rebase]).toContain("origin/master");
 	});
 });

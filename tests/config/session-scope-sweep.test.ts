@@ -13,10 +13,10 @@
  * store, in a reset, or here with a written reason — and each migration
  * slice shrinks a pin in its own PR.
  *
+ * §3.8 item 1 (every registered store is declared, and back) and item 2.6
+ * (every `spec.snapshot` is sync) landed with the first stores in S2 (#3612).
+ *
  * Not here, and where it lands:
- * - §3.8 item 1 (every `scope: "store"` registry entry names a
- *   `defineSessionStore`, and back) and item 2.6 (every `spec.snapshot` is
- *   sync) need the store API, which lands with the first store in S2.
  * - §3.8 item 2.4 (every `pi.on` is wrapped) is
  *   `tests/clients/session-event-guard-sweep.test.ts`; the wrapper's `scope`
  *   option lands with the ambient lineage (S3/S4).
@@ -26,7 +26,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { createReadGuard } from "../../clients/read-guard.js";
+import { READ_GUARD_CELL } from "../../clients/read-guard-branch.js";
 import {
+	beginScope,
+	listSessionStores,
+	scopeCell,
+} from "../../clients/session-scope.js";
+import { SESSION_STORE_REGISTRY } from "../support/session-state-registry.js";
+import {
+	clientSourceFiles,
+	clientsRelative,
 	containerDeclarationNames,
 	moduleContainerNames,
 	repoRoot,
@@ -62,9 +72,11 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
 		"lastAnalyzedStateByFile",
 	],
 	"clients/runtime-turn.ts": ["lspIdleResetTimeout", "pendingSweepRearm"],
-	"clients/session-scope.ts": [],
+	// The declared stores (#3612): one entry per `defineSessionStore` call at
+	// module load, never per session; item 1 below pins its members by name.
+	"clients/session-scope.ts": ["sessionStores"],
 	"clients/test-runner-delivery.ts": ["pending"],
-	"clients/tool-set-policy.ts": ["rememberedLazyToolsBySessionFile"],
+	"clients/tool-set-policy.ts": [],
 	"clients/turn-summary.ts": [],
 	"clients/widget-state.ts": [
 		"diagnosticsWriteGuard",
@@ -118,10 +130,10 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
 	mountedLensWidgetUi: "the UI this activation mounted its widget on",
 	ownEventCtx: "the live ctx of this activation's own events",
 	ownedSessionRole: "this activation's primary or secondary role (#1996)",
-	pendingForkSnapshot:
-		"the widget fork stash (#3589): dead on every real /fork; S2 replaces it with the hand-off slot and deletes this row",
 	renderInvalidator: "this activation's widget repaint callback",
 	scope: "this activation's session scope (#3611)",
+	startInFlight:
+		"this activation's primary session_start until it returns, so a shutdown that lands before the start adopted hands on the slot left for it (#3881)",
 	widgetMountFailureLogged: "a once-per-activation log latch for the mount",
 };
 
@@ -168,6 +180,8 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_readGuard: "reset",
 	_readWidenings: "reset",
 	_reportedThisTurn: "reset",
+	_resolvedBlockerFilesDropped: "reset",
+	_resolvedBlockerFilesThisTurn: "reset",
 	_scope: "reset",
 	_sessionStartedAt: "reset",
 	_startupScansInFlight: "reset",
@@ -194,11 +208,10 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 
 /**
  * §3.8 item 2.5: sidecar writers in the conversation-scoped files, by callee
- * and count. S2's one persistence path (`persistScope`) replaces them.
+ * and count. Since S2 (#3612) the one persistence path is `persistScope`
+ * (`clients/session-state-store.ts`), so none remains here.
  */
-const SIDECAR_WRITERS: Readonly<Record<string, readonly string[]>> = {
-	"index.ts": ["saveSessionState", "saveSessionState", "saveSessionState"],
-};
+const SIDECAR_WRITERS: Readonly<Record<string, readonly string[]>> = {};
 
 function read(relative: string): string {
 	return fs.readFileSync(path.join(repoRoot, relative), "utf8");
@@ -313,7 +326,7 @@ describe("session-scope ratchet (#3609 S8)", () => {
 
 	it("admits no new activation-closure let or container without a reason (item 2.2)", () => {
 		const live = liveActivationState();
-		assertNonEmptyScan("activation-closure state", live.length, 13);
+		assertNonEmptyScan("activation-closure state", live.length, 12);
 		expect(
 			diffNames(
 				"activateExtension state",
@@ -362,5 +375,65 @@ describe("session-scope ratchet (#3609 S8)", () => {
 				),
 			);
 		expect(problems).toEqual([]);
+	});
+});
+
+/** A `defineSessionStore` call (not its declaration), in stripped source. */
+const STORE_DECLARATION =
+	/(?<!function\s)\bdefineSessionStore\s*(?:<[^>()]*>)?\s*\(/g;
+
+describe("session stores (#3609 §3.8, #3612)", () => {
+	/**
+	 * The recurrence: a store whose transition behaviour nobody reviewed. A
+	 * `defineSessionStore` call with no registry row, or a row whose store was
+	 * deleted, reds by name.
+	 */
+	it("registers every declared session store, and declares every registered one (item 1)", async () => {
+		const declaring = new Map<string, number>();
+		for (const file of clientSourceFiles()) {
+			const calls = [
+				...stripSource(fs.readFileSync(file, "utf8")).matchAll(
+					STORE_DECLARATION,
+				),
+			].length;
+			if (calls > 0) declaring.set(clientsRelative(file), calls);
+		}
+		for (const file of declaring.keys())
+			await import(`../../clients/${file.replace(/\.ts$/, ".js")}`);
+		const declared = listSessionStores().map((spec) => spec.name);
+		assertNonEmptyScan("declared session stores", declared.length, 4);
+
+		expect(
+			diffNames(
+				"session store",
+				[...declared].sort(),
+				Object.keys(SESSION_STORE_REGISTRY).sort(),
+			),
+		).toEqual([]);
+		// Every call site registered one store: none hides in a loop or branch.
+		expect([...declaring.values()].reduce((a, b) => a + b, 0)).toBe(
+			declared.length,
+		);
+		for (const [name, row] of Object.entries(SESSION_STORE_REGISTRY))
+			expect(declaring.has(row.module), `${name}: ${row.module}`).toBe(true);
+	});
+
+	/**
+	 * The recurrence: an async snapshot. The hand-off snapshots every store in
+	 * `session_shutdown`, which may not await (#2523); a promise there would
+	 * reach the successor as an empty payload.
+	 */
+	it("snapshots every store synchronously, as JSON (item 2.6)", () => {
+		const scope = beginScope({ role: "primary" });
+		scopeCell(scope, READ_GUARD_CELL, () => createReadGuard("sweep-2-6", {}));
+		for (const spec of listSessionStores()) {
+			const payload = spec.snapshot(scope);
+			expect(
+				typeof (payload as { then?: unknown } | undefined)?.then,
+				`${spec.name} snapshot is a thenable`,
+			).not.toBe("function");
+			expect(payload, `${spec.name} snapshot`).not.toBeUndefined();
+			expect(JSON.parse(JSON.stringify(payload)), spec.name).toEqual(payload);
+		}
 	});
 });

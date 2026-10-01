@@ -1,7 +1,10 @@
 import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
-import { noteAuthoritativeContentAttachment } from "./agent-nudge.js";
+import {
+	noteAuthoritativeContentAttachment,
+	queueAgentAdvisory,
+} from "./agent-nudge.js";
 import {
 	captureFileStats,
 	type CaptureOptions,
@@ -24,8 +27,6 @@ import {
 	type SearchReadLocation,
 } from "./search-read-registration.js";
 import type { CacheManager } from "./cache-manager.js";
-import type { GenerationHandle } from "./generation-guard.js";
-import { createFileTime } from "./file-time.js";
 import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	invalidateProjectIgnoreMatcherForPath,
@@ -98,6 +99,7 @@ import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
+import { type LineageHandle, recordDroppedRead } from "./session-scope.js";
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
@@ -206,6 +208,7 @@ interface ToolResultEvent {
 	input: unknown;
 	details?: unknown;
 	content: Array<{ type: string; text?: string }>;
+	structuredContent?: unknown;
 }
 
 interface ToolResultDeps {
@@ -263,8 +266,13 @@ interface ToolResultDeps {
 	/** Internal: synthetic dispatch inherits the parent's ownership decision. */
 	_allowAutonomousWriters?: boolean;
 	/** Internal (#3568): synthetic dispatch inherits the parent's session. */
-	_sessionGeneration?: GenerationHandle;
+	_sessionGeneration?: LineageHandle;
+	/** Internal (#3525): the debounce re-entry keeps its call's stamp decision. */
+	_ownWriteStamp?: OwnWriteStamp;
 }
+
+/** How the agent's own write/edit moves the read guard (#3524, #3525). */
+type OwnWriteStamp = { stampFileTime: boolean; writtenContent?: string };
 
 function ensureToolResultClients(
 	deps: ToolResultDeps,
@@ -487,6 +495,7 @@ function claimPipelineDispatch(args: {
 type ToolResultReturn = {
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
+	structuredContent?: unknown;
 } | void;
 
 interface DebouncedEntry {
@@ -835,7 +844,13 @@ async function dispatchPipelineAnalysis(args: {
 	 * touch and the caller's later admission of that cascade both drop
 	 * through it once the session is replaced.
 	 */
-	sessionGeneration: GenerationHandle;
+	sessionGeneration: LineageHandle;
+	/**
+	 * #3525: false when the agent's own edit passed a moved FileTime, so the
+	 * post-pipeline re-stamp of `filePath` must not credit those bytes.
+	 * Omitted: stamp, as before.
+	 */
+	ownFileTimeStamp?: boolean;
 }): Promise<
 	| { crashed: false; result: PipelineResult }
 	| {
@@ -843,6 +858,7 @@ async function dispatchPipelineAnalysis(args: {
 			response: {
 				content: Array<{ type: string; text?: string }>;
 				isError: true;
+				structuredContent?: unknown;
 			};
 	  }
 > {
@@ -865,6 +881,7 @@ async function dispatchPipelineAnalysis(args: {
 		nativeAppliedPairs,
 		allowAutonomousWriters,
 		sessionGeneration,
+		ownFileTimeStamp = true,
 	} = args;
 	const {
 		event,
@@ -923,6 +940,9 @@ async function dispatchPipelineAnalysis(args: {
 				scheduleWordIndexPersist(dispatchCwd, index, dbg);
 			},
 			sessionGeneration,
+			// #3830: a whole-package fixer's restore ends after this result, so its
+			// loss notice is queued for the session this dispatch belongs to.
+			onFixRunLoss: (notice) => queueAgentAdvisory(notice, sessionGeneration),
 			// #3559: the re-token's turn, read when it is drawn.
 			nextWriteIndex: () => ({
 				turnIndex: runtime.turnIndex,
@@ -1020,6 +1040,7 @@ async function dispatchPipelineAnalysis(args: {
 					? [...event.content, { type: "text", text: notice }]
 					: event.content,
 				isError: true,
+				structuredContent: event.structuredContent,
 			},
 		};
 	} finally {
@@ -1112,15 +1133,18 @@ async function dispatchPipelineAnalysis(args: {
 	// reflected on disk. Refresh read-guard staleness stamps so a follow-up edit
 	// is judged by read-range coverage, not by our own previous write.
 	if (!getFlag("no-read-guard") && allowAutonomousWriters) {
+		const ownPath = path.resolve(filePath);
 		const changedForReadGuard = new Set([
-			path.resolve(filePath),
+			ownPath,
 			...(result.changedFiles ?? []).map((changedFile) =>
 				path.resolve(changedFile),
 			),
 		]);
 		for (const changedFile of changedForReadGuard) {
 			if (nodeFs.existsSync(changedFile)) {
-				deps.readGuard?.recordWritten(changedFile);
+				deps.readGuard?.recordWritten(changedFile, {
+					stampFileTime: ownFileTimeStamp || changedFile !== ownPath,
+				});
 			}
 		}
 	}
@@ -1131,6 +1155,14 @@ async function dispatchPipelineAnalysis(args: {
 /**
  * #3523: the one `edits[].range` replacement of a positional edit call, as
  * executed. Its `newText` then occupies the lines from `range.start.line`.
+ *
+ * #3760: the only shape recorded. A multi-range batch is not: no host
+ * pi-lens adapts pins whether its ranges are in original or sequential line
+ * numbers, and a guessed shift would put `newText` on lines the host did not
+ * write. `oldRange` carries no replacement text. A hashline edit's lines come
+ * from anchors pi-lens recomputes, not from the tool's own store
+ * (`hashline-anchor.ts`), so where they landed is unverified. Each keeps its
+ * re-edit refused as range-stale: a re-read, never a stale allow.
  */
 function singlePositionalEdit(
 	input: unknown,
@@ -1224,6 +1256,7 @@ function readWideningNote(widening: ReadWidening): string {
 export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
+	structuredContent?: unknown;
 } | void> {
 	const {
 		event,
@@ -1351,7 +1384,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			metadata: { toolCallId, rawFilePath, guessedPath },
 		});
 		return readNote.length > 0
-			? { content: [...readNote, ...event.content] }
+			? {
+					content: [...readNote, ...event.content],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	} else {
 		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
@@ -1583,8 +1619,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
 		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
+			// #3525: the command is in the conversation, the bytes it wrote
+			// are not: authorship, not FileTime.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
-				deps.readGuard?.recordWritten(wp);
+				deps.readGuard?.recordWritten(wp, { stampFileTime: false });
 			else if (!getFlag("no-read-guard") && recognizedWritten.includes(wp))
 				deps.readGuard?.recordUnchanged?.(wp);
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
@@ -1618,6 +1656,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_attachmentBudget: syntheticAttachmentBudget,
 				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
 				_readGuardAuthorship: recognizedAuthoredSet.has(wp),
+				_ownWriteStamp: { stampFileTime: false },
 				// Opaque recovery is mutation evidence only. The synthetic call still
 				// records freshness and runs diagnostics, but it cannot format/autofix
 				// or issue an edit-directed blocker/actionable instruction.
@@ -2023,7 +2062,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			sessionGeneration: runtime.sessionGeneration,
 			turnIndex: runtime.turnIndex,
 			signal: getAmbientAbortSignal(),
-			record: replayThroughMutationBridge,
+			// #3596: the replay lands after the settle's own awaits.
+			record: (entry) =>
+				replayThroughMutationBridge({ ...entry, lineage: writeSession }),
 			getStoredLineHashes: (candidate) =>
 				storedLineHashesFor(deps.readGuard, candidate),
 			isRecordable: (candidate) =>
@@ -2191,6 +2232,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				// release then evicted the outer entry a live, unrelated classified
 				// pipeline had since re-created under it.
 				for (const observedPath of observedDispatchPaths) {
+					// #3596: a replaced session dispatches no further path; each
+					// one's writes would be dropped, so its run is wasted work.
+					if (writeSession.guardedWrite(observedPath, () => true) !== true)
+						continue;
 					const observedDispatchSignal = deps.signal;
 					const observedJoinSignal = deps.signal;
 					const observedStateHashForPath = getFileStateHash(observedPath);
@@ -2279,7 +2324,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 		}
 		return syntheticWriteContent.length > 0
-			? { content: [...event.content, ...syntheticWriteContent] }
+			? {
+					content: [...event.content, ...syntheticWriteContent],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	}
 	if (mutation === undefined) {
@@ -2287,7 +2335,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			`tool_result: skipped turn tracking - toolName="${event.toolName}" is not a classified mutation`,
 		);
 		return syntheticWriteContent.length > 0 || readNote.length > 0
-			? { content: [...readNote, ...event.content, ...syntheticWriteContent] }
+			? {
+					content: [...readNote, ...event.content, ...syntheticWriteContent],
+					structuredContent: event.structuredContent,
+				}
 			: undefined;
 	}
 	if (!filePath) {
@@ -2343,7 +2394,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				}),
 			},
 		});
-		return { content: event.content, isError: true };
+		return {
+			content: event.content,
+			isError: true,
+			structuredContent: event.structuredContent,
+		};
 	}
 
 	// One post-result raw-byte hash, reused for the applied-edit records below and
@@ -2375,29 +2430,45 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// edit only: in a batch, each range's lines shift by the others' growth.
 	// Per event, so before the debounce keeps only the latest. The mark is
 	// only ever set by the guard's own check, so `--no-read-guard` never
-	// reaches here. recordWritten re-stamps FileTime after this, so the
-	// record's own stamp is always superseded.
+	// reaches here. FileTime is recordWritten's to move (#3525): after an
+	// edit that passed a moved FileTime, it must stay moved.
 	const ownEdit = attribution?.editInPlace
 		? singlePositionalEdit(event.input)
 		: undefined;
 	if (ownEdit) {
 		const evidence = ownEditEvidence(filePath, ownEdit);
-		deps.readGuard?.recordRead({
-			filePath,
-			requestedOffset: ownEdit.start,
-			requestedLimit: evidence.lineCount,
-			effectiveOffset: ownEdit.start,
-			effectiveLimit: evidence.lineCount,
-			expandedByLsp: false,
-			...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
-			turnIndex: runtime.turnIndex,
-			writeIndex: runtime.peekWriteIndex(),
-			timestamp: Date.now(),
-			source: "own-edit",
-			...(toolCallId !== undefined && { toolCallId }),
-		});
+		deps.readGuard?.recordRead(
+			{
+				filePath,
+				requestedOffset: ownEdit.start,
+				requestedLimit: evidence.lineCount,
+				effectiveOffset: ownEdit.start,
+				effectiveLimit: evidence.lineCount,
+				expandedByLsp: false,
+				...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
+				turnIndex: runtime.turnIndex,
+				writeIndex: runtime.peekWriteIndex(),
+				timestamp: Date.now(),
+				source: "own-edit",
+				...(toolCallId !== undefined && { toolCallId }),
+			},
+			{ stampFileTime: false },
+		);
 		logConversationRead("own-edit", filePath, ownEdit.start, evidence);
 	}
+
+	// #3525: an edit the guard passed over a moved FileTime leaves it moved;
+	// #3524: a write's creation read is the `content` it executed. Taken here,
+	// before the debounce, which the attribution does not survive.
+	// Only a write's tool_call notes a pending creation, so only a write's
+	// `content` is ever read.
+	const executedContent = (event.input as { content?: unknown }).content;
+	const ownWriteStamp: OwnWriteStamp = deps._ownWriteStamp ?? {
+		stampFileTime: attribution?.fileTimeStale !== true,
+		...(typeof executedContent === "string" && {
+			writtenContent: executedContent,
+		}),
+	};
 
 	// Must happen before debounce admission: latestDeps intentionally retains only
 	// the latest event, but write -> edit is a sticky turn transition.
@@ -2420,7 +2491,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (debounceMs > 0) {
 			return scheduleDebounced(filePath, debounceMs, {
 				...deps,
+				// #3596 G: the re-entry keeps the session this handler entered in.
+				_sessionGeneration: writeSession,
 				_autofixMode: autofixMode,
+				_ownWriteStamp: ownWriteStamp,
 				_telemetryParticipantIds: [readGuardCorrelationId],
 				_telemetryParticipantTotal: 1,
 			});
@@ -2429,7 +2503,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	// Refresh the read-guard's FileTime stamp so that the model's own write
 	// doesn't trigger a spurious "file_modified" block on the next edit.
-	if (bashAuthorshipConfirmed) deps.readGuard?.recordWritten(filePath);
+	if (bashAuthorshipConfirmed)
+		deps.readGuard?.recordWritten(filePath, ownWriteStamp);
 
 	// Keep cachedExports in sync after each write/edit so the pre-write STOP
 	// check doesn't fire on names that were removed from this file this session.
@@ -2473,17 +2548,22 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 
-	const sessionFileTime = createFileTime("default");
-	// tool_result is emitted after write/edit has already been applied.
-	// Asserting pre-write stamps here produces false positives on rapid edits.
-	sessionFileTime.read(filePath);
+	// #3596: the analysers and the join above awaited. A replaced session's
+	// handler writes nothing more into the live session's read guard or
+	// turn-state worklist, and dispatches nothing; the change-log receipt below
+	// stays, because the edit did land on disk.
+	const entryLive = writeSession.guardedWrite(filePath, () => true) === true;
 	if (!getFlag("no-read-guard") && bashAuthorshipConfirmed) {
 		const readGuard = (
 			runtime as {
-				readGuard?: { recordWritten?: (writtenPath: string) => void };
+				readGuard?: {
+					recordWritten?: (writtenPath: string, opts: OwnWriteStamp) => void;
+				};
 			}
 		).readGuard;
-		readGuard?.recordWritten?.(filePath);
+		if (entryLive) readGuard?.recordWritten?.(filePath, ownWriteStamp);
+		else
+			recordDroppedRead(writeSession, "tool-result", writeSession.branchEpoch);
 	}
 
 	// `toolResultStart` is hoisted above both provenance exits (#2464 review
@@ -2524,6 +2604,20 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			: mutation.touchedLines
 				? [{ start: mutation.touchedLines[0], end: mutation.touchedLines[1] }]
 				: undefined;
+	// #3596: turn-state.json is the live session's worklist (#2504).
+	const addTurnRange = (
+		range: { start: number; end: number },
+		importsChanged: boolean,
+	): void => {
+		if (entryLive)
+			cacheManager.addModifiedRange(
+				filePath,
+				range,
+				importsChanged,
+				turnStateCwd,
+				runtime.telemetrySessionId,
+			);
+	};
 	try {
 		// #1334 S6: the host DECLARES this payload (`EditToolDetails`, a
 		// type-only export), so use it instead of re-declaring `{ diff?: string }`
@@ -2551,13 +2645,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				dbg(
 					`tool_result: adding range ${range.start}-${range.end} for ${filePath}`,
 				);
-				cacheManager.addModifiedRange(
-					filePath,
-					range,
-					importsChanged,
-					turnStateCwd,
-					runtime.telemetrySessionId,
-				);
+				addTurnRange(range, importsChanged);
 			}
 			dbg(
 				`tool_result: turn state after add: ${JSON.stringify(cacheManager.readTurnState(turnStateCwd))}`,
@@ -2574,15 +2662,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const content = nodeFs.readFileSync(filePath, "utf-8");
 			const importsChanged = /^import\s/m.test(content);
 			modifiedRanges = adapterRanges;
-			for (const range of adapterRanges) {
-				cacheManager.addModifiedRange(
-					filePath,
-					range,
-					importsChanged,
-					turnStateCwd,
-					runtime.telemetrySessionId,
-				);
-			}
+			for (const range of adapterRanges) addTurnRange(range, importsChanged);
 		} else if (
 			mutation.kind === "edit" &&
 			mutation.provenance === "declared" &&
@@ -2599,25 +2679,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const lineCount = content.split("\n").length;
 			const importsChanged = /^import\s/m.test(content);
 			modifiedRanges = [{ start: 1, end: lineCount }];
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: lineCount },
-				importsChanged,
-				turnStateCwd,
-				runtime.telemetrySessionId,
-			);
+			addTurnRange({ start: 1, end: lineCount }, importsChanged);
 		} else if (mutation.kind === "write" && nodeFs.existsSync(filePath)) {
 			const content = nodeFs.readFileSync(filePath, "utf-8");
 			const lineCount = content.split("\n").length;
 			const hasImports = /^import\s/m.test(content);
 			modifiedRanges = [{ start: 1, end: lineCount }];
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: lineCount },
-				hasImports,
-				turnStateCwd,
-				runtime.telemetrySessionId,
-			);
+			addTurnRange({ start: 1, end: lineCount }, hasImports);
 		}
 	} catch (err) {
 		dbg(`turn state tracking error: ${err}`);
@@ -2649,7 +2717,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// (defined above `handleToolResult`), shared with the observed-mutation
 	// early return. This call site is otherwise unchanged — same arguments, same
 	// crash-then-return / success-then-continue shape as before the split.
-	if (!classifiedClientsReady) return;
+	if (!classifiedClientsReady || !entryLive) return;
 	const dispatchOutcome = await bounded(
 		dispatchPipelineAnalysis({
 			deps,
@@ -2674,6 +2742,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// #3512: one capture for the whole dispatch, the same one the
 			// inline verdict below writes through.
 			sessionGeneration: writeSession,
+			ownFileTimeStamp: ownWriteStamp.stampFileTime,
 		}),
 		{
 			ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
@@ -2693,9 +2762,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// observed path gets them by construction rather than by a second author
 	// remembering to copy them.
 	const result = dispatchOutcome.result;
+	// #3596: the pipeline awaited. A replaced session's handler queues,
+	// summarises and latches nothing in the live session; pi-lens' own writes
+	// still reach the change log below, because they landed on disk.
+	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
 
 	let autofixNewlyQueued = false;
 	if (
+		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
 		autofixMode === "deferred" &&
@@ -2717,6 +2791,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	let formatQueued = false;
 
 	if (
+		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
 		!getFlag("no-autoformat", filePath) &&
@@ -2780,6 +2855,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			source: "autofix",
 			dbg,
 		});
+		if (!resultLive) continue;
 		// Workspace-edit paths come from fileURLToPath and are normally absolute,
 		// so the turn-state cwd is inert for those values. Keep it in the resolve
 		// call because the producer's contract is cwd-relative URI resolution, and
@@ -2832,7 +2908,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// already computed above (diagnostics, autofix count/tools, formatters
 	// used) — no new collection plumbing, just fed into the collector when
 	// the feature is on.
-	if (getFlag("lens-turn-summary")) {
+	if (resultLive && getFlag("lens-turn-summary")) {
 		if (result.diagnostics?.length) {
 			for (const d of result.diagnostics) {
 				runtime.turnSummary.recordDiagnostic(d.filePath || filePath, {
@@ -2904,14 +2980,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 
 	// A superseded verdict must not latch the commit gate either (#3507).
-	runtime.updateGitGuardStatus(
-		inlineVerdictApplied && result.hasBlockers,
-		result.output,
-	);
-	if (getFlag("lens-guard")) {
-		syncGitGuardRecord(runtime, cacheManager, turnStateCwd, filePath);
-		if (result.isError && !result.hasBlockers) {
-			runtime.markGitGuardCacheUnknown("pipeline_error");
+	if (resultLive) {
+		runtime.updateGitGuardStatus(
+			inlineVerdictApplied && result.hasBlockers,
+			result.output,
+		);
+		if (getFlag("lens-guard")) {
+			syncGitGuardRecord(runtime, cacheManager, turnStateCwd, filePath);
+			if (result.isError && !result.hasBlockers) {
+				runtime.markGitGuardCacheUnknown("pipeline_error");
+			}
 		}
 	}
 
@@ -2919,6 +2997,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return {
 			content: [...event.content, { type: "text", text: result.output }],
 			isError: true,
+			structuredContent: event.structuredContent,
 		};
 	}
 
@@ -3044,5 +3123,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		content: output
 			? [...returnedContent, { type: "text", text: output }]
 			: returnedContent,
+		structuredContent: event.structuredContent,
 	};
 }

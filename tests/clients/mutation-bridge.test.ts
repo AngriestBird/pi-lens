@@ -29,6 +29,7 @@ import { normalizeMapKey } from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { retireScope } from "../../clients/session-scope.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const SOURCE = ["import a from 'a';", "const b = 2;", "const c = 3;", ""].join(
@@ -725,6 +726,251 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 	});
 });
 
+describe("#3620/#3709: a retired scope's replay writes no session state", () => {
+	// Recurrence: #3709. The branch epoch restarts at 0 in every scope, so a
+	// settled sweep that captured epoch 0 and replayed after `/new` passed the
+	// #3521 epoch check and was credited to the new session (#3620's NS-RACE).
+	// The in-process producer now hands its lineage handle over, and the bridge
+	// keeps the handle's scope out of every later scope's state.
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+
+	function withScopes(
+		slug: string,
+		body: (args: {
+			filePath: string;
+			tmpDir: string;
+			runtime: RuntimeCoordinator;
+			cacheManager: CacheManager;
+			deps: MutationBridgeDeps;
+		}) => void,
+	): void {
+		const env = setupTestEnvironment(`pi-lens-3709-${slug}-`);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, `${slug}.ts`);
+			fs.writeFileSync(filePath, SOURCE);
+			// Aged, so the mtime fallback cannot answer for an explicit credit.
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: `s-3709-${slug}` });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			body({
+				filePath,
+				tmpDir: env.tmpDir,
+				runtime,
+				cacheManager,
+				deps: makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager }),
+			});
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	const turnFiles = (cacheManager: CacheManager, tmpDir: string) =>
+		Object.keys(cacheManager.readTurnState(tmpDir).files ?? {});
+
+	it("does not credit or queue a retired scope's replay at the same epoch value", () => {
+		withScopes(
+			"same-epoch",
+			({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+				const lineage = runtime.captureSessionGeneration();
+				expect(lineage.branchEpoch).toBe(0);
+				runtime.resetForSession();
+				runtime.beginTurn();
+				expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+
+				const accepted = recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						consumer: "settled-sweep",
+						provenance: "settled-sweep",
+						readGuardBranchEpoch: 0,
+						lineage,
+					},
+					deps,
+				);
+
+				expect({
+					accepted,
+					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+					queued: runtime.consumeDeferredFormatFiles(),
+					turnFiles: turnFiles(cacheManager, tmpDir),
+					// The bytes did change: the change log still says so (I5).
+					receipts: readChangesSince(tmpDir, 0).map((c) => c.source),
+					dropped: getDegradationSummary()
+						.find((group) => group.kind === "generation-guard-stale-write")
+						?.latestReasons.map((r) => r.subject),
+				}).toEqual({
+					accepted: true,
+					verdict: "block",
+					queued: [],
+					turnFiles: [],
+					receipts: ["agent-tool:settled-sweep"],
+					dropped: [`runtime-session:${filePath}`],
+				});
+			},
+		);
+	});
+
+	it("credits and queues a replay whose scope is still live", () => {
+		withScopes("live", ({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+			const lineage = runtime.captureSessionGeneration();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "settled-sweep",
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: 0,
+					lineage,
+				},
+				deps,
+			);
+			expect({
+				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+				queued: runtime.consumeDeferredFormatFiles().map((r) => [...r.kinds]),
+				turnFiles: turnFiles(cacheManager, tmpDir).length,
+			}).toEqual({
+				verdict: "allow",
+				queued: [["autofix", "format"]],
+				turnFiles: 1,
+			});
+		});
+	});
+
+	it("keeps a v1 producer entry without a lineage fail-open after a reset", () => {
+		// The external-producer shape documented in the bridge header: no
+		// lineage, no epoch. It carries no scope, so it stays credited (I4).
+		withScopes("v1", ({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+			runtime.resetForSession();
+			runtime.beginTurn();
+			const v1Entry = JSON.parse(
+				JSON.stringify({
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "my-extension",
+				}),
+			);
+			expect(isValidMutationEntry(v1Entry)).toBe(true);
+			expect(recordMutationThroughSeam(v1Entry, deps)).toBe(true);
+			expect({
+				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+				queued: runtime.consumeDeferredFormatFiles().length,
+				turnFiles: turnFiles(cacheManager, tmpDir).length,
+			}).toEqual({ verdict: "allow", queued: 1, turnFiles: 1 });
+		});
+	});
+
+	it("counts a dropped replay by its scope's retirement reason", () => {
+		// F1 (maintainer decision on #3609): a read-guard write dropped after
+		// `/reload` is a false block while its entry is still on the branch, so
+		// it is counted by the reason the scope retired with.
+		withScopes("reload", ({ filePath, runtime, deps }) => {
+			const lineage = runtime.captureSessionGeneration();
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					lineage,
+				},
+				deps,
+			);
+			expect(
+				getDegradationSummary()
+					.find((group) => group.kind === "session-scope-read-dropped")
+					?.latestReasons.map((r) => r.subject),
+			).toEqual(["reload:settled-sweep"]);
+		});
+	});
+
+	it("counts no false block when the entry was captured on an earlier branch than its handle", () => {
+		// Recurrence: S1's F1 over-count. The write's queue-time epoch is the
+		// entry's, not the handle's: an entry captured before a /tree that its
+		// handle postdates is not on the branch, so its drop is no false block.
+		withScopes("moved", ({ filePath, runtime, deps }) => {
+			runtime.readGuard.retainBranch(new Set());
+			const lineage = runtime.captureSessionGeneration();
+			expect(lineage.branchEpoch).toBe(1);
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: 0,
+					lineage,
+				},
+				deps,
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
+	it("counts no false block under no-read-guard, where no credit was due", () => {
+		withScopes("no-guard", ({ filePath, tmpDir, runtime, cacheManager }) => {
+			const lineage = runtime.captureSessionGeneration();
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					lineage,
+				},
+				makeDeps({
+					tmpDir,
+					runtime,
+					cacheManager,
+					shouldStampReadGuard: () => false,
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
+	it("never lets a non-handle lineage escape to the producer", () => {
+		withScopes("foreign", ({ filePath, runtime, deps }) => {
+			const entry = {
+				filePath,
+				kind: "edit" as const,
+				touchedLines: [1, 2] as [number, number],
+				lineage: {} as never,
+			};
+			expect(() => recordMutationThroughSeam(entry, deps)).not.toThrow();
+			expect(recordMutationThroughSeam(entry, deps)).toBe(false);
+			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+				"block",
+			);
+		});
+	});
+});
+
 describe("mutation bridge registration", () => {
 	it("mounts once, first-wins, and is reachable through the public symbol", () => {
 		const env = setupTestEnvironment("pi-lens-2423-bridge-register-");
@@ -796,4 +1042,62 @@ describe("mutation bridge registration", () => {
 				.every((line) => !/^\s/.test(line)),
 		).toBe(true);
 	});
+});
+
+/**
+ * #3525: the settled sweep replays drift no tool_result described, whoever
+ * wrote it (an external editor, a second pi-lens instance), and the agent was
+ * never shown those bytes. Recurrence: its `recordWritten` re-stamped FileTime,
+ * the only staleness check a line without a hash has, so an edit of a line
+ * another writer changed passed on a record past READ_HASH_MAX_LINES.
+ */
+describe("mutation bridge FileTime credit (#3525)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+	for (const provenance of ["settled-sweep", "observed"] as const) {
+		it(`${provenance === "settled-sweep" ? "does not stamp" : "stamps"} FileTime for a ${provenance} replay`, () => {
+			const env = setupTestEnvironment("pi-lens-3525-bridge-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const filePath = path.join(env.tmpDir, "big.ts");
+				const big = Array.from({ length: 3100 }, (_, i) => `line${i + 1}`);
+				fs.writeFileSync(filePath, big.join("\n"));
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				// A whole-file read past READ_HASH_MAX_LINES: no line hashes.
+				runtime.readGuard.recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: big.length,
+					effectiveOffset: 1,
+					effectiveLimit: big.length,
+					expandedByLsp: false,
+					turnIndex: 0,
+					writeIndex: 0,
+					timestamp: Date.now(),
+				});
+				big[10] = "EXTERNAL11";
+				fs.writeFileSync(filePath, big.join("\n"));
+				expect(
+					recordMutationThroughSeam(
+						{ filePath, kind: "edit", touchedLines: [11, 11], provenance },
+						makeDeps({
+							tmpDir: env.tmpDir,
+							runtime,
+							cacheManager: new CacheManager(false),
+						}),
+					),
+				).toBe(true);
+				expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
+					provenance === "settled-sweep" ? "block" : "allow",
+				);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
 });

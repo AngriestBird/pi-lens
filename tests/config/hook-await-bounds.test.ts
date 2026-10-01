@@ -408,6 +408,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-agent-end.ts#8f9b56ae~24a830f2": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"#3830: the whole-package fixer's restore of agent edits, awaited " +
+			"after the drain's hold on the target is released. It waits for " +
+			"pi's queue entry of each sibling it restores (held only by an edit, " +
+			"an LSP edit or another pipeline's hold, none of which waits for " +
+			"this restore) and does local file I/O. The phase above it is the " +
+			"`runAutofix` await registered below, which has no aggregate bound " +
+			"either.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -1415,16 +1428,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"read, the same double-count the secrets lane's entry below avoids.",
 		owner: "#3274",
 	},
-	"clients/runtime-turn.ts#5b570c81~b2f3321c": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"`knipClient.analyze` — #2523's turn_end list " +
-			"(runtime-turn.ts:1355): the 30s timeout lives INSIDE the " +
-			"spawn, so anything that wedges before the spawn is unreachable " +
-			"by it.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-turn.ts#756411f6~249e7096": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1542,26 +1545,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would add a second timer per target.",
 		owner: "#2523 slice 3",
 	},
-	"index.ts#037ff762~80c6c04d": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
-			"the settle's branch epoch.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#03f9a37d~c085098b": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
-			"the settle's branch epoch.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#1946ceb9~8beff560": {
 		family: "hook-await",
 		site: "session_start",
@@ -1588,6 +1571,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(index.ts:3138). Its `getAutofixClients` closure is the " +
 			"`loadBootstrapClients()` #2523 names under agent_settled; " +
 			"runtime-agent-end.ts:347 is the consumer.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#2c2d49c9~70299538": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
+			"the settle's branch epoch. #3620 re-keyed it: the sweep call " +
+			"above it wraps. #3676 re-keyed it: the drain no longer takes " +
+			"the settle's epoch (its quick fix credits its report's).",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#2ccc914e~d8df7429": {
@@ -1619,6 +1614,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"enforces it today.",
 		owner: "#2523 slice 2",
 	},
+	"index.ts#3e43f4ed~4e890232": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`adoptHandoff` (#3612): the session stores' hand-off, which " +
+			"reads this session's or its parent's sidecar and reconciles the " +
+			"widget with disk (`dropStaleFiles`, up to 1024 concurrent " +
+			"`fs.stat`). The same sidecar I/O as #2523's session_start list " +
+			"(`loadSessionState`, `dropStaleFiles`), moved here from the " +
+			"read-guard and widget restore blocks, unbounded for the same reason.",
+		owner: "#2523 slice 2",
+	},
 	"index.ts#41d6e96f~455b59f1": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -1647,6 +1654,26 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"is waiting for its answer, so no hook budget applies. Flagged " +
 			"only because the await scan covers whole files rather than " +
 			"walking reachability.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#5e46a749~e2db26e6": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
+			"the settle's branch epoch. #3620 re-keyed it: the sweep also " +
+			"takes the settle's lineage handle.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#6222076d~12152939": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSessionHeaderId` (#3521, moved by #3612): the parent session " +
+			"file's header line, read only when the hand-off falls back to the " +
+			"parent's sidecar; the same file I/O as the `adoptHandoff` entry.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#65b51dab~a327124f": {
@@ -1696,15 +1723,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"module load and resolution above it have none.",
 		owner: "#2523 slice 2",
 	},
-	"index.ts#89b9a0a7~d16b873d": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`loadSessionState` — #2523's session_start list " +
-			"(index.ts:2245); #3521 moved it above the read-guard restore, " +
-			"which reads the same sidecar.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#a5c3de37~231f1f06": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1725,15 +1743,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"runtime-agent-end.ts:347 is the consumer.",
 		owner: "#2523 slice 2",
 	},
-	"index.ts#c9a30431~39590b7b": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`resolveReadGuardStartState` (#3521): the parent session file's " +
-			"header line and the parent's sidecar, the same sidecar I/O as the " +
-			"`loadSessionState` entry above, unbounded for the same reason.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#d628f09d~02fe26af": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1742,16 +1751,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"is waiting for its answer, so no hook budget applies. Flagged " +
 			"only because the await scan covers whole files rather than " +
 			"walking reachability.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#dd06eafe~0055eaad": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`dropStaleFiles` — #2523's session_start list (index.ts:2252): " +
-			"up to 1024 concurrent `fs.stat` with no wall bound. On a " +
-			"9p/slow filesystem (#462 measured 1.3ms per stat) that is " +
-			"seconds of unbounded startup.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#e40e5ae4~44b2f503": {
@@ -2237,7 +2236,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// signal until #2523 AC4 threads it, so this records the increase. 9 -> 11
 	// (#3741 round 2): the settle stats the file before reading it and again just
 	// before the write, so a newer edit is never written over.
-	"clients/fix-run-restore.ts": 11,
+	// 11 -> 10 (#3830), recorded rather than absorbed: the restore reads the file
+	// inside pi's queue entry for it and re-reads it before the write instead of
+	// statting twice (the stat's identity was blind to a same-size edit inside
+	// one mtime tick), and the wrapper awaits the caller's scan (`afterRun`) but
+	// no longer `finish()`. One await is the per-file queue entry, which a hook
+	// signal cannot reach until #2523 AC4.
+	"clients/fix-run-restore.ts": 10,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
@@ -2331,7 +2336,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// 225 → 216 (#3476): acquireInstallLock takes the install lock with the
 	// synchronous generation lock, so its awaited mkdir, open, write, close,
 	// read, stat and removes are gone; only its 100 ms retry wait remains.
-	"clients/installer/index.ts": 216,
+	// 216 → 219 (#3400): installArchiveTool awaits one `fs.stat` of the extracted
+	// launcher and, on the refusal branch, one `fs.rm` of the scratch tree (local
+	// disk, ms); installTool awaits `isCommandAvailable` for an archive's
+	// `runtime` (a PATH walk of statSync calls, no spawn, before the download).
+	// All three are intrinsically bounded local work on the install path; none
+	// can take the hook's signal until #2523 AC4 threads it, so this records the
+	// measured increase rather than hiding it.
+	"clients/installer/index.ts": 219,
 	"clients/installer/managed-tool-refresh.ts": 29,
 	// #3538/#3539 add five in each. The reaper reads start times and owner
 	// tags before its backstop decision and asks again before every signal
@@ -2403,15 +2415,29 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// spawn, and the outcome helper awaits the project diff once where the two
 	// branches awaited it separately (net +1). The fixer's spawn was already
 	// awaited under the same hold and the restore is bounded local file work.
-	"clients/pipeline.ts": 63,
+	// 63 -> 64 (#3858): `chainLateFormatResync` is #3828's late-resync
+	// continuation moved out of `handleAgentEnd` (its exemption row is gone) so
+	// the in-band pipeline shares it: a detached reaction on the abandoned
+	// formatter's settlement that parks no awaiting task and holds no queue
+	// entry or timer, so a formatter that never settles leaves it inert. It
+	// reaches the LSP only through `resyncHeldLspDocument`: a document a live
+	// client of the current service already holds, one bounded notify write
+	// (a save, #3828 r3), never a spawn; its answer is the late row's outcome.
+	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
-	"clients/read-guard-branch.ts": 5,
+	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved
+	// to the session-scope hand-off (`adoptHandoff`, below).
+	"clients/read-guard-branch.ts": 3,
 	"clients/recent-touches.ts": 8,
 	"clients/review-graph/builder.ts": 41,
 	"clients/safe-spawn.ts": 9,
+	// #3612: `adoptHandoff` awaits the own and parent sidecar loads and each
+	// store's restore: the session_start sidecar I/O that read-guard-branch.ts
+	// and index.ts held before.
+	"clients/session-scope.ts": 3,
 	"clients/session-state-store.ts": 4,
 	"clients/shared-checkout-guard.ts": 7,
 	"clients/source-filter.ts": 2,
@@ -2427,7 +2453,9 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/tree-sitter-shared.ts": 1,
 	"clients/trivy-client.ts": 2,
 	"clients/warm-attach.ts": 9,
-	"clients/widget-state.ts": 3,
+	// 3 -> 4 (#3612): the widget store's restore awaits `dropStaleFiles` for a
+	// sidecar source, the reconciliation index.ts's rehydrate block awaited.
+	"clients/widget-state.ts": 4,
 	"clients/word-index.ts": 24,
 	"clients/zizmor-config.ts": 2,
 	"tools/ast-grep-outline.ts": 2,
@@ -2612,6 +2640,15 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"promise per store, so the three turn-end stores spend one budget each " +
 		"per delivery however many lanes await them, and an abandoned read " +
 		"yields null — a cold cache to every lane — never a stale envelope.",
+	"call:clients/runtime-turn.ts#2b57f8b9~df074468":
+		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
+		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
+		"wall budget is still live. #3872: this is `knipClient.analyze`, awaited " +
+		"under the budget LEFT after the phases before it (not a fresh 3000 ms), " +
+		"so a slow scan releases the handler instead of holding it past " +
+		"`hook-await-exceeded`. It replaces the #2523 exemption for the same " +
+		"await; the scan itself is abandoned, not cancelled, and finishes off-hook " +
+		"under knip's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
 		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
 		"— the turn's registered abort signal, set from the host's `ctx.signal` " +

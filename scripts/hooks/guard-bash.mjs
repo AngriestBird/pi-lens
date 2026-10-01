@@ -26,6 +26,15 @@
  *     hygiene")
  *   - `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's own home
  *     (AGENTS.md "Probe hygiene", #3026) -- see {@link classifyTempDirVars}
+ *   - a git HOOK BYPASS on `git commit`/`push`/`merge`/`rebase` (#3778, the
+ *     #3703 class): `--no-verify`, `-n` (commit only -- on `push` it is
+ *     `--dry-run`), `-c core.hooksPath=…`, a `git config core.hooksPath`
+ *     write, and the `HUSKY=0` / `PI_LENS_SKIP_HOOKS` env prefixes the repo's
+ *     husky hooks honour -- see {@link classifyHookBypass}
+ *   - force pushes and `+refspec` pushes; an exact
+ *     `--force-with-lease=<branch>:<sha>` is the only force form allowed
+ *   - rebase starts and completion forms. Recovery with `--abort` or `--quit`
+ *     remains available; merge `origin/master` instead of starting a rebase.
  *
  * ## Contract source
  *
@@ -119,6 +128,11 @@
  *     `${G} stash`, `$(which git) stash`): no static text scan can resolve
  *     a runtime-computed word.
  *   - `require(mod)` with a variable specifier, for the probe rule.
+ *   - A hook bypass spelled some other way (#3778):
+ *     `GIT_CONFIG_KEY_0=core.hooksPath`, the separate-token
+ *     `--config-env core.hooksPath=X`, a hand edit of `.git/config`, or `git
+ *     commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
+ *     is ambiguous, so git itself rejects it.)
  *   - `kill $(pgrep -f tlc2.TLC)` and `pgrep -f tlc2 | xargs kill` (#3556
  *     review F6): the same machine-wide kill harm `sharedKill` denies, but
  *     `pgrep` alone only lists PIDs -- nothing in this scan currently
@@ -156,7 +170,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -176,8 +190,16 @@ export const RULE_MESSAGES = {
 		"pkill/killall with a bare (unscoped) pattern is forbidden (#3556) -- it matches machine-wide and can kill another concurrent session's TLC/vitest/etc run on this shared host -- kill the recorded PID of your own background job instead (`kill <pid>`), or use `pkill -f` with a pattern that includes your worktree's absolute path so only your own processes match.",
 	tmpCheckout:
 		"a checkout or scratch directory under /tmp is forbidden (#3526) -- /tmp on the maintainer host is tmpfs (RAM + swap; #2912 saw inode exhaustion there) and review/merge scratch checkouts filled it to 8/8 GB swap -- use `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator/reviewer scratch, `<worktree>/../probes-<pr>` for probe files, or `.claude/worktrees/` for a fixer's own worktree.",
+	hookBypass:
+		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
 		"a `git commit`/`git push` chained after a check (`npm run lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node scripts/check-*.mjs`) through `;` or a pipe, rather than `&&`, is forbidden (#3471) -- the check's exit code gates nothing that way, so a real failure can still get committed or pushed; gate it with `&&`, or read the check's result in its own separate call.",
+	forcePush:
+		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
+	rebase:
+		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
+	ciVerdictStatus:
+		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
 
 /**
@@ -1031,6 +1053,109 @@ function collectPositionals(args, valueFlags) {
 	return positionals;
 }
 
+/** The git subcommands whose hooks `--no-verify` and friends skip (#3778). */
+const HOOK_SUBCOMMANDS = new Set(["commit", "push", "merge", "rebase"]);
+
+/** Message flags whose SEPARATE next token is text, not a flag -- so a
+ *  `git commit -m "--no-verify"` is never read as the flag it quotes. Applies
+ *  to `commit` and `merge` only: on `rebase` `-m` takes no value, and no
+ *  `push` flag carries message text. */
+const MESSAGE_VALUE_FLAGS = new Set(["-m", "-F", "--message", "--file"]);
+
+/** `git commit` short options that take a value (the rest of the bundle, or
+ *  the next token), so a bundle such as `-mn` stops being flags at `m`. */
+const COMMIT_VALUE_LETTERS = "mFCctuS";
+
+/** `git config` words that remove a key, leaving no trailing value to see
+ *  (a SET always has a value after the key). */
+const CONFIG_UNSET_WORDS = new Set(["--unset", "--unset-all", "unset"]);
+
+/**
+ * Does the env carry a variable the repo's husky hooks honour as an opt-out
+ * (#3778)? `HUSKY=0` is husky's own dispatcher (`node_modules/husky/husky`:
+ * `[ "${HUSKY-}" = "0" ] && exit 0`); `PI_LENS_SKIP_HOOKS` is tested with
+ * `[ -n … ]` in .husky/pre-commit and .husky/pre-push, so any NON-EMPTY value
+ * (even `0`) skips. `PI_LENS_PREPUSH_LOCK_SKIP` is deliberately absent: it is
+ * the recorded opt-out #3717's own push-blocked message tells the pusher to
+ * use, and it skips only the targeted-test step after a bounded lock wait.
+ *
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function hasHookSkipEnv(env) {
+	return env.HUSKY === "0" || (env.PI_LENS_SKIP_HOOKS ?? "") !== "";
+}
+
+/**
+ * Classify a `git commit` short-option bundle. Stops at the first
+ * value-taking letter: `-mn` is a message `n`, `-unormal` is an untracked
+ * mode, neither is a bypass. "bypass": `-n` (`--no-verify`) came first.
+ * "detached": the bundle ENDS on `m`/`F`, so the NEXT token is its value
+ * (`-am "-n"`, `-aF -n`) and must not be read as a flag.
+ *
+ * @param {string} arg
+ * @returns {"bypass" | "detached" | null}
+ */
+function scanCommitBundle(arg) {
+	if (!/^-[A-Za-z]+$/.test(arg)) return null;
+	const letters = arg.slice(1);
+	for (let k = 0; k < letters.length; k++) {
+		const ch = letters[k];
+		if (ch === "n") return "bypass";
+		if (COMMIT_VALUE_LETTERS.includes(ch))
+			return k === letters.length - 1 && (ch === "m" || ch === "F")
+				? "detached"
+				: null;
+	}
+	return null;
+}
+
+/**
+ * #3778: is `args[i]` (the subcommand) a hook bypass -- a `git config
+ * core.hooksPath` WRITE, or a `commit`/`push`/`merge`/`rebase` carrying
+ * `--no-verify`, `-n` (commit only: `git push -n` is `--dry-run`, and on
+ * merge/rebase `-n` is `--no-stat`), a `core.hooksPath` global option, or a
+ * skip env variable. Reads of `core.hooksPath` stay allowed.
+ *
+ * @param {string[]} args
+ * @param {number} i index of the subcommand, after {@link gitSubcommandIndex}
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function classifyHookBypass(args, i, env) {
+	const subcommand = args[i];
+	if (subcommand === "config") {
+		const rest = args.slice(i + 1);
+		const key = rest.findIndex((a) => /^core\.hookspath$/i.test(a));
+		if (key === -1) return false;
+		return (
+			rest.some((a) => CONFIG_UNSET_WORDS.has(a)) ||
+			(rest[key + 1] !== undefined && !rest[key + 1].startsWith("-"))
+		);
+	}
+	if (!HOOK_SUBCOMMANDS.has(subcommand)) return false;
+	if (hasHookSkipEnv(env)) return true;
+	if (args.slice(0, i).some((a) => /core\.hookspath/i.test(a))) return true;
+	const skipsMessageValues = subcommand === "commit" || subcommand === "merge";
+	for (let j = i + 1; j < args.length; j++) {
+		const a = args[j];
+		if (a === "--") break;
+		if (skipsMessageValues && MESSAGE_VALUE_FLAGS.has(a)) {
+			j++;
+			continue;
+		}
+		// git accepts the unambiguous abbreviations `--no-veri`/`--no-verif`;
+		// `--no-ver` is ambiguous and git rejects it.
+		if (/^--no-veri(f(y)?)?$/.test(a)) return true;
+		if (subcommand === "commit") {
+			const bundle = scanCommitBundle(a);
+			if (bundle === "bypass") return true;
+			if (bundle === "detached") j++;
+		}
+	}
+	return false;
+}
+
 /**
  * Classify a `git` invocation's args (after the leading "git" word).
  *
@@ -1051,8 +1176,83 @@ function collectPositionals(args, valueFlags) {
  * @returns {DenyRule | null}
  */
 function classifyGit(args, cwd, env = {}) {
+	const isRebaseFalseValue = (value) =>
+		["false", "no", "0", "off"].includes(value.toLowerCase());
 	const i = gitSubcommandIndex(args);
 	const subcommand = args[i];
+	if (classifyHookBypass(args, i, env)) return "hookBypass";
+	if (subcommand === "rebase") {
+		const rest = args.slice(i + 1);
+		return rest.length === 1 && (rest[0] === "--abort" || rest[0] === "--quit")
+			? null
+			: "rebase";
+	}
+	if (subcommand === "pull") {
+		const rest = args.slice(i + 1);
+		if (
+			rest.some(
+				(a) =>
+					a === "-r" ||
+					(/^-[^-]*r/.test(a) && a !== "--rebase") ||
+					a === "--rebase" ||
+					(a.startsWith("--rebase=") &&
+						!isRebaseFalseValue(a.slice("--rebase=".length))),
+			)
+		)
+			return "rebase";
+	}
+	if (subcommand === "config") {
+		const rest = args.slice(i + 1);
+		const keyIndex = rest.findIndex((a) => a.toLowerCase() === "pull.rebase");
+		if (
+			keyIndex >= 0 &&
+			rest[keyIndex + 1] !== undefined &&
+			!isRebaseFalseValue(rest[keyIndex + 1])
+		)
+			return "rebase";
+		const branchKeyIndex = rest.findIndex((a) =>
+			/^branch\..+\.rebase$/i.test(a),
+		);
+		if (
+			branchKeyIndex >= 0 &&
+			rest[branchKeyIndex + 1] !== undefined &&
+			!isRebaseFalseValue(rest[branchKeyIndex + 1])
+		)
+			return "rebase";
+	}
+	if (
+		args.slice(0, i).some((a) => {
+			const match = /^pull\.rebase=(.*)$/i.exec(a);
+			return match !== null && !isRebaseFalseValue(match[1]);
+		})
+	)
+		return "rebase";
+	if (subcommand === "push") {
+		const rest = args.slice(i + 1);
+		const hasExplicitLease = rest.some((a) =>
+			/^--force-with-lease=[^:]+:[0-9a-fA-F]{4,64}$/.test(a),
+		);
+		const hasForce = rest.some(
+			(a) => a === "--force" || a === "-f" || /^-[^-]*f/.test(a),
+		);
+		const hasLease = rest.some(
+			(a) =>
+				a === "--force-with-lease" ||
+				a.startsWith("--force-with-lease=") ||
+				a === "--force-w" ||
+				a === "--force-with",
+		);
+		const hasPlusRefspec = rest.some((a) => a.startsWith("+"));
+		if (
+			rest.includes("--mirror") ||
+			rest.includes("--mirr") ||
+			(hasLease
+				? !hasExplicitLease || hasForce || hasPlusRefspec
+				: hasForce || hasPlusRefspec)
+		)
+			return "forcePush";
+		return null;
+	}
 	if (subcommand === "stash") return "stash";
 	if (subcommand === "reset") {
 		const rest = args.slice(i + 1);
@@ -1916,6 +2116,113 @@ function findUngatedWriteInChain(segments) {
 }
 
 /**
+ * #3883: a pipeline's `$?` is the status of its last command, not
+ * ci-verdict's verdict. Recognize both orderings that make that mistake look
+ * plausible: `ci-verdict | tail; echo $?`. Capturing with
+ * `ci-verdict; echo $? | tail` happens before the pipe and remains allowed.
+ *
+ * F6 (round 2): also recognize the `timeout N node …` and
+ * `node --flag …` wrappers, the `${?}` spelling, and `|&`; allow a
+ * pipe-polluted `$?` once `set -o pipefail` is in force before the pipeline,
+ * and allow a single-quoted `'$?'` (literal text to bash).
+ *
+ * @param {Array<{ text: string; sep: string | null }>} segments
+ * @returns {DenyRule | null}
+ */
+function findPipedCiVerdictStatusRead(segments) {
+	const isCiVerdict = (text) => {
+		const words = stripCommandGroupAndRunnerPrefixes(splitWords(text));
+		// `env FOO=bar` / `FOO=bar` before the wrapper still parse as prefixes.
+		let { rest } = stripEnvAssignments(words);
+		// `timeout <duration> node …` runs the node command it wraps; drop the
+		// wrapper and its options/duration before looking for `node` (#3883 F6).
+		// `-s`/`--signal` and `-k`/`--kill-after` each take their own argument,
+		// so consume it too or the duration read lands on the signal
+		// (`timeout -s KILL 600 node …`, #3883 R2).
+		if (rest[0] === "timeout") {
+			const takesArgument = (word) =>
+				word === "-s" ||
+				word === "--signal" ||
+				word === "-k" ||
+				word === "--kill-after";
+			let i = 1;
+			while (i < rest.length && rest[i].startsWith("-")) {
+				i += takesArgument(rest[i]) ? 2 : 1;
+			}
+			i += 1; // the duration argument
+			rest = rest.slice(i);
+		}
+		if (rest[0] !== "node" && rest[0] !== "nodejs") return false;
+		// A node flag before the script path (`node --no-warnings …`) must not
+		// hide it: the script is a non-flag word ending in the ci-verdict path.
+		return rest
+			.slice(1)
+			.some(
+				(word) =>
+					!word.startsWith("-") &&
+					/(?:^|[/\\])scripts[/\\]ci-verdict\.mjs$/.test(word),
+			);
+	};
+	// A `$?` inside single quotes is literal text to bash, not the status; the
+	// `${?}` spelling still reads it in every other context (#3883 F6). The
+	// scan tracks double quotes too, so an apostrophe INSIDE a double-quoted
+	// string (`echo "it's $? ok"`) does not open a phantom single-quote span
+	// that hides the expansion (#3883 R2).
+	const readsStatus = (text) => {
+		let unquoted = "";
+		let inSingle = false;
+		let inDouble = false;
+		for (const ch of text) {
+			if (ch === "'" && !inDouble) {
+				inSingle = !inSingle;
+				continue;
+			}
+			if (ch === '"' && !inSingle) {
+				inDouble = !inDouble;
+				unquoted += ch;
+				continue;
+			}
+			if (!inSingle) unquoted += ch;
+		}
+		return unquoted.includes("$?") || unquoted.includes("${?}");
+	};
+	// `set -o pipefail` makes the pipeline's `$?` the real status, so a command
+	// that enables it before the pipeline is not the mistake this rule exists
+	// for; `set +o pipefail` DISABLES it again, and a later disable undoes an
+	// earlier enable (#3883 F6, R2).
+	const pipefailSetting = (text) => {
+		const { rest } = stripEnvAssignments(
+			stripCommandGroupAndRunnerPrefixes(splitWords(text)),
+		);
+		if (rest[0] !== "set") return null;
+		for (let j = 1; j < rest.length; j++) {
+			const token = rest[j];
+			if (!/^[-+][A-Za-z]*o$/.test(token)) continue;
+			if (rest[j + 1] !== "pipefail") continue;
+			return token[0] === "-";
+		}
+		return null;
+	};
+	let pipefail = false;
+	for (let i = 0; i < segments.length; i++) {
+		if (!isCiVerdict(segments[i].text)) {
+			const setting = pipefailSetting(segments[i].text);
+			if (setting !== null) pipefail = setting;
+			continue;
+		}
+		// Only a pipefail in force BEFORE this command changes what `$?` means.
+		if (pipefail) continue;
+		for (let pipe = i + 1; pipe < segments.length; pipe++) {
+			const sep = segments[pipe].sep;
+			if (sep !== "|" && sep !== "|&") continue;
+			if (segments.slice(pipe + 1).some((segment) => readsStatus(segment.text)))
+				return "ciVerdictStatus";
+		}
+	}
+	return null;
+}
+
+/**
  * Scan a full Bash command for the first denied rule: every executable
  * region {@link scannableRegions} found, split into segments and
  * classified. The top-level region runs first and accumulates `export`ed
@@ -1938,6 +2245,8 @@ export function findDeny(commandText, cwd) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
 		let effectiveCwd = cwd;
 		const segments = splitSegmentsWithSeparators(regions[index]);
+		const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
+		if (ciVerdictRule) return ciVerdictRule;
 		const chainRule = findUngatedWriteInChain(segments);
 		if (chainRule) return chainRule;
 		for (const { text: segment } of segments) {

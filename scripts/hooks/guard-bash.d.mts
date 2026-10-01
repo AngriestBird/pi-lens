@@ -12,7 +12,11 @@ export type DenyRule =
 	| "tmpdirCollision"
 	| "sharedKill"
 	| "tmpCheckout"
-	| "checkUngated";
+	| "checkUngated"
+	| "hookBypass"
+	| "forcePush"
+	| "ciVerdictStatus"
+	| "rebase";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 

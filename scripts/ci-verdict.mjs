@@ -36,7 +36,7 @@
  * "skipped"/"neutral" conclusion is a genuine non-failure (a job-level
  * `if:` that evaluated false -- see computeVerdict's own doc comment), and
  * its "cancelled" conclusion is UNCERTAIN rather than failing: this repo's
- * `cancel-in-progress: true` (ci.yml:15-16) leaves a stale cancelled row as
+ * event-scoped `cancel-in-progress` leaves a stale cancelled row as
  * the only entry for its name for several minutes before a replacement
  * posts, and reading that window as a hard failure is a false positive on a
  * check still in flight, not one that failed.
@@ -84,6 +84,11 @@
  *         call that hit its own timeout) backs off and keeps waiting
  *         instead (#2935); exit 70 then means the budget ran out while
  *         GitHub was still unreachable
+ *
+ * #3779: a PR-number target on the `gh` transport also prints one advisory
+ * `MUTATION` line (the Mutation diff comment's survivor count and covered head;
+ * STALE / PENDING, see `formatMutationLine`). It is read after the verdict and
+ * is never an input to it: no exit code above depends on it.
  *
  * Absent is not automatically DIRTY (#2539 round 2, F1): the common cause of
  * an absent required check is CI not yet registered on a fresh push or a
@@ -199,6 +204,8 @@ import {
 	REQUIRED_CHECKS,
 	resolveLatestByName,
 } from "./lib/ci-checks.mjs";
+import { findStickyCommentId } from "./lib/mutation-pr-comment.mjs";
+import { STICKY_MARKER } from "./lib/mutation-report-render.mjs";
 
 export { REQUIRED_CHECKS };
 
@@ -212,6 +219,61 @@ export const EXIT_PENDING = 3;
 // `gh` invocation that never even reached GitHub).
 export const EXIT_USAGE = 64;
 export const EXIT_TRANSPORT = 70;
+
+// The verdict EXIT CODE -> KIND table. Every other mode names its own kind at
+// its `run()` exit site, so the printed line never claims a CI verdict the run
+// did not reach (#3883 F4).
+const VERDICT_KIND_BY_EXIT = new Map([
+	[EXIT_SUCCESS, "green"],
+	[EXIT_FAILURE, "red"],
+	[EXIT_DIRTY, "DIRTY"],
+	[EXIT_PENDING, "pending"],
+	[EXIT_USAGE, "usage"],
+	[EXIT_TRANSPORT, "transport"],
+]);
+
+/** The kind a plain verdict exit code prints; modes override with their own. */
+function verdictExitKind(exitCode) {
+	return VERDICT_KIND_BY_EXIT.get(exitCode) ?? "unknown";
+}
+
+/**
+ * The kind `--all`/`--watch-open` prints. Watch mode's 0/3 describe whether
+ * an event was observed, so they keep their own label; its usage and
+ * transport exits still name the real failure instead of hiding behind
+ * `(watch)` (#3883 F4).
+ */
+function watchExitKind({ watchOpen, stream, code }) {
+	if (code === EXIT_USAGE) return "usage";
+	if (code === EXIT_TRANSPORT) return "transport";
+	if (!watchOpen) return "all";
+	return stream ? "stream" : "watch";
+}
+
+/**
+ * The status line a shell pipeline can retain without consulting `$?`.
+ * Takes the `{ code, kind }` `run()` resolved where the exit code was decided,
+ * so the line can never contradict the verdict (#3883 F4): an unexpected
+ * error is `error`, `--all` is `all`, `--approve-fork` is `approve`, and
+ * watch mode keeps `watch`/`stream` except for its `usage`/`transport` exits.
+ */
+export function formatExitLine({ code, kind }) {
+	return `ci-verdict: exit ${code} (${kind})`;
+}
+
+/**
+ * The `{ code, kind }` a non-verdict emission prints. They live here, named
+ * once, so the formatter contract's own unit tests cover them rather than
+ * only an old-Node spawn (version-too-old) or a forced crash (top-level
+ * catch) that a test cannot reach (#3883 F4).
+ */
+export function transportExit() {
+	return { code: EXIT_TRANSPORT, kind: "transport" };
+}
+
+export function crashExit() {
+	return { code: EXIT_FAILURE, kind: "error" };
+}
 
 /** Minutes a required check may stay unregistered on a head with auto-merge
  * armed before the verdict says "re-arm" (#3694). CI normally registers within
@@ -374,13 +436,10 @@ export function isPrNumber(arg) {
  * "success"` comparison, decides whether a COMPLETED gating row is a
  * failure: "skipped" and "neutral" are terminal-but-not-failing conclusions,
  * and NOT hypothetical here -- this repository's own
- * `record-post-merge-validation` job (defined in both ci.yml and lint.yml)
- * carries a job-level `if: ... event_name == 'repository_dispatch'` and
- * reports "skipped" on every ordinary pull_request run (confirmed live on
- * PR #2588, 2026-09-06 -- two "Record post-merge validation" rows, both
- * "skipping" in `gh pr checks`). Reading `!== "success"` as failure the way
- * the pre-#2609 script did would have turned that routine skip into a
- * permanent false FAILURE the moment discovered rows were added.
+ * a conditionally skipped workflow job can report "skipped" on an ordinary
+ * pull_request run. Reading `!== "success"` as failure the way the pre-#2609
+ * script did would have turned that routine skip into a permanent false
+ * FAILURE the moment discovered rows were added.
  */
 export function computeVerdict(
 	checkRunsPayload,
@@ -443,11 +502,9 @@ export function computeVerdict(
 	// exemption applies only to non-cancelled DISCOVERED rows. Applying it to
 	// required rows too (round 1's bug) let
 	// a required `Unit tests` that reported "skipped" (reachable: ci.yml:253's
-	// `test` job has `needs: validate-merge-train-dispatch` with no `if:`, so
-	// a failed dependency skips it outright) read as a clean pass --
-	// `merge-train-lane.mjs`'s real gate never had this bug: its required-row
-	// loop already demands `run.conclusion === PASSING_CONCLUSION` (line
-	// ~262) with no such exemption.
+	// a failed dependency skips it outright) read as a clean pass -- the
+	// required-row loop already demands `run.conclusion === PASSING_CONCLUSION`
+	// with no such exemption.
 	//
 	// #3373: a latest cancelled row is actionable uncertainty for every gating
 	// name, including required names. It is reported with its run id below so a
@@ -507,9 +564,17 @@ export function computeVerdict(
 	} else if (cancelledLatestRows.length > 0) {
 		exitCode = EXIT_PENDING;
 		kind = "cancelled";
-		reason = `superseded run cancelled and not replaced: ${cancelledLatestRows
-			.map(formatRerunHint)
-			.join(", ")}`;
+		const seenRerunHints = new Set();
+		const rerunHints = cancelledLatestRows
+			.map((row) => {
+				const args = rerunArgsFor(row);
+				const key = args?.join(" ") ?? formatRerunHint(row);
+				if (seenRerunHints.has(key)) return null;
+				seenRerunHints.add(key);
+				return formatRerunHint(row);
+			})
+			.filter((hint) => hint !== null);
+		reason = `superseded run cancelled and not replaced: ${rerunHints.join(", ")}`;
 	} else if (failingGatingRows.length > 0) {
 		exitCode = EXIT_FAILURE;
 		kind = "failed";
@@ -1513,6 +1578,94 @@ export function formatGatingSplit(rows, failingRows = []) {
 	];
 }
 
+const MUTATION_CHECK = "mutation (advisory)";
+const MUTATION_PREFIX = "MUTATION (advisory, never gates):";
+
+/** The Mutation diff sticky comment's own lines (scripts/lib/
+ * mutation-report-render.mjs): the head it covers, and what it says about it. */
+function readStickyBody(body) {
+	// Every form is anchored on a line start: a survivor cell quotes source text,
+	// and this repo's renderer literals are source text (#3779 round 2).
+	const head =
+		/^- \*\*Head:\*\* `([0-9a-f]{7,40})`/m.exec(body)?.[1] ??
+		/^\*\*Stale\.\*\* This head \(`([0-9a-f]{7,40})`\)/m.exec(body)?.[1] ??
+		null;
+	let count = "unparsed comment";
+	if (/^\*\*Stale\.\*\*/m.test(body))
+		count = "no report for that head (crash, cancel or time cap)";
+	else if (/^\*\*0 mutants evaluated\.\*\*/m.test(body))
+		count = "0 mutants evaluated (not a clean pass)";
+	else if (/^\*\*Incomplete run\.\*\*/m.test(body))
+		count = "incomplete run (not a clean pass)";
+	else if (/^#### Survivors \(\d+\)$/m.test(body))
+		count = `${/^#### Survivors \((\d+)\)$/m.exec(body)[1]} survivors`;
+	else if (/^No survivors\.$/m.test(body)) count = "0 survivors";
+	const flags = [
+		/^\*\*Partial run\*\*/m.test(body) ? ", partial run" : "",
+		/^\*\*Score:.*truncated test population/m.test(body)
+			? ", truncated test population"
+			: "",
+	].join("");
+	return { head, count: `${count}${flags}` };
+}
+
+/**
+ * The one advisory `MUTATION` line (#3779): the Mutation diff comment's
+ * survivor count and the head it covers; STALE when that head is not the PR's
+ * head, PENDING when there is no comment or the job has not reported on this
+ * head. Information only -- `computeVerdict` never sees it, so it cannot move
+ * an exit code (the advisory split above, #3700).
+ *
+ * @param {Array<{id: number, body?: string, user?: {login?: string}}>} comments
+ * @param {string} prHead
+ * @param {Array<{name: string, status: string|null, conclusion?: string|null}>} rows
+ */
+export function formatMutationLine(comments, prHead, rows = []) {
+	const job = rows.find((row) => row.name === MUTATION_CHECK);
+	const inFlight = job && job.status !== "completed";
+	const id = findStickyCommentId(comments, STICKY_MARKER);
+	if (id === null)
+		return inFlight || !job
+			? `${MUTATION_PREFIX} PENDING -- no Mutation diff comment on this PR yet`
+			: `${MUTATION_PREFIX} no report (job ${job.conclusion}) -- no Mutation diff comment on this PR`;
+	const { head, count } = readStickyBody(
+		comments.find((comment) => comment.id === id)?.body ?? "",
+	);
+	const covers = head ?? "unknown";
+	if (prHead.startsWith(covers))
+		return `${MUTATION_PREFIX} ${count}, head ${covers}`;
+	const prShort = prHead.slice(0, 12);
+	if (inFlight)
+		return `${MUTATION_PREFIX} PENDING -- the mutation job is ${job.status} on PR head ${prShort}; the last comment covers ${covers}`;
+	return `${MUTATION_PREFIX} ${count}, head ${covers}, STALE (PR head is ${prShort})`;
+}
+
+/** The PR's comments through the same `ghExec` seam as every read above; one
+ * call, only for a `gh`-transport PR target, and never part of a poll. */
+export function readMutationLine({
+	repository,
+	target,
+	sha,
+	rows,
+	ghExec = gh,
+	timeoutMs = DEFAULT_GH_TIMEOUT_MS,
+}) {
+	try {
+		const comments = JSON.parse(
+			ghExec(
+				["api", `repos/${repository}/issues/${target}/comments`, "--paginate"],
+				{
+					timeoutMs,
+					maxBuffer: JOB_LOG_MAX_BUFFER,
+				},
+			),
+		);
+		return formatMutationLine(comments, sha, rows);
+	} catch (error) {
+		return `${MUTATION_PREFIX} unreadable -- ${firstLine(error)}`;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #3497: the REST transport. Used only when the real `gh` binary is not on
 // PATH (the Claude Code cloud container's own shape -- `GH_TOKEN`/
@@ -1914,7 +2067,7 @@ async function readPrVerdict(
 	{ ghExec, stderr, sleepImpl, now, absentSinceMs },
 ) {
 	let captured = null;
-	const exitCode = await run({
+	const result = await run({
 		argv: [String(pr)],
 		ghExec,
 		stdout: () => {},
@@ -1922,11 +2075,12 @@ async function readPrVerdict(
 		...(sleepImpl ? { sleepImpl } : {}),
 		...(now ? { now } : {}),
 		absentSinceMs,
+		mutation: false,
 		onVerdict: (info) => {
 			captured = info;
 		},
 	});
-	return exitCode === EXIT_TRANSPORT ? null : captured;
+	return result.code === EXIT_TRANSPORT ? null : captured;
 }
 
 /** `--all`: one line per open PR -- author, auto-merge, head, verdict kind,
@@ -2375,10 +2529,11 @@ export function parseArgs(argv) {
 }
 
 /**
- * The whole CLI, minus the process-exit side effect: resolves an exit code
+ * The whole CLI, minus the process-exit side effect: resolves `{ code, kind }`
  * instead of setting `process.exitCode` or throwing, so tests can drive it
- * with an injectable `ghExec` and injectable output sinks. `main()` below is
- * the only caller that touches `process`.
+ * with an injectable `ghExec` and injectable output sinks, and `main()` never
+ * has to guess the label from argv. `main()` below is the only caller that
+ * touches `process`.
  */
 export async function run({
 	argv = process.argv.slice(2),
@@ -2402,6 +2557,9 @@ export async function run({
 	// #3700: when `--watch-open` first saw this head; the absence clock of a
 	// head with no check suite.
 	absentSinceMs = null,
+	// #3779: false for a `--watch-open` poll (`readPrVerdict`), whose stdout is
+	// discarded: the MUTATION read is for a report someone reads.
+	mutation = true,
 } = {}) {
 	const {
 		target,
@@ -2416,26 +2574,27 @@ export async function run({
 	} = parseArgs(argv);
 	if (approveFork !== null) {
 		try {
-			return await approveForkRuns({
+			const code = await approveForkRuns({
 				target: approveFork,
 				ghExec,
 				stdout,
 				stderr,
 			});
+			return { code, kind: code === EXIT_USAGE ? "usage" : "approve" };
 		} catch (error) {
 			stderr(error instanceof Error ? error.message : String(error));
-			return EXIT_TRANSPORT;
+			return { code: EXIT_TRANSPORT, kind: "transport" };
 		}
 	}
 	if (watchOpen && rerunCancelled && !stateFile) {
 		// Without the state a re-armed watch (the normal shape: a non-stream
 		// watch exits at its first event) re-runs the same head every time.
 		stderr("--rerun-cancelled requires --state-file");
-		return EXIT_USAGE;
+		return { code: EXIT_USAGE, kind: "usage" };
 	}
 	if (all || watchOpen) {
 		try {
-			return watchOpen
+			const code = watchOpen
 				? await watchOpenPrs({
 						ghExec,
 						gitExec,
@@ -2450,16 +2609,17 @@ export async function run({
 						...(now ? { now } : {}),
 					})
 				: await snapshotOpenPrs({ ghExec, stdout, stderr, sleepImpl, now });
+			return { code, kind: watchExitKind({ watchOpen, stream, code }) };
 		} catch (error) {
 			stderr(error instanceof Error ? error.message : String(error));
-			return EXIT_TRANSPORT;
+			return { code: EXIT_TRANSPORT, kind: "transport" };
 		}
 	}
 	if (!target) {
 		stderr(
 			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>] | --all | --approve-fork <pr> | --watch-open [--stream] [--rerun-cancelled] [--sync-main <path>] [--wait <seconds>] [--state-file <path>]",
 		);
-		return EXIT_USAGE;
+		return { code: EXIT_USAGE, kind: "usage" };
 	}
 
 	try {
@@ -2700,15 +2860,29 @@ export async function run({
 		// reading the output never has to infer it from context.
 		stdout(`Transport: ${transport}`);
 		stdout(`Gating source: ${gatingSource}`);
+		if (mutation && transport === TRANSPORT_GH && isPrNumber(target))
+			stdout(
+				readMutationLine({
+					repository,
+					target,
+					sha,
+					rows: verdict.rows,
+					ghExec,
+					// What the polls left of --wait, not the startup allowance.
+					timeoutMs: resolveGhTimeoutMs(
+						deadline === undefined ? undefined : deadline - clock(),
+					),
+				}),
+			);
 		stdout(verdict.reason);
-		return verdict.exitCode;
+		return { code: verdict.exitCode, kind: verdictExitKind(verdict.exitCode) };
 	} catch (error) {
 		// Transport/unexpected (F3): `gh` missing from PATH, a call that hit its
 		// own timeout, malformed JSON, or anything else that means this script
 		// never got a real answer from GitHub. Distinct from EXIT_FAILURE (1),
 		// which means GitHub DID answer and the answer was red.
 		stderr(error instanceof Error ? error.message : String(error));
-		return EXIT_TRANSPORT;
+		return { code: EXIT_TRANSPORT, kind: "transport" };
 	}
 }
 
@@ -2745,6 +2919,7 @@ async function main() {
 	});
 	if (plan === REEXEC_VERSION_TOO_OLD) {
 		console.error(formatVersionTooOldMessage(process.version));
+		console.log(formatExitLine(transportExit()));
 		process.exitCode = EXIT_TRANSPORT;
 		return;
 	}
@@ -2759,14 +2934,20 @@ async function main() {
 			{ stdio: "inherit", env: { ...process.env, NODE_USE_ENV_PROXY: "1" } },
 		);
 		process.exitCode = result.status ?? EXIT_TRANSPORT;
+		if (result.status === null) console.log(formatExitLine(transportExit()));
 		return;
 	}
-	process.exitCode = await run();
+	const result = await run();
+	console.log(formatExitLine(result));
+	process.exitCode = result.code;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	main().catch((error) => {
 		console.error(error);
-		process.exitCode = 1;
+		// An unexpected throw is not a verdict: EXIT_FAILURE's contract is
+		// "GitHub answered and the answer was red" (#3883 F4).
+		console.log(formatExitLine(crashExit()));
+		process.exitCode = EXIT_FAILURE;
 	});
 }
