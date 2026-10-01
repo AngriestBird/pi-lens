@@ -41,6 +41,7 @@ import { renderFixRunLoss } from "./fix-run-restore.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
+import { surfaceHandlerCrash } from "./session-event-guard.js";
 import { recordDroppedRead } from "./session-scope.js";
 import {
 	getAutofixPolicyForFile,
@@ -71,7 +72,8 @@ const DEFERRED_FORMAT_CONCURRENCY = 3;
  * post-exit resync waits for the formatter the hook bound gave up on under
  * this same budget, so a command resolution that outlives it (an auto-install
  * has no leaf bound) settles as an abandoned resync instead of parking the
- * detached task forever (#3599).
+ * detached task forever (#3599). The formatter's later write is then synced by
+ * a continuation chained onto its settlement (#3828).
  */
 const DEFERRED_FORMAT_BUDGET_MS = 30_000;
 
@@ -740,22 +742,52 @@ export async function handleAgentEnd({
 								// formatter under the drain's own budget instead of forever. A
 								// wait that expires is a degradation, recorded once by
 								// `bounded()` as `off_hook:deferred-format-post-exit-resync`.
-								const formatterSettled = await bounded(
-									phase
-										.then((summary) => summary.abandoned)
-										.then(() => true as const),
-									{
-										ms: DEFERRED_FORMAT_BUDGET_MS,
-										signal: ambientSignal,
-										hook: "off_hook",
-										label: "deferred-format-post-exit-resync",
-									},
-								);
+								const formatterSettling = phase
+									.then((summary) => summary.abandoned)
+									.then(() => true as const);
+								const formatterSettled = await bounded(formatterSettling, {
+									ms: DEFERRED_FORMAT_BUDGET_MS,
+									signal: ambientSignal,
+									hook: "off_hook",
+									label: "deferred-format-post-exit-resync",
+								});
 								if (formatterSettled === undefined) {
-									// The formatter is still running; its later write cannot be
-									// synced from here, and a read now could publish bytes it is
-									// about to replace. Report the resync as abandoned.
+									// The formatter is still running, so a read now could publish
+									// bytes it is about to replace. Report this resync as abandoned
+									// and chain the same resync onto the formatter's settlement
+									// instead (#3828): it parks no awaiting task and holds no
+									// resource, it is one more reaction on a promise the formatter
+									// already owns.
 									outcome = "abandoned";
+									const logLate = (lateOutcome: string) =>
+										logLatency({
+											type: "phase",
+											toolName: "agent_end",
+											filePath,
+											phase: "deferred_format_late_resync",
+											durationMs: Date.now() - fileStart,
+											metadata: { outcome: lateOutcome },
+										});
+									void formatterSettling
+										.then(async () => {
+											// Held-only in every case, current session or not: the
+											// install can outlive the client (idle eviction), and
+											// this must never open a file or spawn for it. The drift
+											// read is its own stamped read of the disk, takes no
+											// ambient abort signal (another turn's Escape must not
+											// stop it), and a removed file is a quiet `vanished`.
+											// The row names what happened to F (#3828 r3).
+											logLate(await resyncHeldLspDocument(filePath));
+										})
+										.catch((err) => {
+											// A throw: one bounded `hook-handler-crash` row per
+											// session, and no rethrow: nothing awaits this.
+											surfaceHandlerCrash("deferred-format-late-resync", err, {
+												dbg,
+												rethrow: false,
+											});
+											logLate("failed");
+										});
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
 									// service gets no touch that would spawn a server.
