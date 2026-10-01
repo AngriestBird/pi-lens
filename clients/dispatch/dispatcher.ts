@@ -70,7 +70,7 @@ import { deferRunnerFindings } from "./pending-runner-findings.js";
 
 import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
-import { isRunnerSkipReason } from "./types.js";
+import { hasUsableResult, isRunnerSkipReason } from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
 	Awaited<ReturnType<typeof probeToolAsync>>
@@ -700,19 +700,21 @@ function buildCoverageNotice(
 		};
 	}
 
-	// Check primary runners first
-	const primaryHasCoverage = relevant.some(
-		(r) => r.status === "succeeded" || r.status === "failed",
-	);
+	// A runner covers the file when it reached a verdict about these bytes:
+	// `succeeded`, or `failed` whose own findings failed the check
+	// (`failureKind: "blocking_diagnostics"`). A timed-out or spawn-failed
+	// primary produced no usable result and must not suppress the notice
+	// (#3867). `hasUsableResult` owns that rule in dispatch/types.ts.
+	const primaryHasCoverage = relevant.some(hasUsableResult);
 	if (primaryHasCoverage) return undefined;
 
-	const allPrimarySkipped = relevant.every(
-		(r) =>
-			r.status === "skipped" ||
-			r.status === "when_skipped" ||
-			r.status === "test_file_skipped",
+	// A primary still in flight (collect-later) may deliver findings at turn
+	// end, so it withholds the notice. A skipped or broken primary produced
+	// nothing for these bytes, so it falls through to the fallback check.
+	const primaryStillInFlight = relevant.some(
+		(r) => r.status === "pending" || r.status === "deferred",
 	);
-	if (!allPrimarySkipped) return undefined;
+	if (primaryStillInFlight) return undefined;
 
 	const plan = getToolPlan(ctx.kind);
 	const fallbackRunnerIds = new Set(
@@ -740,7 +742,7 @@ function buildCoverageNotice(
 		(r) =>
 			fallbackRunnerIds.has(r.runnerId) &&
 			!STRUCTURAL_RUNNERS.has(r.runnerId) &&
-			(r.status === "succeeded" || r.status === "failed"),
+			hasUsableResult(r),
 	);
 	if (anyLinterHasCoverage) return undefined;
 
