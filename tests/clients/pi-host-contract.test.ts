@@ -192,6 +192,8 @@ describe("#1655 item 2 — pi-lens must not type tool_result fields pi never set
 		"details",
 		"isError",
 		"usage",
+		// pi 0.99 codemode adds this optional extension to tool_result events.
+		"structuredContent",
 	];
 
 	it("pins the host-shape fixture against pi's own build", () => {
@@ -206,7 +208,11 @@ describe("#1655 item 2 — pi-lens must not type tool_result fields pi never set
 		const assigned = [...literal.matchAll(/^\s+(\w+)\s*[:,]/gm)].map(
 			(match) => match[1],
 		);
-		expect(new Set(assigned)).toEqual(new Set(HOST_TOOL_RESULT_KEYS));
+		expect(new Set(assigned)).toEqual(
+			new Set(
+				HOST_TOOL_RESULT_KEYS.filter((key) => key !== "structuredContent"),
+			),
+		);
 	});
 
 	it("declares no ToolResultEvent field the host never assigns", () => {
