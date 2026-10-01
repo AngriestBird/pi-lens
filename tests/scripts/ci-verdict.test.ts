@@ -96,7 +96,7 @@ describe("ci-verdict CLI — the final exit line on every reachable exit path (#
 	});
 
 	it("emits `exit 70 (transport)` as its last stdout line when gh fails", () => {
-		const dir = mkdtempSync(join(tmpdir(), "ci-verdict-fake-gh-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-fake-gh-"));
 		try {
 			const fakeGh = join(dir, "gh");
 			writeFileSync(fakeGh, '#!/bin/sh\necho "fake gh: boom" >&2\nexit 1\n');
