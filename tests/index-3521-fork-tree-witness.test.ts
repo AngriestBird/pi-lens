@@ -61,7 +61,6 @@ import {
 	resetPendingRunnerFindings,
 } from "../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
-import { getDegradationSummary } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import {
 	cleanupTestEnvironmentsDrained,
