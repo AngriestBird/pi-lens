@@ -60,7 +60,7 @@
 		"scripts/analyze-config-resolution-smell.test.ts": 2,
 		"scripts/analyze-pi-lens-logs.test.ts": 2,
 		"scripts/astgrep-self-scan.test.ts": 3,
-		"scripts/changelog-entries.test.ts": 14,
+		"scripts/changelog-entries.test.ts": 13,
 		"scripts/changelog.test.ts": 3,
 		"scripts/check-lockfile-sync.test.ts": 2,
 		"scripts/check-pr-body.test.ts": 10,
