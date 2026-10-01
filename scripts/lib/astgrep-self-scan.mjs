@@ -229,8 +229,9 @@ export function trackedSelfScanFileSet(
 		const files = out
 			.split("\0")
 			.map((line) => line.trim())
-			.filter(Boolean)
-			.map(normalizeFindingPath);
+			.filter(Boolean);
+		// git ls-files emits forward-slash repo-relative paths on every
+		// platform, so only the finding side needs normalization.
 		return new Set(files);
 	} catch {
 		// Not a git work tree (or git unavailable): fall back to no filter.
@@ -240,7 +241,9 @@ export function trackedSelfScanFileSet(
 
 /** Drops findings whose file is not in `tracked` (a set from
  * `trackedSelfScanFileSet`); an undefined set is a no-op, so a scan that
- * cannot enumerate tracked files keeps its whole directory result. (#3886) */
+ * cannot enumerate tracked files keeps its whole directory result. Finding
+ * paths are normalized so a Windows-shaped finding from ast-grep still
+ * matches git's forward-slash path. (#3886) */
 export function findingsInTrackedFiles(findings, tracked) {
 	if (!tracked) return findings;
 	return findings.filter((f) =>

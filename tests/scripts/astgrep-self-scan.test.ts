@@ -22,6 +22,7 @@ import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import {
 	findingSignature,
+	findingsInTrackedFiles,
 	loadBaseline,
 	repoRoot,
 	runSelfScan,
@@ -588,6 +589,25 @@ describe("self-scan argv and tracked filter (#3886 r3)", () => {
 		expect(`${run.stdout}\n${run.stderr}`).not.toMatch(
 			/clients\/untracked\.ts/,
 		);
+	});
+
+	it("matches tracked findings across path spellings", () => {
+		// ast-grep emits Windows-shaped paths on Windows; git ls-files always
+		// emits forward slashes. The filter must match both.
+		const tracked = new Set(["clients/tracked.ts"]);
+		const findings = [
+			{ file: "clients/tracked.ts" },
+			{ file: "clients\\tracked.ts" },
+			{ file: "./clients/tracked.ts" },
+			{ file: "clients/untracked.ts" },
+		];
+		expect(
+			findingsInTrackedFiles(findings, tracked).map((f) => f.file),
+		).toEqual([
+			"clients/tracked.ts",
+			"clients\\tracked.ts",
+			"./clients/tracked.ts",
+		]);
 	});
 
 	it("--update-baseline includes untracked findings from the whole-tree scan", () => {
