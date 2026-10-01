@@ -270,6 +270,14 @@ const postExitRows = () =>
 	logLatency.mock.calls
 		.map(([row]) => row as { phase?: string; metadata?: unknown })
 		.filter((row) => row.phase === "deferred_format_post_exit_resync");
+/**
+ * #3828: the drain's LATE resync rows: the resync chained onto an abandoned
+ * formatter's settlement after the post-exit wait above gave up.
+ */
+const lateRows = () =>
+	logLatency.mock.calls
+		.map(([row]) => row as { phase?: string; metadata?: unknown })
+		.filter((row) => row.phase === "deferred_format_late_resync");
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
@@ -497,6 +505,9 @@ describe("#3599: an abandoned formatter's resync wait is bounded", () => {
 		expect(postExitResyncSubjects()).toEqual([
 			"off_hook:deferred-format-post-exit-resync",
 		]);
+		// #3828: a formatter that never settles is never synced, and the
+		// continuation chained on it writes no row and holds nothing.
+		expect(lateRows()).toEqual([]);
 	});
 });
 
@@ -1025,6 +1036,8 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				metadata: expect.objectContaining({ outcome: "synced" }),
 			}),
 		]);
+		// The wait did not give up, so nothing is chained for a second sync.
+		expect(lateRows()).toEqual([]);
 	});
 
 	it("OrphanLsp (#3529): the child the writer's own 30 s aggregate gave up on is synced after it writes, not before", async () => {
@@ -1458,6 +1471,606 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 				metadata: expect.objectContaining({ outcome: "read-failed" }),
 			}),
 		]);
+	});
+
+	/**
+	 * #3828 (`formal/format-drain` `OrphanNoLateSync`, `FixNoLateSync`; the
+	 * merged-fix configs `OrphanLsp` and `Fix`): #3728 bounded the post-exit
+	 * wait and, on expiry, never synced again, so a formatter that writes
+	 * after the bound left the LSP document behind the disk. The wait gives up
+	 * on a formatter whose command resolution (an auto-install) outlives the
+	 * hook's 10 s bound, the writer's own 30 s aggregate and the wait's 30 s
+	 * budget; the child then runs and writes.
+	 */
+	describe("#3828: a formatter that writes after the post-exit wait gave up", () => {
+		async function giveUpBeforeTheChildRuns() {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const drain = handleAgentEnd(drainDeps());
+			await resolving.p;
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.agent_settled + 30_000 + 1,
+			);
+			await drain;
+			await postExitSettled();
+			return { c, install: resolution.open };
+		}
+		const lateSettled = () =>
+			waitFor(lateRows, (rows) => rows.length > 0, {
+				yieldControl: tick,
+				timeoutMs: 2_000,
+			});
+		const spawns = () => lsp.createLSPClient.mock.calls.length;
+		/** `/new`: the session bump and the service retire `session_start` runs. */
+		function newSession() {
+			runtime.resetForSession(Date.now());
+			resetLSPService({ reason: "session_start" });
+		}
+		/**
+		 * The drain is served the real `getLSPService()` singleton, and a read-warm
+		 * touch of the unformatted F leaves a live client of it holding F: the
+		 * one document the late resync may bring to the disk.
+		 */
+		async function currentServiceHoldsF() {
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			await getLSPService().touchFile(filePath, "const x=1\n", {
+				diagnostics: "none",
+				source: "read-warm",
+				readStamp: performance.now(),
+			});
+		}
+
+		it("OrphanGiveUp (#3828): the LSP document equals the disk once the child settles", async () => {
+			await currentServiceHoldsF();
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			// The wait gave up: one abandoned row, and the LSP still has the bytes
+			// from before the format.
+			expect(postExitRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+			]);
+			expect(wire.at(-1)).toBe("const x=1\n");
+			install();
+			await c.wrote;
+			expect(disk()).toBe("const x = 1\n");
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await lateSettled();
+			expect(lateRows()).toEqual([
+				expect.objectContaining({
+					filePath,
+					metadata: { outcome: "resynced" },
+				}),
+			]);
+			// The give-up row stays the only post-exit row: nothing re-reported it.
+			expect(postExitRows()).toHaveLength(1);
+			// `hook-await-exceeded` is still recorded once, at the give-up.
+			expect(postExitResyncSubjects()).toEqual([
+				"off_hook:deferred-format-post-exit-resync",
+			]);
+		});
+
+		it("OrphanGiveUp (#3828): an Escape that ends the wait early, with no ledger record, still chains the late resync", async () => {
+			await currentServiceHoldsF();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const controller = new AbortController();
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const drain = handleAgentEnd(drainDeps({ signal: controller.signal }));
+			await resolving.p;
+			// Only the hook's 10 s bound has fired; the post-exit wait is still
+			// inside its 30 s budget when the user presses Escape.
+			await vi.advanceTimersByTimeAsync(HOOK_WALL_BUDGET_MS.agent_settled + 1);
+			await drain;
+			controller.abort();
+			await postExitSettled();
+			expect(postExitRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+			]);
+			// A cancel is deliberate, not a degradation: `bounded()` records nothing.
+			expect(postExitResyncSubjects()).toEqual([]);
+			resolution.open();
+			await c.wrote;
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+		});
+
+		it("OrphanGiveUp (#3828 r2 F1): in the current session, a file no live client holds is neither opened nor spawned for", async () => {
+			// The session and the service are both current, and the service holds
+			// nothing: the client was idle-evicted during the install, or F was
+			// never opened in it. `service` (the harness's own) holds F; the
+			// drain's real singleton was never built, so the row is `no-service`
+			// (#3828 r3: the live-service case is `late, not held, same session`).
+			lsp.realService = getLSPService;
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			const spawnsBefore = spawns();
+			const wireBefore = wire.length;
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(wire.length).toBe(wireBefore);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
+			]);
+		});
+
+		it("OrphanGiveUp (#3828 r2 F3): another turn's aborted signal at the settle does not stop the late sync", async () => {
+			await currentServiceHoldsF();
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			// A later turn is running when the formatter settles, and the user
+			// has pressed Escape in it: the ambient signal is that turn's.
+			const foreign = new AbortController();
+			foreign.abort();
+			setAmbientAbortSignal(foreign.signal);
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+		});
+
+		it("OrphanGiveUp (#3828): after session_shutdown retired the service the late resync spawns no server", async () => {
+			await currentServiceHoldsF();
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			resetLSPService({ reason: "session_shutdown" });
+			const spawnsBefore = spawns();
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
+			]);
+		});
+
+		it("OrphanGiveUp (#3828): after /new the late resync spawns no server", async () => {
+			lsp.realService = getLSPService;
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			newSession();
+			const spawnsBefore = spawns();
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(lateRows()).toEqual([
+				expect.objectContaining({ metadata: { outcome: "no-service" } }),
+			]);
+		});
+
+		it("OrphanGiveUp (#3828, #3576 R1): after /new the late resync brings only a document the next session already holds to the bytes on disk, without a spawn", async () => {
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			const { c, install } = await giveUpBeforeTheChildRuns();
+			newSession();
+			// Session 2's read-warm touch opens F before the child writes.
+			const spawnsBefore = spawns();
+			await getLSPService().touchFile(filePath, disk(), {
+				diagnostics: "none",
+				source: "read-warm",
+				readStamp: performance.now(),
+			});
+			expect(spawns() - spawnsBefore).toBe(1);
+			install();
+			await c.wrote;
+			await lateSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+			expect(spawns() - spawnsBefore).toBe(1);
+		});
+
+		it("OrphanGiveUp (#3828 r2 F2): a file the child removed is a quiet late resync: no crash row, no rejection", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				await currentServiceHoldsF();
+				child.removeAfterWrite = true;
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				install();
+				await c.wrote;
+				expect(fs.existsSync(filePath)).toBe(false);
+				// Either the row lands or, without a catch, a rejection does;
+				// unhandled rejections surface after the microtask queue drains.
+				await waitFor(
+					() => rejections.length + lateRows().length,
+					(count) => count > 0,
+					{ yieldControl: tick, timeoutMs: 2_000 },
+				);
+				await tick();
+				await tick();
+				expect(rejections).toEqual([]);
+				// An ordinary event (F removed during a long install), not a crash.
+				expect(
+					getDegradationSummary().filter(
+						(group) => group.kind === "hook-handler-crash",
+					),
+				).toEqual([]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "vanished" } }),
+				]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
+
+		it("OrphanGiveUp (#3828 r2 F2): any other throw in the late resync is one hook-handler-crash row and a failed late row, and rejects nothing", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				await currentServiceHoldsF();
+				// The real service's held-only resync fails (a server root that
+				// cannot be resolved, say): nothing awaits the continuation.
+				vi.spyOn(getLSPService(), "resyncGitChangedFiles").mockRejectedValue(
+					new Error("root resolution failed"),
+				);
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				install();
+				await c.wrote;
+				await lateSettled();
+				await tick();
+				await tick();
+				expect(rejections).toEqual([]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "failed" } }),
+				]);
+				expect(
+					getDegradationSummary()
+						.filter((group) => group.kind === "hook-handler-crash")
+						.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+				).toEqual(["deferred-format-late-resync"]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
+
+		/**
+		 * #3828 r3: the whole state space, {settled, late} x {held, not held,
+		 * vanished} x {same session, /new, session_shutdown, idle reset}, one
+		 * case per cell with the wire, spawn, `saved` and row it must produce.
+		 * Recurrences: VERIFY r2 F6 (the late resync, and #3576 R1's held-only
+		 * branch of `syncDrainWrite`, synced the bytes without the didSave a
+		 * save-triggered server recompiles on, #3405) and F7 (the late row read
+		 * `held-only` whether it synced F or did nothing). The r2 cases asserted
+		 * `wire.at(-1) === disk()` only, which sees neither.
+		 *
+		 * `held`: a live client of the service current at the settle holds F (the
+		 * successor's, after a retire). `not held`: in the same session the
+		 * service holds a sibling file but not F; after a retire no successor was
+		 * built. `vanished`: held, and the child removes F after its write.
+		 */
+		const STATE_SPACE: ReadonlyArray<{
+			cell: string;
+			wire: "disk" | "none";
+			spawn: number;
+			saved: boolean[];
+			didSave: number;
+			row: string;
+		}> = [
+			{
+				cell: "settled, held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "synced",
+			},
+			{
+				cell: "settled, not held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "synced",
+			},
+			{
+				cell: "settled, vanished, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "read-failed",
+			},
+			{
+				cell: "settled, held, /new",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, held, session_shutdown",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, held, idle reset",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, not held, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "settled, vanished, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "stale-session",
+			},
+			{
+				cell: "late, held, same session",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "unheld",
+			},
+			{
+				cell: "late, vanished, same session",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, /new",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, /new",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, session_shutdown",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, session_shutdown",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+			{
+				cell: "late, held, idle reset",
+				wire: "disk",
+				spawn: 0,
+				saved: [true],
+				didSave: 1,
+				row: "resynced",
+			},
+			{
+				cell: "late, not held, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "no-service",
+			},
+			{
+				cell: "late, vanished, idle reset",
+				wire: "none",
+				spawn: 0,
+				saved: [],
+				didSave: 0,
+				row: "vanished",
+			},
+		];
+
+		it.each(STATE_SPACE)("state space (#3828 r3): $cell", async (expected) => {
+			const [settle, held, session] = expected.cell.split(", ");
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+			// A save-triggered server: it declared `textDocumentSync.save`.
+			lspState.saveOptions = { includeText: false };
+			const didSaves: string[] = [];
+			const send = vi.mocked(lspState.connection.sendNotification);
+			const wireOf = send.getMockImplementation();
+			send.mockImplementation(async (method: string, params: unknown) => {
+				if (method === "textDocument/didSave") {
+					didSaves.push(
+						String(
+							(params as { textDocument: { uri: string } }).textDocument.uri,
+						),
+					);
+				}
+				return wireOf?.(method, params);
+			});
+			const notify = lspClient.notify as {
+				open: (...args: unknown[]) => Promise<unknown>;
+			};
+			const opens = vi.spyOn(notify, "open");
+			const readWarm = (target: string, content: string) =>
+				getLSPService().touchFile(target, content, {
+					diagnostics: "none",
+					source: "read-warm",
+					readStamp: performance.now(),
+				});
+			if (session === "same session") {
+				if (held === "not held") {
+					// The harness's own `service` opened F on this shared mock
+					// client in `beforeEach`; the singleton's client must not.
+					lspState.openDocuments.delete(normalizeMapKey(filePath));
+					const sibling = path.join(env.tmpDir, "g.ts");
+					fs.writeFileSync(sibling, "let y=1\n");
+					await readWarm(sibling, "let y=1\n");
+				} else {
+					await readWarm(filePath, disk());
+				}
+			}
+			if (held === "vanished") child.removeAfterWrite = true;
+
+			let write: () => void;
+			let wrote: Promise<void>;
+			if (settle === "settled") {
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				const c = armChild({ write: true });
+				const drain = handleAgentEnd(drainDeps());
+				await c.didRead;
+				await vi.advanceTimersByTimeAsync(
+					HOOK_WALL_BUDGET_MS.agent_settled + 1,
+				);
+				await drain;
+				write = c.openWrite;
+				wrote = c.wrote;
+			} else {
+				const { c, install } = await giveUpBeforeTheChildRuns();
+				write = install;
+				wrote = c.wrote;
+			}
+			if (session === "/new") newSession();
+			else if (session === "session_shutdown")
+				resetLSPService({ reason: "session_shutdown" });
+			else if (session === "idle reset") resetLSPService({ reason: "idle" });
+			if (session !== "same session" && held !== "not held") {
+				await readWarm(filePath, disk());
+			}
+
+			const spawnsBefore = spawns();
+			const wireBefore = wire.length;
+			const opensBefore = opens.mock.calls.length;
+			const didSavesBefore = didSaves.length;
+			write();
+			await wrote;
+			if (settle === "settled") await postExitSettled();
+			else await lateSettled();
+
+			expect(fs.existsSync(filePath)).toBe(held !== "vanished");
+			if (expected.wire === "disk") {
+				expect(wire.slice(wireBefore).at(-1)).toBe("const x = 1\n");
+			} else {
+				expect(wire.slice(wireBefore)).toEqual([]);
+			}
+			expect(spawns() - spawnsBefore).toBe(expected.spawn);
+			expect(
+				opens.mock.calls
+					.slice(opensBefore)
+					.filter(
+						([fp]) => normalizeMapKey(String(fp)) === normalizeMapKey(filePath),
+					)
+					.map((call) => call[5]),
+			).toEqual(expected.saved);
+			expect(didSaves.length - didSavesBefore).toBe(expected.didSave);
+			if (settle === "settled") {
+				expect(postExitRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: expected.row } }),
+				]);
+			} else {
+				expect(postExitRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "abandoned" } }),
+				]);
+				expect(lateRows()).toEqual([
+					expect.objectContaining({
+						filePath,
+						metadata: { outcome: expected.row },
+					}),
+				]);
+			}
+		});
 	});
 });
 

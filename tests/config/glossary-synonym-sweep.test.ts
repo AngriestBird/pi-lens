@@ -520,6 +520,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/debug-handles.ts": 1,
 		"clients/debug-heap.ts": 1,
 		"clients/degradation-ledger.ts": 2,
+		// 0 -> 1 (#3218): the demotion path now drops the promotion-note row as
+		// part of degrading a demoted body, one `Array.prototype.filter` use.
+		"clients/demoted-finding-render.ts": 1,
 		// 9 -> 7 (#3436): deleting `parseMadgeSkips` removed its two
 		// `Array.prototype.filter` uses; `localSkips`/the skip channel it served
 		// were structurally always zero under `--json`.
@@ -591,7 +594,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/config.ts": 3,
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 1,
-		"clients/lsp/index.ts": 48,
+		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
+		// into the changed paths (queued as a save) and their importers (not).
+		"clients/lsp/index.ts": 50,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
@@ -952,11 +957,15 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ruff-client.ts": 4,
 		"clients/rules-scanner.ts": 8,
 		"clients/runtime-agent-end.ts": 12,
-		"clients/runtime-coordinator.ts": 27,
+		// 27 -> 28 (#3218): the retire seam reads the removed record with
+		// `path.resolve(filePath)` before naming it resolved.
+		"clients/runtime-coordinator.ts": 28,
 		"clients/runtime-session.ts": 15,
 		"clients/runtime-tool-call.ts": 22,
 		"clients/runtime-tool-result.ts": 22,
-		"clients/runtime-turn.ts": 25,
+		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
+		// blocker set and each resolved entry with `path.resolve`.
+		"clients/runtime-turn.ts": 27,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/sanitize.ts": 2,
@@ -1041,10 +1050,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/read-guard.ts": 20,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
-		"clients/runtime-coordinator.ts": 17,
+		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
+		// `InlineBlockerRecord` (param, path, count, write index).
+		"clients/runtime-coordinator.ts": 23,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
-		"clients/runtime-turn.ts": 6,
+		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker
+		// record.
+		"clients/runtime-turn.ts": 8,
 		"clients/search-read-registration.ts": 1,
 		"clients/test-runner-client.ts": 4,
 		"clients/test-runner-delivery.ts": 15,
@@ -1161,7 +1174,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 3,
-		"clients/dispatch/types.ts": 1,
+		"clients/dispatch/types.ts": 2,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,

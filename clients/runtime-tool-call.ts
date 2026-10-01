@@ -1641,7 +1641,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				};
 			} else if (toolCallId !== undefined) {
 				// #3523: the edit lands at the agent's own line numbers, so its
-				// tool_result may record the written lines as read.
+				// tool_result may record the written lines as read. A relocated
+				// edit is not marked (#3760): its next edit, at the agent's own
+				// numbering, would pass against the record on the wrong line of
+				// the agent's text (formal/read-guard OwnEditRelocInsertRecorded).
 				runtime.markToolCallEditInPlace(toolCallId);
 			}
 		}
