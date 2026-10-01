@@ -102,10 +102,13 @@ describe("workflow concurrency edit safety", () => {
 			if (typeof group === "string") eligible.push({ file, group });
 		}
 
+		// Floor 1, was 2: #3838 moved the only other `edited` workflow
+		// (close-keywords.yml) into pr-metadata.yml and dropped `edited` from
+		// lint.yml, so pr-metadata.yml is the one workflow this sweep reads.
 		assertNonEmptyScan(
 			"edited pull-request concurrency workflows",
 			eligible.length,
-			2,
+			1,
 		);
 		const findings = eligible.flatMap(({ file, group }) => {
 			const opened = evaluateGroup(group, "opened", "run-opened");
@@ -128,7 +131,7 @@ describe("workflow concurrency edit safety", () => {
 		);
 	});
 
-	it("keeps PR and dispatch cancellation for every post-merge workflow", () => {
+	it("keeps PR cancellation for every master-push workflow", () => {
 		for (const file of [
 			"ci.yml",
 			"lint.yml",
@@ -137,7 +140,6 @@ describe("workflow concurrency edit safety", () => {
 		]) {
 			const value = loadWorkflow(file).concurrency?.["cancel-in-progress"];
 			expect(cancelInProgressOn("pull_request", value)).toBe(true);
-			expect(cancelInProgressOn("repository_dispatch", value)).toBe(true);
 		}
 	});
 

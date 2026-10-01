@@ -87,7 +87,10 @@ import type {
 	RunnerResult,
 	RunnerSkipReason,
 } from "./types.js";
-import { formatDiagnostics } from "./utils/format-utils.js";
+import {
+	DELTA_UNUSED_PROMOTION_NOTE,
+	formatDiagnostics,
+} from "./utils/format-utils.js";
 
 // --- Runner Registry ---
 
@@ -537,14 +540,6 @@ function isUnusedValueDiagnostic(d: Diagnostic): boolean {
 	);
 }
 
-/**
- * #3218: why a delta-promoted unused finding blocks. Carried on the promoted
- * diagnostic so the STOP renderers print the reason once beneath the banner
- * instead of each re-deriving why the tier changed.
- */
-const DELTA_UNUSED_PROMOTION_NOTE =
-	"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
-
 function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map((d) => {
 		if (!isUnusedValueDiagnostic(d)) return d;
@@ -589,6 +584,8 @@ export interface RunnerLatency {
 		| "pending";
 	diagnosticCount: number;
 	semantic: string;
+	/** The runner's own `failureKind`, when it set one (#3781). */
+	failureKind?: string;
 	skipReason?: RunnerSkipReason;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
@@ -1124,6 +1121,9 @@ async function runGroup(
 			status: result.status,
 			diagnosticCount: result.diagnostics.length,
 			semantic: result.semantic ?? semantic,
+			...(result.failureKind !== undefined && {
+				failureKind: result.failureKind,
+			}),
 			...(skipReason !== undefined && {
 				skipReason,
 			}),
