@@ -408,6 +408,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-agent-end.ts#8f9b56ae~24a830f2": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"#3830: the whole-package fixer's restore of agent edits, awaited " +
+			"after the drain's hold on the target is released. It waits for " +
+			"pi's queue entry of each sibling it restores (held only by an edit, " +
+			"an LSP edit or another pipeline's hold, none of which waits for " +
+			"this restore) and does local file I/O. The phase above it is the " +
+			"`runAutofix` await registered below, which has no aggregate bound " +
+			"either.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -2222,7 +2235,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// signal until #2523 AC4 threads it, so this records the increase. 9 -> 11
 	// (#3741 round 2): the settle stats the file before reading it and again just
 	// before the write, so a newer edit is never written over.
-	"clients/fix-run-restore.ts": 11,
+	// 11 -> 10 (#3830), recorded rather than absorbed: the restore reads the file
+	// inside pi's queue entry for it and re-reads it before the write instead of
+	// statting twice (the stat's identity was blind to a same-size edit inside
+	// one mtime tick), and the wrapper awaits the caller's scan (`afterRun`) but
+	// no longer `finish()`. One await is the per-file queue entry, which a hook
+	// signal cannot reach until #2523 AC4.
+	"clients/fix-run-restore.ts": 10,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
