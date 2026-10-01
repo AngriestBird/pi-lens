@@ -178,9 +178,15 @@ export interface RunnerResult {
 	 * When status==="failed", a short machine-readable reason that separates a
 	 * genuine runner breakage from "the check ran and found blocking issues".
 	 * Conventional values: "timeout", "exception" (thrown/aborted), "server_error"
-	 * (LSP/tool process failed), "blocking_diagnostics" (the file has blocking
-	 * findings — not a runner fault). Consumers (e.g. the log-smell analyzer)
-	 * use this to avoid counting found-errors as crashes.
+	 * (LSP/tool process failed), "blocking_diagnostics" (the check completed and
+	 * its findings, by the runner's own threshold, failed it — not a runner
+	 * fault). Every `failed` built from findings carries "blocking_diagnostics"
+	 * through `findingsResult` (#3781), so a `failed` without it means the runner
+	 * produced no usable result. A runner may also report findings, blocking ones
+	 * included, as `succeeded`; `status` is not a severity channel, and severity
+	 * lives in `semantic` and the diagnostics. Consumers (the log-smell
+	 * analyzer, latency.log, the MCP analyze row) use this to avoid counting
+	 * found-errors as crashes.
 	 */
 	failureKind?: string;
 	/** Optional short human-readable detail for the failure (truncated). */
@@ -195,6 +201,28 @@ export interface RunnerResult {
 	 * the rest of that set has no delivery path and reads as silent.
 	 */
 	deferredServerIds?: readonly string[];
+}
+
+/**
+ * The result of a run that COMPLETED with findings (#3781).
+ *
+ * A runner reports `failed` for findings when its own threshold says they fail
+ * the check. The threshold differs per tool: a blocking diagnostic, an error
+ * severity, any finding at all, or a nonzero exit. `status` is left as the
+ * runner decided, because a multi-member fallback group continues past a
+ * `failed` member (dispatcher.ts runGroup). The `failureKind` is what tells a
+ * consumer (the log analyzer, latency.log, the MCP analyze row) that this
+ * `failed` is findings and not a runner that broke. A broken run never comes
+ * through here: its arm returns `failed` with its own kind, or with none.
+ */
+export function findingsResult(
+	diagnostics: Diagnostic[],
+	verdict: Pick<RunnerResult, "status" | "semantic">,
+): RunnerResult {
+	if (verdict.status === "failed") {
+		return { ...verdict, diagnostics, failureKind: "blocking_diagnostics" };
+	}
+	return { ...verdict, diagnostics };
 }
 
 // --- Dispatch Context ---
