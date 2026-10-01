@@ -14,66 +14,34 @@ import {
 } from "./review-graph/git-identity.js";
 
 /**
- * Distinct linked worktrees one turn_end may select and run tests in. The
- * session checkout is not counted: it was always selected. Every other root
- * pays its own runner detection, failed-target lookup and spawns, so a turn
- * that edited many worktrees must not fan out across all of them inside the
- * turn_end budget (the per-turn target cap bounds spawns, not roots).
+ * A per-turn resolver: the root that owns `absoluteFile`. An edit belongs to
+ * the checkout that owns it. The session cwd keeps every edit it owned before,
+ * and every edit whose owner is unresolvable or an unrelated repository (a
+ * submodule, a nested clone): those stay foreign and `isExcludedTestTarget`
+ * rejects them exactly as it did. Only a LINKED WORKTREE of the session's
+ * repository (same commondir, different top level) is its own root: tests for
+ * an edit there run in that worktree, with its own config and `node_modules`,
+ * never against the session checkout. A worktree root is returned in the
+ * spelling `absoluteFile` used (the spelling the turn's file keys carry).
+ *
+ * There is deliberately no per-turn cap on roots (#3871 r2): a root costs
+ * about 0.2 ms of synchronous probing, and the spawns it leads to are already
+ * bounded by `TEST_RUNNER_MAX_TARGETS`, so a cap only starved the fourth
+ * worktree's tests.
  */
-export const MAX_LINKED_TEST_ROOTS_PER_TURN = 3;
-
-export interface TestRootVerdict {
-	/**
-	 * The directory test selection and the runner treat as the project root for
-	 * this file: the session cwd, or a linked worktree's own top level in the
-	 * spelling `absoluteFile` used (the spelling the turn's file keys carry).
-	 */
-	root: string;
-	/** True when `root` is a linked worktree beyond the per-turn cap: select nothing there. */
-	overCap: boolean;
-}
-
-export interface TurnEndTestRoots {
-	/** The root that owns `absoluteFile`; memoised per directory for the turn. */
-	rootFor(absoluteFile: string): TestRootVerdict;
-	/** Linked-worktree roots refused by the cap this turn, each once. */
-	overCapRoots(): string[];
-}
-
-/**
- * A per-turn resolver. An edit belongs to the checkout that owns it. The
- * session cwd keeps every edit it owned before, and every edit whose owner is
- * unresolvable or an unrelated repository (a submodule, a nested clone): those
- * stay foreign and `isExcludedTestTarget` rejects them exactly as it did. Only
- * a LINKED WORKTREE of the session's repository (same commondir, different top
- * level) is its own root: tests for an edit there run in that worktree, with
- * its own config and `node_modules`, never against the session checkout.
- */
-export function createTurnEndTestRoots(sessionCwd: string): TurnEndTestRoots {
+export function createTurnEndTestRoots(
+	sessionCwd: string,
+): (absoluteFile: string) => string {
 	const session = resolveGitCheckout(sessionCwd);
 	const ownerByDir = new Map<string, GitCheckout | null>();
-	const admitted: string[] = [];
-	const refused: string[] = [];
-	return {
-		rootFor(absoluteFile) {
-			if (session === null) return { root: sessionCwd, overCap: false };
-			const dir = dirname(absoluteFile);
-			let owner = ownerByDir.get(dir);
-			if (owner === undefined) {
-				owner = resolveLinkedWorktreeOwner(session, absoluteFile);
-				ownerByDir.set(dir, owner);
-			}
-			if (owner === null) return { root: sessionCwd, overCap: false };
-			if (admitted.includes(owner.root)) {
-				return { root: owner.spelledRoot, overCap: false };
-			}
-			if (admitted.length < MAX_LINKED_TEST_ROOTS_PER_TURN) {
-				admitted.push(owner.root);
-				return { root: owner.spelledRoot, overCap: false };
-			}
-			if (!refused.includes(owner.spelledRoot)) refused.push(owner.spelledRoot);
-			return { root: owner.spelledRoot, overCap: true };
-		},
-		overCapRoots: () => [...refused],
+	return (absoluteFile) => {
+		if (session === null) return sessionCwd;
+		const dir = dirname(absoluteFile);
+		let owner = ownerByDir.get(dir);
+		if (owner === undefined) {
+			owner = resolveLinkedWorktreeOwner(session, absoluteFile);
+			ownerByDir.set(dir, owner);
+		}
+		return owner === null ? sessionCwd : owner.spelledRoot;
 	};
 }

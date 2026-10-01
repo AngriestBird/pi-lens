@@ -96,10 +96,7 @@ import {
 	type TestResult,
 	type TestRunnerClient,
 } from "./test-runner-client.js";
-import {
-	createTurnEndTestRoots,
-	MAX_LINKED_TEST_ROOTS_PER_TURN,
-} from "./test-target-roots.js";
+import { createTurnEndTestRoots } from "./test-target-roots.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
 	gateFindingsByPathFreshness,
@@ -2485,9 +2482,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// neighbor set inherits whatever budget the cascade compute already applied
 		// (CASCADE_NEIGHBOUR_BUDGET), so this can't turn into unbounded per-edit work.
 		// #3871: which checkout root owns each target. One resolver per turn so
-		// the per-turn root cap and the per-directory memo are shared by the
-		// carried-over targets and this turn's candidates.
-		const testRoots = createTurnEndTestRoots(cwd);
+		// its per-directory memo is shared by the carried-over targets and this
+		// turn's candidates.
+		const testRootFor = createTurnEndTestRoots(cwd);
 		const candidates: Array<{
 			display: string;
 			abs: string;
@@ -2683,17 +2680,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// A RunnerConfig carries functions, so the cache stores the runner KEY
 			// and the config is re-resolved here from the single registry.
 			const config = RUNNERS[carried.runner];
-			const carriedRoot = testRoots.rootFor(testFile);
+			const carriedRoot = testRootFor(testFile);
 			if (
 				!config ||
-				isExcludedTestTarget(testFile, carriedRoot.root) ||
+				isExcludedTestTarget(testFile, carriedRoot) ||
 				!fs.existsSync(testFile)
 			) {
 				resolvedDeferralKeys.add(carriedKey);
 				deadDeferred++;
 				continue;
 			}
-			if (carriedRoot.overCap || targets.length >= TEST_RUNNER_MAX_TARGETS) {
+			if (targets.length >= TEST_RUNNER_MAX_TARGETS) {
 				// I5: not settled — held, with `attempts` UNCHANGED. It was never
 				// dispatched, so charging it toward retirement would retire a suite
 				// this turn simply had no room for.
@@ -2716,7 +2713,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				runner: carried.runner,
 				config,
 				strategy: "deferred",
-				testRoot: carriedRoot.root,
+				testRoot: carriedRoot,
 				deferralAttempts: attempts,
 			});
 			dbg(
@@ -2768,14 +2765,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let retiredSkips = 0;
 		for (const { display, abs, isNeighbor } of candidates) {
 			// #3871: select in the checkout that owns the edit. For an edit the
-			// session checkout owns this is `cwd`, exactly as before.
-			const { root: testRoot, overCap: rootOverCap } = testRoots.rootFor(abs);
-			if (rootOverCap) {
-				dbg(
-					`turn_end: ${display} → test root ${toRunnerDisplayPath(cwd, testRoot)} over the per-turn cap of ${MAX_LINKED_TEST_ROOTS_PER_TURN} linked worktrees, skipping selection`,
-				);
-				continue;
-			}
+			// session owns this is `cwd`, exactly as before.
+			const testRoot = testRootFor(abs);
 			const target = testRunnerClient.getTestRunTarget(
 				abs,
 				testRoot,
@@ -2836,15 +2827,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					`turn_end: ${display} → no test file found${isNeighbor ? " (cascade-neighbor)" : ""}`,
 				);
 			}
-		}
-		for (const root of testRoots.overCapRoots()) {
-			// Counted, not once-per-subject: a busy orchestrator session hits the
-			// cap on many turns, and the number of skipped roots is the question.
-			incrementDegradationCount({
-				kind: "turn-end-test-root-skipped",
-				subject: "root-cap",
-				reason: `${toRunnerDisplayPath(cwd, root)} had no tests selected: more than ${MAX_LINKED_TEST_ROOTS_PER_TURN} linked worktrees edited this turn`,
-			});
 		}
 		if (excludedTargets > 0) {
 			dbg(
@@ -2926,13 +2908,42 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// budget kills this spawn rather than letting it run out its
 						// own 60s timeout behind a batch that has already returned.
 						signal: batchSignal,
+						// #3871 r2: a failure in a linked worktree reads relative to the
+						// session checkout (`.worktrees/x/tests/a.test.ts:12`), which
+						// may hold a file at the worktree-relative path.
+						displayRoot: cwd,
+						// A worktree root without its own runner install is skipped, not
+						// run through `npx` (a network fetch) or a bare interpreter.
+						requireOwnInstall: t.testRoot !== cwd,
 					}),
 			})
-				.then(({ results, deferred, stopReason }) => {
-					const settledResults = results as Array<
+				.then(({ results: batchResults, deferred, stopReason }) => {
+					const settledResults = batchResults as Array<
 						PromiseSettledResult<TestResult>
 					>;
-					const verdicts = settledResults.flatMap((result) => {
+					// #3871 r2: a target the client refused to start is neither a pass
+					// nor a failure. Counted here, then taken out of everything below
+					// so a batch of refusals never publishes a clean run.
+					const results: Array<PromiseSettledResult<TestResult>> = [];
+					for (const result of settledResults) {
+						if (!("value" in result) || !result.value.notRun) {
+							results.push(result);
+							continue;
+						}
+						const skippedRoot =
+							targets.find(
+								(candidate) => candidate.testFile === result.value.file,
+							)?.testRoot ?? cwd;
+						incrementDegradationCount({
+							kind: "turn-end-test-root-skipped",
+							subject: result.value.notRun,
+							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own; its tests were skipped rather than fetched through npx or run in another environment`,
+						});
+						dbg(
+							`turn_end: skipped ${toRunnerDisplayPath(cwd, result.value.file)}: ${result.value.notRun} in ${toRunnerDisplayPath(cwd, skippedRoot)}`,
+						);
+					}
+					const verdicts = results.flatMap((result) => {
 						if (result.status === "rejected") return [];
 						const target = targets.find(
 							(candidate) => candidate.testFile === result.value.file,

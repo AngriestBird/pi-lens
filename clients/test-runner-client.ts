@@ -79,6 +79,13 @@ export interface TestResult {
 	 */
 	duration?: number; // ms; absent = not measured
 	error?: string; // if runner itself failed
+	/**
+	 * Set when the run was deliberately not started (#3871 r2): the target's
+	 * checkout root has no install of its own for this runner, so running it
+	 * would fetch an unpinned tool or use the wrong environment. Not a pass and
+	 * not a failure; the turn-end consumer counts it and publishes nothing.
+	 */
+	notRun?: "no-runner-install";
 }
 
 /**
@@ -659,6 +666,20 @@ interface TestRunRequest {
 	 * ambient turn signal exactly as before.
 	 */
 	signal?: AbortSignal;
+	/**
+	 * #3871 r2: the directory failure locations are rendered relative to. The
+	 * dispatch root is the checkout that owns the test, but the reader is in the
+	 * session checkout, which may hold a file at the same relative path; a
+	 * worktree failure must read `.worktrees/x/tests/a.test.ts:12`. Absent
+	 * renders against the dispatch root, as before.
+	 */
+	displayRoot?: string;
+	/**
+	 * #3871 r2: refuse to start the run when this root has no install of its own
+	 * for the runner (resolution would reach `npx` or a bare interpreter). Set
+	 * for linked-worktree roots only; the session checkout keeps its fallbacks.
+	 */
+	requireOwnInstall?: boolean;
 }
 
 interface FailedTargetStateRecord {
@@ -1736,7 +1757,14 @@ export class TestRunnerClient {
 		} else {
 			request = runnerOrRequest;
 		}
-		const { runner, config, turnIndex, signal } = request;
+		const {
+			runner,
+			config,
+			turnIndex,
+			signal,
+			displayRoot,
+			requireOwnInstall,
+		} = request;
 		if (!fs.existsSync(absoluteTestFile)) {
 			return this.emptyResult(
 				absoluteTestFile,
@@ -1751,13 +1779,19 @@ export class TestRunnerClient {
 				cwd: path.resolve(cwd),
 				rootMarkers: config.spawnCwdMarkers ?? config.configFiles,
 			}).cwd;
-			const { command, args, env } = await this.resolveExec(
+			const { command, args, env, ownInstall } = await this.resolveExec(
 				runner,
 				config,
 				absoluteTestFile,
 				cwd,
 				spawnCwd,
 			);
+			if (requireOwnInstall && !ownInstall) {
+				return {
+					...this.emptyResult(absoluteTestFile, "", runner),
+					notRun: "no-runner-install",
+				};
+			}
 			this.log(
 				`Running (async): ${command} ${args.join(" ")} (cwd ${spawnCwd})`,
 			);
@@ -1791,7 +1825,7 @@ export class TestRunnerClient {
 						stdout,
 						stderr,
 						absoluteTestFile,
-						cwd,
+						displayRoot ?? cwd,
 						runner,
 					);
 					break;
@@ -1800,7 +1834,7 @@ export class TestRunnerClient {
 						stdout,
 						stderr,
 						absoluteTestFile,
-						cwd,
+						displayRoot ?? cwd,
 						runner,
 					);
 					break;
@@ -3264,7 +3298,20 @@ export class TestRunnerClient {
 		 * Defaults to `cwd`, which is every call where the two are the same.
 		 */
 		spawnCwd: string = cwd,
-	): Promise<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> {
+	): Promise<{
+		command: string;
+		args: string[];
+		env?: NodeJS.ProcessEnv;
+		/**
+		 * #3871 r2: false when resolution reached a fallback that needs no
+		 * install under `cwd` because it fetches (`npx`) or borrows (a bare
+		 * interpreter or `phpunit` on PATH) the tool. Toolchain runners
+		 * (`go`, `cargo`, ...) have no per-project install and are always own.
+		 */
+		ownInstall: boolean;
+	}> {
+		const needsInstall =
+			config.command === "npx" || runner === "pytest" || runner === "phpunit";
 		// Run pytest through the project interpreter itself, not a generic `python`
 		// resolved from the host PATH. The child-only environment also keeps tools
 		// spawned by tests inside the same project environment.
@@ -3275,6 +3322,7 @@ export class TestRunnerClient {
 					command: pythonEnvironment.pythonPath,
 					args: config.args(testFile, spawnCwd),
 					env: augmentPythonEnvironment(process.env, pythonEnvironment),
+					ownInstall: true,
 				};
 			}
 		}
@@ -3286,9 +3334,17 @@ export class TestRunnerClient {
 			const suffix = process.platform === "win32" ? ".bat" : "";
 			const vendorBin = path.join(cwd, "vendor", "bin", `phpunit${suffix}`);
 			if (fs.existsSync(vendorBin)) {
-				return { command: vendorBin, args: config.args(testFile, spawnCwd) };
+				return {
+					command: vendorBin,
+					args: config.args(testFile, spawnCwd),
+					ownInstall: true,
+				};
 			}
-			return { command: "phpunit", args: config.args(testFile, spawnCwd) };
+			return {
+				command: "phpunit",
+				args: config.args(testFile, spawnCwd),
+				ownInstall: false,
+			};
 		}
 
 		const binName = config.binName ?? runner;
@@ -3302,6 +3358,7 @@ export class TestRunnerClient {
 			return {
 				command: localBin,
 				args: stripWrapperArgs(binName, config.args(testFile, spawnCwd)),
+				ownInstall: true,
 			};
 		}
 
@@ -3311,10 +3368,15 @@ export class TestRunnerClient {
 			return {
 				command: globalBin,
 				args: stripWrapperArgs(binName, config.args(testFile, spawnCwd)),
+				ownInstall: !needsInstall,
 			};
 		}
 
-		return { command: config.command, args: config.args(testFile, spawnCwd) };
+		return {
+			command: config.command,
+			args: config.args(testFile, spawnCwd),
+			ownInstall: !needsInstall,
+		};
 	}
 
 	private emptyResult(

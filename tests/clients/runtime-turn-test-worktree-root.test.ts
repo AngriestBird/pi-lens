@@ -57,7 +57,7 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync: vi.fn(
 		async (command: string, args: string[], options?: { cwd?: string }) => {
-			const testFile = args.find((arg) => /\.test\.ts$/.test(arg));
+			const testFile = args.find((arg) => /\.(test\.ts|py)$/.test(arg));
 			if (testFile === undefined) return { stdout: "", stderr: "", status: 0 };
 			runner.spawns.push({ command, args, cwd: options?.cwd ?? "" });
 			const failed = runner.failing.has(path.resolve(testFile)) ? 1 : 0;
@@ -65,7 +65,22 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 				stdout: JSON.stringify({
 					numFailedTests: failed,
 					numPassedTests: failed ? 0 : 1,
-					testResults: [],
+					testResults: failed
+						? [
+								{
+									name: testFile,
+									status: "failed",
+									assertionResults: [
+										{
+											status: "failed",
+											title: "renders",
+											failureMessages: ["expected 1 to be 2"],
+											location: { line: 12, column: 1 },
+										},
+									],
+								},
+							]
+						: [],
 				}),
 				stderr: "",
 				status: failed ? 1 : 0,
@@ -89,9 +104,10 @@ import { _resetInstanceRegistryEnabledForTests } from "../../clients/instance-re
 import { KnipClient } from "../../clients/knip-client.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
-import { MAX_LINKED_TEST_ROOTS_PER_TURN } from "../../clients/test-target-roots.js";
+import { peekTestFindings } from "../../clients/runtime-context.js";
 import {
 	isExcludedTestTarget,
+	RUNNERS,
 	TestRunnerClient,
 } from "../../clients/test-runner-client.js";
 import {
@@ -109,7 +125,10 @@ let runtime: RuntimeCoordinator;
 let cacheManager: CacheManager;
 let client: TestRunnerClient;
 let main: string;
+/** The session cwd the turn runs under: `main`, or a spelling of it for the cases that need one. */
+let session: string;
 let dbgLines: string[];
+let dbgWaiters: Array<{ pattern: RegExp; resolve: () => void }>;
 let runCalls: { mock: { results: Array<{ value: unknown }> } };
 
 function git(cwd: string, ...args: string[]): void {
@@ -153,11 +172,26 @@ function initRepo(dir: string): void {
 	installRunnerShim(dir);
 }
 
-function addWorktree(name: string): string {
+function addWorktree(
+	name: string,
+	options: { install?: boolean } = {},
+): string {
 	const dir = path.join(main, ".worktrees", name);
 	git(main, "worktree", "add", "-q", "-b", name, dir);
-	installRunnerShim(dir);
+	if (options.install !== false) installRunnerShim(dir);
 	return dir;
+}
+
+function dbg(line: string): void {
+	dbgLines.push(line);
+	for (const waiter of dbgWaiters)
+		if (waiter.pattern.test(line)) waiter.resolve();
+}
+
+/** Resolves when the turn has logged a line matching `pattern` (no timers: the turn's own log is the signal). */
+function dbgSeen(pattern: RegExp): Promise<void> {
+	if (dbgLines.some((line) => pattern.test(line))) return Promise.resolve();
+	return new Promise((resolve) => dbgWaiters.push({ pattern, resolve }));
 }
 
 /** The agent wrote `file`: the worklist row turn_end reads, plus the runtime's own seq bump. */
@@ -167,16 +201,16 @@ function edit(file: string): void {
 		file,
 		{ start: 1, end: 1 },
 		false,
-		main,
+		session,
 		SESSION,
 	);
 }
 
 async function turnEnd(): Promise<void> {
 	await handleTurnEnd({
-		ctxCwd: main,
+		ctxCwd: session,
 		getFlag: () => false,
-		dbg: (line: string) => dbgLines.push(line),
+		dbg,
 		runtime,
 		cacheManager,
 		knipClient: new KnipClient(false),
@@ -195,9 +229,15 @@ async function turnEnd(): Promise<void> {
  * the failed-target record is written inside each call before it resolves.
  */
 async function batchSettled(spawnCount: number): Promise<void> {
-	await Promise.allSettled(
-		runCalls.mock.results.map((call) => call.value as Promise<unknown>),
-	);
+	// The pool dispatches the next target when one settles, so keep awaiting
+	// until no call is left that this snapshot has not seen.
+	let seen = 0;
+	while (seen < runCalls.mock.results.length) {
+		seen = runCalls.mock.results.length;
+		await Promise.allSettled(
+			runCalls.mock.results.map((call) => call.value as Promise<unknown>),
+		);
+	}
 	expect(runner.spawns).toHaveLength(spawnCount);
 }
 
@@ -205,7 +245,7 @@ function spawned(): Array<{ cwd: string; file: string; command: string }> {
 	return runner.spawns.map((spawn) => ({
 		cwd: fs.realpathSync.native(spawn.cwd),
 		file: fs.realpathSync.native(
-			spawn.args.find((arg) => /\.test\.ts$/.test(arg)) as string,
+			spawn.args.find((arg) => /\.(test\.ts|py)$/.test(arg)) as string,
 		),
 		command: spawn.command,
 	}));
@@ -245,10 +285,15 @@ beforeEach(async () => {
 	runner.spawns.length = 0;
 	runner.failing.clear();
 	dbgLines = [];
+	dbgWaiters = [];
 	env = setupTestEnvironment("pi-lens-3871-test-root-");
 	vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "machine"));
 	vi.stubEnv("PI_LENS_TEST_MODE", "0");
+	vi.stubEnv("VIRTUAL_ENV", "");
+	vi.stubEnv("CONDA_PREFIX", "");
+	vi.stubEnv("UV_PROJECT_ENVIRONMENT", "");
 	main = path.join(env.tmpDir, "main");
+	session = main;
 	initRepo(main);
 	runtime = new RuntimeCoordinator();
 	runtime.projectRoot = main;
@@ -449,31 +494,253 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 		});
 	});
 
-	describe("per-turn cost bound", () => {
-		it("selects tests in at most the capped number of linked worktrees and counts the rest", async () => {
-			const worktrees = ["w1", "w2", "w3", "w4"].map(addWorktree);
-			expect(worktrees).toHaveLength(MAX_LINKED_TEST_ROOTS_PER_TURN + 1);
+	describe("no per-turn root cap", () => {
+		// Recurrence prevented (#3871 r2 review F3): a cap of 3 linked worktrees
+		// saved about 0.2 ms per root (spawns are already capped at 12) and
+		// silently dropped the fourth worktree's tests.
+		it("runs the tests of every edited worktree, however many", async () => {
+			const worktrees = ["w1", "w2", "w3", "w4", "w5"].map((name) =>
+				addWorktree(name),
+			);
 			for (const dir of worktrees)
 				edit(path.join(dir, "tests", "unit", "self.test.ts"));
-			edit(path.join(worktrees[0] as string, "src", "widget.ts"));
 
 			await turnEnd();
-			// w1 has two targets (its own test and the source's companion), w2 and w3
-			// one each; w4 is over the cap of three roots.
-			await batchSettled(MAX_LINKED_TEST_ROOTS_PER_TURN + 1);
+			await batchSettled(worktrees.length);
 
-			expect([...new Set(spawned().map((spawn) => spawn.cwd))].sort()).toEqual(
-				worktrees
-					.slice(0, MAX_LINKED_TEST_ROOTS_PER_TURN)
-					.map((dir) => real(dir))
+			expect(
+				spawned()
+					.map((spawn) => spawn.cwd)
 					.sort(),
+			).toEqual(worktrees.map((dir) => real(dir)).sort());
+		});
+
+		it("lets a fresh edit in a fourth worktree run beside three carried targets", async () => {
+			const carried = ["w1", "w2", "w3"].map((name) => addWorktree(name));
+			const fresh = addWorktree("w4");
+			cacheManager.writeCache(
+				"test-runner-findings",
+				{
+					content: "deferred",
+					deferredTargets: carried.map((dir) => ({
+						testFile: path.join(dir, "tests", "unit", "self.test.ts"),
+						runner: "vitest",
+						attempts: 1,
+						sessionId: runtime.telemetrySessionId,
+					})),
+				},
+				main,
 			);
-			const skipped = getDegradationSummary().find(
+			edit(path.join(fresh, "tests", "unit", "self.test.ts"));
+
+			await turnEnd();
+			await batchSettled(4);
+
+			expect(
+				spawned()
+					.map((spawn) => spawn.cwd)
+					.sort(),
+			).toEqual([...carried, fresh].map((dir) => real(dir)).sort());
+		});
+	});
+
+	describe("a failure is located relative to the session checkout", () => {
+		// Recurrence prevented (#3871 r2 review F1): the failure's location was
+		// rendered against the worktree root (`at tests/unit/self.test.ts:12`)
+		// into a session whose own checkout holds a file at that path.
+		it("delivers `.worktrees/x/tests/unit/self.test.ts:12`, not the worktree-relative path", async () => {
+			const x = addWorktree("x");
+			const xTest = path.join(x, "tests", "unit", "self.test.ts");
+			runner.failing.add(xTest);
+			edit(xTest);
+
+			await turnEnd();
+			await dbgSeen(/failure\(s\) cached for pull diagnostics/);
+
+			expect(
+				fs.existsSync(path.join(main, "tests", "unit", "self.test.ts")),
+			).toBe(true);
+			const delivered = peekTestFindings(cacheManager, main, runtime, true);
+			expect(JSON.stringify(delivered)).toContain(
+				"at .worktrees/x/tests/unit/self.test.ts:12",
+			);
+		});
+
+		it("keeps a session-checkout failure's location as it was", async () => {
+			const mainTest = path.join(main, "tests", "unit", "self.test.ts");
+			runner.failing.add(mainTest);
+			edit(mainTest);
+
+			await turnEnd();
+			await dbgSeen(/failure\(s\) cached for pull diagnostics/);
+
+			expect(
+				JSON.stringify(peekTestFindings(cacheManager, main, runtime, true)),
+			).toContain("at tests/unit/self.test.ts:12");
+		});
+	});
+
+	describe("a worktree without its own runner install", () => {
+		// Recurrence prevented (#3871 r2 review F2): a fresh worktree has the
+		// committed vitest config but no node_modules or venv, so the run fell
+		// through to `npx vitest` (a 13 s fetch of an unpinned vitest) or a bare
+		// `python`, in an environment the worktree never installed.
+		const skipRows = () =>
+			getDegradationSummary().find(
 				(group) => group.kind === "turn-end-test-root-skipped",
 			);
-			expect(skipped?.count).toBe(1);
-			expect(JSON.stringify(skipped)).toContain("root-cap");
-			expect(JSON.stringify(skipped)).toContain(".worktrees/w4");
+
+		it("starts no process, counts the skip, and publishes no clean run", async () => {
+			const bare = addWorktree("bare", { install: false });
+			edit(path.join(bare, "tests", "unit", "self.test.ts"));
+
+			await turnEnd();
+			await dbgSeen(/no-runner-install/);
+
+			expect(runner.spawns).toEqual([]);
+			expect(skipRows()?.count).toBe(1);
+			expect(JSON.stringify(skipRows())).toContain("no-runner-install");
+			expect(JSON.stringify(skipRows())).toContain(".worktrees/bare");
+			expect(
+				cacheManager.readCache("test-runner-findings", main)?.data,
+			).not.toEqual(expect.objectContaining({ results: expect.anything() }));
+		});
+
+		it("still runs the installed worktree beside the bare one", async () => {
+			const bare = addWorktree("bare", { install: false });
+			const x = addWorktree("x");
+			edit(path.join(bare, "tests", "unit", "self.test.ts"));
+			edit(path.join(x, "tests", "unit", "self.test.ts"));
+
+			await turnEnd();
+			await dbgSeen(/no-runner-install/);
+			await batchSettled(1);
+
+			expect(spawned().map((spawn) => spawn.cwd)).toEqual([real(x)]);
+		});
+
+		it("leaves the session checkout its fallbacks", async () => {
+			fs.rmSync(path.join(main, "node_modules"), { recursive: true });
+			const mainTest = path.join(main, "tests", "unit", "self.test.ts");
+			edit(mainTest);
+
+			await turnEnd();
+			await batchSettled(1);
+
+			expect(runner.spawns[0]?.command).toBe("npx");
+			expect(skipRows()).toBeUndefined();
+		});
+
+		it("resolves a worktree's python from its own venv, and refuses without one (pytest)", async () => {
+			const x = addWorktree("x", { install: false });
+			const test = write(x, "tests/test_widget.py", "def test_a(): pass\n");
+			const run = () =>
+				client.runTestFileAsync(test, x, {
+					runner: "pytest",
+					config: RUNNERS.pytest,
+					requireOwnInstall: true,
+				});
+
+			expect((await run()).notRun).toBe("no-runner-install");
+			expect(runner.spawns).toEqual([]);
+
+			const python = path.join(x, ".venv", "bin", "python");
+			write(x, path.join(".venv", "bin", "python"), "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(python, 0o755);
+			expect((await run()).notRun).toBeUndefined();
+			expect(runner.spawns.map((spawn) => spawn.command)).toEqual([python]);
+		});
+	});
+
+	describe("ownership resolution", () => {
+		it("keeps a worktree's failure through a turn in a sibling worktree", async () => {
+			// Recurrence prevented: the failed-first state keyed by one root for every
+			// checkout. With a shared key the sibling turn retires x's entry as foreign
+			// and x's next edit loses its replay.
+			const x = addWorktree("x");
+			const y = addWorktree("y");
+			const xTest = path.join(x, "tests", "unit", "self.test.ts");
+			runner.failing.add(xTest);
+			edit(xTest);
+			await turnEnd();
+			await batchSettled(1);
+
+			runner.spawns.length = 0;
+			dbgLines.length = 0;
+			runtime.beginTurn();
+			edit(path.join(y, "src", "widget.ts"));
+			await turnEnd();
+			await batchSettled(1);
+
+			runner.spawns.length = 0;
+			dbgLines.length = 0;
+			runtime.beginTurn();
+			edit(path.join(x, "src", "widget.ts"));
+			await turnEnd();
+			await batchSettled(1);
+
+			expect(spawned()).toEqual([
+				expect.objectContaining({ cwd: real(x), file: real(xTest) }),
+			]);
+			expect(dbgLines.join("\n")).toContain("(failed-first)");
+		});
+
+		it("runs two tests edited in the same worktree directory", async () => {
+			// Recurrence prevented: the per-directory owner memo answering the
+			// session root for the second file of a directory.
+			const x = addWorktree("x");
+			const other = write(x, "tests/unit/other.test.ts", "export {};\n");
+			edit(path.join(x, "tests", "unit", "self.test.ts"));
+			edit(other);
+
+			await turnEnd();
+			await batchSettled(2);
+
+			expect(spawned().map((spawn) => spawn.cwd)).toEqual([real(x), real(x)]);
+		});
+
+		it("names a worktree test relative to a symlinked session cwd", async () => {
+			// Recurrence prevented (#3893 r3 spelling): a root in its canonical
+			// spelling renders the target as `../main/.worktrees/...` against the
+			// session's own spelling.
+			const x = addWorktree("x");
+			const alias = path.join(env.tmpDir, "alias");
+			fs.symlinkSync(
+				main,
+				alias,
+				process.platform === "win32" ? "junction" : "dir",
+			);
+			session = alias;
+			runtime.projectRoot = alias;
+			edit(path.join(alias, ".worktrees", "x", "src", "widget.ts"));
+
+			await turnEnd();
+			await batchSettled(1);
+
+			expect(dbgLines.join("\n")).toContain(
+				"test vitest .worktrees/x/tests/widget.test.ts (related)",
+			);
+			expect(spawned()[0]?.cwd).toBe(real(x));
+		});
+
+		it("excludes a nested repository's test in a session that is not a checkout", async () => {
+			// Recurrence prevented: a session cwd outside any git checkout (the
+			// AGENTS.md by-design case) crashed owner resolution with a TypeError.
+			const folder = path.join(env.tmpDir, "plain");
+			const repo = path.join(folder, "repo");
+			initRepo(repo);
+			session = folder;
+			runtime.projectRoot = folder;
+			edit(path.join(repo, "tests", "unit", "self.test.ts"));
+
+			await expect(turnEnd()).resolves.toBeUndefined();
+
+			expect(runner.spawns).toEqual([]);
+			expect(await foreignRows()).toEqual([
+				expect.objectContaining({
+					metadata: expect.objectContaining({ sameCommonDir: "false" }),
+				}),
+			]);
 		});
 	});
 
@@ -504,7 +771,11 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 			await batchSettled(1);
 
 			expect(spawned()).toEqual([
-				expect.objectContaining({ cwd: real(x), file: real(xTest) }),
+				expect.objectContaining({
+					cwd: real(x),
+					file: real(xTest),
+					command: path.join(real(x), "node_modules", ".bin", "vitest"),
+				}),
 			]);
 		});
 	});

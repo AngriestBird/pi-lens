@@ -1447,11 +1447,12 @@ export type DegradationKind =
 	 */
 	| "turn-end-knip-root-skipped"
 	/**
-	 * turn_end selected no tests in a linked worktree whose edit it was handed
-	 * (#3871): more than `MAX_LINKED_TEST_ROOTS_PER_TURN` linked worktrees were
-	 * edited in one turn. The subject is the reason (`root-cap`); counted, like
-	 * its knip sibling, because an orchestrator session would otherwise write
-	 * one row per turn.
+	 * turn_end started no tests for a target in a linked worktree (#3871). The
+	 * subject is the reason: `no-runner-install` (the worktree has no
+	 * `node_modules/.bin`, venv or `vendor/bin` of its own, so running would
+	 * fetch through `npx` or use another environment). Counted, because a plegma
+	 * session edits many fresh worktrees and would otherwise write one row per
+	 * turn.
 	 */
 	| "turn-end-test-root-skipped"
 	/**
