@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import type {
 	SafeSpawnOptions,
 	SpawnResult,
@@ -12,6 +20,20 @@ type SafeSpawnAsync = (
 	args: string[],
 	options?: SafeSpawnOptions,
 ) => Promise<SpawnResult>;
+
+const { isolatedPiLensHome, previousPiLensHome } = await vi.hoisted(
+	async () => {
+		const nodeFs = await import("node:fs");
+		const nodeOs = await import("node:os");
+		const nodePath = await import("node:path");
+		const home = nodeFs.mkdtempSync(
+			nodePath.join(nodeOs.tmpdir(), "pi-lens-3884-home-"),
+		);
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = home;
+		return { isolatedPiLensHome: home, previousPiLensHome: previous };
+	},
+);
 
 const { findGlobalBinary, safeSpawnAsync } = vi.hoisted(() => ({
 	findGlobalBinary: vi.fn(async () => undefined),
@@ -155,6 +177,12 @@ afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+afterAll(() => {
+	fs.rmSync(isolatedPiLensHome, { recursive: true, force: true });
+	if (previousPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousPiLensHome;
 });
 
 describe("pytest project environment", () => {
