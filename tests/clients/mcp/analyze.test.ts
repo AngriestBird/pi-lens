@@ -182,7 +182,7 @@ describe("analyzeFile", () => {
 		const coverageNotice = {
 			id: "coverage-unavailable:go:main.go",
 			message:
-				"Pi-lens go analysis unavailable — language tools are missing or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).",
+				"Pi-lens go analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).",
 			filePath: "main.go",
 			severity: "warning" as const,
 			semantic: "warning" as const,

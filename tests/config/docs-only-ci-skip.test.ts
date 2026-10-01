@@ -246,6 +246,7 @@ const TEST_JOBS = [
 	"prod-install-build",
 	"targeted-tests-advisory",
 	"lint-and-typecheck",
+	"tla-shards",
 	"tla-models",
 ];
 
@@ -382,7 +383,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 	it("model-checks only when formal/ or what runs it changed, and always on master", () => {
 		const names = (event: string, files: string[]) => {
 			const sim = simulate(event, files);
-			return stepsRun("tla-models", event, sim.changes, sim.results)["-"];
+			return stepsRun("tla-shards", event, sim.changes, sim.results)["-"];
 		};
 		expect(names("pull_request", ["clients/index.ts"])).toEqual([
 			"Skip the model check (formal/ unchanged)",
@@ -422,9 +423,15 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 		);
 		expect(results.changes).toBe("failure");
 		for (const id of HEAVY_ADVISORY) expect(results[id], id).toBe("skipped");
-		for (const id of ["test", "unit-tests", "install-test", "tla-models"])
+		for (const id of [
+			"test",
+			"unit-tests",
+			"install-test",
+			"tla-shards",
+			"tla-models",
+		])
 			expect(results[id], id).toBe("success");
-		const steps = stepsRun("tla-models", "pull_request", changes, results)["-"];
+		const steps = stepsRun("tla-shards", "pull_request", changes, results)["-"];
 		expect(steps).toContain(
 			"Model-check formal/ against each config's expected verdict",
 		);
@@ -432,9 +439,9 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 	});
 
 	// Recurrence: a new job gated on `changes` without being a heavy advisory or
-	// TLA+ job would reintroduce a docs-only skip of tests. Exactly these two
-	// (and the gate itself) read `changes`.
-	it("lets only tla-models and heavy-gate depend on `changes`", () => {
+	// TLA+ shard job would reintroduce a docs-only skip of tests. The aggregate
+	// depends on the shards, not on classification; it always judges their result.
+	it("lets only tla-shards and heavy-gate depend on `changes`", () => {
 		const dependents = Object.entries(CI)
 			.filter(
 				([id, job]) =>
@@ -442,7 +449,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 			)
 			.map(([id]) => id)
 			.sort(byCodeUnit);
-		expect(dependents).toEqual(["heavy-gate", "tla-models"]);
+		expect(dependents).toEqual(["heavy-gate", "tla-shards"]);
 		expect(CI["heavy-gate"].if).toBe("needs.changes.outputs.code == 'true'");
 	});
 });

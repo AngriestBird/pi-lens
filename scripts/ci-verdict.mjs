@@ -223,6 +223,61 @@ export const EXIT_PENDING = 3;
 export const EXIT_USAGE = 64;
 export const EXIT_TRANSPORT = 70;
 
+// The verdict EXIT CODE -> KIND table. Every other mode names its own kind at
+// its `run()` exit site, so the printed line never claims a CI verdict the run
+// did not reach (#3883 F4).
+const VERDICT_KIND_BY_EXIT = new Map([
+	[EXIT_SUCCESS, "green"],
+	[EXIT_FAILURE, "red"],
+	[EXIT_DIRTY, "DIRTY"],
+	[EXIT_PENDING, "pending"],
+	[EXIT_USAGE, "usage"],
+	[EXIT_TRANSPORT, "transport"],
+]);
+
+/** The kind a plain verdict exit code prints; modes override with their own. */
+function verdictExitKind(exitCode) {
+	return VERDICT_KIND_BY_EXIT.get(exitCode) ?? "unknown";
+}
+
+/**
+ * The kind `--all`/`--watch-open` prints. Watch mode's 0/3 describe whether
+ * an event was observed, so they keep their own label; its usage and
+ * transport exits still name the real failure instead of hiding behind
+ * `(watch)` (#3883 F4).
+ */
+function watchExitKind({ watchOpen, stream, code }) {
+	if (code === EXIT_USAGE) return "usage";
+	if (code === EXIT_TRANSPORT) return "transport";
+	if (!watchOpen) return "all";
+	return stream ? "stream" : "watch";
+}
+
+/**
+ * The status line a shell pipeline can retain without consulting `$?`.
+ * Takes the `{ code, kind }` `run()` resolved where the exit code was decided,
+ * so the line can never contradict the verdict (#3883 F4): an unexpected
+ * error is `error`, `--all` is `all`, `--approve-fork` is `approve`, and
+ * watch mode keeps `watch`/`stream` except for its `usage`/`transport` exits.
+ */
+export function formatExitLine({ code, kind }) {
+	return `ci-verdict: exit ${code} (${kind})`;
+}
+
+/**
+ * The `{ code, kind }` a non-verdict emission prints. They live here, named
+ * once, so the formatter contract's own unit tests cover them rather than
+ * only an old-Node spawn (version-too-old) or a forced crash (top-level
+ * catch) that a test cannot reach (#3883 F4).
+ */
+export function transportExit() {
+	return { code: EXIT_TRANSPORT, kind: "transport" };
+}
+
+export function crashExit() {
+	return { code: EXIT_FAILURE, kind: "error" };
+}
+
 /** Minutes a required check may stay unregistered on a head with auto-merge
  * armed before the verdict says "re-arm" (#3694). CI normally registers within
  * a minute or two; ten is well past that without hiding a stuck retarget. */
@@ -1911,7 +1966,7 @@ async function readPrVerdict(
 	{ ghExec, stderr, sleepImpl, now, absentSinceMs },
 ) {
 	let captured = null;
-	const exitCode = await run({
+	const result = await run({
 		argv: [String(pr)],
 		ghExec,
 		stdout: () => {},
@@ -1924,7 +1979,7 @@ async function readPrVerdict(
 			captured = info;
 		},
 	});
-	return exitCode === EXIT_TRANSPORT ? null : captured;
+	return result.code === EXIT_TRANSPORT ? null : captured;
 }
 
 /** `--all`: one line per open PR -- author, auto-merge, head, verdict kind,
@@ -2373,10 +2428,11 @@ export function parseArgs(argv) {
 }
 
 /**
- * The whole CLI, minus the process-exit side effect: resolves an exit code
+ * The whole CLI, minus the process-exit side effect: resolves `{ code, kind }`
  * instead of setting `process.exitCode` or throwing, so tests can drive it
- * with an injectable `ghExec` and injectable output sinks. `main()` below is
- * the only caller that touches `process`.
+ * with an injectable `ghExec` and injectable output sinks, and `main()` never
+ * has to guess the label from argv. `main()` below is the only caller that
+ * touches `process`.
  */
 export async function run({
 	argv = process.argv.slice(2),
@@ -2417,26 +2473,27 @@ export async function run({
 	} = parseArgs(argv);
 	if (approveFork !== null) {
 		try {
-			return await approveForkRuns({
+			const code = await approveForkRuns({
 				target: approveFork,
 				ghExec,
 				stdout,
 				stderr,
 			});
+			return { code, kind: code === EXIT_USAGE ? "usage" : "approve" };
 		} catch (error) {
 			stderr(error instanceof Error ? error.message : String(error));
-			return EXIT_TRANSPORT;
+			return { code: EXIT_TRANSPORT, kind: "transport" };
 		}
 	}
 	if (watchOpen && rerunCancelled && !stateFile) {
 		// Without the state a re-armed watch (the normal shape: a non-stream
 		// watch exits at its first event) re-runs the same head every time.
 		stderr("--rerun-cancelled requires --state-file");
-		return EXIT_USAGE;
+		return { code: EXIT_USAGE, kind: "usage" };
 	}
 	if (all || watchOpen) {
 		try {
-			return watchOpen
+			const code = watchOpen
 				? await watchOpenPrs({
 						ghExec,
 						gitExec,
@@ -2451,16 +2508,17 @@ export async function run({
 						...(now ? { now } : {}),
 					})
 				: await snapshotOpenPrs({ ghExec, stdout, stderr, sleepImpl, now });
+			return { code, kind: watchExitKind({ watchOpen, stream, code }) };
 		} catch (error) {
 			stderr(error instanceof Error ? error.message : String(error));
-			return EXIT_TRANSPORT;
+			return { code: EXIT_TRANSPORT, kind: "transport" };
 		}
 	}
 	if (!target) {
 		stderr(
 			"usage: node scripts/ci-verdict.mjs <pr-number|sha> [--wait <seconds>] | --all | --approve-fork <pr> | --watch-open [--stream] [--rerun-cancelled] [--sync-main <path>] [--wait <seconds>] [--state-file <path>]",
 		);
-		return EXIT_USAGE;
+		return { code: EXIT_USAGE, kind: "usage" };
 	}
 
 	try {
@@ -2680,14 +2738,14 @@ export async function run({
 				}),
 			);
 		stdout(verdict.reason);
-		return verdict.exitCode;
+		return { code: verdict.exitCode, kind: verdictExitKind(verdict.exitCode) };
 	} catch (error) {
 		// Transport/unexpected (F3): `gh` missing from PATH, a call that hit its
 		// own timeout, malformed JSON, or anything else that means this script
 		// never got a real answer from GitHub. Distinct from EXIT_FAILURE (1),
 		// which means GitHub DID answer and the answer was red.
 		stderr(error instanceof Error ? error.message : String(error));
-		return EXIT_TRANSPORT;
+		return { code: EXIT_TRANSPORT, kind: "transport" };
 	}
 }
 
@@ -2724,6 +2782,7 @@ async function main() {
 	});
 	if (plan === REEXEC_VERSION_TOO_OLD) {
 		console.error(formatVersionTooOldMessage(process.version));
+		console.log(formatExitLine(transportExit()));
 		process.exitCode = EXIT_TRANSPORT;
 		return;
 	}
@@ -2738,14 +2797,20 @@ async function main() {
 			{ stdio: "inherit", env: { ...process.env, NODE_USE_ENV_PROXY: "1" } },
 		);
 		process.exitCode = result.status ?? EXIT_TRANSPORT;
+		if (result.status === null) console.log(formatExitLine(transportExit()));
 		return;
 	}
-	process.exitCode = await run();
+	const result = await run();
+	console.log(formatExitLine(result));
+	process.exitCode = result.code;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	main().catch((error) => {
 		console.error(error);
-		process.exitCode = 1;
+		// An unexpected throw is not a verdict: EXIT_FAILURE's contract is
+		// "GitHub answered and the answer was red" (#3883 F4).
+		console.log(formatExitLine(crashExit()));
+		process.exitCode = EXIT_FAILURE;
 	});
 }

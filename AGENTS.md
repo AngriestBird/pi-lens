@@ -261,7 +261,11 @@ the surface they bite; each block loads only when its trigger applies.
     contain file input; normalize and redact at the shared diagnostic seam.
 
 31. **Pull-only observability:** new behavior emits a success or decision record
-    in the streams that monitors and analyzers read.
+    in the streams that monitors and analyzers read. A new decision branch on a
+    session, lifecycle or delivery seam names its record, cites an existing one,
+    or says `none: <reason>` naming each file (`check-pr-body` prompts for it);
+    a test reads a record back, and a reason is judged by the reviewer
+    (#3875; recurrence #3873: the S2/S3 fixes could not be shown to fire live).
 
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
@@ -567,12 +571,16 @@ the surface they bite; each block loads only when its trigger applies.
   `test-target-foreign-checkout`. Proven by
   `tests/clients/test-runner-worktree-isolation.test.ts`.
 - By design, a session whose cwd is a plain folder with no `.git` that holds several repositories, a submodule, or a nested linked worktree gets no automatic tests for the files inside them: any nested `.git` is a foreign checkout, and there is no per-project opt-in (maintainer decision, #3649/#3691). Run them explicitly.
+- The one exception to that boundary is a linked worktree of the session's own repository (same git commondir, different top level, `resolveLinkedWorktreeOwner` in `clients/review-graph/git-identity.ts`, #3871): turn_end selects and runs its tests with that worktree's root as the project root (`clients/test-target-roots.ts`), so config, `node_modules` and the failed-first state are the worktree's own. A worktree root without its own runner install (no `node_modules/.bin`, venv or `vendor/bin`) is skipped with a counted `turn-end-test-root-skipped` row rather than run through `npx` or a bare interpreter; a failure there is located relative to the session checkout; a sibling worktree's file is still foreign to every other root.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.
 - Expected skips remain distinct from clean success and failure. Extend the
   closed `RUNNER_SKIP_REASONS` taxonomy when policy intentionally defers work.
   Preserve the skip reason through runner latency and model-facing delivery.
+- `scripts/ci-verdict.mjs` ends every CLI path with `ci-verdict: exit <N> (<kind>)`;
+  read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
+  the piped-status recurrence while allowing output-only pipes.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability
   or a conservative capability allowlist.
@@ -591,8 +599,16 @@ the surface they bite; each block loads only when its trigger applies.
   `runWithFixRestore` (`clients/fix-run-restore.ts`, #3598): hash the tool's
   source files, capture agent mutations pi-lens observes during the run (the
   tool_result seam and the mutation bridge), write them back after, one
-  degradation per run, and name any edit that cannot be restored. Do not add a
-  second whole-package fixer without it.
+  degradation per run, and name any edit that cannot be restored. The restore
+  takes pi's queue entry for each sibling, one at a time (#3830). It starts
+  after the caller's scan of the tool's changes and is awaited only after the
+  target's hold is released, never inside it. The tool_result pipeline does not
+  await it (F's result must not wait on a sibling's holder; the loss notice is
+  queued as an advisory), the `agent_end` drain does, after the release: a queue entry is requested by something that holds no other
+  entry, except the multi-path LSP edit, which requests in ascending key order,
+  and nothing that holds an entry awaits the restore. Do not add a second
+  whole-package fixer without it, and do not await a queue entry while holding
+  another.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
@@ -727,7 +743,10 @@ The four primary host hooks are:
   `RuntimeCoordinator.recordProjectMutation`, then run format, autofix, LSP,
   dispatch, and bounded deferred work.
 - `turn_end`: settle deferred work, deliver findings, persist bounded state, and
-  run the test/actionable-warning drains.
+  run the test/actionable-warning drains. One-shot state a producer consumes
+  for a part of the message (a retirement, a delivery count, a drained run)
+  commits only when that part reaches the capped message; a cut part stays
+  pending for the next turn (`clients/turn-end/delivery-holds.ts`, #3813).
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
