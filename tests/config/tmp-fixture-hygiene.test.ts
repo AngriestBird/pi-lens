@@ -31,6 +31,10 @@ import {
 	TMP_HYGIENE_HOME,
 	TMP_HYGIENE_OWNER_STALE_MS,
 	TMP_HYGIENE_WORKER_HOME,
+	newRepoRootEntries,
+	repoRootBaseline,
+	unadmittedRepoRootEntries,
+	untrackedUnignoredEntries,
 	type TmpHygieneProcessProbe,
 } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
@@ -368,6 +372,23 @@ function ownerForTmpEntry(
 	return owner;
 }
 
+/** The `tests/` files whose source names the literal head of a repo-root entry
+ *  (`mkdtempSync` appends six random characters): a best-effort pointer so a
+ *  leak names a suspect, never a verdict (#3715). */
+function repoRootEntryCandidates(entry: string): string[] {
+	const head = entry.length > 6 ? entry.slice(0, -6) : entry;
+	const hits: string[] = [];
+	for (const { file, source } of readWalkedFiles(
+		listSourceFiles(path.join(REPO_ROOT, "tests"), {
+			extensions: [".ts", ".mjs"],
+		}),
+	))
+		// Comments blanked: a docblock naming the head is not a producer.
+		if (stripSource(source, { strings: "keep" }).includes(head))
+			hits.push(path.relative(REPO_ROOT, file).replace(/\\/g, "/"));
+	return hits;
+}
+
 describe("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
@@ -392,10 +413,27 @@ describe("tmp-fixture-hygiene", () => {
 			const owner = ownerForTmpEntry(entry);
 			return `${entry} (owner: tests/${owner ?? "unknown"})`;
 		});
+		// #3715: the repo root is a second namespace the tmp census does not see.
+		const rootCensus = unadmittedRepoRootEntries(repoRootBaseline());
+		if (rootCensus.unknown)
+			process.stderr.write(
+				`[tmp-hygiene] repo-root census could not run: ${rootCensus.unknown}\n`,
+			);
 		try {
 			expect(
 				attributable,
 				`[tmp-hygiene] tests/${testFile} leaked ${attributable.length} top-level entries: ${described.join(",")}; live owners: ${[...liveOwners].join(",") || "none"}`,
+			).toEqual([]);
+			expect(
+				rootCensus.leaked,
+				`[tmp-hygiene] this run left ${rootCensus.leaked.length} new untracked, unignored entries in the repo root: ${rootCensus.leaked
+					.map(
+						(entry) =>
+							`${entry} (candidate owners: ${repoRootEntryCandidates(entry).join(", ") || "unknown"})`,
+					)
+					.join(
+						"; ",
+					)}. Remove them and fix the producer: a fixture belongs under os.tmpdir() or in a directory the file removes.`,
 			).toEqual([]);
 		} finally {
 			const reaped = cleanupTmpHygiene(otherInvocation);
@@ -495,6 +533,74 @@ describe("tmp-fixture-hygiene", () => {
 	// stale arm, `oldForeign` had no remover at all: a run-id-only sweep cleans
 	// only itself, so every targeted invocation that excludes this file left one
 	// more stamped directory under the persistent home for ever.
+	// #3715: the repo root is observed. Four cells, each through the shipped read:
+	// the diff is by name against the run's baseline, git (not a name list)
+	// decides what is a leak, an entry git cannot classify is reported as
+	// unknown rather than clean, and the REAL baseline is live.
+	it("names the entries a run added to the repo root, and only those", () => {
+		const env = setupTestEnvironment("pi-lens-3715-root-diff-");
+		try {
+			for (const name of ["kept", "added-dir", ".added-dot"])
+				fs.mkdirSync(path.join(env.tmpDir, name));
+			expect(newRepoRootEntries(["kept", "gone-since"], env.tmpDir)).toEqual([
+				".added-dot",
+				"added-dir",
+			]);
+			expect(newRepoRootEntries(undefined, env.tmpDir)).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("classifies a new repo-root entry by git: an untracked stray is a leak; a tracked or ignored one is not", () => {
+		const stray = `.probe-3715-stray-${process.pid}`;
+		const ignored = `probe-3715-${process.pid}-ignored.js`;
+		fs.mkdirSync(path.join(REPO_ROOT, stray));
+		fs.writeFileSync(path.join(REPO_ROOT, ignored), "");
+		try {
+			expect(
+				untrackedUnignoredEntries(
+					[stray, ignored, "package.json", ".probe-home"],
+					REPO_ROOT,
+				),
+			).toEqual([stray]);
+		} finally {
+			fs.rmSync(path.join(REPO_ROOT, stray), { recursive: true, force: true });
+			fs.rmSync(path.join(REPO_ROOT, ignored), { force: true });
+		}
+	});
+
+	it("reports unknown, never clean, when git cannot classify, and when the baseline predates the census", () => {
+		const env = setupTestEnvironment("pi-lens-3715-no-git-");
+		try {
+			fs.mkdirSync(path.join(env.tmpDir, "stray"));
+			expect(untrackedUnignoredEntries(["stray"], env.tmpDir)).toBeUndefined();
+			const unknown = unadmittedRepoRootEntries([], env.tmpDir);
+			expect(unknown.leaked).toEqual([]);
+			expect(unknown.unknown).toContain("stray");
+			expect(unadmittedRepoRootEntries(undefined).unknown).toContain(
+				"predates",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("the run's real baseline sees a stray planted in the repo root, and not once it is removed", () => {
+		const stray = `.probe-3715-live-${process.pid}`;
+		fs.mkdirSync(path.join(REPO_ROOT, stray));
+		try {
+			const during = unadmittedRepoRootEntries(repoRootBaseline());
+			expect(during.unknown).toBeUndefined();
+			expect(during.leaked).toContain(stray);
+		} finally {
+			fs.rmSync(path.join(REPO_ROOT, stray), { recursive: true, force: true });
+		}
+		expect(unadmittedRepoRootEntries(repoRootBaseline()).leaked).not.toContain(
+			stray,
+		);
+	});
+
 	// #3721 (the #3880 flake): the log sinks bind their path from PI_LENS_HOME at
 	// module load, and one home for every worker made the 33 files that run with
 	// PI_LENS_TEST_MODE=0 share one `latency.log`. Observed through the REAL

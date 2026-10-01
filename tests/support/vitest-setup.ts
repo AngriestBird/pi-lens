@@ -2,6 +2,7 @@
 import * as fs from "node:fs";
 import nodeFs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { spawnSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
@@ -350,14 +351,20 @@ function rootBackstopSnapshot(
 interface TmpHygieneBaseline {
 	tmp: string[];
 	backstopRoot: Record<string, number>;
+	/** The repo root's top-level names at run start (#3715). Optional: a record
+	 *  written by a run of an older checkout has none, and the census then says
+	 *  so instead of guessing. */
+	repoRoot?: string[];
 }
 
 let tmpHygieneBefore: Set<string>;
 let backstopRootBefore: Record<string, number>;
+let repoRootBefore: readonly string[] | undefined;
 
 function adoptBaseline(baseline: TmpHygieneBaseline): void {
 	tmpHygieneBefore = new Set(baseline.tmp);
 	backstopRootBefore = baseline.backstopRoot;
+	repoRootBefore = baseline.repoRoot;
 }
 
 try {
@@ -370,6 +377,7 @@ try {
 	const baseline: TmpHygieneBaseline = {
 		tmp: snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
 		backstopRoot: rootBackstopSnapshot(),
+		repoRoot: readTmpDirEntries(process.cwd()),
 	};
 	try {
 		const fd = fs.openSync(tmpHygieneBaselinePath, "wx");
@@ -580,6 +588,110 @@ export function unadmittedRootBackstopEntries(
 	return Object.entries(rootBackstopSnapshot(home))
 		.filter(([name, mtimeMs]) => before[name] !== mtimeMs)
 		.map(([name]) => name);
+}
+
+/**
+ * #3715: the top-level entries a run added to the REPO ROOT: what is there now,
+ * minus what was there at run start (`repoRootBaseline()`), `undefined` when the
+ * baseline predates the census. `before` and `root` are parameters so the owner's guard can drive the
+ * real directory read against a synthetic baseline and a fixture directory
+ * (the real baseline is captured at setup, before any test can plant anything).
+ *
+ * The recurrence: `workspace-diagnostics-language-neutral` created its probe
+ * home under the cwd and left a `.probe-lsp-language-<id>` directory holding a
+ * `.pi-lens-home` in the worktree root (seen twice on 2026-09-30, #3699 and #3706); nothing observed
+ * the repo root, because the tmp census watches `os.tmpdir()` only and the
+ * mkdtemp-parent sweep ALLOWS repo-rooted parents (a dozen fixtures legitimately
+ * live there and clean up after themselves).
+ */
+export function newRepoRootEntries(
+	before: readonly string[] | undefined,
+	root: string = process.cwd(),
+): string[] | undefined {
+	if (before === undefined) return undefined;
+	const known = new Set(before);
+	return readTmpDirEntries(root)
+		.filter((name) => !known.has(name))
+		.sort();
+}
+
+/** The repo-root names this run's baseline recorded at start, or `undefined`
+ *  when the record predates the census. */
+export function repoRootBaseline(): readonly string[] | undefined {
+	return repoRootBefore;
+}
+
+/**
+ * The subset of `names` (top-level entries of `root`) that git neither tracks
+ * nor ignores: what a later `git status` shows and what #3715 reported.
+ * Run-created ignored entries (`.probe-home`, `.tmp`, `reports`, `dist`, ...)
+ * are legitimate and filtered by git itself, not by a name list that would
+ * drift from `.gitignore`. A name that is tracked is not new. One spawn, and
+ * only when the run added something, so a clean run pays nothing.
+ *
+ * Returns `undefined` when git cannot answer (not a checkout, git absent): the
+ * caller reports that, it does not read it as clean.
+ */
+export function untrackedUnignoredEntries(
+	names: readonly string[],
+	root: string = process.cwd(),
+): string[] | undefined {
+	if (names.length === 0) return [];
+	const withSlash = names.map((name) => {
+		const stat = fs.lstatSync(path.join(root, name), { throwIfNoEntry: false });
+		return stat?.isDirectory() ? `${name}/` : name;
+	});
+	const run = (args: string[], input?: string) =>
+		spawnSync("git", args, {
+			cwd: root,
+			encoding: "utf8",
+			timeout: 15_000,
+			input,
+		});
+	const ignored = run(
+		["check-ignore", "--stdin", "-z"],
+		`${withSlash.join("\0")}\0`,
+	);
+	// 0: some ignored, 1: none ignored, anything else: git could not answer.
+	if (ignored.status !== 0 && ignored.status !== 1) return undefined;
+	const ignoredNames = new Set(
+		String(ignored.stdout)
+			.split("\0")
+			.filter(Boolean)
+			.map((entry) => entry.replace(/\/$/, "")),
+	);
+	const tracked = run(["ls-files", "-z", "--", ...names]);
+	if (tracked.status !== 0) return undefined;
+	const trackedTop = new Set(
+		String(tracked.stdout)
+			.split("\0")
+			.filter(Boolean)
+			.map((entry) => entry.split("/")[0]),
+	);
+	return names.filter(
+		(name) => !ignoredNames.has(name) && !trackedTop.has(name),
+	);
+}
+
+/** What this run left in the repo root (#3715), or `undefined` when it cannot
+ *  be known, with the reason in `unknown`. */
+export function unadmittedRepoRootEntries(
+	before: readonly string[] | undefined,
+	root: string = process.cwd(),
+): { leaked: string[]; unknown?: string } {
+	const added = newRepoRootEntries(before, root);
+	if (added === undefined)
+		return {
+			leaked: [],
+			unknown: "the run's baseline predates the repo-root census",
+		};
+	const leaked = untrackedUnignoredEntries(added, root);
+	if (leaked === undefined)
+		return {
+			leaked: [],
+			unknown: `git could not classify ${added.length} new entr${added.length === 1 ? "y" : "ies"} (${added.join(", ")})`,
+		};
+	return { leaked };
 }
 
 // #2042: per-file peak memory, for the files big enough to matter.
