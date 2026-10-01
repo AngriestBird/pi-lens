@@ -45,6 +45,12 @@
 (*    by DEFERRED_FORMAT_BUDGET_MS; it gives up while the run is alive.     *)
 (*    OrphanLateSync (#3828): the give-up chains the same read and send     *)
 (*    onto the run's settlement, so the late write is still synced.         *)
+(*    InBand (#3858): the run's caller is the tool_result pipeline          *)
+(*    (--immediate-format), which waits for nothing after the bound: it     *)
+(*    goes on to read fileContent and send it (the pre-format bytes), and   *)
+(*    the abandoned run writes later. The give-up is the bound's own        *)
+(*    expiry (`gaveUp` at `Abandon`), and OrphanLateSync is the same chain  *)
+(*    at that call site (pipeline.ts `analysePipeline`).                    *)
 (*  - /new: resetForSession (runtime-coordinator.ts ~447) on the module-    *)
 (*    level `runtime`: fresh read guard, cleared queue, generation + 1; and *)
 (*    the LSP service is retired (resetLSPService), so the next touch opens *)
@@ -89,7 +95,8 @@ CONSTANTS
     HeldResync,       \* fix (#3576 R1): a replaced drain resyncs only a live document, fresh read
     EnterAfterResolve, \* fix (#3610): the formatter enters pi's queue after its command resolution
     OrphanSyncBound,  \* TRUE: the post-exit wait gives up after DEFERRED_FORMAT_BUDGET_MS (#3728)
-    OrphanLateSync    \* fix (#3828): a give-up chains the fresh read + resync onto the run's settlement
+    OrphanLateSync,   \* fix (#3828, #3858): a give-up chains the fresh read + resync onto the run's settlement
+    InBand            \* TRUE: the run's caller is the in-band tool_result pipeline (#3858); the bound leaves its tail running
 
 Content == [e : SUBSET (1..Edits), f : BOOLEAN]
 Fmt(c) == [e |-> c.e, f |-> TRUE]
@@ -368,16 +375,23 @@ DAfter ==
                    gaveUp, lspVars, extVars, flagVars>>
 
 \* bounded() expires: requeue "format-failed", move on; the run goes on (it may
-\* still be resolving its command, waiting to enter, or writing)
+\* still be resolving its command, waiting to enter, or writing). InBand (#3858):
+\* the caller is the tool_result pipeline, which requeues nothing and goes on to
+\* its tail (DFc, DApply: the fileContent read and the LSP send of the bytes
+\* from before the run's write) with the run still alive; the bound's expiry is
+\* the give-up, so a late write is synced only with OrphanLateSync.
 Abandon ==
     /\ Orphan /\ hs = "wait" /\ sp \in {"resolve", "enter", "start", "run"}
-    /\ hs' = "done"
-    /\ queued' = IF Current THEN TRUE ELSE queued
-    /\ crossWrite' = (crossWrite \/ (Current /\ dGen # gen))
-    /\ ownDrop' = (ownDrop \/ (~Current /\ dGen = gen))
+    /\ hs' = IF InBand THEN "fc" ELSE "done"
+    /\ gaveUp' = InBand
+    /\ changed' = IF InBand THEN FALSE ELSE changed   \* the phase reports no format
+    /\ queued' = IF Current /\ ~InBand THEN TRUE ELSE queued
+    /\ crossWrite' = (crossWrite \/ (~InBand /\ Current /\ dGen # gen))
+    /\ ownDrop' = (ownDrop \/ (~InBand /\ ~Current /\ dGen = gen))
     /\ qOwner' = IF qOwner = "drain" /\ ~FixQueueHold THEN "none" ELSE qOwner
     /\ UNCHANGED <<file, mtime, applied, sessVars, aop, tmp, nextEdit,
-                   dGen, dLspGen, before, after, changed, fc, fcStamp, subVars,
+                   dGen, dLspGen, before, after, fc, fcStamp,
+                   sp, sub, oc, ocStamp,
                    lspVars, extVars, badClaim, blind, lspCross, respawn>>
 
 \* #3728: the post-exit wait is bounded by DEFERRED_FORMAT_BUDGET_MS and gives
@@ -392,11 +406,13 @@ OrphanGiveUp ==
                    flagVars>>
 
 \* the phase reads fileContent (with its stamp) inside the hold, then settles
-\* and the hold is released
+\* and the hold is released. An abandoned run keeps its own queue entry until
+\* it has written (SubWrite), so a tail reached through Abandon (InBand) does
+\* not release it.
 DFc ==
     /\ hs = "fc"
     /\ fc' = file /\ fcStamp' = clock /\ clock' = clock + 1
-    /\ qOwner' = IF qOwner = "drain" THEN "none" ELSE qOwner
+    /\ qOwner' = IF qOwner = "drain" /\ sp = "none" THEN "none" ELSE qOwner
     /\ hs' = "apply"
     /\ UNCHANGED <<file, mtime, applied, sessVars, aop, tmp, nextEdit,
                    queued, dGen, dLspGen, before, after, changed, subVars,
