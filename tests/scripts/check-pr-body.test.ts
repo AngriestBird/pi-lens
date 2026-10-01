@@ -735,6 +735,39 @@ describe("test-reference positive recognition (#3013)", () => {
 		}
 	});
 
+	// #3902: the corpus is a whole-tree `git ls-files` plus a read-and-lex of
+	// every test file. A body with no test reference never needs it, so the
+	// corpus is computed on first use. The getter counts reads; the TLA+
+	// coverage integration cases red on the 5 s default when a plain prose
+	// body pays for the scan under CI load.
+	it("does not read the test corpus for a body with no test reference", () => {
+		let reads = 0;
+		const result = lintPrBody(body, {
+			cwd: repositoryRoot,
+			get testCorpus() {
+				reads += 1;
+				return { paths: new Set<string>(), titles: new Set<string>() };
+			},
+		});
+		expect(result).toEqual({ valid: true, errors: [] });
+		expect(reads).toBe(0);
+	});
+
+	it("reads the test corpus when the body names a test reference", () => {
+		let reads = 0;
+		const result = lintPrBody(`${body}\nSee \`tests/missing-3902.test.ts\`.`, {
+			cwd: repositoryRoot,
+			get testCorpus() {
+				reads += 1;
+				return { paths: new Set<string>(), titles: new Set<string>() };
+			},
+		});
+		expect(result.errors).toEqual([
+			"PR body test reference is missing under tests/: tests/missing-3902.test.ts",
+		]);
+		expect(reads).toBe(1);
+	});
+
 	// End-to-end proof: three real merged bodies that fail pre-fix pass
 	// post-fix. Only test-reference errors are asserted — the citation and
 	// master-claim surfaces belong to #2904 and are unaffected.
