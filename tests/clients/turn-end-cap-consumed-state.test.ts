@@ -36,7 +36,14 @@ const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/latency-logger.js")>();
-	return { ...actual, logLatency };
+	// Spied AND passed through: the real sink still runs.
+	return {
+		...actual,
+		logLatency: (entry: Parameters<typeof actual.logLatency>[0]) => {
+			logLatency(entry);
+			actual.logLatency(entry);
+		},
+	};
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
