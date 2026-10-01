@@ -976,9 +976,25 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 		},
 		truncate(): void {
 			// #3721: the one rule, asked of its owner. A test process never cuts a
-			// log out of the real home; the refusal is counted, not written.
+			// log out of the real home; the refusal is counted, not written into the
+			// sink. One warning on the 0 -> 1 edge, so the vitest process that
+			// triggers it sees the refusal (#3892 review F1). `emitWarning` is the
+			// only terminal channel a `clients/` module may use (#1333; a raw
+			// `process.stderr.write` reds `extension-terminal-silence.test.ts`).
 			const state = stateForCall();
 			if (isTestProcessTargetingRealHome(state.file)) {
+				if (state.truncateRefusals === 0) {
+					try {
+						process.emitWarning(
+							`pi-lens refused to truncate the real-home log ${state.file} ` +
+								"from a test process (pin PI_LENS_HOME for this file)",
+							{ code: "PI_LENS_LOG_SINK_TRUNCATE_REFUSED" },
+						);
+					} catch {
+						// The refusal is already counted; a warning that cannot be
+						// emitted must not propagate into a test's clear helper.
+					}
+				}
 				state.truncateRefusals += 1;
 				return;
 			}

@@ -473,11 +473,10 @@ the surface they bite; each block loads only when its trigger applies.
   `.claude/worktrees/` for a fixer's own worktree.
 - Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
   (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
-  in `beforeEach`/an `it` body moves nothing (walked by
-  `tests/clients/pi-lens-home-hermeticity.test.ts`; a file that needs a home of
-  its own from the first import uses `pinPrivateLensHome` inside `vi.hoisted`). A test
-  process never truncates a log under the real `~/.pi-lens`
-  (`isTestProcessTargetingRealHome`). `vitest-setup.ts` also pins the orphan-backstop
+  in `beforeEach`/an `it` body moves nothing. A test process never truncates a log
+  under the real `~/.pi-lens` (`isTestProcessTargetingRealHome`); the first refusal
+  emits one `process.emitWarning` (visible on stderr) and folds a
+  `log-sink-truncate-refused` row into `pilens_health`. `vitest-setup.ts` also pins the orphan-backstop
   directory through `resolveBackstopStateDir` (#3083) when the home IS the
   run-shared one. Explicit per-case homes remain authoritative. Never bypass this
   seam for its lock or stamp.

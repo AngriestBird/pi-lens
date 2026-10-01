@@ -19,15 +19,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -51,14 +43,9 @@ import { normalizeFilePath } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 // #3721: the log sinks bind their path from PI_LENS_HOME at module load, so the
-// per-case homes below cannot isolate them; pin a private home before any
-// import and release it last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("../../support/private-lens-home.js")).pinPrivateLensHome(
-		"session-root-config-eviction",
-	),
-);
-afterAll(() => lensHome.release());
+// per-case homes below cannot isolate them. The harness gives this worker its
+// own PI_LENS_HOME before any import, so the sinks stay off every other
+// worker's file.
 
 const DENIED_SERVER = "typos";
 const dirs: string[] = [];

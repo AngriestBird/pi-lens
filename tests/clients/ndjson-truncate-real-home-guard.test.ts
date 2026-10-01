@@ -124,6 +124,27 @@ describe("a test process never truncates a log under the real home (#3721)", () 
 		).toBe(false);
 	});
 
+	it("warns once on the 0 -> 1 refusal edge, so the test process sees the refusal on stderr (#3892 F1)", async () => {
+		const { latency } = await loadLatencyLogger(realGlobalDir);
+		// `emitWarning` is the terminal channel a `clients/` module may use: it
+		// lands on stderr, while a raw `process.stderr.write` is refused by the
+		// #1333 terminal-silence guard.
+		const emitWarning = vi
+			.spyOn(process, "emitWarning")
+			.mockImplementation(() => undefined as never);
+		try {
+			latency.clearLatencyLog();
+			latency.clearLatencyLog();
+			expect(emitWarning).toHaveBeenCalledTimes(1);
+			const [message, options] = emitWarning.mock.calls[0] ?? [];
+			expect(String(message)).toContain(realLatencyLog);
+			expect(String(message)).toContain("refused");
+			expect(options).toEqual({ code: "PI_LENS_LOG_SINK_TRUNCATE_REFUSED" });
+		} finally {
+			emitWarning.mockRestore();
+		}
+	});
+
 	it("refuses when the real home is reached through a link", async () => {
 		const alias = path.join(fakeHome, "home-alias");
 		fs.symlinkSync(fakeHome, alias, "junction");

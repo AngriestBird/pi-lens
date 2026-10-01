@@ -612,7 +612,7 @@ export function newRepoRootEntries(
 	const known = new Set(before);
 	return readTmpDirEntries(root)
 		.filter((name) => !known.has(name))
-		.sort();
+		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /** The repo-root names this run's baseline recorded at start, or `undefined`
