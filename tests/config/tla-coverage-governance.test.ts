@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	evaluateTlaCoverage,
 	loadCoverageMap,
@@ -9,7 +9,10 @@ import {
 	parseChangedFiles,
 	validateCoverageMap,
 } from "../../scripts/lib/tla-coverage.mjs";
-import { lintLocalPrBody } from "../../scripts/check-pr-body.mjs";
+import {
+	lintLocalPrBody,
+	lintTlaCoverage,
+} from "../../scripts/check-pr-body.mjs";
 
 // #3802 rule 2: a PR that changes a mapped runtime file must move its model
 // (a .tla/.cfg under the family) or say "TLA+ unaffected: <family> — <reason>".
@@ -393,5 +396,53 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 		const body = `${BASE_BODY}\n\nTLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.`;
 		const result = lintLocalPrBody(body, REPO_ROOT, git as never);
 		expect(result.valid).toBe(true);
+	});
+});
+
+describe("lintTlaCoverage seam (#3802)", () => {
+	// Recurrence: the Mutation diff of #3864 showed the empty-diff guard, the
+	// map-unavailable error and the local advisory print survived neutering --
+	// no test reached them, so a missing map or a dropped note passed silently.
+	const missingRoot = path.join(os.tmpdir(), "pi-lens-tla-no-map-root");
+
+	it("returns nothing for an empty diff, even with an unreadable map", () => {
+		expect(lintTlaCoverage("", { diff: "", cwd: missingRoot })).toEqual({
+			errors: [],
+			advisories: [],
+		});
+		expect(lintTlaCoverage()).toEqual({ errors: [], advisories: [] });
+	});
+
+	it("reports an unreadable map as one lint error, never a pass", () => {
+		expect(
+			lintTlaCoverage("", { diff: READ_GUARD_DIFF, cwd: missingRoot }),
+		).toEqual({
+			errors: [
+				expect.stringMatching(
+					/^TLA\+ coverage map unavailable: cannot read formal\/coverage-map\.json: /,
+				),
+			],
+			advisories: [],
+		});
+	});
+
+	it("prints a hub-row note through the local lint without failing it", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const git = (args: string[]) =>
+				args.includes("--name-only")
+					? "index.ts\n"
+					: [
+							"diff --git a/index.ts b/index.ts",
+							"@@ -1,0 +1,1 @@",
+							"+// touched",
+						].join("\n");
+			lintLocalPrBody(BASE_BODY, REPO_ROOT, git as never);
+			expect(warn.mock.calls.flat().join("\n")).toContain(
+				"TLA+ note: index.ts",
+			);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });

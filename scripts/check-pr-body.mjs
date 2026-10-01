@@ -1582,10 +1582,7 @@ export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
  * rows stay advisory. The map logic is dependency-free because this script
  * runs with no `npm install` in the PR-body lane.
  */
-export function lintTlaCoverage(
-	body = "",
-	{ diff = "", cwd = REPO_ROOT } = {},
-) {
+export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
 	if (!diff) return { errors: [], advisories: [] };
 	let map;
 	try {
