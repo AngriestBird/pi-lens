@@ -136,10 +136,10 @@ unchanged. With the queue on:
   required but never reports there (a workflow without a `merge_group`
   trigger) stalls the queue, which `tests/config/merge-queue-workflows.test.ts`
   pins.
-- **Not covered here.** The `train:approved` lane workflow
-  (`scripts/lib/merge-train-lane.mjs`) still merges through the REST merge
-  API, which a queue refuses; until it enqueues, label-driven merges are
-  manual while the queue is on (#3761).
+- **No competing merge lane.** The `train:approved` lane that merged through
+  the REST merge API was retired (#3837); every merge now goes through
+  `gh pr merge` (auto-merge or direct), which the queue intercepts when the
+  base branch requires one.
 
 ## Queue ordering
 

@@ -49,6 +49,18 @@ const REQUIRED_JOBS = [
 const asList = (needs: string | string[] | undefined) =>
 	Array.isArray(needs) ? needs : needs ? [needs] : [];
 
+// Jobs that read `github.event.pull_request` yet MUST run on `merge_group`, so
+// they cannot carry the `pull_request` guard. `changes` (#3801) classifies the
+// diff for the heavy gate; on every non-pull_request event (merge_group
+// included) `scripts/ci-changed-files.mjs` takes the fail-open full-suite
+// direction and never reads `--repo`/`--pr`, so an empty
+// `github.event.pull_request` is its supported input, not an error. That
+// premise is pinned by tests/config/docs-only-ci-skip.test.ts (`runs the full
+// suite for a merge_group event even for a docs-only file list`). Every row is
+// checked to still be needed at the end of the guard test, so a future fix
+// that removes the need reds here instead of leaving a stale admission.
+const MERGE_GROUP_SAFE_PR_CONTEXT = [".github/workflows/ci.yml#changes"];
+
 describe("#3754 merge queue workflow contract", () => {
 	// Recurrence it prevents: enabling the queue while a required-check
 	// workflow lacks `merge_group` (a workflow added later, or a trigger block
@@ -119,12 +131,27 @@ describe("#3754 merge queue workflow contract", () => {
 				);
 				if (
 					usesPullRequestContext &&
-					!gate.includes("github.event_name == 'pull_request'")
+					!gate.includes("github.event_name == 'pull_request'") &&
+					!MERGE_GROUP_SAFE_PR_CONTEXT.includes(`${file}#${id}`)
 				)
 					offenders.push(`${file}#${id}`);
 			}
 		}
 		expect(offenders).toEqual([]);
+		// Each admission must still be needed: the job reads PR context and is
+		// unguarded. If either stops being true, delete the row.
+		for (const key of MERGE_GROUP_SAFE_PR_CONTEXT) {
+			const [file, id] = key.split("#");
+			const source = readFileSync(resolve(ROOT, file), "utf8");
+			const jobs = load(file).jobs;
+			expect(
+				jobUsesPullRequestContext(source, id, Object.keys(jobs)),
+				key,
+			).toBe(true);
+			expect(String(jobs[id]?.if ?? ""), key).not.toContain(
+				"github.event_name == 'pull_request'",
+			);
+		}
 	});
 });
 
