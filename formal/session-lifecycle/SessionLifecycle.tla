@@ -70,6 +70,17 @@
 (*                       advisories its own scope queued, and a retired    *)
 (*                       scope's advisories are dropped with a record;     *)
 (*                       without it, the first context call takes them all *)
+(*   "ticketKey"         #3819: a file-less slot is keyed by the S1 ticket *)
+(*                       of the scope that left it, bound to the session   *)
+(*                       manager it left from, and a start's key is the    *)
+(*                       ticket bound to the manager pi hands it           *)
+(*                       (Carrier); without it, both keys are undefined    *)
+(*                       and the reason alone matches                      *)
+(*   "demotedDiscard"    #3819 r2: a declined (demoted) start whose key    *)
+(*                       matches the slot discards it without adopting,    *)
+(*                       so the demoted session cannot take it stale when  *)
+(*                       it later classifies primary; no other start       *)
+(*                       removes a slot except by taking it                *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -308,9 +319,37 @@ Draw ==
 
 HostOk == pend.k = "none" /\ forking = "no" /\ primary # 0 /\ steps < MaxSteps
 
+\* Whether scope s began on its predecessor's pi session manager: pi keeps
+\* the manager on /reload and on an in-memory /fork or /clone, and makes a
+\* new one for /new, resume, a persisted fork, pi --fork and a subagent.
+SameMgr(s) ==
+    /\ predOf[s] # 0
+    /\ why[predOf[s]] \in {"reload", "fork", "clone"}
+    /\ why[predOf[s]] = "reload" \/ sess[s] \in FileLess
+
+\* #3819 (stashHandoff's binding): the ticket of the last slot left from
+\* scope s's session manager. A primary shutdown that stashes (Retire with a
+\* slot reason) binds its ticket; a secondary's shutdown stashes nothing, so
+\* it binds nothing.
+RECURSIVE Carrier(_)
+Carrier(s) ==
+    IF s = 0 THEN 0
+    ELSE IF role[s] = "primary" /\ Has("handoffAtShutdown")
+            /\ why[s] \in {"reload", "fork", "clone"} THEN s
+    ELSE IF SameMgr(s) THEN Carrier(predOf[s])
+    ELSE 0
+
+\* The ticket a start replacing scope s with reason k finds bound to the
+\* manager pi hands it (only a manager-keeping transition inherits one).
+Via(k, s) == IF k \in {"reload", "fork", "clone"} THEN Carrier(s) ELSE 0
+
 \* takeHandoff (clients/session-scope.ts): the slot's key equals the start's
-\* (start reason, session file). A file-less session's file is undefined.
-SlotMatch(r, f) == slot.has /\ slot.reason = r /\ slot.file = Key(f)
+\* (start reason, session file). A file-less session's file is undefined;
+\* under "ticketKey" its key is the ticket that left the slot (slot.from),
+\* and the start's is c, the ticket bound to its manager (Via).
+SlotMatch(r, f, c) ==
+    /\ slot.has /\ slot.reason = r /\ slot.file = Key(f)
+    /\ (Has("ticketKey") /\ f \in FileLess) => slot.from = c
 
 \* The queue after a prune: under #3757, a retired scope's advisories go
 \* (pruneRetiredAdvisories), each with a counted record.
@@ -453,9 +492,9 @@ Begin ==
            f == NewFile(k)
            nb == NewBranch(k)
            takes == IF Has("consumeOnMatch")
-                    THEN SR(k) \in SlotReasons /\ SlotMatch(SR(k), f)
+                    THEN SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
                     ELSE slot.has
-           match == takes /\ SlotMatch(SR(k), f)
+           match == takes /\ SlotMatch(SR(k), f, Via(k, pend.from))
            src == Src(k, match)
            a == Policy("RG", k)
            base == IF a \in {"reset", "none"} THEN {}
@@ -505,7 +544,8 @@ Begin ==
 \* The replacement's session_start when another start already registered as
 \* primary in its gap (a subagent's own /reload or /fork, #3668 row 17): the
 \* probe finds that primary's ctx live, so it is a concurrent secondary. It
-\* skips handleSessionStart and adopts nothing.
+\* skips handleSessionStart and adopts nothing. Under "demotedDiscard" it
+\* discards the slot when the slot's key is its own (#3819 r2).
 BeginDemoted ==
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
     /\ primary # 0
@@ -521,7 +561,10 @@ BeginDemoted ==
        /\ lin' = NewLin(k, t)
        /\ predOf' = [predOf EXCEPT ![t] = pend.from]
        /\ pend' = NoPend
-    /\ UNCHANGED <<ep, why, primary, last, forking, cell, imp, slot, taken,
+       /\ slot' = IF Has("demotedDiscard")
+                     /\ SlotMatch(SR(k), f, Via(k, pend.from))
+                  THEN NoSlot ELSE slot
+    /\ UNCHANGED <<ep, why, primary, last, forking, cell, imp, taken,
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
                    prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
@@ -660,9 +703,9 @@ SecReplace(k) ==
                        ELSE ForkBranch(branch[sess[s]])
                  asPrimary == primary = 0
                  takes == asPrimary /\
-                          IF Has("consumeOnMatch") THEN SlotMatch(k, f)
+                          IF Has("consumeOnMatch") THEN SlotMatch(k, f, Via(k, s))
                           ELSE slot.has
-                 match == takes /\ SlotMatch(k, f)
+                 match == takes /\ SlotMatch(k, f, Via(k, s))
                  src == IF ~asPrimary THEN "none"
                         ELSE IF match THEN "slot"
                         ELSE IF k = "fork" THEN "parent" ELSE "own"
