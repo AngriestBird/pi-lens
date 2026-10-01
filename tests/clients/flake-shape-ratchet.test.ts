@@ -396,6 +396,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	"real-process-spawn:scripts/ci-verdict.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"#3883 F3: the final exit line and process status live at the real main() boundary; only a spawned CLI observes them",
+	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
 		reason:

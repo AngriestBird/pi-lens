@@ -1,3 +1,6 @@
+// flake-shape: real-process-spawn — the final exit line and the process exit
+// status are properties of the real `main()` boundary; an in-process call
+// cannot observe the spawned CLI's last stdout line or its exit status.
 import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
