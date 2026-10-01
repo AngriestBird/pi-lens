@@ -413,6 +413,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	"real-process-spawn:scripts/ci-verdict.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"#3883 F3: the final exit line and process status live at the real main() boundary; only a spawned CLI observes them",
+	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -520,7 +525,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/release-qa.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI exit code are each unobservable in-process",
+			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI pack call site and exit code are each unobservable in-process",
 	},
 	// 2026-09-07 (#2613): the CLI's real exit code (2 vs. 4) and its
 	// GITHUB_OUTPUT write are the subject under test; header on the file

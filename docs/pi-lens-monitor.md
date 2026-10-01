@@ -59,7 +59,12 @@ readout.
    the count of such files. A late row names what happened to the file
    (#3828 r3): `resynced` is the healthy end of the chain; `unheld`,
    `no-service` and `vanished` had nothing to sync; `deferred` is still queued
-   for the next drift pass; `failed` did not land.
+   for the next drift pass; `failed` did not land. The in-band
+   (`--immediate-format`) caller writes the same rows as `inband_format_late_resync`
+   (#3858) with the same outcomes. It has no per-file give-up row: the budget's
+   `hook-await-exceeded` degradation `tool_result_edit:formatter-aggregate` is
+   once per session and names no file, and an Escape leaves none, so a never-settling
+   in-band formatter is not countable by file.
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,

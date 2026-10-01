@@ -70,27 +70,28 @@ jobs:
       - name: Validate changelog fragments
         run: node scripts/check-changelog-fragments.mjs --base "${{ github.event.pull_request.base.sha }}" --merge-ref
 
-  tla-models:
-    name: TLA+ models
+  # #3918: TLC over formal/*/*.cfg runs as parallel `--shard i/N` jobs, N being
+  # the matrix length (`strategy.job-total`, so the count has ONE source). The
+  # single job reached its 12-minute cap at 514 configs (master 623 s; PR heads
+  # cancelled at 736 s, 881 s and 12m15s), because the population outgrew the
+  # estimate this comment used to carry. The job id `tla-models` and the check
+  # name `TLA+ models` stay with the aggregate below (CodeQL `needs:` it, and
+  # the ruleset requires that name); the shard jobs are `tla-shards`.
+  # scripts/check-tla-models.mjs partitions the sorted config list round-robin,
+  # and tests/config/tla-models-shard-workflow.test.ts pins that every config
+  # lands in exactly one shard. Measured per-shard times: PENDING this PR's run.
+  tla-shards:
+    name: TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    # refs #3572, #3517: TLC over formal/*/*.cfg (330 configs as of this
-    # change), run through a CPU-sized concurrency pool instead of one at a
-    # time (scripts/check-tla-models.mjs). Master's serial run was cancelled
-    # at this job's old 10-minute cap on 551415b28 (job 108489017472, run
-    # 36272506689) at 320 configs: the step ran 598s, and the last config
-    # (store-freshness/WorkspaceOwnStatAfterRead) actually finished 30ms
-    # before the cancel landed — so CI's own dedicated 4-vCPU runner does a
-    # full serial pass of this population in about 600s. #3591 raised this
-    # job to 20 minutes as a stopgap pending this fix.
-    # Estimating the pooled time from that CI evidence rather than from a
-    # local run alone (this box is shared with other agents and swings from
-    # near-idle to load average 45): scaling CI's ~600s serial figure by this
-    # session's own local pooled/serial ratio (measured at ~0.48, i.e. 530s
-    # pooled vs. 1099s serial for the same 320 configs) projects a CI pooled
-    # time of about 290s; the CPU floor (total measured CPU-time, ~1200 CPU-s,
-    # scaled to CI's serial speed and spread over 4 lanes) is about 165s. 12
-    # minutes (720s) gives roughly 2.4x headroom over the 290s estimate — keep
-    # 12; re-tune from a real CI run once this lands.
+    strategy:
+      # One red shard must not cancel its siblings: the log of every red shard
+      # then names its own mismatched models.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # refs #3572, #3517: each shard runs its configs through the CPU-sized
+    # concurrency pool in scripts/check-tla-models.mjs, one TLC worker per
+    # config (deterministic first violation).
     timeout-minutes: 12
     permissions:
       contents: read
@@ -110,7 +111,33 @@ jobs:
       - name: Model-check formal/ against each config's expected verdict
         run: |
           java -version
-          node scripts/check-tla-models.mjs
+          node scripts/check-tla-models.mjs --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+  # #3918: the ONE check-run named exactly `TLA+ models`, the name branch
+  # protection requires. A job whose `needs` failed is SKIPPED by default, and
+  # GitHub counts a skipped required check as passing, so `if: always()` is
+  # what makes a red or cancelled shard red here instead of green-by-skip.
+  # `needs.tla-shards.result` must be exactly `success`: skipped, cancelled and
+  # failure all fail this job.
+  tla-models:
+    name: TLA+ models
+    needs: tla-shards
+    if: always()
+    runs-on: ubuntu-latest
+    # Runs one `echo` and a comparison; 10 min is the repo's floor (refs #3123).
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SHARDS_RESULT: ${{ needs.tla-shards.result }}
+    steps:
+      - name: Require every TLA+ models shard to succeed
+        run: |
+          echo "TLA+ models shard jobs (tla-shards): ${SHARDS_RESULT}"
+          if [[ "${SHARDS_RESULT}" != "success" ]]; then
+            echo "::error::a TLA+ models shard did not succeed (${SHARDS_RESULT}); the mismatched models are in that shard's own log, check-run 'TLA+ models (shard k/N)'"
+            exit 1
+          fi
 
   lint-and-typecheck:
     name: Lint & type-check
