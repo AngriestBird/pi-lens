@@ -51,6 +51,7 @@ import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
 import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
 import { secretsLane } from "./turn-end/lanes/secrets.js";
 import type { TurnEndLaneContext } from "./turn-end/lane.js";
+import { isHardFailureSummary } from "./hard-failure-summary.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
 import {
 	MAX_KNIP_ROOTS_PER_TURN,
@@ -1886,9 +1887,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				prevKnip &&
 				!prevKnip.data.success &&
 				!prevKnip.data.failureKind &&
-				/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(
-					prevKnip.data.summary,
-				);
+				isHardFailureSummary(prevKnip.data.summary);
 			// #3872: an abandoned scan that later timed out wrote no cache row, so the
 			// client that saw it settle is asked as well (optional: test doubles).
 			const abandonedFailure = previousFailedHard
@@ -1995,7 +1994,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (
 					prev &&
 					!prev.data.success &&
-					/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prev.data.summary)
+					isHardFailureSummary(prev.data.summary)
 				) {
 					dbg(
 						`turn_end: skipping dead-code after failure: ${prev.data.summary}`,

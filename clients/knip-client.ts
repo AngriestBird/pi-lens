@@ -15,6 +15,7 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
+import { isHardFailureSummary } from "./hard-failure-summary.js";
 import {
 	findNearestMarkerRoot,
 	normalizeEphemeralMapKey,
@@ -114,12 +115,6 @@ const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
 };
 
 const ANALYSIS_TIMEOUT_MS = 30_000;
-
-/**
- * A knip run that died to its own timeout or a kill (#1467). The same words the
- * turn_end back-off reads off a cached failure row.
- */
-const HARD_FAILURE_SUMMARY = /(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i;
 
 /**
  * How long a recorded hard failure keeps a root off the turn_end path: the
@@ -573,7 +568,7 @@ export class KnipClient {
 
 		const promise = this.runAnalyze(key).then((result) => {
 			if (result.success) this.hardFailures.delete(key);
-			else if (HARD_FAILURE_SUMMARY.test(result.summary)) {
+			else if (isHardFailureSummary(result.summary)) {
 				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
 			}
 			const executed = { ...result, execution: "executed" as const };

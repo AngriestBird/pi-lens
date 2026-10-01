@@ -789,3 +789,102 @@ describe("#3872 the timeout back-off's own lifecycle", () => {
 		expect(knipClient.recentHardFailure(main)).toBeNull();
 	});
 });
+
+describe("#3872 one hard-failure rule for every back-off reader", () => {
+	/** A dead-code client whose only observable is whether turn_end ran it. */
+	function deadCodeProbe() {
+		return {
+			id: "probe",
+			language: "Probe",
+			detect: () => true,
+			owns: () => true,
+			ensureAvailable: async () => true,
+			analyze: vi.fn(async () => ({
+				success: true,
+				language: "Probe",
+				unusedExports: [],
+				unusedFiles: [],
+				unusedDeps: [],
+				unlistedDeps: [],
+				summary: "clean",
+			})),
+		};
+	}
+
+	// Verify r2, R2-2. Recurrence: the #1467 back-off was spelled three times
+	// (the knip client's stamp, turn_end's knip row and its dead-code row). A
+	// wording added to one copy only splits them, and the reader that misses it
+	// launches another heavyweight scan every turn.
+	it("backs off on the same failure wordings in the knip client, the knip row and the dead-code row", async () => {
+		const wordings = [
+			["Process timed out after 30000ms", true],
+			["Process killed after exceeding its output cap", true],
+			["terminated by SIGTERM", true],
+			["terminated by SIGKILL", true],
+			["terminated by SIGABRT", true],
+			["spawn knip ENOENT", false],
+			["Failed to parse output", false],
+		] as const;
+		const verdicts: Array<{ message: string; readers: boolean[] }> = [];
+		for (const [message] of wordings) {
+			// Reader 1: the client's own stamp, set where a scan settles.
+			const stampClient = new KnipClient(false);
+			knipProcess.failure = new Error(message);
+			await stampClient.analyze(main);
+			knipProcess.failure = undefined;
+			const stamped = stampClient.recentHardFailure(main) !== null;
+
+			// Readers 2 and 3: turn_end's back-off on a cached failure row.
+			knipClient = new KnipClient(false);
+			cacheManager.writeCache(
+				"knip",
+				{
+					success: false,
+					issues: [],
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: `Error: ${message}`,
+				},
+				main,
+			);
+			cacheManager.writeCache(
+				"dead-code-probe",
+				{
+					success: false,
+					language: "Probe",
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: message,
+				},
+				main,
+			);
+			const deadCode = deadCodeProbe();
+			knipProcess.spawns.length = 0;
+			edit(path.join(main, "src", "a.ts"));
+			await handleTurnEnd({
+				...turnEndDeps(),
+				deadCodeClients: [deadCode],
+			} as unknown as Parameters<typeof handleTurnEnd>[0]);
+
+			verdicts.push({
+				message,
+				readers: [
+					stamped,
+					knipProcess.spawns.length === 0,
+					deadCode.analyze.mock.calls.length === 0,
+				],
+			});
+		}
+
+		expect(verdicts).toEqual(
+			wordings.map(([message, hard]) => ({
+				message,
+				readers: [hard, hard, hard],
+			})),
+		);
+	});
+});
