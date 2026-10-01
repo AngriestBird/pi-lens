@@ -357,7 +357,7 @@ describe("#3872 scan population: nested worktrees are not project files", () => 
 });
 
 describe("#3872 delta: a worktree's first scan is stored, not the agent's work", () => {
-	it("attributes only the export this turn added, never the file's pre-existing ones", async () => {
+	it("attributes only the export this turn added, never the ones the file already had", async () => {
 		const x = addWorktree("x");
 		const file = path.join(x, "src", "a.ts");
 		edit(file);
