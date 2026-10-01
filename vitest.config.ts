@@ -464,6 +464,9 @@ export const wallClockBudgetInclude = [
 	// #2807 review F1/F4: the checker must be exercised through its real local
 	// CLI and a real shallow clone, not an in-process substitute.
 	"tests/scripts/check-pr-body.test.ts",
+	// #3883 F3: the final `ci-verdict: exit` line is emitted by the real
+	// `main()` process; the spawn is the only faithful proof of that boundary.
+	"tests/scripts/ci-verdict.test.ts",
 	// #2668 review F2: two real `node --import <fetch-stub>` child-process
 	// spawns of scripts/classify-ci-failure.mjs, asserting exit code and argv
 	// wiring the library-level suite (in-process) cannot see.
