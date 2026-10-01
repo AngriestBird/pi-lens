@@ -33,6 +33,7 @@
 		"clients/project-data-dir-slug.test.ts": 1,
 		"clients/project-snapshot-cross-process.test.ts": 2,
 		"clients/review-graph.service.test.ts": 7,
+		"clients/runtime-turn-knip-checkout-root.test.ts": 1,
 		"clients/safe-spawn-ambient-signal.test.ts": 10,
 		"clients/safe-spawn-failure-taxonomy.test.ts": 4,
 		"clients/safe-spawn-input.test.ts": 4,
