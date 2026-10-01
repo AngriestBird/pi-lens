@@ -510,6 +510,7 @@ export async function handleAgentEnd({
 		// #3506: the fixer rewrites the file in place, inside pi's queue, which
 		// runAutofix enters only once the fixer is resolved.
 		const fixHold = holdFileMutationQueue(filePath);
+		let restoring: Awaited<ReturnType<typeof runAutofix>>["restoring"];
 		try {
 			const result = await runAutofix(
 				filePath,
@@ -520,17 +521,7 @@ export async function handleAgentEnd({
 				getFlagSource,
 				fixHold,
 			);
-			if (result.lostFiles?.length || result.possiblyLostFiles?.length) {
-				// The agent's turn is over, so a UI notify alone reaches nobody it
-				// could act through (and print/json modes drop it): queue the same
-				// text for the model's next `context` call as well.
-				const loss = renderFixRunLoss({
-					lost: result.lostFiles ?? [],
-					possiblyLost: result.possiblyLostFiles ?? [],
-				});
-				queueAgentAdvisory(loss, session);
-				notify(`pi-lens: ${loss}`, "warning");
-			}
+			restoring = result.restoring;
 			const tools = result.autofixTools.map((label) => label.split(":")[0]);
 			for (const changed of result.changedFiles) {
 				const changedPath = path.resolve(changed);
@@ -590,6 +581,18 @@ export async function handleAgentEnd({
 			);
 		} finally {
 			fixHold?.release();
+		}
+		// The restore of agent edits the fixer overwrote waits for pi's queue
+		// entries (#3830), so it is awaited here, after the hold is released,
+		// never inside it.
+		const loss = await restoring;
+		if (loss && (loss.lost.length > 0 || loss.possiblyLost.length > 0)) {
+			// The agent's turn is over, so a UI notify alone reaches nobody it
+			// could act through (and print/json modes drop it): queue the same
+			// text for the model's next `context` call as well.
+			const text = renderFixRunLoss(loss);
+			queueAgentAdvisory(text, session);
+			notify(`pi-lens: ${text}`, "warning");
 		}
 	}
 	if (deferredAutofixFixes.length > 0) {

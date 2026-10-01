@@ -7,11 +7,12 @@
  * hook-await-bounds.test.ts`) for the sake of one synchronous function.
  */
 
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { pathsEqual } from "./path-utils.js";
 import {
 	type GitCheckout,
 	resolveGitCheckout,
+	resolveLinkedWorktreeOwner,
 } from "./review-graph/git-identity.js";
 
 /**
@@ -52,12 +53,11 @@ export function resolveKnipScanRoots(
 	let sessionOwnsEdit = false;
 	const linked: GitCheckout[] = [];
 	for (const file of modifiedFiles) {
-		const owner = resolveGitCheckout(dirname(resolve(sessionCwd, file)));
-		const isLinkedWorktree =
-			owner !== null &&
-			!pathsEqual(owner.root, session.root) &&
-			pathsEqual(owner.commonDir, session.commonDir);
-		if (!isLinkedWorktree) {
+		const owner = resolveLinkedWorktreeOwner(
+			session,
+			resolve(sessionCwd, file),
+		);
+		if (owner === null) {
 			sessionOwnsEdit = true;
 		} else if (!linked.some((known) => pathsEqual(known.root, owner.root))) {
 			linked.push(owner);
