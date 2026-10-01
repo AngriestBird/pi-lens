@@ -1666,6 +1666,91 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			const nudge = consumeAgentNudge(undefined, edit.runtime.sessionScope);
 			expect(nudge?.messages[0]?.content).toContain("a.rs");
 		});
+
+		// Recurrence: #3914 r2, F6. `onFixRunLoss` closes over the `writeSession`
+		// the tool_result handler captured at entry (#3568), not the session
+		// current when the restore ends. A `/new` between the write's dispatch and
+		// the restore's notice retires the notice with its own session; it must
+		// never reach the successor (the `agent_end` twin is #3748).
+		it("does not hand the loss notice to the session that replaced the write's own (#3748)", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				return 0;
+			};
+			const edit = agentEdit(mainRs, "let MAIN = 1;", "write", false, {
+				autofix: true,
+			});
+			edit.write();
+			const delivery = edit.deliver();
+			await started.p;
+			// The tool erased this edit before pi-lens captured it: a stale write.
+			const sibling = agentEdit(aRs, "let AGENT = 1;");
+			sibling.write();
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			await sibling.deliver();
+			// Hold the sibling's queue entry so the restore cannot end before /new.
+			const release = gate();
+			const entered = gate();
+			const holder = withFileMutationQueue(aRs, async () => {
+				entered.open();
+				await release.p;
+			});
+			await entered.p;
+			proceed.open();
+			await delivery;
+			// `/new` lands after the write's handler returned, while its detached
+			// restore still waits for the sibling.
+			edit.runtime.resetForSession();
+			release.open();
+			await holder;
+			await restoreSettled();
+
+			expect(
+				consumeAgentNudge(undefined, edit.runtime.sessionScope),
+			).toBeUndefined();
+		});
+
+		// Recurrence: #3914 r2, C3. The loss notice was attached after dispatch, so
+		// a dispatch throw ended the pipeline before the detached restore could
+		// report the lost edit. Attaching it right after the fix run keeps the
+		// notice (the ledger row always landed; the agent was not told).
+		it("queues the loss notice when dispatch throws after a lossy fix", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				return 0;
+			};
+			const edit = agentEdit(mainRs, "let MAIN = 1;", "write", false, {
+				autofix: true,
+			});
+			edit.write();
+			const delivery = edit.deliver();
+			await started.p;
+			// The tool erased this edit before pi-lens captured it: a stale write.
+			const sibling = agentEdit(aRs, "let AGENT = 1;");
+			sibling.write();
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			await sibling.deliver();
+			// The sibling's pipeline has settled; the next dispatch is the write's.
+			vi.mocked(dispatchLintWithResult).mockRejectedValueOnce(
+				new Error("dispatch exploded"),
+			);
+			proceed.open();
+			await delivery;
+			await restoreSettled();
+
+			const nudge = consumeAgentNudge(undefined, edit.runtime.sessionScope);
+			expect(nudge?.messages[0]?.content).toContain("a.rs");
+		});
 	});
 });
 

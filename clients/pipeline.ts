@@ -1925,6 +1925,13 @@ async function analysePipeline(
 			getFlagSource,
 			writeHold,
 		));
+	// The restore waits for pi's queue entries (#3830), so this result never
+	// waits for it: F's diagnostics and blockers must not wait on whoever holds a
+	// sibling. Attach its loss notice here, immediately after the fix run, so a
+	// later dispatch throw cannot drop it. It ends on its own, and a loss it
+	// finds goes to the agent through the advisory queue, like the `agent_end`
+	// drain's.
+	if (autofixRestoring) deliverFixRunLoss(autofixRestoring, ctx);
 	for (const changedFile of autofixChangedFiles) {
 		piChangedFiles.add(path.resolve(changedFile));
 	}
@@ -2214,11 +2221,6 @@ async function analysePipeline(
 			autofixTools.length > 0 ? ` (${autofixTools.join(", ")})` : "";
 		output += `\n\n✅ Auto-fixed ${fixedCount} issue(s)${detail}`;
 	}
-	// The restore waits for pi's queue entries (#3830), so this result never
-	// waits for it: F's diagnostics and blockers must not wait on whoever holds a
-	// sibling. It ends on its own, and a loss it finds goes to the agent through
-	// the advisory queue, like the `agent_end` drain's.
-	if (autofixRestoring) deliverFixRunLoss(autofixRestoring, ctx);
 	if (formatFailures.length > 0) {
 		const details = formatFailures.slice(0, 3).join("; ");
 		const suffix =
