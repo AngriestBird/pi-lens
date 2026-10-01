@@ -62,8 +62,13 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
+      - name: Fetch the PR base for the fragment-diff check
+        run: git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+
+      # The checkout is the depth-1 pull_request merge ref, which already
+      # contains the base, so `--merge-ref` diffs from the base itself.
       - name: Validate changelog fragments
-        run: node scripts/check-changelog-fragments.mjs
+        run: node scripts/check-changelog-fragments.mjs --base "${{ github.event.pull_request.base.sha }}" --merge-ref
 
   # #3918: TLC over formal/*/*.cfg runs as parallel `--shard i/N` jobs, N being
   # the matrix length (`strategy.job-total`, so the count has ONE source). The

@@ -843,19 +843,59 @@ export function splitMarkdownUnits(body = "") {
 	return units;
 }
 
-function bodyLinesOutsideFences(body) {
+// `commonMark` also treats `~~~` fences and 4-space or tab indented lines as
+// code; only the garble lint asks for it. The citation and test-reference
+// lints keep the backtick-only view, so a citation in a nested bullet is still
+// checked (#3795 verify r3).
+function bodyLinesOutsideFences(body, { commonMark = false } = {}) {
 	let fence;
+	const fenceMarker = commonMark ? /^\s*(`{3,}|~{3,})/ : /^\s*(```+)/;
 	return String(body ?? "")
 		.split(/\r?\n/)
 		.map((line) => {
-			const marker = line.match(/^\s*(```+)/)?.[1];
+			if (commonMark && !fence && /^(?: {4}|\t)/.test(line)) return "";
+			const marker = line.match(fenceMarker)?.[1];
 			if (marker) {
 				if (!fence) fence = marker;
-				else if (marker.length >= fence.length) fence = undefined;
+				else if (marker[0] === fence[0] && marker.length >= fence.length)
+					fence = undefined;
 				return "";
 			}
 			return fence ? "" : line;
 		});
+}
+
+// #3795: `gh pr edit --body "... `name` ..."` runs the backtick as a command
+// substitution, so the name disappears and the raw `npm run lint` output
+// (the `> pkg@version script` banner and the oxlint command line) lands in the
+// body outside any fence. Two worker bodies shipped this way and the
+// structural lint accepted both.
+function lintShellExpansionGarble(body) {
+	const errors = [];
+	for (const line of bodyLinesOutsideFences(body, { commonMark: true })) {
+		const text = line.trim();
+		if (!text) continue;
+		const emptySpan = /(`+)([\s\S]*?)\1/g;
+		for (const match of text.matchAll(emptySpan)) {
+			if (match[2].trim() === "") {
+				errors.push(
+					`PR body has an empty inline code span outside a fenced block ("${text}"); a shell-expanded name left nothing between the backticks -- restore the name or drop the backticks.`,
+				);
+				break;
+			}
+		}
+		const masked = codeSpanMasked(text).trim();
+		if (!masked) continue;
+		if (/^>\s*[^\s@]+@\d+\.\d+\.\d+\s+\S/.test(masked))
+			errors.push(
+				`PR body pastes an npm-script banner outside a fenced block ("${masked}"); wrap tool output in a \`\`\`text fence.`,
+			);
+		else if (/\boxlint\b/.test(masked) && /--deny-warnings/.test(masked))
+			errors.push(
+				`PR body pastes an oxlint command line outside a fenced block ("${masked}"); wrap tool output in a \`\`\`text fence.`,
+			);
+	}
+	return errors;
 }
 
 function pathLineReferences(text) {
@@ -1524,6 +1564,7 @@ export function lintPrBody(body = "", options = {}) {
 	errors.push(...lintCodeCitations(body, options));
 	errors.push(...lintTestReferences(body, options));
 	errors.push(...lintMasterClaims(body));
+	errors.push(...lintShellExpansionGarble(body));
 	return { valid: errors.length === 0, errors };
 }
 

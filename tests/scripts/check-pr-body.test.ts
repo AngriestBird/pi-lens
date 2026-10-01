@@ -3362,6 +3362,89 @@ foo.test.ts uniquely pins the retry ladder.`;
 	});
 });
 
+// #3795 item 1. Recurrence: #3768's Round 3 body shipped with the shell-eaten
+// inline code spans and npm-script / oxlint output pasted outside any fence.
+// The structural lint passed those two garble symptoms; only the missing
+// test references redded it. The fixture below is that body's Round 3 block
+// (edit-2 of its userContentEdits, before the orchestrator rewrite).
+describe("PR body garble from shell-expanded quotes (#3795)", () => {
+	// The real block: emptied spans on the `fixed`/`Red proof` lines, then the
+	// pasted `npm run lint` banner and oxlint command line, unfenced.
+	const garbledRound3 = [
+		"## Round 3",
+		"",
+		"- N1 fixed: skip-only exit 1 is now scoped to  and ; other smoke lanes retain exit 0.",
+		"- Red proof, removing the gated option:  in .",
+		"- Targeted tests: 23 passed; ",
+		"> pi-lens@4.3.0 lint",
+		"> tsc --project tsconfig.json && npm run lint:js && npm run lint:js:tests",
+		"",
+		"> pi-lens@4.3.0 lint:js",
+		"> oxlint --deny-warnings --import-plugin -D block-scoped-var .",
+	].join("\n");
+
+	it("rejects the real Round 3 body's pasted npm banner and oxlint line", () => {
+		const errors = lintPrBody(`${body}\n\n${garbledRound3}`).errors.join("\n");
+		expect(errors).toContain("npm-script");
+		expect(errors).toContain("oxlint");
+	});
+
+	it("rejects an emptied inline code span outside a fence", () => {
+		const errors = lintPrBody(
+			`${body}\n\nThe span \`\` lost its name.`,
+		).errors.join("\n");
+		expect(errors).toContain("empty inline code span");
+	});
+
+	it("accepts the same tool output inside a fenced block", () => {
+		const fenced = `${body}\n\n## Round 3\n\n\`\`\`text\n> pi-lens@4.3.0 lint\n> oxlint --deny-warnings .\n\`\`\``;
+		const errors = lintPrBody(fenced).errors.join("\n");
+		expect(errors).not.toContain("npm-script");
+		expect(errors).not.toContain("oxlint");
+	});
+
+	it("ignores tilde fences and four-space indented code", () => {
+		const fenced = `${body}\n\n~~~text\n> pi-lens@4.3.0 lint\n> oxlint --deny-warnings .\n~~~`;
+		const indented = `${body}\n\n    > pi-lens@4.3.0 lint\n    > oxlint --deny-warnings .`;
+		expect(lintPrBody(fenced).errors.join("\n")).not.toContain("oxlint");
+		expect(lintPrBody(indented).errors.join("\n")).not.toContain("oxlint");
+	});
+
+	it("ignores tab-indented code and a tilde line inside a backtick fence", () => {
+		const tabbed = `${body}\n\n\t> pi-lens@4.3.0 lint`;
+		// A `~~~` line does not close a ``` fence, so the banner stays fenced.
+		const mixed = `${body}\n\n\`\`\`text\n~~~\n> pi-lens@4.3.0 lint\n\`\`\``;
+		expect(lintPrBody(tabbed).errors.join("\n")).not.toContain("npm-script");
+		expect(lintPrBody(mixed).errors.join("\n")).not.toContain("npm-script");
+	});
+
+	// Verify r3 regression: the indented-code rule landed in the helper that
+	// the citation and test-reference lints share, so a fabricated citation in
+	// a nested bullet passed. Those lints keep master's backtick-only fences.
+	it("still validates citations and test references in nested bullets and tilde fences", () => {
+		const headFiles = new Map([
+			["clients/citation.ts", "export const a = 1;\n"],
+		]);
+		const nested = `${body}\n\n- Evidence:\n    - \`clients/missing.ts:1\` holds it.\n    - Pinned by \`tests/missing.test.ts\`.`;
+		const tilde = `${body}\n\n~~~text\n\`clients/missing.ts:1\` holds it.\n~~~`;
+		const missingCitation =
+			"PR body citation clients/missing.ts:1 does not exist in the HEAD tree.";
+		const nestedErrors = lintPrBody(nested, { headFiles }).errors;
+		expect(nestedErrors).toContain(missingCitation);
+		expect(nestedErrors).toContain(
+			"PR body test reference is missing under tests/: tests/missing.test.ts",
+		);
+		expect(lintPrBody(tilde, { headFiles }).errors).toContain(missingCitation);
+	});
+
+	it("accepts a legitimate inline mention of the oxlint flag", () => {
+		const errors = lintPrBody(
+			`${body}\n\nThe \`oxlint --deny-warnings\` flag stays in the transcript.`,
+		).errors.join("\n");
+		expect(errors).not.toContain("outside a fenced block");
+	});
+});
+
 describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
 	// The diff touches a runtime file, so the Observability section must carry
 	// the literal the runtime-observability lint accepts; the coverage rule is
