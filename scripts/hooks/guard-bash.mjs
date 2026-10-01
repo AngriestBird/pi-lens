@@ -1178,20 +1178,59 @@ function classifyGit(args, cwd, env = {}) {
 	const i = gitSubcommandIndex(args);
 	const subcommand = args[i];
 	if (classifyHookBypass(args, i, env)) return "hookBypass";
-	if (subcommand === "rebase") return "rebase";
+	if (subcommand === "rebase") {
+		const rest = args.slice(i + 1);
+		return rest.length === 1 && (rest[0] === "--abort" || rest[0] === "--quit")
+			? null
+			: "rebase";
+	}
+	if (subcommand === "pull") {
+		const rest = args.slice(i + 1);
+		if (
+			rest.some(
+				(a) =>
+					a === "-r" ||
+					a === "--rebase" ||
+					(a.startsWith("--rebase=") &&
+						a.slice("--rebase=".length).toLowerCase() !== "false"),
+			)
+		)
+			return "rebase";
+	}
+	if (subcommand === "config") {
+		const rest = args.slice(i + 1);
+		const keyIndex = rest.findIndex((a) => a.toLowerCase() === "pull.rebase");
+		if (
+			keyIndex >= 0 &&
+			rest[keyIndex + 1] !== undefined &&
+			rest[keyIndex + 1].toLowerCase() !== "false"
+		)
+			return "rebase";
+	}
+	if (
+		args.slice(0, i).some((a) => {
+			const match = /^pull\.rebase=(.*)$/i.exec(a);
+			return match !== null && match[1].toLowerCase() !== "false";
+		})
+	)
+		return "rebase";
 	if (subcommand === "push") {
 		const rest = args.slice(i + 1);
 		const hasExplicitLease = rest.some((a) =>
 			/^--force-with-lease=[^:]+:[0-9a-fA-F]{4,64}$/.test(a),
 		);
+		const hasForce = rest.some(
+			(a) => a === "--force" || a === "-f" || /^-[^-]*f/.test(a),
+		);
+		const hasLease = rest.some(
+			(a) => a === "--force-with-lease" || a.startsWith("--force-with-lease="),
+		);
+		const hasPlusRefspec = rest.some((a) => a.startsWith("+"));
 		if (
-			!hasExplicitLease &&
-			(rest.some((a) => a === "--force" || a === "-f" || /^-[^-]*f/.test(a)) ||
-				rest.some(
-					(a) =>
-						a === "--force-with-lease" || a.startsWith("--force-with-lease="),
-				) ||
-				rest.some((a) => a.startsWith("+")))
+			rest.includes("--mirror") ||
+			(hasLease
+				? !hasExplicitLease || hasForce || hasPlusRefspec
+				: hasForce || hasPlusRefspec)
 		)
 			return "forcePush";
 		return null;

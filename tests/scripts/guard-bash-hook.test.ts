@@ -100,10 +100,33 @@ function runHook(
 const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	["git push --force origin branch", "force"],
 	["git push -f origin branch", "force"],
+	// review round 2 F1: an explicit lease must not mask an unconditional
+	// force or a +refspec in the same push.
+	["git push --force --force-with-lease=b:0123abcd origin HEAD:b", "force"],
+	["git push --force-with-lease=b:0123abcd origin +HEAD:b", "force"],
+	// review round 2 F4: mirror can delete and overwrite every remote ref.
+	["git push --mirror origin", "force"],
+	// review round 2 F5: both bundled force spellings and -C must remain
+	// visible to the force-push rule.
+	["git push -fu origin branch", "force"],
+	["git push -uf origin branch", "force"],
+	["git -C /tmp/worktree push -f origin branch", "force"],
+	["git push --force-with-lease=b:012 origin HEAD:b", "force"],
 	["git push --force-with-lease origin branch", "force"],
 	["git push --force-with-lease=branch origin branch", "force"],
 	["git push origin +HEAD:branch", "force"],
 	["git rebase origin/master", "rebase"],
+	// review round 2 F2: every pull/config spelling that enables rebase is
+	// denied; explicit false remains an allowed opt-out.
+	["git pull --rebase", "rebase"],
+	["git pull -r", "rebase"],
+	["git pull --rebase=true", "rebase"],
+	["git -c pull.rebase=true pull", "rebase"],
+	["git config pull.rebase true", "rebase"],
+	// review round 2 F3: finishing a rebase is denied, while abort/quit
+	// remain available as recovery exits.
+	["git rebase --continue", "rebase"],
+	["git rebase --skip", "rebase"],
 	["git stash", "stash"],
 	["git stash list", "stash"],
 	["git stash pop", "stash"],
@@ -244,6 +267,11 @@ const ALLOW_CASES: string[] = [
 	"git push",
 	"git push origin HEAD:branch",
 	"git push --force-with-lease=branch:0123456789abcdef0123456789abcdef01234567 origin HEAD:branch",
+	"git rebase --abort",
+	"git rebase --quit",
+	"git pull --rebase=false",
+	"git -c pull.rebase=false pull",
+	"git config pull.rebase false",
 	"git diff > fix.patch",
 	"git checkout HEAD -- x",
 	"git worktree remove -f /tmp/tree",
