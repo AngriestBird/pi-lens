@@ -553,6 +553,7 @@ export interface LSPClientInfo {
 				hash: string;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
+				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined;
 	/** Whether this client currently has an LSP request in flight. */
@@ -1251,6 +1252,12 @@ export interface LSPClientState {
 	mutationContextOwner?: LspMutationContext;
 	activeMutationDepth?: number;
 	readonly serverId: string;
+	/** #3827: `Date.now()` when `createLSPClient` built this state, before the
+	 *  `initialize` handshake, so before the server could read any project file.
+	 *  A file whose mtime sits before it (by more than the filesystem's timestamp
+	 *  granularity) holds bytes the server could only have read as they are now.
+	 *  Optional for mock states; unset means no such claim. */
+	readonly startedAtMs?: number;
 	/** See `LSPServerInfo.spawn`'s `launchVariant` (server.ts). Undefined =
 	 *  single-variant server or not yet reported. */
 	readonly launchVariant?: "classic" | "native-ts7";
@@ -5954,6 +5961,7 @@ export async function createLSPClient(options: {
 	const state: LSPClientState = {
 		isConnected: true,
 		isDestroyed: false,
+		startedAtMs: Date.now(),
 		shutdownRequested: false,
 		shutdownPromise: undefined,
 		shutdownOptions: undefined,
@@ -6490,6 +6498,7 @@ export async function createLSPClient(options: {
 					hash: sent.hash,
 					changedAtMs: sent.changedAtMs,
 					openedAtMs: sent.openedAtMs,
+					clientStartedAtMs: state.startedAtMs,
 				}
 			);
 		},

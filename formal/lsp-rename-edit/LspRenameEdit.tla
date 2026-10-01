@@ -65,7 +65,13 @@ CONSTANTS
     SyncCarriesRead,\* TRUE: a pi sync sends its own pipeline's bytes, not the current disk
     SplitApply,     \* TRUE: an unqueued writer may land between the apply's compare and write
     StampedPrepare, \* candidate: openFileBestEffort's send carries a readStamp (#3481)
-    FirstOpenExempt,\* TRUE (#3827): a file first opened at or after T takes the unopened rule
+    FirstOpenExempt,\* #3827: how a file whose first send is at or after T is bound:
+                    \*  "off"   by its send record (master before #3827)
+                    \*  "stamp" as unopened (the first #3827 rule, refuted by review r1 F1)
+                    \*  "quiet" as unopened only if nothing wrote it since the client
+                    \*          started (mtime = 0), else by its send record (shipped)
+    SyncBeforeCapture, \* TRUE: every pending pi sync has landed before Capture (isolates a
+                    \* sync that lands inside the request window from #3747's late sync)
     Margin,         \* RENAME_MTIME_MARGIN_MS, in clock ticks
     MaxWrites,
     MaxClock
@@ -213,11 +219,19 @@ Request ==
                    writes, tContent, expected, wrote, stale, refused, inflight>>
 
 \* #3827: the server answered from its own copy of a file this client first
-\* opened at or after T, so the client's send says nothing about what it held:
-\* under FirstOpenExempt such a file takes the unopened rule.
+\* opened at or after T, so the client's send says nothing about what it held.
+\* Under "quiet" such a file takes the unopened rule only if it was never
+\* written since the client started: then the server's copy is the disk's, and
+\* the first open adds no bytes. A file pi wrote since (its sync landing as the
+\* first open) keeps the send check and its stamp, which refuses it (review r1
+\* F1; "stamp" applies it).
+\* `mtime[f] = 0` stands for "mtime older than the client's start by the margin":
+\* every write in the model is stamped at clock >= Margin + 1, after the start,
+\* and an external write that keeps the old mtime keeps 0 (the #3747 blind spot).
 UnopenedAtT(f) ==
     \/ sent[f] = NoSend
-    \/ FirstOpenExempt /\ openedAt[f] >= T
+    \/ FirstOpenExempt = "stamp" /\ openedAt[f] >= T
+    \/ FirstOpenExempt = "quiet" /\ openedAt[f] >= T /\ mtime[f] = 0
 
 \* captureRenameExpectedContent, per Rule.
 Refuses(f) ==
@@ -234,6 +248,7 @@ Bound(f) ==
 
 Capture ==
     /\ phase = "requested"
+    /\ (~SyncBeforeCapture \/ pending = {})
     /\ IF \E f \in Files : Refuses(f)
          THEN /\ phase' = "refused"
               /\ refused' = {f \in Files : Refuses(f)}
@@ -305,11 +320,16 @@ AtomicRefusal == phase \in {"refused", "aborted"} => wrote = {}
 
 \* The false refusals master accepts, per file: a changed send stamped in T's
 \* own tick (the `>=` tie); an unopened file whose mtime is within the margin
-\* of T, T's own tick included; and the target, which is held to the bytes
-\* openFileBestEffort read even when the server has since caught up.
+\* of T, T's own tick included; the target, which is held to the bytes
+\* openFileBestEffort read even when the server has since caught up; and, under
+\* "quiet", a file written since the client started and first opened at or after
+\* T, which keeps master's refusal because the client cannot tell a sync that
+\* delivers unseen bytes from one whose watcher already delivered them.
 Accepted(f) ==
     \/ f = Target /\ disk[f] # tContent
     \/ f # Target /\ ~UnopenedAtT(f) /\ Rule = "merged" /\ stamp[f] = T
+    \/ f # Target /\ FirstOpenExempt = "quiet" /\ sent[f] # NoSend /\ openedAt[f] >= T
+       /\ mtime[f] # 0
     \/ f # Target /\ UnopenedAtT(f) /\ Rule \in {"r3", "merged"}
        /\ mtime[f] + Margin >= T
 

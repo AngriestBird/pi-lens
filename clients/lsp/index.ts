@@ -3029,6 +3029,7 @@ export class LSPService {
 				hash: string;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
+				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(

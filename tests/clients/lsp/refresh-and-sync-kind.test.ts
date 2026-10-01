@@ -1623,9 +1623,14 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 				hash: hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
 				changedAtMs: expect.any(Number),
 				openedAtMs: expect.any(Number),
+				clientStartedAtMs: expect.any(Number),
 			});
 			const sent = client.getSentContent?.(filePath);
 			expect(sent?.openedAtMs).toBeLessThanOrEqual(sent?.changedAtMs ?? 0);
+			// #3827 r2: the client's own start precedes every send it made.
+			expect(sent?.clientStartedAtMs).toBeLessThanOrEqual(
+				sent?.openedAtMs ?? 0,
+			);
 			expect(
 				client.getSentContent?.(path.join(os.tmpdir(), "never-opened.ts")),
 			).toBeUndefined();

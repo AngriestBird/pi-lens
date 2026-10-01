@@ -23,6 +23,8 @@
  *  | opened              | rewritten (old mtime), re-synced | refused  |
  *  | never opened        | nothing                          | applies  |
  *  | never opened        | first opened, bytes unchanged    | applies  |
+ *  | written after client start (old mtime), first opened | refused |
+ *  | written within the margin before client start, first opened | refused |
  *  | never opened        | rewritten, then first opened     | refused  |
  *  | never opened        | first opened, then rewritten+sync| refused  |
  */
@@ -58,6 +60,7 @@ function gate() {
 let env: ReturnType<typeof setupTestEnvironment>;
 let fileA: string;
 let fileB: string;
+let clientStartMs: number;
 let client: Awaited<ReturnType<typeof createLSPClient>>;
 let proc: Awaited<ReturnType<typeof spawnFakeLspServer>>;
 
@@ -161,11 +164,19 @@ beforeEach(async () => {
 	fs.utimesSync(fileB, old, old);
 	setHostFileMutationQueueLoader(async () => ({ withFileMutationQueue }));
 	proc = await spawnFakeLspServer({ cwd: env.tmpDir });
-	client = await createLSPClient({
-		serverId: "fake-3827",
-		process: proc,
-		root: env.tmpDir,
-	});
+	// A client started a minute ago, so the files this test writes "after the
+	// client started" can still be older than the rename request's margin.
+	clientStartMs = Date.now() - 60_000;
+	const startClock = vi.spyOn(Date, "now").mockReturnValue(clientStartMs);
+	try {
+		client = await createLSPClient({
+			serverId: "fake-3827",
+			process: proc,
+			root: env.tmpDir,
+		});
+	} finally {
+		startClock.mockRestore();
+	}
 });
 
 afterEach(async () => {
@@ -215,6 +226,39 @@ describe("#3827: a first open after the rename was computed is not a change", ()
 		expect(result.text).toContain("b.ts");
 		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 8;\n");
 		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+	});
+
+	it("a file pi wrote after the client started, more than the margin before the request, whose sync is the first open in the window, is refused", async () => {
+		// Recurrence guarded: review r1 F1 (probe P1). The server holds its
+		// load-time copy of a never-opened file; the pipeline's sync is the first
+		// send and carries bytes it never saw. Master refused it by the stamp, the
+		// first #3827 rule applied it at the server's offsets ("let9;").
+		fs.writeFileSync(fileB, "PI = 9;\n");
+		const tenSecondsAgo = new Date(Date.now() - 10_000);
+		fs.utimesSync(fileB, tenSecondsAgo, tenSecondsAgo);
+		const result = await renameWith(async () => {
+			await touch(fileB, "PI = 9;\n");
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain("b.ts");
+		expect(fs.readFileSync(fileB, "utf8")).toBe("PI = 9;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+	});
+
+	it("a file last written within the margin before the client started is not held to be quiet since it, and its first open is refused", async () => {
+		// Recurrence guarded: the margin on the client-start comparison. A
+		// coarse-timestamp filesystem can stamp a write after the start up to the
+		// margin early; a bare `mtime < start` would exempt it.
+		const justBeforeStart = new Date(clientStartMs - 1_000);
+		fs.utimesSync(fileB, justBeforeStart, justBeforeStart);
+		const result = await renameWith(async () => {
+			await touch(fileB, "const = 2;\n");
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain("b.ts");
+		expect(fs.readFileSync(fileB, "utf8")).toBe("const = 2;\n");
 	});
 
 	it("a file first opened after compute and rewritten and re-synced is refused", async () => {

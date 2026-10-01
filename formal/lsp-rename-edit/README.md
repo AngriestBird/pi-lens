@@ -35,7 +35,14 @@ Code references name symbols, read on master at `cf1b548e5`.
   `clients/lsp/client.ts` moves it only when the bytes change. A first
   `didOpen` has no previous record, so it always stamps. The record also
   keeps `openedAtMs` (`openedAt`), the instant of its first send, which a
-  change or a re-send keeps and a close drops (#3827).
+  change or a re-send keeps and a close drops (#3827). The client also
+  reports its own start (`clientStartedAtMs`, stamped when `createLSPClient`
+  builds its state, before `initialize`), which the model folds into
+  `mtime = 0` ("older than the start by the margin").
+- **`SyncBeforeCapture`** (#3827 r2) requires every pending pi sync to land
+  before `Capture`. It isolates a sync that lands inside the request window
+  (the first open under review) from `Issue3747LateHookSync`'s sync that lands
+  after the capture.
 - **Writers:**
   - `PiWrite`: pi's queued writers, meaning the agent's `edit` and `write`,
     and the formatter since #3610. Each write is followed by a `touchFile`
@@ -80,17 +87,26 @@ lands, `ApplyEdit` should cite its action by name.
 | `r3` | same | as `r2` | refuse if mtime is at or after `T - Margin` | round 3 (`c64b10a8f`) |
 | `merged` | same | as `r2`, and refuse if the send changed at or after `T` | as `r3` | round 4, master (`captureRenameExpectedContent`, `RENAME_MTIME_MARGIN_MS`) |
 
-Under `FirstOpenExempt` (#3827, `merged` only), a file whose record's first
-send was at or after `T` is treated as unopened, whatever its send record
-says now: the server answered from its own copy, so the record says nothing
-about what it held. A change after that first open reaches the mtime rule
-like any write to an unopened file.
+Under `FirstOpenExempt` (#3827, `merged` only) a file whose record's first
+send was at or after `T` is bound by one of three rules:
 
-A file that passes is bound to the bytes the capture read, and the apply
-refuses it if the disk no longer holds them. Round 1 read the non-target
-files through `openFileBestEffort`, which also sent them. That send comes
-after the request, so it cannot change what the server computed from, and
-it is not modelled.
+- `"off"`: by its send record (master before #3827; refuses a benign first
+  open, `MergedFirstOpenTouch`).
+- `"stamp"`: as unopened, whatever it holds. The first #3827 rule. Review r1
+  F1 refuted it: a never-opened file that pi wrote (older than the margin
+  before `T`) whose sync lands as the first open inside the request window is
+  applied at the server's load-time offsets (`FirstOpenPiWriteStamp`).
+- `"quiet"` (shipped, r2): as unopened only if nothing wrote the file since
+  the client started (`mtime[f] = 0`; code: mtime older than
+  `clientStartedAtMs` by the margin, `captureRenameExpectedContent`), else by
+  its send record. A file nobody wrote holds, on disk, the bytes the server
+  could only have read, so the first open adds none. The model stamps every
+  write at `clock >= Margin + 1`, after the start, so `mtime = 0` is that test.
+
+Under `"quiet"` a file written since the client started and first opened in
+the window keeps master's refusal. That is a false refusal when the server
+already got the write (a prompt watcher): the client cannot tell the two
+apart, so `Accepted` names it. A retry passes.
 
 ## Invariants
 
@@ -103,8 +119,10 @@ it is not modelled.
   false refusals (`Accepted`):
   - a changed send stamped in `T`'s own tick (the `>=` tie);
   - an unopened file whose mtime is within the margin of `T` (under
-    `FirstOpenExempt`, a file first opened at or after `T` counts as
-    unopened);
+    `FirstOpenExempt = "stamp"` or `"quiet"`, a file first opened at or after
+    `T` counts as unopened when `"stamp"` says so or it is quiet);
+  - under `"quiet"`, a file written since the client started and first opened
+    at or after `T` (master's refusal, kept);
   - the target, which is held to the bytes `openFileBestEffort` read, even
     when a later sync has already given the server the current bytes.
 
@@ -140,7 +158,14 @@ untouched file is older than the margin.
 | `MergedFirstOpenTouch` | `NoUnexplainedRefusal` violated | 80 |
 | `FirstOpenExempt` | pass | 134 |
 | `FirstOpenExemptOpenedWrites` | pass | 177536 |
-| `FirstOpenExemptRewrite` | pass | 2733 |
+| `FirstOpenExemptRewrite` | pass | 2741 |
+| `FirstOpenPiWriteStamp` | `NoStaleApply` violated | 2303 |
+| `FirstOpenPiWriteQuiet` | pass | 3167 |
+| `FirstOpenPiWriteOff` | pass (`NoStaleApply`, `AtomicRefusal`) | 3182 |
+| `FirstOpenExternalWatcher` | pass | 4827 |
+| `FirstOpenExternalKeepMtime` | `NoStaleApply` violated (#3747, not the exemption) | 801 |
+| `FirstOpenExternalKeepMtimeOff` | `NoStaleApply` violated (#3747 baseline) | 806 |
+| `FirstOpenExternalNoWatcher` | `NoStaleApply` violated (#3747, not the exemption) | 2332 |
 | `Issue3734Master` | `NoStaleApply` violated | 76 |
 | `Issue3734Bound` | pass | 1875 |
 | `Issue3734Abort` | `AtomicRefusal` violated | 149 |
@@ -169,9 +194,16 @@ TLC's traces, because it is chosen under `\E p \in pending`.
 | `Issue3747PromptWatcher` | #3747 boundary | master, with a prompt watcher and honest mtimes | none (pass) |
 | `Issue3747LateHookSync` | #3747 (open), model finding | master: pi's own write to an unopened file, its sync still pending | `Prepare`, a pi write to the unopened file, two ticks, `Request` with the sync pending, `Capture` (unopened, mtime older than the margin), `ApplyEdit`. |
 | `MergedFirstOpenTouch` | #3827, model finding (safe) | before the #3827 fix (`FirstOpenExempt = FALSE`): a first `didOpen` always stamps (`recordSentContent`) | `Prepare`, `Request`, `Tick`, a touch that first opens the unopened file (same bytes), `Capture` refuses it on the stamp. In `T`'s own tick the refusal is the accepted `>=` tie. |
-| `FirstOpenExempt` | #3827 | fix: a first send at or after `T` takes the unopened rule (`FirstOpenExempt`, `openedAtMs`) | none (pass). The `MergedFirstOpenTouch` shape no longer refuses. |
-| `FirstOpenExemptOpenedWrites` | #3827 | fix, with `Merged`'s writers and a first-open touch of the unopened file | none (pass). The opened-file rule holds as in `Merged`. With `openedAt` refreshed on every send (a model mutation), it violates `NoStaleApply`: an opened file rewritten with its old mtime kept and re-synced takes the weaker unopened rule. |
-| `FirstOpenExemptRewrite` | #3827 | fix, over `Issue3747PromptWatcher`: an external write to the unopened file plus first opens of it | none (pass). A first open does not excuse a write; the unopened mtime rule still holds. |
+| `FirstOpenExempt` | #3827 | fix (`"quiet"`): a first send at or after `T` of a file nobody wrote since the client started takes the unopened rule | none (pass). The `MergedFirstOpenTouch` shape no longer refuses. |
+| `FirstOpenExemptOpenedWrites` | #3827 | fix, with `Merged`'s writers and a first-open touch of the unopened file | none (pass). The opened-file rule holds as in `Merged`. With `openedAt` refreshed on every send (a model mutation), it violates `NoStaleApply`. |
+| `FirstOpenExemptRewrite` | #3827 | fix, over `Issue3747PromptWatcher`: an external write to the unopened file plus first opens of it | none (pass). Its write-then-first-open traces are master's refusal, kept (an `Accepted` false refusal). |
+| `FirstOpenPiWriteStamp` | #3827 review r1 F1 | the first #3827 rule (`"stamp"`), with `SyncBeforeCapture` so the sync lands inside the request window | `Prepare`, `PiWrite` to the unopened file, two `Tick`s, `Request`, `PiSync` (the first open), `Capture`, `ApplyEdit`: the mtime rule sees an old mtime and accepts, and the server's load-time copy takes the edit. Probe P1 through the real tool: `let9;` on disk. |
+| `FirstOpenPiWriteQuiet` | #3827 r2 | the shipped rule (`"quiet"`), same shape | none (pass). The written file keeps the send stamp, which refuses it. Dropping the `mtime[f] = 0` test (model mutation) gives `FirstOpenPiWriteStamp`'s violation. |
+| `FirstOpenPiWriteOff` | #3827 r2 baseline | master before #3827 (`"off"`), same shape | none (pass on `NoStaleApply`, `AtomicRefusal`; `NoUnexplainedRefusal` is left out because master still refuses a benign first open). |
+| `FirstOpenExternalWatcher` | #3827 r2 | `"quiet"`, pi and external writers to the first-opened file, honest mtimes, prompt watcher | none (pass) |
+| `FirstOpenExternalKeepMtime` | #3747 boundary | `"quiet"`, an external write that keeps the old mtime | As `Issue3747KeepMtime`: the write lands after the request, and the mtime rule is blind. |
+| `FirstOpenExternalKeepMtimeOff` | #3747 baseline | `"off"`, same shape | The same violation without the exemption: it is not the first-open rule that exposes it. |
+| `FirstOpenExternalNoWatcher` | #3747 boundary | `"quiet"`, external write older than the margin, no watcher | As `Issue3747External`. |
 | `Issue3734Master` | #3734 (open) | master: `renameFile` applies with no `expectedContent` | `Request` (`willRenameFiles`), `Capture` (nothing bound), a pi write, `ApplyEdit`. |
 | `Issue3734Bound` | #3734 | candidate: the #3736 rule, with `T` taken before `willRenameFiles`, and no `didClose` or move failure (`AbortAfterText = FALSE`) | none (pass) |
 | `Issue3734Abort` | #3734, model finding | master order, even with the candidate binding: text edits, then `didClose` and the move | `Request`, `Capture`, `ApplyEdit` writes both files, `Abort`: the rename is reported aborted with the edits written. |
@@ -208,16 +240,24 @@ TLC's traces, because it is chosen under `\E p \in pending`.
    consistent with #3736 round 4's probes applying correctly on one machine
    while verify r3 corrupted `b.ts` on another. The model's watcher is
    idealised, so it does not show the cause.
-6. **A false refusal on master (safe), #3827, fixed.** A read or cascade
-   touch that first opens an unopened file after `T` stamped it (a first
-   `didOpen` has no previous record), so the rename was refused with "it
+6. **A false refusal on master (safe), #3827, fixed in two rounds.** A read
+   or cascade touch that first opens an unopened file after `T` stamped it (a
+   first `didOpen` has no previous record), so the rename was refused with "it
    changed after the language server computed the rename from it", although
-   no byte changed (`MergedFirstOpenTouch`). The client record now keeps
-   `openedAtMs`, and a file first opened at or after `T` takes the unopened
-   rule (`FirstOpenExempt`, `captureRenameExpectedContent`). The fix adds no
-   exposure: that file was unopened for the server at `T`, so the unopened
-   rule is the one that applies to it (`FirstOpenExempt`,
-   `FirstOpenExemptOpenedWrites`, `FirstOpenExemptRewrite`).
+   no byte changed (`MergedFirstOpenTouch`). Round 1 treated every such file
+   as unopened (`"stamp"`). That was wrong: master's stamp also refused the
+   dangerous case, a never-opened file that pi had written, whose pipeline
+   sync lands as the first open inside the request window and delivers bytes
+   the server never saw. The unopened mtime rule accepts it because the mtime
+   is old, so the rename applied at the load-time copy's offsets
+   (`FirstOpenPiWriteStamp`, probe P1). The shipped rule (`"quiet"`) exempts
+   a first open only when the file's mtime is older than the client's start
+   by the margin: then nothing wrote it since the server could have read it.
+   The exemption is then no weaker than master for a file that was written,
+   and it is the unopened rule's own blind spots (#3747: a write that keeps
+   the old mtime, a missed external write) that remain for a file nobody
+   wrote (`FirstOpenExternalKeepMtime`, `FirstOpenExternalNoWatcher`, each
+   violating the same way with the exemption off).
 7. **#3734:** binding the `willRenameFiles` edits with the #3736 rule closes
    the stale apply for opened files only when nothing fails after the text
    edits (`Issue3734Bound` sets `AbortAfterText = FALSE`; unopened files
@@ -239,6 +279,19 @@ TLC's traces, because it is chosen under `\E p \in pending`.
     `openFileBestEffort`'s send makes the #3481 drop close it);
   - the apply is atomic against unqueued writers (`SplitApply = FALSE`;
     dropped by `MergedSplitApply`).
+- **Close is not modelled** (#3827 review r1 F2, F3). `closeDocument` drops
+  the client's record, so a close between compute and apply followed by a
+  reopen counts as a first open, and a close with no reopen leaves a bound
+  file with no record. The probes (review r1: P2 close and reopen applied on
+  the head, refused on master; P3 bare close applied on both; a model copy
+  with a `Close` action violated `NoStaleApply` with the exemption off and
+  on) show the bare-close hole is master's and the reopen interleaving is the
+  exemption's extension of it. In production only `LSPService.renameFile` (on
+  the file it then moves) and client teardown or replacement close a tracked
+  document, so the incidence is very low. Tracked on #3747 (the unopened
+  rule's blind spots), not modelled here. A replacement client has a fresh
+  start stamp and a fresh record, so the guard's `mtime` test applies to it
+  as to a first client.
 - **The empty target is not modelled.** `openFileBestEffort` returns `""`
   for an empty file before it reaches `touchFile`, so the target is bound
   to `""` while the server was never sent it. `Prepare` always sends. A
