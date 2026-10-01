@@ -599,6 +599,19 @@ describe("#3872 scope resolution as a function (guards the branches a turn canno
 		).toEqual({ roots: [workspace], overCap: [] });
 	});
 
+	it("treats an edit spelled by the real path as session-owned when the session cwd is a symlink", () => {
+		const link = path.join(env.tmpDir, "link");
+		fs.symlinkSync(
+			main,
+			link,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+
+		expect(
+			resolveKnipScanRoots(link, [path.join(realPath(main), "src", "a.ts")]),
+		).toEqual({ roots: [link], overCap: [] });
+	});
+
 	it("keeps a monorepo package directory as the session root instead of the repository top", () => {
 		// The session checkout owns this edit, so the scan stays at the cwd the
 		// session chose (`mono/packages/a`), not at `mono`.
@@ -668,5 +681,48 @@ describe("#3872 identity: a symlinked session cwd is the same checkout", () => {
 		await turnEnd();
 
 		expect(totalIssuesOf(0)).toBe(1);
+	});
+});
+
+describe("#3872 the timeout back-off's own lifecycle", () => {
+	const timedOut = (): Error => new Error("Process timed out after 30000ms");
+
+	it("forgets a recorded timeout once a scan of that root succeeds", async () => {
+		knipProcess.failure = timedOut();
+		await knipClient.analyze(main);
+		expect(knipClient.recentHardFailure(main)).toContain("timed out");
+
+		knipProcess.failure = undefined;
+		await knipClient.analyze(main);
+
+		expect(knipClient.recentHardFailure(main)).toBeNull();
+	});
+
+	it("lets a root back in after the 30 minute window", async () => {
+		knipProcess.failure = timedOut();
+		await knipClient.analyze(main);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(Date.now() + 29 * 60_000);
+		expect(knipClient.recentHardFailure(main)).toContain("timed out");
+
+		vi.setSystemTime(Date.now() + 2 * 60_000);
+
+		expect(knipClient.recentHardFailure(main)).toBeNull();
+	});
+
+	it("starts a new session with no recorded timeout", async () => {
+		knipProcess.failure = timedOut();
+		await knipClient.analyze(main);
+
+		knipClient.resetSessionState();
+
+		expect(knipClient.recentHardFailure(main)).toBeNull();
+	});
+
+	it("does not back off a failure that is not a timeout or a kill", async () => {
+		knipProcess.failure = new Error("spawn knip ENOENT");
+		await knipClient.analyze(main);
+
+		expect(knipClient.recentHardFailure(main)).toBeNull();
 	});
 });
