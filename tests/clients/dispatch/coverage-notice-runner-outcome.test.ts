@@ -198,12 +198,16 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 			runnerId: "lsp",
 			durationMs: COLLECT_LATER_THRESHOLD_MS + 1,
 		});
+		let settle!: (result: RunnerResult) => void;
+		const parked = new Promise<RunnerResult>((resolve) => {
+			settle = resolve;
+		});
 		registry.register({
 			id: "lsp",
 			appliesTo: ["jsts"],
 			priority: 4,
 			async run(): Promise<RunnerResult> {
-				return new Promise(() => {});
+				return parked;
 			},
 		});
 		const ctx = context();
@@ -213,6 +217,9 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 
 		expect(result.output).toContain("Pending runners");
 		expect(result.output).not.toContain(COVERAGE_NOTICE);
+		// Settle the parked run so no promise outlives the test.
+		settle({ status: "succeeded", diagnostics: [], semantic: "none" });
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	});
 
 	it("carries the notice when the primary and fallback linters both fault", async () => {
