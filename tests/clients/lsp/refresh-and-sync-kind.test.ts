@@ -390,12 +390,13 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		expect(full.documentContentHashes.size).toBe(0);
 	});
 
-	it("#3827: a binding keeps the instant of its first send through changes and text eviction", async () => {
+	it("#3827: a binding keeps the instant and bytes of its first send through changes and text eviction", async () => {
 		// Recurrence guarded: `lsp_navigation` rename (tools/lsp-navigation.ts
 		// `captureRenameExpectedContent`) reads `openedAtMs` to tell a file first
-		// opened after the request from one the server already held. A send that
-		// refreshed it (or an eviction rewrite that dropped it) would hand an
-		// opened, then rewritten, file the weaker unopened-file rule.
+		// opened after the request from one the server already held, and
+		// `openedHash` to tell a first-opened file whose bytes changed since
+		// (verify r2 F4). A send that refreshed either (or an eviction rewrite
+		// that dropped it) would hand a rewritten file the weaker unopened rule.
 		const state = createMockState({ syncKind: 2 });
 		const now = vi.spyOn(Date, "now");
 		const key = normalizeMapKey(TEST_FILE);
@@ -404,14 +405,17 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		await handleNotifyChange(state, TEST_FILE, "first\n");
 		now.mockReturnValue(2000);
 		await handleNotifyChange(state, TEST_FILE, "second\n");
+		const firstHash = hashDiagnosticContent("first\n");
 		expect(state.documentContentHashes.get(key)).toMatchObject({
 			openedAtMs: 1000,
+			openedHash: firstHash,
 			changedAtMs: 2000,
 		});
 		now.mockReturnValue(3000);
 		await handleNotifyChange(state, TEST_FILE, "second\n");
 		expect(state.documentContentHashes.get(key)).toMatchObject({
 			openedAtMs: 1000,
+			openedHash: firstHash,
 			changedAtMs: 2000,
 		});
 
@@ -426,7 +430,11 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		}
 		const evicted = state.documentContentHashes.get(key);
 		expect(evicted?.text).toBeUndefined();
-		expect(evicted).toMatchObject({ openedAtMs: 1000, changedAtMs: 2000 });
+		expect(evicted).toMatchObject({
+			openedAtMs: 1000,
+			openedHash: firstHash,
+			changedAtMs: 2000,
+		});
 		now.mockRestore();
 		await closeDocument(state, TEST_FILE);
 		expect(state.documentContentHashes.has(key)).toBe(false);
@@ -1623,6 +1631,8 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 				hash: hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
 				changedAtMs: expect.any(Number),
 				openedAtMs: expect.any(Number),
+				// #3827 verify r2: the open's bytes, which the change moved past.
+				openedHash: hashDiagnosticContent("const x = 1;\n"),
 				clientStartedAtMs: expect.any(Number),
 			});
 			const sent = client.getSentContent?.(filePath);

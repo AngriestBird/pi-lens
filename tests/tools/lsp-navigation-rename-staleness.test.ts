@@ -314,6 +314,7 @@ describe("#3601: lsp_navigation's rename refuses an edit on a file that changed"
 			hash: hashDiagnosticContent("const = 2;\n"),
 			changedAtMs: Date.now() + 60_000,
 			openedAtMs: Date.now() + 60_000,
+			openedHash: hashDiagnosticContent("const = 2;\n"),
 			clientStartedAtMs,
 		});
 		const run = async (clientStartedAtMs?: number) => {

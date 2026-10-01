@@ -553,6 +553,7 @@ export interface LSPClientInfo {
 				hash: string;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
+				openedHash?: string | undefined;
 				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined;
@@ -1070,6 +1071,10 @@ export interface LSPClientState {
 			 *  tell a file this client first opened after that instant: the
 			 *  server's copy then was not this client's send. */
 			openedAtMs?: number | undefined;
+			/** #3827 verify r2: the hash of that first send's bytes, kept with
+			 *  `openedAtMs`. A record whose `hash` differs from it changed after
+			 *  its first send, which the first send's own stamp cannot show. */
+			openedHash?: string | undefined;
 			text?: string;
 			lastLine?: LastLinePosition;
 		}
@@ -2227,6 +2232,7 @@ function recordSentContent(
 		hash,
 		changedAtMs: previous?.hash === hash ? previous.changedAtMs : Date.now(),
 		openedAtMs: previous?.openedAtMs ?? Date.now(),
+		openedHash: previous === undefined ? hash : previous.openedHash,
 		// #1669: retain the full text only for Incremental — the sole reader
 		// (`buildContentChanges`) needs it to compute the NEXT change against
 		// what the server last saw; Full/None never read this field.
@@ -2271,6 +2277,7 @@ function recordSentContent(
 				hash: binding.hash,
 				changedAtMs: binding.changedAtMs,
 				openedAtMs: binding.openedAtMs,
+				openedHash: binding.openedHash,
 			});
 			state.incrementalTextRetainedEntries = Math.max(
 				0,
@@ -6498,6 +6505,7 @@ export async function createLSPClient(options: {
 					hash: sent.hash,
 					changedAtMs: sent.changedAtMs,
 					openedAtMs: sent.openedAtMs,
+					openedHash: sent.openedHash,
 					clientStartedAtMs: state.startedAtMs,
 				}
 			);

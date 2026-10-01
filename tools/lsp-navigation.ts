@@ -759,6 +759,9 @@ const RENAME_MTIME_MARGIN_MS = 2000;
  *   file as changed although no byte did. It takes the unopened rule only when
  *   its mtime is older than the client's start by the margin: then the server
  *   could only have read the bytes it holds now, and the first open adds none.
+ *   Only that first send's stamp is skipped: the disk must still hash to the
+ *   last send, and the record must still hold the first send's bytes, or the
+ *   file is refused (a write that keeps the old mtime after the first open).
  *   A file written after the client started (a pi write whose sync lands as
  *   that first open, say) keeps the send check and its stamp, which refuses it:
  *   the server may hold the load-time copy, not these bytes. A client that
@@ -805,7 +808,8 @@ function captureRenameExpectedContent(
 		// #3827: a file this client first opened at or after the request, and
 		// that nobody wrote since the client started, was unopened when the
 		// server answered and held the bytes the disk holds: the first open adds
-		// none, so it takes the unopened rule below, not the send check.
+		// none, so its stamp is skipped. The disk must still hold the first
+		// open's bytes, then the unopened rule below applies.
 		const firstOpenedAfterRequest =
 			tracked !== undefined && (tracked.openedAtMs ?? 0) >= requestedAtMs;
 		const quietSinceClientStart =
@@ -823,6 +827,19 @@ function captureRenameExpectedContent(
 					"it changed after the language server computed the rename from it",
 				);
 			}
+		} else if (
+			tracked !== undefined &&
+			(tracked.hash !== hashDiagnosticContent(content) ||
+				tracked.openedHash !== tracked.hash)
+		) {
+			// #3827 verify r2 F4: the exemption skips only the first open's own
+			// stamp. A disk that no longer holds the last send, or a record whose
+			// bytes changed after its first send, was written after that open
+			// although the mtime says otherwise (#3747's mtime-kept write).
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				"it changed after the language client first opened it, after the rename was requested",
+			);
 		} else if (mtimeMs >= requestedAtMs) {
 			refuseStaleWorkspaceEdit(
 				diskPath,

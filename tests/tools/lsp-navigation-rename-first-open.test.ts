@@ -27,6 +27,8 @@
  *  | written within the margin before client start, first opened | refused |
  *  | never opened        | rewritten, then first opened     | refused  |
  *  | never opened        | first opened, then rewritten+sync| refused  |
+ *  | never opened        | first opened, then rewritten (old mtime), no sync | refused |
+ *  | never opened        | first opened, then rewritten (old mtime), re-synced | refused |
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -272,6 +274,47 @@ describe("#3827: a first open after the rename was computed is not a change", ()
 		expect(result.isError).toBe(true);
 		expect(result.text).toContain("b.ts");
 		expect(fs.readFileSync(fileB, "utf8")).toBe("AGENT = 7;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+	});
+
+	it("a file first opened after compute and then rewritten keeping its old mtime, with no resync, is refused", async () => {
+		// Recurrence guarded: verify r2 F4 (probe P7). The quiet exemption once
+		// dropped the whole send check, so the disk was never compared with the
+		// first open's bytes; the old mtime passed the unopened rule and the
+		// server's offsets landed on the new bytes ("let 77;").
+		const result = await renameWith(async () => {
+			await touch(fileB, "const = 2;\n");
+			fs.writeFileSync(fileB, "EXT = 77;\n");
+			const old = new Date(Date.now() - 3_600_000);
+			fs.utimesSync(fileB, old, old);
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain(
+			"b.ts: it changed after the language client first opened it",
+		);
+		expect(fs.readFileSync(fileB, "utf8")).toBe("EXT = 77;\n");
+		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
+	});
+
+	it("a file first opened after compute and then rewritten keeping its old mtime and re-synced is refused", async () => {
+		// Recurrence guarded: round-3 state table row B11 (probe P9). The resync
+		// makes the disk equal the last send, so the hash check alone passes; a
+		// record whose bytes changed after its first send is not quiet, although
+		// the mtime says so.
+		const result = await renameWith(async () => {
+			await touch(fileB, "const = 2;\n");
+			fs.writeFileSync(fileB, "EXT = 78;\n");
+			const old = new Date(Date.now() - 3_600_000);
+			fs.utimesSync(fileB, old, old);
+			await touch(fileB, "EXT = 78;\n");
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain(
+			"b.ts: it changed after the language client first opened it",
+		);
+		expect(fs.readFileSync(fileB, "utf8")).toBe("EXT = 78;\n");
 		expect(fs.readFileSync(fileA, "utf8")).toBe("const = 1;\n");
 	});
 

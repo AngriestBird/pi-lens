@@ -3029,6 +3029,7 @@ export class LSPService {
 				hash: string;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
+				openedHash?: string | undefined;
 				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined {
