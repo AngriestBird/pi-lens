@@ -19,7 +19,7 @@ jobs:
   # can red tests/clients and tests/scripts (docs/public-api-stability.md,
   # docs/*_rules_catalog.md are read by them), so the suite is never skipped.
   # `formal` is true when the diff touches formal/ (or what runs it), and then
-  # `TLA+ models` model-checks. Push, repository_dispatch and any other event
+  # `TLA+ models` model-checks. Push and any other event
   # get code=true formal=true, so master keeps the full suite, and every doubt
   # (unreadable or empty file list, API cap) resolves to the full suite too.
   #
@@ -631,7 +631,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.sha) }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: node scripts/ci-heavy-gate.mjs --repo "$GITHUB_REPOSITORY" --sha "$HEAD_SHA" --context knip --context "oxfmt format check"
 
   # Windows coverage starts as advisory because the repository has no prior Windows Vitest signal.

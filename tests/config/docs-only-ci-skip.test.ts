@@ -306,8 +306,8 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 			docs.changes,
 			docs.results,
 		);
-		expect(docsSteps["ubuntu-latest"]).toHaveLength(total - 2); // dispatch validation, macOS-only APFS step
-		expect(docsSteps["macos-latest"]).toHaveLength(total - 1);
+		expect(docsSteps["ubuntu-latest"]).toHaveLength(total - 1); // the macOS-only APFS step
+		expect(docsSteps["macos-latest"]).toHaveLength(total);
 	});
 
 	// Recurrence: one non-docs file in an otherwise docs diff (the allowlist is
@@ -329,7 +329,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 
 	// Recurrence: master, merge-train replays and (later) merge_group losing the
 	// full suite to the classifier.
-	it.each(["push", "repository_dispatch", "merge_group"])(
+	it.each(["push", "merge_group"])(
 		"runs the full suite for a %s event even for a docs-only file list",
 		(event) => {
 			const { changes, results } = simulate(event, DOCS_ONLY);
@@ -362,7 +362,6 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 		["code", "pull_request", ["clients/index.ts"]],
 		["formal", "pull_request", ["formal/file-locks/FileLock.tla"]],
 		["push", "push", ["clients/index.ts"]],
-		["repository_dispatch", "repository_dispatch", ["clients/index.ts"]],
 	])(
 		"runs every required ci.yml job on a %s run, so no required check is absent or skipped",
 		(_label, event, files) => {

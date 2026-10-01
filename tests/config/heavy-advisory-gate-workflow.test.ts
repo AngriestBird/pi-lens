@@ -215,7 +215,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	it("reads check-runs at the PR head sha, not the merge commit", () => {
 		const step = gate.steps?.find((entry) => entry.id === "gate");
 		expect(step?.env?.HEAD_SHA).toContain("github.event.pull_request.head.sha");
-		expect(step?.env?.HEAD_SHA).toContain("github.event.client_payload.sha");
+		expect(step?.env?.HEAD_SHA).toContain("|| github.sha");
 		expect(gate.permissions?.checks).toBe("read");
 	});
 
