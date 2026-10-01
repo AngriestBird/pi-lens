@@ -448,6 +448,9 @@ export const wallClockBudgetInclude = [
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
+	// #3870: every detector test drives the analyzer's real CLI entry point
+	// (a real node subprocess) over redacted fixture logs (flake-shape admission).
+	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts",
 	// #3684: the wrapper's advisory scope is a real `git diff` against a real
 	// fixture repo, spawned through the real CLI (flake-shape admission).
 	"tests/scripts/astgrep-self-scan.test.ts",
