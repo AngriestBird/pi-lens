@@ -120,6 +120,20 @@ function getResolvedGitDir(cwd: string): ResolvedGitDir | null {
 	return resolved;
 }
 
+/**
+ * `dir` with its symlinks followed (#3872); the input spelling when it cannot
+ * be resolved. Checkout identity is compared by real location: a session whose
+ * cwd is a link to the repository is the same checkout as the real path git
+ * wrote into every linked worktree's `.git` file.
+ */
+export function canonicalDirectory(dir: string): string {
+	try {
+		return fs.realpathSync.native(dir);
+	} catch {
+		return dir;
+	}
+}
+
 export interface GitCheckout {
 	/** The checkout's top-level directory (parent of its `.git` entry). */
 	root: string;
@@ -137,7 +151,10 @@ export interface GitCheckout {
 export function resolveGitCheckout(startPath: string): GitCheckout | null {
 	const resolved = getResolvedGitDir(startPath);
 	return resolved
-		? { root: resolved.worktreeRoot, commonDir: resolved.commonDir }
+		? {
+				root: canonicalDirectory(resolved.worktreeRoot),
+				commonDir: canonicalDirectory(resolved.commonDir),
+			}
 		: null;
 }
 
@@ -159,7 +176,8 @@ export function listLinkedWorktreeRoots(commonDir: string): string[] {
 		try {
 			const entryDir = join(commonDir, "worktrees", name);
 			const gitFile = fs.readFileSync(join(entryDir, "gitdir"), "utf-8").trim();
-			if (gitFile) roots.push(dirname(resolve(entryDir, gitFile)));
+			if (gitFile)
+				roots.push(canonicalDirectory(dirname(resolve(entryDir, gitFile))));
 		} catch {
 			/* a worktree whose registration is unreadable is not listed */
 		}

@@ -51,6 +51,8 @@ const knipProcess = vi.hoisted(() => ({
 	gate: undefined as Promise<void> | undefined,
 	onSpawn: undefined as (() => void) | undefined,
 	scan: undefined as ((cwd: string) => string) | undefined,
+	/** When set, the spawn settles with this error (knip's own 30 s timeout). */
+	failure: undefined as Error | undefined,
 }));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
@@ -63,6 +65,14 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 			knipProcess.spawns.push({ cwd, args });
 			knipProcess.onSpawn?.();
 			await knipProcess.gate;
+			if (knipProcess.failure) {
+				return {
+					stdout: "",
+					stderr: "",
+					status: null,
+					error: knipProcess.failure,
+				};
+			}
 			return {
 				stdout: knipProcess.scan?.(cwd) ?? '{"issues":[]}',
 				stderr: "",
@@ -85,6 +95,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { _resetInstanceRegistryEnabledForTests } from "../../clients/instance-registry.js";
 import { KnipClient } from "../../clients/knip-client.js";
+import { resolveKnipScanRoots } from "../../clients/knip-scan-roots.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
@@ -127,6 +138,8 @@ function fakeKnip(cwd: string): string {
 let env: ReturnType<typeof setupTestEnvironment>;
 let runtime: RuntimeCoordinator;
 let cacheManager: CacheManager;
+/** One client per test, as production has one per session: back-off state lives on it. */
+let knipClient: KnipClient;
 let main: string;
 
 function git(cwd: string, ...args: string[]): void {
@@ -188,7 +201,7 @@ function turnEndDeps(signal?: AbortSignal) {
 		runtime,
 		cacheManager,
 		...(signal === undefined ? {} : { signal }),
-		knipClient: new KnipClient(false),
+		knipClient,
 		deadCodeClients: [],
 		depChecker: { ensureAvailable: async () => false },
 		testRunnerClient: { getTestRunTarget: () => null },
@@ -240,6 +253,7 @@ beforeEach(() => {
 	knipProcess.gate = undefined;
 	knipProcess.onSpawn = undefined;
 	knipProcess.scan = fakeKnip;
+	knipProcess.failure = undefined;
 	env = setupTestEnvironment("pi-lens-3872-knip-root-");
 	vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "machine"));
 	main = path.join(env.tmpDir, "main");
@@ -249,6 +263,7 @@ beforeEach(() => {
 	runtime.projectRoot = main;
 	runtime.setTelemetryIdentity({ sessionId: SESSION });
 	cacheManager = new CacheManager(false);
+	knipClient = new KnipClient(false);
 });
 afterEach(() => {
 	vi.useRealTimers();
@@ -356,24 +371,36 @@ describe("#3872 scan population: nested worktrees are not project files", () => 
 	});
 });
 
-describe("#3872 delta: a worktree's first scan is stored, not the agent's work", () => {
-	it("attributes only the export this turn added, never the ones the file already had", async () => {
+describe("#3872 delta: a root's first scan still reports this turn's own issues", () => {
+	it("reports what the agent added on the first-touch turn, then diffs later turns against the stored scan", async () => {
 		const x = addWorktree("x");
 		const file = path.join(x, "src", "a.ts");
+		fs.appendFileSync(file, "export const unusedNew = 3;\n");
 		edit(file);
 		const first = await turnEnd();
 
-		// First sight of this root: unusedA was there before the agent touched it.
-		expect(first).not.toContain("unusedA");
-		expect(knipRows()[0]?.metadata).toMatchObject({ firstScan: true });
+		// No stored scan for this root: the issues in the files modified THIS turn
+		// are reported (the same answer a cold session checkout gives), never hidden.
+		expect(first).toContain("unusedNew");
+		expect(first).toContain(path.join(".worktrees", "x", "src", "a.ts"));
 
 		fs.appendFileSync(file, "export const unusedB = 2;\n");
 		edit(file);
 		const second = await turnEnd();
 
 		expect(second).toContain("unusedB");
+		expect(second).not.toContain("unusedNew");
 		expect(second).not.toContain("unusedA");
-		expect(second).toContain(path.join(".worktrees", "x", "src", "a.ts"));
+	});
+
+	it("delivers a session-checkout edit's issues when no scan is stored yet", async () => {
+		fs.appendFileSync(
+			path.join(main, "src", "a.ts"),
+			"export const unusedNew = 3;\n",
+		);
+		edit(path.join(main, "src", "a.ts"));
+
+		expect(await turnEnd()).toContain("unusedNew");
 	});
 });
 
@@ -431,6 +458,53 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 		vi.useRealTimers();
 		expect(cacheManager.readCache("knip", x)).toBeNull();
 		expect(cacheManager.readCache("knip", main)).toBeNull();
+	});
+
+	it("backs off a root whose abandoned scan later timed out, instead of spawning every turn", async () => {
+		// #1467's contract: after a timeout, later turns skip rather than launch
+		// another 30 s knip. The back-off used to ride on the cache row the turn
+		// wrote when the scan settled INSIDE the turn; an abandoned scan writes none.
+		const x = addWorktree("x");
+		knipProcess.failure = new Error("Process timed out after 30000ms");
+		for (let turn = 0; turn < 4; turn++) {
+			edit(path.join(x, "src", "a.ts"));
+			const slow = slowTurn();
+			await vi.advanceTimersByTimeAsync(3_100);
+			await slow.turn;
+			// The parked scan finally times out, long after its turn ended.
+			slow.release();
+			await vi.advanceTimersByTimeAsync(31_000);
+			vi.useRealTimers();
+		}
+
+		expect(spawnCwds()).toHaveLength(1);
+		const rows = knipRows().map(
+			(row) => row.metadata as Record<string, unknown>,
+		);
+		expect(rows[0]).toMatchObject({ execution: "deferred" });
+		for (const row of rows.slice(1)) {
+			expect(row).toMatchObject({ skipped: true });
+			expect(String(row.reason)).toContain("timed out");
+		}
+	});
+
+	it("reports this turn's issues on the next completed scan of a root whose earlier scan was deferred", async () => {
+		const x = addWorktree("x");
+		const file = path.join(x, "src", "a.ts");
+		edit(file);
+		const slow = slowTurn();
+		await slow.spawned;
+		await vi.advanceTimersByTimeAsync(3_100);
+		await slow.turn;
+		slow.release();
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+		knipProcess.gate = undefined;
+
+		// Nothing was stored for x: the deferred scan wrote no baseline.
+		fs.appendFileSync(file, "export const unusedNew = 3;\n");
+		edit(file);
+		expect(await turnEnd()).toContain("unusedNew");
 	});
 
 	it("starts no further scan once one has spent the budget, and counts the skipped roots", async () => {
@@ -501,5 +575,98 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 			execution: "deferred",
 			aborted: true,
 		});
+	});
+});
+
+describe("#3872 scope resolution as a function (guards the branches a turn cannot reach)", () => {
+	it("scans the session cwd alone when there is nothing to attribute", () => {
+		// `files.length === 0 && runtime.hasCascadeRuns()` reaches knip with an
+		// empty worklist; a root list of [] would silently skip the refresh.
+		expect(resolveKnipScanRoots(main, [])).toEqual({
+			roots: [main],
+			overCap: [],
+		});
+	});
+
+	it("keeps the session cwd when it is a plain directory that merely contains a repository", () => {
+		// `session` is null here. Removing the guard throws on `session.root`.
+		const workspace = path.join(env.tmpDir, "ws");
+		const repo = path.join(workspace, "repoA");
+		initRepo(repo);
+
+		expect(
+			resolveKnipScanRoots(workspace, [path.join(repo, "src", "a.ts")]),
+		).toEqual({ roots: [workspace], overCap: [] });
+	});
+
+	it("keeps a monorepo package directory as the session root instead of the repository top", () => {
+		// The session checkout owns this edit, so the scan stays at the cwd the
+		// session chose (`mono/packages/a`), not at `mono`.
+		const mono = path.join(env.tmpDir, "mono");
+		initRepo(mono);
+		const pkg = path.join(mono, "packages", "a");
+		write(pkg, "package.json", '{"name":"a"}\n');
+		write(pkg, "src/x.ts", "export const x = 1;\n");
+
+		expect(resolveKnipScanRoots(pkg, [path.join(pkg, "src", "x.ts")])).toEqual({
+			roots: [pkg],
+			overCap: [],
+		});
+	});
+});
+
+describe("#3872 population details", () => {
+	it("keeps an issue that names no file when nested worktrees exist", async () => {
+		addWorktree("x");
+		knipProcess.scan = () =>
+			JSON.stringify({
+				issues: [
+					{ file: "", dependencies: [{ name: "left-pad" }] },
+					{ file: "src/a.ts", exports: [{ name: "unusedA", line: 1 }] },
+					{
+						file: ".worktrees/x/src/a.ts",
+						exports: [{ name: "unusedA", line: 1 }],
+					},
+				],
+			});
+		edit(path.join(main, "src", "a.ts"));
+
+		await turnEnd();
+
+		expect(totalIssuesOf(0)).toBe(2);
+	});
+});
+
+describe("#3872 identity: a symlinked session cwd is the same checkout", () => {
+	function useSymlinkedSession(): string {
+		const link = path.join(env.tmpDir, "link");
+		fs.symlinkSync(
+			main,
+			link,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		main = link;
+		runtime.projectRoot = link;
+		return link;
+	}
+
+	it("still scans a linked worktree in its own root", async () => {
+		useSymlinkedSession();
+		const x = addWorktree("x");
+		edit(path.join(x, "src", "a.ts"));
+
+		await turnEnd();
+
+		expect(spawnCwds().map(realPath)).toEqual([realPath(x)]);
+	});
+
+	it("still drops nested worktree files from the session scan", async () => {
+		const link = useSymlinkedSession();
+		for (const name of ["w1", "w2"]) addWorktree(name);
+		edit(path.join(link, "src", "a.ts"));
+
+		await turnEnd();
+
+		expect(totalIssuesOf(0)).toBe(1);
 	});
 });

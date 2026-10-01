@@ -1700,8 +1700,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		failureKind?: string;
 		/** True when a failed run left the previous good cache in place (#1467). */
 		cacheKept?: boolean;
-		/** First scan of a linked worktree: stored, not diffed (#3872). */
-		firstScan?: boolean;
 		/** The hook's own signal fired while the scan was awaited (Escape). */
 		aborted?: boolean;
 	};
@@ -1732,12 +1730,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		} else {
 			cacheManager.writeCache("knip", knipResult, scanRoot);
 		}
-		// #3872: a linked worktree has no session_start scan, so its first
-		// successful scan has nothing to be diffed against -- every issue already
-		// in an edited file would read as the agent's. It is stored and
-		// attributes nothing; the next turn diffs against it.
-		const isFirstScan =
-			scanRoot !== cwd && prevKnip?.data.success !== true && knipResult.success;
 		const knipMeta: KnipTurnMeta = {
 			execution: knipResult.execution ?? "executed",
 			success: knipResult.success,
@@ -1750,10 +1742,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			...(!knipResult.success && { reason: knipResult.summary }),
 			...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
 			...(knipWouldPoison && { cacheKept: true }),
-			...(isFirstScan && { firstScan: true }),
 		};
 
-		if (knipResult.success && knipResult.issues.length > 0 && !isFirstScan) {
+		if (knipResult.success && knipResult.issues.length > 0) {
 			// Deliberately excludes the line number — see stableFindingKey's
 			// doc comment (#1483: mirrors the dead-code fix in #1477).
 			const issueKey = (i: KnipIssue) =>
@@ -1898,12 +1889,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(
 					prevKnip.data.summary,
 				);
+			// #3872: an abandoned scan that later timed out wrote no cache row, so the
+			// client that saw it settle is asked as well (optional: test doubles).
+			const abandonedFailure = previousFailedHard
+				? null
+				: (knipClient.recentHardFailure?.(scanRoot) ?? null);
 			let metadata: KnipTurnMeta;
-			if (previousFailedHard) {
-				dbg(
-					`turn_end: skipping knip after recent failure: ${prevKnip.data.summary}`,
-				);
-				metadata = { skipped: true, reason: prevKnip.data.summary };
+			if (previousFailedHard || abandonedFailure !== null) {
+				const reason = previousFailedHard
+					? prevKnip.data.summary
+					: (abandonedFailure ?? "");
+				dbg(`turn_end: skipping knip after recent failure: ${reason}`);
+				metadata = { skipped: true, reason };
 			} else {
 				// #3872: the scan is awaited under the turn_end budget that is LEFT,
 				// and the hook's signal. `bounded()` abandons the await, never the

@@ -21,6 +21,7 @@ import {
 	normalizeFilePath,
 } from "./path-utils.js";
 import {
+	canonicalDirectory,
 	listLinkedWorktreeRoots,
 	resolveGitCheckout,
 } from "./review-graph/git-identity.js";
@@ -113,6 +114,19 @@ const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
 };
 
 const ANALYSIS_TIMEOUT_MS = 30_000;
+
+/**
+ * A knip run that died to its own timeout or a kill (#1467). The same words the
+ * turn_end back-off reads off a cached failure row.
+ */
+const HARD_FAILURE_SUMMARY = /(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i;
+
+/**
+ * How long a recorded hard failure keeps a root off the turn_end path: the
+ * cache row that carried this back-off before #3872 lived exactly as long as
+ * the cache's default max age (`DEFAULT_MAX_AGE_MS`, `clients/cache-manager.ts`).
+ */
+const HARD_FAILURE_BACKOFF_MS = 30 * 60 * 1000;
 
 /**
  * Every package name referenced as a KEY (at any nesting depth — npm's
@@ -282,7 +296,7 @@ function nestedWorktreeMatcher(
 ): (file: string | undefined) => boolean {
 	const checkout = resolveGitCheckout(targetDir);
 	if (!checkout) return () => false;
-	const base = normalizeFilePath(targetDir);
+	const base = normalizeFilePath(canonicalDirectory(targetDir));
 	const baseKey = normalizeEphemeralMapKey(base);
 	const prefixes: string[] = [];
 	for (const root of listLinkedWorktreeRoots(checkout.commonDir)) {
@@ -338,6 +352,17 @@ export class KnipClient {
 	 */
 	private inFlight = new Map<string, Promise<KnipResult>>();
 
+	/**
+	 * Per project root, the last run that died to a timeout or kill (#3872).
+	 * Set where the scan SETTLES, so a scan turn_end abandoned at its budget and
+	 * that later timed out still leaves the failure the next turn must see:
+	 * the turn's own cache row only exists for a scan that settled inside it.
+	 */
+	private readonly hardFailures = new Map<
+		string,
+		{ at: number; summary: string }
+	>();
+
 	/** Last successful result per project and runtime content generation. */
 	private completedByProject = new Map<
 		string,
@@ -357,6 +382,7 @@ export class KnipClient {
 	/** Re-arm content-keyed reuse at the session boundary. */
 	resetSessionState(): void {
 		this.completedByProject.clear();
+		this.hardFailures.clear();
 	}
 
 	/**
@@ -457,6 +483,26 @@ export class KnipClient {
 	}
 
 	/**
+	 * The summary of this root's last timeout or kill, while it is recent
+	 * enough (30 minutes) to keep turn_end from launching another heavyweight
+	 * knip (#1467, #3872); `null` when there is none. The root is resolved the
+	 * way `analyze` resolves it, so a subdirectory and its project root agree.
+	 */
+	recentHardFailure(cwd: string): string | null {
+		// `resolveProjectRoot` returns an already-resolved directory, which is the
+		// key `analyze` stamps under.
+		const key = this.resolveProjectRoot(cwd);
+		if (!key) return null;
+		const failure = this.hardFailures.get(key);
+		if (!failure) return null;
+		if (Date.now() - failure.at > HARD_FAILURE_BACKOFF_MS) {
+			this.hardFailures.delete(key);
+			return null;
+		}
+		return failure.summary;
+	}
+
+	/**
 	 * Run knip analysis on the project.
 	 *
 	 * Async (uses `safeSpawnAsync`) so it never blocks the event loop —
@@ -526,6 +572,10 @@ export class KnipClient {
 		}
 
 		const promise = this.runAnalyze(key).then((result) => {
+			if (result.success) this.hardFailures.delete(key);
+			else if (HARD_FAILURE_SUMMARY.test(result.summary)) {
+				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
+			}
 			const executed = { ...result, execution: "executed" as const };
 			if (result.success && options.projectSeq !== undefined) {
 				this.completedByProject.set(key, {
