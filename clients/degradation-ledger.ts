@@ -253,6 +253,13 @@ export type DegradationKind =
 	 */
 	| "fix-run-agent-edit-overwritten"
 	/**
+	 * #3830: a whole-package fixer's restore left a file alone, and named it
+	 * possibly lost, because a newer agent edit may have won (a call in flight,
+	 * or the bytes moved between the restore's read and its write). Recorded
+	 * ONCE per run, however many files. Subject is the tool.
+	 */
+	| "fix-run-restore-skipped-newer-edit"
+	/**
 	 * #3598: the pre-run hash set for a whole-package fixer was cut (unreadable
 	 * file, file over the size cap, or the byte budget), so an agent edit to an
 	 * uncovered file during the run is not protected. Subject is the tool.
@@ -1452,6 +1459,15 @@ export type DegradationKind =
 	 * and a busy orchestrator session would otherwise write one row per turn.
 	 */
 	| "turn-end-knip-root-skipped"
+	/**
+	 * turn_end started no tests for a target in a linked worktree (#3871). The
+	 * subject is the reason: `no-runner-install` (the worktree has no
+	 * `node_modules/.bin`, venv or `vendor/bin` of its own, so running would
+	 * fetch through `npx` or use another environment). Counted, because a plegma
+	 * session edits many fresh worktrees and would otherwise write one row per
+	 * turn.
+	 */
+	| "turn-end-test-root-skipped"
 	/**
 	 * #2504 review round 8 (S1): a carried-forward deferred file entry was
 	 * dropped from an IN-BAND `turn_end` publish (`clients/actionable-warnings.ts`)

@@ -1135,7 +1135,7 @@ async function activateTools(
 		{ tools } as never,
 		undefined,
 		undefined,
-		runtime.session.extensionRunner.createContext(),
+		runtime.session.extensionRunner.createToolContext(id, undefined),
 	);
 }
 
