@@ -1814,6 +1814,15 @@ async function analysePipeline(
 			undefined,
 			writeHold,
 		);
+		// #3858: a formatter the budget (or Escape) gave up on writes F later,
+		// after the sync below pushed the bytes from before. Sync that write too.
+		if (formatResult.abandoned)
+			chainLateFormatResync(
+				formatResult.abandoned,
+				"inband",
+				{ toolName, filePath, startedAt: pipelineStart },
+				dbg,
+			);
 		formatChanged = formatResult.formatChanged;
 		formattersUsed = formatResult.formattersUsed;
 		formatFailures = formatResult.formatFailures;
