@@ -161,22 +161,11 @@ export async function withHostFileMutationQueues<T>(
  * `release`, the writer joins the hold and `release` waits for it to settle,
  * so its child cannot write over an edit queued behind the hold; after it, the
  * writer takes a queue entry of its own until it settles.
- *
- * `afterRelease` is the lock-order seam (#3830). A queue entry is never
- * requested by something that holds another one, except by the multi-path LSP
- * edit, which requests its keys in ascending order (`withHostFileMutationQueues`).
- * Work that must take a queue entry for another file (the fixer's restore of a
- * sibling) therefore runs through `afterRelease`: `task` starts once the
- * hold's entry has been told to go (the joined writers settled, `releaseHeld`
- * called), and that release never waits for `task`, so the entry cannot sit in
- * a wait cycle through it. A hold that never entered the queue starts `task` at
- * `release`.
  */
 export interface FileMutationHold {
 	acquire(): Promise<void>;
 	enter(writer: Promise<unknown>): Promise<void>;
 	release(): void;
-	afterRelease<T>(task: () => Promise<T>): Promise<T>;
 }
 
 export function holdFileMutationQueue(
@@ -187,10 +176,6 @@ export function holdFileMutationQueue(
 	let releaseHeld: () => void = () => {};
 	let released = false;
 	const outliving: Promise<unknown>[] = [];
-	let announceRelease: () => void = () => {};
-	const afterReleased = new Promise<void>((resolveReleased) => {
-		announceRelease = resolveReleased;
-	});
 	const acquire = () => {
 		entered ??= new Promise<void>((resolveEntered, rejectEntered) => {
 			const held = new Promise<void>((resolveHeld) => {
@@ -219,11 +204,7 @@ export function holdFileMutationQueue(
 		},
 		release() {
 			released = true;
-			void Promise.allSettled(outliving).then(() => {
-				releaseHeld();
-				announceRelease();
-			});
+			void Promise.allSettled(outliving).then(() => releaseHeld());
 		},
-		afterRelease: (task) => afterReleased.then(task),
 	};
 }

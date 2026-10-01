@@ -592,12 +592,13 @@ the surface they bite; each block loads only when its trigger applies.
   source files, capture agent mutations pi-lens observes during the run (the
   tool_result seam and the mutation bridge), write them back after, one
   degradation per run, and name any edit that cannot be restored. The restore
-  takes pi's queue entry for each sibling, one at a time, and starts only after
-  the target's hold is released (`FileMutationHold.afterRelease`, #3830): a
-  queue entry is requested by something that holds no other entry, except the
-  multi-path LSP edit, which requests in ascending key order. Do not add a
-  second whole-package fixer without it, and do not take a queue entry while
-  holding another.
+  takes pi's queue entry for each sibling, one at a time (#3830). It starts at
+  the tool's exit and is awaited only after the target's hold is released,
+  never inside it: a queue entry is requested by something that holds no other
+  entry, except the multi-path LSP edit, which requests in ascending key order,
+  and nothing that holds an entry awaits the restore. Do not add a second
+  whole-package fixer without it, and do not await a queue entry while holding
+  another.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.

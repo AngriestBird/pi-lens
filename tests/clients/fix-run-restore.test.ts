@@ -45,10 +45,10 @@ import {
 	beginFixRun,
 	expectationFromToolInput,
 	FIX_RUN_MAX_FILE_BYTES,
+	noteAgentMutation,
 	runWithFixRestore,
 } from "../../clients/fix-run-restore.js";
 import {
-	holdFileMutationQueue,
 	setHostFileMutationQueueLoader,
 	withHostFileMutationQueues,
 } from "../../clients/file-mutation-queue.js";
@@ -1446,12 +1446,13 @@ describe("fix-run registry (#3598)", () => {
 
 	it("unregisters the run when the fixer settles and when it throws", async () => {
 		const before = activeRuns().size;
-		await runWithFixRestore(
+		const { restoring } = await runWithFixRestore(
 			{ tool: "rust-clippy", extension: ".rs", candidates: [] },
 			async () => {
 				expect(activeRuns().size).toBe(before + 1);
 			},
 		);
+		await restoring;
 		expect(activeRuns().size).toBe(before);
 		await expect(
 			runWithFixRestore(
@@ -1465,49 +1466,87 @@ describe("fix-run registry (#3598)", () => {
 	});
 
 	// Recurrence: window A of #3830. The run left `active` when the tool exited,
-	// before the restore read any file. It now stays registered until the restore
-	// ends, and the restore waits for the hold's release, on a throw too.
-	describe("with a hold on the target's queue (#3830)", () => {
+	// before the restore read any file. It now stays registered until the
+	// restore ends, which waits for pi's queue entry of each sibling, and the
+	// restore still runs when the tool throws.
+	describe("while the restore waits for a sibling's queue entry (#3830)", () => {
+		let dir: string;
+		let cleanup: () => void;
+		let sibling: string;
 		beforeEach(() => {
+			resetDegradationLedger();
+			const env = setupTestEnvironment("pi-lens-fix-run-registry-");
+			dir = env.tmpDir;
+			cleanup = env.cleanup;
+			sibling = path.join(dir, "a.rs");
+			fs.writeFileSync(sibling, "fn a() {}\n");
 			setHostFileMutationQueueLoader(async () => ({ withFileMutationQueue }));
 		});
 		afterEach(() => {
 			setHostFileMutationQueueLoader(undefined);
+			cleanup();
 		});
-		const target = path.resolve("/pi-lens-3830-missing/target.rs");
 
-		it("stays registered through the tool's exit and ends after release and the restore", async () => {
+		/** An agent edit of the sibling, in pi's queue, that holds it until `open`. */
+		async function holdSibling() {
+			const open = gate();
+			const entered = gate();
+			const holder = withFileMutationQueue(sibling, async () => {
+				entered.open();
+				await open.p;
+			});
+			await entered.p;
+			return { release: open.open, holder };
+		}
+
+		/** The tool's run: an agent edit lands and is captured, then the tool writes. */
+		const toolRun = async () => {
+			fs.writeFileSync(sibling, "fn agent() {}\n");
+			noteAgentMutation(sibling);
+			fs.writeFileSync(sibling, "fn tool() {}\n");
+		};
+
+		it("stays registered until the restore has written, and then restores", async () => {
 			const before = activeRuns().size;
-			const hold = holdFileMutationQueue(target);
+			const held = await holdSibling();
 			const { restoring } = await runWithFixRestore(
-				{ tool: "rust-clippy", extension: ".rs", candidates: [] },
-				async () => {},
-				hold,
+				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+				toolRun,
 			);
 			expect(activeRuns().size).toBe(before + 1);
-			hold?.release();
-			await restoring;
+			expect(fs.readFileSync(sibling, "utf-8")).toBe("fn tool() {}\n");
+			held.release();
+			await held.holder;
+			const report = await restoring;
+			expect(report.restored).toEqual([sibling]);
+			expect(fs.readFileSync(sibling, "utf-8")).toBe("fn agent() {}\n");
 			expect(activeRuns().size).toBe(before);
 		});
 
-		it("still restores, once the hold is released, when the tool throws", async () => {
+		it("still restores when the tool throws", async () => {
 			const before = activeRuns().size;
-			const hold = holdFileMutationQueue(target);
+			const held = await holdSibling();
 			await expect(
 				runWithFixRestore(
-					{ tool: "rust-clippy", extension: ".rs", candidates: [] },
+					{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
 					async () => {
+						await toolRun();
 						throw new Error("spawn exploded");
 					},
-					hold,
 				),
 			).rejects.toThrow("spawn exploded");
 			expect(activeRuns().size).toBe(before + 1);
-			hold?.release();
+			held.release();
+			await held.holder;
+			await waitFor(
+				() => fs.readFileSync(sibling, "utf-8"),
+				(bytes) => bytes === "fn agent() {}\n",
+				{ timeoutMs: 2000 },
+			);
 			await waitFor(
 				() => activeRuns().size,
 				(size) => size === before,
-				{ timeoutMs: 1000 },
+				{ timeoutMs: 2000 },
 			);
 		});
 	});

@@ -43,18 +43,22 @@
  * The restore takes pi's queue entry for a sibling S, so an agent `edit` of S
  * cannot land between the restore's compare and its write. The pipeline holds
  * the target F's entry while the tool runs, through its own after-reads
- * (#3506), so the restore runs AFTER that entry is left, never inside it:
- * {@link runWithFixRestore} hands `restore` to the hold's `afterRelease`.
+ * (#3506), and the restore starts at the tool's exit, so it can wait for S's
+ * entry while F is held. That is safe because nothing waits for the restore
+ * while it holds an entry:
  *
  * - A queue entry is requested by something that holds no other entry, with
  *   one exception: the multi-path LSP edit (`withHostFileMutationQueues`)
  *   requests its keys in ascending order.
  * - The restore holds one S entry at a time and does file I/O only inside it.
- * - So nothing that holds an entry waits for a restore, and the wait-for graph
- *   has no cycle. A restore inside F's hold would close one: an LSP edit of
+ * - {@link runWithFixRestore} returns the restore as a promise and awaits
+ *   nothing on it. A caller awaits it only after it has released the target's
+ *   hold. A restore awaited INSIDE F's hold closes a cycle: an LSP edit of
  *   [S, F] holds S and waits for F, the pipeline holds F and waits for the
  *   restore, the restore waits for S (`formal/dispatch-pipeline`
- *   `SiblingRestoreQueuedInHold`, checked with CHECK_DEADLOCK).
+ *   `SiblingRestoreQueuedInHold`, checked with CHECK_DEADLOCK;
+ *   `tests/clients/fix-run-restore.test.ts` runs the same cycle through pi's
+ *   real queue).
  *
  * The run stays registered until the restore ends, so an agent call that
  * starts after the tool exited is tracked (in flight, then captured) and the
@@ -104,10 +108,7 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
-import {
-	type FileMutationHold,
-	withHostFileMutationQueue,
-} from "./file-mutation-queue.js";
+import { withHostFileMutationQueue } from "./file-mutation-queue.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { getProcessSingleton } from "./process-singletons.js";
@@ -164,8 +165,8 @@ export interface FixRun {
 	/**
 	 * The tool has exited. `agentEdited` is what the capture holds now;
 	 * `restore` writes the captures back and ends the run. It takes pi's queue
-	 * entry for each file, so call it only once the caller holds no entry
-	 * (#3830). It never rejects.
+	 * entry for each file, so never await it while holding one (#3830). It
+	 * never rejects.
 	 */
 	finish(): { agentEdited: string[]; restore(): Promise<FixRunReport> };
 }
@@ -173,14 +174,13 @@ export interface FixRun {
 /**
  * Run `run` (the fixer's spawn) with the pre-run hash set and the capture in
  * place, and restore whether `run` returns or throws: a tool that exits
- * nonzero or times out has usually already rewritten files. With a `hold`, the
- * restore starts after the hold's entry is left (see "Lock order" above); the
- * run stays registered until it ends.
+ * nonzero or times out has usually already rewritten files. The restore starts
+ * at the tool's exit and is NOT awaited here (see "Lock order" above); the run
+ * stays registered until it ends.
  */
 export async function runWithFixRestore<T>(
 	args: Parameters<typeof beginFixRun>[0],
 	run: () => Promise<T>,
-	hold?: Pick<FileMutationHold, "afterRelease">,
 ): Promise<{
 	value: T;
 	/** Files an agent edit was captured for; the tool's changes to them are not its own. */
@@ -195,7 +195,7 @@ export async function runWithFixRestore<T>(
 		outcome = { failure };
 	}
 	const { agentEdited, restore } = fixRun.finish();
-	const restoring = hold ? hold.afterRelease(restore) : restore();
+	const restoring = restore();
 	if ("failure" in outcome) {
 		void restoring;
 		throw outcome.failure;

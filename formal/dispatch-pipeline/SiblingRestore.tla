@@ -13,11 +13,13 @@
 (* `withHostFileMutationQueues`) takes S, then F: its keys are sorted, and *)
 (* S sorts first. It writes nothing here: it is a lock-order actor only    *)
 (* (what an LSP edit writes is LspEditQueue's question). A restore that    *)
-(* takes S's entry (RestoreQueue) while the pipeline still holds F         *)
-(* (RestoreAfterHold = FALSE) closes a cycle with that edit, and TLC's     *)
-(* deadlock check finds it (SiblingRestoreQueuedInHold). The code's shape  *)
-(* releases F first (RestoreAfterHold: `runWithFixRestore` hands `restore` *)
-(* to the hold's `afterRelease`), so the restore holds nothing while it    *)
+(* takes S's entry (RestoreQueue) while the pipeline holds F and waits for *)
+(* the restore to end (RestoreGatesHold = TRUE) closes a cycle with that   *)
+(* edit, and TLC's deadlock check finds it (SiblingRestoreQueuedInHold).   *)
+(* The code does not wait: `runWithFixRestore` starts `restore` at the     *)
+(* tool's exit and returns it as a promise, awaited only after the         *)
+(* pipeline has released F (RestoreGatesHold = FALSE), so F's release      *)
+(* never depends on the restore and the restore holds nothing while it     *)
 (* waits for S's entry.                                                    *)
 (*                                                                         *)
 (* Actors:                                                                 *)
@@ -60,7 +62,7 @@ CONSTANTS
     RestoreRecheck, \* TRUE: the re-stat before the write (#3741 round 2)
     RestoreQueue,   \* the restore's read, decision, re-check and write run inside pi's queue entry for S (a per-sibling entry taken only for the restore, #3830)
     TargetHold,     \* TRUE: the pipeline holds the target F's queue entry from Begin until its work is done (#3506)
-    RestoreAfterHold, \* TRUE (the code, #3830): F's entry is released when the tool exits, and the restore starts after that. FALSE: the restore runs inside F's hold (the rejected shape)
+    RestoreGatesHold, \* TRUE (the rejected shape): the pipeline releases F's entry only after the restore has ended. FALSE (the code, #3830): the restore starts at the tool's exit and F's release does not wait for it
     LspMulti        \* TRUE: an LSP multi-path edit takes S's entry, then F's (keys sorted, S first), and waits for F while it holds S
 
 SIds == 1..SEdits
@@ -181,31 +183,31 @@ TWrite ==
                    rpc, rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
 \* The tool exited: `finish()` returns the agentEdited list and the `restore`
-\* thunk. Without SettleCapture the run left `active` here (the code before
-\* #3830). With RestoreAfterHold the pipeline's work on F is over and it
-\* releases F's entry; `restore` starts after that (`afterRelease`). Otherwise
-\* the restore runs inside F's hold.
+\* thunk, which `runWithFixRestore` starts at once. Without SettleCapture the
+\* run left `active` here (the code before #3830).
 Finish ==
     /\ rpc = "run" /\ tpc # "read"
     /\ Quiet
     /\ rpc' = IF ~SRestore THEN "done"
               ELSE IF RestoreQueue THEN "rlock"
               ELSE "rread"
-    /\ fq' = IF TargetHold /\ RestoreAfterHold THEN "none" ELSE fq
     /\ UNCHANGED <<sdisk, sver, sq, sapplied, sa, sabuf, infl, cap, tpc, tbuf,
-                   rbuf, rv, rcap, rc, rep, wk, lpc>>
+                   rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
-\* The pipeline's work on F is over after the restore (RestoreAfterHold =
-\* FALSE): `runPipeline` releases F's entry.
+\* The pipeline's work on F is over and `runPipeline` releases F's entry. The
+\* pipeline's other work after the tool's exit is not modelled, so this can
+\* happen any time after Finish; with RestoreGatesHold it waits for the restore.
 RelF ==
-    /\ TargetHold /\ ~RestoreAfterHold
-    /\ rpc = "done" /\ fq = "pipe"
+    /\ TargetHold /\ fq = "pipe"
+    /\ rpc \notin {"idle", "run"}
+    /\ RestoreGatesHold => rpc = "done"
     /\ fq' = "none"
     /\ UNCHANGED <<sdisk, sver, sq, sapplied, sa, sabuf, infl, cap, tpc, tbuf,
                    rpc, rbuf, rv, rcap, rc, rep, wk, lpc>>
 
 \* RestoreQueue: enter pi's queue for S (waits for an edit or an LSP edit that
-\* holds it). The restore holds no other entry if RestoreAfterHold.
+\* holds it). It holds no other entry; F's may still be held by the pipeline,
+\* which does not wait for the restore (unless RestoreGatesHold).
 RLock ==
     /\ rpc = "rlock" /\ sq = "none"
     /\ Quiet

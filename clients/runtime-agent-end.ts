@@ -591,8 +591,9 @@ export async function handleAgentEnd({
 		} finally {
 			fixHold?.release();
 		}
-		// The restore of agent edits the fixer overwrote starts once the target's
-		// hold is left (#3830), so it is awaited here, not inside the hold.
+		// The restore of agent edits the fixer overwrote waits for pi's queue
+		// entries (#3830), so it is awaited here, after the hold is released,
+		// never inside it.
 		const loss = await restoring;
 		if (loss && (loss.lost.length > 0 || loss.possiblyLost.length > 0)) {
 			// The agent's turn is over, so a UI notify alone reaches nobody it

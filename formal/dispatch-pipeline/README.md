@@ -235,14 +235,17 @@ Lock order (#3830): the model has the target F's entry (`fq`, `TargetHold`: the
 pipeline takes it at `Begin` and keeps it, #3506) and an LSP multi-path edit
 (`LspMulti`: S's entry, then F's, keys sorted and S first, waiting for F while
 it holds S; it writes nothing, so it is a lock-order actor only).
-`RestoreAfterHold` says when F is released: `TRUE` at the tool's exit, with the
-restore starting after (the code: `runWithFixRestore` hands `restore` to the
-hold's `afterRelease`); `FALSE` after the restore (`RelF`), so the restore runs
-inside F's hold. The statement the code keeps: a queue entry is requested by
-something that holds no other entry, except the multi-path LSP edit, which
-requests in ascending key order; the restore holds one S entry at a time and
-does file I/O only inside it. Not modelled: a second pipeline with its own F
-(each restore still holds nothing while it waits), and a second sibling.
+`RestoreGatesHold` says whether F's release (`RelF`) waits for the restore:
+`FALSE` is the code (`runWithFixRestore` starts `restore` at the tool's exit and
+returns it as a promise; the pipeline and the `agent_end` drain await it only
+after they released F), `TRUE` is the rejected shape, where the pipeline holds
+F until the restore has ended. The statement the code keeps: a queue entry is
+requested by something that holds no other entry, except the multi-path LSP
+edit, which requests in ascending key order; the restore holds one S entry at a
+time and does file I/O only inside it; nothing that holds an entry awaits the
+restore. Not modelled: a second pipeline with its own F (each restore still
+holds nothing while it waits, and nothing awaits it under a hold), and a second
+sibling.
 
 | Config | Models | Expect | Distinct states |
 |---|---|---|---|
@@ -253,11 +256,11 @@ does file I/O only inside it. Not modelled: a second pipeline with its own F
 | `MutSiblingNoRecheck` | #3741 round 1, before the re-check | violated `NoRestoreOverPreCheckEdit` | 272 (at the violation) |
 | `SiblingRestoreMerged` | **defect 2** on the merged restore: an edit lands between the re-check and the write | violated `NoRestoreOverGapEdit` | 271 (at the violation) |
 | `SiblingRestoreGap` | defect 2 alone: with `SettleCapture` the other windows below are closed, and this one is left | violated `NoRestoreOverNewer` | 246 (at the violation) |
-| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore after F's release, F held by the pipeline, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 1,962 |
-| `SiblingRestoreQueuedInHold` | the rejected shape: the same, with the restore inside F's hold (`RestoreAfterHold = FALSE`) | violated `Deadlock` | 77 (at the violation) |
+| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore started at the tool's exit with F still held and not waiting for it, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 3,202 |
+| `SiblingRestoreQueuedInHold` | the rejected shape: the same, with the pipeline holding F until the restore has ended (`RestoreGatesHold = TRUE`) | violated `Deadlock` | 77 (at the violation) |
 | `SiblingRestoreQueuedInHoldNoLsp` | the same without the LSP edit: no cycle, so the edit is the cycle's third edge | pass | 859 |
-| `MutSiblingNoRestoreQueue` | `SiblingRestoreQueued` without the queue entry | violated `NoRestoreOverNewer` | 1,500 (at the violation) |
-| `MutSiblingNoSettleCapture` | `SiblingRestoreQueued` without `SettleCapture` (window A) | violated `NoRestoreOverNewer` | 2,203 (at the violation) |
+| `MutSiblingNoRestoreQueue` | `SiblingRestoreQueued` without the queue entry | violated `NoRestoreOverNewer` | 2,093 (at the violation) |
+| `MutSiblingNoSettleCapture` | `SiblingRestoreQueued` without `SettleCapture` (window A) | violated `NoRestoreOverNewer` | 3,160 (at the violation) |
 | `SiblingRestoreLostVerdict` | the `overwritten` verdict, observed with finding B closed by `RestoreNoCapInFlight` | pass | 93 |
 | `SiblingRestoreInFlightHeld` | the in-flight check, with the other windows closed and every call reaching pi-lens during the run | pass | 612 |
 | `MutSiblingNoInFlight` | the same without the in-flight check (the restore before #3741 round 2) | violated `NoRestoreOverNewer` | 493 (at the violation) |
@@ -276,7 +279,7 @@ the queue is what closes the gap (`MutSiblingNoRestoreQueue` against
 registered through the restore is what closes window A (`MutSiblingNoSettleCapture`
 against `SiblingRestoreQueued`, which differ only in `SettleCapture`); the
 release order is what closes the cycle (`SiblingRestoreQueuedInHold` against
-`SiblingRestoreQueued`, which differ only in `RestoreAfterHold`), and the LSP
+`SiblingRestoreQueued`, which differ only in `RestoreGatesHold`), and the LSP
 edit is what makes it a cycle (`SiblingRestoreQueuedInHoldNoLsp` against
 `SiblingRestoreQueuedInHold`, which differ only in `LspMulti`); the in-flight
 check is load-bearing (`MutSiblingNoInFlight` against
@@ -301,10 +304,10 @@ target hold, so it could not see that a queue entry for S taken inside the
 pipeline's hold on F closes a cycle with a multi-path LSP edit: the edit holds S
 and waits for F, the pipeline holds F and waits for the restore, the restore
 waits for S (`SiblingRestoreQueuedInHold`, red under `CHECK_DEADLOCK`, found by
-the #3844 review's probe through the real queue). The code takes S's entry only
-after F is released: the pipeline's `writeHold.release()` has run, and
-`restore` starts from the hold's `afterRelease`. `SiblingRestoreQueued`, with
-the hold and the LSP edit in, passes. The restore reads and compares inside S's
+the #3844 review's probe through the real queue). The code starts the restore
+at the tool's exit and awaits it only after the pipeline has released F, so F's
+release never waits for it. `SiblingRestoreQueued`, with the hold and the LSP
+edit in, passes. The restore reads and compares inside S's
 entry, and the run stays registered until it ends, so window A (below) is
 closed by the same change.
 

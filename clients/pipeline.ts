@@ -792,8 +792,9 @@ function displayLoss(
 interface WholePackageFixOutcome {
 	changedFiles: string[];
 	/**
-	 * The restore of agent edits the fixer overwrote (#3598). It starts after the
-	 * target's hold is released (#3830), so it settles later than the outcome.
+	 * The restore of agent edits the fixer overwrote (#3598). It started at the
+	 * tool's exit and takes pi's queue entry for each sibling (#3830), so the
+	 * caller awaits it only after the target's hold is released.
 	 */
 	restoring?: Promise<FixRunReport>;
 }
@@ -847,7 +848,6 @@ async function tryRustClippyFix(
 				["clippy", "--fix", "--allow-dirty", "--allow-staged", "-q"],
 				{ timeout: 30000, cwd: cargoDir },
 			),
-		writeHold,
 	);
 	return wholePackageFixOutcome(
 		cargoDir,
@@ -885,7 +885,6 @@ async function tryDartFix(
 				timeout: 30000,
 				cwd: pubspecDir,
 			}),
-		writeHold,
 	);
 	return wholePackageFixOutcome(
 		pubspecDir,
@@ -915,7 +914,8 @@ export async function runAutofix(
 	/**
 	 * Display paths of files a whole-package fixer overwrote an agent edit of
 	 * (unrestorable), or where one may not have survived (#3598). The restore
-	 * runs after `writeHold` is released (#3830): await this only once it is.
+	 * takes pi's queue entry for each sibling (#3830): await this only after
+	 * `writeHold` is released.
 	 */
 	restoring?: Promise<FixRunLoss> | undefined;
 	skipReason?: string;
@@ -2149,8 +2149,8 @@ async function analysePipeline(
 			autofixTools.length > 0 ? ` (${autofixTools.join(", ")})` : "";
 		output += `\n\n✅ Auto-fixed ${fixedCount} issue(s)${detail}`;
 	}
-	// The restore starts once the target's hold is left (#3830); the hold was
-	// released above, so this settles.
+	// The restore waits for pi's queue entries (#3830), so it is awaited only
+	// here, after the target's hold was released above, never inside it.
 	const fixRunLoss = await autofixRestoring;
 	if (
 		fixRunLoss &&

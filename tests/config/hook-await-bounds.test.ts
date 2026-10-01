@@ -408,17 +408,17 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#8f9b56ae~1c2e060a": {
+	"clients/runtime-agent-end.ts#8f9b56ae~24a830f2": {
 		family: "hook-await",
 		site: "agent_settled",
 		reason:
 			"#3830: the whole-package fixer's restore of agent edits, awaited " +
 			"after the drain's hold on the target is released. It waits for " +
-			"pi's queue entry of each sibling it restores (held only by an edit " +
-			"or an LSP edit, none of which waits for this restore: the restore " +
-			"takes no entry while it holds one) and does local file I/O. The " +
-			"phase above it is the `runAutofix` await registered just above, " +
-			"which has no aggregate bound either.",
+			"pi's queue entry of each sibling it restores (held only by an edit, " +
+			"an LSP edit or another pipeline's hold, none of which waits for " +
+			"this restore) and does local file I/O. The phase above it is the " +
+			"`runAutofix` await registered below, which has no aggregate bound " +
+			"either.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-agent-end.ts#9cc1f7d8~651bdb1c": {
@@ -2428,7 +2428,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// awaited under the same hold and the restore is bounded local file work.
 	// 63 -> 64 (#3830): `analysePipeline` awaits the whole-package fixer's
 	// restore after it has released the target's hold, so it can render a loss
-	// notice; the restore takes pi's queue entry for each sibling and does
+	// notice; the restore waits for pi's queue entry of each sibling and does
 	// local file I/O, and the fixer's spawn above it was already awaited.
 	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
