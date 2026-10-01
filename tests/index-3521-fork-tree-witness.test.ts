@@ -1136,7 +1136,7 @@ async function activateTools(
 		{ tools } as never,
 		undefined,
 		undefined,
-		runtime.session.extensionRunner.createContext(),
+		runtime.session.extensionRunner.createToolContext(id, undefined),
 	);
 }
 
@@ -1903,7 +1903,10 @@ describe("#3763 ast_grep_replace is wired to the live session", () => {
 			} as never,
 			undefined,
 			undefined,
-			runtime.session.extensionRunner.createContext(),
+			runtime.session.extensionRunner.createToolContext(
+				"call-3763-wired",
+				undefined,
+			),
 		);
 
 		const lineage = (
