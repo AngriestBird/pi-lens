@@ -594,7 +594,9 @@ the surface they bite; each block loads only when its trigger applies.
   degradation per run, and name any edit that cannot be restored. The restore
   takes pi's queue entry for each sibling, one at a time (#3830). It starts
   after the caller's scan of the tool's changes and is awaited only after the
-  target's hold is released, never inside it: a queue entry is requested by something that holds no other
+  target's hold is released, never inside it. The tool_result pipeline does not
+  await it (F's result must not wait on a sibling's holder; the loss notice is
+  queued as an advisory), the `agent_end` drain does, after the release: a queue entry is requested by something that holds no other
   entry, except the multi-path LSP edit, which requests in ascending key order,
   and nothing that holds an entry awaits the restore. Do not add a second
   whole-package fixer without it, and do not await a queue entry while holding

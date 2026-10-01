@@ -53,7 +53,10 @@
  * - The restore holds one S entry at a time and does file I/O only inside it.
  * - {@link runWithFixRestore} returns the restore as a promise and awaits
  *   nothing on it. A caller awaits it only after it has released the target's
- *   hold. A restore awaited INSIDE F's hold closes a cycle: an LSP edit of
+ *   hold, and the tool_result pipeline does not await it at all: F's
+ *   diagnostics and blockers must not wait on whoever holds a sibling, so its
+ *   loss notice goes to the agent through the advisory queue
+ *   (`PipelineContext.onFixRunLoss`). A restore awaited INSIDE F's hold closes a cycle: an LSP edit of
  *   [S, F] holds S and waits for F, the pipeline holds F and waits for the
  *   restore, the restore waits for S (`formal/dispatch-pipeline`
  *   `SiblingRestoreQueuedInHold`, checked with CHECK_DEADLOCK;
@@ -327,20 +330,43 @@ async function restoreRun(
 		agentEdited: [],
 	};
 	const skipped: string[] = [];
+	const startedAt = Date.now();
+	let queueWaitMs = 0;
 	try {
 		for (const [key, file] of run.files) {
 			if (!file.capture) continue;
 			report.agentEdited.push(file.filePath);
+			const requestedAt = Date.now();
 			try {
-				await withHostFileMutationQueue(file.filePath, () =>
-					restoreFile(run, key, file, report, skipped),
-				);
+				await withHostFileMutationQueue(file.filePath, () => {
+					queueWaitMs += Date.now() - requestedAt;
+					return restoreFile(run, key, file, report, skipped);
+				});
 			} catch {
 				report.lost.push(file.filePath);
 			}
 		}
 	} finally {
 		active.delete(run);
+	}
+	if (report.agentEdited.length > 0) {
+		// One row per run that had a capture: `queueWaitMs` is the time spent
+		// behind other holders of the siblings' queue entries, the number to watch
+		// now that the restore waits for them (#3830).
+		logLatency({
+			type: "phase",
+			filePath: "<pi-lens>",
+			phase: "fix_run_restore",
+			durationMs: Date.now() - startedAt,
+			metadata: {
+				tool,
+				files: report.agentEdited.length,
+				restored: report.restored.length,
+				lost: report.lost.length,
+				possiblyLost: report.possiblyLost.length,
+				queueWaitMs,
+			},
+		});
 	}
 	if (skipped.length > 0) {
 		incrementDegradationCount({

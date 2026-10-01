@@ -237,8 +237,9 @@ pipeline takes it at `Begin` and keeps it, #3506) and an LSP multi-path edit
 it holds S; it writes nothing, so it is a lock-order actor only).
 `RestoreGatesHold` says whether F's release (`RelF`) waits for the restore:
 `FALSE` is the code (`runWithFixRestore` starts `restore` after the caller's scan of the tool's changes and
-returns it as a promise; the pipeline and the `agent_end` drain await it only
-after they released F), `TRUE` is the rejected shape, where the pipeline holds
+returns it as a promise; the tool_result pipeline never awaits it and queues
+the loss notice as an advisory, the `agent_end` drain awaits it only after it
+released F; the handler's own liveness is not modelled), `TRUE` is the rejected shape, where the pipeline holds
 F until the restore has ended. The statement the code keeps: a queue entry is
 requested by something that holds no other entry, except the multi-path LSP
 edit, which requests in ascending key order; the restore holds one S entry at a

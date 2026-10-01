@@ -277,6 +277,14 @@ export interface PipelineContext {
 		modelId?: string;
 		provider?: string;
 	};
+	/**
+	 * #3830: receives the notice for agent edits a whole-package fixer
+	 * overwrote and its restore could not put back. It fires after the pipeline
+	 * has returned, because the restore waits for pi's queue entries; the host
+	 * queues it as an advisory for the agent's next turn. Absent: the notice is
+	 * dropped, the degradation record still lands.
+	 */
+	onFixRunLoss?: (notice: string) => void;
 	/** pi.getFlag accessor */
 	getFlag: (name: string, filePath?: string) => boolean | string | undefined;
 	/**
@@ -787,6 +795,27 @@ function displayLoss(
 		lost: report.lost.map((f) => toRunnerDisplayPath(cwd, f)),
 		possiblyLost: report.possiblyLost.map((f) => toRunnerDisplayPath(cwd, f)),
 	}));
+}
+
+/**
+ * Hand a settled restore's loss to `ctx.onFixRunLoss`, detached from the
+ * pipeline's result. Total: a callback that throws is a debug line, never an
+ * unhandled rejection (AGENTS.md shape 53).
+ */
+function deliverFixRunLoss(
+	restoring: Promise<FixRunLoss>,
+	ctx: Pick<PipelineContext, "onFixRunLoss" | "dbg">,
+): void {
+	void restoring
+		.then((loss) => {
+			if (loss.lost.length > 0 || loss.possiblyLost.length > 0)
+				ctx.onFixRunLoss?.(renderFixRunLoss(loss));
+		})
+		.catch((error: unknown) =>
+			ctx.dbg(
+				`fix-run loss notice failed: ${error instanceof Error ? error.message : String(error)}`,
+			),
+		);
 }
 
 interface WholePackageFixOutcome {
@@ -2128,15 +2157,11 @@ async function analysePipeline(
 			autofixTools.length > 0 ? ` (${autofixTools.join(", ")})` : "";
 		output += `\n\n✅ Auto-fixed ${fixedCount} issue(s)${detail}`;
 	}
-	// The restore waits for pi's queue entries (#3830), so it is awaited only
-	// here, after the target's hold was released above, never inside it.
-	const fixRunLoss = await autofixRestoring;
-	if (
-		fixRunLoss &&
-		(fixRunLoss.lost.length > 0 || fixRunLoss.possiblyLost.length > 0)
-	) {
-		output += `\n\n${renderFixRunLoss(fixRunLoss)}`;
-	}
+	// The restore waits for pi's queue entries (#3830), so this result never
+	// waits for it: F's diagnostics and blockers must not wait on whoever holds a
+	// sibling. It ends on its own, and a loss it finds goes to the agent through
+	// the advisory queue, like the `agent_end` drain's.
+	if (autofixRestoring) deliverFixRunLoss(autofixRestoring, ctx);
 	if (formatFailures.length > 0) {
 		const details = formatFailures.slice(0, 3).join("; ");
 		const suffix =

@@ -2427,11 +2427,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// spawn, and the outcome helper awaits the project diff once where the two
 	// branches awaited it separately (net +1). The fixer's spawn was already
 	// awaited under the same hold and the restore is bounded local file work.
-	// 63 -> 64 (#3830): `analysePipeline` awaits the whole-package fixer's
-	// restore after it has released the target's hold, so it can render a loss
-	// notice; the restore waits for pi's queue entry of each sibling and does
-	// local file I/O, and the fixer's spawn above it was already awaited.
-	"clients/pipeline.ts": 64,
+	"clients/pipeline.ts": 63,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
