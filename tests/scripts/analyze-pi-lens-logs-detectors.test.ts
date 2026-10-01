@@ -85,7 +85,8 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// extension (pid 240029): {"level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=.../pi-lens-test-checkout-isolation-xNZNoE/..."}
 		const report = run("real-log-test-pollution");
 		const d2 = report.detectors.realLogTestPollution;
-		// two real `.probe-home/` rows plus the labelled synthetic witness-home row
+		// two real witness-home rows plus the labelled synthetic witness-home
+		// row the #3521 test writes when PI_LENS_HOME is unset
 		expect(d2.latencyByPid).toEqual({ "820094": 3 });
 		expect(d2.extensionByPid).toEqual({ "240029": 2 });
 		expect(smell(report, "real-log-test-pollution")?.count).toBe(5);
@@ -109,9 +110,13 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// toolName:edit and config_resolved on .../fix-3643-review/clients/mcp,
 		// two opaque command rows, /tmp/pi-lens-ast-grep (pid 3103055), and the
 		// extension row of pid 650812 on .../pi-lens-worktrees/review-3673.
+		// Labelled synthetic: two opaque command rows naming a pi-lens-test-*
+		// dir (command text, not a path) and an orchestrator session writing
+		// under .probe-home/orchestration (pid 1393607).
 		const report = run("real-log-test-pollution");
 		const d2 = report.detectors.realLogTestPollution;
 		expect(d2.latencyByPid["1947541"]).toBeUndefined();
+		expect(d2.latencyByPid["1393607"]).toBeUndefined();
 		expect(d2.latencyByPid["3103055"]).toBeUndefined();
 		expect(d2.extensionByPid["650812"]).toBeUndefined();
 	});
@@ -501,8 +506,9 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 
 	it("E5 Projects touched: a bash command filePath is not a project", () => {
 		// {"phase":"opaque_mutation_prescan","filePath":"cd /home/user/Desktop/proj && gh issue view 413 ..."}
-		// Real: five opaque rows (three without `&&`), five comfy-studio rows,
-		// one `<pi-lens>` cache_usage row. Labelled synthetic: a path with a space.
+		// Real: five opaque_mutation_prescan rows and one
+		// opaque_mutation_coverage_unknown row, five comfy-studio rows, one
+		// `<pi-lens>` cache_usage row. Labelled synthetic: a path with a space.
 		const report = run("projects-touched");
 		expect(report.projects).toEqual([{ key: "home", count: 6 }]);
 	});

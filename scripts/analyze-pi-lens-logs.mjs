@@ -226,8 +226,8 @@ function createState(files) {
 			// scan. Sorted after all files are read.
 			rowTs: [],
 			cascadeTs: [],
-			// D2: real-log pollution — rows whose filePath points at a test or
-			// probe home, grouped by pid.
+			// D2: real-log pollution — rows whose filePath points at a test
+			// home, grouped by pid.
 			scratchRows: new Map(),
 			// D5: test_runner_delivery outcomes per session, joined with the
 			// sessionstart firing/stale text into one delivery-health verdict.
@@ -350,7 +350,7 @@ function createState(files) {
 			genuineZeroRead: [],
 		},
 		extension: {
-			// D2: extension.log rows whose payload names a test or probe home
+			// D2: extension.log rows whose payload names a test home
 			// directory, grouped by pid, plus the warn/error census.
 			scratchRows: new Map(),
 			warnErrorGroups: counter(),
@@ -1578,12 +1578,13 @@ function checkoutOf(p) {
 }
 
 /**
- * D2: the markers only a test or probe home carries: a fixer's `.probe-home/`
- * (AGENTS.md probe hygiene), the #3521 fork-tree witness home, and the
- * suite's `pi-lens-test-*` temp dirs. `pi-lens-worktrees` and
- * `pi-lens-orchestrator/tmp` are not markers: real sessions edit there.
+ * D2: the markers only a test home carries: the #3521 fork-tree witness home
+ * and the suite's `pi-lens-test-*` temp dirs. `pi-lens-worktrees`,
+ * `pi-lens-orchestrator/tmp` and `.probe-home/` are not markers: real
+ * sessions edit there (the orchestrator writes its task files under
+ * `.probe-home/orchestration/`).
  */
-const SCRATCH_PATH_RE = /(\/\.probe-home\/|witness-home|pi-lens-test-)/;
+const SCRATCH_PATH_RE = /(witness-home|pi-lens-test-)/;
 
 /** E5: track a latency row's project unless its `filePath` is a shell command. */
 function trackLatencyProject(state, entry) {
@@ -1817,7 +1818,7 @@ function trackLatencySignals(state, entry, ts) {
 	}
 }
 
-/** D2: extension.log rows that name a test or probe home. */
+/** D2: extension.log rows that name a test home. */
 async function analyzeExtension(files, state) {
 	for (const file of files) {
 		await forEachJsonLine(file, "extension", state, (entry) => {
@@ -2344,13 +2345,13 @@ function buildReport(state) {
 			message: `${g.minutes} min gap ${g.start} -> ${g.end}; sessionstartRows=${g.sessionstartRows}; cascadeRows=${g.cascadeRows}`,
 		})),
 	);
-	// D2: test/probe home markers in a real log. Never added to the
+	// D2: test home markers in a real log. Never added to the
 	// default denylist so the pollution stays visible.
 	addSmell(
 		smells,
 		"real-log-test-pollution",
 		latencyScratch + extensionScratch,
-		`Rows naming a test or probe home (.probe-home/, witness-home, pi-lens-test-*) (latency ${latencyScratch}, extension ${extensionScratch}); these never belong in a real log`,
+		`Rows naming a test home (witness-home, pi-lens-test-*) (latency ${latencyScratch}, extension ${extensionScratch}); these never belong in a real log`,
 		[
 			...[...state.latency.scratchRows.entries()].map(([pid, count]) => ({
 				key: `latency pid ${pid}`,
