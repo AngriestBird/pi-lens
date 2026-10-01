@@ -74,6 +74,12 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 - A core-domain rule lives in its owning module; every other caller asks that
   owner. A fix that re-derives an owned rule at a consumer is wrong: extend the
   owner, or create a new one only with a stated reason (#3781, #3794, #3796).
+- A change on a lifecycle, timing, or identity seam extends or adds a TLA+
+  model in step with the code. `formal/coverage-map.json` maps source globs to
+  model families; the PR-body lint requires a `.tla`/`.cfg` change under any one
+  of a mapped row's families, or a `TLA+ unaffected: <family> — <reason>` line
+  for one of them. `unmodelled` rows and rows of 4+ families stay advisory. A
+  TLA lane that adds a family adds its map row (#3802).
 
 <important if="delegating work or coordinating a lane">
 
