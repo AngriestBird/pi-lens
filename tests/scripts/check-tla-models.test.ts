@@ -11,8 +11,11 @@ import {
 	listModelConfigs,
 	parseConcurrencyArg,
 	parseModelHeader,
+	parseShardArg,
 	resolveJarPath,
 	runPool,
+	selectConfigs,
+	selectShard,
 	verdictMatches,
 } from "../../scripts/check-tla-models.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
@@ -198,6 +201,57 @@ describe("parseConcurrencyArg (#3572)", () => {
 	});
 });
 
+describe("parseShardArg (#3918)", () => {
+	it("reads i/N", () => {
+		expect(parseShardArg("2/4")).toEqual({ index: 2, total: 4 });
+	});
+
+	// Recurrence: a typo'd `--shard` that fell back to "all configs" would not
+	// fail CI, the shard would just stop being a shard and rerun everything.
+	it.each(["", "0/4", "5/4", "1/0", "2", "a/b", "1/2/3", "-1/4", "1.5/4"])(
+		"throws on %j",
+		(raw) => {
+			expect(() => parseShardArg(raw)).toThrow(/--shard must be i\/N/);
+		},
+	);
+
+	it("throws when the value is missing", () => {
+		expect(() => parseShardArg(undefined)).toThrow(/--shard must be i\/N/);
+	});
+});
+
+describe("selectShard (#3918)", () => {
+	const items = ["a", "b", "c", "d", "e", "f", "g"];
+
+	it("steps through the list round-robin, so a directory's configs spread across shards", () => {
+		expect(selectShard(items, { index: 1, total: 3 })).toEqual(["a", "d", "g"]);
+		expect(selectShard(items, { index: 2, total: 3 })).toEqual(["b", "e"]);
+		expect(selectShard(items, { index: 3, total: 3 })).toEqual(["c", "f"]);
+	});
+});
+
+describe("selectConfigs (#3918)", () => {
+	it("returns every config without --shard", () => {
+		expect(selectConfigs([], REPO_ROOT)).toEqual(listModelConfigs(REPO_ROOT));
+	});
+
+	it("narrows to the shard's configs with --shard", () => {
+		const all = listModelConfigs(REPO_ROOT);
+		expect(selectConfigs(["--shard", "1/2"], REPO_ROOT)).toEqual(
+			all.filter((_, position) => position % 2 === 0),
+		);
+	});
+
+	// Recurrence: more shards than configs would leave a runner green on
+	// nothing; it must fail loudly.
+	it("throws when the shard selects nothing", () => {
+		const total = listModelConfigs(REPO_ROOT).length + 1;
+		expect(() =>
+			selectConfigs(["--shard", `${total}/${total}`], REPO_ROOT),
+		).toThrow(/selects no formal/);
+	});
+});
+
 describe("buildJavaArgs (#3572, #3517)", () => {
 	it("always emits a literal `-workers 1`, never `auto` and never a caller-supplied count", () => {
 		// #3517: TLC's own thread interleaving under `-workers auto` decides
@@ -325,7 +379,9 @@ describe("formal/ models (#3447)", () => {
 		);
 		expect(
 			runs.some((run) =>
-				/^\s*node scripts\/check-tla-models\.mjs\s*$/m.test(run),
+				/^\s*node scripts\/check-tla-models\.mjs(?: --shard .+)?\s*$/m.test(
+					run,
+				),
 			),
 		).toBe(true);
 		expect(TLA_TOOLS.url).toContain(`/download/${TLA_TOOLS.release}/`);
