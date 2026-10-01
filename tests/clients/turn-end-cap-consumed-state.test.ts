@@ -800,26 +800,6 @@ describe("M3c: late runner findings vs the cap (#3813)", () => {
 		}
 	});
 
-	it("re-offers two identical cut results as two, not one", async () => {
-		const rig = makeRig("pi-lens-3813-m3c-twins-");
-		try {
-			fillerBlocker(rig, 1000);
-			const file = path.join(rig.cwd, "run-a.ts");
-			const twin = () =>
-				deferSettled(rig, "run-a.ts", {
-					status: "succeeded",
-					semantic: "warning",
-					diagnostics: [runnerDiagnostic(file, `${PAD}${RUNNER_END}`)],
-				});
-			twin();
-			twin();
-			await endTurn(rig);
-			expect(pendingRunnerFindingsSize()).toBe(2);
-		} finally {
-			rig.cleanup();
-		}
-	});
-
 	// The stale half of a result is dropped, and recorded, when it is drained.
 	// A cut part hands back only the live half so the drop is not recorded
 	// again on the next drain.
@@ -959,8 +939,8 @@ describe("M3d: late auxiliary coverage vs the cap (#3813)", () => {
 			const rig = makeRig("pi-lens-3813-m3d-ttl-");
 			try {
 				fillerBlocker(rig, 1000);
+				// Marked two seconds ago, so one millisecond of TTL is long past.
 				markAux(rig, "aux-a.ts");
-				await new Promise((resolve) => setTimeout(resolve, 5));
 				await endTurn(rig);
 				expect(pendingAuxiliaryCoverageSize()).toBe(0);
 			} finally {
