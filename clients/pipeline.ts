@@ -811,9 +811,9 @@ function deliverFixRunLoss(
 			if (loss.lost.length > 0 || loss.possiblyLost.length > 0)
 				ctx.onFixRunLoss?.(renderFixRunLoss(loss));
 		})
-		.catch((error: unknown) =>
+		.catch((failure: unknown) =>
 			ctx.dbg(
-				`fix-run loss notice failed: ${error instanceof Error ? error.message : String(error)}`,
+				`fix-run loss notice failed: ${failure instanceof Error ? failure.message : String(failure)}`,
 			),
 		);
 }
