@@ -517,6 +517,13 @@ export type DegradationKind =
 	 * Without this row the fallback is indistinguishable from a healthy run.
 	 */
 	| "kill-ownership-unverifiable"
+	/**
+	 * #3813: a late auxiliary pair whose findings the turn-end cap cut was past
+	 * its re-arm TTL or ceiling, so it was NOT put back for the next turn (a pair
+	 * within its bound is re-armed and counted under `turn-end-sections-held`).
+	 * Counted; subject is `late-auxiliary:<serverId>`, a small fixed set.
+	 */
+	| "late-auxiliary-held-dropped"
 	/** A didChange content mirror was recorded behind a newer document version. */
 	| "lens-diagnostics-analysis-root-rejected"
 	/** Cross-graph rotation options disagreed; the first writer retained ownership. */
@@ -1469,6 +1476,15 @@ export type DegradationKind =
 	 */
 	| "turn-end-knip-root-skipped"
 	/**
+	 * #3813: the turn-end cap cut a part whose producer holds one-shot state
+	 * (a past-EOF retirement, a dependency-drift delivery count, a cascade
+	 * run, a settled runner result, a late auxiliary pair), so that state
+	 * stayed pending for the next turn instead of being consumed unseen. One
+	 * counted row per turn that held anything, never one per held part; the
+	 * turn's `heldSections` latency field carries the per-turn number.
+	 */
+	| "turn-end-sections-held"
+	/**
 	 * turn_end started no tests for a target in a linked worktree (#3871). The
 	 * subject is the reason: `no-runner-install` (the worktree has no
 	 * `node_modules/.bin`, venv or `vendor/bin` of its own, so running would
@@ -2007,6 +2023,10 @@ const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	// #3498: a queued registry removal that landed is the retry working; the
 	// `instance-registry-deregister-queued` beside it is the line that stands out.
 	"instance-registry-deregister-landed",
+	// #3813: a part the cap cut was kept pending for the next turn, which is
+	// the cap and its re-offer working together; the agent's message carries
+	// the "N held" note, and the ledger needs only the tally.
+	"turn-end-sections-held",
 ]);
 
 export function renderDegradationLines(
