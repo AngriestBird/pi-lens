@@ -1235,9 +1235,19 @@ function hasNoRecordReason(content, files) {
 		)
 			reasons.push(reason);
 	}
+	// R-a (#3905 r2): a plain substring let `lsp-server.ts` satisfy a flagged
+	// `clients/lsp/server.ts`. Match the basename as its own path component:
+	// the character before it must not continue it (`[\w.-]`) and the one
+	// after it must not extend it (`\w`), so `lsp-server.ts`,
+	// `tree-sitter-client.ts` and `rootindex.ts` do not satisfy `server.ts`,
+	// `client.ts` and `index.ts`.
 	const text = reasons.join("\n");
 	return (
-		reasons.length > 0 && files.every((file) => text.includes(basename(file)))
+		reasons.length > 0 &&
+		files.every((file) => {
+			const base = basename(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`(?<![\\w.-])${base}(?!\\w)`).test(text);
+		})
 	);
 }
 

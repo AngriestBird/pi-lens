@@ -1330,6 +1330,43 @@ describe("PR body lint (#1844)", () => {
 			expect(none(text)).toEqual({ valid: true, errors: [] });
 		});
 
+		// R-a (#3905 r2): the file check was a plain substring, so a longer
+		// basename satisfied a flagged file. The reviewer's three probes:
+		// `lsp-server.ts` satisfied `clients/lsp/server.ts`, a root-prefixed
+		// `index.ts` satisfied `clients/lsp/index.ts`, and
+		// `tree-sitter-client.ts` satisfied `clients/lsp/client.ts`.
+		it.each([
+			["clients/lsp/server.ts", "lsp-server.ts"],
+			["clients/lsp/index.ts", "rootindex.ts"],
+			["clients/lsp/index.ts", "clients/lsp/other-index.ts"],
+			["clients/lsp/client.ts", "tree-sitter-client.ts"],
+		])("refuses %s when the reason only names %s", (flagged, token) => {
+			const diff = diffAdding(flagged, "\tif (ready) adopt(slot);");
+			const result = lintPrBody(
+				withObservability(
+					`none: ${token} only forwards the already-recorded outcome`,
+				),
+				{ diff },
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain(refusal);
+		});
+
+		it("accepts the flagged basename at a path boundary", () => {
+			const diff = diffAdding(
+				"clients/lsp/server.ts",
+				"\tif (ready) adopt(slot);",
+			);
+			expect(
+				lintPrBody(
+					withObservability(
+						"none: clients/lsp/server.ts only forwards the recorded outcome",
+					),
+					{ diff },
+				),
+			).toEqual({ valid: true, errors: [] });
+		});
+
 		it("accepts one none line per flagged file", () => {
 			const diff = [
 				seamBranch,
