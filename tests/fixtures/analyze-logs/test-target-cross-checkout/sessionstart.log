@@ -23,3 +23,6 @@
 [2026-09-30T10:21:34.751Z] turn_end: .worktrees/442-ws-placeholder/tests/unit/mcp-surface-budget.test.ts → test vitest .worktrees/450-merge-into/tests/unit/workspace.test.ts (failed-first)
 [2026-09-30T10:59:27.031Z] turn_end: .worktrees/470-git-init-guard/src/git-guard-policy.ts → test vitest .worktrees/450-merge-into/tests/unit/workspace.test.ts (failed-first)
 [2026-09-30T10:59:30.697Z] turn_end: .worktrees/470-git-init-guard/src/git-guard-policy.ts → test vitest .worktrees/450-merge-into/tests/unit/workspace.test.ts (failed-first)
+# synthetic: a cross-checkout vitest run whose mode is not failed-first must not count (B43 failed-first filter)
+[2026-09-30T11:00:00.000Z] session_start fired
+[2026-09-30T11:00:05.000Z] turn_end: .worktrees/490-a/src/a.ts → test vitest .worktrees/491-b/tests/unit/a.test.ts (safety)

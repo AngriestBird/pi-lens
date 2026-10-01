@@ -4,7 +4,7 @@
  * (D1-D16 add, E1-E5 enhance, R1-R2 remove).
  *
  * Fixtures are cuts of the read-only forensics session logs, redacted
- * (`/home/akis` -> `/home/user`, `plegma` -> `proj`). A row that is not a
+ * (`<home>` -> `/home/user`, `plegma` -> `proj`). A row that is not a
  * verbatim cut is labelled where it lives: JSON rows carry a
  * `"fixture":"synthetic: <why>"` field (no detector reads it), and text logs
  * carry a `# synthetic:` or `# subset cut:` line above the rows it covers
@@ -83,13 +83,15 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 	it("D2 real-log-test-pollution: only test-home markers count as pollution", () => {
 		// latency (pid 820094): {"phase":"degradation_ledger","filePath":".../review-3703/.probe-home/pi-lens-3521-witness-home-820094/instances.json",...}
 		// extension (pid 240029): {"level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=.../pi-lens-test-checkout-isolation-xNZNoE/..."}
+		// B33: pid 650813's only pi-lens-test- marker sits in metadata.cwd, not
+		// message, so the row proves the scan is over the full JSON object.
 		const report = run("real-log-test-pollution");
 		const d2 = report.detectors.realLogTestPollution;
 		// two real witness-home rows plus the labelled synthetic witness-home
 		// row the #3521 test writes when PI_LENS_HOME is unset
 		expect(d2.latencyByPid).toEqual({ "820094": 3 });
-		expect(d2.extensionByPid).toEqual({ "240029": 2 });
-		expect(smell(report, "real-log-test-pollution")?.count).toBe(5);
+		expect(d2.extensionByPid).toEqual({ "240029": 2, "650813": 1 });
+		expect(smell(report, "real-log-test-pollution")?.count).toBe(6);
 	});
 
 	it("D2 extension-warn-errors: groups warn and error rows only", () => {
@@ -144,7 +146,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		//   -> test vitest .worktrees/450-merge-into/tests/unit/workspace.test.ts (failed-first)
 		// Real runs: 09-20T22:00 has 4 main-checkout (src/) to worktree targets;
 		// 09-21T17:53 has 4 same-checkout targets; 09-22T19:43 has 1 cross
-		// target (below 3); the B2 subset has 6 cross and 1 same.
+		// target (below 3); the B2 subset has 6 cross and 1 same. The labelled
+		// synthetic 11:00 run is cross-checkout but `(safety)` mode, so only the
+		// failed-first filter keeps its counts at 0 (B43).
 		const report = run("test-target-cross-checkout");
 		expect(
 			report.detectors.testTargetCrossCheckout.runs.map((r: any) => [
@@ -158,6 +162,7 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 			["2026-09-21T17:53:08.201Z", 0, 4],
 			["2026-09-22T19:43:07.265Z", 1, 1],
 			["2026-09-30T10:03:45.684Z", 6, 7],
+			["2026-09-30T11:00:00.000Z", 0, 0],
 		]);
 		expect(smell(report, "test-target-cross-checkout")?.count).toBe(10);
 	});
@@ -205,6 +210,8 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// pid 763652: 23107 ms over 1.8 h, max 937 ms, does not flag. Labelled
 		// synthetic pid 9004 flags on the hourly rule alone; pid 9003 (4.8 s in
 		// 2 minutes) does not, because a lifetime under an hour counts as one.
+		// Labelled synthetic pid 9005 has one 40 s row but execution=skipped, so
+		// it must not reach the cost table at all (B45 execution filter).
 		const report = run("knip");
 		expect(
 			report.detectors.knip.cost.map((c: any) => [c.pid, c.totalMs, c.maxRow]),
@@ -299,7 +306,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		//  "metadata":{"readCount":0,"reads":[],"verdictAction":"block","reasonKind":"zero_read"}}
 		// Real rows: the three 09-30 zero_read blocks and every earlier row for
 		// those files (14, 2, 0). A labelled synthetic read in ANOTHER session
-		// does not make the other-session.ts block a lost read set.
+		// does not make the other-session.ts block a lost read set, and a
+		// labelled synthetic edit_blocked with reasonKind range_out_of_bounds
+		// must stay out of both lists (B38 zero_read filter).
 		const report = run("resume-state-loss");
 		const d10 = report.detectors.resumeStateLoss;
 		const base = (r: any) => path.basename(r.filePath);
@@ -352,7 +361,8 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		//  "kept":0,"dropped":0,"branchToolResults":1034,"branchReadable":true}}
 		// Real rows: that one, two parent-sidecar/live rows that kept and
 		// dropped 1, and a source-none startup with 0 results. Labelled
-		// synthetic rows: 49 results, source none with 1034, unreadable branch.
+		// synthetic rows: 49 results, source none with 1034, unreadable branch,
+		// and kept=0/dropped=1 (B19: only kept+dropped===0 is an empty carry).
 		const report = run("carry-empty-restart");
 		const carry = report.detectors.carryEmptyRestart;
 		expect(carry.map((c: any) => [c.pid, c.branchToolResults])).toEqual([
@@ -365,8 +375,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// {"phase":"agent_nudge","metadata":{"originLocal":0,"originCrossProcess":1,...}}
 		// Real: pid 3205171's own-sidecar handoff at 20:51:33.177Z and its two
 		// nudges at 20:52:19Z and 20:52:27Z flag. Labelled synthetic: a nudge
-		// 301 s after the handoff, another pid's nudge inside the window, and a
-		// nudge after a handoffSource none start do not.
+		// 301 s after the handoff, another pid's nudge inside the window, a
+		// nudge after a handoffSource none start, and a same-pid nudge 177 ms
+		// BEFORE the handoff (B20: the nudge must be at or after the handoff).
 		const report = run("restart-self-nudge");
 		expect(
 			report.detectors.restartSelfNudge.map((n: any) => [n.pid, n.ts]),
@@ -386,7 +397,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// {"phase":"late_runner_findings","metadata":{"failed":1,"delivered":0,"dropped":0,...}}
 		// Real: that pair (turn :22), the turn :21 delivery row, and two pid
 		// 20730 immediate-tier failures. Labelled synthetic: a turn :23 runner
-		// with no delivery row, a delivered one and a dropped one.
+		// with no delivery row, a delivered one, a dropped one, a delivery that
+		// precedes its runner (B22), and a delivery whose failed count is 0
+		// (B40).
 		const report = run("deferred-runner-failed-undelivered");
 		const flags = report.detectors.deferredRunnerFailedUndelivered;
 		expect(flags.map((f: any) => [f.pid, f.turnId, f.diagnosticCount])).toEqual(
@@ -398,7 +411,9 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 	it("D14 aux-stuck-pair: flags an auxiliary pair stuck in two turn ends", () => {
 		// {"phase":"late_auxiliary_findings","metadata":{"stuckPairs":[{"filePath":".../src/workspace.ts","serverId":"opengrep"}]}}
 		// Real: the 13 late_auxiliary_findings rows of pid 3205171. tools.ts is
-		// stuck once and does not flag.
+		// stuck once and does not flag. Labelled synthetic: the same pair stuck
+		// once under pid 9801 and once under pid 9802 must not merge (B39 pid
+		// dimension).
 		const report = run("aux-stuck-pair");
 		expect(
 			report.detectors.auxStuckPairs.map((p: any) => [
