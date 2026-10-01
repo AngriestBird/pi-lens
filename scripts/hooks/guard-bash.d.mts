@@ -15,6 +15,7 @@ export type DenyRule =
 	| "checkUngated"
 	| "hookBypass"
 	| "forcePush"
+	| "ciVerdictStatus"
 	| "rebase";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;

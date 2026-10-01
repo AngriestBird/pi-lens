@@ -33,9 +33,8 @@
  *     husky hooks honour -- see {@link classifyHookBypass}
  *   - force pushes and `+refspec` pushes; an exact
  *     `--force-with-lease=<branch>:<sha>` is the only force form allowed
- *   - every `git rebase` form. The hook cannot reliably inspect upstream from
- *     a synthetic or unavailable payload cwd, so this rule is conservative
- *     even for `--abort` and `--continue`; merge `origin/master` instead.
+ *   - rebase starts and completion forms. Recovery with `--abort` or `--quit`
+ *     remains available; merge `origin/master` instead of starting a rebase.
  *
  * ## Contract source
  *
@@ -171,7 +170,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"rebase"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -198,7 +197,9 @@ export const RULE_MESSAGES = {
 	forcePush:
 		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
 	rebase:
-		"`git rebase` is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
+		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
+	ciVerdictStatus:
+		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
 
 /**
@@ -1175,6 +1176,8 @@ function classifyHookBypass(args, i, env) {
  * @returns {DenyRule | null}
  */
 function classifyGit(args, cwd, env = {}) {
+	const isRebaseFalseValue = (value) =>
+		["false", "no", "0", "off"].includes(value.toLowerCase());
 	const i = gitSubcommandIndex(args);
 	const subcommand = args[i];
 	if (classifyHookBypass(args, i, env)) return "hookBypass";
@@ -1190,9 +1193,10 @@ function classifyGit(args, cwd, env = {}) {
 			rest.some(
 				(a) =>
 					a === "-r" ||
+					(/^-[^-]*r/.test(a) && a !== "--rebase") ||
 					a === "--rebase" ||
 					(a.startsWith("--rebase=") &&
-						a.slice("--rebase=".length).toLowerCase() !== "false"),
+						!isRebaseFalseValue(a.slice("--rebase=".length))),
 			)
 		)
 			return "rebase";
@@ -1203,14 +1207,23 @@ function classifyGit(args, cwd, env = {}) {
 		if (
 			keyIndex >= 0 &&
 			rest[keyIndex + 1] !== undefined &&
-			rest[keyIndex + 1].toLowerCase() !== "false"
+			!isRebaseFalseValue(rest[keyIndex + 1])
+		)
+			return "rebase";
+		const branchKeyIndex = rest.findIndex((a) =>
+			/^branch\..+\.rebase$/i.test(a),
+		);
+		if (
+			branchKeyIndex >= 0 &&
+			rest[branchKeyIndex + 1] !== undefined &&
+			!isRebaseFalseValue(rest[branchKeyIndex + 1])
 		)
 			return "rebase";
 	}
 	if (
 		args.slice(0, i).some((a) => {
 			const match = /^pull\.rebase=(.*)$/i.exec(a);
-			return match !== null && match[1].toLowerCase() !== "false";
+			return match !== null && !isRebaseFalseValue(match[1]);
 		})
 	)
 		return "rebase";
@@ -1223,11 +1236,16 @@ function classifyGit(args, cwd, env = {}) {
 			(a) => a === "--force" || a === "-f" || /^-[^-]*f/.test(a),
 		);
 		const hasLease = rest.some(
-			(a) => a === "--force-with-lease" || a.startsWith("--force-with-lease="),
+			(a) =>
+				a === "--force-with-lease" ||
+				a.startsWith("--force-with-lease=") ||
+				a === "--force-w" ||
+				a === "--force-with",
 		);
 		const hasPlusRefspec = rest.some((a) => a.startsWith("+"));
 		if (
 			rest.includes("--mirror") ||
+			rest.includes("--mirr") ||
 			(hasLease
 				? !hasExplicitLease || hasForce || hasPlusRefspec
 				: hasForce || hasPlusRefspec)
@@ -2098,6 +2116,113 @@ function findUngatedWriteInChain(segments) {
 }
 
 /**
+ * #3883: a pipeline's `$?` is the status of its last command, not
+ * ci-verdict's verdict. Recognize both orderings that make that mistake look
+ * plausible: `ci-verdict | tail; echo $?`. Capturing with
+ * `ci-verdict; echo $? | tail` happens before the pipe and remains allowed.
+ *
+ * F6 (round 2): also recognize the `timeout N node …` and
+ * `node --flag …` wrappers, the `${?}` spelling, and `|&`; allow a
+ * pipe-polluted `$?` once `set -o pipefail` is in force before the pipeline,
+ * and allow a single-quoted `'$?'` (literal text to bash).
+ *
+ * @param {Array<{ text: string; sep: string | null }>} segments
+ * @returns {DenyRule | null}
+ */
+function findPipedCiVerdictStatusRead(segments) {
+	const isCiVerdict = (text) => {
+		const words = stripCommandGroupAndRunnerPrefixes(splitWords(text));
+		// `env FOO=bar` / `FOO=bar` before the wrapper still parse as prefixes.
+		let { rest } = stripEnvAssignments(words);
+		// `timeout <duration> node …` runs the node command it wraps; drop the
+		// wrapper and its options/duration before looking for `node` (#3883 F6).
+		// `-s`/`--signal` and `-k`/`--kill-after` each take their own argument,
+		// so consume it too or the duration read lands on the signal
+		// (`timeout -s KILL 600 node …`, #3883 R2).
+		if (rest[0] === "timeout") {
+			const takesArgument = (word) =>
+				word === "-s" ||
+				word === "--signal" ||
+				word === "-k" ||
+				word === "--kill-after";
+			let i = 1;
+			while (i < rest.length && rest[i].startsWith("-")) {
+				i += takesArgument(rest[i]) ? 2 : 1;
+			}
+			i += 1; // the duration argument
+			rest = rest.slice(i);
+		}
+		if (rest[0] !== "node" && rest[0] !== "nodejs") return false;
+		// A node flag before the script path (`node --no-warnings …`) must not
+		// hide it: the script is a non-flag word ending in the ci-verdict path.
+		return rest
+			.slice(1)
+			.some(
+				(word) =>
+					!word.startsWith("-") &&
+					/(?:^|[/\\])scripts[/\\]ci-verdict\.mjs$/.test(word),
+			);
+	};
+	// A `$?` inside single quotes is literal text to bash, not the status; the
+	// `${?}` spelling still reads it in every other context (#3883 F6). The
+	// scan tracks double quotes too, so an apostrophe INSIDE a double-quoted
+	// string (`echo "it's $? ok"`) does not open a phantom single-quote span
+	// that hides the expansion (#3883 R2).
+	const readsStatus = (text) => {
+		let unquoted = "";
+		let inSingle = false;
+		let inDouble = false;
+		for (const ch of text) {
+			if (ch === "'" && !inDouble) {
+				inSingle = !inSingle;
+				continue;
+			}
+			if (ch === '"' && !inSingle) {
+				inDouble = !inDouble;
+				unquoted += ch;
+				continue;
+			}
+			if (!inSingle) unquoted += ch;
+		}
+		return unquoted.includes("$?") || unquoted.includes("${?}");
+	};
+	// `set -o pipefail` makes the pipeline's `$?` the real status, so a command
+	// that enables it before the pipeline is not the mistake this rule exists
+	// for; `set +o pipefail` DISABLES it again, and a later disable undoes an
+	// earlier enable (#3883 F6, R2).
+	const pipefailSetting = (text) => {
+		const { rest } = stripEnvAssignments(
+			stripCommandGroupAndRunnerPrefixes(splitWords(text)),
+		);
+		if (rest[0] !== "set") return null;
+		for (let j = 1; j < rest.length; j++) {
+			const token = rest[j];
+			if (!/^[-+][A-Za-z]*o$/.test(token)) continue;
+			if (rest[j + 1] !== "pipefail") continue;
+			return token[0] === "-";
+		}
+		return null;
+	};
+	let pipefail = false;
+	for (let i = 0; i < segments.length; i++) {
+		if (!isCiVerdict(segments[i].text)) {
+			const setting = pipefailSetting(segments[i].text);
+			if (setting !== null) pipefail = setting;
+			continue;
+		}
+		// Only a pipefail in force BEFORE this command changes what `$?` means.
+		if (pipefail) continue;
+		for (let pipe = i + 1; pipe < segments.length; pipe++) {
+			const sep = segments[pipe].sep;
+			if (sep !== "|" && sep !== "|&") continue;
+			if (segments.slice(pipe + 1).some((segment) => readsStatus(segment.text)))
+				return "ciVerdictStatus";
+		}
+	}
+	return null;
+}
+
+/**
  * Scan a full Bash command for the first denied rule: every executable
  * region {@link scannableRegions} found, split into segments and
  * classified. The top-level region runs first and accumulates `export`ed
@@ -2120,6 +2245,8 @@ export function findDeny(commandText, cwd) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
 		let effectiveCwd = cwd;
 		const segments = splitSegmentsWithSeparators(regions[index]);
+		const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
+		if (ciVerdictRule) return ciVerdictRule;
 		const chainRule = findUngatedWriteInChain(segments);
 		if (chainRule) return chainRule;
 		for (const { text: segment } of segments) {
