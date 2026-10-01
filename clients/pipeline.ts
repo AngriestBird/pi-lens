@@ -1271,22 +1271,6 @@ export async function resyncHeldLspDocument(
 }
 
 /**
- * The late resyncs of a format run its bound gave up on, one per caller of
- * `runFormatPhase`: the phase and the one `hook-handler-crash` subject each
- * writes (#3828 the deferred drain, #3858 the in-band pipeline).
- */
-const LATE_FORMAT_RESYNC = {
-	deferred: {
-		phase: "deferred_format_late_resync",
-		handler: "deferred-format-late-resync",
-	},
-	inband: {
-		phase: "inband_format_late_resync",
-		handler: "inband-format-late-resync",
-	},
-} as const;
-
-/**
  * #3828, #3858: a formatter its bound gave up on writes F when its child
  * settles, after the caller synced the bytes from before. Chain one
  * `resyncHeldLspDocument` onto `settled` (the run's `FormatSummary.abandoned`):
@@ -1301,26 +1285,34 @@ const LATE_FORMAT_RESYNC = {
  */
 export function chainLateFormatResync(
 	settled: Promise<unknown>,
-	which: keyof typeof LATE_FORMAT_RESYNC,
+	which: "deferred" | "inband",
 	row: { toolName: string; filePath: string; startedAt: number },
 	dbg: PipelineContext["dbg"],
 ): void {
-	const { phase, handler } = LATE_FORMAT_RESYNC[which];
-	const logLate = (outcome: string) =>
-		logLatency({
-			type: "phase",
+	const inband = which === "inband";
+	const logLate = (outcome: string) => {
+		const common = {
+			type: "phase" as const,
 			toolName: row.toolName,
 			filePath: row.filePath,
-			phase,
 			durationMs: Date.now() - row.startedAt,
 			metadata: { outcome },
-		});
+		};
+		// One row per caller (#3828 the deferred drain, #3858 the in-band
+		// pipeline): they share one stated meaning, what became of F.
+		if (inband) logLatency({ ...common, phase: "inband_format_late_resync" });
+		else logLatency({ ...common, phase: "deferred_format_late_resync" });
+	};
 	void settled
 		.then(async () => {
 			logLate(await resyncHeldLspDocument(row.filePath));
 		})
 		.catch((err) => {
-			surfaceHandlerCrash(handler, err, { dbg, rethrow: false });
+			surfaceHandlerCrash(
+				inband ? "inband-format-late-resync" : "deferred-format-late-resync",
+				err,
+				{ dbg, rethrow: false },
+			);
 			logLate("failed");
 		});
 }
