@@ -613,6 +613,34 @@ describe("computeVerdict — every check-run gates unless advisory (#2609)", () 
 		);
 	});
 
+	// #3801: the advanced-setup CodeQL jobs report failure on a fork PR (read-only
+	// token, SARIF upload refused) and on any new alert; neither may block.
+	it("exits 0 when the advanced-setup CodeQL advisory jobs fail", () => {
+		const payload = {
+			check_runs: [
+				checkRun({ name: "Unit tests", id: 1 }),
+				checkRun({ name: "Lint & type-check", id: 2 }),
+				checkRun({
+					name: "CodeQL (actions) (advisory)",
+					conclusion: "failure",
+					id: 3,
+				}),
+				checkRun({
+					name: "CodeQL (javascript-typescript) (advisory)",
+					conclusion: "failure",
+					id: 4,
+				}),
+			],
+		};
+		const verdict = computeVerdict(payload, undefined, "MERGEABLE");
+		expect(verdict.exitCode).toBe(EXIT_SUCCESS);
+		expect(
+			verdict.rows
+				.filter((row) => row.name.startsWith("CodeQL"))
+				.map((row) => row.gating),
+		).toEqual([false, false]);
+	});
+
 	it("exits 3 (pending) while a discovered gating check is still queued or in progress", () => {
 		const payload = {
 			check_runs: [
@@ -1227,8 +1255,10 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 	}
 
 	// Names GitHub posts that come from NO committed workflow file, so the
-	// YAML-driven enumeration above cannot discover them: the default CodeQL
-	// code-scanning setup (no codeql.yml in this repo) and the third-party
+	// YAML-driven enumeration above cannot discover them: the legacy CodeQL
+	// default-setup `Analyze (<lang>)` rows (a PR head older than the #3801
+	// switch to the committed advanced setup still carries them; they stay
+	// gating because a real alert on that head is real) and the third-party
 	// SonarCloud GitHub App integration. Live-probed on PR #2588, 2026-09-06.
 	const EXTERNAL_GATING_NAMES = [
 		"Analyze (actions)",
@@ -1258,6 +1288,11 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		"strictness (advisory)",
 		"Targeted tests (advisory)",
 		"host latest nightly (advisory)",
+		// #3801: PR-time CodeQL (advanced setup), matrix-expanded from ci.yml's
+		// `codeql` job. Classified by the suffix; tests/config/codeql-workflow
+		// pins the job shape.
+		"CodeQL (actions) (advisory)",
+		"CodeQL (javascript-typescript) (advisory)",
 		"greeting",
 		// #2993: stale verdict-label cleanup is metadata bookkeeping, not a
 		// change-correctness assertion, so token, API, or already-absent-label
