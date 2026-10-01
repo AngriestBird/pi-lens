@@ -912,6 +912,12 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-lock-unavailable"
 	/**
+	 * #3789: serializing the project snapshot body on the main thread (the step
+	 * before the worker hand-off) threw, so the persist was dropped as failed.
+	 * Subject is the gz body path; reason carries the error message.
+	 */
+	| "project-snapshot-serialize-failed"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep
