@@ -56,6 +56,15 @@ export type DegradationKind =
 	 */
 	| "actionable-warnings-inband-superseded"
 	/**
+	 * #3676: a report entry the settle's quick fix acted on was built under
+	 * another read guard (a /fork, /new or resume) or carried no valid branch
+	 * stamp (a cache file from before it, or a malformed value), so the pass
+	 * was applied and credited to no branch: the read guard then
+	 * asks for a re-read before the agent's next edit of that file. Subject is
+	 * the project root; once per session.
+	 */
+	| "actionable-warnings-quickfix-uncredited"
+	/**
 	 * #3748: a model-facing advisory (`clients/agent-nudge.ts`'s queue) never
 	 * reached a `context` call. Subject `cap:<scope id>`: the queue already held
 	 * its bound. Subject `scope-retired:<scope id>`: the scope that queued it

@@ -3020,7 +3020,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	async function runDeferredMutationDrain(
 		ctx: DeferredDrainCtx,
-		readGuardBranchEpoch: number,
 	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
 		// #791 defense-in-depth: mirrors how session_start already skips
@@ -3062,7 +3061,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { biomeClient, ruffClient };
 			},
 			currentSessionId,
-			readGuardBranchEpoch,
 		});
 		if (ctx.ui?.setStatus && ctx.ui.theme) {
 			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
@@ -3528,8 +3526,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	const onAgentSettled = async (_event: unknown, ctx: DeferredDrainCtx) => {
 		if (!lensEnabled) return;
 		// #3521: pi marks the run inactive before it awaits this handler, so a
-		// /tree can land while the sweep and drain below await. Captured before
-		// the first await: their writes from before the move are not credited.
+		// /tree can land while the sweep below awaits. Captured before the first
+		// await: its replayed writes from before the move are not credited. The
+		// drain carries its own epochs: a record's queue-time epoch, and the
+		// quick fix's report epoch (#3676).
 		const settleBranchEpoch = runtime.readGuard.currentBranchEpoch;
 		// Keep the activation-owned live ctx current for the detached delivery
 		// task. It must probe idleness and append through this run's host seam.
@@ -3571,7 +3571,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					settleBranchEpoch,
 					settleSession,
 				);
-				await runDeferredMutationDrain(ctx, settleBranchEpoch);
+				await runDeferredMutationDrain(ctx);
 				// The drain just wrote formatted/autofixed bytes to files pi-lens
 				// itself owns. Re-baseline them, or the NEXT settle reads our own
 				// formatter output as unexplained third-party drift and requeues the
