@@ -539,6 +539,45 @@ export function discardHandoff(args: {
 	return true;
 }
 
+/**
+ * A primary `session_shutdown` that landed while its own `session_start` was
+ * still in flight (#3881): that start never adopted, so its scope holds none
+ * of the conversation; the slot left for it does. Re-key that slot to this
+ * shutdown's transition, and stash nothing of the scope. A start in flight
+ * with no slot left for it changes nothing. True when a slot was forwarded.
+ */
+export function forwardHandoff(args: {
+	startReason: string | undefined;
+	reason: string | undefined;
+	sessionFile: string | undefined;
+	targetSessionFile: string | undefined;
+	sessionManager: unknown;
+}): boolean {
+	const reason = toStartReason(args.reason);
+	const startReason = toStartReason(args.startReason);
+	const key = startKey(args.sessionFile, args.sessionManager);
+	const stores = SOURCES[reason].includes("slot")
+		? takeHandoff(startReason, key)
+		: undefined;
+	// A taken slot's key equalled `key`, so `key` is defined here.
+	if (stores)
+		handoffSlot().handoff = {
+			reason,
+			key: args.targetSessionFile ?? (key as string | number),
+			stores,
+		};
+	// The successor's start resets the in-memory ledger; the record's durable
+	// `degradation_ledger` row in latency.log is what outlives it.
+	const outcome = stores ? "forwarded" : "no-slot";
+	recordDegradationOnce({
+		kind: "session-scope-handoff-interrupted",
+		subject: startReason,
+		reason: `a ${reason} shutdown landed before its ${startReason} start adopted; it ${stores ? "handed on the slot left for that start" : "found no slot left for that start to hand on"} and stashed nothing of its own scope`,
+		metadata: { shutdownReason: reason, outcome },
+	});
+	return stores !== undefined;
+}
+
 export interface PersistedStores {
 	savedAt: number;
 	stores: Record<string, unknown>;

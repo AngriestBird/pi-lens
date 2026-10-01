@@ -162,6 +162,8 @@ afterAll(async () => {
 async function startRuntime(
 	sessionManager: SessionManager,
 	alongside: Array<(pi: ExtensionAPI) => void> = [],
+	/** Factories whose handlers pi runs before pi-lens's (#3881). */
+	ahead: Array<(pi: ExtensionAPI) => void> = [],
 ): Promise<AgentSessionRuntime> {
 	const runtime = await createAgentSessionRuntime(
 		async ({ cwd: runtimeCwd, sessionManager: sm, sessionStartEvent }) => {
@@ -170,7 +172,7 @@ async function startRuntime(
 				agentDir,
 				extensionFlagValues: FLAGS,
 				resourceLoaderOptions: {
-					extensionFactories: [extension, ...alongside],
+					extensionFactories: [...ahead, extension, ...alongside],
 				},
 			});
 			return {
@@ -984,7 +986,7 @@ describe("#3521 a resumed session keeps only its branch's reads", () => {
 });
 
 /** The `session_scope_transition` rows (#3611), in write order. */
-async function scopeTransitionRows(): Promise<Record<string, unknown>[]> {
+async function latencyRows(phase: string): Promise<Record<string, unknown>[]> {
 	await flushLatencyLog();
 	const text = fs.existsSync(getLatencyLogPath())
 		? fs.readFileSync(getLatencyLogPath(), "utf8")
@@ -993,8 +995,12 @@ async function scopeTransitionRows(): Promise<Record<string, unknown>[]> {
 		.split("\n")
 		.filter(Boolean)
 		.map((line) => JSON.parse(line) as Record<string, unknown>)
-		.filter((row) => row.phase === "session_scope_transition")
+		.filter((row) => row.phase === phase)
 		.map((row) => row.metadata as Record<string, unknown>);
+}
+
+function scopeTransitionRows(): Promise<Record<string, unknown>[]> {
+	return latencyRows("session_scope_transition");
 }
 
 /**
@@ -1739,4 +1745,82 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 			});
 		}
 	});
+});
+
+/**
+ * #3881: pi awaiting the `session_start` emit does not stop a concurrent
+ * `AgentSession.reload()`. A handler ordered before pi-lens schedules one, so
+ * the inner reload's `session_shutdown` lands while pi-lens's start of the
+ * same session is still awaiting, before `adoptHandoff`. The recurrence: that
+ * shutdown stashed its own empty scope over the slot left for its start, and
+ * the inner reload's start took the empty slot, so the conversation lost its
+ * lazy-tool activations.
+ */
+describe("#3881 an interrupted session_start hands on the slot left for it", () => {
+	for (const kind of ["reload", "fork"] as const) {
+		for (const store of ["in-memory", "file-backed"] as const) {
+			it(`keeps a ${store} session's activations when a reload interrupts its ${kind} start before it adopts`, async () => {
+				let runtime: AgentSessionRuntime | undefined;
+				let inner: Promise<void> | undefined;
+				const reloadDuringStart = (pi: ExtensionAPI) => {
+					pi.on("session_start", (event) => {
+						if ((event as { reason?: string }).reason !== kind || inner) return;
+						inner = new Promise<void>((resolve, reject) =>
+							setImmediate(() =>
+								runtime!.session.reload().then(resolve, reject),
+							),
+						);
+					});
+				};
+				runtime = await startRuntime(
+					store === "file-backed"
+						? SessionManager.create(cwd, sessionsDir)
+						: SessionManager.inMemory(cwd),
+					[],
+					[reloadDuringStart],
+				);
+				const c = conversation(runtime);
+				c.user("prompt 1");
+				c.done();
+				await activateTools(runtime, "act", ["ast_grep_search"]);
+				const u2 = c.user("prompt 2");
+				c.done();
+				resetDegradationLedger();
+
+				if (kind === "reload") await reload(runtime);
+				else await runtime.fork(u2);
+				expect(inner).toBeDefined();
+				await inner;
+
+				expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+				const rows = await scopeTransitionRows();
+				const shutdowns = rows.filter((row) => row.transition === "shutdown");
+				const starts = rows.filter((row) => row.transition === "start");
+				// The interrupted start retired a scope it never logged a start
+				// for: its shutdown landed after its scope began (t1), before it
+				// adopted. Its successor, the inner reload, took the slot.
+				const interrupted = shutdowns.at(-1)!.scopeId;
+				expect(starts.some((row) => row.scopeId === interrupted)).toBe(false);
+				expect(starts.at(-1)).toMatchObject({
+					reason: "reload",
+					role: "primary",
+					handoffSource: "slot",
+				});
+				// One bounded record names the interrupted start (#3873 O1). The
+				// inner reload's start resets the in-memory ledger, so read the
+				// record's durable row.
+				expect(
+					(await latencyRows("degradation_ledger")).filter(
+						(row) => row.kind === "session-scope-handoff-interrupted",
+					),
+				).toEqual([
+					expect.objectContaining({
+						subject: kind,
+						shutdownReason: "reload",
+						outcome: "forwarded",
+					}),
+				]);
+			});
+		}
+	}
 });

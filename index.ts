@@ -74,6 +74,7 @@ import {
 	adoptHandoff,
 	beginScope,
 	discardHandoff,
+	forwardHandoff,
 	type LineageHandle,
 	logScopeTransition,
 	retireScope,
@@ -766,6 +767,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// session_start and retired at its session_shutdown. Activation equals
 	// session (pi re-runs this factory on every transition except /tree).
 	let scope: SessionScope | undefined;
+	// #3881: this activation's primary session_start is still in flight
+	// (before its hand-off adoption ran), with its start reason. pi does not
+	// stop a concurrent reload while it awaits the start's emit.
+	let startInFlight: { reason: string | undefined } | undefined;
 	const classifyOwnedSessionEmission = (
 		ctx: unknown,
 		sessionId: string | undefined,
@@ -2327,6 +2332,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return;
 					}
 
+					// #3881: set before this path's first await; the finally clears it.
+					startInFlight = { reason: sessionReason };
 					// #2319: this process-singleton tally belongs to the primary
 					// session that owns the session-end rollup. A concurrent secondary
 					// must not erase a live primary's count before this decision.
@@ -2596,6 +2603,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// sibling catches below cannot drift from it.
 					surfaceHandlerCrash("session_start", sessionErr, { dbg });
 				} finally {
+					startInFlight = undefined;
 					// #3653: primary and secondary alike, after the hand-off
 					// restored this scope's activations, and even when a step above
 					// threw, so a session never keeps every lazy tool active.
@@ -3746,7 +3754,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// continues its conversation (`/reload`, `/fork`, `/clone`), before
 			// any teardown below. Sync: this hook may not await (#2523). The
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
-			if (
+			// #3881: a start still in flight never adopted; the slot left for it
+			// is the conversation's state, so hand that on instead.
+			if (startInFlight) {
+				forwardHandoff({
+					startReason: startInFlight.reason,
+					reason: shutdownReason,
+					sessionFile: getSessionFile(ctx),
+					targetSessionFile: shutdownEvent?.targetSessionFile,
+					sessionManager: getSessionManager(ctx),
+				});
+			} else if (
 				scope &&
 				stashHandoff(scope, {
 					reason: shutdownReason,
