@@ -1354,10 +1354,10 @@ describe("transitive session_start backstop isolation", () => {
 //   B. it calls the real `handleSessionStart(` AND turns test mode off
 //      (`PI_LENS_TEST_MODE`): the loggers no-op under test mode, so only a
 //      test-mode-off file writes the shared logs.
-// MEASURED OUT: the other ~35 files that call `handleSessionStart(` with test
-// mode ON write nothing to the shared logs (every logger returns at
-// `isTestMode()`); they are the follow-up named in the PR body, not silently
-// dropped.
+// MEASURED OUT: the 19 other files that call `handleSessionStart(` with test
+// mode ON write nothing to a log (every logger returns at `isTestMode()`), and
+// since the harness change below every worker has its own home anyway, so they
+// are covered by construction rather than by a pin.
 //
 // PIN = `const NAME = await vi.hoisted(...)` whose body calls
 // `pinPrivateLensHome(` AND a code-position `NAME.release(` (the lifetime half:
