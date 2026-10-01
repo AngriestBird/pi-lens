@@ -801,6 +801,7 @@ describe("run() — REST transport end to end (#3497)", () => {
 			});
 		});
 		expect(result?.code).toBe(EXIT_FAILURE);
+		expect(result?.kind).toBe("red");
 		expect(stdoutLines).toContain("Transport: rest");
 		expect(stdoutLines.join("\n")).not.toContain("failed step");
 		expect(stdoutLines.join("\n")).not.toContain("could not read the job");

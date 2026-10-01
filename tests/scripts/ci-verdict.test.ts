@@ -446,13 +446,14 @@ describe("computeVerdict — DIRTY fires on CONFLICTING regardless of check pres
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const { code: exitCode } = await run({
+		const { code: exitCode, kind } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
 			stderr: () => {},
 		});
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(kind).toBe("green");
 		expect(stdoutLines).toContain("Merge state: MERGEABLE");
 	});
 
@@ -467,13 +468,14 @@ describe("computeVerdict — DIRTY fires on CONFLICTING regardless of check pres
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const { code: exitCode } = await run({
+		const { code: exitCode, kind } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
 			stderr: () => {},
 		});
 		expect(exitCode).toBe(EXIT_DIRTY);
+		expect(kind).toBe("DIRTY");
 		expect(stdoutLines).toContain("Merge state: CONFLICTING");
 	});
 });
@@ -1534,13 +1536,14 @@ describe("run — prints the gating source and uses a live branch-protection rea
 				return JSON.stringify({ check_runs: [] });
 			throw new Error(`unmocked gh call: ${args.join(" ")}`);
 		};
-		const { code: exitCode } = await run({
+		const { code: exitCode, kind } = await run({
 			argv: ["3847"],
 			ghExec,
 			stdout: () => {},
 			stderr: () => {},
 		});
 		expect(exitCode).toBe(EXIT_PENDING);
+		expect(kind).toBe("pending");
 	});
 
 	it("documents the branch-protection source and threads it into the verdict", async () => {

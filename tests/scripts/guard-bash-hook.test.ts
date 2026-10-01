@@ -236,6 +236,10 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	["node scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
 	// #3883 F6: wrappers and spellings the round-1 rule missed.
 	["timeout 600 node scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
+	[
+		"timeout --foreground 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
 	["node --no-warnings scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
 	["node scripts/ci-verdict.mjs 1 | tail; echo ${?}", "ci-verdict"],
 	["node scripts/ci-verdict.mjs 1 |& tail; echo $?", "ci-verdict"],

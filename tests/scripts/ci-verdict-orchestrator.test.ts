@@ -922,8 +922,9 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
 			jobs: [unit],
 		});
-		const { exitCode, lines } = await cli(["--watch-open"], w);
+		const { exitCode, kind, lines } = await cli(["--watch-open"], w);
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(kind).toBe("watch");
 		expect(lines[0]).toBe(
 			`#3688 failed @${sha9(3688)}: gating check(s) completed with a non-success conclusion: Unit tests (failure)`,
 		);
@@ -1517,11 +1518,12 @@ describe("run --watch-open --stream — one line per event, until the window end
 			prs: [{ number: 3688, login: "apmantza", checkRuns: runs }],
 			jobs: [unit],
 		});
-		const { exitCode, lines, sleeps } = await cli(
+		const { exitCode, kind, lines, sleeps } = await cli(
 			["--watch-open", "--stream", "--wait", "300"],
 			w,
 		);
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(kind).toBe("stream");
 		expect(sleeps).toEqual([90_000, 90_000, 90_000, 30_000]);
 		expect(lines[0]).toBe(
 			`FAIL #3688@${sha9(3688)}: gating check(s) completed with a non-success conclusion: Unit tests (failure)`,
