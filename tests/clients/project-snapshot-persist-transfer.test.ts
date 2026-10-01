@@ -65,6 +65,7 @@ import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { fingerprintProjectSnapshotJson } from "../../clients/project-snapshot-fingerprint.js";
 // @ts-expect-error -- bare-node script, no declaration file
 import { buildSyntheticSnapshot } from "../../scripts/bench-snapshot-persist.mjs";
+import { waitFor } from "./interleaving-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const CORPUS = path.join(
@@ -103,15 +104,13 @@ async function withProjectDataDirAsync(
 	}
 }
 
-/** Poll to idle past waitForProjectSnapshotPersistsForTests's 2 s cap. */
+/** Wait to idle past waitForProjectSnapshotPersistsForTests's 2 s cap. */
 async function settle(cwd: string): Promise<void> {
-	const deadline = Date.now() + 15_000;
-	while (Date.now() < deadline) {
-		const state = getProjectSnapshotPersistStateForTests(cwd);
-		if (!state.active && !state.queued) return;
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-	throw new Error("snapshot persist did not settle");
+	await waitFor(
+		() => getProjectSnapshotPersistStateForTests(cwd),
+		(state) => !state.active && !state.queued,
+		{ timeoutMs: 15_000 },
+	);
 }
 
 function gunzippedBody(cwd: string): string {
@@ -192,14 +191,14 @@ describe("worker persist transfers serialized bytes (#3789)", () => {
 			vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (
 				this: Worker,
 				message: { data?: unknown },
-				transferList?: readonly unknown[],
+				transferList?: ArrayBuffer[],
 			) {
 				const data = message.data;
 				const isBytes = data instanceof Uint8Array;
 				const byteLength = isBytes ? data.byteLength : 0;
 				const transferListHoldsBody =
-					isBytes && (transferList ?? []).includes(data.buffer);
-				Reflect.apply(realPost, this, [message, transferList]);
+					isBytes && (transferList ?? []).some((item) => item === data.buffer);
+				realPost.call(this, message, transferList);
 				posts.push({
 					isBytes,
 					byteLength,
