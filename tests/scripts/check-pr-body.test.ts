@@ -1486,6 +1486,32 @@ describe("PR body lint (#1844)", () => {
 			).toContain(refusal);
 		});
 
+		// A file's hunks are separate lexing units that sum back to one verdict.
+		const twoHunks = (first: string, second: string) =>
+			[
+				"diff --git a/clients/session-scope.ts b/clients/session-scope.ts",
+				"@@ -1,0 +1,1 @@",
+				`+${first}`,
+				"@@ -40,0 +41,1 @@",
+				`+${second}`,
+			].join("\n");
+
+		it("keeps a failure path found in an earlier hunk when the last hunk has none", () => {
+			expect(
+				lintPrBody(withObservability(sentence), {
+					diff: twoHunks("\ttry { adopt(); } catch { warn(); }", "\tnext();"),
+				}).errors.join(" "),
+			).toContain("not valid when the added lines contain a failure path");
+		});
+
+		it("sums a file's branches over its hunks", () => {
+			expect(
+				lintPrBody(withObservability(sentence), {
+					diff: twoHunks("\tif (a) adopt();", "\tif (b) reset();"),
+				}).errors.join(" "),
+			).toContain("clients/session-scope.ts: 2");
+		});
+
 		it("reads #3770's real installer diff as a failure path again", () => {
 			// Real `--unified=0` diff of #3770: `} catch {` and `.catch(() => {})`
 			// follow added JSDoc blocks. origin/master refused it under the bare
