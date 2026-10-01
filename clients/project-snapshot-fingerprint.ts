@@ -40,6 +40,7 @@ export function fingerprintProjectSnapshotJson(
 		if (byte === QUOTE) {
 			if (
 				depth === 1 &&
+				index + marker.length <= bytes.length &&
 				bytes.compare(
 					marker,
 					0,

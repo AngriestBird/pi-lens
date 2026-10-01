@@ -372,6 +372,26 @@ describe("snapshot fingerprint over bytes (#3789)", () => {
 		).toBe(releasedMeta.fingerprint);
 	});
 
+	// The 4.3.0 string scanner returned the plain JSON digest when the marker
+	// was absent: `json.startsWith(marker, index)` is false on a body shorter
+	// than the marker, never a throw. A depth-1 quote within the marker's
+	// length of the buffer end must still fall through to that digest.
+	it.each([
+		["a one-key body", { k: 1 }],
+		["a two-key body without the marker", { a: "x", b: 1 }],
+	])("hashes a marker-absent body without throwing: %s", (_name, value) => {
+		const json = JSON.stringify(value);
+		const expected = createHash("sha256").update(json).digest("hex");
+		const generatedAt = "2026-01-01T00:00:00.000Z";
+		expect(fingerprintProjectSnapshotJson(json, generatedAt)).toBe(expected);
+		expect(
+			fingerprintProjectSnapshotJson(
+				new TextEncoder().encode(json),
+				generatedAt,
+			),
+		).toBe(expected);
+	});
+
 	it.each([
 		["ascii", { generatedAt: "2026-01-01T00:00:00.000Z", n: 1 }],
 		["escaped quote in the value", { generatedAt: 'a"b\\c', n: 1 }],
