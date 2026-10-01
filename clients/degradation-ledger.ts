@@ -1138,8 +1138,14 @@ export type DegradationKind =
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
 	/**
+	 * #3819 r2: a demoted `/fork` or `/reload` start (a row-17 start held the
+	 * primary registration) discarded the hand-off slot left for it, so the
+	 * session cannot take it stale later. Once per start reason.
+	 */
+	| "session-scope-handoff-discarded"
+	/**
 	 * #3612: a `/fork` or `/reload` start found no hand-off slot left for its
-	 * session file, so it started from a sidecar or from nothing. Once per
+	 * session file (file-less: its predecessor's ticket, #3819), so it started from a sidecar or from nothing. Once per
 	 * start reason.
 	 */
 	| "session-scope-handoff-missed"

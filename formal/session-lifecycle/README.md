@@ -14,19 +14,20 @@ first line (see `formal/file-locks/README.md`), and the `TLA+ models` CI job
 
 Four kinds of config:
 
-- **Merged behaviour** (`Merged`, `MergedStores`, `H3FileBacked`) must pass.
-  The rest register a known violation of merged master until its fix flips
-  the config to `pass`: `Current` violates `SecondaryIsolation` through N2
-  (#3613); `H3FileLess` violates `NoCrossSessionAdoption` and `H3StaleSlot`
-  violates `HandoffOnce` (#3819); the `H3Demote*` configs record the cost of
-  #3668's row-17 residual (`NoLostCarry`, `NoLostAdvisory`,
+- **Merged behaviour** (`Merged`, `MergedStores`, `H3FileBacked`) must pass,
+  and so must #3819's fix (`H3FileLess`, `H3FileLessStores`,
+  `H3FileLessCarry`, `H3StaleSlot`, `H3StaleSlotFileLess`, with `ticketKey`
+  and `demotedDiscard`). The rest register a known violation of merged
+  master until its fix flips the config to `pass`: `Current` violates
+  `SecondaryIsolation` through N2 (#3613); the `H3Demote*` configs record the
+  cost of #3668's row-17 residual (`NoLostCarry`, `NoLostAdvisory`,
   `NoLostActivation`).
 - **Design** (`Fix`, `FixProcess`, `FixOrder`, `NewestReadTreeFork`) is the
   adopted #3609 design, S4 included (a subagent gets its own read guard and
   turn counter). It is not #3819's fix: with `FileLess = {}` and no subagent
   replacement, `Fix` cannot reach either #3819 path. The `AcceptedLateRead*`
   configs pin the false block the design accepts (F1).
-- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`) restores the shape a
+- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`, `Pre3819*`) restores the shape a
   merged fix removed, and must violate the invariant that fix established.
 - **Mut** configs remove one mechanism or restore one table row: older
   pre-fix shapes, today's open residuals, and design alternatives the design
@@ -173,6 +174,15 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   `clients/session-scope.ts`).
 - `advisoryScope` (#3757): a context call takes only its own scope's
   advisories, and a retired scope's are dropped with a record.
+- `ticketKey` (#3819, option b): a file-less slot is keyed by the ticket of
+  the scope that left it, bound to the session manager it left from
+  (`stashHandoff`), and a start's key is the ticket bound to the manager pi
+  hands it (`Carrier`). pi keeps the manager on `/reload` and on an
+  in-memory `/fork`. Without it, a file-less key is `undefined`.
+- `demotedDiscard` (#3819 r2): a demoted start (`BeginDemoted`) whose key
+  matches the slot discards it without adopting (`discardHandoff`). No
+  other start removes a slot except by taking it. Without it, the slot
+  stays until a later start of the demoted session takes it.
 
 ## Invariants
 
@@ -227,8 +237,11 @@ counterexample.
 | `Merged` | merged master: every transition but a subagent's turn and its own replacement, the primary's read-guard writer | pass | 11116 |
 | `MergedStores` | merged master: activations and advisories across every transition that moves them, with a subagent | pass | 65248 |
 | `H3FileBacked` | merged slot: a subagent's own `/reload` or `/fork` in the primary's gap, file-backed sessions | pass | 445 |
-| `H3FileLess` | the same, file-less sessions: #3819 | violated `NoCrossSessionAdoption` | 29 |
-| `H3StaleSlot` | file-backed, five transitions with `/new` and resume: a demoted session takes a stale slot: #3819 | violated `HandoffOnce` | 413 |
+| `H3FileLess` | the same, file-less sessions, with #3819's fix | pass | 445 |
+| `H3FileLessStores` | `H3FileLess` with activations and advisories: none crosses | pass | 18810 |
+| `H3FileLessCarry` | #3819's ticket key still carries a file-less `/reload`'s activations and advisory while a subagent binds in the gap | pass | 278 |
+| `H3StaleSlot` | file-backed, five transitions with `/new` and resume: the demoted successor discards its slot, so the demoted session's later `/reload` takes nothing, with #3819's fix | pass | 2322 |
+| `H3StaleSlotFileLess` | the same, file-less sessions | pass | 2322 |
 | `H3DemoteCarry` | file-backed row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
 | `H3DemoteAdvisory` | file-backed row 17: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
 | `H3DemoteActivation` | file-backed: a subagent's own replacement starts without its activations; row 17's demoted successor loses the conversation's | violated `NoLostActivation` | 28 |
@@ -250,6 +263,10 @@ counterexample.
 | `PreS2AdvisoryReload` | pre-S2: `/reload` loses a queued advisory | violated `NoLostAdvisory` | 18 |
 | `PreS3StalePipelineAfterNew` | pre-S3: `recordWritten` lands after `/new` | violated `NoCrossSessionState` | 18 |
 | `Pre3757AdvisoryShared` | pre-#3757: a subagent's context call takes the primary's advisory | violated `NoCrossSessionDelivery` | 9 |
+| `Pre3819FileLess` | pre-#3819: a subagent's own replacement takes a file-less primary's slot | violated `NoCrossSessionAdoption` | 29 |
+| `Pre3819StaleSlot` | pre-#3819: a demoted session takes a stale slot | violated `HandoffOnce` | 413 |
+| `MutFileLessNoTicketKey` | #3819's fix without `ticketKey` | violated `NoCrossSessionAdoption` | 29 |
+| `MutStaleSlotNoDiscard` | #3819's fix without `demotedDiscard` | violated `HandoffOnce` | 413 |
 | `MutForkClosureStash` | pre-#3669: the fork stash is per activation | violated `NoLostCarry` | 24 |
 | `MutTreeCarries` | pre-#3669: no `session_tree` handler | violated `NoStaleBranchWrite` | 14 |
 | `MutSettleDuringTree` | the drain writer races `/tree`, fenced at session level only | violated `NoStaleBranchWrite` | 12 |
@@ -269,8 +286,8 @@ alternative" is a shape the adopted design rejects, never shipped.
 
 | Config | Issue | Provenance | Shortest counterexample |
 |---|---|---|---|
-| `H3FileLess` | #3819 | master: the file-less key `(reason, undefined)` (`clients/session-scope.ts`) and #3668's row 17 (`clients/session-lifecycle.ts`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
-| `H3StaleSlot` | #3819 (review S1 on #3835) | master: `stashHandoff` returns early for `/new` and resume (their `SOURCES` hold no slot), so the slot survives them, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` (or resume) keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
+| `Pre3819FileLess` | #3819 | pre-#3819 (560f24ff5): the file-less key `(reason, undefined)` (`clients/session-scope.ts`) and #3668's row 17 (`clients/session-lifecycle.ts`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
+| `Pre3819StaleSlot` | #3819 (review S1 on #3835) | pre-#3819 (560f24ff5): `stashHandoff` returns early for `/new` and resume (their `SOURCES` hold no slot), so the slot survives them, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` (or resume) keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
 | `H3DemoteCarry` | #3855 (#3668 row 17) | master: `classifySessionStart` in `clients/session-lifecycle.ts` declines only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
 | `H3DemoteAdvisory` | #3855 (#3668 row 17) | master, as `H3DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
 | `H3DemoteActivation` | #3855 (#3668 row 17) | master: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. The same invariant catches row 17's demoted real successor without the primary's activations (113 states in the #3835 r1 review), after a longer trace. |
@@ -284,6 +301,8 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `PreS2AdvisoryReload` | #3612 (the advisory scope addition) | pre-S2 (ae5396e46, which has #3757): no advisory store | An advisory is queued, `/reload`, and the prune drops it as its retired scope's. |
 | `PreS3StalePipelineAfterNew` | #3596; the #3528 drain shape | pre-S3 (f8453c664): `runtime.readGuard.recordWritten` resolved when the write lands | A write begins, `/new` completes, and the write lands in session 2. |
 | `Pre3757AdvisoryShared` | #3748 | pre-#3757 (61c6ee644): an untagged queue | The drain queues an advisory, and the subagent's context call takes it. |
+| `MutFileLessNoTicketKey` | #3819 | design alternative: the discard alone | As `Pre3819FileLess`: the subagent's own start classifies primary before the real successor starts, so it matches `(reason, undefined)`. |
+| `MutStaleSlotNoDiscard` | #3819 | design alternative: option (b) alone | As `Pre3819StaleSlot`: the demoted session inherits the primary's session manager on `/reload`, so its ticket key matches the stale slot. |
 | `MutForkClosureStash` | #3521 fork half; the #3589 shape | pre-#3669 (df5fb8abb): `pendingForkReadGuard`, an activation-closure `let` | A read lands, then `/fork`: the fork starts clean. |
 | `MutTreeCarries` | #3521 tree half | pre-#3669 (df5fb8abb): no `session_tree` handler | A read of entry 2 lands, then `/tree` drops entry 2 and the read stays. |
 | `MutLspAfterIdleReset` | #3576 | pre-#3602 (7101a6766): before G5's `captureLspServiceGeneration` | LSP work begins, the idle reset runs, and the work spawns a server. |
@@ -343,7 +362,12 @@ classifies primary. Three consequences follow.
   option (a)) closes it: `H3StaleSlot` passes (2322 states in the #3835 r1
   review). Keying a file-less slot by ticket alone does not close it (the
   #3835 review ran #3819's ticket-key model at five steps). So "file-backed sessions are protected" holds for
-  adoption across sessions only.
+  adoption across sessions only. #3819's fix pairs the ticket key with
+  `demotedDiscard` rather than option (a): (a) also destroys a legitimate
+  slot when a row-17 gap primary quits inside the gap, so the real successor
+  classifies primary and finds nothing (the #3868 r1 review's F1). The
+  model cannot reach that cell, because it has one `pend`; a runtime witness
+  pins it.
 - *Loss.* The demoted real successor adopts nothing, so the conversation
   loses its reads and its queued advisory (`H3DemoteCarry`,
   `H3DemoteAdvisory`), and its activations (`H3DemoteActivation`, whose
