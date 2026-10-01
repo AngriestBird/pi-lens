@@ -8,6 +8,7 @@ import * as path from "node:path";
 // pi's real per-file queue, the one its `edit`/`write` tools run under.
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "./interleaving-kit.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -230,5 +231,69 @@ describe("holdFileMutationQueue: a writer's enter (#3558)", () => {
 		hold?.release();
 		await edit;
 		expect(edited).toBe(true);
+	});
+});
+
+describe("holdFileMutationQueue: afterRelease (#3830)", () => {
+	beforeEach(() => {
+		setHostFileMutationQueueLoader(async () => ({ withFileMutationQueue }));
+	});
+	afterEach(() => {
+		setHostFileMutationQueueLoader(undefined);
+	});
+
+	// Recurrence: the fixer's restore ran inside the target's hold (#3830). Work
+	// that takes another file's queue entry starts only once the hold is told to
+	// go, so it never waits for an entry while it holds this one.
+	it("starts its task after release, never before", async () => {
+		// Never created: pi keys a missing path by its resolved spelling.
+		const filePath = path.resolve("/pi-lens-3830-missing/f.ts");
+		const hold = holdFileMutationQueue(filePath);
+		await hold?.acquire();
+		let started = false;
+		const after = hold?.afterRelease(async () => {
+			started = true;
+			return "ran";
+		});
+		await withFileMutationQueue(`${filePath}.barrier`, async () => {});
+		expect(started).toBe(false);
+		hold?.release();
+		expect(await after).toBe("ran");
+	});
+
+	// Recurrence: the same cycle from the other side. If `release` waited for the
+	// task, the entry would be held while the task waits for another file's
+	// entry: an LSP edit of [S, F] holds S and waits for F, the task waits for S.
+	it("lets the entry go without waiting for its task", async () => {
+		const filePath = path.resolve("/pi-lens-3830-missing/g.ts");
+		const hold = holdFileMutationQueue(filePath);
+		await hold?.acquire();
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const after = hold?.afterRelease(() => pending);
+		let edited = false;
+		const edit = withFileMutationQueue(filePath, async () => {
+			edited = true;
+		});
+		hold?.release();
+		await waitFor(
+			() => edited,
+			(done) => done,
+			{ timeoutMs: 1000 },
+		);
+		release();
+		await after;
+		await edit;
+	});
+
+	it("starts its task at release when the hold never entered the queue", async () => {
+		const hold = holdFileMutationQueue(
+			path.resolve("/pi-lens-3830-missing/h.ts"),
+		);
+		const after = hold?.afterRelease(async () => "ran");
+		hold?.release();
+		expect(await after).toBe("ran");
 	});
 });

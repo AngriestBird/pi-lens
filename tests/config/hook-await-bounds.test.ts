@@ -408,6 +408,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-agent-end.ts#8f9b56ae~1c2e060a": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"#3830: the whole-package fixer's restore of agent edits, awaited " +
+			"after the drain's hold on the target is released. It waits for " +
+			"pi's queue entry of each sibling it restores (held only by an edit " +
+			"or an LSP edit, none of which waits for this restore: the restore " +
+			"takes no entry while it holds one) and does local file I/O. The " +
+			"phase above it is the `runAutofix` await registered just above, " +
+			"which has no aggregate bound either.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-agent-end.ts#9cc1f7d8~651bdb1c": {
 		family: "hook-await",
 		site: "off-hook",
@@ -2235,7 +2248,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// signal until #2523 AC4 threads it, so this records the increase. 9 -> 11
 	// (#3741 round 2): the settle stats the file before reading it and again just
 	// before the write, so a newer edit is never written over.
-	"clients/fix-run-restore.ts": 11,
+	// 11 -> 9 (#3830), recorded rather than absorbed: the restore reads the file
+	// inside pi's queue entry for it and re-reads it before the write instead of
+	// statting twice (the stat's identity was blind to a same-size edit inside
+	// one mtime tick), and the wrapper no longer awaits `finish()`. One await is
+	// the per-file queue entry, which a hook signal cannot reach until #2523 AC4.
+	"clients/fix-run-restore.ts": 9,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
@@ -2408,7 +2426,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// spawn, and the outcome helper awaits the project diff once where the two
 	// branches awaited it separately (net +1). The fixer's spawn was already
 	// awaited under the same hold and the restore is bounded local file work.
-	"clients/pipeline.ts": 63,
+	// 63 -> 64 (#3830): `analysePipeline` awaits the whole-package fixer's
+	// restore after it has released the target's hold, so it can render a loss
+	// notice; the restore takes pi's queue entry for each sibling and does
+	// local file I/O, and the fixer's spawn above it was already awaited.
+	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
