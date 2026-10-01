@@ -55,12 +55,17 @@ jobs:
 
   pr-body-lint:
     name: PR body (advisory)
-    if: github.event_name == 'pull_request' && github.event.action != 'synchronize' && github.event.pull_request.user.login != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     timeout-minutes: 5
+    # Runs on synchronize too (#3802): the TLA+ coverage rule reads the diff, so
+    # a push that adds a mapped-file change or the missing .cfg must re-evaluate
+    # (PR #3864 F2; #3030 had skipped synchronize for the body alone). The
+    # `-edited` concurrency suffix above keeps an edit run and a push run from
+    # cancelling each other.
     # Advisory to start: this job is not in required-checks branch protection.
     # A finding stays visible as a red check without blocking a merge.
     # Promotion bound (#2904): it stays advisory until it has been green on ten

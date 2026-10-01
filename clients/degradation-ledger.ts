@@ -11,6 +11,7 @@ import { logLatency } from "./latency-logger.js";
 import {
 	getSinkRotations,
 	getSinkOptionConflicts,
+	getSinkTruncateRefusals,
 	getSinkWriteFailures,
 	resetSinkRotations,
 	resetSinkWriteFailures,
@@ -506,6 +507,14 @@ export type DegradationKind =
 	| "log-sink-option-conflict"
 	| "log-sink-rotate-failed"
 	| "log-sink-rotated"
+	/**
+	 * A test process called `truncate()` (behind `clearLatencyLog`) on a log
+	 * under the real `~/.pi-lens` and was refused (#3721). Folded in at READ time
+	 * like the other `log-sink-*` kinds: writing it through the sink would be a
+	 * write into the real log from the very process the refusal guards against.
+	 * One row per sink; `count` is the refused calls.
+	 */
+	| "log-sink-truncate-refused"
 	| "log-sink-write-failure"
 	| "lsp-breaker"
 	| "lsp-capability-skip"
@@ -1430,6 +1439,14 @@ export type DegradationKind =
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
+	 * turn_end did not run knip in a checkout whose edit it was handed (#3872):
+	 * the per-turn root cap was reached, or an earlier scan had already spent
+	 * the turn_end budget. The subject is the reason (`root-cap` | `budget`);
+	 * counted, because the number of skipped roots is the observability question
+	 * and a busy orchestrator session would otherwise write one row per turn.
+	 */
+	| "turn-end-knip-root-skipped"
+	/**
 	 * #2504 review round 8 (S1): a carried-forward deferred file entry was
 	 * dropped from an IN-BAND `turn_end` publish (`clients/actionable-warnings.ts`)
 	 * because its file changed, or the publish crossed a session boundary,
@@ -1846,6 +1863,25 @@ export function getDegradationSummary(): DegradationGroup[] {
 				subject: truncateForLedger(sink.file),
 				reason: truncateForLedger(
 					"shared writer rotation options differed across module graphs; first writer retained ownership",
+				),
+			})),
+		});
+	}
+	// #3721, same read-time fold: a refused truncation of a real-home log by a
+	// test process is visible without writing a row through that sink.
+	const truncateRefusals = getSinkTruncateRefusals();
+	if (truncateRefusals.length > 0) {
+		summary.push({
+			kind: "log-sink-truncate-refused",
+			count: truncateRefusals.reduce(
+				(total, sink) => total + sink.refusedCount,
+				0,
+			),
+			droppedCount: 0,
+			latestReasons: truncateRefusals.map((sink) => ({
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					`${sink.refusedCount} truncate call(s) refused: a test process aimed them at the real ~/.pi-lens`,
 				),
 			})),
 		});
