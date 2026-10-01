@@ -1754,7 +1754,8 @@ describe("#3612 a queued agent advisory follows /reload", () => {
  * same session is still awaiting, before `adoptHandoff`. The recurrence: that
  * shutdown stashed its own empty scope over the slot left for its start, and
  * the inner reload's start took the empty slot, so the conversation lost its
- * lazy-tool activations.
+ * lazy-tool activations. A resume start has no slot: its shutdown also
+ * saved that empty scope over the sidecar the inner reload's start reads.
  *
  * "continuing": an extension ordered after pi-lens holds the inner shutdown
  * until the interrupted start's pi-lens handler has settled, so that start
@@ -1762,8 +1763,10 @@ describe("#3612 a queued agent advisory follows /reload", () => {
  * slot its own shutdown handed on, and the inner reload's start missed it.
  */
 describe("#3881 an interrupted session_start hands on the slot left for it", () => {
-	for (const kind of ["reload", "fork"] as const) {
+	for (const kind of ["reload", "fork", "resume"] as const) {
 		for (const store of ["in-memory", "file-backed"] as const) {
+			// pi resumes a session from its file.
+			if (kind === "resume" && store === "in-memory") continue;
 			for (const continuing of [false, true]) {
 				it(`keeps a ${store} session's activations when a reload interrupts its ${kind} start before it adopts${continuing ? ", and the start runs on" : ""}`, async () => {
 					let runtime: AgentSessionRuntime | undefined;
@@ -1806,10 +1809,13 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 					await activateTools(runtime, "act", ["ast_grep_search"]);
 					const u2 = c.user("prompt 2");
 					c.done();
+					if (kind === "resume") await turnEnd(runtime);
 					resetDegradationLedger();
 
 					if (kind === "reload") await reload(runtime);
-					else await runtime.fork(u2);
+					else if (kind === "fork") await runtime.fork(u2);
+					else
+						await runtime.switchSession(c.S().sessionManager.getSessionFile()!);
 					expect(inner).toBeDefined();
 					await inner;
 
@@ -1820,13 +1826,13 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 					// The interrupted start retired a scope it never logged a start
 					// for: its shutdown landed after its scope began (t1), before it
 					// adopted, and it never adopted later. Its successor, the inner
-					// reload, took the slot.
+					// reload, took the slot (a resume left none: the sidecar).
 					const interrupted = shutdowns.at(-1)!.scopeId;
 					expect(starts.some((row) => row.scopeId === interrupted)).toBe(false);
 					expect(starts.at(-1)).toMatchObject({
 						reason: "reload",
 						role: "primary",
-						handoffSource: "slot",
+						handoffSource: kind === "resume" ? "own-sidecar" : "slot",
 					});
 					// One bounded record names the interrupted start (#3873 O1). The
 					// inner reload's start resets the in-memory ledger, so read the
@@ -1839,7 +1845,7 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 						expect.objectContaining({
 							subject: kind,
 							shutdownReason: "reload",
-							outcome: "forwarded",
+							outcome: kind === "resume" ? "no-slot" : "forwarded",
 						}),
 					]);
 				});
