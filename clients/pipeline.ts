@@ -122,6 +122,7 @@ import {
 } from "./tool-policy.js";
 import type { PathSetLike } from "./runtime-coordinator.js";
 import { exceedsLspSyncLimits } from "./lsp/content-limits.js";
+import { surfaceHandlerCrash } from "./session-event-guard.js";
 import type { DriftDisposition } from "./lsp/document-drift.js";
 
 const LSP_SPAWN_BUDGET_MS = RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs;
@@ -1267,6 +1268,61 @@ export async function resyncHeldLspDocument(
 	// Empty only from a destroyed service, which `resetLSPService` unpublishes
 	// before it shuts it down.
 	return dispositions.get(filePath) ?? "no-service";
+}
+
+/**
+ * The late resyncs of a format run its bound gave up on, one per caller of
+ * `runFormatPhase`: the phase and the one `hook-handler-crash` subject each
+ * writes (#3828 the deferred drain, #3858 the in-band pipeline).
+ */
+const LATE_FORMAT_RESYNC = {
+	deferred: {
+		phase: "deferred_format_late_resync",
+		handler: "deferred-format-late-resync",
+	},
+	inband: {
+		phase: "inband_format_late_resync",
+		handler: "inband-format-late-resync",
+	},
+} as const;
+
+/**
+ * #3828, #3858: a formatter its bound gave up on writes F when its child
+ * settles, after the caller synced the bytes from before. Chain one
+ * `resyncHeldLspDocument` onto `settled` (the run's `FormatSummary.abandoned`):
+ * a reaction on a promise the formatter already owns, so it parks no awaiting
+ * task and holds no queue entry or timer, and a run that never settles leaves
+ * it inert. Held-only in every case, current session or not: it opens no file
+ * and spawns no server, and it reads no ambient abort signal (another turn's
+ * Escape must not stop it). It never stamps the read guard or a `FileTime`,
+ * so the formatter's bytes stay unseen by the agent. The row names what
+ * happened to F; a throw is one bounded `hook-handler-crash` and no rethrow:
+ * nothing awaits this.
+ */
+export function chainLateFormatResync(
+	settled: Promise<unknown>,
+	which: keyof typeof LATE_FORMAT_RESYNC,
+	row: { toolName: string; filePath: string; startedAt: number },
+	dbg: PipelineContext["dbg"],
+): void {
+	const { phase, handler } = LATE_FORMAT_RESYNC[which];
+	const logLate = (outcome: string) =>
+		logLatency({
+			type: "phase",
+			toolName: row.toolName,
+			filePath: row.filePath,
+			phase,
+			durationMs: Date.now() - row.startedAt,
+			metadata: { outcome },
+		});
+	void settled
+		.then(async () => {
+			logLate(await resyncHeldLspDocument(row.filePath));
+		})
+		.catch((err) => {
+			surfaceHandlerCrash(handler, err, { dbg, rethrow: false });
+			logLate("failed");
+		});
 }
 
 export async function resyncLspFile(
