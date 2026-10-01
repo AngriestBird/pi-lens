@@ -30,6 +30,7 @@ import {
 import { captureLspServiceGeneration } from "./lsp/server.js";
 import {
 	type LspResyncOutcome,
+	chainLateFormatResync,
 	resyncHeldLspDocument,
 	resyncLspFile,
 	runAutofix,
@@ -41,7 +42,6 @@ import { renderFixRunLoss } from "./fix-run-restore.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
 import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
-import { surfaceHandlerCrash } from "./session-event-guard.js";
 import { recordDroppedRead } from "./session-scope.js";
 import {
 	getAutofixPolicyForFile,
@@ -762,35 +762,15 @@ export async function handleAgentEnd({
 									// resource, it is one more reaction on a promise the formatter
 									// already owns.
 									outcome = "abandoned";
-									const logLate = (lateOutcome: string) =>
-										logLatency({
-											type: "phase",
-											toolName: "agent_end",
-											filePath,
-											phase: "deferred_format_late_resync",
-											durationMs: Date.now() - fileStart,
-											metadata: { outcome: lateOutcome },
-										});
-									void formatterSettling
-										.then(async () => {
-											// Held-only in every case, current session or not: the
-											// install can outlive the client (idle eviction), and
-											// this must never open a file or spawn for it. The drift
-											// read is its own stamped read of the disk, takes no
-											// ambient abort signal (another turn's Escape must not
-											// stop it), and a removed file is a quiet `vanished`.
-											// The row names what happened to F (#3828 r3).
-											logLate(await resyncHeldLspDocument(filePath));
-										})
-										.catch((err) => {
-											// A throw: one bounded `hook-handler-crash` row per
-											// session, and no rethrow: nothing awaits this.
-											surfaceHandlerCrash("deferred-format-late-resync", err, {
-												dbg,
-												rethrow: false,
-											});
-											logLate("failed");
-										});
+									// Held-only in every case (#3828): the install can outlive
+									// the client (idle eviction), and this must never open a
+									// file or spawn for it.
+									chainLateFormatResync(
+										formatterSettling,
+										"deferred",
+										{ toolName: "agent_end", filePath, startedAt: fileStart },
+										dbg,
+									);
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
 									// service gets no touch that would spawn a server.

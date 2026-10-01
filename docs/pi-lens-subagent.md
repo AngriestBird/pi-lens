@@ -125,8 +125,10 @@ their job id. A code change carries one `.changelog/` fragment; never edit
 `CHANGELOG.md`, which is generated at release.
 
 After a push, read the exact head once with
-`node scripts/ci-verdict.mjs <pr|sha>` and report its table and exit code
-(0 success, 1 failure, 2 DIRTY, 3 pending). Never poll, never pass `--wait`
+`node scripts/ci-verdict.mjs <pr|sha>`: read its final
+`ci-verdict: exit <N> (<kind>)` stdout line and report it with the table and
+exit code (0 success, 1 failure, 2 DIRTY, 3 pending). Never infer the verdict
+from `$?` after piping the command. Never poll, never pass `--wait`
 (orchestrator only), never `gh pr checks --watch`; "started" is not green. If
 no `ci.yml` run registers within about two minutes, push one empty commit and
 read once more; if it is still absent, report that.
