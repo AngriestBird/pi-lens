@@ -483,9 +483,15 @@ the surface they bite; each block loads only when its trigger applies.
   `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator and
   reviewer scratch, `<worktree>/../probes-<pr>` for probes, and
   `.claude/worktrees/` for a fixer's own worktree.
-- Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
-  orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
-  per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
+- Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
+  (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
+  in `beforeEach`/an `it` body moves nothing. A test process never truncates a log
+  under the real `~/.pi-lens` (`isTestProcessTargetingRealHome`); the first refusal
+  emits one `process.emitWarning` (visible on stderr) and folds a
+  `log-sink-truncate-refused` row into `pilens_health`. `vitest-setup.ts` also pins the orphan-backstop
+  directory through `resolveBackstopStateDir` (#3083) when the home IS the
+  run-shared one. Explicit per-case homes remain authoritative. Never bypass this
+  seam for its lock or stamp.
 - Test tmp roots are swept by the worker that made them (#2912):
   `tests/support/vitest-setup.ts` removes every `setupTestEnvironment` root at
   `afterAll` and on SIGTERM; any other straggler reds its owner, so do not widen
