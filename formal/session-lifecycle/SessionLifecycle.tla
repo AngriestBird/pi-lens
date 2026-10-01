@@ -86,6 +86,10 @@
 (*                       re-keys the slot left for that start to its own   *)
 (*                       /reload and stashes nothing of its scope;         *)
 (*                       without it, it stashes the scope's empty snapshot *)
+(*   "forwardPolicy"     #3881 r2: the forwarded slot keeps only the       *)
+(*                       stores its own start's reason adopts; without it, *)
+(*                       every store, so the successor's /reload policy    *)
+(*                       carries a /fork start's advisory (AD fork: none)  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -587,6 +591,11 @@ BeginDemoted ==
 \* Under "forwardUnadopted" it re-keys the slot left for the start to its
 \* own /reload (forwardHandoff); without it, it stashes the empty scope.
 \* Registry and LSP writers are out of scope for this step.
+\* forwardHandoff's store filter: a store stays in the forwarded slot when
+\* the interrupted start's reason k adopts it (the model's adopt rows are
+\* every action but reset and none).
+Keeps(s, k) == ~Has("forwardPolicy") \/ Policy(s, k) \notin {"reset", "none"}
+
 Interrupt ==
     /\ "Interrupt" \in Transitions /\ "interrupt" \notin used
     /\ ~RegOn /\ ~LspOn
@@ -609,7 +618,10 @@ Interrupt ==
        /\ slot' = IF Has("forwardUnadopted")
                   THEN IF left
                        THEN [slot EXCEPT !.from = t, !.reason = "reload",
-                                         !.file = Key(f)]
+                                         !.file = Key(f),
+                                         !.facts = IF Keeps("RG", k) THEN @ ELSE {},
+                                         !.act = IF Keeps("LZ", k) THEN @ ELSE {},
+                                         !.adv = IF Keeps("AD", k) THEN @ ELSE {}]
                        ELSE slot
                   ELSE [has |-> TRUE, from |-> t, reason |-> "reload",
                         file |-> Key(f), facts |-> {}, act |-> {}, adv |-> {}]
@@ -1180,6 +1192,12 @@ NoLostActivation ==
 \* #3748: an advisory reaches only a context call of its own conversation.
 NoCrossSessionDelivery ==
     \A d \in advOut : d.o \in lin[sess[d.to]]
+
+\* #3881 r2: an advisory reaches only a context call on its producer's
+\* session file. Only /reload carries an advisory to a successor (AD's
+\* policy), and /reload keeps the file, so a delivery across files crossed a
+\* /fork, /clone or resume.
+AdvisoryStaysInSession == \A d \in advOut : sess[d.o] = sess[d.to]
 
 \* S2 (#3612): an advisory still queued when its scope retired by /reload is
 \* not lost: once the successor started, it is queued again, and so is
