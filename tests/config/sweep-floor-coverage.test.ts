@@ -213,8 +213,6 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"smoke fixture cases, not a production population sweep",
 	"tests/scripts/warm-loader-cache.test.ts":
 		"loader behavior cases, not a production population sweep",
-	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts":
-		"lists one fixture root before and after one run to prove the analyzer wrote nothing; a read-only behavior check, not a registered-or-fail production population sweep",
 	"tests/skills/skill-doc-drift.test.ts":
 		"skill documentation cases, not a production population sweep",
 	"tests/typescript-runtime-free.test.ts":
