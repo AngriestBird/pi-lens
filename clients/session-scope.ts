@@ -545,6 +545,10 @@ export function discardHandoff(args: {
  * of the conversation; the slot left for it does. Re-key that slot to this
  * shutdown's transition, and stash nothing of the scope. A start in flight
  * with no slot left for it changes nothing. True when a slot was forwarded.
+ *
+ * The slot keeps only the stores its own start would have adopted (#3881
+ * r2): the successor's policy then applies on top, so an interrupted `/fork`
+ * resets the parent's authorship and leaves its advisories, as a clean one.
  */
 export function forwardHandoff(args: {
 	startReason: string | undefined;
@@ -564,7 +568,11 @@ export function forwardHandoff(args: {
 		handoffSlot().handoff = {
 			reason,
 			key: args.targetSessionFile ?? (key as string | number),
-			stores,
+			stores: Object.fromEntries(
+				Object.entries(stores).filter(
+					([name]) => sessionStores.get(name)?.policy[startReason] === "adopt",
+				),
+			),
 		};
 	// The successor's start resets the in-memory ledger; the record's durable
 	// `degradation_ledger` row in latency.log is what outlives it.

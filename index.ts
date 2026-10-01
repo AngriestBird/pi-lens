@@ -2191,6 +2191,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				rememberOwnEventCtx(ctx);
 				refreshCtxDerivedPlumbing();
 				const sessionStartFiredAt = Date.now();
+				// #3881: this start's in-flight mark (primary path only).
+				let inFlight:
+					| { reason: string | undefined; shutDown: boolean }
+					| undefined;
 				try {
 					dbg("session_start fired");
 					// #1775: one bounded build-identity line per session start —
@@ -2335,7 +2339,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					}
 
 					// #3881: set before this path's first await; the finally clears it.
-					const inFlight = { reason: sessionReason, shutDown: false };
+					inFlight = { reason: sessionReason, shutDown: false };
 					startInFlight = inFlight;
 					// #2319: this process-singleton tally belongs to the primary
 					// session that owns the session-end rollup. A concurrent secondary
@@ -2610,7 +2614,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// sibling catches below cannot drift from it.
 					surfaceHandlerCrash("session_start", sessionErr, { dbg });
 				} finally {
-					startInFlight = undefined;
+					// A #2890 duplicate admitted meanwhile owns its own mark.
+					if (startInFlight === inFlight) startInFlight = undefined;
 					// #3653: primary and secondary alike, after the hand-off
 					// restored this scope's activations, and even when a step above
 					// threw, so a session never keeps every lazy tool active.

@@ -1553,6 +1553,77 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 	});
 
 	/**
+	 * #3881 r2 F1: a forwarded slot keeps the store policy of the start it
+	 * was left for. The recurrence: a /fork start interrupted by a reload
+	 * handed its slot on as a reload slot, so the fork adopted the parent's
+	 * authorship and its queued advisory, which a clean /fork resets and
+	 * leaves to the parent ("does not carry the parent's authorship into a
+	 * /fork", "still drops an advisory whose session ended with /new").
+	 */
+	describe("#3881 an interrupted /fork keeps the fork's store policy", () => {
+		for (const store of ["in-memory", "file-backed"] as const) {
+			it(`gives a ${store} /fork interrupted by a reload none of the parent's authorship or advisories`, async () => {
+				const seen = coordinators();
+				let runtime: AgentSessionRuntime | undefined;
+				let inner: Promise<void> | undefined;
+				const reloadDuringFork = (pi: ExtensionAPI) => {
+					pi.on("session_start", (event) => {
+						if ((event as { reason?: string }).reason !== "fork" || inner)
+							return;
+						inner = new Promise<void>((resolve, reject) =>
+							setImmediate(() =>
+								runtime!.session.reload().then(resolve, reject),
+							),
+						);
+					});
+				};
+				runtime = await startRuntime(
+					store === "file-backed"
+						? SessionManager.create(cwd, sessionsDir)
+						: SessionManager.inMemory(cwd),
+					[],
+					[reloadDuringFork],
+				);
+				const c = conversation(runtime);
+				const written = path.join(cwd, "authored.conf");
+				c.user("prompt 1");
+				expect(await c.write("call_write", written, "w1\nw2\nw3")).toBe(
+					"ALLOW",
+				);
+				c.done();
+				await activateTools(runtime, "act", ["ast_grep_search"]);
+				queueAgentAdvisory(
+					"lost edit in a.rs",
+					seen[0]!.captureSessionGeneration(),
+				);
+				const u2 = c.user("prompt 2");
+				c.done();
+
+				await runtime.fork(u2);
+				expect(inner).toBeDefined();
+				await inner;
+
+				// As on a clean /fork: the activation crosses; the parent's
+				// authorship and its queued advisory do not.
+				expect.soft(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+				expect
+					.soft(await c.editLine("post_written", written, 2, "Y", false))
+					.toEqual(ZERO_READ);
+				expect
+					.soft(await contextText(runtime))
+					.not.toContain("lost edit in a.rs");
+				const starts = (await scopeTransitionRows()).filter(
+					(row) => row.transition === "start",
+				);
+				expect(starts.at(-1)).toMatchObject({
+					reason: "reload",
+					handoffSource: "slot",
+				});
+			});
+		}
+	});
+
+	/**
 	 * #3819 (TLC `H3FileLess`): a file-less slot matched on its reason alone.
 	 * An in-process subagent that binds in the primary's replacement gap
 	 * (declined, #3662) and then reloads or forks itself sends a non-startup
@@ -1852,4 +1923,63 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 			}
 		}
 	}
+
+	/**
+	 * #3881 r2 F2: a reload scheduled one microtask hop after the fork's
+	 * `session_start` emit lands in t0, after pi-lens's handler was entered
+	 * and before it set its scope. The recurrence: a mark set after the
+	 * start's first await (r1's M3b) left that shutdown with no mark and no
+	 * scope, so the `(fork, key)` slot stayed and the inner reload's start
+	 * missed it.
+	 */
+	it("keeps an in-memory session's activations when a microtask-scheduled reload interrupts its fork start before its scope began", async () => {
+		let runtime: AgentSessionRuntime | undefined;
+		let inner: Promise<void> | undefined;
+		const reloadNextMicrotask = (pi: ExtensionAPI) => {
+			pi.on("session_start", (event) => {
+				if ((event as { reason?: string }).reason !== "fork" || inner) return;
+				// One hop: zero hops lands before pi-lens's handler is entered
+				// (t-1, a pre-existing loss named in #3898's Remainder).
+				inner = Promise.resolve()
+					.then(() => undefined)
+					.then(() => runtime!.session.reload());
+			});
+		};
+		runtime = await startRuntime(
+			SessionManager.inMemory(cwd),
+			[],
+			[reloadNextMicrotask],
+		);
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		c.done();
+		await activateTools(runtime, "act", ["ast_grep_search"]);
+		const u2 = c.user("prompt 2");
+		c.done();
+		resetDegradationLedger();
+
+		await runtime.fork(u2);
+		expect(inner).toBeDefined();
+		await inner;
+
+		expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+		const rows = await scopeTransitionRows();
+		// t0: the interrupted start had no scope yet, so only the parent's
+		// fork shutdown retired one.
+		expect(
+			rows
+				.filter((row) => row.transition === "shutdown")
+				.map((row) => row.reason),
+		).toEqual(["fork"]);
+		expect(
+			rows.filter((row) => row.transition === "start").at(-1),
+		).toMatchObject({ reason: "reload", handoffSource: "slot" });
+		expect(
+			(await latencyRows("degradation_ledger")).filter(
+				(row) => row.kind === "session-scope-handoff-interrupted",
+			),
+		).toEqual([
+			expect.objectContaining({ subject: "fork", outcome: "forwarded" }),
+		]);
+	});
 });
