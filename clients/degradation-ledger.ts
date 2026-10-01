@@ -1446,6 +1446,14 @@ export type DegradationKind =
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
+	 * turn_end did not run knip in a checkout whose edit it was handed (#3872):
+	 * the per-turn root cap was reached, or an earlier scan had already spent
+	 * the turn_end budget. The subject is the reason (`root-cap` | `budget`);
+	 * counted, because the number of skipped roots is the observability question
+	 * and a busy orchestrator session would otherwise write one row per turn.
+	 */
+	| "turn-end-knip-root-skipped"
+	/**
 	 * #3813: the turn-end cap cut a part whose producer holds one-shot state
 	 * (a past-EOF retirement, a dependency-drift delivery count, a cascade
 	 * run, a settled runner result, a late auxiliary pair), so that state
