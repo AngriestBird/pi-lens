@@ -1586,29 +1586,31 @@ function checkoutOf(p) {
  */
 const SCRATCH_PATH_RE = /(witness-home|pi-lens-test-)/;
 
+/**
+ * E5/D2: the `opaque_mutation_*` phases log the bash command as `filePath`
+ * (clients/runtime-tool-call.ts, clients/runtime-tool-result.ts), except
+ * `opaque_mutation_recovered`, which logs the recovered paths.
+ */
+function isCommandTextRow(entry) {
+	const phase = String(entry.phase ?? "");
+	return (
+		phase.startsWith("opaque_mutation_") &&
+		phase !== "opaque_mutation_recovered"
+	);
+}
+
 /** E5: track a latency row's project unless its `filePath` is a shell command. */
 function trackLatencyProject(state, entry) {
 	const filePath = entry?.filePath;
 	if (typeof filePath !== "string" || filePath.length === 0) return;
-	const phase = entry.phase ?? entry.type;
-	if (
-		phase === "opaque_mutation_prescan" ||
-		phase === "opaque_mutation_coverage_unknown"
-	)
-		return;
-	// Only the two opaque phases put a bash command in `filePath`
-	// (clients/runtime-tool-call.ts, clients/runtime-tool-result.ts); the
-	// `<pi-lens>` sentinel is never a project path.
+	if (isCommandTextRow(entry)) return;
+	// The `<pi-lens>` sentinel is never a project path.
 	if (filePath.startsWith("<")) return;
 	state.projects.inc(projectOf(filePath));
 }
 
 function trackLatencyPollution(state, entry) {
-	if (
-		entry.phase === "opaque_mutation_prescan" ||
-		entry.phase === "opaque_mutation_coverage_unknown"
-	)
-		return;
+	if (isCommandTextRow(entry)) return;
 	const hit = pathValues(entry).some((value) => SCRATCH_PATH_RE.test(value));
 	if (!hit) return;
 	const pid = String(entry.pid ?? "unknown");

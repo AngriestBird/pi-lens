@@ -508,9 +508,16 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 		// {"phase":"opaque_mutation_prescan","filePath":"cd /home/user/Desktop/proj && gh issue view 413 ..."}
 		// Real: five opaque_mutation_prescan rows and one
 		// opaque_mutation_coverage_unknown row, five comfy-studio rows, one
-		// `<pi-lens>` cache_usage row. Labelled synthetic: a path with a space.
+		// `<pi-lens>` cache_usage row, and one opaque_mutation_recovered row,
+		// whose filePath is the recovered path (.../proj/.fix-round/ledger.md).
+		// Labelled synthetic: a path with a space, and the two command-text
+		// phases the logs predate (opaque_mutation_incoming_excluded,
+		// opaque_mutation_status_pair_unknown).
 		const report = run("projects-touched");
-		expect(report.projects).toEqual([{ key: "home", count: 6 }]);
+		expect(report.projects).toEqual([
+			{ key: "home", count: 6 },
+			{ key: "proj", count: 1 },
+		]);
 	});
 });
 
