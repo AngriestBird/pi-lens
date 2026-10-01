@@ -1447,6 +1447,15 @@ export type DegradationKind =
 	 */
 	| "turn-end-knip-root-skipped"
 	/**
+	 * turn_end started no tests for a target in a linked worktree (#3871). The
+	 * subject is the reason: `no-runner-install` (the worktree has no
+	 * `node_modules/.bin`, venv or `vendor/bin` of its own, so running would
+	 * fetch through `npx` or use another environment). Counted, because a plegma
+	 * session edits many fresh worktrees and would otherwise write one row per
+	 * turn.
+	 */
+	| "turn-end-test-root-skipped"
+	/**
 	 * #2504 review round 8 (S1): a carried-forward deferred file entry was
 	 * dropped from an IN-BAND `turn_end` publish (`clients/actionable-warnings.ts`)
 	 * because its file changed, or the publish crossed a session boundary,
