@@ -1136,6 +1136,24 @@ describe("PR body lint (#1844)", () => {
 			).toBe(false);
 		});
 
+		it("harvests a read-time fold row's kind (#3721)", () => {
+			const diff = [
+				"diff --git a/clients/degradation-ledger.ts b/clients/degradation-ledger.ts",
+				"@@ -1,0 +1,4 @@",
+				"+\tsummary.push({",
+				'+\t\tkind: "fold-row-kind",',
+				"+\t\tcount: 1,",
+				"+\t});",
+			].join("\n");
+			expect(
+				lintPrBody(withObservability("The record is fold-row-kind."), { diff }),
+			).toEqual({ valid: true, errors: [] });
+			expect(
+				lintPrBody(withObservability("The record is not-in-diff."), { diff })
+					.valid,
+			).toBe(false);
+		});
+
 		it("harvests recordDegradation's kind", () => {
 			const diff = [
 				"diff --git a/clients/example.ts b/clients/example.ts",

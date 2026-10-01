@@ -397,6 +397,13 @@ function recordLocationsFromRuntimeSource(source) {
 		// false "no record added." sentence.
 		["logCascade", ["phase"]],
 		["emitBounded", ["kind", "event", "eventName"]],
+		// #3721: a read-time fold row (`getDegradationSummary()`'s
+		// `summary.push({ kind: ... })`, the `log-sink-*` and
+		// `process-singleton-reset` kinds) is a record by design, written nowhere
+		// because it is pulled from in-memory state. Without this entry a PR that
+		// adds one could name it in no accepted form and the only passing wording
+		// was the false "no record added." sentence.
+		["summary\\.push", ["kind"]],
 	];
 	for (const [name, fields] of calls) {
 		const callPattern = new RegExp(
