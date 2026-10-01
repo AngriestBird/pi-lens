@@ -2516,20 +2516,20 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 		);
 
 		it("OrphanGiveUp (#3858): the abandoned formatter's late bytes are not credited as seen", async () => {
-			// The two stamp assertions after the late write are pins: nothing ever
-			// stamped there, so only the wait for the late row reds before the fix.
-			// They name the recurrence the late resync must not introduce: a
-			// FileTime stamp of bytes the agent never saw (#3525, the FormatService
-			// sharing the read guard's table). The late read is the drift sweep's,
-			// which stamps neither.
+			// The assertions after the late write are pins: nothing ever stamped
+			// there, so only the wait for the late row reds before the fix. They
+			// name the recurrence the late resync must not introduce: a FileTime
+			// stamp of bytes the agent never saw (#3525, the FormatService sharing
+			// the read guard's table). The late read is the drift sweep's, which
+			// stamps neither.
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			const resolving = gate();
 			const resolution = gate();
 			child.resolving = resolving.open;
 			child.resolved = resolution.p;
 			const c = armChild();
-			// The agent's own write, through the real tool_result handler: once
-			// the pipeline returns, it records the write in the read guard.
+			// The agent's own write, through the real tool_result handler: once the
+			// pipeline returns, it records that write in the read guard.
 			const result = handleToolResult({
 				event: {
 					toolName: "write",
@@ -2560,7 +2560,8 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 			await inBandSettled();
 			expect(wire.at(-1)).toBe(disk());
 			// The formatter's late bytes are not: both tables still see the disk
-			// as moved past what they stamped.
+			// as moved past what they stamped. (An edit verdict would not show it:
+			// the read guard's content hashes tolerate a whitespace-only format.)
 			expect(runtime.readGuard.diskMovedSinceStamp(filePath)).toBe(true);
 			expect(getFormatService().hasChanged(filePath)).toBe(true);
 		});
