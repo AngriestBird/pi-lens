@@ -1643,10 +1643,6 @@ export function mergeActionableWarningsReports(args: {
 							incumbent.generatedAt ?? newerReport?.generatedAt,
 							entry.generatedAt ?? olderReport?.generatedAt,
 						),
-						branchEpoch: olderBranchEpoch(
-							incumbent.branchEpoch,
-							entry.branchEpoch,
-						),
 						warnings: incumbent.warnings,
 					}
 				: {

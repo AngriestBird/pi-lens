@@ -2638,124 +2638,148 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 		}
 	});
 
-	// #3676 F7/F8. Recurrence: a cache file written before the stamp existed (it
-	// stays readable for ten minutes) or a malformed epoch must not be credited
-	// to whichever branch the settle runs on. The fix is still applied; only its
-	// credit is withheld, and the row says why.
-	for (const [label, branchEpoch] of [
+	// #3676. The quick fix is credited with the oldest branch epoch among the
+	// entries it fixes. Recurrence: a cache file written before the stamp
+	// existed (readable for ten minutes), a malformed epoch, or one entry older
+	// than its neighbours must not be credited to whichever branch the settle
+	// runs on. The fix is still applied; only its credit is withheld, and the
+	// row says why. The probed file is `a`; `b` is a neighbour in the same pass.
+	const quickFixPass = async (
+		epochs: readonly [unknown, unknown],
+		moved = true,
+	) => {
+		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-pass-");
+		try {
+			const a = createTempFile(env.tmpDir, "src/a.ts", "const x = 1;\n");
+			const b = createTempFile(env.tmpDir, "src/b.ts", "const y = 1;\n");
+			for (const file of [a, b]) fs.utimesSync(file, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			if (moved) runtime.readGuard.retainBranch(new Set());
+			const { getDegradationSummary, resetDegradationLedger } =
+				await import("../../clients/degradation-ledger.js");
+			resetDegradationLedger();
+			const entry = (filePath: string, branchEpoch: unknown) => ({
+				filePath,
+				displayPath: path.basename(filePath),
+				branchEpoch,
+				warnings: [
+					{
+						id: `aw:3676:${path.basename(filePath)}`,
+						filePath,
+						displayPath: path.basename(filePath),
+						severity: "warning",
+						tool: "typescript",
+						message: "unused var",
+						suppressed: false,
+						origin: "dispatch",
+						actions: [
+							{
+								title: "Remove unused var",
+								hasEdit: true,
+								hasCommand: false,
+								autoFixEligible: true,
+							},
+						],
+					},
+				],
+			});
+			const report = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [entry(a, epochs[0]), entry(b, epochs[1])],
+				summary: {
+					warnings: 2,
+					unsuppressed: 2,
+					suppressed: 0,
+					files: 2,
+					actions: 2,
+					autoFixEligible: 2,
+				},
+			} as unknown as ActionableWarningsReport;
+			applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+				async (args: {
+					mutationContext: {
+						readGuard?: { recordWritten: (filePath: string) => void };
+					};
+				}) => {
+					settle(a, "const x = 2;\n");
+					args.mutationContext.readGuard?.recordWritten(a);
+					return {
+						considered: 1,
+						applied: 1,
+						changedFiles: [a],
+						skipped: [],
+					};
+				},
+			);
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
+				notify: vi.fn(),
+				dbg: vi.fn(),
+				runtime,
+				cacheManager: {
+					readCache: () => ({ data: report }),
+					addModifiedRange: vi.fn(),
+				} as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+			expect(fs.readFileSync(a, "utf8")).toBe("const x = 2;\n");
+			return {
+				verdict: zeroRead(runtime, a),
+				rows: getDegradationSummary().filter(
+					(group) => group.kind === "actionable-warnings-quickfix-uncredited",
+				),
+				subject: env.tmpDir,
+			};
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	};
+
+	for (const [label, epoch] of [
 		["no branchEpoch", undefined],
 		["a negative branchEpoch", -1],
 		["a fractional branchEpoch", 1.5],
-		["a string branchEpoch", "0"],
+		["a string branchEpoch", "1"],
 	] as const) {
-		it(`applies a quick fix from a report with ${label} and credits it to no branch`, async () => {
-			const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-bad-");
-			try {
-				const filePath = createTempFile(
-					env.tmpDir,
-					"src/app.ts",
-					"const x = 1;\n",
-				);
-				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
-				const runtime = new RuntimeCoordinator();
-				runtime.projectRoot = env.tmpDir;
-				runtime.seedProjectSequence(1);
-				const { getDegradationSummary, resetDegradationLedger } =
-					await import("../../clients/degradation-ledger.js");
-				resetDegradationLedger();
-				const report = {
-					generatedAt: new Date().toISOString(),
-					scope: "turn_delta",
-					sessionId: "s1",
-					turnIndex: 1,
-					projectSeqEnd: 1,
-					deltaOnly: true,
-					includeLspCodeActions: true,
-					files: [
-						{
-							filePath,
-							displayPath: "src/app.ts",
-							branchEpoch,
-							warnings: [
-								{
-									id: "aw:3676-bad",
-									filePath,
-									displayPath: "src/app.ts",
-									severity: "warning",
-									tool: "typescript",
-									message: "unused var",
-									suppressed: false,
-									origin: "dispatch",
-									actions: [
-										{
-											title: "Remove unused var",
-											hasEdit: true,
-											hasCommand: false,
-											autoFixEligible: true,
-										},
-									],
-								},
-							],
-						},
-					],
-					summary: {
-						warnings: 1,
-						unsuppressed: 1,
-						suppressed: 0,
-						files: 1,
-						actions: 1,
-						autoFixEligible: 1,
-					},
-				} as unknown as ActionableWarningsReport;
-				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
-					async (args: {
-						mutationContext: {
-							readGuard?: { recordWritten: (filePath: string) => void };
-						};
-					}) => {
-						settle(filePath, "const x = 2;\n");
-						args.mutationContext.readGuard?.recordWritten(filePath);
-						return {
-							considered: 1,
-							applied: 1,
-							changedFiles: [filePath],
-							skipped: [],
-						};
-					},
-				);
-				await handleAgentEnd({
-					ctxCwd: env.tmpDir,
-					getFlag: (name) =>
-						name === "lens-actionable-warning-autofix" ||
-						name === "lens-actionable-warnings" ||
-						name === "no-lsp",
-					notify: vi.fn(),
-					dbg: vi.fn(),
-					runtime,
-					cacheManager: {
-						readCache: () => ({ data: report }),
-						addModifiedRange: vi.fn(),
-					} as any,
-					getFormatService: () =>
-						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
-				});
-				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
-				expect(fs.readFileSync(filePath, "utf8")).toBe("const x = 2;\n");
-				expect(zeroRead(runtime, filePath)).toBe("block");
-				expect(
-					getDegradationSummary().filter(
-						(group) => group.kind === "actionable-warnings-quickfix-uncredited",
-					),
-				).toEqual([
-					expect.objectContaining({
-						count: 1,
-						latestReasons: [expect.objectContaining({ subject: env.tmpDir })],
-					}),
-				]);
-			} finally {
-				applyConservativeActionableWarningFixesMock.mockReset();
-				env.cleanup();
-			}
+		it(`applies a quick fix from an entry with ${label} and credits it to no branch`, async () => {
+			const { verdict, rows, subject } = await quickFixPass([epoch, 1]);
+			expect(verdict).toBe("block");
+			expect(rows).toEqual([
+				expect.objectContaining({
+					count: 1,
+					latestReasons: [expect.objectContaining({ subject })],
+				}),
+			]);
+		});
+	}
+
+	// The live epoch is 1 (a /tree ran). The pass is credited with the oldest of
+	// its entries' epochs, in whichever order they come, and an entry without
+	// one withholds the credit however many of its neighbours have one.
+	for (const [label, epochs, verdict] of [
+		["both entries on the live branch", [1, 1], "allow"],
+		["an older neighbour after it", [1, 0], "block"],
+		["an older neighbour before it", [0, 1], "block"],
+		["an unstamped neighbour after it", [1, undefined], "block"],
+		["an unstamped neighbour before it", [undefined, 1], "block"],
+	] as const) {
+		it(`credits a quick fix pass with its oldest entry: ${label}`, async () => {
+			expect((await quickFixPass(epochs)).verdict).toBe(verdict);
 		});
 	}
 });
