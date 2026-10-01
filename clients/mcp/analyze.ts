@@ -268,6 +268,12 @@ interface McpRunnerLatency {
 	durationMs: number;
 	status: string;
 	diagnosticCount: number;
+	/**
+	 * Present when the runner set one (#3781). With `status: "failed"`,
+	 * `"blocking_diagnostics"` means the check ran and its findings failed it;
+	 * any other kind, or none, means the runner produced no usable result.
+	 */
+	failureKind?: string;
 }
 
 export interface McpAnalyzeResult {
@@ -306,6 +312,8 @@ export interface McpAnalyzeResult {
 	lsp?: {
 		ran: boolean;
 		status: string;
+		/** As on the `latency.runners[]` row: why a `failed` LSP run failed (#3781). */
+		failureKind?: string;
 		diagnosticCount: number;
 		durationMs: number;
 	};
@@ -618,6 +626,9 @@ export async function analyzeFile(
 					lspRunner.status !== "when_skipped" &&
 					lspRunner.status !== "test_file_skipped",
 				status: lspRunner.status,
+				...(lspRunner.failureKind !== undefined && {
+					failureKind: lspRunner.failureKind,
+				}),
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,
 			}
@@ -651,6 +662,7 @@ export async function analyzeFile(
 						durationMs: runner.durationMs,
 						status: runner.status,
 						diagnosticCount: runner.diagnosticCount,
+						failureKind: runner.failureKind,
 					})),
 				}
 			: undefined,
