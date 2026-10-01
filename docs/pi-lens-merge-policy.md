@@ -208,8 +208,8 @@ operator's private notes, so a different orchestrator can run the same train.
   `LSPService.touchFile` showed master already returned the pushed
   diagnostic; one investigator round through `createLspDiagnosticsTool`
   then found the real cause in `tools/lsp-diagnostics.ts` (primary/auxiliary
-  partition by `diagnostic.source`). AGENTS.md "premise first" already said
-  this; the train had been dispatching fixers on the orchestrator's guess.
+  partition by `diagnostic.source`). Principles §1 "Premise first" already
+  said this; the train had been dispatching fixers on the orchestrator's guess.
 - **Every "should have been caught by" names a nightly or smoke row, and
   the row is filed the same day.** A detection retrospective that ends in
   prose is not a retrospective. #2776 (emmylua_ls declares pull diagnostics
