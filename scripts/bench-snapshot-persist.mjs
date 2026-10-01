@@ -16,7 +16,7 @@
  * heap never colours the other:
  *
  *   node scripts/bench-snapshot-persist.mjs \
- *     [--modes worker,sync] [--files 11500] [--persists 3] [--out <file.json>]
+ *     [--modes worker,sync] [--files 11500] [--persists 3] [--label <tree>] [--out <file.json>]
  *
  * `--files` sizes the synthetic snapshot (the default lands near the issue's
  * 68 MB raw / 19 MB gzip field measurement). The committed artifact
@@ -256,6 +256,7 @@ async function main() {
 		const home = path.join(base, mode);
 		fs.rmSync(home, { recursive: true, force: true });
 		fs.mkdirSync(home, { recursive: true });
+		const loadavg1mAtStart = round(os.loadavg()[0], 2);
 		const child = spawnSync(
 			process.execPath,
 			[
@@ -284,7 +285,11 @@ async function main() {
 			throw new Error(`bench child ${mode} failed: ${child.stderr}`);
 		}
 		const parsed = JSON.parse(child.stdout.trim().split("\n").pop());
-		results.push({ ...parsed, summary: summarize(parsed) });
+		results.push({
+			...parsed,
+			loadavg1mAtStart,
+			summary: summarize(parsed),
+		});
 	}
 	const report = {
 		schemaVersion: 1,
@@ -293,10 +298,7 @@ async function main() {
 		node: process.version,
 		platform: `${os.platform()} ${os.release()} ${os.arch()}`,
 		cpus: os.cpus().length,
-		gitHead: spawnSync("git", ["rev-parse", "HEAD"], {
-			cwd: root,
-			encoding: "utf8",
-		}).stdout.trim(),
+		label: readArg("--label", ""),
 		results,
 	};
 	const out = readArg("--out", "");
@@ -305,6 +307,9 @@ async function main() {
 	process.stdout.write(text);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+	process.argv[1] !== undefined &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
 	await main();
 }

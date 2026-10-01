@@ -26,6 +26,24 @@ import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Reads the real sink's rows: the mock delegates to the real logger (the same
+// wrapper project-snapshot-cross-process.test.ts uses).
+const latencyRows = vi.hoisted(
+	() => [] as Array<{ phase?: string; metadata?: Record<string, unknown> }>,
+);
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/latency-logger.js")>();
+	return {
+		...actual,
+		logLatency: (entry: Parameters<typeof actual.logLatency>[0]) => {
+			latencyRows.push(entry as (typeof latencyRows)[number]);
+			actual.logLatency(entry);
+		},
+	};
+});
+
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -45,6 +63,8 @@ import {
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { fingerprintProjectSnapshotJson } from "../../clients/project-snapshot-fingerprint.js";
+// @ts-expect-error -- bare-node script, no declaration file
+import { buildSyntheticSnapshot } from "../../scripts/bench-snapshot-persist.mjs";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const CORPUS = path.join(
@@ -105,6 +125,7 @@ beforeEach(() => {
 	resetProjectSnapshotPersistWorkerForTests();
 	_resetProjectSnapshotParseCacheForTests();
 	resetDegradationLedger();
+	latencyRows.length = 0;
 });
 
 afterEach(async () => {
@@ -136,6 +157,27 @@ describe("worker persist transfers serialized bytes (#3789)", () => {
 				1,
 			);
 			expect(JSON.parse(gunzippedBody(cwd))).toEqual(base);
+		}));
+
+	it("reports the dispatcher's serialize time on the worker persist record", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			// The worker now receives bytes, so its own serialize time is about
+			// zero; the record's `serializeMs` must still carry the stringify the
+			// main thread paid, or latency.log hides the one cost left on the loop.
+			const large = buildSyntheticSnapshot(1500, cwd) as ProjectSnapshot;
+			saveProjectSnapshot(cwd, large);
+			await settle(cwd);
+
+			const row = latencyRows.find(
+				(entry) =>
+					entry.phase === "project_snapshot_persist" &&
+					entry.metadata?.outcome === "executed",
+			);
+			expect(row?.metadata).toMatchObject({
+				offloaded: true,
+				rawBytes: Buffer.byteLength(JSON.stringify(large)),
+			});
+			expect(row?.metadata?.serializeMs as number).toBeGreaterThan(0.5);
 		}));
 
 	it("moves the serialized buffer to the worker instead of copying it", async () =>
@@ -212,6 +254,13 @@ describe("worker persist transfers serialized bytes (#3789)", () => {
 			expect(group?.latestReasons[0]?.reason).toContain(
 				"snapshot-serialize-boom",
 			);
+			expect(
+				latencyRows.filter(
+					(entry) =>
+						entry.phase === "project_snapshot_persist_failed" &&
+						entry.metadata?.error === "snapshot-serialize-boom",
+				),
+			).toHaveLength(1);
 
 			saveProjectSnapshot(cwd, next);
 			await settle(cwd);
@@ -329,8 +378,12 @@ describe("snapshot fingerprint over bytes (#3789)", () => {
 		["escaped quote in the value", { generatedAt: 'a"b\\c', n: 1 }],
 		["non-ASCII everywhere", { generatedAt: "日本é", path: "src/日本語/é.ts" }],
 		[
-			"nested key before the top-level one is ignored",
-			{ nested: { generatedAt: "inner" }, generatedAt: "outer" },
+			"a nested key with the same value is not the top-level one",
+			{ nested: { generatedAt: "outer" }, generatedAt: "outer" },
+		],
+		[
+			"an escaped quote and brace before the key do not shift the depth",
+			{ note: 'say "{" now', generatedAt: "g" },
 		],
 		[
 			"marker text inside a string value is not the key",
