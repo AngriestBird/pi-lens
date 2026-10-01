@@ -384,7 +384,9 @@ function runtimeObservabilityFromDiff(diff = "", seamMap = null) {
 			}
 		}
 	}
-	const blanked = blankCommentsAndStrings(added).text;
+	const blanked = blankCommentsAndStrings(
+		withoutCommentContinuations(added),
+	).text;
 	const seamBranches = [];
 	for (const [file, text] of addedByFile) {
 		if (!isSeamFile(file, seamMap)) continue;

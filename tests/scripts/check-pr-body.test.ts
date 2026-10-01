@@ -1314,6 +1314,30 @@ describe("PR body lint (#1844)", () => {
 			});
 		});
 
+		// Same lexer, same `--unified=0` blind spot, on the failure-path scan the
+		// sentence also depends on: a JSDoc continuation line carries no opener.
+		it("does not read a failure path out of a JSDoc continuation line", () => {
+			const diff = diffAdding(
+				"clients/example.ts",
+				" * a retry may throw here and the caller must catch it",
+			);
+			expect(lintPrBody(withObservability(sentence), { diff })).toEqual({
+				valid: true,
+				errors: [],
+			});
+		});
+
+		it("does not let a backtick in a JSDoc continuation line hide a failure path", () => {
+			const diff = diffAdding(
+				"clients/example.ts",
+				" * the `findRelocation`'s window saturates at",
+				"\ttry { adopt(); } catch (error) { warn(error); }",
+			);
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain("not valid when the added lines contain a failure path");
+		});
+
 		it("refuses merged #3785's honest sentence over its read-guard branches", () => {
 			// Real runtime hunks of #3785: `if (opts?.stampFileTime !== false)` and
 			// `if (fileTimeMoved && toolCallId !== undefined)` shipped under this
