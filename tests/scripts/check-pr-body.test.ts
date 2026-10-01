@@ -165,7 +165,10 @@ describe("flattened PR body repair", () => {
 	);
 
 	it.each([
-		["plain quoted headings", `${flattenedBody} "## Summary one ## Tests two"`],
+		[
+			"plain quoted headings",
+			`${flattenedBody} \"## Summary one ## Tests two\"`,
+		],
 		[
 			"fenced quoted headings",
 			`${flattenedBody} \`\`\`text ## Summary one ## Tests two \`\`\``,
@@ -2293,7 +2296,7 @@ describe("head-tree citations and test references", () => {
 					'it("title after typeof regex", () => {});',
 					"const quotient = numerator / denominator;",
 					'it("title after division", () => {});',
-					'it.each([{ value: fn(1) }])("array each title", () => {});',
+					'it.each([{ value: fn(1) }])(\"array each title\", () => {});',
 				].join("\n"),
 			);
 			const git = (args: string[]) =>
@@ -2457,7 +2460,7 @@ describe("head-tree citations and test references", () => {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
 			writeFileSync(
 				join(fixtureCwd, "tests", "lexer.test.ts"),
-				`it("${title.replaceAll("\\", "\\\\")}", () => {});\n`,
+				`it(\"${title.replaceAll("\\", "\\\\")}\", () => {});\n`,
 			);
 			const git = (args: string[]) =>
 				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
