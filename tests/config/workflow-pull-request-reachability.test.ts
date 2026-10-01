@@ -69,8 +69,9 @@ interface PullRequestContext {
 
 // A job is PR-reachable if ANY of these makes its `if:` true. Two rows,
 // because one cannot serve both: `clear-stale-verdict-labels` requires
-// action `synchronize` while `pr-body-lint` requires action != synchronize,
-// and both are genuinely PR-reachable.
+// action `synchronize`, and a job restricted to other actions (as
+// `pr-body-lint` was before #3864 F2) needs a non-synchronize row; both kinds
+// are genuinely PR-reachable.
 const PR_CONTEXTS: readonly PullRequestContext[] = [
 	{
 		label: "pull_request / opened",

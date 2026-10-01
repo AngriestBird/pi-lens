@@ -415,6 +415,8 @@ export const wallClockBudgetInclude = [
 	// synchronous matcher cost and belongs in the quiet serialized phase.
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
+	// #3872: real `git worktree add` children are the fixture (flake-shape admission).
+	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).
 	"tests/clients/runtime-turn-test-runner-bounds.test.ts",
 	"tests/clients/safe-spawn-ambient-signal.test.ts",
@@ -448,6 +450,9 @@ export const wallClockBudgetInclude = [
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
+	// #3870: every detector test drives the analyzer's real CLI entry point
+	// (a real node subprocess) over redacted fixture logs (flake-shape admission).
+	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts",
 	// #3684: the wrapper's advisory scope is a real `git diff` against a real
 	// fixture repo, spawned through the real CLI (flake-shape admission).
 	"tests/scripts/astgrep-self-scan.test.ts",

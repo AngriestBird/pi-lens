@@ -4,8 +4,8 @@ Run the review → verify → merge policy over one or more open PRs: landing a
 PR, babysitting the merge queue, processing a review backlog. It encodes the
 standing quality gates so any session applies the same discipline.
 
-> Source of truth for every rule below is `AGENTS.md` ("Role contracts for
-> delegated work" → "Orchestrator rules", plus the defect catalog). This file
+> Source of truth for every rule below is `AGENTS.md` ("Orchestration and
+> delegated work", plus the defect catalog). This file
 > is the procedure and the record; on any conflict AGENTS.md wins. It replaces
 > the former `merge-train` skill (#3837); the merge-train lane that skill also
 > described is retired.
@@ -208,8 +208,8 @@ operator's private notes, so a different orchestrator can run the same train.
   `LSPService.touchFile` showed master already returned the pushed
   diagnostic; one investigator round through `createLspDiagnosticsTool`
   then found the real cause in `tools/lsp-diagnostics.ts` (primary/auxiliary
-  partition by `diagnostic.source`). AGENTS.md "premise first" already said
-  this; the train had been dispatching fixers on the orchestrator's guess.
+  partition by `diagnostic.source`). Principles §1 "Premise first" already
+  said this; the train had been dispatching fixers on the orchestrator's guess.
 - **Every "should have been caught by" names a nightly or smoke row, and
   the row is filed the same day.** A detection retrospective that ends in
   prose is not a retrospective. #2776 (emmylua_ls declares pull diagnostics
@@ -276,8 +276,9 @@ operator's private notes, so a different orchestrator can run the same train.
   worker. Prune on merge, or when the lane is abandoned.
 - **Scope changes are mirrored on the issue before they are sent.** A fixer
   cannot verify a mid-task `SendMessage`; it CAN verify an issue comment.
-  Post the comment first, then send the message pointing at it (the fixer
-  playbook says to check). Unmirrored additions are declined by design.
+  Post the comment first, then send the message pointing at it
+  (`docs/pi-lens-subagent.md` tells every worker to check). Unmirrored
+  additions are declined by design.
 - **Dependabot PRs merge on real checks, no issue needed (maintainer,
   2026-09-07).** The PR-title issue-ref gate is a policy check this train
   applies to human PRs; a bump title can never carry a ref. Merge order: one
@@ -511,7 +512,7 @@ operator's private notes, so a different orchestrator can run the same train.
   from CRITICAL to NITPICK is reported.
 - **Session retrospective before the regroup.** One ledger block: what the
   maintainer had to bring in from outside, why the process did not surface it,
-  and where the lesson was routed (contract, playbook, skill, issue). The
+  and where the lesson was routed (contract, skill, issue). The
   2026-09-06 entry: the autoqa witness/reachability rules and the release-QA
   layer came from a maintainer link, not from the train's own retrospective
   on #2587.
@@ -547,7 +548,7 @@ operator's private notes, so a different orchestrator can run the same train.
 ## Disposition tables
 
 Verify reports and fixer handoffs end with a per-finding disposition table
-(defined in AGENTS.md "Orchestrator rules" and `docs/pi-lens-reviewer.md`);
+(defined in `docs/pi-lens-reviewer.md` "Findings and verdict");
 read the worst cell to route the round.
 
 ## Honesty rules

@@ -369,7 +369,7 @@ are part of the contract, so the predicate is named here** (`refusalMatches` in
    nothing is refused.
 
 Everything else stays a warning and the tool runs, exactly as it did before: a
-typo (`modee`), an abbreviation (`max`), a substring or reverse containment
+misspelled mode name, an abbreviation (`max`), a substring or reverse containment
 (`files` for `maxLspFiles`, `file` for `path`), a leading or middle word
 (`sourcePath` is not `source`). Such keys still get the `did you mean` hint, which
 is a separate, looser scorer and is advice only; retuning it cannot change
