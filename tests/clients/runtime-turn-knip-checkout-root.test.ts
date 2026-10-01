@@ -626,6 +626,27 @@ describe("#3872 scope resolution as a function (guards the branches a turn canno
 			overCap: [],
 		});
 	});
+
+	// State-space cell S10 (#3872 r3): a link inside the repository that points
+	// into a worktree gives one checkout two spellings that both pass
+	// `addModifiedRange`. Scan roots keep the edit's spelling, but the one
+	// process per checkout per turn is decided on the real path.
+	it("scans a worktree reached through two spellings once", () => {
+		const x = addWorktree("x");
+		const viaLink = path.join(main, "wt-link");
+		fs.symlinkSync(
+			x,
+			viaLink,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+
+		expect(
+			resolveKnipScanRoots(main, [
+				path.join(viaLink, "src", "a.ts"),
+				path.join(x, "src", "a.ts"),
+			]),
+		).toEqual({ roots: [viaLink], overCap: [] });
+	});
 });
 
 describe("#3872 population details", () => {
