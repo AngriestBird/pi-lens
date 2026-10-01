@@ -1323,7 +1323,11 @@ export function evaluateGitGuard(
 	// leaves the pre-#3814 answer (the turn-end drain still records it), counted
 	// once rather than refusing every commit on a bug the agent cannot fix.
 	try {
-		absorbSettledRunnerBlockers(runtime, cwd);
+		const absorbed = absorbSettledRunnerBlockers(runtime, cwd);
+		// The inline path refreshes the persisted record beside the latch at
+		// `tool_result`; a recording at the gate has no turn end to do it, and a
+		// session boundary reads the record, not the latch (r1 M3).
+		if (absorbed.recorded > 0) syncGitGuardRecord(runtime, cacheManager, cwd);
 	} catch (failure) {
 		incrementDegradationCount({
 			kind: "deferred-blocker-gate-error",

@@ -573,6 +573,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
 		"clients/inline-blocker-dispositions.ts": 1,
+		// 2 (#3814 r2): the pipeline's own-file line filter and its number filter,
+		// moved verbatim from `clients/pipeline.ts` (6 -> 4) so the collect-later
+		// merge calls them instead of re-deriving them; no new filter.
+		"clients/inline-blocker-fields.ts": 2,
 		"clients/installer/index.ts": 4,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 3,
@@ -617,7 +621,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
-		"clients/pipeline.ts": 6,
+		"clients/pipeline.ts": 4,
 		"clients/process-snapshot.ts": 5,
 		"clients/project-changes.ts": 3,
 		"clients/project-diagnostics/cache.ts": 2,

@@ -14,6 +14,10 @@ import {
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { Diagnostic } from "./dispatch/types.js";
 import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
+import {
+	inlineBlockerLines,
+	inlineBlockerSources,
+} from "./inline-blocker-fields.js";
 import type { FileComplexity } from "./complexity-client.js";
 import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
@@ -1503,12 +1507,17 @@ export class RuntimeCoordinator {
 			}),
 			summary: formatDiagnostics(diagnostics, "blocking").trim(),
 			diagnostics,
+			// The same two derivations the pipeline's writer uses: `lines` keeps only
+			// this file's own rows, `sources` pins an untagged finding as "unknown".
 			sources: [
-				...new Set([...(existing?.sources ?? []), ...added.map((d) => d.tool)]),
+				...new Set([
+					...(existing?.sources ?? []),
+					...inlineBlockerSources(added),
+				]),
 			],
 			lines: [
 				...(existing?.lines ?? []),
-				...added.flatMap((d) => (d.line === undefined ? [] : [d.line])),
+				...inlineBlockerLines(added, filePath),
 			],
 			// The turn-end policy verdict was about the OLD set; the added findings
 			// passed the policy already and the next turn end re-derives the rest.

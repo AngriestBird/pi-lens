@@ -484,10 +484,15 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		RUNTIME_TURN_FILE,
 		"Turn-end CLI runner findings collected after the post-write path.",
 		// #3248: this lane was the last push surface with no disposition stage;
-		// it now routes through the same shared policy call as its
-		// late-auxiliary twin, which is what this gate pins.
-		["gateFindingsByPathFreshness", "applyPushedFindingPolicy"],
-		['"late-runner-findings"'],
+		// it routes through the same shared policy call as its late-auxiliary
+		// twin. #3814: the freshness gate and that policy call now live in ONE
+		// verdict, `judgeDeferredRunnerFindings` (clients/deferred-runner-blockers.ts),
+		// which the commit gate calls too; this lane's proof is that it asks that
+		// verdict. That the verdict itself runs both seams is pinned by behaviour
+		// (`tests/index-3814-deferred-blocker-gate.test.ts`: a stale answer and a
+		// marked finding each stop blocking, one mutation each).
+		["judgeDeferredRunnerFindings"],
+		["judgeDeferredRunnerFindings("],
 		{ evidenceMin: 2 },
 	),
 	"runtime-turn:cascade-blocker": labeled(

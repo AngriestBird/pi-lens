@@ -165,10 +165,11 @@ describe("deferred blocker recording (#3814)", () => {
 		}
 	});
 
-	it("fails open and counts once when the gate's pre-check throws", async () => {
-		// Recurrence: the pre-check is new code on the commit path; a throw out of
-		// it must not turn every commit into a host error. The pre-#3814 answer
-		// stands and the fault is one counted ledger row.
+	it("fails open on a pre-check fault and judges the same answer again at the next attempt", async () => {
+		// Recurrence (r1 L2): the gate claimed every settled entry before judging
+		// any, so one transient fault left the entry unjudged for the rest of the
+		// session and the next commit passed on a blocker that was waiting. The
+		// fault is one counted ledger row; the retry blocks.
 		const env = setupTestEnvironment("pi-lens-3814-failopen-");
 		try {
 			const filePath = path.join(env.tmpDir, "app.ts");
@@ -177,23 +178,59 @@ describe("deferred blocker recording (#3814)", () => {
 			runtime.projectRoot = env.tmpDir;
 			const cacheManager = new CacheManager(false);
 			await settledAnswer(filePath, env.tmpDir);
-			vi.spyOn(runtime, "recordDeferredInlineBlockers").mockImplementation(
+			vi.spyOn(runtime, "recordDeferredInlineBlockers").mockImplementationOnce(
 				() => {
 					throw new Error("injected recording fault");
 				},
 			);
 
-			for (let attempt = 0; attempt < 2; attempt++) {
-				expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(
-					false,
-				);
-			}
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(
+				false,
+			);
 			const row = getDegradationSummary().find(
 				(group) => group.kind === "deferred-blocker-gate-error",
 			);
 			expect(row?.count).toBe(1);
 			expect(row?.latestReasons[0]?.reason).toContain(
 				"injected recording fault",
+			);
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(
+				true,
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("stamps the record with the moment the runner scanned", async () => {
+		// Recurrence (r1 L3): `recordedAtMs` is the baseline the dependency-drift
+		// sweep compares file and import mtimes against; a record stamped 0 is
+		// demoted at the first sweep, and stamped with the recording time it would
+		// never see a drift that happened between the scan and the recording.
+		const env = setupTestEnvironment("pi-lens-3814-stamp-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const markedAtMs = Date.now() + 10_000;
+			deferRunnerFindings({
+				filePath,
+				cwd: env.tmpDir,
+				projectRoot: env.tmpDir,
+				runnerId: RUNNER_ID,
+				markedAtMs,
+				promise: Promise.resolve({
+					status: "succeeded",
+					diagnostics: [blocking(filePath)],
+					semantic: "blocking",
+				} satisfies RunnerResult),
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(1);
+
+			expect(runtime.getInlineBlockersSnapshot()[0]?.recordedAtMs).toBe(
+				markedAtMs,
 			);
 		} finally {
 			env.cleanup();

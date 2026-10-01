@@ -67,6 +67,7 @@ import {
 	getLatencyLogPath,
 } from "../clients/latency-logger.js";
 import extension from "../index.js";
+import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
@@ -93,6 +94,7 @@ beforeEach(async () => {
 	// The latency row is off in test mode.
 	previousTestMode = process.env.PI_LENS_TEST_MODE;
 	process.env.PI_LENS_TEST_MODE = "0";
+	_resetSessionLifecycleForTests();
 	clearLatencyLog();
 	await flushLatencyLog();
 	resetObservedRunnerLatency();
@@ -149,6 +151,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	_resetSessionLifecycleForTests();
 	if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = previousTestMode;
 	resetPendingRunnerFindings();
@@ -162,7 +165,13 @@ afterAll(async () => {
 	else process.env.PI_LENS_HOME = witnessHome.previous;
 });
 
-async function latencyRows(): Promise<Array<Record<string, any>>> {
+/** The fields of a latency row these cases read. */
+interface LatencyRow {
+	phase?: string;
+	metadata?: Record<string, unknown>;
+}
+
+async function latencyRows(): Promise<LatencyRow[]> {
 	await flushLatencyLog();
 	return (
 		fs.existsSync(getLatencyLogPath())
@@ -171,7 +180,7 @@ async function latencyRows(): Promise<Array<Record<string, any>>> {
 	)
 		.split("\n")
 		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, any>);
+		.map((line) => JSON.parse(line) as LatencyRow);
 }
 
 function blockingDiagnostic(line = 1): Diagnostic {
@@ -309,7 +318,9 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 			await host.edit();
 			await settle();
 			const delivered = await host.turnEnd();
-			expect(delivered).toContain("blocking: fix before continuing");
+			// One blocker section, the tier an in-band blocker gets (r1 M2).
+			expect(delivered).toContain("Unresolved from this turn");
+			expect(delivered).toContain("alpha is not a function");
 
 			const verdict = await host.gate();
 			expect(verdict.block).toBe(true);
@@ -424,28 +435,39 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		expect((await host.gate()).block).toBe(true);
 	});
 
-	it("records an answer once when the gate saw it before the turn end drained it", async () => {
-		// Recurrence: the gate and the drain both hand the same answer to the
-		// blocker map; a replay must add nothing and show the finding once.
-		runnerAnswer = answersBlocking("succeeded");
-		const host = await startSession();
-		await host.turnStart();
-		await host.edit();
-		await settle();
-		expect((await host.gate()).block).toBe(true);
-		await host.turnEnd();
-		await host.turnStart();
-		const replay = await host.turnEnd();
+	for (const order of ["gate-first", "turn-end-first"] as const) {
+		it(`delivers the finding once at the delivering turn end, ${order}`, async () => {
+			// Recurrence (r1 M2): with the gate recording first, the replay section and
+			// the late advisory both carried the finding in one message.
+			runnerAnswer = answersBlocking("succeeded");
+			const host = await startSession();
+			await host.turnStart();
+			await host.edit();
+			await settle();
+			if (order === "gate-first") expect((await host.gate()).block).toBe(true);
+			const delivering = await host.turnEnd();
+			expect(delivering.split("alpha is not a function")).toHaveLength(2);
+			expect(delivering).toContain("Unresolved from this turn");
+			expect((await host.gate()).block).toBe(true);
 
-		const lane = (await latencyRows()).filter(
-			(row) => row.phase === "late_runner_findings",
-		);
-		expect(lane.at(0)?.metadata).toMatchObject({
-			delivered: 1,
-			blockersRecorded: 0,
+			await host.turnStart();
+			const other = path.join(tmpDir, "src", "other.ts");
+			fs.writeFileSync(other, "export const other = 1;\n");
+			await host.edit(other);
+			const later = await host.turnEnd();
+			expect(later.split("alpha is not a function").length).toBeLessThanOrEqual(
+				2,
+			);
+
+			const lane = (await latencyRows()).filter(
+				(row) => row.phase === "late_runner_findings",
+			);
+			expect(lane.at(0)?.metadata).toMatchObject({
+				delivered: 1,
+				blockersRecorded: order === "gate-first" ? 0 : 1,
+			});
 		});
-		expect(replay.split("alpha is not a function")).toHaveLength(2);
-	});
+	}
 
 	it("allows the commit after every deferred blocker was marked false-positive", async () => {
 		// Recurrence (#3248 shape): a disposition verdict on a record with no
@@ -484,9 +506,10 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		expect(verdict.block).toBeUndefined();
 	});
 
-	it("does not repeat the freshness record on a second commit attempt for a stale answer", async () => {
-		// Recurrence: a commit gate that re-judges every settled answer on every
-		// attempt writes the same `finding_stale_line_demote` row per attempt.
+	it("writes one freshness record for a stale answer, from the turn end and not from the gate", async () => {
+		// Recurrence (r1 L1): the gate judged a stale answer and wrote
+		// `finding_stale_line_demote`, then the turn-end lane judged the same
+		// answer and wrote it again, two rows for one decision.
 		runnerAnswer = answersBlocking("succeeded");
 		const host = await startSession();
 		await host.turnStart();
@@ -495,15 +518,100 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		editAfterScan("alpha = () => 1;\n");
 		await host.gate();
 		await host.gate();
-		await host.gate();
+		const staleRows = async () =>
+			(await latencyRows()).filter(
+				(row) =>
+					row.phase === "finding_stale_line_demote" &&
+					row.metadata?.store === "late-runner-findings",
+			);
+		expect(await staleRows()).toHaveLength(0);
 
-		const rows = (await latencyRows()).filter(
-			(row) =>
-				row.phase === "finding_stale_line_demote" &&
-				row.metadata?.store === "late-runner-findings",
-		);
-		expect(rows).toHaveLength(1);
+		// The next edit's own re-check answers clean, so only the first answer is stale.
+		runnerAnswer = answersClean;
+		await host.turnStart();
+		await host.edit();
+		await host.turnEnd();
+		expect(await staleRows()).toHaveLength(1);
 	});
+
+	it("keeps blocking when the deferred runner also cites another file past this file's end", async () => {
+		// Recurrence (r1 M1): a foreign line number in the record's `lines` made the
+		// past-EOF sweep demote and retire the whole record, and the gate opened
+		// while the file still had the error. The pipeline's writer keeps only the
+		// record's own file's lines (#1641 F2); the deferred writer must too.
+		const other = path.join(tmpDir, "src", "other.ts");
+		fs.writeFileSync(other, "export const other = 1;\n");
+		const foreign: Diagnostic = {
+			...blockingDiagnostic(500),
+			id: `${RUNNER_ID}:other.ts:500`,
+			filePath: other,
+			message: "other.ts is broken",
+		};
+		runnerAnswer = async (editedPath) =>
+			path.resolve(editedPath) !== path.resolve(filePath)
+				? await answersClean()
+				: {
+						status: "succeeded",
+						diagnostics: [blockingDiagnostic(1), foreign],
+						semantic: "blocking",
+					};
+		const host = await startSession();
+		await host.turnStart();
+		await host.edit();
+		await settle();
+		expect((await host.gate()).block).toBe(true);
+		await host.turnEnd();
+		await host.turnStart();
+		await host.edit(other);
+		await host.turnEnd();
+		await host.turnStart();
+		fs.writeFileSync(other, "export const other = 2;\n");
+		await host.edit(other);
+		await host.turnEnd();
+
+		expect((await host.gate()).block).toBe(true);
+		expect((await host.gate("git push origin HEAD")).block).toBe(true);
+		expect(fs.readFileSync(filePath, "utf8")).toBe("alpha();\n");
+	});
+
+	for (const reason of ["new", "resume", "fork", "reload"] as const) {
+		for (const order of ["gate-first", "turn-end-first"] as const) {
+			// Recurrence (r1 M3): the deferred recording refreshed the latch but not the
+			// persisted guard record, so across a session boundary the inline blocker
+			// blocked as `session_mismatch` and the deferred one let the commit
+			// through. The inline row is the control: the same boundary, the same
+			// record contract.
+			for (const mode of ["inline", "deferred"] as const) {
+				it(`blocks the ${reason} session as an unknown record, ${mode} blocker, ${order}`, async () => {
+					if (mode === "inline") {
+						runnerAnswer = answersClean;
+						inlineBlocker = blockingDiagnostic();
+					} else runnerAnswer = answersBlocking("succeeded");
+					const host = await startSession();
+					await host.turnStart();
+					await host.edit();
+					await settle();
+					if (order === "gate-first") await host.gate();
+					else await host.turnEnd();
+					expect((await host.gate()).block).toBe(true);
+					await host.pi.emit(
+						"session_shutdown",
+						{ reason },
+						makeCtx({ cwd: tmpDir, sessionId: SESSION_ID }),
+					);
+					await host.pi.emit(
+						"session_start",
+						makeSessionStartEvent({ reason }),
+						makeCtx({ cwd: tmpDir, sessionId: `next-${reason}` }),
+					);
+					const verdict = await host.gate();
+
+					expect(verdict.block).toBe(true);
+					expect(verdict.reason).toContain("session_mismatch");
+				});
+			}
+		}
+	}
 
 	it("does not block on a runner still in flight", async () => {
 		// Unknown is not a finding: the answer has not arrived, and a gate that

@@ -18,8 +18,6 @@ interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
 	promise: Promise<RunnerResult>;
 	settled: boolean;
 	result?: RunnerResult;
-	/** #3814: the commit gate has already judged this settled answer. */
-	gateJudged?: boolean;
 }
 
 const pending: PendingRunnerPromise[] = [];
@@ -121,21 +119,17 @@ export async function drainPendingRunnerFindings(
 }
 
 /**
- * #3814: settled answers the commit gate has not judged yet, WITHOUT removing
- * them: the turn-end drain still owns delivery, so a non-blocking answer the
- * gate looked at is not lost. Each entry is handed out once (`gateJudged`), so
- * a second commit attempt does not repeat the freshness pass and its records
- * for answers already judged. An in-flight run is not handed out: it has said
- * nothing yet, and the store still owns it for the turn-end drain.
+ * #3814: the answers that have settled, WITHOUT removing them: the turn-end
+ * drain still owns delivery, so a non-blocking answer the commit gate looked at
+ * is not lost. The store keeps no per-entry state for the gate, so a fault while
+ * judging one answer cannot leave it unjudged for later attempts (r1 L2). An
+ * in-flight run is not returned: it has said nothing yet, and the store still
+ * owns it for the turn-end drain.
  */
-export function claimSettledRunnerFindingsForGate(): PendingRunnerFindings[] {
-	const claimed: PendingRunnerFindings[] = [];
-	for (const entry of pending) {
-		if (!entry.settled || !entry.result || entry.gateJudged) continue;
-		entry.gateJudged = true;
-		claimed.push(settledSnapshot(entry));
-	}
-	return claimed;
+export function peekSettledRunnerFindings(): PendingRunnerFindings[] {
+	return pending.flatMap((entry) =>
+		entry.settled && entry.result ? [settledSnapshot(entry)] : [],
+	);
 }
 
 /** Drop a stale answer and record the lost re-run coverage. */

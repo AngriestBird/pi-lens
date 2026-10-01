@@ -8,22 +8,25 @@
  * `git commit` while the same error from a fast runner did.
  *
  * The blocker state the gate reads is `RuntimeCoordinator`'s inline-blocker map
- * (its latch, the turn-end replay, the retire/clear lifecycle). This module
- * only feeds that map from the deferred store; it adds no second store and no
- * second verdict:
+ * (its latch, the turn-end replay, the retire/clear lifecycle). This module only
+ * feeds that map from the deferred store; it adds no second store and no second
+ * verdict:
  *
- * - the turn-end late-runner lane (`runtime-turn.ts`) records the survivors it
- *   just delivered, through {@link recordDeferredRunnerBlockers};
+ * - {@link judgeDeferredRunnerFindings} is the one freshness-then-policy verdict
+ *   on a settled answer. The turn-end late-runner lane (`runtime-turn.ts`) and
+ *   the commit gate both call it; an answer is current by the same two shared
+ *   seams in the same order: `gateFindingsByPathFreshness` (a later edit makes
+ *   it stale) and `applyPushedFindingPolicy` (inline ignore, stored
+ *   disposition, rule policy);
+ * - the lane runs BEFORE the blocker replay and records the blocking survivors
+ *   through {@link recordDeferredRunnerBlockers}, so the replay delivers them as
+ *   the one blocker section a finding gets (an advisory copy beside it was r1
+ *   M2) and the composer persists them with the rest of the turn's blockers
+ *   (r1 M3);
  * - the commit gate (`evaluateGitGuard`) asks {@link absorbSettledRunnerBlockers}
  *   first, because a commit in the turn after the edit sees an answer that has
- *   settled but no turn end has drained yet.
- *
- * An answer is current or not by the same two shared seams the lane uses, in the
- * same order: `gateFindingsByPathFreshness` (a later edit makes it stale) and
- * `applyPushedFindingPolicy` (inline ignore, stored disposition, rule policy).
- * The lane keeps its own call to both, because the delivery-surface registry
- * pins that evidence to `runtime-turn.ts` beside the tagged push; a fold of the
- * two sites is the follow-up named on #3814.
+ *   settled but no turn end has drained yet. It judges quietly: the lane owns
+ *   the delivery records, so one answer writes one set (r1 L1).
  *
  * A run still in flight has answered nothing, so it does not gate: refusing every
  * commit while a 5 s+ runner runs would block the agent on nothing it can fix.
@@ -33,7 +36,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { gateFindingsByPathFreshness } from "./advisory-provenance.js";
 import {
-	claimSettledRunnerFindingsForGate,
+	peekSettledRunnerFindings,
 	type PendingRunnerFindings,
 } from "./dispatch/pending-runner-findings.js";
 import { applyPushedFindingPolicy } from "./dispatch/finding-policy.js";
@@ -49,6 +52,68 @@ export interface DeferredBlockerRecording {
 	recorded: number;
 	runnerIds: string[];
 	fileCount: number;
+}
+
+export interface DeferredRunnerVerdict {
+	/** Findings the freshness gate called stale: the answer is about older bytes. */
+	stale: number;
+	/** Findings the freshness gate called current. */
+	live: number;
+	/** Current findings that survived the finding policy: what the agent is shown. */
+	kept: Diagnostic[];
+	/** Current findings the finding policy dropped. */
+	suppressed: number;
+	/** The file's bytes the policy read; `undefined` when unreadable. */
+	bytes: Buffer | undefined;
+}
+
+/**
+ * The one verdict on a settled collect-later answer: freshness, then policy.
+ * `quiet` skips the delivery records (see `gateFindingsByPathFreshness`); a
+ * caller that only peeks passes it.
+ */
+export function judgeDeferredRunnerFindings(
+	pending: PendingRunnerFindings,
+	cwd: string,
+	options: { quiet?: boolean } = {},
+): DeferredRunnerVerdict {
+	const findings = pending.result?.diagnostics ?? [];
+	if (findings.length === 0) {
+		return { stale: 0, live: 0, kept: [], suppressed: 0, bytes: undefined };
+	}
+	const { "late-runner-findings": gate } = gateFindingsByPathFreshness({
+		cwd,
+		sources: {
+			"late-runner-findings": {
+				findings,
+				scannedAt: pending.markedAtMs,
+				citedPath: (finding: Diagnostic) => finding.filePath,
+			},
+		},
+		...(options.quiet === true ? { quiet: true } : {}),
+	});
+	if (gate.live.length === 0) {
+		return {
+			stale: gate.stale.length,
+			live: 0,
+			kept: [],
+			suppressed: 0,
+			bytes: undefined,
+		};
+	}
+	const bytes = readBytes(pending.filePath);
+	const { kept, suppressed } = applyPushedFindingPolicy(gate.live, {
+		cwd,
+		filePath: pending.filePath,
+		content: bytes?.toString("utf-8"),
+	});
+	return {
+		stale: gate.stale.length,
+		live: gate.live.length,
+		kept,
+		suppressed,
+		bytes,
+	};
 }
 
 /**
@@ -98,9 +163,12 @@ function readBytes(filePath: string): Buffer | undefined {
 }
 
 /**
- * Judge every settled, not-yet-judged deferred answer for the commit gate and
- * record the blocking survivors. Synchronous and non-draining: the turn-end
- * drain still delivers every answer, including the non-blocking ones.
+ * Judge every settled deferred answer for the commit gate and record the
+ * blocking survivors. Synchronous and non-draining: the turn-end drain still
+ * delivers every answer, including the non-blocking ones. The store keeps no
+ * per-entry state for this, so every attempt judges every settled answer again;
+ * a replay records nothing (the recorder is idempotent) and, judging quietly,
+ * writes no freshness record.
  */
 export function absorbSettledRunnerBlockers(
 	runtime: RuntimeCoordinator,
@@ -112,32 +180,13 @@ export function absorbSettledRunnerBlockers(
 		fileCount: 0,
 	};
 	const files = new Set<string>();
-	for (const pending of claimSettledRunnerFindingsForGate()) {
-		const findings = pending.result?.diagnostics ?? [];
-		if (findings.length === 0) continue;
-		const { "late-runner-findings": gate } = gateFindingsByPathFreshness({
-			cwd,
-			sources: {
-				"late-runner-findings": {
-					findings,
-					scannedAt: pending.markedAtMs,
-					citedPath: (finding: Diagnostic) => finding.filePath,
-				},
-			},
-		});
-		// Stale answers are the lane's to drop (it records the lost coverage).
-		if (gate.live.length === 0) continue;
-		const bytes = readBytes(pending.filePath);
-		const { kept } = applyPushedFindingPolicy(gate.live, {
-			cwd,
-			filePath: pending.filePath,
-			content: bytes?.toString("utf-8"),
-		});
+	for (const pending of peekSettledRunnerFindings()) {
+		const verdict = judgeDeferredRunnerFindings(pending, cwd, { quiet: true });
 		const recorded = recordDeferredRunnerBlockers(
 			runtime,
 			pending,
-			kept,
-			bytes,
+			verdict.kept,
+			verdict.bytes,
 		);
 		if (recorded === 0) continue;
 		total.recorded += recorded;
@@ -152,7 +201,7 @@ export function absorbSettledRunnerBlockers(
 	total.fileCount = files.size;
 	if (total.recorded > 0) {
 		// One row per gate consult that recorded something new; a repeat consult
-		// finds every answer judged and writes nothing.
+		// finds every finding recorded and writes nothing.
 		logLatency({
 			type: "phase",
 			toolName: "git-guard",
