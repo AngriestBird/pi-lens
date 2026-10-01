@@ -101,6 +101,8 @@ The principles' delegation contract applies. pi-lens adds:
   these rules.
 - Every regroup, merged bug fix, second round on one shape, and incident runs
   the retrospective in `docs/pi-lens-retro.md`.
+- The per-PR loop (review, verify, auto-merge on green), round routing, the
+  merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
   Never merge on absent, stale, or advisory-only checks.
 
@@ -628,6 +630,12 @@ the surface they bite; each block loads only when its trigger applies.
   Every model-facing diagnostic, blocker, advisory, widget, nudge, and snapshot
   either passes the shared freshness/disposition gate or carries an explicit
   bounded age label.
+- The dispatcher coverage notice (`buildCoverageNotice`) latches once per
+  session (`coverageNoticeSeen`) for the pi push surface; pull surfaces
+  (`pilens_analyze`, including its warm PostToolUse hook route) pass
+  `dedupeCoverageNotice: false` so every call carries the notice and the push
+  latch stays untouched (#3791). The warm hook deliberately repeats the notice
+  on every edit, matching its cold hook route.
 - `pilens:files:touched` publishers are `clients/pipeline.ts` and
   `clients/runtime-agent-end.ts`; `clients/agent-nudge.ts` is the subscriber.
   `clients/lsp-mutation.ts` has an optional callback but is not a publisher until

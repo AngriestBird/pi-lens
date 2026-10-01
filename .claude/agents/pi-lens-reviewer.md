@@ -279,7 +279,7 @@ new code is a legitimate member of the exempt class (registration). Say which,
 per entry, with the reason quoted (#2654 r2: two; #2649 r1: one; #2647 r1:
 a pin bump). The verify brief will ask; answer it unprompted.
 
-**Contract-only rounds are not re-verified** (merge-train round routing,
+**Contract-only rounds are not re-verified** (merge-policy round routing,
 2026-09-06). If every finding you raised is a body claim, a docstring, a
 record added with its test, or a test for existing behaviour, say so in the
 verdict ("all findings contract-only; merge on green after the round") so
