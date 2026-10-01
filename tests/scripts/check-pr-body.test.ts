@@ -7,7 +7,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
 import {
@@ -67,10 +67,15 @@ const motivatingFlattenedBodies = [
 	flattenedBody,
 ].map((candidate) => candidate.replaceAll("\\n", " "));
 
-function createOriginMasterFixture() {
+function createOriginMasterFixture(mappedFile?: string) {
 	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	// `mappedFile` (#3802 F3) commits one extra repo-relative file in the same
+	// shell command, so a mapped-path diff costs no additional git spawn.
+	const mapped = mappedFile
+		? ` && mkdir -p '${directory}/${dirname(mappedFile)}' && printf 'touched\\n' > '${directory}/${mappedFile}' && git -C '${directory}' add '${mappedFile}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-mapped`
+		: "";
 	gitExecSync(
-		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head`,
+		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}`,
 	);
 	return directory;
 }
@@ -2917,5 +2922,53 @@ describe("PR body garble from shell-expanded quotes (#3795)", () => {
 			`${body}\n\nThe \`oxlint --deny-warnings\` flag stays in the transcript.`,
 		).errors.join("\n");
 		expect(errors).not.toContain("outside a fenced block");
+	});
+});
+
+describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
+	// The diff touches a runtime file, so the Observability section must carry
+	// the literal the runtime-observability lint accepts; the coverage rule is
+	// then the only open question.
+	const runtimeBody = body.replace(
+		"The advisory check run is the record.",
+		"No new failure path; no record added.",
+	);
+	// Recurrence: PR #3864 r1 wired `lintTlaCoverage` into `lintPullRequestEvent`
+	// with no test through that entry; deleting the wire left 293 tests green,
+	// because the existing coverage case drove only `lintLocalPrBody`.
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture("clients/read-guard.ts");
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("fails a mapped change with no model move and no declaration", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(runtimeBody, []), {
+			pull_request: { number: 7, body: runtimeBody },
+		});
+		expect(result.valid).toBe(false);
+		expect(errors.mock.calls.flat().join("\n")).toContain("formal/read-guard/");
+	});
+
+	it("passes the same diff once the body declares one listed family", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const declared = `${runtimeBody}\n\nTLA+ unaffected: read-guard — only a local helper moved.`;
+		const result = await lintPullRequestEvent(fetchForEvent(declared, []), {
+			pull_request: { number: 7, body: declared },
+		});
+		expect(errors.mock.calls.flat().join("\n")).not.toContain("formal/");
+		expect(result).toMatchObject({ valid: true });
 	});
 });
