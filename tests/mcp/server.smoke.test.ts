@@ -635,7 +635,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_ast_grep_replace {Path} -> paths",
 	"pilens_ast_grep_replace {Precedes} -> precedes",
 	"pilens_ast_grep_replace {Strictness} -> strictness",
-	"pilens_ast_grep_replace {applys} -> apply",
+	"pilens_ast_grep_replace {applys} -> apply", // spellchecker:disable-line
 	"pilens_ast_grep_replace {cwds} -> cwd",
 	"pilens_ast_grep_replace {dirPath} -> paths",
 	"pilens_ast_grep_replace {dir_path} -> paths",
@@ -774,7 +774,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {SYMBOL} -> symbol",
 	"pilens_lsp_navigation {Symbol} -> symbol",
 	"pilens_lsp_navigation {TopLevelOnly} -> topLevelOnly",
-	"pilens_lsp_navigation {applys} -> apply",
+	"pilens_lsp_navigation {applys} -> apply", // spellchecker:disable-line
 	"pilens_lsp_navigation {callHierarchyItems} -> callHierarchyItem",
 	"pilens_lsp_navigation {characters} -> character",
 	"pilens_lsp_navigation {commands} -> command",
@@ -783,7 +783,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {dir_path} -> path",
 	"pilens_lsp_navigation {endCharacters} -> endCharacter",
 	"pilens_lsp_navigation {endLines} -> endLine",
-	"pilens_lsp_navigation {exactMatchs} -> exactMatch",
+	"pilens_lsp_navigation {exactMatchs} -> exactMatch", // spellchecker:disable-line
 	"pilens_lsp_navigation {filePath} -> path",
 	"pilens_lsp_navigation {file_path} -> path",
 	"pilens_lsp_navigation {kind} -> kinds",
@@ -795,7 +795,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {pathPath} -> path",
 	"pilens_lsp_navigation {path_path} -> path",
 	"pilens_lsp_navigation {paths} -> path",
-	"pilens_lsp_navigation {querys} -> query",
+	"pilens_lsp_navigation {querys} -> query", // spellchecker:disable-line
 	"pilens_lsp_navigation {sourcePath} -> path",
 	"pilens_lsp_navigation {source_path} -> path",
 	"pilens_lsp_navigation {symbolPath} -> path",
