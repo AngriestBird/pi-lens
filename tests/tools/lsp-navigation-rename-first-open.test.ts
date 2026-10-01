@@ -191,6 +191,20 @@ describe("#3827: a first open after the rename was computed is not a change", ()
 		expect(fs.readFileSync(fileB, "utf8")).toBe("let = 2;\n");
 	});
 
+	it("a file first opened in the very millisecond the rename was requested is held to the unopened rule", async () => {
+		// Recurrence guarded: the `>=` tie. A first send stamped in T's own tick
+		// may precede or follow the request, so the unopened rule (here: mtime an
+		// hour old) judges it, not the send stamp, which equals T.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		const result = await renameWith(async () => {
+			await touch(fileB, "const = 2;\n");
+		});
+
+		expect(result.text).not.toContain("language server computed the rename");
+		expect(result.isError).toBeUndefined();
+		expect(fs.readFileSync(fileB, "utf8")).toBe("let = 2;\n");
+	});
+
 	it("a file written after compute and then first opened is refused, and its bytes survive", async () => {
 		// Recurrence guarded: the fix over-widening into "any first open passes".
 		const result = await renameWith(async () => {
