@@ -548,7 +548,7 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 		// Recurrence prevented (#3871 r2 review F1): the failure's location was
 		// rendered against the worktree root (`at tests/unit/self.test.ts:12`)
 		// into a session whose own checkout holds a file at that path.
-		it("delivers `.worktrees/x/tests/unit/self.test.ts:12`, not the worktree-relative path", async () => {
+		it("delivers a worktree failure located under .worktrees/x, not at the worktree-relative path", async () => {
 			const x = addWorktree("x");
 			const xTest = path.join(x, "tests", "unit", "self.test.ts");
 			runner.failing.add(xTest);
