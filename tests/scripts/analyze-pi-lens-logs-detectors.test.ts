@@ -171,13 +171,37 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "test-runner-stale-verdicts")?.count).toBe(2);
 	});
 
-	it("D6 scanner-count-drift and turn-end-knip-cost: flags drift and cost pids", () => {
+	it("D6 scanner-count-drift: flags a pid on either drift rule", () => {
 		// {"phase":"knip","durationMs":7878,"metadata":{"execution":"executed","totalIssues":16187,...}}
+		// Real pid 763652 (44 runs, 9256 -> 10758) flags on exactly 5 steps >= 100
+		// with a 16% spread; real pid 3205171 (28 runs, 3 steps, 6%) does not.
+		// Labelled synthetic pids: 9001 drifts by spread alone; 9002 has 9 runs.
 		const report = run("knip");
-		expect(report.detectors.knip.drift.length).toBe(2);
-		expect(report.detectors.knip.cost.length).toBe(1);
+		expect(
+			report.detectors.knip.drift.map((d: any) => [d.pid, d.increments]),
+		).toEqual([
+			["763652", 5],
+			["9001", 0],
+		]);
 		expect(smell(report, "scanner-count-drift")?.count).toBe(2);
-		expect(smell(report, "turn-end-knip-cost")?.count).toBe(1);
+		expect(smell(report, "scanner-count-drift")?.description).toBe(
+			"knip totalIssues rose by >= 100 between consecutive executed runs at least 5 times, or its spread >= 25% (pids with >= 10 executed runs)",
+		);
+	});
+
+	it("D6 turn-end-knip-cost: flags a pid's hourly or single-run knip cost", () => {
+		// Real pid 3205171: 68546 ms of executed knip, single row 7878 ms. Real
+		// pid 763652: 23107 ms over 1.8 h, max 937 ms, does not flag. Labelled
+		// synthetic pid 9004 flags on the hourly rule alone; pid 9003 (4.8 s in
+		// 2 minutes) does not, because a lifetime under an hour counts as one.
+		const report = run("knip");
+		expect(
+			report.detectors.knip.cost.map((c: any) => [c.pid, c.totalMs, c.maxRow]),
+		).toEqual([
+			["3205171", 68546, 7878],
+			["9004", 35000, 3500],
+		]);
+		expect(smell(report, "turn-end-knip-cost")?.count).toBe(2);
 	});
 
 	it("D7 hook-await-exceeded: reports every overrun with its budget ratio", () => {

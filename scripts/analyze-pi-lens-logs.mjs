@@ -1948,8 +1948,9 @@ function computeKnip(state) {
 		const hours = first != null && last != null ? (last - first) / 3600000 : 0;
 		const totalMs = rows.reduce((n, r) => n + r.durationMs, 0);
 		const maxRow = rows.reduce((n, r) => Math.max(n, r.durationMs), 0);
-		const hasMeaningfulLifetime = hours >= 1 / 60;
-		const perHour = hasMeaningfulLifetime ? totalMs / hours : 0;
+		// A lifetime under an hour counts as one hour, so a short pid's few
+		// seconds of knip cannot extrapolate to a large hourly rate.
+		const perHour = totalMs / Math.max(hours, 1);
 		if (perHour >= 30000 || maxRow >= 5000)
 			cost.push({ pid, rows: rows.length, totalMs, hours, perHour, maxRow });
 	}
@@ -2439,7 +2440,7 @@ function buildReport(state) {
 		smells,
 		"scanner-count-drift",
 		knip.drift.length,
-		"knip totalIssues climbed >= 100 on >= 5 consecutive executed runs, or the spread >= 25%",
+		"knip totalIssues rose by >= 100 between consecutive executed runs at least 5 times, or its spread >= 25% (pids with >= 10 executed runs)",
 		knip.drift.slice(0, limit).map((d) => ({
 			key: `pid ${d.pid}`,
 			count: d.increments,
@@ -2452,7 +2453,7 @@ function buildReport(state) {
 		smells,
 		"turn-end-knip-cost",
 		knip.cost.length,
-		"knip consumed >= 30 s per hour of pid lifetime, or a single run took >= 5 s",
+		"knip consumed >= 30 s per hour of pid lifetime (a lifetime under an hour counts as one hour), or a single run took >= 5 s",
 		knip.cost.slice(0, limit).map((c) => ({
 			key: `pid ${c.pid}`,
 			count: Math.round(c.perHour),
