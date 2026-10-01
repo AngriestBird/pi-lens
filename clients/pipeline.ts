@@ -122,6 +122,7 @@ import {
 } from "./tool-policy.js";
 import type { PathSetLike } from "./runtime-coordinator.js";
 import { exceedsLspSyncLimits } from "./lsp/content-limits.js";
+import type { DriftDisposition } from "./lsp/document-drift.js";
 
 const LSP_SPAWN_BUDGET_MS = RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs;
 const AUTOFIX_CHANGED_FILE_SCAN_LIMIT = 5000;
@@ -1249,10 +1250,23 @@ export type LspResyncOutcome =
  * session may already hold the file (a read-warm touch), and the drain's write
  * would otherwise leave that document behind the disk until the next drift
  * sweep. `resyncGitChangedFiles` owns the held-only filter and the drift read.
+ *
+ * #3828 r3: the drain wrote these bytes, so the push is a save, as in
+ * `resyncLspFile` (#3405: a save-triggered server recompiles on didSave and on
+ * nothing else). The answer is the drift pass's disposition of F, or
+ * `no-service` when no current service exists to hold it.
  */
-export async function resyncHeldLspDocument(filePath: string): Promise<void> {
-	const lsp = await loadLspService();
-	await lsp.peekLSPService()?.resyncGitChangedFiles([filePath]);
+export async function resyncHeldLspDocument(
+	filePath: string,
+): Promise<DriftDisposition | "no-service"> {
+	const service = (await loadLspService()).peekLSPService();
+	if (!service) return "no-service";
+	const dispositions = await service.resyncGitChangedFiles([filePath], {
+		saved: true,
+	});
+	// Empty only from a destroyed service, which `resetLSPService` unpublishes
+	// before it shuts it down.
+	return dispositions.get(filePath) ?? "no-service";
 }
 
 export async function resyncLspFile(

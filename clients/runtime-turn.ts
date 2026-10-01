@@ -77,7 +77,10 @@ import { updateHeartbeat } from "./instance-registry.js";
 import { emitLensTurnFindings } from "./lens-events.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { isSubagentSession } from "./subagent-mode.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type {
+	ResolvedBlockerFile,
+	RuntimeCoordinator,
+} from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
 import type { LensToolHost } from "./tool-config.js";
 import { formatRunDurationMs } from "./run-duration.js";
@@ -658,10 +661,71 @@ function capTurnEndMessage(content: string): string {
 		out = `${lines.slice(0, maxLines).join("\n")}\n... (truncated)`;
 	}
 	if (out.length > maxChars) {
-		out = `${out.slice(0, maxChars)}\n... (truncated)`;
+		out = `${sliceAtCodePointBoundaries(out, 0, maxChars)}\n... (truncated)`;
 	}
 
 	return out;
+}
+
+function sliceAtCodePointBoundaries(
+	value: string,
+	start: number,
+	end: number,
+): string {
+	if (
+		start > 0 &&
+		start < value.length &&
+		isLowSurrogate(value.charCodeAt(start)) &&
+		isHighSurrogate(value.charCodeAt(start - 1))
+	) {
+		start += 1;
+	}
+	if (
+		end > 0 &&
+		end < value.length &&
+		isLowSurrogate(value.charCodeAt(end)) &&
+		isHighSurrogate(value.charCodeAt(end - 1))
+	) {
+		end -= 1;
+	}
+	return value.slice(start, end);
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+/**
+ * #3218 criterion 2: the turn-end "Resolved" section's share of the message
+ * cap. It rides first (the cap must never cut a consumed line) but is never
+ * the whole cap: a cleanup report must not crowd the live blockers out
+ * (review-3776-r3 W1). At most 40% of the chars and 5 lines, one of them kept
+ * for the "… and N more" tail.
+ */
+const RESOLVED_SHARE_OF_CHARS = 0.4;
+const RESOLVED_MAX_LINES = 5;
+
+/**
+ * #3218 criterion 2: "1st", "2nd", "3rd", "4th" … for a retiring write's
+ * index in the "Resolved this turn" line. A bare `${n}th` reads as "1th".
+ */
+function formatWriteOrdinal(n: number): string {
+	const mod100 = n % 100;
+	if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+	switch (n % 10) {
+		case 1:
+			return `${n}st`;
+		case 2:
+			return `${n}nd`; // spellchecker:disable-line
+		case 3:
+			return `${n}rd`;
+		default:
+			return `${n}th`;
+	}
 }
 
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
@@ -861,7 +925,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		}
 		resetFormatService();
-		if (pendingRunnerFindingsSize() === 0) return;
+		// #3218 criterion 2: a retirement nobody has reported (a
+		// `lens_diagnostics` confirmation lands on exactly this turn) falls
+		// through to the composer like a carried runner finding.
+		if (pendingRunnerFindingsSize() === 0 && !runtime.hasResolvedBlockerFiles())
+			return;
 	}
 
 	// Cancel any pending idle reset since we're actively working. #1618: also
@@ -4303,6 +4371,99 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 
+	// #3218 criterion 2: files whose inline blocker a fresh clean verdict
+	// retired during the turn. The coordinator's retire seam recorded which
+	// file, how many blockers, and the retiring write; this composer only
+	// formats them. Consumed HERE, once, so a retire is delivered exactly once
+	// (the coordinator clears its list and the line cannot re-serve).
+	const unresolvedKeys = new Set(
+		unresolvedBlockers.map((record) =>
+			normalizeMapKey(path.resolve(record.filePath)),
+		),
+	);
+	// A file this message still lists under `Unresolved` is HELD for the next
+	// turn_end, not dropped: a retire that landed after the snapshot above
+	// (the awaits between it and here) is real, and discarding it leaves the
+	// agent holding a STOP block for a file that is clean.
+	const formatResolvedTail = (dropped: number) => `… and ${dropped} more`;
+	const resolvedTailMax = formatResolvedTail(Number.MAX_SAFE_INTEGER).length;
+	const resolvedShareChars =
+		Math.floor(RUNTIME_CONFIG.turnEnd.maxChars * RESOLVED_SHARE_OF_CHARS) -
+		resolvedTailMax;
+	const formatResolvedLine = (entry: ResolvedBlockerFile): string => {
+		const clause = entry.confirmedClean
+			? " confirmed clean"
+			: entry.writeIndex === undefined
+				? ""
+				: ` cleared by the ${formatWriteOrdinal(entry.writeIndex)} write`;
+		// "This turn" only for a retire from this turn; an entry a turn_end
+		// that delivered nothing left behind is "since the last report".
+		const label =
+			entry.turnIndex === runtime.turnIndex
+				? "Resolved this turn"
+				: "Resolved since the last report";
+		const head = `${label}: `;
+		const tail = ` (${entry.blockerCount} blocker(s)${clause})`;
+		let display = toRunnerDisplayPath(cwd, entry.filePath);
+		// review-3776-r3 W2: no line is wider than the share, so the one line
+		// the floor below always takes can never be the part the cap cuts. The
+		// path loses its middle; both ends (root and file name) stay.
+		const room = resolvedShareChars - 1 - head.length - tail.length;
+		if (display.length > room) {
+			const keepHead = Math.ceil((room - 1) / 2);
+			display = `${sliceAtCodePointBoundaries(display, 0, keepHead)}…${sliceAtCodePointBoundaries(display, display.length - (room - 1 - keepHead), display.length)}`;
+		}
+		return `${head}${display}${tail}`;
+	};
+	// review-3776-verify V1 + review-3776-r3 W1: the section rides FIRST in
+	// the message and is sized BEFORE anything is consumed, on both of
+	// `capTurnEndMessage`'s axes, to what the live blockers after it leave
+	// (their text plus the `\n\n` joining them), never past its share. Room
+	// for the widest tail is kept on both axes. So the cap cuts neither a
+	// consumed line nor a blocker. A line that does not fit is HELD for the
+	// next turn_end; the first is always taken, so the held list drains.
+	const blockerText = blockerParts.join("\n\n");
+	const blockerChars = blockerParts.length > 0 ? blockerText.length + 2 : 0;
+	const blockerLines =
+		blockerParts.length > 0 ? blockerText.split("\n").length + 1 : 0;
+	const resolvedCharBudget = Math.min(
+		resolvedShareChars,
+		RUNTIME_CONFIG.turnEnd.maxChars - blockerChars - resolvedTailMax,
+	);
+	const resolvedLineBudget =
+		Math.min(
+			RESOLVED_MAX_LINES,
+			RUNTIME_CONFIG.turnEnd.maxLines - blockerLines,
+		) - 1;
+	let resolvedChars = 0;
+	let resolvedCount = 0;
+	const {
+		files: resolvedBlockerFileList,
+		dropped: resolvedBlockerFilesDropped,
+	} = runtime.consumeResolvedBlockerFiles((entry) => {
+		if (unresolvedKeys.has(normalizeMapKey(path.resolve(entry.filePath))))
+			return true;
+		const cost = formatResolvedLine(entry).length + 1;
+		if (
+			resolvedCount > 0 &&
+			(resolvedCount >= resolvedLineBudget ||
+				resolvedChars + cost > resolvedCharBudget)
+		)
+			return true;
+		resolvedChars += cost;
+		resolvedCount += 1;
+		return false;
+	});
+	const resolvedLines = resolvedBlockerFileList.map(formatResolvedLine);
+	if (resolvedBlockerFilesDropped > 0) {
+		resolvedLines.push(formatResolvedTail(resolvedBlockerFilesDropped));
+	}
+	// ONE section, `\n`-joined: ten separate `\n\n`-separated sections would
+	// spend 19 of the turn-end message's 20-line budget on blank separators
+	// and let `capTurnEndMessage` truncate the overflow line away.
+	const resolvedParts =
+		resolvedLines.length > 0 ? [resolvedLines.join("\n")] : [];
+
 	const labeledAdvisoryParts = advisoryParts.map((p) =>
 		unlabeledAdvisoryParts.has(p)
 			? p
@@ -4311,6 +4472,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
 	// ship the imperative preamble they were built with (#1622 review M2).
 	const findingParts = [
+		// #3218 criterion 2: the resolution lines ride FIRST, inside their
+		// sized share, so the cap cuts neither a consumed retirement
+		// (review-3776-verify V1) nor a live blocker (review-3776-r3 W1).
+		// They are not a finding tier (no gate applies to a just-cleared
+		// verdict), only a status line, and they are part of the block content
+		// so an otherwise empty turn still delivers them ONCE (the coordinator
+		// consumed them).
+		...resolvedParts,
 		...blockerParts,
 		...staleSecretParts,
 		...labeledAdvisoryParts,
@@ -4478,6 +4647,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			getFlag("lens-guard") &&
 			advisoryParts.length === 0 &&
 			staleSecretParts.length === 0 &&
+			// #3218 criterion 2: a resolved line is content worth delivering,
+			// so it must not be erased by the no-blockers clean-up. The
+			// reader clears it after delivery because `hasBlockers` is false.
+			resolvedParts.length === 0 &&
 			!runtime.gitGuardHasBlockers
 		) {
 			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
@@ -4527,6 +4700,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			blockerSections: blockerParts.length,
 			staleSecretSections: staleSecretParts.length,
 			advisorySections: advisoryParts.length,
+			// #3218 criterion 2: how many files this turn LISTED as resolved
+			// (held-back entries are not counted), and how many retire events
+			// fell past the cap. The line itself is in the delivered content;
+			// these make the feature visible in latency.log even when the block
+			// is suppressed or the agent reads only telemetry.
+			resolvedBlockerFiles: resolvedBlockerFileList.length,
+			resolvedBlockerFilesDropped,
 			// #1944 AC3: an empty advisory section on its own cannot say whether
 			// the turn had nothing to report or dropped something. This counter
 			// answers that from latency.log even when the payload is empty, and

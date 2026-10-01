@@ -1,13 +1,14 @@
----
-name: merge-train
-description: Run the pi-lens review → verify → merge policy over one or more open PRs. Use when asked to land a PR, babysit the merge queue, or process review backlogs. Encodes the standing quality gates so any session applies the same discipline.
----
+# pi-lens merge policy — role contract
 
-# Merge train
+Run the review → verify → merge policy over one or more open PRs: landing a
+PR, babysitting the merge queue, processing a review backlog. It encodes the
+standing quality gates so any session applies the same discipline.
 
 > Source of truth for every rule below is `AGENTS.md` ("Role contracts for
 > delegated work" → "Orchestrator rules", plus the defect catalog). This file
-> is the procedure and the record; on any conflict AGENTS.md wins.
+> is the procedure and the record; on any conflict AGENTS.md wins. It replaces
+> the former `merge-train` skill (#3837); the merge-train lane that skill also
+> described is retired.
 
 The policy that landed the 2026-08-17 arc (11 PRs, every one adversarially
 reviewed, zero unreviewed merges). Apply it to each PR in the queue.
@@ -82,13 +83,10 @@ moved lines; include only structural views that changed.
    If "not up to date", `gh api -X PUT .../pulls/<N>/update-branch`, wait for
    CI, re-gate, merge. On GitHub 503s: retry with backoff, never switch to
    raw-API merge endpoints.
-   Alternative, once the verdict is in: apply the `train:approved` label (add
-   `train:squash` for a squash merge) and let the merge-train lane workflow
-   land it (#2185). The lane merges only when both required checks have
-   CONCLUDED success on the exact current head, so a fix round pushed after
-   labeling re-gates itself. Removing the label aborts. Steps 1 through 4 are
-   unchanged: only the maintainer applies the label, and only after the
-   review verdict.
+   Alternative, once the verdict is in: arm GitHub auto-merge
+   (`gh pr merge <N> --auto --merge`) and let it land the PR when the required
+   checks are green on the current head. Steps 1 through 4 are unchanged: arm
+   it only after the review verdict and with the pushed SHA verified.
 6. **After each merge.** Master moved: check other open PRs for BEHIND/DIRTY,
    check in-flight agents for file overlap with the merged diff and nudge
    affected ones to merge origin/master before their next push.
@@ -285,9 +283,9 @@ operator's private notes, so a different orchestrator can run the same train.
   applies to human PRs; a bump title can never carry a ref. Merge order: one
   at a time (each merge dirties the rest; dependabot rebases them itself);
   gate on Lint, Unit tests and every non-advisory check on the exact head;
-  lint.yml and close-keywords.yml themselves skip "PR title", "PR body
-  (advisory)" and "Close-keyword syntax" for dependabot (2026-09-09, refs
-  #2714), so nothing needs hand-ignoring; hold anything red on a real check
+  pr-metadata.yml itself skips "PR title", "PR body (advisory)" and
+  "Close-keyword syntax" for dependabot (2026-09-09, refs #2714), so nothing
+  needs hand-ignoring; hold anything red on a real check
   with a comment naming the check (2026-09-07: tsls 6 needs a Node-floor bump, biome
   fails the install test, vitest 5 fails four gates; a bump whose install
   script is pinned by `allowScripts` needs the pin moved in a maintainer

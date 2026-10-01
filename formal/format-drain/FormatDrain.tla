@@ -23,22 +23,28 @@
 (*    editor's submit callback, so it runs while the drain runs; the drain  *)
 (*    has no abort signal then.                                             *)
 (*  - the drain handler (one file): the session capture and the claim       *)
-(*    (runtime-agent-end.ts ~147), then runFormatPhase (pipeline.ts ~1342)  *)
-(*    -> formatFile (formatters.ts ~2379): read contentBefore, spawn the    *)
-(*    in-place formatter (it reads and writes F), read contentAfter,        *)
-(*    changed := before # after; then fileContent is read (pipeline.ts      *)
-(*    ~1438); then the apply loop: recordProjectChange, recordWritten,      *)
-(*    addModifiedRange, turnSummary (runtime-agent-end.ts ~769), and        *)
-(*    resyncLspFile(fileContent, fileReadStamp) (~820).                     *)
-(*    FixQueue: the #3561 format hold (~588) is taken before contentBefore  *)
-(*    and released when the phase settles, after the fileContent read.      *)
-(*    The per-file wait is `bounded(..., 10 s)` (~607): on expiry the       *)
-(*    handler requeues and moves on while the formatter child keeps         *)
-(*    running (Orphan). FixQueueHold: the hold's release follows the phase, *)
-(*    not the bound, so the child keeps the queue until it has written.     *)
+(*    (handleAgentEnd), then runFormatPhase -> formatFile: resolve the      *)
+(*    formatter's command (resolveCommand, which may auto-install; #3558),  *)
+(*    enter pi's queue (#3610), read contentBefore, spawn the in-place      *)
+(*    formatter (it reads and writes F), read contentAfter,                 *)
+(*    changed := before # after; then fileContent is read (runFormatPhase); *)
+(*    then the apply loop: recordProjectChange, recordWritten,              *)
+(*    addModifiedRange, turnSummary, and resyncLspFile(fileContent,         *)
+(*    fileReadStamp).                                                       *)
+(*    FixQueue: the #3561 format hold is entered (EnterAfterResolve: after  *)
+(*    the resolution, #3610; before it, the pre-#3610 code) and released    *)
+(*    when the phase settles, after the fileContent read.                   *)
+(*    The per-file wait is `bounded(..., 10 s)`: on expiry the handler      *)
+(*    requeues and moves on while the formatter run keeps going, whether    *)
+(*    it is resolving, waiting to enter or writing (Orphan).                *)
+(*    FixQueueHold: the hold's release follows the phase, not the bound,    *)
+(*    so the child keeps the queue until it has written.                    *)
 (*    FixOrphanSync: once that child has exited, a fresh read of F is taken *)
-(*    and later sent to the LSP (~614); the read and the send are separate  *)
-(*    steps, as in the code.                                                *)
+(*    and later sent to the LSP; the read and the send are separate steps,  *)
+(*    as in the code. OrphanSyncBound (#3728): that wait is itself bounded  *)
+(*    by DEFERRED_FORMAT_BUDGET_MS; it gives up while the run is alive.     *)
+(*    OrphanLateSync (#3828): the give-up chains the same read and send     *)
+(*    onto the run's settlement, so the late write is still synced.         *)
 (*  - /new: resetForSession (runtime-coordinator.ts ~447) on the module-    *)
 (*    level `runtime`: fresh read guard, cleared queue, generation + 1; and *)
 (*    the LSP service is retired (resetLSPService), so the next touch opens *)
@@ -80,7 +86,10 @@ CONSTANTS
     FixOrphanSync,    \* fix: an abandoned child's exit is followed by a stamped read + resync
     IdleRetire,       \* TRUE: the LSP service may be retired without a session bump (#3576)
     ServiceGen,       \* fix (#3576): the drain's sends also check the LSP service generation
-    HeldResync        \* fix (#3576 R1): a replaced drain resyncs only a live document, fresh read
+    HeldResync,       \* fix (#3576 R1): a replaced drain resyncs only a live document, fresh read
+    EnterAfterResolve, \* fix (#3610): the formatter enters pi's queue after its command resolution
+    OrphanSyncBound,  \* TRUE: the post-exit wait gives up after DEFERRED_FORMAT_BUDGET_MS (#3728)
+    OrphanLateSync    \* fix (#3828): a give-up chains the fresh read + resync onto the run's settlement
 
 Content == [e : SUBSET (1..Edits), f : BOOLEAN]
 Fmt(c) == [e |-> c.e, f |-> TRUE]
@@ -93,7 +102,7 @@ VARIABLES
     reads, written, sessStart,
     aop, tmp, nextEdit, queued,
     hs, dGen, before, after, changed, fc, fcStamp,
-    sp, sub, oc, ocStamp,
+    sp, sub, oc, ocStamp, gaveUp,
     clock, lspC, lspLast, lspOpen, lspGen, retired,
     extS, ext, extLeft,
     badClaim, blind, crossWrite, ownDrop, lspCross, respawn,
@@ -102,11 +111,11 @@ VARIABLES
 vars == <<file, mtime, applied, qOwner, gen, sessions, turns, turn, ops,
           reads, written, sessStart, aop, tmp, nextEdit, queued,
           hs, dGen, before, after, changed, fc, fcStamp, sp, sub, oc, ocStamp,
-          clock, lspC, lspLast, lspOpen, lspGen, retired, extS, ext, extLeft,
+          gaveUp, clock, lspC, lspLast, lspOpen, lspGen, retired, extS, ext, extLeft,
           badClaim, blind, crossWrite, ownDrop, lspCross, respawn, dLspGen>>
 
 drainVars == <<hs, dGen, before, after, changed, fc, fcStamp, dLspGen>>
-subVars == <<sp, sub, oc, ocStamp>>
+subVars == <<sp, sub, oc, ocStamp, gaveUp>>
 lspVars == <<clock, lspC, lspLast, lspOpen, lspGen, retired>>
 extVars == <<extS, ext, extLeft>>
 flagVars == <<badClaim, blind, crossWrite, ownDrop, lspCross, respawn>>
@@ -130,7 +139,7 @@ Init ==
     /\ aop = "idle" /\ tmp = Init0 /\ nextEdit = 1 /\ queued = FALSE
     /\ hs = "none" /\ dGen = 0 /\ before = Init0 /\ after = Init0
     /\ changed = FALSE /\ fc = Init0 /\ fcStamp = 0
-    /\ sp = "none" /\ sub = Init0 /\ oc = Init0 /\ ocStamp = 0
+    /\ sp = "none" /\ sub = Init0 /\ oc = Init0 /\ ocStamp = 0 /\ gaveUp = FALSE
     /\ clock = 1 /\ lspC = Init0 /\ lspLast = 0 /\ lspOpen = TRUE
     /\ lspGen = 1 /\ retired = FALSE /\ dLspGen = 0
     /\ extS = "idle" /\ ext = Init0 /\ extLeft = ExtWrites
@@ -275,40 +284,60 @@ DSkip ==
                    queued, dGen, dLspGen, before, after, changed, fc, fcStamp,
                    subVars, lspVars, extVars, flagVars>>
 
-DBefore ==
+\* The format worker starts the formatter run. The run resolves its command
+\* first (`resolveCommand`: an auto-install can take minutes), OUTSIDE pi's
+\* queue (#3558). Before #3610 (EnterAfterResolve = FALSE) the hold was taken
+\* here, so an install held pi's queue.
+DStart ==
     /\ hs = "before" /\ ~Replaced
-    /\ ~FixQueue \/ qOwner = "none"
-    /\ before' = file
-    /\ qOwner' = IF FixQueue THEN "drain" ELSE qOwner
-    /\ hs' = "spawn"
+    /\ (FixQueue /\ ~EnterAfterResolve) => qOwner = "none"
+    /\ qOwner' = IF FixQueue /\ ~EnterAfterResolve THEN "drain" ELSE qOwner
+    /\ hs' = "wait" /\ sp' = "resolve" /\ gaveUp' = FALSE
     /\ UNCHANGED <<file, mtime, applied, sessVars, aop, tmp, nextEdit, queued,
-                   dGen, dLspGen, after, changed, fc, fcStamp, subVars,
-                   lspVars, extVars, flagVars>>
-
-DSpawn ==
-    /\ hs = "spawn"
-    /\ sp' = "start" /\ hs' = "wait"
-    /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
-                   queued, dGen, dLspGen, before, after, changed, fc, fcStamp,
+                   dGen, dLspGen, before, after, changed, fc, fcStamp,
                    sub, oc, ocStamp, lspVars, extVars, flagVars>>
+
+SubResolved ==
+    /\ sp = "resolve"
+    /\ sp' = "enter"
+    /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
+                   queued, drainVars, sub, oc, ocStamp, gaveUp, lspVars, extVars,
+                   flagVars>>
+
+\* #3610: `formatFile` calls `enter()` after the resolution and before the
+\* contentBefore read. A run the bound gave up on during its resolution enters
+\* later, in a queue entry of its own that lasts until it settles.
+SubEnter ==
+    /\ sp = "enter"
+    /\ (FixQueue /\ EnterAfterResolve) => qOwner = "none"
+    /\ qOwner' = IF FixQueue /\ EnterAfterResolve THEN "drain" ELSE qOwner
+    /\ before' = file
+    /\ sp' = "start"
+    /\ UNCHANGED <<file, mtime, applied, sessVars, aop, tmp, nextEdit, queued,
+                   dGen, dLspGen, after, changed, fc, fcStamp, hs, sub, oc,
+                   ocStamp, gaveUp, lspVars, extVars, flagVars>>
 
 SubRead ==
     /\ sp = "start"
     /\ sub' = file /\ sp' = "run"
     /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
-                   queued, drainVars, oc, ocStamp, lspVars, extVars, flagVars>>
+                   queued, drainVars, oc, ocStamp, gaveUp, lspVars, extVars,
+                   flagVars>>
 
 \* the formatter child writes its format of what it read; an abandoned child
-\* releases the hold it kept (FixQueueHold) once it has written
+\* releases the hold it kept (FixQueueHold) once it has written. A run whose
+\* post-exit wait gave up (gaveUp) is synced only with OrphanLateSync (#3828):
+\* the merged #3728 code abandoned that resync and never read or sent again.
 SubWrite ==
     /\ sp = "run"
     /\ WriteFile(Fmt(sub))
     /\ sp' = IF hs = "wait" THEN "exited"
-             ELSE IF FixOrphanSync THEN "oread"
+             ELSE IF FixOrphanSync /\ (~gaveUp \/ OrphanLateSync) THEN "oread"
              ELSE "none"
     /\ qOwner' = IF hs # "wait" /\ qOwner = "drain" THEN "none" ELSE qOwner
     /\ UNCHANGED <<applied, sessVars, aop, tmp, nextEdit, queued,
-                   drainVars, sub, oc, ocStamp, lspVars, extVars, flagVars>>
+                   drainVars, sub, oc, ocStamp, gaveUp, lspVars, extVars,
+                   flagVars>>
 
 \* fix: the post-exit read of F, stamped ...
 OrphanRead ==
@@ -316,7 +345,7 @@ OrphanRead ==
     /\ oc' = file /\ ocStamp' = clock /\ clock' = clock + 1
     /\ sp' = "osend"
     /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
-                   queued, drainVars, sub, lspC, lspLast, lspOpen, lspGen,
+                   queued, drainVars, sub, gaveUp, lspC, lspLast, lspOpen, lspGen,
                    retired, extVars, flagVars>>
 
 \* ... and, later, its send
@@ -325,7 +354,7 @@ OrphanSend ==
     /\ DrainSend(oc, IF FixStamp THEN ocStamp ELSE 0)
     /\ sp' = "none"
     /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
-                   queued, drainVars, sub, oc, ocStamp, lspGen, retired,
+                   queued, drainVars, sub, oc, ocStamp, gaveUp, lspGen, retired,
                    extVars, badClaim, blind, crossWrite, ownDrop>>
 
 DAfter ==
@@ -336,11 +365,12 @@ DAfter ==
     /\ hs' = "fc"
     /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
                    queued, dGen, dLspGen, before, fc, fcStamp, sub, oc, ocStamp,
-                   lspVars, extVars, flagVars>>
+                   gaveUp, lspVars, extVars, flagVars>>
 
-\* bounded() expires: requeue "format-failed", move on; the child runs on
+\* bounded() expires: requeue "format-failed", move on; the run goes on (it may
+\* still be resolving its command, waiting to enter, or writing)
 Abandon ==
-    /\ Orphan /\ hs = "wait" /\ sp \in {"start", "run"}
+    /\ Orphan /\ hs = "wait" /\ sp \in {"resolve", "enter", "start", "run"}
     /\ hs' = "done"
     /\ queued' = IF Current THEN TRUE ELSE queued
     /\ crossWrite' = (crossWrite \/ (Current /\ dGen # gen))
@@ -349,6 +379,17 @@ Abandon ==
     /\ UNCHANGED <<file, mtime, applied, sessVars, aop, tmp, nextEdit,
                    dGen, dLspGen, before, after, changed, fc, fcStamp, subVars,
                    lspVars, extVars, badClaim, blind, lspCross, respawn>>
+
+\* #3728: the post-exit wait is bounded by DEFERRED_FORMAT_BUDGET_MS and gives
+\* up while the abandoned run is still alive. Without OrphanLateSync it reports
+\* "abandoned" and the run's later write is never read or sent (SubWrite).
+OrphanGiveUp ==
+    /\ OrphanSyncBound /\ hs # "wait" /\ ~gaveUp
+    /\ sp \in {"resolve", "enter", "start", "run"}
+    /\ gaveUp' = TRUE
+    /\ UNCHANGED <<file, mtime, applied, qOwner, sessVars, aop, tmp, nextEdit,
+                   queued, drainVars, sp, sub, oc, ocStamp, lspVars, extVars,
+                   flagVars>>
 
 \* the phase reads fileContent (with its stamp) inside the hold, then settles
 \* and the hold is released
@@ -393,7 +434,8 @@ ExtWrite ==
 Next ==
     \/ AgentRead \/ EditCheck \/ EditRead \/ EditWrite \/ EditSync
     \/ EndRun \/ StartRun \/ NewSession
-    \/ DSkip \/ DBefore \/ DSpawn \/ SubRead \/ SubWrite \/ DAfter \/ Abandon
+    \/ DSkip \/ DStart \/ SubResolved \/ SubEnter \/ SubRead \/ SubWrite
+    \/ DAfter \/ Abandon \/ OrphanGiveUp
     \/ OrphanRead \/ OrphanSend
     \/ DFc \/ DApply
     \/ Retire
@@ -407,8 +449,10 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
     /\ file \in Content /\ applied \subseteq 1..Edits
     /\ qOwner \in {"none", "agent", "drain"}
-    /\ hs \in {"none", "before", "spawn", "wait", "fc", "apply", "done"}
-    /\ sp \in {"none", "start", "run", "exited", "oread", "osend"}
+    /\ hs \in {"none", "before", "wait", "fc", "apply", "done"}
+    /\ sp \in {"none", "resolve", "enter", "start", "run", "exited", "oread",
+               "osend"}
+    /\ gaveUp \in BOOLEAN
     /\ lspOpen \in BOOLEAN /\ retired \in BOOLEAN
 
 \* The drain never overwrites an agent edit (pi docs/extensions.md ~1925).
@@ -447,4 +491,9 @@ NoDrainRespawn == ~respawn
 \* in the session it claimed in keeps every session write (recordWritten,
 \* requeue).
 NoOwnDrop == ~ownDrop
+
+\* #3558, #3610: an agent edit never waits on pi's queue while the formatter
+\* only resolves its command (an auto-install runs for minutes). Before #3610
+\* the hold was entered before the resolution.
+NoInstallHold == ~(aop = "wait" /\ qOwner = "drain" /\ sp = "resolve")
 =============================================================================
