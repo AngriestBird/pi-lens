@@ -10,5 +10,5 @@ AGENTS.md automatically; this file carries only what precedes that read.
   bypasses, and the rest of AGENTS.md "Contributing". Fix the command; never
   route around it.
 - Role contracts are `docs/pi-lens-*.md`, the only home of role rules;
-  `.claude/agents/` holds thin Claude wrappers for those roles, and
-  `.claude/skills/` the merge-train and retro procedures.
+  `.claude/agents/` holds thin Claude wrappers, `.claude/skills/` the retro
+  procedure, and `docs/pi-lens-merge-policy.md` the merge policy.

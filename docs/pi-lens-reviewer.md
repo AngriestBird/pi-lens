@@ -148,7 +148,8 @@ the rate they remove them.
 - Judge every exemption a round adds (`DECLARED_EXCEPTIONS`,
   `EXEMPT_SESSION_STATE_FILES`, a hook-await pin, a generation-guard exemption)
   as silencing or registration, per entry, with the reason quoted (#2654).
-- Route the round per principles §3 "Round routing" and say it in the verdict:
+- Route the round per principles §3 and `docs/pi-lens-merge-policy.md`
+  "Round routing", and say it in the verdict:
   "contract-only; merge on green" when every finding is a body claim, comment,
   literal, changelog line, or a prescribed remedy with its quoted red. A
   verdict, guard direction, lifecycle hook, or failsafe keeps the verify.
