@@ -2654,6 +2654,8 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 			moved?: boolean;
 			scopes?: readonly [unknown, unknown];
 			neighbour?: "fixable" | "not eligible" | "suppressed";
+			/** The pid the process presents when the pass runs (a resume elsewhere). */
+			pidAtSettle?: number;
 		} = {},
 	) => {
 		const { moved = true, neighbour = "fixable" } = opts;
@@ -2741,22 +2743,34 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 					};
 				},
 			);
-			await handleAgentEnd({
-				ctxCwd: env.tmpDir,
-				getFlag: (name) =>
-					name === "lens-actionable-warning-autofix" ||
-					name === "lens-actionable-warnings" ||
-					name === "no-lsp",
-				notify: vi.fn(),
-				dbg: vi.fn(),
-				runtime,
-				cacheManager: {
-					readCache: () => ({ data: report }),
-					addModifiedRange: vi.fn(),
-				} as any,
-				getFormatService: () =>
-					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
-			});
+			// `process.pid` is a data property, so `vi.spyOn(process, "pid", "get")`
+			// has no getter to spy on: swap the descriptor and restore it below.
+			const pidDescriptor = Object.getOwnPropertyDescriptor(process, "pid")!;
+			if (opts.pidAtSettle !== undefined)
+				Object.defineProperty(process, "pid", {
+					...pidDescriptor,
+					value: opts.pidAtSettle,
+				});
+			try {
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+			} finally {
+				Object.defineProperty(process, "pid", pidDescriptor);
+			}
 			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
 			expect(fs.readFileSync(a, "utf8")).toBe("const x = 2;\n");
 			return {
@@ -2812,6 +2826,24 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 			]);
 		});
 	}
+
+	// F11, the pid term of `lineageKey`. A resume in another process presents the
+	// same guard ticket (the counter restarts at 1 in each process) and the same
+	// epoch 0; only the pid differs. The report is built under the real pid, then
+	// the process presents another one when the pass runs.
+	it("applies a quick fix from an entry the same ticket and epoch stamped in another process and credits it to no branch", async () => {
+		const { verdict, rows, subject } = await quickFixPass([0, 0], {
+			moved: false,
+			pidAtSettle: process.pid + 1,
+		});
+		expect(verdict).toBe("block");
+		expect(rows).toEqual([
+			expect.objectContaining({
+				count: 1,
+				latestReasons: [expect.objectContaining({ subject })],
+			}),
+		]);
+	});
 
 	it("credits a quick fix pass whose entries were built under the live guard at epoch 0", async () => {
 		expect((await quickFixPass([0, 0], { moved: false })).verdict).toBe(
