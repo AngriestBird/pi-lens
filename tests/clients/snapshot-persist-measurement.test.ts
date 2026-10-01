@@ -11,10 +11,10 @@
  *    own raw runs, so the PR body's numbers cite nothing;
  *  - the two trees measured on different inputs, which makes the ratio
  *    meaningless;
- *  - a later change that puts the clone (or the main-thread gzip) back and
- *    leaves the committed numbers describing code that no longer exists: the
- *    ratios below name what the artifact must still show, and the behaviour
- *    tests in project-snapshot-persist-transfer.test.ts guard the code itself.
+ *  - a later change that puts the clone (or the main-thread gzip) back: this
+ *    file reads the committed artifact and cannot see the code, so it pins
+ *    that artifact's provenance only, not the code; the behaviour tests in
+ *    project-snapshot-persist-transfer.test.ts guard the code itself.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
