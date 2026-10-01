@@ -331,6 +331,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a pull round trip per case -- the same
 	// #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-root-fallback-3750.test.ts",
+	// #3827: drives `lsp_navigation rename` over a REAL `createLSPClient` on the
+	// fake server (a real initialize handshake per case), so the client's own
+	// first-send stamp reaches the capture; the same #1022/#2332 contention
+	// class as its lane siblings.
+	"tests/tools/lsp-navigation-rename-first-open.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
@@ -419,6 +424,8 @@ export const wallClockBudgetInclude = [
 	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).
 	"tests/clients/runtime-turn-test-runner-bounds.test.ts",
+	// #3871: real `git worktree add` / `git submodule add` children are the fixture (flake-shape admission).
+	"tests/clients/runtime-turn-test-worktree-root.test.ts",
 	"tests/clients/safe-spawn-ambient-signal.test.ts",
 	"tests/clients/safe-spawn-failure-taxonomy.test.ts",
 	"tests/clients/safe-spawn-input.test.ts",
