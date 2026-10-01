@@ -926,13 +926,15 @@ function extractTestPathTokens(value) {
 	return tokens;
 }
 
-function lintTestReferences(
-	body,
-	options = {},
-	corpus = options.testCorpus ?? testCorpus(options),
-) {
+function lintTestReferences(body, options = {}) {
 	const references = [];
 	const visibleBody = bodyLinesOutsideFences(body).join("\n");
+	// The corpus is a full `git ls-files` plus a read-and-lex of every test
+	// file. A body with no test reference never needs it, so compute it on
+	// first use: a plain prose body no longer pays for the scan (#3902).
+	let corpus;
+	const getCorpus = () =>
+		(corpus ??= options.testCorpus ?? testCorpus(options));
 	const isExistingDirectory = (pathToken) => {
 		try {
 			return statSync(
@@ -947,10 +949,11 @@ function lintTestReferences(
 			// A trailing slash names a suite directory, never a file.
 			if (pathToken.endsWith("/")) continue;
 			if (!isConcreteTestPathToken(pathToken)) continue;
+			const { paths, titles } = getCorpus();
 			if (
-				corpus.paths.has(pathToken) ||
-				corpus.titles.has(pathToken) ||
-				corpus.paths.has(pathToken.match(/^(tests\/[^:]+):\d+$/)?.[1] ?? "")
+				paths.has(pathToken) ||
+				titles.has(pathToken) ||
+				paths.has(pathToken.match(/^(tests\/[^:]+):\d+$/)?.[1] ?? "")
 			)
 				continue;
 			// A slash-less directory (tests/config) names a suite too.
@@ -1035,10 +1038,11 @@ function lintTestReferences(
 	}
 	const exists = (reference) => {
 		const path = reference.match(/^(tests\/[^:]+):\d+$/)?.[1];
+		const { paths, titles } = getCorpus();
 		return (
-			corpus.paths.has(reference) ||
-			corpus.paths.has(path ?? reference) ||
-			corpus.titles.has(reference)
+			paths.has(reference) ||
+			paths.has(path ?? reference) ||
+			titles.has(reference)
 		);
 	};
 	return [...new Set(references)]
