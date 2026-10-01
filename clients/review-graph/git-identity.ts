@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { dirname, join, resolve } from "node:path";
-import { normalizeFilePath, walkUpDirs } from "../path-utils.js";
+import { normalizeFilePath, pathsEqual, walkUpDirs } from "../path-utils.js";
 
 export interface GitIdentity {
 	/** Resolved HEAD commit SHA (detached or resolved from a symbolic ref). */
@@ -162,6 +162,26 @@ export function resolveGitCheckout(startPath: string): GitCheckout | null {
 				spelledRoot: resolved.worktreeRoot,
 				commonDir: canonicalDirectory(resolved.commonDir),
 			}
+		: null;
+}
+
+/**
+ * The linked worktree of `session`'s repository that owns `absoluteFile`, or
+ * `null` when the session checkout owns it, its owner is a different
+ * repository (a submodule, a nested clone), or no owner can be resolved (#3871,
+ * #3872). Same commondir plus a different top level is the whole rule; every
+ * "which checkout owns this edit" decision in turn_end asks here, so the knip
+ * scan root and the test runner root cannot disagree about a file.
+ */
+export function resolveLinkedWorktreeOwner(
+	session: GitCheckout,
+	absoluteFile: string,
+): GitCheckout | null {
+	const owner = resolveGitCheckout(dirname(absoluteFile));
+	return owner !== null &&
+		!pathsEqual(owner.root, session.root) &&
+		pathsEqual(owner.commonDir, session.commonDir)
+		? owner
 		: null;
 }
 

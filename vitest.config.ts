@@ -419,6 +419,8 @@ export const wallClockBudgetInclude = [
 	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).
 	"tests/clients/runtime-turn-test-runner-bounds.test.ts",
+	// #3871: real `git worktree add` / `git submodule add` children are the fixture (flake-shape admission).
+	"tests/clients/runtime-turn-test-worktree-root.test.ts",
 	"tests/clients/safe-spawn-ambient-signal.test.ts",
 	"tests/clients/safe-spawn-failure-taxonomy.test.ts",
 	"tests/clients/safe-spawn-input.test.ts",

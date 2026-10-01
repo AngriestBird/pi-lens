@@ -97,6 +97,10 @@ import {
 	type TestRunnerClient,
 } from "./test-runner-client.js";
 import {
+	createTurnEndTestRoots,
+	MAX_LINKED_TEST_ROOTS_PER_TURN,
+} from "./test-target-roots.js";
+import {
 	MAX_ADVISORY_AFFECTED_FILES,
 	gateFindingsByPathFreshness,
 	snapshotAdvisoryProvenance,
@@ -2461,6 +2465,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			Omit<TurnEndTestTarget, "strategy"> & {
 				strategy: TurnEndTestTarget["strategy"] | "deferred";
 				sourceFile: string;
+				/**
+				 * The checkout root this target is selected and run in (#3871): the
+				 * session cwd, or the linked worktree that owns it. Not persisted;
+				 * a carried target re-derives it from its path.
+				 */
+				testRoot: string;
 				fileSeqAtRun?: number;
 				/** Cut-batch count carried in from the cache, for the cap below. */
 				deferralAttempts?: number;
@@ -2474,6 +2484,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// LSP cascade-diagnostics merge — no second reverse-dependency walk, and the
 		// neighbor set inherits whatever budget the cascade compute already applied
 		// (CASCADE_NEIGHBOUR_BUDGET), so this can't turn into unbounded per-edit work.
+		// #3871: which checkout root owns each target. One resolver per turn so
+		// the per-turn root cap and the per-directory memo are shared by the
+		// carried-over targets and this turn's candidates.
+		const testRoots = createTurnEndTestRoots(cwd);
 		const candidates: Array<{
 			display: string;
 			abs: string;
@@ -2669,16 +2683,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// A RunnerConfig carries functions, so the cache stores the runner KEY
 			// and the config is re-resolved here from the single registry.
 			const config = RUNNERS[carried.runner];
+			const carriedRoot = testRoots.rootFor(testFile);
 			if (
 				!config ||
-				isExcludedTestTarget(testFile, cwd) ||
+				isExcludedTestTarget(testFile, carriedRoot.root) ||
 				!fs.existsSync(testFile)
 			) {
 				resolvedDeferralKeys.add(carriedKey);
 				deadDeferred++;
 				continue;
 			}
-			if (targets.length >= TEST_RUNNER_MAX_TARGETS) {
+			if (carriedRoot.overCap || targets.length >= TEST_RUNNER_MAX_TARGETS) {
 				// I5: not settled — held, with `attempts` UNCHANGED. It was never
 				// dispatched, so charging it toward retirement would retire a suite
 				// this turn simply had no room for.
@@ -2701,6 +2716,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				runner: carried.runner,
 				config,
 				strategy: "deferred",
+				testRoot: carriedRoot.root,
 				deferralAttempts: attempts,
 			});
 			dbg(
@@ -2751,9 +2767,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let excludedTargets = 0;
 		let retiredSkips = 0;
 		for (const { display, abs, isNeighbor } of candidates) {
+			// #3871: select in the checkout that owns the edit. For an edit the
+			// session checkout owns this is `cwd`, exactly as before.
+			const { root: testRoot, overCap: rootOverCap } = testRoots.rootFor(abs);
+			if (rootOverCap) {
+				dbg(
+					`turn_end: ${display} → test root ${toRunnerDisplayPath(cwd, testRoot)} over the per-turn cap of ${MAX_LINKED_TEST_ROOTS_PER_TURN} linked worktrees, skipping selection`,
+				);
+				continue;
+			}
 			const target = testRunnerClient.getTestRunTarget(
 				abs,
-				cwd,
+				testRoot,
 				runtime.turnIndex,
 			);
 			const targetKey = target ? normalizeMapKey(target.testFile) : "";
@@ -2779,7 +2804,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// Cache admission and retirement reject foreign-checkout failures;
 				// this gate still covers self/related discovery and deferred targets.
 				// The log must not claim a specific cause from a boolean verdict.
-				if (isExcludedTestTarget(target.testFile, cwd)) {
+				if (isExcludedTestTarget(target.testFile, testRoot)) {
 					excludedTargets++;
 					dbg(
 						`turn_end: ${display} → test target excluded by the built-in turn-end policy, skipping spawn (${path.relative(cwd, target.testFile)})`,
@@ -2802,7 +2827,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					overCapTargets++;
 					continue;
 				}
-				targets.push({ ...target, sourceFile: abs });
+				targets.push({ ...target, sourceFile: abs, testRoot });
 				dbg(
 					`turn_end: ${display} → test ${target.runner} ${path.relative(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
 				);
@@ -2811,6 +2836,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					`turn_end: ${display} → no test file found${isNeighbor ? " (cascade-neighbor)" : ""}`,
 				);
 			}
+		}
+		for (const root of testRoots.overCapRoots()) {
+			// Counted, not once-per-subject: a busy orchestrator session hits the
+			// cap on many turns, and the number of skipped roots is the question.
+			incrementDegradationCount({
+				kind: "turn-end-test-root-skipped",
+				subject: "root-cap",
+				reason: `${toRunnerDisplayPath(cwd, root)} had no tests selected: more than ${MAX_LINKED_TEST_ROOTS_PER_TURN} linked worktrees edited this turn`,
+			});
 		}
 		if (excludedTargets > 0) {
 			dbg(
@@ -2884,7 +2918,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// abort signal the rest of the spawn layer already honours.
 				signal: getAmbientAbortSignal(),
 				run: (t, batchSignal) =>
-					testRunnerClient.runTestFileAsync(t.testFile, cwd, {
+					testRunnerClient.runTestFileAsync(t.testFile, t.testRoot, {
 						runner: t.runner,
 						config: t.config,
 						turnIndex: firedAtTurn,

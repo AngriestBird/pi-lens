@@ -45,6 +45,7 @@ import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 import { isMeasuredDuration, toMeasuredDurationMs } from "./run-duration.js";
 import { safeSpawn, safeSpawnAsync } from "./safe-spawn.js";
 import { stripAnsi } from "./sanitize.js";
+import { resolveGitCheckout } from "./review-graph/git-identity.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 
 // --- Types ---
@@ -382,6 +383,23 @@ function foreignGitRoot(testFilePath: string, cwd: string): string | null {
 }
 
 /**
+ * Whether the excluded checkout is another working tree of the dispatch root's
+ * own repository (a sibling linked worktree, #3871) rather than an unrelated
+ * repository: the one fact that tells a maintainer reading the record whether
+ * the exclusion is the #3649 crossover guard or a selection gap. Unresolvable
+ * on either side is `false`, never a guess.
+ */
+function sharesCommonDir(cwd: string, checkoutRoot: string): boolean {
+	const dispatch = resolveGitCheckout(cwd);
+	const excluded = resolveGitCheckout(checkoutRoot);
+	return (
+		dispatch !== null &&
+		excluded !== null &&
+		pathsEqual(dispatch.commonDir, excluded.commonDir)
+	);
+}
+
+/**
  * Turn-end exclusion policy: out-of-tree files, foreign Git checkouts, and the
  * built-in integration/e2e globs (#2522). Absolute and cwd-relative inputs
  * share the same policy; explicit test execution does not use this gate.
@@ -426,7 +444,12 @@ export function isExcludedTestTarget(
 				.update(JSON.stringify([cwd, testFilePath, checkoutRoot]))
 				.digest("hex"),
 			reason: "automatic test target belongs to another Git checkout",
-			metadata: { cwd, candidate: testFilePath, checkoutRoot },
+			metadata: {
+				cwd,
+				candidate: testFilePath,
+				checkoutRoot,
+				sameCommonDir: sharesCommonDir(cwd, checkoutRoot),
+			},
 		});
 		return true;
 	}

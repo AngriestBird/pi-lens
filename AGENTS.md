@@ -567,6 +567,7 @@ the surface they bite; each block loads only when its trigger applies.
   `test-target-foreign-checkout`. Proven by
   `tests/clients/test-runner-worktree-isolation.test.ts`.
 - By design, a session whose cwd is a plain folder with no `.git` that holds several repositories, a submodule, or a nested linked worktree gets no automatic tests for the files inside them: any nested `.git` is a foreign checkout, and there is no per-project opt-in (maintainer decision, #3649/#3691). Run them explicitly.
+- The one exception to that boundary is a linked worktree of the session's own repository (same git commondir, different top level, `resolveLinkedWorktreeOwner` in `clients/review-graph/git-identity.ts`, #3871): turn_end selects and runs its tests with that worktree's root as the project root (`clients/test-target-roots.ts`), so config, `node_modules` and the failed-first state are the worktree's own. At most `MAX_LINKED_TEST_ROOTS_PER_TURN` such roots per turn; a sibling worktree's file is still foreign to every other root.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.

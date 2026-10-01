@@ -1447,6 +1447,14 @@ export type DegradationKind =
 	 */
 	| "turn-end-knip-root-skipped"
 	/**
+	 * turn_end selected no tests in a linked worktree whose edit it was handed
+	 * (#3871): more than `MAX_LINKED_TEST_ROOTS_PER_TURN` linked worktrees were
+	 * edited in one turn. The subject is the reason (`root-cap`); counted, like
+	 * its knip sibling, because an orchestrator session would otherwise write
+	 * one row per turn.
+	 */
+	| "turn-end-test-root-skipped"
+	/**
 	 * #2504 review round 8 (S1): a carried-forward deferred file entry was
 	 * dropped from an IN-BAND `turn_end` publish (`clients/actionable-warnings.ts`)
 	 * because its file changed, or the publish crossed a session boundary,
