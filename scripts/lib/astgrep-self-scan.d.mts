@@ -42,3 +42,5 @@ export function findingsInChangedFiles(
 	changed: Set<string>,
 	root?: string,
 ): SelfScanFinding[];
+
+export function trackedSelfScanPaths(root?: string, roots?: string[]): string[];

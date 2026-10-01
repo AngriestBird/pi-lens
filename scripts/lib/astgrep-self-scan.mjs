@@ -176,7 +176,17 @@ export function findingSignature(finding) {
 export function loadBaseline(root = repoRoot()) {
 	const p = baselinePath(root);
 	if (!fs.existsSync(p)) return new Set();
-	const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+	let raw;
+	try {
+		raw = JSON.parse(fs.readFileSync(p, "utf8"));
+	} catch (e) {
+		// A malformed baseline must stay loud: an empty set would resurface
+		// every triaged finding as new instead of naming the bad file.
+		throw new Error(
+			`[astgrep-self-scan] baseline ${p} is not valid JSON: ${e?.message ?? e}`,
+			{ cause: e },
+		);
+	}
 	return new Set(Array.isArray(raw.allowed) ? raw.allowed : []);
 }
 
@@ -195,6 +205,35 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	};
 	fs.writeFileSync(p, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 	return p;
+}
+
+/** Tracked files under the scan roots, from `git ls-files`, so an untracked
+ * working-tree scratch file cannot gate a local scan CI would never run it in
+ * (#3886). Falls back to the directory roots when git cannot list them (not a
+ * work tree, or no tracked file under the roots). */
+export function trackedSelfScanPaths(
+	root = repoRoot(),
+	roots = ["clients", "tests"],
+) {
+	try {
+		const out = String(
+			gitExecFileSync(["ls-files", "-z", "--", ...roots], {
+				cwd: root,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+			}),
+		);
+		const files = out
+			.split("\0")
+			.map((line) => line.trim())
+			// A tracked file deleted in the working tree (not yet staged) is not
+			// on disk to scan; `git ls-files` still lists it.
+			.filter((file) => file && fs.existsSync(path.join(root, file)));
+		if (files.length > 0) return files;
+	} catch {
+		// Not a git work tree (or git unavailable): fall back to the roots.
+	}
+	return roots;
 }
 
 /** Absolute (real) paths of files changed between

@@ -30,6 +30,7 @@ import {
 	loadBaseline,
 	runSelfScan,
 	selfScanRuleIds,
+	trackedSelfScanPaths,
 	writeBaseline,
 } from "./lib/astgrep-self-scan.mjs";
 
@@ -94,7 +95,11 @@ function main() {
 	try {
 		result = runSelfScan({
 			ruleIds,
-			...(scanPathArgs.length > 0 ? { scanPaths: scanPathArgs } : {}),
+			// Default to tracked files only (#3886): an untracked working-tree
+			// scratch file must not gate a push CI would never run it in. An
+			// explicit path argument (the wrapper's own tests) still wins.
+			scanPaths:
+				scanPathArgs.length > 0 ? scanPathArgs : trackedSelfScanPaths(),
 			...(sgConfigOverride ? { sgConfigPath: sgConfigOverride } : {}),
 		});
 	} catch (e) {
