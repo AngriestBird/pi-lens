@@ -591,7 +591,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/config.ts": 3,
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 1,
-		"clients/lsp/index.ts": 48,
+		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
+		// into the changed paths (queued as a save) and their importers (not).
+		"clients/lsp/index.ts": 50,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
