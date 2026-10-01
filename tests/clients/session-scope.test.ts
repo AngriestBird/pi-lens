@@ -400,7 +400,7 @@ describe("#3612 adoptHandoff", () => {
 		sessionFile: string | undefined,
 		own?: PersistedStores,
 		parent?: PersistedStores,
-		sessionManager?: object,
+		sessionManager?: Record<string, unknown>,
 	) {
 		const scope = beginScope({ role: "primary" });
 		const loadOwnSidecar = vi.fn(async () => own);
