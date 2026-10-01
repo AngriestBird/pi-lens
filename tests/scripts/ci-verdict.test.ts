@@ -1531,7 +1531,7 @@ describe("run — prints the gating source and uses a live branch-protection rea
 				return JSON.stringify({ check_runs: [] });
 			throw new Error(`unmocked gh call: ${args.join(" ")}`);
 		};
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["3847"],
 			ghExec,
 			stdout: () => {},
