@@ -9,7 +9,10 @@
 
 import { dirname, resolve } from "node:path";
 import { pathsEqual } from "./path-utils.js";
-import { resolveGitCheckout } from "./review-graph/git-identity.js";
+import {
+	type GitCheckout,
+	resolveGitCheckout,
+} from "./review-graph/git-identity.js";
 
 /**
  * Distinct checkouts one turn_end may scan. Each is a whole-project knip run,
@@ -32,6 +35,11 @@ export const MAX_KNIP_ROOTS_PER_TURN = 3;
  * A session cwd outside any git checkout, or a turn with no modified files,
  * scans the session cwd only. `overCap` lists the roots beyond
  * {@link MAX_KNIP_ROOTS_PER_TURN}; the caller records them as skipped.
+ *
+ * Ownership is decided on real paths (a symlinked session cwd is the same
+ * checkout); a returned root keeps the spelling of the edit that named it, the
+ * spelling of the turn's file keys, because the caller matches issue paths
+ * under that root against those keys (#3872 r3).
  */
 export function resolveKnipScanRoots(
 	sessionCwd: string,
@@ -42,7 +50,7 @@ export function resolveKnipScanRoots(
 		return { roots: [sessionCwd], overCap: [] };
 	}
 	let sessionOwnsEdit = false;
-	const linked: string[] = [];
+	const linked: GitCheckout[] = [];
 	for (const file of modifiedFiles) {
 		const owner = resolveGitCheckout(dirname(resolve(sessionCwd, file)));
 		const isLinkedWorktree =
@@ -51,11 +59,12 @@ export function resolveKnipScanRoots(
 			pathsEqual(owner.commonDir, session.commonDir);
 		if (!isLinkedWorktree) {
 			sessionOwnsEdit = true;
-		} else if (!linked.some((root) => pathsEqual(root, owner.root))) {
-			linked.push(owner.root);
+		} else if (!linked.some((known) => pathsEqual(known.root, owner.root))) {
+			linked.push(owner);
 		}
 	}
-	const roots = sessionOwnsEdit ? [sessionCwd, ...linked] : linked;
+	const linkedRoots = linked.map((checkout) => checkout.spelledRoot);
+	const roots = sessionOwnsEdit ? [sessionCwd, ...linkedRoots] : linkedRoots;
 	return {
 		roots: roots.slice(0, MAX_KNIP_ROOTS_PER_TURN),
 		overCap: roots.slice(MAX_KNIP_ROOTS_PER_TURN),

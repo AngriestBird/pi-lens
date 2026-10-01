@@ -682,6 +682,69 @@ describe("#3872 identity: a symlinked session cwd is the same checkout", () => {
 
 		expect(totalIssuesOf(0)).toBe(1);
 	});
+
+	// Verify r2, R2-1 (state-space cell S4): round 2 scanned the worktree under
+	// its REAL path while the edit's key stayed spelled through the link, so the
+	// delta compared two spellings of one file and dropped the issue. The row
+	// read `executed`, `newIssues: 0`: a clean-looking turn that discarded a
+	// finding (shape 10).
+	it("delivers a worktree edit's new issue when the session cwd is a symlink", async () => {
+		useSymlinkedSession();
+		const x = addWorktree("x");
+		const file = path.join(x, "src", "a.ts");
+		fs.appendFileSync(file, "export const unusedNew = 3;\n");
+		edit(file);
+
+		const message = await turnEnd();
+
+		expect(message).toContain("unusedNew");
+		expect(message).toContain(".worktrees/x/src/a.ts");
+		expect(message).not.toContain(realPath(x));
+	});
+
+	// State-space cell S5: the session cwd is real but `.worktrees` itself is a
+	// link to another disk (a scratch volume). The worktree's real root is
+	// outside the session spelling; the edit's key is not.
+	it("delivers a worktree edit's new issue when the worktrees directory is a symlink", async () => {
+		const elsewhere = path.join(env.tmpDir, "elsewhere");
+		fs.mkdirSync(elsewhere);
+		fs.symlinkSync(
+			elsewhere,
+			path.join(main, ".worktrees"),
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		const x = addWorktree("x");
+		const file = path.join(x, "src", "a.ts");
+		fs.appendFileSync(file, "export const unusedNew = 3;\n");
+		edit(file);
+
+		const message = await turnEnd();
+
+		expect(spawnCwds().map(realPath)).toEqual([realPath(x)]);
+		expect(message).toContain("unusedNew");
+	});
+
+	// Verify r2, R2-3: git writes real paths into `worktrees/<name>/gitdir`, but
+	// a registry entry written before its directory moved behind a link (a home
+	// relocated onto a symlinked volume) names the old spelling. The matcher
+	// compares canonical prefixes, so the registry side must be canonical too.
+	it("drops a nested worktree whose registry entry names it through a link", async () => {
+		addWorktree("x");
+		const alias = path.join(env.tmpDir, "alias");
+		fs.symlinkSync(
+			main,
+			alias,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		fs.writeFileSync(
+			path.join(main, ".git", "worktrees", "x", "gitdir"),
+			`${path.join(alias, ".worktrees", "x", ".git")}\n`,
+		);
+
+		const result = await knipClient.analyze(main);
+
+		expect(result.issues.map((issue) => issue.file)).toEqual(["src/a.ts"]);
+	});
 });
 
 describe("#3872 the timeout back-off's own lifecycle", () => {

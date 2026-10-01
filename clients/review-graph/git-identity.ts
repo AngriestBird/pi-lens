@@ -135,9 +135,15 @@ export function canonicalDirectory(dir: string): string {
 }
 
 export interface GitCheckout {
-	/** The checkout's top-level directory (parent of its `.git` entry). */
+	/** The checkout's top-level directory (parent of its `.git` entry), real path: its identity. */
 	root: string;
-	/** The shared commondir: equal for a repository and every linked worktree of it. */
+	/**
+	 * The same top-level directory in the path spelling `startPath` used (the
+	 * directory the upward walk found `.git` in). Anything compared with paths
+	 * spelled like `startPath` derives from this, never from `root` (#3872 r3).
+	 */
+	spelledRoot: string;
+	/** The shared commondir, real path: equal for a repository and every linked worktree of it. */
 	commonDir: string;
 }
 
@@ -153,6 +159,7 @@ export function resolveGitCheckout(startPath: string): GitCheckout | null {
 	return resolved
 		? {
 				root: canonicalDirectory(resolved.worktreeRoot),
+				spelledRoot: resolved.worktreeRoot,
 				commonDir: canonicalDirectory(resolved.commonDir),
 			}
 		: null;
