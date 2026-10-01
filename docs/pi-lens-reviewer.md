@@ -61,6 +61,8 @@ issue's acceptance criteria, the full merge-base diff
   with *widen in this PR*, *follow-up issue* (with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
+- Review the pre-push self-scan with `npm run astgrep:self-scan`; `pr-preflight`
+  runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
   `origin/master` and the head.
 - Read the `Mutation diff` comment for the EXACT head: check its `Head:` line

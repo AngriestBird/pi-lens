@@ -436,6 +436,11 @@ export async function main() {
 	} else {
 		console.log("[pre-push] building...");
 		runInherit("npm", ["run", "build"], { needsShimShell: true });
+		// #3886: the self-scan imports compiled `clients/` modules, so it must
+		// follow the build. `--skip-build` (CI's Targeted-tests job) means the
+		// Unit-tests job already ran the scan, so it is skipped too.
+		console.log("[pre-push] running ast-grep self-scan...");
+		runInherit("npm", ["run", "astgrep:self-scan"], { needsShimShell: true });
 	}
 
 	if (changed === null || changed.length === 0) {
