@@ -1173,6 +1173,12 @@ export type DegradationKind =
 	 */
 	| "session-scope-handoff-discarded"
 	/**
+	 * #3881: a primary shutdown landed while its own `session_start` was still
+	 * in flight, before it adopted; it forwarded the slot left for that start
+	 * (or found none) and stashed nothing of its scope. Once per start reason.
+	 */
+	| "session-scope-handoff-interrupted"
+	/**
 	 * #3612: a `/fork` or `/reload` start found no hand-off slot left for its
 	 * session file (file-less: its predecessor's ticket, #3819), so it started from a sidecar or from nothing. Once per
 	 * start reason.
