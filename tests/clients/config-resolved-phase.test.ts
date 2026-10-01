@@ -67,12 +67,11 @@ import { removeTempDirSync } from "./test-utils.js";
 // neighbouring file made this one red in 3 of 5 overlapping runs (#3682). The
 // loggers fix their paths when they load, so pin a private home before any
 // import and remove it after the file.
-const phaseHome = vi.hoisted(() => {
-	const previous = process.env.PI_LENS_HOME;
-	const home = `${previous ?? "."}/pi-lens-3682-config-phase-home-${process.pid}`;
-	process.env.PI_LENS_HOME = home;
-	return { home, previous };
-});
+const phaseHome = await vi.hoisted(async () =>
+	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
+		"3682-config-phase",
+	),
+);
 
 interface ConfigResolvedMetadata {
 	sessionId: string;
@@ -207,11 +206,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-	await flushLatencyLog();
-	await flushSessionStartLog();
-	removeTempDirSync(phaseHome.home);
-	if (phaseHome.previous === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = phaseHome.previous;
+	await phaseHome.release();
 });
 
 /** A workspace whose only config document is the canonical `.pi-lens.json`. */

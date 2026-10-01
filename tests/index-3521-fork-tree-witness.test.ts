@@ -55,7 +55,6 @@ import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js"
 import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
-	removeTempDirSync,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
 
@@ -67,12 +66,11 @@ import {
 // concurrently running reader: tests/clients/config-resolved-phase.test.ts
 // failed on PR #3669's first Unit tests run. The loggers fix their paths when
 // they load, so the redirect runs hoisted, before any import.
-const witnessHome = vi.hoisted(() => {
-	const previous = process.env.PI_LENS_HOME;
-	const home = `${previous ?? "."}/pi-lens-3521-witness-home-${process.pid}`;
-	process.env.PI_LENS_HOME = home;
-	return { home, previous };
-});
+const witnessHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"3521-witness",
+	),
+);
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -149,10 +147,7 @@ afterEach(async () => {
 
 afterAll(async () => {
 	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
-	await flushLatencyLog();
-	removeTempDirSync(witnessHome.home);
-	if (witnessHome.previous === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = witnessHome.previous;
+	await witnessHome.release();
 });
 
 async function startRuntime(

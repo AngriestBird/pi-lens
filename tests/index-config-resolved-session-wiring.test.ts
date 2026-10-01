@@ -87,12 +87,11 @@ import { removeTempDirSync } from "./clients/test-utils.js";
 // (tests/clients/config-resolved-phase.test.ts) — the sibling defect #3682
 // fixes. The loggers fix their paths when they load, so pin a private home
 // before any import and remove it after the file.
-const wiringHome = vi.hoisted(() => {
-	const previous = process.env.PI_LENS_HOME;
-	const home = `${previous ?? "."}/pi-lens-3682-config-wiring-home-${process.pid}`;
-	process.env.PI_LENS_HOME = home;
-	return { home, previous };
-});
+const wiringHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"3682-config-wiring",
+	),
+);
 
 interface ConfigResolvedRow {
 	filePath: string;
@@ -165,11 +164,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-	await flushLatencyLog();
-	await flushSessionStartLog();
-	removeTempDirSync(wiringHome.home);
-	if (wiringHome.previous === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = wiringHome.previous;
+	await wiringHome.release();
 });
 
 /** A fresh workspace, so index.ts's process-lifetime cwd memo cannot skip it. */
