@@ -3,15 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as v8 from "node:v8";
 import * as vm from "node:vm";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
@@ -27,16 +19,6 @@ import { makeSessionStartEvent } from "./support/host-event-factory.js";
 // no longer clears it — that is the fix, not a regression. This suite gives
 // every case a cold extension graph, so it must reset the process state too.
 import { _resetProcessSingletonsForTests } from "../clients/process-singletons.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-integration",
-	),
-);
-afterAll(() => lensHome.release());
 
 const r6Mocks = vi.hoisted(() => ({
 	incrementDegradationCount: vi.fn(),

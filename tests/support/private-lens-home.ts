@@ -2,16 +2,14 @@
  * A private `PI_LENS_HOME` for one test file's lifetime (#3721, folding the
  * inline `vi.hoisted` pins of #3669 and #3682).
  *
- * WHY A FILE NEEDS ONE. `tests/support/vitest-setup.ts` pins ONE
- * `PI_LENS_HOME` for the whole vitest run, so every worker shares
- * `latency.log`, `sessionstart.log`, `instances.json` and the stamps beside
- * them. The loggers freeze their paths when they LOAD, so a pin made inside a
- * test body moves nothing: it has to run before the first import. A file that
- * drives a real `session_start` while sharing that home appends rows to, and
- * (through `clearLatencyLog`) truncates rows out of, whichever reader runs
- * beside it: `config-resolved-phase` redded in 3 of 5 overlapping runs (#3682),
- * and `index-session-start-classification-wiring` failed in batch runs because
- * the untouched 3190 witness wrote an extra latency row (#3732 verify).
+ * WHY A FILE MAY STILL WANT ONE. Every vitest worker already has its own
+ * `PI_LENS_HOME` (`TMP_HYGIENE_WORKER_HOME`, #3721), so cross-worker sharing is
+ * gone by construction. A file wants this when it needs a home of its own WITHIN
+ * the process from the first import: the loggers freeze their paths when they
+ * LOAD, so a pin made inside a test body moves nothing, and a file that clears
+ * and reads a sink across several `session_start`s (the #3521 witness,
+ * `config-resolved-phase`, `session-root-config-eviction`) wants a directory it
+ * can remove whole at the end.
  *
  * USE. Hoisted, before any import, then released in `afterAll`:
  *
@@ -23,9 +21,9 @@
  * The call has to be an async import inside `vi.hoisted` because a hoisted
  * body runs before the file's own static imports exist. This module imports
  * only node builtins at load, so that early import cannot load a logger.
- * `tests/clients/pi-lens-home-hermeticity.test.ts` walks `tests/` and fails a
- * file that imports the extension entry (or drives a real `handleSessionStart`
- * with test mode off) without this call inside `vi.hoisted`.
+ * `tests/clients/pi-lens-home-hermeticity.test.ts` accepts this call inside
+ * `vi.hoisted` as an early assignment (a late one over a static sink import is
+ * flagged).
  */
 import * as path from "node:path";
 

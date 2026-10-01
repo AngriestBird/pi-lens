@@ -40,15 +40,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const pipeline = vi.hoisted(() => ({ runPipeline: vi.fn() }));
 vi.mock("../clients/pipeline.js", () => pipeline);
@@ -60,16 +52,6 @@ import extension from "../index.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-1892-govulncheck-lane-witness",
-	),
-);
-afterAll(() => lensHome.release());
 
 const SESSION_ID = "pi-1892-govulncheck-lane-session";
 const SCAN_MS = Date.UTC(2026, 7, 18, 7, 0, 0);

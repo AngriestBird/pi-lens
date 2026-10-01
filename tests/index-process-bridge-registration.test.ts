@@ -12,7 +12,7 @@
  * `activateExtension`, unconditional on any event — activating the mock host
  * is enough to trigger both.
  */
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	getMutationBridge,
 	MUTATION_BRIDGE_KEY,
@@ -20,16 +20,6 @@ import {
 import { READ_BRIDGE_KEY } from "../clients/read-bridge.js";
 import extension from "../index.js";
 import { createPiMock } from "./support/pi-mock.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-process-bridge-registration",
-	),
-);
-afterAll(() => lensHome.release());
 
 // Runs before the describe below activates the extension — each test FILE
 // gets a fresh child process (vitest forks pool, `isolate: true`), so

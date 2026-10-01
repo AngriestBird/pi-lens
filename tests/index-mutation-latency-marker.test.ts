@@ -1,15 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logLatency } from "../clients/latency-logger.js";
 import { hashlineFixture } from "./support/hashline-anchor-vectors.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
@@ -20,16 +12,6 @@ vi.mock("../clients/latency-logger.js", async (importOriginal) => ({
 }));
 
 import extension from "../index.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-mutation-latency-marker",
-	),
-);
-afterAll(() => lensHome.release());
 
 /**
  * #2423 review round 1, finding F4.

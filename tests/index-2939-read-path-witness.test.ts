@@ -34,15 +34,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../clients/bootstrap.js", async () => {
 	const { bootstrapSeamMock } = await import("./support/bootstrap-mock.js");
@@ -80,16 +72,6 @@ import {
 import extension from "../index.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, type PiMock } from "./support/pi-mock.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-2939-read-path-witness",
-	),
-);
-afterAll(() => lensHome.release());
 
 let tmpDir: string;
 let filePath: string;

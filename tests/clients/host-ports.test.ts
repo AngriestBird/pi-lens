@@ -1,18 +1,8 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	createDefaultHostPorts,
 	type HostPorts,
 } from "../../clients/host-ports.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
-		"host-ports",
-	),
-);
-afterAll(() => lensHome.release());
 
 describe("HostPorts contract (#1358 S2)", () => {
 	it("preserves absent-host feature-detection defaults", async () => {

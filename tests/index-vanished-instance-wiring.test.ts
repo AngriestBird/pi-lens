@@ -1,30 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "../index.js";
 import { getGlobalPiLensDir } from "../clients/file-utils.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
-		"index-vanished-instance-wiring",
-	),
-);
-afterAll(() => lensHome.release());
 
 /**
  * End-to-end wiring guard for the #1123 item 2 vanished-instance marker: a

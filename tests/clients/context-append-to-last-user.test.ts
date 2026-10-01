@@ -6,28 +6,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { _resetProcessSingletonsForTests } from "../../clients/process-singletons.js";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
-
-// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
-// extension entry, so pin a private home before any import and release it
-// last (afterAll hooks run in reverse registration order).
-const lensHome = await vi.hoisted(async () =>
-	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
-		"context-append-to-last-user",
-	),
-);
-afterAll(() => lensHome.release());
 
 const TIMEOUT_MS = 30_000;
 
