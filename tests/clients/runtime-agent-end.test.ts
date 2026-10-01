@@ -2458,6 +2458,8 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 						{
 							filePath,
 							displayPath: "src/app.ts",
+							// #3676: the quick fix credits the epoch its entry was built on.
+							branchEpoch: runtime.readGuard.currentBranchEpoch,
 							warnings: [
 								{
 									id: "aw:3521",
@@ -2533,11 +2535,12 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 		});
 	}
 
-	// #3521 round-3 verify F-B: onAgentSettled captures the epoch before the
-	// sweep awaits and passes it in. A /tree that lands before the drain starts
-	// must still refuse the quick fix's write; a drain that re-read the current
-	// epoch at its own entry would credit it to the new branch.
-	it("does not credit a quick fix when the /tree landed before the drain started", async () => {
+	// #3521 round-3 verify F-B, reshaped by #3676 (F-A): a /tree that lands
+	// before the drain starts must still refuse the quick fix's write. The
+	// report was built before the move, so it carries the old epoch; a drain
+	// that credited the epoch current at its own entry would credit it to the
+	// new branch.
+	it("does not credit a quick fix whose report predates a /tree that landed before the drain started", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-entry-");
 		try {
 			const filePath = createTempFile(
@@ -2561,6 +2564,7 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 					{
 						filePath,
 						displayPath: "src/app.ts",
+						branchEpoch: runtime.readGuard.currentBranchEpoch,
 						warnings: [
 							{
 								id: "aw:3521-entry",
@@ -2608,8 +2612,7 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 					};
 				},
 			);
-			// The settle captured epoch 0; the /tree lands while the sweep awaits.
-			const settleEpoch = runtime.readGuard.currentBranchEpoch;
+			// The report was built at epoch 0; the /tree lands while the sweep awaits.
 			runtime.readGuard.retainBranch(new Set());
 			await handleAgentEnd({
 				ctxCwd: env.tmpDir,
@@ -2626,7 +2629,6 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 				} as any,
 				getFormatService: () =>
 					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
-				readGuardBranchEpoch: settleEpoch,
 			});
 			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
 			expect(zeroRead(runtime, filePath)).toBe("block");
@@ -2635,6 +2637,127 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 			env.cleanup();
 		}
 	});
+
+	// #3676 F7/F8. Recurrence: a cache file written before the stamp existed (it
+	// stays readable for ten minutes) or a malformed epoch must not be credited
+	// to whichever branch the settle runs on. The fix is still applied; only its
+	// credit is withheld, and the row says why.
+	for (const [label, branchEpoch] of [
+		["no branchEpoch", undefined],
+		["a negative branchEpoch", -1],
+		["a fractional branchEpoch", 1.5],
+		["a string branchEpoch", "0"],
+	] as const) {
+		it(`applies a quick fix from a report with ${label} and credits it to no branch`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-bad-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"const x = 1;\n",
+				);
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.seedProjectSequence(1);
+				const { getDegradationSummary, resetDegradationLedger } =
+					await import("../../clients/degradation-ledger.js");
+				resetDegradationLedger();
+				const report = {
+					generatedAt: new Date().toISOString(),
+					scope: "turn_delta",
+					sessionId: "s1",
+					turnIndex: 1,
+					projectSeqEnd: 1,
+					deltaOnly: true,
+					includeLspCodeActions: true,
+					files: [
+						{
+							filePath,
+							displayPath: "src/app.ts",
+							branchEpoch,
+							warnings: [
+								{
+									id: "aw:3676-bad",
+									filePath,
+									displayPath: "src/app.ts",
+									severity: "warning",
+									tool: "typescript",
+									message: "unused var",
+									suppressed: false,
+									origin: "dispatch",
+									actions: [
+										{
+											title: "Remove unused var",
+											hasEdit: true,
+											hasCommand: false,
+											autoFixEligible: true,
+										},
+									],
+								},
+							],
+						},
+					],
+					summary: {
+						warnings: 1,
+						unsuppressed: 1,
+						suppressed: 0,
+						files: 1,
+						actions: 1,
+						autoFixEligible: 1,
+					},
+				} as unknown as ActionableWarningsReport;
+				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+					async (args: {
+						mutationContext: {
+							readGuard?: { recordWritten: (filePath: string) => void };
+						};
+					}) => {
+						settle(filePath, "const x = 2;\n");
+						args.mutationContext.readGuard?.recordWritten(filePath);
+						return {
+							considered: 1,
+							applied: 1,
+							changedFiles: [filePath],
+							skipped: [],
+						};
+					},
+				);
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				expect(fs.readFileSync(filePath, "utf8")).toBe("const x = 2;\n");
+				expect(zeroRead(runtime, filePath)).toBe("block");
+				expect(
+					getDegradationSummary().filter(
+						(group) => group.kind === "actionable-warnings-quickfix-uncredited",
+					),
+				).toEqual([
+					expect.objectContaining({
+						count: 1,
+						latestReasons: [expect.objectContaining({ subject: env.tmpDir })],
+					}),
+				]);
+			} finally {
+				applyConservativeActionableWarningFixesMock.mockReset();
+				env.cleanup();
+			}
+		});
+	}
 });
 
 // #3521 round-2 verify R2-F1 (catalog shape 22): the branch epoch was taken
@@ -2707,7 +2830,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 			await handleAgentEnd({
 				...base,
 				runtime,
-				readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 				...args.secondSettle,
 			});
 			return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
@@ -2732,7 +2854,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 			...base,
 			runtime,
 			signal: aborted.signal,
-			readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 		});
 		expect(runtime.pendingDeferredMutationCount).toBe(1);
 	};
@@ -2748,7 +2869,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 		await handleAgentEnd({
 			...base,
 			runtime,
-			readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 			getFormatService: () =>
 				({
 					recordRead: () => {},
@@ -2771,7 +2891,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 		await handleAgentEnd({
 			...base,
 			runtime,
-			readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 		});
 		expect(runtime.pendingDeferredMutationCount).toBe(1);
 	};
@@ -2948,7 +3067,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 					moved,
 					onY: (runtime, filePath, cwd) =>
 						sweepReplay(runtime, filePath, cwd, 0),
-					secondSettle: { readGuardBranchEpoch: 0 },
 				}),
 			).toBe(moved ? "block" : "allow");
 		});
@@ -2964,7 +3082,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 					await handleAgentEnd({
 						...base,
 						runtime,
-						readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 						getFormatService: () =>
 							({
 								recordRead: () => {},
@@ -2995,7 +3112,6 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 					await handleAgentEnd({
 						...base,
 						runtime,
-						readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch,
 						getFormatService: () =>
 							({
 								recordRead: () => {},

@@ -22,6 +22,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	type AgentSessionRuntime,
 	type ExtensionAPI,
@@ -41,6 +42,7 @@ import {
 	vi,
 } from "vitest";
 import extension from "../index.js";
+import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -67,6 +69,23 @@ import {
 // to latency.log, and beforeEach truncates latency.log. The harness's
 // per-worker PI_LENS_HOME (#3721) keeps those writes off every other worker's
 // sink; the loggers bind their paths at load, so the home is the harness's.
+
+/**
+ * #3676: the LSP service is the one process boundary the quick fix's real
+ * apply path crosses. Armed only by the #3676 describe; every other test in
+ * this file sees the real service.
+ */
+const lspDouble = vi.hoisted(() => ({ service: undefined as unknown }));
+vi.mock("../clients/lsp/index.js", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("../clients/lsp/index.js")>();
+	return {
+		...original,
+		getLSPService: () =>
+			(lspDouble.service as ReturnType<typeof original.getLSPService>) ??
+			original.getLSPService(),
+	};
+});
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -682,6 +701,129 @@ describe("#3521 a /tree during agent_settled work gets no credit from it (shape 
 
 	it("blocks the same edit when the settle finishes before the /tree", async () => {
 		expect(await settledThenTree(false)).toEqual(ZERO_READ);
+	});
+});
+
+describe("#3676 the quick fix is credited to the branch its report was produced on", () => {
+	// Recurrence: #3669 round-3 verify F-A. The report the quick fix acts on
+	// survives a /tree (it moves neither projectSeq nor fileSeq), and a read-only
+	// turn on the new branch publishes no report over it. The settle then applied
+	// the fix and credited it with the settle's own epoch, so branch Y's agent
+	// could edit a file it had never read.
+	const ACTIONABLE_FLAGS = [
+		"lens-actionable-warnings",
+		"lens-actionable-warning-actions",
+		"lens-actionable-warning-all",
+		"lens-actionable-warning-autofix",
+	];
+
+	beforeEach(() => {
+		for (const flag of ACTIONABLE_FLAGS) FLAGS.set(flag, true);
+	});
+
+	afterEach(() => {
+		for (const flag of ACTIONABLE_FLAGS) FLAGS.delete(flag);
+		lspDouble.service = undefined;
+	});
+
+	/** The LSP boundary: a warning with a preferred quick fix, served while warm. */
+	function armLsp(file: string, warm: () => boolean) {
+		const range = {
+			start: { line: 0, character: 0 },
+			end: { line: 0, character: 5 },
+		};
+		lspDouble.service = makeLspServiceDouble({
+			supportsLSP: () => warm(),
+			openFile: async () => undefined,
+			getLastKnownDiagnostics: () => [
+				{
+					severity: 2,
+					message: "replace this value",
+					code: "fix-value",
+					source: "eslint",
+					serverId: "eslint",
+					range,
+				},
+			],
+			codeAction: async () => [
+				{
+					title: "Fix it",
+					kind: "quickfix",
+					isPreferred: true,
+					edit: {
+						changes: {
+							[pathToFileURL(file).href]: [{ range, newText: "FIXED" }],
+						},
+					},
+				},
+			],
+		});
+	}
+
+	const settle = (runtime: AgentSessionRuntime) =>
+		runtime.session.extensionRunner.emit({ type: "agent_settled" } as never);
+	const turnStart = (runtime: AgentSessionRuntime) =>
+		runtime.session.extensionRunner.emit({
+			type: "turn_start",
+			turnIndex: 0,
+			timestamp: Date.now(),
+		} as never);
+
+	/**
+	 * Branch X reads and rewrites `f`, ends its turn (the report is built and
+	 * persisted) and settles while the LSP is cold, so the pass skips. The
+	 * conversation moves to a branch that never read `f`, takes a read-only turn
+	 * (no report is published over X's), and settles with the LSP warm. Returns
+	 * the zero-read probe on the new branch.
+	 */
+	async function reportOnXFixOnY(fixOnY = true): Promise<string> {
+		fs.writeFileSync(
+			path.join(cwd, "package.json"),
+			'{"devDependencies":{"eslint":"^9.0.0"}}',
+		);
+		fs.writeFileSync(
+			path.join(cwd, "package-lock.json"),
+			'{"packages":{"node_modules/eslint":{"version":"9.0.0"}}}',
+		);
+		const f = fixture("fix.conf", 4);
+		let warm = true;
+		armLsp(f, () => warm);
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		const c = conversation(runtime);
+		const u1 = c.user("prompt on X");
+		await turnStart(runtime);
+		await c.read("x_read_f", f);
+		expect(
+			await c.write("x_write_f", f, "value = 1;\nline2\nline3\nline4"),
+		).toBe("ALLOW");
+		c.done();
+		await turnEnd(runtime);
+		warm = false;
+		await settle(runtime);
+		expect(fs.readFileSync(f, "utf8")).not.toContain("FIXED");
+
+		await c.S().navigateTree(u1);
+		warm = fixOnY;
+		c.user("a question on Y, no file touched");
+		c.done();
+		await turnStart(runtime);
+		await turnEnd(runtime);
+		await settle(runtime);
+		expect(fs.readFileSync(f, "utf8").includes("FIXED")).toBe(fixOnY);
+		// Isolate the authorship credit from the mtime fallback (#3520).
+		const old = (Date.now() - 3_600_000) / 1000;
+		fs.utimesSync(f, old, old);
+		return c.editLine("y_edit_f", f, 3, "Y", false);
+	}
+
+	it("does not credit a quick fix applied on a branch the report was not produced on", async () => {
+		expect(await reportOnXFixOnY()).toEqual(ZERO_READ);
+	});
+
+	// The control: the same moves with the fix never applied on Y. Without it
+	// the case above could be answered by anything but the fix's credit.
+	it("blocks the same zero-read edit when no fix was applied on the new branch", async () => {
+		expect(await reportOnXFixOnY(false)).toEqual(ZERO_READ);
 	});
 });
 

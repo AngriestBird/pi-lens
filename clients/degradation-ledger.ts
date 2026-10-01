@@ -39,6 +39,14 @@ export { LEDGER_FIELD_MAX, truncateForLedger };
 
 export type DegradationKind =
 	/**
+	 * #3676: the actionable-warnings report the settle's quick fix acted on
+	 * carried no valid `branchEpoch` (a cache file from before the stamp, or a
+	 * malformed value), so the fix was applied and credited to no branch: the
+	 * read guard then asks for a re-read before the agent's next edit of that
+	 * file. Subject is the project root; once per session.
+	 */
+	| "actionable-warnings-quickfix-uncredited"
+	/**
 	 * #3071: an actionable-warnings phase (LSP code-action enrichment, the
 	 * fix-application batch) truncated its eligible file/fix set at a bound —
 	 * `clients/actionable-warnings.ts`'s several file/fix caps all share this
