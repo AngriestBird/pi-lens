@@ -1195,7 +1195,9 @@ function log(message) {
  * Parse npm's JSON pack listing even when a lifecycle script writes to stdout.
  * Npm's JSON document is the first parseable array with the pack-listing
  * shape; a lifecycle message such as `[setup-git-hooks] skipped ...` is not
- * JSON and must not determine the slice (#3877).
+ * JSON and must not determine the slice (#3877). Each candidate array is
+ * bounded at a closing `]` rather than sliced to the end of stdout, so a
+ * trailing lifecycle line after the JSON does not break the parse (#3887 F2).
  */
 export function parseNpmPackJson(text) {
 	for (
@@ -1203,23 +1205,35 @@ export function parseNpmPackJson(text) {
 		start >= 0;
 		start = text.indexOf("[", start + 1)
 	) {
-		try {
-			const parsed = JSON.parse(text.slice(start));
-			const listing = parsed?.[0];
-			if (
-				Array.isArray(parsed) &&
-				listing &&
-				typeof listing === "object" &&
-				typeof listing.filename === "string" &&
-				Array.isArray(listing.files)
-			) {
-				return listing;
+		for (
+			let end = text.indexOf("]", start);
+			end >= 0;
+			end = text.indexOf("]", end + 1)
+		) {
+			try {
+				const parsed = JSON.parse(text.slice(start, end + 1));
+				const listing = parsed?.[0];
+				if (
+					Array.isArray(parsed) &&
+					listing &&
+					typeof listing === "object" &&
+					typeof listing.filename === "string" &&
+					Array.isArray(listing.files)
+				) {
+					return listing;
+				}
+			} catch {
+				// Try a later `]`, then the next `[` in lifecycle output.
 			}
-		} catch {
-			// Try the next `[` in lifecycle output or the JSON document.
 		}
 	}
-	throw new Error("npm pack --json printed no JSON pack listing");
+	// Keep a bounded stdout head: a DO-NOT-SHIP pack parse is diagnosed from
+	// the message alone, and the old parser at least named the bytes it saw.
+	const head = text.slice(0, 200).replace(/\s+/g, " ").trim();
+	throw new Error(
+		`npm pack --json printed no JSON pack listing; stdout head: ` +
+			JSON.stringify(text.length > 200 ? `${head}…` : head),
+	);
 }
 
 /**

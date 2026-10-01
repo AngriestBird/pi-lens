@@ -503,7 +503,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/release-qa.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI exit code are each unobservable in-process",
+			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI pack call site and exit code are each unobservable in-process",
 	},
 	// 2026-09-07 (#2613): the CLI's real exit code (2 vs. 4) and its
 	// GITHUB_OUTPUT write are the subject under test; header on the file
