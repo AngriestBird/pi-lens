@@ -15,7 +15,15 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
-import { findNearestMarkerRoot } from "./path-utils.js";
+import {
+	findNearestMarkerRoot,
+	normalizeEphemeralMapKey,
+	normalizeFilePath,
+} from "./path-utils.js";
+import {
+	listLinkedWorktreeRoots,
+	resolveGitCheckout,
+} from "./review-graph/git-identity.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	createAvailabilityChecker,
@@ -253,6 +261,40 @@ function readKnipShimVersion(binary: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Whether a knip-reported file lies inside a linked worktree nested under
+ * `targetDir` (#3872). knip reads the checkout's `.gitignore` and nothing
+ * else, so a `.worktrees/*` directory the project never ignored is walked as
+ * project files: live, `totalIssues` rose by about 300 per worktree
+ * (9256 -> 16187 over 55 worktrees) and each first touch read as one new issue.
+ * A worktree is a separate checkout with its own scan root, never a part of
+ * this one. A knip config cannot be extended from here without replacing the
+ * project's own (#1721), so the scan cost stays and the verdict is corrected.
+ *
+ * knip reports files relative to its cwd. The nested roots are normalized
+ * once; each issue then costs one lexical key and a prefix compare, not a
+ * realpath (a 16 000-issue result against 55 worktrees is ~880 000 compares).
+ */
+function nestedWorktreeMatcher(
+	targetDir: string,
+): (file: string | undefined) => boolean {
+	const checkout = resolveGitCheckout(targetDir);
+	if (!checkout) return () => false;
+	const base = normalizeFilePath(targetDir);
+	const baseKey = normalizeEphemeralMapKey(base);
+	const prefixes: string[] = [];
+	for (const root of listLinkedWorktreeRoots(checkout.commonDir)) {
+		const key = normalizeEphemeralMapKey(normalizeFilePath(root));
+		if (key.startsWith(`${baseKey}/`)) prefixes.push(`${key}/`);
+	}
+	if (prefixes.length === 0) return () => false;
+	return (file) => {
+		if (!file) return false;
+		const key = normalizeEphemeralMapKey(`${base}/${file}`);
+		return prefixes.some((prefix) => key.startsWith(prefix));
+	};
 }
 
 /** Distinct toolchain records kept per client instance (bounded telemetry). */
@@ -698,7 +740,10 @@ export class KnipClient {
 		}
 
 		return {
-			...this.dropOverridePinnedDeps(this.parseOutput(output), targetDir),
+			...this.dropOverridePinnedDeps(
+				this.parseOutput(output, nestedWorktreeMatcher(targetDir)),
+				targetDir,
+			),
 			scannedAt,
 		};
 	}
@@ -833,7 +878,10 @@ export class KnipClient {
 
 	// --- Internal ---
 
-	private parseOutput(output: string): KnipResult {
+	private parseOutput(
+		output: string,
+		isInNestedWorktree: (file: string | undefined) => boolean = () => false,
+	): KnipResult {
 		try {
 			const data = JSON.parse(output);
 			const issues: KnipIssue[] = [];
@@ -843,6 +891,7 @@ export class KnipClient {
 			const unlistedDeps: KnipIssue[] = [];
 
 			const addIssue = (issue: KnipIssue) => {
+				if (isInNestedWorktree(issue.file)) return;
 				issues.push(issue);
 				if (issue.type === "export" || issue.type === "enumMember") {
 					unusedExports.push(issue);

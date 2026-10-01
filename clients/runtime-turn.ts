@@ -52,6 +52,10 @@ import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
 import { secretsLane } from "./turn-end/lanes/secrets.js";
 import type { TurnEndLaneContext } from "./turn-end/lane.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
+import {
+	MAX_KNIP_ROOTS_PER_TURN,
+	resolveKnipScanRoots,
+} from "./knip-scan-roots.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
 import {
 	deadCodeIssueKey,
@@ -1681,10 +1685,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		},
 	});
 
-	const t2 = Date.now();
-	let knipMeta: {
+	type KnipTurnMeta = {
 		skipped?: boolean;
-		execution?: "executed" | "cache";
+		/** `deferred`: the scan outlived the turn_end budget and runs on, off-hook (#3872). */
+		execution?: "executed" | "cache" | "deferred";
 		success?: boolean;
 		totalIssues?: number;
 		newIssues?: number;
@@ -1696,172 +1700,245 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		failureKind?: string;
 		/** True when a failed run left the previous good cache in place (#1467). */
 		cacheKept?: boolean;
-	} = {};
-	if (runtime.isStartupScanInFlight("knip")) {
-		dbg("turn_end: skipping knip (startup scan still in flight)");
-		knipMeta = { skipped: true };
-	} else {
-		// Let KnipClient resolve/validate a real JS project root before probing or
-		// auto-installing knip. Non-JS repos (for example Unity projects) should not
-		// run tool checks every turn. Also back off after a timeout/kill so every
-		// agent turn does not spend 30s launching another heavyweight knip process.
-		const prevKnip = cacheManager.readCache<KnipResult>("knip", cwd);
-		// An availability failure is NOT a hard knip failure: knip never ran, so
-		// there is nothing to back off from, and backing off would make an
-		// expiring probe verdict permanent again (#1467).
-		const previousFailedHard =
-			prevKnip &&
-			!prevKnip.data.success &&
-			!prevKnip.data.failureKind &&
-			/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prevKnip.data.summary);
-
-		if (previousFailedHard) {
+		/** First scan of a linked worktree: stored, not diffed (#3872). */
+		firstScan?: boolean;
+		/** The hook's own signal fired while the scan was awaited (Escape). */
+		aborted?: boolean;
+	};
+	// #3872: knip runs in the checkout that owns each edit. A linked worktree is
+	// its own project; the session root would walk it as a nested copy of the
+	// whole tree (live: +300 issues per worktree, a 7 s scan past a 3 s budget).
+	const knipScan = resolveKnipScanRoots(cwd, files);
+	for (const root of knipScan.overCap) {
+		incrementDegradationCount({
+			kind: "turn-end-knip-root-skipped",
+			subject: "root-cap",
+			reason: `${toRunnerDisplayPath(cwd, root)} not scanned: more than ${MAX_KNIP_ROOTS_PER_TURN} checkouts edited this turn`,
+		});
+	}
+	/** One checkout's finished scan: cache write, delta, delivery. `scanRoot === cwd` is the session checkout. */
+	const applyKnipResult = (
+		scanRoot: string,
+		prevKnip: CacheEntry<KnipResult> | null,
+		knipResult: KnipResult,
+	): KnipTurnMeta => {
+		// Never overwrite a good scan with a failure (#925, #1467): the last
+		// good result stays until a new successful scan replaces it.
+		const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
+		if (knipWouldPoison) {
 			dbg(
-				`turn_end: skipping knip after recent failure: ${prevKnip.data.summary}`,
+				`turn_end: keeping last good knip cache; this run failed: ${knipResult.summary}`,
 			);
-			knipMeta = { skipped: true, reason: prevKnip.data.summary };
 		} else {
-			const knipResult = await knipClient.analyze(
-				cwd,
-				getKnipIgnorePatterns(),
-				{
-					projectSeq: runtime.projectSeq,
-				},
-			);
-			// Never overwrite a good scan with a failure (#925, #1467): the last
-			// good result stays until a new successful scan replaces it.
-			const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
-			if (knipWouldPoison) {
-				dbg(
-					`turn_end: keeping last good knip cache; this run failed: ${knipResult.summary}`,
+			cacheManager.writeCache("knip", knipResult, scanRoot);
+		}
+		// #3872: a linked worktree has no session_start scan, so its first
+		// successful scan has nothing to be diffed against -- every issue already
+		// in an edited file would read as the agent's. It is stored and
+		// attributes nothing; the next turn diffs against it.
+		const isFirstScan =
+			scanRoot !== cwd && prevKnip?.data.success !== true && knipResult.success;
+		const knipMeta: KnipTurnMeta = {
+			execution: knipResult.execution ?? "executed",
+			success: knipResult.success,
+			totalIssues: knipResult.issues.length,
+			newIssues: 0,
+			blockerIssues: 0,
+			// #3248: bounded per-turn, on the row this lane already writes —
+			// never one record per finding.
+			dispositionSuppressed: 0,
+			...(!knipResult.success && { reason: knipResult.summary }),
+			...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
+			...(knipWouldPoison && { cacheKept: true }),
+			...(isFirstScan && { firstScan: true }),
+		};
+
+		if (knipResult.success && knipResult.issues.length > 0 && !isFirstScan) {
+			// Deliberately excludes the line number — see stableFindingKey's
+			// doc comment (#1483: mirrors the dead-code fix in #1477).
+			const issueKey = (i: KnipIssue) =>
+				stableFindingKey(i.type, i.file, i.name, i.package);
+			const prevKeys = new Set((prevKnip?.data?.issues ?? []).map(issueKey));
+			const modifiedSet = new Set(files.map((f) => resolveRunnerPath(cwd, f)));
+
+			const newIssues = knipResult.issues.filter((issue) => {
+				if (prevKeys.has(issueKey(issue))) return false;
+				if (!issue.file) return false;
+				const abs = resolveRunnerPath(scanRoot, issue.file);
+				return modifiedSet.has(abs);
+			});
+			knipMeta.newIssues = newIssues.length;
+			if (newIssues.length > 0) {
+				projectDiagnosticsDelta.push(
+					...knipIssuesToProjectDiagnostics(scanRoot, newIssues),
 				);
-			} else {
-				cacheManager.writeCache("knip", knipResult, cwd);
+				projectDiagnosticsSources.add("knip");
 			}
-			knipMeta = {
-				execution: knipResult.execution ?? "executed",
-				success: knipResult.success,
-				totalIssues: knipResult.issues.length,
-				newIssues: 0,
-				blockerIssues: 0,
-				// #3248: bounded per-turn, on the row this lane already writes —
-				// never one record per finding.
-				dispositionSuppressed: 0,
-				...(!knipResult.success && { reason: knipResult.summary }),
-				...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
-				...(knipWouldPoison && { cacheKept: true }),
+
+			// #3248: what the agent READS goes through the same stored-
+			// disposition filter every other findings surface applies, keyed off
+			// knip's OWN `ProjectDiagnostic` adapter — the identity
+			// `lens_diagnostics` surfaces and `lens_diagnostic_mark` anchors
+			// against — so a marked finding stops re-reporting here. The
+			// `projectDiagnosticsDelta` push above deliberately keeps the
+			// UNFILTERED set: that record is what the scan found, and its reader
+			// (`lens_diagnostics`) applies dispositions on read, so filtering it
+			// here would apply the same policy twice on one lane.
+			// Paired through `flatMap` rather than indexing the adapter's array:
+			// `knipIssuesToProjectDiagnostics` is a straight `issues.map(...)`
+			// (one diagnostic per issue, never empty), so this keeps the pairing
+			// total while staying honest under `noUncheckedIndexedAccess`.
+			const knipPaired = newIssues.flatMap((issue) =>
+				knipIssuesToProjectDiagnostics(scanRoot, [issue]).map((diagnostic) => ({
+					issue,
+					diagnostic,
+				})),
+			);
+			const knipFiltered = filterFindingsByDisposition(
+				knipPaired,
+				cwd,
+				(pair) => pair.diagnostic,
+			);
+			const knipDeliverable = {
+				kept: knipFiltered.kept.map((pair) => pair.issue),
+				suppressed: knipFiltered.suppressed,
 			};
+			knipMeta.dispositionSuppressed = knipDeliverable.suppressed;
+			// Issue files are relative to the scan root; the agent reads paths
+			// relative to the session.
+			const displayPath = (issue: KnipIssue): string =>
+				issue.file
+					? toRunnerDisplayPath(cwd, resolveRunnerPath(scanRoot, issue.file))
+					: "(unknown)";
 
-			if (knipResult.success && knipResult.issues.length > 0) {
-				// Deliberately excludes the line number — see stableFindingKey's
-				// doc comment (#1483: mirrors the dead-code fix in #1477).
-				const issueKey = (i: KnipIssue) =>
-					stableFindingKey(i.type, i.file, i.name, i.package);
-				const prevKeys = new Set((prevKnip?.data?.issues ?? []).map(issueKey));
-				const modifiedSet = new Set(
-					files.map((f) => resolveRunnerPath(cwd, f)),
-				);
-
-				const newIssues = knipResult.issues.filter((issue) => {
-					if (prevKeys.has(issueKey(issue))) return false;
-					if (!issue.file) return false;
-					const abs = resolveRunnerPath(cwd, issue.file);
-					return modifiedSet.has(abs);
-				});
-				knipMeta.newIssues = newIssues.length;
-				if (newIssues.length > 0) {
-					projectDiagnosticsDelta.push(
-						...knipIssuesToProjectDiagnostics(cwd, newIssues),
-					);
-					projectDiagnosticsSources.add("knip");
+			const blockerIssues = knipDeliverable.kept.filter(
+				(i) => i.type === "unlisted" || i.type === "bin",
+			);
+			knipMeta.blockerIssues = blockerIssues.length;
+			if (blockerIssues.length > 0) {
+				let report =
+					"🔴 New unresolved imports/deps in modified code (Knip):\n";
+				let firstPath: string | null = null;
+				for (const issue of blockerIssues.slice(0, 5)) {
+					const display = displayPath(issue);
+					if (!firstPath && display !== "(unknown)") firstPath = display;
+					report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.type}: ${issue.name}\n`;
 				}
-
-				// #3248: what the agent READS goes through the same stored-
-				// disposition filter every other findings surface applies, keyed off
-				// knip's OWN `ProjectDiagnostic` adapter — the identity
-				// `lens_diagnostics` surfaces and `lens_diagnostic_mark` anchors
-				// against — so a marked finding stops re-reporting here. The
-				// `projectDiagnosticsDelta` push above deliberately keeps the
-				// UNFILTERED set: that record is what the scan found, and its reader
-				// (`lens_diagnostics`) applies dispositions on read, so filtering it
-				// here would apply the same policy twice on one lane.
-				// Paired through `flatMap` rather than indexing the adapter's array:
-				// `knipIssuesToProjectDiagnostics` is a straight `issues.map(...)`
-				// (one diagnostic per issue, never empty), so this keeps the pairing
-				// total while staying honest under `noUncheckedIndexedAccess`.
-				const knipPaired = newIssues.flatMap((issue) =>
-					knipIssuesToProjectDiagnostics(cwd, [issue]).map((diagnostic) => ({
-						issue,
-						diagnostic,
-					})),
-				);
-				const knipFiltered = filterFindingsByDisposition(
-					knipPaired,
-					cwd,
-					(pair) => pair.diagnostic,
-				);
-				const knipDeliverable = {
-					kept: knipFiltered.kept.map((pair) => pair.issue),
-					suppressed: knipFiltered.suppressed,
-				};
-				knipMeta.dispositionSuppressed = knipDeliverable.suppressed;
-
-				const blockerIssues = knipDeliverable.kept.filter(
-					(i) => i.type === "unlisted" || i.type === "bin",
-				);
-				knipMeta.blockerIssues = blockerIssues.length;
-				if (blockerIssues.length > 0) {
-					let report =
-						"🔴 New unresolved imports/deps in modified code (Knip):\n";
-					let firstPath: string | null = null;
-					for (const issue of blockerIssues.slice(0, 5)) {
-						const display = issue.file
-							? toRunnerDisplayPath(cwd, issue.file)
-							: "(unknown)";
-						if (!firstPath && display !== "(unknown)") firstPath = display;
-						report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.type}: ${issue.name}\n`;
-					}
-					if (firstPath) {
-						report += `  First location: ${firstPath}\n`;
-					}
-					// @delivery-surface: runtime-turn:knip-blocker
-					blockerParts.push(report);
+				if (firstPath) {
+					report += `  First location: ${firstPath}\n`;
 				}
+				// @delivery-surface: runtime-turn:knip-blocker
+				blockerParts.push(report);
+			}
 
-				// Turn-end injects only this turn's HIGH-CONFIDENCE, ATTRIBUTABLE
-				// delta: symbols in files the agent just edited that became unused
-				// (weren't flagged in the previous scan) — low-volume and actionable
-				// now. The FULL project-wide dead-code picture is deliberately NOT
-				// injected per turn (hundreds of mostly-pre-existing findings would
-				// drown the blockers and burn context every turn); it's available
-				// on demand via lens_diagnostics. The delta also feeds the session-slop
-				// record (`projectDiagnosticsDelta`) above.
-				const unusedExportDelta = knipDeliverable.kept.filter(
-					(i) => i.type === "export" || i.type === "enumMember",
-				);
-				if (unusedExportDelta.length > 0) {
-					let report =
-						"⚠️ Newly unused exports in files you edited — check if callers need updating (Knip):\n";
-					for (const issue of unusedExportDelta.slice(0, 5)) {
-						const display = issue.file
-							? toRunnerDisplayPath(cwd, issue.file)
-							: "(unknown)";
-						report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.name}\n`;
-					}
-					// @delivery-surface: runtime-turn:knip-advisory
-					advisoryParts.push(report);
+			// Turn-end injects only this turn's HIGH-CONFIDENCE, ATTRIBUTABLE
+			// delta: symbols in files the agent just edited that became unused
+			// (weren't flagged in the previous scan) — low-volume and actionable
+			// now. The FULL project-wide dead-code picture is deliberately NOT
+			// injected per turn (hundreds of mostly-pre-existing findings would
+			// drown the blockers and burn context every turn); it's available
+			// on demand via lens_diagnostics. The delta also feeds the session-slop
+			// record (`projectDiagnosticsDelta`) above.
+			const unusedExportDelta = knipDeliverable.kept.filter(
+				(i) => i.type === "export" || i.type === "enumMember",
+			);
+			if (unusedExportDelta.length > 0) {
+				let report =
+					"⚠️ Newly unused exports in files you edited — check if callers need updating (Knip):\n";
+				for (const issue of unusedExportDelta.slice(0, 5)) {
+					const display = displayPath(issue);
+					report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.name}\n`;
 				}
+				// @delivery-surface: runtime-turn:knip-advisory
+				advisoryParts.push(report);
 			}
 		}
+		return knipMeta;
+	};
+	const logKnipRow = (
+		root: string,
+		startedAt: number,
+		metadata: KnipTurnMeta,
+	): void =>
+		logLatency({
+			type: "phase",
+			toolName: "turn_end",
+			filePath: root,
+			phase: "knip",
+			durationMs: Date.now() - startedAt,
+			metadata,
+		});
+	if (runtime.isStartupScanInFlight("knip")) {
+		dbg("turn_end: skipping knip (startup scan still in flight)");
+		logKnipRow(cwd, Date.now(), { skipped: true });
+	} else {
+		let budgetSpent = false;
+		for (const scanRoot of knipScan.roots) {
+			if (budgetSpent) {
+				incrementDegradationCount({
+					kind: "turn-end-knip-root-skipped",
+					subject: "budget",
+					reason: `${toRunnerDisplayPath(cwd, scanRoot)} not scanned: an earlier knip scan spent the turn_end budget`,
+				});
+				continue;
+			}
+			const startedAt = Date.now();
+			// Let KnipClient resolve/validate a real JS project root before probing or
+			// auto-installing knip. Non-JS repos (for example Unity projects) should not
+			// run tool checks every turn. Also back off after a timeout/kill so every
+			// agent turn does not spend 30s launching another heavyweight knip process.
+			const prevKnip = cacheManager.readCache<KnipResult>("knip", scanRoot);
+			// An availability failure is NOT a hard knip failure: knip never ran, so
+			// there is nothing to back off from, and backing off would make an
+			// expiring probe verdict permanent again (#1467).
+			const previousFailedHard =
+				prevKnip &&
+				!prevKnip.data.success &&
+				!prevKnip.data.failureKind &&
+				/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(
+					prevKnip.data.summary,
+				);
+			let metadata: KnipTurnMeta;
+			if (previousFailedHard) {
+				dbg(
+					`turn_end: skipping knip after recent failure: ${prevKnip.data.summary}`,
+				);
+				metadata = { skipped: true, reason: prevKnip.data.summary };
+			} else {
+				// #3872: the scan is awaited under the turn_end budget that is LEFT,
+				// and the hook's signal. `bounded()` abandons the await, never the
+				// process: knip keeps its own 30 s timeout and single-flight slot, so
+				// the scan finishes off-hook and warms knip's own cache for the next
+				// turn. Its late result is never written or delivered here -- the turn
+				// it was computed for has already ended.
+				const scanned = await bounded(
+					knipClient.analyze(scanRoot, getKnipIgnorePatterns(), {
+						projectSeq: runtime.projectSeq,
+					}),
+					{
+						ms: Math.max(
+							0,
+							HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
+						),
+						signal: deps.signal,
+						hook: "turn_end",
+						label: "knip",
+					},
+				);
+				if (scanned === undefined) {
+					dbg(`turn_end: knip for ${scanRoot} outlived the turn_end budget`);
+					metadata = {
+						execution: "deferred",
+						aborted: deps.signal?.aborted === true,
+					};
+				} else {
+					metadata = applyKnipResult(scanRoot, prevKnip, scanned);
+				}
+			}
+			budgetSpent = metadata.execution === "deferred";
+			logKnipRow(scanRoot, startedAt, metadata);
+		}
 	}
-	logLatency({
-		type: "phase",
-		toolName: "turn_end",
-		filePath: cwd,
-		phase: "knip",
-		durationMs: Date.now() - t2,
-		metadata: knipMeta,
-	});
 
 	// Cross-file dead-code (#127) for non-JS/TS languages, on knip's contract:
 	// re-scan only when this turn touched a file the client owns, then inject the
