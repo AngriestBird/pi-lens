@@ -14,8 +14,11 @@
 // that already had one (#3774, #3768), against the one-fragment-per-change
 // rule the PR template states. `--base <ref>` supplies the PR base; when it
 // is absent the count rule is skipped and only the shape check runs.
+// `--merge-ref` says HEAD is CI's pull_request merge ref, which already
+// contains the base: the diff starts at the base itself, because that
+// checkout is depth 1 and has no merge-base (#3795 verify r3).
 //
-// Usage: node scripts/check-changelog-fragments.mjs [--base <ref>]
+// Usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]]
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,44 +35,43 @@ const SCRIPT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runGit = (args, options) => gitExecFileSync(args, options);
 
 /**
- * The `.changelog/*.md` files the range adds between `base` and the working
- * tree, or `null` when no base was supplied or Git could not answer (a shallow
- * checkout, a missing ref). The working tree is the comparison point, not
- * HEAD, so a fragment a worker has written but not committed is still counted
- * before push; untracked files are unioned in for the same reason.
- * `README.md` is documentation, not a fragment.
+ * The `.changelog/*.md` files the range adds between its start and the
+ * working tree, or `null` when no base was supplied or Git could not answer (a
+ * missing ref, a shallow checkout without `mergeRef`). The start is `base`
+ * when `mergeRef` says HEAD already contains it, else `git merge-base HEAD
+ * base`, so a local branch behind master does not count master's fragments.
+ * The working tree is the end point, not HEAD, so a fragment a worker has
+ * written but not committed is still counted before push; untracked files are
+ * added for the same reason (`git diff` lists only tracked paths, so the two
+ * lists never share a path). `README.md` is documentation, not a fragment.
  */
 export function addedChangelogFragments({
 	base,
-	cwd = SCRIPT_ROOT,
+	cwd,
 	git = runGit,
+	mergeRef = false,
 } = {}) {
 	if (!base) return null;
 	try {
-		const mergeBase = String(
-			git(["merge-base", "HEAD", base], {
-				cwd,
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "pipe"],
-			}),
-		).trim();
-		if (!mergeBase) throw new Error("merge-base returned no commit");
+		const from = mergeRef
+			? base
+			: String(
+					git(["merge-base", "HEAD", base], {
+						cwd,
+						encoding: "utf8",
+						stdio: ["ignore", "pipe", "pipe"],
+					}),
+				).trim();
 		const diff = git(
-			[
-				"diff",
-				"--diff-filter=A",
-				"--name-only",
-				mergeBase,
-				"--",
-				".changelog/",
-			],
-			{ cwd, encoding: "utf8" },
+			["diff", "--diff-filter=A", "--name-only", from, "--", ".changelog/"],
+			{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 		);
 		const untracked = git(
 			["ls-files", "--others", "--exclude-standard", "--", ".changelog/"],
 			{ cwd, encoding: "utf8" },
 		);
-		return [...new Set(`${diff}\n${untracked}`.split(/\r?\n/))]
+		return `${diff}\n${untracked}`
+			.split(/\r?\n/)
 			.filter(
 				(file) =>
 					/^\.changelog\/[^/]+\.md$/.test(file) &&
@@ -82,17 +84,18 @@ export function addedChangelogFragments({
 }
 
 /**
- * The PR-level changelog gate. Fails when the diff adds more than one
- * fragment; otherwise runs the shared shape validation. `fragments` is the
+ * The PR-level changelog gate for the repository at `cwd`. Fails when the
+ * diff adds more than one fragment; otherwise runs the shared shape
+ * validation, whose error becomes the one-line message. `fragments` is the
  * added set when Git answered, else `null`.
  */
 export function checkChangelogFragments({
 	base,
-	cwd = SCRIPT_ROOT,
+	cwd,
 	git = runGit,
-	rootDir = SCRIPT_ROOT,
+	mergeRef = false,
 } = {}) {
-	const fragments = addedChangelogFragments({ base, cwd, git });
+	const fragments = addedChangelogFragments({ base, cwd, git, mergeRef });
 	if (base && fragments === null) {
 		return {
 			valid: false,
@@ -107,7 +110,16 @@ export function checkChangelogFragments({
 			message: `PR diff adds ${fragments.length} changelog fragments; keep exactly one per PR: ${fragments.join(", ")}`,
 		};
 	}
-	const entries = validateChangelogEntries({ rootDir });
+	let entries;
+	try {
+		entries = validateChangelogEntries({ rootDir: cwd });
+	} catch (error) {
+		return {
+			valid: false,
+			fragments,
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
 	return {
 		valid: true,
 		fragments,
@@ -121,18 +133,20 @@ if (
 ) {
 	const baseIndex = process.argv.indexOf("--base");
 	const cwdIndex = process.argv.indexOf("--cwd");
+	const mergeRef = process.argv.includes("--merge-ref");
 	const base = baseIndex === -1 ? undefined : process.argv[baseIndex + 1];
 	const cwd = cwdIndex === -1 ? SCRIPT_ROOT : process.argv[cwdIndex + 1];
 	const invalidArgument =
 		(baseIndex !== -1 && (!base || base.startsWith("--"))) ||
-		(cwdIndex !== -1 && (!cwd || cwd.startsWith("--")));
+		(cwdIndex !== -1 && (!cwd || cwd.startsWith("--"))) ||
+		(mergeRef && baseIndex === -1);
 	const result = invalidArgument
 		? {
 				valid: false,
 				message:
-					"usage: node scripts/check-changelog-fragments.mjs [--base <ref>] [--cwd <dir>]",
+					"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]] [--cwd <dir>]",
 			}
-		: checkChangelogFragments({ base, cwd, rootDir: cwd });
+		: checkChangelogFragments({ base, cwd, mergeRef });
 	if (result.valid) {
 		console.log(result.message);
 	} else {

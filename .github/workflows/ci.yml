@@ -63,11 +63,12 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the PR base for the fragment-diff check
-        if: github.event_name == 'pull_request'
         run: git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
 
+      # The checkout is the depth-1 pull_request merge ref, which already
+      # contains the base, so `--merge-ref` diffs from the base itself.
       - name: Validate changelog fragments
-        run: node scripts/check-changelog-fragments.mjs --base "${{ github.event.pull_request.base.sha }}"
+        run: node scripts/check-changelog-fragments.mjs --base "${{ github.event.pull_request.base.sha }}" --merge-ref
 
   tla-models:
     name: TLA+ models

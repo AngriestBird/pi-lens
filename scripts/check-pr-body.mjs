@@ -755,13 +755,18 @@ export function splitMarkdownUnits(body = "") {
 	return units;
 }
 
-function bodyLinesOutsideFences(body) {
+// `commonMark` also treats `~~~` fences and 4-space or tab indented lines as
+// code; only the garble lint asks for it. The citation and test-reference
+// lints keep the backtick-only view, so a citation in a nested bullet is still
+// checked (#3795 verify r3).
+function bodyLinesOutsideFences(body, { commonMark = false } = {}) {
 	let fence;
+	const fenceMarker = commonMark ? /^\s*(`{3,}|~{3,})/ : /^\s*(```+)/;
 	return String(body ?? "")
 		.split(/\r?\n/)
 		.map((line) => {
-			if (/^(?: {4}|\t)/.test(line) && !fence) return "";
-			const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
+			if (commonMark && !fence && /^(?: {4}|\t)/.test(line)) return "";
+			const marker = line.match(fenceMarker)?.[1];
 			if (marker) {
 				if (!fence) fence = marker;
 				else if (marker[0] === fence[0] && marker.length >= fence.length)
@@ -779,7 +784,7 @@ function bodyLinesOutsideFences(body) {
 // structural lint accepted both.
 function lintShellExpansionGarble(body) {
 	const errors = [];
-	for (const line of bodyLinesOutsideFences(body)) {
+	for (const line of bodyLinesOutsideFences(body, { commonMark: true })) {
 		const text = line.trim();
 		if (!text) continue;
 		const emptySpan = /(`+)([\s\S]*?)\1/g;

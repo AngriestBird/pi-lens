@@ -80,7 +80,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "HEAD~1",
 			cwd: dir,
-			rootDir: dir,
 			git: gitFor(dir),
 		});
 		expect(result.valid).toBe(false);
@@ -95,7 +94,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "HEAD~1",
 			cwd: dir,
-			rootDir: dir,
 			git: gitFor(dir),
 		});
 		expect(result.valid).toBe(true);
@@ -109,7 +107,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "HEAD~1",
 			cwd: dir,
-			rootDir: dir,
 			git: gitFor(dir),
 		});
 		expect(result.valid).toBe(true);
@@ -133,7 +130,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "rollup",
 			cwd: dir,
-			rootDir: dir,
 			git: gitFor(dir),
 		});
 		expect(result.valid).toBe(true);
@@ -153,7 +149,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "HEAD",
 			cwd: dir,
-			rootDir: dir,
 			git: gitFor(dir),
 		});
 		expect(result.valid).toBe(false);
@@ -176,7 +171,6 @@ describe("one changelog fragment per PR (#3795)", () => {
 		const result = checkChangelogFragments({
 			base: "HEAD",
 			cwd: dir,
-			rootDir: dir,
 		});
 		expect(result.valid).toBe(false);
 		expect(result.message).toContain(".changelog/pr-a.md");
@@ -220,11 +214,16 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"PR diff adds 2 changelog fragments; keep exactly one per PR: .changelog/pr-a.md, .changelog/pr-b.md\n",
 		);
 
-		const badBase = runCli(["--base", "deadbeef", "--cwd", dir], dir);
-		expect(badBase.status).toBe(1);
-		expect(badBase.stderr.trim().split(/\r?\n/)).toEqual([
-			"unable to resolve changelog comparison base: deadbeef",
-		]);
+		for (const mode of [[], ["--merge-ref"]]) {
+			const badBase = runCli(
+				["--base", "deadbeef", ...mode, "--cwd", dir],
+				dir,
+			);
+			expect(badBase.status).toBe(1);
+			expect(badBase.stderr).toBe(
+				"unable to resolve changelog comparison base: deadbeef\n",
+			);
+		}
 
 		for (const args of [
 			["--base", "--cwd", dir],
