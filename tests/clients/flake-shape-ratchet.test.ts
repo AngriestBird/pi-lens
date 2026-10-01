@@ -381,6 +381,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the provider wire roster is produced by a real pi host loading the built extension; an in-process double cannot certify tools.<name>.enabled",
 	},
+	// #3870: the detector tests drive the analyzer's real CLI entry point as a
+	// real node subprocess over redacted fixture logs; an in-process call could
+	// not prove the --root/--json/--since argv or the JSON report boundary.
+	"real-process-spawn:scripts/analyze-pi-lens-logs-detectors.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the tests spawn the analyzer's real CLI over fixture logs; an in-process call cannot prove the --root/--json argv or the JSON report boundary (same seam as analyze-pi-lens-logs.test.ts)",
+	},
 	// #3684: the advisory scope is the wrapper's own `git diff` against a real
 	// throwaway fixture repo; an in-process call cannot prove the git boundary
 	// or the wrapper's argv/env (GITHUB_BASE_REF) handling.
