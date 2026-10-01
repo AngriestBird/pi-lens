@@ -101,6 +101,7 @@ import {
 	type TestResult,
 	type TestRunnerClient,
 } from "./test-runner-client.js";
+import { createTurnEndTestRoots } from "./test-target-roots.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
 	gateFindingsByPathFreshness,
@@ -2565,6 +2566,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			Omit<TurnEndTestTarget, "strategy"> & {
 				strategy: TurnEndTestTarget["strategy"] | "deferred";
 				sourceFile: string;
+				/**
+				 * The checkout root this target is selected and run in (#3871): the
+				 * session cwd, or the linked worktree that owns it. Not persisted;
+				 * a carried target re-derives it from its path.
+				 */
+				testRoot: string;
 				fileSeqAtRun?: number;
 				/** Cut-batch count carried in from the cache, for the cap below. */
 				deferralAttempts?: number;
@@ -2578,6 +2585,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// LSP cascade-diagnostics merge — no second reverse-dependency walk, and the
 		// neighbor set inherits whatever budget the cascade compute already applied
 		// (CASCADE_NEIGHBOUR_BUDGET), so this can't turn into unbounded per-edit work.
+		// #3871: which checkout root owns each target. One resolver per turn so
+		// its per-directory memo is shared by the carried-over targets and this
+		// turn's candidates.
+		const testRootFor = createTurnEndTestRoots(cwd);
 		const candidates: Array<{
 			display: string;
 			abs: string;
@@ -2773,9 +2784,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// A RunnerConfig carries functions, so the cache stores the runner KEY
 			// and the config is re-resolved here from the single registry.
 			const config = RUNNERS[carried.runner];
+			const carriedRoot = testRootFor(testFile);
 			if (
 				!config ||
-				isExcludedTestTarget(testFile, cwd) ||
+				isExcludedTestTarget(testFile, carriedRoot) ||
 				!fs.existsSync(testFile)
 			) {
 				resolvedDeferralKeys.add(carriedKey);
@@ -2805,6 +2817,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				runner: carried.runner,
 				config,
 				strategy: "deferred",
+				testRoot: carriedRoot,
 				deferralAttempts: attempts,
 			});
 			dbg(
@@ -2855,9 +2868,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let excludedTargets = 0;
 		let retiredSkips = 0;
 		for (const { display, abs, isNeighbor } of candidates) {
+			// #3871: select in the checkout that owns the edit. For an edit the
+			// session owns this is `cwd`, exactly as before.
+			const testRoot = testRootFor(abs);
 			const target = testRunnerClient.getTestRunTarget(
 				abs,
-				cwd,
+				testRoot,
 				runtime.turnIndex,
 			);
 			const targetKey = target ? normalizeMapKey(target.testFile) : "";
@@ -2883,7 +2899,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// Cache admission and retirement reject foreign-checkout failures;
 				// this gate still covers self/related discovery and deferred targets.
 				// The log must not claim a specific cause from a boolean verdict.
-				if (isExcludedTestTarget(target.testFile, cwd)) {
+				if (isExcludedTestTarget(target.testFile, testRoot)) {
 					excludedTargets++;
 					dbg(
 						`turn_end: ${display} → test target excluded by the built-in turn-end policy, skipping spawn (${path.relative(cwd, target.testFile)})`,
@@ -2906,7 +2922,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					overCapTargets++;
 					continue;
 				}
-				targets.push({ ...target, sourceFile: abs });
+				targets.push({ ...target, sourceFile: abs, testRoot });
 				dbg(
 					`turn_end: ${display} → test ${target.runner} ${path.relative(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
 				);
@@ -2988,7 +3004,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// abort signal the rest of the spawn layer already honours.
 				signal: getAmbientAbortSignal(),
 				run: (t, batchSignal) =>
-					testRunnerClient.runTestFileAsync(t.testFile, cwd, {
+					testRunnerClient.runTestFileAsync(t.testFile, t.testRoot, {
 						runner: t.runner,
 						config: t.config,
 						turnIndex: firedAtTurn,
@@ -2996,13 +3012,42 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// budget kills this spawn rather than letting it run out its
 						// own 60s timeout behind a batch that has already returned.
 						signal: batchSignal,
+						// #3871 r2: a failure in a linked worktree reads relative to the
+						// session checkout (`.worktrees/x/tests/a.test.ts:12`), which
+						// may hold a file at the worktree-relative path.
+						displayRoot: cwd,
+						// A worktree root without its own runner install is skipped, not
+						// run through `npx` (a network fetch) or a bare interpreter.
+						requireOwnInstall: t.testRoot !== cwd,
 					}),
 			})
-				.then(({ results, deferred, stopReason }) => {
-					const settledResults = results as Array<
+				.then(({ results: batchResults, deferred, stopReason }) => {
+					const settledResults = batchResults as Array<
 						PromiseSettledResult<TestResult>
 					>;
-					const verdicts = settledResults.flatMap((result) => {
+					// #3871 r2: a target the client refused to start is neither a pass
+					// nor a failure. Counted here, then taken out of everything below
+					// so a batch of refusals never publishes a clean run.
+					const results: Array<PromiseSettledResult<TestResult>> = [];
+					for (const result of settledResults) {
+						if (!("value" in result) || !result.value.notRun) {
+							results.push(result);
+							continue;
+						}
+						const skippedRoot =
+							targets.find(
+								(candidate) => candidate.testFile === result.value.file,
+							)?.testRoot ?? cwd;
+						incrementDegradationCount({
+							kind: "turn-end-test-root-skipped",
+							subject: result.value.notRun,
+							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own; its tests were skipped rather than fetched through npx or run in another environment`,
+						});
+						dbg(
+							`turn_end: skipped ${toRunnerDisplayPath(cwd, result.value.file)}: ${result.value.notRun} in ${toRunnerDisplayPath(cwd, skippedRoot)}`,
+						);
+					}
+					const verdicts = results.flatMap((result) => {
 						if (result.status === "rejected") return [];
 						const target = targets.find(
 							(candidate) => candidate.testFile === result.value.file,

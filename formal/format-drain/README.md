@@ -11,7 +11,8 @@ Issues: #3527 (the drain outside pi's mutation queue), #3528 (the drain
 writes the next session's state), #3529 (the drain's LSP sync), #3576 (the
 retire without a session bump, and the held resync R1), #3558 and #3610 (the
 formatter enters pi's queue after its command resolution), #3599 and #3728
-(the bounded post-exit wait), #3828 (the late resync after that bound gave up).
+(the bounded post-exit wait), #3828 (the late resync after that bound gave up),
+#3858 (the same late resync for the in-band `--immediate-format` caller).
 
 ## What the model covers
 
@@ -51,6 +52,13 @@ formatter enters pi's queue after its command resolution), #3599 and #3728
     `DEFERRED_FORMAT_BUDGET_MS`. With `OrphanSyncBound` (#3728) the wait gives
     up while the run is alive (`OrphanGiveUp`); `OrphanLateSync` (#3828) then
     chains the resync onto the run's settlement (`gaveUp` in `SubWrite`).
+  - With `InBand` (#3858) the caller is the tool_result pipeline
+    (`analysePipeline`, `--immediate-format`), which waits for nothing after the
+    bound: `Abandon` reports no format, requeues nothing and sets `gaveUp`, and
+    the pipeline goes on to its tail, `DFc` and `DApply` (the `fileContent` read
+    and the LSP send of the bytes from before the run's write), while the run is
+    alive and keeps its own queue entry. The run's late write is then synced
+    only with `OrphanLateSync`: the same chain at its second call site.
 - **`/new`** (or fork, resume) resets the session state and retires the
   LSP service (`resetLSPService`). The next touch opens a fresh document, so
   a drain touch after the reset would spawn a server for the next session
@@ -76,7 +84,8 @@ bit. So a formatter that writes back stale bytes shows up as a missing edit.
 | `EnterAfterResolve` | #3610 (#3558): `formatFile` calls `enter` after `resolveCommand`, so an install holds no queue entry; without it the hold is taken before the resolution |
 | `FixOrphanSync` | #3529: once an abandoned phase and its abandoned formatters have settled, a fresh stamped read of F is resynced (`handleAgentEnd`, the post-exit resync). The read and the send are separate steps, as in the code |
 | `OrphanSyncBound` | not a fix: #3599/#3728 bound that wait by `DEFERRED_FORMAT_BUDGET_MS`, so it can give up while the run is alive |
-| `OrphanLateSync` | #3828: a give-up chains a resync onto the abandoned run's settlement (`handleAgentEnd`, `deferred_format_late_resync`); it needs `FixOrphanSync`. In the code it is held-only in every case (`resyncHeldLspDocument`, #3828 r2): the model has no action that closes a document, so a current-session send to a held F and a held-only one are the same step here, and the no-spawn half is pinned by the replays, not by TLC |
+| `OrphanLateSync` | #3828, #3858: a give-up chains a resync onto the abandoned run's settlement (`chainLateFormatResync`, called by `handleAgentEnd` as `deferred_format_late_resync` and by `analysePipeline` as `inband_format_late_resync`); it needs `FixOrphanSync`. In the code it is held-only in every case (`resyncHeldLspDocument`, #3828 r2): the model has no action that closes a document, so a current-session send to a held F and a held-only one are the same step here, and the no-spawn half is pinned by the replays, not by TLC |
+| `InBand` | #3858: not a fix: the run's caller is the in-band pipeline, so the bound's expiry leaves the pipeline's tail running (`Abandon`, `DFc`, `DApply`) instead of requeueing and ending the caller's work |
 | `LspGen` | #3528 r1 F1: the drain's LSP sends (the in-hook format and autofix resyncs and the post-exit resync) run only while its session is current |
 | `StartGen` | #3528 r1 F1: after `/new`, the format worker and the autofix loop start no new file; that write's sync would be skipped |
 | `ServiceGen` | #3576: the drain's LSP sends also check the LSP service generation it captured (`captureLspServiceGeneration`), so a retire without a session bump stops them too |
@@ -129,6 +138,11 @@ change that drops it turns the check red.
 | `FixNoStamp` | without `FixStamp` (the code before #3529) | violated `LspMatchesDisk` | 2,796 |
 | `OrphanNoLateSync` | without `OrphanLateSync` (the code merged in #3728): the give-up reports `abandoned` and the late write is never synced (#3828) | violated `LspMatchesDisk` | 327 |
 | `FixNoLateSync` | the same on the full model (`/new`, retire, overlap) | violated `LspMatchesDisk` | 2,136 |
+| `InBandLsp` | fixed code (#3858): the in-band caller's bound gives up, its tail sends the bytes from before the write, and the late write is resynced | pass | 2,598 |
+| `FixInBand` | all fix parts on the in-band caller; overlap, orphan, `/new` and a retire on | pass | 83,918 |
+| `InBandNoLateSync` | without `OrphanLateSync` at the in-band call site (the code before #3858) | violated `LspMatchesDisk` | 370 |
+| `FixInBandNoLateSync` | the same on the full model | violated `LspMatchesDisk` | 3,230 |
+| `InBandNoStamp` | without `FixStamp` on the in-band caller: the tail's unstamped send can land after the late resync | violated `LspMatchesDisk` | 593 |
 | `FixEnterEarly` | without `EnterAfterResolve` (the code before #3610): an install holds pi's queue | violated `NoInstallHold` | 164 |
 | `FixNoOrphanSync` | without `FixOrphanSync` (the code before #3529) | violated `LspMatchesDisk` | 594 |
 | `MutNoReset` | non-vacuity: `/new` keeps the read guard | violated `NoBlindAllow` | 601 |
@@ -154,6 +168,13 @@ Two fix parts now overlap in the model, and the code keeps both:
 
 ## What the model does not cover
 
+- **The in-band caller's start (#3858).** `InBand` changes only what the
+  bound's expiry does. The run still starts at `EndRun` as the model's one run;
+  the real in-band caller starts it inside the agent's own `tool_result`, which
+  holds that turn, so the agent cannot overlap it. The model's agent can
+  overlap a run (`Overlap`), a superset of that. The pipeline's other
+  phases (autofix, dispatch) are not modelled; its LSP send of the final read
+  is `DApply`.
 - **A run that never settles** (an install without a leaf bound). The late
   resync is chained on the run's settlement, so a run that never settles is
   never synced, and owes nothing: it never writes. Without fairness the model
