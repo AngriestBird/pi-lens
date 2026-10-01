@@ -553,6 +553,9 @@ the surface they bite; each block loads only when its trigger applies.
 - Expected skips remain distinct from clean success and failure. Extend the
   closed `RUNNER_SKIP_REASONS` taxonomy when policy intentionally defers work.
   Preserve the skip reason through runner latency and model-facing delivery.
+- `scripts/ci-verdict.mjs` ends every CLI path with `ci-verdict: exit <N> (<kind>)`;
+  read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
+  the piped-status recurrence while allowing output-only pipes.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability
   or a conservative capability allowlist.

@@ -60,6 +60,8 @@
   --report <downloaded mutation.json>`). Absent, stale, `0 mutants evaluated`,
   partial or `no report` mutation evidence goes under `Could not verify`, never
   implied green.
+- Read the final stdout line `ci-verdict: exit <N> (<kind>)`; never infer the
+  verdict from `$?` after piping the command.
 - Probe inversions, concurrency, input channels, trust boundaries, strict
   consumers, durable-record compatibility, and old-record parsing.
 - Repeat the pattern and population sweeps.

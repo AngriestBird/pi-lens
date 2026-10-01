@@ -220,6 +220,33 @@ export const EXIT_PENDING = 3;
 export const EXIT_USAGE = 64;
 export const EXIT_TRANSPORT = 70;
 
+/**
+ * The status line a shell pipeline can retain without consulting `$?`.
+ * Watch modes use their own labels because exit 0/3 there describes whether
+ * an event was observed, not whether one PR was green or pending (#3883).
+ */
+export function formatExitLine(exitCode, argv = []) {
+	const args = Array.isArray(argv) ? argv : [];
+	const watchIndex = args.indexOf("--watch-open");
+	if (watchIndex !== -1)
+		return `ci-verdict: exit ${exitCode} (${args.includes("--stream") ? "stream" : "watch"})`;
+	const kind =
+		exitCode === EXIT_SUCCESS
+			? "green"
+			: exitCode === EXIT_PENDING
+				? "pending"
+				: exitCode === EXIT_FAILURE
+					? "red"
+					: exitCode === EXIT_DIRTY
+						? "DIRTY"
+						: exitCode === EXIT_USAGE
+							? "usage"
+							: exitCode === EXIT_TRANSPORT
+								? "transport"
+								: "unknown";
+	return `ci-verdict: exit ${exitCode} (${kind})`;
+}
+
 /** Minutes a required check may stay unregistered on a head with auto-merge
  * armed before the verdict says "re-arm" (#3694). CI normally registers within
  * a minute or two; ten is well past that without hiding a stuck retarget. */
@@ -2647,6 +2674,7 @@ async function main() {
 	});
 	if (plan === REEXEC_VERSION_TOO_OLD) {
 		console.error(formatVersionTooOldMessage(process.version));
+		console.log(formatExitLine(EXIT_TRANSPORT, process.argv.slice(2)));
 		process.exitCode = EXIT_TRANSPORT;
 		return;
 	}
@@ -2661,14 +2689,19 @@ async function main() {
 			{ stdio: "inherit", env: { ...process.env, NODE_USE_ENV_PROXY: "1" } },
 		);
 		process.exitCode = result.status ?? EXIT_TRANSPORT;
+		if (result.status === null)
+			console.log(formatExitLine(EXIT_TRANSPORT, process.argv.slice(2)));
 		return;
 	}
-	process.exitCode = await run();
+	const exitCode = await run();
+	console.log(formatExitLine(exitCode, process.argv.slice(2)));
+	process.exitCode = exitCode;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	main().catch((error) => {
 		console.error(error);
+		console.log(formatExitLine(1, process.argv.slice(2)));
 		process.exitCode = 1;
 	});
 }

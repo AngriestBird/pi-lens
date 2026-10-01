@@ -14,6 +14,7 @@ import {
 	EXIT_USAGE,
 	fetchCheckRunsPayload,
 	formatAbsentRequiredReason,
+	formatExitLine,
 	formatVerdictTable,
 	HARD_CAP_SECONDS,
 	isPrNumber,
@@ -36,6 +37,28 @@ import {
 	isUnitTestsJobName,
 	isUnitTestsShardJobName,
 } from "../../scripts/lib/ci-checks.mjs";
+
+describe("formatExitLine — the pipe-safe CLI status contract (#3883)", () => {
+	it.each([
+		[EXIT_SUCCESS, "green"],
+		[EXIT_PENDING, "pending"],
+		[EXIT_FAILURE, "red"],
+		[EXIT_DIRTY, "DIRTY"],
+		[EXIT_USAGE, "usage"],
+		[EXIT_TRANSPORT, "transport"],
+	] as const)("pins verdict exit %i as %s", (code, kind) => {
+		expect(formatExitLine(code)).toBe(`ci-verdict: exit ${code} (${kind})`);
+	});
+
+	it.each([
+		["--watch-open", "watch"],
+		["--watch-open --stream", "stream"],
+	] as const)("pins %s event exit codes", (args, kind) => {
+		expect(formatExitLine(EXIT_SUCCESS, args.split(" "))).toBe(
+			`ci-verdict: exit 0 (${kind})`,
+		);
+	});
+});
 
 function checkRun({
 	name,

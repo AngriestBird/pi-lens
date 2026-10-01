@@ -96,6 +96,8 @@ the cost of not doing so.
   `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
   `MUTATION` line). Kill every survivor on a line you added with a test in the
   PR, or show it equivalent with a reason in the PR body.
+- Read the final stdout line `ci-verdict: exit <N> (<kind>)`; never infer the
+  verdict from `$?` after piping the command.
 - Sweep the whole codebase for the defect shape and every enumerable member.
 - Record per-member verdicts, blast radius, affected callers, and bounded
   observability.

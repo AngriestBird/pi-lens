@@ -231,6 +231,9 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 		"npx vitest run tests/foo.test.ts 2>&1 | grep -iE 'error|fail'; git add -A && git commit -m x && git push origin y",
 		"chained",
 	],
+	// #3883: a pipeline reads the pipe's status, not ci-verdict's status;
+	// the final `ci-verdict: exit` line is the authoritative status instead.
+	["node scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
 ];
 
 // Every allow string the issue lists, which must stay green.
@@ -244,6 +247,11 @@ const ALLOW_CASES: string[] = [
 	'echo "git stash"',
 	"PI_LENS_HOME=/x node -e \"require('./clients/foo.js')\"",
 	"node scripts/ci-verdict.mjs 1",
+	// #3883: piping output without reading `$?` is a valid way to inspect the
+	// final `ci-verdict: exit` line.
+	"node scripts/ci-verdict.mjs 1 | head",
+	// #3883: capture `$?` before sending the captured status through a pipe.
+	"node scripts/ci-verdict.mjs 1; echo $? | tail",
 	// #3723: the sanctioned form of the worktree open/close sequence the
 	// hook's worktreeSymlink rule otherwise denies -- a node script, not a
 	// hand-typed `git worktree remove`, and it loads no clients/ or dist/ code.
@@ -507,6 +515,13 @@ describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
 		expect(result.status).toBe(2);
 		expect(result.stderr.toLowerCase()).toContain(ruleNeedle);
 	});
+
+	it("explains the pipe-safe final line for #3883", () => {
+		const result = runHook("node scripts/ci-verdict.mjs 1 | tail; echo $?");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("final `ci-verdict: exit <N> (<kind>)`");
+		expect(result.stderr).toContain("; echo $?` before the pipe");
+	});
 });
 
 describe("scripts/hooks/guard-bash.mjs -- allow list (#2699)", () => {
@@ -551,6 +566,11 @@ describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)"
 		// Same guard, for #3471's ninth rule.
 		const rule: DenyRule = "checkUngated";
 		expect(RULE_MESSAGES[rule]).toContain("&&");
+	});
+
+	it("declares ciVerdictStatus in the DenyRule union", () => {
+		const rule: DenyRule = "ciVerdictStatus";
+		expect(RULE_MESSAGES[rule]).toContain("final `ci-verdict: exit`");
 	});
 });
 
@@ -720,7 +740,7 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 			} else {
 				expect(result.status, command).toBe(2);
 				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained/,
+					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained|ci-verdict/,
 				);
 			}
 		},

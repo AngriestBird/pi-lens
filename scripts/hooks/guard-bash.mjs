@@ -166,7 +166,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"ciVerdictStatus"|"hookBypass"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -190,6 +190,8 @@ export const RULE_MESSAGES = {
 		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
 		"a `git commit`/`git push` chained after a check (`npm run lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node scripts/check-*.mjs`) through `;` or a pipe, rather than `&&`, is forbidden (#3471) -- the check's exit code gates nothing that way, so a real failure can still get committed or pushed; gate it with `&&`, or read the check's result in its own separate call.",
+	ciVerdictStatus:
+		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
 
 /**
@@ -2032,6 +2034,34 @@ function findUngatedWriteInChain(segments) {
 }
 
 /**
+ * #3883: a pipeline's `$?` is the status of its last command, not
+ * ci-verdict's verdict. Recognize both orderings that make that mistake look
+ * plausible: `ci-verdict | tail; echo $?`. Capturing with
+ * `ci-verdict; echo $? | tail` happens before the pipe and remains allowed.
+ *
+ * @param {Array<{ text: string; sep: string | null }>} segments
+ * @returns {DenyRule | null}
+ */
+function findPipedCiVerdictStatusRead(segments) {
+	const isCiVerdict = (text) => {
+		const words = stripCommandGroupAndRunnerPrefixes(splitWords(text));
+		const { rest } = stripEnvAssignments(words);
+		if (rest[0] !== "node" && rest[0] !== "nodejs") return false;
+		return /(?:^|[/\\])scripts[/\\]ci-verdict\.mjs$/.test(rest[1] ?? "");
+	};
+	const readsStatus = (text) => text.includes("$?");
+	for (let i = 0; i < segments.length; i++) {
+		if (!isCiVerdict(segments[i].text)) continue;
+		for (let pipe = i + 1; pipe < segments.length; pipe++) {
+			if (segments[pipe].sep !== "|") continue;
+			if (segments.slice(pipe + 1).some((segment) => readsStatus(segment.text)))
+				return "ciVerdictStatus";
+		}
+	}
+	return null;
+}
+
+/**
  * Scan a full Bash command for the first denied rule: every executable
  * region {@link scannableRegions} found, split into segments and
  * classified. The top-level region runs first and accumulates `export`ed
@@ -2054,6 +2084,8 @@ export function findDeny(commandText, cwd) {
 		const env = index === 0 ? sharedEnv : { ...sharedEnv };
 		let effectiveCwd = cwd;
 		const segments = splitSegmentsWithSeparators(regions[index]);
+		const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
+		if (ciVerdictRule) return ciVerdictRule;
 		const chainRule = findUngatedWriteInChain(segments);
 		if (chainRule) return chainRule;
 		for (const { text: segment } of segments) {
