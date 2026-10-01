@@ -331,6 +331,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a pull round trip per case -- the same
 	// #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-root-fallback-3750.test.ts",
+	// #3827: drives `lsp_navigation rename` over a REAL `createLSPClient` on the
+	// fake server (a real initialize handshake per case), so the client's own
+	// first-send stamp reaches the capture; the same #1022/#2332 contention
+	// class as its lane siblings.
+	"tests/tools/lsp-navigation-rename-first-open.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
