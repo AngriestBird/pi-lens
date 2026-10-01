@@ -1,12 +1,30 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import {
 	_settleRegistryMutationsForTests,
 	deregisterInstance,
 } from "../clients/instance-registry.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-2992-integration",
+	),
+);
+afterAll(() => lensHome.release());
 
 const workerHome = process.env.PI_LENS_HOME;
 

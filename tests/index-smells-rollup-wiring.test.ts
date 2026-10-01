@@ -1,5 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { createPiMock } from "./support/pi-mock.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-smells-rollup-wiring",
+	),
+);
+afterAll(() => lensHome.release());
 
 // Wiring guard for the #1123 item 3 smells self-surfacing turn_end note:
 // turn_end MUST call the bounded rollup (`countRecentSmells`) every

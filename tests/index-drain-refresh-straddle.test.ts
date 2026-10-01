@@ -20,7 +20,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 const drain = vi.hoisted(() => ({ replaceSession: false }));
 const refresh = vi.hoisted(() => ({ calls: 0 }));
@@ -68,6 +76,16 @@ import {
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-drain-refresh-straddle",
+	),
+);
+afterAll(() => lensHome.release());
 
 describe("#3576: the post-drain ledger refresh stays in the drain's session", () => {
 	let tmp: string;

@@ -19,7 +19,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import extension from "../index.js";
 import {
 	initLSPConfig,
@@ -31,6 +39,16 @@ import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js"
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-lsp-config-root-eviction",
+	),
+);
+afterAll(() => lensHome.release());
 
 const DENIED_SERVER = "typos";
 const dirs: string[] = [];

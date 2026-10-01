@@ -1,10 +1,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { removeTempDirSync } from "./test-utils.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
+		"lsp-lazy-liveness",
+	),
+);
+afterAll(() => lensHome.release());
 
 describe("LSP session warm/first-use liveness (#1394)", () => {
 	afterEach(() => vi.resetModules());

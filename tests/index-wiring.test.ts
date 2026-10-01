@@ -177,6 +177,16 @@ import {
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
 
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-wiring",
+	),
+);
+afterAll(() => lensHome.release());
+
 // #643: the dynamic-tool-deactivation call now runs inside the session_start
 // handler rather than synchronously at registration time (see index.ts), so
 // the tests below that need to observe it must actually fire session_start.

@@ -34,7 +34,7 @@ export interface PrivateLensHome {
 	readonly home: string;
 	/**
 	 * Flush every deferred writer that can recreate the home (project-snapshot,
-	 * review-graph, extension-log, `latency.log`, `sessionstart.log`), remove
+	 * review-graph, extension-log, `latency.log`, `sessionstart.log`, probe-cache), remove
 	 * it, and restore the previous `PI_LENS_HOME`. The restore sits in `finally`;
 	 * a flush that cannot run (a file that mocks a logger away) skips only itself.
 	 */
@@ -62,6 +62,13 @@ export function pinPrivateLensHome(tag: string): PrivateLensHome {
 						(
 							await import("../../clients/sessionstart-logger.js")
 						).flushSessionStartLog(),
+					// The probe cache persists on a 300ms unref'd timer into a path
+					// fixed at module load, i.e. into this home: left alone it
+					// recreates the home after the removal below.
+					async () =>
+						(
+							await import("../../clients/installer/index.js")
+						).flushProbeCache(),
 				];
 				for (const flush of flushes) {
 					try {

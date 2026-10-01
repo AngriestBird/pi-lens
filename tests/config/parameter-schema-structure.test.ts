@@ -1,9 +1,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import extension from "../../index.js";
 import { McpHarness } from "../mcp/harness.js";
 import { createPiMock } from "../support/pi-mock.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
+		"parameter-schema-structure",
+	),
+);
+afterAll(() => lensHome.release());
 
 type Tool = {
 	name: string;

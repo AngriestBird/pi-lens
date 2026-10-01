@@ -13,7 +13,15 @@
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import {
 	clearLatencyLog,
 	flushLatencyLog,
@@ -35,6 +43,16 @@ vi.mock("../../clients/lsp/index.js", () => ({
 }));
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("../support/private-lens-home.js")).pinPrivateLensHome(
+		"session-start-total-classification",
+	),
+);
+afterAll(() => lensHome.release());
 
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;

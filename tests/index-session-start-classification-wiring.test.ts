@@ -12,7 +12,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import extension from "../index.js";
 import {
 	clearLatencyLog,
@@ -23,6 +31,16 @@ import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js"
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+// #3721: every vitest worker shares one PI_LENS_HOME; this file loads the
+// extension entry, so pin a private home before any import and release it
+// last (afterAll hooks run in reverse registration order).
+const lensHome = await vi.hoisted(async () =>
+	(await import("./support/private-lens-home.js")).pinPrivateLensHome(
+		"index-session-start-classification-wiring",
+	),
+);
+afterAll(() => lensHome.release());
 
 /** Make an already-emitted ctx read as invalidated, the way the SDK does
  *  after a session replacement. */
