@@ -501,6 +501,13 @@ export type DegradationKind =
 	 * Without this row the fallback is indistinguishable from a healthy run.
 	 */
 	| "kill-ownership-unverifiable"
+	/**
+	 * #3813: a late auxiliary pair whose findings the turn-end cap cut was past
+	 * its re-arm TTL or ceiling, so it was NOT put back for the next turn (a pair
+	 * within its bound is re-armed and counted under `turn-end-sections-held`).
+	 * Counted; subject is `late-auxiliary:<serverId>`, a small fixed set.
+	 */
+	| "late-auxiliary-held-dropped"
 	/** A didChange content mirror was recorded behind a newer document version. */
 	| "lens-diagnostics-analysis-root-rejected"
 	/** Cross-graph rotation options disagreed; the first writer retained ownership. */

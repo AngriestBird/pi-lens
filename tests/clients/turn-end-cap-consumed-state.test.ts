@@ -15,6 +15,7 @@
  * the way production does (`consumeTurnEndFindings`), then asserts the
  * producer's own state and the NEXT turn's message. The cap is never mocked.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +68,11 @@ import {
 	resetPendingAuxiliaryCoverage,
 } from "../../clients/lsp/pending-aux-coverage.js";
 import { DEPENDENCY_DRIFT_MAX_DELIVERIES } from "../../clients/blocker-freshness.js";
+import {
+	_resetStateCacheForTests,
+	markDisposition,
+} from "../../clients/diagnostic-dispositions.js";
+import { evaluateGitGuard } from "../../clients/git-guard.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
@@ -92,10 +98,11 @@ function makeDeps(
 	cacheManager: CacheManager,
 	cwd: string,
 	midTurn?: () => void,
+	lensGuard = false,
 ) {
 	return {
 		ctxCwd: cwd,
-		getFlag: () => false,
+		getFlag: (name: string) => lensGuard && name === "lens-guard",
 		dbg: () => {},
 		runtime,
 		cacheManager,
@@ -119,6 +126,8 @@ interface Rig {
 	cwd: string;
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
+	/** `--lens-guard`: the flag the commit gate hangs off. */
+	lensGuard: boolean;
 	cleanup: () => void;
 }
 
@@ -131,6 +140,7 @@ function makeRig(prefix: string): Rig {
 		cwd: env.tmpDir,
 		runtime,
 		cacheManager: new CacheManager(false),
+		lensGuard: false,
 		cleanup: env.cleanup,
 	};
 }
@@ -153,7 +163,7 @@ function touch(rig: Rig, name: string, content = "export const a = 1;\n") {
 /** End the turn; return what the agent receives, consumed like production. */
 async function endTurn(rig: Rig, midTurn?: () => void): Promise<string> {
 	await handleTurnEnd(
-		makeDeps(rig.runtime, rig.cacheManager, rig.cwd, midTurn),
+		makeDeps(rig.runtime, rig.cacheManager, rig.cwd, midTurn, rig.lensGuard),
 	);
 	return (
 		consumeTurnEndFindings(rig.cacheManager, rig.cwd, rig.runtime)
@@ -211,6 +221,7 @@ function ledgerCount(kind: string): number {
 }
 
 beforeEach(() => {
+	_resetStateCacheForTests();
 	resetDegradationLedger();
 	resetBoundedTelemetry();
 	resetPendingRunnerFindings();
@@ -959,24 +970,49 @@ describe("M3d: late auxiliary coverage vs the cap (#3813)", () => {
 	});
 
 	// The re-offer spends the pair's own re-arm ceiling, so a blocker that
-	// never clears cannot keep a pair alive forever.
-	it("a pair cut on every turn stops re-arming at the ceiling", async () => {
+	// never clears cannot keep a pair alive forever. r1 F3: the drop at the
+	// ceiling is not a hold (the message must not promise it), and it writes
+	// its own record.
+	it("a pair cut on every turn stops re-arming at the ceiling and records the drop", async () => {
 		const rig = makeRig("pi-lens-3813-m3d-bound-");
 		try {
 			fillerBlocker(rig, 1000);
 			markAux(rig, "aux-a.ts");
+			const messages: string[] = [];
 			let turns = 0;
 			while (pendingAuxiliaryCoverageSize() > 0 && turns < 20) {
 				turns += 1;
 				nextTurn(rig, turns);
-				await endTurn(rig);
+				const message = await endTurn(rig);
+				if (message) messages.push(message);
 			}
 			expect(pendingAuxiliaryCoverageSize()).toBe(0);
-			// Held on every turn that drained it, re-armed on all but the last.
+			// Held (kept pending) on each turn that re-armed the pair; the
+			// turn that found it past the ceiling dropped it instead.
 			// (A turn the cycle cap skips outright drains nothing.)
-			expect(ledgerCount("turn-end-sections-held")).toBe(
-				MAX_LATE_AUX_REARMS + 1,
-			);
+			expect(ledgerCount("turn-end-sections-held")).toBe(MAX_LATE_AUX_REARMS);
+			expect(ledgerCount("late-auxiliary-held-dropped")).toBe(1);
+			const last = messages[messages.length - 1] ?? "";
+			expect(last).toContain("(truncated");
+			expect(last).not.toContain("held for the next turn");
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// r1 F3: the row that says what a turn did with its pairs is written
+	// before the cap runs, so a re-arm made by a hold needs its own row, or
+	// `pendingAfter` reads 0 for a pair that is still pending.
+	it("logs the hold's re-arm and the store size after it settles", async () => {
+		const rig = makeRig("pi-lens-3813-m3d-row-");
+		try {
+			fillerBlocker(rig, 1000);
+			markAux(rig, "aux-a.ts");
+			await endTurn(rig);
+			const row = logLatency.mock.calls
+				.map((call) => call[0])
+				.find((entry: any) => entry?.phase === "late_auxiliary_holds");
+			expect(row?.metadata).toMatchObject({ rearmed: 1, pendingAfter: 1 });
 		} finally {
 			rig.cleanup();
 		}
@@ -1009,6 +1045,237 @@ describe("F6: a resolved retirement the signature dedupe would suppress (#3813)"
 			rig.runtime.beginTurn();
 			retire();
 			expect(await endTurn(rig)).toContain(line);
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
+/** A blocker the agent marked false-positive: the policy suppresses it. */
+function markedBlocker(rig: Rig, name: string): string {
+	const file = touch(rig, name, "alpha();\n");
+	const diagnostic: Diagnostic = {
+		id: `ast-grep:${name}:1`,
+		message: "alpha is unsafe",
+		filePath: file,
+		line: 1,
+		severity: "error",
+		semantic: "blocking",
+		tool: "ast-grep",
+		rule: "no-eval",
+	};
+	const bytes = fs.readFileSync(file);
+	rig.runtime.recordInlineBlockers(
+		file,
+		"🔴 STOP — alpha is unsafe",
+		rig.runtime.nextWriteIndex(),
+		["ast-grep"],
+		[1],
+		{
+			size: bytes.byteLength,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		},
+		[diagnostic],
+	);
+	markDisposition(
+		rig.cwd,
+		{
+			cwd: rig.cwd,
+			filePath: file,
+			tool: diagnostic.tool,
+			rule: diagnostic.rule,
+			message: diagnostic.message,
+			line: 1,
+			content: fs.readFileSync(file, "utf8"),
+		},
+		"false-positive",
+	);
+	return file;
+}
+
+describe("F1: a retire a hold commits re-derives the commit-gate latch (#3813 r1)", () => {
+	// Recurrence (review r1 F1): `updateGitGuardStatus` counts every map entry,
+	// and neither retire re-derived the latch. Moving the past-EOF retire behind
+	// the policy re-derive turned a master-open gate (retire + policy suppression
+	// in one turn) into a closed one. The same missing re-derive already left the
+	// latch set on master after a lone retire.
+	it.each([
+		{ suppressed: true, what: "a retire and a policy suppression in one turn" },
+		{ suppressed: false, what: "a retire alone" },
+	])("$what leaves the commit gate open", async ({ suppressed }) => {
+		const rig = makeRig("pi-lens-3813-f1-");
+		try {
+			rig.lensGuard = true;
+			if (suppressed) markedBlocker(rig, "marked.ts");
+			const file = pastEofRecord(rig, "pe.ts");
+			rig.runtime.updateGitGuardStatus(false, "");
+			expect(rig.runtime.gitGuardHasBlockers).toBe(true);
+
+			const message = await endTurn(rig);
+			expect(message).toContain(RETIRED_NOTE);
+			expect(pending(rig, file)).toBe(false);
+			expect(rig.runtime.gitGuardHasBlockers).toBe(false);
+			expect(evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd)).toEqual({
+				block: false,
+			});
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	it("the dependency-drift cap retire re-derives the latch too", async () => {
+		const rig = makeRig("pi-lens-3813-f1-drift-");
+		try {
+			rig.lensGuard = true;
+			const file = driftRecord(rig, "drift-a.ts");
+			for (let i = 0; i < DEPENDENCY_DRIFT_MAX_DELIVERIES - 1; i++)
+				rig.runtime.incrementInlineBlockerStaleDelivery(file);
+			rig.runtime.updateGitGuardStatus(false, "");
+			expect(rig.runtime.gitGuardHasBlockers).toBe(true);
+
+			await endTurn(rig);
+			expect(pending(rig, file)).toBe(false);
+			expect(rig.runtime.gitGuardHasBlockers).toBe(false);
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
+/** `lineCount` lines totalling exactly `chars` chars of one blocker part. */
+function linesBlocker(
+	rig: Rig,
+	name: string,
+	chars: number,
+	lineCount: number,
+): string {
+	const file = touch(rig, name);
+	const prefix = `Unresolved from this turn — ${name}:\n`;
+	const body = chars - prefix.length - (lineCount - 1);
+	const base = Math.floor(body / lineCount);
+	const extra = body - base * lineCount;
+	const lines = Array.from({ length: lineCount }, (_, i) =>
+		"y".repeat(base + (i < extra ? 1 : 0)),
+	);
+	const summary = lines.join("\n");
+	expect(prefix.length + summary.length).toBe(chars);
+	rig.runtime.recordInlineBlockers(
+		file,
+		summary,
+		rig.runtime.nextWriteIndex(),
+		["eslint"],
+		[1],
+	);
+	return file;
+}
+
+const MARKERS = /\.\.\. \(/g;
+
+describe("F5: the truncation marker never garbles the message (#3813 r1)", () => {
+	// Recurrence (review r1 F5): the 20-line cut appended the marker and the
+	// char axis then cut THAT, leaving a half-printed marker before a second
+	// one. The band is a 20-line prefix of 985-1000 chars (held=0) or 959-1000
+	// (the longer held marker).
+	it.each([
+		{ held: 1, chars: 960, what: "a held-count marker" },
+		{ held: 0, chars: 990, what: "the plain marker" },
+	])(
+		"$what is printed once, whole, after a 20-line cut",
+		async ({ held, chars }) => {
+			const rig = makeRig("pi-lens-3813-f5-");
+			try {
+				// 19 lines + the blank separator = the 20 lines the cap keeps.
+				linesBlocker(rig, "lines.ts", chars, 19);
+				if (held > 0) pastEofRecord(rig, "pe-a.ts");
+				else linesBlocker(rig, "more.ts", 300, 6);
+				const message = await endTurn(rig);
+				const body = message.slice(message.indexOf("Unresolved"));
+				expect(body.match(MARKERS)).toHaveLength(1);
+				expect(
+					body.endsWith(
+						held > 0 ? "(truncated; 1 held for the next turn)" : "(truncated)",
+					),
+				).toBe(true);
+			} finally {
+				rig.cleanup();
+			}
+		},
+	);
+});
+
+describe("F2: an oversized part is reached only when it leads the message (#3813 r1)", () => {
+	// Recurrence (review r1 F2): "its head is kept" held for one character.
+	// A blocking cascade section was consumed with `Cascade error` shown, and a
+	// past-EOF record retired with `ℹ️ Advisory —` shown.
+	const BIG = Array.from(
+		{ length: 40 },
+		(_, i) => `L${i} ${"q".repeat(40)}`,
+	).join("\n");
+
+	async function drain(rig: Rig, fillerFile: string, done: () => boolean) {
+		// The cleared filler leaves a one-line Resolved report ahead of the
+		// part for one turn; the part leads the turn after.
+		clearFiller(rig, fillerFile);
+		for (let turn = 2; turn <= 4 && !done(); turn++) {
+			nextTurn(rig, turn);
+			await endTurn(rig);
+		}
+		expect(done()).toBe(true);
+	}
+
+	it("holds a past-EOF record shown only as a sliver, then retires it when it leads", async () => {
+		const rig = makeRig("pi-lens-3813-f2-pe-");
+		try {
+			const fillerFile = fillerBlocker(rig, 985);
+			const file = pastEofRecord(rig, "pe-big.ts", BIG);
+			const first = await endTurn(rig);
+			expect(first).toContain("ℹ️ Advisory");
+			expect(first).not.toContain("pe-big.ts");
+			expect(pending(rig, file)).toBe(true);
+			await drain(rig, fillerFile, () => !pending(rig, file));
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	it("holds a cascade section shown only as a sliver, then consumes it when it leads", async () => {
+		const rig = makeRig("pi-lens-3813-f2-casc-");
+		try {
+			const fillerFile = fillerBlocker(rig, 985);
+			const primary = touch(rig, "casc-primary.ts");
+			const neighbor = touch(rig, "casc-dep.ts");
+			rig.runtime.appendCascadeRun({
+				filePath: primary,
+				result: cascadeResult(primary, neighbor, BIG),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+			const first = await endTurn(rig);
+			expect(first).toContain("Cascade");
+			expect(first).not.toContain("casc-dep.ts");
+			expect(rig.runtime.hasCascadeRuns()).toBe(true);
+			await drain(rig, fillerFile, () => !rig.runtime.hasCascadeRuns());
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	it("holds a runner result shown only as a sliver, then consumes it when it leads", async () => {
+		const rig = makeRig("pi-lens-3813-f2-run-");
+		try {
+			const fillerFile = fillerBlocker(rig, 985);
+			const file = path.join(rig.cwd, "run-a.ts");
+			deferSettled(rig, "run-a.ts", {
+				status: "succeeded",
+				semantic: "warning",
+				diagnostics: [
+					runnerDiagnostic(file, `${"r".repeat(1500)}${RUNNER_END}`),
+				],
+			});
+			const first = await endTurn(rig);
+			expect(first).not.toContain("Late runner");
+			expect(pendingRunnerFindingsSize()).toBe(1);
+			await drain(rig, fillerFile, () => pendingRunnerFindingsSize() === 0);
 		} finally {
 			rig.cleanup();
 		}

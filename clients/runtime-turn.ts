@@ -116,6 +116,7 @@ import {
 	rearmPendingAuxiliaryCoverage,
 	MAX_LATE_AUX_REARMS,
 	pendingAuxiliaryCoverageSize,
+	canRearmPendingAuxiliary,
 } from "./lsp/pending-aux-coverage.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
@@ -667,16 +668,22 @@ function capTurnEndMessage(content: string, held = 0): string {
 			? `... (truncated; ${held} held for the next turn)`
 			: "... (truncated)";
 
-	let out = content;
-	const lines = out.split("\n");
+	// Both axes cut the CONTENT, then ONE marker is appended. Appending it after
+	// the line cut and letting the char axis cut that again left a half-printed
+	// marker before a second one (#3813 review r1 F5).
+	let kept = content;
+	let cut = false;
+	const lines = kept.split("\n");
 	if (lines.length > maxLines) {
-		out = `${lines.slice(0, maxLines).join("\n")}\n${marker}`;
+		kept = lines.slice(0, maxLines).join("\n");
+		cut = true;
 	}
-	if (out.length > maxChars) {
-		out = `${sliceAtCodePointBoundaries(out, 0, maxChars)}\n${marker}`;
+	if (kept.length > maxChars) {
+		kept = sliceAtCodePointBoundaries(kept, 0, maxChars);
+		cut = true;
 	}
 
-	return out;
+	return cut ? `${kept}\n${marker}` : content;
 }
 
 /**
@@ -1046,6 +1053,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		(bPath: string, deadLines: readonly number[], displayPath: string) =>
 		(): void => {
 			if (!runtime.retireDemotedPastEofBlocker(bPath, deadLines)) return;
+			// The retire left the commit-gate latch counting a record that is
+			// gone, as `retireInlineBlockerAndResyncGuard` does for a clean verdict.
+			runtime.updateGitGuardStatus(false, "");
 			demotedFindingsRetired += 1;
 			// Bounded by the ledger's own per-kind/subject tally, and the subject
 			// keeps the discriminating identity (which store, which file).
@@ -1060,6 +1070,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const deliveryCount = runtime.incrementInlineBlockerStaleDelivery(bPath);
 			if (deliveryCount < DEPENDENCY_DRIFT_MAX_DELIVERIES) return;
 			if (!runtime.retireDemotedDependencyDriftBlocker(bPath)) return;
+			runtime.updateGitGuardStatus(false, "");
 			demotedFindingsRetired += 1;
 			incrementDegradationCount({
 				kind: "demoted-finding-retired",
@@ -4101,6 +4112,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let lateAuxCeilingExhausted = 0;
 	let lateAuxAnswered = 0;
 	let lateAuxNotifyStallDemoted = 0;
+	// #3813: what the turn-end holds did with pairs the cap cut, after the drain's
+	// own row above was already logged (see `settleHolds`).
+	let lateAuxHoldRearmed = 0;
+	let lateAuxHoldExpired = 0;
+	let lateAuxHoldCeiling = 0;
 	// #3102: dropped by the shared finding-policy stack (inline `pi-lens-ignore`
 	// / stored disposition / `.pi-lens.json` rule policy) and, separately, by the
 	// auxiliary profile's OWN native suppression inside `retagAuxiliaryDiagnostics`.
@@ -4151,10 +4167,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// ceilingExhausted/expired below.
 					lateAuxProbeFailed += pairs.length;
 					for (const pair of pairs) {
-						if (
-							!isPendingAuxiliaryPastRearmTtl(pair) &&
-							(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
-						) {
+						if (canRearmPendingAuxiliary(pair)) {
 							rearmPendingAuxiliaryCoverage(pair);
 							lateAuxRearmed += 1;
 						} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
@@ -4251,10 +4264,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// the delivery gate stats against — while the re-arm TTL is
 						// anchored on `lastRearmedAtMs`, advanced by every successful
 						// empty probe: the scanner is demonstrably alive, just slow.
-						if (
-							!isPendingAuxiliaryPastRearmTtl(pair) &&
-							(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
-						) {
+						if (canRearmPendingAuxiliary(pair)) {
 							rearmPendingAuxiliaryCoverage(pair);
 							lateAuxRearmed += 1;
 							if (lateAuxStuckPairs.length < 20)
@@ -4351,10 +4361,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							// with the SAME baseline and carry the ceiling count (#3482:
 							// a refreshed baseline absorbed the edit, so an older queued
 							// scan that published later passed both gates).
-							if (
-								!isPendingAuxiliaryPastRearmTtl(pair) &&
-								(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
-							) {
+							if (canRearmPendingAuxiliary(pair)) {
 								rearmPendingAuxiliaryCoverage(pair);
 								lateAuxRearmed += 1;
 							} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
@@ -4425,13 +4432,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// the scanner's findings are probed and re-gated next turn.
 					deliveryHolds.push({
 						part: lateAuxPart,
+						canHold: () => canRearmPendingAuxiliary(pair),
 						onHeld: () => {
-							if (
-								!isPendingAuxiliaryPastRearmTtl(pair) &&
-								(pair.rearmCount ?? 0) < MAX_LATE_AUX_REARMS
-							) {
-								rearmPendingAuxiliaryCoverage(pair);
-							}
+							rearmPendingAuxiliaryCoverage(pair);
+							lateAuxHoldRearmed += 1;
+						},
+						onDropped: () => {
+							// The bound the drain's own branches count as expired or
+							// ceilingExhausted: a delivered-then-cut pair past it is lost.
+							if (isPendingAuxiliaryPastRearmTtl(pair)) lateAuxHoldExpired += 1;
+							else lateAuxHoldCeiling += 1;
+							incrementDegradationCount({
+								kind: "late-auxiliary-held-dropped",
+								subject: `late-auxiliary:${pair.serverId}`,
+								reason:
+									"cut by the turn-end cap and past its re-arm bound, so not re-armed",
+							});
 						},
 					});
 				}
@@ -4633,7 +4649,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			parts: composedParts,
 			keptChars: turnEndKeptChars(joined),
 			separatorLength: "\n\n".length,
-			fitsAlone: (text) => capTurnEndMessage(text) === text,
 		});
 		const settleHolds = (suppressed: boolean): void => {
 			const outcome = holdPlan.settle({
@@ -4642,6 +4657,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				onFault: (cause) => dbg(`turn_end: delivery hold failed: ${cause}`),
 			});
 			heldSections = outcome.held;
+			if (lateAuxHoldRearmed + lateAuxHoldExpired + lateAuxHoldCeiling > 0) {
+				// One row per turn: the `late_auxiliary_findings` row was logged
+				// before the cap ran, so a hold's re-arm (or loss) is only here.
+				logLatency({
+					type: "phase",
+					toolName: "turn_end",
+					filePath: cwd,
+					phase: "late_auxiliary_holds",
+					durationMs: 0,
+					metadata: {
+						rearmed: lateAuxHoldRearmed,
+						expired: lateAuxHoldExpired,
+						ceilingExhausted: lateAuxHoldCeiling,
+						pendingAfter: pendingAuxiliaryCoverageSize(),
+					},
+				});
+			}
 			if (outcome.held > 0) {
 				// One counted row per turn, never one per held part.
 				incrementDegradationCount({

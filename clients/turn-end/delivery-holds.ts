@@ -18,10 +18,11 @@
  *   back for the next turn.
  *
  * Reach rule, per part: the part is reached when it lies whole inside the kept
- * prefix, or when its head is kept and it could not fit the cap even as the
- * first part (holding it would pin it forever, so the first delivery is its
- * delivery). A part whose head the cap cut away, or that fits alone yet was
- * cut part-way, is held.
+ * prefix, or when it LEADS the message and could not fit the cap even alone
+ * (holding it would pin it forever, so its first delivery from the start is
+ * its delivery). Anything else is held: a part the cap cut away, one that fits
+ * alone yet was cut part-way, and an oversized part trailing others, of which
+ * a sliver may show (#3813 review r1 F2).
  */
 
 export interface DeliveryHold {
@@ -31,6 +32,14 @@ export interface DeliveryHold {
 	onDelivered?: () => void;
 	/** The cap cut the part: put the producer's state back. */
 	onHeld?: () => void;
+	/**
+	 * False when the producer cannot keep the part for the next turn (a pair
+	 * past its re-arm bound). Asked once, before the message is final, so a
+	 * dropped part is neither promised in the marker nor counted as held.
+	 */
+	canHold?: () => boolean;
+	/** The cap cut the part and `canHold` said no: record the loss. */
+	onDropped?: () => void;
 	/**
 	 * A counter that only advances on a message the agent actually receives:
 	 * not committed when the signature dedupe suppresses the turn (#1950 F1).
@@ -45,7 +54,7 @@ export interface ComposedPart {
 }
 
 export interface DeliveryHoldPlan {
-	/** Parts whose hold the cap cut, known before the message is finalized. */
+	/** Cut parts that will stay pending, known before the message is final. */
 	heldCount: number;
 	/**
 	 * Run each hold's callback once. `suppressed` is true when the message is
@@ -56,7 +65,7 @@ export interface DeliveryHoldPlan {
 		suppressed: boolean;
 		isCurrentSession: () => boolean;
 		onFault: (cause: unknown) => void;
-	}): { delivered: number; held: number };
+	}): { delivered: number; held: number; dropped: number };
 }
 
 export function planDeliveryHolds(args: {
@@ -65,8 +74,6 @@ export function planDeliveryHolds(args: {
 	/** Chars of the `\n\n`-joined message the cap kept. */
 	keptChars: number;
 	separatorLength: number;
-	/** True when `text` passes the cap unchanged as the first part. */
-	fitsAlone: (text: string) => boolean;
 }): DeliveryHoldPlan {
 	const byPart = new Map<string, DeliveryHold[]>();
 	for (const hold of args.holds) {
@@ -74,35 +81,52 @@ export function planDeliveryHolds(args: {
 		if (queue) queue.push(hold);
 		else byPart.set(hold.part, [hold]);
 	}
-	const settled: Array<{ hold: DeliveryHold; reached: boolean }> = [];
+	const settled: Array<{
+		hold: DeliveryHold;
+		reached: boolean;
+		keeps: boolean;
+	}> = [];
 	let start = 0;
 	for (const part of args.parts) {
 		const end = start + part.text.length;
 		const hold = byPart.get(part.raw)?.shift();
 		if (hold) {
 			const whole = end <= args.keptChars;
-			const headOfOversized =
-				start < args.keptChars && !args.fitsAlone(part.text);
-			settled.push({ hold, reached: whole || headOfOversized });
+			// A part at offset 0 that the cap did not keep whole was cut by the cap
+			// alone, so it could never fit: this delivery is its delivery.
+			const leadsOversized = start === 0;
+			const reached = whole || leadsOversized;
+			settled.push({
+				hold,
+				reached,
+				keeps: reached || (hold.canHold?.() ?? true),
+			});
 		}
 		start = end + args.separatorLength;
 	}
 	return {
-		heldCount: settled.reduce((n, entry) => n + (entry.reached ? 0 : 1), 0),
+		heldCount: settled.reduce(
+			(n, entry) => n + (entry.reached || !entry.keeps ? 0 : 1),
+			0,
+		),
 		settle: ({ suppressed, isCurrentSession, onFault }) => {
 			let delivered = 0;
 			let held = 0;
+			let dropped = 0;
 			// A session replaced mid-turn owns none of this state any more.
 			const live = isCurrentSession();
-			for (const { hold, reached } of settled) {
+			for (const { hold, reached, keeps } of settled) {
 				if (reached) delivered += 1;
-				else held += 1;
+				else if (keeps) held += 1;
+				else dropped += 1;
 				if (!live) continue;
 				const run = reached
 					? suppressed && hold.skipOnSuppressed
 						? undefined
 						: hold.onDelivered
-					: hold.onHeld;
+					: keeps
+						? hold.onHeld
+						: hold.onDropped;
 				if (!run) continue;
 				try {
 					run();
@@ -110,7 +134,7 @@ export function planDeliveryHolds(args: {
 					onFault(cause);
 				}
 			}
-			return { delivered, held };
+			return { delivered, held, dropped };
 		},
 	};
 }
