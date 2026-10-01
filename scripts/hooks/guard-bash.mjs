@@ -2039,21 +2039,64 @@ function findUngatedWriteInChain(segments) {
  * plausible: `ci-verdict | tail; echo $?`. Capturing with
  * `ci-verdict; echo $? | tail` happens before the pipe and remains allowed.
  *
+ * F6 (round 2): also recognize the `timeout N node …` and
+ * `node --flag …` wrappers, the `${?}` spelling, and `|&`; allow a
+ * pipe-polluted `$?` once `set -o pipefail` is in force before the pipeline,
+ * and allow a single-quoted `'$?'` (literal text to bash).
+ *
  * @param {Array<{ text: string; sep: string | null }>} segments
  * @returns {DenyRule | null}
  */
 function findPipedCiVerdictStatusRead(segments) {
 	const isCiVerdict = (text) => {
 		const words = stripCommandGroupAndRunnerPrefixes(splitWords(text));
-		const { rest } = stripEnvAssignments(words);
+		// `env FOO=bar` / `FOO=bar` before the wrapper still parse as prefixes.
+		let { rest } = stripEnvAssignments(words);
+		// `timeout <duration> node …` runs the node command it wraps; drop the
+		// wrapper and its options/duration before looking for `node` (#3883 F6).
+		if (rest[0] === "timeout") {
+			let i = 1;
+			while (i < rest.length && rest[i].startsWith("-")) i++;
+			i += 1; // the duration argument
+			rest = rest.slice(i);
+		}
 		if (rest[0] !== "node" && rest[0] !== "nodejs") return false;
-		return /(?:^|[/\\])scripts[/\\]ci-verdict\.mjs$/.test(rest[1] ?? "");
+		// A node flag before the script path (`node --no-warnings …`) must not
+		// hide it: the script is a non-flag word ending in the ci-verdict path.
+		return rest
+			.slice(1)
+			.some(
+				(word) =>
+					!word.startsWith("-") &&
+					/(?:^|[/\\])scripts[/\\]ci-verdict\.mjs$/.test(word),
+			);
 	};
-	const readsStatus = (text) => text.includes("$?");
+	// A `$?` inside single quotes is literal text to bash, not the status; the
+	// `${?}` spelling still reads it in every other context (#3883 F6).
+	const readsStatus = (text) => {
+		const unquoted = text.replace(/'[^']*'/g, "");
+		return unquoted.includes("$?") || unquoted.includes("${?}");
+	};
+	// `set -o pipefail` (any option spelling) makes the pipeline's `$?` the real
+	// status, so a command that enables it before the pipeline is not the
+	// mistake this rule exists for (#3883 F6).
+	const enablesPipefail = (text) => {
+		const { rest } = stripEnvAssignments(
+			stripCommandGroupAndRunnerPrefixes(splitWords(text)),
+		);
+		return rest[0] === "set" && rest.includes("pipefail");
+	};
+	let pipefail = false;
 	for (let i = 0; i < segments.length; i++) {
-		if (!isCiVerdict(segments[i].text)) continue;
+		if (!isCiVerdict(segments[i].text)) {
+			if (enablesPipefail(segments[i].text)) pipefail = true;
+			continue;
+		}
+		// Only a pipefail in force BEFORE this command changes what `$?` means.
+		if (pipefail) continue;
 		for (let pipe = i + 1; pipe < segments.length; pipe++) {
-			if (segments[pipe].sep !== "|") continue;
+			const sep = segments[pipe].sep;
+			if (sep !== "|" && sep !== "|&") continue;
 			if (segments.slice(pipe + 1).some((segment) => readsStatus(segment.text)))
 				return "ciVerdictStatus";
 		}

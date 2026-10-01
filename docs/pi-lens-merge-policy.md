@@ -321,9 +321,11 @@ operator's private notes, so a different orchestrator can run the same train.
   event, so the required checks stay ABSENT and `ci-verdict` reports "absent,
   treating as pending" — exit 3, not 0; the "exit 0" first recorded on #2664
   was `$?` read after a `| tail`. After a retarget, push a commit or
-  close/reopen. Read exit codes without a pipe. The merge loop is
-  `node scripts/ci-verdict.mjs <pr> --wait <seconds>; echo $?` — 0 merge, 3
-  still pending (re-arm the wait), anything else read the table. Never
+  close/reopen. Read the final `ci-verdict: exit <N> (<kind>)` stdout line,
+  never `$?` after a pipe (`; echo $?` on its own line, before any pipe, is
+  also fine). The merge loop is
+  `node scripts/ci-verdict.mjs <pr> --wait <seconds>` — read its final line:
+  0 merge, 3 still pending (re-arm the wait), anything else read the table. Never
   text-match the table for `failure`: advisory rows (PR body, Vale)
   print `failure` while the verdict is green, and on 2026-09-07 that stopped
   the #2692 loop on a green PR.
@@ -590,7 +592,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Arming `plegma watch --next` after the lane already settled | The watch only sees settlements newer than itself; check `plegma_status` by handle first and process a done lane directly (three lanes sat settled for hours, 2026-09-10) |
 | Pruning trees with `merge-base --is-ancestor` | Prune only trees whose branch is the head of the PR just merged (#2358's tree, 2026-09-06) |
 | Retargeting a PR base and waiting for CI | `edited` does not fire ci.yml; push a commit or close/reopen |
-| Reading `$?` after a pipe | `node scripts/ci-verdict.mjs <pr> --wait N; echo $?` on its own line |
+| Reading `$?` after a pipe | Read the final `ci-verdict: exit <N> (<kind>)` line (`; echo $?` on its own line, before any pipe, is also fine) |
 | Text-matching the verdict table for `failure` | Key on the exit code; advisory rows print `failure` on green PRs (#2692) |
 | Committing a worker tree with `git add -A` and a pathspec exclude | Check `git ls-files` for handoff files and scratch dirs before the commit; fold a second fragment (#2807, #2808, 2026-09-09) |
 | Merging two green PRs that edit the same baseline or admission map in parallel | Serialise them and re-run that file's test on master between (#2816) |

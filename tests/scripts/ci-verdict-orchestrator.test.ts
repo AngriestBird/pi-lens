@@ -298,7 +298,7 @@ async function cli(
 	const time = clock(hooks);
 	const lines: string[] = [];
 	const errors: string[] = [];
-	const exitCode = await run({
+	const { code: exitCode, kind } = await run({
 		argv,
 		ghExec: ghFor(w),
 		...(hooks.gitExec ? { gitExec: hooks.gitExec } : {}),
@@ -309,6 +309,7 @@ async function cli(
 	});
 	return {
 		exitCode,
+		kind,
 		lines,
 		out: lines.join("\n"),
 		reason: lines.at(-1) ?? "",
@@ -882,8 +883,10 @@ describe("run --all — one line per open PR (#3700)", () => {
 			],
 			jobs: [unit],
 		});
-		const { exitCode, lines } = await cli(["--all"], w);
+		const { exitCode, kind, lines } = await cli(["--all"], w);
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		// F4: `--all` is a snapshot, not a green verdict.
+		expect(kind).toBe("all");
 		expect(lines).toEqual([
 			`#10 apmantza auto-merge=on head=${sha9(10)} gating=failed first-failure=Unit tests`,
 			`#11 stranger auto-merge=off head=${sha9(11)} gating=success`,
@@ -1328,7 +1331,7 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 		const seenOnFirstLine: boolean[] = [];
 		const time = clock();
 		const errors: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["--watch-open", "--state-file", file],
 			ghExec: ghFor(w),
 			now: time.now,
@@ -1352,8 +1355,10 @@ describe("run --watch-open — every PR the maintainer or orchestrator owns (#37
 
 	it("exits 70, not a verdict code, when the open-PR list cannot be read", async () => {
 		const w = world({ prs: [], listThrows: true });
-		const { exitCode, errors } = await cli(["--watch-open"], w);
+		const { exitCode, kind, errors } = await cli(["--watch-open"], w);
 		expect(exitCode).toBe(EXIT_TRANSPORT);
+		// F4: a watch-mode transport failure names transport, not `(watch)`.
+		expect(kind).toBe("transport");
 		expect(errors.join("\n")).toContain("HTTP 404");
 	});
 });
@@ -1874,8 +1879,10 @@ describe("run --watch-open --stream — one line per event, until the window end
 			["--watch-open", "--rerun-cancelled"],
 			["--watch-open", "--stream", "--rerun-cancelled", "--wait", "0"],
 		]) {
-			const { exitCode, errors, lines } = await cli(argv, w);
+			const { exitCode, kind, errors, lines } = await cli(argv, w);
 			expect(exitCode).toBe(EXIT_USAGE);
+			// F4: a watch-mode usage error names usage, not `(watch)`.
+			expect(kind).toBe("usage");
 			expect(errors.join("\n")).toContain(
 				"--rerun-cancelled requires --state-file",
 			);
@@ -2056,8 +2063,10 @@ describe("run --approve-fork <PR> — explicit and per PR (#3722)", () => {
 				},
 			],
 		});
-		const { exitCode, lines } = await cli(["--approve-fork", "3443"], w);
+		const { exitCode, kind, lines } = await cli(["--approve-fork", "3443"], w);
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		// F4: approval is its own mode, not a CI verdict.
+		expect(kind).toBe("approve");
 		expect(w.mutations).toEqual([
 			"api -X POST repos/apmantza/pi-lens/actions/runs/101/approve",
 			"api -X POST repos/apmantza/pi-lens/actions/runs/102/approve",
@@ -2092,11 +2101,13 @@ describe("run --approve-fork <PR> — explicit and per PR (#3722)", () => {
 			],
 			approveThrows: [101],
 		});
-		const { exitCode, lines, errors } = await cli(
+		const { exitCode, kind, lines, errors } = await cli(
 			["--approve-fork", "3443"],
 			w,
 		);
 		expect(exitCode).toBe(EXIT_FAILURE);
+		// A refused approval is still the approve mode, never `(red)`.
+		expect(kind).toBe("approve");
 		expect(errors.join("\n")).toContain("could not approve run 101: HTTP 403");
 		expect(lines).toEqual([`APPROVED run 102 of #3443@${sha9(3443)}`]);
 	});
@@ -2106,8 +2117,12 @@ describe("run --approve-fork <PR> — explicit and per PR (#3722)", () => {
 			prs: [{ number: 3443, checkRuns: [] }],
 			runsThrow: true,
 		});
-		const { exitCode, out, errors } = await cli(["--approve-fork", "3443"], w);
+		const { exitCode, kind, out, errors } = await cli(
+			["--approve-fork", "3443"],
+			w,
+		);
 		expect(exitCode).toBe(EXIT_TRANSPORT);
+		expect(kind).toBe("transport");
 		expect(out).toBe("");
 		expect(errors.join("\n")).toContain("HTTP 404");
 	});
@@ -2115,8 +2130,9 @@ describe("run --approve-fork <PR> — explicit and per PR (#3722)", () => {
 	it("takes a PR number, not a SHA or nothing", async () => {
 		const w = world({ prs: [{ number: 3443, checkRuns: [] }] });
 		for (const argv of [["--approve-fork", shaOf(3443)], ["--approve-fork"]]) {
-			const { exitCode, errors } = await cli(argv, w);
+			const { exitCode, kind, errors } = await cli(argv, w);
 			expect(exitCode).toBe(EXIT_USAGE);
+			expect(kind).toBe("usage");
 			expect(errors.join("\n")).toContain("--approve-fork takes a PR number");
 		}
 		expect(w.mutations).toEqual([]);

@@ -330,8 +330,10 @@ invalidated another reviewer's or the orchestrator's in-flight commands. A
 report that ends with the shared tree on a branch other than `master` is a
 finding against the report.
 
-**One CI read.** `node scripts/ci-verdict.mjs <pr>; echo $?` once, in the
-report. Polling CI is the orchestrator's job; a reviewer or fixer that loops on
+**One CI read.** `node scripts/ci-verdict.mjs <pr>` once, in the report, and
+read its final `ci-verdict: exit <N> (<kind>)` line (`; echo $?` on its own
+line, before any pipe, is also fine). Polling CI is the orchestrator's job; a
+reviewer or fixer that loops on
 it is a zombie the maintainer has to notice (2026-09-07, #2707 round 3).
 
 Any ad-hoc probe you run against the built `clients/*.js` outside vitest — a

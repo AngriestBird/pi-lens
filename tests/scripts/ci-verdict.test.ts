@@ -1,4 +1,13 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as yaml from "js-yaml";
 import { describe, expect, it } from "vitest";
@@ -40,23 +49,70 @@ import {
 
 describe("formatExitLine — the pipe-safe CLI status contract (#3883)", () => {
 	it.each([
-		[EXIT_SUCCESS, "green"],
-		[EXIT_PENDING, "pending"],
-		[EXIT_FAILURE, "red"],
-		[EXIT_DIRTY, "DIRTY"],
-		[EXIT_USAGE, "usage"],
-		[EXIT_TRANSPORT, "transport"],
-	] as const)("pins verdict exit %i as %s", (code, kind) => {
-		expect(formatExitLine(code)).toBe(`ci-verdict: exit ${code} (${kind})`);
+		[{ code: EXIT_SUCCESS, kind: "green" }, "0 (green)"],
+		[{ code: EXIT_PENDING, kind: "pending" }, "3 (pending)"],
+		[{ code: EXIT_FAILURE, kind: "red" }, "1 (red)"],
+		[{ code: EXIT_DIRTY, kind: "DIRTY" }, "2 (DIRTY)"],
+		[{ code: EXIT_USAGE, kind: "usage" }, "64 (usage)"],
+		[{ code: EXIT_TRANSPORT, kind: "transport" }, "70 (transport)"],
+		// F4: the kinds `run()` names at its other exit sites, including a
+		// crash, which must never print `(red)`.
+		[{ code: EXIT_FAILURE, kind: "error" }, "1 (error)"],
+		[{ code: EXIT_SUCCESS, kind: "all" }, "0 (all)"],
+		[{ code: EXIT_SUCCESS, kind: "approve" }, "0 (approve)"],
+		[{ code: EXIT_SUCCESS, kind: "watch" }, "0 (watch)"],
+		[{ code: EXIT_SUCCESS, kind: "stream" }, "0 (stream)"],
+	] as const)("prints %j as %s", (result, expected) => {
+		expect(formatExitLine(result)).toBe(`ci-verdict: exit ${expected}`);
+	});
+});
+
+// F3 (round 2): the emission itself is the contract, so it is pinned through
+// the REAL CLI process on the paths a test can reach without a network. The
+// `--all`/`--approve-fork` kinds are pinned through `run()` in the
+// orchestrator suite.
+describe("ci-verdict CLI — the final exit line on every reachable exit path (#3883)", () => {
+	const cli = join(process.cwd(), "scripts", "ci-verdict.mjs");
+	const cleanEnv = () => {
+		const env = { ...process.env };
+		delete env.HTTPS_PROXY;
+		delete env.https_proxy;
+		delete env.NODE_USE_ENV_PROXY;
+		return env;
+	};
+	const lastLine = (stdout: string) => stdout.trim().split("\n").at(-1) ?? "";
+
+	it("emits `exit 64 (usage)` as its last stdout line with no target", () => {
+		const result = spawnSync(process.execPath, [cli], {
+			encoding: "utf8",
+			env: cleanEnv(),
+			timeout: 30_000,
+		});
+		expect(lastLine(result.stdout)).toBe("ci-verdict: exit 64 (usage)");
+		expect(result.status).toBe(EXIT_USAGE);
 	});
 
-	it.each([
-		["--watch-open", "watch"],
-		["--watch-open --stream", "stream"],
-	] as const)("pins %s event exit codes", (args, kind) => {
-		expect(formatExitLine(EXIT_SUCCESS, args.split(" "))).toBe(
-			`ci-verdict: exit 0 (${kind})`,
-		);
+	it("emits `exit 70 (transport)` as its last stdout line when gh fails", () => {
+		const dir = mkdtempSync(join(tmpdir(), "ci-verdict-fake-gh-"));
+		try {
+			const fakeGh = join(dir, "gh");
+			writeFileSync(fakeGh, '#!/bin/sh\necho "fake gh: boom" >&2\nexit 1\n');
+			chmodSync(fakeGh, 0o755);
+			const result = spawnSync(process.execPath, [cli, "2539"], {
+				encoding: "utf8",
+				env: {
+					...cleanEnv(),
+					PATH: `${dir}:${process.env.PATH ?? ""}`,
+					GH_TOKEN: "",
+					GITHUB_TOKEN: "",
+				},
+				timeout: 30_000,
+			});
+			expect(lastLine(result.stdout)).toBe("ci-verdict: exit 70 (transport)");
+			expect(result.status).toBe(EXIT_TRANSPORT);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -387,7 +443,7 @@ describe("computeVerdict — DIRTY fires on CONFLICTING regardless of check pres
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
@@ -408,7 +464,7 @@ describe("computeVerdict — DIRTY fires on CONFLICTING regardless of check pres
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
@@ -1475,7 +1531,7 @@ describe("run — prints the gating source and uses a live branch-protection rea
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
@@ -1498,7 +1554,7 @@ describe("run — prints the gating source and uses a live branch-protection rea
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
@@ -1969,7 +2025,7 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 			throw new Error("must not call gh on a usage error");
 		};
 		const stderrLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode, kind } = await run({
 			argv: [],
 			ghExec,
 			stdout: () => {},
@@ -1977,6 +2033,7 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 		});
 		expect(exitCode).toBe(EXIT_USAGE);
 		expect(exitCode).not.toBe(EXIT_DIRTY); // 64, never collides with 2
+		expect(kind).toBe("usage");
 		expect(stderrLines.join("\n")).toMatch(/usage:/);
 	});
 
@@ -1985,7 +2042,7 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 			throw new Error("gh: command not found");
 		};
 		const stderrLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode, kind } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: () => {},
@@ -1993,6 +2050,7 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 		});
 		expect(exitCode).toBe(EXIT_TRANSPORT);
 		expect(exitCode).not.toBe(EXIT_FAILURE); // 70, never collides with 1
+		expect(kind).toBe("transport");
 		expect(stderrLines.join("\n")).toMatch(/command not found/);
 	});
 
@@ -2007,13 +2065,14 @@ describe("run — exit codes distinct from verdict codes (#2539 round 2, F3)", (
 			return JSON.stringify(BOTH_SUCCESS);
 		};
 		const stdoutLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode, kind } = await run({
 			argv: ["2539"],
 			ghExec,
 			stdout: (line: string) => stdoutLines.push(line),
 			stderr: () => {},
 		});
 		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(kind).toBe("green");
 		expect(stdoutLines.join("\n")).toContain("acme/repo@c0ffee");
 	});
 });
@@ -2100,7 +2159,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 		]);
 		const clock = fakeClock();
 		const stderrLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "600"],
 			ghExec,
 			stdout: () => {},
@@ -2145,7 +2204,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 			return answer as string;
 		};
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "600"],
 			ghExec,
 			stdout: () => {},
@@ -2168,7 +2227,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 			Array.from({ length: 5 }, () => ghError(CONNECT)),
 		);
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", String(HARD_CAP_SECONDS)],
 			ghExec,
 			stdout: () => {},
@@ -2186,7 +2245,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 		);
 		const clock = fakeClock();
 		const stderrLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "100"],
 			ghExec,
 			stdout: () => {},
@@ -2209,7 +2268,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 		]) {
 			const { ghExec, checkRunsCalls } = flakyGh([ghError(stderr)]);
 			const clock = fakeClock();
-			const exitCode = await run({
+			const { code: exitCode } = await run({
 				argv: ["2935", "--wait", "600"],
 				ghExec,
 				stdout: () => {},
@@ -2226,7 +2285,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 	it("a one-shot read (no --wait) still exits 70 on a transient error", async () => {
 		const { ghExec, checkRunsCalls } = flakyGh([ghError(CONNECT)]);
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935"],
 			ghExec,
 			stdout: () => {},
@@ -2276,7 +2335,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 		);
 		const clock = fakeClock();
 		const stderrLines: string[] = [];
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "600"],
 			ghExec,
 			stdout: () => {},
@@ -2301,7 +2360,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 			Array.from({ length: 10 }, () => ghError(CONNECT)),
 		);
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "100"],
 			ghExec,
 			stdout: () => {},
@@ -2345,7 +2404,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 			});
 		};
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935", "--wait", "120"],
 			ghExec,
 			stdout: () => {},
@@ -2363,7 +2422,7 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 	it("a one-shot read still exits 70 when a startup lookup fails transiently", async () => {
 		const { ghExec, calls } = startupFlakyGh([ghError(CONNECT)], []);
 		const clock = fakeClock();
-		const exitCode = await run({
+		const { code: exitCode } = await run({
 			argv: ["2935"],
 			ghExec,
 			stdout: () => {},
@@ -2516,7 +2575,7 @@ async function runVerdict(
 ) {
 	const { ghExec, calls } = gh3694(options);
 	const lines: string[] = [];
-	const exitCode = await run({
+	const { code: exitCode } = await run({
 		argv,
 		ghExec,
 		now: () => nowMs,
