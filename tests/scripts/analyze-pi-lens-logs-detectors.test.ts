@@ -110,39 +110,65 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(d2.extensionByPid["650812"]).toBeUndefined();
 	});
 
-	it("D3 turn-end-tests-excluded: flags the run that excluded its test files", () => {
+	it("D3 turn-end-tests-excluded: flags excluded test files and edit-only runs", () => {
 		// [2026-09-30T21:47:54.336Z] turn_end: .worktrees/245-branch-lock-backlog/tests/unit/state-reaper.test.ts
 		//   -> test target excluded by the built-in turn-end policy, skipping spawn (...)
+		// Real runs: B3 (20:51:33Z: 44 `file(s) modified` lines, 0 ran, 3 excluded
+		// test files) and 09-26T17:30:16Z (40 edits, 0 ran) flag; 09-27T07:40:48Z
+		// (3 edits, 0 ran) and the B2b subset (12 edits, 1 ran) do not; the
+		// labelled synthetic run excludes a SOURCE file's target and does not.
 		const report = run("turn-end-tests-excluded");
 		const runs = report.detectors.turnEndTestsExcluded.runs;
-		expect(runs).toHaveLength(1);
-		expect(runs[0].excluded).toBe(3);
-		expect(runs[0].ran).toBe(0);
-		expect(runs[0].edits).toBe(1);
-		expect(smell(report, "turn-end-tests-excluded")?.count).toBe(1);
+		expect(
+			runs.map((r: any) => [r.startTs, r.edits, r.ran, r.excluded]),
+		).toEqual([
+			["2026-09-26T17:30:16.185Z", 40, 0, 0],
+			["2026-09-30T20:51:33.141Z", 44, 0, 3],
+		]);
+		expect(smell(report, "turn-end-tests-excluded")?.count).toBe(2);
 	});
 
-	it("D4 test-target-cross-checkout: flags failed-first targets in another checkout", () => {
+	it("D4 test-target-cross-checkout: counts runs with at least 3 cross targets", () => {
 		// [2026-09-30T11:07:31.035Z] turn_end: .worktrees/471-retained-trees/src/workspace.ts
 		//   -> test vitest .worktrees/450-merge-into/tests/unit/workspace.test.ts (failed-first)
+		// Real runs: 09-20T22:00 has 4 main-checkout (src/) to worktree targets;
+		// 09-21T17:53 has 4 same-checkout targets; 09-22T19:43 has 1 cross
+		// target (below 3); the B2 subset has 6 cross and 1 same.
 		const report = run("test-target-cross-checkout");
-		const cross = report.detectors.testTargetCrossCheckout.runs.reduce(
-			(n: number, r: any) => n + (r.crossCheckout >= 3 ? r.crossCheckout : 0),
-			0,
-		);
-		expect(cross).toBe(6);
-		expect(smell(report, "test-target-cross-checkout")?.count).toBe(6);
+		expect(
+			report.detectors.testTargetCrossCheckout.runs.map((r: any) => [
+				r.startTs,
+				r.crossCheckout,
+				r.failedFirst,
+			]),
+		).toEqual([
+			[null, 0, 0], // the rows before the first `session_start fired`
+			["2026-09-20T22:00:11.849Z", 4, 8],
+			["2026-09-21T17:53:08.201Z", 0, 4],
+			["2026-09-22T19:43:07.265Z", 1, 1],
+			["2026-09-30T10:03:45.684Z", 6, 7],
+		]);
+		expect(smell(report, "test-target-cross-checkout")?.count).toBe(10);
 	});
 
-	it("D5 test-runner-stale-verdicts: joins firings/stale text to delivery outcomes", () => {
+	it("D5 test-runner-stale-verdicts: judges stale share and delivery per session", () => {
 		// [2026-09-30T20:40:34.636Z] turn_end: all tests passed (stale — turn advanced while tests ran)
+		// Real runs: 09-23T19:12 (10 firings, 10 stale) flags; 09-25T19:09
+		// (5/5) and 09-27T15:30 (9/8) stay under the 10-firing floor even
+		// though together they pass it; the B2 subset (10 firings, 4 stale)
+		// stays under the 50% share. Delivery: real session 01a0f1c5 (3 of 39
+		// delivered) flags; the labelled synthetic sessions (3 of 10, 0 of 9) do not.
 		const report = run("test-runner-stale-verdicts");
 		const d5 = report.detectors.testRunnerStaleVerdicts;
-		expect(d5.firings).toBe(10);
-		expect(d5.stale).toBe(5);
-		expect(d5.textFlag).toBe(true);
-		expect(d5.lowDelivery.length).toBeGreaterThanOrEqual(1);
-		expect(smell(report, "test-runner-stale-verdicts")?.count).toBe(5);
+		expect(d5.staleRuns).toEqual([
+			{ startTs: "2026-09-23T19:12:30.754Z", firings: 10, stale: 10 },
+		]);
+		expect(d5.firings).toBe(34);
+		expect(d5.stale).toBe(27);
+		expect(
+			d5.lowDelivery.map((s: any) => [s.sessionId, s.delivered, s.total]),
+		).toEqual([["01a0f1c5-27ff-7414-8319-69eb2296dbe4", 3, 39]]);
+		expect(smell(report, "test-runner-stale-verdicts")?.count).toBe(2);
 	});
 
 	it("D6 scanner-count-drift and turn-end-knip-cost: flags drift and cost pids", () => {

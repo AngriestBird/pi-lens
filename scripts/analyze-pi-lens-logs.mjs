@@ -385,9 +385,6 @@ function createState(files) {
 			// D3/D4/D5/D8: one run per `session_start fired`. Run splitting is the
 			// only way to attribute a turn-end test decision to the session that made it.
 			runs: [],
-			// D5: sessionstart-level firing and stale counters (text, not rows).
-			testFirings: 0,
-			testStale: 0,
 			currentRun: newRun(),
 		},
 		actionable: {
@@ -1020,9 +1017,9 @@ async function analyzeSessionStart(files, state) {
 				}
 			}
 			if (/turn_end: firing \d+ test target\(s\) async/.test(message))
-				state.session.testFirings += 1;
+				run.testFirings += 1;
 			if (/\(stale\s*[—-]\s*turn advanced while tests ran\)/.test(message))
-				state.session.testStale += 1;
+				run.testStale += 1;
 			if (/turn_end: retaining newer turn state/.test(message))
 				run.retainingNewerTurn += 1;
 
@@ -1563,6 +1560,8 @@ function newRun() {
 		excludedTestFiles: [],
 		noTestFile: 0,
 		retainingNewerTurn: 0,
+		testFirings: 0,
+		testStale: 0,
 	};
 }
 
@@ -1886,10 +1885,18 @@ function activeLatencyTruncation(_state) {
 	return null;
 }
 
-/** D5: the sessionstart firing/stale text joined to the delivery outcomes. */
+/** D5: per-session firing/stale text and per-session delivery outcomes. */
 function computeTestRunnerHealth(state) {
-	const firings = state.session.testFirings;
-	const stale = state.session.testStale;
+	const runs = state.session.runs.map((r) => ({
+		startTs: r.startTs,
+		firings: r.testFirings,
+		stale: r.testStale,
+	}));
+	const staleRuns = runs.filter(
+		(r) => r.firings >= 10 && r.stale / r.firings >= 0.5,
+	);
+	const firings = runs.reduce((n, r) => n + r.firings, 0);
+	const stale = runs.reduce((n, r) => n + r.stale, 0);
 	const sessions = [];
 	for (const [sessionId, c] of state.latency.testRunnerDelivery) {
 		const total = c.entries().reduce((n, [, v]) => n + v, 0);
@@ -1911,7 +1918,7 @@ function computeTestRunnerHealth(state) {
 		firings,
 		stale,
 		staleShare: firings ? stale / firings : 0,
-		textFlag: firings >= 10 && stale / firings >= 0.5,
+		staleRuns,
 		sessions,
 		lowDelivery,
 	};
@@ -2155,9 +2162,8 @@ function buildReport(state) {
 		(n, r) => n + (r.crossCheckout >= 3 ? r.crossCheckout : 0),
 		0,
 	);
-	const testRunnerSmellCount = testRunnerHealth.textFlag
-		? testRunnerHealth.stale
-		: testRunnerHealth.lowDelivery.reduce((n, s) => n + s.total, 0);
+	const testRunnerSmellCount =
+		testRunnerHealth.staleRuns.length + testRunnerHealth.lowDelivery.length;
 	addSmell(
 		smells,
 		"diagnostic-blockers",
@@ -2407,24 +2413,18 @@ function buildReport(state) {
 				message: `${r.crossCheckout} cross-checkout of ${r.failedFirst} failed-first`,
 			})),
 	);
-	// D5: the sessionstart firing/stale ratio plus low delivery share.
+	// D5: sessions whose turn-end verdicts went stale, or were rarely delivered.
 	addSmell(
 		smells,
 		"test-runner-stale-verdicts",
 		testRunnerSmellCount,
-		`Sessionstart test firings ${testRunnerHealth.firings}, stale ${testRunnerHealth.stale} (${(
-			testRunnerHealth.staleShare * 100
-		).toFixed(
-			1,
-		)}%), low-delivery sessions ${testRunnerHealth.lowDelivery.length}`,
+		`Sessions with >= 10 test firings and >= 50% stale (${testRunnerHealth.staleRuns.length}), or >= 10 delivery rows and < 25% delivered (${testRunnerHealth.lowDelivery.length}); window firings ${testRunnerHealth.firings}, stale ${testRunnerHealth.stale}`,
 		[
-			...(testRunnerHealth.textFlag
-				? [
-						{
-							message: `firings=${testRunnerHealth.firings} stale=${testRunnerHealth.stale}`,
-						},
-					]
-				: []),
+			...testRunnerHealth.staleRuns.map((r) => ({
+				ts: r.startTs,
+				count: r.stale,
+				message: `firings=${r.firings} stale=${r.stale}`,
+			})),
 			...testRunnerHealth.lowDelivery.map((s) => ({
 				key: s.sessionId,
 				count: s.delivered,
@@ -2689,8 +2689,6 @@ function buildReport(state) {
 			starts: state.session.starts,
 			cwds: state.session.cwds.top(limit),
 			commits: state.session.commits.toJSON(),
-			testFirings: state.session.testFirings,
-			testStale: state.session.testStale,
 			slowLoads: state.session.slowLoads.slice(0, limit),
 			errors: state.session.errors.slice(0, limit),
 		},
