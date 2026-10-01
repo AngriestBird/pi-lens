@@ -226,8 +226,8 @@ function createState(files) {
 			// scan. Sorted after all files are read.
 			rowTs: [],
 			cascadeTs: [],
-			// D2: real-log pollution — rows whose filePath points at an
-			// orchestrator/test scratch directory, grouped by pid.
+			// D2: real-log pollution — rows whose filePath points at a test or
+			// probe home, grouped by pid.
 			scratchRows: new Map(),
 			// D5: test_runner_delivery outcomes per session, joined with the
 			// sessionstart firing/stale text into one delivery-health verdict.
@@ -350,7 +350,7 @@ function createState(files) {
 			genuineZeroRead: [],
 		},
 		extension: {
-			// D2: extension.log rows whose payload names an orchestrator/test scratch
+			// D2: extension.log rows whose payload names a test or probe home
 			// directory, grouped by pid, plus the warn/error census.
 			scratchRows: new Map(),
 			warnErrorGroups: counter(),
@@ -685,7 +685,7 @@ async function analyzeReadGuard(files, state) {
 			if (!inWindow(ts)) {
 				// D10 needs evidence that may precede a live-monitor window.
 				// Keep this lookback state private; outside rows never affect counts.
-				if (entry.event === "edit_batch_summary") {
+				if (hasReadEvidence(entry)) {
 					const key = `${readGuardSessionOf(entry) ?? "?"}\u0000${entry.filePath ?? "?"}`;
 					state.readGuard.fileEvidence.set(key, true);
 				}
@@ -783,16 +783,21 @@ async function analyzeReadGuard(files, state) {
 				);
 			}
 
-			const hasReadEvidence =
-				event === "edit_batch_summary" ||
-				(event === "range_snapshot_validation" &&
-					Number(md.candidateReadCount ?? 0) > 0) ||
-				(event === "edit_warned" && Number(md.readCount ?? 0) > 0);
-			if (hasReadEvidence) state.readGuard.fileEvidence.set(evidenceKey, true);
-			else if (!state.readGuard.fileEvidence.has(evidenceKey))
-				state.readGuard.fileEvidence.set(evidenceKey, false);
+			if (hasReadEvidence(entry))
+				state.readGuard.fileEvidence.set(evidenceKey, true);
 		});
 	}
+}
+
+/** D10: a row proving the file was read or edited earlier in its session. */
+function hasReadEvidence(entry) {
+	const md = entry.metadata ?? {};
+	return (
+		entry.event === "edit_batch_summary" ||
+		(entry.event === "range_snapshot_validation" &&
+			Number(md.candidateReadCount ?? 0) > 0) ||
+		(entry.event === "edit_warned" && Number(md.readCount ?? 0) > 0)
+	);
 }
 
 /**
@@ -1577,8 +1582,13 @@ function maskSessionStartPaths(message) {
 	);
 }
 
-const SCRATCH_PATH_RE =
-	/(pi-lens-orchestrator\/tmp|pi-lens-worktrees|\/\.probe-home\/|witness-home|\/tmp\/pi-lens-(?!ast-grep))/;
+/**
+ * D2: the markers only a test or probe home carries: a fixer's `.probe-home/`
+ * (AGENTS.md probe hygiene), the #3521 fork-tree witness home, and the
+ * suite's `pi-lens-test-*` temp dirs. `pi-lens-worktrees` and
+ * `pi-lens-orchestrator/tmp` are not markers: real sessions edit there.
+ */
+const SCRATCH_PATH_RE = /(\/\.probe-home\/|witness-home|pi-lens-test-)/;
 
 /** E5: track a latency row's project unless its `filePath` is a shell command. */
 function trackLatencyProject(state, entry) {
@@ -1811,7 +1821,7 @@ function trackLatencySignals(state, entry, ts) {
 	}
 }
 
-/** D2: extension.log rows that name an orchestrator/test scratch directory. */
+/** D2: extension.log rows that name a test or probe home. */
 async function analyzeExtension(files, state) {
 	for (const file of files) {
 		await forEachJsonLine(file, "extension", state, (entry) => {
@@ -2345,13 +2355,13 @@ function buildReport(state) {
 		"No reliable rotation marker is available in latency.log; ledgerGeneration is not a rotation signal",
 		[],
 	);
-	// D2: orchestrator/test scratch paths in a real log. Never added to the
+	// D2: test/probe home markers in a real log. Never added to the
 	// default denylist so the pollution stays visible.
 	addSmell(
 		smells,
 		"real-log-test-pollution",
 		latencyScratch + extensionScratch,
-		`Rows naming an orchestrator/test scratch directory (latency ${latencyScratch}, extension ${extensionScratch}); these never belong in a real log`,
+		`Rows naming a test or probe home (.probe-home/, witness-home, pi-lens-test-*) (latency ${latencyScratch}, extension ${extensionScratch}); these never belong in a real log`,
 		[
 			...[...state.latency.scratchRows.entries()].map(([pid, count]) => ({
 				key: `latency pid ${pid}`,

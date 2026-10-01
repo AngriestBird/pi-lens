@@ -74,19 +74,40 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "log-rotation-truncation")).toBeUndefined();
 	});
 
-	it("D2 real-log-test-pollution: counts scratch paths in latency + extension", () => {
-		// latency: {"phase":"degradation_ledger","filePath":".../pi-lens-orchestrator/tmp/review-.../proj",...}
-		// extension: {"level":"warn","subsystem":"lsp-config","message":"deprecated LSP config location in .../pi-lens-orchestrator/tmp/review-..."}
+	it("D2 real-log-test-pollution: only test-home markers count as pollution", () => {
+		// latency (pid 820094): {"phase":"degradation_ledger","filePath":".../review-3703/.probe-home/pi-lens-3521-witness-home-820094/instances.json",...}
+		// extension (pid 240029): {"level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=.../pi-lens-test-checkout-isolation-xNZNoE/..."}
 		const report = run("real-log-test-pollution");
-		expect(report.detectors.realLogTestPollution.latencyTotal).toBe(0);
-		expect(report.detectors.realLogTestPollution.extensionTotal).toBe(5);
+		const d2 = report.detectors.realLogTestPollution;
+		// two real `.probe-home/` rows plus the labelled synthetic witness-home row
+		expect(d2.latencyByPid).toEqual({ "820094": 3 });
+		expect(d2.extensionByPid).toEqual({ "240029": 2 });
 		expect(smell(report, "real-log-test-pollution")?.count).toBe(5);
-		expect(smell(report, "extension-warn-errors")?.count).toBe(1);
 	});
 
-	it("F2: a real worktree mentioned by opaque mutation telemetry is not pollution", () => {
+	it("D2 extension-warn-errors: groups warn and error rows only", () => {
+		// {"level":"error","subsystem":"dispatch","message":"yamllint: no config detected, running with default rules"} x2
+		// {"level":"error","subsystem":"lsp-diagnostics","message":"lens_diagnostics verdict"}; three debug rows are not groups
 		const report = run("real-log-test-pollution");
-		expect(report.detectors.realLogTestPollution.latencyTotal).toBe(0);
+		expect(report.detectors.extensionWarnErrors).toEqual({
+			"dispatch: yamllint: no config detected, running with default rules": 2,
+			"lsp-diagnostics: lens_diagnostics verdict": 1,
+		});
+		expect(smell(report, "extension-warn-errors")?.count).toBe(2);
+	});
+
+	it("F2: a real session editing under pi-lens-worktrees is not pollution", () => {
+		// Recurrence: r1/r2 flagged pid 1947541, a 1.5-day real session, as
+		// "never belongs in a real log" because its edits live under
+		// ~/Desktop/pi-lens-worktrees. Real rows: tool_result_received
+		// toolName:edit and config_resolved on .../fix-3643-review/clients/mcp,
+		// two opaque command rows, /tmp/pi-lens-ast-grep (pid 3103055), and the
+		// extension row of pid 650812 on .../pi-lens-worktrees/review-3673.
+		const report = run("real-log-test-pollution");
+		const d2 = report.detectors.realLogTestPollution;
+		expect(d2.latencyByPid["1947541"]).toBeUndefined();
+		expect(d2.latencyByPid["3103055"]).toBeUndefined();
+		expect(d2.extensionByPid["650812"]).toBeUndefined();
 	});
 
 	it("D3 turn-end-tests-excluded: flags the run that excluded its test files", () => {
@@ -176,10 +197,37 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "resume-state-loss")?.count).toBe(2);
 	});
 
-	it("F3: a window starting mid-session keeps the anchored read evidence", () => {
+	it("F3: a window starting mid-session carries every read-evidence kind", () => {
+		// Recurrence: r2 carried only edit_batch_summary across the --since edge,
+		// so a 12:00Z window called workspace.ts (whose only pre-window row here
+		// is range_snapshot_validation candidateReadCount 1 at 11:07:27Z)
+		// genuine. Pre-window rows live in read-guard.log.1, the blocks in
+		// read-guard.log, so reading the rotated file first is also pinned.
 		const report = run("window-anchors", "2026-09-30T12:00:00Z");
-		expect(report.detectors.resumeStateLoss.stateLost).toHaveLength(1);
-		expect(smell(report, "resume-state-loss")?.count).toBe(1);
+		const d10 = report.detectors.resumeStateLoss;
+		const base = (r: any) => path.basename(r.filePath);
+		expect(d10.stateLost.map(base).sort()).toEqual([
+			"warned-only.ts",
+			"workspace.ts",
+			"worktree-captured-dirt.test.ts",
+		]);
+		expect(d10.genuine.map(base).sort()).toEqual([
+			"router.ts",
+			"unread-a.ts",
+			"unread-b.ts",
+		]);
+		expect(smell(report, "resume-state-loss")?.count).toBe(3);
+	});
+
+	it("F3: a window starting after session_start fired keeps the D3 run", () => {
+		// Recurrence: r1 dropped the final run when its `session_start fired`
+		// (20:51:33Z) preceded the window, so --since 21:00Z zeroed D3.
+		const report = run("window-anchors", "2026-09-30T21:00:00Z");
+		const runs = report.detectors.turnEndTestsExcluded.runs;
+		expect(runs).toHaveLength(1);
+		expect(runs[0].startTs).toBe("2026-09-30T20:51:33.141Z");
+		expect(runs[0].excluded).toBe(2);
+		expect(smell(report, "turn-end-tests-excluded")?.count).toBe(1);
 	});
 
 	it("D11 carry-empty-restart: flags an empty carry into a populated branch", () => {
