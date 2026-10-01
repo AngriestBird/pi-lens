@@ -357,6 +357,11 @@ export interface ToolCallAttribution {
 	 * are not where the agent believes they are.
 	 */
 	editInPlace?: true;
+	/**
+	 * #3525: FileTime had moved when the read guard checked this call's edit
+	 * (`ReadGuard.fileTimeMoved`), so its write must not re-stamp it.
+	 */
+	fileTimeStale?: true;
 	/** `Date.now()` when recorded — see `TOOL_CALL_ATTRIBUTION_TTL_MS`. */
 	recordedAt: number;
 }
@@ -1832,6 +1837,12 @@ export class RuntimeCoordinator {
 	markToolCallEditInPlace(toolCallId: string): void {
 		const attribution = this._toolCallAttributions.get(toolCallId);
 		if (attribution) attribution.editInPlace = true;
+	}
+
+	/** #3525: see {@link ToolCallAttribution.fileTimeStale}. */
+	markToolCallFileTimeStale(toolCallId: string): void {
+		const attribution = this._toolCallAttributions.get(toolCallId);
+		if (attribution) attribution.fileTimeStale = true;
 	}
 
 	/**

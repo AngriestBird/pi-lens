@@ -97,7 +97,7 @@ export interface MutationBridgeDeps {
 			currentBranchEpoch: number;
 			recordWritten?: (
 				filePath: string,
-				opts?: { branchEpoch?: number },
+				opts?: { branchEpoch?: number; stampFileTime?: boolean },
 			) => void;
 		};
 		recordProjectMutation?: (args: {
@@ -359,10 +359,14 @@ export function recordMutationThroughSeam(
 		//    `isRecordable` check above already passed, so the write itself is
 		//    still bookkept below whether or not the stamp fires.
 		if (sessionLive && stampReadGuard) {
-			runtime.readGuard.recordWritten?.(
-				filePath,
-				stamp === undefined ? undefined : { branchEpoch: stamp },
-			);
+			runtime.readGuard.recordWritten?.(filePath, {
+				...(stamp !== undefined && {
+					branchEpoch: stamp,
+				}),
+				// #3525: settled-sweep drift is unattributed, and the agent never
+				// saw it: authorship, not FileTime.
+				...(entry.provenance === "settled-sweep" && { stampFileTime: false }),
+			});
 		}
 
 		// 2. Turn state: this is the insert that leaves `turn-state.json` `files`

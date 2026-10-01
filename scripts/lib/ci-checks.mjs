@@ -61,10 +61,13 @@ export const ADVISORY_CHECKS = new Set([
 	// integration, not a workflow job in .github/workflows) -- has no
 	// "(advisory)" suffix to self-identify by, so it needs an explicit entry.
 	"SonarCloud Code Analysis",
-	// GitHub's own code-scanning summary check (default CodeQL setup -- there
-	// is no committed codeql.yml; the per-language "Analyze (<lang>)" jobs it
-	// spawns are a DIFFERENT, unrelated set of check-run names this list does
-	// NOT cover, and they gate like any other non-advisory check).
+	// GitHub's own code-scanning summary check. Since #3801 CodeQL runs as a
+	// committed advanced setup: ci.yml's PR-time `CodeQL (<lang>) (advisory)` and
+	// codeql.yml's `CodeQL baseline (<lang>) (advisory)` are classified by the
+	// suffix, not by an entry here. The legacy default-setup `Analyze (<lang>)`
+	// rows, which a PR head older than the switch still carries, are a
+	// DIFFERENT set of names this list does NOT cover; they keep gating because
+	// an alert on such a head is a real result.
 	"CodeQL",
 	// #2706 tooling jobs have explicit advisory entries as well as the suffix.
 	"jscpd (advisory)",
@@ -121,8 +124,8 @@ export function isBlockingConclusion(conclusion) {
 
 // #2618 fix-round-2, F2: `CANCELLED` sits in `BLOCKING_CONCLUSIONS` above
 // because a check a HUMAN cancelled genuinely is not passing -- but
-// `cancel-in-progress: true` (ci.yml:15-16) cancels the PREVIOUS in-flight
-// run of a concurrency group on every new push/dispatch to the SAME ref, and
+// Event-scoped `cancel-in-progress` cancels the PREVIOUS in-flight run of a
+// concurrency group when a cancelling event targets the SAME ref, and
 // that cancelled check-run can be the ONLY row present for its name for
 // several minutes before its replacement posts (live-probed 2026-09-06 on
 // PR #2607's head: three "Record post-merge validation" check-suites on ONE
