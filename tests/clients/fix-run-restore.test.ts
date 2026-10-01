@@ -1458,6 +1458,7 @@ describe("fix-run registry (#3598)", () => {
 			async () => {
 				expect(activeRuns().size).toBe(before + 1);
 			},
+			async () => {},
 		);
 		await restoring;
 		expect(activeRuns().size).toBe(before);
@@ -1467,6 +1468,7 @@ describe("fix-run registry (#3598)", () => {
 				async () => {
 					throw new Error("spawn exploded");
 				},
+				async () => {},
 			),
 		).rejects.toThrow("spawn exploded");
 		expect(activeRuns().size).toBe(before);
@@ -1519,6 +1521,7 @@ describe("fix-run registry (#3598)", () => {
 			const { restoring } = await runWithFixRestore(
 				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
 				toolRun,
+				async () => {},
 			);
 			expect(activeRuns().size).toBe(before + 1);
 			expect(fs.readFileSync(sibling, "utf-8")).toBe("fn tool() {}\n");
@@ -1540,6 +1543,7 @@ describe("fix-run registry (#3598)", () => {
 						await toolRun();
 						throw new Error("spawn exploded");
 					},
+					async () => {},
 				),
 			).rejects.toThrow("spawn exploded");
 			expect(activeRuns().size).toBe(before + 1);
@@ -1553,6 +1557,63 @@ describe("fix-run registry (#3598)", () => {
 			await waitFor(
 				() => activeRuns().size,
 				(size) => size === before,
+				{ timeoutMs: 2000 },
+			);
+		});
+
+		// Recurrence: the pipeline scans the project right after the tool (the
+		// mtime-and-size diff of what the tool changed). A restore running during
+		// that scan stages `<file>.tmp-*` beside the sibling and renames it, and the
+		// scan can report the staging file, or the restored file, as the tool's.
+		it("starts the restore after the caller's scan of the tool's changes, not during it", async () => {
+			const realRead = fs.promises.readFile;
+			let siblingReads = 0;
+			const spy = vi
+				.spyOn(fs.promises, "readFile")
+				.mockImplementation(async (...args: Parameters<typeof realRead>) => {
+					if (String(args[0]) === sibling) siblingReads += 1;
+					return realRead(...args);
+				});
+			try {
+				let readsDuringScan = -1;
+				let seenDuringScan = "";
+				const { restoring } = await runWithFixRestore(
+					{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+					toolRun,
+					async () => {
+						const readsBefore = siblingReads;
+						// A queue call on another path registers after the restore's own, if
+						// it had started, and a free file's entry has run by then.
+						await withFileMutationQueue(
+							path.join(dir, "registration-barrier"),
+							async () => {},
+						);
+						readsDuringScan = siblingReads - readsBefore;
+						seenDuringScan = fs.readFileSync(sibling, "utf-8");
+					},
+				);
+				await restoring;
+				expect(readsDuringScan).toBe(0);
+				expect(seenDuringScan).toBe("fn tool() {}\n");
+				expect(fs.readFileSync(sibling, "utf-8")).toBe("fn agent() {}\n");
+			} finally {
+				spy.mockRestore();
+			}
+		});
+
+		it("still restores when the caller's scan throws", async () => {
+			await expect(
+				runWithFixRestore(
+					{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+					toolRun,
+					async () => {
+						throw new Error("scan exploded");
+					},
+				),
+			).rejects.toThrow("scan exploded");
+			await waitFor(
+				() => fs.readFileSync(sibling, "utf-8"),
+				(bytes) => bytes === "fn agent() {}\n",
 				{ timeoutMs: 2000 },
 			);
 		});

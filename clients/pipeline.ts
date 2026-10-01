@@ -792,9 +792,9 @@ function displayLoss(
 interface WholePackageFixOutcome {
 	changedFiles: string[];
 	/**
-	 * The restore of agent edits the fixer overwrote (#3598). It started at the
-	 * tool's exit and takes pi's queue entry for each sibling (#3830), so the
-	 * caller awaits it only after the target's hold is released.
+	 * The restore of agent edits the fixer overwrote (#3598). It started after
+	 * the project diff and takes pi's queue entry for each sibling (#3830), so
+	 * the caller awaits it only after the target's hold is released.
 	 */
 	restoring?: Promise<FixRunReport>;
 }
@@ -804,21 +804,16 @@ interface WholePackageFixOutcome {
  * agent-edited file is the agent's change, restored or not; counting it would
  * report a restored file as an autofix result.
  */
-async function wholePackageFixOutcome(
+async function wholePackageChangedFiles(
 	root: string,
 	before: FileSnapshot,
 	result: Awaited<ReturnType<typeof safeSpawnAsync>>,
 	agentEdited: readonly string[],
-	restoring: Promise<FixRunReport>,
-): Promise<WholePackageFixOutcome> {
-	if (result.error || result.status !== 0)
-		return { changedFiles: [], restoring };
+): Promise<string[]> {
+	if (result.error || result.status !== 0) return [];
 	const edited = new Set(agentEdited);
 	const changed = await diffProjectSnapshot(root, before);
-	return {
-		changedFiles: changed.flatMap((file) => (edited.has(file) ? [] : [file])),
-		restoring,
-	};
+	return changed.flatMap((file) => (edited.has(file) ? [] : [file]));
 }
 
 async function tryRustClippyFix(
@@ -836,11 +831,7 @@ async function tryRustClippyFix(
 	if (writeHold) await writeHold.acquire();
 
 	const before = await snapshotProjectFiles(cargoDir);
-	const {
-		value: result,
-		agentEdited,
-		restoring,
-	} = await runWithFixRestore(
+	const { result: changedFiles, restoring } = await runWithFixRestore(
 		{ tool: "rust-clippy", extension: ".rs", candidates: before.keys() },
 		() =>
 			safeSpawnAsync(
@@ -848,14 +839,10 @@ async function tryRustClippyFix(
 				["clippy", "--fix", "--allow-dirty", "--allow-staged", "-q"],
 				{ timeout: 30000, cwd: cargoDir },
 			),
+		(result, agentEdited) =>
+			wholePackageChangedFiles(cargoDir, before, result, agentEdited),
 	);
-	return wholePackageFixOutcome(
-		cargoDir,
-		before,
-		result,
-		agentEdited,
-		restoring,
-	);
+	return { changedFiles, restoring };
 }
 
 async function tryDartFix(
@@ -874,25 +861,17 @@ async function tryDartFix(
 	if (writeHold) await writeHold.acquire();
 
 	const before = await snapshotProjectFiles(pubspecDir);
-	const {
-		value: result,
-		agentEdited,
-		restoring,
-	} = await runWithFixRestore(
+	const { result: changedFiles, restoring } = await runWithFixRestore(
 		{ tool: "dart-analyze", extension: ".dart", candidates: before.keys() },
 		() =>
 			safeSpawnAsync("dart", ["fix", "--apply"], {
 				timeout: 30000,
 				cwd: pubspecDir,
 			}),
+		(result, agentEdited) =>
+			wholePackageChangedFiles(pubspecDir, before, result, agentEdited),
 	);
-	return wholePackageFixOutcome(
-		pubspecDir,
-		before,
-		result,
-		agentEdited,
-		restoring,
-	);
+	return { changedFiles, restoring };
 }
 
 // --- Pipeline phase helpers ---

@@ -236,7 +236,7 @@ pipeline takes it at `Begin` and keeps it, #3506) and an LSP multi-path edit
 (`LspMulti`: S's entry, then F's, keys sorted and S first, waiting for F while
 it holds S; it writes nothing, so it is a lock-order actor only).
 `RestoreGatesHold` says whether F's release (`RelF`) waits for the restore:
-`FALSE` is the code (`runWithFixRestore` starts `restore` at the tool's exit and
+`FALSE` is the code (`runWithFixRestore` starts `restore` after the caller's scan of the tool's changes and
 returns it as a promise; the pipeline and the `agent_end` drain await it only
 after they released F), `TRUE` is the rejected shape, where the pipeline holds
 F until the restore has ended. The statement the code keeps: a queue entry is
@@ -256,7 +256,7 @@ sibling.
 | `MutSiblingNoRecheck` | #3741 round 1, before the re-check | violated `NoRestoreOverPreCheckEdit` | 272 (at the violation) |
 | `SiblingRestoreMerged` | **defect 2** on the merged restore: an edit lands between the re-check and the write | violated `NoRestoreOverGapEdit` | 271 (at the violation) |
 | `SiblingRestoreGap` | defect 2 alone: with `SettleCapture` the other windows below are closed, and this one is left | violated `NoRestoreOverNewer` | 246 (at the violation) |
-| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore started at the tool's exit with F still held and not waiting for it, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 3,202 |
+| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore started after the caller's scan, with F still held and not waiting for it, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 3,202 |
 | `SiblingRestoreQueuedInHold` | the rejected shape: the same, with the pipeline holding F until the restore has ended (`RestoreGatesHold = TRUE`) | violated `Deadlock` | 77 (at the violation) |
 | `SiblingRestoreQueuedInHoldNoLsp` | the same without the LSP edit: no cycle, so the edit is the cycle's third edge | pass | 859 |
 | `MutSiblingNoRestoreQueue` | `SiblingRestoreQueued` without the queue entry | violated `NoRestoreOverNewer` | 2,093 (at the violation) |
@@ -305,7 +305,7 @@ pipeline's hold on F closes a cycle with a multi-path LSP edit: the edit holds S
 and waits for F, the pipeline holds F and waits for the restore, the restore
 waits for S (`SiblingRestoreQueuedInHold`, red under `CHECK_DEADLOCK`, found by
 the #3844 review's probe through the real queue). The code starts the restore
-at the tool's exit and awaits it only after the pipeline has released F, so F's
+after the caller's scan of the tool's changes and awaits it only after the pipeline has released F, so F's
 release never waits for it. `SiblingRestoreQueued`, with the hold and the LSP
 edit in, passes. The restore reads and compares inside S's
 entry, and the run stays registered until it ends, so window A (below) is

@@ -43,9 +43,9 @@
  * The restore takes pi's queue entry for a sibling S, so an agent `edit` of S
  * cannot land between the restore's compare and its write. The pipeline holds
  * the target F's entry while the tool runs, through its own after-reads
- * (#3506), and the restore starts at the tool's exit, so it can wait for S's
- * entry while F is held. That is safe because nothing waits for the restore
- * while it holds an entry:
+ * (#3506), and the restore starts after the caller's scan of the tool's
+ * changes, so it can wait for S's entry while F is held. That is safe because
+ * nothing waits for the restore while it holds an entry:
  *
  * - A queue entry is requested by something that holds no other entry, with
  *   one exception: the multi-path LSP edit (`withHostFileMutationQueues`)
@@ -173,34 +173,34 @@ export interface FixRun {
 
 /**
  * Run `run` (the fixer's spawn) with the pre-run hash set and the capture in
- * place, and restore whether `run` returns or throws: a tool that exits
+ * place, then `afterRun` (the caller's own scan of what the tool changed, given
+ * the files an agent edit was captured for: the tool's changes to them are not
+ * its own), and restore whether `run` returns or throws: a tool that exits
  * nonzero or times out has usually already rewritten files. The restore starts
- * at the tool's exit and is NOT awaited here (see "Lock order" above); the run
- * stays registered until it ends.
+ * after `afterRun`, so it never writes while the caller scans, and is NOT
+ * awaited here (see "Lock order" above); the run stays registered until it ends.
  */
-export async function runWithFixRestore<T>(
+export async function runWithFixRestore<T, R>(
 	args: Parameters<typeof beginFixRun>[0],
 	run: () => Promise<T>,
-): Promise<{
-	value: T;
-	/** Files an agent edit was captured for; the tool's changes to them are not its own. */
-	agentEdited: string[];
-	restoring: Promise<FixRunReport>;
-}> {
+	afterRun: (value: T, agentEdited: string[]) => Promise<R>,
+): Promise<{ result: R; restoring: Promise<FixRunReport> }> {
 	const fixRun = await beginFixRun(args);
-	let outcome: { value: T } | { failure: unknown };
+	let finished: ReturnType<FixRun["finish"]> | undefined;
+	let outcome: { result: R } | { failure: unknown };
 	try {
-		outcome = { value: await run() };
+		const value = await run();
+		finished = fixRun.finish();
+		outcome = { result: await afterRun(value, finished.agentEdited) };
 	} catch (failure) {
 		outcome = { failure };
 	}
-	const { agentEdited, restore } = fixRun.finish();
-	const restoring = restore();
+	const restoring = (finished ?? fixRun.finish()).restore();
 	if ("failure" in outcome) {
 		void restoring;
 		throw outcome.failure;
 	}
-	return { value: outcome.value, agentEdited, restoring };
+	return { result: outcome.result, restoring };
 }
 
 interface Registry {

@@ -16,11 +16,11 @@
 (* takes S's entry (RestoreQueue) while the pipeline holds F and waits for *)
 (* the restore to end (RestoreGatesHold = TRUE) closes a cycle with that   *)
 (* edit, and TLC's deadlock check finds it (SiblingRestoreQueuedInHold).   *)
-(* The code does not wait: `runWithFixRestore` starts `restore` at the     *)
-(* tool's exit and returns it as a promise, awaited only after the         *)
-(* pipeline has released F (RestoreGatesHold = FALSE), so F's release      *)
-(* never depends on the restore and the restore holds nothing while it     *)
-(* waits for S's entry.                                                    *)
+(* The code does not wait: `runWithFixRestore` starts `restore` once the   *)
+(* caller has scanned the tool's changes and returns it as a promise,      *)
+(* awaited only after the pipeline has released F (RestoreGatesHold =      *)
+(* FALSE), so F's release never depends on the restore and the restore     *)
+(* holds nothing while it waits for S's entry.                             *)
 (*                                                                         *)
 (* Actors:                                                                 *)
 (*  - the agent: edits 1..SEdits of S, in order, each a read-modify-write  *)
@@ -62,7 +62,7 @@ CONSTANTS
     RestoreRecheck, \* TRUE: the re-stat before the write (#3741 round 2)
     RestoreQueue,   \* the restore's read, decision, re-check and write run inside pi's queue entry for S (a per-sibling entry taken only for the restore, #3830)
     TargetHold,     \* TRUE: the pipeline holds the target F's queue entry from Begin until its work is done (#3506)
-    RestoreGatesHold, \* TRUE (the rejected shape): the pipeline releases F's entry only after the restore has ended. FALSE (the code, #3830): the restore starts at the tool's exit and F's release does not wait for it
+    RestoreGatesHold, \* TRUE (the rejected shape): the pipeline releases F's entry only after the restore has ended. FALSE (the code, #3830): the restore starts once the caller has scanned the tool's changes and F's release does not wait for it
     LspMulti        \* TRUE: an LSP multi-path edit takes S's entry, then F's (keys sorted, S first), and waits for F while it holds S
 
 SIds == 1..SEdits
@@ -183,8 +183,10 @@ TWrite ==
                    rpc, rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
 \* The tool exited: `finish()` returns the agentEdited list and the `restore`
-\* thunk, which `runWithFixRestore` starts at once. Without SettleCapture the
-\* run left `active` here (the code before #3830).
+\* thunk, which `runWithFixRestore` starts once the caller has scanned the
+\* tool's changes (the scan touches neither S nor a queue entry, so the model
+\* folds it into Finish). Without SettleCapture the run left `active` here (the
+\* code before #3830).
 Finish ==
     /\ rpc = "run" /\ tpc # "read"
     /\ Quiet
@@ -195,8 +197,9 @@ Finish ==
                    rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
 \* The pipeline's work on F is over and `runPipeline` releases F's entry. The
-\* pipeline's other work after the tool's exit is not modelled, so this can
-\* happen any time after Finish; with RestoreGatesHold it waits for the restore.
+\* pipeline's other work after the tool's exit (its reads of F) touches neither
+\* S nor a queue entry and is not modelled, so this can happen any time after
+\* Finish; with RestoreGatesHold it waits for the restore.
 RelF ==
     /\ TargetHold /\ fq = "pipe"
     /\ rpc \notin {"idle", "run"}

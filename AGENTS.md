@@ -592,9 +592,9 @@ the surface they bite; each block loads only when its trigger applies.
   source files, capture agent mutations pi-lens observes during the run (the
   tool_result seam and the mutation bridge), write them back after, one
   degradation per run, and name any edit that cannot be restored. The restore
-  takes pi's queue entry for each sibling, one at a time (#3830). It starts at
-  the tool's exit and is awaited only after the target's hold is released,
-  never inside it: a queue entry is requested by something that holds no other
+  takes pi's queue entry for each sibling, one at a time (#3830). It starts
+  after the caller's scan of the tool's changes and is awaited only after the
+  target's hold is released, never inside it: a queue entry is requested by something that holds no other
   entry, except the multi-path LSP edit, which requests in ascending key order,
   and nothing that holds an entry awaits the restore. Do not add a second
   whole-package fixer without it, and do not await a queue entry while holding
