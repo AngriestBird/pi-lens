@@ -36,7 +36,7 @@
  * "skipped"/"neutral" conclusion is a genuine non-failure (a job-level
  * `if:` that evaluated false -- see computeVerdict's own doc comment), and
  * its "cancelled" conclusion is UNCERTAIN rather than failing: this repo's
- * `cancel-in-progress: true` (ci.yml:15-16) leaves a stale cancelled row as
+ * event-scoped `cancel-in-progress` leaves a stale cancelled row as
  * the only entry for its name for several minutes before a replacement
  * posts, and reading that window as a hard failure is a false positive on a
  * check still in flight, not one that failed.
@@ -381,13 +381,10 @@ export function isPrNumber(arg) {
  * "success"` comparison, decides whether a COMPLETED gating row is a
  * failure: "skipped" and "neutral" are terminal-but-not-failing conclusions,
  * and NOT hypothetical here -- this repository's own
- * `record-post-merge-validation` job (defined in both ci.yml and lint.yml)
- * carries a job-level `if: ... event_name == 'repository_dispatch'` and
- * reports "skipped" on every ordinary pull_request run (confirmed live on
- * PR #2588, 2026-09-06 -- two "Record post-merge validation" rows, both
- * "skipping" in `gh pr checks`). Reading `!== "success"` as failure the way
- * the pre-#2609 script did would have turned that routine skip into a
- * permanent false FAILURE the moment discovered rows were added.
+ * a conditionally skipped workflow job can report "skipped" on an ordinary
+ * pull_request run. Reading `!== "success"` as failure the way the pre-#2609
+ * script did would have turned that routine skip into a permanent false
+ * FAILURE the moment discovered rows were added.
  */
 export function computeVerdict(
 	checkRunsPayload,
@@ -449,11 +446,9 @@ export function computeVerdict(
 	// exemption applies only to non-cancelled DISCOVERED rows. Applying it to
 	// required rows too (round 1's bug) let
 	// a required `Unit tests` that reported "skipped" (reachable: ci.yml:253's
-	// `test` job has `needs: validate-merge-train-dispatch` with no `if:`, so
-	// a failed dependency skips it outright) read as a clean pass --
-	// `merge-train-lane.mjs`'s real gate never had this bug: its required-row
-	// loop already demands `run.conclusion === PASSING_CONCLUSION` (line
-	// ~262) with no such exemption.
+	// a failed dependency skips it outright) read as a clean pass -- the
+	// required-row loop already demands `run.conclusion === PASSING_CONCLUSION`
+	// with no such exemption.
 	//
 	// #3373: a latest cancelled row is actionable uncertainty for every gating
 	// name, including required names. It is reported with its run id below so a

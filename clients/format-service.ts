@@ -75,7 +75,10 @@ export class FormatService {
 	private enabled: boolean;
 
 	constructor(sessionID: string, enabled: boolean = true) {
-		this.fileTime = new FileTime(sessionID);
+		// Its own table: a `FileTime` is keyed by session id, and the read
+		// guard's is the session's. Sharing it let every stamp here vouch for
+		// bytes the agent never saw (#3525).
+		this.fileTime = new FileTime(`${sessionID}:format`);
 		this.enabled = enabled;
 	}
 

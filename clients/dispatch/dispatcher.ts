@@ -87,7 +87,10 @@ import type {
 	RunnerResult,
 	RunnerSkipReason,
 } from "./types.js";
-import { formatDiagnostics } from "./utils/format-utils.js";
+import {
+	DELTA_UNUSED_PROMOTION_NOTE,
+	formatDiagnostics,
+} from "./utils/format-utils.js";
 
 // --- Runner Registry ---
 
@@ -537,14 +540,6 @@ function isUnusedValueDiagnostic(d: Diagnostic): boolean {
 	);
 }
 
-/**
- * #3218: why a delta-promoted unused finding blocks. Carried on the promoted
- * diagnostic so the STOP renderers print the reason once beneath the banner
- * instead of each re-deriving why the tier changed.
- */
-const DELTA_UNUSED_PROMOTION_NOTE =
-	"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
-
 function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map((d) => {
 		if (!isUnusedValueDiagnostic(d)) return d;
@@ -607,9 +602,22 @@ export interface DispatchLatencyReport {
 	warnings: number;
 }
 
+/**
+ * Build the synthetic coverage notice for this dispatch, or `undefined` when
+ * the runners covered the file.
+ *
+ * `dedupe` is the push/pull axis, always supplied by the sole caller
+ * (`dispatchForFile`). `true` is the pi push surface, where the session-scoped
+ * `coverageNoticeSeen` latch keeps a per-edit notice from repeating on every
+ * keystroke. A pull surface (`pilens_analyze`) passes `false`: each call is an
+ * independent question, so the notice must come back every time, and the latch
+ * is left untouched so a later push still gets its once-per-session notice
+ * (refs #3791).
+ */
 function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
+	dedupe: boolean,
 ): Diagnostic | undefined {
 	if (!ctx.kind) return undefined;
 	const lspEnabled = !ctx.pi.getFlag("no-lsp");
@@ -665,8 +673,10 @@ function buildCoverageNotice(
 		// scanner that recovered a delivery path (or lost one) kept the stale
 		// wording for the rest of the session.
 		const onceKey = `${ctx.kind}:${ctx.filePath}:${dedupeSet(silentServerIds)}|${dedupeSet(deferredServerIds)}`;
-		if (coverageNoticeSeen.has(onceKey)) return undefined;
-		coverageNoticeSeen.add(onceKey);
+		if (dedupe) {
+			if (coverageNoticeSeen.has(onceKey)) return undefined;
+			coverageNoticeSeen.add(onceKey);
+		}
 		const coverageParts: string[] = [];
 		if (deferredServerIds.length > 0) {
 			coverageParts.push(
@@ -733,8 +743,10 @@ function buildCoverageNotice(
 	if (anyLinterHasCoverage) return undefined;
 
 	const onceKey = `${ctx.kind}:${ctx.filePath}`;
-	if (coverageNoticeSeen.has(onceKey)) return undefined;
-	coverageNoticeSeen.add(onceKey);
+	if (dedupe) {
+		if (coverageNoticeSeen.has(onceKey)) return undefined;
+		coverageNoticeSeen.add(onceKey);
+	}
 
 	return {
 		id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
@@ -1180,6 +1192,12 @@ export async function dispatchForFile(
 	groups: RunnerGroup[],
 	registry: RunnerRegistryContract,
 	onRunnerResult?: RunnerResultSink,
+	/**
+	 * Push/pull coverage-notice dedupe (refs #3791). Defaults to `true` (the pi
+	 * push surface's once-per-session latch). A pull surface passes `false` so
+	 * every call carries the notice — see {@link buildCoverageNotice}.
+	 */
+	options?: { dedupeCoverageNotice?: boolean },
 ): Promise<DispatchResult> {
 	const _overallStart = Date.now();
 	if (ctx.fileRole === "generated") {
@@ -1416,7 +1434,11 @@ export async function dispatchForFile(
 
 	const inlineBlockers = blockers;
 	const inlineFixed = fixedItems;
-	const coverageNotice = buildCoverageNotice(ctx, runnerLatencies);
+	const coverageNotice = buildCoverageNotice(
+		ctx,
+		runnerLatencies,
+		options?.dedupeCoverageNotice ?? true,
+	);
 
 	// Format output — only blocking issues shown inline
 	// Warnings tracked but not shown (noise) — surfaced via lens_diagnostics
