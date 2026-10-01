@@ -1582,8 +1582,10 @@ describe("fix-run registry (#3598)", () => {
 					toolRun,
 					async () => {
 						const readsBefore = siblingReads;
-						// A queue call on another path registers after the restore's own, if
-						// it had started, and a free file's entry has run by then.
+						// Let a restore that had started reach its queue registration; a queue
+						// call on another path then registers after the restore's own, and a
+						// free file's entry has run by then.
+						await new Promise<void>((resolve) => setImmediate(resolve));
 						await withFileMutationQueue(
 							path.join(dir, "registration-barrier"),
 							async () => {},
