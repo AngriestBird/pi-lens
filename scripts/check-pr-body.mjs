@@ -5,6 +5,7 @@ import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	evaluateTlaCoverage,
 	loadCoverageMap,
+	matchGlob,
 	parseChangedFiles,
 } from "./lib/tla-coverage.mjs";
 import {
@@ -291,22 +292,58 @@ function isRuntimeObservabilityPath(name) {
 	);
 }
 
+// #3875: a decision branch on a session, lifecycle or delivery seam is not a
+// failure path, so the failure-path test above let `if (adopt) ... else reset`
+// pass with "No new failure path; no record added." and the S2/S3 fixes of
+// 2026-09-30 shipped with no record to read back (#3873). The seam is every
+// row of the checked-in `formal/coverage-map.json` (the lifecycle, timing and
+// identity files #3802 maintains), hub and `unmodelled` rows included: the
+// 50-PR calibration in the #3875 body flagged nothing extra for them.
+const DECISION_BRANCH_G = /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\b/g;
+
+function loadSeamMap(cwd = REPO_ROOT) {
+	try {
+		return loadCoverageMap(cwd);
+	} catch {
+		// lintTlaCoverage already reports an unreadable map as an error.
+		return null;
+	}
+}
+
+function isSeamFile(file, map) {
+	return Object.keys(map?.map ?? {}).some((glob) => matchGlob(glob, file));
+}
+
+// `git diff --unified=0` hands the detector a block comment's continuation
+// lines without the opener the blanker needs, so a prose word like `case` in
+// a JSDoc body read as a `case` label (#3774 in the calibration). oxfmt keeps
+// a continuation line's `*` first, so those lines are dropped before blanking.
+function withoutCommentContinuations(text) {
+	return text
+		.split("\n")
+		.filter((line) => !/^\s*\*/.test(line))
+		.join("\n");
+}
+
 // Records are harvested from each hunk's post-image (added plus context
 // lines), because a new call whose closing braces are unchanged context has
 // its literal split across both (#2915). Only a call whose span contains an
 // added line counts, so an untouched record in the context never passes as
 // new. The failure-path test still reads added lines alone.
-function runtimeObservabilityFromDiff(diff = "") {
+function runtimeObservabilityFromDiff(diff = "", seamMap = null) {
 	const records = new Set();
 	let runtime = false;
 	let added = "";
 	let currentRuntime = false;
+	let currentFile = "";
+	const addedByFile = new Map();
 	const hunks = [];
 	let hunk = null;
 	for (const line of String(diff).split(/\r?\n/)) {
 		const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
 		if (header) {
 			currentRuntime = [header[1], header[2]].some(isRuntimeObservabilityPath);
+			currentFile = header[2];
 			runtime ||= currentRuntime;
 			hunk = currentRuntime ? { lines: [], added: new Set() } : null;
 			if (hunk) hunks.push(hunk);
@@ -320,13 +357,18 @@ function runtimeObservabilityFromDiff(diff = "") {
 		}
 		if (/^\+(?!\+\+)/.test(line)) {
 			added += `${line.slice(1)}\n`;
+			addedByFile.set(
+				currentFile,
+				`${addedByFile.get(currentFile) ?? ""}${line.slice(1)}\n`,
+			);
 			hunk.lines.push(line.slice(1));
 			hunk.added.add(hunk.lines.length);
 		} else if (line.startsWith(" ") || line === "") {
 			hunk.lines.push(line.slice(1));
 		}
 	}
-	if (!runtime) return { runtime: false, records, failurePath: false };
+	if (!runtime)
+		return { runtime: false, records, failurePath: false, seamBranches: [] };
 	for (const { lines, added: addedLines } of hunks) {
 		if (!addedLines.size) continue;
 		for (const {
@@ -343,9 +385,18 @@ function runtimeObservabilityFromDiff(diff = "") {
 		}
 	}
 	const blanked = blankCommentsAndStrings(added).text;
+	const seamBranches = [];
+	for (const [file, text] of addedByFile) {
+		if (!isSeamFile(file, seamMap)) continue;
+		const branches = blankCommentsAndStrings(
+			withoutCommentContinuations(text),
+		).text.match(DECISION_BRANCH_G);
+		if (branches) seamBranches.push({ file, count: branches.length });
+	}
 	return {
 		runtime: true,
 		records,
+		seamBranches,
 		failurePath:
 			/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
 				blanked,
@@ -1071,7 +1122,7 @@ function lintMasterClaims(body) {
 }
 
 function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
-	const observation = runtimeObservabilityFromDiff(diff);
+	const observation = runtimeObservabilityFromDiff(diff, loadSeamMap());
 	if (!observation.runtime) return [];
 	const content = observabilitySectionContent(lines, headings);
 	if ([...observation.records].some((record) => content.includes(record)))
@@ -1111,18 +1162,36 @@ function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
 			// Fall through to the existing strict error.
 		}
 	}
-	if (
-		!observation.failurePath &&
-		content.includes("No new failure path; no record added.")
-	)
-		return [];
 	if (observation.failurePath)
 		return [
 			`PR body Observability must name a record literal from the runtime diff${observation.records.size ? ` (${[...observation.records].join(", ")})` : ""}; "No new failure path; no record added." is not valid when the added lines contain a failure path.`,
 		];
+	// #3875: `none: <reason>` is valid for any diff without a failure path; the
+	// exact no-record sentence is valid only while the diff adds no decision
+	// branch on a seam either.
+	if (noRecordReason(content)) return [];
+	if (observation.seamBranches.length)
+		return [
+			`PR body Observability must name the record of each new decision branch (${observation.seamBranches.map(({ file, count }) => `${file}: ${count}`).join(", ")}) as a record literal from the diff or \`covered by existing record <kind> at <file>:<line>\`, or write \`none: <reason>\`; "No new failure path; no record added." is not valid when the added lines contain a decision branch on a session, lifecycle or delivery seam.`,
+		];
+	if (content.includes("No new failure path; no record added.")) return [];
 	return [
 		'PR body Observability must name a record literal present in the runtime diff, or state exactly "No new failure path; no record added.".',
 	];
+}
+
+// A `none: <reason>` line: at least three words, and not a placeholder.
+function noRecordReason(content) {
+	for (const line of content.split(/\r?\n/)) {
+		const reason = /^\s*(?:[-*+]\s+)?\**none:\**\s*(\S.*)$/i.exec(line)?.[1];
+		if (
+			reason &&
+			reason.trim().split(/\s+/).length >= 3 &&
+			!/^(?:n\/?a|none|not applicable|tbd|todo)\b/i.test(reason.trim())
+		)
+			return reason.trim();
+	}
+	return null;
 }
 
 /** Detect the high-confidence shape produced when a worker flattens a body. */

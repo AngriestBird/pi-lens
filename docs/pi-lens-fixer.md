@@ -146,8 +146,9 @@ rigor (#2599).
   heading present in order: `## Why` (one sentence), `## Notes for the
   reviewer`, `## Change outline`, `## Summary`, `## Type of change`,
   `## Area`, `## Checklist`, `## Tests`, `## Blast radius`,
-  `## Observability` (a record literal from the runtime diff, or exactly
-  `No new failure path; no record added.`), `## Class sweep`, and
+  `## Observability` (a record literal from the runtime diff, `none: <reason>`,
+  or exactly `No new failure path; no record added.`, which a new decision
+  branch on a session, lifecycle or delivery seam refuses, #3875), `## Class sweep`, and
   `## Test assessment`. A brief that names only some headings does not
   shorten this list. The closing keyword lives in the body; GitHub ignores it
   in a title.

@@ -1173,6 +1173,197 @@ describe("PR body lint (#1844)", () => {
 		});
 	});
 
+	describe("decision branches on a session, lifecycle or delivery seam (#3875)", () => {
+		const sentence = "No new failure path; no record added.";
+		const withObservability = (text: string) =>
+			body.replace("The advisory check run is the record.", text);
+		const diffAdding = (file: string, ...added: string[]) =>
+			[
+				`diff --git a/${file} b/${file}`,
+				`@@ -1,0 +1,${added.length} @@`,
+				...added.map((line) => `+${line}`),
+			].join("\n");
+		// Recurrence: #3873 — the S2/S3 session-scope fixes (#3819, #3855, #3758,
+		// #3759) added adopt/reset/skip branches that are not failure paths, so
+		// the exact no-record sentence passed and the records never existed.
+		const seamBranch = diffAdding(
+			"clients/session-scope.ts",
+			"\tif (slot.sessionFile === sessionFile) adoptHandoff(slot);",
+		);
+		const refusal = "decision branch";
+
+		it("refuses the no-record sentence for a branch added to a seam file", () => {
+			const result = lintPrBody(withObservability(sentence), {
+				diff: seamBranch,
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain(refusal);
+			expect(result.errors.join(" ")).toContain("clients/session-scope.ts: 1");
+		});
+
+		it.each([
+			["if", "\tif (adopt) apply(slot);"],
+			["else", "\t} else {"],
+			["switch", "\tswitch (slot.kind) {"],
+			["case", '\t\tcase "adopt":'],
+		])("detects a %s branch", (_name, line) => {
+			expect(
+				lintPrBody(withObservability(sentence), {
+					diff: diffAdding("clients/session-scope.ts", line),
+				}).errors.join(" "),
+			).toContain(refusal);
+		});
+
+		it.each([
+			["a hub file", "index.ts"],
+			["an unmodelled row", "clients/fix-run-restore.ts"],
+			["a delivery file", "clients/agent-nudge.ts"],
+		])("treats %s in the coverage map as a seam", (_name, file) => {
+			expect(
+				lintPrBody(withObservability(sentence), {
+					diff: diffAdding(file, "\tif (adopt) apply(slot);"),
+				}).errors.join(" "),
+			).toContain(refusal);
+		});
+
+		it("accepts the same diff when the body names a record literal the diff adds", () => {
+			const diff = diffAdding(
+				"clients/session-scope.ts",
+				"\tif (slot.sessionFile === sessionFile) {",
+				'\t\tlogLatency({ phase: "session_handoff_adopt" });',
+				"\t}",
+			);
+			expect(
+				lintPrBody(withObservability("The record is session_handoff_adopt."), {
+					diff,
+				}),
+			).toEqual({ valid: true, errors: [] });
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain(refusal);
+		});
+
+		it("accepts `none: <reason>` for the same diff", () => {
+			expect(
+				lintPrBody(
+					withObservability(
+						"none: the branch only selects between two already-recorded outcomes",
+					),
+					{ diff: seamBranch },
+				),
+			).toEqual({ valid: true, errors: [] });
+		});
+
+		it.each([
+			"none:",
+			"none: n/a",
+			"none: none",
+			"none: tbd later today",
+			"none: not applicable here",
+			"none: too short",
+		])("refuses the placeholder reason %j", (text) => {
+			expect(
+				lintPrBody(withObservability(text), { diff: seamBranch }).errors.join(
+					" ",
+				),
+			).toContain(refusal);
+		});
+
+		it("still requires a record for a failure path, whatever the reason says", () => {
+			const diff = diffAdding(
+				"clients/session-scope.ts",
+				"\ttry { adopt(); } catch (error) { warn(error); }",
+			);
+			expect(
+				lintPrBody(
+					withObservability("none: the catch only forwards to the host"),
+					{ diff },
+				).errors.join(" "),
+			).toContain("not valid when the added lines contain a failure path");
+		});
+
+		it("leaves a branch in a file outside the coverage map on the old form", () => {
+			const diff = diffAdding("clients/example.ts", "\tif (ready) go();");
+			expect(lintPrBody(withObservability(sentence), { diff })).toEqual({
+				valid: true,
+				errors: [],
+			});
+		});
+
+		it("leaves a seam file without an added branch on the old form", () => {
+			const diff = diffAdding(
+				"clients/session-scope.ts",
+				"\tconst keyHash = hashKey(slot.sessionFile);",
+			);
+			expect(lintPrBody(withObservability(sentence), { diff })).toEqual({
+				valid: true,
+				errors: [],
+			});
+		});
+
+		it("reads code, not prose: comments, strings and JSDoc continuations never count", () => {
+			const diff = diffAdding(
+				"clients/session-scope.ts",
+				"\t// if (adopt) the other case wins, else reset",
+				'\tconst note = "if (adopt) else switch (kind) case";',
+				"\t * is the unverifiable case above and else nothing",
+			);
+			expect(lintPrBody(withObservability(sentence), { diff })).toEqual({
+				valid: true,
+				errors: [],
+			});
+		});
+
+		it("refuses merged #3785's honest sentence over its read-guard branches", () => {
+			// Real runtime hunks of #3785: `if (opts?.stampFileTime !== false)` and
+			// `if (fileTimeMoved && toolCallId !== undefined)` shipped under this
+			// exact sentence with no record of the FileTime decision.
+			const diff = readFileSync(
+				join(
+					repositoryRoot,
+					"tests",
+					"fixtures",
+					"ci-pr-bodies",
+					"pr-3785-runtime.diff",
+				),
+				"utf8",
+			);
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain("clients/read-guard.ts");
+		});
+
+		it("does not flag #3774's comment-only edit, whose prose said `case`", () => {
+			// Real `--unified=0` hunk: the block comment's opener is not in the
+			// diff, so the continuation line `unverifiable case above` read as a
+			// `case` label in the first calibration run.
+			const diff = readFileSync(
+				join(
+					repositoryRoot,
+					"tests",
+					"fixtures",
+					"ci-pr-bodies",
+					"pr-3774-comment-runtime.diff",
+				),
+				"utf8",
+			);
+			expect(lintPrBody(withObservability(sentence), { diff })).toEqual({
+				valid: true,
+				errors: [],
+			});
+		});
+
+		it("reaches the local preflight entry point", () => {
+			const result = lintLocalPrBody(
+				withObservability(sentence),
+				process.cwd(),
+				() => seamBranch,
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain(refusal);
+		});
+	});
+
 	it("accepts an existing record named with its source location", () => {
 		const source = join(process.cwd(), "clients", "existing-record.ts");
 		mkdirSync(join(process.cwd(), "clients"), { recursive: true });

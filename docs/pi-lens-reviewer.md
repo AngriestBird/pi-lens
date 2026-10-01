@@ -116,6 +116,10 @@ Run every probe the diff can trip and say which ran and what each returned.
   `logSessionStart`, the degradation ledger), and the diff contains that
   literal. A pull-only surface is a gap (#2513, #2526). A new or replaced seam
   also needs a success-path record.
+- **Record read-back (#3875).** Every new decision branch on a session,
+  lifecycle or delivery seam names its record (sink plus kind) or `none:
+  <reason>`, and a test in the diff reads that record back through the real
+  seam; a record no test reads is a finding (recurrence: #3873).
 - **Changelog fragment.** Front matter `section:` is one of Added, Changed,
   Deprecated, Removed, Fixed, or Security, followed by exactly one top-level
   entry. Bullet style and a bold or plain title are the author's choice

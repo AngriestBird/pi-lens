@@ -261,7 +261,10 @@ the surface they bite; each block loads only when its trigger applies.
     contain file input; normalize and redact at the shared diagnostic seam.
 
 31. **Pull-only observability:** new behavior emits a success or decision record
-    in the streams that monitors and analyzers read.
+    in the streams that monitors and analyzers read. A new decision branch on a
+    session, lifecycle or delivery seam names its record or `none: <reason>`
+    (`check-pr-body` enforces it) and a test reads the record back (#3875;
+    recurrence #3873: the S2/S3 fixes could not be shown to fire live).
 
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
