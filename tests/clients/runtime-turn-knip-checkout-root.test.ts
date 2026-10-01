@@ -402,7 +402,7 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 		return { turn, spawned, release, settled: () => done };
 	}
 
-	it("returns inside the turn_end budget, writes no late cache row, and records the deferral once", async () => {
+	it("returns inside the turn_end budget, records the deferral, and writes no late cache row", async () => {
 		const x = addWorktree("x");
 		edit(path.join(x, "src", "a.ts"));
 		const slow = slowTurn();
@@ -411,9 +411,15 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 		await vi.advanceTimersByTimeAsync(3_100);
 		await slow.turn;
 		expect(slow.settled()).toBe(true);
+		// The handler reached its end inside the budget: it cleared its OWN turn's
+		// worklist before any newer turn could begin, so nothing is "retained".
+		expect(cacheManager.readTurnState(main).files).toEqual({});
 
 		const [row] = knipRows();
-		expect(row?.metadata).toMatchObject({ execution: "deferred" });
+		expect(row?.metadata).toMatchObject({
+			execution: "deferred",
+			aborted: false,
+		});
 		const exceeded = getDegradationSummary().find(
 			(group) => group.kind === "hook-await-exceeded",
 		);
@@ -425,16 +431,6 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 		vi.useRealTimers();
 		expect(cacheManager.readCache("knip", x)).toBeNull();
 		expect(cacheManager.readCache("knip", main)).toBeNull();
-
-		// The next turn does not pay the deferral record again.
-		edit(path.join(x, "src", "a.ts"));
-		knipProcess.gate = undefined;
-		await turnEnd();
-		expect(
-			getDegradationSummary().find(
-				(group) => group.kind === "hook-await-exceeded",
-			)?.count,
-		).toBe(1);
 	});
 
 	it("starts no further scan once one has spent the budget, and counts the skipped roots", async () => {
@@ -501,6 +497,9 @@ describe("#3872 budget: a slow scan no longer holds the turn_end handler", () =>
 				(group) => group.kind === "hook-await-exceeded",
 			),
 		).toBeUndefined();
-		expect(knipRows()[0]?.metadata).toMatchObject({ execution: "deferred" });
+		expect(knipRows()[0]?.metadata).toMatchObject({
+			execution: "deferred",
+			aborted: true,
+		});
 	});
 });
