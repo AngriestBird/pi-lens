@@ -105,9 +105,11 @@ select) names its record as sink plus kind, or says `none: <reason>`. The
    the new failure path is observed by a record an existing seam already
    emits (the cited line must sit within 20 lines of that literal, in a
    runtime file, no `..` in the path);
-3. `none: <reason>` — a reason of at least three words, valid ONLY when the
-   diff adds no `catch`, `throw`, `return null` or degradation branch in
-   runtime code; it is how a decision branch with no record says why (#3875);
+3. `none: <reason>` — a reason of at least three words that is not the
+   template's `<reason>` or placeholder words, valid ONLY when the diff adds
+   no `catch`, `throw`, `return null` or degradation branch in runtime code.
+   When the diff adds a decision branch on a seam, the `none:` lines must
+   name each flagged file by basename (#3875);
 4. the exact sentence `No new failure path; no record added.` — valid ONLY
    when the diff adds no `catch`, `throw`, `return null` or degradation
    branch, AND no `if` / `else` / `switch` / `case` in a runtime file mapped

@@ -262,9 +262,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 31. **Pull-only observability:** new behavior emits a success or decision record
     in the streams that monitors and analyzers read. A new decision branch on a
-    session, lifecycle or delivery seam names its record or `none: <reason>`
-    (`check-pr-body` enforces it) and a test reads the record back (#3875;
-    recurrence #3873: the S2/S3 fixes could not be shown to fire live).
+    session, lifecycle or delivery seam names its record, cites an existing one,
+    or says `none: <reason>` naming each file (`check-pr-body` prompts for it);
+    a test reads a record back, and a reason is judged by the reviewer
+    (#3875; recurrence #3873: the S2/S3 fixes could not be shown to fire live).
 
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.

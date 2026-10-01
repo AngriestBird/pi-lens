@@ -1236,8 +1236,10 @@ describe("PR body lint (#1844)", () => {
 
 		it.each([
 			["if", "\tif (adopt) apply(slot);"],
+			["if without a space", "\tif(adopt) apply(slot);"],
 			["else", "\t} else {"],
 			["switch", "\tswitch (slot.kind) {"],
+			["switch without a space", "\tswitch(slot.kind) {"],
 			["case", '\t\tcase "adopt":'],
 		])("detects a %s branch", (_name, line) => {
 			expect(
@@ -1247,16 +1249,29 @@ describe("PR body lint (#1844)", () => {
 			).toContain(refusal);
 		});
 
-		it.each([
-			["a hub file", "index.ts"],
-			["an unmodelled row", "clients/fix-run-restore.ts"],
-			["a delivery file", "clients/agent-nudge.ts"],
-		])("treats %s in the coverage map as a seam", (_name, file) => {
-			expect(
-				lintPrBody(withObservability(sentence), {
-					diff: diffAdding(file, "\tif (adopt) apply(slot);"),
-				}).errors.join(" "),
-			).toContain(refusal);
+		// Recurrence: r1 of #3905 pinned `clients/fix-run-restore.ts` as "the
+		// unmodelled row"; the pin decays when a TLA lane models that file. Every
+		// row of the real map is the population, so a hub, an `unmodelled` value
+		// and a single-family row are all in it with no file named here.
+		it("treats every coverage-map row, whatever its value, as a seam", () => {
+			const rows = Object.keys(
+				JSON.parse(
+					readFileSync(
+						join(repositoryRoot, "formal", "coverage-map.json"),
+						"utf8",
+					),
+				).map,
+			);
+			expect(rows.length).toBeGreaterThan(0);
+			const missed = rows.filter(
+				(file) =>
+					!lintPrBody(withObservability(sentence), {
+						diff: diffAdding(file, "\tif (adopt) apply(slot);"),
+					})
+						.errors.join(" ")
+						.includes(refusal),
+			);
+			expect(missed).toEqual([]);
 		});
 
 		it("accepts the same diff when the body names a record literal the diff adds", () => {
@@ -1276,30 +1291,99 @@ describe("PR body lint (#1844)", () => {
 			).toContain(refusal);
 		});
 
-		it("accepts `none: <reason>` for the same diff", () => {
+		// Recurrence: r1 of #3905 F2: `none: yes yes yes` and the template text
+		// `none: <reason> goes here` passed, so one throwaway line answered every
+		// branch in every file. The reason now names each flagged file.
+		const none = (reason: string) =>
+			lintPrBody(withObservability(reason), { diff: seamBranch });
+
+		it("accepts `none: <reason>` that names the flagged file", () => {
 			expect(
-				lintPrBody(
-					withObservability(
-						"none: the branch only selects between two already-recorded outcomes",
-					),
-					{ diff: seamBranch },
+				none(
+					"none: session-scope.ts only selects between two already-recorded outcomes",
 				),
 			).toEqual({ valid: true, errors: [] });
 		});
 
 		it.each([
-			"none:",
-			"none: n/a",
-			"none: none",
-			"none: tbd later today",
-			"none: not applicable here",
-			"none: too short",
-		])("refuses the placeholder reason %j", (text) => {
+			["a bullet", "- none: session-scope.ts only picks a recorded outcome"],
+			["bold", "**none:** session-scope.ts only picks a recorded outcome"],
+			["upper case", "None: session-scope.ts only picks a recorded outcome"],
+			[
+				"a later line",
+				"Prose first.\nnone: session-scope.ts only picks a recorded one",
+			],
+			[
+				"CRLF",
+				"Prose first.\r\nnone: session-scope.ts only picks a recorded one",
+			],
+			["three words", "none: guards the session-scope.ts"],
+			[
+				"an honest none-of reason",
+				"none: none of session-scope.ts decides delivery",
+			],
+			[
+				"an honest placeholder-word suffix",
+				"none: the guard in session-scope.ts is not applicable here",
+			],
+		])("accepts a reason written as %s", (_name, text) => {
+			expect(none(text)).toEqual({ valid: true, errors: [] });
+		});
+
+		it("accepts one none line per flagged file", () => {
+			const diff = [
+				seamBranch,
+				diffAdding("clients/agent-nudge.ts", "\tif (queued) flush();"),
+			].join("\n");
+			const reasons = (text: string) =>
+				lintPrBody(withObservability(text), { diff });
 			expect(
-				lintPrBody(withObservability(text), { diff: seamBranch }).errors.join(
-					" ",
+				reasons(
+					"none: session-scope.ts only selects a recorded outcome\nnone: agent-nudge.ts only flushes an already counted queue",
 				),
-			).toContain(refusal);
+			).toEqual({ valid: true, errors: [] });
+			const refused = reasons(
+				"none: session-scope.ts only selects a recorded outcome",
+			).errors.join(" ");
+			expect(refused).toContain(
+				"clients/session-scope.ts: 1, clients/agent-nudge.ts: 1",
+			);
+		});
+
+		it.each([
+			["nothing after the colon", "none:"],
+			["a bare n/a", "none: n/a"],
+			["a bare none", "none: none"],
+			["too short", "none: session-scope.ts only"],
+			["a trailing space after two words", "none: skips session-scope.ts "],
+			["a double space between two words", "none: skips  session-scope.ts"],
+			[
+				"the template placeholder",
+				"none: <reason> goes here in session-scope.ts",
+			],
+			["no flagged file named", "none: yes yes yes"],
+			[
+				"a different file named",
+				"none: agent-nudge.ts only picks a recorded outcome",
+			],
+			["n/a repeated", "none: n/a n/a n/a"],
+			["na repeated", "none: na na na"],
+			["none repeated", "none: none none none"],
+			["not applicable", "none: not applicable here"],
+			["tbd repeated", "none: tbd tbd tbd"],
+			["todo repeated", "none: todo todo todo"],
+			[
+				"not mid-line",
+				"see the none: session-scope.ts only picks a recorded outcome",
+			],
+		])("refuses a reason that is %s", (_name, text) => {
+			expect(none(text).errors.join(" ")).toContain(refusal);
+		});
+
+		it("tells the author to name each flagged file", () => {
+			expect(none("none: yes yes yes").errors.join(" ")).toContain(
+				"naming each file above by basename",
+			);
 		});
 
 		it("still requires a record for a failure path, whatever the reason says", () => {
@@ -1332,6 +1416,93 @@ describe("PR body lint (#1844)", () => {
 				valid: true,
 				errors: [],
 			});
+		});
+
+		// Recurrence: r1 of #3905 F1: dropping every `*`-led line also dropped a
+		// block's closer, so the blanker read an unterminated comment and hid all
+		// later code, which let #3770's `catch` blocks pass the bare sentence.
+		it.each([
+			[
+				"a whole block, then code",
+				["/**", " * a note", " */", "\tif (adopt) apply(slot);"],
+			],
+			[
+				"an orphan closer, then code",
+				[" * the end of a note", " */", "\tif (adopt) apply(slot);"],
+			],
+			[
+				"an orphan closer sharing a line with code",
+				[" * the end of a note", " */ if (adopt) apply(slot);"],
+			],
+			[
+				"a one-line block, then code",
+				["/** a note */", "\tif (adopt) apply(slot);"],
+			],
+			[
+				"an inline block before code",
+				["\t/* a note */ if (adopt) apply(slot);"],
+			],
+			[
+				"a block closer sharing a line with code",
+				["/**", " * a note", " */ if (adopt) apply(slot);"],
+			],
+			[
+				"a line comment, then code",
+				["\t// a note", "\tif (adopt) apply(slot);"],
+			],
+			["a multiplication line", ["\tconst n = a * b; if (adopt) apply(slot);"]],
+		])("still sees a seam branch after %s", (_name, lines) => {
+			expect(
+				lintPrBody(withObservability(sentence), {
+					diff: diffAdding("clients/session-scope.ts", ...lines),
+				}).errors.join(" "),
+			).toContain(refusal);
+		});
+
+		it("still sees a failure path after a whole JSDoc block", () => {
+			const diff = diffAdding(
+				"clients/example.ts",
+				"/**",
+				" * installs the thing",
+				" */",
+				"\ttry { install(); } catch (error) { warn(error); }",
+			);
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain("not valid when the added lines contain a failure path");
+		});
+
+		it("does not let an opener without a closer in one hunk hide the next hunk", () => {
+			const diff = [
+				"diff --git a/clients/session-scope.ts b/clients/session-scope.ts",
+				"@@ -1,0 +1,2 @@",
+				"+/**",
+				"+ * an opener whose closer is an unchanged context line",
+				"@@ -40,0 +42,1 @@",
+				"+\tif (adopt) apply(slot);",
+			].join("\n");
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain(refusal);
+		});
+
+		it("reads #3770's real installer diff as a failure path again", () => {
+			// Real `--unified=0` diff of #3770: `} catch {` and `.catch(() => {})`
+			// follow added JSDoc blocks. origin/master refused it under the bare
+			// sentence; the r1 filter accepted it.
+			const diff = readFileSync(
+				join(
+					repositoryRoot,
+					"tests",
+					"fixtures",
+					"ci-pr-bodies",
+					"pr-3770-runtime.diff",
+				),
+				"utf8",
+			);
+			expect(
+				lintPrBody(withObservability(sentence), { diff }).errors.join(" "),
+			).toContain("not valid when the added lines contain a failure path");
 		});
 
 		it("reads code, not prose: comments, strings and JSDoc continuations never count", () => {

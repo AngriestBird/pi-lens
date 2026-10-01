@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
@@ -314,15 +314,36 @@ function isSeamFile(file, map) {
 	return Object.keys(map?.map ?? {}).some((glob) => matchGlob(glob, file));
 }
 
-// `git diff --unified=0` hands the detector a block comment's continuation
-// lines without the opener the blanker needs, so a prose word like `case` in
-// a JSDoc body read as a `case` label (#3774 in the calibration). oxfmt keeps
-// a continuation line's `*` first, so those lines are dropped before blanking.
+// `git diff --unified=0` hands the lexer a block comment's continuation lines
+// without the opener it needs, so prose such as `case` in a JSDoc body read as
+// a `case` label (#3774), and a backtick in one opened a template string that
+// hid the code after it. oxfmt keeps a continuation line's `*` first, so those
+// orphan lines are dropped. A whole block is dropped too, opener and closer
+// together: dropping the closer alone left an unterminated comment that hid
+// every later line (#3905 r1 F1; #3770's `catch` blocks). Text after a
+// closer, and a block that opens and closes on one line, stay for the blanker.
+// One call covers one hunk, so a block left open at a hunk's end cannot hide
+// the next hunk.
 function withoutCommentContinuations(text) {
-	return text
-		.split("\n")
-		.filter((line) => !/^\s*\*/.test(line))
-		.join("\n");
+	let inBlock = false;
+	const kept = [];
+	for (const line of text.split("\n")) {
+		if (inBlock) {
+			const close = line.indexOf("*/");
+			if (close === -1) continue;
+			inBlock = false;
+			kept.push(line.slice(close + 2));
+		} else if (/^\s*\/\*/.test(line) && !line.includes("*/")) inBlock = true;
+		else if (/^\s*\*/.test(line)) {
+			const close = line.indexOf("*/");
+			if (close !== -1) kept.push(line.slice(close + 2));
+		} else kept.push(line);
+	}
+	return kept.join("\n");
+}
+
+function newHunk(file) {
+	return { file, lines: [], added: new Set(), text: "" };
 }
 
 // Records are harvested from each hunk's post-image (added plus context
@@ -330,13 +351,11 @@ function withoutCommentContinuations(text) {
 // its literal split across both (#2915). Only a call whose span contains an
 // added line counts, so an untouched record in the context never passes as
 // new. The failure-path test still reads added lines alone.
-function runtimeObservabilityFromDiff(diff = "", seamMap = null) {
+function runtimeObservabilityFromDiff(diff, seamMap) {
 	const records = new Set();
 	let runtime = false;
-	let added = "";
 	let currentRuntime = false;
 	let currentFile = "";
-	const addedByFile = new Map();
 	const hunks = [];
 	let hunk = null;
 	for (const line of String(diff).split(/\r?\n/)) {
@@ -345,22 +364,18 @@ function runtimeObservabilityFromDiff(diff = "", seamMap = null) {
 			currentRuntime = [header[1], header[2]].some(isRuntimeObservabilityPath);
 			currentFile = header[2];
 			runtime ||= currentRuntime;
-			hunk = currentRuntime ? { lines: [], added: new Set() } : null;
+			hunk = currentRuntime ? newHunk(currentFile) : null;
 			if (hunk) hunks.push(hunk);
 			continue;
 		}
 		if (!currentRuntime) continue;
 		if (line.startsWith("@@")) {
-			hunk = { lines: [], added: new Set() };
+			hunk = newHunk(currentFile);
 			hunks.push(hunk);
 			continue;
 		}
 		if (/^\+(?!\+\+)/.test(line)) {
-			added += `${line.slice(1)}\n`;
-			addedByFile.set(
-				currentFile,
-				`${addedByFile.get(currentFile) ?? ""}${line.slice(1)}\n`,
-			);
+			hunk.text += `${line.slice(1)}\n`;
 			hunk.lines.push(line.slice(1));
 			hunk.added.add(hunk.lines.length);
 		} else if (line.startsWith(" ") || line === "") {
@@ -384,25 +399,29 @@ function runtimeObservabilityFromDiff(diff = "", seamMap = null) {
 			}
 		}
 	}
-	const blanked = blankCommentsAndStrings(
-		withoutCommentContinuations(added),
-	).text;
-	const seamBranches = [];
-	for (const [file, text] of addedByFile) {
-		if (!isSeamFile(file, seamMap)) continue;
-		const branches = blankCommentsAndStrings(
+	// Each hunk lexes alone: lexer state must not leak from one hunk's added
+	// lines into the next, and a file's seam count is the sum over its hunks.
+	let failurePath = false;
+	const branchesByFile = new Map();
+	for (const { file, text } of hunks) {
+		const blanked = blankCommentsAndStrings(
 			withoutCommentContinuations(text),
-		).text.match(DECISION_BRANCH_G);
-		if (branches) seamBranches.push({ file, count: branches.length });
+		).text;
+		failurePath ||=
+			/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
+				blanked,
+			);
+		const count = isSeamFile(file, seamMap)
+			? (blanked.match(DECISION_BRANCH_G)?.length ?? 0)
+			: 0;
+		if (count)
+			branchesByFile.set(file, (branchesByFile.get(file) ?? 0) + count);
 	}
 	return {
 		runtime: true,
 		records,
-		seamBranches,
-		failurePath:
-			/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
-				blanked,
-			),
+		failurePath,
+		seamBranches: [...branchesByFile].map(([file, count]) => ({ file, count })),
 	};
 }
 
@@ -1175,10 +1194,16 @@ function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
 	// #3875: `none: <reason>` is valid for any diff without a failure path; the
 	// exact no-record sentence is valid only while the diff adds no decision
 	// branch on a seam either.
-	if (noRecordReason(content)) return [];
+	if (
+		hasNoRecordReason(
+			content,
+			observation.seamBranches.map(({ file }) => file),
+		)
+	)
+		return [];
 	if (observation.seamBranches.length)
 		return [
-			`PR body Observability must name the record of each new decision branch (${observation.seamBranches.map(({ file, count }) => `${file}: ${count}`).join(", ")}) as a record literal from the diff or \`covered by existing record <kind> at <file>:<line>\`, or write \`none: <reason>\`; "No new failure path; no record added." is not valid when the added lines contain a decision branch on a session, lifecycle or delivery seam.`,
+			`PR body Observability must name the record of each new decision branch (${observation.seamBranches.map(({ file, count }) => `${file}: ${count}`).join(", ")}) as a record literal from the diff or \`covered by existing record <kind> at <file>:<line>\`, or write \`none: <reason>\` naming each file above by basename; "No new failure path; no record added." is not valid when the added lines contain a decision branch on a session, lifecycle or delivery seam.`,
 		];
 	if (content.includes("No new failure path; no record added.")) return [];
 	return [
@@ -1186,18 +1211,34 @@ function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
 	];
 }
 
-// A `none: <reason>` line: at least three words, and not a placeholder.
-function noRecordReason(content) {
+// A reason made only of these words says nothing (`none: not applicable
+// here`). Anchored at both ends: an honest reason that merely starts or ends
+// with one (`none of ...`, `... is not applicable here`) stays valid.
+const PLACEHOLDER_REASON =
+	/^(?:(?:n\/?a|none|not|applicable|tbd|todo|here|later|ok)\b[\s.,;:!-]*)+$/i;
+
+// `none: <reason>` lines: each reason is at least three words, not the
+// template's `<reason>`, not placeholder words only. Together they must name
+// every flagged file by basename, so the line answers each file, not the PR
+// once (#3905 r1 F2). Records are deliberately not bound to files.
+function hasNoRecordReason(content, files) {
+	const reasons = [];
 	for (const line of content.split(/\r?\n/)) {
-		const reason = /^\s*(?:[-*+]\s+)?\**none:\**\s*(\S.*)$/i.exec(line)?.[1];
+		const reason = /^\s*(?:[-*+]\s+)?\**none:\**\s*(\S.*)$/i
+			.exec(line)?.[1]
+			?.trim();
 		if (
 			reason &&
-			reason.trim().split(/\s+/).length >= 3 &&
-			!/^(?:n\/?a|none|not applicable|tbd|todo)\b/i.test(reason.trim())
+			reason.split(/\s+/).length >= 3 &&
+			!reason.includes("<reason>") &&
+			!PLACEHOLDER_REASON.test(reason)
 		)
-			return reason.trim();
+			reasons.push(reason);
 	}
-	return null;
+	const text = reasons.join("\n");
+	return (
+		reasons.length > 0 && files.every((file) => text.includes(basename(file)))
+	);
 }
 
 /** Detect the high-confidence shape produced when a worker flattens a body. */
