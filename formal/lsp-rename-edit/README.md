@@ -33,7 +33,9 @@ Code references name symbols, read on master at `cf1b548e5`.
   aborted").
 - **The send-change stamp** (`changedAtMs`): `recordSentContent` in
   `clients/lsp/client.ts` moves it only when the bytes change. A first
-  `didOpen` has no previous record, so it always stamps.
+  `didOpen` has no previous record, so it always stamps. The record also
+  keeps `openedAtMs` (`openedAt`), the instant of its first send, which a
+  change or a re-send keeps and a close drops (#3827).
 - **Writers:**
   - `PiWrite`: pi's queued writers, meaning the agent's `edit` and `write`,
     and the formatter since #3610. Each write is followed by a `touchFile`
@@ -78,6 +80,12 @@ lands, `ApplyEdit` should cite its action by name.
 | `r3` | same | as `r2` | refuse if mtime is at or after `T - Margin` | round 3 (`c64b10a8f`) |
 | `merged` | same | as `r2`, and refuse if the send changed at or after `T` | as `r3` | round 4, master (`captureRenameExpectedContent`, `RENAME_MTIME_MARGIN_MS`) |
 
+Under `FirstOpenExempt` (#3827, `merged` only), a file whose record's first
+send was at or after `T` is treated as unopened, whatever its send record
+says now: the server answered from its own copy, so the record says nothing
+about what it held. A change after that first open reaches the mtime rule
+like any write to an unopened file.
+
 A file that passes is bound to the bytes the capture read, and the apply
 refuses it if the disk no longer holds them. Round 1 read the non-target
 files through `openFileBestEffort`, which also sent them. That send comes
@@ -94,7 +102,9 @@ it is not modelled.
   (the edit would have been stale there) or is one of master's accepted
   false refusals (`Accepted`):
   - a changed send stamped in `T`'s own tick (the `>=` tie);
-  - an unopened file whose mtime is within the margin of `T`;
+  - an unopened file whose mtime is within the margin of `T` (under
+    `FirstOpenExempt`, a file first opened at or after `T` counts as
+    unopened);
   - the target, which is held to the bytes `openFileBestEffort` read, even
     when a later sync has already given the server the current bytes.
 
@@ -105,28 +115,32 @@ it is not modelled.
 
 ## Results
 
-TLC 1.7.4, one worker. Constants shared by every config: `Margin = 1`,
-`MaxWrites = 2`, `MaxClock = 4`; the clock starts at `Margin + 1`, so an
+TLC 1.7.4, one worker. The #3827 `openedAt` variable raised the counts of
+configs with sends from the #3803 run. Constants shared by every config:
+`Margin = 1`, `MaxWrites = 2`, `MaxClock = 4`; the clock starts at `Margin + 1`, so an
 untouched file is older than the margin.
 
 | Config | Verdict | Distinct states |
 |---|---|---|
-| `Merged` | pass | 36654 |
-| `MergedWitness` | `NoAppliedAfterInFlightWrite` violated (non-vacuity) | 15499 |
-| `MergedTargetRevert` | `NoStaleApply` violated | 23944 |
-| `MergedTargetOlderSync` | `NoStaleApply` violated | 25122 |
-| `CandidateStampedPrepare` | pass (`NoStaleApply`, `AtomicRefusal`) | 63835 |
-| `MergedSplitApply` | `NoStaleApply` violated | 6431 |
-| `PreFix` | `NoStaleApply` violated | 503 |
+| `Merged` | pass | 47567 |
+| `MergedWitness` | `NoAppliedAfterInFlightWrite` violated (non-vacuity) | 17652 |
+| `MergedTargetRevert` | `NoStaleApply` violated | 27465 |
+| `MergedTargetOlderSync` | `NoStaleApply` violated | 28565 |
+| `CandidateStampedPrepare` | pass (`NoStaleApply`, `AtomicRefusal`) | 81195 |
+| `MergedSplitApply` | `NoStaleApply` violated | 7005 |
+| `PreFix` | `NoStaleApply` violated | 514 |
 | `R1CaptureRead` | `NoStaleApply` violated | 199 |
 | `R2RefuseUnopened` | `NoUnexplainedRefusal` violated | 122 |
 | `R3HashOnly` | `NoStaleApply` violated | 429 |
 | `R3MtimeAtLoad` | `NoStaleApply` violated | 274 |
 | `Issue3747External` | `NoStaleApply` violated | 274 |
 | `Issue3747KeepMtime` | `NoStaleApply` violated | 229 |
-| `Issue3747LateHookSync` | `NoStaleApply` violated | 753 |
+| `Issue3747LateHookSync` | `NoStaleApply` violated | 778 |
 | `Issue3747PromptWatcher` | pass | 375 |
 | `MergedFirstOpenTouch` | `NoUnexplainedRefusal` violated | 80 |
+| `FirstOpenExempt` | pass | 134 |
+| `FirstOpenExemptOpenedWrites` | pass | 177536 |
+| `FirstOpenExemptRewrite` | pass | 2733 |
 | `Issue3734Master` | `NoStaleApply` violated | 76 |
 | `Issue3734Bound` | pass | 1875 |
 | `Issue3734Abort` | `AtomicRefusal` violated | 149 |
@@ -154,7 +168,10 @@ TLC's traces, because it is chosen under `\E p \in pending`.
 | `Issue3747KeepMtime` | #3747 (open) | master, with a prompt watcher | `Prepare`, `Request`, an external write that keeps the old mtime, `Capture`, `ApplyEdit`. |
 | `Issue3747PromptWatcher` | #3747 boundary | master, with a prompt watcher and honest mtimes | none (pass) |
 | `Issue3747LateHookSync` | #3747 (open), model finding | master: pi's own write to an unopened file, its sync still pending | `Prepare`, a pi write to the unopened file, two ticks, `Request` with the sync pending, `Capture` (unopened, mtime older than the margin), `ApplyEdit`. |
-| `MergedFirstOpenTouch` | #3827, model finding (safe) | master: a first `didOpen` always stamps (`recordSentContent`) | `Prepare`, `Request`, `Tick`, a touch that first opens the unopened file (same bytes), `Capture` refuses it on the stamp. In `T`'s own tick the refusal is the accepted `>=` tie. |
+| `MergedFirstOpenTouch` | #3827, model finding (safe) | before the #3827 fix (`FirstOpenExempt = FALSE`): a first `didOpen` always stamps (`recordSentContent`) | `Prepare`, `Request`, `Tick`, a touch that first opens the unopened file (same bytes), `Capture` refuses it on the stamp. In `T`'s own tick the refusal is the accepted `>=` tie. |
+| `FirstOpenExempt` | #3827 | fix: a first send at or after `T` takes the unopened rule (`FirstOpenExempt`, `openedAtMs`) | none (pass). The `MergedFirstOpenTouch` shape no longer refuses. |
+| `FirstOpenExemptOpenedWrites` | #3827 | fix, with `Merged`'s writers and a first-open touch of the unopened file | none (pass). The opened-file rule holds as in `Merged`. With `openedAt` refreshed on every send (a model mutation), it violates `NoStaleApply`: an opened file rewritten with its old mtime kept and re-synced takes the weaker unopened rule. |
+| `FirstOpenExemptRewrite` | #3827 | fix, over `Issue3747PromptWatcher`: an external write to the unopened file plus first opens of it | none (pass). A first open does not excuse a write; the unopened mtime rule still holds. |
 | `Issue3734Master` | #3734 (open) | master: `renameFile` applies with no `expectedContent` | `Request` (`willRenameFiles`), `Capture` (nothing bound), a pi write, `ApplyEdit`. |
 | `Issue3734Bound` | #3734 | candidate: the #3736 rule, with `T` taken before `willRenameFiles`, and no `didClose` or move failure (`AbortAfterText = FALSE`) | none (pass) |
 | `Issue3734Abort` | #3734, model finding | master order, even with the candidate binding: text edits, then `didClose` and the move | `Request`, `Capture`, `ApplyEdit` writes both files, `Abort`: the rename is reported aborted with the edits written. |
@@ -191,11 +208,16 @@ TLC's traces, because it is chosen under `\E p \in pending`.
    consistent with #3736 round 4's probes applying correctly on one machine
    while verify r3 corrupted `b.ts` on another. The model's watcher is
    idealised, so it does not show the cause.
-6. **A false refusal on master (safe), #3827.** A read or cascade touch
-   that first opens an unopened file after `T` stamps it (a first `didOpen`
-   has no previous record), so the rename is refused with "it changed after
-   the language server computed the rename from it", although no byte
-   changed (`MergedFirstOpenTouch`). A retry passes.
+6. **A false refusal on master (safe), #3827, fixed.** A read or cascade
+   touch that first opens an unopened file after `T` stamped it (a first
+   `didOpen` has no previous record), so the rename was refused with "it
+   changed after the language server computed the rename from it", although
+   no byte changed (`MergedFirstOpenTouch`). The client record now keeps
+   `openedAtMs`, and a file first opened at or after `T` takes the unopened
+   rule (`FirstOpenExempt`, `captureRenameExpectedContent`). The fix adds no
+   exposure: that file was unopened for the server at `T`, so the unopened
+   rule is the one that applies to it (`FirstOpenExempt`,
+   `FirstOpenExemptOpenedWrites`, `FirstOpenExemptRewrite`).
 7. **#3734:** binding the `willRenameFiles` edits with the #3736 rule closes
    the stale apply for opened files only when nothing fails after the text
    edits (`Issue3734Bound` sets `AbortAfterText = FALSE`; unopened files

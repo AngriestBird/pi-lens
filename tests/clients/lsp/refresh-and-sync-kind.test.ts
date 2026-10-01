@@ -390,6 +390,48 @@ describe("outgoing didChange honors the negotiated sync kind (#1669)", () => {
 		expect(full.documentContentHashes.size).toBe(0);
 	});
 
+	it("#3827: a binding keeps the instant of its first send through changes and text eviction", async () => {
+		// Recurrence guarded: `lsp_navigation` rename (tools/lsp-navigation.ts
+		// `captureRenameExpectedContent`) reads `openedAtMs` to tell a file first
+		// opened after the request from one the server already held. A send that
+		// refreshed it (or an eviction rewrite that dropped it) would hand an
+		// opened, then rewritten, file the weaker unopened-file rule.
+		const state = createMockState({ syncKind: 2 });
+		const now = vi.spyOn(Date, "now");
+		const key = normalizeMapKey(TEST_FILE);
+		state.openDocuments.add(key);
+		now.mockReturnValue(1000);
+		await handleNotifyChange(state, TEST_FILE, "first\n");
+		now.mockReturnValue(2000);
+		await handleNotifyChange(state, TEST_FILE, "second\n");
+		expect(state.documentContentHashes.get(key)).toMatchObject({
+			openedAtMs: 1000,
+			changedAtMs: 2000,
+		});
+		now.mockReturnValue(3000);
+		await handleNotifyChange(state, TEST_FILE, "second\n");
+		expect(state.documentContentHashes.get(key)).toMatchObject({
+			openedAtMs: 1000,
+			changedAtMs: 2000,
+		});
+
+		for (
+			let index = 0;
+			index < MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES;
+			index++
+		) {
+			const filePath = `/project/evict-3827-${index}.ts`;
+			state.openDocuments.add(normalizeMapKey(filePath));
+			await handleNotifyChange(state, filePath, `text-${index}`);
+		}
+		const evicted = state.documentContentHashes.get(key);
+		expect(evicted?.text).toBeUndefined();
+		expect(evicted).toMatchObject({ openedAtMs: 1000, changedAtMs: 2000 });
+		now.mockRestore();
+		await closeDocument(state, TEST_FILE);
+		expect(state.documentContentHashes.has(key)).toBe(false);
+	});
+
 	it("#2065 fix round 1 F2: the 64 MiB byte cap evicts on its own, independent of the 128-entry cap", async () => {
 		const state = createMockState({ syncKind: 2 });
 		// Two ~40 MiB (UTF-16) documents: entry count (2) stays far below the
@@ -1574,10 +1616,16 @@ describe("negotiateSyncKind through the real createLSPClient init path (#1669 re
 			// (a Full-sync client retains no text, only the fingerprint), which
 			// is what `lsp_navigation`'s rename binds a touched file to. A path it
 			// never opened, and one it has closed, report nothing.
+			// #3827: `openedAtMs` is the first send's instant and survives the
+			// change that moved `changedAtMs` (the open and the change are the
+			// two sends above), so a caller can tell a first open from a change.
 			expect(client.getSentContent?.(filePath)).toEqual({
 				hash: hashDiagnosticContent("const x = 1;\nconst y = 2;\n"),
 				changedAtMs: expect.any(Number),
+				openedAtMs: expect.any(Number),
 			});
+			const sent = client.getSentContent?.(filePath);
+			expect(sent?.openedAtMs).toBeLessThanOrEqual(sent?.changedAtMs ?? 0);
 			expect(
 				client.getSentContent?.(path.join(os.tmpdir(), "never-opened.ts")),
 			).toBeUndefined();

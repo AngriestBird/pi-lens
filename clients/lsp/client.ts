@@ -548,9 +548,13 @@ export interface LSPClientInfo {
 	 * from state already held in memory. Optional for the same reason
 	 * `openDocumentPaths` is.
 	 */
-	getSentContent?(
-		filePath: string,
-	): { hash: string; changedAtMs?: number | undefined } | undefined;
+	getSentContent?(filePath: string):
+		| {
+				hash: string;
+				changedAtMs?: number | undefined;
+				openedAtMs?: number | undefined;
+		  }
+		| undefined;
 	/** Whether this client currently has an LSP request in flight. */
 	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
@@ -1059,6 +1063,12 @@ export interface LSPClientState {
 			 *  on the server (a re-send of the same bytes keeps it), so a caller
 			 *  can tell whether the server's copy changed after a request it made. */
 			changedAtMs?: number | undefined;
+			/** #3827: `Date.now()` of the FIRST send in this record's life (a
+			 *  re-send and a change keep it; a close drops the record). A caller
+			 *  that asks what the server held at an earlier instant reads it to
+			 *  tell a file this client first opened after that instant: the
+			 *  server's copy then was not this client's send. */
+			openedAtMs?: number | undefined;
 			text?: string;
 			lastLine?: LastLinePosition;
 		}
@@ -2209,6 +2219,7 @@ function recordSentContent(
 		version,
 		hash,
 		changedAtMs: previous?.hash === hash ? previous.changedAtMs : Date.now(),
+		openedAtMs: previous?.openedAtMs ?? Date.now(),
 		// #1669: retain the full text only for Incremental — the sole reader
 		// (`buildContentChanges`) needs it to compute the NEXT change against
 		// what the server last saw; Full/None never read this field.
@@ -2252,6 +2263,7 @@ function recordSentContent(
 				version: binding.version,
 				hash: binding.hash,
 				changedAtMs: binding.changedAtMs,
+				openedAtMs: binding.openedAtMs,
 			});
 			state.incrementalTextRetainedEntries = Math.max(
 				0,
@@ -6473,7 +6485,13 @@ export async function createLSPClient(options: {
 
 		getSentContent(filePath) {
 			const sent = state.documentContentHashes.get(normalizeMapKey(filePath));
-			return sent && { hash: sent.hash, changedAtMs: sent.changedAtMs };
+			return (
+				sent && {
+					hash: sent.hash,
+					changedAtMs: sent.changedAtMs,
+					openedAtMs: sent.openedAtMs,
+				}
+			);
 		},
 
 		isBusy() {

@@ -65,6 +65,7 @@ CONSTANTS
     SyncCarriesRead,\* TRUE: a pi sync sends its own pipeline's bytes, not the current disk
     SplitApply,     \* TRUE: an unqueued writer may land between the apply's compare and write
     StampedPrepare, \* candidate: openFileBestEffort's send carries a readStamp (#3481)
+    FirstOpenExempt,\* TRUE (#3827): a file first opened at or after T takes the unopened rule
     Margin,         \* RENAME_MTIME_MARGIN_MS, in clock ticks
     MaxWrites,
     MaxClock
@@ -76,6 +77,7 @@ VARIABLES
     mtime,
     sent,       \* the client's last send (NoSend: unopened)
     stamp,      \* changedAtMs: when a send last changed the sent bytes
+    openedAt,   \* openedAtMs: when the first send of this file's record was made (#3827)
     srv,        \* the server's view
     pending,    \* <<file, bytes, write order>> of pi writes whose sync has not run
                 \* (<<file, 0, 0>> when the sync sends the current disk)
@@ -94,7 +96,7 @@ VARIABLES
     refused,    \* files the refusal named
     inflight    \* files written after the operation began
 
-vars == <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, clock, writes,
+vars == <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, clock, writes,
           phase, T, tContent, basis, expected, wrote, stale, refused, inflight>>
 
 Init ==
@@ -102,6 +104,7 @@ Init ==
     /\ mtime = [f \in Files |-> 0]
     /\ sent = [f \in Files |-> IF f \in Opened THEN 1 ELSE NoSend]
     /\ stamp = [f \in Files |-> 0]
+    /\ openedAt = [f \in Files |-> 0]
     /\ srv = [f \in Files |-> 1]
     /\ pending = {}
     /\ stampedW = [f \in Files |-> 0]
@@ -122,10 +125,12 @@ Live == phase \in {"idle", "prepared", "requested", "captured"}
 \* The operation has begun: a write now is concurrent with it.
 InFlight == phase \in {"prepared", "requested", "captured", "compared"}
 
-\* recordSentContent (clients/lsp/client.ts): the stamp moves only when the bytes change.
+\* recordSentContent (clients/lsp/client.ts): the stamp moves only when the bytes
+\* change; `openedAt` is set by the first send and kept (#3827).
 Send(f, c) ==
     /\ sent' = [sent EXCEPT ![f] = c]
     /\ stamp' = [stamp EXCEPT ![f] = IF sent[f] = c THEN @ ELSE clock]
+    /\ openedAt' = [openedAt EXCEPT ![f] = IF sent[f] = NoSend THEN clock ELSE @]
     /\ srv' = [srv EXCEPT ![f] = c]
 
 NewContent(f) == IF Revert THEN {c \in 1..nextId : c # disk[f]} ELSE {nextId}
@@ -140,7 +145,7 @@ Write(f, c, m) ==
 Tick ==
     /\ Live /\ clock < MaxClock
     /\ clock' = clock + 1
-    /\ UNCHANGED <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, writes,
+    /\ UNCHANGED <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, writes,
                    phase, T, tContent, basis, expected, wrote, stale, refused, inflight>>
 
 PiWrite(f) ==
@@ -149,7 +154,7 @@ PiWrite(f) ==
           /\ Write(f, c, clock)
           /\ pending' = pending \union
                 {IF SyncCarriesRead THEN <<f, c, writes + 1>> ELSE <<f, 0, 0>>}
-    /\ UNCHANGED <<sent, stamp, srv, stampedW, clock, phase, T, tContent, basis,
+    /\ UNCHANGED <<sent, stamp, openedAt, srv, stampedW, clock, phase, T, tContent, basis,
                    expected, wrote, stale, refused>>
 
 \* The pipeline's touchFile: didChange for an open document, didOpen otherwise.
@@ -161,7 +166,7 @@ PiSync(p) ==
          THEN /\ Send(p[1], disk[p[1]])
               /\ UNCHANGED stampedW
          ELSE IF p[3] < stampedW[p[1]]
-           THEN UNCHANGED <<sent, stamp, srv, stampedW>>
+           THEN UNCHANGED <<sent, stamp, openedAt, srv, stampedW>>
            ELSE /\ Send(p[1], p[2])
                 /\ stampedW' = [stampedW EXCEPT ![p[1]] = p[3]]
     /\ UNCHANGED <<disk, mtime, nextId, clock, writes, phase, T, tContent, basis,
@@ -182,7 +187,7 @@ ExternalWrite(f) ==
           /\ Write(f, c, m)
           /\ srv' = IF WatcherPrompt /\ sent[f] = NoSend
                       THEN [srv EXCEPT ![f] = c] ELSE srv
-    /\ UNCHANGED <<sent, stamp, pending, stampedW, clock, phase, T, tContent, basis,
+    /\ UNCHANGED <<sent, stamp, openedAt, pending, stampedW, clock, phase, T, tContent, basis,
                    expected, wrote, stale, refused>>
 
 \* openFileBestEffort: read the target and send it. Its send carries no
@@ -204,13 +209,20 @@ Request ==
     /\ T' = clock
     /\ basis' = srv
     /\ phase' = "requested"
-    /\ UNCHANGED <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, clock,
+    /\ UNCHANGED <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, clock,
                    writes, tContent, expected, wrote, stale, refused, inflight>>
+
+\* #3827: the server answered from its own copy of a file this client first
+\* opened at or after T, so the client's send says nothing about what it held:
+\* under FirstOpenExempt such a file takes the unopened rule.
+UnopenedAtT(f) ==
+    \/ sent[f] = NoSend
+    \/ FirstOpenExempt /\ openedAt[f] >= T
 
 \* captureRenameExpectedContent, per Rule.
 Refuses(f) ==
     IF Rule \in {"none", "r1"} \/ f = Target THEN FALSE
-    ELSE IF sent[f] # NoSend
+    ELSE IF ~UnopenedAtT(f)
         THEN sent[f] # disk[f] \/ (Rule = "merged" /\ stamp[f] >= T)
     ELSE IF Rule = "r2" THEN TRUE
     ELSE mtime[f] + Margin >= T
@@ -229,7 +241,7 @@ Capture ==
          ELSE /\ expected' = [f \in Files |-> Bound(f)]
               /\ phase' = "captured"
               /\ UNCHANGED refused
-    /\ UNCHANGED <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, clock,
+    /\ UNCHANGED <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, clock,
                    writes, T, tContent, basis, wrote, stale, inflight>>
 
 Mismatch == {f \in Files : expected[f] # 0 /\ expected[f] # disk[f]}
@@ -254,27 +266,27 @@ ApplyEdit ==
                 /\ UNCHANGED <<disk, mtime, nextId, wrote, stale, refused>>
            ELSE /\ WriteAll
                 /\ UNCHANGED refused
-    /\ UNCHANGED <<sent, stamp, srv, pending, stampedW, clock, writes, T, tContent,
+    /\ UNCHANGED <<sent, stamp, openedAt, srv, pending, stampedW, clock, writes, T, tContent,
                    basis, expected, inflight>>
 
 \* SplitApply: the write loop re-reads each file and writes it with no second compare.
 ApplyWrite ==
     /\ phase = "compared"
     /\ WriteAll
-    /\ UNCHANGED <<sent, stamp, srv, pending, stampedW, clock, writes, T, tContent,
+    /\ UNCHANGED <<sent, stamp, openedAt, srv, pending, stampedW, clock, writes, T, tContent,
                    basis, expected, refused, inflight>>
 
 \* renameFile after its text edits: didClose fails, or the resource move's preflight does.
 Abort ==
     /\ Flow = "renameFile" /\ AbortAfterText /\ phase = "textApplied"
     /\ phase' = "aborted"
-    /\ UNCHANGED <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, clock,
+    /\ UNCHANGED <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, clock,
                    writes, T, tContent, basis, expected, wrote, stale, refused, inflight>>
 
 Move ==
     /\ Flow = "renameFile" /\ phase = "textApplied"
     /\ phase' = "applied"
-    /\ UNCHANGED <<disk, mtime, sent, stamp, srv, pending, stampedW, nextId, clock,
+    /\ UNCHANGED <<disk, mtime, sent, stamp, openedAt, srv, pending, stampedW, nextId, clock,
                    writes, T, tContent, basis, expected, wrote, stale, refused, inflight>>
 
 Next ==
@@ -297,8 +309,8 @@ AtomicRefusal == phase \in {"refused", "aborted"} => wrote = {}
 \* openFileBestEffort read even when the server has since caught up.
 Accepted(f) ==
     \/ f = Target /\ disk[f] # tContent
-    \/ f # Target /\ sent[f] # NoSend /\ Rule = "merged" /\ stamp[f] = T
-    \/ f # Target /\ sent[f] = NoSend /\ Rule \in {"r3", "merged"}
+    \/ f # Target /\ ~UnopenedAtT(f) /\ Rule = "merged" /\ stamp[f] = T
+    \/ f # Target /\ UnopenedAtT(f) /\ Rule \in {"r3", "merged"}
        /\ mtime[f] + Margin >= T
 
 \* Every file a refusal names would have taken a stale edit, or is an accepted

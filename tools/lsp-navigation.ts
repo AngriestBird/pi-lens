@@ -747,7 +747,10 @@ const RENAME_MTIME_MARGIN_MS = 2000;
  *   send's bytes must not have changed at or after `requestedAtMs`: a
  *   hook-synced write after the request makes the disk equal the last send
  *   while the server answered from the one before it.
- * - a file it has not opened: best effort only. The file is refused when its
+ * - a file it has not opened, or first opened at or after `requestedAtMs`
+ *   (#3827: the server then answered from its own copy, and that first
+ *   `didOpen` stamps the file as changed although no byte did): best effort
+ *   only. The file is refused when its
  *   mtime is at or after `requestedAtMs` minus the margin. This cannot prove
  *   the server read the current bytes: the server answers from a copy it read
  *   earlier, and pi-lens does not tell it about a write it did not make, so an
@@ -792,7 +795,14 @@ function captureRenameExpectedContent(
 			expected.set(realPath, targetContent);
 			continue;
 		}
-		const sent = lspService.getTrackedContent(diskPath, cwd);
+		const tracked = lspService.getTrackedContent(diskPath, cwd);
+		// #3827: a file this client first opened at or after the request was
+		// unopened when the server answered, so its send says nothing about what
+		// the server held: it takes the unopened rule below, not the send check.
+		const sent =
+			tracked !== undefined && (tracked.openedAtMs ?? 0) < requestedAtMs
+				? tracked
+				: undefined;
 		if (sent !== undefined) {
 			if (
 				sent.hash !== hashDiagnosticContent(content) ||
