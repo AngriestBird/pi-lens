@@ -82,6 +82,9 @@ are not repeated here.
   partial, or absent comment in the body, never read it as clean, and run
   `node scripts/stryker-diff.mjs --base origin/master --max-files 6`, then
   `node scripts/mutation-report.mjs` on `reports/mutation/mutation.json`.
+  The `mutation` job starts only after every required check passed on the head
+  (#3801): until then the `MUTATION` line reads `PENDING`, and after a red
+  required check or a red gate it reads `NOT RUN` with the reason.
 - Every record the `Observability` section names is asserted by a test in the
   diff and quoted in the body (#2642, #2647, #2649, #2654).
 - Every behavioural sentence (a docstring invariant, a memo, a registry
