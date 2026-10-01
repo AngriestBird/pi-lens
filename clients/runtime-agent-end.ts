@@ -1163,8 +1163,8 @@ export async function handleAgentEnd({
 				// the branch since), never with this settle's own epoch. An entry
 				// with no valid epoch has no branch to vouch for; the fix is applied
 				// and credited to none.
-				const creditEpoch = quickFixCreditEpoch(fixableFiles);
-				if (creditEpoch === undefined && !getFlag("no-read-guard")) {
+				const credit = quickFixCreditEpoch(fixableFiles);
+				if (credit === undefined && !getFlag("no-read-guard")) {
 					recordDegradationOnce({
 						kind: "actionable-warnings-quickfix-uncredited",
 						subject: fixCwd,
@@ -1180,13 +1180,13 @@ export async function handleAgentEnd({
 					runtime,
 					cacheManager,
 					readGuard:
-						getFlag("no-read-guard") || creditEpoch === undefined
+						getFlag("no-read-guard") || credit === undefined
 							? undefined
 							: {
 									// #3525: bytes the agent never saw; authorship, not FileTime.
 									recordWritten: (filePath: string) =>
 										runtime.readGuard.recordWritten(filePath, {
-											branchEpoch: creditEpoch,
+											branchEpoch: credit,
 											stampFileTime: false,
 										}),
 								},

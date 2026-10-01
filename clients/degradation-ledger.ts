@@ -39,14 +39,6 @@ export { LEDGER_FIELD_MAX, truncateForLedger };
 
 export type DegradationKind =
 	/**
-	 * #3676: the actionable-warnings report the settle's quick fix acted on
-	 * carried no valid `branchEpoch` (a cache file from before the stamp, or a
-	 * malformed value), so the fix was applied and credited to no branch: the
-	 * read guard then asks for a re-read before the agent's next edit of that
-	 * file. Subject is the project root; once per session.
-	 */
-	| "actionable-warnings-quickfix-uncredited"
-	/**
 	 * #3071: an actionable-warnings phase (LSP code-action enrichment, the
 	 * fix-application batch) truncated its eligible file/fix set at a bound —
 	 * `clients/actionable-warnings.ts`'s several file/fix caps all share this
@@ -63,6 +55,14 @@ export type DegradationKind =
 	 * instead of leaving the observational net's work invisible.
 	 */
 	| "actionable-warnings-inband-superseded"
+	/**
+	 * #3676: a report entry the settle's quick fix acted on carried no valid
+	 * `branchEpoch` (a cache file from before the stamp, or a malformed value),
+	 * so the pass was applied and credited to no branch: the read guard then
+	 * asks for a re-read before the agent's next edit of that file. Subject is
+	 * the project root; once per session.
+	 */
+	| "actionable-warnings-quickfix-uncredited"
 	/**
 	 * #3748: a model-facing advisory (`clients/agent-nudge.ts`'s queue) never
 	 * reached a `context` call. Subject `cap:<scope id>`: the queue already held

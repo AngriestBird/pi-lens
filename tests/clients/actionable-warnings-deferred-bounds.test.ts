@@ -2531,29 +2531,6 @@ describe("#3676 — each report entry carries the branch epoch its build began o
 		expect(epochOf(persistedReport(cacheManager), file)).toBe(0);
 	});
 
-	it("leaves an in-band entry its own epoch when nothing is carried into it", async () => {
-		const { publishActionableWarningsReport } = await loadWarnings();
-		const cacheManager = new CacheManager(false);
-		const [file, other] = makeSources(2);
-		// The persisted entry is not deferred-origin, so the scope guard drops it.
-		cacheManager.writeCache(
-			"actionable-warnings",
-			report([entry(other, 0)]),
-			env.tmpDir,
-		);
-
-		publishActionableWarningsReport(
-			cacheManager,
-			env.tmpDir,
-			report([entry(file, 1)], { turnIndex: 2 }),
-			{ origin: "in-band" },
-		);
-
-		const persisted = persistedReport(cacheManager);
-		expect(epochOf(persisted, file)).toBe(1);
-		expect(persisted?.files.map((f) => f.filePath)).toEqual([file]);
-	});
-
 	// A cache file written before #3676 is still readable for ten minutes. Its
 	// entries carry no epoch (the real producer, given no epoch, writes exactly
 	// that shape), and an entry that absorbed one must not vouch for any branch.

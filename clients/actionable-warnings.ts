@@ -1848,15 +1848,15 @@ export function quickFixCreditEpoch(
 ): number | undefined {
 	let oldest: number | undefined;
 	for (const { branchEpoch } of files) {
-		if (
-			typeof branchEpoch !== "number" ||
-			!Number.isInteger(branchEpoch) ||
-			branchEpoch < 0
-		)
-			return undefined;
+		if (!isBranchEpoch(branchEpoch)) return undefined;
 		oldest = oldest === undefined ? branchEpoch : Math.min(oldest, branchEpoch);
 	}
 	return oldest;
+}
+
+/** An epoch a cache file can legitimately carry: an integer `>= 0`. */
+function isBranchEpoch(value: unknown): value is number {
+	return Number.isInteger(value) && (value as number) >= 0;
 }
 
 function minDefined(a?: number, b?: number): number | undefined {
