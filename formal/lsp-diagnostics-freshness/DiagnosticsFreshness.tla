@@ -10,17 +10,17 @@
 (*    handleNotifyOpenOnce (client.ts): the document is open, so it        *)
 (*    bumps documentVersions, clears the path's diagnostics and sends      *)
 (*    didChange in ONE tick; markTouched runs after the send               *)
-(*    resolves (index.ts);                                                 *)
+(*    resolves (lsp/index.ts);                                             *)
 (*  - the waiter. SkippedWait = FALSE: A itself waits with minVersion =    *)
-(*    its baseline (index.ts). SkippedWait = TRUE: the dispatch            *)
+(*    its baseline (lsp/index.ts). SkippedWait = TRUE: the dispatch        *)
 (*    runner's touch B, same content, finds A's markTouched entry          *)
 (*    (shouldSkipNotify), sends nothing, and waits with no baseline        *)
-(*    (index.ts);                                                          *)
+(*    (lsp/index.ts);                                                      *)
 (*  - clientWaitForDiagnostics (client.ts): the early return               *)
 (*    (fresh && !isVersionStale && non-empty cache), else a listener whose *)
 (*    onDiagnostics re-checks and (re)arms a quiet-window timer that       *)
 (*    resolves the wait; a timeout also resolves it. touchFile then reads  *)
-(*    getDiagnostics (index.ts) after further awaits;                      *)
+(*    getDiagnostics (lsp/index.ts) after further awaits;                  *)
 (*  - the publishDiagnostics handler (client.ts): seed-first-              *)
 (*    push stores at once, otherwise a per-path debounce timer that checks *)
 (*    isSupersededPush when it fires; a clear cancels that timer;          *)
@@ -124,7 +124,7 @@ ClearVars == /\ cache' = Empty
              /\ docVerRec' = NONE
              /\ stamp' = 0
 
-\* Store + emit (client.ts): cache the publish, record its version
+\* Store + emit (client.ts, setupIncomingHandlers): cache the publish, record its version
 \* (only when it carries one), bump the stamp, and run the waiter's
 \* onDiagnostics synchronously: it (re)arms the quiet-window timer when fresh
 \* and not stale; otherwise it returns and leaves an armed timer armed.
@@ -141,7 +141,7 @@ Store(p) ==
 -----------------------------------------------------------------------------
 \* Touch A.
 
-\* touchFile reads the per-path baseline before its notify (index.ts).
+\* touchFile reads the per-path baseline before its notify (clients/lsp/index.ts).
 Baseline ==
     /\ phase = "start"
     /\ phase' = "based"
@@ -167,7 +167,7 @@ RunnerStart ==
               /\ UNCHANGED fencing
     /\ UNCHANGED <<baseline, gctr, srvVer, srvPrev, pubs, npubs, w, how, result>>
 
-\* The send resolves; markTouched records A's content (index.ts).
+\* The send resolves; markTouched records A's content (clients/lsp/index.ts).
 RunnerFinish ==
     /\ phase = "sent"
     /\ phase' = "done"
@@ -183,7 +183,7 @@ RunnerFinish ==
 \* The waiter: A after its notify, or the skipped touch B after A's markTouched.
 
 \* clientWaitForDiagnostics entry: the early return, or register the
-\* listener, in one synchronous tick (client.ts).
+\* listener, in one synchronous tick (client.ts, clientWaitForDiagnostics).
 WaitStart ==
     /\ w = "idle"
     /\ phase = "done"
@@ -211,7 +211,7 @@ WaitTimeout ==
     /\ UNCHANGED <<phase, baseline, cliVer, cache, docVerRec, stamp, gctr, timer,
                    fencing, wire, srvVer, srvPrev, pubs, npubs, result>>
 
-\* touchFile reads getDiagnostics after further awaits (index.ts).
+\* touchFile reads getDiagnostics after further awaits (clients/lsp/index.ts).
 Read ==
     /\ w = "resolved"
     /\ w' = "read"

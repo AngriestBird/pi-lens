@@ -1,6 +1,7 @@
 ------------------------------ MODULE ReadGuard ------------------------------
 (***************************************************************************)
-(* The read-before-edit guard (clients/read-guard.ts) for one file F, seen *)
+(* The read-before-edit guard (clients/read-guard.ts checkEdit) for one    *)
+(* file F, seen                                                            *)
 (* from a POSITIONAL edit tool (oldRange / edits[].range / hashline): the  *)
 (* class of edit the guard fully enforces. An oldText edit is content-     *)
 (* validated by the host and skips FileTime, snapshot and (as a block)     *)
@@ -15,24 +16,30 @@
 (*  - the agent (one tool at a time; pi awaits each handler):              *)
 (*      read   : tool_call provisional record (runtime-tool-call.ts,       *)
 (*               hashes + FileTime taken at tool_call), host read, then    *)
-(*               the tool_result record (runtime-tool-result.ts)           *)
+(*               the tool_result record (runtime-tool-result.ts            *)
+(*               handleToolResult)                                         *)
 (*               that supersedes it (from the delivered bytes when the     *)
 (*               file moved after the tool_call's stamp, #3524);           *)
 (*      edit   : positional edit of 1 or 2 lines; checkEdit at tool_call   *)
-(*               (runtime-tool-call.ts), optional relocation               *)
+(*               (runtime-tool-call.ts handleToolCall), optional           *)
+(*               relocation                                                *)
 (*               then host apply, then recordWritten at tool_result        *)
-(*               (runtime-tool-result.ts), with the written lines          *)
+(*               (runtime-tool-result.ts handleToolResult), with the       *)
+(*               written lines                                             *)
 (*               recorded as read when not relocated (#3523);              *)
 (*      write  : noteCreatedFile at tool_call, host write,                 *)
-(*               recordWritten (injects the creation read, read-guard.ts)  *)
-(*               the turn's first write runs the immediate                 *)
-(*               autofix (pipeline.ts), recordWritten again                *)
-(*               (runtime-tool-result.ts), and the post-fix                *)
+(*               recordWritten (injects the creation read,                 *)
+(*               read-guard.ts).                                           *)
+(*               The turn's first write runs the immediate                 *)
+(*               autofix (pipeline.ts runAutofix), recordWritten again     *)
+(*               (runtime-tool-result.ts handleToolResult), and the        *)
+(*               post-fix                                                  *)
 (*               bytes are attached as "authoritative" and                 *)
 (*               recorded as a whole-file read (#3519).                    *)
 (*  - another writer (external editor, second pi-lens instance, git):      *)
 (*    changes F between any two steps.                                     *)
-(*  - pi-lens' deferred agent_end format drain (runtime-agent-end.ts):     *)
+(*  - pi-lens' deferred agent_end format drain (runtime-agent-end.ts       *)
+(*  handleAgentEnd):                                                       *)
 (*    rewrites F, then recordWritten: authorship only since #3525, which   *)
 (*    leaves FileTime where it was (FormatStamp).                          *)
 (*  - boundaries: user turn (kTurn = what the agent knew before the        *)
@@ -145,7 +152,7 @@ KnowAll(c) == [l \in Lines |-> IF l <= Len(c) THEN c[l] ELSE 0]
 AddRec(S, r, whole) == Append(S, [r EXCEPT !.whole = whole])
 
 ----------------------------------------------------------------------------
-\* Guard predicates (read-guard.ts). Record order in `reads` is timestamp order.
+\* Guard predicates (read-guard.ts checkEdit). Record order in `reads` is timestamp order.
 Max(a, b) == IF a > b THEN a ELSE b
 \* readCoversRange: the effective range widened by contextLines.
 CtxCovers(r, lo, hi) == Max(1, r.lo - Ctx) <= lo /\ hi <= r.hi + Ctx

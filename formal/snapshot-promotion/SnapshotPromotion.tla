@@ -1,7 +1,8 @@
 --------------------------- MODULE SnapshotPromotion ---------------------------
 (***************************************************************************)
 (* Worker-thread persist and promotion of the project snapshot body        *)
-(* (clients/project-snapshot.ts, #958 item 2) for ONE project cache dir,   *)
+(* (clients/project-snapshot.ts saveProjectSnapshot, #958 item 2) for ONE  *)
+(* project cache dir,                                                      *)
 (* shared by N pi-lens processes (a pi session and the MCP server, or two  *)
 (* pi sessions in one checkout).                                           *)
 (*                                                                         *)
@@ -263,7 +264,7 @@ InProcessLatestWins == ~inprocBad
 \* tree view than one already promoted.
 NoRegression == body.seq >= hi
 
-\* project-snapshot.ts: meta-first ordering exists so the meta is
+\* project-snapshot.ts saveProjectSnapshot: meta-first ordering exists so the meta is
 \* never BEHIND the body ("an old-seq meta sitting over a freshly written body
 \* ... throwing away a genuinely fresh snapshot").
 MetaNotBehindBody == meta >= body.seq

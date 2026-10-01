@@ -1,7 +1,8 @@
 ------------------------- MODULE ReviewGraphPromotion -------------------------
 (***************************************************************************)
 (* Worker-thread persist and promotion of the review-graph snapshot        *)
-(* (clients/review-graph/builder.ts, persist-worker.ts) for ONE            *)
+(* (clients/review-graph/builder.ts persistGraph, persist-worker.ts        *)
+(* serveGzipStageWorker) for ONE                                           *)
 (* project cache dir, shared by N pi-lens processes (a pi session and the  *)
 (* MCP server, or two pi sessions in one checkout).                        *)
 (*                                                                         *)

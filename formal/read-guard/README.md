@@ -1,6 +1,6 @@
 # Read-guard model
 
-A TLA+ model of the read-before-edit guard (`clients/read-guard.ts`) for one
+A TLA+ model of the read-before-edit guard (`clients/read-guard.ts` `checkEdit`) for one
 file. It covers the agent's reads and edits, pi-lens' own writes (the
 immediate autofix, the deferred `agent_end` format), another writer, and
 session boundaries. The `TLA+ models` CI job
@@ -16,7 +16,7 @@ current code (`violated`).
 The model covers **positional** edits: `oldRange`, `edits[].range`, and the
 hashline adapters. The guard fully enforces only this class. An `oldText` edit
 is content-validated by the host, so `checkEdit` gets `skipSnapshotCheck` and
-`oldTextResolved` (`runtime-tool-call.ts`). For such an edit, FileTime and
+`oldTextResolved` (`clients/runtime-tool-call.ts` `handleToolCall`). For such an edit, FileTime and
 the snapshot are skipped and out-of-range is only a warning. The only checks
 left are zero-read and the bridge content binding.
 
@@ -28,28 +28,28 @@ change.
 
 - **The agent**, one tool at a time (pi awaits each handler):
   - **read** (full or ranged): the tool_call provisional record, which takes
-    a FileTime stamp (`runtime-tool-call.ts`), the host read, then the
-    tool_result record that supersedes it (`runtime-tool-result.ts`).
+    a FileTime stamp (`clients/runtime-tool-call.ts` `handleToolCall`), the host read, then the
+    tool_result record that supersedes it (`clients/runtime-tool-result.ts` `handleToolResult`).
     Since #3524, when the file moved after the tool_call's stamp, that record
     is hashed and sized from the delivered text and keeps the stamp;
   - **positional edit** of 1 or 2 lines: `checkEdit` at tool_call,
     optional relocation, the host apply, then `recordWritten` at
     tool_result. Since #3523, an edit the guard allowed unrelocated
     (`markToolCallEditInPlace`) is recorded as a read of the lines it
-    wrote, hashed from its `newText` (`runtime-tool-result.ts`);
+    wrote, hashed from its `newText` (`clients/runtime-tool-result.ts` `handleToolResult`);
   - **write**: `noteCreatedFile` at tool_call, the host write, and
     `recordWritten`, which injects the creation read (`read-guard.ts`
     `injectCreationRead`). Since #3524's remainder it is hashed from the
     write's executed `content`, not from disk. The turn's first write then
-    runs the immediate autofix (`pipeline.ts`), calls `recordWritten` again
-    (`runtime-tool-result.ts`), and attaches the post-fix bytes as
+    runs the immediate autofix (`clients/pipeline.ts` `runAutofix`), calls `recordWritten` again
+    (`clients/runtime-tool-result.ts` `handleToolResult`), and attaches the post-fix bytes as
     "authoritative". Since #3519 the attachment, when delivered, is
     recorded as a whole-file read hashed from the attached bytes.
 - **Another writer** (an external editor, a second pi-lens instance, git):
   changes the file between any two steps. With `ExtPhases` it can land inside
   a tool call.
 - **The deferred `agent_end` format drain**: rewrites the file, then calls
-  `recordWritten` (`runtime-agent-end.ts`). Since #3525 that call credits
+  `recordWritten` (`clients/runtime-agent-end.ts` `handleAgentEnd`). Since #3525 that call credits
   authorship (`written`) and leaves FileTime where it was
   (`stampFileTime: false`): the agent never saw those bytes. The format
   service's own FileTime is its own table (`format-service.ts`, keyed

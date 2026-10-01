@@ -13,9 +13,10 @@ Issues: #3480 (the debounce fingerprint), #3481 (the stale cascade touch).
 - **Agent writes** `w1`/`w2`: the write tool lands its bytes (a new mtime).
   Then that edit's pipeline reads the file (`pipeline.ts`
   `readFileSync`) and calls `touchFile` (`lsp_sync`, scope
-  `primary`). `write-ordering-guard.ts` allows two same-turn pipelines
+  `primary`). `clients/write-ordering-guard.ts` `WriteOrderingGuard` allows two same-turn pipelines
   for one file to run concurrently.
-- **The cascade neighbour reader** `cas`: `integration.ts` reads the
+- **The cascade neighbour reader** `cas`: `clients/dispatch/integration.ts`
+  `computeCascadeForFile` reads the
   file, awaits `getCapabilitySnapshots`/`getClientForFile`, and then calls
   `touchFile` with what it read (tier-aware, then a full wait).
 - **`LSPService.touchFile`** (`lsp/index.ts`):

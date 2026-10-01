@@ -13,25 +13,25 @@ Issue: #3484.
 - **Touch A** (`LSPService.touchFile`, the pipeline's `lsp_sync` touch):
   - it reads the per-path baseline (`getDiagnosticsVersionForPath`,
     `clients/lsp/index.ts`);
-  - then `notify.open` → `handleNotifyOpenOnce` (`client.ts`). The
+  - then `notify.open` → `handleNotifyOpenOnce` (`clients/lsp/client.ts`). The
     document is open, so in one tick it bumps `documentVersions`, calls
     `clearDiagnosticsForPath` (unless `preserveDiagnostics`) and sends
     `didChange`;
-  - `markTouched` runs after the send resolves (`index.ts`).
+  - `markTouched` runs after the send resolves (`clients/lsp/index.ts` `touchFile`).
 - **The waiter**, in one of two forms:
   - `SkippedWait = FALSE`: A itself waits, with `minVersion` set to its
-    baseline (`index.ts`);
+    baseline (`clients/lsp/index.ts` `touchFile`);
   - `SkippedWait = TRUE`: the dispatch runner's touch B, with the same
     content. `shouldSkipNotify` finds A's `markTouched` entry, so B
     sends nothing and waits with no baseline.
-- **`clientWaitForDiagnostics`** (`client.ts`):
+- **`clientWaitForDiagnostics`** (`clients/lsp/client.ts`):
   - the early return: fresh, not `isVersionStale`, and a non-empty cache;
   - otherwise it registers a listener. `onDiagnostics` re-checks those
     conditions and (re)arms a quiet-window timer, which resolves the wait
     without checking again;
   - a timeout also resolves the wait;
   - `touchFile` reads `getDiagnostics` later, after more awaits.
-- **The `publishDiagnostics` handler** (`client.ts`):
+- **The `publishDiagnostics` handler** (`clients/lsp/client.ts` `setupIncomingHandlers`):
   - seed-first-push stores the first push at once, with an `isSupersededPush`
     check;
   - otherwise it uses a per-path debounce timer, which checks
@@ -145,9 +145,9 @@ diagnostics.
 - `isVersionStale` stops them from *settling* the wait (`VersionedPreserve`
   passes).
 - A wait that times out still reads them. This is the "#1095 note" at
-  `client.ts`: the binding then reads `boundToCurrentDisk: false`.
+  `clients/lsp/client.ts` `handleNotifyOpenOnce`: the binding then reads `boundToCurrentDisk: false`.
 - `touchFile`'s own notify never passes `preserveDiagnostics`. The only
-  caller that passes `true` is the rename path (`index.ts`).
+  caller that passes `true` is the rename path (`clients/lsp/index.ts` `renameFile`).
 
 ## Replay on the real client
 

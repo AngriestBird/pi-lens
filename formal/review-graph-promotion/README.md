@@ -1,8 +1,8 @@
 # Review-graph promotion model
 
 A TLA+ model of the worker-thread persist of the review-graph snapshot
-(`clients/review-graph/builder.ts` and `persist-worker.ts`) for one
-project cache directory that N pi-lens processes share. It is adapted from
+(`clients/review-graph/builder.ts` `persistGraph` and `persist-worker.ts`
+`serveGzipStageWorker`) for one project cache directory that N pi-lens processes share. It is adapted from
 the project-snapshot promotion model of #3509. The `TLA+ models` CI job
 (`node scripts/check-tla-models.mjs`) checks every config here against its
 `\* expect:` line.
@@ -17,7 +17,7 @@ Issue: #3536.
 - Every `persistGraph` call takes a fresh generation, and there
   is no one-active queue. Several requests can be in the worker at once, and
   the worker serves them concurrently: `serveGzipStageWorker` runs an async
-  closure per message (`clients/gzip-stage-write.ts`). Only the current
+  closure per message (`clients/gzip-stage-write.ts` `serveGzipStageWorker`). Only the current
   generation promotes.
 - A debounced `pending` slot coalesces persists.
 - The sweep checks pid liveness (`isStaleStageFile`).

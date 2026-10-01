@@ -8,7 +8,7 @@
 (*    (`decideOrphanReaping`), kill each chosen pid in turn                *)
 (*    (`killPidTree` + a verify poll), then prune the dead and             *)
 (*    stale entries BY PID (`pruneDeadInstances`, instance-registry.ts)    *)
-(*    Fire-and-forget at every session_start (index.ts), no                *)
+(*    Fire-and-forget at every session_start (index.ts sweepOrphans), no   *)
 (*    lock, so several run concurrently;                                   *)
 (*  - the registry-independent backstop `sweepUntrackedOrphans`:           *)
 (*    enumerate processes whose command line names a managed binary, keep *)
