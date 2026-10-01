@@ -1004,7 +1004,7 @@ function formatAnalyze(
 	// read as "clean" — a known limit on large projects (warm mode / re-run once
 	// the persistent server has indexed gives complete LSP coverage).
 	const lspNote = result.lsp
-		? ` · lsp ${result.lsp.diagnosticCount} (${result.lsp.status}, ${result.lsp.durationMs}ms)`
+		? ` · lsp ${result.lsp.diagnosticCount} (${result.lsp.status}${result.lsp.failureKind ? `: ${result.lsp.failureKind}` : ""}, ${result.lsp.durationMs}ms)`
 		: "";
 	const summary =
 		`${path.relative(cwd, result.filePath) || result.filePath} [${mode}] — ` +
