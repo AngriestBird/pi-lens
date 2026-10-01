@@ -125,6 +125,7 @@ import {
 	filterFindingsByDisposition,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
+import { recordDeferredRunnerBlockers } from "./deferred-runner-blockers.js";
 import {
 	applyInlineBlockerPolicy,
 	type InlineBlockerPolicyTallyEntry,
@@ -3830,6 +3831,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let runnerFindingsStale = 0;
 	let runnerFindingsFailed = 0;
 	let runnerFindingsDropped = 0;
+	/** #3814: blocking survivors newly entered into the blocker map this turn end. */
+	let runnerBlockersRecorded = 0;
 	/** #3248: bounded per-turn on this lane's own row, never per finding. */
 	let runnerFindingsDispositionSuppressed = 0;
 	const runnerFindingsDeliveredIds: string[] = [];
@@ -3893,17 +3896,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// the freshness gate, like every other lane: the anchor is derived from
 		// the post-gate identity, never the raw pre-gate set. The file's CURRENT
 		// bytes; an unreadable file fails open inside the helper.
-		let runnerContent: string | undefined;
+		let runnerBytes: Buffer | undefined;
 		try {
-			runnerContent = fs.readFileSync(pending.filePath, "utf-8");
+			runnerBytes = fs.readFileSync(pending.filePath);
 		} catch {
-			runnerContent = undefined;
+			runnerBytes = undefined;
 		}
 		const { kept: runnerKept, suppressed: runnerSuppressedHere } =
 			applyPushedFindingPolicy(gate.live, {
 				cwd,
 				filePath: pending.filePath,
-				content: runnerContent,
+				content: runnerBytes?.toString("utf-8"),
 			});
 		runnerFindingsDispositionSuppressed += runnerSuppressedHere;
 		if (runnerKept.length === 0) {
@@ -3917,6 +3920,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				`  ${displayPath}:${finding.line ?? 1}:${finding.column ?? 1} [${finding.rule ?? finding.id}] ${finding.message}`,
 		);
 		runnerFindingsDelivered += runnerKept.length;
+		// #3814: a blocking survivor is a blocker, not only an advisory: it enters
+		// the map the commit gate's latch and the next turn ends' replay read, and
+		// stays until a later write to the file replaces or clears it. The commit
+		// gate may have recorded it already (a replay records 0).
+		runnerBlockersRecorded += recordDeferredRunnerBlockers(
+			runtime,
+			pending,
+			runnerKept,
+			runnerBytes,
+		);
 		for (const finding of runnerKept) {
 			if (runnerFindingsDeliveredIds.length < 50) {
 				runnerFindingsDeliveredIds.push(finding.id);
@@ -3948,6 +3961,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			stale: runnerFindingsStale,
 			failed: runnerFindingsFailed,
 			dropped: runnerFindingsDropped,
+			blockersRecorded: runnerBlockersRecorded,
 			dispositionSuppressed: runnerFindingsDispositionSuppressed,
 			deliveredIds: runnerFindingsDeliveredIds,
 		},

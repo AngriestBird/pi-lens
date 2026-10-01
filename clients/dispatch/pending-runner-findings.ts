@@ -18,9 +18,24 @@ interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
 	promise: Promise<RunnerResult>;
 	settled: boolean;
 	result?: RunnerResult;
+	/** #3814: the commit gate has already judged this settled answer. */
+	gateJudged?: boolean;
 }
 
 const pending: PendingRunnerPromise[] = [];
+
+/** The drain's and the commit gate's one view of a settled entry. */
+function settledSnapshot(entry: PendingRunnerPromise): PendingRunnerFindings {
+	return {
+		filePath: entry.filePath,
+		cwd: entry.cwd,
+		projectRoot: entry.projectRoot,
+		runnerId: entry.runnerId,
+		markedAtMs: entry.markedAtMs,
+		writeIndex: entry.writeIndex,
+		result: entry.result,
+	};
+}
 const MAX_PENDING_RUNNER_FINDINGS = 50;
 
 export function deferRunnerFindings(
@@ -97,20 +112,30 @@ export async function drainPendingRunnerFindings(
 	}
 	for (const entry of current) {
 		if (entry.settled && entry.result) {
-			results.push({
-				filePath: entry.filePath,
-				cwd: entry.cwd,
-				projectRoot: entry.projectRoot,
-				runnerId: entry.runnerId,
-				markedAtMs: entry.markedAtMs,
-				writeIndex: entry.writeIndex,
-				result: entry.result,
-			});
+			results.push(settledSnapshot(entry));
 		} else {
 			pending.push(entry);
 		}
 	}
 	return results;
+}
+
+/**
+ * #3814: settled answers the commit gate has not judged yet, WITHOUT removing
+ * them: the turn-end drain still owns delivery, so a non-blocking answer the
+ * gate looked at is not lost. Each entry is handed out once (`gateJudged`), so
+ * a second commit attempt does not repeat the freshness pass and its records
+ * for answers already judged. An in-flight run is not handed out: it has said
+ * nothing yet, and the store still owns it for the turn-end drain.
+ */
+export function claimSettledRunnerFindingsForGate(): PendingRunnerFindings[] {
+	const claimed: PendingRunnerFindings[] = [];
+	for (const entry of pending) {
+		if (!entry.settled || !entry.result || entry.gateJudged) continue;
+		entry.gateJudged = true;
+		claimed.push(settledSnapshot(entry));
+	}
+	return claimed;
 }
 
 /** Drop a stale answer and record the lost re-run coverage. */

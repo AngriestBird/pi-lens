@@ -657,6 +657,12 @@ the surface they bite; each block loads only when its trigger applies.
 - Git command classification has one lexer and one guarded-verb matcher seam.
   Unknown wrappers and indirect guarded verbs fail closed. Text-consumer
   allowances recurse through command substitutions and execution contexts.
+- The commit gate reads one blocker state: the inline-blocker map's latch
+  (`RuntimeCoordinator`). A collect-later runner's blocking findings join that
+  map through `clients/deferred-runner-blockers.ts` (the turn-end late-runner
+  lane, and the gate's own pre-check of answers that settled but no turn end
+  has drained), never through a second store; a run still in flight does not
+  gate (#3814).
 - The shared-checkout guard refuses unsafe worktree mutation when another live
   session and uncommitted work are both proven. It never auto-stashes.
 - `mcp/server.ts` talks to pi-lens through `clients/lens-engine.ts`. A mirrored

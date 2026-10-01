@@ -687,8 +687,10 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"clients/git-guard.ts",
 		"Git-guard commit/push 🔴 COMMIT BLOCKED verdict (--lens-guard).",
 		"Synchronous preflight rejection returned inline with the failed git " +
-			"command — no stored state is delivered, so nothing can go stale between " +
-			"detection and delivery.",
+			"command. The blocker map it reads is refreshed at decision time: the " +
+			"gate first judges settled collect-later runner answers through the " +
+			"freshness gate and the finding policy (#3814), so a stale answer " +
+			"cannot block.",
 		"live",
 	),
 	"shared-checkout-guard:worktree-mutation-blocked": labeled(

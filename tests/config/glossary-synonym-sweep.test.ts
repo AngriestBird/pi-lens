@@ -959,7 +959,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-agent-end.ts": 12,
 		// 27 -> 28 (#3218): the retire seam reads the removed record with
 		// `path.resolve(filePath)` before naming it resolved.
-		"clients/runtime-coordinator.ts": 28,
+		// 28 -> 29 (#3814): the deferred-blocker merge derives the map key with
+		// `path.resolve(filePath)`, the expression every sibling method uses.
+		"clients/runtime-coordinator.ts": 29,
 		"clients/runtime-session.ts": 15,
 		"clients/runtime-tool-call.ts": 22,
 		"clients/runtime-tool-result.ts": 22,
