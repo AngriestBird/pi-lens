@@ -1223,7 +1223,7 @@ const PLACEHOLDER_REASON =
 // once (#3905 r1 F2). Records are deliberately not bound to files.
 function hasNoRecordReason(content, files) {
 	const reasons = [];
-	for (const line of content.split(/\r?\n/)) {
+	for (const line of content.split("\n")) {
 		const reason = /^\s*(?:[-*+]\s+)?\**none:\**\s*(\S.*)$/i
 			.exec(line)?.[1]
 			?.trim();

@@ -1380,6 +1380,26 @@ describe("PR body lint (#1844)", () => {
 			expect(none(text).errors.join(" ")).toContain(refusal);
 		});
 
+		// With a seam file the basename requirement already refuses placeholder
+		// words; on a diff with no flagged file only the placeholder test stands.
+		it.each([
+			"n/a n/a n/a",
+			"na na na",
+			"none none none",
+			"not applicable here",
+			"tbd tbd tbd",
+			"todo todo todo",
+		])(
+			"refuses the placeholder reason %j when no file is flagged",
+			(reason) => {
+				expect(
+					lintPrBody(withObservability(`none: ${reason}`), {
+						diff: diffAdding("clients/example.ts", "\tif (ready) go();"),
+					}).valid,
+				).toBe(false);
+			},
+		);
+
 		it("tells the author to name each flagged file", () => {
 			expect(none("none: yes yes yes").errors.join(" ")).toContain(
 				"naming each file above by basename",
