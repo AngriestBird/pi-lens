@@ -770,7 +770,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// #3881: this activation's primary session_start is still in flight
 	// (before its hand-off adoption ran), with its start reason. pi does not
 	// stop a concurrent reload while it awaits the start's emit.
-	let startInFlight: { reason: string | undefined } | undefined;
+	let startInFlight:
+		| { reason: string | undefined; shutDown: boolean }
+		| undefined;
 	const classifyOwnedSessionEmission = (
 		ctx: unknown,
 		sessionId: string | undefined,
@@ -2333,7 +2335,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					}
 
 					// #3881: set before this path's first await; the finally clears it.
-					startInFlight = { reason: sessionReason };
+					const inFlight = { reason: sessionReason, shutDown: false };
+					startInFlight = inFlight;
 					// #2319: this process-singleton tally belongs to the primary
 					// session that owns the session-end rollup. A concurrent secondary
 					// must not erase a live primary's count before this decision.
@@ -2540,6 +2543,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// resume or a `pi --session` launch (a launch fires "startup", not
 					// "resume"), the parent's for `pi --fork` and a fork whose slot
 					// is gone. `/new` resets.
+					// #3881: this activation shut down while the start was in flight
+					// (another extension's shutdown handler kept pi from invalidating
+					// the ctx yet). That shutdown handed the slot on; adopt nothing.
+					if (inFlight.shutDown) return;
 					const stateCwd = ctx.cwd ?? process.cwd();
 					const handoffSource = await adoptHandoff(scope, {
 						reason: sessionReason,
@@ -3757,6 +3764,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
 			if (startInFlight) {
+				startInFlight.shutDown = true;
 				forwardHandoff({
 					startReason: startInFlight.reason,
 					reason: shutdownReason,

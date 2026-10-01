@@ -1755,72 +1755,95 @@ describe("#3612 a queued agent advisory follows /reload", () => {
  * shutdown stashed its own empty scope over the slot left for its start, and
  * the inner reload's start took the empty slot, so the conversation lost its
  * lazy-tool activations.
+ *
+ * "continuing": an extension ordered after pi-lens holds the inner shutdown
+ * until the interrupted start's pi-lens handler has settled, so that start
+ * runs on with a ctx pi has not yet invalidated. The recurrence: it took the
+ * slot its own shutdown handed on, and the inner reload's start missed it.
  */
 describe("#3881 an interrupted session_start hands on the slot left for it", () => {
 	for (const kind of ["reload", "fork"] as const) {
 		for (const store of ["in-memory", "file-backed"] as const) {
-			it(`keeps a ${store} session's activations when a reload interrupts its ${kind} start before it adopts`, async () => {
-				let runtime: AgentSessionRuntime | undefined;
-				let inner: Promise<void> | undefined;
-				const reloadDuringStart = (pi: ExtensionAPI) => {
-					pi.on("session_start", (event) => {
-						if ((event as { reason?: string }).reason !== kind || inner) return;
-						inner = new Promise<void>((resolve, reject) =>
-							setImmediate(() =>
-								runtime!.session.reload().then(resolve, reject),
-							),
-						);
+			for (const continuing of [false, true]) {
+				it(`keeps a ${store} session's activations when a reload interrupts its ${kind} start before it adopts${continuing ? ", and the start runs on" : ""}`, async () => {
+					let runtime: AgentSessionRuntime | undefined;
+					let inner: Promise<void> | undefined;
+					const reloadDuringStart = (pi: ExtensionAPI) => {
+						pi.on("session_start", (event) => {
+							if ((event as { reason?: string }).reason !== kind || inner)
+								return;
+							inner = new Promise<void>((resolve, reject) =>
+								setImmediate(() =>
+									runtime!.session.reload().then(resolve, reject),
+								),
+							);
+						});
+					};
+					let startSettled = () => {};
+					const settled = new Promise<void>((resolve) => {
+						startSettled = resolve;
 					});
-				};
-				runtime = await startRuntime(
-					store === "file-backed"
-						? SessionManager.create(cwd, sessionsDir)
-						: SessionManager.inMemory(cwd),
-					[],
-					[reloadDuringStart],
-				);
-				const c = conversation(runtime);
-				c.user("prompt 1");
-				c.done();
-				await activateTools(runtime, "act", ["ast_grep_search"]);
-				const u2 = c.user("prompt 2");
-				c.done();
-				resetDegradationLedger();
+					const holdShutdownForStart = (pi: ExtensionAPI) => {
+						// Ordered after pi-lens: pi reaches it once pi-lens's handler
+						// for the interrupted start has settled.
+						pi.on("session_start", () => {
+							if (inner) startSettled();
+						});
+						pi.on("session_shutdown", async () => {
+							if (inner) await settled;
+						});
+					};
+					runtime = await startRuntime(
+						store === "file-backed"
+							? SessionManager.create(cwd, sessionsDir)
+							: SessionManager.inMemory(cwd),
+						continuing ? [holdShutdownForStart] : [],
+						[reloadDuringStart],
+					);
+					const c = conversation(runtime);
+					c.user("prompt 1");
+					c.done();
+					await activateTools(runtime, "act", ["ast_grep_search"]);
+					const u2 = c.user("prompt 2");
+					c.done();
+					resetDegradationLedger();
 
-				if (kind === "reload") await reload(runtime);
-				else await runtime.fork(u2);
-				expect(inner).toBeDefined();
-				await inner;
+					if (kind === "reload") await reload(runtime);
+					else await runtime.fork(u2);
+					expect(inner).toBeDefined();
+					await inner;
 
-				expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
-				const rows = await scopeTransitionRows();
-				const shutdowns = rows.filter((row) => row.transition === "shutdown");
-				const starts = rows.filter((row) => row.transition === "start");
-				// The interrupted start retired a scope it never logged a start
-				// for: its shutdown landed after its scope began (t1), before it
-				// adopted. Its successor, the inner reload, took the slot.
-				const interrupted = shutdowns.at(-1)!.scopeId;
-				expect(starts.some((row) => row.scopeId === interrupted)).toBe(false);
-				expect(starts.at(-1)).toMatchObject({
-					reason: "reload",
-					role: "primary",
-					handoffSource: "slot",
+					expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+					const rows = await scopeTransitionRows();
+					const shutdowns = rows.filter((row) => row.transition === "shutdown");
+					const starts = rows.filter((row) => row.transition === "start");
+					// The interrupted start retired a scope it never logged a start
+					// for: its shutdown landed after its scope began (t1), before it
+					// adopted, and it never adopted later. Its successor, the inner
+					// reload, took the slot.
+					const interrupted = shutdowns.at(-1)!.scopeId;
+					expect(starts.some((row) => row.scopeId === interrupted)).toBe(false);
+					expect(starts.at(-1)).toMatchObject({
+						reason: "reload",
+						role: "primary",
+						handoffSource: "slot",
+					});
+					// One bounded record names the interrupted start (#3873 O1). The
+					// inner reload's start resets the in-memory ledger, so read the
+					// record's durable row.
+					expect(
+						(await latencyRows("degradation_ledger")).filter(
+							(row) => row.kind === "session-scope-handoff-interrupted",
+						),
+					).toEqual([
+						expect.objectContaining({
+							subject: kind,
+							shutdownReason: "reload",
+							outcome: "forwarded",
+						}),
+					]);
 				});
-				// One bounded record names the interrupted start (#3873 O1). The
-				// inner reload's start resets the in-memory ledger, so read the
-				// record's durable row.
-				expect(
-					(await latencyRows("degradation_ledger")).filter(
-						(row) => row.kind === "session-scope-handoff-interrupted",
-					),
-				).toEqual([
-					expect.objectContaining({
-						subject: kind,
-						shutdownReason: "reload",
-						outcome: "forwarded",
-					}),
-				]);
-			});
+			}
 		}
 	}
 });
