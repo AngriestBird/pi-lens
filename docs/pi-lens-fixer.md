@@ -100,6 +100,8 @@ are not repeated here.
 
 - Run every test that mocks or deep-equals a changed module or record, and the
   spawn-heavy lanes for real child or LSP tests.
+- Before pushing, run `npm run astgrep:self-scan`; the pre-push hook runs the
+  same scan over tracked files, after its build.
 - Reproduce CI-only failures in the CI command shape.
 - Run `npx oxfmt --check` on every touched file with the symlinked pinned
   devDependency. Never `npm install oxfmt --no-save`: it replaces the linked

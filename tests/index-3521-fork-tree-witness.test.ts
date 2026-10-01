@@ -59,24 +59,14 @@ import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js"
 import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
-	removeTempDirSync,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
 
-// Every vitest worker shares one PI_LENS_HOME (tests/support/vitest-setup.ts),
-// and this file runs 25 real session_starts with PI_LENS_TEST_MODE=0: each
-// appends the config-resolution lines to sessionstart.log and a
-// config_resolved row to latency.log, and beforeEach truncates latency.log.
-// On a shared home that fed rows into, and truncated rows out of, a
-// concurrently running reader: tests/clients/config-resolved-phase.test.ts
-// failed on PR #3669's first Unit tests run. The loggers fix their paths when
-// they load, so the redirect runs hoisted, before any import.
-const witnessHome = vi.hoisted(() => {
-	const previous = process.env.PI_LENS_HOME;
-	const home = `${previous ?? "."}/pi-lens-3521-witness-home-${process.pid}`;
-	process.env.PI_LENS_HOME = home;
-	return { home, previous };
-});
+// This file runs 25 real session_starts with PI_LENS_TEST_MODE=0: each appends
+// the config-resolution lines to sessionstart.log and a `config_resolved` row
+// to latency.log, and beforeEach truncates latency.log. The harness's
+// per-worker PI_LENS_HOME (#3721) keeps those writes off every other worker's
+// sink; the loggers bind their paths at load, so the home is the harness's.
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -153,10 +143,6 @@ afterEach(async () => {
 
 afterAll(async () => {
 	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
-	await flushLatencyLog();
-	removeTempDirSync(witnessHome.home);
-	if (witnessHome.previous === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = witnessHome.previous;
 });
 
 async function startRuntime(

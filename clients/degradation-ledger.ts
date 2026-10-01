@@ -11,6 +11,7 @@ import { logLatency } from "./latency-logger.js";
 import {
 	getSinkRotations,
 	getSinkOptionConflicts,
+	getSinkTruncateRefusals,
 	getSinkWriteFailures,
 	resetSinkRotations,
 	resetSinkWriteFailures,
@@ -506,6 +507,14 @@ export type DegradationKind =
 	| "log-sink-option-conflict"
 	| "log-sink-rotate-failed"
 	| "log-sink-rotated"
+	/**
+	 * A test process called `truncate()` (behind `clearLatencyLog`) on a log
+	 * under the real `~/.pi-lens` and was refused (#3721). Folded in at READ time
+	 * like the other `log-sink-*` kinds: writing it through the sink would be a
+	 * write into the real log from the very process the refusal guards against.
+	 * One row per sink; `count` is the refused calls.
+	 */
+	| "log-sink-truncate-refused"
 	| "log-sink-write-failure"
 	| "lsp-breaker"
 	| "lsp-capability-skip"
@@ -1846,6 +1855,25 @@ export function getDegradationSummary(): DegradationGroup[] {
 				subject: truncateForLedger(sink.file),
 				reason: truncateForLedger(
 					"shared writer rotation options differed across module graphs; first writer retained ownership",
+				),
+			})),
+		});
+	}
+	// #3721, same read-time fold: a refused truncation of a real-home log by a
+	// test process is visible without writing a row through that sink.
+	const truncateRefusals = getSinkTruncateRefusals();
+	if (truncateRefusals.length > 0) {
+		summary.push({
+			kind: "log-sink-truncate-refused",
+			count: truncateRefusals.reduce(
+				(total, sink) => total + sink.refusedCount,
+				0,
+			),
+			droppedCount: 0,
+			latestReasons: truncateRefusals.map((sink) => ({
+				subject: truncateForLedger(sink.file),
+				reason: truncateForLedger(
+					`${sink.refusedCount} truncate call(s) refused: a test process aimed them at the real ~/.pi-lens`,
 				),
 			})),
 		});

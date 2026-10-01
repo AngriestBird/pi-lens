@@ -7,6 +7,7 @@ import { CI_JOB_NAMES } from "./lib/ci-checks.mjs";
 
 export const GATES = [
 	["build", ["npm", "run", "build"], CI_JOB_NAMES.LINT_AND_TYPECHECK],
+	["self-scan", ["npm", "run", "astgrep:self-scan"], CI_JOB_NAMES.UNIT_TESTS],
 	["lint", ["npm", "run", "lint"], CI_JOB_NAMES.LINT_AND_TYPECHECK],
 	["fmt:check", ["npm", "run", "fmt:check"], "oxfmt format check"],
 	["changelog:check", ["npm", "run", "changelog:check"], "Unit tests"],
@@ -252,7 +253,7 @@ export function runPreflight({
 
 if (
 	process.argv[1] &&
-	import.meta.url === pathToFileURL(process.argv[1]).href
+	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
 ) {
 	try {
 		process.exitCode = runPreflight({ argv: process.argv.slice(2) });
