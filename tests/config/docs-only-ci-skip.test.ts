@@ -127,7 +127,6 @@ function simulate(
 	files: string[],
 	gateReady = "true",
 	changesFails = false,
-	forced: Record<string, string> = {},
 ) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-docs-skip-"));
 	const output = path.join(dir, "output");
@@ -153,7 +152,6 @@ function simulate(
 		) as { code: string; formal: string };
 		const results: Record<string, string> = {
 			...(changesFails ? { changes: "failure" } : {}),
-			...forced,
 		};
 		const outputs: Record<string, Record<string, string>> = {
 			changes,
@@ -432,26 +430,6 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 			"Model-check formal/ against each config's expected verdict",
 		);
 		expect(steps).not.toContain("Skip the model check (formal/ unchanged)");
-	});
-
-	// Recurrence (verify r3 V4): the V1 fix (`!cancelled()`) also dropped the
-	// implicit success() over `validate-merge-train-dispatch`, so a failed
-	// dispatch validation no longer skipped `tla-models`, which then checked out
-	// the UNVALIDATED payload sha and ran the checker from it. Every other
-	// payload-checkout job keeps the skip. (Goes with the hop when #3859 lands.)
-	it("keeps the skip when the dispatch validation failed: tla-models does not check out an unvalidated payload", () => {
-		const { results } = simulate(
-			"repository_dispatch",
-			DOCS_ONLY,
-			"true",
-			false,
-			{ "validate-merge-train-dispatch": "failure" },
-		);
-		expect(results["validate-merge-train-dispatch"]).toBe("failure");
-		expect(results["tla-models"]).toBe("skipped");
-		// and the V1 guarantee stands when validation passed but `changes` failed
-		const both = simulate("repository_dispatch", DOCS_ONLY, "true", true);
-		expect(both.results["tla-models"]).toBe("success");
 	});
 
 	// Recurrence: a new job gated on `changes` without being a heavy advisory or

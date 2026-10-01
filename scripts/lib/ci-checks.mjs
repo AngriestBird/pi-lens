@@ -3,9 +3,9 @@
  * list and the ONE fail-closed "latest check-run per name" resolver, shared
  * by every consumer that reads GitHub check-runs for this repo's two gating
  * checks -- merge-train-warden.mjs (GraphQL rollup: `startedAt`, UPPERCASE
- * `status`/`conclusion`), merge-train-lane.mjs (via the warden today, moved
- * to import this module directly in this round), and ci-verdict.mjs (REST
- * `commits/<sha>/check-runs`: `started_at`, lowercase `status`/`conclusion`).
+ * `status`/`conclusion`) and ci-verdict.mjs (REST `commits/<sha>/check-runs`:
+ * `started_at`, lowercase `status`/`conclusion`). A third consumer,
+ * The retired merge lane no longer consumes this module.
  *
  * Before this round, ci-verdict.mjs hand-rolled its own `latestRunNamed`
  * with an `id`-as-tiebreak policy that is NOT fail-closed (a superseded
@@ -48,13 +48,11 @@ export function isUnitTestsShardJobName(name) {
 // ends in "(advisory)". Probed 2026-08-26 against the live rollups of every
 // open PR -- `PR body (advisory)`, `Vale prose lint (advisory)`,
 // `OSV scan (advisory)`. Originally lived only
-// in merge-train-lane.mjs; moved here in #2609 so ci-verdict.mjs (a second
+// in the former merge lane; moved here in #2609 so ci-verdict.mjs (a second
 // consumer of the exact same policy) imports the ONE list instead of
 // hand-rolling its own -- AGENTS.md shape 38's own warning ("the cheapest
 // evasion is adding a real gate to the advisory list") is a defect risk
 // multiplied by every duplicate copy of this set, not just the original.
-// merge-train-lane.mjs re-exports these three names unchanged for its
-// existing importers.
 const ADVISORY_SUFFIX = "(advisory)";
 export const ADVISORY_CHECKS = new Set([
 	// Third-party SonarCloud GitHub App check-run (posted via the SonarCloud
@@ -118,7 +116,7 @@ export function isAdvisoryCheck(name) {
 }
 
 // A non-advisory check in any of these states blocks a merge (#2185's real
-// merge-train gate; moved here from merge-train-lane.mjs in #2609 for the
+// merge gate; moved here from the former merge lane in #2609 for the
 // same single-source reason as ADVISORY_CHECKS above). GraphQL's rollup
 // reports these UPPERCASE; REST's check-runs API reports them lowercase --
 // `isBlockingConclusion` below normalizes case so both payload shapes share
@@ -126,11 +124,9 @@ export function isAdvisoryCheck(name) {
 // documents: "success", "skipped", and "neutral" are exactly the completed
 // conclusions that are NOT failures, and every one of them is a real,
 // observed shape in this repo -- "skipped" is not hypothetical, it is what
-// `record-post-merge-validation`'s job-level
-// `if: ... && github.event_name == 'repository_dispatch'` reports on EVERY
-// ordinary pull_request run (probed live on PR #2588, 2026-09-06: two
-// "Record post-merge validation" rows, both "skipping"). Treating a job's
-// own conditional skip as a failure would red every PR forever (#2609).
+// a conditionally skipped workflow job reports on an ordinary pull_request
+// run. Treating a job's own conditional skip as a failure would red every PR
+// forever (#2609).
 const BLOCKING_CONCLUSIONS = new Set([
 	"FAILURE",
 	"TIMED_OUT",

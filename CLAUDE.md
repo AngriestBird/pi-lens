@@ -10,5 +10,5 @@ that read, plus the Claude-specific assets.
   bypasses, and the rest of AGENTS.md "Contributing". Fix the command; never
   route around it.
 - Role contracts are `docs/pi-lens-*.md`; `.claude/agents/` holds the Claude
-  agent definitions for those roles, and `.claude/skills/` the merge-train and
-  retro procedures.
+  agent definitions for those roles, and `.claude/skills/` the retro
+  procedure; the merge policy is `docs/pi-lens-merge-policy.md`.
