@@ -165,10 +165,7 @@ describe("flattened PR body repair", () => {
 	);
 
 	it.each([
-		[
-			"plain quoted headings",
-			`${flattenedBody} \"## Summary one ## Tests two\"`,
-		],
+		["plain quoted headings", `${flattenedBody} "## Summary one ## Tests two"`],
 		[
 			"fenced quoted headings",
 			`${flattenedBody} \`\`\`text ## Summary one ## Tests two \`\`\``,
@@ -2296,7 +2293,7 @@ describe("head-tree citations and test references", () => {
 					'it("title after typeof regex", () => {});',
 					"const quotient = numerator / denominator;",
 					'it("title after division", () => {});',
-					'it.each([{ value: fn(1) }])(\"array each title\", () => {});',
+					'it.each([{ value: fn(1) }])("array each title", () => {});',
 				].join("\n"),
 			);
 			const git = (args: string[]) =>
@@ -2460,7 +2457,7 @@ describe("head-tree citations and test references", () => {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
 			writeFileSync(
 				join(fixtureCwd, "tests", "lexer.test.ts"),
-				`it(\"${title.replaceAll("\\", "\\\\")}\", () => {});\n`,
+				`it("${title.replaceAll("\\", "\\\\")}", () => {});\n`,
 			);
 			const git = (args: string[]) =>
 				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
@@ -2834,5 +2831,61 @@ foo.test.ts uniquely pins the retry ladder.`;
 		);
 		expect(result).toMatchObject({ valid: true });
 		warning.mockRestore();
+	});
+});
+
+// #3795 item 1. Recurrence: #3768's Round 3 body shipped with the shell-eaten
+// inline code spans and npm-script / oxlint output pasted outside any fence.
+// The structural lint passed those two garble symptoms; only the missing
+// test references redded it. The fixture below is that body's Round 3 block
+// (edit-2 of its userContentEdits, before the orchestrator rewrite).
+describe("PR body garble from shell-expanded quotes (#3795)", () => {
+	// The real block: emptied spans on the `fixed`/`Red proof` lines, then the
+	// pasted `npm run lint` banner and oxlint command line, unfenced.
+	const garbledRound3 = [
+		"## Round 3",
+		"",
+		"- N1 fixed: skip-only exit 1 is now scoped to  and ; other smoke lanes retain exit 0.",
+		"- Red proof, removing the gated option:  in .",
+		"- Targeted tests: 23 passed; ",
+		"> pi-lens@4.3.0 lint",
+		"> tsc --project tsconfig.json && npm run lint:js && npm run lint:js:tests",
+		"",
+		"> pi-lens@4.3.0 lint:js",
+		"> oxlint --deny-warnings --import-plugin -D block-scoped-var .",
+	].join("\n");
+
+	it("rejects the real Round 3 body's pasted npm banner and oxlint line", () => {
+		const errors = lintPrBody(`${body}\n\n${garbledRound3}`).errors.join("\n");
+		expect(errors).toContain("npm-script");
+		expect(errors).toContain("oxlint");
+	});
+
+	it("rejects an emptied inline code span outside a fence", () => {
+		const errors = lintPrBody(
+			`${body}\n\nThe span \`\` lost its name.`,
+		).errors.join("\n");
+		expect(errors).toContain("empty inline code span");
+	});
+
+	it("accepts the same tool output inside a fenced block", () => {
+		const fenced = `${body}\n\n## Round 3\n\n\`\`\`text\n> pi-lens@4.3.0 lint\n> oxlint --deny-warnings .\n\`\`\``;
+		const errors = lintPrBody(fenced).errors.join("\n");
+		expect(errors).not.toContain("npm-script");
+		expect(errors).not.toContain("oxlint");
+	});
+
+	it("ignores tilde fences and four-space indented code", () => {
+		const fenced = `${body}\n\n~~~text\n> pi-lens@4.3.0 lint\n> oxlint --deny-warnings .\n~~~`;
+		const indented = `${body}\n\n    > pi-lens@4.3.0 lint\n    > oxlint --deny-warnings .`;
+		expect(lintPrBody(fenced).errors.join("\n")).not.toContain("oxlint");
+		expect(lintPrBody(indented).errors.join("\n")).not.toContain("oxlint");
+	});
+
+	it("accepts a legitimate inline mention of the oxlint flag", () => {
+		const errors = lintPrBody(
+			`${body}\n\nThe \`oxlint --deny-warnings\` flag stays in the transcript.`,
+		).errors.join("\n");
+		expect(errors).not.toContain("outside a fenced block");
 	});
 });

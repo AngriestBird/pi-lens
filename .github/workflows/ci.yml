@@ -62,8 +62,12 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
+      - name: Fetch the PR base for the fragment-diff check
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+
       - name: Validate changelog fragments
-        run: node scripts/check-changelog-fragments.mjs
+        run: node scripts/check-changelog-fragments.mjs --base "${{ github.event.pull_request.base.sha }}"
 
   tla-models:
     name: TLA+ models

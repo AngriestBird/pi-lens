@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { CI_JOB_NAMES } from "./lib/ci-checks.mjs";
 
 export const GATES = [
@@ -11,7 +12,12 @@ export const GATES = [
 	["changelog:check", ["npm", "run", "changelog:check"], "Unit tests"],
 	[
 		"check-changelog-fragments",
-		[process.execPath, "scripts/check-changelog-fragments.mjs"],
+		[
+			process.execPath,
+			"scripts/check-changelog-fragments.mjs",
+			"--base",
+			"origin/master",
+		],
 		CI_JOB_NAMES.CHANGELOG_FRAGMENT,
 	],
 	[
@@ -246,7 +252,7 @@ export function runPreflight({
 
 if (
 	process.argv[1] &&
-	resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
+	import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
 	try {
 		process.exitCode = runPreflight({ argv: process.argv.slice(2) });
