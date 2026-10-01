@@ -780,7 +780,25 @@ npm run changelog:check               rollup check; fragments use check-changelo
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
+node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
 ```
+
+CI cost gates (#3801). The heavy advisory jobs (`mutation (advisory)`, `Unit
+tests Windows (advisory)`) start only after every required check passed on the
+head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
+or unfinished at its deadline). ci-verdict lists them with their real state
+(PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
+success. A docs-only pull request (root `*.md`, `docs/**`, `.changelog/**` and
+nothing else, classified by `scripts/ci-changed-files.mjs`; every doubt runs the
+full suite) skips only those heavy advisory jobs: the Unit shards and every
+other test job always run, because a docs edit can red tests outside tests/config
+(`docs/public-api-stability.md`, `docs/*_rules_catalog.md`). `TLA+ models`
+model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
+job never skips at job level: ci-verdict and the merge train demand a literal
+`success`, so `TLA+ models` starts and skips its steps.
+The Unit shards are packed by the per-file seconds in
+`scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
+`vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
 
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
