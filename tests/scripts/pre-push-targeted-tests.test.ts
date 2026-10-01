@@ -555,6 +555,260 @@ describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)",
 	);
 });
 
+// #3886: the pre-push self-scan now lives INSIDE scripts/pre-push-targeted-tests.mjs,
+// after its build (the scan imports compiled `clients/` modules) and after the
+// deletion-only early return, and is skipped under --skip-build. These cases
+// drive the real `.husky/pre-push` -> wrapper chain with the real `npm`
+// executable resolving fixture package.json scripts, so a fake npm that
+// ignores argv can no longer hide an ordering or resolution defect (r1 S2).
+describe("pre-push ast-grep self-scan (#3886)", () => {
+	const roots: string[] = [];
+
+	afterEach(() => {
+		for (const root of roots.splice(0))
+			fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	function git(root: string, ...args: string[]): string {
+		return String(
+			gitExecFileSync(
+				[
+					"-c",
+					"user.name=t",
+					"-c",
+					"user.email=t@example.com",
+					"-c",
+					"commit.gpgsign=false",
+					...args,
+				],
+				{ cwd: root, encoding: "utf8" },
+			),
+		).trim();
+	}
+
+	function put(root: string, rel: string, content: string) {
+		const full = path.join(root, rel);
+		fs.mkdirSync(path.dirname(full), { recursive: true });
+		fs.writeFileSync(full, content, "utf8");
+	}
+
+	/** Copies the hook + wrapper, links `node_modules`, and runs the case with a
+	 * scrubbed env (no ambient PI_LENS_* / VITEST). `input` is the git ref line
+	 * a real pre-push receives on stdin. */
+	function runHook(root: string, input: string) {
+		const home = path.join(root, "home");
+		fs.mkdirSync(home, { recursive: true });
+		const env = envFor(root);
+		for (const key of Object.keys(env))
+			if (
+				/^(VITEST|PI_LENS_|PILENS_|NODE_OPTIONS$|GITHUB_STEP_SUMMARY$)/.test(
+					key,
+				)
+			)
+				delete env[key];
+		Object.assign(env, {
+			PI_LENS_HOME: home,
+			PI_LENS_TEST_LOCK_TIMEOUT_MS: "300",
+			PATH: `${path.join(repoRoot, "node_modules/.bin")}:${env.PATH ?? ""}`,
+		});
+		return spawnSync("sh", [".husky/pre-push"], {
+			cwd: root,
+			env,
+			encoding: "utf8",
+			input,
+		});
+	}
+
+	/** Sources the hook + wrapper from this tree and a `build` stub that writes
+	 * `built.marker`. `astgrep:self-scan` refuses to run before that marker
+	 * exists, so the test observes the real build-before-scan ordering through
+	 * real npm resolution. */
+	function makeOrderingFixture() {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-scan-order-"),
+		);
+		roots.push(root);
+		for (const rel of [
+			".husky/pre-push",
+			"scripts/pre-push-targeted-tests.mjs",
+			"scripts/with-test-lock.mjs",
+			"scripts/lib/suite-lock.mjs",
+		])
+			put(root, rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+		put(
+			root,
+			"scan.mjs",
+			[
+				'import fs from "node:fs";',
+				'if (!fs.existsSync("built.marker")) {',
+				'  console.error("[scan] refused: build marker missing");',
+				"  process.exit(1);",
+				"}",
+				'console.log("[scan] ran after build");',
+				"",
+			].join("\n"),
+		);
+		put(
+			root,
+			"package.json",
+			JSON.stringify({
+				scripts: {
+					build:
+						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+					"astgrep:self-scan": "node scan.mjs",
+				},
+			}),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(root, "node_modules"),
+			"junction",
+		);
+		git(root, "init", "-q");
+		git(root, "add", ".husky", "scripts", "package.json", "scan.mjs");
+		git(root, "commit", "-q", "-m", "base");
+		const base = git(root, "rev-parse", "HEAD");
+		put(root, "docs/readme.md", "# docs\n");
+		git(root, "add", "docs");
+		git(root, "commit", "-q", "-m", "docs");
+		const head = git(root, "rev-parse", "HEAD");
+		return { root, refs: `refs/heads/t ${head} refs/heads/t ${base}\n` };
+	}
+
+	it("builds before the self-scan: an unbuilt tree on a docs-only push exits 0", () => {
+		const fx = makeOrderingFixture();
+		const result = runHook(fx.root, fx.refs);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("[scan] ran after build");
+		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(true);
+	});
+
+	it("a deletion-only push exits 0 before the build or the self-scan", () => {
+		const fx = makeOrderingFixture();
+		const zero = "0".repeat(40);
+		const result = runHook(
+			fx.root,
+			`(delete) ${zero} refs/heads/gone abc123\n`,
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain(
+			"deletion-only push; skipping build and tests",
+		);
+		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(false);
+	});
+
+	const VIOLATION = [
+		'import { writeFileSync } from "node:fs";',
+		"function f(file: string, data: unknown) {",
+		"  writeFileSync(file, JSON.stringify(data));",
+		"}",
+		"",
+	].join("\n");
+
+	/** A git fixture that runs the REAL scan: copied scan scripts, the compiled
+	 * `clients/` modules the lib imports, the shipped `rules/` symlinked, and a
+	 * `package.json` whose `astgrep:self-scan` runs the real wrapper. */
+	function makeRealScanFixture({ plantTracked }: { plantTracked: boolean }) {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-scan-real-"),
+		);
+		roots.push(root);
+		for (const rel of [
+			".husky/pre-push",
+			"scripts/pre-push-targeted-tests.mjs",
+			"scripts/with-test-lock.mjs",
+			"scripts/lib/suite-lock.mjs",
+			"scripts/run-astgrep-pi-lens.mjs",
+			"scripts/lib/astgrep-self-scan.mjs",
+			"scripts/lib/git-fixture-env.mjs",
+		])
+			put(root, rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+		put(root, "clients/clean.ts", "export const clean = 1;\n");
+		put(root, "tests/clean.test.ts", "export const t = 1;\n");
+		// The scan lib imports compiled clients/; symlink the real twins so their
+		// own relative imports resolve in the real tree. Only clients/clean.ts is
+		// tracked, so tracked-file enumeration stays legible.
+		fs.symlinkSync(
+			path.join(repoRoot, "clients/safe-spawn.js"),
+			path.join(root, "clients/safe-spawn.js"),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "clients/string-utils.js"),
+			path.join(root, "clients/string-utils.js"),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "rules"),
+			path.join(root, "rules"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(root, "node_modules"),
+			"junction",
+		);
+		put(
+			root,
+			"package.json",
+			JSON.stringify({
+				scripts: {
+					build: 'node -e "process.exit(0)"',
+					"astgrep:self-scan": "node scripts/run-astgrep-pi-lens.mjs",
+				},
+			}),
+		);
+		git(root, "init", "-q");
+		git(root, "add", ".husky", "scripts", "package.json", "clients", "tests");
+		git(root, "commit", "-q", "-m", "base");
+		const base = git(root, "rev-parse", "HEAD");
+		put(root, "clients/planted.ts", VIOLATION);
+		if (plantTracked) git(root, "add", "clients/planted.ts");
+		put(root, "clients/clean.ts", "export const clean = 2;\n");
+		git(root, "add", "clients/clean.ts");
+		git(root, "commit", "-q", "-m", "head");
+		const head = git(root, "rev-parse", "HEAD");
+		return { root, refs: `refs/heads/t ${head} refs/heads/t ${base}\n` };
+	}
+
+	it("blocks a push with a self-scan finding in a tracked file", () => {
+		const fx = makeRealScanFixture({ plantTracked: true });
+		// The guard lives in the wrapper now, so drive the wrapper directly: a
+		// green pre-fix run proves the scan was not reached from the hook's old
+		// position alone.
+		const result = spawnSync(
+			process.execPath,
+			["scripts/pre-push-targeted-tests.mjs"],
+			{ cwd: fx.root, encoding: "utf8", input: fx.refs, env: envFor(fx.root) },
+		);
+		expect(result.status).toBe(1);
+		expect(`${result.stdout}\n${result.stderr}`).toMatch(
+			/no-raw-json-store-write .*clients\/planted\.ts/,
+		);
+	});
+
+	it("does not block on an untracked planted file", () => {
+		const fx = makeRealScanFixture({ plantTracked: false });
+		// Drive the hook so the current-head scan's whole-directory walk would
+		// see the untracked plant; the fix must not.
+		const result = runHook(fx.root, fx.refs);
+		expect(result.status).toBe(0);
+	});
+
+	it("--skip-build skips the build and the self-scan", () => {
+		const fx = makeOrderingFixture();
+		// The scan stub refuses to run before `built.marker` exists, so a scan
+		// that leaks out of the build branch reds here instead of staying a
+		// vacuous "skipped under --skip-build" claim.
+		const result = spawnSync(
+			process.execPath,
+			["scripts/pre-push-targeted-tests.mjs", "--skip-build"],
+			{ cwd: fx.root, encoding: "utf8", input: fx.refs, env: envFor(fx.root) },
+		);
+		expect(result.status).toBe(0);
+		expect(`${result.stdout}\n${result.stderr}`).not.toContain("[scan]");
+		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(false);
+	});
+});
+
 // #3717 recurrence: a busy machine-wide test lock made pre-push exit 0 without
 // running the targeted tests, silently. Every case drives the REAL
 // `.husky/pre-push` -> `pre-push-targeted-tests.mjs` -> `with-test-lock.mjs`
@@ -624,6 +878,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 				scripts: {
 					build:
 						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+					"astgrep:self-scan": 'node -e "process.exit(0)"',
 				},
 			}),
 		);
