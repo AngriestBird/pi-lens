@@ -24,7 +24,10 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queue.js";
-import { FormatService } from "../../clients/format-service.js";
+import {
+	FormatService,
+	getFormatService,
+} from "../../clients/format-service.js";
 import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
 import * as clientModule from "../../clients/lsp/client.js";
 import {
@@ -33,9 +36,11 @@ import {
 	resetLSPService,
 } from "../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { type PipelineDeps, runPipeline } from "../../clients/pipeline.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
+import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { retireScope } from "../../clients/session-scope.js";
 import { waitFor } from "./interleaving-kit.js";
 import { createMockState } from "./lsp/mock-client-state.js";
@@ -175,6 +180,27 @@ vi.mock("../../clients/lsp-lazy.js", async (importOriginal) => {
 		}),
 	};
 });
+
+// #3858: the in-band cases run the real `runPipeline`; only its dispatch
+// (runners, cascade) is doubled, to a clean verdict, since the format phase and
+// the LSP sync under test run before it.
+vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/dispatch/integration.js")
+	>()),
+	dispatchLintWithResult: vi.fn(async () => ({
+		diagnostics: [],
+		blockers: [],
+		warnings: [],
+		baselineWarningCount: 0,
+		fixed: [],
+		resolvedCount: 0,
+		output: "",
+		blockerOutput: "",
+		hasBlockers: false,
+	})),
+	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
+}));
 
 let env: ReturnType<typeof setupTestEnvironment>;
 let runtime: RuntimeCoordinator;
@@ -2070,6 +2096,474 @@ describe("#3529: the drain's LSP sync ends on the bytes on disk", () => {
 					}),
 				]);
 			}
+		});
+	});
+
+	describe("#3858: a formatter the in-band (--immediate-format) budget gave up on", () => {
+		/**
+		 * The in-band pipeline (`runPipeline`, the tool_result path) formats
+		 * with `HOOK_WALL_BUDGET_MS.tool_result_edit`, then reads F and syncs
+		 * those bytes to the LSP and moves on while the abandoned child runs on
+		 * and writes later. Recurrence: #3828's stale LSP document, on the other
+		 * caller of `runFormatPhase`. TLC: `InBandLsp` and `FixInBand` (pass),
+		 * `InBandNoLateSync` and `FixInBandNoLateSync` (violate `LspMatchesDisk`).
+		 */
+		const inBandRows = () =>
+			logLatency.mock.calls
+				.map(([row]) => row as { phase?: string; metadata?: unknown })
+				.filter((row) => row.phase === "inband_format_late_resync");
+		const inBandSettled = () =>
+			waitFor(inBandRows, (rows) => rows.length > 0, {
+				yieldControl: tick,
+				timeoutMs: 2_000,
+			});
+		const spawns = () => lsp.createLSPClient.mock.calls.length;
+
+		beforeEach(() => {
+			flags.add("immediate-format");
+			// The pipeline's own sync and the late resync both go to the real
+			// singleton; its client holds F once the pipeline has synced it.
+			lsp.realService = getLSPService;
+			lspClient.isDocumentOpen = (fp: string) =>
+				lspState.openDocuments.has(normalizeMapKey(fp));
+		});
+
+		function runInBand(signal?: AbortSignal) {
+			return runPipeline(
+				{
+					filePath,
+					cwd: env.tmpDir,
+					toolName: "edit",
+					autofixMode: "deferred",
+					getFlag: (name: string) => flags.has(name),
+					dbg: () => {},
+					...(signal ? { signal } : {}),
+				},
+				{
+					biomeClient: {} as never,
+					ruffClient: {} as never,
+					metricsClient: {} as never,
+					getFormatService: () => new FormatService("format-drain", true),
+					fixedThisTurn: new Set<string>(),
+				} as PipelineDeps,
+			);
+		}
+
+		/** The budget fires while the formatter still resolves its command. */
+		async function giveUpInBand() {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const run = runInBand();
+			await resolving.p;
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.tool_result_edit + 1,
+			);
+			await run;
+			return { c, install: resolution.open };
+		}
+
+		it("OrphanGiveUp (#3858): the LSP document equals the disk once the formatter the budget gave up on writes", async () => {
+			const { c, install } = await giveUpInBand();
+			// The pipeline moved on and synced the bytes from before the format.
+			expect(wire.at(-1)).toBe("const x=1\n");
+			const spawnsBefore = spawns();
+			install();
+			await c.wrote;
+			expect(disk()).toBe("const x = 1\n");
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await inBandSettled();
+			expect(spawns() - spawnsBefore).toBe(0);
+			expect(inBandRows()).toEqual([
+				expect.objectContaining({
+					filePath,
+					metadata: { outcome: "resynced" },
+				}),
+			]);
+		});
+
+		it("OrphanGiveUp (#3858): an Escape that ends the formatter's wait still chains the late resync", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const controller = new AbortController();
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			const run = runInBand(controller.signal);
+			await resolving.p;
+			controller.abort();
+			await run;
+			// An Escape is not a degradation, and the child is still alive.
+			expect(wire.at(-1)).toBe("const x=1\n");
+			resolution.open();
+			await c.wrote;
+			await waitFor(
+				() => wire.at(-1),
+				(last) => last === disk(),
+				{ yieldControl: tick, timeoutMs: 2_000 },
+			);
+			await inBandSettled();
+			expect(disk()).toBe("const x = 1\n");
+		});
+
+		it("OrphanGiveUp (#3858): a formatter that never settles leaves the LSP as the pipeline synced it, with no row, frame or spawn", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				await giveUpInBand();
+				const spawnsBefore = spawns();
+				const wireBefore = wire.length;
+				// A wedged install has no leaf bound: nothing wakes the continuation.
+				await vi.advanceTimersByTimeAsync(10 * 60_000);
+				await tick();
+				await tick();
+				expect(inBandRows()).toEqual([]);
+				expect(wire.length).toBe(wireBefore);
+				expect(spawns() - spawnsBefore).toBe(0);
+				expect(rejections).toEqual([]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
+
+		it("OrphanGiveUp (#3858): another turn's aborted signal at the settle does not stop the late sync", async () => {
+			const { c, install } = await giveUpInBand();
+			// A later turn is running when the formatter settles, and the user has
+			// pressed Escape in it: the ambient signal is that turn's.
+			const foreign = new AbortController();
+			foreign.abort();
+			setAmbientAbortSignal(foreign.signal);
+			install();
+			await c.wrote;
+			await inBandSettled();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+		});
+
+		it("OrphanGiveUp (#3858): a throw in the late resync is one hook-handler-crash row and a failed late row, and rejects nothing", async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				const { c, install } = await giveUpInBand();
+				// The held-only resync fails (a server root that cannot be
+				// resolved, say): nothing awaits the continuation.
+				vi.spyOn(getLSPService(), "resyncGitChangedFiles").mockRejectedValue(
+					new Error("root resolution failed"),
+				);
+				install();
+				await c.wrote;
+				await inBandSettled();
+				await tick();
+				await tick();
+				expect(rejections).toEqual([]);
+				expect(inBandRows()).toEqual([
+					expect.objectContaining({ metadata: { outcome: "failed" } }),
+				]);
+				expect(
+					getDegradationSummary()
+						.filter((group) => group.kind === "hook-handler-crash")
+						.flatMap((group) => group.latestReasons.map((r) => r.subject)),
+				).toEqual(["inband-format-late-resync"]);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		});
+
+		it("a formatter the budget did not abandon chains no late resync", async () => {
+			// Recurrence guard: `FormatSummary.abandoned` was always present, so
+			// chaining on its presence would resync (and send a save) after every
+			// in-band format, not only after a late write.
+			const c = armChild();
+			await runInBand();
+			await c.wrote;
+			await tick();
+			await tick();
+			expect(disk()).toBe("const x = 1\n");
+			expect(wire.at(-1)).toBe(disk());
+			expect(inBandRows()).toEqual([]);
+		});
+
+		/**
+		 * The state space (#3858): {settled in budget, abandoned then late write}
+		 * x {F held, not held, vanished} x {same session, /new, session_shutdown,
+		 * idle reset}. `settled in budget` has no boundary to cross (the pipeline
+		 * runs inside one tool_result), so it is one cell per F state. The late
+		 * cells are #3828's, on this caller; the expectations are derived from
+		 * the contract (held-only, a save, a row naming what happened to F), not
+		 * from the code under test. Recurrence: the #3828 r2 F6 shape (a resync
+		 * that matches the disk and sends no didSave, which a save-triggered
+		 * server needs, #3405) and F7 (a row that cannot tell a sync from a
+		 * no-op), which `wire.at(-1) === disk()` alone sees neither.
+		 *
+		 * `held`: a live client of the service current at the settle holds F (the
+		 * successor's, after a retire). `not held`: the live service's client
+		 * dropped F (idle eviction, a close); after a retire no successor was
+		 * built. `vanished`: held, and the child removes F after its write.
+		 */
+		const IN_BAND_STATE_SPACE: ReadonlyArray<{
+			cell: string;
+			wire: "disk" | "none";
+			saved: boolean[];
+			didSave: number;
+			rows: string[];
+		}> = [
+			{
+				cell: "settled, held, same session",
+				wire: "disk",
+				saved: [true],
+				didSave: 1,
+				rows: [],
+			},
+			{
+				cell: "late, held, same session",
+				wire: "disk",
+				saved: [true],
+				didSave: 1,
+				rows: ["resynced"],
+			},
+			{
+				cell: "late, held, /new",
+				wire: "disk",
+				saved: [true],
+				didSave: 1,
+				rows: ["resynced"],
+			},
+			{
+				cell: "late, held, session_shutdown",
+				wire: "disk",
+				saved: [true],
+				didSave: 1,
+				rows: ["resynced"],
+			},
+			{
+				cell: "late, held, idle reset",
+				wire: "disk",
+				saved: [true],
+				didSave: 1,
+				rows: ["resynced"],
+			},
+			{
+				cell: "late, not held, same session",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["unheld"],
+			},
+			{
+				cell: "late, not held, /new",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["no-service"],
+			},
+			{
+				cell: "late, not held, session_shutdown",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["no-service"],
+			},
+			{
+				cell: "late, not held, idle reset",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["no-service"],
+			},
+			{
+				cell: "late, vanished, same session",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["vanished"],
+			},
+			{
+				cell: "late, vanished, /new",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["vanished"],
+			},
+			{
+				cell: "late, vanished, session_shutdown",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["vanished"],
+			},
+			{
+				cell: "late, vanished, idle reset",
+				wire: "none",
+				saved: [],
+				didSave: 0,
+				rows: ["vanished"],
+			},
+		];
+
+		it.each(IN_BAND_STATE_SPACE)(
+			"state space (#3858): $cell",
+			async (expected) => {
+				const [settle, held, session] = expected.cell.split(", ");
+				// A save-triggered server: it declared `textDocumentSync.save`.
+				lspState.saveOptions = { includeText: false };
+				const didSaves: string[] = [];
+				const send = vi.mocked(lspState.connection.sendNotification);
+				const wireOf = send.getMockImplementation();
+				send.mockImplementation(async (method: string, params: unknown) => {
+					if (method === "textDocument/didSave") {
+						didSaves.push(
+							String(
+								(params as { textDocument: { uri: string } }).textDocument.uri,
+							),
+						);
+					}
+					return wireOf?.(method, params);
+				});
+				const opens = vi.spyOn(
+					lspClient.notify as {
+						open: (...args: unknown[]) => Promise<unknown>;
+					},
+					"open",
+				);
+				const snap = () => ({
+					opens: opens.mock.calls.length,
+					didSaves: didSaves.length,
+					wire: wire.length,
+					spawns: spawns(),
+				});
+				if (held === "vanished") child.removeAfterWrite = true;
+
+				// `settled` counts from the start: the pipeline's own sync is the one
+				// sync. `late` counts from just before the child writes.
+				let at = snap();
+				let write = () => {};
+				let wrote: Promise<void>;
+				if (settle === "settled") {
+					const c = armChild();
+					await runInBand();
+					wrote = c.wrote;
+				} else {
+					const { c, install } = await giveUpInBand();
+					write = install;
+					wrote = c.wrote;
+					// The boundary falls while the abandoned child still runs on.
+					if (session === "/new") {
+						runtime.resetForSession(Date.now());
+						resetLSPService({ reason: "session_start" });
+					} else if (session === "session_shutdown")
+						resetLSPService({ reason: "session_shutdown" });
+					else if (session === "idle reset")
+						resetLSPService({ reason: "idle" });
+					if (held === "not held" && session === "same session") {
+						// The live client dropped F (idle eviction, a close).
+						lspClient.isDocumentOpen = (fp: string) =>
+							normalizeMapKey(fp) !== normalizeMapKey(filePath) &&
+							lspState.openDocuments.has(normalizeMapKey(fp));
+					} else if (session !== "same session" && held !== "not held") {
+						// The successor's read-warm touch opens F before the child writes.
+						await getLSPService().touchFile(filePath, "const x=1\n", {
+							diagnostics: "none",
+							source: "read-warm",
+							readStamp: performance.now(),
+						});
+					}
+					at = snap();
+				}
+
+				write();
+				await wrote;
+				if (settle === "late") await inBandSettled();
+				else {
+					await tick();
+					await tick();
+				}
+
+				expect(fs.existsSync(filePath)).toBe(held !== "vanished");
+				// The late resync spawns nothing; the settled pipeline's own sync is the
+				// one spawn of this cell's client.
+				expect(spawns() - at.spawns).toBe(settle === "settled" ? 1 : 0);
+				if (expected.wire === "disk") {
+					expect(wire.slice(at.wire).at(-1)).toBe("const x = 1\n");
+				} else {
+					expect(wire.slice(at.wire)).toEqual([]);
+				}
+				expect(
+					opens.mock.calls
+						.slice(at.opens)
+						.filter(
+							([fp]) =>
+								normalizeMapKey(String(fp)) === normalizeMapKey(filePath),
+						)
+						.map((call) => call[5]),
+				).toEqual(expected.saved);
+				expect(didSaves.length - at.didSaves).toBe(expected.didSave);
+				expect(inBandRows()).toEqual(
+					expected.rows.map((outcome) =>
+						expect.objectContaining({ filePath, metadata: { outcome } }),
+					),
+				);
+			},
+		);
+
+		it("OrphanGiveUp (#3858): the abandoned formatter's late bytes are not credited as seen", async () => {
+			// The assertions after the late write are pins: nothing ever stamped
+			// there, so only the wait for the late row reds before the fix. They
+			// name the recurrence the late resync must not introduce: a FileTime
+			// stamp of bytes the agent never saw (#3525, the FormatService sharing
+			// the read guard's table). The late read is the drift sweep's, which
+			// stamps neither.
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const resolving = gate();
+			const resolution = gate();
+			child.resolving = resolving.open;
+			child.resolved = resolution.p;
+			const c = armChild();
+			// The agent's own write, through the real tool_result handler: once the
+			// pipeline returns, it records that write in the read guard.
+			const result = handleToolResult({
+				event: {
+					toolName: "write",
+					toolCallId: "c1",
+					input: { path: filePath, content: "const x=1\n" },
+					details: {},
+					content: [],
+				},
+				getFlag: (name: string) => flags.has(name),
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				readGuard: runtime.readGuard,
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+			await resolving.p;
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.tool_result_edit + 1,
+			);
+			await result;
+			// The bytes the agent wrote and the pipeline synced are credited.
+			expect(runtime.readGuard.diskMovedSinceStamp(filePath)).toBe(false);
+			expect(getFormatService().hasChanged(filePath)).toBe(false);
+			resolution.open();
+			await c.wrote;
+			await inBandSettled();
+			expect(wire.at(-1)).toBe(disk());
+			// The formatter's late bytes are not: both tables still see the disk
+			// as moved past what they stamped. (An edit verdict would not show it:
+			// the read guard's content hashes tolerate a whitespace-only format.)
+			expect(runtime.readGuard.diskMovedSinceStamp(filePath)).toBe(true);
+			expect(getFormatService().hasChanged(filePath)).toBe(true);
 		});
 	});
 });
