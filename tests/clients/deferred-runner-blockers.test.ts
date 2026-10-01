@@ -97,6 +97,74 @@ describe("deferred blocker recording (#3814)", () => {
 		}
 	});
 
+	it("makes a file blocking again when a deferred blocker joins a fully suppressed record", async () => {
+		// Recurrence: `policySuppressed` is a verdict about the OLD finding set
+		// (#3248). A merge that kept it would let the gate ignore a live deferred
+		// blocker because the agent marked the earlier, different finding.
+		const env = setupTestEnvironment("pi-lens-3814-suppressed-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const inline: Diagnostic = {
+				...blocking(filePath),
+				id: "inline-tool:app.ts:1",
+				tool: "inline-tool",
+				message: "inline finding",
+			};
+			runtime.recordInlineBlockers(
+				filePath,
+				"inline summary",
+				runtime.nextWriteIndex(),
+				["inline-tool"],
+				[1],
+				undefined,
+				[inline],
+			);
+			runtime.applyInlineBlockerPolicyVerdicts([filePath]);
+			runtime.updateGitGuardStatus(false, "");
+			expect(runtime.gitGuardHasBlockers).toBe(false);
+
+			await settledAnswer(filePath, env.tmpDir);
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(1);
+
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves a record with no structured diagnostics as it was", async () => {
+		// Recurrence: merging into a text-only record would replace its text with
+		// the new findings alone at the next replay (the replay re-renders from
+		// `diagnostics`). The file already blocks, so nothing is lost by waiting.
+		const env = setupTestEnvironment("pi-lens-3814-unstructured-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.recordInlineBlockers(
+				filePath,
+				"legacy summary text",
+				runtime.nextWriteIndex(),
+				["legacy-tool"],
+			);
+			await settledAnswer(filePath, env.tmpDir);
+
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(0);
+			expect(runtime.getInlineBlockersSnapshot()).toMatchObject([
+				{ summary: "legacy summary text" },
+			]);
+			expect(
+				runtime.getInlineBlockersSnapshot()[0]?.diagnostics,
+			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("fails open and counts once when the gate's pre-check throws", async () => {
 		// Recurrence: the pre-check is new code on the commit path; a throw out of
 		// it must not turn every commit into a host error. The pre-#3814 answer
