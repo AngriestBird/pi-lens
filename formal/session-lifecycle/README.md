@@ -17,7 +17,8 @@ Four kinds of config:
 - **Merged behaviour** (`Merged`, `MergedStores`, `H3FileBacked`) must pass,
   and so must #3819's fix (`H3FileLess`, `H3FileLessStores`,
   `H3FileLessCarry`, `H3StaleSlot`, `H3StaleSlotFileLess`, with `ticketKey`
-  and `demotedDiscard`). The rest register a known violation of merged
+  and `demotedDiscard`), and so must #3881's (`H3Interrupted`,
+  `H3InterruptedFileLess`, with `forwardUnadopted`). The rest register a known violation of merged
   master until its fix flips the config to `pass`: `Current` violates
   `SecondaryIsolation` through N2 (#3613); the `H3Demote*` configs record the
   cost of #3668's row-17 residual (`NoLostCarry`, `NoLostAdvisory`,
@@ -27,7 +28,7 @@ Four kinds of config:
   turn counter). It is not #3819's fix: with `FileLess = {}` and no subagent
   replacement, `Fix` cannot reach either #3819 path. The `AcceptedLateRead*`
   configs pin the false block the design accepts (F1).
-- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`, `Pre3819*`) restores the shape a
+- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`, `Pre3819*`, `Pre3881*`) restores the shape a
   merged fix removed, and must violate the invariant that fix established.
 - **Mut** configs remove one mechanism or restore one table row: older
   pre-fix shapes, today's open residuals, and design alternatives the design
@@ -76,6 +77,7 @@ scope the most recent primary `session_start` served.
 | subagent start/stop | An in-process subagent binds with reason `startup` while the primary is live, or in its replacement gap, where #3668 declines it. It skips `handleSessionStart` (#473), begins its own scope (`beginScope` in the `session_start` handler, `index.ts`) and never adopts. |
 | subagent `/reload`, `/fork` | Its own replacement. Its shutdown takes the secondary path (no stash). With no primary registered (the primary's replacement gap), its start is the successor by #3668's rule (a reason other than `startup`), so it classifies primary and adopts; the primary's real successor is then demoted to a secondary (`BeginDemoted`). This is #3668's stated residual, row 17. |
 | duplicate start | A second `session_start` for the same replacement (I5, #2890). |
+| interrupted start | `Interrupt` (#3881): the replacement's primary start begins (its scope's ticket is drawn, the module-level runtime serves it), and before `adoptHandoff` the activation's own `/reload` shutdown lands, because a handler ordered before pi-lens scheduled `AgentSession.reload()` and pi does not stop it while it awaits the start's emit. One step, once per behaviour. The start never adopts or registers, and the shutdown saves no sidecar (the coordinator's session id is not pinned yet, so `persistScope` does not run). Not combined with registry or LSP writers. |
 
 **The hand-off (S2).** `stashHandoff` (`clients/session-scope.ts`)
 replaces the one process slot at a primary shutdown whose successor reads it:
@@ -183,6 +185,11 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   matches the slot discards it without adopting (`discardHandoff`). No
   other start removes a slot except by taking it. Without it, the slot
   stays until a later start of the demoted session takes it.
+- `forwardUnadopted` (#3881): the interrupted start's shutdown
+  (`Interrupt`) re-keys the slot left for that start to its own `/reload`,
+  written by the interrupted scope (`forwardHandoff`), and stashes nothing
+  of the scope. Without it, it stashes the scope's empty snapshot, as
+  `stashHandoff` did.
 
 ## Invariants
 
@@ -242,6 +249,8 @@ counterexample.
 | `H3FileLessCarry` | #3819's ticket key still carries a file-less `/reload`'s activations and advisory while a subagent binds in the gap | pass | 278 |
 | `H3StaleSlot` | file-backed, five transitions with `/new` and resume: the demoted successor discards its slot, so the demoted session's later `/reload` takes nothing, with #3819's fix | pass | 2322 |
 | `H3StaleSlotFileLess` | the same, file-less sessions | pass | 2322 |
+| `H3Interrupted` | file-backed: a `/reload`, `/fork` or resume start is interrupted by its own `/reload` before it adopts, with #3881's fix: the inner reload's start keeps the reads, activations and advisory | pass | 189402 |
+| `H3InterruptedFileLess` | the same, file-less sessions | pass | 189402 |
 | `H3DemoteCarry` | file-backed row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
 | `H3DemoteAdvisory` | file-backed row 17: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
 | `H3DemoteActivation` | file-backed: a subagent's own replacement starts without its activations; row 17's demoted successor loses the conversation's | violated `NoLostActivation` | 28 |
@@ -265,6 +274,7 @@ counterexample.
 | `Pre3757AdvisoryShared` | pre-#3757: a subagent's context call takes the primary's advisory | violated `NoCrossSessionDelivery` | 9 |
 | `Pre3819FileLess` | pre-#3819: a subagent's own replacement takes a file-less primary's slot | violated `NoCrossSessionAdoption` | 29 |
 | `Pre3819StaleSlot` | pre-#3819: a demoted session takes a stale slot | violated `HandoffOnce` | 413 |
+| `Pre3881Interrupted` | pre-#3881: the interrupted start's shutdown stashes its empty scope | violated `NoLostActivation` | 283 |
 | `MutFileLessNoTicketKey` | #3819's fix without `ticketKey` | violated `NoCrossSessionAdoption` | 29 |
 | `MutStaleSlotNoDiscard` | #3819's fix without `demotedDiscard` | violated `HandoffOnce` | 413 |
 | `MutForkClosureStash` | pre-#3669: the fork stash is per activation | violated `NoLostCarry` | 24 |
@@ -301,6 +311,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `PreS2AdvisoryReload` | #3612 (the advisory scope addition) | pre-S2 (ae5396e46, which has #3757): no advisory store | An advisory is queued, `/reload`, and the prune drops it as its retired scope's. |
 | `PreS3StalePipelineAfterNew` | #3596; the #3528 drain shape | pre-S3 (f8453c664): `runtime.readGuard.recordWritten` resolved when the write lands | A write begins, `/new` completes, and the write lands in session 2. |
 | `Pre3757AdvisoryShared` | #3748 | pre-#3757 (61c6ee644): an untagged queue | The drain queues an advisory, and the subagent's context call takes it. |
+| `Pre3881Interrupted` | #3881 | pre-#3881 (5d55e4821): `stashHandoff` at every primary `/reload` shutdown, whether or not the activation's start adopted | An activation lands; `/reload` (or `/fork`) leaves the slot; the successor's start is interrupted by its own `/reload`, whose shutdown stashes the empty scope over that slot; the inner reload's start takes the empty slot. |
 | `MutFileLessNoTicketKey` | #3819 | design alternative: the discard alone | As `Pre3819FileLess`: the subagent's own start classifies primary before the real successor starts, so it matches `(reason, undefined)`. |
 | `MutStaleSlotNoDiscard` | #3819 | design alternative: option (b) alone | As `Pre3819StaleSlot`: the demoted session inherits the primary's session manager on `/reload`, so its ticket key matches the stale slot. |
 | `MutForkClosureStash` | #3521 fork half; the #3589 shape | pre-#3669 (df5fb8abb): `pendingForkReadGuard`, an activation-closure `let` | A read lands, then `/fork`: the fork starts clean. |
@@ -379,6 +390,25 @@ classifies primary. Three consequences follow.
 shared read guard puts a subagent's read in the primary's cell
 (`MutSecondaryReadShared`, and `Current` without `SecondaryIsolation`).
 
+**F5. An interrupted start's shutdown re-keys the slot; skipping the stash
+is not enough (#3881).** The interrupted start never adopted, so the slot
+left for it is the conversation's state. Model mutations of
+`forwardUnadopted` on `H3Interrupted` / `H3InterruptedFileLess`:
+
+- Leaving the slot as it is (no stash, no re-key) violates `HandoffOnce`
+  file-backed (61 states: the inner reload's start takes a slot written by
+  a scope it did not replace) and `NoLostActivation` file-less (363
+  states: the inner reload's start finds no slot keyed by its manager's
+  ticket).
+- Re-keying without the interrupted scope as the writer violates the same
+  two (61 and 363 states).
+- Keeping the start's reason violates `NoLostActivation` (362 states): a
+  `/fork` start's slot never matches the inner `/reload`'s start.
+- Re-keying any slot rather than the one left for the start passes inside
+  the bounds (no stale slot is reachable in three steps); the unit test
+  `forwards the slot left for an interrupted start to that session's next
+  start, and no other slot` pins it.
+
 **Confirmations.** D3: `PreS2SnapshotAtBeforeFork` violates `NoLostCarry`.
 D5: `PreS2ReloadReset` violates `NoLostCarry`. Carrying authorship on
 `/reload` is required, not merely safe.
@@ -397,6 +427,15 @@ Not modelled:
   git-guard latch, the debounce re-entry) and the fail-open external bridge
   producer (#3763); the deferral queue's two-hop credit (#3705). `svc` is
   one process counter, which is the merged behaviour (#3755).
+- **The interrupted start's own continuation (#3881).** When another
+  extension's `session_shutdown` handler awaits, pi has not yet invalidated
+  the interrupted start's ctx, so that start runs on after its shutdown;
+  the code returns before `adoptHandoff` once its shutdown ran. `Interrupt`
+  is one step, so the model never reaches that continuation; the runtime
+  witnesses' "the start runs on" axis pins it
+  (`tests/index-3521-fork-tree-witness.test.ts`). An interrupt between the
+  slot take and the end of `adoptHandoff`'s synchronous restores (a
+  microtask-driven reload) is not modelled either.
 - **#3668's successor marker and its expiry.** A replacement whose successor
   never starts (row 15), and a `session_start` that crashed before its scope
   was set, are not modelled; either leaves an untaken slot that only a start
