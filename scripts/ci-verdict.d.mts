@@ -9,6 +9,8 @@ export declare function formatExitLine(result: {
 	code: number;
 	kind: string;
 }): string;
+export declare function transportExit(): { code: number; kind: string };
+export declare function crashExit(): { code: number; kind: string };
 export declare const ABSENT_REQUIRED_REARM_MINUTES: number;
 export declare function formatAbsentRequiredReason(
 	sha: string,

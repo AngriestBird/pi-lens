@@ -261,6 +261,20 @@ export function formatExitLine({ code, kind }) {
 	return `ci-verdict: exit ${code} (${kind})`;
 }
 
+/**
+ * The `{ code, kind }` a non-verdict emission prints. They live here, named
+ * once, so the formatter contract's own unit tests cover them rather than
+ * only an old-Node spawn (version-too-old) or a forced crash (top-level
+ * catch) that a test cannot reach (#3883 F4).
+ */
+export function transportExit() {
+	return { code: EXIT_TRANSPORT, kind: "transport" };
+}
+
+export function crashExit() {
+	return { code: EXIT_FAILURE, kind: "error" };
+}
+
 /** Minutes a required check may stay unregistered on a head with auto-merge
  * armed before the verdict says "re-arm" (#3694). CI normally registers within
  * a minute or two; ten is well past that without hiding a stuck retarget. */
@@ -2686,7 +2700,7 @@ async function main() {
 	});
 	if (plan === REEXEC_VERSION_TOO_OLD) {
 		console.error(formatVersionTooOldMessage(process.version));
-		console.log(formatExitLine({ code: EXIT_TRANSPORT, kind: "transport" }));
+		console.log(formatExitLine(transportExit()));
 		process.exitCode = EXIT_TRANSPORT;
 		return;
 	}
@@ -2701,8 +2715,7 @@ async function main() {
 			{ stdio: "inherit", env: { ...process.env, NODE_USE_ENV_PROXY: "1" } },
 		);
 		process.exitCode = result.status ?? EXIT_TRANSPORT;
-		if (result.status === null)
-			console.log(formatExitLine({ code: EXIT_TRANSPORT, kind: "transport" }));
+		if (result.status === null) console.log(formatExitLine(transportExit()));
 		return;
 	}
 	const result = await run();
@@ -2715,7 +2728,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 		console.error(error);
 		// An unexpected throw is not a verdict: EXIT_FAILURE's contract is
 		// "GitHub answered and the answer was red" (#3883 F4).
-		console.log(formatExitLine({ code: EXIT_FAILURE, kind: "error" }));
+		console.log(formatExitLine(crashExit()));
 		process.exitCode = EXIT_FAILURE;
 	});
 }

@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import {
 	ABSENT_REQUIRED_REARM_MINUTES,
 	computeVerdict,
+	crashExit,
 	DEFAULT_GH_TIMEOUT_MS,
 	EXIT_DIRTY,
 	EXIT_FAILURE,
@@ -42,6 +43,7 @@ import {
 	resolveRequiredCheckNames,
 	resolveWaitCapSeconds,
 	run,
+	transportExit,
 } from "../../scripts/ci-verdict.mjs";
 import {
 	ADVISORY_CHECKS,
@@ -67,6 +69,16 @@ describe("formatExitLine — the pipe-safe CLI status contract (#3883)", () => {
 		[{ code: EXIT_SUCCESS, kind: "stream" }, "0 (stream)"],
 	] as const)("prints %j as %s", (result, expected) => {
 		expect(formatExitLine(result)).toBe(`ci-verdict: exit ${expected}`);
+	});
+
+	it("pins the non-verdict exit records the CLI emits itself", () => {
+		// The old-Node and unexpected-throw emissions cannot be reached by a
+		// spawn, so their records are pinned here and used by `main()`.
+		expect(transportExit()).toEqual({
+			code: EXIT_TRANSPORT,
+			kind: "transport",
+		});
+		expect(crashExit()).toEqual({ code: EXIT_FAILURE, kind: "error" });
 	});
 });
 
