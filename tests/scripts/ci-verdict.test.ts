@@ -129,6 +129,41 @@ describe("ci-verdict CLI — the final exit line on every reachable exit path (#
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("emits `exit 1 (error)` as its last stdout line when main() throws", () => {
+		// R1: `main().catch` is the only emitter of `crashExit()`. A preload
+		// makes the FIRST `console.error` (run()'s usage branch) throw, so
+		// `run()` rejects through to the top-level catch without a real crash.
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-crash-"));
+		try {
+			const preload = join(dir, "crash-preload.mjs");
+			writeFileSync(
+				preload,
+				[
+					"const original = console.error;",
+					"let armed = true;",
+					"console.error = (...args) => {",
+					"  if (armed) {",
+					"    armed = false;",
+					"    console.error = original;",
+					"    throw new Error('preload: forcing the crash path');",
+					"  }",
+					"  return original(...args);",
+					"};",
+					"",
+				].join("\n"),
+			);
+			const result = spawnSync(process.execPath, ["--import", preload, cli], {
+				encoding: "utf8",
+				env: cleanEnv(),
+				timeout: 30_000,
+			});
+			expect(lastLine(result.stdout)).toBe("ci-verdict: exit 1 (error)");
+			expect(result.status).toBe(EXIT_FAILURE);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 function checkRun({

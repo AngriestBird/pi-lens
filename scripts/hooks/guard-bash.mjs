@@ -2054,9 +2054,19 @@ function findPipedCiVerdictStatusRead(segments) {
 		let { rest } = stripEnvAssignments(words);
 		// `timeout <duration> node …` runs the node command it wraps; drop the
 		// wrapper and its options/duration before looking for `node` (#3883 F6).
+		// `-s`/`--signal` and `-k`/`--kill-after` each take their own argument,
+		// so consume it too or the duration read lands on the signal
+		// (`timeout -s KILL 600 node …`, #3883 R2).
 		if (rest[0] === "timeout") {
+			const takesArgument = (word) =>
+				word === "-s" ||
+				word === "--signal" ||
+				word === "-k" ||
+				word === "--kill-after";
 			let i = 1;
-			while (i < rest.length && rest[i].startsWith("-")) i++;
+			while (i < rest.length && rest[i].startsWith("-")) {
+				i += takesArgument(rest[i]) ? 2 : 1;
+			}
 			i += 1; // the duration argument
 			rest = rest.slice(i);
 		}
@@ -2072,24 +2082,50 @@ function findPipedCiVerdictStatusRead(segments) {
 			);
 	};
 	// A `$?` inside single quotes is literal text to bash, not the status; the
-	// `${?}` spelling still reads it in every other context (#3883 F6).
+	// `${?}` spelling still reads it in every other context (#3883 F6). The
+	// scan tracks double quotes too, so an apostrophe INSIDE a double-quoted
+	// string (`echo "it's $? ok"`) does not open a phantom single-quote span
+	// that hides the expansion (#3883 R2).
 	const readsStatus = (text) => {
-		const unquoted = text.replace(/'[^']*'/g, "");
+		let unquoted = "";
+		let inSingle = false;
+		let inDouble = false;
+		for (const ch of text) {
+			if (ch === "'" && !inDouble) {
+				inSingle = !inSingle;
+				continue;
+			}
+			if (ch === '"' && !inSingle) {
+				inDouble = !inDouble;
+				unquoted += ch;
+				continue;
+			}
+			if (!inSingle) unquoted += ch;
+		}
 		return unquoted.includes("$?") || unquoted.includes("${?}");
 	};
-	// `set -o pipefail` (any option spelling) makes the pipeline's `$?` the real
-	// status, so a command that enables it before the pipeline is not the
-	// mistake this rule exists for (#3883 F6).
-	const enablesPipefail = (text) => {
+	// `set -o pipefail` makes the pipeline's `$?` the real status, so a command
+	// that enables it before the pipeline is not the mistake this rule exists
+	// for; `set +o pipefail` DISABLES it again, and a later disable undoes an
+	// earlier enable (#3883 F6, R2).
+	const pipefailSetting = (text) => {
 		const { rest } = stripEnvAssignments(
 			stripCommandGroupAndRunnerPrefixes(splitWords(text)),
 		);
-		return rest[0] === "set" && rest.includes("pipefail");
+		if (rest[0] !== "set") return null;
+		for (let j = 1; j < rest.length; j++) {
+			const token = rest[j];
+			if (!/^[-+][A-Za-z]*o$/.test(token)) continue;
+			if (rest[j + 1] !== "pipefail") continue;
+			return token[0] === "-";
+		}
+		return null;
 	};
 	let pipefail = false;
 	for (let i = 0; i < segments.length; i++) {
 		if (!isCiVerdict(segments[i].text)) {
-			if (enablesPipefail(segments[i].text)) pipefail = true;
+			const setting = pipefailSetting(segments[i].text);
+			if (setting !== null) pipefail = setting;
 			continue;
 		}
 		// Only a pipefail in force BEFORE this command changes what `$?` means.

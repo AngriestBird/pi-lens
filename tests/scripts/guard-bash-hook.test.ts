@@ -243,6 +243,28 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	["node --no-warnings scripts/ci-verdict.mjs 1 | tail; echo $?", "ci-verdict"],
 	["node scripts/ci-verdict.mjs 1 | tail; echo ${?}", "ci-verdict"],
 	["node scripts/ci-verdict.mjs 1 |& tail; echo $?", "ci-verdict"],
+	// #3883 R2: `timeout`'s own options take arguments (`-s KILL`, `-k 5`), so
+	// the duration read must not land on the signal.
+	[
+		"timeout -s KILL 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
+	[
+		"timeout -k 5 600 node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
+	// #3883 R2: the single-quote stripper must not treat an apostrophe inside a
+	// double-quoted string as opening a single-quote span that hides `$?`.
+	[
+		"node scripts/ci-verdict.mjs 1 | tail; echo \"it's $? ok it's\"",
+		"ci-verdict",
+	],
+	// #3883 R2: `set +o pipefail` DISABLES pipefail, so the pipeline's `$?` is
+	// the filter's status again.
+	[
+		"set +o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
+		"ci-verdict",
+	],
 ];
 
 // Every allow string the issue lists, which must stay green.
@@ -267,6 +289,9 @@ const ALLOW_CASES: string[] = [
 	"node scripts/ci-verdict.mjs 1; git status; echo $?",
 	// #3883 F6: `set -o pipefail` makes the pipeline's status the real one.
 	"set -o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
+	// #3883 R2: a later `set +o pipefail` disables it, and re-enabling after a
+	// disable still makes the pipeline's status the real one.
+	"set +o pipefail; set -o pipefail; node scripts/ci-verdict.mjs 1 | tail; echo $?",
 	// #3883 F6: a single-quoted `'$?'` is literal text, not the status.
 	"node scripts/ci-verdict.mjs 1 | tail; echo '$?'",
 	// #3723: the sanctioned form of the worktree open/close sequence the
