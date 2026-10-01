@@ -26,6 +26,16 @@ are not repeated here.
 - When a gate becomes fail-closed, sweep every construction site that reaches
   it, test doubles included, and prove the sweep with the behaviour suites
   (#3622).
+- A change on a lifecycle, timing, or identity seam extends or adds a TLA+
+  model in this step (#3802; the rule itself is in `AGENTS.md`). Find the
+  family in `formal/coverage-map.json`, write the invariant the change
+  preserves or tightens, and show the violating config red on the pre-fix model
+  and green after, or carry `TLA+ unaffected: <family> — <reason>` in the PR
+  body. A row is any-of (one listed family's model move or declaration
+  satisfies it); a row of 4+ families only prints a note until hunk-level
+  matching exists (#3878). The map owner is the lane that adds a
+  `formal/<family>/`: it adds the family and its map row in the same PR, and
+  `validateCoverageMap` reds the Unit tests lane otherwise.
 - Seams are named in the brief before the round. A fixer that needs an
   unconfirmed seam stops and reports it as a finding, not as a test.
 
