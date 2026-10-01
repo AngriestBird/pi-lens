@@ -530,6 +530,44 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(overwrittenCount()).toBe(1);
 	});
 
+	// Recurrence: AGENTS.md shape 53. The notice is delivered from a detached
+	// promise chain (#3830), so a host callback that throws would be an unhandled
+	// rejection, which kills the pi host. It is a debug line instead.
+	it("survives a loss-notice callback that throws", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+		const dbg = vi.fn();
+		const run = runPipelineSettled(
+			{
+				...pipelineContext(mainRs),
+				dbg,
+				onFixRunLoss: () => {
+					throw new Error("advisory queue exploded");
+				},
+			},
+			pipelineDeps(),
+		);
+		await started.p;
+		const edit = agentEdit(aRs, "let AGENT = 1;");
+		edit.write();
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		await edit.deliver();
+		proceed.open();
+		await run;
+
+		expect(dbg).toHaveBeenCalledWith(
+			expect.stringContaining(
+				"fix-run loss notice failed: advisory queue exploded",
+			),
+		);
+	});
+
 	it("warns at agent_end when the deferred fix run overwrote an edit it could not restore", async () => {
 		const aRs = path.join(srcDir, "a.rs");
 		const started = gate();
