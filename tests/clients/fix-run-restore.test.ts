@@ -773,6 +773,13 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 		expect(fs.readFileSync(aRs, "utf-8")).toBe("let TWO = 1;\n");
 		expect(result.output).toContain("a.rs");
+		// #3830: the skip is counted once, so an operator can see how often a
+		// newer edit won.
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "fix-run-restore-skipped-newer-edit",
+			)?.count,
+		).toBe(1);
 	});
 
 	it("restores after a second edit whose tool_result was delivered", async () => {
