@@ -19,7 +19,7 @@ Task routing:
   review-graph, Git-guard, or rule work: read the matching **Standing
   invariants** subsection and the relevant source tests.
 - Delegated work: read `docs/pi-lens-subagent.md` and exactly one role contract
-  from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden}.md`.
+  from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden,retro}.md`.
 - Pi documentation work: read the installed pi documentation named by the
   global instructions. Do not infer SDK behavior from memory.
 
@@ -46,7 +46,9 @@ claims enforcement names its guard by path; a guard that is only planned is
 named by its open issue, never described as if it runs.
 
 Keep project instructions consistent with `CLAUDE.md`, role contracts, skills,
-and tests. The repository wins when a runner-side copy differs.
+and tests. The repository wins when a runner-side copy differs. Role rules live
+only in `docs/pi-lens-*.md`; `.claude/agents/*.md` are thin Claude Code
+wrappers that point there and hold only harness-specific lines.
 
 ## Issue and PR design contract
 
@@ -55,6 +57,7 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 - Issues and PRs lead with the outcome, then evidence, root cause (or a labeled
   hypothesis), acceptance criteria, non-goals, failure semantics, test matrix,
   observability, and class-sweep coverage. The issue reference goes in the PR
+  title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
 - Every `Mutation diff` survivor on an added line is killed or shown
   equivalent.
@@ -71,6 +74,12 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 - A core-domain rule lives in its owning module; every other caller asks that
   owner. A fix that re-derives an owned rule at a consumer is wrong: extend the
   owner, or create a new one only with a stated reason (#3781, #3794, #3796).
+- A change on a lifecycle, timing, or identity seam extends or adds a TLA+
+  model in step with the code. `formal/coverage-map.json` maps source globs to
+  model families; the PR-body lint requires a `.tla`/`.cfg` change under any one
+  of a mapped row's families, or a `TLA+ unaffected: <family> — <reason>` line
+  for one of them. `unmodelled` rows and rows of 4+ families stay advisory. A
+  TLA lane that adds a family adds its map row (#3802).
 
 <important if="delegating work or coordinating a lane">
 
@@ -284,7 +293,10 @@ the surface they bite; each block loads only when its trigger applies.
     evidence; preserve the classifier and evidence when a caller asserts a fact.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
-    exit codes, output shapes, severity names, or fixtures.
+    exit codes, output shapes, severity names, or fixtures. For a third-party
+    extension, server, or file format, read its source or schema at a pinned
+    SHA and pin a test vector generated from it, citing the SHA; a double
+    built from an issue's description encodes the same guess (#2432).
 
 40. **Tool root drift:** all runner, formatter, and LSP child spawns use
     `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
@@ -471,9 +483,15 @@ the surface they bite; each block loads only when its trigger applies.
   `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator and
   reviewer scratch, `<worktree>/../probes-<pr>` for probes, and
   `.claude/worktrees/` for a fixer's own worktree.
-- Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
-  orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
-  per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
+- Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
+  (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
+  in `beforeEach`/an `it` body moves nothing. A test process never truncates a log
+  under the real `~/.pi-lens` (`isTestProcessTargetingRealHome`); the first refusal
+  emits one `process.emitWarning` (visible on stderr) and folds a
+  `log-sink-truncate-refused` row into `pilens_health`. `vitest-setup.ts` also pins the orphan-backstop
+  directory through `resolveBackstopStateDir` (#3083) when the home IS the
+  run-shared one. Explicit per-case homes remain authoritative. Never bypass this
+  seam for its lock or stamp.
 - Test tmp roots are swept by the worker that made them (#2912):
   `tests/support/vitest-setup.ts` removes every `setupTestEnvironment` root at
   `afterAll` and on SIGTERM; any other straggler reds its owner, so do not widen
@@ -615,7 +633,11 @@ the surface they bite; each block loads only when its trigger applies.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
 - Session degradation uses the ledger's bounded once/count APIs and resets at
-  the correct primary session boundary. A process-lifetime latch cannot store a
+  the correct primary session boundary. `SessionStartClassification`
+  (`clients/session-lifecycle.ts`): `primary` and `sequential-replacement`
+  (resume and reload) both run the full start and reset; only
+  `concurrent-secondary` skips the reset, since a subagent reset tears down the
+  primary's warm state. `secondary` belongs to the shutdown classification. A process-lifetime latch cannot store a
   session fact without an explicit reset.
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
@@ -735,7 +757,7 @@ npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
 npm run check:lockfile                lockfile consistency
-npm run changelog:check               changelog validation
+npm run changelog:check               rollup check; fragments use check-changelog-fragments.mjs
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
@@ -816,8 +838,16 @@ Test authoring screens:
 
 - Enter through the production entry point, not a parallel helper path.
 - Make unavailable prerequisites visible with `skipIf`, never a bare return.
+  Every `skipIf(process.platform …)` names the lane that runs it or reads
+  `// lane: dev-box-only`; prefer a cross-platform variant through the test's
+  own seam when the divergence is a technique artifact.
+- Measure a platform skip for a case-variant fixture: probe the real
+  filesystem for the collision first, and create the sibling fixture only
+  after the probe confirms it (#3159).
 - Pin the seam that broke, not a value supplied by the test.
-- Make doubles depend on explicit arguments, never stack or caller inspection.
+- Make doubles depend on explicit arguments, never stack or caller inspection,
+  and honour every input the production seam honours on the axis under test (a
+  timeout, a budget, a generation).
 - Restore env, timers, cwd, and module state; run the case in isolation.
 - Keep performance bounds close to measured fixed and regressed values.
 - Assert real behavior, not only mock calls or `not.toThrow`.
