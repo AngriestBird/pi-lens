@@ -1968,4 +1968,64 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 			expect.objectContaining({ subject: "fork", outcome: "forwarded" }),
 		]);
 	});
+
+	/**
+	 * #3881 r3: a #2890 duplicate `session_start` admitted while the first
+	 * start is in flight runs a second primary start in this activation
+	 * (`liveToolPlan.changed` lets it through). The first start adopts the
+	 * fork's slot and becomes the activation's scope. The recurrence: r2's
+	 * guarded `finally` kept the duplicate's in-flight mark, so the later
+	 * reload's shutdown forwarded (finding no slot) instead of stashing the
+	 * adopted scope, and the inner reload started without the activation.
+	 */
+	it("keeps an in-memory /fork's activations when a duplicate start is admitted mid-flight and a reload follows", async () => {
+		let runtime: AgentSessionRuntime | undefined;
+		let armed = false;
+		let dup: Promise<unknown> | undefined;
+		let inner: Promise<void> | undefined;
+		const duplicateStart = (pi: ExtensionAPI) => {
+			pi.on("session_start", (event) => {
+				const reason = (event as { reason?: string }).reason;
+				if (!armed || reason !== "fork" || dup) return;
+				const runner = runtime!.session.extensionRunner;
+				dup = Promise.resolve().then(() =>
+					runner.emit({ type: "session_start", reason } as never),
+				);
+			});
+		};
+		const reloadAfterStart = (pi: ExtensionAPI) => {
+			pi.on("session_start", () => {
+				if (dup && !inner) inner = runtime!.session.reload();
+			});
+		};
+		runtime = await startRuntime(
+			SessionManager.inMemory(cwd),
+			[reloadAfterStart],
+			[duplicateStart],
+		);
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		c.done();
+		await activateTools(runtime, "act", ["ast_grep_search"]);
+		const u2 = c.user("prompt 2");
+		c.done();
+		// The saved sidecar keeps the duplicate in flight until the reload's
+		// shutdown lands (without it the duplicate settles first).
+		await turnEnd(runtime);
+		resetDegradationLedger();
+
+		armed = true;
+		await runtime.fork(u2);
+		expect(dup).toBeDefined();
+		await dup;
+		expect(inner).toBeDefined();
+		await inner;
+
+		expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+		expect(
+			(await scopeTransitionRows())
+				.filter((row) => row.transition === "start")
+				.at(-1),
+		).toMatchObject({ reason: "reload", handoffSource: "slot" });
+	});
 });
