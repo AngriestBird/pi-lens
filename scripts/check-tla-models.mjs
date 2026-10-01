@@ -72,6 +72,10 @@ export function parseModelHeader(text) {
 export function classifyTlcOutput(output) {
 	const violated = /Error: Invariant (\w+) is violated/.exec(output);
 	if (violated) return { status: "violated", invariant: violated[1] };
+	// A config with `CHECK_DEADLOCK TRUE` (a lock-order model, #3830) reports a
+	// cycle as `Error: Deadlock reached.`; a config expects it as `violated Deadlock`.
+	if (/^Error: Deadlock reached\./m.test(output))
+		return { status: "violated", invariant: "Deadlock" };
 	if (/Model checking completed\. No error has been found\./.test(output))
 		return { status: "pass" };
 	const errorLine = output

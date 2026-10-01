@@ -253,6 +253,13 @@ export type DegradationKind =
 	 */
 	| "fix-run-agent-edit-overwritten"
 	/**
+	 * #3830: a whole-package fixer's restore left a file alone, and named it
+	 * possibly lost, because a newer agent edit may have won (a call in flight,
+	 * or the bytes moved between the restore's read and its write). Recorded
+	 * ONCE per run, however many files. Subject is the tool.
+	 */
+	| "fix-run-restore-skipped-newer-edit"
+	/**
 	 * #3598: the pre-run hash set for a whole-package fixer was cut (unreadable
 	 * file, file over the size cap, or the byte budget), so an agent edit to an
 	 * uncovered file during the run is not protected. Subject is the tool.

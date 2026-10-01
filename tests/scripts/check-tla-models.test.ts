@@ -46,6 +46,13 @@ const TLC_VIOLATED = `TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
 Error: Invariant MutualExclusion is violated.
 Error: The behavior up to this point is:
 State 1: <Initial predicate>`;
+// Trimmed from a real TLC 2.19 run of formal/dispatch-pipeline
+// SiblingRestoreQueuedInHold (CHECK_DEADLOCK TRUE).
+const TLC_DEADLOCK = `TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Finished computing initial states: 1 distinct state generated at 2026-10-01 06:52:13.
+Error: Deadlock reached.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>`;
 const TLC_PARSE_ERROR = `TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
 Error: TLC threw an unexpected exception.
 This was probably caused by an error in the spec or model.`;
@@ -99,6 +106,23 @@ describe("classifyTlcOutput (#3447)", () => {
 		expect(classifyTlcOutput(TLC_VIOLATED)).toEqual({
 			status: "violated",
 			invariant: "MutualExclusion",
+		});
+	});
+
+	// Recurrence: #3830. A lock-order model checks for deadlock; without this the
+	// config's `violated Deadlock` expectation would read as a tool error.
+	it("reads a deadlock as a violation named Deadlock", () => {
+		expect(classifyTlcOutput(TLC_DEADLOCK)).toEqual({
+			status: "violated",
+			invariant: "Deadlock",
+		});
+		expect(
+			parseModelHeader(
+				"\\* expect: violated Deadlock\n\\* module: SiblingRestore\n",
+			),
+		).toEqual({
+			module: "SiblingRestore",
+			expect: { status: "violated", invariant: "Deadlock" },
 		});
 	});
 
