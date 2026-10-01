@@ -563,17 +563,18 @@ export function forwardHandoff(args: {
 	const stores = SOURCES[reason].includes("slot")
 		? takeHandoff(startReason, key)
 		: undefined;
-	// A taken slot's key equalled `key`, so `key` is defined here.
-	if (stores)
+	if (stores) {
+		const adopted: Record<string, unknown> = {};
+		for (const [name, payload] of Object.entries(stores))
+			if (sessionStores.get(name)?.policy[startReason] === "adopt")
+				adopted[name] = payload;
+		// A taken slot's key equalled `key`, so `key` is defined here.
 		handoffSlot().handoff = {
 			reason,
 			key: args.targetSessionFile ?? (key as string | number),
-			stores: Object.fromEntries(
-				Object.entries(stores).filter(
-					([name]) => sessionStores.get(name)?.policy[startReason] === "adopt",
-				),
-			),
+			stores: adopted,
 		};
+	}
 	// The successor's start resets the in-memory ledger; the record's durable
 	// `degradation_ledger` row in latency.log is what outlives it.
 	const outcome = stores ? "forwarded" : "no-slot";
