@@ -61,6 +61,8 @@ issue's acceptance criteria, the full merge-base diff
   with *widen in this PR*, *follow-up issue* (with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
+- Review the pre-push self-scan with `npm run astgrep:self-scan`; `pr-preflight`
+  runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
   `origin/master` and the head.
 - Read the `Mutation diff` comment for the EXACT head: check its `Head:` line
@@ -98,6 +100,12 @@ Run every probe the diff can trip and say which ran and what each returned.
   unsafe-to-fold reason, and the issue link, and plumbing with no consumer,
   unless the PR names its forcing function. Name the skipped rung; some seams
   are wide on purpose (`HISTORY.md` "SDK-reuse boundaries").
+- **Model covers the change, not only TLC green (#3802).** When the diff
+  touches a file mapped in `formal/coverage-map.json`, require a `.tla`/`.cfg`
+  change under any one of the row's families or a `TLA+ unaffected: <family> —
+  <reason>` line for any one of them; rows of 4+ families only print a note. A
+  green `TLA+ models` run over an unchanged model proves nothing about the new
+  code.
 - **Red-proof audit.** A claimed red without its quoted transcript is a finding
   of its own; reproduce it (step 3).
 - **Quoted-evidence audit.** Diff every CI line the body quotes against the job

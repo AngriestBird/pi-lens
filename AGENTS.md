@@ -74,6 +74,12 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 - A core-domain rule lives in its owning module; every other caller asks that
   owner. A fix that re-derives an owned rule at a consumer is wrong: extend the
   owner, or create a new one only with a stated reason (#3781, #3794, #3796).
+- A change on a lifecycle, timing, or identity seam extends or adds a TLA+
+  model in step with the code. `formal/coverage-map.json` maps source globs to
+  model families; the PR-body lint requires a `.tla`/`.cfg` change under any one
+  of a mapped row's families, or a `TLA+ unaffected: <family> — <reason>` line
+  for one of them. `unmodelled` rows and rows of 4+ families stay advisory. A
+  TLA lane that adds a family adds its map row (#3802).
 
 <important if="delegating work or coordinating a lane">
 
@@ -477,9 +483,15 @@ the surface they bite; each block loads only when its trigger applies.
   `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator and
   reviewer scratch, `<worktree>/../probes-<pr>` for probes, and
   `.claude/worktrees/` for a fixer's own worktree.
-- Vitest keeps the #2912 run-shared home; `vitest-setup.ts` pins only the
-  orphan-backstop directory through `resolveBackstopStateDir` (#3083). Explicit
-  per-case homes remain authoritative. Never bypass this seam for its lock or stamp.
+- Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
+  (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
+  in `beforeEach`/an `it` body moves nothing. A test process never truncates a log
+  under the real `~/.pi-lens` (`isTestProcessTargetingRealHome`); the first refusal
+  emits one `process.emitWarning` (visible on stderr) and folds a
+  `log-sink-truncate-refused` row into `pilens_health`. `vitest-setup.ts` also pins the orphan-backstop
+  directory through `resolveBackstopStateDir` (#3083) when the home IS the
+  run-shared one. Explicit per-case homes remain authoritative. Never bypass this
+  seam for its lock or stamp.
 - Test tmp roots are swept by the worker that made them (#2912):
   `tests/support/vitest-setup.ts` removes every `setupTestEnvironment` root at
   `afterAll` and on SIGTERM; any other straggler reds its owner, so do not widen
