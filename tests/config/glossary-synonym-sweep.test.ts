@@ -919,7 +919,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
-		"clients/probe-home-state.ts": 7,
+		"clients/probe-home-state.ts": 10,
 		"clients/project-changes.ts": 5,
 		"clients/project-conventions.ts": 5,
 		"clients/project-diagnostics/cache.ts": 4,

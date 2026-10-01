@@ -79,6 +79,29 @@ const tmpHygieneHome = process.env.PI_LENS_HOME
 	? path.resolve(process.env.PI_LENS_HOME)
 	: path.join(process.cwd(), ".probe-home");
 fs.mkdirSync(tmpHygieneHome, { recursive: true });
+/** The run-shared directory: harness state every worker and the serialized
+ *  hygiene owner must see (owner markers, baselines, the tmp-hygiene records,
+ *  `install.log`, the agent dir). Since #3721 it is NOT what `PI_LENS_HOME`
+ *  names inside a worker: that is {@link TMP_HYGIENE_WORKER_HOME}. Tests whose
+ *  subject is the run-shared directory read it from here. */
+export const TMP_HYGIENE_HOME = tmpHygieneHome;
+// #3721: the log sinks bind their paths at module load from PI_LENS_HOME, and
+// one home for every worker meant the 33 files that run with
+// PI_LENS_TEST_MODE=0 shared one `latency.log`: a neighbour's rows leaked into
+// this file's reads ("got 5") and its `clearLatencyLog()` cut this file's rows
+// ("got 1", "got 2"; #3880: 15 of 15 runs red for
+// test-runner-python-environment beside session-root-config-eviction at 4
+// workers). Vitest's forks pool with isolate:true gives every test FILE its
+// own process, so the process id names the worker, and a directory per worker
+// makes cross-worker sharing impossible by construction instead of file by file.
+// Removed by this worker's own teardown; the serialized owner sweeps what a
+// deferred writer recreated and what a killed run left (`removeRunBackstopDirs`).
+const tmpHygieneWorkerHomePrefix = `worker-home-${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-`;
+export const TMP_HYGIENE_WORKER_HOME = path.join(
+	tmpHygieneHome,
+	`${tmpHygieneWorkerHomePrefix}${process.pid}`,
+);
+fs.mkdirSync(TMP_HYGIENE_WORKER_HOME, { recursive: true });
 const tmpHygieneBaselinePath = path.join(
 	process.cwd(),
 	".probe-home",
@@ -273,6 +296,14 @@ function sweepOwnTmpRoots(via: "afterAll" | "SIGTERM"): void {
 // re-raise as `clients/safe-spawn.ts` does so the fork still dies at once.
 process.once("SIGTERM", () => {
 	sweepOwnTmpRoots("SIGTERM");
+	// #3721: the worker home too: a deferred writer (the probe cache's 300ms
+	// timer) can recreate it between the file's teardown and this signal, and a
+	// nested vitest run a test launched has no owner to sweep its homes.
+	try {
+		tmpRootIo.remove(TMP_HYGIENE_WORKER_HOME);
+	} catch {
+		// Best effort, like the sweep above: the owner reclaims what is left.
+	}
 	try {
 		process.kill(process.pid, "SIGTERM");
 	} catch {
@@ -361,7 +392,7 @@ try {
 		}
 	}
 }
-process.env.PI_LENS_HOME = tmpHygieneHome;
+process.env.PI_LENS_HOME = TMP_HYGIENE_WORKER_HOME;
 // #2651: scripts/warm-loader-cache.mjs appends to PI_LENS_INSTALL_LOG before
 // it falls back to PI_LENS_HOME/install.log, so an ambient value (a
 // developer's shell pointing it at the real ~/.pi-lens/install.log) would
@@ -369,7 +400,10 @@ process.env.PI_LENS_HOME = tmpHygieneHome;
 // Pinned here once, for every worker and every inheriting child, instead of
 // one `env:` pin per call site. A test that exercises the fallback deletes it
 // from the child's env explicitly.
-process.env.PI_LENS_INSTALL_LOG = path.join(tmpHygieneHome, "install.log");
+process.env.PI_LENS_INSTALL_LOG = path.join(
+	TMP_HYGIENE_WORKER_HOME,
+	"install.log",
+);
 
 // Hermeticity, same class as PI_LENS_CONFIG_PATH above: the global-config-
 // location PR (refs #2457) reads the host's config dir in the resolution's
@@ -490,6 +524,14 @@ export function removeRunBackstopDirs(
 ): void {
 	sweepScratchDirs(home, backstopRunPrefix, { maxAgeMs: SWEEP_ANY_AGE });
 	sweepScratchDirs(home, "backstop-", { maxAgeMs: BACKSTOP_STALE_MS });
+	// #3721: the per-worker homes, same two arms and same reasons: this run's
+	// (a deferred writer recreated one after its worker removed it) by prefix
+	// alone, any other run's (killed, or a targeted run without this owner) by
+	// the generous stale window so a live sibling invocation keeps its own.
+	sweepScratchDirs(home, tmpHygieneWorkerHomePrefix, {
+		maxAgeMs: SWEEP_ANY_AGE,
+	});
+	sweepScratchDirs(home, "worker-home-", { maxAgeMs: BACKSTOP_STALE_MS });
 	// Round 4 F4, second half: the baseline stops root-level residue accusing an
 	// innocent file, but only this reclaims it — otherwise it sits under the
 	// persistent home for ever, exactly the leak F1 closed one directory over.
@@ -1215,6 +1257,7 @@ afterAll(async () => {
 		} finally {
 			tmpHygieneAfterAllProbeForTests = undefined;
 			removeTmpHygieneOwnerMarker();
+			removeTempDirSync(TMP_HYGIENE_WORKER_HOME);
 		}
 	}
 });
