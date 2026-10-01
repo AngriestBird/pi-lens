@@ -68,12 +68,6 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "log-coverage-gap")?.count).toBe(1);
 	});
 
-	it("F8: ledger generation is not treated as a log rotation marker", () => {
-		const report = run("log-coverage-gap");
-		expect(report.detectors.logCoverageGap.rotationTruncation).toBeNull();
-		expect(smell(report, "log-rotation-truncation")).toBeUndefined();
-	});
-
 	it("D2 real-log-test-pollution: only test-home markers count as pollution", () => {
 		// latency (pid 820094): {"phase":"degradation_ledger","filePath":".../review-3703/.probe-home/pi-lens-3521-witness-home-820094/instances.json",...}
 		// extension (pid 240029): {"level":"debug","subsystem":"tool-cwd","message":"cwd runner pytest cwd=.../pi-lens-test-checkout-isolation-xNZNoE/..."}

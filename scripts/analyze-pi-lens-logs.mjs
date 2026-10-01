@@ -1032,13 +1032,17 @@ async function analyzeSessionStart(files, state) {
 				state.smellTotals.inc("tool-install-noise");
 				state.session.toolNoise.inc(normalizeSessionNoise(message));
 			}
-			// E1: blank the `key=<path>` tokens first so a worktree directory name
-			// such as `468-wait-timeout` inside `cwd=`/`command=` cannot match the
-			// failure words. The 20 false positives in the live session were all
-			// path tokens, not spawn failures.
+			// E1: anchor to the production failure emitters so a worktree name
+			// such as `468-wait-timeout` inside a `cwd=`/`command=` token cannot
+			// match (the 20 false positives in the live session). Every emitter
+			// puts the failure word before any `key=` token: `lsp spawn <id>:
+			// unavailable|failed` (clients/lsp/index.ts) and `lsp launch
+			// candidate|managed|bundle|tree-bin failed` (clients/lsp/server.ts).
+			// `lsp read warm unavailable` is informational, and `lsp process
+			// <cmd>:` only ever logs `spawn-error` or `closed` (clients/lsp/launch.ts).
 			if (
-				/^(?:lsp (?:launch (?:candidate|managed|bundle|tree-bin) failed|spawn [^:]+: (?:unavailable|failed|timeout|skipped_broken|exited immediately|binary not found)|process [^:]+: (?:unavailable|failed|timeout|skipped_broken|exited immediately|binary not found)))/i.test(
-					maskSessionStartPaths(message),
+				/^lsp (?:spawn [^:]+: (?:unavailable|failed)|launch (?:candidate|managed|bundle|tree-bin) failed)/.test(
+					message,
 				)
 			) {
 				state.smellTotals.inc("lsp-availability-noise");
@@ -1573,14 +1577,6 @@ function checkoutOf(p) {
 	return null;
 }
 
-/** E1: blank `key=<path>` tokens so a directory name cannot look like a failure. */
-function maskSessionStartPaths(message) {
-	return message.replace(
-		/\b(command|resolved|cwd|root|file|args)=("[^"]*"|\S+)/g,
-		"$1=<path>",
-	);
-}
-
 /**
  * D2: the markers only a test or probe home carries: a fixer's `.probe-home/`
  * (AGENTS.md probe hygiene), the #3521 fork-tree witness home, and the
@@ -1599,10 +1595,10 @@ function trackLatencyProject(state, entry) {
 		phase === "opaque_mutation_coverage_unknown"
 	)
 		return;
-	// A bash command leaks in as `filePath`; whitespace, `&&` and the `<pi-lens>`
-	// sentinel are the three shapes that are never a project path.
+	// Only the two opaque phases put a bash command in `filePath`
+	// (clients/runtime-tool-call.ts, clients/runtime-tool-result.ts); the
+	// `<pi-lens>` sentinel is never a project path.
 	if (filePath.startsWith("<")) return;
-	if (/\n|&&/.test(filePath)) return;
 	state.projects.inc(projectOf(filePath));
 }
 
@@ -1804,10 +1800,11 @@ function trackLatencySignals(state, entry, ts) {
 		}
 	} else if (phase === "advisory_provenance_decision") {
 		const reasons = Array.isArray(md.reasons) ? md.reasons : [];
-		if (
-			md.decision === "historical" &&
-			reasons.includes("malformed-or-legacy-provenance")
-		) {
+		// The malformed reason implies decision "historical": the validator
+		// returns status "unknown" with it (clients/advisory-provenance.ts) and
+		// the row logs every non-current status as historical
+		// (clients/runtime-context.ts), so the reason alone is the rule.
+		if (reasons.includes("malformed-or-legacy-provenance")) {
 			state.latency.advisoryProvenance.push({
 				ts: nowIso,
 				ms,
@@ -1876,13 +1873,6 @@ function computeCoverageGaps(state) {
 		});
 	}
 	return gaps;
-}
-
-/** D1 second rule: the active latency file's first row was already rotated away. */
-function activeLatencyTruncation(_state) {
-	// ledgerGeneration belongs to the in-process degradation ledger. It does
-	// not identify a file rotation, so there is no trustworthy detector here.
-	return null;
 }
 
 /** D5: per-session firing/stale text and per-session delivery outcomes. */
@@ -2133,7 +2123,6 @@ function buildReport(state) {
 	// D1-D16 detector computations. Kept out of the smell list so every value
 	// they produce is assertable on its own, not only through a smell count.
 	const coverageGaps = computeCoverageGaps(state);
-	const rotationTruncation = activeLatencyTruncation(state);
 	const testRunnerHealth = computeTestRunnerHealth(state);
 	const knip = computeKnip(state);
 	const hookAwait = computeHookAwait(state);
@@ -2344,7 +2333,7 @@ function buildReport(state) {
 		ws.sweeps.slice(0, limit),
 	);
 
-	// D1: a latency gap a live session filled, plus the active-file truncation.
+	// D1: a latency gap a live session filled.
 	addSmell(
 		smells,
 		"log-coverage-gap",
@@ -2354,13 +2343,6 @@ function buildReport(state) {
 			ts: g.start,
 			message: `${g.minutes} min gap ${g.start} -> ${g.end}; sessionstartRows=${g.sessionstartRows}; cascadeRows=${g.cascadeRows}`,
 		})),
-	);
-	addSmell(
-		smells,
-		"log-rotation-truncation",
-		0,
-		"No reliable rotation marker is available in latency.log; ledgerGeneration is not a rotation signal",
-		[],
 	);
 	// D2: test/probe home markers in a real log. Never added to the
 	// default denylist so the pollution stays visible.
@@ -2736,7 +2718,7 @@ function buildReport(state) {
 		// D1-D16: the per-detector values behind the smells above, so a test can
 		// pin the rule (not only the rendered count) and a reader can see WHY.
 		detectors: {
-			logCoverageGap: { gaps: coverageGaps, rotationTruncation },
+			logCoverageGap: { gaps: coverageGaps },
 			realLogTestPollution: {
 				latencyByPid: Object.fromEntries(state.latency.scratchRows),
 				extensionByPid: Object.fromEntries(state.extension.scratchRows),
@@ -2820,15 +2802,11 @@ function printReport(report) {
 	// D1/D2/D5/D6/D7: the non-smell breakdown behind the new detectors.
 	const det = report.detectors ?? {};
 	const gap = det.logCoverageGap;
-	if (gap?.gaps?.length || gap?.rotationTruncation) {
+	if (gap?.gaps?.length) {
 		console.log("\nLog coverage");
 		for (const g of gap.gaps ?? [])
 			console.log(
 				`  gap ${g.minutes}min ${g.start} → ${g.end} sessionstart=${g.sessionstartRows} cascade=${g.cascadeRows}`,
-			);
-		if (gap.rotationTruncation)
-			console.log(
-				`  active latency.log opens at ${gap.rotationTruncation.kind} generation ${gap.rotationTruncation.ledgerGeneration} (${gap.rotationTruncation.ts})`,
 			);
 	}
 	const warnErrors = Object.entries(det.extensionWarnErrors ?? {});
