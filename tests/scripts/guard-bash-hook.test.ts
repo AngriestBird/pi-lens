@@ -98,6 +98,12 @@ function runHook(
 // name (the acceptance criterion: "assert exit code AND the message names
 // the rule").
 const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
+	["git push --force origin branch", "force"],
+	["git push -f origin branch", "force"],
+	["git push --force-with-lease origin branch", "force"],
+	["git push --force-with-lease=branch origin branch", "force"],
+	["git push origin +HEAD:branch", "force"],
+	["git rebase origin/master", "rebase"],
 	["git stash", "stash"],
 	["git stash list", "stash"],
 	["git stash pop", "stash"],
@@ -235,6 +241,9 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 
 // Every allow string the issue lists, which must stay green.
 const ALLOW_CASES: string[] = [
+	"git push",
+	"git push origin HEAD:branch",
+	"git push --force-with-lease=branch:0123456789abcdef0123456789abcdef01234567 origin HEAD:branch",
 	"git diff > fix.patch",
 	"git checkout HEAD -- x",
 	"git worktree remove -f /tmp/tree",
@@ -450,6 +459,9 @@ function commandHash(command: string): string {
 //     set entirely (the `timeout` word was an unrecognized command, not
 //     stripped).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
+	// #3888 audit: no executable historical `git push --force`, `+refspec`,
+	// or `git rebase` rows were present; prose and commit-message mentions are
+	// inert and remain correctly allowed by the corpus test.
 	"21def4efd19e12fd4fcb3f0cfcbc7f000814ed54d6ecdb39701e74b08288811f",
 	"22441661595314c7a8207f7cb04bee63c81882c05e64e5325d7245ffcb3ec5d7",
 	// #3471 checkUngated -- audited true positives, round 1 (20):
@@ -720,7 +732,7 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 			} else {
 				expect(result.status, command).toBe(2);
 				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained/,
+					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained|force|rebase/,
 				);
 			}
 		},
@@ -2659,5 +2671,23 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		);
 		expect(dispatcher).toContain('[ "${HUSKY-}" = "0" ] && exit 0');
 		expect(findDeny("HUSKY=0 git commit -m x")).toBe("hookBypass");
+	});
+});
+
+describe("scripts/hooks/guard-bash.mjs -- branch history guard (#3888)", () => {
+	it("teaches merge-over-rebase and explicit lease authorization", () => {
+		const rebase = runHook("git rebase origin/master");
+		expect(rebase.status).toBe(2);
+		expect(rebase.stderr).toContain("merge `origin/master`");
+		const force = runHook("git push --force origin branch");
+		expect(force.status).toBe(2);
+		expect(force.stderr).toContain("explicit orchestrator authorization");
+	});
+
+	it("declares the new rules in the typed export", () => {
+		const force: DenyRule = "forcePush";
+		const rebase: DenyRule = "rebase";
+		expect(RULE_MESSAGES[force]).toContain("origin/master");
+		expect(RULE_MESSAGES[rebase]).toContain("origin/master");
 	});
 });

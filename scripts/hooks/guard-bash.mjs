@@ -31,6 +31,11 @@
  *     `--dry-run`), `-c core.hooksPath=…`, a `git config core.hooksPath`
  *     write, and the `HUSKY=0` / `PI_LENS_SKIP_HOOKS` env prefixes the repo's
  *     husky hooks honour -- see {@link classifyHookBypass}
+ *   - force pushes and `+refspec` pushes; an exact
+ *     `--force-with-lease=<branch>:<sha>` is the only force form allowed
+ *   - every `git rebase` form. The hook cannot reliably inspect upstream from
+ *     a synthetic or unavailable payload cwd, so this rule is conservative
+ *     even for `--abort` and `--continue`; merge `origin/master` instead.
  *
  * ## Contract source
  *
@@ -166,7 +171,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"rebase"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -190,6 +195,10 @@ export const RULE_MESSAGES = {
 		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
 		"a `git commit`/`git push` chained after a check (`npm run lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node scripts/check-*.mjs`) through `;` or a pipe, rather than `&&`, is forbidden (#3471) -- the check's exit code gates nothing that way, so a real failure can still get committed or pushed; gate it with `&&`, or read the check's result in its own separate call.",
+	forcePush:
+		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
+	rebase:
+		"`git rebase` is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
 };
 
 /**
@@ -1169,6 +1178,24 @@ function classifyGit(args, cwd, env = {}) {
 	const i = gitSubcommandIndex(args);
 	const subcommand = args[i];
 	if (classifyHookBypass(args, i, env)) return "hookBypass";
+	if (subcommand === "rebase") return "rebase";
+	if (subcommand === "push") {
+		const rest = args.slice(i + 1);
+		const hasExplicitLease = rest.some((a) =>
+			/^--force-with-lease=[^:]+:[0-9a-fA-F]{4,64}$/.test(a),
+		);
+		if (
+			!hasExplicitLease &&
+			(rest.some((a) => a === "--force" || a === "-f" || /^-[^-]*f/.test(a)) ||
+				rest.some(
+					(a) =>
+						a === "--force-with-lease" || a.startsWith("--force-with-lease="),
+				) ||
+				rest.some((a) => a.startsWith("+")))
+		)
+			return "forcePush";
+		return null;
+	}
 	if (subcommand === "stash") return "stash";
 	if (subcommand === "reset") {
 		const rest = args.slice(i + 1);

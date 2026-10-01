@@ -13,7 +13,9 @@ export type DenyRule =
 	| "sharedKill"
 	| "tmpCheckout"
 	| "checkUngated"
-	| "hookBypass";
+	| "hookBypass"
+	| "forcePush"
+	| "rebase";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 
