@@ -58,8 +58,8 @@ describe("one changelog fragment per PR (#3795)", () => {
 		gitExecFileSync(["init", "-q"], { cwd: dir });
 		fs.mkdirSync(path.join(dir, ".changelog"), { recursive: true });
 		fs.writeFileSync(
-			path.join(dir, ".changelog", "README.md"),
-			"# Fragments\n",
+			path.join(dir, ".changelog", "old.md"),
+			fragment("released before the branch"),
 		);
 		gitExecFileSync(["add", "."], { cwd: dir });
 		commit(dir, "base");
@@ -183,6 +183,15 @@ describe("one changelog fragment per PR (#3795)", () => {
 		expect(result.message).toContain(".changelog/pr-b.md");
 	});
 
+	const cli = path.resolve(
+		process.cwd(),
+		"scripts/check-changelog-fragments.mjs",
+	);
+	const runCli = (args: string[], cwd: string) =>
+		spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8" });
+	const usage =
+		"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]] [--cwd <dir>]";
+
 	it("spawns the CLI in a fixture repo and fails closed on its real output", () => {
 		const dir = makeRepo();
 		addFragment(dir, "pr-a.md", "first change");
@@ -193,42 +202,228 @@ describe("one changelog fragment per PR (#3795)", () => {
 			fragment("not a fragment"),
 		);
 		fs.writeFileSync(path.join(dir, ".changelog", "ignored.txt"), "ignored\n");
-		const cli = path.resolve(
-			process.cwd(),
-			"scripts/check-changelog-fragments.mjs",
+		// An added README is documentation, and a git-ignored scratch file is
+		// not part of the change: neither is counted.
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "README.md"),
+			"# Fragments\n",
 		);
-		const result = spawnSync(
-			process.execPath,
-			[cli, "--base", "HEAD", "--cwd", dir],
-			{ cwd: dir, encoding: "utf8" },
+		fs.writeFileSync(path.join(dir, ".gitignore"), ".changelog/scratch.md\n");
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "scratch.md"),
+			fragment("scratch"),
 		);
+		const result = runCli(["--base", "HEAD", "--cwd", dir], dir);
 		expect(result.status).toBe(1);
 		expect(result.stdout).toBe("");
-		expect(result.stderr).toContain(
-			"PR diff adds 2 changelog fragments; keep exactly one per PR: .changelog/pr-a.md, .changelog/pr-b.md",
+		expect(result.stderr).toBe(
+			"PR diff adds 2 changelog fragments; keep exactly one per PR: .changelog/pr-a.md, .changelog/pr-b.md\n",
 		);
-		expect(result.stderr).not.toContain("README.md");
-		expect(result.stderr).not.toContain("ignored");
 
-		const badBase = spawnSync(
-			process.execPath,
-			[cli, "--base", "deadbeef", "--cwd", dir],
-			{ cwd: dir, encoding: "utf8" },
-		);
+		const badBase = runCli(["--base", "deadbeef", "--cwd", dir], dir);
 		expect(badBase.status).toBe(1);
 		expect(badBase.stderr.trim().split(/\r?\n/)).toEqual([
 			"unable to resolve changelog comparison base: deadbeef",
 		]);
 
-		const trailingBase = spawnSync(
-			process.execPath,
-			[cli, "--base", "--cwd", dir],
-			{ cwd: dir, encoding: "utf8" },
+		for (const args of [
+			["--base", "--cwd", dir],
+			["--merge-ref", "--cwd", dir],
+		]) {
+			const misuse = runCli(args, dir);
+			expect(misuse.status).toBe(1);
+			expect(misuse.stderr.trim().split(/\r?\n/)).toEqual([usage]);
+		}
+	});
+
+	// Verify r3: an invalid fragment died with an uncaught stack trace. The
+	// fast-fail job exists to print one readable line (#1844).
+	it("prints one line for an invalid fragment, with or without --base", () => {
+		const dir = makeRepo();
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "pr-a.md"),
+			"- no front matter\n",
 		);
-		expect(trailingBase.status).toBe(1);
-		expect(trailingBase.stderr.trim().split(/\r?\n/)).toEqual([
-			"usage: node scripts/check-changelog-fragments.mjs [--base <ref>] [--cwd <dir>]",
+		for (const args of [
+			["--cwd", dir],
+			["--base", "HEAD", "--cwd", dir],
+		]) {
+			const result = runCli(args, dir);
+			expect(result.status).toBe(1);
+			expect(result.stdout).toBe("");
+			const lines = result.stderr.trim().split(/\r?\n/);
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toMatch(/^Invalid changelog entry pr-a\.md: /);
+		}
+	});
+
+	// Verify r3: the CLI's default root (no `--cwd`, as CI and pr-preflight
+	// run it) was never exercised, so a wrong repo-root derivation survived.
+	// The caller's cwd holds an invalid fragment the checker must not read.
+	it("reads the repository's own .changelog when no --cwd is given", () => {
+		const dir = makeRepo();
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "pr-a.md"),
+			"- no front matter\n",
+		);
+		const result = runCli([], dir);
+		expect(result.stderr).toBe("");
+		expect(result.status).toBe(0);
+		const repoFragments = fs
+			.readdirSync(entriesDir)
+			.filter((name) => name.endsWith(".md") && name !== "README.md");
+		expect(result.stdout).toMatch(/^changelog fragments OK \((\d+) entr/);
+		expect(Number(result.stdout.match(/\((\d+) entr/)?.[1])).toBe(
+			repoFragments.length,
+		);
+	});
+
+	// Verify r3 blocker: CI checks out the pull_request merge ref at depth 1
+	// and fetches the base sha at depth 1 (ci.yml, Changelog fragment
+	// fast-fail), so `git merge-base HEAD <base>` has no shared history and
+	// exits 1; r3 failed every PR there. This builds that checkout: a branch
+	// cut before a master rollup, merged onto the moved master.
+	const mergeRefCheckout = (
+		branchFiles: Record<string, string>,
+		depth: "depth-1" | "full",
+	) => {
+		const origin = fs.mkdtempSync(
+			path.join(process.cwd(), ".tmp-changelog-origin-"),
+		);
+		dirs.push(origin);
+		const run = (args: string[], cwd = origin) =>
+			String(gitExecFileSync(args, { cwd, encoding: "utf8" })).trim();
+		const write = (name: string, text: string) => {
+			fs.mkdirSync(path.dirname(path.join(origin, name)), { recursive: true });
+			fs.writeFileSync(path.join(origin, name), text);
+		};
+		run(["init", "-q", "-b", "master"]);
+		write(".changelog/old.md", fragment("released before the branch"));
+		run(["add", "."]);
+		commit(origin, "base");
+		run(["checkout", "-q", "-b", "pr"]);
+		for (const [name, text] of Object.entries(branchFiles)) write(name, text);
+		run(["add", "."]);
+		commit(origin, "pr");
+		run(["checkout", "-q", "master"]);
+		fs.rmSync(path.join(origin, ".changelog", "old.md"));
+		write(".changelog/master.md", fragment("merged on master"));
+		run(["add", "-A"]);
+		commit(origin, "rollup");
+		const baseSha = run(["rev-parse", "HEAD"]);
+		run(["checkout", "-q", "-b", "merge-ref"]);
+		run([
+			"-c",
+			"user.email=pi-lens-test@example.com",
+			"-c",
+			"user.name=pi-lens-test",
+			"merge",
+			"-q",
+			"--no-ff",
+			"-m",
+			"merge",
+			"pr",
 		]);
+		const clone = fs.mkdtempSync(
+			path.join(process.cwd(), ".tmp-changelog-clone-"),
+		);
+		dirs.push(clone);
+		const depthArgs = depth === "depth-1" ? ["--depth", "1"] : [];
+		run([
+			"clone",
+			"-q",
+			...depthArgs,
+			"--branch",
+			"merge-ref",
+			`file://${origin}`,
+			clone,
+		]);
+		if (depth === "depth-1")
+			run(["fetch", "-q", "--no-tags", "--depth=1", "origin", baseSha], clone);
+		return { clone, baseSha };
+	};
+
+	it.each([
+		[
+			"no fragment",
+			{ "notes.md": "docs\n" },
+			0,
+			"changelog fragments OK (1 entry in .changelog/)\n",
+			"",
+		],
+		[
+			"one fragment",
+			{ ".changelog/pr-a.md": fragment("change") },
+			0,
+			"changelog fragments OK (2 entries in .changelog/)\n",
+			"",
+		],
+		[
+			"two fragments",
+			{
+				".changelog/pr-a.md": fragment("one"),
+				".changelog/pr-b.md": fragment("two"),
+			},
+			1,
+			"",
+			"PR diff adds 2 changelog fragments; keep exactly one per PR: .changelog/pr-a.md, .changelog/pr-b.md\n",
+		],
+		[
+			"README plus one fragment",
+			{
+				".changelog/README.md": "# Fragments\n",
+				".changelog/pr-a.md": fragment("change"),
+			},
+			0,
+			"changelog fragments OK (2 entries in .changelog/)\n",
+			"",
+		],
+	] as const)(
+		"counts only the PR's additions in a merge-ref checkout: %s",
+		(_state, branchFiles, status, stdout, stderr) => {
+			for (const depth of ["depth-1", "full"] as const) {
+				const { clone, baseSha } = mergeRefCheckout(branchFiles, depth);
+				const result = runCli(
+					["--base", baseSha, "--merge-ref", "--cwd", clone],
+					clone,
+				);
+				expect({
+					depth,
+					status: result.status,
+					stdout: result.stdout,
+					stderr: result.stderr,
+				}).toEqual({ depth, status, stdout, stderr });
+			}
+		},
+	);
+
+	it("prints one line for an invalid fragment in a merge-ref checkout", () => {
+		const { clone, baseSha } = mergeRefCheckout(
+			{ ".changelog/pr-a.md": "- no front matter\n" },
+			"depth-1",
+		);
+		const result = runCli(
+			["--base", baseSha, "--merge-ref", "--cwd", clone],
+			clone,
+		);
+		expect(result.status).toBe(1);
+		const lines = result.stderr.trim().split(/\r?\n/);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatch(/^Invalid changelog entry pr-a\.md: /);
+	});
+
+	// The fixture witness: without `--merge-ref` the depth-1 checkout has no
+	// merge-base, which is the r3 failure, and the CLI fails closed on it.
+	it("fails closed when a depth-1 merge-ref checkout is diffed from the merge-base", () => {
+		const { clone, baseSha } = mergeRefCheckout(
+			{ ".changelog/pr-a.md": fragment("change") },
+			"depth-1",
+		);
+		const result = runCli(["--base", baseSha, "--cwd", clone], clone);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toBe(
+			`unable to resolve changelog comparison base: ${baseSha}\n`,
+		);
 	});
 
 	it("returns null when no base ref is available", () => {

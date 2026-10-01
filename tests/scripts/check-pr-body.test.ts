@@ -2882,6 +2882,33 @@ describe("PR body garble from shell-expanded quotes (#3795)", () => {
 		expect(lintPrBody(indented).errors.join("\n")).not.toContain("oxlint");
 	});
 
+	it("ignores tab-indented code and a tilde line inside a backtick fence", () => {
+		const tabbed = `${body}\n\n\t> pi-lens@4.3.0 lint`;
+		// A `~~~` line does not close a ``` fence, so the banner stays fenced.
+		const mixed = `${body}\n\n\`\`\`text\n~~~\n> pi-lens@4.3.0 lint\n\`\`\``;
+		expect(lintPrBody(tabbed).errors.join("\n")).not.toContain("npm-script");
+		expect(lintPrBody(mixed).errors.join("\n")).not.toContain("npm-script");
+	});
+
+	// Verify r3 regression: the indented-code rule landed in the helper that
+	// the citation and test-reference lints share, so a fabricated citation in
+	// a nested bullet passed. Those lints keep master's backtick-only fences.
+	it("still validates citations and test references in nested bullets and tilde fences", () => {
+		const headFiles = new Map([
+			["clients/citation.ts", "export const a = 1;\n"],
+		]);
+		const nested = `${body}\n\n- Evidence:\n    - \`clients/missing.ts:1\` holds it.\n    - Pinned by \`tests/missing.test.ts\`.`;
+		const tilde = `${body}\n\n~~~text\n\`clients/missing.ts:1\` holds it.\n~~~`;
+		const missingCitation =
+			"PR body citation clients/missing.ts:1 does not exist in the HEAD tree.";
+		const nestedErrors = lintPrBody(nested, { headFiles }).errors;
+		expect(nestedErrors).toContain(missingCitation);
+		expect(nestedErrors).toContain(
+			"PR body test reference is missing under tests/: tests/missing.test.ts",
+		);
+		expect(lintPrBody(tilde, { headFiles }).errors).toContain(missingCitation);
+	});
+
 	it("accepts a legitimate inline mention of the oxlint flag", () => {
 		const errors = lintPrBody(
 			`${body}\n\nThe \`oxlint --deny-warnings\` flag stays in the transcript.`,
