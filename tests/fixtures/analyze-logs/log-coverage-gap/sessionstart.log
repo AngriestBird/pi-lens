@@ -23,3 +23,25 @@
 [2026-09-30T11:52:28.672Z] turn_end: 1 test failure(s) cached for pull diagnostics and post-agent delivery (stale — turn advanced while tests ran)
 [2026-09-30T11:52:32.370Z] tool_call fired for: /home/user/Desktop/proj/.worktrees/469-settlement-usage/src/control/plane.ts (exists: true)
 [2026-09-30T11:52:32.572Z] tool_call fired for: /home/user/Desktop/proj/.worktrees/469-settlement-usage/src/server.ts (exists: true)
+[2026-09-30T14:55:23.872Z] pi-lens loaded: 420ms after process start (from dist)
+# synthetic: 20 rows inside the 9-minute latency gap 16:00:00Z -> 16:09:00Z above; it must not flag (under 10 minutes).
+[2026-09-30T16:00:20.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:00:45.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:01:10.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:01:35.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:02:00.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:02:25.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:02:50.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:03:15.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:03:40.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:04:05.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:04:30.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:04:55.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:05:20.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:05:45.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:06:10.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:06:35.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:07:00.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:07:25.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:07:50.000Z] word-index persist: 1 files, 1 tokens
+[2026-09-30T16:08:15.000Z] word-index persist: 1 files, 1 tokens

@@ -3,11 +3,16 @@
  * #3870: `scripts/analyze-pi-lens-logs.mjs` detects the live-session smells
  * (D1-D16 add, E1-E5 enhance, R1-R2 remove).
  *
- * Fixtures are redacted cuts of the read-only forensics session logs unless a
- * test comment labels a minimal synthetic boundary row. Each test pins one report row's
- * match rule and its expected count from section 8.2. The quoted transcript in
- * each header is the real log line the detector must catch (or, for E1/E2/E3,
- * the real false positive the enhancement must stop counting).
+ * Fixtures are cuts of the read-only forensics session logs, redacted
+ * (`/home/akis` -> `/home/user`, `plegma` -> `proj`). A row that is not a
+ * verbatim cut is labelled where it lives: JSON rows carry a
+ * `"fixture":"synthetic: <why>"` field (no detector reads it), and text logs
+ * carry a `# synthetic:` or `# subset cut:` line above the rows it covers
+ * (the sessionstart parser skips lines without a `[ts]` prefix). Synthetic
+ * rows exist only where the real logs hold no row for a must-NOT-flag or
+ * boundary case. Each test pins one report row's must-flag and must-NOT-flag
+ * cases from section 8.2 of the forensics report; its comment names the real
+ * rows and the labelled synthetic ones.
  *
  * The script runs through its real entry point (subprocess with --root/--json)
  * exactly like `analyze-pi-lens-logs.test.ts`.
@@ -60,11 +65,18 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// latency.log.1 last: ...lsp_touch_file ... 2026-09-30T11:52:18.708Z
 		// latency.log  first: {"phase":"degradation_ledger",... "ledgerGeneration":31,
 		//                      "ts":"2026-09-30T13:08:41.562Z"}
+		// Must not flag: the real idle gap 14:44:08Z -> 14:55:23Z (11 minutes, one
+		// sessionstart row) and the labelled synthetic 9-minute gap holding 20 rows.
 		const report = run("log-coverage-gap");
-		const gaps = report.detectors.logCoverageGap.gaps;
-		expect(gaps).toHaveLength(1);
-		expect(gaps[0].minutes).toBe(76);
-		expect(gaps[0].sessionstartRows).toBe(25);
+		expect(report.detectors.logCoverageGap.gaps).toEqual([
+			{
+				start: "2026-09-30T11:52:18.708Z",
+				end: "2026-09-30T13:08:41.562Z",
+				minutes: 76,
+				sessionstartRows: 25,
+				cascadeRows: 0,
+			},
+		]);
 		expect(smell(report, "log-coverage-gap")?.count).toBe(1);
 	});
 
@@ -198,36 +210,81 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		expect(smell(report, "turn-end-knip-cost")?.count).toBe(2);
 	});
 
-	it("D7 hook-await-exceeded: reports every overrun with its budget ratio", () => {
+	it("D7 hook-await-exceeded: reports every overrun and the per-pid ledger census", () => {
 		// {"phase":"degradation_ledger","metadata":{"hook":"tool_result_edit","label":"registered-handler",
 		//  "budgetMs":"10000","elapsedMs":"11398","kind":"hook-await-exceeded",...}}
+		// Real ratios 1.149, 1.14, 1.228, 1.228 are over 1.1; 1.044, 1.007,
+		// 1.003, 1.0 are not. The census keeps each kind's MAX count: pid 20730's
+		// lsp-document-drift rows carry 4 then 2.
 		const report = run("hook-await-exceeded");
 		expect(report.detectors.hookAwait.rows).toHaveLength(8);
 		expect(report.detectors.hookAwait.over).toBe(4);
 		expect(smell(report, "hook-await-exceeded")?.count).toBe(8);
+		expect(report.detectors.hookAwait.census).toEqual([
+			{
+				pid: "20730",
+				kinds: [
+					"read-guard-record-cap-trim=128",
+					"lsp-document-drift=4",
+					"hook-await-exceeded=1",
+				],
+			},
+			{ pid: "3205171", kinds: ["hook-await-exceeded=1"] },
+		]);
 	});
 
-	it("D8 turn-end-slow: flags the pid whose turn_end summaries overrun", () => {
+	it("D8 turn-end-slow: flags a pid by slow share or by one long summary", () => {
 		// {"type":"tool_result","toolName":"turn_end","durationMs":10188,"metadata":{"blockerSections":0,...}}
+		// Real pid 3205171: 14 of 43 over 3 s, max 10188. Real pid 763652: 0 of
+		// 42. Labelled synthetic pid 9201 (10 rows, 2 slow, max 4000) is under
+		// the 20-row floor; pid 9202 (5 rows, one 8500 ms) flags on max alone.
 		const report = run("turn-end-slow");
-		const flagged = report.detectors.turnEndSlow.flagged;
-		expect(flagged).toHaveLength(1);
-		expect(flagged[0].slow).toBe(14);
-		expect(flagged[0].max).toBe(10188);
-		expect(smell(report, "turn-end-slow")?.count).toBe(1);
+		expect(
+			report.detectors.turnEndSlow.flagged.map((f: any) => [
+				f.pid,
+				f.rows,
+				f.slow,
+				f.max,
+			]),
+		).toEqual([
+			["3205171", 43, 14, 10188],
+			["9202", 5, 1, 8500],
+		]);
+		expect(smell(report, "turn-end-slow")?.count).toBe(2);
+	});
+
+	it("D8 turn-end-retained-state: flags a session that retained newer turn state 5+ times", () => {
+		// [2026-09-30T20:56:36.852Z] turn_end: retaining newer turn state (dispatch=43, current=44)
+		// Real runs: B3 (20:51:33Z) has 14 such lines; B2b (12:25:38Z) has 1.
+		const report = run("turn-end-slow");
+		expect(report.detectors.turnEndSlow.retainRuns).toEqual([
+			{ start: "2026-09-30T20:51:33.141Z", count: 14 },
+		]);
 		expect(smell(report, "turn-end-retained-state")?.count).toBe(1);
 	});
 
 	it("D9 lsp-wait-empty-candidates: empty waits, no-client edits, warm-reuse clashes", () => {
 		// {"phase":"lsp_touch_file",...,"metadata":{"source":"tool_call:edit","failureKind":"no_clients_none_spawning"}}
 		// {"phase":"lsp_client_selected","metadata":{"serverId":"typescript","outcome":"warm-reuse"}}
+		// Real rows: pid 3205171 (8 empty waits, 14500 ms; 9 of 26 edit touches
+		// saw no client; 6 warm-reuse clashes, plus one at +515 ms that is
+		// outside the window); pid 20730 (1500 ms of empty waits; a subset cut
+		// of 24 edit touches, 4 with no client; 4 clashes). Two labelled
+		// synthetic warm-reuse rows (another pid, another file) do not clash.
 		const report = run("lsp-wait-empty-candidates");
 		const d9 = report.detectors.lspWait;
-		expect(d9.empty).toHaveLength(1);
-		expect(d9.empty[0].ms).toBe(14500);
-		expect(d9.noClients).toHaveLength(1);
-		expect(d9.noClients[0].noClients).toBe(9);
-		expect(d9.contradictions).toHaveLength(10);
+		expect(d9.empty).toEqual([{ pid: "3205171", ms: 14500, rows: 8 }]);
+		expect(d9.noClients.map((n: any) => [n.pid, n.noClients, n.rows])).toEqual([
+			["3205171", 9, 26],
+		]);
+		const clashes = d9.contradictions.reduce(
+			(acc: Record<string, number>, c: any) => ({
+				...acc,
+				[c.pid]: (acc[c.pid] ?? 0) + 1,
+			}),
+			{},
+		);
+		expect(clashes).toEqual({ "20730": 4, "3205171": 6 });
 		expect(d9.pidCount).toBe(2);
 		expect(smell(report, "lsp-wait-empty-candidates")?.count).toBe(2);
 	});
@@ -235,9 +292,20 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 	it("D10 resume-state-loss: separates a lost read set from a genuine zero_read", () => {
 		// {"event":"edit_blocked","filePath":".../471-retained-trees/src/workspace.ts",
 		//  "metadata":{"readCount":0,"reads":[],"verdictAction":"block","reasonKind":"zero_read"}}
+		// Real rows: the three 09-30 zero_read blocks and every earlier row for
+		// those files (14, 2, 0). A labelled synthetic read in ANOTHER session
+		// does not make the other-session.ts block a lost read set.
 		const report = run("resume-state-loss");
-		expect(report.detectors.resumeStateLoss.stateLost).toHaveLength(2);
-		expect(report.detectors.resumeStateLoss.genuine).toHaveLength(1);
+		const d10 = report.detectors.resumeStateLoss;
+		const base = (r: any) => path.basename(r.filePath);
+		expect(d10.stateLost.map(base).sort()).toEqual([
+			"workspace.ts",
+			"worktree-captured-dirt.test.ts",
+		]);
+		expect(d10.genuine.map(base).sort()).toEqual([
+			"other-session.ts",
+			"router.ts",
+		]);
 		expect(smell(report, "resume-state-loss")?.count).toBe(2);
 	});
 
@@ -277,17 +345,30 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 	it("D11 carry-empty-restart: flags an empty carry into a populated branch", () => {
 		// {"phase":"read_guard_branch_retained","metadata":{"trigger":"startup","source":"own-sidecar",
 		//  "kept":0,"dropped":0,"branchToolResults":1034,"branchReadable":true}}
+		// Real rows: that one, two parent-sidecar/live rows that kept and
+		// dropped 1, and a source-none startup with 0 results. Labelled
+		// synthetic rows: 49 results, source none with 1034, unreadable branch.
 		const report = run("carry-empty-restart");
 		const carry = report.detectors.carryEmptyRestart;
-		expect(carry).toHaveLength(1);
-		expect(carry[0].branchToolResults).toBe(1034);
+		expect(carry.map((c: any) => [c.pid, c.branchToolResults])).toEqual([
+			["3205171", 1034],
+		]);
 		expect(smell(report, "carry-empty-restart")?.count).toBe(1);
 	});
 
 	it("D12 restart-self-nudge: flags a cross-process nudge after a handoff", () => {
 		// {"phase":"agent_nudge","metadata":{"originLocal":0,"originCrossProcess":1,...}}
+		// Real: pid 3205171's own-sidecar handoff at 20:51:33.177Z and its two
+		// nudges at 20:52:19Z and 20:52:27Z flag. Labelled synthetic: a nudge
+		// 301 s after the handoff, another pid's nudge inside the window, and a
+		// nudge after a handoffSource none start do not.
 		const report = run("restart-self-nudge");
-		expect(report.detectors.restartSelfNudge).toHaveLength(2);
+		expect(
+			report.detectors.restartSelfNudge.map((n: any) => [n.pid, n.ts]),
+		).toEqual([
+			["3205171", "2026-09-30T20:52:19.339Z"],
+			["3205171", "2026-09-30T20:52:27.708Z"],
+		]);
 		expect(smell(report, "restart-self-nudge")?.count).toBe(2);
 		expect(smell(report, "restart-self-nudge")?.description).toContain(
 			"suspect-grade",
@@ -298,54 +379,86 @@ describe("analyze-pi-lens-logs.mjs D1-D16 detectors (#3870)", () => {
 		// {"type":"runner","runnerId":"lsp","status":"failed","diagnosticCount":27,
 		//  "metadata":{"tier":"collect-later","delivered":"turn_end"}} then
 		// {"phase":"late_runner_findings","metadata":{"failed":1,"delivered":0,"dropped":0,...}}
+		// Real: that pair (turn :22), the turn :21 delivery row, and two pid
+		// 20730 immediate-tier failures. Labelled synthetic: a turn :23 runner
+		// with no delivery row, a delivered one and a dropped one.
 		const report = run("deferred-runner-failed-undelivered");
 		const flags = report.detectors.deferredRunnerFailedUndelivered;
-		expect(flags).toHaveLength(1);
-		expect(flags[0].diagnosticCount).toBe(27);
+		expect(flags.map((f: any) => [f.pid, f.turnId, f.diagnosticCount])).toEqual(
+			[["3205171", "01a0f1c5-27ff-7414-8319-69eb2296dbe4:22", 27]],
+		);
 		expect(smell(report, "deferred-runner-failed-undelivered")?.count).toBe(1);
 	});
 
 	it("D14 aux-stuck-pair: flags an auxiliary pair stuck in two turn ends", () => {
 		// {"phase":"late_auxiliary_findings","metadata":{"stuckPairs":[{"filePath":".../src/workspace.ts","serverId":"opengrep"}]}}
+		// Real: the 13 late_auxiliary_findings rows of pid 3205171. tools.ts is
+		// stuck once and does not flag.
 		const report = run("aux-stuck-pair");
-		expect(report.detectors.auxStuckPairs).toHaveLength(3);
+		expect(
+			report.detectors.auxStuckPairs.map((p: any) => [
+				p.filePath.split(".worktrees/")[1],
+				p.count,
+			]),
+		).toEqual([
+			["245-branch-lock-backlog/src/workspace.ts", 3],
+			["245-branch-lock-backlog/src/cli.ts", 2],
+			["231-ask3/src/workspace.ts", 2],
+		]);
 		expect(smell(report, "aux-stuck-pair")?.count).toBe(3);
 	});
 
 	it("D15 advisory-provenance-unknown: flags malformed-or-legacy provenance", () => {
 		// {"phase":"advisory_provenance_decision","metadata":{"decision":"historical",
 		//  "reasons":["malformed-or-legacy-provenance"],"provenanceStamp":"session unknown / turn unknown / generation unknown"}}
+		// Real: pid 3205171's first row (20:51:32.500Z) and the malformed row
+		// 186 s later; three content-changed historical rows do not flag.
 		const report = run("advisory-provenance-unknown");
 		const rows = report.detectors.advisoryProvenanceUnknown;
-		expect(rows).toHaveLength(1);
-		expect(rows[0].secondsSinceFirstRow).toBeTypeOf("number");
+		expect(rows.map((r: any) => [r.pid, r.secondsSinceFirstRow])).toEqual([
+			["3205171", 186],
+		]);
 		expect(smell(report, "advisory-provenance-unknown")?.count).toBe(1);
 	});
 
 	it("D16 slow-extension-load: flags pi-lens loads at or above 2s", () => {
 		// [2026-09-30T12:25:38.171Z] pi-lens loaded: 6123ms after process start (from dist)
+		// Real: 5608, 6013, 6123 and 2260 ms flag; 310, 375, 1136 and 596 ms do
+		// not. 6013 (10:07:18Z) and 2260 (21:55:09Z) have no session start
+		// within 60 s. Labelled synthetic edges: a 2000 ms load with a start at
+		// its own ms, and 3000 ms loads with a start at +60000 ms (kept) and
+		// +60001 ms (short-lived).
 		const report = run("slow-extension-load");
-		expect(report.detectors.slowExtensionLoad).toHaveLength(3);
-		// A load with a session start at its own ms or at +60000 ms is not
-		// short-lived; one at +60001 ms is. This pins both window edges.
 		expect(
-			report.detectors.slowExtensionLoad.filter((l: any) => l.shortLived),
-		).toHaveLength(1);
-		expect(smell(report, "slow-extension-load")?.count).toBe(3);
+			report.detectors.slowExtensionLoad.map((l: any) => [
+				l.ts,
+				l.durationMs,
+				l.shortLived,
+			]),
+		).toEqual([
+			["2026-09-30T06:27:41.836Z", 5608, false],
+			["2026-09-30T10:07:18.603Z", 6013, true],
+			["2026-09-30T12:25:38.171Z", 6123, false],
+			["2026-09-30T21:55:09.752Z", 2260, true],
+			["2026-09-30T22:00:00.000Z", 2000, false],
+			["2026-09-30T23:00:00.000Z", 3000, false],
+			["2026-09-30T23:30:00.000Z", 3000, true],
+		]);
+		expect(smell(report, "slow-extension-load")?.count).toBe(7);
 	});
 });
 
 describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
-	it("E1 lsp-availability-noise: path tokens cannot match the failure words", () => {
-		// false: "lsp launch: command=... cwd=.../.worktrees/468-wait-timeout shell=false pid=384054"
-		// real:  "[...] lsp spawn marksman: failed (15299ms) error=Timeout after 15000ms"
+	it("E1 lsp-availability-noise: counts the production failure emitters only", () => {
+		// real: "[...] lsp spawn marksman: failed (15299ms) error=Timeout after 15000ms"
+		// real: "lsp launch candidate failed tool=vscode-json-language-server ... ENOENT" (F1)
+		// not:  "lsp launch: command=... cwd=.../.worktrees/468-wait-timeout ..." and
+		//       the other real path-token lines, "lsp read warm unavailable: ...",
+		//       "lsp process <cmd>: closed code=143 ...".
+		// Labelled synthetic production shapes: spawn unavailable, launch
+		// managed/bundle/tree-bin failed.
 		const report = run("lsp-availability-noise");
-		expect(smell(report, "lsp-availability-noise")?.count).toBe(2);
-	});
-
-	it("F1: matches the launch-candidate failure emitted by the LSP server", () => {
-		const report = run("lsp-availability-noise");
-		expect(smell(report, "lsp-availability-noise")?.count).toBe(2);
+		expect(smell(report, "lsp-availability-noise")?.count).toBe(7);
 	});
 
 	it("F4: E2 reports blocks without claiming an unobservable host/model split", () => {
@@ -371,6 +484,9 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 	it("E4 session starts count from `session_start fired` with build attribution", () => {
 		// [2026-09-30T20:51:33.141Z] session_start fired
 		// [2026-09-30T20:51:33.142Z] session_start: build identity — commit=cf1b548e ...
+		// A real config_resolution_pending line whose root= sits under the
+		// default exclude glob **/.plegma/work/** is excluded; the real
+		// Desktop/proj pending line and its resolution are kept.
 		const report = run("session-starts-build-attribution");
 		expect(report.session.starts).toBe(4);
 		expect(report.session.commits).toEqual({
@@ -378,15 +494,17 @@ describe("analyze-pi-lens-logs.mjs E1-E5 enhancements (#3870)", () => {
 			"64163cc9": 1,
 			cf1b548e: 1,
 		});
+		expect(report.rowsExcluded).toBe(1);
+		expect(report.config.sessionsPendingResolution).toBe(1);
+		expect(report.config.sessionsWithoutResolution).toBe(0);
 	});
 
 	it("E5 Projects touched: a bash command filePath is not a project", () => {
-		// {"phase":"opaque_mutation_prescan","filePath":"cd /home/user/Desktop/proj/.worktrees/231-ask3 && python3 - <<'PY'..."}
+		// {"phase":"opaque_mutation_prescan","filePath":"cd /home/user/Desktop/proj && gh issue view 413 ..."}
+		// Real: five opaque rows (three without `&&`), five comfy-studio rows,
+		// one `<pi-lens>` cache_usage row. Labelled synthetic: a path with a space.
 		const report = run("projects-touched");
-		expect(
-			report.projects.filter((p: any) => p.key.includes("&&")),
-		).toHaveLength(0);
-		expect(report.projects.find((p: any) => p.key === "home")?.count).toBe(6);
+		expect(report.projects).toEqual([{ key: "home", count: 6 }]);
 	});
 });
 
