@@ -103,6 +103,8 @@ the cost of not doing so.
 ## Required checks
 
 - Run `npm run build` before tests and rebuild between mutations.
+- Before pushing, run `npm run astgrep:self-scan`; the pre-push hook runs the
+  same complete scan.
 - Run targeted tests through the repository's pinned environment. Include every
   test that mocks or deep-equals a changed module or record.
 - Add `tests/config/` and spawn-heavy lanes for real child or LSP tests.

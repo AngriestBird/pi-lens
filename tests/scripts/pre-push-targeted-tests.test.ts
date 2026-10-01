@@ -555,6 +555,59 @@ describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)",
 	);
 });
 
+describe(".husky/pre-push — ast-grep self-scan gate (#3886)", () => {
+	it("blocks a push when a changed file has a self-scan finding", () => {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-self-scan-"),
+		);
+		try {
+			const bin = path.join(root, "bin");
+			const clients = path.join(root, "clients");
+			fs.mkdirSync(bin, { recursive: true });
+			fs.mkdirSync(clients, { recursive: true });
+			fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
+			fs.writeFileSync(
+				path.join(root, "scripts/pre-push-targeted-tests.mjs"),
+				"process.exitCode = 0;\n",
+				"utf8",
+			);
+			fs.writeFileSync(
+				path.join(clients, "changed.ts"),
+				[
+					'import { writeFileSync } from "node:fs";',
+					"function save(file: string, data: unknown) {",
+					"  writeFileSync(file, JSON.stringify(data));",
+					"}",
+					"",
+				].join("\n"),
+				"utf8",
+			);
+			const fakeNpm = path.join(bin, "npm");
+			fs.writeFileSync(
+				fakeNpm,
+				`#!/bin/sh\nexec node ${JSON.stringify(path.join(repoRoot, "scripts/run-astgrep-pi-lens.mjs"))} ${JSON.stringify(clients)}\n`,
+				{ mode: 0o755 },
+			);
+			const result = spawnSync("sh", [path.join(repoRoot, ".husky/pre-push")], {
+				cwd: root,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					PATH: `${bin}:${path.join(repoRoot, "node_modules/.bin")}:${process.env.PATH ?? ""}`,
+					PI_LENS_SKIP_HOOKS: "",
+				},
+			});
+
+			expect(result.status).toBe(1);
+			expect(`${result.stdout}\n${result.stderr}`).toMatch(
+				/no-raw-json-store-write .*changed\.ts/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
 // #3717 recurrence: a busy machine-wide test lock made pre-push exit 0 without
 // running the targeted tests, silently. Every case drives the REAL
 // `.husky/pre-push` -> `pre-push-targeted-tests.mjs` -> `with-test-lock.mjs`
@@ -624,6 +677,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 				scripts: {
 					build:
 						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+					"astgrep:self-scan": 'node -e "process.exit(0)"',
 				},
 			}),
 		);

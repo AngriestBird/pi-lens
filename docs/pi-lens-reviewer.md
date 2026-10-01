@@ -28,6 +28,7 @@
   #3288), plus #3284's own `path` count red (cue-vet 5→6, dart-analyze 6→4)
   until a trailing re-pin.
 - Build and run the targeted and required governance suites.
+- Review the pre-push self-scan with `npm run astgrep:self-scan`.
 - Flag any new rule predicate added outside its owning domain module; consumers
   must ask the owner rather than re-derive its rule (#3781, #3794, #3796).
 - Review a behaviour-preserving move commit for caller-result parity separately

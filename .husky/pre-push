@@ -13,4 +13,6 @@ case "$PI_LENS_TEST_LOCK_TIMEOUT_MS" in
   ''|*[!0-9]*|0*) PI_LENS_TEST_LOCK_TIMEOUT_MS=120000 ;;
 esac
 export PI_LENS_TEST_LOCK_TIMEOUT_MS
-node scripts/pre-push-targeted-tests.mjs
+# Measured on 2026-10-01: `npm run astgrep:self-scan` scans 1,911 files in
+# 0.61s wall time on the maintainer box, so keep the complete scan here.
+npm run astgrep:self-scan && node scripts/pre-push-targeted-tests.mjs
