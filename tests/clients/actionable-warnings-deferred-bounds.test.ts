@@ -2384,6 +2384,12 @@ describe("#3676 — each report entry carries the branch epoch its build began o
 			Number.MAX_SAFE_INTEGER,
 		)?.data;
 
+	const scopeOf = (
+		report: ActionableWarningsReport | undefined,
+		filePath: string,
+	): string | undefined =>
+		report?.files.find((entry) => entry.filePath === filePath)?.branchScope;
+
 	function entry(
 		filePath: string,
 		branchEpoch: number | undefined,
@@ -2394,6 +2400,7 @@ describe("#3676 — each report entry carries the branch epoch its build began o
 			displayPath: path.basename(filePath),
 			generatedAt: new Date(2_000_000).toISOString(),
 			branchEpoch,
+			branchScope: "guard-A",
 			warnings: [
 				{
 					id: `aw:${path.basename(filePath)}`,
@@ -2484,6 +2491,9 @@ describe("#3676 — each report entry carries the branch epoch its build began o
 		// Its observation was made on epoch 0, whatever report now holds it.
 		expect(epochOf(persisted, first)).toBe(0);
 		expect(epochOf(persisted, second)).toBe(1);
+		// Both were built under the one guard: its lineage key rides every entry.
+		expect(scopeOf(persisted, first)).toBe(runtime.readGuard.lineageKey);
+		expect(scopeOf(persisted, second)).toBe(runtime.readGuard.lineageKey);
 	});
 
 	for (const [persistedEpoch, incomingEpoch] of [
@@ -2530,6 +2540,34 @@ describe("#3676 — each report entry carries the branch epoch its build began o
 
 		expect(epochOf(persistedReport(cacheManager), file)).toBe(0);
 	});
+
+	// F12. Recurrence (#3912 review r1 F2): an entry that absorbed one built
+	// under another guard must not vouch for either: the epoch counts in one
+	// guard only.
+	for (const [label, persistedScope, incomingScope, merged] of [
+		["another guard's", "guard-B", "guard-A", undefined],
+		["the same guard's", "guard-A", "guard-A", "guard-A"],
+	] as const) {
+		it(`leaves an entry that absorbed ${label} entry ${merged ? "its scope" : "without a scope"}`, async () => {
+			const { publishActionableWarningsReport } = await loadWarnings();
+			const cacheManager = new CacheManager(false);
+			const [file] = makeSources(1);
+			cacheManager.writeCache(
+				"actionable-warnings",
+				report([entry(file, 0, { branchScope: persistedScope })]),
+				env.tmpDir,
+			);
+
+			publishActionableWarningsReport(
+				cacheManager,
+				env.tmpDir,
+				report([entry(file, 0, { branchScope: incomingScope })]),
+				{ origin: "deferred" },
+			);
+
+			expect(scopeOf(persistedReport(cacheManager), file)).toBe(merged);
+		});
+	}
 
 	// A cache file written before #3676 is still readable for ten minutes. Its
 	// entries carry no epoch (the real producer, given no epoch, writes exactly

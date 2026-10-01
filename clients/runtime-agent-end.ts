@@ -1161,15 +1161,19 @@ export async function handleAgentEnd({
 				// it is credited with the oldest branch epoch among the entries it
 				// can fix (`ReadGuard.recordWritten` refuses it once a /tree moved
 				// the branch since), never with this settle's own epoch. An entry
-				// with no valid epoch has no branch to vouch for; the fix is applied
-				// and credited to none.
-				const credit = quickFixCreditEpoch(fixableFiles);
+				// built under another read guard (a /fork, /new or resume restarts
+				// the epoch at 0), or with no valid stamp, has no branch to vouch
+				// for; the fix is applied and credited to none.
+				const credit = quickFixCreditEpoch(
+					fixableFiles,
+					runtime.readGuard.lineageKey,
+				);
 				if (credit === undefined && !getFlag("no-read-guard")) {
 					recordDegradationOnce({
 						kind: "actionable-warnings-quickfix-uncredited",
 						subject: fixCwd,
 						reason:
-							"an actionable-warnings entry the quick fix acts on carries no valid branchEpoch; its fixes are applied and credited to no branch",
+							"an actionable-warnings entry the quick fix acts on was built under another read guard, or carries no valid branch stamp; its fixes are applied and credited to no branch",
 					});
 				}
 				const mutationContext: LspMutationContext = {

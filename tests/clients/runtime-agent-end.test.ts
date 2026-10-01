@@ -2460,6 +2460,7 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 							displayPath: "src/app.ts",
 							// #3676: the quick fix credits the epoch its entry was built on.
 							branchEpoch: runtime.readGuard.currentBranchEpoch,
+							branchScope: runtime.readGuard.lineageKey,
 							warnings: [
 								{
 									id: "aw:3521",
@@ -2565,6 +2566,7 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 						filePath,
 						displayPath: "src/app.ts",
 						branchEpoch: runtime.readGuard.currentBranchEpoch,
+						branchScope: runtime.readGuard.lineageKey,
 						warnings: [
 							{
 								id: "aw:3521-entry",
@@ -2644,10 +2646,17 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 	// than its neighbours must not be credited to whichever branch the settle
 	// runs on. The fix is still applied; only its credit is withheld, and the
 	// row says why. The probed file is `a`; `b` is a neighbour in the same pass.
+	// `scopes` overrides the guard lineage each entry was built under (default:
+	// the live guard's), `neighbour` makes `b` something the pass cannot fix.
 	const quickFixPass = async (
 		epochs: readonly [unknown, unknown],
-		moved = true,
+		opts: {
+			moved?: boolean;
+			scopes?: readonly [unknown, unknown];
+			neighbour?: "fixable" | "not eligible" | "suppressed";
+		} = {},
 	) => {
+		const { moved = true, neighbour = "fixable" } = opts;
 		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-pass-");
 		try {
 			const a = createTempFile(env.tmpDir, "src/a.ts", "const x = 1;\n");
@@ -2660,10 +2669,20 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 			const { getDegradationSummary, resetDegradationLedger } =
 				await import("../../clients/degradation-ledger.js");
 			resetDegradationLedger();
-			const entry = (filePath: string, branchEpoch: unknown) => ({
+			const scopes = opts.scopes ?? [
+				runtime.readGuard.lineageKey,
+				runtime.readGuard.lineageKey,
+			];
+			const entry = (
+				filePath: string,
+				branchEpoch: unknown,
+				branchScope: unknown,
+				kind: "fixable" | "not eligible" | "suppressed" = "fixable",
+			) => ({
 				filePath,
 				displayPath: path.basename(filePath),
 				branchEpoch,
+				branchScope,
 				warnings: [
 					{
 						id: `aw:3676:${path.basename(filePath)}`,
@@ -2672,14 +2691,14 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 						severity: "warning",
 						tool: "typescript",
 						message: "unused var",
-						suppressed: false,
+						suppressed: kind === "suppressed",
 						origin: "dispatch",
 						actions: [
 							{
 								title: "Remove unused var",
 								hasEdit: true,
 								hasCommand: false,
-								autoFixEligible: true,
+								autoFixEligible: kind !== "not eligible",
 							},
 						],
 					},
@@ -2693,7 +2712,10 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 				projectSeqEnd: 1,
 				deltaOnly: true,
 				includeLspCodeActions: true,
-				files: [entry(a, epochs[0]), entry(b, epochs[1])],
+				files: [
+					entry(a, epochs[0], scopes[0]),
+					entry(b, epochs[1], scopes[1], neighbour),
+				],
 				summary: {
 					warnings: 2,
 					unsuppressed: 2,
@@ -2765,6 +2787,45 @@ describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
 					latestReasons: [expect.objectContaining({ subject })],
 				}),
 			]);
+		});
+	}
+
+	// F10/F11. Recurrence (#3912 review r1 F2): a new guard restarts the epoch at
+	// 0, so an entry another guard stamped 0 equals the live 0 of a fork, a /new
+	// session or a resume. The live epoch is 0 here, as in a fresh guard.
+	for (const [label, scope] of [
+		["another process's guard", `${process.pid + 1}:${1}`],
+		["another scope of this process", "scope-from-a-dead-guard"],
+		["no scope (a cache file from before the stamp)", undefined],
+	] as const) {
+		it(`applies a quick fix from an entry built under ${label} and credits it to no branch`, async () => {
+			const { verdict, rows, subject } = await quickFixPass([0, 0], {
+				moved: false,
+				scopes: [scope, scope],
+			});
+			expect(verdict).toBe("block");
+			expect(rows).toEqual([
+				expect.objectContaining({
+					count: 1,
+					latestReasons: [expect.objectContaining({ subject })],
+				}),
+			]);
+		});
+	}
+
+	it("credits a quick fix pass whose entries were built under the live guard at epoch 0", async () => {
+		expect((await quickFixPass([0, 0], { moved: false })).verdict).toBe(
+			"allow",
+		);
+	});
+
+	// M12/M13. The pass is credited over the entries it can fix. A neighbour it
+	// cannot fix (no eligible action, or suppressed) is not part of the evidence,
+	// however old: crediting over every enabled entry would withhold a credit the
+	// probed file's own entry earns.
+	for (const neighbour of ["not eligible", "suppressed"] as const) {
+		it(`ignores an older neighbour entry the pass cannot fix (${neighbour})`, async () => {
+			expect((await quickFixPass([1, 0], { neighbour })).verdict).toBe("allow");
 		});
 	}
 

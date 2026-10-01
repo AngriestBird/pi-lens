@@ -394,7 +394,10 @@ async function sidecarSettled(sessionId: string): Promise<void> {
 }
 
 /** pi-lens persists its sidecar at turn_end; emit one the way pi does. */
-async function turnEnd(runtime: AgentSessionRuntime): Promise<void> {
+async function turnEnd(
+	runtime: AgentSessionRuntime,
+	awaitSidecar = true,
+): Promise<void> {
 	await runtime.session.extensionRunner.emit({
 		type: "turn_end",
 		turnIndex: 0,
@@ -410,7 +413,8 @@ async function turnEnd(runtime: AgentSessionRuntime): Promise<void> {
 		},
 		toolResults: [],
 	} as never);
-	await sidecarSettled(runtime.session.sessionManager.getSessionId());
+	if (awaitSidecar)
+		await sidecarSettled(runtime.session.sessionManager.getSessionId());
 }
 
 describe("#3521 /tree keeps only the reads on the new branch", () => {
@@ -769,14 +773,21 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 			timestamp: Date.now(),
 		} as never);
 
+	/** The conversation moves pi can make between X's report and Y's settle. */
+	type Move = "tree" | "fork" | "new" | "resume" | "clone" | "reload";
+
 	/**
 	 * Branch X reads and rewrites `f`, ends its turn (the report is built and
 	 * persisted) and settles while the LSP is cold, so the pass skips. The
-	 * conversation moves to a branch that never read `f`, takes a read-only turn
-	 * (no report is published over X's), and settles with the LSP warm. Returns
-	 * the zero-read probe on the new branch.
+	 * conversation makes `move` to a branch that never read `f` (a clone at the
+	 * leaf and a reload keep X's reads), takes a read-only turn (no report is
+	 * published over X's), and settles with the LSP warm. Returns the zero-read
+	 * probe on the new branch.
 	 */
-	async function reportOnXFixOnY(fixOnY = true): Promise<string> {
+	async function reportOnXFixOnY(
+		fixOnY = true,
+		move: Move = "tree",
+	): Promise<string> {
 		fs.writeFileSync(
 			path.join(cwd, "package.json"),
 			'{"devDependencies":{"eslint":"^9.0.0"}}',
@@ -788,8 +799,20 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 		const f = fixture("fix.conf", 4);
 		let warm = true;
 		armLsp(f, () => warm);
-		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		const runtime = await startRuntime(
+			move === "tree"
+				? SessionManager.inMemory(cwd)
+				: SessionManager.create(cwd, sessionsDir),
+		);
 		const c = conversation(runtime);
+		let otherSession: string | undefined;
+		if (move === "resume") {
+			// The session a resume lands on: it never read `f`.
+			c.user("prompt on the other session");
+			c.done();
+			otherSession = c.S().sessionManager.getSessionFile()!;
+			await runtime.newSession();
+		}
 		const u1 = c.user("prompt on X");
 		await turnStart(runtime);
 		await c.read("x_read_f", f);
@@ -802,12 +825,21 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 		await settle(runtime);
 		expect(fs.readFileSync(f, "utf8")).not.toContain("FIXED");
 
-		await c.S().navigateTree(u1);
+		if (move === "tree") await c.S().navigateTree(u1);
+		else if (move === "fork") await runtime.fork(u1);
+		else if (move === "new") await runtime.newSession();
+		else if (move === "resume") await runtime.switchSession(otherSession!);
+		else if (move === "clone")
+			await runtime.fork(c.S().sessionManager.getLeafId()!, {
+				position: "at",
+			});
+		else await reload(runtime);
 		warm = fixOnY;
 		c.user("a question on Y, no file touched");
 		c.done();
 		await turnStart(runtime);
-		await turnEnd(runtime);
+		// A read-only turn on a moved session writes no sidecar to wait for.
+		await turnEnd(runtime, false);
 		await settle(runtime);
 		expect(fs.readFileSync(f, "utf8").includes("FIXED")).toBe(fixOnY);
 		// Isolate the authorship credit from the mtime fallback (#3520).
@@ -825,6 +857,30 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 	it("blocks the same zero-read edit when no fix was applied on the new branch", async () => {
 		expect(await reportOnXFixOnY(false)).toEqual(ZERO_READ);
 	});
+
+	// Recurrence (#3912 review r1 F2): a new ReadGuard restarts its branch epoch
+	// at 0, so an entry the parent stamped 0 equals the live 0 of a fork, a /new
+	// session or a resume, and the report (one cache file per project) crossed
+	// the move with its credit.
+	for (const move of ["fork", "new", "resume"] as const) {
+		it(`does not credit a quick fix applied after a ${move}`, async () => {
+			expect(await reportOnXFixOnY(true, move)).toEqual(ZERO_READ);
+		});
+
+		it(`blocks the same zero-read edit after a ${move} when no fix was applied`, async () => {
+			expect(await reportOnXFixOnY(false, move)).toEqual(ZERO_READ);
+		});
+	}
+
+	// The moves that keep X's reads keep their legitimate allow: the reads, not
+	// the quick fix's credit, vouch for the edit.
+	for (const move of ["clone", "reload"] as const) {
+		for (const fixOnY of [true, false]) {
+			it(`keeps the allow its kept reads give after a ${move} (fix ${fixOnY ? "applied" : "not applied"})`, async () => {
+				expect(await reportOnXFixOnY(fixOnY, move)).toBe("ALLOW");
+			});
+		}
+	}
 });
 
 describe("#3521 every read producer carries its tool call across a move", () => {

@@ -3610,6 +3610,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				projectSeqEnd: runtime.projectSeq,
 				// #3676: the quick fix credits its writes with this epoch.
 				branchEpoch: runtime.readGuard.currentBranchEpoch,
+				branchScope: runtime.readGuard.lineageKey,
 				fileSeqByPath,
 				deltaOnly: !getFlag("lens-actionable-warning-all"),
 				dbg,
