@@ -6,8 +6,8 @@ replacement. Every config here states its expected verdict on its first line,
 and the `TLA+ models` CI job (`node scripts/check-tla-models.mjs`) checks them
 all.
 
-Issues: #3758 and #3813 (the store's session fence and the requeue), #3814 (the
-commit gate's non-draining peek).
+Issues: #3758 (the store's session fence) and #3813/#3824 (the turn-end cap's
+requeue), #3814 (the commit gate's non-draining peek).
 
 ## What the model covers
 
@@ -66,5 +66,8 @@ admission and the requeue round-trip on both readers; the stale direction is
 reproduced with a raw `GenerationSource` bump as #3824 does.
 `tests/clients/deferred-runner-blockers.test.ts` drives the real
 `evaluateGitGuard` over the store for the stale-reject and sole-fresh no-drop
-directions. `tests/clients/session-generation-properties.test.ts` drives the
-production enqueue, drain, requeue and peek under a scheduler.
+directions. `tests/clients/turn-end-cap-consumed-state.test.ts` drives the real
+`handleTurnEnd` cap cut, the delivery hold's `onHeld` requeue and the
+successor's own turn end (M3c). `tests/clients/session-generation-properties.test.ts`
+drives the production enqueue, drain, requeue and peek under a scheduler, with
+the safety and no-drop directions and the no-handle arm.

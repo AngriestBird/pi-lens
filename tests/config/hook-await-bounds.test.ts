@@ -1322,6 +1322,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"join.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-tool-result.ts#a1bef279~57385903": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"The edit tool_result body — the ONE path #2523's contract " +
+			"allows to block the host, and only for 10000ms. Measured write " +
+			"p90 2614ms / edit p90 3199ms today, so the budget is a ceiling " +
+			"rather than a change. The #3934 merge's own line insert pushed this " +
+			"recursive synthetic await past the 400-line enclosing-declaration " +
+			"lookback, so the key carries no symbol and is keyed by content alone.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-tool-result.ts#dispatchPipelineAnalysis:52da0ba3~78ccd40a": {
 		family: "hook-await",
 		site: "tool_result_edit",
@@ -1353,16 +1365,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-tool-result.ts#handleToolResult:7d560cfc~f14ecaea": {
-		family: "hook-await",
-		site: "tool_result_edit",
-		reason:
-			"The edit tool_result body — the ONE path #2523's contract " +
-			"allows to block the host, and only for 10000ms. Measured write " +
-			"p90 2614ms / edit p90 3199ms today, so the budget is a ceiling " +
-			"rather than a change.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-tool-result.ts#handleToolResult:a1bef279~57385903": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
