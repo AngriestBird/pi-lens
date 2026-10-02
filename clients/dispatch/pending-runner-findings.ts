@@ -15,8 +15,10 @@ export interface PendingRunnerFindings {
 	/**
 	 * #3758/#3813: the producer's captured handle, carried through the drain so
 	 * a requeued, capacity-held answer stays fenced to the scope that owned it.
+	 * `| undefined` so an explicit `session: handle | undefined` at a dispatch
+	 * site stays assignable under `exactOptionalPropertyTypes`.
 	 */
-	session?: GenerationHandle;
+	session?: GenerationHandle | undefined;
 }
 
 interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
