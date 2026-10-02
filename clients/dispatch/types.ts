@@ -204,6 +204,13 @@ export interface RunnerResult {
 }
 
 /**
+ * The `failureKind` that says a `failed` run completed its check and its own
+ * findings failed it — not a runner fault (#3781). `findingsResult` stamps it,
+ * and {@link hasUsableResult} is the one reader of the coverage rule.
+ */
+export const BLOCKING_DIAGNOSTICS_FAILURE_KIND = "blocking_diagnostics";
+
+/**
  * The result of a run that COMPLETED with findings (#3781).
  *
  * A runner reports `failed` for findings when its own threshold says they fail
@@ -220,9 +227,38 @@ export function findingsResult(
 	verdict: Pick<RunnerResult, "status" | "semantic">,
 ): RunnerResult {
 	if (verdict.status === "failed") {
-		return { ...verdict, diagnostics, failureKind: "blocking_diagnostics" };
+		return {
+			...verdict,
+			diagnostics,
+			failureKind: BLOCKING_DIAGNOSTICS_FAILURE_KIND,
+		};
 	}
 	return { ...verdict, diagnostics };
+}
+
+/**
+ * Whether a runner result is usable coverage of the bytes it ran on (#3867).
+ *
+ * A `succeeded` run reached a verdict about the file. A `failed` run reached
+ * one only when `failureKind` is `"blocking_diagnostics"` — the check
+ * completed and its own findings failed it, per the `RunnerResult.failureKind`
+ * contract above. Any other `failureKind`, or none, means the runner broke or
+ * never ran (timeout, spawn failure, server error) and covered nothing, so a
+ * caller must not read it as "the file was analysed".
+ *
+ * The parameter accepts the wider latency-row status set (`when_skipped`,
+ * `pending`, and `deferred`) so the dispatcher asks this one owner instead of
+ * comparing `status`/`failureKind` itself.
+ */
+export function hasUsableResult(result: {
+	status: string;
+	failureKind?: string;
+}): boolean {
+	return (
+		result.status === "succeeded" ||
+		(result.status === "failed" &&
+			result.failureKind === BLOCKING_DIAGNOSTICS_FAILURE_KIND)
+	);
 }
 
 // --- Dispatch Context ---

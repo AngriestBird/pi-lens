@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import yaml from "../../clients/deps/js-yaml.js";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	augmentAndSummarize,
@@ -57,10 +58,17 @@ const driver = readFileSync(
 	resolve(import.meta.dirname, "../../scripts/stryker-diff.mjs"),
 	"utf8",
 );
-const workflow = readFileSync(
-	resolve(import.meta.dirname, "../../.github/workflows/mutation.yml"),
-	"utf8",
-);
+// #3801: the `mutation (advisory)` job moved from mutation.yml into ci.yml (so
+// `needs:` can hold it behind the required checks); the cap is read from that
+// job, never from the first `timeout-minutes:` in the file.
+const mutationJob = (
+	yaml.load(
+		readFileSync(
+			resolve(import.meta.dirname, "../../.github/workflows/ci.yml"),
+			"utf8",
+		),
+	) as { jobs: Record<string, { "timeout-minutes"?: number }> }
+).jobs.mutation;
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const driverPath = join(repositoryRoot, "scripts", "stryker-diff.mjs");
@@ -430,7 +438,7 @@ describe("stryker diff wall-clock budget", () => {
 		// timeout-minutes, so the driver never regained control and its
 		// "no mutants evaluated" message never printed. The driver's own bound
 		// must leave the job room to report it.
-		const cap = Number(/timeout-minutes:\s*(\d+)/.exec(workflow)?.[1]);
+		const cap = Number(mutationJob?.["timeout-minutes"]);
 
 		expect(cap).toBeGreaterThan(0);
 		expect(MUTATION_BUDGET_MINUTES).toBeLessThan(cap);
