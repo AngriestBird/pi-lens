@@ -17,7 +17,9 @@
  * - `deferRunnerFindings` (#3568: a collect-later runner's deferral into the
  *   turn-end store, whose compute also settles under the scheduler);
  * - `recordLspMutation` with a session on its context (#3576: the quickfix
- *   pass's bookkeeping into the change log, the read guard and turn state).
+ *   pass's bookkeeping into the read guard and turn state; its change-log
+ *   receipt and file seq are facts about the bytes and stay, #3763 r2, so
+ *   the oracle reads the turn-state writes and the session each landed in).
  * - the widget's write guard (#3540 r2: `recordDiagnostics` under the order
  *   token `runtime.nextWriteOrderToken()` draws when the writer is issued).
  *   The widget is not session-guarded: a `/reload` keeps it and its guard,
@@ -168,6 +170,15 @@ async function execute(
 	const runtime = new RuntimeCoordinator();
 	runtime.projectRoot = root;
 	const cacheManager = new CacheManager(false);
+	// Observed, not replaced: each turn-state write and the session it landed in.
+	const turnStateWrites: Array<{ file: string; session: number }> = [];
+	const addModifiedRange = cacheManager.addModifiedRange.bind(cacheManager);
+	vi.spyOn(cacheManager, "addModifiedRange").mockImplementation(
+		(filePath, ...rest) => {
+			turnStateWrites.push({ file: normalizeMapKey(filePath), session });
+			return addModifiedRange(filePath, ...rest);
+		},
+	);
 	resetPendingRunnerFindings();
 	clearWidgetState();
 	let session = 1;
@@ -329,7 +340,11 @@ async function execute(
 	await runtime.settleCascadeRuns(0);
 	run.cascade = runtime.consumeCascadeRuns().map((r) => r.filePath);
 	run.runner = (await drainPendingRunnerFindings(0)).map((e) => e.filePath);
-	const bookkept = new Set(runtime.getFileSeqEntries().map(([key]) => key));
+	const bookkept = new Set(
+		turnStateWrites
+			.filter((write) => write.session === session)
+			.map((write) => write.file),
+	);
 	run.bookkeep = run.writers
 		.filter((w) => bookkept.has(normalizeMapKey(w.file)))
 		.map((w) => w.file);
