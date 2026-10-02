@@ -19,6 +19,7 @@ import {
 	describe,
 	expect,
 	it,
+	vi,
 } from "vitest";
 import {
 	ipcPathForCwd,
@@ -363,6 +364,7 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 	});
 
 	afterEach(async () => {
+		vi.unstubAllEnvs();
 		await stub?.close();
 		stub = undefined;
 		try {
@@ -521,6 +523,7 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 
 	// #3922: surfaced exception text must be bounded, redacted, and one line.
 	it("redacts and bounds failures before stdout, stderr, and persistence", async () => {
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
 		const secret = `ghp_${"a".repeat(36)}`;
 		const preload = new URL(
 			"../fixtures/mcp/analyze-cli-failure.mjs",
@@ -536,9 +539,27 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 			["--import", preload.href],
 		);
 		expect(result.code).toBe(2);
+		const records = fs
+			.readFileSync(
+				path.join(testIsolationDir, "home", "extension.log"),
+				"utf8",
+			)
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line))
+			.filter(
+				(row) =>
+					row.subsystem === "analyze-cli" && row.metadata?.cwd === turnDir,
+			);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({
+			message: "analyze-cli-failed",
+			metadata: { cwd: turnDir, operation: "analyze" },
+		});
 		for (const text of [
 			result.stdout,
 			result.stderr,
+			records[0].metadata.reason,
 			readTurnEndStatus(turnDir)?.lastFailureReason ?? "",
 		]) {
 			expect(text).toContain("[REDACTED:github-token]");

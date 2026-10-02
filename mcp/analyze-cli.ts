@@ -31,6 +31,7 @@
  */
 
 import * as path from "node:path";
+import { flushExtensionLog, logExtension } from "../clients/extension-log.js";
 import { redactSecrets } from "../clients/redact/secrets.js";
 import type { McpAnalyzeResult } from "../clients/mcp/analyze.js";
 import {
@@ -326,8 +327,14 @@ async function main(): Promise<void> {
 				: detail;
 		const message = `pi-lens-analyze failed: ${reason}`;
 		recordTurnEndOutcome(cwd, { failed: true, operation, reason });
+		logExtension({
+			subsystem: "analyze-cli",
+			message: "analyze-cli-failed",
+			metadata: { cwd, operation, reason },
+		});
 		process.stderr.write(`${message}\n`);
 		await writeReport(message, hookMode && operation === "analyze");
+		await flushExtensionLog();
 		process.exit(hookInvocation ? 0 : 2);
 	}
 }
