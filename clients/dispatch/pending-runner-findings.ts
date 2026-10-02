@@ -48,6 +48,26 @@ function settledSnapshot(entry: PendingRunnerPromise): PendingRunnerFindings {
 }
 const MAX_PENDING_RUNNER_FINDINGS = 50;
 
+/**
+ * #3758/#3813: true while the producer's captured scope still owns its settled
+ * answer, so a reader on another session must not deliver or gate on it. An
+ * entry with no captured handle (a deferral from a released writer) passes:
+ * the fence narrows known-retired answers, it never drops an unanswered one.
+ * `site` distinguishes which reader dropped it in the degradation row.
+ */
+function ownedByLiveSession(
+	entry: PendingRunnerPromise,
+	site: string,
+): boolean {
+	if (entry.session === undefined) return true;
+	return (
+		entry.session.guardedWrite(
+			`${site}:${entry.runnerId}:${entry.filePath}`,
+			() => true,
+		) !== undefined
+	);
+}
+
 export function deferRunnerFindings(
 	entry: Omit<PendingRunnerFindings, "result"> & {
 		promise: Promise<RunnerResult>;
@@ -150,14 +170,7 @@ export async function drainPendingRunnerFindings(
 		// #3758: a turn end of another session (a concurrent secondary's, in
 		// the gap before the next session_start clears this store) must not
 		// deliver a retired session's result; the drop leaves the handle's row.
-		if (
-			entry.session !== undefined &&
-			entry.session.guardedWrite(
-				`turn-end:${entry.runnerId}:${entry.filePath}`,
-				() => true,
-			) === undefined
-		)
-			continue;
+		if (!ownedByLiveSession(entry, "turn-end")) continue;
 		if (entry.settled && entry.result) {
 			results.push(settledSnapshot(entry));
 		} else {
