@@ -1001,18 +1001,24 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 						shouldStampReadGuard: () => readGuardOn,
 					}),
 				);
+				const epochRecord = getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				);
 				expect({
 					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
 					queued: runtime
 						.consumeDeferredFormatFiles()
 						.map((record) => record.readGuardBranchEpoch),
-					recorded: getDegradationSummary().find(
-						(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
-					)?.count,
+					recorded: epochRecord?.count,
+					// #3763 item 5: the above-live value is named in the record, so
+					// the ignored epoch is observable, not a silent skip (kills the
+					// reason-string mutant on this added line).
+					reason: epochRecord?.latestReasons[0]?.reason,
 				}).toEqual({
 					verdict: readGuardOn ? "allow" : "block",
 					queued: [0],
 					recorded: 1,
+					reason: "ignored a readGuardBranchEpoch above the live epoch (5 > 0)",
 				});
 			},
 		);
