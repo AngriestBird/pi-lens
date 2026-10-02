@@ -28,6 +28,7 @@ import {
 } from "../../clients/mcp/ipc.js";
 import { AUTOMATION_FRAMING } from "../../clients/runtime-context.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { McpHarness } from "./harness.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -47,12 +48,14 @@ const SMELLY = `export function f(x) {
 function runBin(
 	args: string[],
 	stdin?: string,
+	nodeArgs: string[] = [],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [binJs, ...args], {
+		const child = spawn(process.execPath, [...nodeArgs, binJs, ...args], {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: {
 				...process.env,
+				HOME: path.join(testIsolationDir, "home"),
 				PILENS_DATA_DIR: path.join(testIsolationDir, "data"),
 				PI_LENS_HOME: path.join(testIsolationDir, "home"),
 			},
@@ -63,8 +66,14 @@ function runBin(
 		child.stdout.on("data", (c: string) => (stdout += c));
 		child.stderr.setEncoding("utf8");
 		child.stderr.on("data", (c: string) => (stderr += c));
-		child.on("error", reject);
-		child.on("close", (code) => resolve({ stdout, stderr, code: code ?? 0 }));
+		child.on("error", (error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve({ stdout, stderr, code: code ?? 0 });
+		});
 		const timer = setTimeout(() => {
 			child.kill();
 			reject(new Error("timeout"));
@@ -363,6 +372,213 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		}
 		removeTempDirSync(turnDir);
 	});
+
+	// #3922: exercise the real bin, failing only the external peer or IPC boundary.
+	it.each([
+		{ name: "plain CLI", args: "file", event: undefined, code: 2, json: false },
+		{
+			name: "explicit hook",
+			args: "hook",
+			event: undefined,
+			code: 0,
+			json: true,
+		},
+		{
+			name: "PostToolUse stdin",
+			args: "stdin",
+			event: "PostToolUse",
+			code: 0,
+			json: false,
+		},
+		{
+			name: "legacy stdin",
+			args: "stdin",
+			event: undefined,
+			code: 0,
+			json: false,
+		},
+		{
+			name: "Stop flag",
+			args: "turn-end",
+			event: undefined,
+			code: 0,
+			json: false,
+		},
+		{
+			name: "Stop flag with --hook",
+			args: "turn-end-hook",
+			event: undefined,
+			code: 0,
+			json: false,
+		},
+		{ name: "Stop stdin", args: "stdin", event: "Stop", code: 0, json: false },
+	])(
+		"reports an unrunnable $name without claiming a clean scan",
+		async ({ args, event, code, json }) => {
+			const turnEnd = args.startsWith("turn-end") || event === "Stop";
+			const file = path.join(turnDir, "sample.js");
+			fs.writeFileSync(file, "const unused = 1;\n");
+			const preload = new URL(
+				"../fixtures/mcp/analyze-cli-failure.mjs",
+				import.meta.url,
+			);
+			if (turnEnd) preload.searchParams.set("target", "ipc");
+			const argv =
+				args === "stdin"
+					? []
+					: [
+							`--cwd=${turnDir}`,
+							...(turnEnd ? ["--turn-end"] : [`--file=${file}`]),
+							...(json || args === "turn-end-hook" ? ["--hook"] : []),
+						];
+			const payload = JSON.stringify({
+				cwd: turnDir,
+				hook_event_name: event,
+				tool_input: { file_path: file },
+			});
+			const result = await runBin(argv, payload, ["--import", preload.href]);
+			expect(result.stderr).toContain(
+				"Cannot find package '@earendil-works/pi-tui'",
+			);
+			const report = json
+				? (
+						JSON.parse(result.stdout) as {
+							hookSpecificOutput: {
+								hookEventName: string;
+								additionalContext: string;
+							};
+						}
+					).hookSpecificOutput
+				: undefined;
+			if (json) expect(report?.hookEventName).toBe("PostToolUse");
+			expect(report?.additionalContext ?? result.stdout).toMatch(
+				/^pi-lens-analyze failed:/,
+			);
+			expect(result.code).toBe(code);
+			expect(readTurnEndStatus(turnDir)).toMatchObject({
+				ran: 0,
+				skipped: 0,
+				failed: 1,
+				lastFailureOperation: turnEnd ? "turn-end" : "analyze",
+				lastFailureReason: expect.stringContaining("@earendil-works/pi-tui"),
+				lastFailureAt: expect.any(String),
+			});
+		},
+		20_000,
+	);
+
+	// #3922: a later Stop must not erase failures from the separate hook process.
+	it("keeps repeated failures through Stop writes and reports them through health", async () => {
+		const preload = new URL(
+			"../fixtures/mcp/analyze-cli-failure.mjs",
+			import.meta.url,
+		);
+		const args = [`--cwd=${turnDir}`, `--file=${cleanFile}`];
+		await runBin(args, undefined, ["--import", preload.href]);
+		await runBin(args, undefined, ["--import", preload.href]);
+		await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+		});
+		await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		await stub.close();
+		stub = undefined;
+		expect(readTurnEndStatus(turnDir)).toMatchObject({
+			ran: 1,
+			skipped: 1,
+			failed: 2,
+		});
+
+		const harness = new McpHarness({
+			cwd: turnDir,
+			env: { HOME: path.join(testIsolationDir, "home") },
+		});
+		try {
+			const response = await harness.request(3922, "tools/call", {
+				name: "pilens_health",
+				arguments: {},
+			});
+			const text = (response.result as { content: { text: string }[] })
+				.content[0].text;
+			expect(text).toContain(
+				"Analyzer invocations: 2 failed; last analyze failure at",
+			);
+			expect(text).toContain("@earendil-works/pi-tui");
+			const json = JSON.parse(
+				text.match(/```json\n([\s\S]*)\n```/)?.[1] ?? "{}",
+			);
+			expect(json.turnEnd).toMatchObject({
+				ran: 1,
+				skipped: 1,
+				failed: 2,
+				lastFailureOperation: "analyze",
+			});
+		} finally {
+			harness.dispose();
+		}
+	}, 30_000);
+
+	// #3922: surfaced exception text must be bounded, redacted, and one line.
+	it("redacts and bounds failures before stdout, stderr, and persistence", async () => {
+		const secret = `ghp_${"a".repeat(36)}`;
+		const preload = new URL(
+			"../fixtures/mcp/analyze-cli-failure.mjs",
+			import.meta.url,
+		);
+		preload.searchParams.set(
+			"message",
+			`failed\u001b[31m ${secret}\u001b[0m\n\t${"x".repeat(1500)}`,
+		);
+		const result = await runBin(
+			[`--cwd=${turnDir}`, `--file=${cleanFile}`],
+			undefined,
+			["--import", preload.href],
+		);
+		expect(result.code).toBe(2);
+		for (const text of [
+			result.stdout,
+			result.stderr,
+			readTurnEndStatus(turnDir)?.lastFailureReason ?? "",
+		]) {
+			expect(text).toContain("[REDACTED:github-token]");
+			expect(text).not.toContain(secret);
+			expect(text).not.toContain("\u001b");
+			expect(text).not.toContain("\t");
+			expect(text.trimEnd().split("\n")).toHaveLength(1);
+			expect(text).toContain("… (truncated)");
+			expect(text.length).toBeLessThan(1100);
+		}
+	}, 20_000);
+
+	it("reports non-Error failures and survives an unwritable status destination", async () => {
+		const statusPath = turnEndStatusPathForCwd(turnDir);
+		fs.mkdirSync(statusPath);
+		try {
+			const preload = new URL(
+				"../fixtures/mcp/analyze-cli-failure.mjs",
+				import.meta.url,
+			);
+			preload.searchParams.set("nonError", "true");
+			const result = await runBin(
+				["--hook", `--cwd=${turnDir}`, `--file=${cleanFile}`],
+				undefined,
+				["--import", preload.href],
+			);
+			expect(result.code).toBe(0);
+			expect(
+				JSON.parse(result.stdout).hookSpecificOutput.additionalContext,
+			).toBe(
+				"pi-lens-analyze failed: Cannot find package '@earendil-works/pi-tui'",
+			);
+			expect(result.stderr).toContain(
+				"Cannot find package '@earendil-works/pi-tui'",
+			);
+			expect(readTurnEndStatus(turnDir)).toBeUndefined();
+		} finally {
+			fs.rmdirSync(statusPath);
+		}
+	}, 20_000);
 
 	it("renders the warm server's report without the injection framing", async () => {
 		stub = await startTurnEndStub(turnDir, {
