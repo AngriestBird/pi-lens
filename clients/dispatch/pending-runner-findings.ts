@@ -187,11 +187,17 @@ export async function drainPendingRunnerFindings(
  * judging one answer cannot leave it unjudged for later attempts (r1 L2). An
  * in-flight run is not returned: it has said nothing yet, and the store still
  * owns it for the turn-end drain.
+ *
+ * #3758: it admits only answers whose producer scope is still live, the same
+ * owned-admission the drain applies. A commit gate in the gap before the next
+ * session_start clears this store must not block on a retired session's answer.
  */
 export function peekSettledRunnerFindings(): PendingRunnerFindings[] {
-	return pending.flatMap((entry) =>
-		entry.settled && entry.result ? [settledSnapshot(entry)] : [],
-	);
+	return pending.flatMap((entry) => {
+		if (!entry.settled || !entry.result) return [];
+		if (!ownedByLiveSession(entry, "commit-gate")) return [];
+		return [settledSnapshot(entry)];
+	});
 }
 
 /** Drop a stale answer and record the lost re-run coverage. */

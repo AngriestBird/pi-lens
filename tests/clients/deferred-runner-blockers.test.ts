@@ -21,6 +21,10 @@ import {
 	deferRunnerFindings,
 	resetPendingRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
+import {
+	createGenerationSource,
+	type GenerationHandle,
+} from "../../clients/generation-guard.js";
 import type { Diagnostic, RunnerResult } from "../../clients/dispatch/types.js";
 import { evaluateGitGuard } from "../../clients/git-guard.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -47,8 +51,13 @@ function blocking(filePath: string): Diagnostic {
 	};
 }
 
-/** A settled deferred answer for `filePath`, scanned just now. */
-async function settledAnswer(filePath: string, cwd: string): Promise<void> {
+/** A settled deferred answer for `filePath`, scanned just now. `session` is
+ * the producer's captured handle; omitting it is a released writer's shape. */
+async function settledAnswer(
+	filePath: string,
+	cwd: string,
+	session?: GenerationHandle,
+): Promise<void> {
 	const result: RunnerResult = {
 		status: "succeeded",
 		diagnostics: [blocking(filePath)],
@@ -61,6 +70,7 @@ async function settledAnswer(filePath: string, cwd: string): Promise<void> {
 		runnerId: RUNNER_ID,
 		markedAtMs: Date.now(),
 		promise: Promise.resolve(result),
+		...(session ? { session } : {}),
 	});
 	await new Promise<void>((resolve) => setImmediate(resolve));
 }
@@ -232,6 +242,71 @@ describe("deferred blocker recording (#3814)", () => {
 			expect(runtime.getInlineBlockersSnapshot()[0]?.recordedAtMs).toBe(
 				markedAtMs,
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops a retired producer's settled answer from the gate (staleReject)", async () => {
+		// #3758/#3814: the gate's non-draining peek applies the same owned
+		// admission the turn-end drain does. A commit in the gap before the next
+		// session_start clears this store must not block on a retired session's
+		// answer; the drop leaves the handle's `generation-guard-stale-write` row.
+		const env = setupTestEnvironment("pi-lens-3814-peek-stale-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const sessions = createGenerationSource("test-runtime-session");
+			const retired = sessions.capture();
+			await settledAnswer(filePath, env.tmpDir, retired);
+			sessions.bump();
+
+			const cacheManager = new CacheManager(false);
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(
+				false,
+			);
+			const row = getDegradationSummary().find(
+				(group) => group.kind === "generation-guard-stale-write",
+			);
+			expect(row?.latestReasons[0]?.subject).toContain(
+				`commit-gate:${RUNNER_ID}:${filePath}`,
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the sole live answer gating beside a retired one (no-drop)", async () => {
+		// Shape 54: the fence is proven in both directions. The retired file must
+		// not be recorded while the live session's only fresh answer still is;
+		// a peek that skipped the whole store on the first stale entry would let
+		// this commit through.
+		const env = setupTestEnvironment("pi-lens-3814-peek-live-");
+		try {
+			const stalePath = path.join(env.tmpDir, "stale.ts");
+			const livePath = path.join(env.tmpDir, "live.ts");
+			fs.writeFileSync(stalePath, "beta();\n");
+			fs.writeFileSync(livePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const sessions = createGenerationSource("test-runtime-session");
+			const retired = sessions.capture();
+			await settledAnswer(stalePath, env.tmpDir, retired);
+			sessions.bump();
+			const live = sessions.capture();
+			await settledAnswer(livePath, env.tmpDir, live);
+
+			const recording = absorbSettledRunnerBlockers(runtime, env.tmpDir);
+			expect(recording.recorded).toBe(1);
+			expect(recording.fileCount).toBe(1);
+			expect(
+				runtime.getInlineBlockersSnapshot().map((record) => record.filePath),
+			).toEqual([livePath]);
+			expect(
+				evaluateGitGuard(runtime, new CacheManager(false), env.tmpDir).block,
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}

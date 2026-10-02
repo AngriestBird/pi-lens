@@ -58,6 +58,7 @@ import {
 	deferRunnerFindings,
 	drainPendingRunnerFindings,
 	resetPendingRunnerFindings,
+	peekSettledRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
 import type { RunnerResult } from "../../clients/dispatch/types.js";
 import { recordLspMutation } from "../../clients/lsp-mutation.js";
@@ -85,7 +86,7 @@ const PROPERTY_TIMEOUT_MS = 20_000;
 
 type WriterKind = "cascade" | "runner" | "bookkeep" | "widget";
 type Command =
-	| { t: "write"; kind: WriterKind }
+	| { t: "write"; kind: WriterKind; unfenced?: boolean }
 	| { t: "turn" }
 	/** `keepWidget`: a `/reload` (the widget and its guard survive) or `/new`. */
 	| { t: "start"; keepWidget: boolean }
@@ -102,6 +103,8 @@ const commandArb: fc.Arbitrary<Command> = fc.oneof(
 				"bookkeep",
 				"widget",
 			),
+			// Shape 57: a released producer defers a runner without a handle.
+			unfenced: fc.boolean(),
 		}),
 	},
 	{ weight: 2, arbitrary: fc.constant({ t: "turn" as const }) },
@@ -127,6 +130,8 @@ interface Writer {
 	/** The test's own session count when the writer was issued. */
 	session: number;
 	settled: boolean;
+	/** `false` for a released producer's unfenced deferral (shape 57). */
+	fenced: boolean;
 	/** Widget writers: the order token drawn at issue. */
 	token?: number;
 	/** Widget writers: the run's step at which the write ran. */
@@ -140,6 +145,8 @@ interface Run {
 	/** Writer files each store holds at quiescence. */
 	cascade: string[];
 	runner: string[];
+	/** The commit gate's non-draining view, read before the final drain. */
+	peek: string[];
 	bookkeep: string[];
 	/** The widget file's message at quiescence (the writer's name). */
 	widget: string | undefined;
@@ -160,6 +167,7 @@ async function execute(
 		finalSession: 1,
 		cascade: [],
 		runner: [],
+		peek: [],
 		bookkeep: [],
 		widget: undefined,
 		widgetSinceClear: [],
@@ -225,7 +233,7 @@ async function execute(
 				runnerId: `runner-${writer.id}`,
 				markedAtMs: 0,
 				promise: s.schedule(Promise.resolve(result), `runner:${writer.id}`),
-				session: handle,
+				...(writer.fenced ? { session: handle } : {}),
 			});
 		} else {
 			recordLspMutation(
@@ -269,7 +277,7 @@ async function execute(
 		}
 	};
 
-	const issueWriter = (kind: WriterKind, id: number) => {
+	const issueWriter = (kind: WriterKind, id: number, unfenced = false) => {
 		if (!turnOpen) {
 			runtime.beginTurn();
 			turnOpen = true;
@@ -280,6 +288,7 @@ async function execute(
 			file: path.join(root, `w${id}.ts`),
 			session,
 			settled: false,
+			fenced: !unfenced,
 		};
 		fs.writeFileSync(writer.file, `export const w${id} = ${id};\n`);
 		run.writers.push(writer);
@@ -299,7 +308,8 @@ async function execute(
 		commands.map((command, index) => ({
 			label: `cmd${index}`,
 			builder: async () => {
-				if (command.t === "write") issueWriter(command.kind, index);
+				if (command.t === "write")
+					issueWriter(command.kind, index, command.unfenced === true);
 				else if (command.t === "turn") {
 					runtime.beginTurn();
 					turnOpen = true;
@@ -339,6 +349,8 @@ async function execute(
 	// The final session's turn end reads each store.
 	await runtime.settleCascadeRuns(0);
 	run.cascade = runtime.consumeCascadeRuns().map((r) => r.filePath);
+	// The commit gate's non-draining read runs before the drain consumes it.
+	run.peek = peekSettledRunnerFindings().map((e) => e.filePath);
 	run.runner = (await drainPendingRunnerFindings(0)).map((e) => e.filePath);
 	const bookkept = new Set(
 		turnStateWrites
@@ -378,6 +390,8 @@ function noStaleWrite(run: Run): string[] {
 	const out: string[] = [];
 	for (const w of run.writers) {
 		if (w.kind === "widget" || w.session === run.finalSession) continue;
+		// An unfenced deferral (shape 57) is not this fence's to reject.
+		if (w.kind === "runner" && !w.fenced) continue;
 		if (heldBy(run, w.kind).includes(w.file))
 			out.push(
 				`${w.kind} w${w.id} from session ${w.session} is in session ${run.finalSession}'s state`,
@@ -396,6 +410,22 @@ function noOwnDrop(run: Run): string[] {
 		if (w.kind === "widget" || w.session !== run.finalSession) continue;
 		if (!heldBy(run, w.kind).includes(w.file))
 			out.push(`${w.kind} w${w.id} of the final session was dropped`);
+	}
+	return out;
+}
+
+/**
+ * No-drop (shape 54): the fence never drops the final session's own answer, nor
+ * a released writer's unfenced deferral, from the gate's peek. The stale
+ * direction is proven below the host by the store's own witnesses, because no
+ * schedulable ordering in this model retires a scope while its answers stay.
+ */
+function peekNoOwnDrop(run: Run): string[] {
+	const out: string[] = [];
+	for (const w of run.writers) {
+		if (w.kind !== "runner" || w.session !== run.finalSession) continue;
+		if (!run.peek.includes(w.file))
+			out.push(`runner w${w.id} of the final session was dropped by the peek`);
 	}
 	return out;
 }
@@ -421,6 +451,7 @@ const PROPERTIES = {
 	liveness,
 	noStaleWrite,
 	noOwnDrop,
+	peekNoOwnDrop,
 	widgetLatest,
 } satisfies Record<string, (run: Run) => string[]>;
 type PropertyName = keyof typeof PROPERTIES;
