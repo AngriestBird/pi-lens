@@ -74,12 +74,16 @@ import { createPiMock, makeCtx } from "./support/pi-mock.js";
 
 const SESSION_ID = "pi-3814-deferred-gate-session";
 const RUNNER_ID = "slow-runner";
+/** A non-TypeScript registry entry driven through the same gate seam (#3896 R2). */
+const PY_RUNNER_ID = "pyright";
 
 let tmpDir: string;
 let filePath: string;
 let previousTestMode: string | undefined;
 /** What the deferred runner answers for the NEXT edit's dispatch. */
 let runnerAnswer: (editedPath: string) => Promise<RunnerResult>;
+/** The same, for the non-jsts runner. */
+let pyRunnerAnswer: (editedPath: string) => Promise<RunnerResult>;
 /** An in-band blocker the pipeline's own verdict raises for the same edit. */
 let inlineBlocker: Diagnostic | undefined;
 
@@ -100,6 +104,8 @@ beforeEach(async () => {
 	resetObservedRunnerLatency();
 	resetPendingRunnerFindings();
 	inlineBlocker = undefined;
+	runnerAnswer = answersClean;
+	pyRunnerAnswer = answersClean;
 	pipeline.runPipeline.mockReset();
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3814-gate-")),
@@ -113,6 +119,14 @@ beforeEach(async () => {
 		appliesTo: ["jsts"],
 		priority: 1,
 		run: async (ctx) => runnerAnswer(ctx.filePath),
+	});
+	// A real non-TypeScript row: the same collect-later deferral and the same
+	// commit gate, reached only for a python file kind (#3896 R2).
+	registry.register({
+		id: PY_RUNNER_ID,
+		appliesTo: ["python"],
+		priority: 1,
+		run: async (ctx) => pyRunnerAnswer(ctx.filePath),
 	});
 	// The pipeline's own verdict: clean unless a test sets `inlineBlocker`, so
 	// the deferred runner is the only source of findings by default.
@@ -128,6 +142,11 @@ beforeEach(async () => {
 				runnerId: RUNNER_ID,
 				durationMs: COLLECT_LATER_THRESHOLD_MS + 1,
 			});
+			observeRunnerLatency({
+				projectRoot: ctx.projectRoot,
+				runnerId: PY_RUNNER_ID,
+				durationMs: COLLECT_LATER_THRESHOLD_MS + 1,
+			});
 			const dispatchCtx = createDispatchContext(
 				ctx.filePath,
 				ctx.cwd,
@@ -140,7 +159,7 @@ beforeEach(async () => {
 			);
 			await dispatchForFile(
 				dispatchCtx,
-				[{ mode: "all", runnerIds: [RUNNER_ID] }],
+				[{ mode: "all", runnerIds: [RUNNER_ID, PY_RUNNER_ID] }],
 				registry,
 			);
 			return inlineBlocker
@@ -184,16 +203,26 @@ async function latencyRows(): Promise<LatencyRow[]> {
 }
 
 function blockingDiagnostic(line = 1): Diagnostic {
+	return blockingDiagnosticFor(RUNNER_ID, filePath, line, "TS2349");
+}
+
+/** The same blocking finding on another runner and file (the non-jsts row). */
+function blockingDiagnosticFor(
+	runnerId: string,
+	targetPath: string,
+	line = 1,
+	rule = "TS2349",
+): Diagnostic {
 	return {
-		id: `${RUNNER_ID}:app.ts:${line}`,
+		id: `${runnerId}:${path.basename(targetPath)}:${line}`,
 		message: "alpha is not a function",
-		filePath,
+		filePath: targetPath,
 		line,
 		column: 1,
 		severity: "error",
 		semantic: "blocking",
-		tool: RUNNER_ID,
-		rule: "TS2349",
+		tool: runnerId,
+		rule,
 	};
 }
 
@@ -403,6 +432,62 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		await host.turnStart();
 		await host.edit();
 		await settle();
+		expect((await host.gate()).block).toBeUndefined();
+		await host.turnEnd();
+		expect((await host.gate()).block).toBeUndefined();
+	});
+
+	it("blocks the commit on a non-TypeScript (python) deferred blocker", async () => {
+		// #3896 R2: the deployable registry row is not TypeScript-only. A real
+		// non-jsts runner's blocking finding reaches the same gate seam.
+		const pyPath = path.join(tmpDir, "src", "app.py");
+		fs.writeFileSync(pyPath, "alpha()\n");
+		pyRunnerAnswer = async (editedPath) =>
+			path.resolve(editedPath) !== path.resolve(pyPath)
+				? await answersClean()
+				: {
+						status: "succeeded",
+						diagnostics: [blockingDiagnosticFor(PY_RUNNER_ID, pyPath)],
+						semantic: "blocking",
+					};
+		const host = await startSession();
+		await host.turnStart();
+		await host.edit(pyPath);
+		await settle();
+
+		const verdict = await host.gate();
+		expect(verdict.block).toBe(true);
+		expect(verdict.reason).toContain("COMMIT BLOCKED (--lens-guard)");
+		expect(verdict.reason).toContain("alpha is not a function");
+		// The recorded provenance names the non-jsts runner, not a TS one.
+		const rows = (await latencyRows()).filter(
+			(row) => row.phase === "deferred_runner_blockers",
+		);
+		expect(rows.at(-1)?.metadata?.runnerIds).toEqual([PY_RUNNER_ID]);
+	});
+
+	it("does not block on a non-TypeScript warning-tier deferred finding", async () => {
+		// The blocking/warning tier decides, not the runner's language.
+		const pyPath = path.join(tmpDir, "src", "app.py");
+		fs.writeFileSync(pyPath, "alpha()\n");
+		pyRunnerAnswer = async (editedPath) =>
+			path.resolve(editedPath) !== path.resolve(pyPath)
+				? await answersClean()
+				: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								...blockingDiagnosticFor(PY_RUNNER_ID, pyPath),
+								semantic: "warning",
+							},
+						],
+						semantic: "warning",
+					};
+		const host = await startSession();
+		await host.turnStart();
+		await host.edit(pyPath);
+		await settle();
+
 		expect((await host.gate()).block).toBeUndefined();
 		await host.turnEnd();
 		expect((await host.gate()).block).toBeUndefined();

@@ -57,8 +57,9 @@ import type { CascadeRun } from "../../clients/cascade-types.js";
 import {
 	deferRunnerFindings,
 	drainPendingRunnerFindings,
-	resetPendingRunnerFindings,
 	peekSettledRunnerFindings,
+	requeueRunnerFindings,
+	resetPendingRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
 import type { RunnerResult } from "../../clients/dispatch/types.js";
 import { recordLspMutation } from "../../clients/lsp-mutation.js";
@@ -88,6 +89,8 @@ type WriterKind = "cascade" | "runner" | "bookkeep" | "widget";
 type Command =
 	| { t: "write"; kind: WriterKind; unfenced?: boolean }
 	| { t: "turn" }
+	/** The #3813 delivery hold: drain, then requeue the cut settled answer. */
+	| { t: "collect" }
 	/** `keepWidget`: a `/reload` (the widget and its guard survive) or `/new`. */
 	| { t: "start"; keepWidget: boolean }
 	| { t: "shutdown" };
@@ -108,6 +111,7 @@ const commandArb: fc.Arbitrary<Command> = fc.oneof(
 		}),
 	},
 	{ weight: 2, arbitrary: fc.constant({ t: "turn" as const }) },
+	{ weight: 2, arbitrary: fc.constant({ t: "collect" as const }) },
 	{
 		weight: 2,
 		arbitrary: fc.record({
@@ -314,6 +318,23 @@ async function execute(
 					runtime.beginTurn();
 					turnOpen = true;
 					note("turn_start");
+				} else if (command.t === "collect") {
+					// The #3813 delivery hold: a settled answer the turn-end cap cut
+					// re-enters the store. The requeue is scheduled, so it may land on
+					// either side of a session start: a raw store clear leaves the
+					// snapshot to be re-added, and the next reader must fence the
+					// retired producer it carried (the stale-peek direction, #3758).
+					const collected = await drainPendingRunnerFindings(0);
+					for (const entry of collected) {
+						if (!entry.result) continue;
+						void s
+							.schedule(Promise.resolve(), `requeue:${entry.runnerId}`)
+							.then(() => {
+								requeueRunnerFindings({ ...entry, result: entry.result! });
+								note(`requeue ${entry.runnerId}`);
+							});
+					}
+					note("collect");
 				} else if (command.t === "start") {
 					resetPendingRunnerFindings();
 					runtime.resetForSession();
@@ -415,10 +436,27 @@ function noOwnDrop(run: Run): string[] {
 }
 
 /**
+ * Safety (shape 54): the fence never lets a superseded session's own fenced
+ * runner answer into the commit gate's peek. The drain side is `noStaleWrite`;
+ * this pins the non-draining reader across the #3813 requeue round-trip.
+ */
+function peekNoStale(run: Run): string[] {
+	const out: string[] = [];
+	for (const w of run.writers) {
+		if (w.kind !== "runner" || !w.fenced || w.session === run.finalSession)
+			continue;
+		if (run.peek.includes(w.file))
+			out.push(
+				`runner w${w.id} from session ${w.session} is in session ${run.finalSession}'s peek`,
+			);
+	}
+	return out;
+}
+
+/**
  * No-drop (shape 54): the fence never drops the final session's own answer, nor
- * a released writer's unfenced deferral, from the gate's peek. The stale
- * direction is proven below the host by the store's own witnesses, because no
- * schedulable ordering in this model retires a scope while its answers stay.
+ * a released writer's unfenced deferral, from the gate's peek, across the #3813
+ * requeue round-trip.
  */
 function peekNoOwnDrop(run: Run): string[] {
 	const out: string[] = [];
@@ -450,6 +488,7 @@ function widgetLatest(run: Run): string[] {
 const PROPERTIES = {
 	liveness,
 	noStaleWrite,
+	peekNoStale,
 	noOwnDrop,
 	peekNoOwnDrop,
 	widgetLatest,
