@@ -381,6 +381,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the provider wire roster is produced by a real pi host loading the built extension; an in-process double cannot certify tools.<name>.enabled",
 	},
+	// #3870: the detector tests drive the analyzer's real CLI entry point as a
+	// real node subprocess over redacted fixture logs; an in-process call could
+	// not prove the --root/--json/--since argv or the JSON report boundary.
+	"real-process-spawn:scripts/analyze-pi-lens-logs-detectors.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the tests spawn the analyzer's real CLI over fixture logs; an in-process call cannot prove the --root/--json argv or the JSON report boundary (same seam as analyze-pi-lens-logs.test.ts)",
+	},
 	// #3684: the advisory scope is the wrapper's own `git diff` against a real
 	// throwaway fixture repo; an in-process call cannot prove the git boundary
 	// or the wrapper's argv/env (GITHUB_BASE_REF) handling.
@@ -389,12 +397,26 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the wrapper's advisory scope runs a real `git diff` in a throwaway fixture repo and reads argv/env; an in-process double proves neither boundary",
 	},
+	// #3795: the one-fragment-per-PR check diffs a real fixture repo through
+	// real `git` (`git diff` plus `git ls-files --others`); that command
+	// boundary is the subject, and no in-process double reproduces git's own
+	// tracked-vs-untracked split.
+	"real-process-spawn:scripts/changelog-entries.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the PR-diff fragment count shells out to real `git` against a fixture repo; an in-process double cannot prove git's tracked-vs-untracked split",
+	},
 	// #2807 review F1/F4: the local CLI's exact argv and a shallow checkout's
 	// missing diff are the subjects; an in-process call cannot prove either.
 	"real-process-spawn:scripts/check-pr-body.test.ts": {
 		detector: "real-process-spawn",
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
+	},
+	"real-process-spawn:scripts/ci-verdict.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"#3883 F3: the final exit line and process status live at the real main() boundary; only a spawned CLI observes them",
 	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
@@ -503,7 +525,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/release-qa.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI exit code are each unobservable in-process",
+			"npm ignoring a handed env, a child's own os.homedir(), and main()'s CLI pack call site and exit code are each unobservable in-process",
 	},
 	// 2026-09-07 (#2613): the CLI's real exit code (2 vs. 4) and its
 	// GITHUB_OUTPUT write are the subject under test; header on the file

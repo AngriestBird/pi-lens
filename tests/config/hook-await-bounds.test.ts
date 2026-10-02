@@ -408,6 +408,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-agent-end.ts#8f9b56ae~24a830f2": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"#3830: the whole-package fixer's restore of agent edits, awaited " +
+			"after the drain's hold on the target is released. It waits for " +
+			"pi's queue entry of each sibling it restores (held only by an edit, " +
+			"an LSP edit or another pipeline's hold, none of which waits for " +
+			"this restore) and does local file I/O. The phase above it is the " +
+			"`runAutofix` await registered below, which has no aggregate bound " +
+			"either.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -1415,16 +1428,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"read, the same double-count the secrets lane's entry below avoids.",
 		owner: "#3274",
 	},
-	"clients/runtime-turn.ts#5b570c81~b2f3321c": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"`knipClient.analyze` — #2523's turn_end list " +
-			"(runtime-turn.ts:1355): the 30s timeout lives INSIDE the " +
-			"spawn, so anything that wedges before the spawn is unreachable " +
-			"by it.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-turn.ts#756411f6~249e7096": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1542,17 +1545,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would add a second timer per target.",
 		owner: "#2523 slice 3",
 	},
-	"index.ts#03f9a37d~70299538": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
-			"the settle's branch epoch. #3620 re-keyed it: the sweep call " +
-			"above it wraps.",
-		owner: "#2523 slice 2",
-	},
 	"index.ts#1946ceb9~8beff560": {
 		family: "hook-await",
 		site: "session_start",
@@ -1579,6 +1571,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(index.ts:3138). Its `getAutofixClients` closure is the " +
 			"`loadBootstrapClients()` #2523 names under agent_settled; " +
 			"runtime-agent-end.ts:347 is the consumer.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#2c2d49c9~70299538": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
+			"the settle's branch epoch. #3620 re-keyed it: the sweep call " +
+			"above it wraps. #3676 re-keyed it: the drain no longer takes " +
+			"the settle's epoch (its quick fix credits its report's).",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#2ccc914e~d8df7429": {
@@ -2232,7 +2236,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// signal until #2523 AC4 threads it, so this records the increase. 9 -> 11
 	// (#3741 round 2): the settle stats the file before reading it and again just
 	// before the write, so a newer edit is never written over.
-	"clients/fix-run-restore.ts": 11,
+	// 11 -> 10 (#3830), recorded rather than absorbed: the restore reads the file
+	// inside pi's queue entry for it and re-reads it before the write instead of
+	// statting twice (the stat's identity was blind to a same-size edit inside
+	// one mtime tick), and the wrapper awaits the caller's scan (`afterRun`) but
+	// no longer `finish()`. One await is the per-file queue entry, which a hook
+	// signal cannot reach until #2523 AC4.
+	"clients/fix-run-restore.ts": 10,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.
@@ -2405,7 +2415,15 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// spawn, and the outcome helper awaits the project diff once where the two
 	// branches awaited it separately (net +1). The fixer's spawn was already
 	// awaited under the same hold and the restore is bounded local file work.
-	"clients/pipeline.ts": 63,
+	// 63 -> 64 (#3858): `chainLateFormatResync` is #3828's late-resync
+	// continuation moved out of `handleAgentEnd` (its exemption row is gone) so
+	// the in-band pipeline shares it: a detached reaction on the abandoned
+	// formatter's settlement that parks no awaiting task and holds no queue
+	// entry or timer, so a formatter that never settles leaves it inert. It
+	// reaches the LSP only through `resyncHeldLspDocument`: a document a live
+	// client of the current service already holds, one bounded notify write
+	// (a save, #3828 r3), never a spawn; its answer is the late row's outcome.
+	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
 	"clients/quiet-window.ts": 6,
@@ -2622,6 +2640,15 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"promise per store, so the three turn-end stores spend one budget each " +
 		"per delivery however many lanes await them, and an abandoned read " +
 		"yields null — a cold cache to every lane — never a stale envelope.",
+	"call:clients/runtime-turn.ts#2b57f8b9~df074468":
+		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
+		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
+		"wall budget is still live. #3872: this is `knipClient.analyze`, awaited " +
+		"under the budget LEFT after the phases before it (not a fresh 3000 ms), " +
+		"so a slow scan releases the handler instead of holding it past " +
+		"`hook-await-exceeded`. It replaces the #2523 exemption for the same " +
+		"await; the scan itself is abandoned, not cancelled, and finishes off-hook " +
+		"under knip's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#4da1e4ca~7e52ce49":
 		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
 		"— the turn's registered abort signal, set from the host's `ctx.signal` " +

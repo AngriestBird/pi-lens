@@ -22,7 +22,8 @@ agent using pi-lens can observe (tools, diagnostics, messages, config, install,
 performance, a fixed bug they could hit), `internal` for CI, tests, `formal/`,
 contributor docs, orchestration and refactors with no observable change. The
 GitHub release body lists only `user` entries plus a one-line internal count;
-`CHANGELOG.md` keeps the `internal` ones in a collapsed `### Internal` block. The entry may use a `-` or `*` bullet, bold or plain text, and an
+`CHANGELOG.md` keeps the `internal` ones in a collapsed `### Internal` block.
+The entry may use a `-` or `*` bullet, bold or plain text, and an
 em dash, period, or no title separator. Continuation lines and nested bullets
 are preserved; each file must contain exactly one top-level entry.
 
