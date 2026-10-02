@@ -1024,6 +1024,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 * counter must not advance for it (`skipOnSuppressed`).
 	 */
 	const deliveryHolds: DeliveryHold[] = [];
+	/** A session replaced mid-turn owns none of the held state any more. */
+	const holdGeneration = runtime.sessionGeneration;
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
 
@@ -1210,8 +1212,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	/** #1944/#1950: demotions retired after their delivery limit. */
 	let demotedFindingsRetired = 0;
-	/** A session replaced mid-turn owns none of the held state any more. */
-	const holdGeneration = runtime.sessionGeneration;
 	/**
 	 * The two inline-blocker commits a hold runs once its advisory reached the
 	 * message. The past-EOF retire is #1944's "after this ONE delivery"; the
