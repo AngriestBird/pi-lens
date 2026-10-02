@@ -12,6 +12,11 @@ export interface PendingRunnerFindings {
 	markedAtMs: number;
 	writeIndex?: number;
 	result?: RunnerResult;
+	/**
+	 * #3758/#3813: the producer's captured handle, carried through the drain so
+	 * a requeued, capacity-held answer stays fenced to the scope that owned it.
+	 */
+	session?: GenerationHandle;
 }
 
 interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
@@ -71,7 +76,10 @@ export function deferRunnerFindings(
  * #3813: hand a drained, settled result back for the next turn end because the
  * turn-end cap cut the part that carried it. It re-enters through the same
  * bounded store as a fresh deferral (same cap, same eviction record) and the
- * next drain re-gates it for freshness against its original `markedAtMs`.
+ * next drain re-gates it for freshness against its original `markedAtMs`. It
+ * carries the producer's captured handle, so the next drain still fences it to
+ * the scope that owned the result (#3758); a requeue after that scope retired
+ * is dropped with its counted `generation-guard-stale-write` row.
  */
 export function requeueRunnerFindings(
 	entry: PendingRunnerFindings & { result: RunnerResult },
@@ -79,7 +87,7 @@ export function requeueRunnerFindings(
 	const { result, ...owned } = entry;
 	track({
 		...owned,
-		session: undefined,
+		session: entry.session,
 		promise: Promise.resolve(result),
 		settled: true,
 		result,
@@ -140,6 +148,7 @@ export async function drainPendingRunnerFindings(
 				runnerId: entry.runnerId,
 				markedAtMs: entry.markedAtMs,
 				writeIndex: entry.writeIndex,
+				session: entry.session,
 				result: entry.result,
 			});
 		} else {
