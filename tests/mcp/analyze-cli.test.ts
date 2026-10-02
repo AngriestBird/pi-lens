@@ -50,15 +50,16 @@ function runBin(
 	args: string[],
 	stdin?: string,
 	nodeArgs: string[] = [],
+	home = path.join(testIsolationDir, "home"),
 ): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...nodeArgs, binJs, ...args], {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: {
 				...process.env,
-				HOME: path.join(testIsolationDir, "home"),
+				HOME: home,
 				PILENS_DATA_DIR: path.join(testIsolationDir, "data"),
-				PI_LENS_HOME: path.join(testIsolationDir, "home"),
+				PI_LENS_HOME: home,
 			},
 		});
 		let stdout = "";
@@ -414,9 +415,25 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 			json: false,
 		},
 		{ name: "Stop stdin", args: "stdin", event: "Stop", code: 0, json: false },
+		{
+			name: "PostToolUse stdin with --hook",
+			args: "stdin",
+			event: "PostToolUse",
+			code: 0,
+			json: true,
+			hook: true,
+		},
+		{
+			name: "Stop stdin with --hook",
+			args: "stdin",
+			event: "Stop",
+			code: 0,
+			json: false,
+			hook: true,
+		},
 	])(
 		"reports an unrunnable $name without claiming a clean scan",
-		async ({ args, event, code, json }) => {
+		async ({ args, event, code, json, hook }) => {
 			const turnEnd = args.startsWith("turn-end") || event === "Stop";
 			const file = path.join(turnDir, "sample.js");
 			fs.writeFileSync(file, "const unused = 1;\n");
@@ -425,14 +442,15 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 				import.meta.url,
 			);
 			if (turnEnd) preload.searchParams.set("target", "ipc");
-			const argv =
-				args === "stdin"
+			const argv = [
+				...(args === "stdin"
 					? []
 					: [
 							`--cwd=${turnDir}`,
 							...(turnEnd ? ["--turn-end"] : [`--file=${file}`]),
-							...(json || args === "turn-end-hook" ? ["--hook"] : []),
-						];
+						]),
+				...(hook || json || args === "turn-end-hook" ? ["--hook"] : []),
+			];
 			const payload = JSON.stringify({
 				cwd: turnDir,
 				hook_event_name: event,
@@ -599,6 +617,32 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		} finally {
 			fs.rmdirSync(statusPath);
 		}
+	}, 20_000);
+
+	it("keeps hook failures visible when extension.log cannot be written", async () => {
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		const home = path.join(turnDir, "log-home");
+		const logPath = path.join(home, "extension.log");
+		fs.mkdirSync(logPath, { recursive: true });
+		const preload = new URL(
+			"../fixtures/mcp/analyze-cli-failure.mjs",
+			import.meta.url,
+		);
+		const result = await runBin(
+			["--hook", `--cwd=${turnDir}`, `--file=${cleanFile}`],
+			undefined,
+			["--import", preload.href],
+			home,
+		);
+		expect(result.code).toBe(0);
+		expect(JSON.parse(result.stdout).hookSpecificOutput).toEqual({
+			hookEventName: "PostToolUse",
+			additionalContext:
+				"pi-lens-analyze failed: Cannot find package '@earendil-works/pi-tui'",
+		});
+		expect(result.stderr).toContain("@earendil-works/pi-tui");
+		expect(readTurnEndStatus(turnDir)).toMatchObject({ failed: 1 });
+		expect(fs.statSync(logPath).isDirectory()).toBe(true);
 	}, 20_000);
 
 	it("renders the warm server's report without the injection framing", async () => {
