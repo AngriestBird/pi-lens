@@ -120,8 +120,10 @@ unchanged. With the queue on:
   the PR`, with the failing job, step and test lines read from the
   `merge_group` run. Treat that exactly as a red PR run: fix, push, enqueue
   again. A failure from before the head's last push is an earlier head's and is
-  ignored. The queue read is one GraphQL call on a green head and is skipped
-  on a red or pending one; without a queue on master it is the only extra call.
+  ignored. The queue read is one GraphQL call each time a poll finds the head's
+  own checks green (a red or still-running head costs none); an in-queue PR
+  stays pending, so under `--wait` the queue is re-read once per poll until it
+  merges or ejects. Without a queue on master it is the only extra call.
 - **Retire update-branch and BEHIND.** The queue tests against the latest
   master itself, so `gh pr update-branch`, "not up to date" retries, and the
   `gh run rerun` replays-the-old-merge-commit workaround are moot. Worse, any
