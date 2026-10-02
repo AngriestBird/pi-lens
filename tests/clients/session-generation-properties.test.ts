@@ -113,6 +113,7 @@ const commandArb: fc.Arbitrary<Command> = fc.oneof(
 			kind: fc.constantFrom<WriterKind>(
 				"cascade",
 				"runner",
+				"runnerBare",
 				"bookkeep",
 				"widget",
 			),
