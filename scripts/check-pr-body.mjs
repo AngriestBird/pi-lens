@@ -317,27 +317,74 @@ function isSeamFile(file, map) {
 // `git diff --unified=0` hands the lexer a block comment's continuation lines
 // without the opener it needs, so prose such as `case` in a JSDoc body read as
 // a `case` label (#3774), and a backtick in one opened a template string that
-// hid the code after it. oxfmt keeps a continuation line's `*` first, so those
-// orphan lines are dropped. A whole block is dropped too, opener and closer
-// together: dropping the closer alone left an unterminated comment that hid
-// every later line (#3905 r1 F1; #3770's `catch` blocks). Text after a
-// closer, and a block that opens and closes on one line, stay for the blanker.
-// One call covers one hunk, so a block left open at a hunk's end cannot hide
-// the next hunk.
+// hid the code after it. A continuation line is neutralized IN PLACE, never
+// dropped: `recordLocationsFromRuntimeSource` keys a record's span to its line
+// number, so a dropped line would shift every later record out of its hunk's
+// added-line set and lose a real record (#3906). One call serves the
+// failure-path, seam-branch and record-harvest scans, one hunk at a time, so a
+// block left open at a hunk's end cannot hide the next hunk.
+//
+// A line whose first non-space character is `*` is a continuation only when the
+// `*` does not head a generator method: oxfmt writes a generator as `*name(`
+// (the star is part of the name), while a JSDoc body is `* text` and a fragment
+// is `*/`. `*name` is real code and stays; `* text`/`*` is blanked. Text after
+// a `*/` closer is code and stays (#3905 r1 F1; #3770's `catch` blocks). A
+// `/*` opener that follows a closer on the same orphan line is blanked WITHOUT
+// opening a block, so ` */ /* more` cannot hide the rest of the hunk (#3906
+// N-a). A genuine `/*` opener without a closer still opens a block.
 function withoutCommentContinuations(text) {
 	let inBlock = false;
+	const blank = (line) => " ".repeat(line.length);
+	const maskCommentSpans = (line, start, openBlocks) => {
+		let masked = " ".repeat(start) + line.slice(start);
+		let index = start;
+		for (;;) {
+			const open = masked.indexOf("/*", index);
+			if (open === -1) return masked;
+			const close = masked.indexOf("*/", open + 2);
+			if (close === -1) {
+				if (openBlocks) inBlock = true;
+				return masked.slice(0, open) + " ".repeat(masked.length - open);
+			}
+			masked =
+				masked.slice(0, open) +
+				" ".repeat(close + 2 - open) +
+				masked.slice(close + 2);
+			index = close + 2;
+		}
+	};
 	const kept = [];
 	for (const line of text.split("\n")) {
 		if (inBlock) {
 			const close = line.indexOf("*/");
-			if (close === -1) continue;
+			if (close === -1) {
+				kept.push(blank(line));
+				continue;
+			}
 			inBlock = false;
-			kept.push(line.slice(close + 2));
-		} else if (/^\s*\/\*/.test(line) && !line.includes("*/")) inBlock = true;
-		else if (/^\s*\*/.test(line)) {
-			const close = line.indexOf("*/");
-			if (close !== -1) kept.push(line.slice(close + 2));
-		} else kept.push(line);
+			kept.push(maskCommentSpans(line, close + 2, true));
+			continue;
+		}
+		const star = /^(\s*)\*/.exec(line);
+		if (!star) {
+			if (/^\s*\/\*/.test(line) && !line.includes("*/")) {
+				inBlock = true;
+				kept.push(blank(line));
+			} else kept.push(line);
+			continue;
+		}
+		const after = line[star[1].length + 1];
+		if (after !== undefined && !/\s/.test(after) && after !== "/") {
+			// `*name(...)`: a generator method, not a comment continuation.
+			kept.push(line);
+			continue;
+		}
+		const close = line.indexOf("*/", star[1].length);
+		if (close === -1) {
+			kept.push(blank(line));
+			continue;
+		}
+		kept.push(maskCommentSpans(line, close + 2, false));
 	}
 	return kept.join("\n");
 }
@@ -454,13 +501,19 @@ function closeParenIndex(blanked, open) {
 
 function recordLocationsFromRuntimeSource(source) {
 	const records = [];
-	const blanked = blankCommentsAndStrings(source).text;
+	// The same continuation filter the failure-path and seam-branch scans use
+	// (#3906): under `--unified=0` a JSDoc continuation's backtick otherwise
+	// opened a template string and hid the record literal below it, and prose
+	// carrying a `recordDegradationOnce(...)` satisfied the check. Line numbers
+	// are preserved, so a record's span still maps back to the hunk's added lines.
+	const filtered = withoutCommentContinuations(source);
+	const blanked = blankCommentsAndStrings(filtered).text;
 	const push = (value, valueIndex, start, end) =>
 		records.push({
 			value,
-			line: lineAt(source, valueIndex),
-			startLine: lineAt(source, start),
-			endLine: lineAt(source, end),
+			line: lineAt(filtered, valueIndex),
+			startLine: lineAt(filtered, start),
+			endLine: lineAt(filtered, end),
 		});
 	const calls = [
 		["recordDegradationOnce", ["kind"]],
@@ -492,7 +545,10 @@ function recordLocationsFromRuntimeSource(source) {
 			"g",
 		);
 		for (const match of blanked.matchAll(callPattern)) {
-			const original = source.slice(match.index, match.index + match[0].length);
+			const original = filtered.slice(
+				match.index,
+				match.index + match[0].length,
+			);
 			for (const field of fields) {
 				const fieldMatch = new RegExp(`${field}\\s*:\\s*["']([^"']+)["']`).exec(
 					original,
@@ -515,8 +571,8 @@ function recordLocationsFromRuntimeSource(source) {
 	for (const match of blanked.matchAll(/\bemitBounded\s*\(/g)) {
 		const open = match.index + match[0].length - 1;
 		const close = closeParenIndex(blanked, open);
-		const end = close === -1 ? source.length : close + 1;
-		const call = source.slice(open + 1, end);
+		const end = close === -1 ? filtered.length : close + 1;
+		const call = filtered.slice(open + 1, end);
 		const phase = /^\s*(["'`])([^"'`$]+)\1/.exec(call);
 		if (phase)
 			push(

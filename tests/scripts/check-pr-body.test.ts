@@ -1206,6 +1206,84 @@ describe("PR body lint (#1844)", () => {
 		});
 	});
 
+	// #3906: `git diff --unified=0` hands the record-harvest scan a JSDoc body's
+	// continuation lines with no opener. A quote or backtick in the prose opened
+	// a string in the blanker and hid the real record literal below it, so the
+	// honest body was refused; a prose `recordDegradationOnce(...)` in the same
+	// position wrongly satisfied the check instead. The continuation filter now
+	// runs over the record scan too, and blanks a continuation in place so a
+	// record's line number still maps to the hunk's added lines.
+	describe("block-comment continuations never hide or satisfy a record (#3906)", () => {
+		const withObservability = (text: string) =>
+			body.replace("The advisory check run is the record.", text);
+		const diffAdding = (file: string, ...added: string[]) =>
+			[
+				`diff --git a/${file} b/${file}`,
+				`@@ -1,0 +1,${added.length} @@`,
+				...added.map((line) => `+${line}`),
+			].join("\n");
+
+		it.each([
+			["an unbalanced backtick", " * the `findRelocation window"],
+			[
+				"a balanced backtick and apostrophe",
+				" * the `findRelocation`'s window",
+			],
+			["an unbalanced double quote", ' * the "relocation window'],
+		])(
+			"finds the record below a JSDoc continuation carrying %s",
+			(_name, continuation) => {
+				expect(
+					lintPrBody(withObservability("The record is real-kind."), {
+						diff: diffAdding(
+							"clients/widget.ts",
+							continuation,
+							'\treturn recordDegradationOnce({ kind: "real-kind" });',
+						),
+					}),
+				).toEqual({ valid: true, errors: [] });
+			},
+		);
+
+		it("keeps a record's line number when a continuation line sits above it", () => {
+			// A dropped continuation line would shift the record out of the hunk's
+			// added-line set and lose it even after the filter.
+			const diff = [
+				"diff --git a/clients/widget.ts b/clients/widget.ts",
+				"@@ -5,3 +5,4 @@",
+				" \tconst before = 1;",
+				"+ * the `findRelocation window",
+				'+\treturn recordDegradationOnce({ kind: "shift-kind" });',
+				" \tconst after = 2;",
+			].join("\n");
+			expect(
+				lintPrBody(withObservability("The record is shift-kind."), { diff }),
+			).toEqual({ valid: true, errors: [] });
+		});
+
+		it("refuses a prose record literal inside a JSDoc continuation", () => {
+			expect(
+				lintPrBody(withObservability("The record is prose-kind."), {
+					diff: diffAdding(
+						"clients/widget.ts",
+						' * recordDegradationOnce({ kind: "prose-kind" }) is documentation.',
+					),
+				}).valid,
+			).toBe(false);
+		});
+
+		it("keeps a record on a generator method line", () => {
+			expect(
+				lintPrBody(withObservability("The record is gen-kind."), {
+					diff: diffAdding(
+						"clients/widget.ts",
+						'*entries() { return recordDegradationOnce({ kind: "gen-kind" }); }',
+					),
+				}),
+			).toEqual({ valid: true, errors: [] });
+		});
+	});
+
 	describe("decision branches on a session, lifecycle or delivery seam (#3875)", () => {
 		const sentence = "No new failure path; no record added.";
 		const withObservability = (text: string) =>
