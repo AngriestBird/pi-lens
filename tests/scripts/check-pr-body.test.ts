@@ -170,10 +170,7 @@ describe("flattened PR body repair", () => {
 	);
 
 	it.each([
-		[
-			"plain quoted headings",
-			`${flattenedBody} \"## Summary one ## Tests two\"`,
-		],
+		["plain quoted headings", `${flattenedBody} "## Summary one ## Tests two"`],
 		[
 			"fenced quoted headings",
 			`${flattenedBody} \`\`\`text ## Summary one ## Tests two \`\`\``,
@@ -1282,6 +1279,101 @@ describe("PR body lint (#1844)", () => {
 				}),
 			).toEqual({ valid: true, errors: [] });
 		});
+
+		it("keeps a record on a computed generator method line", () => {
+			expect(
+				lintPrBody(withObservability("The record is computed-kind."), {
+					diff: diffAdding(
+						"clients/widget.ts",
+						'*[Symbol.iterator]() { return recordDegradationOnce({ kind: "computed-kind" }); }',
+					),
+				}),
+			).toEqual({ valid: true, errors: [] });
+		});
+
+		it("finds the record below a multiline generator head", () => {
+			expect(
+				lintPrBody(withObservability("The record is multi-kind."), {
+					diff: diffAdding(
+						"clients/widget.ts",
+						"*multi(",
+						"\ta,",
+						") {",
+						'\treturn recordDegradationOnce({ kind: "multi-kind" });',
+						"}",
+					),
+				}),
+			).toEqual({ valid: true, errors: [] });
+		});
+
+		// F1 (#3906 r2): oxfmt leaves `*the`/`**Note:**` untouched, so a
+		// continuation with no space after the `*` is a real, formatter-stable
+		// shape. It must be blanked like ` * text`.
+		it.each([
+			["an unbalanced backtick", " *the `findRelocation window"],
+			["a balanced backtick and apostrophe", " *the `findRelocation`'s window"],
+			["an unbalanced double quote", ' *the "relocation window'],
+			["a doubled star", " **Note:** the `window"],
+		])(
+			"finds the record below a no-space JSDoc continuation carrying %s",
+			(_name, continuation) => {
+				expect(
+					lintPrBody(withObservability("The record is no-space-kind."), {
+						diff: diffAdding(
+							"clients/widget.ts",
+							continuation,
+							'\treturn recordDegradationOnce({ kind: "no-space-kind" });',
+						),
+					}),
+				).toEqual({ valid: true, errors: [] });
+			},
+		);
+
+		it.each([
+			[
+				"a no-space continuation",
+				' *the `window` and recordDegradationOnce({ kind: "prose-kind" }) docs',
+			],
+			[
+				"a doubled-star continuation",
+				' **recordDegradationOnce({ kind: "prose-kind" })** docs',
+			],
+			[
+				"a bare call at the star",
+				'*recordDegradationOnce({ kind: "prose-kind" }) is documented.',
+			],
+		])("refuses a prose record literal inside %s", (_name, line) => {
+			expect(
+				lintPrBody(withObservability("The record is prose-kind."), {
+					diff: diffAdding("clients/widget.ts", line),
+				}).valid,
+			).toBe(false);
+		});
+
+		// A no-space continuation carrying an unbalanced quote used to open a
+		// template string that blanked the failure path or seam branch below it,
+		// so the bare sentence passed (#3906 F1 false clean).
+		it.each([
+			[
+				"a failure path",
+				"clients/widget.ts",
+				"\tcatch (error) { warn(error); }",
+			],
+			[
+				"a seam branch",
+				"clients/session-scope.ts",
+				"\tif (adopt) apply(slot);",
+			],
+		])(
+			"still refuses the no-record sentence when a no-space continuation precedes %s",
+			(_name, file, branch) => {
+				const result = lintPrBody(
+					withObservability("No new failure path; no record added."),
+					{ diff: diffAdding(file, " *the `window", branch) },
+				);
+				expect(result.valid).toBe(false);
+			},
+		);
 	});
 
 	describe("decision branches on a session, lifecycle or delivery seam (#3875)", () => {
@@ -2899,7 +2991,7 @@ describe("head-tree citations and test references", () => {
 					'it("title after typeof regex", () => {});',
 					"const quotient = numerator / denominator;",
 					'it("title after division", () => {});',
-					'it.each([{ value: fn(1) }])(\"array each title\", () => {});',
+					'it.each([{ value: fn(1) }])("array each title", () => {});',
 				].join("\n"),
 			);
 			const git = (args: string[]) =>
@@ -3063,7 +3155,7 @@ describe("head-tree citations and test references", () => {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
 			writeFileSync(
 				join(fixtureCwd, "tests", "lexer.test.ts"),
-				`it(\"${title.replaceAll("\\", "\\\\")}\", () => {});\n`,
+				`it("${title.replaceAll("\\", "\\\\")}", () => {});\n`,
 			);
 			const git = (args: string[]) =>
 				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";

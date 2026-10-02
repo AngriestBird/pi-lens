@@ -301,6 +301,14 @@ function isRuntimeObservabilityPath(name) {
 // 50-PR calibration in the #3875 body flagged nothing extra for them.
 const DECISION_BRANCH_G = /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\b/g;
 
+// `*name(...) {` / `*[computed](...) {` is a generator method head: the only
+// `*`-led code line formatter output leaves at the start of a line. The block
+// body brace after the parameter list is what separates it from a JSDoc body
+// that merely calls something (`*recordDegradationOnce({ ... })`), which stays
+// blanked. oxfmt writes the name and `(` with no space between them.
+const GENERATOR_HEAD_G =
+	/^\s*(?:[A-Za-z_$][\w$]*|\[[^\]]*\])\(.*\)\s*(?::[^{;]*)?\{/;
+
 function loadSeamMap(cwd = REPO_ROOT) {
 	try {
 		return loadCoverageMap(cwd);
@@ -324,14 +332,25 @@ function isSeamFile(file, map) {
 // failure-path, seam-branch and record-harvest scans, one hunk at a time, so a
 // block left open at a hunk's end cannot hide the next hunk.
 //
-// A line whose first non-space character is `*` is a continuation only when the
-// `*` does not head a generator method: oxfmt writes a generator as `*name(`
-// (the star is part of the name), while a JSDoc body is `* text` and a fragment
-// is `*/`. `*name` is real code and stays; `* text`/`*` is blanked. Text after
-// a `*/` closer is code and stays (#3905 r1 F1; #3770's `catch` blocks). A
-// `/*` opener that follows a closer on the same orphan line is blanked WITHOUT
-// opening a block, so ` */ /* more` cannot hide the rest of the hunk (#3906
-// N-a). A genuine `/*` opener without a closer still opens a block.
+// A line whose first non-space character is `*` is kept as code only when it
+// is a generator method head: `*name(...) {` or `*[computed](...) {` (the star
+// is part of the name, and oxfmt writes the name and `(` with no space between
+// them). The block body brace after the parameter list is what separates a
+// generator method from a JSDoc body that merely calls something: `*the` and
+// `**Note:**` carry no head, and `*recordDegradationOnce({ ... })` closes its
+// call without a body. Every other `*`-led line is a continuation and is
+// blanked. Text after a `*/` closer is code and stays (#3905 r1 F1; #3770's
+// `catch` blocks). A `/*` opener that follows a closer on the same orphan line
+// is blanked WITHOUT opening a block, so ` */ /* more` cannot hide the rest of
+// the hunk (#3906 N-a). A genuine `/*` opener without a closer still opens a
+// block.
+//
+// F1 (r2): the previous `*X` guard kept every non-space second character, so
+// `*the`/`**Note:**`/`*'...'` stayed code, a prose quote opened a string and
+// hid the real record or branch below it, and a prose `recordDegradationOnce`
+// satisfied the check. oxfmt 0.71.0 expands every generator body onto its own
+// line, so no record or branch sits on a head line; a multiline head (`*multi(`)
+// is blanked in place, which preserves line numbers and loses nothing.
 function withoutCommentContinuations(text) {
 	let inBlock = false;
 	const blank = (line) => " ".repeat(line.length);
@@ -374,8 +393,13 @@ function withoutCommentContinuations(text) {
 			continue;
 		}
 		const after = line[star[1].length + 1];
-		if (after !== undefined && !/\s/.test(after) && after !== "/") {
-			// `*name(...)`: a generator method, not a comment continuation.
+		if (
+			after !== undefined &&
+			after !== "/" &&
+			GENERATOR_HEAD_G.test(line.slice(star[1].length + 1))
+		) {
+			// `*name(...) {`: a generator method head, not a comment
+			// continuation.
 			kept.push(line);
 			continue;
 		}
