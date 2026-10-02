@@ -261,7 +261,11 @@ the surface they bite; each block loads only when its trigger applies.
     contain file input; normalize and redact at the shared diagnostic seam.
 
 31. **Pull-only observability:** new behavior emits a success or decision record
-    in the streams that monitors and analyzers read.
+    in the streams that monitors and analyzers read. A new decision branch on a
+    session, lifecycle or delivery seam names its record, cites an existing one,
+    or says `none: <reason>` naming each file (`check-pr-body` prompts for it);
+    a test reads a record back, and a reason is judged by the reviewer
+    (#3875; recurrence #3873: the S2/S3 fixes could not be shown to fire live).
 
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
@@ -739,7 +743,10 @@ The four primary host hooks are:
   `RuntimeCoordinator.recordProjectMutation`, then run format, autofix, LSP,
   dispatch, and bounded deferred work.
 - `turn_end`: settle deferred work, deliver findings, persist bounded state, and
-  run the test/actionable-warning drains.
+  run the test/actionable-warning drains. One-shot state a producer consumes
+  for a part of the message (a retirement, a delivery count, a drained run)
+  commits only when that part reaches the capped message; a cut part stays
+  pending for the next turn (`clients/turn-end/delivery-holds.ts`, #3813).
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
@@ -773,7 +780,25 @@ npm run changelog:check               rollup check; fragments use check-changelo
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
+node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
 ```
+
+CI cost gates (#3801). The heavy advisory jobs (`mutation (advisory)`, `Unit
+tests Windows (advisory)`) start only after every required check passed on the
+head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
+or unfinished at its deadline). ci-verdict lists them with their real state
+(PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
+success. A docs-only pull request (root `*.md`, `docs/**`, `.changelog/**` and
+nothing else, classified by `scripts/ci-changed-files.mjs`; every doubt runs the
+full suite) skips only those heavy advisory jobs: the Unit shards and every
+other test job always run, because a docs edit can red tests outside tests/config
+(`docs/public-api-stability.md`, `docs/*_rules_catalog.md`). `TLA+ models`
+model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
+job never skips at job level: ci-verdict and the merge train demand a literal
+`success`, so `TLA+ models` starts and skips its steps.
+The Unit shards are packed by the per-file seconds in
+`scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
+`vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
 
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run

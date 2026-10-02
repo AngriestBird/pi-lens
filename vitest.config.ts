@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import { defineConfig } from "vitest/config";
+import { BalancedShardSequencer } from "./scripts/lib/balanced-shard-sequencer.mjs";
 import {
 	formatTestWorkerBudget,
 	resolveTestWorkerBudget,
@@ -463,6 +464,10 @@ export const wallClockBudgetInclude = [
 	// #3684: the wrapper's advisory scope is a real `git diff` against a real
 	// fixture repo, spawned through the real CLI (flake-shape admission).
 	"tests/scripts/astgrep-self-scan.test.ts",
+	// #3795: the one-fragment-per-PR check diffs a real fixture repo through
+	// real `git` (`git diff` + `git ls-files --others`), which is the boundary
+	// under test (flake-shape admission).
+	"tests/scripts/changelog-entries.test.ts",
 	// #2807 review F1/F4: the checker must be exercised through its real local
 	// CLI and a real shallow clone, not an in-process substitute.
 	"tests/scripts/check-pr-body.test.ts",
@@ -612,6 +617,11 @@ export default defineConfig({
 		// below) — applies to every project's fork teardown, not just the
 		// grammar-heavy one, which is strictly more forgiving everywhere else.
 		teardownTimeout: 30_000,
+		// #3771: `--shard=k/N` packs files by recorded duration instead of vitest's
+		// equal-count sha1 cut (scripts/test-shard-weights.json). Root-config-only
+		// in Vitest 4 (`sequencer` is shared across projects); only `shard()` is
+		// overridden, so a run without `--shard` sorts exactly as before.
+		sequence: { sequencer: BalancedShardSequencer },
 		projects: [
 			{
 				test: {
