@@ -112,7 +112,7 @@ export function summarizeSection(body, opts = {}) {
 	}
 	if (internalCount > 0) {
 		out.push(
-			`Plus ${internalCount} internal ${internalCount === 1 ? "change" : "changes"}: tests, CI, tooling.`,
+			`Plus ${internalCount} internal ${internalCount === 1 ? "change" : "changes"}: tests, CI, tooling, and refactors.`,
 		);
 	}
 	return out.join("\n").replace(/^\n+/, "").replace(/\s+$/, "");

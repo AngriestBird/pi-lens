@@ -134,7 +134,10 @@ function bucketSectionBody(body) {
 		if (heading) {
 			flush();
 			section = RELEASE_SECTIONS.find((candidate) => candidate === heading[1]);
-		} else if (section && !INTERNAL_WRAPPER_LINE.test(line.trim())) {
+		} else if (
+			section &&
+			!(section === INTERNAL_HEADING && INTERNAL_WRAPPER_LINE.test(line.trim()))
+		) {
 			lines.push(line);
 		}
 	}
@@ -145,7 +148,7 @@ function bucketSectionBody(body) {
 function renderInternal(entries) {
 	// Chunks, not entries: one chunk can hold several bullets after a bucketing.
 	const count = entries.join("\n").split(/\r?\n/).filter(isEntryBullet).length;
-	const summary = `${count} internal ${count === 1 ? "change" : "changes"}: tests, CI, tooling`;
+	const summary = `${count} internal ${count === 1 ? "change" : "changes"}: tests, CI, tooling, and refactors`;
 	return `### ${INTERNAL_HEADING}\n\n<details>\n<summary>${summary}</summary>\n\n${entries.join("\n\n")}\n\n</details>`;
 }
 

@@ -180,7 +180,7 @@ describe("fragment audience (#3852)", () => {
 		expect(summary).not.toContain("Test flake");
 		expect(summary).not.toContain("### Internal");
 		expect(summary.split("\n").at(-1)).toBe(
-			"Plus 2 internal changes: tests, CI, tooling.",
+			"Plus 2 internal changes: tests, CI, tooling, and refactors.",
 		);
 	});
 
@@ -188,7 +188,7 @@ describe("fragment audience (#3852)", () => {
 		const { released } = rollMixed();
 		const internal = released.slice(released.indexOf("### Internal"));
 		expect(internal).toContain(
-			"<details>\n<summary>2 internal changes: tests, CI, tooling</summary>",
+			"<details>\n<summary>2 internal changes: tests, CI, tooling, and refactors</summary>",
 		);
 		expect(internal).toContain("- **CI shard** - detail.");
 		expect(internal).toContain("- **Test flake** - detail.");
@@ -218,7 +218,7 @@ describe("fragment audience (#3852)", () => {
 	it("a release with one internal entry says 'change', and none prints no count", () => {
 		expect(
 			summarizeSection("### Fixed\n\n- **A**\n\n### Internal\n\n- **B**"),
-		).toMatch(/\nPlus 1 internal change: tests, CI, tooling\.$/);
+		).toMatch(/\nPlus 1 internal change: tests, CI, tooling, and refactors\.$/);
 		expect(summarizeSection("### Fixed\n\n- **A**")).toBe(
 			"### Fixed\n\n- **A**",
 		);
@@ -259,5 +259,142 @@ describe("fragment audience (#3852)", () => {
 		expect(fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8")).toBe(
 			before,
 		);
+	});
+
+	// Edge shapes that a naive marker regex or wrapper strip would mangle.
+	it("accepts audience with no space and with trailing whitespace, and rejects a half-marker line", () => {
+		expect(
+			parseEntry("---\nsection: Fixed\naudience:user\n---\n\n- **T**\n", "x.md")
+				.audience,
+		).toBe("user");
+		expect(
+			parseEntry(
+				"---\nsection: Fixed\naudience: internal  \n---\n\n- **T**\n",
+				"x.md",
+			).audience,
+		).toBe("internal");
+		expect(() =>
+			parseEntry(
+				"---\nsection: Fixed\naudience: user extra\n---\n\n- **T**\n",
+				"x.md",
+			),
+		).toThrow(/missing audience marker/);
+		expect(() =>
+			parseEntry(
+				"---\nsection: Fixed\nxaudience: user\n---\n\n- **T**\n",
+				"x.md",
+			),
+		).toThrow(/missing audience marker/);
+	});
+
+	it("counts only column-0 Internal bullets and tolerates extra spaces", () => {
+		const body =
+			"### Fixed\n\n- **A**\n\n### Internal\n\n-  **B**\n\n  - nested under Internal\n";
+		expect(summarizeSection(body)).toBe(
+			"### Fixed\n\n- **A**\n\nPlus 1 internal change: tests, CI, tooling, and refactors.",
+		);
+	});
+
+	it("a roll of one internal entry says 'change' in its summary", () => {
+		const root = fixtureRoot();
+		fs.writeFileSync(
+			path.join(root, ".changelog", "a.md"),
+			fragment("internal", "Only internal"),
+		);
+		rollupChangelog("2.0.0", { rootDir: root, date: "2026-08-13" });
+		const released =
+			extractSection(
+				fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8"),
+				"2.0.0",
+			) ?? "";
+		expect(released).toContain(
+			"<summary>1 internal change: tests, CI, tooling, and refactors</summary>",
+		);
+	});
+
+	it("omits a section heading with no entries", () => {
+		const root = fixtureRoot();
+		fs.writeFileSync(
+			path.join(root, ".changelog", "a.md"),
+			fragment("user", "Only fixed"),
+		);
+		rollupChangelog("2.0.0", { rootDir: root, date: "2026-08-13" });
+		const released =
+			extractSection(
+				fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8"),
+				"2.0.0",
+			) ?? "";
+		expect(released).not.toContain("### Deprecated");
+		expect(released).not.toContain("### Removed");
+	});
+
+	it("does not strip a bare <details> line from a user section", () => {
+		const root = fixtureRoot();
+		fs.writeFileSync(
+			path.join(root, ".changelog", "a.md"),
+			"---\nsection: Fixed\naudience: user\n---\n\n- **U** - uses HTML.\n\n<details>\n\n<summary>user html</summary>\n",
+		);
+		rollupChangelog("2.0.0", { rootDir: root, date: "2026-08-13" });
+		const released =
+			extractSection(
+				fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8"),
+				"2.0.0",
+			) ?? "";
+		expect(released).toContain("<details>\n\n<summary>user html</summary>");
+	});
+
+	it("re-rolls an Internal block with whitespace-padded wrappers and wrapper-like prose", () => {
+		const root = fixtureRoot();
+		const rolled = [
+			"# Changelog",
+			"",
+			"## [Unreleased]",
+			"",
+			"### Added",
+			"",
+			"### Changed",
+			"",
+			"### Deprecated",
+			"",
+			"### Removed",
+			"",
+			"### Fixed",
+			"",
+			"### Security",
+			"",
+			"## [2.0.0] - 2026-08-01",
+			"",
+			"### Internal",
+			"",
+			"<details> ",
+			"<summary>1 internal change: tests, CI, tooling, and refactors</summary>",
+			"",
+			"- **Old internal**",
+			"",
+			"<details>kept as prose",
+			"",
+			"trailing prose</details>",
+			"",
+			"</details>",
+			"",
+		].join("\n");
+		fs.writeFileSync(path.join(root, "CHANGELOG.md"), rolled);
+		fs.writeFileSync(
+			path.join(root, ".changelog", "n.md"),
+			fragment("internal", "New internal"),
+		);
+		rollupChangelog("2.0.0", { rootDir: root, date: "2026-08-02" });
+		const released =
+			extractSection(
+				fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8"),
+				"2.0.0",
+			) ?? "";
+		expect(released).toContain("<details>kept as prose");
+		expect(released).toContain("trailing prose</details>");
+		expect(released).not.toContain("<details> \n");
+		expect(released).toContain(
+			"<summary>2 internal changes: tests, CI, tooling, and refactors</summary>",
+		);
+		expect(released).toMatch(/\n\n- \*\*New internal\*\*/);
 	});
 });
