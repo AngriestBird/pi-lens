@@ -8,12 +8,19 @@
 // tests/support/git-fixture-env.ts seam. Both are the boundaries under test;
 // no in-process double observes them.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import yaml from "../../clients/deps/js-yaml.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
 	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,
@@ -91,6 +98,197 @@ const gated = Object.entries(CI.jobs).filter(
 	([id, job]) =>
 		id !== "heavy-gate" && asList(job.needs).includes("heavy-gate"),
 );
+
+// #3941: ONE checkout census over every workflow file, parsed from the real
+// YAML (never a text scan -- a comment or a string that happens to spell a
+// ref is not a checkout input). The taxonomy comes from each job's own parsed
+// fields, so a member can never be satisfied by a name-shaped comment:
+//
+//   A gating/dependencies   pull_request-eligible, not an early advisory site
+//   B heavy-gated           `needs:` includes the heavy gate (#3926)
+//   C early-start advisory  pull_request-eligible, advisory, with a checkout
+//   D other triggers        not pull_request-eligible
+//   gate                    the heavy gate itself, excluded from A-D above
+//
+// The #3926 stage-B rule and the #3941 stage-C rule both read this one seam.
+// Only stages B and C can start after a merge deletes `refs/pull/<n>/merge`;
+// stage A must report before the merge and stage D never runs on a pull
+// request. `github.ref` names the mutable merge ref, so a B or C checkout
+// that pins it fetches a ref the merge may already have deleted. Stages A and
+// D keep their inputs and are the named excluded defaults.
+const WORKFLOW_DIR = resolve(ROOT, ".github/workflows");
+const EPHEMERAL_PULL_REF = "${{ github.ref }}";
+const CAPTURED_COMMIT = "${{ github.sha }}";
+const PINNED_CHECKOUT =
+	"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+
+type Stage = "A" | "B" | "C" | "D" | "gate";
+type CensusRow = {
+	file: string;
+	jobId: string;
+	jobName: string;
+	stage: Stage;
+	events: string[];
+	uses: string[];
+	refs: Array<string | undefined>;
+};
+type CheckoutSite = {
+	file: string;
+	jobId: string;
+	jobName: string;
+	stage: Stage;
+	events: string[];
+	uses: string;
+	ref: string | undefined;
+};
+
+function workflowEvents(workflow: Workflow): Set<string> {
+	const on = (workflow as { on?: unknown }).on;
+	if (typeof on === "string") return new Set([on]);
+	if (Array.isArray(on)) return new Set(on.map(String));
+	if (on && typeof on === "object") return new Set(Object.keys(on));
+	return new Set();
+}
+
+function checkoutStepsOf(job: Job): Step[] {
+	return (job.steps ?? []).filter(
+		(step) => step.uses?.startsWith("actions/checkout@") === true,
+	);
+}
+
+function classifyStage(
+	file: string,
+	jobId: string,
+	job: Job,
+	events: Set<string>,
+): Stage {
+	if (file === "ci.yml" && jobId === "heavy-gate") return "gate";
+	if (asList(job.needs).includes("heavy-gate")) return "B";
+	const pullRequestEligible =
+		events.has("pull_request") &&
+		!/event_name\s*!=\s*'pull_request'/.test(job.if ?? "");
+	if (!pullRequestEligible) return "D";
+	if (isAdvisoryCheck(job.name ?? jobId) && checkoutStepsOf(job).length > 0)
+		return "C";
+	return "A";
+}
+
+function workflowSources(): Map<string, string> {
+	return new Map(
+		readdirSync(WORKFLOW_DIR)
+			.filter((name) => name.endsWith(".yml"))
+			.sort(byCodeUnit)
+			.map((name) => [name, readFileSync(resolve(WORKFLOW_DIR, name), "utf8")]),
+	);
+}
+
+function censusRows(sources: ReadonlyMap<string, string>): CensusRow[] {
+	const rows: CensusRow[] = [];
+	for (const [file, text] of [...sources.entries()].sort(([a], [b]) =>
+		byCodeUnit(a, b),
+	)) {
+		const workflow = yaml.load(text) as Workflow;
+		const events = workflowEvents(workflow);
+		for (const [jobId, job] of Object.entries(workflow.jobs ?? {})) {
+			const steps = checkoutStepsOf(job);
+			rows.push({
+				file,
+				jobId,
+				jobName: job.name ?? jobId,
+				stage: classifyStage(file, jobId, job, events),
+				events: [...events],
+				uses: steps.map((step) => step.uses ?? ""),
+				refs: steps.map((step) => step.with?.ref),
+			});
+		}
+	}
+	return rows;
+}
+
+function sitesOf(rows: CensusRow[]): CheckoutSite[] {
+	return rows.flatMap((row) =>
+		row.refs.map((ref, index) => ({
+			file: row.file,
+			jobId: row.jobId,
+			jobName: row.jobName,
+			stage: row.stage,
+			events: row.events,
+			uses: row.uses[index] ?? "",
+			ref,
+		})),
+	);
+}
+
+function stageJobCounts(rows: CensusRow[]) {
+	const counts = new Map<Stage, number>();
+	for (const row of rows)
+		counts.set(row.stage, (counts.get(row.stage) ?? 0) + 1);
+	return counts;
+}
+
+function stageSummary(sites: CheckoutSite[]) {
+	const summary = new Map<
+		Stage,
+		{ jobs: Set<string>; sites: number; explicit: number; githubRef: number }
+	>();
+	for (const site of sites) {
+		const entry = summary.get(site.stage) ?? {
+			jobs: new Set<string>(),
+			sites: 0,
+			explicit: 0,
+			githubRef: 0,
+		};
+		entry.jobs.add(`${site.file}::${site.jobId}`);
+		entry.sites += 1;
+		if (site.ref !== undefined) entry.explicit += 1;
+		if (site.ref === EPHEMERAL_PULL_REF) entry.githubRef += 1;
+		summary.set(site.stage, entry);
+	}
+	return summary;
+}
+
+// A checkout is on the captured commit when it leaves `ref` unset (the pinned
+// action's default is `github.sha`) or names `github.sha` explicitly.
+const onCapturedCommit = (ref: string | undefined) =>
+	ref === undefined || ref === CAPTURED_COMMIT;
+
+// Stage C checkout sites that name the mutable merge ref. Empty after the
+// #3941 fix; the census mutation cases below reintroduce each one in turn.
+const earlyStartUnsafeSites = (sites: CheckoutSite[]) =>
+	sites.filter((site) => site.stage === "C" && site.ref === EPHEMERAL_PULL_REF);
+
+const CENSUS_SOURCES = workflowSources();
+const CENSUS_ROWS = censusRows(CENSUS_SOURCES);
+const CENSUS_SITES = sitesOf(CENSUS_ROWS);
+
+// The eleven early-start advisory jobs whose checkout pinned the merge ref,
+// by the ids the task names. Each must stay pull_request-eligible, advisory,
+// and NOT behind the gate; the census proves the trigger and the stage.
+const EARLY_START_MEMBERS = [
+	{
+		file: "ci.yml",
+		jobId: "targeted-tests-advisory",
+		name: "Targeted tests (advisory)",
+	},
+	{
+		file: "install-smoke.yml",
+		jobId: "mise-repro",
+		name: "mise repro (#285) \u00b7 ${{ matrix.os }} \u00b7 ${{ matrix.pi_via }} (advisory)",
+	},
+	{ file: "lint.yml", jobId: "vale", name: "Vale prose lint (advisory)" },
+	{ file: "lint.yml", jobId: "oxlint-advisory", name: "oxlint (advisory)" },
+	{ file: "lint.yml", jobId: "jscpd", name: "jscpd (advisory)" },
+	{ file: "lint.yml", jobId: "complexity", name: "complexity (advisory)" },
+	{ file: "lint.yml", jobId: "strictness", name: "strictness (advisory)" },
+	{ file: "lint.yml", jobId: "yamllint", name: "yamllint (advisory)" },
+	{ file: "lint.yml", jobId: "typos", name: "typos (advisory)" },
+	{ file: "lint.yml", jobId: "taplo", name: "taplo (advisory)" },
+	{
+		file: "pr-metadata.yml",
+		jobId: "pr-body-lint",
+		name: "PR body (advisory)",
+	},
+] as const;
 
 describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	// Recurrence: a required check renamed or dropped from the workflows makes
@@ -288,24 +486,18 @@ describe("#3926 a gated checkout pins the captured commit, never the merge ref",
 
 	// Recurrence (#3807/#3924): a gated job (or this one) restores
 	// `ref: ${{ github.ref }}` and its checkout fetches a ref the merge deleted.
+	// Reads the shared census (stage B), not a second checkout sweep.
 	it("keeps every checkout behind heavy-gate off the ephemeral pull ref", () => {
-		const gatedIds = gated.map(([id]) => id);
-		expect(gatedIds.length).toBeGreaterThan(0);
-		const offenders: string[] = [];
-		for (const id of gatedIds) {
-			const steps = checkoutSteps(id);
-			// A gated job with no checkout step would make the ref sweep
-			// vacuous, so its absence is its own failure.
+		const gatedSites = CENSUS_SITES.filter((site) => site.stage === "B");
+		expect(gatedSites.length).toBeGreaterThan(0);
+		for (const [id] of gated)
 			expect(
-				steps.length,
+				gatedSites.some((site) => site.jobId === id),
 				`${id} must still check out the repository`,
-			).toBeGreaterThan(0);
-			for (const step of steps) {
-				const ref = step.with?.ref;
-				if (ref === undefined || ref === "${{ github.sha }}") continue;
-				offenders.push(`${id}: ref=${ref}`);
-			}
-		}
+			).toBe(true);
+		const offenders = gatedSites
+			.filter((site) => !onCapturedCommit(site.ref))
+			.map((site) => `${site.file}::${site.jobId}: ref=${site.ref}`);
 		expect(offenders).toEqual([]);
 	});
 
@@ -333,6 +525,260 @@ describe("#3926 a gated checkout pins the captured commit, never the merge ref",
 			}
 		}
 	});
+});
+
+// #3941: the early-start advisory population. These eleven jobs run on
+// `pull_request` and are NOT behind `heavy-gate`, so a runner-queue delay can
+// start their checkout after auto-merge deletes the mutable
+// `refs/pull/<n>/merge` that `github.ref` names. This is the separate producer
+// the gate-based #3926 rule cannot cover. No field incident is claimed on
+// these eleven: the failure class is proven by the same pinned checkout
+// source contract (`actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`,
+// asserted below) and the real deleted-ref / captured-SHA witness in the
+// #3926 block; the production failure (#3926) is the same checkout mechanism
+// on the one gated Windows site. The rule folds onto the shared census, so a
+// future early-start advisory job is covered without a second resolver.
+//
+// Mutation harness: reintroduce `ref: <ref>` on the named job's first
+// checkout in an in-memory copy of the real file text, then re-parse. The
+// committed sources are never written; each trial starts from a fresh copy.
+function restoreCheckoutRef(text: string, jobId: string, ref: string): string {
+	const lines = text.split("\n");
+	const start = lines.findIndex((line) => line === `  ${jobId}:`);
+	if (start < 0) throw new Error(`job ${jobId} not found`);
+	let end = lines.length;
+	for (let i = start + 1; i < lines.length; i++) {
+		const line = lines[i] ?? "";
+		if (/^  \S/.test(line) && line.trimEnd().endsWith(":")) {
+			end = i;
+			break;
+		}
+	}
+	let checkout = -1;
+	for (let i = start + 1; i < end; i++) {
+		if ((lines[i] ?? "").includes("uses: actions/checkout@")) {
+			checkout = i;
+			break;
+		}
+	}
+	if (checkout < 0) throw new Error(`checkout not found in ${jobId}`);
+	let withAt = -1;
+	for (let i = checkout + 1; i < end; i++) {
+		const line = lines[i] ?? "";
+		if (line === "        with:") {
+			withAt = i;
+			break;
+		}
+		if (/^      - /.test(line)) break; // next step: this checkout has no with:
+	}
+	if (withAt >= 0) {
+		let refAt = -1;
+		for (let i = withAt + 1; i < end; i++) {
+			const line = lines[i] ?? "";
+			if (/^          ref:/.test(line)) {
+				refAt = i;
+				break;
+			}
+			if (!/^ {10,}\S/.test(line)) break;
+		}
+		if (refAt >= 0) lines[refAt] = `          ref: ${ref}`;
+		else lines.splice(withAt + 1, 0, `          ref: ${ref}`);
+	} else
+		lines.splice(checkout + 1, 0, "        with:", `          ref: ${ref}`);
+	return lines.join("\n");
+}
+
+describe("#3941 early-start advisory checkouts pin the captured commit", () => {
+	const summary = stageSummary(CENSUS_SITES);
+	const jobCounts = stageJobCounts(CENSUS_ROWS);
+	const stageJobs = (stage: Stage) => jobCounts.get(stage) ?? 0;
+	const stageRefs = (stage: Stage) => summary.get(stage)?.githubRef ?? 0;
+
+	// A minimal real-shaped workflow for the default / captured-SHA / unsafe
+	// controls. `on:` is the only knob that changes a job's stage, and `name:`
+	// is the only knob that changes its advisory classification.
+	const fixture = (
+		refLine: string,
+		extraSteps: string[] = [],
+		jobName = "Fixture tool (advisory)",
+		trigger = "  pull_request:",
+	) =>
+		[
+			"name: Fixture",
+			"on:",
+			trigger,
+			"jobs:",
+			"  fixture:",
+			`    name: ${jobName}`,
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			`      - uses: ${PINNED_CHECKOUT} # v7`,
+			"        with:",
+			refLine,
+			"          persist-credentials: false",
+			...extraSteps,
+			"",
+		].join("\n");
+	const sitesOfFixture = (text: string) =>
+		sitesOf(censusRows(new Map([["fixture.yml", text]])));
+
+	it("records every stage's job and site counts from the parsed YAML", () => {
+		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B3/C15/D20).
+		// Sites and jobs are counted separately so a no-checkout job cannot launder
+		// a stage's population. The floor call keeps this census registered under
+		// the sweep-floor meta-sweep: an empty walk fails instead of reading clean.
+		assertNonEmptyScan(
+			"early-start advisory checkout census",
+			CENSUS_SITES.length,
+			55,
+		);
+		expect(CENSUS_SITES.length).toBe(55);
+		expect(
+			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
+		).toBe(60);
+		expect(stageJobs("A")).toBe(22);
+		expect(stageJobs("B")).toBe(3);
+		expect(stageJobs("C")).toBe(15);
+		expect(stageJobs("D")).toBe(20);
+		// The gate's own checkout is its own stage and is excluded from A-D.
+		expect(summary.get("gate")?.sites).toBe(1);
+	});
+
+	it("removes every stage-C merge-ref site and only those", () => {
+		// After the fix: 27 github.ref sites became 16 (19 explicit refs).
+		expect(stageRefs("A")).toBe(15);
+		expect(stageRefs("B")).toBe(0);
+		expect(stageRefs("C")).toBe(0);
+		expect(stageRefs("D")).toBe(1);
+		const totalGithubRef = CENSUS_SITES.filter(
+			(site) => site.ref === EPHEMERAL_PULL_REF,
+		).length;
+		expect(totalGithubRef).toBe(16);
+		const totalExplicit = CENSUS_SITES.filter(
+			(site) => site.ref !== undefined,
+		).length;
+		expect(totalExplicit).toBe(19);
+	});
+
+	it("keeps every early-start advisory checkout off the ephemeral merge ref", () => {
+		expect(earlyStartUnsafeSites(CENSUS_SITES)).toEqual([]);
+	});
+
+	it("names the exact eleven early-start advisory members", () => {
+		const byFileJob = new Map(
+			CENSUS_SITES.map((site) => [`${site.file}::${site.jobId}`, site]),
+		);
+		for (const member of EARLY_START_MEMBERS) {
+			const key = `${member.file}::${member.jobId}`;
+			const site = byFileJob.get(key);
+			expect(site, key).toBeDefined();
+			expect(site?.stage, `${key} stage`).toBe("C");
+			expect(site?.jobName, `${key} name`).toBe(member.name);
+			// Trigger and pinned source: pull_request-eligible, and the pinned
+			// actions/checkout revision whose default fetches the captured
+			// `github.sha`.
+			expect(site?.events, `${key} trigger`).toContain("pull_request");
+			expect(site?.uses, `${key} checkout revision`).toBe(PINNED_CHECKOUT);
+			// `github.ref` gone, so the pinned action falls back to `github.sha`.
+			expect(site?.ref, `${key} ref`).toBeUndefined();
+		}
+		expect(stageJobs("C")).toBeGreaterThanOrEqual(EARLY_START_MEMBERS.length);
+	});
+
+	// The excluded defaults, named and measured: stage-A gating jobs must
+	// report before the merge, so their merge ref still exists and they keep
+	// `github.ref`; stage D never runs on a pull request. The rule must not
+	// reach into either, and it must flag only the eleven stage-C sites.
+	it("leaves the gating and other-trigger checkouts as named exclusions", () => {
+		const gatingSites = CENSUS_SITES.filter(
+			(site) => site.stage === "A" && site.ref === EPHEMERAL_PULL_REF,
+		);
+		expect(gatingSites.length).toBe(15);
+		expect(earlyStartUnsafeSites(gatingSites)).toEqual([]);
+		const otherTriggerSites = CENSUS_SITES.filter(
+			(site) => site.stage === "D" && site.ref === EPHEMERAL_PULL_REF,
+		);
+		expect(
+			otherTriggerSites.map((site) => `${site.file}::${site.jobId}`),
+		).toEqual(["labels.yml::sync"]);
+	});
+
+	// Controls, all through the real parser: the default checkout and an
+	// explicit captured commit are safe; `github.ref` is unsafe; and a comment
+	// or a string that spells the ref is not a checkout input. Only stage C is
+	// in scope.
+	it("allows the default and the captured commit, and flags only github.ref", () => {
+		expect(
+			earlyStartUnsafeSites(sitesOfFixture(fixture("          # no ref"))),
+		).toEqual([]);
+		expect(
+			earlyStartUnsafeSites(
+				sitesOfFixture(fixture(`          ref: ${CAPTURED_COMMIT}`)),
+			),
+		).toEqual([]);
+		const unsafe = earlyStartUnsafeSites(
+			sitesOfFixture(fixture(`          ref: ${EPHEMERAL_PULL_REF}`)),
+		);
+		expect(unsafe.map((site) => site.ref)).toEqual([EPHEMERAL_PULL_REF]);
+	});
+
+	it("does not read a comment or a string as a checkout ref", () => {
+		const commented = sitesOfFixture(
+			fixture(`          # ref: ${EPHEMERAL_PULL_REF}`),
+		);
+		expect(commented[0]?.ref).toBeUndefined();
+		expect(earlyStartUnsafeSites(commented)).toEqual([]);
+		const stringLiteral = sitesOfFixture(
+			fixture("          # no ref", [
+				"      - name: note",
+				`        run: 'echo "ref: ${EPHEMERAL_PULL_REF} is prose"'`,
+			]),
+		);
+		expect(stringLiteral[0]?.ref).toBeUndefined();
+		expect(earlyStartUnsafeSites(stringLiteral)).toEqual([]);
+	});
+
+	it("scopes the rule to stage C, not gating or other-trigger jobs", () => {
+		const gating = sitesOfFixture(
+			fixture(`          ref: ${EPHEMERAL_PULL_REF}`, [], "Fixture tool"),
+		);
+		expect(gating[0]?.stage).toBe("A");
+		expect(earlyStartUnsafeSites(gating)).toEqual([]);
+		const otherTrigger = sitesOfFixture(
+			fixture(
+				`          ref: ${EPHEMERAL_PULL_REF}`,
+				[],
+				"Fixture tool (advisory)",
+				"  push:",
+			),
+		);
+		expect(otherTrigger[0]?.stage).toBe("D");
+		expect(earlyStartUnsafeSites(otherTrigger)).toEqual([]);
+	});
+
+	// The eleven mutations: reintroduce the old unsafe input on each member in
+	// a fresh in-memory copy and prove the guard reds on exactly that site.
+	for (const member of EARLY_START_MEMBERS) {
+		it(`flags ${member.file}::${member.jobId} again when its github.ref returns`, () => {
+			const sources = new Map(CENSUS_SOURCES);
+			const original = sources.get(member.file);
+			expect(original, member.file).toBeDefined();
+			sources.set(
+				member.file,
+				restoreCheckoutRef(
+					original as string,
+					member.jobId,
+					EPHEMERAL_PULL_REF,
+				),
+			);
+			const offenders = earlyStartUnsafeSites(sitesOf(censusRows(sources))).map(
+				(site) => `${site.file}::${site.jobId}`,
+			);
+			expect(offenders).toContain(`${member.file}::${member.jobId}`);
+			// The real sources are a fresh read and stay clean: restore is exact.
+			expect(earlyStartUnsafeSites(CENSUS_SITES)).toEqual([]);
+		});
+	}
 });
 
 // #3926 secondary defect: the always-run summary invoked the checked-out
