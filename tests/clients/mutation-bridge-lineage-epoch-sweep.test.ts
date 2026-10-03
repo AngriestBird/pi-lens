@@ -29,7 +29,9 @@
  * defect shape (AGENTS.md 34). The #3824 follow-up quoted that fixture.
  *
  * This version folds bounded LOCAL provenance instead of matching spellings.
- * Each expression resolves to at most twelve possible OUTPUTS. An output
+ * Each expression resolves to at most sixteen possible OUTPUTS, of which at
+ * most fourteen are reachable (`absent` never coexists with `unknown`); the
+ * profiles are deduped, never capped, so no alternative is dropped. An output
  * records whether an epoch is present, what the `lineage` field's VALUE is
  * known to be, and whether an unresolved part could add or overwrite census
  * keys. The runtime fence is value-based (`clients/mutation-bridge.ts`: the
@@ -51,19 +53,25 @@
  *     falsy, because a falsy operand spreads no keys; `a || b` / `a ?? b`
  *     union both operands;
  *   * a binding that is ever reassigned, has a property written, is deleted,
- *     is destructured into, or is the target of `Object.assign` or a reflective
- *     mutator (`Object.defineProperty(ies)`,
- *     `Reflect.{deleteProperty,set,defineProperty}`) is NOT resolved (a stale
- *     initializer must never read as the live value);
- *   * a cycle, a parameter, an import, a call result, a cross-file name, or a
- *     dynamic computed key is UNRESOLVED.
+ *     is destructured into, is passed to a call other than the bridge's own
+ *     (which may retain and write it — this covers `Object.assign` and the
+ *     reflective helpers), or is bound to another local by identity
+ *     (`const b = a`, the same heap object) is NOT resolved, and neither is any
+ *     binding in its alias component: a stale initializer must never read as
+ *     the live value. `const b = { ...a }` is a COPY, not an alias, so mutating
+ *     `b` does not taint `a`;
+ *   * a cycle, a parameter, an import, a call result, a cross-file name, a
+ *     computed key with a template substitution, or a string/template literal
+ *     carrying an escape this fold does not decode is UNRESOLVED.
  *
  * The lineage value is folded beside its presence, because presence alone is
  * the r2 false-safe: `undefined` / `void 0` is not a lineage, a non-`undefined`
- * literal or a constructor is, a required parameter annotated without
- * `undefined` / `void` is, and anything else (a call, a member read, an optional
- * parameter, an import) is MAYBE — present but unproven, hence indeterminate
- * beside an epoch.
+ * literal or a constructor is, and **anything else** — a call, a member read, a
+ * parameter, an import, `null` — is MAYBE: present but unproven, hence
+ * indeterminate beside an epoch. The fold does not resolve TypeScript types, so
+ * no annotation is proof (not even the owned `LineageHandle`): a named type that
+ * includes `undefined` behind an alias, a generic, an import, or a local shadow
+ * is indistinguishable from the owned interface by spelling alone.
  *
  * The call population enumerates the callee spellings that rebind the bridge:
  * an import rename, a variable alias (`const r = replayThrough…`), a property
@@ -84,19 +92,22 @@
  * Known limits, stated rather than papered over:
  *   * cross-file provenance is outside this static fold; a binding whose value
  *     is imported or built in another module resolves to indeterminate;
- *   * TypeScript type resolution is not attempted. The value fold reads a
- *     literal, a local initializer, or a parameter's syntactic annotation; a
- *     call, a member read, or an import is MAYBE, so a site that cannot prove
- *     its lineage value defined beside an epoch is INDETERMINATE. The one
- *     production epoch sender's value is pinned by
- *     `tests/index-observed-sweep-no-read-guard.test.ts`, and the one admitted
- *     unproven value by the tool_result replay regression named in its
- *     admission reason;
- *   * reflective mutation is enumerated by owner namespace (`Object.assign`,
+ *   * TypeScript type resolution is not attempted, deliberately: proving a
+ *     named annotation non-nullable needs a type resolver this fold does not
+ *     have. The value fold reads a literal, a local initializer, or an explicit
+ *     `undefined`; a call, a member read, a parameter, or an import is MAYBE, so
+ *     a site that cannot prove its lineage value defined beside an epoch is
+ *     INDETERMINATE — including the one production epoch sender (`index.ts`'s
+ *     settled sweep). That producer's real value is pinned at runtime by
+ *     `tests/index-observed-sweep-no-read-guard.test.ts`, and the producer plus
+ *     the generic replay seam are registered below with their reasons;
+ *   * ANY call with a bare identifier argument other than the bridge seam is
+ *     treated as escaping it: an unresolved callee may retain and write the
+ *     object, and the reflective write helpers (`Object.assign`,
  *     `Object.defineProperty(ies)`,
- *     `Reflect.{deleteProperty,set,defineProperty}`). An aliased or
- *     unenumerated reflective helper is not detected; a mutation fixture below
- *     crosses the boundary;
+ *     `Reflect.{deleteProperty,set,defineProperty}`) are that same case. A
+ *     reflective target that is a member expression
+ *     (`Object.assign(hidden.nested, …)`) is not tainted: a stated limit;
  *   * a local function or class that shares a bridge callee's name is still
  *     counted as the bridge — a name collision this fold cannot resolve without
  *     type/module information. The approximation is LOUD: it can red a safe
@@ -186,8 +197,6 @@ interface Binding {
 	readonly scopeId: number;
 	readonly value: SgNode | null;
 	readonly nodeId: number;
-	/** For a parameter: its annotation proves the value not `undefined`. */
-	readonly defined?: boolean;
 }
 
 /**
@@ -206,8 +215,9 @@ type LineageState = "absent" | "undefined" | "maybe" | "defined";
  *
  * The verdict is per OUTPUT, not per key set: two mutually exclusive
  * conditional arms must not let a lineage key in one launder an epoch-only
- * sibling. Deduping the profiles bounds a construction to at most twelve
- * outputs, so folding alternatives is not an exponential branch product.
+ * sibling. Deduping the profiles bounds a construction to at most sixteen
+ * profiles (fourteen reachable), so folding alternatives is not an exponential
+ * branch product and no alternative is capped away.
  */
 interface Output {
 	readonly epoch: boolean;
@@ -256,6 +266,29 @@ function unquote(text: string): string {
 		return text.slice(1, -1);
 	}
 	return text;
+}
+
+/**
+ * The canonical string a literal key or subscript spells, or `undefined` when
+ * the node is not a static string this fold can trust: a template with a
+ * substitution is dynamic (the `template_substitution` named child, never a
+ * `${` text match), and a literal carrying a backslash escape is left UNKNOWN
+ * rather than decoded, because this fold is not a JavaScript string decoder.
+ */
+function staticStringValue(node: SgNode | null): string | undefined {
+	if (!node) return undefined;
+	const kind = node.kind();
+	if (kind !== "string" && kind !== "template_string") return undefined;
+	if (
+		kind === "template_string" &&
+		node
+			.namedChildren()
+			.some((child) => child.kind() === "template_substitution")
+	) {
+		return undefined;
+	}
+	if (node.text().includes("\\")) return undefined;
+	return unquote(node.text());
 }
 
 /** Every identifier a parameter pattern can bind (best-effort, never throws). */
@@ -309,18 +342,17 @@ function rootIdentifierName(node: SgNode | null): string | undefined {
 	return undefined;
 }
 
-/** Owner namespaces whose property-write helpers mutate their first argument. */
-const REFLECTIVE_MUTATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-	["Object", new Set(["assign", "defineProperty", "defineProperties"])],
-	["Reflect", new Set(["deleteProperty", "set", "defineProperty"])],
-]);
-
-function collectMutatedNames(root: SgNode): ReadonlySet<string> {
+function collectMutatedNames(
+	root: SgNode,
+	calleeNames: ReadonlySet<string>,
+): ReadonlySet<string> {
 	const names = new Set<string>();
+	/** `const b = a` names one heap object; `const b = { ...a }` does not. */
+	const aliases: Array<[string, string]> = [];
 	/** `h = …`, `h.x = …`, `[h] = …`, and `({ x: h } = …)` all write `h`. */
 	const addTargets = (target: SgNode | null): void => {
-		const root = rootIdentifierName(target);
-		if (root) names.add(root);
+		const targetRoot = rootIdentifierName(target);
+		if (targetRoot) names.add(targetRoot);
 		const bound: string[] = [];
 		collectPatternNames(target, bound);
 		for (const name of bound) names.add(name);
@@ -342,40 +374,48 @@ function collectMutatedNames(root: SgNode): ReadonlySet<string> {
 				const name = rootIdentifierName(node.namedChildren()[0] ?? null);
 				if (name) names.add(name);
 			}
+		} else if (kind === "variable_declarator") {
+			// An identity alias (`const b = a`) is the same heap object; a copy
+			// (`const b = { ...a }`) is not, so only a bare identifier initializer
+			// joins the alias relation.
+			const name = node.field("name");
+			const value = node.field("value");
+			if (name?.kind() === "identifier" && value?.kind() === "identifier") {
+				aliases.push([name.text(), value.text()]);
+			}
 		} else if (kind === "call_expression") {
-			// `Object.assign(target, …)` and the reflective write helpers mutate
-			// target, so a later read cannot resolve to the stale initializer.
+			// ANY call may retain and write a bare identifier argument: an
+			// unresolved helper (`mutate(entry)`) or a reflective write helper
+			// (`Object.assign(hidden, …)`, `Reflect.deleteProperty(hidden, …)`).
+			// The bridge seam is the census's own read-only call, so its arguments
+			// are the exception; everything else escapes the argument, so a stale
+			// initializer can never read as the live value.
 			const fn = node.field("function");
-			if (fn?.kind() === "member_expression") {
-				const owner = fn.field("object")?.text();
-				const member = fn.field("property")?.text();
-				if (
-					owner !== undefined &&
-					member !== undefined &&
-					REFLECTIVE_MUTATORS.get(owner)?.has(member)
-				) {
-					const target = node.field("arguments")?.namedChildren()[0] ?? null;
-					const name = rootIdentifierName(target);
-					if (name) names.add(name);
+			const callee = calleeName(fn);
+			if (callee === undefined || !calleeNames.has(callee)) {
+				for (const argument of node.field("arguments")?.namedChildren() ?? []) {
+					if (argument.kind() === "identifier") names.add(argument.text());
 				}
 			}
 		}
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
+	// A write through any name in an identity-alias component is visible through
+	// its siblings. Close over the (bounded, in-file) alias pairs, then taint the
+	// whole component of every tainted member. No second cache or writer.
+	let changed = aliases.length > 0;
+	while (changed) {
+		changed = false;
+		for (const [a, b] of aliases) {
+			if (names.has(a) !== names.has(b)) {
+				names.add(a);
+				names.add(b);
+				changed = true;
+			}
+		}
+	}
 	return names;
-}
-
-/**
- * A required parameter whose annotation names neither `undefined` nor `void` is
- * not `undefined` at runtime (its type contract excludes it). An optional
- * parameter, an `any`/`unknown` annotation, or no annotation at all is MAYBE.
- */
-function parameterIsDefined(parameter: SgNode): boolean {
-	if (parameter.kind() === "optional_parameter") return false;
-	const annotation = parameter.field("type");
-	if (!annotation) return false;
-	return !/\b(undefined|void|any|unknown)\b/.test(annotation.text());
 }
 
 function buildBindings(root: SgNode): Binding[] {
@@ -402,14 +442,12 @@ function buildBindings(root: SgNode): Binding[] {
 				for (const parameter of parameters.namedChildren()) {
 					const names: string[] = [];
 					collectPatternNames(parameter, names);
-					const defined = parameterIsDefined(parameter);
 					for (const name of names) {
 						bindings.push({
 							name,
 							scopeId: owner.id(),
 							value: null,
 							nodeId: node.id(),
-							defined,
 						});
 					}
 				}
@@ -478,7 +516,10 @@ function calleeName(fn: SgNode | null): string | undefined {
 		const index = fn.field("index");
 		if (!index) return undefined;
 		if (index.kind() === "string" || index.kind() === "template_string") {
-			return unquote(index.text());
+			// A template with a substitution is not a static callee name, so the
+			// site is outside the lexical population (see the header's known
+			// limits); a no-substitution template is the explicit name it spells.
+			return staticStringValue(index);
 		}
 		if (
 			index.kind() === "identifier" ||
@@ -654,9 +695,12 @@ function truthiness(node: SgNode | null): Truth {
 	return "unknown";
 }
 
-function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
+function makeResolver(
+	root: SgNode,
+	calleeNames: ReadonlySet<string>,
+): (node: SgNode | null) => Construction {
 	const bindings = buildBindings(root);
-	const mutated = collectMutatedNames(root);
+	const mutated = collectMutatedNames(root, calleeNames);
 	const byName = new Map<string, Binding[]>();
 	for (const binding of bindings) {
 		const list = byName.get(binding.name) ?? [];
@@ -771,7 +815,6 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 			kind === "string" ||
 			kind === "true" ||
 			kind === "false" ||
-			kind === "null" ||
 			kind === "regex" ||
 			kind === "template_string" ||
 			kind === "object" ||
@@ -794,9 +837,9 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 				next.add(binding.nodeId);
 				return resolveLineageValue(binding.value, next);
 			}
-			// A parameter, a function/class name, an import: the annotation is the
-			// only local evidence, and only a non-optional annotation proves it.
-			return binding.defined ? "defined" : "maybe";
+			// A parameter, a function/class name, or an import: the fold does not
+			// resolve types, so no annotation is proof and the value is MAYBE.
+			return "maybe";
 		}
 		if (
 			kind === "parenthesized_expression" ||
@@ -840,17 +883,16 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 			return { key: key.text(), dynamic: false };
 		}
 		if (kind === "string" || kind === "template_string") {
-			return { key: unquote(key.text()), dynamic: false };
+			const value = staticStringValue(key);
+			return value === undefined
+				? { dynamic: true }
+				: { key: value, dynamic: false };
 		}
 		if (kind === "computed_property_name") {
-			const inner = key.namedChildren()[0];
-			if (
-				inner &&
-				(inner.kind() === "string" || inner.kind() === "template_string")
-			) {
-				return { key: unquote(inner.text()), dynamic: false };
-			}
-			return { dynamic: true };
+			const value = staticStringValue(key.namedChildren()[0] ?? null);
+			return value === undefined
+				? { dynamic: true }
+				: { key: value, dynamic: false };
 		}
 		return { dynamic: true };
 	};
@@ -1032,6 +1074,36 @@ function censusKeys(construction: Construction): ReadonlySet<string> {
 }
 
 /**
+ * Test seam: the distinct `(epoch, lineage, unknown)` profiles one argument
+ * expression resolves to, so the lattice bound is asserted directly (sixteen
+ * cells, fourteen reachable) instead of inferred from a verdict. Identifiers
+ * the probe does not bind (`__unknown__`, `getLineage`) resolve to the
+ * UNKNOWN/MAYBE arms by design.
+ */
+function resolveOutputProfiles(expression: string): string[] {
+	const root = parse(
+		Lang.TypeScript,
+		`const __r4_probe__ = (${expression});`,
+	).root();
+	const declarators: SgNode[] = [];
+	const visit = (node: SgNode): void => {
+		if (
+			node.kind() === "variable_declarator" &&
+			node.field("name")?.text() === "__r4_probe__"
+		) {
+			declarators.push(node);
+		}
+		for (const child of node.children()) visit(child);
+	};
+	visit(root);
+	const resolve = makeResolver(root, collectCalleeNames(root));
+	return resolve(declarators[0]?.field("value") ?? null).outputs.map(
+		(output) =>
+			`${output.epoch ? "e" : "-"}|${output.lineage}|${output.unknown ? "u" : "-"}`,
+	);
+}
+
+/**
  * A file that never spells a bridge callee cannot call one, directly or
  * through an import alias (the alias still imports the original name). This is
  * a lexical ADMISSION check only: every admitted match still comes from the
@@ -1061,7 +1133,7 @@ function analyzeBridgeSites(source: string, file: string): BridgeSite[] {
 		);
 	}
 	const calleeNames = collectCalleeNames(root);
-	const resolve = makeResolver(root);
+	const resolve = makeResolver(root, calleeNames);
 	const sites: BridgeSite[] = [];
 	const visit = (node: SgNode): void => {
 		if (node.kind() === "call_expression") {
@@ -1153,6 +1225,8 @@ const ADMITTED_INDETERMINATE: Readonly<Record<string, string>> = {
 		"the generic replay seam forwards a caller-built entry; its two in-tree callers construct lineage at the call site",
 	"clients/runtime-tool-result.ts::handleToolResult::replayThroughMutationBridge":
 		"the value is `deps._sessionGeneration ?? runtime.captureSessionGeneration()`, a call result the fold does not resolve; the tool_result replay regression `tests/clients/observed-mutation-integration.test.ts` '#3596 a settle replay that lands after the replacement credits nothing in the new session' drops the replay, which is only possible when the lineage value is defined",
+	"index.ts::runObservedSettledSweepSafely::replayThroughMutationBridge":
+		"the lineage is the `lineage: LineageHandle` parameter, and the fold does not resolve types (`LineageHandle` itself has no `undefined`, but proving that needs a type resolver, and a nullable alias would spell the same). The real settled-sweep producer is pinned at runtime by `tests/index-observed-sweep-no-read-guard.test.ts` 'a third-party write under --no-read-guard is still caught by the settled sweep and replayed through the bridge, skipping only the read-guard stamp', whose floor observes the producer replay an epoch and whose safety clause asserts every epoch-carrying entry carries `lineage !== undefined`; if this value ever became `undefined`, that clause reds and the static `unsafe` check does too",
 };
 
 describe("#3824 S2 / #3937: a bridge entry names its lineage whenever it can name an epoch", () => {
@@ -1232,10 +1306,10 @@ describe("#3937: bounded local object/spread provenance", () => {
 		expect(site.line).toBe(4);
 	});
 
-	it("passes a benign spread that carries a proven lineage", () => {
+	it("passes a benign spread whose last write proves the lineage", () => {
 		const site = only(`
-			function replayCaller(entry: unknown, lineage: LineageHandle) {
-				const safeEntry = { ...entry, lineage };
+			function replayCaller(entry: unknown) {
+				const safeEntry = { ...entry, lineage: 1 };
 				replayThroughMutationBridge({ ...safeEntry });
 			}
 		`);
@@ -1693,13 +1767,268 @@ describe("#3937 review round 3 — value-level soundness and spelling coverage",
 		expect(site.kind).toBe("safe");
 	});
 
-	it("proves a required parameter's lineage value defined beside an epoch", () => {
+	it("does not prove a required parameter's lineage value from its annotation", () => {
 		const site = only(`
 			function replayCaller(entry: unknown, readGuardBranchEpoch: number, lineage: LineageHandle) {
 				replayThroughMutationBridge({ ...entry, readGuardBranchEpoch, lineage });
 			}
 		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+});
+
+describe("#3937 review round 4 — the provable floor (no type, heap, or key overreach)", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+
+	// W1 — no annotation is proof. A named nullable alias, a generic, an import,
+	// a local shadow of the owned name, and an explicit inline union are all the
+	// same question the fold cannot answer without a type resolver.
+	it("does not prove a named nullable type alias", () => {
+		const site = only(`
+			type OptionalLineage = LineageHandle | undefined;
+			function f(entry: unknown, lineage: OptionalLineage) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not prove a generic type parameter", () => {
+		const site = only(`
+			function f<T>(lineage: T) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not prove an imported named type", () => {
+		const site = only(`
+			import type { MaybeLineage } from "./x.js";
+			function f(lineage: MaybeLineage) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not prove a local shadow of the owned type's name", () => {
+		const site = only(`
+			interface LineageHandle { x: number }
+			function f(lineage: LineageHandle) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not prove a generic default of undefined", () => {
+		const site = only(`
+			function f<T = undefined>(lineage: T) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// W2 — object identity, not name identity.
+	it("taints the original through an identity alias", () => {
+		const site = only(`
+			function f() {
+				const h: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				const other = h;
+				delete other.lineage;
+				replayThroughMutationBridge(h);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("taints the original through a reflective alias mutation", () => {
+		const site = only(`
+			function f() {
+				const h: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				const other = h;
+				Reflect.deleteProperty(other, "lineage");
+				replayThroughMutationBridge(h);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("treats a binding passed to an unresolved callee as escaped, not stale", () => {
+		const site = only(`
+			function f(mutate: (x: any) => void) {
+				const h = { lineage: 1, readGuardBranchEpoch: 5 };
+				mutate(h);
+				replayThroughMutationBridge(h);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("does not propagate a copy spread's mutation to the original", () => {
+		// `{ ...h }` is a COPY, not the same heap object: deleting a key on the
+		// copy must not taint `h`, whose own value is still proven.
+		const site = only(`
+			function f() {
+				const h: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				const other = { ...h };
+				delete other.lineage;
+				replayThroughMutationBridge(h);
+			}
+		`);
 		expect(site.kind).toBe("safe");
+	});
+
+	// W3 — a computed template key with a substitution is dynamic, never the
+	// literal `${k}` string the fold used to read.
+	it("treats a computed template key with a substitution as dynamic", () => {
+		const site = only(`
+			function f(k: string) {
+				replayThroughMutationBridge({ [\`\${k}\`]: 5 });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not let a substituted key overwrite a proven lineage", () => {
+		const site = only(`
+			function f(k: string) {
+				replayThroughMutationBridge({ lineage: 1, [\`\${k}\`]: undefined, readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("still sees a no-substitution template key", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ [\`readGuardBranchEpoch\`]: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("leaves an escaped census key unknown rather than decoding it", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ "\\u0072eadGuardBranchEpoch": 5 });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// W4 — `null` is nullish, never a defined proof.
+	it("does not treat a null ?? undefined lineage as defined", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: null ?? undefined });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("does not treat a bare null lineage as defined beside an epoch", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: null });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// W6 — the survivor arms the r3 reviewer found untested.
+	it("does not resolve a new-expression argument", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge(new Entry());
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a member-expression argument", () => {
+		const site = only(`
+			function f(mod: { entry: unknown }) {
+				replayThroughMutationBridge(mod.entry);
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a call-result argument", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge(getEntry());
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("folds a void-falsy && left as the empty spread it is", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ ...(void 0 && { readGuardBranchEpoch: 5 }) });
+			}
+		`);
+		expect(site.kind).not.toBe("unsafe");
+	});
+
+	it("reads a method named lineage as a defined value", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage() {} });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	// W5 — the profile lattice is finite and uncapped. Every reachable
+	// `(epoch, lineage, unknown)` profile appears once; `absent` never coexists
+	// with `unknown`, so 16 cartesian cells leave 14 reachable. A drop cap or a
+	// lost profile would make this count fall below 14.
+	it("keeps exactly the fourteen reachable profiles (no drop cap)", () => {
+		const expression = [
+			"{}",
+			"{ lineage: 1 }",
+			"{ ...__unknown__, lineage: 1 }",
+			"{ lineage: getLineage() }",
+			"{ ...__unknown__, lineage: getLineage() }",
+			"{ lineage: undefined }",
+			"{ ...__unknown__, lineage: undefined }",
+			"{ readGuardBranchEpoch: 5 }",
+			"{ readGuardBranchEpoch: 5, lineage: 1 }",
+			"{ readGuardBranchEpoch: 5, ...__unknown__, lineage: 1 }",
+			"{ readGuardBranchEpoch: 5, lineage: getLineage() }",
+			"{ readGuardBranchEpoch: 5, ...__unknown__ }",
+			"{ readGuardBranchEpoch: 5, lineage: undefined }",
+			"{ readGuardBranchEpoch: 5, ...__unknown__, lineage: undefined }",
+		].join(" || ");
+		expect(resolveOutputProfiles(expression).sort()).toEqual(
+			[
+				"-|absent|-",
+				"-|defined|-",
+				"-|defined|u",
+				"-|maybe|-",
+				"-|maybe|u",
+				"-|undefined|-",
+				"-|undefined|u",
+				"e|absent|-",
+				"e|defined|-",
+				"e|defined|u",
+				"e|maybe|-",
+				"e|maybe|u",
+				"e|undefined|-",
+				"e|undefined|u",
+			].sort(),
+		);
 	});
 });
 
