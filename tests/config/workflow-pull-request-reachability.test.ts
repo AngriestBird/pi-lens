@@ -648,6 +648,62 @@ describe("the reachability model itself", () => {
 		},
 	);
 
+	// #3941 r6 (F9): `COMPARISON_BOUNDARY_OPERATORS` already lists `<=`,
+	// `>=`, and `!=`, and the entry guard keeps a non-literal right operand
+	// out of the fold, but no case pinned any of the four. Removing `<=`,
+	// `>=`, or `!=` from the boundary set, or forcing the entry guard false,
+	// survived the r5 suite and silently restored the wrong-boolean F7 harm at
+	// that neighbour. Each case drives the real model entry point AND the real
+	// caller, so the refusal propagates instead of a clean `[]` flag.
+	it.each(["1 <= 2 == true", "1 >= 2 == true", "fromJSON('0') != 1 == 2"])(
+		"refuses an unsupported comparison neighbour: %s",
+		(expr) => {
+			expect(() => isPullRequestReachable(expr)).toThrow(
+				/unsupported expression/,
+			);
+			const file: WorkflowFile = {
+				path: ".github/workflows/fixture.yml",
+				text: [
+					"on:",
+					"  pull_request:",
+					"jobs:",
+					"  probe:",
+					`    if: ${expr}`,
+				].join("\n"),
+			};
+			expect(() => findPullRequestUnreachableJobs([file])).toThrow(
+				/unsupported expression/,
+			);
+		},
+	);
+
+	// #3941 r6 (F9): `1 == fromJSON('1')` is supported, not refused: the right
+	// operand is a call, so the entry guard leaves the comparison to the
+	// evaluator and GitHub loose equality makes `1 == 1` true. The guard is
+	// load-bearing -- forcing it false folds the call as a literal and throws a
+	// raw `SyntaxError` from `new Function`. A job gated on the expression is
+	// reachable, and its advisory declaration is still named.
+	it("keeps a comparison whose right operand is a call, not a literal", () => {
+		expect(isPullRequestReachable("1 == fromJSON('1')")).toBe(true);
+		const file: WorkflowFile = {
+			path: ".github/workflows/fixture.yml",
+			text: [
+				"on:",
+				"  pull_request:",
+				"jobs:",
+				"  probe:",
+				"    name: probe (advisory)",
+				"    continue-on-error: true",
+				"    if: 1 == fromJSON('1')",
+			].join("\n"),
+		};
+		expect(findPullRequestUnreachableJobs([file]).flagged).toEqual([]);
+		expect(findUndeclaredAdvisoryJobs([file])).toEqual({
+			flagged: [],
+			advisoryJobs: [".github/workflows/fixture.yml::probe"],
+		});
+	});
+
 	// #3941 r5 (F8.1): GitHub's expression grammar has single-quoted strings
 	// only. A double-quoted literal is invalid, and the model names the
 	// grammar rule at the real caller instead of falling through to a generic
