@@ -173,9 +173,6 @@ describe("declared-transparent servers evict through the real registry (#3952)",
 			process.env.PI_LENS_LSP_IDLE_EVICT_MS = String(IDLE_WINDOW_MS);
 			doubleSpawnBoundary(id, () => nextPid);
 			const server = getServerById(id) as LSPServerInfo;
-			// Precondition: the registry still needs a reason for this declaration,
-			// and the registry test pins it `transparent`.
-			expect(server.idleEviction, `${id} declared`).toBe("transparent");
 			const file = fixtureFileFor(server);
 			const { LSPService } = await import("../../../clients/lsp/index.js");
 			const service = new LSPService();
