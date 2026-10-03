@@ -4,6 +4,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,6 +197,11 @@ type RuntimePostImageFixture = {
 	pre: string[];
 	post: string[];
 	dirty: string[];
+	// Unchanged padding appended to the pre- and post-images (#3906 r5): the
+	// committed diff stays one added line while the post-image blob crosses the
+	// reader's byte ceiling. Over the shell argv limit it is written with
+	// `writeFileSync` and `cp`ed into place instead of a `printf` argument.
+	padLines?: number;
 };
 
 function shellRows(rows: string[]): string {
@@ -225,11 +231,25 @@ function createOriginMasterFixture(
 	// head so the diff names `index <pre>..<post>`, and the working tree is then
 	// dirtied in an unchanged line. The reader must take the named blob; reading
 	// the dirty tree would flip the lexical state without changing any added line.
+	//
+	// A `padLines` post-image (#3906 r5 byte-ceiling witnesses) is over the
+	// argv limit, so its bytes come from a fixture-local file and a `cp`; a small
+	// image keeps the single-argument `printf` writer.
+	const writePostImageContent = (rows: string[], tempName: string) => {
+		const destination = `${directory}/${postImage?.path}`;
+		if (!postImage?.padLines)
+			return `printf '%s\\n' ${shellRows(rows)} > '${destination}'`;
+		writeFileSync(
+			join(directory, tempName),
+			`${rows.join("\n")}\n${"// pad\n".repeat(postImage.padLines)}`,
+		);
+		return `cp '${directory}/${tempName}' '${destination}'`;
+	};
 	const preImage = postImage
-		? `mkdir -p '${directory}/${dirname(postImage.path)}' && printf '%s\\n' ${shellRows(postImage.pre)} > '${directory}/${postImage.path}' && git -C '${directory}' add '${postImage.path}' && `
+		? `mkdir -p '${directory}/${dirname(postImage.path)}' && ${writePostImageContent(postImage.pre, ".fixture-pre")} && git -C '${directory}' add '${postImage.path}' && `
 		: "";
 	const postImageSegment = postImage
-		? ` && printf '%s\\n' ${shellRows(postImage.post)} > '${directory}/${postImage.path}' && git -C '${directory}' add '${postImage.path}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-post-image && printf '%s\\n' ${shellRows(postImage.dirty)} > '${directory}/${postImage.path}'`
+		? ` && ${writePostImageContent(postImage.post, ".fixture-post")} && git -C '${directory}' add '${postImage.path}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-post-image && ${writePostImageContent(postImage.dirty, ".fixture-dirty")}`
 		: "";
 	gitExecSync(
 		`git init --quiet --initial-branch=main '${directory}' && ${preImage}git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}${postImageSegment}`,
@@ -1781,6 +1801,80 @@ describe("PR body lint (#1844)", () => {
 				expect(result.errors.join(" ")).toContain("could not classify");
 			} finally {
 				rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		// #3906 r5 F1: the blob branch's byte ceiling is the boundary that keeps a
+		// truncated read from being classified. A committed post-image over
+		// `MAX_SOURCE_BYTES` must decline visibly (`indeterminate`), and a size
+		// between Node's 1 MiB default and the 16 MiB ceiling must read, or the
+		// reader drops legitimate records. Both go through production
+		// `headFileSource` with the real `git cat-file -p` transport; no
+		// `headFiles` override stands in for the blob.
+		it("refuses a committed post-image blob over the byte ceiling", () => {
+			const fixtureCwd = createOriginMasterFixture(undefined, {
+				path: "clients/over-ceiling.ts",
+				pre: ["export let x = 0;"],
+				post: [
+					"export let x = 0;",
+					'recordDegradationOnce({ kind: "over-kind" });',
+				],
+				dirty: [
+					"export let x = 0;",
+					'recordDegradationOnce({ kind: "over-kind" });',
+				],
+				padLines: 2_546_542,
+			});
+			try {
+				const bytes = statSync(
+					join(fixtureCwd, "clients", "over-ceiling.ts"),
+				).size;
+				expect(bytes).toBeGreaterThan(16 * 1024 * 1024);
+				const diff = localDiff(fixtureCwd);
+				expect(diff).toContain("index ");
+				const result = lintPrBody(
+					withObservability("The record is over-kind."),
+					{ diff, cwd: fixtureCwd, workingTree: true },
+				);
+				expect(result.valid).toBe(false);
+				expect(result.errors.join(" ")).toContain("could not classify");
+				expect(result.errors.join(" ")).toContain("clients/over-ceiling.ts");
+			} finally {
+				rmSync(fixtureCwd, { recursive: true, force: true });
+			}
+		});
+
+		it("reads a committed post-image blob over Node's default buffer", () => {
+			const fixtureCwd = createOriginMasterFixture(undefined, {
+				path: "clients/mid-ceiling.ts",
+				pre: ["export let x = 0;"],
+				post: [
+					"export let x = 0;",
+					'recordDegradationOnce({ kind: "mid-kind" });',
+				],
+				dirty: [
+					"export let x = 0;",
+					'recordDegradationOnce({ kind: "mid-kind" });',
+				],
+				padLines: 299_592,
+			});
+			try {
+				const bytes = statSync(
+					join(fixtureCwd, "clients", "mid-ceiling.ts"),
+				).size;
+				expect(bytes).toBeGreaterThan(1024 * 1024);
+				expect(bytes).toBeLessThan(16 * 1024 * 1024);
+				const diff = localDiff(fixtureCwd);
+				expect(diff).toContain("index ");
+				expect(
+					lintPrBody(withObservability("The record is mid-kind."), {
+						diff,
+						cwd: fixtureCwd,
+						workingTree: true,
+					}),
+				).toEqual({ valid: true, errors: [] });
+			} finally {
+				rmSync(fixtureCwd, { recursive: true, force: true });
 			}
 		});
 
