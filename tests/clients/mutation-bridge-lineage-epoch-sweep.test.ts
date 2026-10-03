@@ -29,10 +29,16 @@
  * defect shape (AGENTS.md 34). The #3824 follow-up quoted that fixture.
  *
  * This version folds bounded LOCAL provenance instead of matching spellings.
- * Each expression resolves to at most eight possible OUTPUTS, each summarized
- * by whether an epoch and a lineage are guaranteed in that output and whether
- * an unresolved part could add more; the verdict is taken per output, so a
- * conditional's lineage arm cannot launder its epoch-only sibling:
+ * Each expression resolves to at most twelve possible OUTPUTS. An output
+ * records whether an epoch is present, what the `lineage` field's VALUE is
+ * known to be, and whether an unresolved part could add or overwrite census
+ * keys. The runtime fence is value-based (`clients/mutation-bridge.ts`: the
+ * entry is dropped only when `lineage !== undefined` and the guard refuses), so
+ * the census asks the same question: `safe` requires a lineage value the fold
+ * can prove is not `undefined`. A key that is present but nullable or built by
+ * a call is INDETERMINATE, never `safe`, and never described as runtime-safe.
+ * The verdict is taken per output, so a conditional's lineage arm cannot
+ * launder its epoch-only sibling:
  *
  *   * an object-literal argument contributes its explicit keys (`pair`,
  *     shorthand, method, and a computed STRING-literal key — an unlisted
@@ -40,19 +46,31 @@
  *   * a spread/alias/reference identifier resolves to its nearest SCOPE-AWARE
  *     local binding, whose object-literal initializer is folded recursively;
  *   * `Object.assign(target, ...sources)` folds every argument;
- *   * `a ? b : c` unions both arms as separate outputs; `a && b` is its right
- *     operand (a falsy left is a no-op, never an object); `a || b` / `a ?? b`
+ *   * `a ? b : c` unions both arms as separate outputs; `a && b` contributes
+ *     its right operand only when `a` can be truthy, and nothing when `a` is
+ *     falsy, because a falsy operand spreads no keys; `a || b` / `a ?? b`
  *     union both operands;
  *   * a binding that is ever reassigned, has a property written, is deleted,
- *     or is the target of `Object.assign` is NOT resolved (a stale initializer
- *     must never read as the live value);
+ *     is destructured into, or is the target of `Object.assign` or a reflective
+ *     mutator (`Object.defineProperty(ies)`,
+ *     `Reflect.{deleteProperty,set,defineProperty}`) is NOT resolved (a stale
+ *     initializer must never read as the live value);
  *   * a cycle, a parameter, an import, a call result, a cross-file name, or a
  *     dynamic computed key is UNRESOLVED.
+ *
+ * The lineage value is folded beside its presence, because presence alone is
+ * the r2 false-safe: `undefined` / `void 0` is not a lineage, a non-`undefined`
+ * literal or a constructor is, a required parameter annotated without
+ * `undefined` / `void` is, and anything else (a call, a member read, an optional
+ * parameter, an import) is MAYBE — present but unproven, hence indeterminate
+ * beside an epoch.
  *
  * The call population enumerates the callee spellings that rebind the bridge:
  * an import rename, a variable alias (`const r = replayThrough…`), a property
  * alias (`const r = mod.replayThrough…`), a destructured binding
- * (`const { replayThrough…: r } = mod`), and a subscript call
+ * (`const { replayThrough…: r } = mod`), a defaulted destructured binding
+ * (`const { replayThrough…: r = mod.recordMutation } = mod`), a sequence callee
+ * (`(0, mod.recordMutation)(…)`), and a subscript call
  * (`bridge["recordMutation"](…)`). A bridge callee silently absent from the
  * population is the F3 defect this round closes.
  *
@@ -66,9 +84,19 @@
  * Known limits, stated rather than papered over:
  *   * cross-file provenance is outside this static fold; a binding whose value
  *     is imported or built in another module resolves to indeterminate;
- *   * TypeScript type resolution is not attempted, so a binding annotated with
- *     a type that lacks the field is still indeterminate unless its initializer
- *     is a resolvable object literal;
+ *   * TypeScript type resolution is not attempted. The value fold reads a
+ *     literal, a local initializer, or a parameter's syntactic annotation; a
+ *     call, a member read, or an import is MAYBE, so a site that cannot prove
+ *     its lineage value defined beside an epoch is INDETERMINATE. The one
+ *     production epoch sender's value is pinned by
+ *     `tests/index-observed-sweep-no-read-guard.test.ts`, and the one admitted
+ *     unproven value by the tool_result replay regression named in its
+ *     admission reason;
+ *   * reflective mutation is enumerated by owner namespace (`Object.assign`,
+ *     `Object.defineProperty(ies)`,
+ *     `Reflect.{deleteProperty,set,defineProperty}`). An aliased or
+ *     unenumerated reflective helper is not detected; a mutation fixture below
+ *     crosses the boundary;
  *   * a local function or class that shares a bridge callee's name is still
  *     counted as the bridge — a name collision this fold cannot resolve without
  *     type/module information. The approximation is LOUD: it can red a safe
@@ -80,6 +108,11 @@ import * as path from "node:path";
 import { Lang, parse } from "@ast-grep/napi";
 import { describe, expect, it } from "vitest";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
+import {
+	type MutationBridgeDeps,
+	recordMutationThroughSeam,
+} from "../../clients/mutation-bridge.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -105,10 +138,19 @@ type SiteKind = "safe" | "unsafe" | "indeterminate";
 /**
  * The verdict for one bridge construction site.
  *
- * `unsafe`  — the argument can carry an epoch and cannot carry lineage.
- * `indeterminate` — a spread the fold cannot resolve could add an epoch, and
- *   lineage is not present explicitly. Disclosed, never silently clean.
- * `safe` — either no epoch can be present, or lineage is explicit beside it.
+ * The obligation is the runtime fence's (`clients/mutation-bridge.ts`:
+ * `lineage !== undefined`), so `safe` is a VALUE verdict, not a key verdict: it
+ * requires the fold to prove an output either cannot carry an epoch or carries
+ * a lineage value it can prove is not `undefined`. A `lineage` key whose value
+ * is merely present, nullable, or unprovable is NOT `safe`.
+ *
+ * `unsafe`  — an output has a definite epoch and a lineage that is definitely
+ *   not defined (absent, or the literal `undefined`).
+ * `indeterminate` — no output is definitely unsafe, but one could be: a
+ *   definite epoch beside a maybe-defined value, or an unresolved part that
+ *   could add an epoch. Disclosed, never silently clean.
+ * `safe` — every output either cannot carry an epoch, or carries a lineage
+ *   value the fold proved is not `undefined`.
  */
 interface BridgeSite {
 	readonly file: string;
@@ -144,21 +186,32 @@ interface Binding {
 	readonly scopeId: number;
 	readonly value: SgNode | null;
 	readonly nodeId: number;
+	/** For a parameter: its annotation proves the value not `undefined`. */
+	readonly defined?: boolean;
 }
 
 /**
- * One possible final object a construction can produce: whether an epoch and a
- * lineage are guaranteed present in that output, and whether an unresolved part
- * could add further keys (an epoch without a lineage, in the worst case).
+ * What the fold knows about the `lineage` VALUE in one output. The runtime
+ * fence tests the value (`lineage !== undefined`), so only `defined`
+ * satisfies it: `absent` and `undefined` are definite holes, `maybe` is an
+ * unproven value the census refuses to call safe.
+ */
+type LineageState = "absent" | "undefined" | "maybe" | "defined";
+
+/**
+ * One possible final object a construction can produce: whether an epoch is
+ * present in the known part, what the `lineage` value is known to be, and
+ * whether an unresolved part could add or overwrite census keys (an epoch
+ * without a lineage, in the worst case).
  *
  * The verdict is per OUTPUT, not per key set: two mutually exclusive
  * conditional arms must not let a lineage key in one launder an epoch-only
- * sibling. Deduping the triples bounds a construction to at most eight outputs,
- * so folding alternatives is not an exponential branch product.
+ * sibling. Deduping the profiles bounds a construction to at most twelve
+ * outputs, so folding alternatives is not an exponential branch product.
  */
 interface Output {
 	readonly epoch: boolean;
-	readonly lineage: boolean;
+	readonly lineage: LineageState;
 	readonly unknown: boolean;
 }
 
@@ -166,11 +219,23 @@ interface Construction {
 	readonly outputs: readonly Output[];
 }
 
-const EMPTY_OUTPUT: Output = { epoch: false, lineage: false, unknown: false };
+const EMPTY_OUTPUT: Output = {
+	epoch: false,
+	lineage: "absent",
+	unknown: false,
+};
 
 const UNKNOWN_CONSTRUCTION: Construction = {
-	outputs: [{ epoch: false, lineage: false, unknown: true }],
+	outputs: [{ epoch: false, lineage: "absent", unknown: true }],
 };
+
+/** The weaker of two value states; `defined` only when both are defined. */
+function joinLineage(a: LineageState, b: LineageState): LineageState {
+	if (a === "defined" && b === "defined") return "defined";
+	if (a === "absent" && b === "absent") return "absent";
+	if (a === "undefined" && b === "undefined") return "undefined";
+	return "maybe";
+}
 
 function isScope(node: SgNode): boolean {
 	return (
@@ -194,7 +259,8 @@ function unquote(text: string): string {
 }
 
 /** Every identifier a parameter pattern can bind (best-effort, never throws). */
-function collectPatternNames(node: SgNode, out: string[]): void {
+function collectPatternNames(node: SgNode | null, out: string[]): void {
+	if (!node) return;
 	const kind = node.kind();
 	if (kind === "identifier") {
 		out.push(node.text());
@@ -206,14 +272,23 @@ function collectPatternNames(node: SgNode, out: string[]): void {
 		kind === "array_pattern" ||
 		kind === "required_parameter" ||
 		kind === "optional_parameter" ||
-		kind === "rest_pattern"
+		kind === "rest_pattern" ||
+		kind === "parenthesized_expression"
 	) {
 		for (const child of node.namedChildren()) collectPatternNames(child, out);
 		return;
 	}
+	if (kind === "pair_pattern") {
+		// `{ key: local }` binds `local`; the key is not a binding.
+		collectPatternNames(node.field("value"), out);
+		return;
+	}
+	if (kind === "shorthand_property_identifier_pattern") {
+		out.push(node.text());
+		return;
+	}
 	if (kind === "assignment_pattern") {
-		const left = node.field("left");
-		if (left) collectPatternNames(left, out);
+		collectPatternNames(node.field("left"), out);
 	}
 }
 
@@ -234,16 +309,29 @@ function rootIdentifierName(node: SgNode | null): string | undefined {
 	return undefined;
 }
 
+/** Owner namespaces whose property-write helpers mutate their first argument. */
+const REFLECTIVE_MUTATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["Object", new Set(["assign", "defineProperty", "defineProperties"])],
+	["Reflect", new Set(["deleteProperty", "set", "defineProperty"])],
+]);
+
 function collectMutatedNames(root: SgNode): ReadonlySet<string> {
 	const names = new Set<string>();
+	/** `h = …`, `h.x = …`, `[h] = …`, and `({ x: h } = …)` all write `h`. */
+	const addTargets = (target: SgNode | null): void => {
+		const root = rootIdentifierName(target);
+		if (root) names.add(root);
+		const bound: string[] = [];
+		collectPatternNames(target, bound);
+		for (const name of bound) names.add(name);
+	};
 	const visit = (node: SgNode): void => {
 		const kind = node.kind();
 		if (
 			kind === "assignment_expression" ||
 			kind === "augmented_assignment_expression"
 		) {
-			const name = rootIdentifierName(node.field("left"));
-			if (name) names.add(name);
+			addTargets(node.field("left"));
 		} else if (kind === "update_expression") {
 			const name = rootIdentifierName(node.namedChildren()[0] ?? null);
 			if (name) names.add(name);
@@ -255,23 +343,39 @@ function collectMutatedNames(root: SgNode): ReadonlySet<string> {
 				if (name) names.add(name);
 			}
 		} else if (kind === "call_expression") {
-			// `Object.assign(target, ...)` mutates target, so a later read of the
-			// binding cannot resolve to its stale initializer.
+			// `Object.assign(target, …)` and the reflective write helpers mutate
+			// target, so a later read cannot resolve to the stale initializer.
 			const fn = node.field("function");
-			if (
-				fn?.kind() === "member_expression" &&
-				fn.field("object")?.text() === "Object" &&
-				fn.field("property")?.text() === "assign"
-			) {
-				const target = node.field("arguments")?.namedChildren()[0] ?? null;
-				const name = rootIdentifierName(target);
-				if (name) names.add(name);
+			if (fn?.kind() === "member_expression") {
+				const owner = fn.field("object")?.text();
+				const member = fn.field("property")?.text();
+				if (
+					owner !== undefined &&
+					member !== undefined &&
+					REFLECTIVE_MUTATORS.get(owner)?.has(member)
+				) {
+					const target = node.field("arguments")?.namedChildren()[0] ?? null;
+					const name = rootIdentifierName(target);
+					if (name) names.add(name);
+				}
 			}
 		}
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
 	return names;
+}
+
+/**
+ * A required parameter whose annotation names neither `undefined` nor `void` is
+ * not `undefined` at runtime (its type contract excludes it). An optional
+ * parameter, an `any`/`unknown` annotation, or no annotation at all is MAYBE.
+ */
+function parameterIsDefined(parameter: SgNode): boolean {
+	if (parameter.kind() === "optional_parameter") return false;
+	const annotation = parameter.field("type");
+	if (!annotation) return false;
+	return !/\b(undefined|void|any|unknown)\b/.test(annotation.text());
 }
 
 function buildBindings(root: SgNode): Binding[] {
@@ -295,15 +399,19 @@ function buildBindings(root: SgNode): Binding[] {
 		} else if (FUNCTION_SCOPE_KINDS.has(String(kind))) {
 			const parameters = node.field("parameters");
 			if (parameters) {
-				const names: string[] = [];
-				collectPatternNames(parameters, names);
-				for (const name of names) {
-					bindings.push({
-						name,
-						scopeId: owner.id(),
-						value: null,
-						nodeId: node.id(),
-					});
+				for (const parameter of parameters.namedChildren()) {
+					const names: string[] = [];
+					collectPatternNames(parameter, names);
+					const defined = parameterIsDefined(parameter);
+					for (const name of names) {
+						bindings.push({
+							name,
+							scopeId: owner.id(),
+							value: null,
+							nodeId: node.id(),
+							defined,
+						});
+					}
 				}
 			}
 			const name = node.field("name");
@@ -383,6 +491,11 @@ function calleeName(fn: SgNode | null): string | undefined {
 	if (kind === "parenthesized_expression") {
 		return calleeName(fn.namedChildren()[0] ?? null);
 	}
+	if (kind === "sequence_expression") {
+		// `(0, mod.recordMutation)(…)` — the callable is the last operand.
+		const operands = fn.namedChildren();
+		return calleeName(operands[operands.length - 1] ?? null);
+	}
 	return undefined;
 }
 
@@ -402,10 +515,14 @@ function collectObjectPatternAliases(
 		const key = parts[0]?.text();
 		const local = parts[parts.length - 1];
 		if (!key || !local) continue;
-		if (local.kind() === "identifier") {
-			out.push({ name: local.text(), value: key });
-		} else if (local.kind() === "object_pattern") {
-			collectObjectPatternAliases(local, out);
+		// `{ replay: r = mod.recordMutation }` — the bound name is the pattern's
+		// left, never the default expression.
+		const target =
+			local.kind() === "assignment_pattern" ? local.field("left") : local;
+		if (target?.kind() === "identifier") {
+			out.push({ name: target.text(), value: key });
+		} else if (target?.kind() === "object_pattern") {
+			collectObjectPatternAliases(target, out);
 		}
 	}
 }
@@ -503,6 +620,40 @@ function enclosingSymbol(node: SgNode): string {
 	return "<module>";
 }
 
+type Truth = "truthy" | "falsy" | "unknown";
+
+/**
+ * The static truthiness of an operand, so `a && b` folds as `b` when `a` is
+ * truthy and as nothing when it is falsy. Only syntactic literals and
+ * constructors are decided; everything else is `unknown` (the union arm).
+ */
+function truthiness(node: SgNode | null): Truth {
+	if (!node) return "unknown";
+	const kind = node.kind();
+	if (kind === "false" || kind === "null" || kind === "undefined")
+		return "falsy";
+	if (kind === "number")
+		return node.text() === "0" || node.text() === "0n" ? "falsy" : "truthy";
+	if (kind === "string")
+		return unquote(node.text()) === "" ? "falsy" : "truthy";
+	if (kind === "true") return "truthy";
+	if (
+		kind === "object" ||
+		kind === "array" ||
+		kind === "function_expression" ||
+		kind === "arrow_function" ||
+		kind === "class" ||
+		kind === "new_expression"
+	) {
+		return "truthy";
+	}
+	if (kind === "unary_expression") {
+		if (node.children().some((child) => child.kind() === "void"))
+			return "falsy";
+	}
+	return "unknown";
+}
+
 function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 	const bindings = buildBindings(root);
 	const mutated = collectMutatedNames(root);
@@ -536,7 +687,7 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 	const dedupe = (outputs: readonly Output[]): Output[] => {
 		const byProfile = new Map<string, Output>();
 		for (const output of outputs) {
-			const profile = `${output.epoch ? "e" : "-"}${output.lineage ? "l" : "-"}${output.unknown ? "u" : "-"}`;
+			const profile = `${output.epoch ? "e" : "-"}:${output.lineage}:${output.unknown ? "u" : "-"}`;
 			if (!byProfile.has(profile)) byProfile.set(profile, output);
 		}
 		return [...byProfile.values()];
@@ -548,7 +699,11 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		right: Construction,
 	): Construction => ({ outputs: dedupe([...left.outputs, ...right.outputs]) });
 
-	/** The result carries the keys of both (a spread). */
+	/**
+	 * The result carries the keys of both (a spread): `right` overwrites `left`
+	 * for every key it carries. An unresolved `right` may carry ANY key,
+	 * including `lineage: undefined`, so it weakens an existing value proof.
+	 */
 	const combineConstructions = (
 		left: Construction,
 		right: Construction,
@@ -556,9 +711,11 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		const outputs: Output[] = [];
 		for (const a of left.outputs) {
 			for (const b of right.outputs) {
+				const lineage =
+					b.lineage !== "absent" ? b.lineage : b.unknown ? "maybe" : a.lineage;
 				outputs.push({
 					epoch: a.epoch || b.epoch,
-					lineage: a.lineage || b.lineage,
+					lineage,
 					unknown: a.unknown || b.unknown,
 				});
 			}
@@ -566,26 +723,113 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		return { outputs: dedupe(outputs) };
 	};
 
-	const addKey = (
-		construction: Construction,
-		key: string | undefined,
-	): Construction => {
-		if (key !== EPOCH_FIELD && key !== LINEAGE_FIELD) return construction;
-		return {
-			outputs: construction.outputs.map((output) => ({
-				epoch: output.epoch || key === EPOCH_FIELD,
-				lineage: output.lineage || key === LINEAGE_FIELD,
-				unknown: output.unknown,
-			})),
-		};
-	};
+	const markEpoch = (construction: Construction): Construction => ({
+		outputs: construction.outputs.map((output) => ({
+			...output,
+			epoch: true,
+		})),
+	});
 
+	const setLineage = (
+		construction: Construction,
+		state: LineageState,
+	): Construction => ({
+		outputs: construction.outputs.map((output) => ({
+			...output,
+			lineage: state,
+		})),
+	});
+
+	/**
+	 * An unresolved property or spread may add or overwrite any key, so it can
+	 * supply an epoch and it can replace a proven lineage with `undefined`.
+	 */
 	const markUnknown = (construction: Construction): Construction => ({
 		outputs: construction.outputs.map((output) => ({
 			...output,
+			lineage: "maybe",
 			unknown: true,
 		})),
 	});
+
+	/** What an expression's value tells us about the `lineage` obligation. */
+	const resolveLineageValue = (
+		node: SgNode | null,
+		visiting: ReadonlySet<number>,
+	): LineageState => {
+		if (!node) return "maybe";
+		const kind = node.kind();
+		if (kind === "undefined") return "undefined";
+		if (kind === "unary_expression") {
+			// `void 0` is `undefined`.
+			return node.children().some((child) => child.kind() === "void")
+				? "undefined"
+				: "maybe";
+		}
+		if (
+			kind === "number" ||
+			kind === "string" ||
+			kind === "true" ||
+			kind === "false" ||
+			kind === "null" ||
+			kind === "regex" ||
+			kind === "template_string" ||
+			kind === "object" ||
+			kind === "array" ||
+			kind === "function_expression" ||
+			kind === "arrow_function" ||
+			kind === "class" ||
+			kind === "new_expression"
+		) {
+			return "defined";
+		}
+		if (kind === "identifier" || kind === "shorthand_property_identifier") {
+			if (node.text() === "undefined") return "undefined";
+			const binding = findBinding(node);
+			if (!binding) return "maybe";
+			if (mutated.has(binding.name)) return "maybe";
+			if (binding.value) {
+				if (visiting.has(binding.nodeId)) return "maybe";
+				const next = new Set(visiting);
+				next.add(binding.nodeId);
+				return resolveLineageValue(binding.value, next);
+			}
+			// A parameter, a function/class name, an import: the annotation is the
+			// only local evidence, and only a non-optional annotation proves it.
+			return binding.defined ? "defined" : "maybe";
+		}
+		if (
+			kind === "parenthesized_expression" ||
+			kind === "as_expression" ||
+			kind === "satisfies_expression" ||
+			kind === "type_assertion" ||
+			kind === "non_null_expression"
+		) {
+			return resolveLineageValue(
+				node.field("expression") ?? node.namedChildren()[0] ?? null,
+				visiting,
+			);
+		}
+		if (kind === "ternary_expression" || kind === "conditional_expression") {
+			return joinLineage(
+				resolveLineageValue(node.field("consequence"), visiting),
+				resolveLineageValue(node.field("alternative"), visiting),
+			);
+		}
+		if (kind === "binary_expression") {
+			const operator = node.field("operator")?.text();
+			const left = resolveLineageValue(node.field("left"), visiting);
+			const right = resolveLineageValue(node.field("right"), visiting);
+			if (operator === "??") {
+				// `a ?? b` is `undefined` only when BOTH are.
+				if (left === "defined" || right === "defined") return "defined";
+				if (left === "undefined" && right === "undefined") return "undefined";
+				return "maybe";
+			}
+			return joinLineage(left, right);
+		}
+		return "maybe";
+	};
 
 	const resolveKey = (
 		key: SgNode | null,
@@ -618,26 +862,47 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		let result: Construction = { outputs: [EMPTY_OUTPUT] };
 		for (const property of node.namedChildren()) {
 			const kind = property.kind();
+			// In-object comments are named children in this grammar; they are not
+			// properties and must not read as an unknown key (r2 V5).
+			if (kind === "comment") continue;
 			if (kind === "pair") {
 				const resolved = resolveKey(property.field("key") ?? property);
-				result = resolved.dynamic
-					? markUnknown(result)
-					: addKey(result, resolved.key);
-			} else if (kind === "shorthand_property_identifier") {
-				result = addKey(result, property.text());
-			} else if (kind === "method_definition") {
+				if (resolved.dynamic) {
+					result = markUnknown(result);
+				} else if (resolved.key === EPOCH_FIELD) {
+					result = markEpoch(result);
+				} else if (resolved.key === LINEAGE_FIELD) {
+					result = setLineage(
+						result,
+						resolveLineageValue(property.field("value"), visiting),
+					);
+				}
+				continue;
+			}
+			if (kind === "shorthand_property_identifier") {
+				const name = property.text();
+				if (name === EPOCH_FIELD) result = markEpoch(result);
+				else if (name === LINEAGE_FIELD) {
+					result = setLineage(result, resolveLineageValue(property, visiting));
+				}
+				continue;
+			}
+			if (kind === "method_definition") {
 				const resolved = resolveKey(property.field("name") ?? property);
-				result = resolved.dynamic
-					? markUnknown(result)
-					: addKey(result, resolved.key);
-			} else if (kind === "spread_element") {
+				if (resolved.dynamic) result = markUnknown(result);
+				else if (resolved.key === EPOCH_FIELD) result = markEpoch(result);
+				else if (resolved.key === LINEAGE_FIELD)
+					result = setLineage(result, "defined");
+				continue;
+			}
+			if (kind === "spread_element") {
 				result = combineConstructions(
 					result,
 					resolve(property.namedChildren()[0] ?? null, visiting),
 				);
-			} else {
-				result = markUnknown(result);
+				continue;
 			}
+			result = markUnknown(result);
 		}
 		return result;
 	};
@@ -700,11 +965,19 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		}
 		if (kind === "binary_expression") {
 			const operator = node.field("operator")?.text();
-			// `a && b` is `b` when the guard holds and the falsy `a` otherwise; a
-			// falsy operand spreads nothing and is never the object result. Taking
-			// only the right operand keeps a guarded `...(lineage && { lineage })`
-			// safe instead of unknown.
-			if (operator === "&&") return resolve(node.field("right"), visiting);
+			if (operator === "&&") {
+				// `a && b` is `a` when `a` is falsy and `b` otherwise. A falsy operand
+				// spreads no keys, so a statically-falsy left contributes nothing and a
+				// statically-truthy left contributes only `b`. An unknown left may
+				// contribute either, so a guarded `...(lineage && { lineage })` beside
+				// an unconditional epoch cannot read as safe.
+				const left = truthiness(node.field("left"));
+				if (left === "falsy") return { outputs: [EMPTY_OUTPUT] };
+				if (left === "truthy") return resolve(node.field("right"), visiting);
+				return unionConstructions(resolve(node.field("right"), visiting), {
+					outputs: [EMPTY_OUTPUT],
+				});
+			}
 			if (operator === "||" || operator === "??") {
 				return unionConstructions(
 					resolve(node.field("left"), visiting),
@@ -721,16 +994,29 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 }
 
 /**
- * The verdict over every possible output. `unsafe` dominates: one arm with a
- * definite epoch and no lineage reds the whole construction even if another arm
- * looks safe. `indeterminate` means no arm is definitely unsafe, but an
- * unresolved arm could still carry an epoch without a lineage.
+ * The verdict over every possible output. A definite epoch paired with no
+ * lineage key or an explicitly-undefined value is `unsafe`: the runtime fence
+ * `lineage !== undefined` is skipped there and the entry is credited. A
+ * definite epoch with a possibly-undefined value, or an unresolved structure
+ * that could itself carry an epoch, is `indeterminate` — the obligation may or
+ * may not be met. `safe` means every output proves the lineage value defined
+ * wherever an epoch is present.
  */
 function classify(construction: Construction): SiteKind {
 	let indeterminate = false;
 	for (const output of construction.outputs) {
-		if (output.epoch && !output.lineage) return "unsafe";
-		if (output.unknown && !output.lineage) indeterminate = true;
+		if (
+			output.epoch &&
+			(output.lineage === "absent" || output.lineage === "undefined")
+		) {
+			return "unsafe";
+		}
+		if (
+			(output.epoch && output.lineage === "maybe") ||
+			(output.unknown && output.lineage !== "defined")
+		) {
+			indeterminate = true;
+		}
 	}
 	return indeterminate ? "indeterminate" : "safe";
 }
@@ -740,7 +1026,7 @@ function censusKeys(construction: Construction): ReadonlySet<string> {
 	const keys = new Set<string>();
 	for (const output of construction.outputs) {
 		if (output.epoch) keys.add(EPOCH_FIELD);
-		if (output.lineage) keys.add(LINEAGE_FIELD);
+		if (output.lineage !== "absent") keys.add(LINEAGE_FIELD);
 	}
 	return keys;
 }
@@ -865,6 +1151,8 @@ function localBridgeDeclarations(source: string): string[] {
 const ADMITTED_INDETERMINATE: Readonly<Record<string, string>> = {
 	"clients/observed-mutation-sources.ts::replayThroughMutationBridge::recordMutation":
 		"the generic replay seam forwards a caller-built entry; its two in-tree callers construct lineage at the call site",
+	"clients/runtime-tool-result.ts::handleToolResult::replayThroughMutationBridge":
+		"the value is `deps._sessionGeneration ?? runtime.captureSessionGeneration()`, a call result the fold does not resolve; the tool_result replay regression `tests/clients/observed-mutation-integration.test.ts` '#3596 a settle replay that lands after the replacement credits nothing in the new session' drops the replay, which is only possible when the lineage value is defined",
 };
 
 describe("#3824 S2 / #3937: a bridge entry names its lineage whenever it can name an epoch", () => {
@@ -928,28 +1216,43 @@ describe("#3937: bounded local object/spread provenance", () => {
 		return sites[0] as BridgeSite;
 	};
 
-	it("flags the quoted spread-forwarded epoch without lineage", () => {
+	it("flags the spread-forwarded epoch without a proven lineage", () => {
 		const site = only(`
 			function replayCaller(entry: unknown) {
 				const hiddenEntry = { ...entry, readGuardBranchEpoch: 5 };
 				replayThroughMutationBridge({ ...hiddenEntry });
 			}
 		`);
-		expect(site.kind).toBe("unsafe");
+		// The epoch is definite, but `entry` is unresolved and may itself carry a
+		// lineage, so the r3 value model reads honest uncertainty, never `safe`.
+		expect(site.kind).toBe("indeterminate");
 		// The failure must name the file and the seam, so a red is actionable.
 		expect(site.file).toBe("fixture.ts");
 		expect(site.callee).toBe("replayThroughMutationBridge");
 		expect(site.line).toBe(4);
 	});
 
-	it("passes a benign spread that carries the lineage", () => {
+	it("passes a benign spread that carries a proven lineage", () => {
 		const site = only(`
-			function replayCaller(entry: unknown, lineage: unknown) {
+			function replayCaller(entry: unknown, lineage: LineageHandle) {
 				const safeEntry = { ...entry, lineage };
 				replayThroughMutationBridge({ ...safeEntry });
 			}
 		`);
 		expect(site.kind).toBe("safe");
+	});
+
+	it("does not call an untyped lineage value safe", () => {
+		// The r2 false-safe: the key is present, so the old key-based fold read
+		// `safe`; the runtime fence is `lineage !== undefined`, and an untyped
+		// parameter may be `undefined`.
+		const site = only(`
+			function replayCaller(entry: unknown, lineage: unknown) {
+				const built = { ...entry, lineage };
+				replayThroughMutationBridge({ ...built });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
 	});
 
 	it("passes a legacy lineage-only construction with no epoch", () => {
@@ -1053,9 +1356,9 @@ describe("#3937: bounded local object/spread provenance", () => {
 				replayThroughMutationBridge(a);
 			}
 		`);
-		// A self-reference cycle leaves the epoch definite and the lineage
-		// unprovable, so the site is `unsafe` (the loud verdict), not silent.
-		expect(cyclic.kind).toBe("unsafe");
+		// A self-reference cycle leaves the epoch definite but the spread's keys
+		// unresolved, so the site is `indeterminate` (the loud verdict), not silent.
+		expect(cyclic.kind).toBe("indeterminate");
 		const reassigned = only(`
 			function replayCaller(epoch: number) {
 				let built = { lineage: 1 };
@@ -1101,7 +1404,10 @@ describe("#3937 review round 2 — per-output soundness and callee/mutation cove
 				replayThroughMutationBridge({ ...hidden });
 			}
 		`);
-		expect(site.kind).toBe("unsafe");
+		// The epoch arm's unresolved spread may carry a lineage, so the r3 value
+		// model is `indeterminate`; a key-union classify reads the other arm's
+		// `{ lineage: 1 }` and reds the pair.
+		expect(site.kind).toBe("indeterminate");
 	});
 
 	it("does not drop an outer lineage overlay over a conditional", () => {
@@ -1203,5 +1509,243 @@ describe("#3937 review round 2 — per-output soundness and callee/mutation cove
 			}
 		`);
 		expect(site.kind).toBe("unsafe");
+	});
+});
+
+describe("#3937 review round 3 — value-level soundness and spelling coverage", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+
+	// V1 — `a && b` is `b` only while `a` is truthy. A guarded lineage spread
+	// beside an unconditional epoch must not read as safe.
+	it("does not launder an unconditional epoch through a guarded lineage spread", () => {
+		const site = only(`
+			function replayCaller(lineage: LineageHandle | undefined) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, ...(lineage && { lineage }) });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("treats a statically-falsy && left as the empty spread it is", () => {
+		const site = only(`
+			function replayCaller() {
+				replayThroughMutationBridge({ ...(0 && { readGuardBranchEpoch: 5 }) });
+			}
+		`);
+		expect(site.kind).not.toBe("unsafe");
+	});
+
+	it("keeps a statically-truthy && left safe beside an epoch", () => {
+		const site = only(`
+			function replayCaller() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, ...(true && { lineage: 1 }) });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	it("flags an unknown && left beside an epoch", () => {
+		const site = only(`
+			function replayCaller(cond: boolean) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, ...(cond && { lineage: 1 }) });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	// V2 — value definedness, not key naming. The runtime fence tests the VALUE.
+	it("does not let a literal undefined lineage satisfy the epoch obligation", () => {
+		const site = only(`
+			function replayCaller() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: undefined });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("treats a maybe-defined lineage value beside an epoch as indeterminate", () => {
+		const site = only(`
+			function replayCaller(lineage: LineageHandle | undefined) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not let an unknown spread overwrite a proven lineage silently", () => {
+		const site = only(`
+			function replayCaller(entry: unknown) {
+				replayThroughMutationBridge({ lineage: 1, ...entry, readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("does not rederive a value proof from a call result", () => {
+		const site = only(`
+			function replayCaller() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: getLineage() });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not let a dynamic computed key leave a proven lineage defined", () => {
+		// A computed key can be `lineage`, so it may overwrite the proven value
+		// with `undefined`; the unresolved-property marker must weaken the value.
+		const site = only(`
+			function replayCaller(key: string) {
+				replayThroughMutationBridge({ lineage: 1, [key]: 1, readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// V3 — every target spelling that rewrites the binding.
+	it("treats an array-destructuring assignment target as mutated", () => {
+		const site = only(`
+			function replayCaller() {
+				const hidden: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				[hidden] = [{ readGuardBranchEpoch: 9 }];
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("treats an object-destructuring assignment target as mutated", () => {
+		const site = only(`
+			function replayCaller() {
+				const hidden: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				({ x: hidden } = { x: { readGuardBranchEpoch: 9 } });
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("treats a reflective delete/define target as mutated", () => {
+		const viaDelete = only(`
+			function replayCaller() {
+				const hidden: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				Reflect.deleteProperty(hidden, "lineage");
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(viaDelete.kind).not.toBe("safe");
+		const viaDefine = only(`
+			function replayCaller() {
+				const hidden: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				Object.defineProperty(hidden, "lineage", { value: undefined });
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(viaDefine.kind).not.toBe("safe");
+	});
+
+	// V4 — the call population must not silently drop a callee spelling.
+	it("sees a defaulted destructured bridge callee alias", () => {
+		const site = only(`
+			import * as mod from "./observed-mutation-sources.js";
+			const { replayThroughMutationBridge: replay = mod.recordMutation } = mod;
+			function run() {
+				replay({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("sees a sequence-expression bridge callee", () => {
+		const site = only(`
+			import * as mod from "./observed-mutation-sources.js";
+			function run() {
+				(0, mod.recordMutation)({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	// V5 — a comment is not a property.
+	it("does not read an in-object comment as an unknown property", () => {
+		const site = only(`
+			function replayCaller() {
+				replayThroughMutationBridge({ filePath: "x" /* not a key */ });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	// Non-regression: the outer overlay still repairs every arm (the `safe`
+	// counterexample to a "classify arms worst" remedy).
+	it("keeps an outer lineage overlay repairing a conditional", () => {
+		const site = only(`
+			function replayCaller(cond: boolean) {
+				const hidden = cond ? { readGuardBranchEpoch: 5 } : {};
+				replayThroughMutationBridge({ ...hidden, lineage: 1 });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	it("proves a required parameter's lineage value defined beside an epoch", () => {
+		const site = only(`
+			function replayCaller(entry: unknown, readGuardBranchEpoch: number, lineage: LineageHandle) {
+				replayThroughMutationBridge({ ...entry, readGuardBranchEpoch, lineage });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+});
+
+describe("#3937: the census obligation is the bridge fence's value check", () => {
+	it("credits a no-lineage at-live epoch and drops a defined-but-retired handle", () => {
+		// The census is a STATIC approximation; this drives the real seam with a
+		// typed handle so the two verdicts map to the fence, never to a
+		// `{ lineage: 1 }` stand-in.
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = "/probe";
+		runtime.beginTurn();
+		const deps: MutationBridgeDeps = {
+			getRuntime: () => runtime as never,
+			getCacheManager: () => ({ addModifiedRange: () => undefined }),
+			getProjectRoot: () => "/probe",
+			getDispatchCwd: () => "/probe",
+			countFileLines: () => 1,
+			isRecordable: () => true,
+			dbg: () => {},
+		};
+		const entry = {
+			filePath: "/probe/census.ts",
+			kind: "edit" as const,
+			touchedLines: [1, 2] as [number, number],
+		};
+		const atLive = runtime.readGuard.currentBranchEpoch;
+		// No lineage: the fence is skipped and the at-live epoch is credited. This
+		// is the hole the census's `unsafe` verdict names.
+		expect(
+			recordMutationThroughSeam(
+				{ ...entry, readGuardBranchEpoch: atLive },
+				deps,
+			),
+		).toBe(true);
+		expect(runtime.consumeDeferredFormatFiles().length).toBeGreaterThan(0);
+		// A real typed handle the value fold calls `defined`: the fence runs, and a
+		// retired handle writes none of the live scope's state.
+		const retired = runtime.captureSessionGeneration();
+		runtime.resetForSession();
+		runtime.beginTurn();
+		expect(
+			recordMutationThroughSeam(
+				{ ...entry, readGuardBranchEpoch: atLive, lineage: retired },
+				deps,
+			),
+		).toBe(true);
+		expect(runtime.consumeDeferredFormatFiles()).toEqual([]);
 	});
 });
