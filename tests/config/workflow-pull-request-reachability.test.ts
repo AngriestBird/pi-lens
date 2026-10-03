@@ -22,33 +22,16 @@
 // pull request must declare "(advisory)" in its check-run name, so neither
 // the check list nor `ci-verdict` reads its unconditional success as a gate.
 //
-// EVALUATION: the same technique as tests/config/ci-infra-kill-rerun-gate.ts
-// and install-smoke-gates.ts -- yaml.load the REAL workflow, substitute every
-// context path in the LOADED `if:` string with a JSON literal, and evaluate
-// with `new Function`. GitHub Actions expression syntax and JS agree exactly
-// on this subset (dotted paths, `==`, `!=`, `&&`, `||`, parentheses, quoted
-// strings and numbers). An unrecognised context path THROWS rather than
-// being guessed at, so a workflow that grows a new one fails loudly here
-// instead of being silently read as reachable.
-//
-// THE MODEL, and what it cannot see. Reachability is decided against a small
-// declared set of pull_request contexts (PR_CONTEXTS below) -- a job is
-// reachable if ANY of them makes its `if:` true. `needs.*.result` reads
-// `success` and `needs.*.outputs.*` reads `'true'`, the permissive reading:
-// a job that is reachable only when an upstream job FAILS will read as
-// unreachable and needs a registry entry naming that. A job's
-// `strategy.matrix` is evaluated under the same contexts (#3085 gap 2): an
-// exclusion moved OUT of `if:` and INTO a matrix that narrows to no cell on
-// pull_request is the same unreachability, and is flagged the same way. One
-// known blind spot, stated rather than papered over: a workflow with no
-// `pull_request`/`pull_request_target` trigger at all is out of scope -- the
-// nightly-only lanes (tool-smoke, compat-smoke, parser-smoke, release,
-// labels, ...) are deliberate, and flagging every job in them would bury this
-// sweep's real signal in a registry nobody reads (#3085 gap 1).
+// EVALUATION and THE MODEL live in the shared owner,
+// tests/support/workflow-pull-request-reachability.ts (#3941): the contexts,
+// the `${{ }}`/`==` substitution, the `new Function` evaluation, and
+// `triggersOnPullRequest`. This file keeps only the sweep: the matrix
+// narrowing helpers below (`pullRequestMatrixCells` and friends), the
+// registry audit, and the fixtures. `isPullRequestReachable` is imported so
+// the reachability cases here drive the same function the sweep does.
 import { readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import yaml from "../../clients/deps/js-yaml.js";
 import { isAdvisoryCheck } from "../../scripts/lib/ci-checks.mjs";
 import {
 	assertSortedRegistry,
@@ -56,116 +39,23 @@ import {
 	listSourceFiles,
 	relativePosix,
 } from "../support/sweep-kit.js";
+import {
+	PR_CONTEXTS,
+	type PullRequestContext,
+	evaluateForPullRequest,
+	isPullRequestReachable,
+	isTrueForPullRequest,
+	loadWorkflow,
+	substituteForPullRequest,
+	triggersOnPullRequest,
+	type WorkflowFile,
+} from "../support/workflow-pull-request-reachability.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS_DIR = resolve(REPO_ROOT, ".github/workflows");
 
-interface PullRequestContext {
-	label: string;
-	eventName: string;
-	action: string;
-	merged: boolean;
-}
-
-// A job is PR-reachable if ANY of these makes its `if:` true. Two rows,
-// because one cannot serve both: `clear-stale-verdict-labels` requires
-// action `synchronize`, and a job restricted to other actions (as
-// `pr-body-lint` was before #3864 F2) needs a non-synchronize row; both kinds
-// are genuinely PR-reachable.
-const PR_CONTEXTS: readonly PullRequestContext[] = [
-	{
-		label: "pull_request / opened",
-		eventName: "pull_request",
-		action: "opened",
-		merged: false,
-	},
-	{
-		label: "pull_request / synchronize",
-		eventName: "pull_request",
-		action: "synchronize",
-		merged: false,
-	},
-];
-
-const CONTEXT_PATHS: Array<[string, (ctx: PullRequestContext) => unknown]> = [
-	["github.event_name", (ctx) => ctx.eventName],
-	["github.event.action", (ctx) => ctx.action],
-	["github.event.pull_request.merged", (ctx) => ctx.merged],
-	// Same-repo PR by a human: the common case, and the permissive one for
-	// every fork / bot guard in the tree.
-	["github.event.pull_request.head.repo.full_name", () => "acme/repo"],
-	["github.event.pull_request.user.login", () => "a-human"],
-	["github.repository", () => "acme/repo"],
-	// A `pull_request` event carries no workflow_run payload at all, so every
-	// path under it reads null -- which is what makes a workflow_run-only job
-	// correctly unreachable from a PR.
-	["github.event.workflow_run.head_repository.full_name", () => null],
-	["github.event.workflow_run.head_branch", () => null],
-	["github.event.workflow_run.conclusion", () => null],
-	["github.event.workflow_run.run_attempt", () => null],
-	["github.event.workflow_run.event", () => null],
-];
-
-// Zero-argument status functions and the permissive `needs.*` reading. Order
-// matters only in that these run before the leftover-reference check.
-const FUNCTION_SUBSTITUTIONS: Array<[RegExp, string]> = [
-	[/always\(\)/g, "true"],
-	[/success\(\)/g, "true"],
-	[/failure\(\)/g, "false"],
-	[/cancelled\(\)/g, "false"],
-	[/needs\.[A-Za-z0-9_-]+\.result/g, '"success"'],
-	[/needs\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+/g, '"true"'],
-];
-
-export function substituteForPullRequest(
-	expr: string,
-	ctx: PullRequestContext,
-): string {
-	// `${{ ... }}` is optional around a job-level `if:`; release.yml writes it
-	// that way. Strip it before evaluating either spelling.
-	let out = expr.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
-	for (const [path, read] of CONTEXT_PATHS) {
-		out = out.split(path).join(JSON.stringify(read(ctx)) ?? "null");
-	}
-	for (const [pattern, replacement] of FUNCTION_SUBSTITUTIONS) {
-		out = out.replace(pattern, replacement);
-	}
-	if (/(?:github|needs|env|inputs|steps|vars|secrets)\./.test(out)) {
-		throw new Error(
-			`workflow-pull-request-reachability: unrecognised context path in an if: expression -- ` +
-				`add it to CONTEXT_PATHS with the value a pull_request run would see, rather than ` +
-				`letting it be guessed at. Residue: ${out}`,
-		);
-	}
-	// `!=`/`==` before `===`, so the `!==` produced here is not re-rewritten.
-	return out.replace(/!=/g, "!==").replace(/(?<![!<>=])==(?!=)/g, "===");
-}
-
-/**
- * Evaluate a workflow expression under one PR context. `fromJSON` is the one
- * function a matrix narrowing uses, and it is JSON.parse.
- */
-function evaluateForPullRequest(
-	expr: string,
-	ctx: PullRequestContext,
-): unknown {
-	const substituted = substituteForPullRequest(expr, ctx);
-	// `new Function` over this repo's own workflow text plus JSON-literal
-	// fixtures, never external or untrusted input -- the same argument
-	// tests/config/ci-infra-kill-rerun-gate.test.ts makes for the same
-	// technique.
-	return new Function("fromJSON", `"use strict"; return (${substituted});`)(
-		(text: string) => JSON.parse(text),
-	);
-}
-
-function isTrueForPullRequest(expr: string, ctx: PullRequestContext): boolean {
-	return Boolean(evaluateForPullRequest(expr, ctx));
-}
-
-export function isPullRequestReachable(expr: string): boolean {
-	return PR_CONTEXTS.some((ctx) => isTrueForPullRequest(expr, ctx));
-}
+// The expression model itself is imported from
+// tests/support/workflow-pull-request-reachability.ts (see the header).
 
 /** A matrix value as a pull request sees it: `${{ }}` evaluated, else as written. */
 function resolveMatrixValue(value: unknown, ctx: PullRequestContext): unknown {
@@ -231,49 +121,6 @@ export function pullRequestMatrixCells(
 		}
 	}
 	return count;
-}
-
-interface WorkflowFile {
-	/** `.github/workflows/<name>.yml`, the registry key prefix. */
-	path: string;
-	text: string;
-}
-
-type Job = {
-	if?: unknown;
-	name?: unknown;
-	"continue-on-error"?: unknown;
-	strategy?: { matrix?: unknown };
-};
-type Workflow = { on?: unknown; jobs?: Record<string, Job> };
-
-function loadWorkflow(text: string): Workflow {
-	// `on:` is YAML 1.1 truthy, so js-yaml can key it as boolean `true`.
-	const parsed = yaml.load(text) as Record<string, unknown>;
-	const triggers = parsed?.on ?? parsed?.[true as unknown as string];
-	return { on: triggers, jobs: parsed?.jobs as Record<string, Job> };
-}
-
-export function triggersOnPullRequest(workflow: Workflow): boolean {
-	const triggers = workflow.on;
-	// GitHub accepts three spellings of `on:` and this must read all three.
-	// The ARRAY case is checked first and explicitly (round 2, F1): an array
-	// is `typeof "object"`, so the mapping branch below would key it with
-	// Object.keys and get ["0","1"] -- no match, and every job in that file
-	// silently skipped with jobsExamined 0, the sweep reading clean over a
-	// file it never looked inside. Every workflow in the tree happens to use
-	// the mapping form today, which is exactly why this read clean; the
-	// sweep exists for the next member, which may use any spelling.
-	const names = Array.isArray(triggers)
-		? triggers.map(String)
-		: typeof triggers === "string"
-			? [triggers]
-			: triggers && typeof triggers === "object"
-				? Object.keys(triggers as Record<string, unknown>)
-				: [];
-	return names.some(
-		(name) => name === "pull_request" || name === "pull_request_target",
-	);
 }
 
 /**

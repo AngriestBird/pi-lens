@@ -21,6 +21,7 @@ import yaml from "../../clients/deps/js-yaml.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { provesNotPullRequestEligible } from "../support/workflow-pull-request-reachability.js";
 import {
 	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,
@@ -116,6 +117,13 @@ const gated = Object.entries(CI.jobs).filter(
 // request. `github.ref` names the mutable merge ref, so a B or C checkout
 // that pins it fetches a ref the merge may already have deleted. Stages A and
 // D keep their inputs and are the named excluded defaults.
+//
+// `pull_request-eligible` (stages A and C) is the shared event-only exclusion
+// projection, never a negative regex (#3941 F1):
+// `provesNotPullRequestEligible` says a job's `if:` can only be true for a
+// non-pull-request event. A condition it cannot prove -- another context
+// path, a status function, an action or event it does not model -- stays
+// eligible, so the guard keeps covering a real checkout (AGENTS.md shape 48).
 const WORKFLOW_DIR = resolve(ROOT, ".github/workflows");
 const EPHEMERAL_PULL_REF = "${{ github.ref }}";
 const CAPTURED_COMMIT = "${{ github.sha }}";
@@ -164,9 +172,15 @@ function classifyStage(
 ): Stage {
 	if (file === "ci.yml" && jobId === "heavy-gate") return "gate";
 	if (asList(job.needs).includes("heavy-gate")) return "B";
+	// A workflow that can trigger on `pull_request` at all, whose job `if:`
+	// does not PROVE it runs only off `pull_request`. The projection is the
+	// shared event-only one (#3941 F1): `host-latest-smoke`'s
+	// `event_name == 'schedule' || event_name == 'workflow_dispatch'` is
+	// excluded, while `event_name != 'pull_request'` is NOT (a
+	// `pull_request_target` event satisfies it), so an unproven condition
+	// stays eligible rather than silently losing the guard.
 	const pullRequestEligible =
-		events.has("pull_request") &&
-		!/event_name\s*!=\s*'pull_request'/.test(job.if ?? "");
+		events.has("pull_request") && !provesNotPullRequestEligible(job.if);
 	if (!pullRequestEligible) return "D";
 	if (isAdvisoryCheck(job.name ?? jobId) && checkoutStepsOf(job).length > 0)
 		return "C";
@@ -247,15 +261,40 @@ function stageSummary(sites: CheckoutSite[]) {
 	return summary;
 }
 
-// A checkout is on the captured commit when it leaves `ref` unset (the pinned
-// action's default is `github.sha`) or names `github.sha` explicitly.
+// The ONE captured-commit predicate, used by BOTH the stage-B and stage-C
+// rules (#3941 F2): a checkout is on the captured source event commit when it
+// leaves `ref` unset (the pinned action's default is `github.sha`) or names
+// `${{ github.sha }}` explicitly. Those are the only two proven-equivalent
+// spellings; every other explicit ref is treated as unsafe rather than matched
+// against a denylist of mutable names.
 const onCapturedCommit = (ref: string | undefined) =>
 	ref === undefined || ref === CAPTURED_COMMIT;
 
-// Stage C checkout sites that name the mutable merge ref. Empty after the
-// #3941 fix; the census mutation cases below reintroduce each one in turn.
+// The ONE named admission to the captured-commit rule: osv-scan deliberately
+// checks out the PR's own head commit so it scans the PR's lockfile rather
+// than a merge-drifted one (#1844). The job runs no checked-out code -- it
+// feeds the lockfile to osv-scanner -- so reading the untrusted head is
+// acceptable HERE and nowhere else. The admission names the site AND its
+// exact ref expression: a changed ref no longer matches, so the conservative
+// predicate below flags it (the stale-admission test pins the live value in
+// both directions).
+const OSV_HEAD_SCAN = "osv-scan.yml::osv-scan";
+const OSV_HEAD_SCAN_REF =
+	"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}";
+const isAdmittedHeadScan = (site: CheckoutSite): boolean =>
+	`${site.file}::${site.jobId}` === OSV_HEAD_SCAN &&
+	site.ref === OSV_HEAD_SCAN_REF;
+
+// Stage-C checkout sites that do NOT use the captured commit and are not the
+// one reviewed head-scan admission. Empty after the #3941 fix; the census
+// mutation cases below reintroduce each member in turn.
 const earlyStartUnsafeSites = (sites: CheckoutSite[]) =>
-	sites.filter((site) => site.stage === "C" && site.ref === EPHEMERAL_PULL_REF);
+	sites.filter(
+		(site) =>
+			site.stage === "C" &&
+			!onCapturedCommit(site.ref) &&
+			!isAdmittedHeadScan(site),
+	);
 
 const CENSUS_SOURCES = workflowSources();
 const CENSUS_ROWS = censusRows(CENSUS_SOURCES);
@@ -623,10 +662,12 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B3/C15/D20).
-		// Sites and jobs are counted separately so a no-checkout job cannot launder
-		// a stage's population. The floor call keeps this census registered under
-		// the sweep-floor meta-sweep: an empty walk fails instead of reading clean.
+		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B3/C14/D21
+		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
+		// from C to D). Sites and jobs are counted separately so a no-checkout
+		// job cannot launder a stage's population. The floor call keeps this
+		// census registered under the sweep-floor meta-sweep: an empty walk fails
+		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
@@ -638,10 +679,18 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		).toBe(60);
 		expect(stageJobs("A")).toBe(22);
 		expect(stageJobs("B")).toBe(3);
-		expect(stageJobs("C")).toBe(15);
-		expect(stageJobs("D")).toBe(20);
+		expect(stageJobs("C")).toBe(14);
+		expect(stageJobs("D")).toBe(21);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
+		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
+		// even though its workflow also triggers on pull_request.
+		const hostLatest = CENSUS_SITES.find(
+			(site) =>
+				site.file === "install-smoke.yml" && site.jobId === "host-latest-smoke",
+		);
+		expect(hostLatest?.stage, "host-latest-smoke").toBe("D");
+		expect(hostLatest?.events).toContain("pull_request");
 	});
 
 	it("removes every stage-C merge-ref site and only those", () => {
@@ -660,11 +709,72 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		expect(totalExplicit).toBe(19);
 	});
 
-	it("keeps every early-start advisory checkout off the ephemeral merge ref", () => {
+	it("keeps every early-start advisory checkout on the captured commit", () => {
+		// The predicate is the captured commit, not the literal `github.ref`: a
+		// stage-C site on any other explicit ref is unsafe (#3941 F2).
 		expect(earlyStartUnsafeSites(CENSUS_SITES)).toEqual([]);
+		const stageCNotCaptured = CENSUS_SITES.filter(
+			(site) => site.stage === "C" && !onCapturedCommit(site.ref),
+		);
+		// Exactly one stage-C site is not on the captured commit: the admitted
+		// osv-scan head scan. Every other stage-C site uses the default.
+		expect(
+			stageCNotCaptured.map((site) => `${site.file}::${site.jobId}`),
+		).toEqual([OSV_HEAD_SCAN]);
+		const admitted = stageCNotCaptured[0];
+		expect(admitted !== undefined && isAdmittedHeadScan(admitted)).toBe(true);
+	});
+
+	// The one admission is live and exact. A stale admission -- the ref changed,
+	// or the head-scan source removed -- reds the pin below, and the mutation
+	// proves a mutable ref at that site is flagged, not admitted.
+	it("admits only osv-scan's exact read-only head-scan ref", () => {
+		const osvSite = CENSUS_SITES.find(
+			(site) => `${site.file}::${site.jobId}` === OSV_HEAD_SCAN,
+		);
+		expect(osvSite, OSV_HEAD_SCAN).toBeDefined();
+		expect(osvSite?.stage, OSV_HEAD_SCAN).toBe("C");
+		// Pins the live admission value: a changed ref leaves the admission
+		// meaningless and stale, so this expectation reds.
+		expect(osvSite?.ref, `${OSV_HEAD_SCAN} ref`).toBe(OSV_HEAD_SCAN_REF);
+		const sources = new Map(CENSUS_SOURCES);
+		sources.set(
+			"osv-scan.yml",
+			restoreCheckoutRef(
+				CENSUS_SOURCES.get("osv-scan.yml") as string,
+				"osv-scan",
+				"${{ github.head_ref }}",
+			),
+		);
+		const offenders = earlyStartUnsafeSites(sitesOf(censusRows(sources))).map(
+			(site) => `${site.file}::${site.jobId}`,
+		);
+		expect(offenders).toEqual([OSV_HEAD_SCAN]);
 	});
 
 	it("names the exact eleven early-start advisory members", () => {
+		// #3941 F3: an independent population pin. The per-member mutation cases
+		// below are generated FROM `EARLY_START_MEMBERS`, so deleting a row would
+		// delete its own witness; the count and the exact key set are the floor
+		// that reds instead.
+		expect(EARLY_START_MEMBERS.length).toBe(11);
+		expect(
+			EARLY_START_MEMBERS.map(
+				(member) => `${member.file}::${member.jobId}`,
+			).sort(byCodeUnit),
+		).toEqual([
+			"ci.yml::targeted-tests-advisory",
+			"install-smoke.yml::mise-repro",
+			"lint.yml::complexity",
+			"lint.yml::jscpd",
+			"lint.yml::oxlint-advisory",
+			"lint.yml::strictness",
+			"lint.yml::taplo",
+			"lint.yml::typos",
+			"lint.yml::vale",
+			"lint.yml::yamllint",
+			"pr-metadata.yml::pr-body-lint",
+		]);
 		const byFileJob = new Map(
 			CENSUS_SITES.map((site) => [`${site.file}::${site.jobId}`, site]),
 		);
@@ -679,10 +789,9 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 			// `github.sha`.
 			expect(site?.events, `${key} trigger`).toContain("pull_request");
 			expect(site?.uses, `${key} checkout revision`).toBe(PINNED_CHECKOUT);
-			// `github.ref` gone, so the pinned action falls back to `github.sha`.
+			// The captured commit is the default, so `ref` is unset.
 			expect(site?.ref, `${key} ref`).toBeUndefined();
 		}
-		expect(stageJobs("C")).toBeGreaterThanOrEqual(EARLY_START_MEMBERS.length);
 	});
 
 	// The excluded defaults, named and measured: stage-A gating jobs must
@@ -707,7 +816,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 	// explicit captured commit are safe; `github.ref` is unsafe; and a comment
 	// or a string that spells the ref is not a checkout input. Only stage C is
 	// in scope.
-	it("allows the default and the captured commit, and flags only github.ref", () => {
+	it("allows the default and the captured commit, and flags every other explicit ref", () => {
 		expect(
 			earlyStartUnsafeSites(sitesOfFixture(fixture("          # no ref"))),
 		).toEqual([]);
@@ -716,10 +825,22 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 				sitesOfFixture(fixture(`          ref: ${CAPTURED_COMMIT}`)),
 			),
 		).toEqual([]);
-		const unsafe = earlyStartUnsafeSites(
-			sitesOfFixture(fixture(`          ref: ${EPHEMERAL_PULL_REF}`)),
-		);
-		expect(unsafe.map((site) => site.ref)).toEqual([EPHEMERAL_PULL_REF]);
+		// Every other explicit ref is unsafe, not just `${{ github.ref }}`
+		// (#3941 F2): a mutable name, a ref_name, or an interpolated merge ref.
+		for (const ref of [
+			EPHEMERAL_PULL_REF,
+			"${{ github.head_ref }}",
+			"${{ github.ref_name }}",
+			"refs/pull/${{ github.event.pull_request.number }}/merge",
+		]) {
+			const unsafe = earlyStartUnsafeSites(
+				sitesOfFixture(fixture(`          ref: ${ref}`)),
+			);
+			expect(
+				unsafe.map((site) => site.ref),
+				`ref ${ref}`,
+			).toEqual([ref]);
+		}
 	});
 
 	it("does not read a comment or a string as a checkout ref", () => {
@@ -757,7 +878,8 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 	});
 
 	// The eleven mutations: reintroduce the old unsafe input on each member in
-	// a fresh in-memory copy and prove the guard reds on exactly that site.
+	// a fresh in-memory copy and prove the guard reds on exactly that site and
+	// no other, without changing the site population.
 	for (const member of EARLY_START_MEMBERS) {
 		it(`flags ${member.file}::${member.jobId} again when its github.ref returns`, () => {
 			const sources = new Map(CENSUS_SOURCES);
@@ -771,14 +893,115 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 					EPHEMERAL_PULL_REF,
 				),
 			);
-			const offenders = earlyStartUnsafeSites(sitesOf(censusRows(sources))).map(
+			const mutatedSites = sitesOf(censusRows(sources));
+			// The mutation changed one ref, not the population.
+			expect(mutatedSites.length).toBe(CENSUS_SITES.length);
+			const offenders = earlyStartUnsafeSites(mutatedSites).map(
 				(site) => `${site.file}::${site.jobId}`,
 			);
-			expect(offenders).toContain(`${member.file}::${member.jobId}`);
+			expect(offenders).toEqual([`${member.file}::${member.jobId}`]);
 			// The real sources are a fresh read and stay clean: restore is exact.
 			expect(earlyStartUnsafeSites(CENSUS_SITES)).toEqual([]);
 		});
 	}
+});
+
+// #3941 F1: stage eligibility is the SHARED event-only exclusion projection,
+// not the old negative-only `!/event_name != 'pull_request'/` regex. That
+// regex read install-smoke.yml::host-latest-smoke -- whose workflow also
+// carries `pull_request` while its own `if:` runs only on
+// schedule/workflow_dispatch -- as an early-start advisory site. The
+// projection is conservative in one direction: it excludes a job only when
+// its `if:` is false for EVERY pull-request event name, and anything it
+// cannot prove stays eligible (AGENTS.md shape 48).
+describe("#3941 stage eligibility is the shared event-only projection", () => {
+	const fixtureStage = (
+		ifLine: string,
+		trigger = "  pull_request:",
+	): Stage | undefined => {
+		const text = [
+			"name: Fixture",
+			"on:",
+			trigger,
+			"jobs:",
+			"  fixture:",
+			"    name: Fixture tool (advisory)",
+			`    if: ${ifLine}`,
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			`      - uses: ${PINNED_CHECKOUT} # v7`,
+			"        with:",
+			"          persist-credentials: false",
+			"",
+		].join("\n");
+		return sitesOf(censusRows(new Map([["fixture.yml", text]])))[0]?.stage;
+	};
+
+	it("excludes only a condition false for every pull-request event", () => {
+		// The real host, plus any event-name-only non-PR gate, is excluded.
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+			),
+		).toBe(true);
+		expect(provesNotPullRequestEligible("github.event_name == 'push'")).toBe(
+			true,
+		);
+		expect(
+			provesNotPullRequestEligible("${{ github.event_name == 'schedule' }}"),
+		).toBe(true);
+		// pull_request itself, a mixed `||`, and pull_request_target are NOT.
+		expect(
+			provesNotPullRequestEligible("github.event_name == 'pull_request'"),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'schedule' || github.event_name == 'pull_request'",
+			),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'pull_request_target'",
+			),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible("github.event_name != 'pull_request'"),
+		).toBe(false);
+		// Unproven stays eligible: another context path, a status function, an
+		// action the model does not enumerate, or no `if:` at all.
+		expect(provesNotPullRequestEligible("failure()")).toBe(false);
+		expect(
+			provesNotPullRequestEligible("github.event.action == 'closed'"),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'schedule' || github.event.issue.number == 1",
+			),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible("needs.changes.outputs.code == 'true'"),
+		).toBe(false);
+		// A condition that names no pull-request event at all is outside this
+		// projection's axis: unproven, and -- unlike every other unproven case --
+		// never even handed to `new Function`.
+		expect(provesNotPullRequestEligible("false")).toBe(false);
+		expect(provesNotPullRequestEligible(undefined)).toBe(false);
+	});
+
+	it("stages the same conditions through the real census parser", () => {
+		expect(fixtureStage("github.event_name == 'schedule'")).toBe("D");
+		expect(
+			fixtureStage(
+				"github.event_name == 'schedule' || github.event_name == 'pull_request'",
+			),
+		).toBe("C");
+		expect(fixtureStage("github.event_name == 'pull_request'")).toBe("C");
+		expect(fixtureStage("failure()")).toBe("C");
+		expect(fixtureStage("github.event.action == 'closed'")).toBe("C");
+		expect(fixtureStage("github.event_name == 'pull_request_target'")).toBe(
+			"C",
+		);
+	});
 });
 
 // #3926 secondary defect: the always-run summary invoked the checked-out
