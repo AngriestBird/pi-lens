@@ -100,7 +100,11 @@ import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
-import { type LineageHandle, recordDroppedRead } from "./session-scope.js";
+import {
+	type LineageHandle,
+	recordDroppedRead,
+	sessionFencedFixedThisTurn,
+} from "./session-scope.js";
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
@@ -895,6 +899,13 @@ async function dispatchPipelineAnalysis(args: {
 		resetLSPService,
 	} = deps;
 
+	// #3763 r2: `runAutofix` marks the file fixed after its fixer awaits; a
+	// replaced session's mark would skip the next session's own autofix of
+	// that file (the #3576 facade of the agent_end drain, for this caller).
+	const fixedThisTurn = sessionFencedFixedThisTurn(
+		runtime.fixedThisTurn,
+		sessionGeneration,
+	);
 	const pipelinePromise = runPipeline(
 		{
 			signal: deps.signal,
@@ -956,7 +967,7 @@ async function dispatchPipelineAnalysis(args: {
 			ruffClient: ruffClient!,
 			metricsClient: metricsClient!,
 			getFormatService,
-			fixedThisTurn: runtime.fixedThisTurn,
+			fixedThisTurn,
 		},
 	);
 	const pipelineTelemetry: InFlightPipeline = {
@@ -1105,10 +1116,14 @@ async function dispatchPipelineAnalysis(args: {
 		: undefined;
 	const finalStateHash = pipelineOwnedWriteHash ?? initialStateHash;
 	if (!result.fileModified || pipelineOwnedWriteHash !== undefined) {
-		lastAnalyzedStateByFile.set(filePath, {
-			turnIndex: runtime.turnIndex,
-			stateHash: finalStateHash,
-		});
+		// #3763: keyed by the LIVE turn index, so a replaced session's pipeline
+		// would mark the new session's same bytes as already analysed.
+		sessionGeneration.guardedWrite(filePath, () =>
+			lastAnalyzedStateByFile.set(filePath, {
+				turnIndex: runtime.turnIndex,
+				stateHash: finalStateHash,
+			}),
+		);
 	}
 
 	// #2402: pi-lens' own immediate format/autofix may have rewritten the file
@@ -1630,9 +1645,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				deps.readGuard?.recordUnchanged?.(wp);
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
 				.recordMutationToolReceipt;
-			const autofixMode = receipt
-				? receipt.call(runtime, wp, "write").autofixMode
-				: "immediate";
+			// #3763: after the recovery and earlier synthetic awaits, a replaced
+			// session's receipt stays out of the live session's turn.
+			const autofixMode =
+				(receipt &&
+					writeSession.guardedWrite(wp, () =>
+						receipt.call(runtime, wp, "write"),
+					)?.autofixMode) ??
+				"immediate";
 			// Recovered opaque writes carry their own source so the change log
 			// distinguishes them from parsed writes (auditable in production).
 			const isOpaque = opaqueSet.has(wp);
@@ -2178,9 +2198,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				filePath,
 				stateHash: observedStateHash,
 			});
-			const receiptOutcome = (
-				runtime as Partial<RuntimeCoordinator>
-			).recordMutationToolReceipt?.call(runtime, filePath, observedKind);
+			// #3763: the settle awaited; a replaced session's receipt stays out
+			// of the live session's turn.
+			const receiptOutcome = writeSession.guardedWrite(filePath, () =>
+				(
+					runtime as Partial<RuntimeCoordinator>
+				).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
+			);
 			refreshCachedExports(runtime, filePath);
 			// Same fallback formula the classified chain uses below, minus its
 			// `_bypassDebounce` branch (#2464 review round 2, S3): that branch was
@@ -2477,14 +2501,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// the latest event, but write -> edit is a sticky turn transition.
 	const receipt = (runtime as Partial<RuntimeCoordinator>)
 		.recordMutationToolReceipt;
+	// #3763: an armed call awaited the settle above; a replaced session's
+	// receipt stays out of the live session's turn.
 	const autofixMode = deps._bypassDebounce
 		? (deps._autofixMode ??
 			(mutation.kind === "edit" ? "deferred" : "immediate"))
-		: receipt
-			? receipt.call(runtime, filePath, mutation.kind).autofixMode
-			: mutation.kind === "edit"
-				? "deferred"
-				: "immediate";
+		: ((receipt &&
+				writeSession.guardedWrite(filePath, () =>
+					receipt.call(runtime, filePath, mutation.kind),
+				)?.autofixMode) ??
+			(mutation.kind === "edit" ? "deferred" : "immediate"));
 
 	// Coalesce sequential edits to the same file into one pipeline run against
 	// the final state. Only the debounce-fired call (with _bypassDebounce=true)

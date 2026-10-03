@@ -25,9 +25,13 @@ import {
 	EXIT_SUCCESS,
 	EXIT_TRANSPORT,
 	EXIT_USAGE,
+	fetchActionRequiredRuns,
 	fetchCheckRunsPayload,
 	fetchFailedQueueRuns,
+	fetchHeadRuns,
+	fetchRerunState,
 	formatAbsentRequiredReason,
+	formatAbsentRunReason,
 	formatExitLine,
 	formatVerdictTable,
 	HARD_CAP_SECONDS,
@@ -38,6 +42,7 @@ import {
 	parseArgs,
 	pollVerdict,
 	readMergeQueueState,
+	readOpenPrs,
 	resolveClassification,
 	resolveGhTimeoutMs,
 	resolveHeadSha,
@@ -413,9 +418,24 @@ describe("computeVerdict — absent-check verdict is mergeable-aware (#2539 roun
 	// ever registers) with a MERGEABLE head. The issue claimed this exited 0;
 	// it already exits 3 (see the doc comment above computeVerdict), so this
 	// pins that exit code AND the issue's optional hint text, which is the
-	// one piece #2664 actually adds.
+	// one piece #2664 actually adds. #3861 F2: the hint requires the POSITIVE
+	// "no run for the head" answer; a missing run answer is not evidence.
 	it("A5 (#2664): both required rows absent + MERGEABLE exits 3 with the retarget hint", () => {
-		const verdict = computeVerdict({ check_runs: [] }, undefined, "MERGEABLE");
+		const verdict = computeVerdict(
+			{ check_runs: [] },
+			undefined,
+			"MERGEABLE",
+			null,
+			null,
+			{
+				repository: "acme/repo",
+				sha: "a".repeat(40),
+				actionRequiredRuns: [],
+				autoMerge: false,
+				absentMinutes: 5,
+				headRun: { state: "none", id: null, ageMinutes: null },
+			},
+		);
 		expect(verdict.exitCode).toBe(EXIT_PENDING);
 		expect(verdict.rows.every((row) => !row.present)).toBe(true);
 		expect(verdict.reason).toContain("mergeable=MERGEABLE");
@@ -792,20 +812,18 @@ describe("computeVerdict — every check-run gates unless advisory (#2609)", () 
 		expect(verdict.reason).toContain(REAL_PROD_INSTALL_BUILD_NAME);
 	});
 
-	// Not hypothetical: this repository's `record-post-merge-validation` job
-	// (ci.yml AND lint.yml) has a job-level `if: ... event_name ==
-	// 'repository_dispatch'` and reports "skipped" on every ordinary
-	// pull_request run (confirmed live on PR #2588, 2026-09-06 -- two "Record
-	// post-merge validation" rows, both "skipping" in `gh pr checks`). A bare
-	// `conclusion !== "success"` check (the pre-#2609 comparison, applied to a
-	// newly-discovered row) would red every PR forever.
+	// Not hypothetical: a discovered job can report "skipped" on an ordinary
+	// pull_request run (a job-level `if:` that evaluated false, or a skipped
+	// `needs:`). A bare `conclusion !== "success"` check (the pre-#2609
+	// comparison, applied to a newly-discovered row) would red every PR
+	// forever.
 	it("a discovered gating check that concluded 'skipped' does not fail the verdict", () => {
 		const payload = {
 			check_runs: [
 				checkRun({ name: "Unit tests", id: 1 }),
 				checkRun({ name: "Lint & type-check", id: 2 }),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "skipped",
 					id: 3,
 				}),
@@ -902,11 +920,11 @@ describe("computeVerdict — every check-run gates unless advisory (#2609)", () 
 //  discovered  | absent     | --                   | impossible by construction -- a discovered row's name, by definition, appeared in the payload
 //  advisory    | any incl. failure | --            | 0 (existing)      | 2 (existing)
 describe("computeVerdict — required rows reject skip/neutral/failure while latest cancellation reruns (#3373)", () => {
-	// The exact reported shape: ci.yml:253's `test` job (`Unit tests`) has
-	// `needs: validate-merge-train-dispatch` with no `if:` -- a failed/skipped
-	// dependency skips it outright, and the pre-fix-round-2 code (which
-	// exempted EVERY gating row's skipped/neutral conclusion, not just
-	// discovered ones) read that as a clean pass.
+	// The exact reported shape: ci.yml's `Unit tests` aggregate requires the
+	// `test` matrix job, and a failed/skipped dependency skips the aggregate
+	// outright, so the pre-fix-round-2 code (which exempted EVERY gating row's
+	// skipped/neutral conclusion, not just discovered ones) read that as a
+	// clean pass.
 	it("RED PROOF: a required 'Unit tests' that concluded skipped no longer passes", () => {
 		const payload = {
 			check_runs: [
@@ -955,11 +973,10 @@ describe("computeVerdict — required rows reject skip/neutral/failure while lat
 });
 
 describe("computeVerdict — a discovered row's cancelled conclusion is uncertain, not failing (#2618 fix-round-2, F2)", () => {
-	// RED PROOF against the pre-fix-round-2 code, reproduced with the REAL
-	// check_suite id and started_at GitHub returned for PR #2607's
-	// "Record post-merge validation" oldest (cancelled) run, live-probed
-	// 2026-09-06: `gh api repos/apmantza/pi-lens/commits/<sha>/check-runs`
-	// returned THREE check-suites for that name on ONE commit -- 17:21:06
+	// RED PROOF against the pre-fix-round-2 code, reproduced with a REAL
+	// check_suite id and started_at GitHub returned for PR #2607's oldest
+	// (cancelled) run, live-probed 2026-09-06: `gh api repos/apmantza/pi-lens/commits/<sha>/check-runs`
+	// returned THREE check-suites for that named job on ONE commit -- 17:21:06
 	// cancelled, 17:25:29 skipped, 17:32:15 skipped. This fixture carries
 	// ONLY the cancelled one, reproducing the transient window before either
 	// replacement had posted (`cancel-in-progress: true`, ci.yml:15-16).
@@ -969,7 +986,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 				checkRun({ name: "Unit tests", id: 1 }),
 				checkRun({ name: "Lint & type-check", id: 2 }),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "cancelled",
 					started_at: "2026-09-06T17:21:06Z",
 					id: 101527303167,
@@ -993,15 +1010,9 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 				checkRun({ name: "Unit tests", id: 1 }),
 				checkRun({ name: "Lint & type-check", id: 2 }),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "cancelled",
 					id: 3,
-				}),
-				checkRun({
-					name: "Production install build (--omit=dev, from source)",
-					status: "in_progress",
-					conclusion: null,
-					id: 4,
 				}),
 			],
 		};
@@ -1025,19 +1036,19 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 				checkRun({ name: "Unit tests", id: 1 }),
 				checkRun({ name: "Lint & type-check", id: 2 }),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "cancelled",
 					started_at: "2026-09-06T17:21:06Z",
 					id: 101527303167,
 				}),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "skipped",
 					started_at: "2026-09-06T17:25:29Z",
 					id: 101527918964,
 				}),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "skipped",
 					started_at: "2026-09-06T17:32:15Z",
 					id: 101528845721,
@@ -1047,7 +1058,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 		const verdict = computeVerdict(payload, undefined, "MERGEABLE");
 		expect(verdict.exitCode).toBe(EXIT_SUCCESS);
 		const row = verdict.rows.find(
-			(r) => r.name === "Record post-merge validation",
+			(r) => r.name === "Production install build (--omit=dev, from source)",
 		);
 		expect(row?.conclusion).toBe("skipped");
 	});
@@ -1058,7 +1069,7 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 				checkRun({ name: "Unit tests", id: 1 }),
 				checkRun({ name: "Lint & type-check", id: 2 }),
 				checkRun({
-					name: "Record post-merge validation",
+					name: "Production install build (--omit=dev, from source)",
 					conclusion: "cancelled",
 					id: 3,
 				}),
@@ -1491,7 +1502,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 			"Dependency boundaries",
 			"Close-keyword syntax",
 			"Changelog fragment (fast-fail)",
-			"Validate merge-train dispatch",
 			"Install test (ubuntu-latest)",
 			"Install test (windows-latest)",
 			"Install test (macos-latest)",
@@ -2616,6 +2626,8 @@ interface Gh3694Options {
 	committedAt?: string | null;
 	checkSuites?: unknown[] | null;
 	runsThrow?: boolean;
+	/** A raw `actions/runs` body, for the malformed-shape contract (#3861 F1). */
+	runsApiBody?: string | null;
 }
 
 function gh3694({
@@ -2627,6 +2639,7 @@ function gh3694({
 	committedAt = null,
 	checkSuites = null,
 	runsThrow = false,
+	runsApiBody = null,
 }: Gh3694Options = {}) {
 	const calls: string[] = [];
 	const ghExec = (args: string[]) => {
@@ -2641,7 +2654,7 @@ function gh3694({
 		if (endpoint.includes("/check-runs")) return JSON.stringify(checkRuns);
 		if (endpoint.includes("/actions/runs")) {
 			if (runsThrow) throw new Error("HTTP 502");
-			return JSON.stringify({ workflow_runs: workflowRuns });
+			return runsApiBody ?? JSON.stringify({ workflow_runs: workflowRuns });
 		}
 		if (endpoint.includes(`/commits/${sha}/check-suites`)) {
 			if (checkSuites === null) throw new Error("HTTP 502");
@@ -2912,6 +2925,244 @@ describe("run — absent-required re-arm message (#3694)", () => {
 		expect(calls.some((call) => call.includes("/actions/runs"))).toBe(false);
 		expect(calls.some((call) => call.includes("autoMergeRequest"))).toBe(false);
 		expect(calls.some((call) => call.includes("/check-suites"))).toBe(false);
+	});
+});
+
+// #3861: the absent-required re-arm advice is WRONG when a `ci.yml` run for
+// the exact head is already registered -- the usual cause is runner
+// starvation or the concurrency group holding a cancelled run's `if:
+// always()` job, and an empty re-arm commit only adds a run to a saturated
+// queue (observed on PR #3842, 2026-09-30). The run lookup is one read of
+// the same `actions/runs?head_sha=` endpoint the fork-approval read already
+// uses; only a POSITIVE no-run answer authorizes re-arm, and an unreadable
+// lookup never does.
+const headRun = (overrides: Record<string, unknown> = {}) => ({
+	id: 4242,
+	name: "CI",
+	event: "pull_request",
+	head_sha: FORK_APPROVAL.sha,
+	status: "queued",
+	conclusion: null,
+	run_attempt: 1,
+	created_at: minutesBefore(45),
+	run_started_at: minutesBefore(45),
+	...overrides,
+});
+
+const armedAbsent = {
+	checkRuns: { check_runs: [] },
+	autoMergeRequest: {},
+	checkSuites: suitesAt(minutesBefore(45)),
+};
+
+describe("run — a registered ci.yml run suppresses the re-arm advice (#3861)", () => {
+	// N1: pin the exact rendered lines, never the formatter under test, so a
+	// formatter regression reds here.
+	const REARM_LINE = `required checks absent for 45 min on ${FORK_APPROVAL.sha} (auto-merge on) — push or merge master to re-arm`;
+	const REGISTERED_TAIL = "the run is registered, so no re-arm is needed";
+	const TERMINAL_TAIL =
+		"the run is terminal and cannot produce the missing check-runs -- inspect it or re-run it manually (gh run rerun 4242); the verdict never re-arms automatically";
+	const UNKNOWN_LINE = `required checks absent for 45 min on ${FORK_APPROVAL.sha} and the ci.yml run lookup was unreadable: no re-arm advice without a run answer`;
+	// The same literal through the fallback branch (auto-merge off or under the
+	// threshold) and the over-threshold branch: one rendered run line.
+	const QUEUED_LINE = `ci.yml run 4242 is queued (45 min old) for ${FORK_APPROVAL.sha}: ${REGISTERED_TAIL}`;
+
+	it.each([
+		["queued", "queued", REGISTERED_TAIL],
+		["in_progress", "in progress", REGISTERED_TAIL],
+		["completed", "completed", TERMINAL_TAIL],
+	] as const)(
+		"a %s run for the head prints run id and age, never re-arm",
+		async (status, label, tail) => {
+			const run_ = headRun({ status, run_started_at: minutesBefore(45) });
+			const { exitCode, reason } = await runVerdict(["3679"], {
+				...armedAbsent,
+				workflowRuns: [run_],
+			});
+			expect(exitCode).toBe(EXIT_PENDING);
+			expect(reason).toBe(
+				`ci.yml run 4242 is ${label} (45 min old) for ${FORK_APPROVAL.sha}: ${tail}`,
+			);
+			expect(reason).toContain(`run 4242 is ${label}`);
+			expect(reason).not.toContain("push or merge master to re-arm");
+		},
+	);
+
+	// F3: a terminal run cannot produce the missing check-runs, so it names the
+	// manual rerun instead of the false-comfort "no re-arm is needed", and it
+	// never fires an automatic re-arm (#3795 item 3 stays held).
+	it("a terminal run names the manual rerun and never says no re-arm is needed", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ status: "completed", conclusion: "success" })],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toContain("gh run rerun 4242");
+		expect(reason).toContain("never re-arms automatically");
+		expect(reason).not.toContain("no re-arm is needed");
+	});
+
+	it("a cancelled attempt for the head still suppresses the re-arm advice", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ status: "completed", conclusion: "cancelled" })],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(
+			`ci.yml run 4242 is cancelled (45 min old) for ${FORK_APPROVAL.sha}: ${TERMINAL_TAIL}`,
+		);
+		expect(reason).not.toContain("no re-arm is needed");
+		expect(reason).not.toContain("push or merge master to re-arm");
+	});
+
+	// F1: a 200 body that violates the documented `workflow_runs` shape is a
+	// contract violation, not the positive "none" that authorizes a re-arm.
+	it.each([
+		["an empty object", "{}"],
+		["a JSON null", "null"],
+		["a JSON array", "[]"],
+		["a bare total_count without workflow_runs", '{"total_count":0}'],
+		["a Not Found message", '{"message":"Not Found","documentation_url":"x"}'],
+		["an object where the array belongs", '{"workflow_runs":{}}'],
+		["a truncated body", '{"workflow_runs":['],
+	])(
+		"a %s actions/runs body is unreadable, never a positive none",
+		async (_label, body) => {
+			const { exitCode, reason } = await runVerdict(["3679"], {
+				...armedAbsent,
+				runsApiBody: body,
+			});
+			expect(exitCode).toBe(EXIT_PENDING);
+			expect(reason).toBe(UNKNOWN_LINE);
+			expect(reason).not.toContain("push or merge master to re-arm");
+		},
+	);
+
+	it("a valid empty workflow_runs array stays the positive none that re-arms", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			runsApiBody: JSON.stringify({ total_count: 0, workflow_runs: [] }),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(REARM_LINE);
+	});
+
+	// F2: the fallback branch (auto-merge off, or under the threshold) used to
+	// append the same retarget clause while a run for the head was registered.
+	it("auto-merge off with a registered run prints the run line, not the retarget clause", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			workflowRuns: [headRun({ status: "queued" })],
+			checkRuns: { check_runs: [] },
+			autoMergeRequest: null,
+			checkSuites: suitesAt(minutesBefore(45)),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(QUEUED_LINE);
+		expect(reason).not.toContain("push a commit or close/reopen to re-arm");
+	});
+
+	it("under the re-arm threshold with a registered run prints the run line, not the retarget clause", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ status: "queued" })],
+			checkSuites: suitesAt(minutesBefore(2)),
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(QUEUED_LINE);
+		expect(reason).not.toContain("push a commit or close/reopen to re-arm");
+	});
+
+	// F2: a context with no head-run answer (the REST transport, or a legacy
+	// caller) is NOT evidence of a missing run: it must not re-arm.
+	it.each([
+		["null", null],
+		["absent", undefined],
+	] as const)(
+		"a %s head-run answer never authorizes a re-arm",
+		(_label, value) => {
+			const verdict = computeVerdict(
+				{ check_runs: [] },
+				undefined,
+				"MERGEABLE",
+				null,
+				null,
+				{
+					repository: "acme/repo",
+					sha: FORK_APPROVAL.sha,
+					actionRequiredRuns: [],
+					autoMerge: true,
+					absentMinutes: 45,
+					headRun: value,
+				},
+			);
+			expect(verdict.kind).toBe("pending");
+			expect(verdict.reason).not.toContain("push or merge master to re-arm");
+			expect(verdict.reason).not.toContain(
+				"push a commit or close/reopen to re-arm",
+			);
+		},
+	);
+
+	it("no run for the head still advises the re-arm", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(REARM_LINE);
+	});
+
+	it("an unreadable run lookup never advises the re-arm", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			runsThrow: true,
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(UNKNOWN_LINE);
+		expect(reason).not.toContain("push or merge master to re-arm");
+	});
+
+	it("a run for another head does not suppress the re-arm", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ head_sha: "0".repeat(40) })],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(REARM_LINE);
+	});
+
+	it("a merge_group run never counts as the head's ci.yml run", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ event: "merge_group", id: 7 })],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(REARM_LINE);
+	});
+
+	it("another workflow's run does not count as the head's ci.yml run", async () => {
+		const { exitCode, reason } = await runVerdict(["3679"], {
+			...armedAbsent,
+			workflowRuns: [headRun({ name: "CodeQL", id: 9 })],
+		});
+		expect(exitCode).toBe(EXIT_PENDING);
+		expect(reason).toBe(REARM_LINE);
+	});
+});
+
+// N2 (#3861): `readOpenPrs` names a malformed open-PR list instead of leaking a
+// bare SyntaxError; `run()`'s message-only catch then prints the named form.
+describe("readOpenPrs guards its JSON parse (#3861 N2)", () => {
+	it("throws a named error on a malformed open-PR list", () => {
+		expect(() => readOpenPrs(() => "not json")).toThrow(
+			/could not parse the open PR list JSON/,
+		);
+	});
+
+	it("returns the parsed list for a valid payload", () => {
+		expect(
+			readOpenPrs(() => JSON.stringify([{ number: 1, headRefOid: "abc" }])),
+		).toEqual([{ number: 1, headRefOid: "abc" }]);
 	});
 });
 
@@ -3588,5 +3839,328 @@ describe("computeVerdict — queue context shapes (#3754)", () => {
 		);
 		expect(verdict.exitCode).toBe(EXIT_SUCCESS);
 		expect(verdict.reason).toContain("flake watch, nightly smoke");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3861 added-line mutation coverage (direct unit seams)
+//
+// The `run`-level #3861 suites above drive the whole path with one run at a
+// time; they leave the formatter ternaries, the multi-run head selection, the
+// status mapping, the malformed-response direction, and the argv contract
+// unnamed. Each block below drives the REAL exported seam and pins the literal
+// result, so the mutation it names cannot survive.
+// ---------------------------------------------------------------------------
+
+const HEAD_SHA = "a".repeat(40);
+
+const workflowRun = (
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+	id: 1,
+	name: "CI",
+	event: "pull_request",
+	head_sha: HEAD_SHA,
+	status: "completed",
+	conclusion: "success",
+	run_attempt: 1,
+	created_at: "2026-01-01T00:00:00Z",
+	run_started_at: "2026-01-01T00:00:00Z",
+	...overrides,
+});
+
+const headRunsBody = (runs: Array<Record<string, unknown> | null>) =>
+	JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+
+describe("formatAbsentRunReason — unnamed run, omitted age, terminal rerun text (#3861)", () => {
+	it("names an unnamed terminal run and appends no rerun command", () => {
+		const text = formatAbsentRunReason({
+			state: "completed",
+			id: null,
+			ageMinutes: null,
+			sha: "abc123",
+		});
+		expect(text).toBe(
+			"ci.yml an unnamed run is completed for abc123: the run is terminal and cannot produce the missing check-runs -- inspect it; the verdict never re-arms automatically",
+		);
+		expect(text).not.toContain("Stryker");
+		expect(text).not.toContain("gh run rerun");
+	});
+
+	it("names an unnamed registered run with no age text", () => {
+		const text = formatAbsentRunReason({
+			state: "queued",
+			id: null,
+			ageMinutes: null,
+			sha: "abc123",
+		});
+		expect(text).toBe(
+			"ci.yml an unnamed run is queued for abc123: the run is registered, so no re-arm is needed",
+		);
+		expect(text).not.toContain("Stryker");
+	});
+});
+
+describe("computeVerdict — the absent-required re-arm threshold is inclusive (#3861 C2)", () => {
+	it("at exactly the threshold a registered unknown run names the unreadable lookup", () => {
+		const verdict = computeVerdict(
+			{ check_runs: [] },
+			undefined,
+			"MERGEABLE",
+			null,
+			null,
+			{
+				repository: "acme/repo",
+				sha: HEAD_SHA,
+				actionRequiredRuns: [],
+				autoMerge: true,
+				absentMinutes: ABSENT_REQUIRED_REARM_MINUTES,
+				headRun: { state: "unknown", id: null, ageMinutes: null },
+			},
+		);
+		expect(verdict.exitCode).toBe(EXIT_PENDING);
+		expect(verdict.reason).toBe(
+			`required checks absent for ${ABSENT_REQUIRED_REARM_MINUTES} min on ${HEAD_SHA} and the ci.yml run lookup was unreadable: no re-arm advice without a run answer`,
+		);
+	});
+});
+
+describe("resolveHeadSha — malformed PR view JSON (#3861 D)", () => {
+	it("throws a named error rather than returning a fallback object", () => {
+		expect(() => resolveHeadSha("2539", () => "not json")).toThrow(
+			/could not parse the PR view JSON for 2539/,
+		);
+	});
+});
+
+describe("fetchCheckRunsPayload — malformed check-runs JSON (#3861 E)", () => {
+	it("throws a named error rather than returning an empty payload", () => {
+		expect(() =>
+			fetchCheckRunsPayload("acme/repo", "deadbeef", () => "not json"),
+		).toThrow(/could not parse the check-runs JSON for deadbeef \(page 1\)/);
+	});
+});
+
+describe("fetchHeadRuns — the head's latest ci.yml run (#3861 F)", () => {
+	const attemptRun = (
+		id: number,
+		run_attempt: number,
+		created_at: string,
+		run_started_at: string,
+	) =>
+		workflowRun({
+			id,
+			run_attempt,
+			created_at,
+			run_started_at,
+			status: "completed",
+			conclusion: "success",
+		});
+	const orderedRuns = [
+		attemptRun(1, 1, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+		attemptRun(2, 2, "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"),
+		// The latest run's run_started_at deliberately differs from its
+		// created_at: `startedAtMs` must prefer run_started_at.
+		attemptRun(3, 3, "2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z"),
+	];
+
+	it("picks the latest attempt from every input order", () => {
+		for (const order of [
+			[0, 1, 2],
+			[0, 2, 1],
+			[1, 0, 2],
+			[1, 2, 0],
+			[2, 0, 1],
+			[2, 1, 0],
+		]) {
+			const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+				headRunsBody(order.map((index) => orderedRuns[index]!)),
+			);
+			expect(result.headRun.id, `input order ${order}`).toBe(3);
+			expect(result.headRun.startedAtMs, `input order ${order}`).toBe(
+				Date.parse("2026-01-04T00:00:00Z"),
+			);
+		}
+	});
+
+	// The tie-break: two runs for the SAME attempt (GitHub can report a rerun
+	// this way) resolve by ascending created_at, never by input order.
+	const sameAttempt = [
+		workflowRun({
+			id: 11,
+			run_attempt: 1,
+			created_at: "2026-01-01T00:00:00Z",
+			run_started_at: "2026-01-01T00:00:00Z",
+		}),
+		workflowRun({
+			id: 12,
+			run_attempt: 1,
+			created_at: "2026-01-02T00:00:00Z",
+			run_started_at: "2026-01-02T00:00:00Z",
+		}),
+	];
+
+	it("breaks a same-attempt tie by created_at from either input order", () => {
+		for (const order of [
+			[0, 1],
+			[1, 0],
+		]) {
+			const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+				headRunsBody(order.map((index) => sameAttempt[index]!)),
+			);
+			expect(result.headRun.id, `input order ${order}`).toBe(12);
+		}
+	});
+
+	it("orders by run_attempt first, never by created_at when attempts differ", () => {
+		// A rerun (attempt 2) created EARLIER than its original (attempt 1): the
+		// attempt ladder, not the clock, chooses the latest.
+		const original = workflowRun({
+			id: 21,
+			run_attempt: 1,
+			created_at: "2026-01-02T00:00:00Z",
+			run_started_at: "2026-01-02T00:00:00Z",
+		});
+		const rerun = workflowRun({
+			id: 22,
+			run_attempt: 2,
+			created_at: "2026-01-01T00:00:00Z",
+			run_started_at: "2026-01-01T00:00:00Z",
+		});
+		const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+			headRunsBody([original, rerun]),
+		);
+		expect(result.headRun.id).toBe(22);
+	});
+});
+
+describe("fetchHeadRuns — status mapping (#3861 G)", () => {
+	it.each([
+		["queued", "queued"],
+		["waiting", "queued"],
+		["requested", "queued"],
+		["in_progress", "in_progress"],
+		["completed", "completed"],
+		["pending", "unknown"],
+	])("maps a %j status to %s", (status, expected) => {
+		const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+			headRunsBody([workflowRun({ status, conclusion: null })]),
+		);
+		expect(result.headRun.state).toBe(expected);
+	});
+
+	it("maps a completed cancelled run to cancelled", () => {
+		const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+			headRunsBody([
+				workflowRun({ status: "completed", conclusion: "cancelled" }),
+			]),
+		);
+		expect(result.headRun.state).toBe("cancelled");
+	});
+});
+
+describe("fetchHeadRuns — off-schema responses and null elements (#3861 H)", () => {
+	it.each([
+		["an empty object", "{}"],
+		["a JSON null", "null"],
+		["an object where the array belongs", '{"workflow_runs":{}}'],
+	])("rethrows the named malformed error for %s", (_label, body) => {
+		expect(() =>
+			fetchActionRequiredRuns(
+				"acme/repo",
+				HEAD_SHA,
+				() => body,
+				undefined,
+				false,
+			),
+		).toThrow(
+			/malformed actions\/runs response: workflow_runs is not an array/,
+		);
+	});
+
+	it("keeps the real run when the head's list carries a null element", () => {
+		const real = workflowRun({
+			id: 77,
+			status: "in_progress",
+			conclusion: null,
+		});
+		const result = fetchHeadRuns("acme/repo", HEAD_SHA, () =>
+			headRunsBody([null, real]),
+		);
+		expect(result.headRun.id).toBe(77);
+		expect(result.headRun.state).toBe("in_progress");
+	});
+});
+
+describe("fetchRerunState — the exact ci.yml head runs form the ladder (#3861 I)", () => {
+	it("keeps only the CI workflow's exact-head runs and reports the latest attempt", () => {
+		const result = fetchRerunState("acme/repo", HEAD_SHA, () =>
+			JSON.stringify({
+				total_count: 5,
+				workflow_runs: [
+					workflowRun({
+						id: 10,
+						run_attempt: 1,
+						status: "completed",
+						conclusion: "failure",
+					}),
+					workflowRun({
+						id: 11,
+						run_attempt: 2,
+						status: "in_progress",
+						conclusion: null,
+					}),
+					workflowRun({
+						id: 20,
+						name: "CodeQL",
+						run_attempt: 5,
+						status: "completed",
+						conclusion: "failure",
+					}),
+					workflowRun({
+						id: 30,
+						head_sha: "b".repeat(40),
+						run_attempt: 6,
+						status: "completed",
+						conclusion: "failure",
+					}),
+					null,
+				],
+			}),
+		);
+		expect(result).toEqual({
+			originalFailed: true,
+			latestAttempt: {
+				status: "in_progress",
+				conclusion: null,
+				run_attempt: 2,
+			},
+		});
+	});
+});
+
+describe("readOpenPrs — the exact pr list argv and caller timeout (#3861 K)", () => {
+	it("passes the exact argv and the caller's timeoutMs", () => {
+		const calls: Array<{ args: string[]; options: unknown }> = [];
+		const ghExec = (args: string[], options: unknown) => {
+			calls.push({ args, options });
+			return "[]";
+		};
+		expect(readOpenPrs(ghExec, 12_345)).toEqual([]);
+		expect(calls).toEqual([
+			{
+				args: [
+					"pr",
+					"list",
+					"--state",
+					"open",
+					"--limit",
+					"100",
+					"--json",
+					"number,author,headRefOid,autoMergeRequest",
+				],
+				options: { timeoutMs: 12_345 },
+			},
+		]);
 	});
 });
