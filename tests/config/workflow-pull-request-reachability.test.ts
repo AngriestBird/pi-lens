@@ -42,6 +42,7 @@ import {
 import {
 	PR_CONTEXTS,
 	type PullRequestContext,
+	type ScalarLiteralValue,
 	evaluateForPullRequest,
 	githubEquals,
 	isPullRequestReachable,
@@ -591,6 +592,132 @@ describe("the reachability model itself", () => {
 				openedContext,
 			),
 		).toThrow(/unsupported expression/);
+	});
+
+	// #3941 r5 (F7): the fold used to trust token adjacency as operand
+	// identity, but GitHub binds `!` and the relationals tighter than `==`/`!=`
+	// and compares left-associatively. A literal comparison that is not a
+	// complete operand is REFUSED with the bounded unsupported-expression
+	// error, never folded into a guessed boolean. Each case drives the real
+	// consumer entry point.
+	it.each([
+		// relational to the left of the equality's left operand
+		"1 < 2 == true",
+		"0 > 1 == false",
+		"2 < 3 == true",
+		// the same unsupported topology even when the guess happens to match
+		"1 > 0 == true",
+		// a relational takes the equality's right operand
+		"0 == 1 < 2",
+		"1 == 2 < 3",
+		"true == 1 < 2",
+		// prefix `!` directly on the operand
+		"! 'x' != 'y'",
+		"!1 == 0",
+		"! 1 < 2 == true",
+		// a comparison run that starts or ends at a non-literal operand
+		"fromJSON('0') == 1 == 2",
+		"1 == 1 == fromJSON('1')",
+		// mixed with a supported boolean operator
+		"1 < 2 == true && 'a' == 'A'",
+	])("refuses unsupported comparison topology: %s", (expr) => {
+		expect(() => isPullRequestReachable(expr)).toThrow(
+			/unsupported expression/,
+		);
+	});
+
+	it.each([
+		// parentheses make the comparison a complete operand again
+		["(1 > 0) == true", true],
+		["(1 < 2) == true", true],
+		["!(1 == 2)", true],
+		["((1 == 1)) == true", true],
+		// equality chains evaluate left-associatively, as GitHub does
+		["1 == 1 == true", true],
+		["1 != 1 == false", true],
+		["1 == 2 == 3", false],
+		["1 == 2 == 3 == 4", false],
+		["1 == 1 == 1 == 1", true],
+		// boolean operators bind looser than equality
+		["1 < 2 && 3 == 3", true],
+		["1 == 1 || 2 == 3", true],
+	])(
+		"keeps supported comparison topology: %s -> reachable=%s",
+		(expr, expected) => {
+			expect(isPullRequestReachable(expr)).toBe(expected);
+		},
+	);
+
+	// #3941 r5 (F8.1): GitHub's expression grammar has single-quoted strings
+	// only. A double-quoted literal is invalid, and the model names the
+	// grammar rule at the real caller instead of falling through to a generic
+	// character error.
+	it("reports a GitHub-invalid double-quoted string as unsupported", () => {
+		expect(() =>
+			evaluateForPullRequest(
+				'github.event_name == "pull_request"',
+				openedContext,
+			),
+		).toThrow(/double-quoted string/);
+	});
+
+	// #3941 r5 (F8.3): the number token keeps GitHub's hex spelling (and the
+	// exponent, leading-dot, and signed spellings), so `0xff == 255` is true.
+	it.each([
+		["0xff == 255", true],
+		["0x10 == 16", true],
+		["1e2 == 100", true],
+		[".5 == 0.5", true],
+		["-1 == -1", true],
+		["1.5 == 1.5", true],
+	])("keeps the number spelling GitHub accepts: %s", (expr, expected) => {
+		expect(isPullRequestReachable(expr)).toBe(expected);
+	});
+
+	// #3941 r5 (F8.4): the `^...$` anchors on the needs forms are load-bearing.
+	// A path that only begins or ends like a supported one must reach the
+	// code-residue refusal, not be silently substituted as `success`/`'true'`.
+	it("refuses a needs path that only begins or ends like a supported one", () => {
+		for (const expr of [
+			"needs.foo.result.bar == 'success'",
+			"needs.foo.outputs.name.extra == 'true'",
+			"xneeds.foo.result == 'success'",
+			"xneeds.foo.outputs.name == 'true'",
+		]) {
+			expect(() => isPullRequestReachable(expr)).toThrow(
+				/unrecognised context path/,
+			);
+		}
+	});
+
+	it("keeps a quoted literal that spells a needs path as DATA", () => {
+		expect(
+			evaluateForPullRequest(
+				"'needs.foo.result.bar' == 'needs.foo.result.bar'",
+				openedContext,
+			),
+		).toBe(true);
+	});
+
+	it("substitutes the supported needs result and output forms", () => {
+		expect(isPullRequestReachable("needs.foo.result == 'success'")).toBe(true);
+		expect(isPullRequestReachable("needs.foo.outputs.name == 'true'")).toBe(
+			true,
+		);
+	});
+
+	// #3941 r5 (F8.2): the context-value domain is closed to scalars at the
+	// type level, so the old runtime non-scalar branch is deleted rather than
+	// kept as an unreachable guard. The assertion below does not type-check if
+	// `ScalarLiteralValue` is widened to admit an object.
+	it("closes the context-value domain to scalars at the type level", () => {
+		const scalarRow: [string, (ctx: PullRequestContext) => ScalarLiteralValue] =
+			["github.example.scalar", () => 1];
+		expect(scalarRow[0]).toBe("github.example.scalar");
+		// A CONTEXT_PATHS row's value function may only return a scalar literal.
+		// @ts-expect-error a context path may only inject a scalar literal
+		const objectRowValue = (): ScalarLiteralValue => ({ nested: true });
+		expect(objectRowValue).toBeTypeOf("function");
 	});
 
 	it("never rescans an injected context value as code", () => {

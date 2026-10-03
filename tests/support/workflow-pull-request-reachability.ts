@@ -20,12 +20,21 @@
  * compares strings case-insensitively and coerces a mismatched type to a
  * number; JS strict equality does neither, so a bare `new Function`
  * UNDER-approximates GitHub truth and can read a real pull-request job as
- * unreachable. Folding keeps this a PARTIAL approximation: a comparison whose
- * operand is not a literal still runs under JS strict equality, which is the
- * model's stated residual -- the workflow population reaches none, because
- * every context path substitutes to a literal. An unrecognised context path
- * THROWS rather than being guessed at, so a workflow that grows a new one
- * fails loudly instead of being silently read as reachable.
+ * unreachable. Folding keeps this a PARTIAL approximation, and the model is
+ * NOT a GitHub expression compiler: two residuals are refused loudly rather
+ * than guessed at. A comparison with a non-literal operand still runs under JS
+ * strict equality -- the workflow population reaches none, because every
+ * context path substitutes to a literal. A literal comparison that is not a
+ * COMPLETE operand -- immediately beside `!`, a relational operator, or
+ * another comparison operator -- throws `WorkflowExpressionError` (#3941 r5,
+ * F7). GitHub binds every one of those at or above equality, so folding such a
+ * pair reads `1 < 2 == true` as `1 < (2 == true)` (GitHub: `(1 < 2) == true`)
+ * and `0 == 1 < 2` as `(0 == 1) < 2` (GitHub: `0 == (1 < 2)`). That topology is
+ * the model's declared excluded default, never a silently wrong `false`. A run
+ * of literal `==`/`!=` comparisons is folded LEFT-ASSOCIATIVELY, as GitHub
+ * does. An unrecognised context path THROWS rather than being guessed at, so a
+ * workflow that grows a new one fails loudly instead of being silently read as
+ * reachable.
  *
  * CODE versus DATA (#3941 r4, F6). A transform that edits raw text cannot see
  * where the code ends and a string literal begins, so it rewrote the INSIDE of
@@ -83,7 +92,17 @@ export const PR_CONTEXTS: readonly PullRequestContext[] = [
 	},
 ];
 
-const CONTEXT_PATHS: Array<[string, (ctx: PullRequestContext) => unknown]> = [
+/**
+ * The closed domain of a value a declared context path injects: exactly the
+ * literals GitHub expressions have (string, number, boolean, null). A row that
+ * returned an object does not type-check, so `literalToken` needs no runtime
+ * non-scalar branch and no cast (F8.2).
+ */
+export type ScalarLiteralValue = string | number | boolean | null;
+
+const CONTEXT_PATHS: Array<
+	[string, (ctx: PullRequestContext) => ScalarLiteralValue]
+> = [
 	["github.event_name", (ctx) => ctx.eventName],
 	["github.event.action", (ctx) => ctx.action],
 	["github.event.pull_request.merged", (ctx) => ctx.merged],
@@ -268,12 +287,11 @@ function tokenizeExpression(expr: string): ExpressionToken[] {
 	return tokens;
 }
 
-function literalToken(value: unknown): LiteralToken {
-	if (value === null || value === undefined) return { kind: "null" };
+function literalToken(value: ScalarLiteralValue): LiteralToken {
+	if (value === null) return { kind: "null" };
 	if (typeof value === "boolean") return { kind: "bool", value };
 	if (typeof value === "number") return { kind: "number", value };
-	if (typeof value === "string") return { kind: "string", value };
-	throw new WorkflowExpressionError("a context path read a non-scalar value");
+	return { kind: "string", value };
 }
 
 /** Rewrite CODE only: context reads, status functions, and the needs forms. */
@@ -333,30 +351,105 @@ function literalValueOf(token: LiteralToken): string | number | boolean | null {
 	return token.kind === "null" ? null : token.value;
 }
 
-/** Fold `LITERAL ==|!= LITERAL` through GitHub's equality, left to right. */
+function isEqualityOperator(
+	token: ExpressionToken | undefined,
+): token is { kind: "punct"; text: "==" | "!=" } {
+	return (
+		token?.kind === "punct" && (token.text === "==" || token.text === "!=")
+	);
+}
+
+// Operators GitHub binds at or above equality (`!` and the relationals), plus
+// equality itself. A literal comparison beside one of these is not a complete
+// operand: it is `!`'s operand, a relational's operand, or the non-literal side
+// of a longer equality chain. Folding it would guess a topology GitHub
+// evaluates differently, so the fold refuses instead (F7).
+const COMPARISON_BOUNDARY_OPERATORS: ReadonlySet<string> = new Set([
+	"!",
+	"<",
+	"<=",
+	">",
+	">=",
+	"==",
+	"!=",
+]);
+
+/**
+ * Refuse a literal comparison run that is not a COMPLETE operand. `start` is
+ * the run's first literal token and `end` the token just past its last
+ * operand. The message names the neighbouring operator and the reason; it
+ * never echoes the expression's own data.
+ */
+function refuseAmbiguousComparison(
+	tokens: readonly ExpressionToken[],
+	start: number,
+	end: number,
+): void {
+	const before = tokens[start - 1];
+	if (
+		before?.kind === "punct" &&
+		COMPARISON_BOUNDARY_OPERATORS.has(before.text)
+	) {
+		throw new WorkflowExpressionError(
+			`a literal ==/!= comparison is preceded by ${JSON.stringify(before.text)}, ` +
+				`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
+		);
+	}
+	const after = tokens[end];
+	if (
+		after?.kind === "punct" &&
+		COMPARISON_BOUNDARY_OPERATORS.has(after.text)
+	) {
+		throw new WorkflowExpressionError(
+			`a literal ==/!= comparison is followed by ${JSON.stringify(after.text)}, ` +
+				`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
+		);
+	}
+}
+
+/**
+ * Fold every run of literal `==`/`!=` comparisons through GitHub's equality,
+ * LEFT-ASSOCIATIVELY as GitHub does (`a == b == c` is `(a == b) == c`). A run
+ * whose boundary is not a complete operand is refused, never guessed at (F7).
+ */
 function foldLiteralComparisons(
 	tokens: readonly ExpressionToken[],
 ): ExpressionToken[] {
 	const folded: ExpressionToken[] = [];
-	for (let index = 0; index < tokens.length; index += 1) {
-		const left = tokens[index] as ExpressionToken;
-		const operator = tokens[index + 1] as ExpressionToken | undefined;
-		const right = tokens[index + 2] as ExpressionToken | undefined;
+	let index = 0;
+	while (index < tokens.length) {
+		const token = tokens[index] as ExpressionToken;
 		if (
-			isLiteralToken(left) &&
-			isLiteralToken(right) &&
-			operator?.kind === "punct" &&
-			(operator.text === "==" || operator.text === "!=")
+			!isLiteralToken(token) ||
+			!isEqualityOperator(tokens[index + 1]) ||
+			!isLiteralToken(tokens[index + 2])
 		) {
-			const equal = githubEquals(literalValueOf(left), literalValueOf(right));
-			folded.push({
-				kind: "bool",
-				value: operator.text === "==" ? equal : !equal,
-			});
-			index += 2;
+			folded.push(token);
+			index += 1;
 			continue;
 		}
-		folded.push(left);
+		// Measure the run `LITERAL (==|!= LITERAL)+` before folding it, so the
+		// boundary check sees the whole comparison chain.
+		let end = index + 3;
+		while (isEqualityOperator(tokens[end]) && isLiteralToken(tokens[end + 1])) {
+			end += 2;
+		}
+		refuseAmbiguousComparison(tokens, index, end);
+		let accumulator = token;
+		for (let at = index + 1; at < end; at += 2) {
+			const operator = tokens[at] as { kind: "punct"; text: "==" | "!=" };
+			const right = tokens[at + 1] as LiteralToken;
+			const equal = githubEquals(
+				literalValueOf(accumulator),
+				literalValueOf(right),
+			);
+			accumulator = {
+				kind: "bool",
+				value: operator.text === "==" ? equal : !equal,
+			};
+		}
+		folded.push(accumulator);
+		index = end;
 	}
 	return folded;
 }
