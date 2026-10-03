@@ -351,14 +351,6 @@ function literalValueOf(token: LiteralToken): string | number | boolean | null {
 	return token.kind === "null" ? null : token.value;
 }
 
-function isEqualityOperator(
-	token: ExpressionToken | undefined,
-): token is { kind: "punct"; text: "==" | "!=" } {
-	return (
-		token?.kind === "punct" && (token.text === "==" || token.text === "!=")
-	);
-}
-
 // Operators GitHub binds at or above equality (`!` and the relationals), plus
 // equality itself. A literal comparison beside one of these is not a complete
 // operand: it is `!`'s operand, a relational's operand, or the non-literal side
@@ -375,42 +367,14 @@ const COMPARISON_BOUNDARY_OPERATORS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Refuse a literal comparison run that is not a COMPLETE operand. `start` is
- * the run's first literal token and `end` the token just past its last
- * operand. The message names the neighbouring operator and the reason; it
- * never echoes the expression's own data.
- */
-function refuseAmbiguousComparison(
-	tokens: readonly ExpressionToken[],
-	start: number,
-	end: number,
-): void {
-	const before = tokens[start - 1];
-	if (
-		before?.kind === "punct" &&
-		COMPARISON_BOUNDARY_OPERATORS.has(before.text)
-	) {
-		throw new WorkflowExpressionError(
-			`a literal ==/!= comparison is preceded by ${JSON.stringify(before.text)}, ` +
-				`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
-		);
-	}
-	const after = tokens[end];
-	if (
-		after?.kind === "punct" &&
-		COMPARISON_BOUNDARY_OPERATORS.has(after.text)
-	) {
-		throw new WorkflowExpressionError(
-			`a literal ==/!= comparison is followed by ${JSON.stringify(after.text)}, ` +
-				`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
-		);
-	}
-}
-
-/**
  * Fold every run of literal `==`/`!=` comparisons through GitHub's equality,
- * LEFT-ASSOCIATIVELY as GitHub does (`a == b == c` is `(a == b) == c`). A run
- * whose boundary is not a complete operand is refused, never guessed at (F7).
+ * LEFT-ASSOCIATIVELY as GitHub does (`a == b == c` is `(a == b) == c`). A
+ * literal comparison run that is not a COMPLETE operand -- the token before its
+ * first literal, or the token after its last operand, is `!`, a relational, or
+ * another comparison operator -- is REFUSED with a bounded
+ * `WorkflowExpressionError` rather than folded into a guessed boolean. The
+ * refusal names the neighbouring operator and the reason; it never echoes the
+ * expression's own data (F7).
  */
 function foldLiteralComparisons(
 	tokens: readonly ExpressionToken[],
@@ -419,22 +383,51 @@ function foldLiteralComparisons(
 	let index = 0;
 	while (index < tokens.length) {
 		const token = tokens[index] as ExpressionToken;
+		const firstOperator = tokens[index + 1] as ExpressionToken | undefined;
 		if (
 			!isLiteralToken(token) ||
-			!isEqualityOperator(tokens[index + 1]) ||
+			firstOperator?.kind !== "punct" ||
+			(firstOperator.text !== "==" && firstOperator.text !== "!=") ||
 			!isLiteralToken(tokens[index + 2])
 		) {
 			folded.push(token);
 			index += 1;
 			continue;
 		}
-		// Measure the run `LITERAL (==|!= LITERAL)+` before folding it, so the
-		// boundary check sees the whole comparison chain.
+		// Measure the whole run `LITERAL (==|!= LITERAL)+` first, so the boundary
+		// check below sees the comparison chain rather than one pair.
 		let end = index + 3;
-		while (isEqualityOperator(tokens[end]) && isLiteralToken(tokens[end + 1])) {
+		for (;;) {
+			const next = tokens[end] as ExpressionToken | undefined;
+			if (
+				next?.kind !== "punct" ||
+				(next.text !== "==" && next.text !== "!=") ||
+				!isLiteralToken(tokens[end + 1])
+			) {
+				break;
+			}
 			end += 2;
 		}
-		refuseAmbiguousComparison(tokens, index, end);
+		const before = tokens[index - 1] as ExpressionToken | undefined;
+		if (
+			before?.kind === "punct" &&
+			COMPARISON_BOUNDARY_OPERATORS.has(before.text)
+		) {
+			throw new WorkflowExpressionError(
+				`a literal ==/!= comparison is preceded by ${JSON.stringify(before.text)}, ` +
+					`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
+			);
+		}
+		const after = tokens[end] as ExpressionToken | undefined;
+		if (
+			after?.kind === "punct" &&
+			COMPARISON_BOUNDARY_OPERATORS.has(after.text)
+		) {
+			throw new WorkflowExpressionError(
+				`a literal ==/!= comparison is followed by ${JSON.stringify(after.text)}, ` +
+					`which GitHub binds at or above equality; this topology is outside the model's partial evaluation`,
+			);
+		}
 		let accumulator = token;
 		for (let at = index + 1; at < end; at += 2) {
 			const operator = tokens[at] as { kind: "punct"; text: "==" | "!=" };
