@@ -65,8 +65,8 @@
  *
  * The lineage value is folded beside its presence, because presence alone is
  * the r2 false-safe: `undefined` / `void 0` is not a lineage, a non-`undefined`
- * literal or a constructor is, and **anything else** — a call, a member read, a
- * parameter, an import, `null` — is MAYBE: present but unproven, hence
+ * literal or a constructor is, and **anything else** — a name, a call, a member
+ * read, a parameter, an import, `null` — is MAYBE: present but unproven, hence
  * indeterminate beside an epoch. The fold does not resolve TypeScript types, so
  * no annotation is proof (not even the owned `LineageHandle`): a named type that
  * includes `undefined` behind an alias, a generic, an import, or a local shadow
@@ -93,19 +93,20 @@
  *     is imported or built in another module resolves to indeterminate;
  *   * TypeScript type resolution is not attempted, deliberately: proving a
  *     named annotation non-nullable needs a type resolver this fold does not
- *     have. The value fold reads a literal, a local initializer, or an explicit
- *     `undefined`; a call, a member read, a parameter, or an import is MAYBE, so
+ *     have. The value fold reads a literal, a constructor, or an explicit
+ *     `undefined` written at the call site; a name, a call, a member read, a
+ *     parameter, or an import is MAYBE, so
  *     a site that cannot prove its lineage value defined beside an epoch is
  *     INDETERMINATE — including the one production epoch sender (`index.ts`'s
  *     settled sweep). That producer's real value is pinned at runtime by
  *     `tests/index-observed-sweep-no-read-guard.test.ts`, and the producer plus
  *     the generic replay seam are registered below with their reasons;
- *   * an object-valued LINEAGE value is still resolved (an object is never
- *     `undefined`), and a value variable is followed only when no statement
- *     rebinds it (`const lineage = 1` proves `defined`; `lineage = undefined`
- *     does not). Rebinding is the one write that can change a variable's value;
- *     mutating a named object through any alias cannot make the name itself
- *     `undefined`, so it needs no separate guard;
+ *   * a lineage VALUE named by a variable is NOT followed: `const lineage = 1`
+ *     and `const { lineage } = entry` are the same spelling to a name-only
+ *     fold, and a binding-declaration form it does not enumerate (a
+ *     destructuring, `for…of`, or defaulted pattern) resolves the WRONG
+ *     binding (the R5-1 finding, AGENTS.md 34). A name is MAYBE; only a
+ *     literal, constructor, or explicit `undefined` at the call site decides;
  *   * a local function or class that shares a bridge callee's name is still
  *     counted as the bridge — a name collision this fold cannot resolve without
  *     type/module information. The approximation is LOUD: it can red a safe
@@ -198,13 +199,6 @@ const FUNCTION_SCOPE_KINDS: ReadonlySet<string> = new Set([
 	"generator_function",
 ]);
 
-interface Binding {
-	readonly name: string;
-	readonly scopeId: number;
-	readonly value: SgNode | null;
-	readonly nodeId: number;
-}
-
 /**
  * What the fold knows about the `lineage` VALUE in one output. The runtime
  * fence tests the value (`lineage !== undefined`), so only `defined`
@@ -253,12 +247,6 @@ function joinLineage(a: LineageState, b: LineageState): LineageState {
 	return "maybe";
 }
 
-function isScope(node: SgNode): boolean {
-	return (
-		node.kind() === "program" || FUNCTION_SCOPE_KINDS.has(String(node.kind()))
-	);
-}
-
 /** Strip one layer of matching quotes/backticks from an AST key's text. */
 function unquote(text: string): string {
 	const first = text.charAt(0);
@@ -295,176 +283,6 @@ function staticStringValue(node: SgNode | null): string | undefined {
 	}
 	if (node.text().includes("\\")) return undefined;
 	return unquote(node.text());
-}
-
-/** Every identifier a parameter pattern can bind (best-effort, never throws). */
-function collectPatternNames(node: SgNode | null, out: string[]): void {
-	if (!node) return;
-	const kind = node.kind();
-	if (kind === "identifier") {
-		out.push(node.text());
-		return;
-	}
-	if (
-		kind === "formal_parameters" ||
-		kind === "object_pattern" ||
-		kind === "array_pattern" ||
-		kind === "required_parameter" ||
-		kind === "optional_parameter" ||
-		kind === "rest_pattern" ||
-		kind === "parenthesized_expression"
-	) {
-		for (const child of node.namedChildren()) collectPatternNames(child, out);
-		return;
-	}
-	if (kind === "pair_pattern") {
-		// `{ key: local }` binds `local`; the key is not a binding.
-		collectPatternNames(node.field("value"), out);
-		return;
-	}
-	if (kind === "shorthand_property_identifier_pattern") {
-		out.push(node.text());
-		return;
-	}
-	if (kind === "assignment_pattern") {
-		collectPatternNames(node.field("left"), out);
-	}
-}
-
-/**
- * The base identifier of an assignment/update target, so a binding whose state
- * is written after construction is never resolved to a stale initializer.
- */
-function rootIdentifierName(node: SgNode | null): string | undefined {
-	if (!node) return undefined;
-	const kind = node.kind();
-	if (kind === "identifier") return node.text();
-	if (kind === "member_expression" || kind === "subscript_expression") {
-		return rootIdentifierName(node.field("object"));
-	}
-	if (kind === "parenthesized_expression") {
-		return rootIdentifierName(node.namedChildren()[0] ?? null);
-	}
-	return undefined;
-}
-
-/**
- * The names a later statement can rebind. Only a DIRECT rebind matters to the
- * value fold: `h = …`, `h++`, and a destructuring target can change the value
- * a name holds, while a property write (`h.x = …`), `delete h.x`, passing `h`
- * to a call, and `const other = h` cannot — none of them can make `h` itself
- * `undefined`, and a copied primitive is not an alias. Object aliasing needs no
- * enumeration here because an object-valued binding is opaque at the object
- * seam (see `resolve`); this set only guards a lineage VALUE variable.
- */
-function collectReassignedNames(root: SgNode): ReadonlySet<string> {
-	const names = new Set<string>();
-	/** `h = …`, `[h] = …`, and `({ x: h } = …)` all rebind `h`. */
-	const addTargets = (target: SgNode | null): void => {
-		const targetRoot = rootIdentifierName(target);
-		if (targetRoot) names.add(targetRoot);
-		const bound: string[] = [];
-		collectPatternNames(target, bound);
-		for (const name of bound) names.add(name);
-	};
-	const visit = (node: SgNode): void => {
-		const kind = node.kind();
-		if (
-			kind === "assignment_expression" ||
-			kind === "augmented_assignment_expression"
-		) {
-			addTargets(node.field("left"));
-		} else if (kind === "update_expression") {
-			const name = rootIdentifierName(node.namedChildren()[0] ?? null);
-			if (name) names.add(name);
-		}
-		for (const child of node.children()) visit(child);
-	};
-	visit(root);
-	return names;
-}
-
-function buildBindings(root: SgNode): Binding[] {
-	const bindings: Binding[] = [];
-	const stack: SgNode[] = [];
-	const visit = (node: SgNode): void => {
-		const kind = node.kind();
-		const scope = isScope(node);
-		if (scope) stack.push(node);
-		const owner = stack[stack.length - 1] ?? root;
-		if (kind === "variable_declarator") {
-			const name = node.field("name");
-			if (name?.kind() === "identifier") {
-				bindings.push({
-					name: name.text(),
-					scopeId: owner.id(),
-					value: node.field("value"),
-					nodeId: node.id(),
-				});
-			}
-		} else if (FUNCTION_SCOPE_KINDS.has(String(kind))) {
-			const parameters = node.field("parameters");
-			if (parameters) {
-				for (const parameter of parameters.namedChildren()) {
-					const names: string[] = [];
-					collectPatternNames(parameter, names);
-					for (const name of names) {
-						bindings.push({
-							name,
-							scopeId: owner.id(),
-							value: null,
-							nodeId: node.id(),
-						});
-					}
-				}
-			}
-			const name = node.field("name");
-			if (name?.kind() === "identifier") {
-				bindings.push({
-					name: name.text(),
-					scopeId: owner.id(),
-					value: null,
-					nodeId: node.id(),
-				});
-			}
-		} else if (kind === "class_declaration") {
-			const name = node.field("name");
-			if (name?.kind() === "identifier") {
-				bindings.push({
-					name: name.text(),
-					scopeId: owner.id(),
-					value: null,
-					nodeId: node.id(),
-				});
-			}
-		} else if (kind === "import_specifier") {
-			const alias = node.field("alias");
-			const imported = node.field("name");
-			const local = alias?.kind() === "identifier" ? alias : imported;
-			if (local?.kind() === "identifier") {
-				bindings.push({
-					name: local.text(),
-					scopeId: owner.id(),
-					value: null,
-					nodeId: node.id(),
-				});
-			}
-		} else if (kind === "import_clause") {
-			const name = node.field("name");
-			if (name?.kind() === "identifier") {
-				bindings.push({
-					name: name.text(),
-					scopeId: owner.id(),
-					value: null,
-					nodeId: node.id(),
-				});
-			}
-		}
-		for (const child of node.children()) visit(child);
-		if (scope) stack.pop();
-	};
-	visit(root);
-	return bindings;
 }
 
 /**
@@ -661,35 +479,7 @@ function truthiness(node: SgNode | null): Truth {
 	return "unknown";
 }
 
-function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
-	const bindings = buildBindings(root);
-	const reassigned = collectReassignedNames(root);
-	const byName = new Map<string, Binding[]>();
-	for (const binding of bindings) {
-		const list = byName.get(binding.name) ?? [];
-		list.push(binding);
-		byName.set(binding.name, list);
-	}
-
-	const findBinding = (identifier: SgNode): Binding | undefined => {
-		const scopes: number[] = [];
-		let current: SgNode | null = identifier.parent();
-		while (current) {
-			if (isScope(current)) scopes.push(current.id());
-			current = current.parent();
-		}
-		const candidates = byName.get(identifier.text()) ?? [];
-		for (const scopeId of scopes) {
-			const inScope = candidates.filter(
-				(candidate) => candidate.scopeId === scopeId,
-			);
-			if (inScope.length === 1) return inScope[0];
-			// Two same-named bindings in one scope: a shadow we cannot order.
-			if (inScope.length > 1) return undefined;
-		}
-		return undefined;
-	};
-
+function makeResolver(): (node: SgNode | null) => Construction {
 	/** Distinct output profiles, deduped by `(epoch, lineage, unknown)`. */
 	const dedupe = (outputs: readonly Output[]): Output[] => {
 		const byProfile = new Map<string, Output>();
@@ -759,11 +549,18 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		})),
 	});
 
-	/** What an expression's value tells us about the `lineage` obligation. */
-	const resolveLineageValue = (
-		node: SgNode | null,
-		visiting: ReadonlySet<number>,
-	): LineageState => {
+	/**
+	 * What an expression's value tells us about the `lineage` obligation.
+	 *
+	 * A NAME is never a proof. `const lineage = 1` and
+	 * `const { lineage } = entry` share the spelling the old identifier arm
+	 * followed, and recording every binding-declaration form would be another
+	 * enumerator one layer down (AGENTS.md 34, the R5-1 finding). Only what is
+	 * written at the call site decides: an explicit `undefined` (or `void`), a
+	 * literal or constructor, or a fold of those across `??`/`?:`. Everything
+	 * else is MAYBE.
+	 */
+	const resolveLineageValue = (node: SgNode | null): LineageState => {
 		if (!node) return "maybe";
 		const kind = node.kind();
 		if (kind === "undefined") return "undefined";
@@ -790,19 +587,11 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 			return "defined";
 		}
 		if (kind === "identifier" || kind === "shorthand_property_identifier") {
-			if (node.text() === "undefined") return "undefined";
-			const binding = findBinding(node);
-			if (!binding) return "maybe";
-			if (reassigned.has(binding.name)) return "maybe";
-			if (binding.value) {
-				if (visiting.has(binding.nodeId)) return "maybe";
-				const next = new Set(visiting);
-				next.add(binding.nodeId);
-				return resolveLineageValue(binding.value, next);
-			}
-			// A parameter, a function/class name, or an import: the fold does not
-			// resolve types, so no annotation is proof and the value is MAYBE.
-			return "maybe";
+			// A name is NOT followed to its initializer: an unenumerated binding
+			// form (a destructuring, `for…of`, or defaulted pattern) would resolve
+			// the wrong declaration (R5-1). `undefined` spelled as a name is the
+			// one value this fold can decide; everything else is MAYBE.
+			return node.text() === "undefined" ? "undefined" : "maybe";
 		}
 		if (
 			kind === "parenthesized_expression" ||
@@ -813,19 +602,18 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		) {
 			return resolveLineageValue(
 				node.field("expression") ?? node.namedChildren()[0] ?? null,
-				visiting,
 			);
 		}
 		if (kind === "ternary_expression" || kind === "conditional_expression") {
 			return joinLineage(
-				resolveLineageValue(node.field("consequence"), visiting),
-				resolveLineageValue(node.field("alternative"), visiting),
+				resolveLineageValue(node.field("consequence")),
+				resolveLineageValue(node.field("alternative")),
 			);
 		}
 		if (kind === "binary_expression") {
 			const operator = node.field("operator")?.text();
-			const left = resolveLineageValue(node.field("left"), visiting);
-			const right = resolveLineageValue(node.field("right"), visiting);
+			const left = resolveLineageValue(node.field("left"));
+			const right = resolveLineageValue(node.field("right"));
 			if (operator === "??") {
 				// `a ?? b` is `undefined` only when BOTH are.
 				if (left === "defined" || right === "defined") return "defined";
@@ -876,7 +664,7 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 				} else if (resolved.key === LINEAGE_FIELD) {
 					result = setLineage(
 						result,
-						resolveLineageValue(property.field("value"), new Set<number>()),
+						resolveLineageValue(property.field("value")),
 					);
 				}
 				continue;
@@ -885,10 +673,7 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 				const name = property.text();
 				if (name === EPOCH_FIELD) result = markEpoch(result);
 				else if (name === LINEAGE_FIELD) {
-					result = setLineage(
-						result,
-						resolveLineageValue(property, new Set<number>()),
-					);
+					result = setLineage(result, resolveLineageValue(property));
 				}
 				continue;
 			}
@@ -1035,7 +820,7 @@ function resolveOutputProfiles(expression: string): string[] {
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
-	const resolve = makeResolver(root);
+	const resolve = makeResolver();
 	return resolve(declarators[0]?.field("value") ?? null).outputs.map(
 		(output) =>
 			`${output.epoch ? "e" : "-"}|${output.lineage}|${output.unknown ? "u" : "-"}`,
@@ -1072,7 +857,7 @@ function analyzeBridgeSites(source: string, file: string): BridgeSite[] {
 		);
 	}
 	const calleeNames = collectCalleeNames(root);
-	const resolve = makeResolver(root);
+	const resolve = makeResolver();
 	const sites: BridgeSite[] = [];
 	const visit = (node: SgNode): void => {
 		if (node.kind() === "call_expression") {
@@ -2088,8 +1873,11 @@ describe("#3937 review round 5 — R4-1: a bound object is opaque", () => {
 		expect(site.kind).toBe("safe");
 	});
 
-	// The ONE write that can change a value variable's value. Object aliasing needs
-	// no tracking (a named object is never `undefined`), so this is the whole guard.
+	// A name is never followed (r6, R5-1): the direct rebind, the destructuring
+	// rebind, and the unrebound binding all read `indeterminate`, because the
+	// fold cannot tell which declaration the name denotes. They stay as
+	// independent classification checks — a mutation that made a name `defined`
+	// would read all three `safe`.
 	it("does not prove a lineage value variable that is later rebound", () => {
 		const site = only(`
 			function f() {
@@ -2112,14 +1900,109 @@ describe("#3937 review round 5 — R4-1: a bound object is opaque", () => {
 		expect(site.kind).not.toBe("safe");
 	});
 
-	it("still proves a lineage value variable that is never rebound", () => {
+	it("does not prove a lineage value variable that is never rebound", () => {
 		const site = only(`
 			function f() {
 				const lineage = 1;
 				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
 			}
 		`);
-		expect(site.kind).toBe("safe");
+		expect(site.kind).toBe("indeterminate");
+	});
+});
+
+describe("#3937 review round 6 — R5-1: a name is not a value proof", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+	// The R5-1 counterexamples: a destructuring declaration is a binding form
+	// `buildBindings` never recorded, so the old identifier arm walked past it to
+	// an enclosing same-named constant and proved the WRONG value. Each shape
+	// below read `safe` on the r5 scanner beside an epoch whose runtime `lineage`
+	// is `undefined` — the bridge's fail-open branch (VERIFY_R5).
+	const OUTER = "const lineage = 1;";
+
+	it("does not resolve an object-destructured name to an outer constant", () => {
+		const site = only(
+			`${OUTER} function f(obj: any) { const { lineage } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve an array-destructured name to an outer constant", () => {
+		const site = only(
+			`${OUTER} function f(arr: any) { const [lineage] = arr; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a for-of destructured name to an outer constant", () => {
+		const site = only(
+			`${OUTER} function f(xs: any) { for (const { lineage } of xs) { replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); } }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a defaulted destructured name to an outer constant", () => {
+		const site = only(
+			`${OUTER} function f(obj: any) { const { lineage = obj } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a nested destructured name to an outer constant", () => {
+		const site = only(
+			`${OUTER} function f(obj: any) { const { a: { lineage } } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a destructured name to an outer object constant", () => {
+		const site = only(
+			`const lineage = { x: 1 }; function f(obj: any) { const { lineage } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not resolve a destructured name to an outer function-scope constant", () => {
+		const site = only(
+			`function outer() { const lineage = 1; function f(obj: any) { const { lineage } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); } return f; }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// The control: a sibling scope that declares the same name is NOT an
+	// ancestor, so even the r5 fold read `indeterminate` there. The fix must not
+	// turn it `unsafe` or resolve the sibling's constant.
+	it("does not resolve a sibling scope's same-named constant", () => {
+		const site = only(
+			`function g() { const lineage = 1; return lineage; } function f(obj: any) { const { lineage } = obj; replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage }); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// The unsafe direction is retained independently through the supported
+	// vector: a `void 0` written at the call site is a definite hole.
+	it("keeps a direct void 0 lineage literal unsafe beside an epoch", () => {
+		const site = only(
+			`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: void 0 }); }`,
+		);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	// A ternary VALUE joins both arms, so a defined arm cannot prove the sibling
+	// that may be `undefined`.
+	it("does not let a ternary's defined arm prove an undefined sibling", () => {
+		const site = only(`
+			function f(cond: boolean) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: cond ? 1 : undefined });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
 	});
 });
 
