@@ -43,6 +43,7 @@ import {
 	PR_CONTEXTS,
 	type PullRequestContext,
 	evaluateForPullRequest,
+	githubEquals,
 	isPullRequestReachable,
 	isTrueForPullRequest,
 	loadWorkflow,
@@ -353,6 +354,27 @@ describe("the #3043 shape is what this sweep flags", () => {
 		expect(flagged).not.toContain(".github/workflows/install-smoke.yml::smoke");
 	});
 
+	// #3941 r3: the old JS-strict evaluation read a mixed-case pull-request
+	// gate as unreachable and demanded a registry exemption for a real PR job.
+	// The fold reads GitHub's case-insensitive equality, so no flag.
+	it("does not flag a mixed-case pull-request gate as unreachable", () => {
+		const file = [
+			"on:",
+			"  pull_request:",
+			"jobs:",
+			"  mixed:",
+			"    if: github.event_name == 'PULL_REQUEST'",
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			"      - run: echo mixed",
+			"",
+		].join("\n");
+		const { flagged } = findPullRequestUnreachableJobs([
+			{ path: ".github/workflows/fixture.yml", text: file },
+		]);
+		expect(flagged).toEqual([]);
+	});
+
 	// Round 2, F1: GitHub Actions accepts THREE spellings of `on:` -- a
 	// mapping (`on:\n  pull_request:`), a bare string (`on: pull_request`)
 	// and a LIST (`on: [push, pull_request]`). js-yaml parses the list as a
@@ -476,6 +498,30 @@ describe("the reachability model itself", () => {
 		expect(isPullRequestReachable(expr)).toBe(expected);
 	});
 
+	// #3941 r3: GitHub compares strings case-insensitively and coerces a
+	// mismatched scalar type to a number. The shared fold routes both callers
+	// through `githubEquals`, so a mixed-case pull-request literal is reachable
+	// rather than silently read as unreachable -- which used to make
+	// `findUndeclaredAdvisoryJobs` SKIP a real PR advisory job.
+	it.each([
+		["github.event_name == 'PULL_REQUEST'", true],
+		["github.event_name == 'Pull_Request'", true],
+		["github.event_name == 'PUSH'", false],
+		["'0' == 0", true],
+	])("folds GitHub equality: %s -> reachable=%s", (expr, expected) => {
+		expect(isPullRequestReachable(expr)).toBe(expected);
+	});
+
+	it("exposes one GitHub equality owner for the fold and the projection", () => {
+		expect(githubEquals("Pull_Request", "pull_request")).toBe(true);
+		expect(githubEquals("push", "pull_request")).toBe(false);
+		expect(githubEquals("0", 0)).toBe(true);
+		expect(githubEquals(null, 0)).toBe(true);
+		expect(githubEquals(false, 0)).toBe(true);
+		expect(githubEquals(true, 1)).toBe(true);
+		expect(githubEquals("nope", 0)).toBe(false);
+	});
+
 	// A context path nobody declared must throw, not be guessed at: silently
 	// reading an unknown path as reachable is how a sweep stops sweeping
 	// (AGENTS.md defect shape 10).
@@ -586,6 +632,27 @@ describe("reachable and gating are two columns (#3087)", () => {
 			].join("\n"),
 		);
 		expect(findUndeclaredAdvisoryJobs([file]).advisoryJobs).toEqual([]);
+	});
+
+	// #3941 r3 caller witness: a mixed-case pull-request gate is a REAL
+	// pull-request job. The old JS-strict evaluation read it as unreachable and
+	// this sweep skipped its missing advisory marker; the fold keeps it in the
+	// population.
+	it("names a mixed-case advisory job instead of skipping it", () => {
+		const file = workflow(
+			[
+				"  probe:",
+				"    name: probe",
+				"    if: github.event_name == 'PULL_REQUEST'",
+				"    continue-on-error: true",
+				"    runs-on: ubuntu-latest",
+				"    steps:",
+				"      - run: echo probe",
+			].join("\n"),
+		);
+		expect(findUndeclaredAdvisoryJobs([file]).flagged).toEqual([
+			".github/workflows/fixture.yml::probe",
+		]);
 	});
 });
 

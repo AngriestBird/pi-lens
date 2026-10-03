@@ -608,13 +608,13 @@ function restoreCheckoutRef(text: string, jobId: string, ref: string): string {
 			withAt = i;
 			break;
 		}
-		if (/^      - /.test(line)) break; // next step: this checkout has no with:
+		if (line.startsWith("      - ")) break; // next step: this checkout has no with:
 	}
 	if (withAt >= 0) {
 		let refAt = -1;
 		for (let i = withAt + 1; i < end; i++) {
 			const line = lines[i] ?? "";
-			if (/^          ref:/.test(line)) {
+			if (line.startsWith("          ref:")) {
 				refAt = i;
 				break;
 			}
@@ -915,27 +915,33 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 // its `if:` is false for EVERY pull-request event name, and anything it
 // cannot prove stays eligible (AGENTS.md shape 48).
 describe("#3941 stage eligibility is the shared event-only projection", () => {
-	const fixtureStage = (
-		ifLine: string,
-		trigger = "  pull_request:",
-	): Stage | undefined => {
-		const text = [
+	// The checkout `with:` block carries an optional `ref:` line; the `if:` is
+	// the only knob that changes the stage. The `if:` value is emitted as a YAML
+	// double-quoted scalar (JSON escaping) so an expression that begins with a
+	// quote -- `'github.event_name' != …` -- is still valid YAML.
+	const fixtureText = (ifLine: string, refLine?: string): string =>
+		[
 			"name: Fixture",
 			"on:",
-			trigger,
+			"  pull_request:",
 			"jobs:",
 			"  fixture:",
 			"    name: Fixture tool (advisory)",
-			`    if: ${ifLine}`,
+			`    if: ${JSON.stringify(ifLine)}`,
 			"    runs-on: ubuntu-latest",
 			"    steps:",
 			`      - uses: ${PINNED_CHECKOUT} # v7`,
 			"        with:",
+			...(refLine ? [refLine] : []),
 			"          persist-credentials: false",
 			"",
 		].join("\n");
-		return sitesOf(censusRows(new Map([["fixture.yml", text]])))[0]?.stage;
-	};
+	const fixtureSites = (ifLine: string, refLine?: string) =>
+		sitesOf(
+			censusRows(new Map([["fixture.yml", fixtureText(ifLine, refLine)]])),
+		);
+	const fixtureStage = (ifLine: string): Stage | undefined =>
+		fixtureSites(ifLine)[0]?.stage;
 
 	it("excludes only a condition false for every pull-request event", () => {
 		// The real host, plus any event-name-only non-PR gate, is excluded.
@@ -982,10 +988,76 @@ describe("#3941 stage eligibility is the shared event-only projection", () => {
 			provesNotPullRequestEligible("needs.changes.outputs.code == 'true'"),
 		).toBe(false);
 		// A condition that names no pull-request event at all is outside this
-		// projection's axis: unproven, and -- unlike every other unproven case --
-		// never even handed to `new Function`.
+		// projection's axis: unproven, never excluded.
 		expect(provesNotPullRequestEligible("false")).toBe(false);
 		expect(provesNotPullRequestEligible(undefined)).toBe(false);
+	});
+
+	// #3941 F5: GitHub compares strings case-insensitively ("GitHub ignores
+	// case when comparing strings"), so a literal that case-insensitively names
+	// a pull-request event makes the condition true on that event and the job
+	// is NOT excluded. The pre-fix projection evaluated the substituted string
+	// with JS strict equality and read `'PULL_REQUEST'` as excluded.
+	it("treats a mixed-case pull-request literal as eligible (#3941 F5)", () => {
+		expect(
+			provesNotPullRequestEligible("github.event_name == 'PULL_REQUEST'"),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible("github.event_name == 'Pull_Request'"),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'schedule' || github.event_name == 'PULL_REQUEST'",
+			),
+		).toBe(false);
+		// The same fold, other direction: a non-PR literal in any case still
+		// excludes, because the atom is false for both PR events.
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'SCHEDULE' || github.event_name == 'WORKFLOW_DISPATCH'",
+			),
+		).toBe(true);
+	});
+
+	// #3941 r3: the projection is a syntactic SHAPE, so one extra operator, a
+	// numeric comparison, grouping, or a `github.event_name` inside quoted
+	// prose is UNPROVEN and stays eligible. The pre-fix `new Function` oracle
+	// evaluated each with JS semantics and read it as excluded.
+	it("leaves an unproven operator, type, or quoted axis eligible", () => {
+		// GHA loose equality coerces `'0'` to `0`, so this runs on a PR.
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'pull_request' && '0' == 0",
+			),
+		).toBe(false);
+		// `github.event_name` inside quoted prose is DATA, not a context read;
+		// both constant strings differ from either literal, so the `&&` is true
+		// on a PR and the job runs.
+		expect(
+			provesNotPullRequestEligible(
+				"'github.event_name' != '\"pull_request\"' && 'github.event_name' != '\"pull_request_target\"'",
+			),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible("(github.event_name == 'schedule')"),
+		).toBe(false);
+		expect(
+			provesNotPullRequestEligible(
+				"github.event_name == 'schedule' || github.event.issue.number == 1",
+			),
+		).toBe(false);
+	});
+
+	// #3941 r3: GitHub's string escaping is not JS's (a literal quote is
+	// doubled, not backslash-escaped), so an escaped literal is UNPROVEN and
+	// never guessed at as JS string content.
+	it("does not guess a JS escaping GitHub does not use", () => {
+		expect(provesNotPullRequestEligible("github.event_name == 'don''t'")).toBe(
+			false,
+		);
+		expect(
+			provesNotPullRequestEligible("github.event_name == 'pull_requ\\'est'"),
+		).toBe(false);
 	});
 
 	it("stages the same conditions through the real census parser", () => {
@@ -1001,6 +1073,52 @@ describe("#3941 stage eligibility is the shared event-only projection", () => {
 		expect(fixtureStage("github.event_name == 'pull_request_target'")).toBe(
 			"C",
 		);
+		// #3941 F5/r3: a mixed-case PR literal, an extra operator, and a quoted
+		// axis are all UNPROVEN, so the job stays stage C; a mixed-case non-PR
+		// `||` still excludes (stage D).
+		expect(fixtureStage("github.event_name == 'PULL_REQUEST'")).toBe("C");
+		expect(
+			fixtureStage(
+				"github.event_name == 'schedule' || github.event_name == 'PULL_REQUEST'",
+			),
+		).toBe("C");
+		expect(
+			fixtureStage("github.event_name == 'pull_request' && '0' == 0"),
+		).toBe("C");
+		expect(
+			fixtureStage(
+				"'github.event_name' != '\"pull_request\"' && 'github.event_name' != '\"pull_request_target\"'",
+			),
+		).toBe("C");
+		expect(
+			fixtureStage(
+				"github.event_name == 'SCHEDULE' || github.event_name == 'WORKFLOW_DISPATCH'",
+			),
+		).toBe("D");
+	});
+
+	// The consequence of the conservative direction, measured end to end: an
+	// unproven `if:` keeps the job in stage C, so an early-start checkout that
+	// pins the merge ref is still flagged -- the real pull-request guard is
+	// never lost to a false exclusion.
+	it("keeps an unproven condition's early-start checkout in the guard", () => {
+		for (const ifLine of [
+			"github.event_name == 'PULL_REQUEST'",
+			"github.event_name == 'pull_request' && '0' == 0",
+			"'github.event_name' != '\"pull_request\"' && 'github.event_name' != '\"pull_request_target\"'",
+		]) {
+			const sites = fixtureSites(
+				ifLine,
+				`          ref: ${EPHEMERAL_PULL_REF}`,
+			);
+			expect(sites[0]?.stage, ifLine).toBe("C");
+			expect(
+				earlyStartUnsafeSites(sites).map(
+					(site) => `${site.file}::${site.jobId}`,
+				),
+				ifLine,
+			).toEqual(["fixture.yml::fixture"]);
+		}
 	});
 });
 

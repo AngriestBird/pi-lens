@@ -14,12 +14,18 @@
  *
  * EVALUATION: the same technique as tests/config/ci-infra-kill-rerun-gate.ts
  * and install-smoke-gates.ts -- yaml.load the REAL workflow, substitute every
- * context path in the LOADED `if:` string with a JSON literal, and evaluate
- * with `new Function`. GitHub Actions expression syntax and JS agree exactly
- * on this subset (dotted paths, `==`, `!=`, `&&`, `||`, parentheses, quoted
- * strings and numbers). An unrecognised context path THROWS rather than
- * being guessed at, so a workflow that grows a new one fails loudly instead of
- * being silently read as reachable.
+ * context path in the LOADED `if:` string with a JSON literal, evaluate with
+ * `new Function`, and fold every comparison whose two operands are literals
+ * through `githubEquals`, this module's one owner of GitHub's equality. GitHub
+ * compares strings case-insensitively and coerces a mismatched type to a
+ * number; JS strict equality does neither, so a bare `new Function`
+ * UNDER-approximates GitHub truth and can read a real pull-request job as
+ * unreachable. Folding keeps this a PARTIAL approximation: a comparison whose
+ * operand is not a literal still runs under JS strict equality, which is the
+ * model's stated residual -- the workflow population reaches none, because
+ * every context path substitutes to a literal. An unrecognised context path
+ * THROWS rather than being guessed at, so a workflow that grows a new one
+ * fails loudly instead of being silently read as reachable.
  *
  * THE MODEL, and what it cannot see. Reachability is decided against a small
  * declared set of pull_request contexts (PR_CONTEXTS below) -- a job is
@@ -113,6 +119,90 @@ function completedComparisons(out: string): string {
 	return out.replace(/!=/g, "!==").replace(/(?<![!<>=])==(?!=)/g, "===");
 }
 
+/**
+ * GitHub's equality, and the module's ONE owner of it (see EVALUATION above).
+ * A string pair compares case-insensitively ("GitHub ignores case when
+ * comparing strings"); a mismatched scalar pair coerces to a number
+ * (`null`/`""` -> 0, `false` -> 0, `true` -> 1, any other non-numeric string
+ * -> NaN), and NaN equals nothing -- including itself. This is the seam the
+ * #3941 projection and the `substituteForPullRequest` fold both ask, so the
+ * two cannot drift onto different comparison semantics.
+ */
+export function githubEquals(left: unknown, right: unknown): boolean {
+	if (typeof left === "string" && typeof right === "string") {
+		return left.toLowerCase() === right.toLowerCase();
+	}
+	return toGithubNumber(left) === toGithubNumber(right);
+}
+
+function toGithubNumber(value: unknown): number {
+	if (value === null || value === undefined) return 0;
+	if (typeof value === "boolean") return value ? 1 : 0;
+	if (typeof value === "number") return value;
+	if (typeof value === "string") return Number(value);
+	return Number.NaN;
+}
+
+// A literal operand, as it appears in a substituted expression: a JSON string
+// written by `JSON.stringify` for a context path, a workflow `'…'` string, a
+// number, or a word literal. The lookarounds keep `true` from matching inside
+// an identifier such as `isTrue`.
+const STRING_LITERAL = String.raw`"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`;
+const NUMBER_LITERAL = String.raw`-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?`;
+const LITERAL = `(?:${STRING_LITERAL}|${NUMBER_LITERAL}|true|false|null)`;
+const LITERAL_COMPARISON = new RegExp(
+	`(?<![\\w$])(${LITERAL})\\s*(==|!=)\\s*(${LITERAL})(?![\\w$])`,
+	"g",
+);
+
+const UNPARSED_LITERAL = Symbol("unparsed-literal");
+
+function literalValue(raw: string): unknown {
+	if (raw.startsWith('"')) {
+		try {
+			return JSON.parse(raw);
+		} catch {
+			return UNPARSED_LITERAL;
+		}
+	}
+	if (raw.startsWith("'")) {
+		const inner = raw.slice(1, -1);
+		// GitHub escapes a single quote by doubling it and has no backslash
+		// escape; anything else here is JS-flavoured and is left to
+		// `new Function` rather than guessed at.
+		if (inner.includes("\\") || inner.includes("'")) {
+			return UNPARSED_LITERAL;
+		}
+		return inner;
+	}
+	if (raw === "true") return true;
+	if (raw === "false") return false;
+	if (raw === "null") return null;
+	const value = Number(raw);
+	return Number.isNaN(value) ? UNPARSED_LITERAL : value;
+}
+
+/**
+ * Fold every comparison between two literals to GitHub's own result, before
+ * `completedComparisons` rewrites the operators the fold leaves behind. A
+ * literal the module cannot parse (a JS-escaped string) is returned untouched,
+ * never guessed at. Called before `new Function` sees the expression.
+ */
+function foldLiteralComparisons(out: string): string {
+	return out.replace(
+		LITERAL_COMPARISON,
+		(whole, leftRaw: string, operator: string, rightRaw: string) => {
+			const left = literalValue(leftRaw);
+			const right = literalValue(rightRaw);
+			if (left === UNPARSED_LITERAL || right === UNPARSED_LITERAL) {
+				return whole;
+			}
+			const equal = githubEquals(left, right);
+			return (operator === "==" ? equal : !equal) ? "true" : "false";
+		},
+	);
+}
+
 export function substituteForPullRequest(
 	expr: string,
 	ctx: PullRequestContext,
@@ -131,7 +221,7 @@ export function substituteForPullRequest(
 				`letting it be guessed at. Residue: ${out}`,
 		);
 	}
-	return completedComparisons(out);
+	return completedComparisons(foldLiteralComparisons(out));
 }
 
 /**
@@ -219,48 +309,52 @@ const PULL_REQUEST_EVENT_NAMES = [
 ] as const;
 
 /**
- * Substitute ONLY the `github.event_name` axis, leaving every other context
- * path for `new Function` to reject. Built on the shared `expressionBody` /
- * `completedComparisons` so it reads the same expression the reachability
- * model reads, without re-deriving GitHub's `${{ }}` and `==`/`!=` syntax.
+ * Read `expr` as one whole `github.event_name == '<literal>'` expression whose
+ * atoms are joined by `||`, and return the literals. Returns null -- UNPROVEN
+ * -- for every other operator, context path, function, group, or escaped
+ * literal.
+ *
+ * This is a syntactic SHAPE, not an enumeration of event spellings: the atoms
+ * are compared through `githubEquals`, so `'PULL_REQUEST'`, `'Pull_Request'`
+ * and `'pull_request'` are one atom. The `^…$` anchor is load-bearing: a
+ * `github.event_name` inside quoted prose (`'github.event_name' != …`) or
+ * beside a second operator (`… && '0' == 0`) is never read as an event-name
+ * comparison. A literal may not contain a quote or a backslash, so GitHub's
+ * doubled quote and a JS backslash escape stay UNPROVEN rather than guessed.
  */
-function substituteEventName(expr: string, eventName: string): string {
-	const body = expressionBody(expr)
-		.split("github.event_name")
-		.join(JSON.stringify(eventName));
-	return completedComparisons(body);
+function eventNameEqualityLiterals(expr: string): string[] | null {
+	const body = expressionBody(expr).trim();
+	if (body === "") return null;
+	const literals: string[] = [];
+	for (const atom of body.split("||")) {
+		const match = /^\s*github\.event_name\s*==\s*'([^'\\]*)'\s*$/.exec(atom);
+		if (match === null) return null;
+		literals.push(match[1] as string);
+	}
+	return literals;
 }
 
 /**
  * Does this job-level `if:` PROVE the job never runs on a pull request?
  *
- * The reachability model above reads a `pull_request` run as one of two
- * opened/synchronize contexts. A `false` from it is NOT proof of exclusion:
- * `failure()` may hold, GitHub sends actions those two rows do not name, and
- * `pull_request_target` is a pull request event whose `github.event_name` is
- * not `pull_request`. So this projection substitutes ONLY the event-name axis
- * and lets every other context path fall through to `new Function`'s
- * ReferenceError, which is caught and read as UNPROVEN. That is the
- * conservative direction required for a guard: an unproven condition stays
- * eligible (stage A/C), so the #3941 rule keeps guarding a real checkout
- * rather than losing it (AGENTS.md shape 48).
- *
- * True only when the expression names `github.event_name` and is false for
- * every pull request event name, with no other context path involved. A
- * condition that merely shares a line with an unknown path
- * (`… == 'schedule' || github.event.issue.number == 1`) throws on that path
- * and reads as unproven, never as excluded.
+ * A job is excluded only when its `if:` is a whole `github.event_name ==
+ * '<literal>'` `||`-expression that is false for EVERY pull-request event
+ * name. Everything the shape does not prove -- `!=`, `&&`, grouping, another
+ * context path, a status function, a JS-escaped literal, a `github.event_name`
+ * inside quoted prose -- returns false, so the job stays pull-request eligible
+ * and the #3941 guard keeps covering a real checkout rather than losing it
+ * (AGENTS.md shape 48). The trade is deliberate and asymmetric: an unproven
+ * condition may keep a genuinely schedule-only job in stage C and ask it to
+ * move off the merge ref (over-inclusion), but a real pull-request job is
+ * never silently dropped to stage D (the false-exclusion harm this guard
+ * exists to prevent).
  */
 export function provesNotPullRequestEligible(expr: unknown): boolean {
-	if (typeof expr !== "string" || !expr.includes("github.event_name")) {
-		return false;
-	}
-	try {
-		return PULL_REQUEST_EVENT_NAMES.every((eventName) => {
-			const projected = substituteEventName(expr, eventName);
-			return !new Function(`"use strict"; return (${projected});`)();
-		});
-	} catch {
-		return false;
-	}
+	if (typeof expr !== "string") return false;
+	const literals = eventNameEqualityLiterals(expr);
+	if (literals === null) return false;
+	return PULL_REQUEST_EVENT_NAMES.every(
+		(eventName) =>
+			!literals.some((literal) => githubEquals(literal, eventName)),
+	);
 }
