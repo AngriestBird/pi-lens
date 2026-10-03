@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
 import {
 	gitExecFileSync,
@@ -3109,6 +3110,71 @@ describe("PR body lint (#1844)", () => {
 		expect(
 			lintPrBody(body.replace("Summary\nOpening context.\n\n", "")),
 		).toMatchObject({ valid: false });
+	});
+});
+
+// #3906 AC2: the #3799 pull-coverage decision in clients/dispatch/dispatcher.ts
+// must be visible to the seam record rule. The corpus is the exact published
+// #3799 body + diff and the three post-image sources the diff names, pinned by
+// each source's git blob oid. CI's shallow checkout does not carry the 2026
+// #3799 objects, so the explicit `headFiles` seam supplies the immutable
+// post-image and the source hash proves the fixture is that exact object.
+describe("dispatcher seam row (#3906 AC2)", () => {
+	const corpusDir = join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies");
+	const provenance = JSON.parse(
+		readFileSync(join(corpusDir, "pr-3799-provenance.json"), "utf8"),
+	) as {
+		bodyPath: string;
+		bodySha256: string;
+		diffPath: string;
+		diffSha256: string;
+		postImages: Record<string, { path: string; oid: string }>;
+	};
+	const sha256 = (text: string) =>
+		createHash("sha256").update(text, "utf8").digest("hex");
+	// Git's blob identity: sha1 over `blob <byteLength>\0` plus the raw bytes.
+	const gitBlobOid = (text: string) => {
+		const bytes = Buffer.from(text, "utf8");
+		return createHash("sha1")
+			.update(`blob ${bytes.length}\0`)
+			.update(bytes)
+			.digest("hex");
+	};
+	const readCorpus = (name: string) =>
+		readFileSync(join(corpusDir, name), "utf8");
+	const body = readCorpus(provenance.bodyPath);
+	const diff = readCorpus(provenance.diffPath);
+	const headFiles = new Map<string, string>();
+	for (const [file, meta] of Object.entries(provenance.postImages)) {
+		const source = readCorpus(meta.path);
+		expect(gitBlobOid(source), `${file} fixture git blob oid`).toBe(meta.oid);
+		headFiles.set(file, source);
+	}
+
+	it("pins the archived #3799 body and diff bytes", () => {
+		expect(sha256(body)).toBe(provenance.bodySha256);
+		expect(sha256(diff)).toBe(provenance.diffSha256);
+	});
+
+	it("refuses #3799's no-record sentence over the dispatcher's four branches", () => {
+		const result = lintPrBody(body, { diff, headFiles });
+		expect(result.valid).toBe(false);
+		const refusal = result.errors.find((error) =>
+			error.includes("clients/dispatch/dispatcher.ts"),
+		);
+		expect(refusal).toBeDefined();
+		expect(refusal).toContain("decision branch");
+		expect(refusal).toContain("(clients/dispatch/dispatcher.ts: 4)");
+	});
+
+	it("accepts an honest `none:` naming dispatcher.ts for the same diff", () => {
+		const honest = body.replace(
+			"No new failure path; no record added.",
+			"none: dispatcher.ts keeps no new record kind for its coverage-notice decision yet",
+		);
+		const result = lintPrBody(honest, { diff, headFiles });
+		expect(result.errors.join(" ")).not.toContain("decision branch");
+		expect(result.valid).toBe(true);
 	});
 });
 
