@@ -39,6 +39,18 @@ const CRITICAL_STEPS: [jobId: string, stepName: string][] = [
 	["install-test", "Verify package.json entry points exist in tarball"],
 	["install-test", "Verify bundled core grammars shipped in the tarball"],
 	["install-test", "Load each extension entry point (catches missing files)"],
+	[
+		"install-test",
+		"Verify no host-provided package shipped in the tarball (#1926)",
+	],
+	[
+		"install-test",
+		"Verify extension entry loads (catches missing node_modules deps)",
+	],
+	[
+		"install-test",
+		"Startup not weakened — entry loads from precompiled dist (#182)",
+	],
 ];
 
 describe("#3920 sharded required-check failure policy", () => {
