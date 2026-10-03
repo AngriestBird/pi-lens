@@ -109,12 +109,25 @@ function postImageFromDiff(diff: string) {
 	return { diff, headFiles };
 }
 
+// Git's blob identity: sha1 over `blob <byteLength>\0` plus the raw bytes.
+function gitBlobOid(text: string) {
+	const bytes = Buffer.from(text, "utf8");
+	return createHash("sha1")
+		.update(`blob ${bytes.length}\0`)
+		.update(bytes)
+		.digest("hex");
+}
+
 // An archived `--unified=0` fixture records its post-image blob in the `index`
-// line, which the object database still holds. Reading that blob keeps the
-// lexer faithful to the real source version the diff was taken against, rather
-// than the diff's own hunk-local reconstruction. Falls back to the
-// reconstruction when the blob is absent.
-function blobPostImage(diff: string) {
+// line. A shallow CI checkout does not carry those historical objects, so the
+// bytes are vendored beside the fixture and read back; each is verified against
+// the blob oid the diff names. A missing or mismatched vendored image fails
+// loudly: there is no reconstruction fallback (#3945).
+function fixtureWithBlob(diff: string) {
+	const corpusDir = join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies");
+	const provenance = JSON.parse(
+		readFileSync(join(corpusDir, "pr-3906-hermetic-provenance.json"), "utf8"),
+	) as { postImages: Record<string, { path: string; oid: string }> };
 	const headFiles = new Map<string, string>();
 	let file: string | null = null;
 	for (const line of diff.split("\n")) {
@@ -123,33 +136,19 @@ function blobPostImage(diff: string) {
 			file = header[2];
 			continue;
 		}
-		const index = /^index ([0-9a-f]+)\.\.([0-9a-f]+)/.exec(line);
-		if (index && file) {
-			try {
-				headFiles.set(
-					file,
-					String(
-						gitExecFileSync(["cat-file", "-p", index[2]], {
-							cwd: repositoryRoot,
-							encoding: "utf8",
-							maxBuffer: 32 * 1024 * 1024,
-						}),
-					),
-				);
-			} catch {
-				// Blob absent; the caller falls back to the reconstruction.
-			}
-		}
+		const index = /^index [0-9a-f]+\.\.([0-9a-f]+)/.exec(line);
+		if (!index || !file) continue;
+		const meta = provenance.postImages[file];
+		if (!meta) throw new Error(`no vendored post-image for ${file} (#3945)`);
+		const source = readFileSync(join(corpusDir, meta.path), "utf8");
+		const oid = gitBlobOid(source);
+		if (oid !== meta.oid || !oid.startsWith(index[1]))
+			throw new Error(
+				`vendored post-image for ${file} does not match ${index[1]} (#3945)`,
+			);
+		headFiles.set(file, source);
 	}
-	return headFiles;
-}
-
-function fixtureWithBlob(diff: string) {
-	const blobs = blobPostImage(diff);
-	return {
-		diff,
-		headFiles: blobs.size > 0 ? blobs : postImageFromDiff(diff).headFiles,
-	};
+	return { diff, headFiles };
 }
 const repositoryRoot = process.cwd();
 // The stub `clients/new-path.ts` diff several existing-record tests use: a
@@ -2521,10 +2520,10 @@ describe("PR body lint (#1844)", () => {
 		});
 
 		it("does not flag #3774's comment-only edit, whose prose said `case`", () => {
-			// The archived `--unified=0` hunk's post-image blob is still in the
-			// object database, so the real continuation lines are lexed under their
-			// real JSDoc opener. The visible consequence is unchanged: a prose
-			// `case` in a comment is not a branch.
+			// The archived `--unified=0` hunk's post-image is vendored beside the
+			// fixture and pinned by the blob oid its `index` line names, so the real
+			// continuation lines are lexed under their real JSDoc opener. The visible
+			// consequence is unchanged: a prose `case` in a comment is not a branch.
 			expect(
 				lintPrBody(
 					withObservability(sentence),
@@ -3113,6 +3112,56 @@ describe("PR body lint (#1844)", () => {
 	});
 });
 
+// The archived `--unified=0` fixtures (#3770, #3774, #3785) name their
+// post-image blobs in the `index` line. CI checks out at depth 1, so those
+// historical objects are unreachable from the checkout that runs this suite.
+// The bytes are vendored beside the fixtures
+// (`pr-3906-hermetic-provenance.json`) and every one is pinned by the git blob
+// oid the diff names (#3945). A missing or byte-flipped sidecar fails loudly;
+// `fixtureWithBlob` never reconstructs an authentic archive from its hunks.
+describe("archived post-image corpus (#3945)", () => {
+	const corpusDir = join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies");
+	const provenance = JSON.parse(
+		readFileSync(join(corpusDir, "pr-3906-hermetic-provenance.json"), "utf8"),
+	) as { postImages: Record<string, { path: string; oid: string }> };
+
+	it("vendors every named post-image and pins it to its blob oid", () => {
+		const entries = Object.entries(provenance.postImages);
+		expect(entries.length).toBeGreaterThanOrEqual(5);
+		for (const [file, meta] of entries) {
+			const sidecar = join(corpusDir, meta.path);
+			expect(statSync(sidecar).isFile(), `${file} -> ${meta.path}`).toBe(true);
+			expect(gitBlobOid(readFileSync(sidecar, "utf8")), `${file} oid`).toBe(
+				meta.oid,
+			);
+		}
+	});
+
+	it("fails loudly for a fixture whose post-image is not vendored", () => {
+		const diff = [
+			"diff --git a/clients/unvendored.ts b/clients/unvendored.ts",
+			"index 1111111..2222222 100644",
+			"@@ -1,0 +1 @@",
+			"+\tif (adopt) apply(slot);",
+		].join("\n");
+		expect(() => fixtureWithBlob(diff)).toThrow(
+			/no vendored post-image for clients\/unvendored\.ts/,
+		);
+	});
+
+	it("fails loudly when the diff names an oid the vendored bytes do not hash to", () => {
+		const diff = [
+			"diff --git a/clients/read-guard.ts b/clients/read-guard.ts",
+			"index 0000000..deadbeef 100644",
+			"@@ -1,0 +1 @@",
+			"+\tif (adopt) apply(slot);",
+		].join("\n");
+		expect(() => fixtureWithBlob(diff)).toThrow(
+			/vendored post-image for clients\/read-guard\.ts does not match deadbeef/,
+		);
+	});
+});
+
 // #3906 AC2: the #3799 pull-coverage decision in clients/dispatch/dispatcher.ts
 // must be visible to the seam record rule. The corpus is the exact published
 // #3799 body + diff and the three post-image sources the diff names, pinned by
@@ -3132,14 +3181,6 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 	};
 	const sha256 = (text: string) =>
 		createHash("sha256").update(text, "utf8").digest("hex");
-	// Git's blob identity: sha1 over `blob <byteLength>\0` plus the raw bytes.
-	const gitBlobOid = (text: string) => {
-		const bytes = Buffer.from(text, "utf8");
-		return createHash("sha1")
-			.update(`blob ${bytes.length}\0`)
-			.update(bytes)
-			.digest("hex");
-	};
 	const readCorpus = (name: string) =>
 		readFileSync(join(corpusDir, name), "utf8");
 	const body = readCorpus(provenance.bodyPath);
