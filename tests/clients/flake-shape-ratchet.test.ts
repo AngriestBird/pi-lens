@@ -318,6 +318,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real gitignore rules and index entries decide shadow files outside the test process",
 	},
+	"real-process-spawn:config/heavy-advisory-gate-workflow.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is the real `Record Windows Vitest outcome` bash block (a stub `node` on the child PATH is the only mock) and the ref-deleted Git fetch form through the git-fixture-env seam",
+	},
 	"real-process-spawn:config/oxlint-advisory-rule-floor-gate.test.ts": {
 		detector: "real-process-spawn",
 		reason:
