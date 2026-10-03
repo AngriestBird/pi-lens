@@ -321,7 +321,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:config/heavy-advisory-gate-workflow.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the subject is the real `Record Windows Vitest outcome` bash block (a stub `node` on the child PATH is the only mock) and the ref-deleted Git fetch form through the git-fixture-env seam",
+			"the subject is the real `Record Windows Vitest outcome` bash block under GitHub's bash flags (a fixture Node program at the population-script path runs under the real `node`, so no PATH, delimiter, or executable name is mocked) and the ref-deleted Git fetch form through the git-fixture-env seam",
 	},
 	"real-process-spawn:config/oxlint-advisory-rule-floor-gate.test.ts": {
 		detector: "real-process-spawn",

@@ -1,16 +1,14 @@
 // flake-shape: real-process-spawn — #3926 executes the real `Record Windows
-// Vitest outcome` bash block at its true process boundary (a stub `node` on the
-// child's PATH is the only mock), and drives the ref-deleted Git mechanism
-// through the registered tests/support/git-fixture-env.ts seam. Both are the
-// boundaries under test; no in-process double observes them.
+// Vitest outcome` bash block at its true process boundary under GitHub's
+// `bash --noprofile --norc -eo pipefail` flags. A fixture Node program at the
+// production population-script path is the only stand-in; the `node`
+// interpreter and the child PATH are the real ones, so no delimiter,
+// executable name, or shebang is mocked (#3926 review F1). It also drives the
+// ref-deleted Git mechanism through the registered
+// tests/support/git-fixture-env.ts seam. Both are the boundaries under test;
+// no in-process double observes them.
 import { spawnSync } from "node:child_process";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import yaml from "../../clients/deps/js-yaml.js";
@@ -340,31 +338,39 @@ describe("#3926 a gated checkout pins the captured commit, never the merge ref",
 // #3926 secondary defect: the always-run summary invoked the checked-out
 // population script unconditionally, so after a failed checkout it died with
 // `Cannot find module ... win32-gate-population.mjs` instead of reporting that
-// the subset never ran. The cases execute the real `Record Windows Vitest
-// outcome` `run:` block at a true process boundary (GitHub substitutes the one
-// `steps.windows-vitest.outcome` expression); a stub `node` on the child PATH
-// is the only mock.
+// the subset never ran. These cases run the real `Record Windows Vitest
+// outcome` `run:` block under GitHub's `bash --noprofile --norc -eo pipefail`
+// flags at a true process boundary. A fixture Node program at the production
+// population-script path is the only stand-in, and it runs under the real
+// `node` on PATH, so the child PATH is never rewritten and no delimiter,
+// executable name, or `#!/bin/sh` shebang is mocked (#3926 review F1: the old
+// `stubBin + ":" + PATH` line was POSIX-only and the stub shadowed `node`
+// only on a `:`-delimited PATH).
 describe("#3926 the Windows summary stays honest when the tree is unavailable", () => {
 	const summaryStep = (CI.jobs["unit-tests-windows"]?.steps ?? []).find(
 		(step) => step.name === "Record Windows Vitest outcome",
 	);
 
 	const fixture = setupTestEnvironment("pi-lens-3926-");
-	let stubBin = "";
 
 	beforeAll(() => {
-		stubBin = resolve(fixture.tmpDir, "bin");
-		mkdirSync(stubBin, { recursive: true });
-		const stub = resolve(stubBin, "node");
+		const lib = resolve(fixture.tmpDir, "scripts/lib");
+		mkdirSync(lib, { recursive: true });
 		writeFileSync(
-			stub,
-			'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$NODE_MARKER"\nexit 0\n',
+			resolve(lib, "win32-gate-population.mjs"),
+			[
+				'import { appendFileSync } from "node:fs";',
+				'import { basename } from "node:path";',
+				"const args = process.argv.slice(2);",
+				'appendFileSync(process.env.NODE_MARKER, `${basename(process.argv[1])} ${args.join(" ")}\\n`);',
+				'console.log(`population-fixture: ${args.join(" ")}`);',
+				'process.exit(Number(process.env.NODE_FIXTURE_EXIT ?? "0"));',
+			].join("\n"),
 		);
-		chmodSync(stub, 0o755);
 	});
 	afterAll(() => fixture.cleanup());
 
-	function runSummary(caseName: string, withList: boolean) {
+	function runSummary(caseName: string, withList: boolean, exitCode = 0) {
 		const runnerTemp = resolve(fixture.tmpDir, `runner-${caseName}`);
 		mkdirSync(runnerTemp, { recursive: true });
 		if (withList)
@@ -378,17 +384,21 @@ describe("#3926 the Windows summary stays honest when the tree is unavailable", 
 			/\$\{\{\s*steps\.windows-vitest\.outcome\s*\}\}/,
 			"skipped",
 		);
-		const result = spawnSync("bash", ["-c", script], {
-			cwd: fixture.tmpDir,
-			encoding: "utf8",
-			env: {
-				...process.env,
-				PATH: `${stubBin}:${process.env.PATH ?? ""}`,
-				GITHUB_STEP_SUMMARY: summary,
-				RUNNER_TEMP: runnerTemp,
-				NODE_MARKER: marker,
+		const result = spawnSync(
+			"bash",
+			["--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+			{
+				cwd: fixture.tmpDir,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					GITHUB_STEP_SUMMARY: summary,
+					RUNNER_TEMP: runnerTemp,
+					NODE_MARKER: marker,
+					NODE_FIXTURE_EXIT: String(exitCode),
+				},
 			},
-		});
+		);
 		return { result, summary, marker };
 	}
 
@@ -412,11 +422,26 @@ describe("#3926 the Windows summary stays honest when the tree is unavailable", 
 		expect(result.status, String(result.stderr)).toBe(0);
 		expect(existsSync(marker)).toBe(true);
 		expect(readFileSync(marker, "utf8")).toContain(
-			"scripts/lib/win32-gate-population.mjs --summary",
+			"win32-gate-population.mjs --summary --executed-file-list",
 		);
 		const text = readFileSync(summary, "utf8");
+		// The fixture's own stdout reached the step summary: the real child ran.
+		expect(text).toContain("population-fixture: --summary");
 		expect(text).not.toContain("Not executed");
 		expect(text).toContain("windows_vitest=skipped");
+	});
+
+	// The safety direction of the same seam under GitHub's real `-eo pipefail`
+	// flags: a population script that exits nonzero must abort the step, never
+	// fall through to a `windows_vitest=` line that reads as a clean run.
+	// Measured on the host: without `-e` the same block exits 0 and writes
+	// `windows_vitest=success` even though `node` failed.
+	it("does not write a clean outcome when the population script exits nonzero", () => {
+		const { result, summary } = runSummary("nodefail", true, 3);
+		expect(result.status, String(result.stderr)).not.toBe(0);
+		expect(readFileSync(summary, "utf8")).not.toContain(
+			"windows_vitest=skipped",
+		);
 	});
 });
 

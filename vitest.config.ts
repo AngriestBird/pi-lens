@@ -449,7 +449,8 @@ export const wallClockBudgetInclude = [
 	"tests/clients/workspace-glob-nonbacktracking-budget.test.ts",
 	"tests/config/gitignore-tracked-shadow.test.ts",
 	// #3926: the real `Record Windows Vitest outcome` bash block is executed at
-	// its true process boundary (stub `node` on the child PATH is the only mock),
+	// its true process boundary under GitHub's bash flags (a fixture Node
+	// program runs under the real `node`; no PATH/delimiter/executable mock),
 	// and the ref-deleted Git mechanism runs through git-fixture-env
 	// (flake-shape admission).
 	"tests/config/heavy-advisory-gate-workflow.test.ts",
