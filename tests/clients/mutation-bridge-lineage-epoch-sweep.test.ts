@@ -179,10 +179,10 @@ interface BridgeSite {
 	/** Stable per-site identity for the indeterminate admission registry. */
 	readonly key: string;
 	/**
-	 * The census-relevant keys (`readGuardBranchEpoch`, `lineage`) the fold
-	 * proved present in at least one possible output of the argument. The
-	 * per-output verdict is `kind`: a key present in one alternative of a
-	 * conditional is still reported here.
+	 * The census keys the fold proved present in at least one possible output of
+	 * the argument (`readGuardBranchEpoch` only; the `lineage` presence is read
+	 * through `kind`, never here). A key present in one alternative of a
+	 * conditional is still reported.
 	 */
 	readonly keys: ReadonlySet<string>;
 	/** True when an unresolved spread/alias could add arbitrary keys. */
@@ -589,9 +589,11 @@ function makeResolver(): (node: SgNode | null) => Construction {
 		if (kind === "identifier" || kind === "shorthand_property_identifier") {
 			// A name is NOT followed to its initializer: an unenumerated binding
 			// form (a destructuring, `for…of`, or defaulted pattern) would resolve
-			// the wrong declaration (R5-1). `undefined` spelled as a name is the
-			// one value this fold can decide; everything else is MAYBE.
-			return node.text() === "undefined" ? "undefined" : "maybe";
+			// the wrong declaration (R5-1). The `undefined` KEYWORD is its own node
+			// kind and is handled above; a name spelled `undefined` is still only a
+			// name (a shorthand `{ undefined }` is keyed `undefined` and never
+			// routed here under `lineage`), so every identifier is MAYBE.
+			return "maybe";
 		}
 		if (
 			kind === "parenthesized_expression" ||
@@ -787,12 +789,16 @@ function classify(construction: Construction): SiteKind {
 	return indeterminate ? "indeterminate" : "safe";
 }
 
-/** The census-relevant keys present in at least one possible output. */
+/**
+ * The census keys present in at least one possible output: the epoch alone. The
+ * `lineage` value is the verdict's question, answered through `kind`, and the
+ * epoch-site floor below is the only consumer of this set; a second presence
+ * key here would be dead bookkeeping.
+ */
 function censusKeys(construction: Construction): ReadonlySet<string> {
 	const keys = new Set<string>();
 	for (const output of construction.outputs) {
 		if (output.epoch) keys.add(EPOCH_FIELD);
-		if (output.lineage !== "absent") keys.add(LINEAGE_FIELD);
 	}
 	return keys;
 }
@@ -2050,5 +2056,193 @@ describe("#3937: the census obligation is the bridge fence's value check", () =>
 			),
 		).toBe(true);
 		expect(runtime.consumeDeferredFormatFiles()).toEqual([]);
+	});
+});
+
+describe("#3937 review round 7 — survivor witnesses: deferred aliases, malformed objects, positive arms", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+
+	// R6-1 — the alias closure is a fixpoint, not a single pass. Each chain is
+	// initialized before `deliver` runs, so the order is a valid execution, not a
+	// temporal-dead-zone error, and the fold must find the bridge call. A single
+	// pass reads `[]`, which the census gate would call clean: the false-clean the
+	// retained fixpoint prevents.
+	it("finds a bridge site behind a deferred alias initialized after it is named", () => {
+		const site = only(`
+			function deliver() {
+				const first = second;
+				first({ readGuardBranchEpoch: 5 });
+			}
+			const second = replayThroughMutationBridge;
+			deliver();
+		`);
+		expect(site.callee).toBe("first");
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("finds a bridge site behind a two-hop deferred alias chain", () => {
+		const site = only(`
+			function deliver() {
+				const first = second;
+				const third = first;
+				third({ readGuardBranchEpoch: 5 });
+			}
+			const second = replayThroughMutationBridge;
+			deliver();
+		`);
+		expect(site.callee).toBe("third");
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("runs a deferred alias chain in an order that is not a TDZ error", () => {
+		// Independent bounded in-process trace: the deferred aliases are
+		// initialized before `deliver` runs, so the ordering the fold resolves is a
+		// real execution order. The stand-in is a local function, not the real
+		// bridge or store.
+		const order: string[] = [];
+		let second: () => void = () => {};
+		const replayThroughMutationBridge = (): void => {
+			order.push("call");
+		};
+		function deliver(): void {
+			const first = second;
+			first();
+		}
+		second = replayThroughMutationBridge;
+		order.push("init");
+		deliver();
+		expect(order).toEqual(["init", "call"]);
+	});
+
+	// R6-2 — the object fallback is reachable. A parse `ERROR` that does not name
+	// a bridge callee leaves the object to the fold, and its unhandled child kind
+	// must read `not safe`; the mutation that drops the fallback marks the
+	// epoch+lineage literal `safe`.
+	it("reads a malformed object argument as indeterminate, never safe", () => {
+		const site = only(`
+			function f() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage: 1, @@@ });
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// R6-3 — the positive, call-site arms are retained, and each has a named
+	// witness. Every value is written at the call site (a name is not a proof),
+	// so no abstract `LineageHandle`-shaped stand-in reaches the real seam.
+	// Dropping a `defined` kind, the `??` precision, or the parenthesis peel turns
+	// one of these `safe` arms into `indeterminate` and reds its witness.
+	it("keeps a direct string lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: "x" }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct template-string lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				"function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: `t` }); }",
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct regex lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: /re/ }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct true lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: true }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct false lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: false }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct object lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: {} }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct array lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: [] }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a direct constructor lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: new Foo() }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a parenthesized literal lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: (1) }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a defined-left nullish lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: 1 ?? undefined }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps an undefined-left nullish lineage value safe beside an epoch", () => {
+		expect(
+			only(
+				`function f(epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: undefined ?? 1 }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("keeps a name-on-the-left nullish lineage value safe beside an epoch", () => {
+		// `x ?? 1` is defined whichever arm wins: the defined right arm decides the
+		// fold, and the run-time value is never `undefined`. Measured through the
+		// real analyzer, not assumed from the prose.
+		expect(
+			only(
+				`function f(x: unknown, epoch: number) { replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: x ?? 1 }); }`,
+			).kind,
+		).toBe("safe");
+	});
+
+	it("flags an undefined-by-both-arms nullish lineage value as unsafe", () => {
+		const site = only(`
+			function f(epoch: number) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: undefined ?? undefined });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
 	});
 });
