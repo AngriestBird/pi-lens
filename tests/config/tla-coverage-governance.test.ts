@@ -78,6 +78,12 @@ const READ_GUARD_DIFF = [
 	"+// touched",
 ].join("\n");
 
+// The runtime post-image must match the diff's added lines (#3906 r3), so a
+// synthetic diff supplies its own post-image instead of the real file.
+const READ_GUARD_HEAD_FILES = new Map([
+	["clients/read-guard.ts", "// touched"],
+]);
+
 function compareStrings(a: string, b: string) {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -383,7 +389,9 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 			args.includes("--name-only")
 				? "clients/read-guard.ts\n"
 				: READ_GUARD_DIFF;
-		const result = lintLocalPrBody(BASE_BODY, REPO_ROOT, git as never);
+		const result = lintLocalPrBody(BASE_BODY, REPO_ROOT, git as never, {
+			headFiles: READ_GUARD_HEAD_FILES,
+		});
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("formal/read-guard/");
 	});
@@ -394,7 +402,9 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 				? "clients/read-guard.ts\n"
 				: READ_GUARD_DIFF;
 		const body = `${BASE_BODY}\n\nTLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.`;
-		const result = lintLocalPrBody(body, REPO_ROOT, git as never);
+		const result = lintLocalPrBody(body, REPO_ROOT, git as never, {
+			headFiles: READ_GUARD_HEAD_FILES,
+		});
 		expect(result.valid).toBe(true);
 	});
 });

@@ -36,6 +36,9 @@ const REQUIRED_SECTIONS = [
 ];
 const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 const FLATTENED_BODY_MAX_NEWLINES = 2;
+// One post-image read bound, shared by the git and working-tree branches of
+// `headFileSource`: a file-count bound alone is not a byte bound.
+const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const REPAIR_HEADINGS = [
 	"Why",
 	"Notes for the reviewer",
@@ -301,14 +304,6 @@ function isRuntimeObservabilityPath(name) {
 // 50-PR calibration in the #3875 body flagged nothing extra for them.
 const DECISION_BRANCH_G = /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\b/g;
 
-// `*name(...) {` / `*[computed](...) {` is a generator method head: the only
-// `*`-led code line formatter output leaves at the start of a line. The block
-// body brace after the parameter list is what separates it from a JSDoc body
-// that merely calls something (`*recordDegradationOnce({ ... })`), which stays
-// blanked. oxfmt writes the name and `(` with no space between them.
-const GENERATOR_HEAD_G =
-	/^\s*(?:[A-Za-z_$][\w$]*|\[[^\]]*\])\(.*\)\s*(?::[^{;]*)?\{/;
-
 function loadSeamMap(cwd = REPO_ROOT) {
 	try {
 		return loadCoverageMap(cwd);
@@ -322,177 +317,220 @@ function isSeamFile(file, map) {
 	return Object.keys(map?.map ?? {}).some((glob) => matchGlob(glob, file));
 }
 
-// `git diff --unified=0` hands the lexer a block comment's continuation lines
-// without the opener it needs, so prose such as `case` in a JSDoc body read as
-// a `case` label (#3774), and a backtick in one opened a template string that
-// hid the code after it. A continuation line is neutralized IN PLACE, never
-// dropped: `recordLocationsFromRuntimeSource` keys a record's span to its line
-// number, so a dropped line would shift every later record out of its hunk's
-// added-line set and lose a real record (#3906). One call serves the
-// failure-path, seam-branch and record-harvest scans, one hunk at a time, so a
-// block left open at a hunk's end cannot hide the next hunk.
+// `git diff --unified=0` hands a hunk to a lexer without the block-comment
+// opener its continuation lines belong to, so prose such as `case` in a JSDoc
+// body read as code, a backtick in one opened a template string that hid the
+// code after it (#3774), and a prose `recordDegradationOnce(...)` satisfied the
+// record check (#3906). The opener cannot be recovered from the hunk: the line
+// ` * name(...) {` is lexically identical as a JSDoc continuation and as a JS
+// generator head, so no line-local predicate can decide it (#3906 N1).
 //
-// A line whose first non-space character is `*` is kept as code only when it
-// is a generator method head: `*name(...) {` or `*[computed](...) {` (the star
-// is part of the name, and oxfmt writes the name and `(` with no space between
-// them). The block body brace after the parameter list is what separates a
-// generator method from a JSDoc body that merely calls something: `*the` and
-// `**Note:**` carry no head, and `*recordDegradationOnce({ ... })` closes its
-// call without a body. Every other `*`-led line is a continuation and is
-// blanked. Text after a `*/` closer is code and stays (#3905 r1 F1; #3770's
-// `catch` blocks). A `/*` opener that follows a closer on the same orphan line
-// is blanked WITHOUT opening a block, so ` */ /* more` cannot hide the rest of
-// the hunk (#3906 N-a). A genuine `/*` opener without a closer still opens a
-// block.
-//
-// F1 (r2): the previous `*X` guard kept every non-space second character, so
-// `*the`/`**Note:**`/`*'...'` stayed code, a prose quote opened a string and
-// hid the real record or branch below it, and a prose `recordDegradationOnce`
-// satisfied the check. oxfmt 0.71.0 expands every generator body onto its own
-// line, so no record or branch sits on a head line; a multiline head (`*multi(`)
-// is blanked in place, which preserves line numbers and loses nothing.
-function withoutCommentContinuations(text) {
-	let inBlock = false;
-	const blank = (line) => " ".repeat(line.length);
-	const maskCommentSpans = (line, start, openBlocks) => {
-		let masked = " ".repeat(start) + line.slice(start);
-		let index = start;
-		for (;;) {
-			const open = masked.indexOf("/*", index);
-			if (open === -1) return masked;
-			const close = masked.indexOf("*/", open + 2);
-			if (close === -1) {
-				if (openBlocks) inBlock = true;
-				return masked.slice(0, open) + " ".repeat(masked.length - open);
-			}
-			masked =
-				masked.slice(0, open) +
-				" ".repeat(close + 2 - open) +
-				masked.slice(close + 2);
-			index = close + 2;
-		}
-	};
-	const kept = [];
-	for (const line of text.split("\n")) {
-		if (inBlock) {
-			const close = line.indexOf("*/");
-			if (close === -1) {
-				kept.push(blank(line));
-				continue;
-			}
-			inBlock = false;
-			kept.push(maskCommentSpans(line, close + 2, true));
+// The harvest therefore reads the whole post-image the diff names — where the
+// `/**` opener IS present — lexes it once with `blankCommentsAndStrings`, and
+// intersects the evidence it finds with the hunk's added POST-image lines. The
+// line numbers come from the hunk's `+start` offset and are checked against the
+// post-image text before use, so a stale, renamed, or concurrently edited image
+// is refused instead of misread (never a false clean, never a wrong
+// "no record added").
+
+// Git quotes a `diff --git` path that holds a non-ASCII byte, a `"`, a `\\`,
+// or a control character, and C-escapes it. A quoted runtime path must still be
+// read or the harvest silently skips the file (a false clean).
+function unquoteGitPath(raw) {
+	const value = String(raw);
+	if (!value.startsWith('"')) return value;
+	// Git C-quotes path bytes, so an octal escape is one UTF-8 byte, not a
+	// code point: collect bytes and decode the path once.
+	const bytes = [];
+	for (let index = 1; index < value.length; index += 1) {
+		const char = value[index];
+		if (char === '"') break;
+		if (char !== "\\") {
+			bytes.push(char.charCodeAt(0));
 			continue;
 		}
-		const star = /^(\s*)\*/.exec(line);
-		if (!star) {
-			if (/^\s*\/\*/.test(line) && !line.includes("*/")) {
-				inBlock = true;
-				kept.push(blank(line));
-			} else kept.push(line);
-			continue;
-		}
-		const after = line[star[1].length + 1];
-		if (
-			after !== undefined &&
-			after !== "/" &&
-			GENERATOR_HEAD_G.test(line.slice(star[1].length + 1))
-		) {
-			// `*name(...) {`: a generator method head, not a comment
-			// continuation.
-			kept.push(line);
-			continue;
-		}
-		const close = line.indexOf("*/", star[1].length);
-		if (close === -1) {
-			kept.push(blank(line));
-			continue;
-		}
-		kept.push(maskCommentSpans(line, close + 2, false));
+		const escaped = value[++index];
+		if (escaped === "n") bytes.push(0x0a);
+		else if (escaped === "t") bytes.push(0x09);
+		else if (escaped === "r") bytes.push(0x0d);
+		else if (escaped !== undefined && /[0-7]/.test(escaped)) {
+			bytes.push(Number.parseInt(value.slice(index, index + 3), 8));
+			index += 2;
+		} else if (escaped !== undefined) bytes.push(escaped.charCodeAt(0));
 	}
-	return kept.join("\n");
+	return Buffer.from(bytes).toString("utf8");
 }
 
-function newHunk(file) {
-	return { file, lines: [], added: new Set(), text: "" };
+function readQuotedPath(source, start) {
+	if (source[start] !== '"') return null;
+	let raw = '"';
+	for (let index = start + 1; index < source.length; index += 1) {
+		const char = source[index];
+		raw += char;
+		if (char === "\\") {
+			index += 1;
+			if (index < source.length) raw += source[index];
+			continue;
+		}
+		if (char === '"') return { value: unquoteGitPath(raw), end: index + 1 };
+	}
+	return null;
 }
 
-// Records are harvested from each hunk's post-image (added plus context
-// lines), because a new call whose closing braces are unchanged context has
-// its literal split across both (#2915). Only a call whose span contains an
-// added line counts, so an untouched record in the context never passes as
-// new. The failure-path test still reads added lines alone.
-function runtimeObservabilityFromDiff(diff, seamMap) {
-	const records = new Set();
-	let runtime = false;
-	let currentRuntime = false;
-	let currentFile = "";
-	const hunks = [];
-	let hunk = null;
+// `diff --git` path pair: two quoted tokens, or `a/<pre> b/<post>`. The
+// pre-image path is kept so a rename away from a runtime path still counts.
+function gitHeaderPaths(rest) {
+	if (rest.startsWith('"')) {
+		const first = readQuotedPath(rest, 0);
+		if (!first || rest[first.end] !== " ") return null;
+		const second = readQuotedPath(rest, first.end + 1);
+		if (!second) return null;
+		return {
+			pre: first.value.replace(/^a\//, ""),
+			post: second.value.replace(/^b\//, ""),
+		};
+	}
+	const match = /^a\/(.+) b\/(.+)$/.exec(rest);
+	if (!match) return null;
+	return { pre: match[1], post: match[2] };
+}
+
+// Every file in the diff with the post-image line number of each added line.
+// A real hunk resets the cursor from its `+start`; a bare fixture with no `@@`
+// numbers its `+` lines from the top.
+function parseRuntimeHunks(diff) {
+	const files = [];
+	let current = null;
 	for (const line of String(diff).split(/\r?\n/)) {
-		const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-		if (header) {
-			currentRuntime = [header[1], header[2]].some(isRuntimeObservabilityPath);
-			currentFile = header[2];
-			runtime ||= currentRuntime;
-			hunk = currentRuntime ? newHunk(currentFile) : null;
-			if (hunk) hunks.push(hunk);
+		if (line.startsWith("diff --git ")) {
+			const paths = gitHeaderPaths(line.slice("diff --git ".length));
+			current = {
+				pre: paths?.pre ?? "",
+				post: paths?.post ?? "",
+				postLine: 1,
+				added: new Map(),
+			};
+			files.push(current);
 			continue;
 		}
-		if (!currentRuntime) continue;
-		if (line.startsWith("@@")) {
-			hunk = newHunk(currentFile);
-			hunks.push(hunk);
+		if (!current) continue;
+		const rename = /^rename to (.+)$/.exec(line);
+		if (rename) {
+			current.post = unquoteGitPath(rename[1]);
 			continue;
 		}
-		if (/^\+(?!\+\+)/.test(line)) {
-			hunk.text += `${line.slice(1)}\n`;
-			hunk.lines.push(line.slice(1));
-			hunk.added.add(hunk.lines.length);
-		} else if (line.startsWith(" ") || line === "") {
-			hunk.lines.push(line.slice(1));
+		const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+		if (hunk) {
+			current.postLine = Number(hunk[1]);
+			continue;
 		}
+		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (line.startsWith("+")) {
+			current.added.set(current.postLine, line.slice(1));
+			current.postLine += 1;
+		} else if (line.startsWith(" ")) current.postLine += 1;
 	}
-	if (!runtime)
-		return { runtime: false, records, failurePath: false, seamBranches: [] };
-	for (const { lines, added: addedLines } of hunks) {
-		if (!addedLines.size) continue;
+	return files;
+}
+
+// Records are harvested from the post-image the diff names, because under
+// `--unified=0` a call's closing brace may be unchanged and the opener may be
+// outside the hunk (#2915, #3906). Only a call whose span contains an added
+// POST-image line counts, so an untouched record never passes as new. The
+// failure-path and seam-branch scans read the added lines alone. A file whose
+// post-image is missing, unreadable, oversize, or does not match the diff's own
+// added text is reported `indeterminate` (visibly inconclusive), never
+// classified from the ambiguous hunk.
+function runtimeObservabilityFromDiff(diff, seamMap, options = {}) {
+	const files = parseRuntimeHunks(diff);
+	const runtimeTouched = files.some(
+		(file) =>
+			isRuntimeObservabilityPath(file.post) ||
+			isRuntimeObservabilityPath(file.pre),
+	);
+	const addedRuntime = files.filter(
+		(file) =>
+			file.added.size > 0 &&
+			(isRuntimeObservabilityPath(file.post) ||
+				isRuntimeObservabilityPath(file.pre)),
+	);
+	if (!addedRuntime.length)
+		return {
+			runtime: runtimeTouched,
+			records: new Set(),
+			failurePath: false,
+			seamBranches: [],
+			indeterminate: [],
+		};
+	const records = new Set();
+	let failurePath = false;
+	const branchesByFile = new Map();
+	const indeterminate = [];
+	for (const file of addedRuntime) {
+		// The post-image is the working tree or HEAD, never the caller's citation
+		// `ref` (a base revision for `--ref` path checks).
+		const source = headFileSource(file.post, {
+			headFiles: options.headFiles,
+			workingTree: options.workingTree,
+			cwd: options.cwd,
+			git: options.git,
+		});
+		if (typeof source !== "string") {
+			indeterminate.push({ file: file.post, line: null });
+			continue;
+		}
+		const rows = sourceLines(source);
+		let mismatch = false;
+		for (const [postLine, text] of file.added) {
+			if (rows[postLine - 1] !== text) {
+				indeterminate.push({ file: file.post, line: postLine });
+				mismatch = true;
+				break;
+			}
+		}
+		if (mismatch) continue;
+		const blanked = blankCommentsAndStrings(source).text;
+		const blankedRows = blanked.split("\n");
 		for (const {
 			value,
 			startLine,
 			endLine,
-		} of recordLocationsFromRuntimeSource(lines.join("\n"))) {
-			for (let line = startLine; line <= endLine; line++) {
-				if (addedLines.has(line)) {
+		} of recordLocationsFromRuntimeSource(source, blanked)) {
+			for (let line = startLine; line <= endLine; line += 1) {
+				if (file.added.has(line)) {
 					records.add(value);
 					break;
 				}
 			}
 		}
-	}
-	// Each hunk lexes alone: lexer state must not leak from one hunk's added
-	// lines into the next, and a file's seam count is the sum over its hunks.
-	let failurePath = false;
-	const branchesByFile = new Map();
-	for (const { file, text } of hunks) {
-		const blanked = blankCommentsAndStrings(
-			withoutCommentContinuations(text),
-		).text;
-		failurePath ||=
-			/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
-				blanked,
-			);
-		const count = isSeamFile(file, seamMap)
-			? (blanked.match(DECISION_BRANCH_G)?.length ?? 0)
-			: 0;
-		if (count)
-			branchesByFile.set(file, (branchesByFile.get(file) ?? 0) + count);
+		for (const postLine of file.added.keys()) {
+			failurePath ||=
+				/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
+					blankedRows[postLine - 1] ?? "",
+				);
+		}
+		if (isSeamFile(file.post, seamMap)) {
+			let count = 0;
+			for (const postLine of file.added.keys())
+				count +=
+					(blankedRows[postLine - 1] ?? "").match(DECISION_BRANCH_G)?.length ??
+					0;
+			if (count)
+				branchesByFile.set(
+					file.post,
+					(branchesByFile.get(file.post) ?? 0) + count,
+				);
+		}
 	}
 	return {
 		runtime: true,
 		records,
 		failurePath,
-		seamBranches: [...branchesByFile].map(([file, count]) => ({ file, count })),
+		seamBranches: [...branchesByFile].map(([file, count]) => ({
+			file,
+			count,
+		})),
+		indeterminate,
 	};
 }
 
@@ -523,21 +561,19 @@ function closeParenIndex(blanked, open) {
 	return -1;
 }
 
-function recordLocationsFromRuntimeSource(source) {
+function recordLocationsFromRuntimeSource(source, blankedText) {
 	const records = [];
-	// The same continuation filter the failure-path and seam-branch scans use
-	// (#3906): under `--unified=0` a JSDoc continuation's backtick otherwise
-	// opened a template string and hid the record literal below it, and prose
-	// carrying a `recordDegradationOnce(...)` satisfied the check. Line numbers
-	// are preserved, so a record's span still maps back to the hunk's added lines.
-	const filtered = withoutCommentContinuations(source);
-	const blanked = blankCommentsAndStrings(filtered).text;
+	// `blankedText` is the caller's single whole-post-image lex; the fallback
+	// keeps the exported-free helper usable on its own. Line numbers index the
+	// source itself, so a record's span still maps back to the diff's added
+	// POST-image lines.
+	const blanked = blankedText ?? blankCommentsAndStrings(source).text;
 	const push = (value, valueIndex, start, end) =>
 		records.push({
 			value,
-			line: lineAt(filtered, valueIndex),
-			startLine: lineAt(filtered, start),
-			endLine: lineAt(filtered, end),
+			line: lineAt(source, valueIndex),
+			startLine: lineAt(source, start),
+			endLine: lineAt(source, end),
 		});
 	const calls = [
 		["recordDegradationOnce", ["kind"]],
@@ -569,10 +605,7 @@ function recordLocationsFromRuntimeSource(source) {
 			"g",
 		);
 		for (const match of blanked.matchAll(callPattern)) {
-			const original = filtered.slice(
-				match.index,
-				match.index + match[0].length,
-			);
+			const original = source.slice(match.index, match.index + match[0].length);
 			for (const field of fields) {
 				const fieldMatch = new RegExp(`${field}\\s*:\\s*["']([^"']+)["']`).exec(
 					original,
@@ -595,8 +628,8 @@ function recordLocationsFromRuntimeSource(source) {
 	for (const match of blanked.matchAll(/\bemitBounded\s*\(/g)) {
 		const open = match.index + match[0].length - 1;
 		const close = closeParenIndex(blanked, open);
-		const end = close === -1 ? filtered.length : close + 1;
-		const call = filtered.slice(open + 1, end);
+		const end = close === -1 ? source.length : close + 1;
+		const call = source.slice(open + 1, end);
 		const phase = /^\s*(["'`])([^"'`$]+)\1/.exec(call);
 		if (phase)
 			push(
@@ -621,6 +654,9 @@ const CODE_CITATION = /`([^`\s:]+):((?:~?\d+)(?:-\d+)?)`/g;
 const MASTER_CLAIM =
 	/pre-existing|red on master|also fails on origin\/master|environment-specific/i;
 
+// One post-image read per changed runtime file, bounded by the same byte
+// ceiling on every branch: `git show` for a ref or HEAD, and a stat-gated
+// working-tree read. A file-count bound alone is not a byte bound.
 function headFileSource(file, options = {}) {
 	if (options.headFiles?.has?.(file)) return options.headFiles.get(file);
 	if (/(?:^|\/)\.\.(?:\/|$)/.test(file) || isAbsolute(file)) return null;
@@ -630,7 +666,7 @@ function headFileSource(file, options = {}) {
 				(options.git ?? gitExecFileSync)(["show", `${options.ref}:${file}`], {
 					cwd: options.cwd ?? process.cwd(),
 					encoding: "utf8",
-					maxBuffer: 16 * 1024 * 1024,
+					maxBuffer: MAX_SOURCE_BYTES,
 				}),
 			);
 		} catch {
@@ -639,7 +675,9 @@ function headFileSource(file, options = {}) {
 	}
 	if (options.workingTree) {
 		try {
-			return readFileSync(resolve(options.cwd ?? process.cwd(), file), "utf8");
+			const path = resolve(options.cwd ?? process.cwd(), file);
+			if (statSync(path).size > MAX_SOURCE_BYTES) return null;
+			return readFileSync(path, "utf8");
 		} catch {
 			return null;
 		}
@@ -649,6 +687,7 @@ function headFileSource(file, options = {}) {
 			(options.git ?? gitExecFileSync)(["show", `HEAD:${file}`], {
 				cwd: options.cwd ?? process.cwd(),
 				encoding: "utf8",
+				maxBuffer: MAX_SOURCE_BYTES,
 			}),
 		);
 	} catch {
@@ -1266,9 +1305,28 @@ function lintMasterClaims(body) {
 	return errors;
 }
 
-function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
-	const observation = runtimeObservabilityFromDiff(diff, loadSeamMap());
+function lintRuntimeObservability(lines, headings, diff, options = {}) {
+	const observation = runtimeObservabilityFromDiff(
+		diff,
+		loadSeamMap(),
+		options,
+	);
 	if (!observation.runtime) return [];
+	// A post-image the reader could not obtain or match leaves the added lines
+	// unclassifiable. Refuse visibly: never a false clean, never a wrong
+	// "no record added". The author can re-run with the changed files present.
+	if (observation.indeterminate.length) {
+		const shown = observation.indeterminate
+			.slice(0, 5)
+			.map(({ file, line }) => (line ? `${file}:${line}` : file));
+		const extra =
+			observation.indeterminate.length > shown.length
+				? ` (+${observation.indeterminate.length - shown.length} more)`
+				: "";
+		return [
+			`PR body Observability could not classify the added lines of ${shown.join(", ")}${extra}: the post-image is missing, could not be read, or does not match the diff, so a record or a decision branch cannot be confirmed. Re-run with the changed files present, or name the record on a line the diff adds.`,
+		];
+	}
 	const content = observabilitySectionContent(lines, headings);
 	if ([...observation.records].some((record) => content.includes(record)))
 		return [];
@@ -1293,7 +1351,7 @@ function lintRuntimeObservability(lines, headings, diff, cwd = process.cwd()) {
 		const { file, line: lineNumber } = existingRecordCitation;
 		try {
 			const source = readFileSync(
-				isAbsolute(file) ? file : resolve(cwd, file),
+				isAbsolute(file) ? file : resolve(options.cwd ?? process.cwd(), file),
 				"utf8",
 			);
 			if (
@@ -1639,7 +1697,7 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.diff)
 		errors.push(
-			...lintRuntimeObservability(lines, headings, options.diff, options.cwd),
+			...lintRuntimeObservability(lines, headings, options.diff, options),
 		);
 	errors.push(...lintCodeCitations(body, options));
 	errors.push(...lintTestReferences(body, options));
@@ -1899,6 +1957,7 @@ export function lintLocalPrBody(
 		cwd,
 		workingTree: true,
 		ref: options.ref,
+		headFiles: options.headFiles,
 	});
 	const coverage = lintTlaCoverage(body, { diff });
 	result.errors.push(...coverage.errors);
