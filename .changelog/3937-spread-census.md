@@ -3,15 +3,17 @@ section: Changed
 audience: internal
 ---
 
-- Narrow the mutation-bridge epoch/lineage census to its provable floor: the
-  bounded per-output fold proves the `lineage` VALUE (not merely the key) only
-  for literals, constructors, and a local initializer, and treats every
-  annotation as MAYBE (no type resolver), so a named nullable alias, a generic,
-  an import, or a local shadow can no longer read `safe` beside an epoch. An
-  identity alias (`const b = a`) and an escape through an unresolved callee
-  taint the aliased binding, while a copy spread does not; a computed template
-  key with a substitution and a literal carrying an undecoded escape are
-  dynamic; and a `null` literal no longer serves as a defined proof. The
-  reflective-mutation table is deleted because the escape rule subsumes it.
-  Every unresolved forwarding is registered with a checked reason, and the
+- Narrow the mutation-bridge epoch/lineage census to its provable floor: an
+  object-valued binding is OPAQUE, so the fold proves the `lineage` VALUE only
+  for an object literal written at the call site (or a
+  conditional/short-circuit of such literals), never for a name. Any heap
+  alias carrier — a property value, an array element, an assignment RHS, a
+  conditional arm, a destructuring source, a nested argument, a reflective
+  member mutation, or a bare alias — can no longer read `safe` beside an
+  epoch, and the `const b = a` alias fixed point and unknown-callee escape rule
+  are deleted because the opaque default subsumes them. A lineage VALUE
+  variable is still followed when no statement rebinds it. Every annotation
+  stays MAYBE (no type resolver), a computed template key with a substitution
+  and an undecoded escape are dynamic, and a `null` literal is not a defined
+  proof. The `Object.assign` fold is deleted (a call result is opaque), and the
   reachable-profile bound (fourteen of sixteen) is pinned (#3937).

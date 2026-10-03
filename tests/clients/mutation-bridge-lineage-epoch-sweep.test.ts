@@ -45,24 +45,23 @@
  *   * an object-literal argument contributes its explicit keys (`pair`,
  *     shorthand, method, and a computed STRING-literal key — an unlisted
  *     spelling of the same explicit key), plus the keys of every spread;
- *   * a spread/alias/reference identifier resolves to its nearest SCOPE-AWARE
- *     local binding, whose object-literal initializer is folded recursively;
- *   * `Object.assign(target, ...sources)` folds every argument;
+ *   * ONLY a literal object written at the call site is folded. A bound object
+ *     is OPAQUE: `const h = { … }` captures a heap object, and a later statement
+ *     can reach that same object through a property value, an array slot, an
+ *     assignment RHS, a conditional arm, a destructuring source, a nested call
+ *     argument, or a bare alias (`const other = h`) and mutate it. The fold
+ *     cannot enumerate those spellings (AGENTS.md 34 — the r4 single-spelling
+ *     `const b = a` relation read every other carrier as SAFE), so it proves
+ *     NOTHING about a binding, only about the literal at the call site;
  *   * `a ? b : c` unions both arms as separate outputs; `a && b` contributes
  *     its right operand only when `a` can be truthy, and nothing when `a` is
  *     falsy, because a falsy operand spreads no keys; `a || b` / `a ?? b`
  *     union both operands;
- *   * a binding that is ever reassigned, has a property written, is deleted,
- *     is destructured into, is passed to a call other than the bridge's own
- *     (which may retain and write it — this covers `Object.assign` and the
- *     reflective helpers), or is bound to another local by identity
- *     (`const b = a`, the same heap object) is NOT resolved, and neither is any
- *     binding in its alias component: a stale initializer must never read as
- *     the live value. `const b = { ...a }` is a COPY, not an alias, so mutating
- *     `b` does not taint `a`;
- *   * a cycle, a parameter, an import, a call result, a cross-file name, a
- *     computed key with a template substitution, or a string/template literal
- *     carrying an escape this fold does not decode is UNRESOLVED.
+ *   * a parameter, an import, a call result, a cross-file name, a computed key
+ *     with a template substitution, or a string/template literal carrying an
+ *     escape this fold does not decode is UNRESOLVED. `Object.assign(…)` is a
+ *     call result and is UNRESOLVED too: folding it would fold the object it
+ *     mutates and returns, which is the same opaque binding by another name.
  *
  * The lineage value is folded beside its presence, because presence alone is
  * the r2 false-safe: `undefined` / `void 0` is not a lineage, a non-`undefined`
@@ -101,18 +100,25 @@
  *     settled sweep). That producer's real value is pinned at runtime by
  *     `tests/index-observed-sweep-no-read-guard.test.ts`, and the producer plus
  *     the generic replay seam are registered below with their reasons;
- *   * ANY call with a bare identifier argument other than the bridge seam is
- *     treated as escaping it: an unresolved callee may retain and write the
- *     object, and the reflective write helpers (`Object.assign`,
- *     `Object.defineProperty(ies)`,
- *     `Reflect.{deleteProperty,set,defineProperty}`) are that same case. A
- *     reflective target that is a member expression
- *     (`Object.assign(hidden.nested, …)`) is not tainted: a stated limit;
+ *   * an object-valued LINEAGE value is still resolved (an object is never
+ *     `undefined`), and a value variable is followed only when no statement
+ *     rebinds it (`const lineage = 1` proves `defined`; `lineage = undefined`
+ *     does not). Rebinding is the one write that can change a variable's value;
+ *     mutating a named object through any alias cannot make the name itself
+ *     `undefined`, so it needs no separate guard;
  *   * a local function or class that shares a bridge callee's name is still
  *     counted as the bridge — a name collision this fold cannot resolve without
  *     type/module information. The approximation is LOUD: it can red a safe
  *     site, never pass an epoch-without-lineage site as safe. No production
- *     file declares one; a guard pins that population.
+ *     file declares one; a guard pins that population;
+ *   * the call population is the lexical set `calleeName` decodes (a bare name,
+ *     a member read, a string/identifier subscript, a sequence, and local
+ *     aliases). A fully dynamic callee (`bridge[index](…)` with a computed
+ *     `index`) is OUTSIDE it. `mightContainBridgeCallee` is only a lexical
+ *     file-admission check — whether the text names a bridge callee at all —
+ *     so a file can contain the plain name and still yield ZERO sites when
+ *     every call spells the callee dynamically. The census makes no universal
+ *     call-coverage claim.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -342,14 +348,18 @@ function rootIdentifierName(node: SgNode | null): string | undefined {
 	return undefined;
 }
 
-function collectMutatedNames(
-	root: SgNode,
-	calleeNames: ReadonlySet<string>,
-): ReadonlySet<string> {
+/**
+ * The names a later statement can rebind. Only a DIRECT rebind matters to the
+ * value fold: `h = …`, `h++`, and a destructuring target can change the value
+ * a name holds, while a property write (`h.x = …`), `delete h.x`, passing `h`
+ * to a call, and `const other = h` cannot — none of them can make `h` itself
+ * `undefined`, and a copied primitive is not an alias. Object aliasing needs no
+ * enumeration here because an object-valued binding is opaque at the object
+ * seam (see `resolve`); this set only guards a lineage VALUE variable.
+ */
+function collectReassignedNames(root: SgNode): ReadonlySet<string> {
 	const names = new Set<string>();
-	/** `const b = a` names one heap object; `const b = { ...a }` does not. */
-	const aliases: Array<[string, string]> = [];
-	/** `h = …`, `h.x = …`, `[h] = …`, and `({ x: h } = …)` all write `h`. */
+	/** `h = …`, `[h] = …`, and `({ x: h } = …)` all rebind `h`. */
 	const addTargets = (target: SgNode | null): void => {
 		const targetRoot = rootIdentifierName(target);
 		if (targetRoot) names.add(targetRoot);
@@ -367,54 +377,10 @@ function collectMutatedNames(
 		} else if (kind === "update_expression") {
 			const name = rootIdentifierName(node.namedChildren()[0] ?? null);
 			if (name) names.add(name);
-		} else if (kind === "unary_expression") {
-			// `delete x.y` parses as unary_expression whose operator child is
-			// `delete`; this grammar has no `delete_expression` kind.
-			if (node.children().some((child) => child.kind() === "delete")) {
-				const name = rootIdentifierName(node.namedChildren()[0] ?? null);
-				if (name) names.add(name);
-			}
-		} else if (kind === "variable_declarator") {
-			// An identity alias (`const b = a`) is the same heap object; a copy
-			// (`const b = { ...a }`) is not, so only a bare identifier initializer
-			// joins the alias relation.
-			const name = node.field("name");
-			const value = node.field("value");
-			if (name?.kind() === "identifier" && value?.kind() === "identifier") {
-				aliases.push([name.text(), value.text()]);
-			}
-		} else if (kind === "call_expression") {
-			// ANY call may retain and write a bare identifier argument: an
-			// unresolved helper (`mutate(entry)`) or a reflective write helper
-			// (`Object.assign(hidden, …)`, `Reflect.deleteProperty(hidden, …)`).
-			// The bridge seam is the census's own read-only call, so its arguments
-			// are the exception; everything else escapes the argument, so a stale
-			// initializer can never read as the live value.
-			const fn = node.field("function");
-			const callee = calleeName(fn);
-			if (callee === undefined || !calleeNames.has(callee)) {
-				for (const argument of node.field("arguments")?.namedChildren() ?? []) {
-					if (argument.kind() === "identifier") names.add(argument.text());
-				}
-			}
 		}
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
-	// A write through any name in an identity-alias component is visible through
-	// its siblings. Close over the (bounded, in-file) alias pairs, then taint the
-	// whole component of every tainted member. No second cache or writer.
-	let changed = aliases.length > 0;
-	while (changed) {
-		changed = false;
-		for (const [a, b] of aliases) {
-			if (names.has(a) !== names.has(b)) {
-				names.add(a);
-				names.add(b);
-				changed = true;
-			}
-		}
-	}
 	return names;
 }
 
@@ -695,12 +661,9 @@ function truthiness(node: SgNode | null): Truth {
 	return "unknown";
 }
 
-function makeResolver(
-	root: SgNode,
-	calleeNames: ReadonlySet<string>,
-): (node: SgNode | null) => Construction {
+function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 	const bindings = buildBindings(root);
-	const mutated = collectMutatedNames(root, calleeNames);
+	const reassigned = collectReassignedNames(root);
 	const byName = new Map<string, Binding[]>();
 	for (const binding of bindings) {
 		const list = byName.get(binding.name) ?? [];
@@ -830,7 +793,7 @@ function makeResolver(
 			if (node.text() === "undefined") return "undefined";
 			const binding = findBinding(node);
 			if (!binding) return "maybe";
-			if (mutated.has(binding.name)) return "maybe";
+			if (reassigned.has(binding.name)) return "maybe";
 			if (binding.value) {
 				if (visiting.has(binding.nodeId)) return "maybe";
 				const next = new Set(visiting);
@@ -897,10 +860,7 @@ function makeResolver(
 		return { dynamic: true };
 	};
 
-	const resolveObject = (
-		node: SgNode,
-		visiting: ReadonlySet<number>,
-	): Construction => {
+	const resolveObject = (node: SgNode): Construction => {
 		let result: Construction = { outputs: [EMPTY_OUTPUT] };
 		for (const property of node.namedChildren()) {
 			const kind = property.kind();
@@ -916,7 +876,7 @@ function makeResolver(
 				} else if (resolved.key === LINEAGE_FIELD) {
 					result = setLineage(
 						result,
-						resolveLineageValue(property.field("value"), visiting),
+						resolveLineageValue(property.field("value"), new Set<number>()),
 					);
 				}
 				continue;
@@ -925,7 +885,10 @@ function makeResolver(
 				const name = property.text();
 				if (name === EPOCH_FIELD) result = markEpoch(result);
 				else if (name === LINEAGE_FIELD) {
-					result = setLineage(result, resolveLineageValue(property, visiting));
+					result = setLineage(
+						result,
+						resolveLineageValue(property, new Set<number>()),
+					);
 				}
 				continue;
 			}
@@ -940,7 +903,7 @@ function makeResolver(
 			if (kind === "spread_element") {
 				result = combineConstructions(
 					result,
-					resolve(property.namedChildren()[0] ?? null, visiting),
+					resolve(property.namedChildren()[0] ?? null),
 				);
 				continue;
 			}
@@ -949,44 +912,20 @@ function makeResolver(
 		return result;
 	};
 
-	const resolveObjectAssign = (
-		node: SgNode,
-		visiting: ReadonlySet<number>,
-	): Construction => {
-		const fn = node.field("function");
-		if (
-			fn?.kind() !== "member_expression" ||
-			fn.field("object")?.text() !== "Object" ||
-			fn.field("property")?.text() !== "assign"
-		) {
-			return UNKNOWN_CONSTRUCTION;
-		}
-		let result: Construction = { outputs: [EMPTY_OUTPUT] };
-		for (const argument of node.field("arguments")?.namedChildren() ?? []) {
-			result = combineConstructions(result, resolve(argument, visiting));
-		}
-		return result;
-	};
-
-	const resolve = (
-		node: SgNode | null,
-		visiting: ReadonlySet<number>,
-	): Construction => {
+	const resolve = (node: SgNode | null): Construction => {
 		if (!node) return UNKNOWN_CONSTRUCTION;
 		const kind = node.kind();
-		if (kind === "object") return resolveObject(node, visiting);
-		if (kind === "identifier") {
-			const binding = findBinding(node);
-			if (!binding || !binding.value || mutated.has(binding.name)) {
-				return UNKNOWN_CONSTRUCTION;
-			}
-			if (visiting.has(binding.nodeId)) return UNKNOWN_CONSTRUCTION;
-			const next = new Set(visiting);
-			next.add(binding.nodeId);
-			return resolve(binding.value, next);
-		}
+		if (kind === "object") return resolveObject(node);
+		// A bound object is OPAQUE. `const h = { … }` captures an object, but any
+		// later statement can reach that same heap object through a property, an
+		// array slot, an assignment, a conditional arm, a destructuring source, a
+		// nested argument, or a copy-free alias and mutate it. The fold cannot
+		// enumerate those spellings (AGENTS.md 34), so it proves nothing about a
+		// binding: only an object literal written at the call site, or a
+		// conditional/short-circuit of such literals, is folded. See the header.
+		if (kind === "identifier") return UNKNOWN_CONSTRUCTION;
 		if (kind === "parenthesized_expression") {
-			return resolve(node.namedChildren()[0] ?? null, visiting);
+			return resolve(node.namedChildren()[0] ?? null);
 		}
 		if (
 			kind === "as_expression" ||
@@ -996,13 +935,12 @@ function makeResolver(
 		) {
 			return resolve(
 				node.field("expression") ?? node.namedChildren()[0] ?? null,
-				visiting,
 			);
 		}
 		if (kind === "ternary_expression" || kind === "conditional_expression") {
 			return unionConstructions(
-				resolve(node.field("consequence"), visiting),
-				resolve(node.field("alternative"), visiting),
+				resolve(node.field("consequence")),
+				resolve(node.field("alternative")),
 			);
 		}
 		if (kind === "binary_expression") {
@@ -1015,24 +953,25 @@ function makeResolver(
 				// an unconditional epoch cannot read as safe.
 				const left = truthiness(node.field("left"));
 				if (left === "falsy") return { outputs: [EMPTY_OUTPUT] };
-				if (left === "truthy") return resolve(node.field("right"), visiting);
-				return unionConstructions(resolve(node.field("right"), visiting), {
+				if (left === "truthy") return resolve(node.field("right"));
+				return unionConstructions(resolve(node.field("right")), {
 					outputs: [EMPTY_OUTPUT],
 				});
 			}
 			if (operator === "||" || operator === "??") {
 				return unionConstructions(
-					resolve(node.field("left"), visiting),
-					resolve(node.field("right"), visiting),
+					resolve(node.field("left")),
+					resolve(node.field("right")),
 				);
 			}
 			return UNKNOWN_CONSTRUCTION;
 		}
-		if (kind === "call_expression") return resolveObjectAssign(node, visiting);
+		// A call result (including `Object.assign(…)`) is opaque: the fold does not
+		// see the object it returns.
 		return UNKNOWN_CONSTRUCTION;
 	};
 
-	return (node) => resolve(node, new Set<number>());
+	return resolve;
 }
 
 /**
@@ -1096,7 +1035,7 @@ function resolveOutputProfiles(expression: string): string[] {
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
-	const resolve = makeResolver(root, collectCalleeNames(root));
+	const resolve = makeResolver(root);
 	return resolve(declarators[0]?.field("value") ?? null).outputs.map(
 		(output) =>
 			`${output.epoch ? "e" : "-"}|${output.lineage}|${output.unknown ? "u" : "-"}`,
@@ -1133,7 +1072,7 @@ function analyzeBridgeSites(source: string, file: string): BridgeSite[] {
 		);
 	}
 	const calleeNames = collectCalleeNames(root);
-	const resolve = makeResolver(root, calleeNames);
+	const resolve = makeResolver(root);
 	const sites: BridgeSite[] = [];
 	const visit = (node: SgNode): void => {
 		if (node.kind() === "call_expression") {
@@ -1307,10 +1246,12 @@ describe("#3937: bounded local object/spread provenance", () => {
 	});
 
 	it("passes a benign spread whose last write proves the lineage", () => {
+		// The proof is the call-site literal's OWN ordered spread, not a binding's
+		// captured initializer: a bound object is opaque (see the R4-1 section
+		// below), so only the literal written at the call site is folded.
 		const site = only(`
 			function replayCaller(entry: unknown) {
-				const safeEntry = { ...entry, lineage: 1 };
-				replayThroughMutationBridge({ ...safeEntry });
+				replayThroughMutationBridge({ ...entry, lineage: 1 });
 			}
 		`);
 		expect(site.kind).toBe("safe");
@@ -1349,14 +1290,19 @@ describe("#3937: bounded local object/spread provenance", () => {
 		).toEqual([]);
 	});
 
-	it("resolves a local const alias and an Object.assign source", () => {
+	it("treats a const alias and an Object.assign result as opaque bindings", () => {
+		// Both name a heap object the fold does not refresh: the alias can be
+		// mutated through any carrier, and `Object.assign` is a call result. The
+		// verdict narrows from `unsafe` to `indeterminate` — still non-safe, but the
+		// census no longer claims a definite hole it cannot prove. A fresh literal
+		// keeps the definite verdict (the R4-1 section below pins that control).
 		const viaAlias = only(`
 			function replayCaller(epoch: number) {
 				const built = { readGuardBranchEpoch: epoch };
 				replayThroughMutationBridge(built);
 			}
 		`);
-		expect(viaAlias.kind).toBe("unsafe");
+		expect(viaAlias.kind).toBe("indeterminate");
 		const viaAssign = only(`
 			function replayCaller(epoch: number) {
 				replayThroughMutationBridge(
@@ -1364,7 +1310,7 @@ describe("#3937: bounded local object/spread provenance", () => {
 				);
 			}
 		`);
-		expect(viaAssign.kind).toBe("unsafe");
+		expect(viaAssign.kind).toBe("indeterminate");
 	});
 
 	it("sees an import-renamed replay call as an unlisted spelling", () => {
@@ -1495,10 +1441,11 @@ describe("#3937 review round 2 — per-output soundness and callee/mutation cove
 	});
 
 	it("does not let an unrelated lineage arm launder a short-circuit epoch arm", () => {
+		// Direct literals keep the per-output verdict: the `||`'s epoch arm is
+		// still `unsafe` beside the lineage-only arm.
 		const site = only(`
 			function replayCaller(cond: boolean) {
-				const hidden = (cond && { lineage: 1 }) || { readGuardBranchEpoch: 5 };
-				replayThroughMutationBridge(hidden);
+				replayThroughMutationBridge((cond && { lineage: 1 }) || { readGuardBranchEpoch: 5 });
 			}
 		`);
 		expect(site.kind).toBe("unsafe");
@@ -1874,8 +1821,15 @@ describe("#3937 review round 4 — the provable floor (no type, heap, or key ove
 	});
 
 	it("does not propagate a copy spread's mutation to the original", () => {
-		// `{ ...h }` is a COPY, not the same heap object: deleting a key on the
-		// copy must not taint `h`, whose own value is still proven.
+		// A copy spread is not an identity alias: deleting a key on the copy leaves
+		// the original's key in place. The plain-JavaScript assertion is the
+		// independent proof of that rule. Under the opaque floor the ORIGINAL also
+		// reads `indeterminate`, because a bound object is not folded whether or not
+		// anything aliases it; the copy must not make it WORSE (`unsafe`).
+		const original: Record<string, unknown> = { lineage: 1 };
+		const copy: Record<string, unknown> = { ...original };
+		delete copy.lineage;
+		expect("lineage" in original).toBe(true);
 		const site = only(`
 			function f() {
 				const h: any = { lineage: 1, readGuardBranchEpoch: 5 };
@@ -1884,7 +1838,7 @@ describe("#3937 review round 4 — the provable floor (no type, heap, or key ove
 				replayThroughMutationBridge(h);
 			}
 		`);
-		expect(site.kind).toBe("safe");
+		expect(site.kind).toBe("indeterminate");
 	});
 
 	// W3 — a computed template key with a substitution is dynamic, never the
@@ -2029,6 +1983,143 @@ describe("#3937 review round 4 — the provable floor (no type, heap, or key ove
 				"e|undefined|u",
 			].sort(),
 		);
+	});
+});
+
+describe("#3937 review round 5 — R4-1: a bound object is opaque", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+	// A bound object with a proven-looking literal initializer. If the fold
+	// resolved it (r4 did), every carrier below would read `safe`; the runtime
+	// entry it stands for has `lineage === undefined` beside an epoch, which is
+	// the bridge's fail-open branch.
+	const H = "const h: any = { lineage: 1, readGuardBranchEpoch: 5 };";
+
+	it("treats a heap-sharing carrier as opaque: property value", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const box = { item: h }; delete box.item.lineage; replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: reflective member", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const box = { item: h }; Reflect.deleteProperty(box.item, "lineage"); replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: assignment RHS", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} let other; other = h; delete other.lineage; replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: conditional arm", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const other = a ? h : h; delete other.lineage; replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: array element", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const arr = [h]; delete arr[0].lineage; replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: destructuring source", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const box = { item: h }; const { item } = box; delete item.lineage; replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: nested argument", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const box = { item: h }; consume(box); replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("treats a heap-sharing carrier as opaque: Object.assign member target", () => {
+		const site = only(
+			`function f(a: boolean) { ${H} const box = { item: h }; Object.assign(box.item, { lineage: undefined }); replayThroughMutationBridge(h); }`,
+		);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("does not prove a bound object that nothing aliases", () => {
+		// The floor is the call-site literal, not the binding: a `const` binding can
+		// still be reached through a carrier the fold cannot enumerate, so even an
+		// untouched-looking binding is opaque.
+		const site = only(`
+			function f(epoch: number) {
+				const built = { readGuardBranchEpoch: epoch, lineage: 1 };
+				replayThroughMutationBridge(built);
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	it("keeps a fresh literal argument's definite epoch unsafe", () => {
+		// The `unsafe` verdict survives the narrowing for a call-site literal.
+		const site = only(`
+			function f(epoch: number) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: epoch });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("keeps a fresh literal argument that proves the lineage safe", () => {
+		const site = only(`
+			function f(epoch: number) {
+				replayThroughMutationBridge({ readGuardBranchEpoch: epoch, lineage: 1 });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	// The ONE write that can change a value variable's value. Object aliasing needs
+	// no tracking (a named object is never `undefined`), so this is the whole guard.
+	it("does not prove a lineage value variable that is later rebound", () => {
+		const site = only(`
+			function f() {
+				let lineage = 1;
+				lineage = undefined;
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("does not prove a destructured value variable that is rebound", () => {
+		const site = only(`
+			function f() {
+				let lineage = 1;
+				[lineage] = [undefined];
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	it("still proves a lineage value variable that is never rebound", () => {
+		const site = only(`
+			function f() {
+				const lineage = 1;
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5, lineage });
+			}
+		`);
+		expect(site.kind).toBe("safe");
 	});
 });
 
