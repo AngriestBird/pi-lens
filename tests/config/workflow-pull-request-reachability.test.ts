@@ -375,6 +375,29 @@ describe("the #3043 shape is what this sweep flags", () => {
 		expect(flagged).toEqual([]);
 	});
 
+	// #3941 r4 (F6): the quoted-prose pair is TRUE on a pull request (two
+	// constant strings differ), so a real PR job must not be flagged
+	// unreachable. The pre-fix raw substitution corrupted the DATA and read it as
+	// false.
+	it("does not flag a true constant quoted-prose pair", () => {
+		const quotedPair = `'github.event_name' != '"pull_request"' && 'github.event_name' != '"pull_request_target"'`;
+		const file = [
+			"on:",
+			"  pull_request:",
+			"jobs:",
+			"  quoted:",
+			`    if: ${JSON.stringify(quotedPair)}`,
+			"    runs-on: ubuntu-latest",
+			"    steps:",
+			"      - run: echo quoted",
+			"",
+		].join("\n");
+		const { flagged } = findPullRequestUnreachableJobs([
+			{ path: ".github/workflows/fixture.yml", text: file },
+		]);
+		expect(flagged).toEqual([]);
+	});
+
 	// Round 2, F1: GitHub Actions accepts THREE spellings of `on:` -- a
 	// mapping (`on:\n  pull_request:`), a bare string (`on: pull_request`)
 	// and a LIST (`on: [push, pull_request]`). js-yaml parses the list as a
@@ -512,6 +535,84 @@ describe("the reachability model itself", () => {
 		expect(isPullRequestReachable(expr)).toBe(expected);
 	});
 
+	// #3941 r4 (F6): the shared full model used to rewrite string-literal DATA
+	// before folding, because every pass ran on raw text. A quoted literal is
+	// DATA: a context path, a status function, or an operator inside it is
+	// GitHub's own string bytes, never CODE. These cases drive the real consumer
+	// entry point, not a helper.
+	const openedContext = PR_CONTEXTS[0] as PullRequestContext;
+
+	it.each([
+		["'github.event_name'", "github.event_name"],
+		["'always()'", "always()"],
+		["'x==y'", "x==y"],
+	])("keeps quoted literal DATA intact: %s", (expr, expected) => {
+		expect(evaluateForPullRequest(expr, openedContext)).toBe(expected);
+	});
+
+	it("folds a constant quoted-prose pair the way GitHub compares it", () => {
+		expect(
+			isPullRequestReachable(
+				`'github.event_name' != '"pull_request"' && 'github.event_name' != '"pull_request_target"'`,
+			),
+		).toBe(true);
+	});
+
+	it("does not read a context path inside a quoted literal as a context read", () => {
+		expect(
+			evaluateForPullRequest(
+				"'github.event.issue.number' == 'github.event.issue.number'",
+				openedContext,
+			),
+		).toBe(true);
+	});
+
+	it("reads GitHub's doubled-quote escape instead of producing invalid JS", () => {
+		expect(
+			evaluateForPullRequest("github.event_name == 'don''t'", openedContext),
+		).toBe(false);
+		expect(evaluateForPullRequest("'don''t' == 'don''t'", openedContext)).toBe(
+			true,
+		);
+	});
+
+	it("treats a backslash in a GitHub string as data, not a JS escape", () => {
+		// `\u0041` is six literal characters in GitHub's grammar; JS would read
+		// it as `A`, so a true result here would be the old silent decode.
+		expect(evaluateForPullRequest("'a\\u0041b' == 'aAb'", openedContext)).toBe(
+			false,
+		);
+	});
+
+	it("reports a doubled-away or unclosed literal as unsupported", () => {
+		expect(() =>
+			evaluateForPullRequest(
+				"github.event_name == 'pull_requ\\'est'",
+				openedContext,
+			),
+		).toThrow(/unsupported expression/);
+	});
+
+	it("never rescans an injected context value as code", () => {
+		// The value reads like a context path; a second raw pass would rewrite
+		// it, and the two operands would no longer be equal.
+		expect(
+			evaluateForPullRequest("github.event_name == 'github.repository'", {
+				...openedContext,
+				eventName: "github.repository",
+			}),
+		).toBe(true);
+	});
+
+	it("preserves fromJSON JSON bytes, keys, and case", () => {
+		expect(
+			evaluateForPullRequest(
+				`fromJSON('[{"KEY":"github.event_name"},{"always()":"x==y"}]')`,
+				openedContext,
+			),
+		).toEqual([{ KEY: "github.event_name" }, { "always()": "x==y" }]);
+	});
+
 	it("exposes one GitHub equality owner for the fold and the projection", () => {
 		expect(githubEquals("Pull_Request", "pull_request")).toBe(true);
 		expect(githubEquals("push", "pull_request")).toBe(false);
@@ -644,6 +745,27 @@ describe("reachable and gating are two columns (#3087)", () => {
 				"  probe:",
 				"    name: probe",
 				"    if: github.event_name == 'PULL_REQUEST'",
+				"    continue-on-error: true",
+				"    runs-on: ubuntu-latest",
+				"    steps:",
+				"      - run: echo probe",
+			].join("\n"),
+		);
+		expect(findUndeclaredAdvisoryJobs([file]).flagged).toEqual([
+			".github/workflows/fixture.yml::probe",
+		]);
+	});
+
+	// #3941 r4 (F6) caller witness: the quoted-prose pair is TRUE on a pull
+	// request, so this job is PR-reachable. Skipping it would drop a real
+	// advisory job from the sweep.
+	it("names an advisory job whose quoted-prose gate is true on a pull request", () => {
+		const quotedPair = `'github.event_name' != '"pull_request"' && 'github.event_name' != '"pull_request_target"'`;
+		const file = workflow(
+			[
+				"  probe:",
+				"    name: probe",
+				`    if: ${JSON.stringify(quotedPair)}`,
 				"    continue-on-error: true",
 				"    runs-on: ubuntu-latest",
 				"    steps:",

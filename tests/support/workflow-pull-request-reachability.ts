@@ -14,7 +14,7 @@
  *
  * EVALUATION: the same technique as tests/config/ci-infra-kill-rerun-gate.ts
  * and install-smoke-gates.ts -- yaml.load the REAL workflow, substitute every
- * context path in the LOADED `if:` string with a JSON literal, evaluate with
+ * context path in the LOADED `if:` string with a literal, evaluate with
  * `new Function`, and fold every comparison whose two operands are literals
  * through `githubEquals`, this module's one owner of GitHub's equality. GitHub
  * compares strings case-insensitively and coerces a mismatched type to a
@@ -26,6 +26,19 @@
  * every context path substitutes to a literal. An unrecognised context path
  * THROWS rather than being guessed at, so a workflow that grows a new one
  * fails loudly instead of being silently read as reachable.
+ *
+ * CODE versus DATA (#3941 r4, F6). A transform that edits raw text cannot see
+ * where the code ends and a string literal begins, so it rewrote the INSIDE of
+ * a quoted literal too: a context path, an `always()`, or an `==` inside a
+ * workflow string is DATA, not a reference or an operator. Every pass here
+ * first tokenizes the expression into CODE (identifiers, operators,
+ * punctuation, bare literals) and DATA (a single-quoted string's bytes); only
+ * CODE is rewritten, and the fold compares a literal's decoded value through
+ * `githubEquals`. GitHub's only string escape is a doubled single quote
+ * (`'It''s'`); a backslash is a literal backslash, NOT a JS escape, so a
+ * backslash is carried as data and never decoded. Normative source: GitHub
+ * Docs "Evaluate expressions in workflows and actions" (literals, and the
+ * loose-equality conversion table this file's `githubEquals` implements).
  *
  * THE MODEL, and what it cannot see. Reachability is decided against a small
  * declared set of pull_request contexts (PR_CONTEXTS below) -- a job is
@@ -89,16 +102,24 @@ const CONTEXT_PATHS: Array<[string, (ctx: PullRequestContext) => unknown]> = [
 	["github.event.workflow_run.event", () => null],
 ];
 
-// Zero-argument status functions and the permissive `needs.*` reading. Order
-// matters only in that these run before the leftover-reference check.
-const FUNCTION_SUBSTITUTIONS: Array<[RegExp, string]> = [
-	[/always\(\)/g, "true"],
-	[/success\(\)/g, "true"],
-	[/failure\(\)/g, "false"],
-	[/cancelled\(\)/g, "false"],
-	[/needs\.[A-Za-z0-9_-]+\.result/g, '"success"'],
-	[/needs\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+/g, '"true"'],
-];
+// Zero-argument status functions carry a fixed result; the permissive
+// `needs.*` reading substitutes `success` and `'true'`. These are CODE-only
+// rewrites on the token stream below, never a raw regex over the text.
+const NEEDS_RESULT = /^needs\.[A-Za-z0-9_-]+\.result$/;
+const NEEDS_OUTPUT = /^needs\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+$/;
+
+function statusFunctionResult(name: string): boolean | undefined {
+	switch (name) {
+		case "always":
+		case "success":
+			return true;
+		case "failure":
+		case "cancelled":
+			return false;
+		default:
+			return undefined;
+	}
+}
 
 /**
  * `${{ ... }}` is optional around a job-level `if:`; release.yml writes it
@@ -108,15 +129,6 @@ const FUNCTION_SUBSTITUTIONS: Array<[RegExp, string]> = [
  */
 function expressionBody(expr: string): string {
 	return expr.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
-}
-
-/**
- * Normalize GitHub's `==`/`!=` to JS strict forms for `new Function`. `!=`/`==`
- * before `===`, so the `!==` produced here is not re-rewritten; the character
- * class keeps `>=`/`<=` untouched.
- */
-function completedComparisons(out: string): string {
-	return out.replace(/!=/g, "!==").replace(/(?<![!<>=])==(?!=)/g, "===");
 }
 
 /**
@@ -143,85 +155,261 @@ function toGithubNumber(value: unknown): number {
 	return Number.NaN;
 }
 
-// A literal operand, as it appears in a substituted expression: a JSON string
-// written by `JSON.stringify` for a context path, a workflow `'…'` string, a
-// number, or a word literal. The lookarounds keep `true` from matching inside
-// an identifier such as `isTrue`.
-const STRING_LITERAL = String.raw`"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`;
-const NUMBER_LITERAL = String.raw`-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?`;
-const LITERAL = `(?:${STRING_LITERAL}|${NUMBER_LITERAL}|true|false|null)`;
-const LITERAL_COMPARISON = new RegExp(
-	`(?<![\\w$])(${LITERAL})\\s*(==|!=)\\s*(${LITERAL})(?![\\w$])`,
-	"g",
-);
+// A literal operand, kept as its decoded value: a GitHub `'…'` string, a
+// number, a boolean, or null. CODE and DATA are separate token kinds, so no
+// transform can reach inside a string's bytes.
+type LiteralToken =
+	| { kind: "string"; value: string }
+	| { kind: "number"; value: number }
+	| { kind: "bool"; value: boolean }
+	| { kind: "null" };
+type ExpressionToken =
+	| LiteralToken
+	| { kind: "word"; text: string }
+	| { kind: "punct"; text: string };
 
-const UNPARSED_LITERAL = Symbol("unparsed-literal");
+class WorkflowExpressionError extends Error {
+	constructor(detail: string) {
+		super(
+			`workflow-pull-request-reachability: unsupported expression: ${detail}`,
+		);
+		this.name = "WorkflowExpressionError";
+	}
+}
 
-function literalValue(raw: string): unknown {
-	if (raw.startsWith('"')) {
-		try {
-			return JSON.parse(raw);
-		} catch {
-			return UNPARSED_LITERAL;
+// Sticky so each scan starts exactly where the previous token ended. A number
+// keeps the docs' hex spelling (`0xff`) and a negative sign.
+const IDENTIFIER_TOKEN =
+	/[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*/y;
+const NUMBER_TOKEN =
+	/-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/y;
+const OPERATOR_TOKEN = /(?:!==|===|==|!=|<=|>=|&&|\|\||[!<>(,)[\]*+\-/%.])/y;
+
+function identifierToken(text: string): ExpressionToken {
+	if (text === "true") return { kind: "bool", value: true };
+	if (text === "false") return { kind: "bool", value: false };
+	if (text === "null") return { kind: "null" };
+	return { kind: "word", text };
+}
+
+/** Index just past a GitHub single-quoted literal, `''` counting as a quote. */
+function scanGithubString(expr: string, start: number): number {
+	let index = start + 1;
+	while (index < expr.length) {
+		if (expr[index] !== "'") {
+			index += 1;
+			continue;
 		}
-	}
-	if (raw.startsWith("'")) {
-		const inner = raw.slice(1, -1);
-		// GitHub escapes a single quote by doubling it and has no backslash
-		// escape; anything else here is JS-flavoured and is left to
-		// `new Function` rather than guessed at.
-		if (inner.includes("\\") || inner.includes("'")) {
-			return UNPARSED_LITERAL;
+		if (expr[index + 1] === "'") {
+			index += 2;
+			continue;
 		}
-		return inner;
+		return index + 1;
 	}
-	if (raw === "true") return true;
-	if (raw === "false") return false;
-	if (raw === "null") return null;
-	const value = Number(raw);
-	return Number.isNaN(value) ? UNPARSED_LITERAL : value;
+	throw new WorkflowExpressionError(
+		`unterminated string literal at index ${start} in ${JSON.stringify(expr)}`,
+	);
 }
 
 /**
- * Fold every comparison between two literals to GitHub's own result, before
- * `completedComparisons` rewrites the operators the fold leaves behind. A
- * literal the module cannot parse (a JS-escaped string) is returned untouched,
- * never guessed at. Called before `new Function` sees the expression.
+ * Split an expression into CODE and DATA tokens. GitHub's string escape is a
+ * doubled single quote; a backslash is a literal backslash (never a JS escape),
+ * and a double-quoted string is not GitHub syntax, so both are carried or
+ * reported rather than guessed at.
  */
-function foldLiteralComparisons(out: string): string {
-	return out.replace(
-		LITERAL_COMPARISON,
-		(whole, leftRaw: string, operator: string, rightRaw: string) => {
-			const left = literalValue(leftRaw);
-			const right = literalValue(rightRaw);
-			if (left === UNPARSED_LITERAL || right === UNPARSED_LITERAL) {
-				return whole;
+function tokenizeExpression(expr: string): ExpressionToken[] {
+	const tokens: ExpressionToken[] = [];
+	let index = 0;
+	while (index < expr.length) {
+		const char = expr[index] as string;
+		if (/\s/.test(char)) {
+			index += 1;
+			continue;
+		}
+		if (char === "'") {
+			const end = scanGithubString(expr, index);
+			tokens.push({
+				kind: "string",
+				value: expr.slice(index + 1, end - 1).replace(/''/g, "'"),
+			});
+			index = end;
+			continue;
+		}
+		if (char === '"') {
+			throw new WorkflowExpressionError(
+				`double-quoted string at index ${index}: GitHub expressions use single quotes, in ${JSON.stringify(expr)}`,
+			);
+		}
+		IDENTIFIER_TOKEN.lastIndex = index;
+		const identifier = IDENTIFIER_TOKEN.exec(expr);
+		if (identifier !== null) {
+			tokens.push(identifierToken(identifier[0]));
+			index += identifier[0].length;
+			continue;
+		}
+		NUMBER_TOKEN.lastIndex = index;
+		const number = NUMBER_TOKEN.exec(expr);
+		if (number !== null) {
+			tokens.push({ kind: "number", value: Number(number[0]) });
+			index += number[0].length;
+			continue;
+		}
+		OPERATOR_TOKEN.lastIndex = index;
+		const operator = OPERATOR_TOKEN.exec(expr);
+		if (operator !== null) {
+			tokens.push({ kind: "punct", text: operator[0] });
+			index += operator[0].length;
+			continue;
+		}
+		throw new WorkflowExpressionError(
+			`unrecognised character ${JSON.stringify(char)} at index ${index} in ${JSON.stringify(expr)}`,
+		);
+	}
+	return tokens;
+}
+
+function literalToken(value: unknown): LiteralToken {
+	if (value === null || value === undefined) return { kind: "null" };
+	if (typeof value === "boolean") return { kind: "bool", value };
+	if (typeof value === "number") return { kind: "number", value };
+	if (typeof value === "string") return { kind: "string", value };
+	throw new WorkflowExpressionError("a context path read a non-scalar value");
+}
+
+/** Rewrite CODE only: context reads, status functions, and the needs forms. */
+function substituteTokens(
+	tokens: readonly ExpressionToken[],
+	ctx: PullRequestContext,
+): ExpressionToken[] {
+	const substituted: ExpressionToken[] = [];
+	let index = 0;
+	while (index < tokens.length) {
+		const token = tokens[index] as ExpressionToken;
+		if (token.kind === "word") {
+			const context = CONTEXT_PATHS.find(([path]) => path === token.text);
+			if (context !== undefined) {
+				substituted.push(literalToken(context[1](ctx)));
+				index += 1;
+				continue;
 			}
-			const equal = githubEquals(left, right);
-			return (operator === "==" ? equal : !equal) ? "true" : "false";
-		},
-	);
+			if (NEEDS_RESULT.test(token.text)) {
+				substituted.push({ kind: "string", value: "success" });
+				index += 1;
+				continue;
+			}
+			if (NEEDS_OUTPUT.test(token.text)) {
+				substituted.push({ kind: "string", value: "true" });
+				index += 1;
+				continue;
+			}
+			const status = statusFunctionResult(token.text);
+			const open = tokens[index + 1] as ExpressionToken | undefined;
+			const close = tokens[index + 2] as ExpressionToken | undefined;
+			if (
+				status !== undefined &&
+				open?.kind === "punct" &&
+				open.text === "(" &&
+				close?.kind === "punct" &&
+				close.text === ")"
+			) {
+				substituted.push({ kind: "bool", value: status });
+				index += 3;
+				continue;
+			}
+		}
+		substituted.push(token);
+		index += 1;
+	}
+	return substituted;
+}
+
+function isLiteralToken(
+	token: ExpressionToken | undefined,
+): token is LiteralToken {
+	return token !== undefined && token.kind !== "word" && token.kind !== "punct";
+}
+
+function literalValueOf(token: LiteralToken): string | number | boolean | null {
+	return token.kind === "null" ? null : token.value;
+}
+
+/** Fold `LITERAL ==|!= LITERAL` through GitHub's equality, left to right. */
+function foldLiteralComparisons(
+	tokens: readonly ExpressionToken[],
+): ExpressionToken[] {
+	const folded: ExpressionToken[] = [];
+	for (let index = 0; index < tokens.length; index += 1) {
+		const left = tokens[index] as ExpressionToken;
+		const operator = tokens[index + 1] as ExpressionToken | undefined;
+		const right = tokens[index + 2] as ExpressionToken | undefined;
+		if (
+			isLiteralToken(left) &&
+			isLiteralToken(right) &&
+			operator?.kind === "punct" &&
+			(operator.text === "==" || operator.text === "!=")
+		) {
+			const equal = githubEquals(literalValueOf(left), literalValueOf(right));
+			folded.push({
+				kind: "bool",
+				value: operator.text === "==" ? equal : !equal,
+			});
+			index += 2;
+			continue;
+		}
+		folded.push(left);
+	}
+	return folded;
+}
+
+/** Rebuild JS source: operators normalized, string DATA as a JSON literal. */
+function renderTokens(tokens: readonly ExpressionToken[]): string {
+	return tokens
+		.map((token) => {
+			switch (token.kind) {
+				case "string":
+					return JSON.stringify(token.value);
+				case "number":
+					return String(token.value);
+				case "bool":
+					return token.value ? "true" : "false";
+				case "null":
+					return "null";
+				case "word":
+					return token.text;
+				case "punct":
+					return token.text === "=="
+						? "==="
+						: token.text === "!="
+							? "!=="
+							: token.text;
+			}
+		})
+		.join(" ");
 }
 
 export function substituteForPullRequest(
 	expr: string,
 	ctx: PullRequestContext,
 ): string {
-	let out = expressionBody(expr);
-	for (const [path, read] of CONTEXT_PATHS) {
-		out = out.split(path).join(JSON.stringify(read(ctx)) ?? "null");
-	}
-	for (const [pattern, replacement] of FUNCTION_SUBSTITUTIONS) {
-		out = out.replace(pattern, replacement);
-	}
-	if (/(?:github|needs|env|inputs|steps|vars|secrets)\./.test(out)) {
+	const substituted = substituteTokens(
+		tokenizeExpression(expressionBody(expr)),
+		ctx,
+	);
+	// The residue is CODE only: a context path inside a string literal is DATA
+	// and is deliberately not read as a context reference.
+	const residue = substituted
+		.map((token) =>
+			token.kind === "word" || token.kind === "punct" ? token.text : "",
+		)
+		.join("");
+	if (/(?:github|needs|env|inputs|steps|vars|secrets)\./.test(residue)) {
 		throw new Error(
 			`workflow-pull-request-reachability: unrecognised context path in an if: expression -- ` +
 				`add it to CONTEXT_PATHS with the value a pull_request run would see, rather than ` +
-				`letting it be guessed at. Residue: ${out}`,
+				`letting it be guessed at. Residue: ${residue}`,
 		);
 	}
-	return completedComparisons(foldLiteralComparisons(out));
+	return renderTokens(foldLiteralComparisons(substituted));
 }
 
 /**
