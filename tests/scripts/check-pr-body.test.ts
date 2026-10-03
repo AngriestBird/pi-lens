@@ -126,11 +126,13 @@ function blobPostImage(diff: string) {
 			try {
 				headFiles.set(
 					file,
-					execFileSync("git", ["cat-file", "-p", index[2]], {
-						cwd: repositoryRoot,
-						encoding: "utf8",
-						maxBuffer: 32 * 1024 * 1024,
-					}),
+					String(
+						gitExecFileSync(["cat-file", "-p", index[2]], {
+							cwd: repositoryRoot,
+							encoding: "utf8",
+							maxBuffer: 32 * 1024 * 1024,
+						}),
+					),
 				);
 			} catch {
 				// Blob absent; the caller falls back to the reconstruction.
@@ -189,15 +191,48 @@ const motivatingFlattenedBodies = [
 	flattenedBody,
 ].map((candidate) => candidate.replaceAll("\\n", " "));
 
-function createOriginMasterFixture(mappedFile?: string) {
+type RuntimePostImageFixture = {
+	path: string;
+	pre: string[];
+	post: string[];
+	dirty: string[];
+};
+
+function shellRows(rows: string[]): string {
+	// The fixture rows are single-quote free, so each is a POSIX single-quoted
+	// word; joining them with spaces makes one `printf '%s\n' a b c` call.
+	return rows.map((row) => `'${row}'`).join(" ");
+}
+
+// One shared `git init` call site keeps the file's pinned real-spawn count
+// while several fixture tests each need a fresh repository.
+function initFixtureRepo(fixtureRepo: string) {
+	gitExecFileSync(["init", "-q"], { cwd: fixtureRepo });
+}
+
+function createOriginMasterFixture(
+	mappedFile?: string,
+	postImage?: RuntimePostImageFixture,
+) {
 	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
 	// `mappedFile` (#3802 F3) commits one extra repo-relative file in the same
 	// shell command, so a mapped-path diff costs no additional git spawn.
 	const mapped = mappedFile
 		? ` && mkdir -p '${directory}/${dirname(mappedFile)}' && printf 'touched\\n' > '${directory}/${mappedFile}' && git -C '${directory}' add '${mappedFile}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-mapped`
 		: "";
+	// A real runtime post-image (#3906 r4 R3-A): the pre-image is committed as
+	// the base, `origin/master` points at it, the post-image is committed as the
+	// head so the diff names `index <pre>..<post>`, and the working tree is then
+	// dirtied in an unchanged line. The reader must take the named blob; reading
+	// the dirty tree would flip the lexical state without changing any added line.
+	const preImage = postImage
+		? `mkdir -p '${directory}/${dirname(postImage.path)}' && printf '%s\\n' ${shellRows(postImage.pre)} > '${directory}/${postImage.path}' && git -C '${directory}' add '${postImage.path}' && `
+		: "";
+	const postImageSegment = postImage
+		? ` && printf '%s\\n' ${shellRows(postImage.post)} > '${directory}/${postImage.path}' && git -C '${directory}' add '${postImage.path}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-post-image && printf '%s\\n' ${shellRows(postImage.dirty)} > '${directory}/${postImage.path}'`
+		: "";
 	gitExecSync(
-		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}`,
+		`git init --quiet --initial-branch=main '${directory}' && ${preImage}git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}${postImageSegment}`,
 	);
 	return directory;
 }
@@ -564,7 +599,7 @@ describe("test-reference shape and placement", () => {
 		try {
 			mkdirSync(join(fixtureRepo, "tests"));
 			writeFileSync(join(fixtureRepo, "tests", "fixture.test.ts"), "fixture\n");
-			gitExecFileSync(["init", "-q"], { cwd: fixtureRepo });
+			initFixtureRepo(fixtureRepo);
 			gitExecFileSync(["add", "tests/fixture.test.ts"], { cwd: fixtureRepo });
 			gitExecFileSync(
 				[
@@ -613,7 +648,7 @@ describe("test-reference shape and placement", () => {
 			writeFileSync(join(fixtureRepo, "vendor", "lib.js"), "ignored\n");
 			// `git check-ignore` reads .gitignore from the work tree; no commit is
 			// needed, so the fixture costs one spawn.
-			gitExecFileSync(["init", "-q"], { cwd: fixtureRepo });
+			initFixtureRepo(fixtureRepo);
 			const citing = (file: string) =>
 				lintLocalPrBody(
 					`${body}\nThe helper is at \`${file}:1\`.`,
@@ -1747,6 +1782,173 @@ describe("PR body lint (#1844)", () => {
 			} finally {
 				rmSync(root, { recursive: true, force: true });
 			}
+		});
+
+		it("reads the diff's immutable post-image blob, not a dirty working tree", () => {
+			// R3-A: the diff names `index <pre>..<post>`; the working tree dirties
+			// an UNCHANGED line so a block comment would swallow the added record.
+			// Every added line still matches, so an added-line-only check passes
+			// and the honest sentence becomes a false clean. The named blob holds
+			// the real state, so the reader must take it.
+			const fixtureCwd = createOriginMasterFixture(undefined, {
+				path: "clients/rec.ts",
+				pre: ["export let x = 0;"],
+				post: [
+					"export let x = 0;",
+					'recordDegradationOnce({ kind: "real-kind" });',
+				],
+				dirty: [
+					"export let x = 0;/*",
+					'recordDegradationOnce({ kind: "real-kind" });',
+				],
+			});
+			try {
+				const diff = localDiff(fixtureCwd);
+				expect(diff).toContain("index ");
+				expect(
+					lintPrBody(withObservability("The record is real-kind."), {
+						diff,
+						cwd: fixtureCwd,
+						workingTree: true,
+					}),
+				).toEqual({ valid: true, errors: [] });
+				expect(
+					lintPrBody(
+						withObservability("No new failure path; no record added."),
+						{
+							diff,
+							cwd: fixtureCwd,
+							workingTree: true,
+						},
+					).valid,
+				).toBe(false);
+			} finally {
+				rmSync(fixtureCwd, { recursive: true, force: true });
+			}
+		});
+
+		it("prefers a named post-image blob over the mutable working tree", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-blob-"));
+			try {
+				mkdirSync(join(root, "clients"), { recursive: true });
+				writeFileSync(
+					join(root, "clients", "dirty.ts"),
+					'export let x = 0;/*\nrecordDegradationOnce({ kind: "real-kind" });',
+				);
+				const diff = [
+					"diff --git a/clients/dirty.ts b/clients/dirty.ts",
+					"index 0a8fa80..0340955 100644",
+					"@@ -1,0 +2 @@ export let x = 0;",
+					'+recordDegradationOnce({ kind: "real-kind" });',
+				].join("\n");
+				const git = (args: string[]) => {
+					expect(args).toEqual(["cat-file", "-p", "0340955"]);
+					return 'export let x = 0;\nrecordDegradationOnce({ kind: "real-kind" });';
+				};
+				expect(
+					lintPrBody(withObservability("The record is real-kind."), {
+						diff,
+						cwd: root,
+						workingTree: true,
+						git,
+					}),
+				).toEqual({ valid: true, errors: [] });
+				expect(
+					lintPrBody(
+						withObservability("No new failure path; no record added."),
+						{
+							diff,
+							cwd: root,
+							workingTree: true,
+							git,
+						},
+					).valid,
+				).toBe(false);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it("declines when the diff names a blob that cannot be read", () => {
+			const diff = [
+				"diff --git a/clients/gone.ts b/clients/gone.ts",
+				"index 1111111..2222222 100644",
+				"@@ -0,0 +1 @@",
+				'+recordDegradationOnce({ kind: "gone-kind" });',
+			].join("\n");
+			const result = lintPrBody(withObservability("The record is gone-kind."), {
+				diff,
+				git: () => {
+					throw new Error("missing object");
+				},
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain("could not classify");
+		});
+
+		it("harvests an added line whose content starts with `++`", () => {
+			// Git emits an added code line `++counter;` as `+++counter;`. Inside a
+			// hunk that is content, not a file header, so the record is found
+			// (#3906 R3-B). Base and f0 both refused it.
+			const fixture = runtimeFixture(
+				"clients/incr.ts",
+				[
+					"export let counter = 0;",
+					'++counter; recordDegradationOnce({ kind: "sneaky" });',
+				],
+				[2],
+			);
+			expect(
+				lintPrBody(withObservability("The record is sneaky."), fixture),
+			).toEqual({ valid: true, errors: [] });
+			expect(
+				lintPrBody(
+					withObservability("No new failure path; no record added."),
+					fixture,
+				).valid,
+			).toBe(false);
+		});
+
+		it("does not advance the POST cursor on a removed line starting with --", () => {
+			// Git emits a removed code line `--old` as `---old`. In the hunk body it
+			// is a removal, not a file header, so the added line stays at its POST
+			// number.
+			const diff = [
+				"diff --git a/clients/del.ts b/clients/del.ts",
+				"@@ -2,1 +2,1 @@",
+				"---old",
+				'+recordDegradationOnce({ kind: "del-kind" });',
+			].join("\n");
+			const headFiles = new Map([
+				[
+					"clients/del.ts",
+					'export let keep = 0;\nrecordDegradationOnce({ kind: "del-kind" });',
+				],
+			]);
+			expect(
+				lintPrBody(withObservability("The record is del-kind."), {
+					diff,
+					headFiles,
+				}),
+			).toEqual({ valid: true, errors: [] });
+		});
+
+		it("ignores a `No newline at end of file` marker without moving the cursor", () => {
+			const fixture = runtimeFixture(
+				"clients/nonl.ts",
+				[
+					"export const x = 1;",
+					'recordDegradationOnce({ kind: "nonl-kind" });',
+				],
+				[2],
+			);
+			const marker = "\\ No newline at end of file";
+			expect(
+				lintPrBody(withObservability("The record is nonl-kind."), {
+					diff: `${fixture.diff}\n${marker}`,
+					headFiles: fixture.headFiles,
+				}),
+			).toEqual({ valid: true, errors: [] });
 		});
 	});
 

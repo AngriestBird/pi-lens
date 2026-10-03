@@ -325,13 +325,16 @@ function isSeamFile(file, map) {
 // ` * name(...) {` is lexically identical as a JSDoc continuation and as a JS
 // generator head, so no line-local predicate can decide it (#3906 N1).
 //
-// The harvest therefore reads the whole post-image the diff names — where the
-// `/**` opener IS present — lexes it once with `blankCommentsAndStrings`, and
+// The harvest therefore carries the post-image identity the diff names — the
+// `index <post>` blob oid, read back with `git cat-file -p` — where the
+// `/**` opener IS present, lexes it once with `blankCommentsAndStrings`, and
 // intersects the evidence it finds with the hunk's added POST-image lines. The
 // line numbers come from the hunk's `+start` offset and are checked against the
-// post-image text before use, so a stale, renamed, or concurrently edited image
-// is refused instead of misread (never a false clean, never a wrong
-// "no record added").
+// post-image text before use, so a renamed or concurrently edited image is
+// refused instead of misread (never a false clean, never a wrong
+// "no record added"). Carrying the blob oid — not re-reading the working tree —
+// is what keeps an unchanged opener outside the diff from flipping the lexical
+// state (#3906 r4 R3-A).
 
 // Git quotes a `diff --git` path that holds a non-ASCII byte, a `"`, a `\\`,
 // or a control character, and C-escapes it. A quoted runtime path must still be
@@ -395,36 +398,54 @@ function gitHeaderPaths(rest) {
 	return { pre: match[1], post: match[2] };
 }
 
-// Every file in the diff with the post-image line number of each added line.
-// A real hunk resets the cursor from its `+start`; a bare fixture with no `@@`
-// numbers its `+` lines from the top.
+// Every file in the diff with the post-image line number of each added line and
+// the immutable post-image blob oid the diff names. A real hunk resets the
+// cursor from its `+start`; a bare fixture with no `@@` numbers its `+` lines
+// from the top. `inHunk` separates the file header (`diff --git`, `index`,
+// `rename to`, `--- a/…`, `+++ b/…`) from the hunk body: only in the header is
+// a leading `+++`/`---` a file header. Inside a hunk an added code line that
+// itself starts with `++` is emitted as `+++…` and must be harvested, not
+// skipped (#3906 R3-B), and a removed `--…` line likewise must not advance the
+// POST cursor.
 function parseRuntimeHunks(diff) {
 	const files = [];
 	let current = null;
+	let inHunk = false;
 	for (const line of String(diff).split(/\r?\n/)) {
 		if (line.startsWith("diff --git ")) {
 			const paths = gitHeaderPaths(line.slice("diff --git ".length));
 			current = {
 				pre: paths?.pre ?? "",
 				post: paths?.post ?? "",
+				postBlob: null,
 				postLine: 1,
 				added: new Map(),
 			};
 			files.push(current);
+			inHunk = false;
 			continue;
 		}
 		if (!current) continue;
-		const rename = /^rename to (.+)$/.exec(line);
-		if (rename) {
-			current.post = unquoteGitPath(rename[1]);
-			continue;
+		if (!inHunk) {
+			const rename = /^rename to (.+)$/.exec(line);
+			if (rename) {
+				current.post = unquoteGitPath(rename[1]);
+				continue;
+			}
+			// `index <pre>..<post> [mode]` names the immutable post-image blob.
+			const index = /^index ([0-9a-f]+)\.\.([0-9a-f]+)/.exec(line);
+			if (index) {
+				current.postBlob = index[2];
+				continue;
+			}
 		}
 		const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
 		if (hunk) {
 			current.postLine = Number(hunk[1]);
+			inHunk = true;
 			continue;
 		}
-		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (!inHunk && (line.startsWith("+++") || line.startsWith("---"))) continue;
 		if (line.startsWith("+")) {
 			current.added.set(current.postLine, line.slice(1));
 			current.postLine += 1;
@@ -467,13 +488,17 @@ function runtimeObservabilityFromDiff(diff, seamMap, options = {}) {
 	const branchesByFile = new Map();
 	const indeterminate = [];
 	for (const file of addedRuntime) {
-		// The post-image is the working tree or HEAD, never the caller's citation
-		// `ref` (a base revision for `--ref` path checks).
+		// The post-image is the blob the diff's `index <post>` names, never the
+		// caller's citation `ref` (a base revision for `--ref` path checks) and
+		// never a mutable working tree the diff does not mention. When the diff
+		// names no blob (a hand-built hunk), `headFileSource` falls back to the
+		// caller-supplied image, HEAD, or the working tree.
 		const source = headFileSource(file.post, {
 			headFiles: options.headFiles,
 			workingTree: options.workingTree,
 			cwd: options.cwd,
 			git: options.git,
+			postBlob: file.postBlob,
 		});
 		if (typeof source !== "string") {
 			indeterminate.push({ file: file.post, line: null });
@@ -655,11 +680,32 @@ const MASTER_CLAIM =
 	/pre-existing|red on master|also fails on origin\/master|environment-specific/i;
 
 // One post-image read per changed runtime file, bounded by the same byte
-// ceiling on every branch: `git show` for a ref or HEAD, and a stat-gated
-// working-tree read. A file-count bound alone is not a byte bound.
+// ceiling on every branch: `git cat-file -p` for the diff's own blob,
+// `git show` for a ref or HEAD, and a stat-gated working-tree read. A
+// file-count bound alone is not a byte bound.
+//
+// The `index <post>` blob is the identity carried from the diff producer to
+// the reader. Reading exactly that object means an unchanged line the diff
+// never mentions (a block-comment opener) cannot flip the lexical state even
+// when the working tree has drifted from the diff's post-image (#3906 r4
+// R3-A). A named-but-unreadable blob declines (null → `indeterminate`); it
+// never falls through to a mutable source that would look authoritative.
 function headFileSource(file, options = {}) {
 	if (options.headFiles?.has?.(file)) return options.headFiles.get(file);
 	if (/(?:^|\/)\.\.(?:\/|$)/.test(file) || isAbsolute(file)) return null;
+	if (options.postBlob && !/^0+$/.test(options.postBlob)) {
+		try {
+			return String(
+				(options.git ?? gitExecFileSync)(["cat-file", "-p", options.postBlob], {
+					cwd: options.cwd ?? process.cwd(),
+					encoding: "utf8",
+					maxBuffer: MAX_SOURCE_BYTES,
+				}),
+			);
+		} catch {
+			return null;
+		}
+	}
 	if (options.ref) {
 		try {
 			return String(
