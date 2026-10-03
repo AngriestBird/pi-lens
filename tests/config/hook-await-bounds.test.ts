@@ -3411,4 +3411,68 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		);
 		expect(afterKey).toBe(beforeKey);
 	});
+
+	it("#3938 comment/template padding does not re-key the registered runtime-tool-result await", () => {
+		// The REAL scan (module-level `awaits`) already keyed every hook-path
+		// await. Take the live registered occurrence from it, not a hand-typed
+		// hash, and prove below that it is a real exemption.
+		const rel = "clients/runtime-tool-result.ts";
+		const registeredKey = `${rel}#handleToolResult:a1bef279~57385903`;
+		const registered = awaits.occurrences.find((o) => o.key === registeredKey);
+		expect(
+			registered,
+			"the real scan no longer derives the registered #handleToolResult await",
+		).toBeDefined();
+		expect(Object.hasOwn(EXEMPT_SITES, registered!.key)).toBe(true);
+
+		const rawLines = fs
+			.readFileSync(path.join(REPO_ROOT, rel), "utf8")
+			.split("\n");
+		const flaggedIndex = Number(registered!.detail.match(/:(\d+)\s/)?.[1]) - 1;
+		expect(awaitOccurrenceKey(rel, rawLines, flaggedIndex)).toBe(
+			registered!.key,
+		);
+
+		// Insert far from the await (right after handleToolResult's own
+		// `} = deps;`) so the flagged line's `~context` neighbours are untouched.
+		const declIndex = rawLines.findIndex((l) =>
+			/^(?:export\s+)?(?:async\s+)?function\s+handleToolResult\b/.test(l),
+		);
+		let insertAt = -1;
+		for (let i = declIndex; i < flaggedIndex; i++) {
+			if (rawLines[i].trim() === "} = deps;") {
+				insertAt = i + 1;
+				break;
+			}
+		}
+		expect(declIndex).toBeGreaterThanOrEqual(0);
+		expect(insertAt).toBeGreaterThan(declIndex);
+
+		// Both shapes were verified byte-identical under `oxfmt` (#3938 r2):
+		// the column-0 interior line is stable, so the formatter would not move
+		// the fixture that triggers the re-key.
+		const paddings: Record<string, string[]> = {
+			"template-literal interior": [
+				"\tconst noise = `",
+				"function fakeFromString() {",
+				"`;",
+			],
+			"block-comment interior": ["/*", "function fakeFromComment() {", "*/"],
+		};
+		for (const [label, padding] of Object.entries(paddings)) {
+			const padded = [
+				...rawLines.slice(0, insertAt),
+				...padding,
+				...rawLines.slice(insertAt),
+			];
+			const paddedIndex = flaggedIndex + padding.length;
+			// The flagged line's own hash and neighbourhood are byte-identical;
+			// only the owner derivation could re-key it.
+			expect(padded[paddedIndex]).toBe(rawLines[flaggedIndex]);
+			expect(
+				awaitOccurrenceKey(rel, padded, paddedIndex),
+				`${label} must not re-key the registered await`,
+			).toBe(registered!.key);
+		}
+	});
 });

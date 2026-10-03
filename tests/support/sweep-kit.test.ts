@@ -738,6 +738,47 @@ describe("sweep-kit: findEnclosingSymbol / stableOccurrenceKey (#2475)", () => {
 				"}",
 			];
 			expect(findEnclosingSymbol(lines, 4)).toBe("realOwner");
+
+			// A MULTI-LINE interior whose column-0 line IS declaration-shaped is
+			// the case the single-line shapes cannot reach: the old raw-text match
+			// treated it as an owner. The owner now comes from the shared
+			// `stripSource` seam, so both interiors blank to spaces (#3938 AC5).
+			const multiLine = [
+				"export function realOwner() {",
+				"/*",
+				"function fakeFromComment() {",
+				"*/",
+				"\tconst template = `",
+				"function fakeFromString() {",
+				"`;",
+				"\tawait work();",
+				"}",
+			];
+			expect(findEnclosingSymbol(multiLine, 7)).toBe("realOwner");
+		});
+
+		it("hashes the flagged line RAW while deriving the owner from blanked text", () => {
+			// Two raw lines that blank to the SAME text (`\tconst s = "";`)
+			// but differ as written. If the hash were taken from the blanked line
+			// they would collide; hashing the RAW line keeps them distinct, so an
+			// edit to the flagged statement still re-triggers review.
+			const lines = [
+				["function owner() {", '\tconst s = "one";', "}"],
+				["function owner() {", '\tconst s = "two";', "}"],
+			];
+			const [one, two] = lines.map((l) =>
+				stableOccurrenceKey("fixture.ts", l, 1),
+			);
+			expect(one).toMatch(/^fixture\.ts#owner:[0-9a-f]{8}$/);
+			expect(two).toMatch(/^fixture\.ts#owner:[0-9a-f]{8}$/);
+			expect(one).not.toBe(two);
+		});
+
+		it("an out-of-range lineIndex returns no owner (0 <= lineIndex < lines.length)", () => {
+			const lines = ["function owner() {", "\ta();", "}"];
+			expect(findEnclosingSymbol(lines, 2)).toBe("owner");
+			expect(findEnclosingSymbol(lines, 3)).toBeUndefined();
+			expect(findEnclosingSymbol(lines, -1)).toBeUndefined();
 		});
 
 		it("a malformed, unbalanced fragment still resolves the nearest declaration without throwing", () => {

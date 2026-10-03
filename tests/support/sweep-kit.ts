@@ -791,6 +791,14 @@ export function readWalkedFiles(
  * bounded on both axes: one pass per distinct array, and each pass visits
  * each line once.
  *
+ * Ownership is LEXICAL (#3938 r2): the lines are passed through the shared
+ * {@link stripSource} seam (`strings: "blank"`) before the declaration match,
+ * so a column-0 `function`/`const`-shaped line inside a multi-line block
+ * comment or template literal is blanked to spaces and is NOT an owner. This
+ * is the same comment/string stripper every sweep already runs for detection;
+ * it preserves length, line count and column layout, so the blanked line index
+ * is still the raw line index, and the flagged line's own hash stays RAW.
+ *
  * Matched at column 0 ONLY — no leading whitespace. This repo's shipped
  * source declares every top-level function/class/const at column 0, so
  * anchoring there is what keeps a nested LOCAL (`let evictKey` two lines
@@ -813,7 +821,6 @@ const DECLARATION_PATTERN =
  * the caller already holds for one file, so the entry lives exactly as long
  * as that scan: this is request-local derived state, not a cross-request
  * cache, and the `WeakMap` lets a finished scan's arrays be collected.
- * Callers must not mutate a `lines` array after passing it here.
  */
 const ENCLOSING_OWNER_INDEX = new WeakMap<
 	readonly string[],
@@ -821,16 +828,24 @@ const ENCLOSING_OWNER_INDEX = new WeakMap<
 >();
 
 /**
- * One forward pass over `lines`, recording for every index the nearest
- * column-0 declaration STRICTLY ABOVE it (`undefined` when there is none).
- * The array is memoised per `lines` identity; see
+ * One forward pass over the comment/string-BLANKED lines, recording for every
+ * index the nearest column-0 declaration STRICTLY ABOVE it (`undefined` when
+ * there is none). The array is memoised per `lines` identity; see
  * {@link ENCLOSING_OWNER_INDEX}.
+ *
+ * Ownership is lexical: the text goes through the shared {@link stripSource}
+ * seam (`strings: "blank"`) before matching. A declaration-shaped line inside
+ * a multi-line block comment or template literal is blanked to spaces and is
+ * never an owner, while a real column-0 declaration is untouched. The strip
+ * preserves length, line count and column layout, so a blanked index is the
+ * same raw index the flagged line's own hash uses.
  */
 function enclosingOwnerIndex(
 	lines: readonly string[],
 ): readonly (string | undefined)[] {
 	const cached = ENCLOSING_OWNER_INDEX.get(lines);
 	if (cached !== undefined) return cached;
+	const blanked = stripSource(lines.join("\n")).split("\n");
 	const owners: (string | undefined)[] = new Array(lines.length);
 	let owner: string | undefined;
 	for (let i = 0; i < lines.length; i++) {
@@ -838,13 +853,26 @@ function enclosingOwnerIndex(
 		// reads as `const x = ...` (the eviction idiom's own shape) never
 		// resolves to ITSELF as its own "enclosing" declaration.
 		owners[i] = owner;
-		const match = DECLARATION_PATTERN.exec(lines[i] ?? "");
+		const match = DECLARATION_PATTERN.exec(blanked[i] ?? "");
 		if (match) owner = match[1] ?? match[2];
 	}
 	ENCLOSING_OWNER_INDEX.set(lines, owners);
 	return owners;
 }
 
+/**
+ * Nearest named function/class/const-or-let declaration STRICTLY ABOVE
+ * `lineIndex` (0-based) that is real CODE. The text is matched after
+ * {@link stripSource} blanks comments and string/template contents, so a
+ * declaration-shaped interior line is never an owner. `lineIndex` must be a
+ * valid index into `lines` (`0 <= lineIndex < lines.length`); an out-of-range
+ * index returns `undefined`.
+ *
+ * Contract: the caller must not mutate `lines` after the first call. The owner
+ * index is memoised on the array's identity, so an in-place edit makes a later
+ * call return the pre-edit owner. Every production caller builds the array
+ * once and only reads it.
+ */
 export function findEnclosingSymbol(
 	lines: readonly string[],
 	lineIndex: number,
