@@ -28,7 +28,11 @@
  * call site, so it escaped the census entirely — the spelling-enumerator
  * defect shape (AGENTS.md 34). The #3824 follow-up quoted that fixture.
  *
- * This version folds bounded LOCAL provenance instead of matching spellings:
+ * This version folds bounded LOCAL provenance instead of matching spellings.
+ * Each expression resolves to at most eight possible OUTPUTS, each summarized
+ * by whether an epoch and a lineage are guaranteed in that output and whether
+ * an unresolved part could add more; the verdict is taken per output, so a
+ * conditional's lineage arm cannot launder its epoch-only sibling:
  *
  *   * an object-literal argument contributes its explicit keys (`pair`,
  *     shorthand, method, and a computed STRING-literal key — an unlisted
@@ -36,11 +40,21 @@
  *   * a spread/alias/reference identifier resolves to its nearest SCOPE-AWARE
  *     local binding, whose object-literal initializer is folded recursively;
  *   * `Object.assign(target, ...sources)` folds every argument;
- *   * `cond && {...}` / `a ? b : c` fold both arms;
- *   * a binding that is ever reassigned or has a property written is NOT
- *     resolved (a stale initializer must never read as the live value);
+ *   * `a ? b : c` unions both arms as separate outputs; `a && b` is its right
+ *     operand (a falsy left is a no-op, never an object); `a || b` / `a ?? b`
+ *     union both operands;
+ *   * a binding that is ever reassigned, has a property written, is deleted,
+ *     or is the target of `Object.assign` is NOT resolved (a stale initializer
+ *     must never read as the live value);
  *   * a cycle, a parameter, an import, a call result, a cross-file name, or a
  *     dynamic computed key is UNRESOLVED.
+ *
+ * The call population enumerates the callee spellings that rebind the bridge:
+ * an import rename, a variable alias (`const r = replayThrough…`), a property
+ * alias (`const r = mod.replayThrough…`), a destructured binding
+ * (`const { replayThrough…: r } = mod`), and a subscript call
+ * (`bridge["recordMutation"](…)`). A bridge callee silently absent from the
+ * population is the F3 defect this round closes.
  *
  * An unresolved spread leaves the site INDETERMINATE, never falsely safe: the
  * forwarding might carry an epoch. The indeterminate set is registered below
@@ -55,8 +69,11 @@
  *   * TypeScript type resolution is not attempted, so a binding annotated with
  *     a type that lacks the field is still indeterminate unless its initializer
  *     is a resolvable object literal;
- *   * a bridge function aliased through a variable (`const r = replayThrough…`)
- *     is not in the call population (an import alias IS, see the fixture).
+ *   * a local function or class that shares a bridge callee's name is still
+ *     counted as the bridge — a name collision this fold cannot resolve without
+ *     type/module information. The approximation is LOUD: it can red a safe
+ *     site, never pass an epoch-without-lineage site as safe. No production
+ *     file declares one; a guard pins that population.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -101,7 +118,12 @@ interface BridgeSite {
 	readonly kind: SiteKind;
 	/** Stable per-site identity for the indeterminate admission registry. */
 	readonly key: string;
-	/** Keys the fold proved present on the constructed argument. */
+	/**
+	 * The census-relevant keys (`readGuardBranchEpoch`, `lineage`) the fold
+	 * proved present in at least one possible output of the argument. The
+	 * per-output verdict is `kind`: a key present in one alternative of a
+	 * conditional is still reported here.
+	 */
 	readonly keys: ReadonlySet<string>;
 	/** True when an unresolved spread/alias could add arbitrary keys. */
 	readonly unknown: boolean;
@@ -124,14 +146,30 @@ interface Binding {
 	readonly nodeId: number;
 }
 
-interface Construction {
-	readonly keys: ReadonlySet<string>;
+/**
+ * One possible final object a construction can produce: whether an epoch and a
+ * lineage are guaranteed present in that output, and whether an unresolved part
+ * could add further keys (an epoch without a lineage, in the worst case).
+ *
+ * The verdict is per OUTPUT, not per key set: two mutually exclusive
+ * conditional arms must not let a lineage key in one launder an epoch-only
+ * sibling. Deduping the triples bounds a construction to at most eight outputs,
+ * so folding alternatives is not an exponential branch product.
+ */
+interface Output {
+	readonly epoch: boolean;
+	readonly lineage: boolean;
 	readonly unknown: boolean;
 }
 
+interface Construction {
+	readonly outputs: readonly Output[];
+}
+
+const EMPTY_OUTPUT: Output = { epoch: false, lineage: false, unknown: false };
+
 const UNKNOWN_CONSTRUCTION: Construction = {
-	keys: new Set<string>(),
-	unknown: true,
+	outputs: [{ epoch: false, lineage: false, unknown: true }],
 };
 
 function isScope(node: SgNode): boolean {
@@ -206,9 +244,29 @@ function collectMutatedNames(root: SgNode): ReadonlySet<string> {
 		) {
 			const name = rootIdentifierName(node.field("left"));
 			if (name) names.add(name);
-		} else if (kind === "update_expression" || kind === "delete_expression") {
+		} else if (kind === "update_expression") {
 			const name = rootIdentifierName(node.namedChildren()[0] ?? null);
 			if (name) names.add(name);
+		} else if (kind === "unary_expression") {
+			// `delete x.y` parses as unary_expression whose operator child is
+			// `delete`; this grammar has no `delete_expression` kind.
+			if (node.children().some((child) => child.kind() === "delete")) {
+				const name = rootIdentifierName(node.namedChildren()[0] ?? null);
+				if (name) names.add(name);
+			}
+		} else if (kind === "call_expression") {
+			// `Object.assign(target, ...)` mutates target, so a later read of the
+			// binding cannot resolve to its stale initializer.
+			const fn = node.field("function");
+			if (
+				fn?.kind() === "member_expression" &&
+				fn.field("object")?.text() === "Object" &&
+				fn.field("property")?.text() === "assign"
+			) {
+				const target = node.field("arguments")?.namedChildren()[0] ?? null;
+				const name = rootIdentifierName(target);
+				if (name) names.add(name);
+			}
 		}
 		for (const child of node.children()) visit(child);
 	};
@@ -297,6 +355,61 @@ function buildBindings(root: SgNode): Binding[] {
 	return bindings;
 }
 
+/**
+ * The bridge callee a call names, across the callable spellings the census
+ * enumerates: `recordMutation`, `bridge.recordMutation`, `bridge["recordMutation"]`,
+ * `(bridge.recordMutation)`, and any local alias of them (resolved separately by
+ * `collectCalleeNames`).
+ */
+function calleeName(fn: SgNode | null): string | undefined {
+	if (!fn) return undefined;
+	const kind = fn.kind();
+	if (kind === "identifier") return fn.text();
+	if (kind === "member_expression") return fn.field("property")?.text();
+	if (kind === "subscript_expression") {
+		const index = fn.field("index");
+		if (!index) return undefined;
+		if (index.kind() === "string" || index.kind() === "template_string") {
+			return unquote(index.text());
+		}
+		if (
+			index.kind() === "identifier" ||
+			index.kind() === "property_identifier"
+		) {
+			return index.text();
+		}
+		return undefined;
+	}
+	if (kind === "parenthesized_expression") {
+		return calleeName(fn.namedChildren()[0] ?? null);
+	}
+	return undefined;
+}
+
+/** Every local name an object pattern binds to a bridge callee's key. */
+function collectObjectPatternAliases(
+	pattern: SgNode,
+	out: Array<{ name: string; value: string }>,
+): void {
+	for (const binding of pattern.namedChildren()) {
+		const kind = binding.kind();
+		if (kind === "shorthand_property_identifier_pattern") {
+			out.push({ name: binding.text(), value: binding.text() });
+			continue;
+		}
+		if (kind !== "pair_pattern") continue;
+		const parts = binding.namedChildren();
+		const key = parts[0]?.text();
+		const local = parts[parts.length - 1];
+		if (!key || !local) continue;
+		if (local.kind() === "identifier") {
+			out.push({ name: local.text(), value: key });
+		} else if (local.kind() === "object_pattern") {
+			collectObjectPatternAliases(local, out);
+		}
+	}
+}
+
 /** The callee names this file can call the bridge through, import aliases included. */
 function collectCalleeNames(root: SgNode): ReadonlySet<string> {
 	const names = new Set<string>(BRIDGE_CALLEES);
@@ -315,17 +428,22 @@ function collectCalleeNames(root: SgNode): ReadonlySet<string> {
 			}
 		} else if (kind === "variable_declarator") {
 			const name = node.field("name");
-			const value = node.field("value");
-			if (name?.kind() === "identifier" && value?.kind() === "identifier") {
-				aliases.push({ name: name.text(), value: value.text() });
+			if (name?.kind() === "identifier") {
+				const terminal = calleeName(node.field("value"));
+				if (terminal !== undefined) {
+					aliases.push({ name: name.text(), value: terminal });
+				}
+			} else if (name?.kind() === "object_pattern") {
+				collectObjectPatternAliases(name, aliases);
 			}
 		}
 		for (const child of node.children()) visit(child);
 	};
 	visit(root);
 	// A local alias of the bridge function (`const replay = replayThroughMutationBridge`)
-	// is the same seam under a different name. Close over chains of aliases so
-	// one hop cannot hide the call.
+	// is the same seam under a different name, whether it comes from an import
+	// rename, a variable or property alias, or a destructured binding. Close over
+	// chains of aliases so one hop cannot hide the call.
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -414,12 +532,65 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		return undefined;
 	};
 
-	const union = (left: Construction, right: Construction): Construction => ({
-		keys: new Set([...left.keys, ...right.keys]),
-		unknown: left.unknown || right.unknown,
+	/** Distinct output profiles, deduped by `(epoch, lineage, unknown)`. */
+	const dedupe = (outputs: readonly Output[]): Output[] => {
+		const byProfile = new Map<string, Output>();
+		for (const output of outputs) {
+			const profile = `${output.epoch ? "e" : "-"}${output.lineage ? "l" : "-"}${output.unknown ? "u" : "-"}`;
+			if (!byProfile.has(profile)) byProfile.set(profile, output);
+		}
+		return [...byProfile.values()];
+	};
+
+	/** Both expressions can be the result (a conditional, `||`, or `??`). */
+	const unionConstructions = (
+		left: Construction,
+		right: Construction,
+	): Construction => ({ outputs: dedupe([...left.outputs, ...right.outputs]) });
+
+	/** The result carries the keys of both (a spread). */
+	const combineConstructions = (
+		left: Construction,
+		right: Construction,
+	): Construction => {
+		const outputs: Output[] = [];
+		for (const a of left.outputs) {
+			for (const b of right.outputs) {
+				outputs.push({
+					epoch: a.epoch || b.epoch,
+					lineage: a.lineage || b.lineage,
+					unknown: a.unknown || b.unknown,
+				});
+			}
+		}
+		return { outputs: dedupe(outputs) };
+	};
+
+	const addKey = (
+		construction: Construction,
+		key: string | undefined,
+	): Construction => {
+		if (key !== EPOCH_FIELD && key !== LINEAGE_FIELD) return construction;
+		return {
+			outputs: construction.outputs.map((output) => ({
+				epoch: output.epoch || key === EPOCH_FIELD,
+				lineage: output.lineage || key === LINEAGE_FIELD,
+				unknown: output.unknown,
+			})),
+		};
+	};
+
+	const markUnknown = (construction: Construction): Construction => ({
+		outputs: construction.outputs.map((output) => ({
+			...output,
+			unknown: true,
+		})),
 	});
 
-	const resolveKey = (key: SgNode): { key?: string; dynamic: boolean } => {
+	const resolveKey = (
+		key: SgNode | null,
+	): { key?: string; dynamic: boolean } => {
+		if (!key) return { dynamic: true };
 		const kind = key.kind();
 		if (kind === "property_identifier" || kind === "identifier") {
 			return { key: key.text(), dynamic: false };
@@ -444,29 +615,31 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		node: SgNode,
 		visiting: ReadonlySet<number>,
 	): Construction => {
-		const keys = new Set<string>();
-		let unknown = false;
+		let result: Construction = { outputs: [EMPTY_OUTPUT] };
 		for (const property of node.namedChildren()) {
 			const kind = property.kind();
 			if (kind === "pair") {
-				const { key, dynamic } = resolveKey(property.field("key") ?? property);
-				if (dynamic) unknown = true;
-				else if (key !== undefined) keys.add(key);
+				const resolved = resolveKey(property.field("key") ?? property);
+				result = resolved.dynamic
+					? markUnknown(result)
+					: addKey(result, resolved.key);
 			} else if (kind === "shorthand_property_identifier") {
-				keys.add(property.text());
+				result = addKey(result, property.text());
 			} else if (kind === "method_definition") {
-				const { key, dynamic } = resolveKey(property.field("name") ?? property);
-				if (dynamic) unknown = true;
-				else if (key !== undefined) keys.add(key);
+				const resolved = resolveKey(property.field("name") ?? property);
+				result = resolved.dynamic
+					? markUnknown(result)
+					: addKey(result, resolved.key);
 			} else if (kind === "spread_element") {
-				const inner = resolve(property.namedChildren()[0] ?? null, visiting);
-				for (const spreadKey of inner.keys) keys.add(spreadKey);
-				unknown = unknown || inner.unknown;
+				result = combineConstructions(
+					result,
+					resolve(property.namedChildren()[0] ?? null, visiting),
+				);
 			} else {
-				unknown = true;
+				result = markUnknown(result);
 			}
 		}
-		return { keys, unknown };
+		return result;
 	};
 
 	const resolveObjectAssign = (
@@ -481,9 +654,9 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 		) {
 			return UNKNOWN_CONSTRUCTION;
 		}
-		let result: Construction = { keys: new Set<string>(), unknown: false };
+		let result: Construction = { outputs: [EMPTY_OUTPUT] };
 		for (const argument of node.field("arguments")?.namedChildren() ?? []) {
-			result = union(result, resolve(argument, visiting));
+			result = combineConstructions(result, resolve(argument, visiting));
 		}
 		return result;
 	};
@@ -520,16 +693,25 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 			);
 		}
 		if (kind === "ternary_expression" || kind === "conditional_expression") {
-			return union(
+			return unionConstructions(
 				resolve(node.field("consequence"), visiting),
 				resolve(node.field("alternative"), visiting),
 			);
 		}
 		if (kind === "binary_expression") {
-			return union(
-				resolve(node.field("left"), visiting),
-				resolve(node.field("right"), visiting),
-			);
+			const operator = node.field("operator")?.text();
+			// `a && b` is `b` when the guard holds and the falsy `a` otherwise; a
+			// falsy operand spreads nothing and is never the object result. Taking
+			// only the right operand keeps a guarded `...(lineage && { lineage })`
+			// safe instead of unknown.
+			if (operator === "&&") return resolve(node.field("right"), visiting);
+			if (operator === "||" || operator === "??") {
+				return unionConstructions(
+					resolve(node.field("left"), visiting),
+					resolve(node.field("right"), visiting),
+				);
+			}
+			return UNKNOWN_CONSTRUCTION;
 		}
 		if (kind === "call_expression") return resolveObjectAssign(node, visiting);
 		return UNKNOWN_CONSTRUCTION;
@@ -538,12 +720,29 @@ function makeResolver(root: SgNode): (node: SgNode | null) => Construction {
 	return (node) => resolve(node, new Set<number>());
 }
 
+/**
+ * The verdict over every possible output. `unsafe` dominates: one arm with a
+ * definite epoch and no lineage reds the whole construction even if another arm
+ * looks safe. `indeterminate` means no arm is definitely unsafe, but an
+ * unresolved arm could still carry an epoch without a lineage.
+ */
 function classify(construction: Construction): SiteKind {
-	const hasEpoch = construction.keys.has(EPOCH_FIELD);
-	const hasLineage = construction.keys.has(LINEAGE_FIELD);
-	if (hasEpoch && !hasLineage) return "unsafe";
-	if (!hasLineage && construction.unknown) return "indeterminate";
-	return "safe";
+	let indeterminate = false;
+	for (const output of construction.outputs) {
+		if (output.epoch && !output.lineage) return "unsafe";
+		if (output.unknown && !output.lineage) indeterminate = true;
+	}
+	return indeterminate ? "indeterminate" : "safe";
+}
+
+/** The census-relevant keys present in at least one possible output. */
+function censusKeys(construction: Construction): ReadonlySet<string> {
+	const keys = new Set<string>();
+	for (const output of construction.outputs) {
+		if (output.epoch) keys.add(EPOCH_FIELD);
+		if (output.lineage) keys.add(LINEAGE_FIELD);
+	}
+	return keys;
 }
 
 /**
@@ -580,13 +779,7 @@ function analyzeBridgeSites(source: string, file: string): BridgeSite[] {
 	const sites: BridgeSite[] = [];
 	const visit = (node: SgNode): void => {
 		if (node.kind() === "call_expression") {
-			const fn = node.field("function");
-			const callee =
-				fn?.kind() === "identifier"
-					? fn.text()
-					: fn?.kind() === "member_expression"
-						? fn.field("property")?.text()
-						: undefined;
+			const callee = calleeName(node.field("function"));
 			if (callee !== undefined && calleeNames.has(callee)) {
 				const args = node.field("arguments")?.namedChildren() ?? [];
 				const construction =
@@ -599,8 +792,8 @@ function analyzeBridgeSites(source: string, file: string): BridgeSite[] {
 					callee,
 					kind: classify(construction),
 					key: `${file}::${symbol}::${callee}`,
-					keys: construction.keys,
-					unknown: construction.unknown,
+					keys: censusKeys(construction),
+					unknown: construction.outputs.some((output) => output.unknown),
 				});
 			}
 		}
@@ -635,6 +828,36 @@ function productionSites(): BridgeSite[] {
 }
 
 /**
+ * Bridge callee names a file declares with a `function`, `class`, or top-level
+ * `const`/`let`/`var`. A local declaration sharing a bridge name is the shape the
+ * fold cannot tell from the bridge (F5): it is counted as the bridge, which can
+ * red a safe site but never passes an epoch-without-lineage site. This measures
+ * that population so a real shadow has to be assessed rather than assumed.
+ */
+function localBridgeDeclarations(source: string): string[] {
+	if (!mightContainBridgeCallee(source)) return [];
+	const root = parse(Lang.TypeScript, source).root();
+	const declared = new Set<string>();
+	const visit = (node: SgNode): void => {
+		const kind = node.kind();
+		if (kind === "function_declaration" || kind === "class_declaration") {
+			const name = node.field("name");
+			if (name?.kind() === "identifier" && BRIDGE_CALLEES.has(name.text())) {
+				declared.add(name.text());
+			}
+		} else if (kind === "variable_declarator") {
+			const name = node.field("name");
+			if (name?.kind() === "identifier" && BRIDGE_CALLEES.has(name.text())) {
+				declared.add(name.text());
+			}
+		}
+		for (const child of node.children()) visit(child);
+	};
+	visit(root);
+	return [...declared];
+}
+
+/**
  * Every forwarding site the local fold cannot resolve. Each carries a checked
  * reason; the audit below fails on a new one (a new unsupported form) and on a
  * stale one (a resolved form), so the list can only stay honest.
@@ -656,6 +879,24 @@ describe("#3824 S2 / #3937: a bridge entry names its lineage whenever it can nam
 			.filter((site) => site.kind === "unsafe")
 			.map((site) => `${site.file}:${site.line} (${site.callee})`);
 		expect(unsafe, "epoch-carrying construction without lineage").toEqual([]);
+	});
+
+	it("no production file declares a bridge callee name beyond the bridge definition", () => {
+		const declaringFiles = productionSourceFiles()
+			.map((file) => ({
+				file: relativePosix(REPO_ROOT, file),
+				declared: localBridgeDeclarations(fs.readFileSync(file, "utf8")),
+			}))
+			.filter((entry) => entry.declared.length > 0);
+		// The only production declaration is the bridge itself. A second one must
+		// be assessed here, because the fold would count it as the bridge and could
+		// red a safe producer (loud, never false-clean).
+		expect(declaringFiles).toEqual([
+			{
+				file: "clients/observed-mutation-sources.ts",
+				declared: ["replayThroughMutationBridge"],
+			},
+		]);
 	});
 
 	it("every unresolved forwarding site is admitted with a checked reason", () => {
@@ -812,7 +1053,9 @@ describe("#3937: bounded local object/spread provenance", () => {
 				replayThroughMutationBridge(a);
 			}
 		`);
-		expect(cyclic.kind).not.toBe("safe");
+		// A self-reference cycle leaves the epoch definite and the lineage
+		// unprovable, so the site is `unsafe` (the loud verdict), not silent.
+		expect(cyclic.kind).toBe("unsafe");
 		const reassigned = only(`
 			function replayCaller(epoch: number) {
 				let built = { lineage: 1 };
@@ -828,5 +1071,137 @@ describe("#3937: bounded local object/spread provenance", () => {
 			}
 		`);
 		expect(shadowed.kind).not.toBe("safe");
+	});
+});
+
+describe("#3937 review round 2 — per-output soundness and callee/mutation coverage", () => {
+	const analyze = (source: string): BridgeSite[] =>
+		analyzeBridgeSites(source, "fixture.ts");
+	const only = (source: string): BridgeSite => {
+		const sites = analyze(source);
+		expect(sites).toHaveLength(1);
+		return sites[0] as BridgeSite;
+	};
+
+	// F1 — a conditional's arms are mutually exclusive; a lineage key in one arm
+	// must not launder an epoch-only sibling into a safe verdict.
+	it("flags a heterogeneous conditional whose epoch arm lacks lineage", () => {
+		const site = only(`
+			function replayCaller(cond: boolean) {
+				replayThroughMutationBridge(cond ? { lineage: 1 } : { readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("flags a conditional whose epoch arm is only partially repaired", () => {
+		const site = only(`
+			function replayCaller(cond: boolean, entry: unknown) {
+				const hidden = cond ? { ...entry, readGuardBranchEpoch: 5 } : { lineage: 1 };
+				replayThroughMutationBridge({ ...hidden });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("does not drop an outer lineage overlay over a conditional", () => {
+		const site = only(`
+			function replayCaller(cond: boolean) {
+				const hidden = cond ? { readGuardBranchEpoch: 5 } : {};
+				replayThroughMutationBridge({ ...hidden, lineage: 1 });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	it("does not let an unrelated lineage arm launder a short-circuit epoch arm", () => {
+		const site = only(`
+			function replayCaller(cond: boolean) {
+				const hidden = (cond && { lineage: 1 }) || { readGuardBranchEpoch: 5 };
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("models a && spread as its right operand so a guarded lineage arm stays safe", () => {
+		const site = only(`
+			function replayCaller(lineage: unknown) {
+				replayThroughMutationBridge({ ...(lineage && { lineage }) });
+			}
+		`);
+		expect(site.kind).toBe("safe");
+	});
+
+	// F2 — the pinned TypeScript grammar parses `delete x.y` as unary_expression
+	// (children `delete`, `member_expression`), never `delete_expression`.
+	it("treats a post-construction delete of lineage as unresolved", () => {
+		const site = only(`
+			function replayCaller() {
+				const hidden: any = { lineage: 1, readGuardBranchEpoch: 5 };
+				delete hidden.lineage;
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(site.kind).not.toBe("safe");
+	});
+
+	// F3 — a bridge callee rebound through destructuring, a property alias, or a
+	// subscript is still the same seam; it must be a site, never silently zero.
+	it("sees a destructured bridge callee alias", () => {
+		const site = only(`
+			import * as mod from "./observed-mutation-sources.js";
+			const { replayThroughMutationBridge: replay } = mod;
+			function run() {
+				replay({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("sees a property-aliased bridge callee", () => {
+		const site = only(`
+			import * as mod from "./observed-mutation-sources.js";
+			const replay = mod.replayThroughMutationBridge;
+			function run() {
+				replay({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	it("sees a subscript bridge callee", () => {
+		const site = only(`
+			function run() {
+				bridge["recordMutation"]({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
+	});
+
+	// F4 — Object.assign(target, ...) mutates target, so a later read of the
+	// binding cannot resolve to the stale initializer. It read as unsafe before.
+	it("treats an Object.assign target as unresolved rather than stale", () => {
+		const site = only(`
+			function replayCaller() {
+				const hidden = { readGuardBranchEpoch: 5 };
+				Object.assign(hidden, { lineage: 1 });
+				replayThroughMutationBridge(hidden);
+			}
+		`);
+		expect(site.kind).toBe("indeterminate");
+	});
+
+	// F5 — a local function that shadows a bridge name is conservatively flagged
+	// (loud over-approximation). No production file has this shape; the measured
+	// guard below pins that population so a real shadow must be assessed.
+	it("conservatively flags a same-name local function shadow", () => {
+		const site = only(`
+			function replayThroughMutationBridge(x: unknown) { return x; }
+			function run() {
+				replayThroughMutationBridge({ readGuardBranchEpoch: 5 });
+			}
+		`);
+		expect(site.kind).toBe("unsafe");
 	});
 });
