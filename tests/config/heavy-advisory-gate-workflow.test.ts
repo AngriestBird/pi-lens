@@ -455,17 +455,22 @@ describe("#3926 the merge ref disappears but the captured commit resolves", () =
 	const fixture = setupTestEnvironment("pi-lens-3926-git-");
 	afterAll(() => fixture.cleanup());
 
+	// The fixture owns its identity through the four environment keys Git reads
+	// for BOTH roles. The git-fixture-env seam pins GIT_CONFIG_GLOBAL at
+	// `<cwd>/gitconfig` and discards a caller override, so a config-file identity
+	// never reaches git here; without these four keys `git commit` dies with
+	// "Author identity unknown" on any host with no ambient identity (#3926 r3).
 	it("fails the by-name fetch and succeeds the by-captured-SHA fetch", () => {
-		const gitconfig = resolve(fixture.tmpDir, "gitconfig");
-		writeFileSync(
-			gitconfig,
-			"[user]\n\tname = pi-lens test\n\temail = test@example.com\n",
-		);
 		const git = (cwd: string, args: string[]): string =>
 			gitExecFileSync("git", args, {
 				cwd,
 				encoding: "utf8",
-				env: { GIT_CONFIG_GLOBAL: gitconfig },
+				env: {
+					GIT_AUTHOR_NAME: "pi-lens test",
+					GIT_AUTHOR_EMAIL: "test@example.com",
+					GIT_COMMITTER_NAME: "pi-lens test",
+					GIT_COMMITTER_EMAIL: "test@example.com",
+				},
 			});
 
 		const work = resolve(fixture.tmpDir, "work");
