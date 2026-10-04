@@ -1405,20 +1405,27 @@ describe("index.ts extension wiring", () => {
 			});
 		});
 
-		// #205: resources_discover must point at the real skills/ dir, which lives
-		// at the package root in BOTH the source and the compiled dist/ layouts.
-		// The previous module-relative join landed on dist/skills/ (nonexistent) so
-		// skills silently failed to load.
-		it("resolves skillPaths to an existing skills/ directory at the package root", async () => {
+		// #1416: the `resources_discover` handler must NOT contribute skill
+		// paths. pi applies the settings package filters (`packages[].skills`:
+		// `[]`, `!pattern`, `-path`) only to the `pi.skills` manifest resources;
+		// pi merges a contributed path raw, so the old
+		// `skillPaths: [<packageRoot>/skills]` re-added every excluded skill
+		// (reported on 4.3.0 against pi 0.99.2 and 1.0.0).
+		it("contributes no skillPaths, leaving skill registration to the pi.skills manifest (#1416)", async () => {
 			resetDegradationLedger();
 			const pi = createPiMock();
 			extension(pi.asExtensionAPI());
 
 			const result = (await pi.emit("resources_discover")) as {
-				skillPaths: string[];
+				skillPaths?: string[];
 			};
-			expect(result?.skillPaths).toHaveLength(1);
-			const skillsDir = result.skillPaths[0];
+			expect(result?.skillPaths ?? []).toEqual([]);
+
+			// #205/#519: the package-root skills/ dir and the four namespaced
+			// skill dirs still live there (the manifest's `./skills`), so a
+			// manifest path that escaped the package or a rename-back still
+			// reds even though the hook no longer resolves it.
+			const skillsDir = path.resolve(import.meta.dirname, "..", "skills");
 			expect(skillsDir.replace(/\\/g, "/")).toMatch(/\/skills$/);
 			expect(skillsDir.replace(/\\/g, "/")).not.toMatch(/\/dist\/skills$/);
 			expect(fs.existsSync(skillsDir), `skills dir exists: ${skillsDir}`).toBe(
@@ -1453,10 +1460,10 @@ describe("index.ts extension wiring", () => {
 				).toBe(false);
 			}
 			// #2626: the standard layout (this repo's own skills/ beside
-			// package.json) must produce NO "skills-dir-missing" degradation —
-			// the negative case for the silent-zero-skills fix, driven through
-			// the real resources_discover handler rather than the resolver in
-			// isolation.
+			// package.json) must still produce NO "skills-dir-missing"
+			// degradation — the negative case for the silent-zero-skills fix,
+			// driven through the real resources_discover handler rather than the
+			// resolver in isolation.
 			expect(
 				getDegradationSummary().find(
 					(group) => group.kind === "skills-dir-missing",
