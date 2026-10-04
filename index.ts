@@ -1150,7 +1150,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return {
 					render: (width: number) => {
 						scheduleStaleReconcile();
-						return renderWidget(width, theme, compactWidget);
+						return renderWidget(width, theme, { compact: compactWidget });
 					},
 					invalidate: () => {
 						renderInvalidator = undefined;

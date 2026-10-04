@@ -155,6 +155,12 @@ import { CacheManager } from "../clients/cache-manager.js";
 import { snapshotAdvisoryProvenance } from "../clients/advisory-provenance.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
 import { LENS_FLAGS } from "../clients/lens-flag-registry.js";
+import {
+	clearWidgetState,
+	recordDiagnostics,
+	recordRunner,
+	setSessionLanguages,
+} from "../clients/widget-state.js";
 import extension from "../index.js";
 import {
 	_resetForTests as resetBusPublishForTests,
@@ -2117,5 +2123,99 @@ describe("hook handler crash surfacing (#2884)", () => {
 
 		expectCrashRecorded("turn_end");
 		expect(crashLedgerGroup()?.count).toBe(1);
+	});
+});
+
+// #3959: mount-seam witness — ui.compactWidget must travel from the flag through
+// the setWidget factory to component.render. The renderWidget unit tests cannot
+// kill a mutation that hardcodes { compact: ... } to true/false (review 2).
+describe("ui.compactWidget mount seam (#3959)", () => {
+	let mountSeq = 0;
+
+	function seedSummaryFixture(): string {
+		clearWidgetState();
+		const filePath = path.join(process.cwd(), "compact-widget-mount.ts");
+		setSessionLanguages(["css", "html", "json", "jsts", "markdown", "shell"]);
+		recordRunner(filePath, "type-safety", "failed", 1);
+		recordDiagnostics(filePath, [
+			{
+				severity: "error",
+				semantic: "blocking",
+				message: "blocking detail",
+				line: 2278,
+				rule: "typescript:2451",
+			},
+			{
+				severity: "warning",
+				message: "warning detail",
+				line: 497,
+				rule: "ts-react-antipatterns",
+			},
+		]);
+		return filePath;
+	}
+
+	// Walk the real extension → session_start → setWidget path to grab the
+	// factory and instantiate the component it returns.
+	async function mountWidget(flags: Record<string, boolean | string>) {
+		// Earlier tests leave a primary registration behind; without a reset this
+		// session_start is classified concurrent-secondary and skips mounting.
+		_resetSessionLifecycleForTests();
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-compact-widget-");
+		const savedHome = process.env.PI_LENS_HOME;
+		// Isolate the real ~/.pi-lens config: the widget defaults to visible and
+		// the flag is decided by the mock alone.
+		process.env.PI_LENS_HOME = tmpDir;
+		try {
+			const pi = createPiMock(flags);
+			extension(pi.asExtensionAPI());
+			const ctx = makeCtx({
+				cwd: process.cwd(),
+				sessionId: `compact-widget-mount-${++mountSeq}`,
+			});
+			await pi.emit("session_start", { reason: "startup" }, ctx);
+
+			const mount = ctx.widgetCalls.find((call) => call.key === "pi-lens");
+			expect(mount?.content).toBeTypeOf("function");
+			const factory = mount!.content as (
+				tui: { requestRender: () => void },
+				theme: { fg: (color: string, s: string) => string },
+			) => { render: (width: number) => string[] };
+			return factory(
+				{ requestRender: () => {} },
+				{ fg: (_color: string, s: string) => s },
+			);
+		} finally {
+			if (savedHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = savedHome;
+			cleanup();
+		}
+	}
+
+	it("renders one compact line when lens-compact-widget is enabled", async () => {
+		try {
+			const component = await mountWidget({ "lens-compact-widget": true });
+			// The session_start store restore during mounting clears widget state,
+			// so seed the fixture only after mounting.
+			seedSummaryFixture();
+			const lines = component.render(120);
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("1E");
+			expect(lines[0]).toContain("1W");
+		} finally {
+			clearWidgetState();
+		}
+	});
+
+	it("keeps the multi-line widget when the flag is not set", async () => {
+		try {
+			const component = await mountWidget({});
+			const filePath = seedSummaryFixture();
+			const lines = component.render(120);
+			expect(lines.length).toBeGreaterThan(1);
+			expect(lines.join("\n")).toContain(path.basename(filePath));
+		} finally {
+			clearWidgetState();
+		}
 	});
 });

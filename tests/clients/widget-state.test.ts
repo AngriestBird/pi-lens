@@ -2125,7 +2125,7 @@ describe("renderWidget compact summary (#3959)", () => {
 	it("renders exactly one line: the summary header with languages and totals", () => {
 		summaryFixture();
 
-		const lines = renderWidget(120, theme, true);
+		const lines = renderWidget(120, theme, { compact: true });
 
 		expect(lines).toHaveLength(1);
 		const header = lines[0] ?? "";
@@ -2140,19 +2140,42 @@ describe("renderWidget compact summary (#3959)", () => {
 		expect(visibleWidth(header)).toBeLessThanOrEqual(120);
 	});
 
-	it("is still one line in narrow mode (vertical would otherwise stack per-file rows)", () => {
+	// #3959 review 1: narrow mode must not rely on whole-line tail truncation —
+	// it swallows the totals, which are this line's primary datum. The language
+	// text is what gets truncated.
+	it("keeps totals visible in narrow mode while language text is truncated", () => {
 		summaryFixture();
 
-		const lines = renderWidget(40, theme, true);
+		const lines = renderWidget(40, theme, { compact: true });
 
 		expect(lines).toHaveLength(1);
-		expect(visibleWidth(lines[0] ?? "")).toBeLessThanOrEqual(40);
+		const header = lines[0] ?? "";
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		expect(header).not.toContain("css html json jsts markdown shell");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(40);
 	});
 
-	it("keeps the default multi-line rendering when the flag is off", () => {
+	// #3959 review 2: compact narrow mode keeps the LSP spawning state too,
+	// or it would diverge from wide-mode behavior.
+	it("keeps the LSP spawning chip in compact narrow mode", () => {
+		summaryFixture();
+		recordLsp("typescript", "/repo", "spawn_start");
+
+		const lines = renderWidget(40, theme, { compact: true });
+
+		expect(lines).toHaveLength(1);
+		const header = lines[0] ?? "";
+		expect(header).toContain("LSP↑");
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(40);
+	});
+
+	it("keeps the default multi-line rendering when compact is off", () => {
 		summaryFixture();
 
-		const lines = renderWidget(120, theme, false);
+		const lines = renderWidget(120, theme);
 
 		expect(lines.length).toBeGreaterThan(1);
 		expect(lines.join("\n")).toContain("compact-widget.ts");

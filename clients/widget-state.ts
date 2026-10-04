@@ -2031,13 +2031,33 @@ export function recordLsp(
 
 const HORIZONTAL_MIN_WIDTH = 70;
 
+// #3959: compact summary header. The tally is this line's primary datum, so
+// the language list gets only the leftover width and is truncated first — a
+// whole-line fitLine truncation eats the totals from the tail.
+function fitCompactHeader(
+	width: number,
+	label: string,
+	languages: string,
+	chip: string,
+	summary: string,
+): string {
+	const tail = chip + (summary ? "  " + summary : "");
+	const langBudget = width - visibleWidth(` ${label}`) - visibleWidth(tail);
+	const langs =
+		languages && langBudget >= 4
+			? "  " + fitLine(languages, langBudget - 2, "…")
+			: "";
+	return fitLine(` ${label}${langs}${tail}`, width);
+}
+
 export function renderWidget(
 	width: number,
 	theme: {
 		fg: (color: string, s: string) => string;
 	},
-	// #3959: opt-in one-line summary (ui.compactWidget / --lens-compact-widget).
-	compactWidget = false,
+	// #3959: one-line summary switch (ui.compactWidget / --lens-compact-widget).
+	// An options object instead of a boolean flag parameter, per no-flag-argument.
+	opts?: { compact?: boolean },
 ): string[] {
 	const dim = (s: string) => theme.fg("dim", s);
 	const red = (s: string) => theme.fg("error", s);
@@ -2077,14 +2097,30 @@ export function renderWidget(
 	const spawning = [...lspServers.values()].filter(
 		(s) => s.status === "spawning",
 	);
+	// #3959: compact is a single line, so fold the spawning state into the header
+	// for narrow/wide consistency (narrow mode would otherwise drop it silently).
 	const lspChip =
-		useHorizontal && spawning.length > 0 ? "  " + dim("LSP↑") : "";
+		(useHorizontal || opts?.compact) && spawning.length > 0
+			? "  " + dim("LSP↑")
+			: "";
+
+	// #3959: compact mode stops at the summary header. File rows, the
+	// suppressed count and blocker details stay reachable via lens_diagnostics.
+	if (opts?.compact) {
+		lines.push(
+			fitCompactHeader(
+				w,
+				cyan("pi-lens"),
+				langStr ? dim(langStr) : "",
+				lspChip,
+				summary,
+			),
+		);
+		return lines;
+	}
 
 	const header = ` ${cyan("pi-lens")}${langStr ? "  " + dim(langStr) : ""}${lspChip}${summary ? "  " + summary : ""}`;
 	lines.push(fitLine(header, w));
-	// #3959: compact mode stops at the summary header. File rows, the
-	// suppressed count and blocker details stay reachable via lens_diagnostics.
-	if (compactWidget) return lines;
 	if (totalSuppressed > 0) {
 		lines.push(fitLine(` ${dim(`suppressed: ${totalSuppressed}`)}`, w));
 	}
