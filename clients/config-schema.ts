@@ -50,6 +50,7 @@ import {
 	type ConfigSchemaNode,
 	DENY_KEY,
 	type DenyPolicy,
+	MERGE_STRATEGY_KEY,
 } from "./config-core/schema.js";
 import {
 	flagConfigSectionKeys,
@@ -138,6 +139,45 @@ function denyAnnotation(key: string): { [DENY_KEY]?: DenyPolicy } {
 	return policy === undefined ? {} : { [DENY_KEY]: policy };
 }
 
+/**
+ * The `lsp.servers.<id>` entry shape this schema publishes.
+ *
+ * #2416 reserved the namespace; #3968 adds its first typed FIELD — `covers`,
+ * the runner-ownership claim (`clients/lsp/config.ts`'s
+ * `CustomServerConfig.covers`). The entry stays OPEN on every other field
+ * (`additionalProperties: true` — the loader owns those shapes' diagnostics
+ * today), so declaring `covers` narrows nothing a user already relies on.
+ * The type is the fail-closed half of the claim's validation: a non-array
+ * value or a non-string member is dropped by `config-core`'s `validate()`
+ * with a `PILENS_CFG_0005` record AT THE LEAF'S POINTER (file and tier
+ * attributed by the resolution), before any loader projects it. The ID
+ * semantics (a recognized dispatch runner id) are the loader's check — the
+ * schema cannot import the dispatch registry without closing a
+ * `no-client-cycles` cycle, so this node deliberately declares type, not
+ * enum.
+ *
+ * `x-merge-strategy: "replace"` is the core's default, spelled to state the
+ * intent: the nearest tier that sets `covers` supplies the WHOLE claim (the
+ * field belongs to the server entry's definition — no union of two tiers'
+ * claims), matching `x-merge-strategy`'s documented vocabulary rather than
+ * introducing a strategy kind.
+ */
+function lspServerEntryNode(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		[STABILITY_TIER_KEY]: "experimental",
+		properties: {
+			covers: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[MERGE_STRATEGY_KEY]: "replace",
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+	};
+}
+
 function lspNamespace(): ConfigSchemaNode {
 	const properties: Record<string, ConfigSchemaNode> = {
 		// Reserved but deliberately UNTYPED. `lens-config.ts` already rejects a
@@ -154,7 +194,13 @@ function lspNamespace(): ConfigSchemaNode {
 		properties[key] = {
 			...(declared ? { type: declared } : {}),
 			[STABILITY_TIER_KEY]: "experimental",
-			...(declared === "object" ? { additionalProperties: true } : {}),
+			...(declared === "object"
+				? key === "servers"
+					? // #3968: server entries are TYPED — each carries the covers
+						// claim node — while staying open on every other field.
+						{ additionalProperties: lspServerEntryNode() }
+					: { additionalProperties: true }
+				: {}),
 			...denyAnnotation(key),
 		};
 	}

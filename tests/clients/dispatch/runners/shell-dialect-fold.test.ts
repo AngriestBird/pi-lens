@@ -8,11 +8,16 @@
  * clean — every skip discloses its reason, and a lane-coverage loss discloses
  * the notice (the #3166 r2 / defect shape 10 direction).
  *
- * The four arms the PR body's table names:
+ * The five arms the PR body's table names:
  *
  * - builtin-bash-covered: `.sh` primary bash + tools → `covered-by-primary`.
  * - shuck-installed: `.zsh` primary shuck (bash's `.zsh` claim narrowed) +
  *   shuck on PATH → `covered-by-primary`.
+ * - custom-covers: `.zsh` primary a config-registered server whose
+ *   `lsp.servers.<id>.covers` claims shellcheck (the stacked config PR's
+ *   channel; shuck disabled so the custom entry selects) →
+ *   `covered-by-primary`. This is the arm that fails if the config
+ *   projection drops the field.
  * - shuck-absent: `.zsh` primary shuck, shuck NOT probeable → the covering
  *   lane cannot run, so no covers skip — the dialect gate skips, and the
  *   dispatch surface discloses `coverage-unavailable` (never a silent clean).
@@ -76,6 +81,7 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 	/** The fold seam: real registry + real runner + real covers selection. */
 	async function fold() {
 		const { makeRunnerCtx } = await import("../../../support/runner-ctx.js");
+		const lspConfig = await import("../../../../clients/lsp/config.js");
 		const {
 			RunnerRegistry,
 			dispatchForFile,
@@ -92,6 +98,7 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 			registry,
 			clearLatencyReports,
 			getLatencyReports,
+			initLSPConfig: lspConfig.initLSPConfig,
 		};
 	}
 
@@ -102,6 +109,8 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 		options: {
 			present?: Record<string, boolean>;
 			noLsp?: boolean;
+			/** Run the real config funnel first, so custom servers register. */
+			initLspConfig?: boolean;
 		} = {},
 	): Promise<Record<string, unknown>> {
 		const {
@@ -110,7 +119,9 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 			registry,
 			clearLatencyReports,
 			getLatencyReports,
+			initLSPConfig,
 		} = await fold();
+		if (options.initLspConfig) await initLSPConfig(tmpDir);
 		const filePath = path.join(tmpDir, relFile);
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, content);
@@ -170,6 +181,48 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 			expect(runnerRow).toMatchObject({
 				metadata: { skipReason: "covered-by-primary" },
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("custom-covers arm: a config-declared covers claim on the selected primary defers the runner (covered-by-primary)", async () => {
+		const env = setupTestEnvironment("pi-lens-fold-");
+		try {
+			// The stacked config PR's channel: a project `.pi-lens.json` registers
+			// a custom zsh LSP that claims shellcheck, and disables the builtin
+			// shuck row so the custom entry is the selected primary for `.zsh`
+			// (builtin rows select first). The projection runs through the REAL
+			// loader funnel above — this arm reds when it drops the field.
+			fs.mkdirSync(env.tmpDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					lsp: {
+						servers: {
+							zshz: {
+								name: "zshz",
+								extensions: [".zsh"],
+								command: "zsh-language-server",
+								covers: ["shellcheck"],
+							},
+						},
+						disabledServers: ["shuck"],
+					},
+				}),
+			);
+			const out = await arm(env.tmpDir, "dotfiles/zshrc.zsh", SHEBANG_ZSH, {
+				initLspConfig: true,
+				present: { "bash-language-server": false, shellcheck: true },
+			});
+			expect(out.latency).toMatchObject({
+				runnerId: "shellcheck",
+				status: "skipped",
+				skipReason: "covered-by-primary",
+			});
+			// A config-declared lane carries no gate commands: the skip is the
+			// covers match, not a spawn — nothing reached the process boundary.
+			expect(safeSpawn).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}

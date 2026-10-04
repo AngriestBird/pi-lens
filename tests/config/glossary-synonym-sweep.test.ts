@@ -1036,7 +1036,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/config-core/records.ts": 6,
 		"clients/config-resolve.ts": 16,
 		"clients/degradation-ledger.ts": 16,
-		"clients/effective-config.ts": 10,
+		// #3968 PR 2: +1 — `redactServerSpec` reads `record.covers` (the
+		// rendered claim beside the existing redacted fields).
+		"clients/effective-config.ts": 11,
 		"clients/git-guard.ts": 44,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,

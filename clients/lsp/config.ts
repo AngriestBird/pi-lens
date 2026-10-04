@@ -59,6 +59,12 @@
 import { resetIgnoredConfigWarnCache } from "../config-warn.js";
 import * as os from "node:os";
 import path from "node:path";
+import { LSP_NAMESPACE_KEY } from "../config-locations.js";
+import {
+	type MigrationRecord,
+	migrationSubject,
+} from "../config-core/records.js";
+import type { SourceTier } from "../config-core/provenance.js";
 import {
 	lspSectionOf,
 	type PiLensConfigResolution,
@@ -67,6 +73,11 @@ import {
 	resolvePiLensConfig,
 	summarizeConfigResolution,
 } from "../config-resolve.js";
+import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	isKnownRunnerId,
+	runnerIdentityPopulated,
+} from "../dispatch/known-runner-ids.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	claimPhaseOncePerSession,
@@ -103,6 +114,24 @@ export interface CustomServerConfig {
 	args?: string[];
 	rootMarkers?: string[];
 	env?: Record<string, string>;
+	/**
+	 * Dispatch runner ids this server subsumes (#3968): while this server is
+	 * a file's selected primary LSP, the runners it names defer to the warm
+	 * lane (`lspPrimaryCoversFile`,
+	 * `clients/dispatch/runners/utils/runner-helpers.ts` — the builtin facts
+	 * table `clients/lsp/server-covers.ts` is the builtin rows' spelling of
+	 * the same fact). Values are runner ids projected from the dispatch
+	 * registry's own registrations — a member the registry does not know is
+	 * dropped at load with a visible `PILENS_CFG_0005` record and the server
+	 * still registers, its LSP lane being independent of the claim. The
+	 * ARRAY shape (`array` of `string`) is enforced by the published schema
+	 * (`clients/config-schema.ts`), so a value reaching here is `string[]`;
+	 * an empty array carries no claim. Across tiers the nearest tier that
+	 * sets the field supplies the whole array (the core's default `replace`
+	 * strategy) — the field belongs to the server entry's definition, never
+	 * a union of two tiers' claims.
+	 */
+	covers?: string[];
 }
 
 /**
@@ -428,9 +457,23 @@ export async function loadLSPConfig(
 	// loader's report with the pi-lens loaders' report of the SAME record into
 	// one notice. Filtering here (as round 2 did) silently dropped a pi-lens-
 	// owned record from a document only this multi-file resolution discovered.
-	if (reporting) reportPiLensConfigRecords(resolution.records);
-
-	const config = lspConfigOf(resolution.value);
+	//
+	// The projection VALIDATES the resolved value's covers claims (#3968), and
+	// the funnel owns the NEW records because it owns the resolution's
+	// provenance (`coversClaimRecords`'s file/tier lookups) and the reporting
+	// gate (`report: false` exists so a QUERY cannot warn or consume the
+	// warn-once latch; the ledger row below is durable telemetry and follows
+	// `recordConfigResolved`'s "report: false is not a gate" rule). The
+	// resolution's records and the covers records report here, once, together.
+	const coversProblems = newCoversClaimProblems();
+	const config = lspConfigOf(resolution.value, coversProblems);
+	if (reporting) {
+		reportPiLensConfigRecords([
+			...resolution.records,
+			...coversClaimRecords(resolution, coversProblems),
+		]);
+	}
+	recordCoversUnvalidated(resolution, coversProblems);
 	// #2526: the session's one positive record that config resolution HAPPENED,
 	// written where the resolution actually exists. `report: false` is not a
 	// gate here — the option suppresses USER-FACING notices, and a record in
@@ -464,11 +507,224 @@ export async function loadLSPConfig(
  * a single definition, so a derived config and a session-registered one cannot
  * disagree about what a document means.
  */
-export function lspConfigOf(value: Record<string, unknown>): LSPConfig {
+/**
+ * One custom server's `covers` claim refused in whole or part at load.
+ *
+ * A refusal is per SERVER ENTRY (not per member): the record names the
+ * claim's pointer and carries the counts, so a misspelled runner id is
+ * visible (`PILENS_CFG_0005`) while the server itself still registers.
+ */
+export interface CoversClaimRefusal {
+	/** The server id whose covers claim was refused in whole or part. */
+	readonly serverId: string;
+	/** How many members the resolved claim carried. */
+	readonly declaredCount: number;
+	/** How many members survived (runner ids the registry knows). */
+	readonly keptCount: number;
+}
+
+/** A covers claim accepted WITHOUT validation — no runner registry yet. */
+export interface CoversClaimUnvalidated {
+	readonly serverId: string;
+}
+
+/**
+ * The covers-validation side channel of {@link lspConfigOf}.
+ *
+ * The projection must stay the ONE place a resolved value becomes an
+ * `LSPConfig` (#2427), and the records it generates need the resolution's
+ * provenance (which file, which tier), which the projection itself does not
+ * carry. So the projection VALIDATES (drops what must not reach the gates)
+ * and reports INTO this collector; `loadLSPConfig` — the one funnel, which
+ * has the resolution — turns the entries into records (`coversClaimRecords`)
+ * and the bounded ledger row (`recordCoversUnvalidated`). A caller that
+ * passes no collector gets the same validated projection silently.
+ */
+export interface CoversClaimProblems {
+	readonly refusals: CoversClaimRefusal[];
+	readonly unvalidated: CoversClaimUnvalidated[];
+}
+
+function newCoversClaimProblems(): CoversClaimProblems {
+	return { refusals: [], unvalidated: [] };
+}
+
+/**
+ * The pointer of a server entry's covers claim, spelled the way `merge()`
+ * spells its provenance keys (JSON pointer into the RESOLVED value).
+ */
+function coversPointer(serverId: string): string {
+	return `/${LSP_NAMESPACE_KEY}/servers/${serverId}/covers`;
+}
+
+/**
+ * Which file and tier supplied the claim at `pointer`, walked up the
+ * provenance chain (leaf first, then ancestors); the nearest contributing
+ * document is the last-resort file, so a record never names an empty path.
+ */
+function coversClaimSource(
+	resolution: PiLensConfigResolution,
+	pointer: string,
+): { file: string; tier?: SourceTier } {
+	let candidate: string | undefined = pointer;
+	while (candidate !== undefined) {
+		const entry = resolution.provenance.get(candidate);
+		if (entry) {
+			return {
+				file: entry.file ?? "",
+				...(entry.tier ? { tier: entry.tier } : {}),
+			};
+		}
+		const cut = candidate.lastIndexOf("/");
+		candidate = cut > 0 ? candidate.slice(0, cut) : undefined;
+	}
+	return { file: resolution.documents.at(-1)?.file ?? "" };
+}
+
+/**
+ * THE `PILENS_CFG_0005` records for refused covers claims (#3968).
+ *
+ * One record per refused SERVER ENTRY, carrying the claim's pointer in `key`
+ * (the ledger subject, so per-claim counting stays possible) and the refusal
+ * in `reason` — the counts are structural, and the reason never quotes the
+ * offending member value (the `MigrationRecord` contract; the user value is
+ * also not safe to embed unredacted). The server still registers, so the
+ * reason says so: a user reading "your covers claim was dropped" must not
+ * conclude their LSP lane disappeared.
+ */
+function coversClaimRecords(
+	resolution: PiLensConfigResolution,
+	problems: CoversClaimProblems,
+): MigrationRecord[] {
+	return problems.refusals.map((refusal) => {
+		const pointer = coversPointer(refusal.serverId);
+		const { file, tier } = coversClaimSource(resolution, pointer);
+		const dropped = refusal.declaredCount - refusal.keptCount;
+		return {
+			code: "PILENS_CFG_0005",
+			file,
+			key: pointer,
+			subject: migrationSubject(file, pointer),
+			reason:
+				`lsp.servers.${refusal.serverId}.covers declares member(s) that ` +
+				`are not recognized dispatch runner ids; ${dropped} of ` +
+				`${refusal.declaredCount} member(s) dropped, the server still ` +
+				keptTail(refusal.keptCount),
+			...(tier ? { tier } : {}),
+		};
+	});
+}
+
+/** The refusal tail: what remains of the claim after the drop. */
+function keptTail(keptCount: number): string {
+	return keptCount > 0
+		? "registers with the remaining covers claim"
+		: "registers with no covers claim";
+}
+
+/**
+ * The bounded ledger row for covers claims accepted UNVALIDATED (#3968).
+ *
+ * Fires regardless of the reporting gate: `report: false` exists so a QUERY
+ * cannot fire user-facing notices or consume the warn-once latch, and this
+ * row is neither — the skip-itself observation (`catalog shape 10`), bounded
+ * once per session per claim. Subject `<file>\0<pointer>` so a covers entry
+ * in two documents yields two records, each naming the file.
+ */
+function recordCoversUnvalidated(
+	resolution: PiLensConfigResolution,
+	problems: CoversClaimProblems,
+): void {
+	for (const unvalidated of problems.unvalidated) {
+		const pointer = coversPointer(unvalidated.serverId);
+		const { file } = coversClaimSource(resolution, pointer);
+		recordDegradationOnce({
+			kind: "lsp-covers-unvalidated",
+			subject: `${file}\0${pointer}`,
+			reason:
+				"no runner registry has populated this process yet; the covers " +
+				"claim was accepted without runner-id validation and the next " +
+				"config load validates it",
+			metadata: { pointer },
+		});
+	}
+}
+
+/**
+ * THE resolved value's `lsp.servers` object, each entry's covers claim
+ * validated against the dispatch registry's runner ids (#3968).
+ *
+ * Fail-closed on IDENTITY, never on registration: an unknown runner member
+ * is dropped from the claim (wholly when nothing survives, so the field is
+ * gone rather than an empty claim) and the server keeps every other field —
+ * its LSP lane is independent of what it claims to subsume. When no runner
+ * registry has populated the process yet (the first session's load races
+ * the fire-and-forget dispatch warm-up), the claim is accepted UNVALIDATED
+ * and the skip is reported into the collector — dropped there, it would be
+ * silent nondeterminism; `known-runner-ids.ts` names why that arm fails
+ * open rather than closed.
+ */
+function coversValidatedServers(
+	servers: Record<string, unknown>,
+	problems: CoversClaimProblems | undefined = undefined,
+): Record<string, CustomServerConfig> {
+	const out: Record<string, CustomServerConfig> = {};
+	for (const [id, raw] of Object.entries(servers)) {
+		const entry = raw as CustomServerConfig;
+		// An empty (or absent) array carries no claim — nothing to validate,
+		// nothing to record; the configured no-claim entry rides through so
+		// `effective_config` still shows the server as configured.
+		if (!entry.covers?.length) {
+			out[id] = entry;
+			continue;
+		}
+		if (!runnerIdentityPopulated()) {
+			problems?.unvalidated.push({ serverId: id });
+			out[id] = entry;
+			continue;
+		}
+		const kept: string[] = [];
+		for (const member of entry.covers) {
+			if (isKnownRunnerId(member)) kept.push(member);
+		}
+		if (kept.length === entry.covers.length) {
+			out[id] = entry;
+			continue;
+		}
+		problems?.refusals.push({
+			serverId: id,
+			declaredCount: entry.covers.length,
+			keptCount: kept.length,
+		});
+		const { covers: _dropped, ...rest } = entry;
+		out[id] = kept.length > 0 ? { ...rest, covers: kept } : rest;
+	}
+	return out;
+}
+
+/**
+ * The resolved value's custom-server entries in the shape the runtime
+ * registers them — each entry's covers claim validated exactly like
+ * `lspConfigOf`'s (one definition of a valid claim). `effective_config`'s
+ * redacted projection reads through this instead of the raw section, so the
+ * covers values it renders are the claim the runtime actually holds — a
+ * member the loader dropped cannot render as if the runtime would honor it.
+ */
+export function customServerSpecsOf(
+	value: Record<string, unknown>,
+): Record<string, CustomServerConfig> {
+	const servers = asRecord(lspSectionOf(value).servers);
+	return servers ? coversValidatedServers(servers) : {};
+}
+
+export function lspConfigOf(
+	value: Record<string, unknown>,
+	problems?: CoversClaimProblems,
+): LSPConfig {
 	const section = lspSectionOf(value);
 	const config: LSPConfig = {};
 	const servers = asRecord(section.servers);
-	if (servers) config.servers = servers as Record<string, CustomServerConfig>;
+	if (servers) config.servers = coversValidatedServers(servers, problems);
 	const serverOverrides = asRecord(section.serverOverrides);
 	if (serverOverrides) {
 		config.serverOverrides = serverOverrides as Record<
@@ -500,6 +756,10 @@ export function createCustomServer(
 		custom: true,
 		extensions: config.extensions,
 		idleEviction: "unmeasured",
+		// The config-declared covers channel (#3968): the claim the loader
+		// validated (`lspConfigOf`'s projection drops unknown runner ids) rides
+		// the server entry into the runner-coverage seam.
+		...(config.covers ? { covers: config.covers } : {}),
 		...(config.rootMarkers ? { rootMarkers: config.rootMarkers } : {}),
 		root: config.rootMarkers
 			? async (file) =>

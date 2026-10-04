@@ -91,6 +91,7 @@ import {
 	DELTA_UNUSED_PROMOTION_NOTE,
 	formatDiagnostics,
 } from "./utils/format-utils.js";
+import { registerRunnerId } from "./known-runner-ids.js";
 
 // --- Runner Registry ---
 
@@ -100,6 +101,11 @@ export class RunnerRegistry implements RunnerRegistryContract {
 	register(runner: RunnerDefinition): void {
 		if (this.runners.has(runner.id)) return;
 		this.runners.set(runner.id, runner);
+		// The registry is the runner-id identity source (#3968): every id that
+		// enters any registry is the set `lsp.servers.<id>.covers` validation
+		// projects from (`clients/dispatch/known-runner-ids.ts`, an import
+		// leaf so the config loader can ask without importing this graph).
+		registerRunnerId(runner.id);
 	}
 
 	get(id: string): RunnerDefinition | undefined {
