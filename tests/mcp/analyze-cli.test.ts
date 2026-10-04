@@ -336,12 +336,31 @@ function readFailureRecord(home: string): AnalyzeFailureRecord | undefined {
  */
 describe("pi-lens-analyze cold-path witnesses", { retry: 2 }, () => {
 	let coldDir: string;
+	// Every cwd a case hands to the bin, so the describe can remove exactly the
+	// `turnEndStatusPathForCwd` artifacts those cases own (#3961 F3). `coldDir`
+	// plus the two argv cwds the failure/fallback cases create; no glob, no
+	// foreign deletion.
+	const ownedCwds = new Set<string>();
+
+	const ownCwd = (cwd: string): string => {
+		ownedCwds.add(cwd);
+		return cwd;
+	};
 
 	beforeEach(() => {
 		coldDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cli-cold-"));
+		ownedCwds.add(coldDir);
 	});
 
 	afterEach(() => {
+		for (const cwd of ownedCwds) {
+			try {
+				fs.rmSync(turnEndStatusPathForCwd(cwd), { force: true });
+			} catch {
+				/* best effort, same as the turn-end describe's own cleanup */
+			}
+		}
+		ownedCwds.clear();
 		vi.unstubAllEnvs();
 		removeTempDirSync(coldDir);
 	});
@@ -371,7 +390,7 @@ describe("pi-lens-analyze cold-path witnesses", { retry: 2 }, () => {
 	// not the child's process.cwd().
 	it("records the --cwd value when the stdin read fails", async () => {
 		vi.stubEnv("PI_LENS_TEST_MODE", "0");
-		const argvCwd = path.join(coldDir, "argv-cwd");
+		const argvCwd = ownCwd(path.join(coldDir, "argv-cwd"));
 		const childCwd = path.join(coldDir, "child-cwd");
 		fs.mkdirSync(argvCwd);
 		fs.mkdirSync(childCwd);
@@ -406,7 +425,7 @@ describe("pi-lens-analyze cold-path witnesses", { retry: 2 }, () => {
 	// id 32: the argv `--cwd` wins over a stdin payload's cwd; the report must be
 	// relative to the argv cwd.
 	it("prefers the argv --cwd over the stdin payload cwd", async () => {
-		const argvCwd = path.join(coldDir, "argv");
+		const argvCwd = ownCwd(path.join(coldDir, "argv"));
 		const payloadCwd = path.join(coldDir, "payload");
 		fs.mkdirSync(argvCwd);
 		fs.mkdirSync(payloadCwd);
@@ -441,6 +460,7 @@ describe("pi-lens-analyze cold-path witnesses", { retry: 2 }, () => {
 	// captured options object, so it holds whether or not a language server is
 	// installed (a skipped lsp runner still records its row).
 	it("defaults to the no-lsp path and schedules lsp only with --lsp", async () => {
+		vi.stubEnv("PI_LENS_DISABLE_LSP_INSTALL", "1");
 		vi.stubEnv("PI_LENS_DISABLE_TOOL_INSTALL", "1");
 		vi.stubEnv("PI_LENS_TEST_MODE", "0");
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cli-latency-"));
