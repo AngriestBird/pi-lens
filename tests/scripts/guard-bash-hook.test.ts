@@ -2837,6 +2837,16 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(runHook("if true; then git commit -n; fi").status).toBe(2);
 	});
 
+	// #3787 mutation follow-up: braces group commands but do not gate a
+	// failed check; excluding every keyword must not also exclude `{`.
+	it.each(["git commit -m x", "git push"])(
+		"denies an ungated %s after a brace-led check",
+		(write) => {
+			expect(findDeny(`{ npm test; }; ${write}`)).toBe("checkUngated");
+			expect(findDeny(`{ npm test && ${write}; }`)).toBeNull();
+		},
+	);
+
 	const GLOBAL_FLAGS: string[] = [
 		"--git-dir x",
 		"--work-tree x",
