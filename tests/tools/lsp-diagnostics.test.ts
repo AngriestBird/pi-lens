@@ -330,7 +330,9 @@ describe("lsp_diagnostics tool", () => {
 				unavailable: 1,
 			});
 			// Unsupported and unavailable files were never checked, so they are not clean.
-			expect(result.details?.cleanFiles).toBe(result.details?.outcomeCounts.clean);
+			expect(result.details?.cleanFiles).toBe(
+				result.details?.outcomeCounts.clean,
+			);
 			expect(result.details?.outcomes.map((entry: any) => entry.file)).toEqual(
 				files,
 			);
