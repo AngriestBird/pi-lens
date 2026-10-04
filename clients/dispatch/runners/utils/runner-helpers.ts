@@ -32,10 +32,8 @@ import {
 	resetPathWalkMemo,
 	type InstallAttempt,
 } from "../../../installer/index.js";
-import {
-	getServersForFileWithConfig,
-	isServerDisabled,
-} from "../../../lsp/config.js";
+import { getServersForFileWithConfig } from "../../../lsp/config.js";
+import { BUILTIN_SERVER_RUNNER_COVERS } from "../../../lsp/server.js";
 import {
 	findGlobalBinary,
 	findLocalBinAt,
@@ -89,27 +87,78 @@ export {
 } from "./availability-policy.js";
 
 /**
- * True when the LSP runner will cover `ctx.filePath` via the given PRIMARY server
- * id. Used by CLI runners that duplicate a linter a warm LSP already wraps
- * (taplo↔`toml` LSP = `taplo lsp`; shellcheck↔`bash` LSP runs shellcheck
- * internally) so they SELF-SKIP and stop double-reporting the same findings (#233)
- * — the same dormant-when-LSP-covers pattern the ast-grep napi runner uses.
+ * The covering lane a runner should defer to: the file's SELECTED PRIMARY
+ * server claims one of its declared runner capabilities, with the gate
+ * commands the caller must probe (`DispatchContext.hasTool`) before honoring
+ * the fact — a covering lane that cannot run never defers, so coverage never
+ * regresses.
+ */
+export interface PrimaryRunnerCoverage {
+	/** The covering server's id (the file's selected primary). */
+	serverId: string;
+	/**
+	 * Probeable commands gating the covering lane, from the builtin covers
+	 * fact. A config-declared `covers` (the stacked PR) carries none — its
+	 * producer owns its availability story.
+	 */
+	gateCommands: readonly string[];
+}
+
+/**
+ * The capability question behind the #233 self-skip: does the file's selected
+ * PRIMARY LSP server subsume `runnerId` (a dispatch runner id — the RUNNER
+ * capability, never a server id)? Used by CLI runners that duplicate a linter
+ * a warm LSP already wraps (shcheck → the `bash`/`shuck` LSPs embed
+ * shellcheck; taplo CLI → the `toml` LSP embeds the taplo linter) so they
+ * SELF-SKIP and stop double-reporting the same findings.
  *
- * Non-spawning and conservative: honors the `no-lsp` kill switch + per-server
- * disable/config, and only matches when this server is the SELECTED primary for
- * the file (first non-auxiliary candidate). The caller additionally gates on tool
- * availability, so coverage never regresses when the LSP is absent/disabled.
+ * The claim has two sources, read in one place: the server row's own
+ * `covers` field (config-declared, the stacked PR's channel) and the builtin
+ * facts table `BUILTIN_SERVER_RUNNER_COVERS` (clients/lsp/server.ts), which
+ * additionally carries the availability gate commands. Callers gate with
+ * `coveringLaneAvailable` so a missing covering lane never skips.
+ *
+ * The old spelling — `lspPrimaryCoversFile(ctx, "bash")`, a literal SERVER id
+ * at a call site asking about a RUNNER's capability — was #3968's defect: a
+ * custom/covers-capable shell LSP could not defer the runner (the zdot
+ * workaround needed `disabledServers: ["bash"]` to make `bash` NOT the
+ * primary). Non-spawning and conservative: honors the `no-lsp` kill switch;
+ * the primary itself is availability-independent BY SELECTION (disabled
+ * servers never select), and availability gate work happens in
+ * `coveringLaneAvailable`.
  */
 export function lspPrimaryCoversFile(
 	ctx: DispatchContext,
-	serverId: string,
-): boolean {
-	if (ctx.pi?.getFlag?.("no-lsp")) return false;
-	if (isServerDisabled(serverId, ctx.filePath)) return false;
+	runnerId: string,
+): PrimaryRunnerCoverage | undefined {
+	if (ctx.pi?.getFlag?.("no-lsp")) return undefined;
 	const primary = getServersForFileWithConfig(ctx.filePath).find(
 		(s) => s.role !== "auxiliary",
 	);
-	return primary?.id === serverId;
+	if (!primary) return undefined;
+	const fact = BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
+	const covers = primary.covers ?? fact?.runnerIds;
+	if (!covers?.includes(runnerId)) return undefined;
+	return {
+		serverId: primary.id,
+		gateCommands: fact?.gateCommands ?? [],
+	};
+}
+
+/**
+ * The availability half of the seam: every gate command the covering fact
+ * names must probe present (`ctx.hasTool`), else the runner must NOT skip —
+ * coverage never regresses (#3968's "when the covering lane is absent, no
+ * skip").
+ */
+export async function coveringLaneAvailable(
+	ctx: DispatchContext,
+	cover: PrimaryRunnerCoverage,
+): Promise<boolean> {
+	for (const gate of cover.gateCommands) {
+		if (!(await ctx.hasTool(gate))) return false;
+	}
+	return true;
 }
 
 const _realThisDir = (() => {

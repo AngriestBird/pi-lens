@@ -154,10 +154,16 @@ export interface RunnerDefinition {
 	run(ctx: DispatchContext): Promise<RunnerResult>;
 }
 
-/** Closed telemetry taxonomy for expected runner skips. */
+/** Closed telemetry taxonomy for expected runner skips (#3968 added the two
+ * ownership reasons: a runner may skip because its capability is policy-
+ * deferred to a lane that owns it, or because its tool categorically cannot
+ * serve the file's dialect — both are policy decisions named at the delivery
+ * surface, never an empty output read as clean). */
 export const RUNNER_SKIP_REASONS = [
 	"no-files-matched",
 	"configured-non-biome-linter",
+	"dialect-unsupported",
+	"covered-by-primary",
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 

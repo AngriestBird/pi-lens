@@ -37,6 +37,7 @@ step log only, because it flaps.
 |---|---|---|---|---|---|---|
 | ast-grep | auxiliary | unmeasured | eligible | · | ok | preserved |
 | bash | primary | unmeasured | eligible | · | ok | preserved |
+| shuck | primary | unmeasured | eligible | · | ok | preserved |
 | clojure | primary | unmeasured | eligible | · | ok | preserved |
 | cmake | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
 | cpp | primary | unmeasured | eligible | · | ok | preserved |

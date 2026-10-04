@@ -39,6 +39,17 @@ describe("rule-policy.matchesRule", () => {
 		expect(evaluateRulePolicy("no-eval", policyMap)).toEqual({ dropped: true });
 	});
 
+	it("drops a shuck LSP diagnostic by its native code and by the rendered spelling (#3968)", () => {
+		// The shuck LSP renders rule `shuck:C006`; a user disabling the native
+		// code reaches it via the shared normalization (the rendered spelling
+		// matches raw, the bare code matches normalized).
+		const policyMap = { zot: { disable: ["C006"] } };
+		expect(evaluateRulePolicy("shuck:C006", policyMap)).toEqual({
+			dropped: true,
+		});
+		expect(evaluateRulePolicy("C006", policyMap)).toEqual({ dropped: true });
+	});
+
 	it("does NOT drop a different rule", () => {
 		const policyMap = { "no-eval": { disable: ["no-eval"] } };
 		expect(evaluateRulePolicy("no-debugger", policyMap)).toEqual({

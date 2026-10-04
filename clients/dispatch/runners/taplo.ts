@@ -15,6 +15,7 @@ import type {
 import { findingsResult } from "../types.js";
 import {
 	createAvailabilityChecker,
+	coveringLaneAvailable,
 	lspPrimaryCoversFile,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
@@ -142,11 +143,15 @@ const taploRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		// #233: the `toml` LSP server IS `taplo lsp` (same binary). When that LSP
-		// covers this file, the warm server already produces these diagnostics —
-		// skip the redundant CLI scan to avoid double-reporting. Stays active when
-		// the LSP is disabled/unavailable so TOML coverage never regresses.
-		if (lspPrimaryCoversFile(ctx, "toml") && (await ctx.hasTool("taplo"))) {
+		// #233, generalized (#3968): the `toml` LSP server IS `taplo lsp` (same
+		// binary), so the LSP covers this RUNNER's capability — the covers fact
+		// table (clients/lsp/server.ts `toml` → `taplo`) carries the mapping and
+		// the availability gates are the LSP's own binary. The warm server
+		// already produces these diagnostics — skip the redundant CLI scan.
+		// Stays active when the LSP is disabled/unavailable so TOML coverage
+		// never regresses.
+		const cover = lspPrimaryCoversFile(ctx, "taplo");
+		if (cover && (await coveringLaneAvailable(ctx, cover))) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
