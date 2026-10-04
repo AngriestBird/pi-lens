@@ -1937,19 +1937,23 @@ export class ReadGuard {
 		const boundIndex = fileReads.lastIndexOf(boundRead);
 		if (boundIndex < 0) return false;
 
-		for (let i = fileReads.length - 1; i > boundIndex; i -= 1) {
-			const candidate = fileReads[i];
+		// Newest-first reads recorded after the bound one. Iterating a reversed
+		// slice types `candidate` as `ReadRecord`: a raw `fileReads[i]` narrows to
+		// `ReadRecord | undefined` under `noUncheckedIndexedAccess` and would add
+		// strictness diagnostics without proving anything (the index is already in
+		// range). The order is exactly the old `length - 1` down to `boundIndex + 1`.
+		for (const candidate of fileReads.slice(boundIndex + 1).reverse()) {
 			if (candidate.provisional === true) continue;
 			// `currentLinesMatchReadSnapshot` reads the disk itself and reports
 			// `checked: false` for a candidate that covers no hash, so a partial
 			// or unhashed newer read never reaches disk and never qualifies.
 			const deliversEveryEditedLine = rangesToCheck.every((range) => {
-				const snapshot = currentLinesMatchReadSnapshot(
+				const evidence = currentLinesMatchReadSnapshot(
 					filePath,
 					candidate,
 					range,
 				);
-				return snapshot.checked && snapshot.matches;
+				return evidence.checked && evidence.matches;
 			});
 			if (deliversEveryEditedLine) return true;
 		}

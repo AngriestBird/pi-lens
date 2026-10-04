@@ -13,7 +13,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import type { BiomeClient } from "../../clients/biome-client.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
@@ -22,6 +30,11 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { computeHashlineAnchors } from "../../clients/hashline-anchor.js";
 import { lineContentHash } from "../../clients/read-guard.js";
+import {
+	READ_BRIDGE_KEY,
+	registerReadBridge,
+	type ReadBridge,
+} from "../../clients/read-bridge.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
@@ -2385,6 +2398,95 @@ describe("#3524: the creation read is the written content", () => {
 			const edit = await positionalEdit(runtime, file, [[2, 2, "agent2"]]);
 			expect(edit.reason).toBeUndefined();
 			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #3962: the bridge's `contentBinding` is the only content-bound read anchor,
+ * but the block's own remedy ("Re-read the file") produces a NATIVE record,
+ * which carries read-time hashes and never a binding. This drives the real
+ * cross-extension bridge and the real native `read` tool through
+ * `handleToolCall` / `handleToolResult`: the stale binding is superseded only
+ * by a newer covering read whose hashes still match disk. The bridge is
+ * registered once for the file (its global property is non-configurable);
+ * `_bridgeRuntime` points it at the current case's guard.
+ */
+let _bridgeRuntime: RuntimeCoordinator | undefined;
+
+describe("#3962: a native re-read supersedes a stale bridge binding", () => {
+	beforeAll(() => {
+		registerReadBridge({
+			getReadGuard: () => _bridgeRuntime!.readGuard,
+			getTurnIndex: () => 0,
+			peekWriteIndex: () => 0,
+			isRecordable: () => true,
+		});
+	});
+
+	it("lets the real read tool clear a stale bridge binding for a positional edit", async () => {
+		const env = setupTestEnvironment("rg-3962-native-");
+		try {
+			const file = fixture(
+				env.tmpDir,
+				"b.ts",
+				"const a = 1;\nconst b = 2;\nconst c = 3;\n",
+			);
+			const runtime = newRuntime(env.tmpDir);
+			_bridgeRuntime = runtime;
+			// The producer's real recordRead: a non-zero read binds the bytes it saw.
+			const bridge = (globalThis as Record<symbol, ReadBridge>)[
+				READ_BRIDGE_KEY
+			];
+			bridge.recordRead({
+				filePath: file,
+				requestedOffset: 1,
+				requestedLimit: 1,
+			});
+			expect(runtime.readGuard.checkEdit(file, [1, 1]).action).toBe("allow");
+			// An external writer changes the bytes; the binding goes stale.
+			writeNow(file, "const a = 99;\nconst b = 2;\nconst c = 3;\n");
+			// The remedy the block asks for: the real native read of the new bytes.
+			await piRead(runtime, file, { offset: 1, limit: 3 });
+			const edit = await positionalEdit(runtime, file, [
+				[1, 1, "const a = 100;"],
+			]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("still blocks when the native re-read did not deliver the edited line", async () => {
+		const env = setupTestEnvironment("rg-3962-native-noncover-");
+		try {
+			const file = fixture(
+				env.tmpDir,
+				"b.ts",
+				"const a = 1;\nconst b = 2;\nconst c = 3;\n",
+			);
+			const runtime = newRuntime(env.tmpDir);
+			_bridgeRuntime = runtime;
+			const bridge = (globalThis as Record<symbol, ReadBridge>)[
+				READ_BRIDGE_KEY
+			];
+			bridge.recordRead({
+				filePath: file,
+				requestedOffset: 1,
+				requestedLimit: 1,
+			});
+			writeNow(file, "const a = 99;\nconst b = 2;\nconst c = 3;\n");
+			// A newer native read of line 1 only; the edit targets line 3, which
+			// the read never delivered. The strong anchor is not dropped for it.
+			await piRead(runtime, file, { offset: 1, limit: 1 });
+			const edit = await positionalEdit(runtime, file, [
+				[3, 3, "const c = 30;"],
+			]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("content no longer matches");
 		} finally {
 			env.cleanup();
 		}
