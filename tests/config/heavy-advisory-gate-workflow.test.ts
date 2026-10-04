@@ -1,7 +1,19 @@
-import { existsSync, readFileSync } from "node:fs";
+// flake-shape: real-process-spawn — #3926 executes the real `Record Windows
+// Vitest outcome` bash block at its true process boundary under GitHub's
+// `bash --noprofile --norc -eo pipefail` flags. A fixture Node program at the
+// production population-script path is the only stand-in; the `node`
+// interpreter and the child PATH are the real ones, so no delimiter,
+// executable name, or shebang is mocked (#3926 review F1). It also drives the
+// ref-deleted Git mechanism through the registered
+// tests/support/git-fixture-env.ts seam. Both are the boundaries under test;
+// no in-process double observes them.
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { setupTestEnvironment } from "../clients/test-utils.js";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 import {
 	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,
@@ -21,6 +33,8 @@ const ROOT = resolve(import.meta.dirname, "../..");
 type Step = {
 	id?: string;
 	name?: string;
+	uses?: string;
+	with?: Record<string, string>;
 	run?: string;
 	env?: Record<string, string>;
 };
@@ -255,5 +269,279 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		expect(REQUIRED_CONTEXTS).not.toContain(gate.name);
 		expect(CI.jobs["unit-tests"].name).toBe("Unit tests");
 		expect(CI.jobs["unit-tests"].if).toBe("always()");
+	});
+});
+
+// #3926: the heavy advisory jobs start only after the required checks pass, so
+// auto-merge may already have deleted the mutable `refs/pull/<n>/merge` that
+// `github.ref` names. A gated checkout must rely on the action's default
+// captured commit (`github.sha`, the validated test-merge tree), never on the
+// ephemeral ref. The sibling gated jobs `mutation` and `codeql` already do.
+// The rule is derived from `needs`, so a future gated job is covered.
+describe("#3926 a gated checkout pins the captured commit, never the merge ref", () => {
+	const checkoutSteps = (id: string): Step[] =>
+		(CI.jobs[id]?.steps ?? []).filter(
+			(step) => step.uses?.startsWith("actions/checkout@") === true,
+		);
+	const checkoutRefs = (id: string): Array<string | undefined> =>
+		checkoutSteps(id).map((step) => step.with?.ref);
+
+	// Recurrence (#3807/#3924): a gated job (or this one) restores
+	// `ref: ${{ github.ref }}` and its checkout fetches a ref the merge deleted.
+	it("keeps every checkout behind heavy-gate off the ephemeral pull ref", () => {
+		const gatedIds = gated.map(([id]) => id);
+		expect(gatedIds.length).toBeGreaterThan(0);
+		const offenders: string[] = [];
+		for (const id of gatedIds) {
+			const steps = checkoutSteps(id);
+			// A gated job with no checkout step would make the ref sweep
+			// vacuous, so its absence is its own failure.
+			expect(
+				steps.length,
+				`${id} must still check out the repository`,
+			).toBeGreaterThan(0);
+			for (const step of steps) {
+				const ref = step.with?.ref;
+				if (ref === undefined || ref === "${{ github.sha }}") continue;
+				offenders.push(`${id}: ref=${ref}`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
+	// Positive pin: the one site #3807/#3924 proved red now uses the default.
+	it("uses the captured commit on unit-tests-windows", () => {
+		expect(checkoutRefs("unit-tests-windows")).not.toContain(
+			"${{ github.ref }}",
+		);
+		expect(
+			checkoutRefs("unit-tests-windows").every(
+				(ref) => ref === undefined || ref === "${{ github.sha }}",
+			),
+		).toBe(true);
+	});
+
+	// The action's default is what makes the captured commit reachable; the
+	// evaluated revision must stay pinned, not drift to a floating tag.
+	it("keeps the pinned checkout revision", () => {
+		for (const [id, job] of gated) {
+			for (const step of job.steps ?? []) {
+				if (!step.uses?.startsWith("actions/checkout@")) continue;
+				expect(step.uses, `${id} checkout revision`).toBe(
+					"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+				);
+			}
+		}
+	});
+});
+
+// #3926 secondary defect: the always-run summary invoked the checked-out
+// population script unconditionally, so after a failed checkout it died with
+// `Cannot find module ... win32-gate-population.mjs` instead of reporting that
+// the subset never ran. These cases run the real `Record Windows Vitest
+// outcome` `run:` block under GitHub's `bash --noprofile --norc -eo pipefail`
+// flags at a true process boundary. A fixture Node program at the production
+// population-script path is the only stand-in, and it runs under the real
+// `node` on PATH, so the child PATH is never rewritten and no delimiter,
+// executable name, or `#!/bin/sh` shebang is mocked (#3926 review F1: the old
+// `stubBin + ":" + PATH` line was POSIX-only and the stub shadowed `node`
+// only on a `:`-delimited PATH).
+describe("#3926 the Windows summary stays honest when the tree is unavailable", () => {
+	const summaryStep = (CI.jobs["unit-tests-windows"]?.steps ?? []).find(
+		(step) => step.name === "Record Windows Vitest outcome",
+	);
+
+	const fixture = setupTestEnvironment("pi-lens-3926-");
+
+	beforeAll(() => {
+		const lib = resolve(fixture.tmpDir, "scripts/lib");
+		mkdirSync(lib, { recursive: true });
+		writeFileSync(
+			resolve(lib, "win32-gate-population.mjs"),
+			[
+				'import { appendFileSync } from "node:fs";',
+				'import { basename } from "node:path";',
+				"const args = process.argv.slice(2);",
+				'appendFileSync(process.env.NODE_MARKER, `${basename(process.argv[1])} ${args.join(" ")}\\n`);',
+				'console.log(`population-fixture: ${args.join(" ")}`);',
+				'process.exit(Number(process.env.NODE_FIXTURE_EXIT ?? "0"));',
+			].join("\n"),
+		);
+	});
+	afterAll(() => fixture.cleanup());
+
+	function runSummary(caseName: string, withList: boolean, exitCode = 0) {
+		const runnerTemp = resolve(fixture.tmpDir, `runner-${caseName}`);
+		mkdirSync(runnerTemp, { recursive: true });
+		if (withList)
+			writeFileSync(
+				resolve(runnerTemp, "windows-vitest-files.txt"),
+				"tests/a.test.ts\n",
+			);
+		const summary = resolve(fixture.tmpDir, `summary-${caseName}.md`);
+		const marker = resolve(fixture.tmpDir, `node-${caseName}.marker`);
+		const script = String(summaryStep?.run).replace(
+			/\$\{\{\s*steps\.windows-vitest\.outcome\s*\}\}/,
+			"skipped",
+		);
+		const result = spawnSync(
+			"bash",
+			["--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+			{
+				cwd: fixture.tmpDir,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					GITHUB_STEP_SUMMARY: summary,
+					RUNNER_TEMP: runnerTemp,
+					NODE_MARKER: marker,
+					NODE_FIXTURE_EXIT: String(exitCode),
+				},
+			},
+		);
+		return { result, summary, marker };
+	}
+
+	// Recurrence (#3924): the missing-module error replaced the real checkout
+	// failure. With no list, the step exits 0, says "Not executed", and never
+	// touches the checked-out script; the checkout step's own error stays the
+	// visible cause.
+	it("reports Not executed and never runs the script when the list is absent", () => {
+		const { result, summary, marker } = runSummary("absent", false);
+		expect(result.status, String(result.stderr)).toBe(0);
+		const text = readFileSync(summary, "utf8");
+		expect(text).toContain("Not executed");
+		expect(text).toContain("windows_vitest=skipped");
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	// The other direction: with the list present the guard must not swallow the
+	// real population summary (the no-drop invariant beside the safety one).
+	it("runs the population script and keeps its summary when the list exists", () => {
+		const { result, summary, marker } = runSummary("present", true);
+		expect(result.status, String(result.stderr)).toBe(0);
+		expect(existsSync(marker)).toBe(true);
+		expect(readFileSync(marker, "utf8")).toContain(
+			"win32-gate-population.mjs --summary --executed-file-list",
+		);
+		const text = readFileSync(summary, "utf8");
+		// The fixture's own stdout reached the step summary: the real child ran.
+		expect(text).toContain("population-fixture: --summary");
+		expect(text).not.toContain("Not executed");
+		expect(text).toContain("windows_vitest=skipped");
+	});
+
+	// The safety direction of the same seam under GitHub's real `-eo pipefail`
+	// flags: a population script that exits nonzero must abort the step, never
+	// fall through to a `windows_vitest=` line that reads as a clean run.
+	// Measured on the host: without `-e` the same block exits 0 and writes
+	// `windows_vitest=success` even though `node` failed.
+	it("does not write a clean outcome when the population script exits nonzero", () => {
+		const { result, summary } = runSummary("nodefail", true, 3);
+		expect(result.status, String(result.stderr)).not.toBe(0);
+		expect(readFileSync(summary, "utf8")).not.toContain(
+			"windows_vitest=skipped",
+		);
+	});
+});
+
+// #3926 root-cause witness: reproduces the refspec-form mechanism against the
+// real `git` binary through the registered `git-fixture-env` seam. The local
+// transport proves the form difference (by-name fails after the ref is
+// deleted; by-captured-SHA resolves the object); GitHub's own server-side
+// policy is established by the same-run, same-second sibling successes in
+// INVESTIGATION.md.
+describe("#3926 the merge ref disappears but the captured commit resolves", () => {
+	const fixture = setupTestEnvironment("pi-lens-3926-git-");
+	afterAll(() => fixture.cleanup());
+
+	// The fixture owns its identity through the four environment keys Git reads
+	// for BOTH roles. The git-fixture-env seam pins GIT_CONFIG_GLOBAL at
+	// `<cwd>/gitconfig` and discards a caller override, so a config-file identity
+	// never reaches git here; without these four keys `git commit` dies with
+	// "Author identity unknown" on any host with no ambient identity (#3926 r3).
+	it("fails the by-name fetch and succeeds the by-captured-SHA fetch", () => {
+		const git = (cwd: string, args: string[]): string =>
+			gitExecFileSync("git", args, {
+				cwd,
+				encoding: "utf8",
+				env: {
+					GIT_AUTHOR_NAME: "pi-lens test",
+					GIT_AUTHOR_EMAIL: "test@example.com",
+					GIT_COMMITTER_NAME: "pi-lens test",
+					GIT_COMMITTER_EMAIL: "test@example.com",
+				},
+			});
+
+		const work = resolve(fixture.tmpDir, "work");
+		const origin = resolve(fixture.tmpDir, "origin.git");
+		mkdirSync(work, { recursive: true });
+		git(work, ["init", "-q", "-b", "master"]);
+		writeFileSync(resolve(work, "base.txt"), "base\n");
+		git(work, ["add", "-A"]);
+		git(work, ["commit", "-qm", "base"]);
+		const base = git(work, ["rev-parse", "HEAD"]).trim();
+
+		git(work, ["checkout", "-q", "-b", "pr"]);
+		writeFileSync(resolve(work, "head.txt"), "head\n");
+		git(work, ["add", "-A"]);
+		git(work, ["commit", "-qm", "head"]);
+		const head = git(work, ["rev-parse", "HEAD"]).trim();
+
+		// The base advances independently, so the test merge is a real two-parent
+		// commit with no parent reachable through the PR head.
+		git(work, ["checkout", "-q", "master"]);
+		writeFileSync(resolve(work, "main.txt"), "main\n");
+		git(work, ["add", "-A"]);
+		git(work, ["commit", "-qm", "main advance"]);
+		const main = git(work, ["rev-parse", "HEAD"]).trim();
+
+		git(work, ["merge", "--no-ff", "-q", "-m", "test merge", "pr"]);
+		const merge = git(work, ["rev-parse", "HEAD"]).trim();
+		expect(
+			[base, head, main, merge].every((sha) => /^[0-9a-f]{40}$/.test(sha)),
+		).toBe(true);
+		expect(new Set([base, head, main, merge]).size).toBe(4);
+
+		git(work, ["checkout", "-q", "master"]);
+		git(work, ["reset", "-q", "--hard", main]);
+		git(work, ["update-ref", "refs/pull/7/head", head]);
+		git(work, ["update-ref", "refs/pull/7/merge", merge]);
+		git(fixture.tmpDir, ["init", "-q", "--bare", origin]);
+		git(work, [
+			"push",
+			"-q",
+			origin,
+			"refs/heads/master:refs/heads/master",
+			"refs/pull/7/head:refs/pull/7/head",
+			"refs/pull/7/merge:refs/pull/7/merge",
+		]);
+
+		// The merge commit is now reachable only through the mutable ref that the
+		// merge deletes. A clone after the deletion does not carry the object.
+		git(origin, ["update-ref", "-d", "refs/pull/7/merge"]);
+		const consumer = resolve(fixture.tmpDir, "consumer");
+		git(fixture.tmpDir, ["clone", "-q", "--no-local", origin, consumer]);
+
+		const byName = (() => {
+			try {
+				git(consumer, [
+					"fetch",
+					"origin",
+					"+refs/pull/7/merge:refs/remotes/pull/7/merge",
+				]);
+				return "succeeded";
+			} catch (error) {
+				return String((error as { stderr?: Buffer | string }).stderr ?? error);
+			}
+		})();
+		expect(byName).toContain("couldn't find remote ref refs/pull/7/merge");
+
+		expect(() =>
+			git(consumer, ["fetch", "origin", `+${merge}:refs/remotes/pull/7/b1`]),
+		).not.toThrow();
+		expect(git(consumer, ["rev-parse", "refs/remotes/pull/7/b1"]).trim()).toBe(
+			merge,
+		);
 	});
 });

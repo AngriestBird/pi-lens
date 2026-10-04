@@ -1645,6 +1645,9 @@ async function callTool(
 					`${turnEnd.lastRunAt ? ` (last ran ${turnEnd.lastRunAt})` : ""}` +
 					`${turnEnd.lastSkipReason ? ` — last skip: ${turnEnd.lastSkipReason}${turnEnd.lastSkipAt ? ` at ${turnEnd.lastSkipAt}` : ""}` : ""}`
 				: "Stop-hook turn-end: no activity recorded (hook not installed, or no Stop yet)",
+			turnEnd?.failed
+				? `Analyzer invocations: ${turnEnd.failed} failed; last ${turnEnd.lastFailureOperation} failure at ${turnEnd.lastFailureAt}: ${turnEnd.lastFailureReason}`
+				: "Analyzer invocations: no failures recorded",
 			healthConfigLine(configProvenance),
 			footprint
 				? `Resource footprint: ${footprint.instanceCount} pi-lens instance(s) · ` +
