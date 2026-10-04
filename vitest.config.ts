@@ -288,6 +288,11 @@ const timingSensitiveInclude = [
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
 	"tests/clients/dispatch/runners/lsp-real-runner.test.ts",
+	// #3968: the builtin shuck row's smoke — a real `shuck server` child driven
+	// through the production LSP runner (real initialize handshake, real
+	// diagnostics publish, one didChange round trip). Real child + real wire,
+	// same #1022/#2332 contention class as its lane siblings.
+	"tests/clients/dispatch/runners/shuck-lsp-smoke.test.ts",
 	// #3501: two real fake-server children (the second a respawn after the
 	// first is SIGKILLed), each through a real initialize handshake, then a
 	// first-diagnostics wait on the replacement — the #1022/#2332 shape.
@@ -337,11 +342,6 @@ const lspSpawnHeavyInclude = [
 	// first-send stamp reaches the capture; the same #1022/#2332 contention
 	// class as its lane siblings.
 	"tests/tools/lsp-navigation-rename-first-open.test.ts",
-	// #3968: the builtin shuck row's smoke — a real `shuck server` child driven
-	// through the production LSP runner (real initialize handshake, real
-	// diagnostics publish, one didChange round trip). Real child + real wire,
-	// same #1022/#2332 contention class as its lane siblings.
-	"tests/clients/dispatch/runners/shuck-lsp-smoke.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
