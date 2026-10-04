@@ -4495,3 +4495,300 @@ describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
 		expect(result).toMatchObject({ valid: true });
 	});
 });
+
+// #3945 recovery: independent reviewer12 reconciled the audit to 27 survivors
+// and 15 unsampled ranges (7 EQUIVALENT, 19 production-reachable caller gaps,
+// 1 synthetic-only, 2 latent manual-range gaps). These witnesses call the real
+// exported `lintPrBody` seam with compile-valid source-identity mutations; each
+// block names the survivor `line`, `original`, and `replacement` it reds. The
+// seven equivalents (ids 4, 7, 8, 10, 11, 40, 49) and the synthetic-only id 2
+// keep their recorded disposition and get no manufactured test.
+describe("post-image mutation witnesses (#3945 survivors)", () => {
+	const withObservability = (text: string) =>
+		body.replace("The advisory check run is the record.", text);
+
+	// ids 36/37 (line 533, `\breturn\s+null\b`): the failure-path scan must
+	// match a one-space and a two-space `return null`. A missed failure path
+	// turns the honest sentence into a false clean.
+	it("refuses the honest sentence for an added one-space `return null` failure path (#3945 id 37)", () => {
+		const added = "\treturn null;";
+		const diff = [
+			"diff --git a/clients/failure.ts b/clients/failure.ts",
+			"@@ -0,0 +1 @@",
+			`+${added}`,
+		].join("\n");
+		const result = lintPrBody(
+			withObservability("No new failure path; no record added."),
+			{ diff, headFiles: new Map([["clients/failure.ts", added]]) },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("failure path");
+	});
+
+	it("refuses the honest sentence for an added two-space `return  null` failure path (#3945 id 36)", () => {
+		const added = "\treturn  null;";
+		const diff = [
+			"diff --git a/clients/failure.ts b/clients/failure.ts",
+			"@@ -0,0 +1 @@",
+			`+${added}`,
+		].join("\n");
+		const result = lintPrBody(
+			withObservability("No new failure path; no record added."),
+			{ diff, headFiles: new Map([["clients/failure.ts", added]]) },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("failure path");
+	});
+
+	// id 6 (line 430, `/^rename to (.+)$/`): the `rename to` scan must stay
+	// anchored. A `+++` header path that contains the words is a header, not a
+	// rename directive; an unanchored match rewrites the post path and the
+	// harvest reads the wrong file (indeterminate).
+	it("keeps a `+++` header path containing `rename to` as the diff header path (#3945 id 6)", () => {
+		const diff = [
+			"diff --git a/clients/widget.ts b/clients/widget.ts",
+			"--- a/clients/widget.ts",
+			"+++ b/clients/rename to moved.ts",
+			"@@ -0,0 +1 @@",
+			'+recordDegradationOnce({ kind: "keep-kind" });',
+		].join("\n");
+		expect(
+			lintPrBody(withObservability("The record is keep-kind."), {
+				diff,
+				headFiles: new Map([
+					[
+						"clients/widget.ts",
+						'recordDegradationOnce({ kind: "keep-kind" });',
+					],
+				]),
+			}),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	// id 12 (line 436, `/^index ([0-9a-f]+)\.\.([0-9a-f]+)/`): an
+	// `index ab..cd` token inside a `+++` path is not the post-image blob. The
+	// mutant reads the wrong identity; the real working tree is the source here,
+	// so no fabricated `headFiles` can mask the divergence.
+	it("does not read an `index ab..cd` token inside a `+++` path as the post blob (#3945 id 12)", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-index-token-"));
+		try {
+			const added = 'recordDegradationOnce({ kind: "index-kind" });';
+			mkdirSync(join(root, "clients"), { recursive: true });
+			writeFileSync(join(root, "clients", "widget.ts"), added);
+			const diff = [
+				"diff --git a/clients/widget.ts b/clients/widget.ts",
+				"--- a/clients/widget.ts",
+				"+++ b/clients/widget.ts index ab..cd",
+				"@@ -0,0 +1 @@",
+				`+${added}`,
+			].join("\n");
+			expect(
+				lintPrBody(withObservability("The record is index-kind."), {
+					diff,
+					cwd: root,
+					workingTree: true,
+				}),
+			).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// id 20 (line 442, `/^@@ -\d+.../`): an added code line whose content
+	// begins with `@@` is content, not a hunk header, so its record is harvested.
+	it("harvests an added code line whose content begins with `@@` (#3945 id 20)", () => {
+		const source = [
+			"@@ -1 +1 @@",
+			'recordDegradationOnce({ kind: "hunk-kind" });',
+		].join("\n");
+		const diff = [
+			"diff --git a/clients/hunk.ts b/clients/hunk.ts",
+			"@@ -0,0 +1,2 @@",
+			"+@@ -1 +1 @@",
+			'+recordDegradationOnce({ kind: "hunk-kind" });',
+		].join("\n");
+		expect(
+			lintPrBody(withObservability("The record is hunk-kind."), {
+				diff,
+				headFiles: new Map([["clients/hunk.ts", source]]),
+			}),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	// id 24 (line 442, `-\d+(?:,\d+)?`): a two-digit old-hunk count followed
+	// by a second hunk must still reset the POST cursor.
+	it("maps a two-digit old-hunk count in a second hunk (#3945 id 24)", () => {
+		const rows = [
+			'recordDegradationOnce({ kind: "first-kind" });',
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			'recordDegradationOnce({ kind: "second-kind" });',
+		];
+		const diff = [
+			"diff --git a/clients/two.ts b/clients/two.ts",
+			"@@ -1,1 +1,1 @@",
+			'+recordDegradationOnce({ kind: "first-kind" });',
+			"@@ -10,20 +10,2 @@",
+			'+recordDegradationOnce({ kind: "second-kind" });',
+		].join("\n");
+		expect(
+			lintPrBody(withObservability("The record is first-kind."), {
+				diff,
+				headFiles: new Map([["clients/two.ts", rows.join("\n")]]),
+			}),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	// id 60 (line 726, `"utf8"`): a working-tree-only read must be decoded to
+	// a string, or a small post-image with no `headFiles` declines.
+	it("classifies a small working-tree post-image with no headFiles (#3945 id 60)", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-worktree-small-"));
+		try {
+			const added = '\trecordDegradationOnce({ kind: "small-kind" });';
+			mkdirSync(join(root, "clients"), { recursive: true });
+			writeFileSync(join(root, "clients", "small.ts"), `${added}\n`);
+			const diff = [
+				"diff --git a/clients/small.ts b/clients/small.ts",
+				"@@ -0,0 +1 @@",
+				`+${added}`,
+			].join("\n");
+			expect(
+				lintPrBody(withObservability("The record is small-kind."), {
+					diff,
+					cwd: root,
+					workingTree: true,
+				}),
+			).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// id 58 (line 725, `>` -> `>=`) and manual range 39-41 (`MAX_SOURCE_BYTES`):
+	// a working-tree post-image of exactly the ceiling is classified; only a
+	// strictly larger one declines.
+	it("classifies a working-tree post-image of exactly MAX_SOURCE_BYTES (#3945 id 58, range 39-41)", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-boundary-"));
+		const ceiling = 16 * 1024 * 1024;
+		try {
+			const added = '\trecordDegradationOnce({ kind: "boundary-kind" });';
+			mkdirSync(join(root, "clients"), { recursive: true });
+			const head = `${added}\n`;
+			const padding = ceiling - Buffer.byteLength(head, "utf8");
+			const path = join(root, "clients", "boundary.ts");
+			writeFileSync(path, `${head}${"x".repeat(padding)}`);
+			expect(statSync(path).size).toBe(ceiling);
+			const diff = [
+				"diff --git a/clients/boundary.ts b/clients/boundary.ts",
+				"@@ -0,0 +1 @@",
+				`+${added}`,
+			].join("\n");
+			expect(
+				lintPrBody(withObservability("The record is boundary-kind."), {
+					diff,
+					cwd: root,
+					workingTree: true,
+				}),
+			).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// manual range 383-413 (`gitHeaderPaths` pre/post split): a runtime file
+	// renamed AWAY to a non-runtime path must stay in the population through its
+	// pre path, or a real failure path becomes a false clean.
+	it("keeps a runtime file renamed away to a non-runtime path in the population (#3945 range 383-413)", () => {
+		const diff = [
+			"diff --git a/clients/moved.ts b/docs/moved.md",
+			"similarity index 80%",
+			"rename from clients/moved.ts",
+			"rename to docs/moved.md",
+			"@@ -0,0 +1 @@",
+			"+\treturn null;",
+		].join("\n");
+		const result = lintPrBody(
+			withObservability("No new failure path; no record added."),
+			{ diff, headFiles: new Map([["docs/moved.md", "\treturn null;"]]) },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("failure path");
+	});
+
+	// ids 64, 66, 67, 68, 69, 70, 71, 72, 73, 76 (lines 1365-1373): the
+	// indeterminate refusal renders the `file:line` location, the first five
+	// entries, its overflow count, the `-` difference, and the `, ` separator.
+	it("renders one mismatched post-image line as `file:line` (#3945 ids 66, 67, 69, 73)", () => {
+		const diff = [
+			"diff --git a/clients/render.ts b/clients/render.ts",
+			"@@ -1,0 +2 @@",
+			'+recordDegradationOnce({ kind: "render-kind" });',
+		].join("\n");
+		const result = lintPrBody(withObservability("The record is render-kind."), {
+			diff,
+			headFiles: new Map([
+				["clients/render.ts", "export const a = 1;\nexport const b = 2;"],
+			]),
+		});
+		expect(result.errors).toEqual([
+			"PR body Observability could not classify the added lines of clients/render.ts:2: the post-image is missing, could not be read, or does not match the diff, so a record or a decision branch cannot be confirmed. Re-run with the changed files present, or name the record on a line the diff adds.",
+		]);
+	});
+
+	it("renders the first five indeterminate files and the overflow count (#3945 ids 64, 68, 70, 71, 72, 76)", () => {
+		const files = [1, 2, 3, 4, 5, 6].map((n) => `clients/render-${n}.ts`);
+		const diff = files
+			.map(
+				(file) =>
+					`diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+recordDegradationOnce({ kind: "render-${file}" });`,
+			)
+			.join("\n");
+		const headFiles = new Map(
+			files.map((file) => [file, "export const mismatch = 0;"]),
+		);
+		const result = lintPrBody(
+			withObservability("No new failure path; no record added."),
+			{ diff, headFiles },
+		);
+		const shown = files
+			.slice(0, 5)
+			.map((file) => `${file}:1`)
+			.join(", ");
+		expect(result.errors).toEqual([
+			`PR body Observability could not classify the added lines of ${shown} (+1 more): the post-image is missing, could not be read, or does not match the diff, so a record or a decision branch cannot be confirmed. Re-run with the changed files present, or name the record on a line the diff adds.`,
+		]);
+	});
+
+	// id 77 (line 1400, `??` -> `&&`): `lintPullRequestEvent` calls `lintPrBody`
+	// with no `cwd`, so the existing-record read must default to `process.cwd()`.
+	it("resolves an existing-record citation when cwd is omitted (#3945 id 77)", () => {
+		const previousCwd = process.cwd();
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-ci-cwd-"));
+		try {
+			const source = 'recordDegradationOnce({ kind: "tool-cwd-resolution" });';
+			mkdirSync(join(root, "clients"), { recursive: true });
+			writeFileSync(join(root, "clients", "existing-record.ts"), `${source}\n`);
+			process.chdir(root);
+			const result = lintPrBody(
+				withObservability(
+					"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
+				),
+				{
+					diff: NEW_PATH_RUNTIME_DIFF,
+					headFiles: NEW_PATH_HEAD_FILES,
+					workingTree: true,
+				},
+			);
+			expect(result).toEqual({ valid: true, errors: [] });
+		} finally {
+			process.chdir(previousCwd);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
