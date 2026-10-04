@@ -830,7 +830,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/prisma-validate.ts": 2,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
 		"clients/dispatch/runners/rubocop.ts": 6,
-		"clients/dispatch/runners/shellcheck.ts": 7,
+		// 7 -> 8 (#3968): `path.extname` inside `resolveShellFileDialect` — one
+		// more `path` use, same sense (a path operation).
+		"clients/dispatch/runners/shellcheck.ts": 8,
 		"clients/dispatch/runners/spellcheck.ts": 6,
 		"clients/dispatch/runners/spotbugs.ts": 4,
 		"clients/dispatch/runners/sqlfluff.ts": 3,
@@ -1160,7 +1162,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/rubocop.ts": 2,
 		"clients/dispatch/runners/ruff.ts": 2,
 		"clients/dispatch/runners/rust-clippy.ts": 10,
-		"clients/dispatch/runners/shellcheck.ts": 4,
+		// 4 -> 5 (#3968): one more skip branch (`covered-by-primary`) beside the
+		// existing skipped/no-cmd returns — the same `status:` member sense.
+		"clients/dispatch/runners/shellcheck.ts": 5,
 		"clients/dispatch/runners/shfmt.ts": 8,
 		"clients/dispatch/runners/spellcheck.ts": 3,
 		"clients/dispatch/runners/spotbugs.ts": 8,
