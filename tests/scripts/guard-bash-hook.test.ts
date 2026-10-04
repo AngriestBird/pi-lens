@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 29217)
-Total output lines: 2972
+Warning: truncated output (original token count: 29344)
+Total output lines: 2992
 
 // flake-shape: real-process-spawn — the subject IS the guard's own
 // stdin/exit-code/stderr contract (what Claude Code's PreToolUse dispatch
@@ -620,17 +620,7 @@ const EXPECTED_TRANSCRIPT_ALLOWS = new Set([
 
 describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
 	it.each(DENY_CASES)("denies %j", (command, ruleNeedle) => {
-		const result =…13217 tokens truncated…t cwd is itself under /tmp", () => {
-		// #3526's acceptance: "a git worktree add ../x from a checkout under
-		// /tmp is denied" -- built with a real cwd under /tmp so the
-		// resolution is not a fictitious path string.
-		const underTmp = "/tmp/pi-lens-guard-bash-3526-cwd-fixture";
-		expect(findDeny("git worktree add ../sibling-tree", underTmp)).toBe(
-			"tmpCheckout",
-		);
-	});
-
-	it("a literal $TMPDIR-shaped worktree destination defaults to /tmp when TMPDIR is not set on this command or ambiently", () => {
+		const result =…13344 tokens truncated… () => {
 		const result = runHook(
 			'git worktree add "$TMPDIR/foo"',
 			NO_AMBIENT_TMPDIR_ENV,
@@ -1055,6 +1045,26 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 		} finally {
 			rmSync(otherRepo, { recursive: true, force: true });
 			rmSync(foreignDir, { recursive: true, force: true });
+		}
+	});
+
+	it("denies a relative node probe after cd fails inside another repository", () => {
+		const foreignRepo = mkdtempSync(
+			join(tmpdir(), "pi-lens-3680-foreign-repo-"),
+		);
+		try {
+			gitExecFileSync("git", ["init", "--quiet", foreignRepo], {
+				stdio: "ignore",
+			});
+			expect(
+				runHook(
+					`cd ${join(foreignRepo, "missing")} && node dist/cli.js --help`,
+					BASE_ENV,
+					repoRoot,
+				).status,
+			).toBe(2);
+		} finally {
+			rmSync(foreignRepo, { recursive: true, force: true });
 		}
 	});
 

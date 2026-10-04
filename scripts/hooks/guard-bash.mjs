@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 24798)
-Total output lines: 2492
+Warning: truncated output (original token count: 24888)
+Total output lines: 2503
 
 #!/usr/bin/env node
 /**
@@ -783,7 +783,7 @@ const GIT_TWO_TOKEN_FLAGS = new Set([
  * already throws EISDIR for exactly the directory case that pre-check
  * existed to catch (measured directly: `fs.readFileSync` on a real
  * directory throws `EISDIR`), so the pre-check never changed the verdict
- * and mutating it out left every test in thi…8798 tokens truncated…		a === "-p" ||
+ * and mutating it out left every test in thi…8888 tokens truncated…		a === "-p" ||
 			a === "--input-type" ||
 			a.startsWith("--input-type="),
 	);
