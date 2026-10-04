@@ -448,6 +448,12 @@ export const wallClockBudgetInclude = [
 	// `**` chain), so a fake clock measures nothing.
 	"tests/clients/workspace-glob-nonbacktracking-budget.test.ts",
 	"tests/config/gitignore-tracked-shadow.test.ts",
+	// #3926: the real `Record Windows Vitest outcome` bash block is executed at
+	// its true process boundary under GitHub's bash flags (a fixture Node
+	// program runs under the real `node`; no PATH/delimiter/executable mock),
+	// and the ref-deleted Git mechanism runs through git-fixture-env
+	// (flake-shape admission).
+	"tests/config/heavy-advisory-gate-workflow.test.ts",
 	// #3244: the advisory floor must observe the real oxlint --print-config and
 	// counter process; an in-process double would only restate the expected rule map.
 	"tests/config/oxlint-advisory-rule-floor-gate.test.ts",
