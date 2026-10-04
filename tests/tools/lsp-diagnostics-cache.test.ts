@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -63,7 +64,12 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-diag-cache-"));
-		// Legacy per-project data dir marker so the cache writes inside tmpDir.
+		// Legacy per-project data dir marker: with no PILENS_DATA_DIR override this
+		// makes `getProjectDataDir` resolve the cache INSIDE tmpDir (cleaned up by
+		// afterEach) instead of the real global ~/.pi-lens dir. Under a relocated
+		// PILENS_DATA_DIR the production owner wins, and every fixture path below
+		// is built from `getProjectDataDir(tmpDir)`, so the write and read never
+		// disagree about which data root owns the cache.
 		fs.mkdirSync(path.join(tmpDir, ".pi-lens"));
 		reconcileScanDiagnostics.mockClear();
 		getServersForFileWithConfig.mockReset();
@@ -100,8 +106,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		{ mtimeMs: number; sizeBytes?: number }
 	> {
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -292,8 +297,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 	it("fails open on a corrupt cache file: still touches every file instead of throwing", async () => {
 		const files = writeFiles(["a.ts"]);
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -480,8 +484,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 
 		// The wall-clock time the cache recorded this scan at.
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);

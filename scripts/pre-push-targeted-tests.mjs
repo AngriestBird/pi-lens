@@ -64,6 +64,9 @@ export const CI_ONLY_PRE_PUSH_TESTS = {
 // import resolution cannot discover them. The governance suite pins this
 // executable population against the scanner shape.
 export const TREE_SCANNING_GOVERNANCE_TESTS = [
+	// #3937: walks clients/tools/mcp/scripts + index.ts for bridge-entry
+	// construction sites (provenance fold over the source tree).
+	"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 	"tests/clients/session-state-conformance.test.ts",
 	"tests/config/glossary-synonym-sweep.test.ts",
 	"tests/config/strictness-ratchet.test.ts",
