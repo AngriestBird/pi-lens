@@ -131,7 +131,7 @@ describe("#3968 class sweep — dialect/capability ownership over the runners", 
 		// A set that silently gains zsh (or loses a member) changes what the
 		// categorical gate skips — exactly the reported defect in reverse.
 		const mod =
-			(await import("../../../../clients/dispatch/runners/shellcheck.js")) as unknown as {
+			(await import("../../clients/dispatch/runners/shellcheck.js")) as unknown as {
 				SHELLCHECK_SUPPORTED_DIALECTS: readonly string[];
 				resolveShellFileDialect: (f: string) => {
 					dialect: string;
