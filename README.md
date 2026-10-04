@@ -158,6 +158,13 @@ Or from git:
 pi install git:github.com/apmantza/pi-lens
 ```
 
+pi-lens delivers its four skills through the `pi.skills` package manifest, so
+install it as a package (`npm:`, `git:`, or a local path); a package install
+honours the host's `packages[].skills` filters (for example `[]`,
+`!skills/<name>/SKILL.md`, or `-skills/<name>/SKILL.md`). Loading the extension
+file directly (`pi --extension ./index.js`) does not read that manifest and
+loads no pi-lens skills.
+
 Requires Node.js >=22.19.0 (matches the pi host's own floor — see `engines`
 in `package.json`).
 
