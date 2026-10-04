@@ -318,6 +318,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real gitignore rules and index entries decide shadow files outside the test process",
 	},
+	"real-process-spawn:config/heavy-advisory-gate-workflow.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is the real `Record Windows Vitest outcome` bash block under GitHub's bash flags (a fixture Node program at the population-script path runs under the real `node`, so no PATH, delimiter, or executable name is mocked) and the ref-deleted Git fetch form through the git-fixture-env seam",
+	},
 	"real-process-spawn:config/oxlint-advisory-rule-floor-gate.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -568,11 +573,18 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// early-exit call sites) only exists in the real module's own top-level
 	// execution order; a source-text assertion on the driver already passed
 	// under the crash, so only spawning the actual script against a real,
-	// throwaway git fixture reproduces it.
+	// throwaway git fixture reproduces it. The count moved 3 -> 4 with the
+	// #3853 lock test: whether the real driver waits behind a live exclusive
+	// holder (and refuses to fork vitest) is only observable by spawning the
+	// real script, since the lock lives in the driver's own top-level order.
+	// The count moved 4 -> 8 with #3856 F3: the heartbeat/refusal behind a live
+	// exclusive holder, the budget-signal abort, the absent and partial
+	// coverage reports, and the skipped/corrupt compiled source are each only
+	// observable by spawning the real driver against the throwaway fixture.
 	"real-process-spawn:scripts/stryker-diff.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the defect is a temporal-dead-zone crash in the driver's own top-level execution order; no source-text or in-process substitute reproduces it",
+			"the defect is a temporal-dead-zone crash in the driver's own top-level execution order; the #3853 lock wait/refusal and the #3856 F3 stage dispositions (heartbeat/refusal behind a live holder, the budget-signal abort, the absent and partial coverage reports, the skipped/corrupt compiled source) are only observable by spawning the real script, and no source-text or in-process substitute reproduces them",
 	},
 	// 2026-09-06 (#2586 review F1): proves the actual delimiter
 	// supply-host-provided-deps.mjs prints in its own stdout bytes; an
