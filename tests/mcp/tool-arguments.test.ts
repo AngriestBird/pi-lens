@@ -398,6 +398,47 @@ describe("qualifier-aware head-noun matching (#3809)", () => {
 		);
 	});
 
+	// Mutation survivors in #3950: one-token qualifiers did not distinguish
+	// folding a compound declared key from joining its tokens with punctuation.
+	it("warns and runs when a compound qualifier names a declared parameter", () => {
+		const report = findIgnoredArguments(
+			{ properties: { file: {}, blastRadius: {} }, required: ["file"] },
+			{ file: "a.ts", blast_radius_file: true },
+		);
+		expect(report).toEqual({
+			ignored: [{ key: "blast_radius_file", suggestion: "blastRadius" }],
+			missingRequired: [],
+			unsentSuggestions: [],
+		});
+		expect(refusalResult("pilens_module_report", report!)).toBeUndefined();
+	});
+
+	// A positive slice offset happened to select the suffix of two-token
+	// keys. A longer locator must still refuse, rather than run on defaults.
+	it("refuses a locator with multiple undeclared qualifier tokens", () => {
+		const report = findIgnoredArguments(DIAGNOSTICS, { localFilePath: "/x" });
+		expect(report?.unsentSuggestions).toEqual([
+			{ key: "localFilePath", suggestion: "path" },
+		]);
+		expect(refusalResult("pilens_diagnostics", report!)?.isError).toBe(true);
+	});
+
+	// Joining either side without spaces loses multi-token suffix matches;
+	// the spelling must still refuse when the whole declared suffix matches.
+	it("refuses a compound declared suffix with its token boundaries intact", () => {
+		const report = findIgnoredArguments(
+			{ properties: { file: {}, blastRadius: {} }, required: ["file"] },
+			{ file: "a.ts", requested_blast_radius: true },
+		);
+		expect(report?.ignored).toEqual([
+			{ key: "requested_blast_radius", suggestion: "blastRadius" },
+		]);
+		expect(report?.unsentSuggestions).toEqual([
+			{ key: "requested_blast_radius", suggestion: "blastRadius" },
+		]);
+		expect(refusalResult("pilens_module_report", report!)?.isError).toBe(true);
+	});
+
 	it("warns and runs with no hint at the head noun it is not", () => {
 		for (const key of ["maxFiles", "outFile", "includeFiles"]) {
 			const report = findIgnoredArguments(ANALYZE, { file: "a.ts", [key]: 1 });
