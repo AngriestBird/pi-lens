@@ -238,7 +238,9 @@ describe("#3920 sharded required-check failure policy", () => {
 
 	// #3957: enumerate every step of the three non-matrix required producers so
 	// a new step is classified before it can run unguarded, and assert the
-	// classification count table. Only the `verdict` class is no-drop (the
+	// classification count table. The live identities must be a sub-multiset of
+	// the declared ones, so a duplicate `name:`/`uses:` cannot ride a removed
+	// step past classification. Only the `verdict` class is no-drop (the
 	// named population above), so a removed setup or best-effort step stays
 	// accepted while a removed verdict step reds in the test above.
 	it.each(PRODUCERS)(
@@ -253,11 +255,27 @@ describe("#3920 sharded required-check failure policy", () => {
 			const live = (job?.steps ?? []).map(
 				(step) => step.name ?? (step.uses ?? "").replace(/@.*$/, ""),
 			);
+			// The live identities must be a sub-multiset of the declared ones:
+			// `l(id) <= d(id)` per identity, not a set subset and not a total
+			// count. A live step may reuse a declared identity only as often as
+			// the declaration does, so a duplicate `name:`/`uses:` reds even when
+			// another step was removed and the total is unchanged. A removed
+			// setup or best-effort step leaves `l(id) = 0` and stays accepted; a
+			// removed verdict step reds in the named test above.
+			const declaredCount = new Map<string, number>();
+			for (const id of declared) {
+				declaredCount.set(id, (declaredCount.get(id) ?? 0) + 1);
+			}
+			const liveCount = new Map<string, number>();
 			for (const id of live) {
+				liveCount.set(id, (liveCount.get(id) ?? 0) + 1);
+			}
+			for (const [id, count] of liveCount) {
+				const declaredForId = declaredCount.get(id) ?? 0;
 				expect(
-					declared,
-					`${producer.workflow}:${producer.job} step \`${id}\` must be classified`,
-				).toContain(id);
+					declaredForId,
+					`${producer.workflow}:${producer.job} step \`${id}\` is declared ${declaredForId} time(s) but appears ${count} time(s) in the workflow`,
+				).toBeGreaterThanOrEqual(count);
 			}
 			const counts: Record<StepClass, number> = {
 				verdict: 0,
