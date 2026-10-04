@@ -1094,7 +1094,14 @@ export class ReadGuard {
 			.find((read) => read.contentBinding !== undefined);
 		if (
 			lastBoundRead?.contentBinding &&
-			!currentContentMatchesBinding(filePath, lastBoundRead.contentBinding)
+			!currentContentMatchesBinding(filePath, lastBoundRead.contentBinding) &&
+			!this.newerReadSupersedesBinding(
+				filePath,
+				fileReads,
+				lastBoundRead,
+				touchedLines,
+				editRanges,
+			)
 		) {
 			const verdict = this.blockOrWarn(
 				"file-modified",
@@ -1896,6 +1903,60 @@ export class ReadGuard {
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * #3962: whether a read recorded AFTER `boundRead` is at least as strong
+	 * evidence for THIS edit as the bridge `contentBinding` it would otherwise be
+	 * judged against. A stale binding (its snapshot no longer matches disk) must
+	 * not keep blocking once a newer record has DELIVERED every edited line from
+	 * the current bytes: the block's own remedy ("Re-read the file") is exactly
+	 * what a native re-read cannot satisfy, because native records carry hashes,
+	 * never a binding. The rule lives here, in the evidence owner; consumers do
+	 * not re-derive it.
+	 *
+	 * Eligibility is deliberately narrow so the strong anchor is never dropped
+	 * for weak evidence: the candidate must be non-provisional (delivered), its
+	 * effective range must cover the line (never the context zone), it must
+	 * carry a read-time hash for the line, and that hash must equal the bytes on
+	 * disk now. A newer partial, unhashed, search-slack-only, or stale read is
+	 * not eligible, and `touchedLines === undefined` keeps the existing block
+	 * (there is no range to prove coverage over).
+	 */
+	private newerReadSupersedesBinding(
+		filePath: string,
+		fileReads: ReadRecord[],
+		boundRead: ReadRecord,
+		touchedLines?: [number, number],
+		editRanges?: [number, number][],
+	): boolean {
+		if (!touchedLines) return false;
+		const rangesToCheck: [number, number][] =
+			editRanges && editRanges.length > 1 ? editRanges : [touchedLines];
+
+		const boundIndex = fileReads.lastIndexOf(boundRead);
+		if (boundIndex < 0) return false;
+
+		let lines: string[];
+		try {
+			lines = splitLines(fs.readFileSync(filePath, "utf-8"));
+		} catch {
+			// An unreadable disk cannot vouch for any newer read.
+			return false;
+		}
+
+		for (let i = fileReads.length - 1; i > boundIndex; i -= 1) {
+			const candidate = fileReads[i];
+			if (candidate.provisional === true) continue;
+			if (
+				rangesToCheck.every((range) =>
+					this.readRangeHashesStillMatch(candidate, lines, range),
+				)
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
