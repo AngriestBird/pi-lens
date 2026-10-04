@@ -27,6 +27,7 @@ import {
 	turnEndStatusPathForCwd,
 	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../clients/mcp/ipc.js";
+import { CacheManager } from "../../clients/cache-manager.js";
 import { AUTOMATION_FRAMING } from "../../clients/runtime-context.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { McpHarness } from "./harness.js";
@@ -51,10 +52,12 @@ function runBin(
 	stdin?: string,
 	nodeArgs: string[] = [],
 	home = path.join(testIsolationDir, "home"),
+	cwd = repoRoot,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...nodeArgs, binJs, ...args], {
 			stdio: ["pipe", "pipe", "pipe"],
+			cwd,
 			env: {
 				...process.env,
 				HOME: home,
@@ -375,6 +378,142 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		}
 		removeTempDirSync(turnDir);
 	});
+
+	// #3935 survivors 21/22/32/33: retain cwd before reading stdin and let
+	// explicit argv win over a different payload cwd, including failures.
+	it("uses the child cwd when plain CLI has no cwd flag", async () => {
+		stub = await startWarmAnalyzeStub(turnDir, {
+			filePath: cleanFile,
+			counts: { diagnostics: 1, blockers: 0, warnings: 1, advisories: 0 },
+			diagnostics: [
+				{ line: 1, semantic: "warning", tool: "probe", message: "cwd witness" },
+			],
+		});
+		const result = await runBin(
+			[`--file=${cleanFile}`],
+			undefined,
+			[],
+			undefined,
+			turnDir,
+		);
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain("cwd witness");
+		expect(stub.requests).toHaveLength(1);
+	});
+
+	it("records argv cwd rather than a conflicting payload cwd", async () => {
+		const preload = new URL(
+			"../fixtures/mcp/analyze-cli-failure.mjs",
+			import.meta.url,
+		);
+		const result = await runBin(
+			[`--cwd=${turnDir}`],
+			JSON.stringify({
+				cwd: tmpDir,
+				tool_input: { file_path: cleanFile },
+			}),
+			["--import", preload.href],
+		);
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain("pi-lens-analyze failed:");
+		expect(readTurnEndStatus(turnDir)).toMatchObject({
+			failed: 1,
+			lastFailureOperation: "analyze",
+		});
+		expect(readTurnEndStatus(tmpDir)).toBeUndefined();
+	});
+
+	it("retains argv cwd when stdin reading fails", async () => {
+		const preload = new URL(
+			"../fixtures/mcp/analyze-cli-failure.mjs",
+			import.meta.url,
+		);
+		preload.searchParams.set("target", "stdin");
+		preload.searchParams.set("message", "stdin read failed");
+		const result = await runBin([`--cwd=${turnDir}`], undefined, [
+			"--import",
+			preload.href,
+		]);
+		expect(result.code).toBe(2);
+		expect(result.stdout).toBe("pi-lens-analyze failed: stdin read failed\n");
+		expect(readTurnEndStatus(turnDir)).toMatchObject({
+			failed: 1,
+			lastFailureReason: "stdin read failed",
+		});
+	});
+
+	// #3935 survivors 58/59: no-work is success, not an undefined-file failure.
+	it("exits silently without a file or Stop request", async () => {
+		const result = await runBin([`--cwd=${turnDir}`]);
+		expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+		expect(readTurnEndStatus(turnDir)).toBeUndefined();
+	});
+
+	// #3935 survivors 64/65/66/68: exercise real cold dispatch and its disk
+	// consumer, rather than asserting the options passed to an analyze mock.
+	it("skips LSP and persists the cold analyzed file for turn-end", async () => {
+		const file = path.join(turnDir, "cold.ts");
+		fs.writeFileSync(file, SMELLY);
+		fs.writeFileSync(
+			path.join(turnDir, "tsconfig.json"),
+			JSON.stringify({
+				compilerOptions: { strict: true },
+				include: ["cold.ts"],
+			}),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(turnDir, "node_modules"),
+			"junction",
+		);
+		const result = await runBin([`--cwd=${turnDir}`, `--file=${file}`]);
+		expect(result.code).toBe(0);
+		expect(result.stdout).toMatch(/deep-nesting|console-statement/);
+		expect(result.stdout).not.toContain("ts:7006");
+		vi.stubEnv("PILENS_DATA_DIR", path.join(testIsolationDir, "data"));
+		const state = new CacheManager().readTurnState(turnDir);
+		expect(state.files["cold.ts"]).toMatchObject({ importsChanged: true });
+		const withLsp = await runBin([
+			`--cwd=${turnDir}`,
+			`--file=${file}`,
+			"--lsp",
+		]);
+		expect(withLsp.code).toBe(0);
+		expect(withLsp.stdout).toContain("ts:7006");
+	}, 45_000);
+
+	// #3935 survivors 74/79: distinguish whitespace runs and the exact cap
+	// from the existing secret-redaction and over-cap test.
+	it.each([
+		{
+			name: "collapses whitespace runs",
+			message: "p   q\n\t  r",
+			reason: "p q r",
+		},
+		{
+			name: "keeps exactly 1000 code units",
+			message: "x".repeat(1000),
+			reason: "x".repeat(1000),
+		},
+	])(
+		"$name in failure output and durable status",
+		async ({ message, reason }) => {
+			const preload = new URL(
+				"../fixtures/mcp/analyze-cli-failure.mjs",
+				import.meta.url,
+			);
+			preload.searchParams.set("message", message);
+			const result = await runBin(
+				[`--cwd=${turnDir}`, `--file=${cleanFile}`],
+				undefined,
+				["--import", preload.href],
+			);
+			expect(result.code).toBe(2);
+			expect(result.stdout).toBe(`pi-lens-analyze failed: ${reason}\n`);
+			expect(result.stderr).toBe(`pi-lens-analyze failed: ${reason}\n`);
+			expect(readTurnEndStatus(turnDir)?.lastFailureReason).toBe(reason);
+		},
+	);
 
 	// #3922: exercise the real bin, failing only the external peer or IPC boundary.
 	it.each([

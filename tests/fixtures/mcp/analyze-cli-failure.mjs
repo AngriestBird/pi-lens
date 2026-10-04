@@ -3,7 +3,11 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 const params = new URL(import.meta.url).searchParams;
 const message = params.get("message") ?? "Cannot find package '@earendil-works/pi-tui'";
 
-if (params.get("target") === "ipc") {
+if (params.get("target") === "stdin") {
+	process.stdin[Symbol.asyncIterator] = () => ({
+		next: () => Promise.reject(new Error(message)),
+	});
+} else if (params.get("target") === "ipc") {
 	const { default: netModule } = await import("node:net");
 	netModule.createConnection = () => {
 		throw new Error(message);
