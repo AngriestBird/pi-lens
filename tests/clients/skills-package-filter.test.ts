@@ -20,6 +20,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -54,7 +55,10 @@ afterEach(() => {
 type PackageFilter = string[] | undefined;
 
 /** A package whose manifest skills resolve (through a symlink) to the repo's. */
-function writeFixture(filter: PackageFilter): {
+function writeFixture(
+	filter: PackageFilter,
+	opts: { declareExtension?: boolean } = {},
+): {
 	agentDir: string;
 	projectDir: string;
 } {
@@ -66,12 +70,27 @@ function writeFixture(filter: PackageFilter): {
 	fs.mkdirSync(projectDir, { recursive: true });
 	fs.mkdirSync(packageRoot, { recursive: true });
 	fs.symlinkSync(REPO_SKILLS, path.join(packageRoot, "skills"), "dir");
+	const pi: { skills: string[]; extensions?: string[] } = {
+		skills: ["./skills"],
+	};
+	if (opts.declareExtension === true) {
+		// A `pi.extensions` manifest entry loads the extension by FILE PATH, so
+		// `getExtensionSourceLabel` (`agent-session.js`) derives
+		// `extension:index` from the basename. An inline factory gets
+		// `extension:inline:1`, so only this shape can witness the real
+		// registrar (F5).
+		pi.extensions = ["./index.js"];
+		fs.writeFileSync(
+			path.join(packageRoot, "index.js"),
+			`export { default } from ${JSON.stringify(pathToFileURL(ENTRY).href)};\n`,
+		);
+	}
 	fs.writeFileSync(
 		path.join(packageRoot, "package.json"),
 		JSON.stringify({
 			name: "pi-lens-1416-fixture",
 			version: "0.0.0",
-			pi: { skills: ["./skills"] },
+			pi,
 		}),
 	);
 	const entry: { source: string; skills?: string[] } = {
@@ -90,17 +109,21 @@ async function boundSkills(options: {
 	agentDir: string;
 	projectDir: string;
 	extensionFactories?: boolean;
+	manifestExtension?: boolean;
 }): Promise<{
 	afterReload: string[];
 	afterBind: string[];
+	afterBindSources: Array<string | undefined>;
 	inPrompt: string[];
 }> {
 	const loader = new DefaultResourceLoader({
 		cwd: options.projectDir,
 		agentDir: options.agentDir,
-		...(options.extensionFactories === false
-			? { additionalExtensionPaths: [ENTRY] }
-			: { extensionFactories: [extension] }),
+		...(options.manifestExtension === true
+			? {}
+			: options.extensionFactories === false
+				? { additionalExtensionPaths: [ENTRY] }
+				: { extensionFactories: [extension] }),
 	});
 	await loader.reload();
 	const afterReload = skillNames(loader);
@@ -115,6 +138,7 @@ async function boundSkills(options: {
 		return {
 			afterReload,
 			afterBind: skillNames(loader),
+			afterBindSources: skillSources(loader),
 			inPrompt: SHIPPED.filter((name) => session.systemPrompt.includes(name)),
 		};
 	} finally {
@@ -127,6 +151,12 @@ function skillNames(loader: DefaultResourceLoader): string[] {
 		.getSkills()
 		.skills.map((skill) => skill.name)
 		.sort();
+}
+
+function skillSources(
+	loader: DefaultResourceLoader,
+): Array<string | undefined> {
+	return loader.getSkills().skills.map((skill) => skill.sourceInfo?.source);
 }
 
 describe("package skill filters survive resources_discover (#1416)", () => {
@@ -173,33 +203,22 @@ describe("package skill filters survive resources_discover (#1416)", () => {
 		expect(inPrompt).toEqual([...SHIPPED].sort());
 	});
 
-	it("loads skills from the package manifest, not the extension handler", async () => {
-		const { agentDir, projectDir } = writeFixture(undefined);
-		const loader = new DefaultResourceLoader({
-			cwd: projectDir,
+	it("labels held skills with the package registrar, never the extension handler", async () => {
+		// F5: load the extension through the package manifest (`pi.extensions`),
+		// so its real path yields the `extension:index` registrar on the pre-fix
+		// handler. An inline factory is labelled `extension:inline:1` and this
+		// cell would pass on base.
+		const { agentDir, projectDir } = writeFixture(
+			[`!skills/${EXCLUDED}/SKILL.md`],
+			{ declareExtension: true },
+		);
+		const { afterBind, afterBindSources } = await boundSkills({
 			agentDir,
-			extensionFactories: [extension],
+			projectDir,
+			manifestExtension: true,
 		});
-		await loader.reload();
-		const { session } = await createAgentSession({
-			cwd: projectDir,
-			agentDir,
-			resourceLoader: loader,
-			sessionManager: SessionManager.inMemory(),
-		});
-		try {
-			const registrars = loader
-				.getSkills()
-				.skills.map((skill) => skill.sourceInfo?.source);
-			expect(registrars).not.toContain("extension:index");
-			await session.bindExtensions({});
-			const afterBind = loader
-				.getSkills()
-				.skills.map((skill) => skill.sourceInfo?.source);
-			expect(afterBind).not.toContain("extension:index");
-		} finally {
-			session.dispose();
-		}
+		expect(afterBind).toEqual(SHIPPED.filter((n) => n !== EXCLUDED).sort());
+		expect(afterBindSources).not.toContain("extension:index");
 	});
 });
 
