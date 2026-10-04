@@ -431,9 +431,14 @@ describe("shell dialect ownership (#3968)", () => {
 			// Filesystem collision probe: the arm's name differs from every
 			// other fixture's basename, so no case-collision exists even on an
 			// APFS case-insensitive volume — verified by creation succeeding.
-			const out = await runDialectArm(env.tmpDir, "CASEVAR.ZSH", "autoload -Uz compinit\n", {
-				bashLanguageServerPresent: false,
-			});
+			const out = await runDialectArm(
+				env.tmpDir,
+				"CASEVAR.ZSH",
+				"autoload -Uz compinit\n",
+				{
+					bashLanguageServerPresent: false,
+				},
+			);
 			expect(out.status).toBe("skipped");
 			expect(out.skipReason).toBe("dialect-unsupported");
 			expect(out.spawned).toBe(false);

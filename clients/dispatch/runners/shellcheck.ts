@@ -128,7 +128,9 @@ export function resolveShellFileDialect(filePath: string): ShellFileDialect {
 	// extension arm matches case-insensitively too — a `.ZSH` file must not
 	// slip through to the bash fallback.
 	const parsed =
-		directive ?? shebang ?? (path.extname(filePath).toLowerCase() === ".zsh" ? "zsh" : null);
+		directive ??
+		shebang ??
+		(path.extname(filePath).toLowerCase() === ".zsh" ? "zsh" : null);
 	return {
 		shebang,
 		directive,
