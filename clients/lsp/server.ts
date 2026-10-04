@@ -3692,39 +3692,15 @@ export const BashServer: LSPServerInfo = {
 };
 
 /**
- * Builtin runner-cover facts ({@link LSPServerInfo.covers}, #3968): runner
- * capabilities a BUILTIN LSP server subsumes, so CLI runners that duplicate
- * the server's work skip (#233's dormant-when-LSP-covers pattern, generalized
- * from the literal server-id match). Owned here because each fact is true OF
- * THE SERVER — it names the binaries the server embeds — not of the runner.
- *
- * `gateCommands` are the probeable commands the RUNNER must see present
- * (`DispatchContext.hasTool`) before honouring the fact — without them the
- * covering lane cannot actually run, and skipping would silently regress
- * coverage. Facts key by server id; the runner adds its OWN tool's gates
- * (an embedded linter still needs its binary).
- *
- * History: `bash` embeds `shellcheck` (bash-language-server lints through
- * it); `shuck` embeds shellcheck-equivalent lint (binary `shuck`, native
- * `C/S/P/X/K` codes); `toml` embeds the `taplo` linter (the LSP binary IS
- * `taplo`, which is why the old seam call passed the literal id `toml`).
+ * Builtin runner-cover facts live in `./server-covers.js` — the leaf the
+ * dispatch seam (`clients/dispatch/runners/utils/runner-helpers.ts`) can
+ * import without pulling this registry in (a registry import closes a cycle
+ * through the installer's graph; `no-client-cycles`, #2125). Re-exported so
+ * the {@link LSPServerInfo} consumers import covers facts from the registry
+ * module like the rest of its surface. See {@link LSPServerInfo.covers}.
  */
-export interface ServerRunnerCoverFact {
-	runnerIds: readonly string[];
-	gateCommands: readonly string[];
-}
-
-export const BUILTIN_SERVER_RUNNER_COVERS: ReadonlyMap<
-	string,
-	ServerRunnerCoverFact
-> = new Map([
-	[
-		"bash",
-		{ runnerIds: ["shellcheck"], gateCommands: ["bash-language-server"] },
-	],
-	["shuck", { runnerIds: ["shellcheck"], gateCommands: ["shuck"] }],
-	["toml", { runnerIds: ["taplo"], gateCommands: ["taplo"] }],
-]);
+export type { ServerRunnerCoverFact } from "./server-covers.js";
+export { BUILTIN_SERVER_RUNNER_COVERS } from "./server-covers.js";
 
 /**
  * Shuck — zsh-aware shell language server (#3968). The builtin primary for
@@ -3741,8 +3717,10 @@ export const BUILTIN_SERVER_RUNNER_COVERS: ReadonlyMap<
  * `"shuck"` and native `C/S/P/X/K` codes; `# shellcheck disable=SC…`
  * directives in owned files are honored by the server itself (suppression
  * spec 006 maps SC codes through). The builtin covers fact — shuck subsumes
- * the `shellcheck` runner's lint — lives beside the table above, not on the
- * row, so the availability gates travel with it.
+ * the `shellcheck` runner's lint — lives in the covers-fact leaf
+ * (`clients/lsp/server-covers.ts`), not on the row, so the availability
+ * gates can travel with it without giving the dispatch seam a reason to
+ * import this registry (cycle boundary).
  *
  * No managed install and no `shuck check` CLI runner in this work:
  * distribution is brew/pip/cargo/npm-wasm/release binaries, and the #233

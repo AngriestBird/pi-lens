@@ -33,7 +33,10 @@ import {
 	type InstallAttempt,
 } from "../../../installer/index.js";
 import { getServersForFileWithConfig } from "../../../lsp/config.js";
-import { BUILTIN_SERVER_RUNNER_COVERS } from "../../../lsp/server.js";
+// The covers-fact LEAF, not the server registry: importing clients/lsp/server.js
+// here closes a dependency cycle through the installer's graph
+// (`no-client-cycles`, dependency-cruiser #2125).
+import { BUILTIN_SERVER_RUNNER_COVERS } from "../../../lsp/server-covers.js";
 import {
 	findGlobalBinary,
 	findLocalBinAt,
@@ -114,9 +117,10 @@ export interface PrimaryRunnerCoverage {
  *
  * The claim has two sources, read in one place: the server row's own
  * `covers` field (config-declared, the stacked PR's channel) and the builtin
- * facts table `BUILTIN_SERVER_RUNNER_COVERS` (clients/lsp/server.ts), which
- * additionally carries the availability gate commands. Callers gate with
- * `coveringLaneAvailable` so a missing covering lane never skips.
+ * facts table `BUILTIN_SERVER_RUNNER_COVERS` (clients/lsp/server-covers.ts —
+ * the importable leaf, not the registry), which additionally carries the
+ * availability gate commands. Callers gate with `coveringLaneAvailable` so a
+ * missing covering lane never skips.
  *
  * The old spelling — `lspPrimaryCoversFile(ctx, "bash")`, a literal SERVER id
  * at a call site asking about a RUNNER's capability — was #3968's defect: a
