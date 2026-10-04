@@ -421,6 +421,27 @@ describe("shell dialect ownership (#3968)", () => {
 		}
 	});
 
+	it("skips a case-variant uppercase .ZSH file dialect-unsupported", async () => {
+		// #3159 screen: this fixture's basename is unique on this tmp root (no
+		// same-basename case sibling is created), so a case-insensitive
+		// filesystem cannot surface a collision; the case-arm is the point, not
+		// a platform skip.
+		const env = setupTestEnvironment("pi-lens-shell-dialect-");
+		try {
+			// Filesystem collision probe: the arm's name differs from every
+			// other fixture's basename, so no case-collision exists even on an
+			// APFS case-insensitive volume — verified by creation succeeding.
+			const out = await runDialectArm(env.tmpDir, "CASEVAR.ZSH", "autoload -Uz compinit\n", {
+				bashLanguageServerPresent: false,
+			});
+			expect(out.status).toBe("skipped");
+			expect(out.skipReason).toBe("dialect-unsupported");
+			expect(out.spawned).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("zsh skips regardless of LSP state: the shuck-absent arm skips dialect-unsupported", async () => {
 		const env = setupTestEnvironment("pi-lens-shell-dialect-");
 		try {
