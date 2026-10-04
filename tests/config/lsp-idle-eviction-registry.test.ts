@@ -50,6 +50,7 @@ const NEXT_PHASE_ELIGIBLE_IDS = [
 	"ast-grep",
 	"cue",
 	"docker",
+	"docker-official",
 	"gleam",
 	"json",
 	"lua",
@@ -124,7 +125,7 @@ describe("LSP idle-eviction registry (#3622)", () => {
 		expect(LSP_SERVERS.length).toBeGreaterThan(40);
 	});
 
-	it("pins the 46-server registry by idle-eviction decision class (#3952)", () => {
+	it("pins the 47-server registry by idle-eviction decision class (#3952, #3939)", () => {
 		const declared = new Map(LSP_SERVERS.map((s) => [s.id, s.idleEviction]));
 		const classified = [
 			...TRANSPARENT_IDS,

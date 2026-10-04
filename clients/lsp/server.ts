@@ -3744,6 +3744,48 @@ export const DockerServer: LSPServerInfo = {
 	},
 };
 
+/**
+ * Official Docker Language Server (`docker-language-server start --stdio`,
+ * docker/docker-language-server). It is a same-language alternate of
+ * {@link DockerServer} whose binary name AND argv differ from the legacy
+ * rcjsuen npm server, so it cannot be a candidate inside DockerServer's spec:
+ * that spec's `args` are shared by every candidate and omit `start` (#3939).
+ *
+ * It is acquired only through the registry's `fallbackFor` owner when `docker`
+ * declines (binary absent, spawn throws, or the id is denied). Its capabilities,
+ * publish order, and idle cost are UNMEASURED: no official binary is installed
+ * on CI, so the legacy row's measurements must not be attributed here, and it
+ * declares no `managedToolId` (no installer entry and no automatic download).
+ */
+export const DockerOfficialServer: LSPServerInfo = {
+	id: "docker-official",
+	idleEviction: "unmeasured",
+	name: "Docker Language Server (official)",
+	fallbackFor: "docker",
+	extensions: [".dockerfile", "Dockerfile"],
+	root: RootWithFallback(
+		PriorityRoot([
+			[
+				"docker-compose.yml",
+				"docker-compose.yaml",
+				"compose.yml",
+				"compose.yaml",
+			],
+			[".git"],
+		]),
+	),
+	spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: nodeBinCandidates(root, "docker-language-server"),
+				args: ["start", "--stdio"],
+				cwd: root,
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const YamlServer: LSPServerInfo = {
 	id: "yaml",
 	idleEviction: "transparent",
@@ -4369,6 +4411,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	FishServer,
 	CMakeServer,
 	DockerServer,
+	DockerOfficialServer, // alternate of docker; acquired only when docker declines (#3939)
 	YamlServer,
 	JsonServer,
 	HtmlServer,
