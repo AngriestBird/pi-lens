@@ -97,8 +97,8 @@ describe("pilens_symbol_search over MCP (tiny project, pre-seeded index)", () =>
 		harness.notify("notifications/initialized");
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		try {
 			rmSync(projectDir, {
 				recursive: true,

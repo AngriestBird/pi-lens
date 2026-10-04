@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	cleanupTestEnvironmentsDrained,
 	removeTempDirSync,
 	setupTestEnvironment,
-	useTrackedTempDirs,
 } from "../test-utils.js";
 
 // These launch tests use fake timers and don't exercise Windows Ruby drive-root
@@ -44,7 +44,13 @@ describe("lsp launch", () => {
 		vi.clearAllMocks();
 	});
 	// Spawns are mocked, so nothing but this file owns the fixture roots.
-	useTrackedTempDirs("pi-lens-shim-", "pi-lens-ps1-", "pi-lens-launch-");
+	afterEach(async () => {
+		// This file's child processes are mocked; none of the background writers
+		// are involved, so don't load and drain the full writer graph per case.
+		for (const prefix of ["pi-lens-shim-", "pi-lens-ps1-", "pi-lens-launch-"]) {
+			await cleanupTestEnvironmentsDrained(prefix, { drainWrites: false });
+		}
+	});
 
 	it.runIf(process.platform !== "win32")(
 		"spawns LSP servers in their own process group on POSIX",
@@ -142,7 +148,7 @@ describe("lsp launch", () => {
 
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn(() => {
 						const proc = new MockChildProcess(4321);
 						setTimeout(() => {
@@ -182,8 +188,8 @@ describe("lsp launch", () => {
 			fs.writeFileSync(resolvedBinary, "");
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn((command: string) => {
-						if (command === "where taplo") {
+					execFileSync: vi.fn((command: string, args: string[]) => {
+						if (command === "where" && args[0] === "taplo") {
 							return `${resolvedBinary}\r\n`;
 						}
 						return "";
@@ -294,8 +300,13 @@ describe("lsp launch", () => {
 		async () => {
 			vi.useFakeTimers();
 			const dir = setupTestEnvironment("pi-lens-ps1-").tmpDir;
-			const ps1 = path.join(dir, "test.ps1");
-			const cmd = path.join(dir, "test.cmd");
+			const shimDir = path.join(dir, "scripts");
+			fs.mkdirSync(shimDir, { recursive: true });
+			const ps1 = path.join(shimDir, "test.ps1");
+			const cmd = path.join(shimDir, "test.cmd");
+			const jsTarget = path.join(dir, "pkg", "bin", "cli.js");
+			fs.mkdirSync(path.dirname(jsTarget), { recursive: true });
+			fs.writeFileSync(jsTarget, "console.log('hello')");
 			fs.writeFileSync(ps1, `"$basedir/../pkg/bin/cli.js" "$@"`);
 			fs.writeFileSync(cmd, `@"%~dp0\\..\\pkg\\bin\\cli.js" %*`);
 

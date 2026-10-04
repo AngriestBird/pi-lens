@@ -45,7 +45,13 @@ describe("result contract across registered tool surfaces", () => {
 	let pi: ReturnType<typeof createPiMock>;
 
 	beforeAll(async () => {
-		cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-result-contract-"));
+		const createdCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-result-contract-"),
+		);
+		cwd =
+			process.platform === "win32"
+				? fs.realpathSync.native(createdCwd)
+				: createdCwd;
 		const fixtureRoot = path.resolve("tests/fixtures");
 		fs.copyFileSync(
 			path.join(fixtureRoot, "tool-smoke/ast-grep-baseline/bad.ts"),
@@ -81,9 +87,9 @@ describe("result contract across registered tool surfaces", () => {
 		});
 	});
 
-	afterAll(() => {
-		mcp?.dispose();
+	afterAll(async () => {
 		process.chdir(originalCwd);
+		await mcp?.disposeAndWait();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 
@@ -106,7 +112,13 @@ describe("result contract across registered tool surfaces", () => {
 				apply: false,
 			},
 			lsp_navigation: { operation: "documentSymbol", path: "fixture.ts" },
-			lens_diagnostics: { source: "lsp", scope: "paths", paths: ["bad.ts"] },
+			// This suite pins renderer parity. Session diagnostics are deterministic;
+			// live LSP availability and startup timing are covered by LSP tests.
+			lens_diagnostics: {
+				source: "session",
+				scope: "paths",
+				paths: ["bad.ts"],
+			},
 			symbol_search: { query: "fixture", paths: ["fixture.ts"] },
 			module_report: { path: "fixture.ts", view: "compact" },
 			project_report: { view: "compact", limit: 1 },

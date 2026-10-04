@@ -141,8 +141,8 @@ describe("warm turn-end IPC route (real spawn)", { retry: 2 }, () => {
 		});
 	}, 30_000);
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		removeTempDirSync(projectDir);
 	});
 

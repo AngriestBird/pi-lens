@@ -22,7 +22,7 @@ function laneSources(): Array<{ file: string; stripped: string }> {
 	// than read as clean. The floor is the interface plus one lane module.
 	assertNonEmptyScan("turn-end lane modules", files.length, 2);
 	return files.map((full) => ({
-		file: path.relative(REPO_ROOT, full),
+		file: path.relative(REPO_ROOT, full).replace(/\\/g, "/"),
 		stripped: stripCommentsAndStrings(fs.readFileSync(full, "utf8")),
 	}));
 }

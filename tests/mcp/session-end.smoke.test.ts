@@ -65,8 +65,8 @@ describe("MCP situational dead-weight session end", () => {
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		fs.rmSync(home, { recursive: true, force: true });
 	});
 
@@ -135,7 +135,7 @@ describe("MCP connection-scoped situational dead-weight lifecycle", () => {
 				"ast_grep_search",
 			);
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 			fs.rmSync(home, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -157,7 +157,7 @@ describe("MCP connection-scoped situational dead-weight lifecycle", () => {
 			});
 			expect(await readDeadWeightRows(home)).toHaveLength(1);
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 			fs.rmSync(home, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -176,7 +176,7 @@ describe("MCP connection-scoped situational dead-weight lifecycle", () => {
 			await harness.closeInput();
 			expect(await readDeadWeightRows(home)).toHaveLength(1);
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 			fs.rmSync(home, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -201,7 +201,7 @@ describe("MCP connection-scoped situational dead-weight lifecycle", () => {
 			await harness.closeInput();
 			expect(await readDeadWeightRows(home)).toHaveLength(1);
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 			fs.rmSync(home, { recursive: true, force: true });
 		}
 	}, 60_000);

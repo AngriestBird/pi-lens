@@ -1354,7 +1354,14 @@ describe("tmp-fixture-hygiene", () => {
 					markerMtimeMs: Date.now(),
 					nowMs: Date.now(),
 					selfPid: process.pid,
-					probe: { ...probe, startTimeOf: () => ownMarker.startTime },
+					// This synthetic marker uses pid 1, which is not present on Windows.
+					// Pin liveness alongside start-time lookup so the classifier test
+					// proves the matching-lifetime branch rather than host PID inventory.
+					probe: {
+						...probe,
+						startTimeOf: () => ownMarker.startTime,
+						isAlive: () => true,
+					},
 					staleAfterMs: TMP_HYGIENE_OWNER_STALE_MS,
 				}),
 			).toBe("live");

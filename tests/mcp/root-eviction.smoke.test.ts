@@ -23,8 +23,8 @@ describe(
 			harness = new McpHarness({ cwd: roots[0] });
 		}, 30_000);
 
-		afterAll(() => {
-			harness.dispose();
+		afterAll(async () => {
+			await harness.disposeAndWait();
 			for (const root of roots)
 				fs.rmSync(root, { recursive: true, force: true });
 		}, 30_000);

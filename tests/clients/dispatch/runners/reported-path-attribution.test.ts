@@ -1035,7 +1035,9 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		// gleam's `location.path` is absolute by construction: the CLI walks up
 		// from the absolute cwd to `gleam.toml` and joins `src`
 		// (`compiler-cli/src/fs.rs:32-62`, `compiler-core/src/paths.rs:42-48`).
-		expect(observed.reported).toBe(observed.dispatchedPath);
+		expect(observed.reported.replace(/\\/g, "/")).toBe(
+			observed.dispatchedPath.replace(/\\/g, "/"),
+		);
 		expectGleamAttached(observed, gleamCheck);
 	});
 

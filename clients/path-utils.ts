@@ -229,6 +229,25 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
 export function normalizeFilePath(filePath: string): string {
 	// Convert backslashes to forward slashes first
 	const normalized = filePath.replace(/\\/g, "/");
+	// `""` is a sentinel, not a request for the current working directory.
+	if (normalized === "") return "";
+
+	// Keep relative Windows keys relative just as the POSIX arm does. The
+	// previous fallback used `win32.resolve`, which silently rooted a relative
+	// key at process.cwd(); that split readers from writers which retain the
+	// caller's relative spelling (#2490).
+	if (process.platform === "win32" && !win32.isAbsolute(normalized)) {
+		const relative = win32.normalize(normalized).replace(/\\/g, "/");
+		try {
+			// Keep existing relative paths relative while adopting their on-disk
+			// spelling, as the POSIX arm does. Missing paths still need Windows'
+			// case-insensitive key form.
+			const canonical = realpathSync.native(filePath).replace(/\\/g, "/");
+			return adoptCanonicalCasing(relative, canonical);
+		} catch {
+			return relative.toLowerCase();
+		}
+	}
 
 	if (process.platform !== "win32" && !isWindowsPath(normalized)) {
 		// #3184. `path.posix`, not the host default: this branch is already

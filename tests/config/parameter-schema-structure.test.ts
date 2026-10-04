@@ -65,7 +65,9 @@ describe("trimmed parameter schema structure (#2800 item 13)", () => {
 		mcpTools = ((listed.result as { tools: Tool[] }).tools ?? []) as Tool[];
 	});
 
-	afterAll(() => mcp?.dispose());
+	afterAll(async () => {
+		await mcp?.disposeAndWait();
+	});
 
 	it("preserves every accepted argument shape on pi and MCP surfaces", () => {
 		const actual = {

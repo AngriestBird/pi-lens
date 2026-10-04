@@ -70,8 +70,8 @@ describe("pilens_analyze coverage notice across repeat warm pulls (#3791)", () =
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		try {
 			rmSync(projectDir, {
 				recursive: true,

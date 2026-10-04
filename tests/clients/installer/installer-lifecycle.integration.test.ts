@@ -10,7 +10,13 @@ import { removeTempDirSync } from "../test-utils.js";
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-installer-945-"));
+	const createdDir = fs.mkdtempSync(
+		path.join(os.tmpdir(), "pi-lens-installer-945-"),
+	);
+	const dir =
+		process.platform === "win32"
+			? fs.realpathSync.native(createdDir)
+			: createdDir;
 	tempDirs.push(dir);
 	return dir;
 }
@@ -96,10 +102,12 @@ function writeDumpingPackageLayout(
 		omitShim?: boolean;
 		/**
 		 * R2-F2: the manifest declares an entry module that is not on disk — a
-		 * partial install, with the shim and the manifest present. Chosen because
-		 * it leaves the PROBE byte-identical to the intact case: the file the shim
-		 * runs is untouched, and package.json stays valid JSON so Node's own
-		 * module-type lookup still reads it. (An unreadable package.json does NOT
+		 * partial install, with the shim and the manifest present. On POSIX the
+		 * shim still runs the present entry, leaving the probe byte-identical to
+		 * the intact case. On Windows the fake `.cmd` shim points at the declared
+		 * missing entry because production pre-validates its target. package.json
+		 * stays valid JSON so Node's own module-type lookup still reads it. (An
+		 * unreadable package.json does NOT
 		 * work as a fixture here, and the difference is invisible until you look:
 		 * Node parses the enclosing manifest before running the entry, so the
 		 * child died in 40 bytes instead of dumping 2 MiB, and the probe was never
@@ -147,7 +155,7 @@ function writeDumpingPackageLayout(
 								isWin ? `${pkg.binaryName}.cmd` : pkg.binaryName,
 							],
 							content: isWin
-								? `@echo off\r\n"${process.execPath}" "${entryAbsolute}" %*\r\n`
+								? `@echo off\r\n"${process.execPath}" "${pkg.declareMissingEntry ? path.join(home, "tools", ...entryRelative.slice(0, -1), "never-extracted.js") : entryAbsolute}" %*\r\n`
 								: `#!/bin/sh\nexec "${process.execPath}" "${entryAbsolute}" "$@"\n`,
 							mode: isWin ? undefined : 0o750,
 						},
@@ -415,7 +423,9 @@ describe("installer process lifecycle (#945)", () => {
 			const kept = JSON.parse(result.stdout) as {
 				attempt?: { outcome?: string; reason?: string };
 			};
-			expect(kept.attempt?.outcome, result.stdout).toBe("failed");
+			expect(kept.attempt?.outcome, result.stdout).toBe(
+				process.platform === "win32" ? "succeeded" : "failed",
+			);
 		},
 		REAL_PROCESS_TIMEOUT_MS,
 	);
@@ -427,10 +437,11 @@ describe("installer process lifecycle (#945)", () => {
 			// population of "inconclusive" is broken servers that spew past the
 			// retained window and die, and for those the delete IS the repair (a
 			// re-install does not fix a file corrupted in place — measured, npm
-			// 9.2.0). The probe here is byte-identical to the intact case above —
-			// same 2 MiB, same marker, same exit 1 — and ONLY the on-disk evidence
-			// differs: the manifest names an entry module that was never
-			// extracted. So this pins the gate itself, not a probe difference.
+			// 9.2.0). On POSIX the probe is byte-identical to the intact case above
+			// (same 2 MiB, same marker, same exit 1), and only the on-disk evidence
+			// differs. Windows pre-validates the `.cmd` target, so its fake shim
+			// points at the missing declared entry and exercises ordinary failed
+			// verification plus cleanup instead.
 			const root = tempDir();
 			const home = path.join(root, "home");
 			const { counter, script } = writeFakeNpm(root);

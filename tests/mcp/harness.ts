@@ -8,6 +8,7 @@
  */
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -47,6 +48,7 @@ export class McpHarness {
 	private readonly isolationDir: string;
 	private pending = new Map<number, (msg: Record<string, unknown>) => void>();
 	private defaultTimeoutMs: number;
+	private disposed = false;
 
 	constructor(options: McpHarnessOptions = {}) {
 		this.defaultTimeoutMs =
@@ -142,6 +144,8 @@ export class McpHarness {
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
 		const endpoints = [
 			ipcPathForCwd(this.workspaceDir),
 			diagnosticsIpcPathForCwd(this.workspaceDir, this.child.pid ?? 0),
@@ -163,10 +167,40 @@ export class McpHarness {
 		// Unlink before and after child exit: kill() is asynchronous, and the
 		// child can finish binding after the first cleanup (#2912).
 		cleanup();
-		this.child.once("exit", cleanup);
-		if (!this.workspaceDir || this.workspaceDir !== process.cwd()) {
-			fs.rmSync(this.workspaceDir, { recursive: true, force: true });
+		const removeDirectories = (): void => {
+			if (this.workspaceDir !== process.cwd()) {
+				fs.rmSync(this.workspaceDir, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 200,
+				});
+			}
+			fs.rmSync(this.isolationDir, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 200,
+			});
+		};
+		if (this.child.exitCode !== null || this.child.signalCode !== null) {
+			cleanup();
+			removeDirectories();
+		} else {
+			this.child.once("exit", () => {
+				cleanup();
+				removeDirectories();
+			});
 		}
-		fs.rmSync(this.isolationDir, { recursive: true, force: true });
+	}
+
+	/** Stop the child and wait until Windows releases its cwd handle. */
+	async disposeAndWait(): Promise<void> {
+		const exited =
+			this.child.exitCode !== null || this.child.signalCode !== null
+				? Promise.resolve()
+				: once(this.child, "exit").then(() => undefined);
+		this.dispose();
+		await exited;
 	}
 }

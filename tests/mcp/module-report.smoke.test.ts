@@ -75,8 +75,8 @@ describe("module_report + read_symbol over MCP (tiny project)", () => {
 		harness.notify("notifications/initialized");
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		try {
 			rmSync(projectDir, {
 				recursive: true,

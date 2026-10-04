@@ -129,7 +129,9 @@ describe("tool roster description budget", () => {
 		mcpTools = (listed.result as { tools: ListedTool[] }).tools ?? [];
 	});
 
-	afterAll(() => mcp?.dispose());
+	afterAll(async () => {
+		await mcp?.disposeAndWait();
+	});
 
 	it("keeps the pi roster within its two-sided baseline", () => {
 		expectUniqueNames(piTools);

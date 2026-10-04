@@ -95,6 +95,9 @@ describe("oxlint advisory rule-count floor guard (#2700 review round 2, F2)", ()
 			{
 				cwd: REPO_ROOT,
 				encoding: "utf8",
+				// npm is a `.cmd` shim on Windows; spawnSync cannot run it without
+				// shell handling, so the real advisory script never starts there.
+				shell: process.platform === "win32",
 				env: {
 					...process.env,
 					PI_LENS_HOME: resolve(REPO_ROOT, ".probe-home"),

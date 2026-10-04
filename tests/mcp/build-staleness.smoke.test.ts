@@ -70,8 +70,8 @@ describe("warm build-staleness guard (real spawn)", { retry: 2 }, () => {
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		rmSync(stampDir, { recursive: true, force: true });
 	});
 

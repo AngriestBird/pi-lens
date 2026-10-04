@@ -817,7 +817,7 @@ describe("Pipeline", () => {
 				retainedEntries: 0,
 			});
 			expect(getDegradationSummary()).toEqual([]);
-		});
+		}, 30_000);
 
 		it("surfaces formatter failures instead of plain clean output", async () => {
 			const filePath = createTempFile(

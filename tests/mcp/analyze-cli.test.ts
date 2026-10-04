@@ -150,7 +150,7 @@ beforeAll(() => {
 	fs.writeFileSync(hintFile, HINT_ONLY);
 });
 
-afterAll(() => {
+afterAll(async () => {
 	removeTempDirSync(tmpDir);
 	removeTempDirSync(testIsolationDir);
 });
@@ -535,7 +535,7 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 				lastFailureOperation: "analyze",
 			});
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 		}
 	}, 30_000);
 

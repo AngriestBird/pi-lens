@@ -41,7 +41,15 @@ export function setupTestEnvironment(prefix = "pi-lens-test-"): {
 	tmpDir: string;
 	cleanup: () => void;
 } {
-	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const createdDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	// Windows may return an 8.3 alias from `mkdtempSync` while APIs such as
+	// `process.cwd()` and child-process cwd reporting return the long spelling.
+	// Keep one spelling throughout each fixture so path-key assertions exercise
+	// behavior rather than alias reconciliation.
+	const tmpDir =
+		process.platform === "win32"
+			? fs.realpathSync.native(createdDir)
+			: createdDir;
 	activeTestEnvironments.add(tmpDir);
 	// #2912: the shared setup removes this root at file teardown and on SIGTERM,
 	// so a timeout or a failed assertion before `cleanup()` cannot leak it.

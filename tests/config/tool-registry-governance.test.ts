@@ -27,7 +27,9 @@ describe("model-facing tool registry governance (#2800)", () => {
 		).map((tool) => tool.name);
 	});
 
-	afterAll(() => mcp?.dispose());
+	afterAll(async () => {
+		await mcp?.disposeAndWait();
+	});
 
 	it("covers every pi and MCP registration, including the five MCP-only tools", () => {
 		const piEntries = TOOL_REGISTRY.filter((entry) => entry.piName);
@@ -86,7 +88,7 @@ describe("model-facing tool registry governance (#2800)", () => {
 			expect(names).not.toContain("pilens_health");
 			expect(names).toContain("pilens_session_start");
 		} finally {
-			isolated.dispose();
+			await isolated.disposeAndWait();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 25_000);

@@ -79,13 +79,14 @@ describe("go-vet runner", () => {
 
 	it("vets the package containing the file from the module root (not the file in isolation)", async () => {
 		safeSpawnAsync.mockResolvedValue(goResult());
-		const ctx = makeCtx("/m/sub/b.go", "/m");
+		const moduleRoot = path.resolve("/m");
+		const ctx = makeCtx(path.join(moduleRoot, "sub", "b.go"), moduleRoot);
 		await runner.default.run(ctx);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 		const [exe, args, opts] = safeSpawnAsync.mock.calls[0];
 		expect(exe).toBe("/usr/local/bin/go");
 		expect(args).toEqual(["vet", "./sub"]);
-		expect(opts).toMatchObject({ cwd: "/m", timeout: 30000 });
+		expect(opts).toMatchObject({ cwd: moduleRoot, timeout: 30000 });
 	});
 
 	it("vets '.' for a file in the module-root package", async () => {

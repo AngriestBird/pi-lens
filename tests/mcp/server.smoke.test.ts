@@ -37,8 +37,8 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		harness = new McpHarness();
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 	});
 
 	// #2860 round 4 N6: this scans the production construction itself. The
@@ -241,7 +241,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 				"Unknown or disabled tool: pilens_lsp_diagnostics",
 			);
 		} finally {
-			isolated.dispose();
+			await isolated.disposeAndWait();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 25_000);
@@ -261,7 +261,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 			expect(names).not.toContain("pilens_ast_grep_replace");
 			expect(names).toContain("pilens_ast_grep_search");
 		} finally {
-			isolated.dispose();
+			await isolated.disposeAndWait();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 25_000);
@@ -296,7 +296,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 				"unavailable in an installed pi-lens package",
 			);
 		} finally {
-			installedHarness.dispose();
+			await installedHarness.disposeAndWait();
 			fs.rmSync(installedRoot, { recursive: true, force: true });
 		}
 	}, 25_000);
@@ -391,7 +391,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 			expect(result.content[0].text).not.toContain("No files diagnosed");
 			expect(result.content[0].text).toMatch(/deep-nesting|console-statement/);
 		} finally {
-			isolated.dispose();
+			await isolated.disposeAndWait();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -450,7 +450,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 			// excludes the "pilens_" prefix both names above carry.
 			expect(text).not.toMatch(/(?<![A-Za-z0-9_])lens_diagnostics/);
 		} finally {
-			isolated.dispose();
+			await isolated.disposeAndWait();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -602,7 +602,7 @@ describe("pi-lens MCP result bounds", { retry: 2 }, () => {
 			expect(Buffer.byteLength(fullText)).toBeGreaterThan(40 * 1024);
 			expect(fullText).toContain("value319");
 		} finally {
-			harness.dispose();
+			await harness.disposeAndWait();
 			fs.rmSync(workspace, { recursive: true, force: true });
 		}
 	}, 45_000);
@@ -912,8 +912,8 @@ describe("pi-lens MCP unknown arguments (#3749)", { retry: 2 }, () => {
 		harness.notify("notifications/initialized");
 	}, 25_000);
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 	});
 
 	// The reporter's exact call (#3749 round 2): `path` is optional for

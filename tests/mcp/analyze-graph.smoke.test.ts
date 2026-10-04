@@ -96,8 +96,8 @@ describe("pilens_analyze (warm) maintains the review graph over MCP", () => {
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		try {
 			rmSync(projectDir, {
 				recursive: true,
@@ -233,8 +233,8 @@ describe("pilens_analyze (warm) also maintains the word index over MCP (#536 rid
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		try {
 			rmSync(projectDir, {
 				recursive: true,

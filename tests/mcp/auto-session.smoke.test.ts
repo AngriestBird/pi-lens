@@ -88,8 +88,8 @@ describe("MCP auto session_start visibility (PI_LENS_MCP_AUTO_SESSION unset)", (
 		harness.notify("notifications/initialized");
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		rmSync(projectDir, { recursive: true, force: true });
 	});
 
@@ -115,8 +115,8 @@ describe("MCP auto session_start (PI_LENS_MCP_AUTO_SESSION=1)", () => {
 		});
 	});
 
-	afterAll(() => {
-		harness.dispose();
+	afterAll(async () => {
+		await harness.disposeAndWait();
 		rmSync(projectDir, { recursive: true, force: true });
 	});
 

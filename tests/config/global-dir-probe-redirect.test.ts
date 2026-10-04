@@ -157,7 +157,15 @@ function makeFixture(slug: string): {
 	/** A temp dir for the child that contains NOTHING else in the fixture. */
 	isolatedTmp: string;
 } {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-lens-${slug}-`));
+	const createdRoot = fs.mkdtempSync(
+		path.join(os.tmpdir(), `pi-lens-${slug}-`),
+	);
+	// Windows can return a DOS 8.3 alias here while the child and cwd APIs use
+	// the long spelling. Compare facts from one canonical fixture path.
+	const root =
+		process.platform === "win32"
+			? fs.realpathSync.native(createdRoot)
+			: createdRoot;
 	const fakeHome = path.join(root, "fake-real-home");
 	const isolatedTmp = path.join(root, "child-tmp");
 	fs.mkdirSync(fakeHome, { recursive: true });
@@ -603,12 +611,17 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 	// that vitest never touches at all. The old text told a reader the redirect
 	// was test-mode-scoped when it is not.
 	it("describes the actual trigger, not a removed test-mode gate", () => {
-		const root = fs.mkdtempSync(
+		const createdRoot = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-probe-reason-"),
 		);
+		const root =
+			process.platform === "win32"
+				? fs.realpathSync.native(createdRoot)
+				: createdRoot;
 		// #3696: a deep agent worktree/TMPDIR used to leave a dangling `(cwd:`
 		// stub after the fixed diagnostic consumed the ledger's 200-character cap.
-		const longCwd = path.join(root, `cwd-${"x".repeat(220)}`);
+		// Keep the deliberately deep directory below Win32's legacy path limit.
+		const longCwd = path.join(root, `cwd-${"x".repeat(150)}`);
 		fs.mkdirSync(longCwd, { recursive: true });
 		const savedHome = process.env.PI_LENS_HOME;
 		const savedProbe = process.env.PILENS_PROBE;

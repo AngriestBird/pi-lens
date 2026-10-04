@@ -173,7 +173,7 @@ describe("#3694 live cwd safety rail (planners)", () => {
 			worktrees: [agentRow],
 			nowMs: 10_000_000,
 			minAgeMs: 1,
-			liveProcessCwds: new Set([`${AGENT}/src`]),
+			liveProcessCwds: new Set([toComparablePath(`${AGENT}/src`)]),
 		});
 		expect(result.remove).toHaveLength(0);
 		expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
@@ -187,7 +187,7 @@ describe("#3694 live cwd safety rail (planners)", () => {
 				worktrees: [agentRow],
 				nowMs: 10_000_000,
 				minAgeMs: 1,
-				liveProcessCwds: new Set([cwd]),
+				liveProcessCwds: new Set([toComparablePath(cwd)]),
 			});
 		expect(plan(`${AGENT}b/src`).remove).toHaveLength(1);
 		expect(plan(AGENT).keep[0]).toMatchObject({ reason: "live-cwd" });
@@ -204,7 +204,7 @@ describe("#3694 live cwd safety rail (planners)", () => {
 			nowMs: 10_000_000,
 			minAgeMs: 1,
 			only: [AGENT],
-			liveProcessCwds: new Set([`${AGENT}/src`]),
+			liveProcessCwds: new Set([toComparablePath(`${AGENT}/src`)]),
 		});
 		expect(result.keep).toHaveLength(0);
 		expect(result.remove).toHaveLength(1);
@@ -236,7 +236,9 @@ describe("#3694 live cwd safety rail (planners)", () => {
 			const result = planMergedWorktreeRemovals({
 				candidates: [mergedRow],
 				nowMs: 10_000_000,
-				liveProcessCwds: new Set(["/repo/elsewhere/merged-a/src"]),
+				liveProcessCwds: new Set([
+					toComparablePath("/repo/elsewhere/merged-a/src"),
+				]),
 			});
 			expect(result.remove).toHaveLength(0);
 			expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
@@ -278,7 +280,9 @@ describe("#3694 live cwd safety rail (planners)", () => {
 				nowMs: 10_000_000,
 				minAgeMs: 1_000_000,
 				selectedKeys: named,
-				liveProcessCwds: new Set(["/repo/elsewhere/merged-a/src"]),
+				liveProcessCwds: new Set([
+					toComparablePath("/repo/elsewhere/merged-a/src"),
+				]),
 			});
 			expect(result.remove).toHaveLength(1);
 			const unknown = planMergedWorktreeRemovals({
@@ -1848,7 +1852,11 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 	// F5 (orchestrator decision): the live-cwd rail protects OTHER trees. The
 	// stopped agent's own tree is reaped WITH its leftover process, as before
 	// #3694 -- a hook that refuses to reap its own agent is the #2486 regression.
-	it(
+	// This acceptance case keeps a live Node process inside the selected tree
+	// while the hook removes it. Windows has no procfs cwd inventory, and that
+	// process holds directory handles that prevent Git from removing the tree;
+	// the Linux lane owns this `/proc`-specific behavior.
+	linuxOnly(
 		"still reaps the stopped agent's own tree, and its leftover process, on SubagentStop (#3694 F5)",
 		{ timeout: 90_000 },
 		async () => {

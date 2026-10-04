@@ -457,7 +457,11 @@ describe("bash grep searchReads registration", () => {
 		}
 	});
 
-	it("registers only the lines shown by the real bash host cap", async () => {
+	it("registers only the lines shown by the real bash host cap", async (ctx) => {
+		ctx.skip(
+			process.platform === "win32",
+			"the fixture proves the POSIX Bash host's 2,000-line cap; lane: ubuntu Unit tests",
+		);
 		resetDegradationLedger();
 		const env = setupTestEnvironment("pi-lens-2802-bash-cap-");
 		try {
@@ -580,23 +584,15 @@ describe("bash grep searchReads registration", () => {
 				updateLspStatus: () => {},
 				resetLSPService: () => {},
 			} as any);
-			const bashTool = createBashToolDefinition(env.tmpDir, {
-				exposeSessionEnvironment: false,
-			});
-			const result = await bashTool.execute(
-				"2802-noop",
-				{ command },
-				undefined,
-				undefined,
-				{ cwd: env.tmpDir } as never,
-			);
+			// The no-op shell write is represented at the tool-result boundary.
+			// Its recognized `sed -i` target is still a successful host operation,
+			// while running GNU sed here would make this test POSIX-only.
 			await handleToolResult({
 				event: {
 					toolName: "bash",
 					toolCallId: "2802-noop",
 					input: { command },
-					content: result.content,
-					details: result.details,
+					content: [{ type: "text", text: "" }],
 				},
 				getFlag: () => false,
 				dbg: () => {},

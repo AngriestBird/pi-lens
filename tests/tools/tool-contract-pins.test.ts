@@ -45,7 +45,9 @@ describe("model-facing tool contract pins (#2808)", () => {
 		mcpTools = (listed.result as { tools: ListedTool[] }).tools ?? [];
 	});
 
-	afterAll(() => mcp?.dispose());
+	afterAll(async () => {
+		await mcp?.disposeAndWait();
+	});
 
 	it("pins the read-before-edit contract independently on each surface", () => {
 		for (const tools of [piTools, mcpTools]) {

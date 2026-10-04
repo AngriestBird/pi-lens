@@ -191,6 +191,39 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 	});
 });
 
+// lane: windows-vitest
+it.runIf(process.platform === "win32")(
+	"keeps relative Windows map keys relative while folding path identity",
+	() => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-relative-win-");
+		try {
+			const file = path.join(tmpDir, "src", "Foo.ts");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "export {};\n");
+
+			const misCased = path.join(tmpDir, "src", "foo.ts");
+			const relative = path.relative(process.cwd(), misCased);
+			const key = normalizeFilePath(relative);
+			const expected = path
+				.relative(process.cwd(), fs.realpathSync.native(file))
+				.replace(/\\/g, "/");
+			expect(path.win32.isAbsolute(key)).toBe(false);
+			expect(key).toBe(expected);
+			expect(normalizeFilePath(relative.toLowerCase())).toBe(key);
+
+			const missing = path.relative(
+				process.cwd(),
+				path.join(tmpDir, "src", "Missing.ts"),
+			);
+			expect(normalizeFilePath(missing)).toBe(
+				path.win32.normalize(missing).replace(/\\/g, "/").toLowerCase(),
+			);
+		} finally {
+			cleanup();
+		}
+	},
+);
+
 describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half of #1024)", () => {
 	// RECURRENCE GUARDED: the POSIX arm used to return the caller's spelling
 	// unchanged, so on a case-insensitive filesystem (macOS APFS, `nocase`
@@ -276,7 +309,11 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		}
 	});
 
-	it("a path that does not exist stays case-preserving", () => {
+	it("a path that does not exist stays case-preserving", (ctx) => {
+		ctx.skip(
+			process.platform === "win32",
+			"POSIX case-sensitive missing-path behavior; covered by the ubuntu Unit tests lane",
+		);
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
 		try {
 			const absent = path.join(tmpDir, "NOPE", "b.ts");
@@ -2310,7 +2347,13 @@ describe("the uv-members dialect reproduces the pre-fold minimatch answers (#259
 					relativePath,
 					UV_WORKSPACE_MEMBERS_DIALECT,
 				);
-				const preFold = minimatch(relativePath, normalized, { dot: true });
+				// The historical corpus is POSIX path text. Pin minimatch's POSIX
+				// backslash handling so Windows' path-separator default does not alter
+				// the reference answers for the three x\\y cells.
+				const preFold = minimatch(relativePath, normalized, {
+					dot: true,
+					windowsPathsNoEscape: false,
+				});
 				if (folded !== preFold && !UV_MINIMATCH_DIVERGENCES.has(key)) {
 					unexpected.push(`${key} folded=${folded} minimatch=${preFold}`);
 				}
