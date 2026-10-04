@@ -1937,24 +1937,21 @@ export class ReadGuard {
 		const boundIndex = fileReads.lastIndexOf(boundRead);
 		if (boundIndex < 0) return false;
 
-		let lines: string[];
-		try {
-			lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-		} catch {
-			// An unreadable disk cannot vouch for any newer read.
-			return false;
-		}
-
 		for (let i = fileReads.length - 1; i > boundIndex; i -= 1) {
 			const candidate = fileReads[i];
 			if (candidate.provisional === true) continue;
-			if (
-				rangesToCheck.every((range) =>
-					this.readRangeHashesStillMatch(candidate, lines, range),
-				)
-			) {
-				return true;
-			}
+			// `currentLinesMatchReadSnapshot` reads the disk itself and reports
+			// `checked: false` for a candidate that covers no hash, so a partial
+			// or unhashed newer read never reaches disk and never qualifies.
+			const deliversEveryEditedLine = rangesToCheck.every((range) => {
+				const snapshot = currentLinesMatchReadSnapshot(
+					filePath,
+					candidate,
+					range,
+				);
+				return snapshot.checked && snapshot.matches;
+			});
+			if (deliversEveryEditedLine) return true;
 		}
 		return false;
 	}
