@@ -2097,3 +2097,64 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 		}
 	});
 });
+
+// #3959: opt-in one-line widget summary (ui.compactWidget / --lens-compact-widget).
+describe("renderWidget compact summary (#3959)", () => {
+	const summaryFixture = () => {
+		const filePath = `${process.cwd()}/compact-widget.ts`;
+		setSessionLanguages(["css", "html", "json", "jsts", "markdown", "shell"]);
+		recordRunner(filePath, "type-safety", "failed", 1);
+		recordDiagnostics(filePath, [
+			{
+				severity: "error",
+				semantic: "blocking",
+				message: "blocking detail that must not render",
+				line: 2278,
+				rule: "typescript:2451",
+			},
+			{
+				severity: "warning",
+				message: "warning detail that must not render",
+				line: 497,
+				rule: "ts-react-antipatterns",
+			},
+		]);
+		return filePath;
+	};
+
+	it("renders exactly one line: the summary header with languages and totals", () => {
+		summaryFixture();
+
+		const lines = renderWidget(120, theme, true);
+
+		expect(lines).toHaveLength(1);
+		const header = lines[0] ?? "";
+		expect(header).toContain("pi-lens");
+		expect(header).toContain("css html json jsts markdown shell");
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		// No file rows, no blocker details in compact mode.
+		expect(header).not.toContain("compact-widget.ts");
+		expect(header).not.toContain("blocking detail that must not render");
+		expect(header).not.toContain("warning detail that must not render");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(120);
+	});
+
+	it("is still one line in narrow mode (vertical would otherwise stack per-file rows)", () => {
+		summaryFixture();
+
+		const lines = renderWidget(40, theme, true);
+
+		expect(lines).toHaveLength(1);
+		expect(visibleWidth(lines[0] ?? "")).toBeLessThanOrEqual(40);
+	});
+
+	it("keeps the default multi-line rendering when the flag is off", () => {
+		summaryFixture();
+
+		const lines = renderWidget(120, theme, false);
+
+		expect(lines.length).toBeGreaterThan(1);
+		expect(lines.join("\n")).toContain("compact-widget.ts");
+	});
+});

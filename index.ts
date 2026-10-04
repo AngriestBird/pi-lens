@@ -1140,6 +1140,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		setWidget(
 			"pi-lens",
 			(tui: LensWidgetTui, theme: LensWidgetTheme) => {
+				// #3959: read once per mount, like the other session-scoped flags.
+				const compactWidget = getLensFlag("lens-compact-widget") === true;
 				renderInvalidator = () => tui.requestRender();
 				setRenderCallback(() => {
 					scheduleStaleReconcile();
@@ -1148,7 +1150,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return {
 					render: (width: number) => {
 						scheduleStaleReconcile();
-						return renderWidget(width, theme);
+						return renderWidget(width, theme, compactWidget);
 					},
 					invalidate: () => {
 						renderInvalidator = undefined;

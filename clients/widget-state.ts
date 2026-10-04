@@ -2036,6 +2036,8 @@ export function renderWidget(
 	theme: {
 		fg: (color: string, s: string) => string;
 	},
+	// #3959: opt-in one-line summary (ui.compactWidget / --lens-compact-widget).
+	compactWidget = false,
 ): string[] {
 	const dim = (s: string) => theme.fg("dim", s);
 	const red = (s: string) => theme.fg("error", s);
@@ -2080,6 +2082,9 @@ export function renderWidget(
 
 	const header = ` ${cyan("pi-lens")}${langStr ? "  " + dim(langStr) : ""}${lspChip}${summary ? "  " + summary : ""}`;
 	lines.push(fitLine(header, w));
+	// #3959: compact mode stops at the summary header. File rows, the
+	// suppressed count and blocker details stay reachable via lens_diagnostics.
+	if (compactWidget) return lines;
 	if (totalSuppressed > 0) {
 		lines.push(fitLine(` ${dim(`suppressed: ${totalSuppressed}`)}`, w));
 	}

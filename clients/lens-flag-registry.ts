@@ -243,6 +243,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "lens-compact-widget",
+		description:
+			"Opt-in (#3959): render the pi-lens widget as ONE summary line (languages + error/warning totals) instead of also stacking file rows, the suppressed count and blocker details below it. Default off. Also via ui.compactWidget=true in ~/.pi-lens/config.json.",
+		configKey: "ui.compactWidget",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "no-lazy-tools",
 		description:
 			"Keep all pi-lens tools active to avoid tool-list cache changes. Also via tools.lazy=false in ~/.pi-lens/config.json.",
