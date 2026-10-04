@@ -766,6 +766,17 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 		},
 		CENSUS_TIMEOUT_MS,
 	);
+
+	it(
+		"registers the host event-shape scan as a tests-tree scanner",
+		() => {
+			const scanner = "tests/support/host-event-shape-scan.test.ts";
+			expect(census()).toContain(scanner);
+			expect(TEST_TREE_GOVERNANCE_TESTS).toContain(scanner);
+			expect(TREE_SCANNING_GOVERNANCE_TESTS).not.toContain(scanner);
+		},
+		CENSUS_TIMEOUT_MS,
+	);
 });
 
 describe("CI-only pre-push tier (#3426 H3432-1)", () => {
