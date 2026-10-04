@@ -394,9 +394,14 @@ be exercised + debugged directly through Claude Code without running pi.
   hook (reads the tool payload from stdin → `tool_input.path`/`file_path` + cwd)
   AND as a plain CLI (`--file=`). Defaults to `no-lsp` (FAST: ~1-2s, the cold
   LSP would cost ~5s/edit and under-report anyway — pull `pilens_analyze` on the
-  warm server for type errors). Silent on clean files; advisory (always exit 0).
-  `--hook` emits a PostToolUse `additionalContext` envelope; plain mode prints a
-  report. 4 bin tests (CLI, --hook envelope, clean-file silence, stdin payload).
+  warm server for type errors). Silent on clean files. Clean scans and findings
+  exit 0; an invocation that cannot run reports its failure on stdout and stderr.
+  Plain CLI failures exit 2. `--hook`, stdin hook payloads, and `--turn-end` stay
+  advisory and exit 0, including on failure. `--hook` emits a PostToolUse
+  `additionalContext` envelope; plain mode and Stop hooks print text.
+  `pilens_health` reports failed invocation counts and the last operation,
+  timestamp, and bounded, redacted reason from the workspace status record.
+  These counters are best-effort history, not a current readiness verdict.
 
   Wire it in Claude Code `settings.json`:
 
@@ -454,7 +459,7 @@ be exercised + debugged directly through Claude Code without running pi.
   in the server, and concurrent turn-ends cannot race the turn-state clear.
   **Warm-only, no cold fallback**: only the server process owns the session state
   and pending turn work, so a local pass would report a false clean — no warm
-  server means one stderr line, silent stdout, exit 0.
+  server means a skip reason on stdout and stderr, exit 0.
   The client waits 55s so it gives up inside Claude Code's 60s hook timeout.
   `SubagentStop` is deliberately NOT registered: subagent edits already fire
   PostToolUse into the shared turn-state, the consume bridges are one-shot (a
