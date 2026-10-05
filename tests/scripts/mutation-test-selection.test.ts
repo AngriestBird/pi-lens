@@ -391,6 +391,45 @@ describe("selectMutationTests", () => {
 	const lines = (entries: Record<string, number | null>) =>
 		new Map(Object.entries(entries));
 
+	it.each([
+		["failed", { status: 1 }],
+		["timed out", { status: null, timedOut: true }],
+		["aborted", { status: null, aborted: true }],
+	] as const)(
+		"keeps a %s probe's explicit null source evidence",
+		async (_name, outcome) => {
+			// #3978 R1-F1: failed probes publish explicit null, not a missing map
+			// entry; narrowing must retain their witness beside a fresh answer.
+			const rangesByFile = new Map<string, Array<[number, number]>>([
+				["clients/active.ts", [[1, 20]]],
+			]);
+			const counts = new Map([["clients/active.ts", 0]]);
+			const result = await probeTestCoverage("failed", {
+				run: async () => outcome,
+				readCoverage: () => null,
+				rangesByFile,
+				root: "/repo",
+				sourceCounts: counts,
+			});
+			const sourceCoverage = new Map<string, Map<string, number> | null>([
+				["direct", new Map([["clients/active.ts", 1]])],
+				["failed", "unknown" in result ? null : counts],
+			]);
+			const selection = selectMutationTests({
+				related: ["direct", "failed"],
+				lines: new Map([
+					["direct", 1],
+					["failed", "unknown" in result ? null : result.lines],
+				]),
+				maxTests: 47,
+				activeSources: ["clients/active.ts"],
+				sourceCoverage,
+			});
+			expect(selection.kept).toEqual(["direct", "failed"]);
+			expect(selection.unknown).toEqual(["failed"]);
+		},
+	);
+
 	it("drops only proven coverage of unsampled sources while retaining shared, unknown, and own witnesses", async () => {
 		// #3973: range sampling must not repeat tests that only cover another
 		// source, or drop a transitive witness just because its import is indirect.
@@ -420,7 +459,9 @@ describe("selectMutationTests", () => {
 				],
 			];
 		for (const [test, report] of reports) {
-			const counts = new Map([...rangesByFile.keys()].map((file) => [file, 0]));
+			// The coverage owner also supports a fresh accumulator: absent report
+			// entries then remain absent, rather than becoming positive evidence.
+			const counts = new Map<string, number>();
 			const probe = {
 				run: async () => ({ status: 0 }),
 				readCoverage: () => report,
