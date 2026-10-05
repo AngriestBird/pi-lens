@@ -2864,6 +2864,14 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(findDeny(command)).toBe("stash");
 	});
 
+	it.each([
+		["git stash --include-untracked", "stash"],
+		["git commit -n -m x", "hookBypass"],
+		["git push --force origin main", "forcePush"],
+	] as const)("keeps git arguments in named coproc groups: %s", (git, rule) => {
+		expect(findDeny(`coproc C { ${git}; }`)).toBe(rule);
+	});
+
 	// #3787 mutation follow-up: braces group commands but do not gate a
 	// failed check; excluding every keyword must not also exclude `{`.
 	it.each(["git commit -m x", "git push"])(
