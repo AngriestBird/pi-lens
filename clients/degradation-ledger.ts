@@ -1566,13 +1566,17 @@ export type DegradationKind =
 	 */
 	| "wasm-trap"
 	/**
-	 * #2626: `resources_discover` (#205) resolved `<packageRoot>/skills` to a
-	 * directory that is absent, unreadable, or holds no `SKILL.md` — pi then
-	 * registers zero skills with no extension error and no stderr. Fires on
-	 * an installed copy missing `skills/`, or on the entry file having been
-	 * copied out of the package tree by a managed extension cache (so the
-	 * nearest `package.json` is the cache's own). Subject is the resolved
-	 * `skills/` path; see `clients/skills-resolver.ts`.
+	 * #2626: the `resources_discover` handler (#205) resolves
+	 * `<packageRoot>/skills` and checks it — absent, unreadable, or holding no
+	 * `SKILL.md`. Before #1416 it also contributed the resolved path to pi, so
+	 * this record meant pi registered zero skills with no extension error and
+	 * no stderr; the contribution is gone, so it now reports only the
+	 * entry-relative health of that directory (the `pi.skills` manifest is the
+	 * registrar and may still deliver the skills). Fires on an installed copy
+	 * missing `skills/`, or on the entry file having been copied out of the
+	 * package tree by a managed extension cache (so the nearest `package.json`
+	 * is the cache's own). Subject is the resolved `skills/` path; see
+	 * `clients/skills-resolver.ts`.
 	 */
 	| "web-tree-sitter-load-failed"
 	| "widget-disposition-reconcile-fallback"

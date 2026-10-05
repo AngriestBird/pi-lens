@@ -1495,7 +1495,7 @@ describe("release-QA skills-registration verdict (#2619 review N3)", () => {
 		name: `skill:${name}`,
 		sourceInfo: {
 			path: `${PKG}/skills/${name}/SKILL.md`,
-			source: "extension:index",
+			source: "package:manifest",
 			...over,
 		},
 	});
@@ -1506,21 +1506,22 @@ describe("release-QA skills-registration verdict (#2619 review N3)", () => {
 		skill("pi-lens-write-tree-sitter-rule"),
 	];
 
-	it("passes four in-package skills registered by the extension's own handler", () => {
+	it("passes four in-package skills registered by the package manifest", () => {
 		const verdict = classifySkillsRegistration(four(), PKG);
 		expect(verdict.status).toBe("pass");
-		expect(verdict.shows).toContain("4/4 via extension:index");
+		expect(verdict.shows).toContain("0 via extension:index, must be 0");
 	});
 
-	it("fails when a skill was registered by the manifest instead of the handler", () => {
-		// The F2 fix, as its own case: #2587 proved one registrar can be broken
-		// for four releases while the other silently covers for it, so the row
-		// names which half is load-bearing.
+	it("fails when a skill was re-added by the extension's own handler (#1416)", () => {
+		// #1416: the handler contributed `<packageRoot>/skills`, pi merged it
+		// raw, and every skill it registered is labelled `extension:index` —
+		// which undid the settings package filters. One such skill is the
+		// regression this row now guards.
 		const commands = four();
-		commands[0].sourceInfo.source = "package:manifest";
+		commands[0].sourceInfo.source = "extension:index";
 		const verdict = classifySkillsRegistration(commands, PKG);
 		expect(verdict.status).toBe("fail");
-		expect(verdict.shows).toContain("3/4 via extension:index");
+		expect(verdict.shows).toContain("1 via extension:index, must be 0");
 	});
 
 	it("fails when a skill resolved outside the installed package", () => {

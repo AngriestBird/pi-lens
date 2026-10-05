@@ -16,9 +16,13 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { absorbSettledRunnerBlockers } from "../../clients/deferred-runner-blockers.js";
+import {
+	absorbSettledRunnerBlockers,
+	judgeDeferredRunnerFindings,
+} from "../../clients/deferred-runner-blockers.js";
 import {
 	deferRunnerFindings,
+	peekSettledRunnerFindings,
 	resetPendingRunnerFindings,
 } from "../../clients/dispatch/pending-runner-findings.js";
 import {
@@ -27,8 +31,18 @@ import {
 } from "../../clients/generation-guard.js";
 import type { Diagnostic, RunnerResult } from "../../clients/dispatch/types.js";
 import { evaluateGitGuard } from "../../clients/git-guard.js";
+import {
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+// Only the OS read boundary is wrapped; stores, coordinator, policy, and gate remain real.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
 
 const RUNNER_ID = "slow-runner";
 
@@ -36,6 +50,7 @@ afterEach(() => {
 	resetPendingRunnerFindings();
 	resetDegradationLedger();
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
 });
 
 function blocking(filePath: string): Diagnostic {
@@ -76,6 +91,135 @@ async function settledAnswer(
 }
 
 describe("deferred blocker recording (#3814)", () => {
+	it("keeps a fresh settled blocker gating when its bytes cannot be read", async () => {
+		// Recurrence: #3896 mutant27 removed the optional byte read, turning
+		// EACCES after a successful stat into a pre-check exception and false allow.
+		// The real-filesystem POSIX probe proved the same red; faulting only the
+		// OS read makes this witness portable without weakening any real owner.
+		const env = setupTestEnvironment("pi-lens-3814-failopen-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await settledAnswer(filePath, env.tmpDir);
+			const actualFs =
+				await vi.importActual<typeof import("node:fs")>("node:fs");
+			vi.mocked(fs.readFileSync).mockImplementation((file, options) => {
+				if (file === filePath) {
+					throw Object.assign(new Error("EACCES: reading app.ts"), {
+						code: "EACCES",
+					});
+				}
+				return actualFs.readFileSync(file, options);
+			});
+			expect(
+				evaluateGitGuard(runtime, new CacheManager(false), env.tmpDir).block,
+			).toBe(true);
+			expect(
+				getDegradationSummary().some(
+					(row) => row.kind === "deferred-blocker-gate-error",
+				),
+			).toBe(false);
+		} finally {
+			vi.mocked(fs.readFileSync).mockImplementation(
+				(await vi.importActual<typeof import("node:fs")>("node:fs"))
+					.readFileSync,
+			);
+			env.cleanup();
+		}
+	});
+
+	it("leaves the missing-path record to delivery rather than writing it during a gate peek", async () => {
+		// Recurrence: #3814 r1 L1 duplicated delivery records from a commit peek.
+		// Mutation of advisory-provenance's quiet guard must red this real sink.
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		const env = setupTestEnvironment("pi-lens-3814-failopen-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await settledAnswer(filePath, env.tmpDir);
+			fs.unlinkSync(filePath);
+			expect(
+				evaluateGitGuard(runtime, new CacheManager(false), env.tmpDir).block,
+			).toBe(false);
+			await flushLatencyLog();
+			const before = fs
+				.readFileSync(getLatencyLogPath(), "utf-8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter(
+					(row) =>
+						row.filePath === env.tmpDir &&
+						row.phase === "finding_dead_path_drop",
+				);
+			expect(before).toHaveLength(0);
+			// The real settled store still owns the answer; delivery asks the same
+			// verdict without quiet, just as the turn-end lane does.
+			const [pending] = peekSettledRunnerFindings();
+			expect(pending).toBeDefined();
+			judgeDeferredRunnerFindings(pending, env.tmpDir);
+			await flushLatencyLog();
+			const after = fs
+				.readFileSync(getLatencyLogPath(), "utf-8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter(
+					(row) =>
+						row.filePath === env.tmpDir &&
+						row.phase === "finding_dead_path_drop",
+				);
+			expect(after).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("counts only newly recorded files when a settled replay joins a fresh answer", async () => {
+		// The worker home is pinned before logger load; opt into the real sink.
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		// Recurrence: #3896 mutant63 counted an already recorded answer as a
+		// newly blocking file in the commit-gate result and latency record.
+		const env = setupTestEnvironment("pi-lens-3814-sources-");
+		try {
+			const firstPath = path.join(env.tmpDir, "first.ts");
+			const secondPath = path.join(env.tmpDir, "second.ts");
+			fs.writeFileSync(firstPath, "alpha();\n");
+			fs.writeFileSync(secondPath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await settledAnswer(firstPath, env.tmpDir);
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(1);
+			await settledAnswer(secondPath, env.tmpDir);
+			const result = absorbSettledRunnerBlockers(runtime, env.tmpDir);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(2);
+			expect(result.recorded).toBe(1);
+			expect(result.fileCount).toBe(1);
+			await flushLatencyLog();
+			const rows = fs
+				.readFileSync(getLatencyLogPath(), "utf-8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter(
+					(row) =>
+						row.phase === "deferred_runner_blockers" &&
+						row.filePath === env.tmpDir,
+				);
+			expect(rows).toHaveLength(2);
+			expect(rows.at(-1)?.metadata).toMatchObject({
+				recorded: 1,
+				fileCount: 1,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("is retired only by a clean verdict that covers the runner that raised it", async () => {
 		// Recurrence: inline blockers carry the `tool` ids behind them so an
 		// LSP-only clean cannot retire an eslint/pyright blocker (#1561 F1). A
