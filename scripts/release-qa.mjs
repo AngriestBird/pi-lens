@@ -91,8 +91,14 @@ import { parseTable } from "./lib/md-matrix.mjs";
  * `index.ts`'s `resources_discover` handler (#205) — pi-lens registering its
  * own skills — as opposed to a `pi.skills` manifest entry pi resolved itself.
  * Read off live pi 0.80.10 and 0.85.1 responses, both identical.
+ *
+ * #1416: pi-lens no longer contributes skill paths from that handler. pi
+ * applies settings package filters (`packages[].skills`) only to manifest
+ * resources and merges a contributed path raw, so the old contribution
+ * re-added every excluded skill. Skills must now come from the manifest, so
+ * this label is the one the skills row asserts is ABSENT.
  */
-const EXPECTED_SKILL_REGISTRAR = "extension:index";
+const EXTENSION_HANDLER_REGISTRAR = "extension:index";
 /** How many skills pi-lens ships: one SKILL.md per dir under `skills`. */
 const MIN_SHIPPED_SKILLS = 4;
 
@@ -476,10 +482,13 @@ export function classifyRunFailure(observed) {
  *   - at least four skills registered at all (#2587's headline);
  *   - every one resolved INSIDE the installed package (a foreign tree adopted
  *     from a parent directory would otherwise read as success);
- *   - every one registered by `extension:index` — pi-lens's own
- *     `resources_discover` handler (#205) rather than the `pi.skills` manifest.
- *     #2587 is the proof that one registrar can be broken for four releases
- *     while the other silently covers for it.
+ *   - NONE registered by `extension:index` — pi-lens's own
+ *     `resources_discover` handler (#205). #1416: that handler used to
+ *     contribute the whole `<packageRoot>/skills` directory, which pi merged
+ *     raw and thereby undid the settings package filters
+ *     (`packages[].skills`). The `pi.skills` manifest is the only registrar
+ *     now; `extension:index` reappearing means the handler (or another raw
+ *     contributor) came back.
  *
  * Lived inline in the probe, so deleting the third condition — the F2 fix
  * itself — left every test green (MP-D).
@@ -492,8 +501,8 @@ export function classifySkillsRegistration(commands, installedPkgDir) {
 	const inPackage = skills.filter((c) =>
 		String(c.sourceInfo?.path ?? "").startsWith(String(installedPkgDir ?? "")),
 	);
-	const byHandler = skills.filter(
-		(c) => c.sourceInfo?.source === EXPECTED_SKILL_REGISTRAR,
+	const viaHandler = skills.filter(
+		(c) => c.sourceInfo?.source === EXTENSION_HANDLER_REGISTRAR,
 	);
 	const registrars = [
 		...new Set(skills.map((c) => String(c.sourceInfo?.source ?? "(none)"))),
@@ -503,11 +512,11 @@ export function classifySkillsRegistration(commands, installedPkgDir) {
 		`${skills.map((c) => c.name).join(", ") || "(none)"}; ` +
 		`${inPackage.length} resolved inside the installed package; ` +
 		`registrar(s): ${registrars.join(", ") || "(none)"} ` +
-		`(${byHandler.length}/${skills.length} via ${EXPECTED_SKILL_REGISTRAR})`;
+		`(${viaHandler.length} via ${EXTENSION_HANDLER_REGISTRAR}, must be 0)`;
 	const ok =
 		skills.length >= MIN_SHIPPED_SKILLS &&
 		inPackage.length === skills.length &&
-		byHandler.length === skills.length;
+		viaHandler.length === 0;
 	return { status: ok ? "pass" : "fail", detail: shows, shows };
 }
 
