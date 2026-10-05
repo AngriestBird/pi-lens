@@ -395,15 +395,12 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"exercises the tests-tree write guard against a temp root the test creates; the live tests/ tree is not the population",
 };
 
-/** The scanner population discovered on this tree, repo-relative and sorted. */
-export function discoveredTreeScanners(): string[] {
-	const walked = listSourceFiles(TESTS_ROOT, { extensions: [".ts"] })
-		.filter((file) => file.endsWith(".test.ts"))
-		.filter((file) => relativePosix(ROOT, file) !== SELF);
-	// readWalkedFiles, not readFileSync: a path that vanished between the walk
-	// and the read is out of the population, not a finding (#3082).
-	const index = createSupportWalkIndex(readWalkedFile);
-	const discovered = readWalkedFiles(walked)
+function discoverTreeScannersFromWalk(
+	walked: readonly { file: string; source: string }[],
+	readSupport: SourceReader,
+): string[] {
+	const index = createSupportWalkIndex(readSupport);
+	const discovered = walked
 		.filter(({ file, source }) =>
 			isTreeScannerCandidate(source, { file, index }),
 		)
@@ -411,6 +408,16 @@ export function discoveredTreeScanners(): string[] {
 		.sort();
 	index.assertComplete();
 	return discovered;
+}
+
+/** The scanner population discovered on this tree, repo-relative and sorted. */
+export function discoveredTreeScanners(): string[] {
+	const walked = listSourceFiles(TESTS_ROOT, { extensions: [".ts"] })
+		.filter((file) => file.endsWith(".test.ts"))
+		.filter((file) => relativePosix(ROOT, file) !== SELF);
+	// readWalkedFiles, not readFileSync: a path that vanished between the walk
+	// and the read is out of the population, not a finding (#3082).
+	return discoverTreeScannersFromWalk(readWalkedFiles(walked), readWalkedFile);
 }
 
 // One census per worker: two assertions read the same walking of ~1,200 files.
@@ -791,6 +798,24 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			total: 1,
 		});
 		expect(() => index.assertComplete()).toThrow(
+			/support import coverage incomplete \(1 unreadable path\(s\); 0 omitted\)/,
+		);
+	});
+
+	it("fails closed at the census boundary when a support import is unreadable", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const walked = [
+			{
+				file: testFile,
+				source:
+					'import { counts } from "../support/__census_boundary_gap__.js";\ncounts();',
+			},
+		];
+
+		expect(() => discoverTreeScannersFromWalk(walked, () => undefined)).toThrow(
 			/support import coverage incomplete \(1 unreadable path\(s\); 0 omitted\)/,
 		);
 	});
