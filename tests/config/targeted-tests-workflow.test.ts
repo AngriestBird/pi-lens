@@ -98,7 +98,7 @@ const SUPPORT_ROOT = resolve(TESTS_ROOT, "support");
 const DECLARATION =
 	/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)?|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=])/gm;
 const DEFAULT_ARROW_DECLARATION =
-	/^export\s+default\s+(?:async\s+)?(?:\([^)]*\)(?:\s*:\s*[^=\n]+)?|[A-Za-z_$][\w$]*)\s*=>/gm;
+	/^export\s+default\s+(?:async\s+)?(?:<[^;\n]+>\s*)?(?:\([^)]*\)(?:\s*:\s*[^=\n]+)?|[A-Za-z_$][\w$]*)\s*=>/gm;
 const RELATIVE_IMPORT =
 	/\bimport\s+(?:type\s+)?([^;"']*?)\s*from\s*["'](\.[^"']*)["']/g;
 const DEFAULT_EXPORT_ALIAS = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g;
@@ -736,6 +736,14 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			{
 				"scan.ts":
 					"export default (d: string): string[] => listSourceFiles(d);",
+			},
+		],
+		[
+			"a generic default arrow expression",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default <T extends string>(d: T): string[] => listSourceFiles(d);",
 			},
 		],
 		[
