@@ -58,7 +58,7 @@ pre-existing-red claims carry the
 - [ ] The change has tests (happy path, edge cases, regression test for bugs)
 - [ ] Targeted test files for the touched seams pass locally after `npm run build`; the full suite is CI's job.
 - [ ] Every NEW regression test is proven RED on pre-fix code; the red output is quoted in this PR
-- [ ] The new guard/branch/filter/cap the PR is about is mutation-proof (deleting or neutering it reds at least one test), and every `Mutation diff` survivor on an added line is killed or shown equivalent
+- [ ] New guards/branches/filters/caps/fallbacks have compile-valid mutation proof; exact-head exploratory findings have bounded dispositions, and demonstrated correctness gaps are fixed (AGENTS.md two-layer acceptance)
 - [ ] PR title carries the conventional prefix and the issue ref
 - [ ] `npm run lint` passes
 - [ ] `npm run build:dist` succeeds if I changed code under `clients/`, `commands/`, `tools/`, or `index.ts`
