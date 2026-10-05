@@ -117,6 +117,9 @@ interface SupportModule {
 	helpers: RegExp;
 }
 
+// Keep diagnostics concise while counting every distinct miss in this census.
+const SUPPORT_IMPORT_GAP_LIMIT = 16;
+
 function supportImports(
 	from: string,
 	source: string,
@@ -164,9 +167,16 @@ function supportModule(file: string, source: string): SupportModule {
 function createSupportWalkIndex(read: SourceReader) {
 	const modules = new Map<string, SupportModule | undefined>();
 	const verdicts = new Map<string, boolean>();
+	const supportImportGaps: string[] = [];
+	let droppedSupportImportGaps = 0;
 	const load = (file: string): SupportModule | undefined => {
 		if (!modules.has(file)) {
 			const source = read(file);
+			if (source === undefined) {
+				if (supportImportGaps.length < SUPPORT_IMPORT_GAP_LIMIT)
+					supportImportGaps.push(file);
+				else droppedSupportImportGaps += 1;
+			}
 			modules.set(
 				file,
 				source === undefined ? undefined : supportModule(file, source),
@@ -199,7 +209,23 @@ function createSupportWalkIndex(read: SourceReader) {
 		else verdicts.delete(key);
 		return verdict;
 	};
+	const gapEvidence = () => ({
+		paths: [...supportImportGaps],
+		dropped: droppedSupportImportGaps,
+		total: supportImportGaps.length + droppedSupportImportGaps,
+	});
+	const assertComplete = () => {
+		const evidence = gapEvidence();
+		if (evidence.total > 0) {
+			throw new Error(
+				`support import coverage incomplete (${evidence.total} unreadable path(s); ${evidence.dropped} omitted): ${evidence.paths.join(", ")}`,
+			);
+		}
+	};
 	return {
+		/** Missing paths are request-local; the next census creates a fresh index. */
+		gapEvidence,
+		assertComplete,
 		/** True when `source` calls a support export that walks a tree. */
 		callsSupportWalker(from: string, source: string): boolean {
 			return [...supportImports(from, source)].some(([local, binding]) => {
@@ -377,12 +403,14 @@ export function discoveredTreeScanners(): string[] {
 	// readWalkedFiles, not readFileSync: a path that vanished between the walk
 	// and the read is out of the population, not a finding (#3082).
 	const index = createSupportWalkIndex(readWalkedFile);
-	return readWalkedFiles(walked)
+	const discovered = readWalkedFiles(walked)
 		.filter(({ file, source }) =>
 			isTreeScannerCandidate(source, { file, index }),
 		)
 		.map(({ file }) => relativePosix(ROOT, file))
 		.sort();
+	index.assertComplete();
+	return discovered;
 }
 
 // One census per worker: two assertions read the same walking of ~1,200 files.
@@ -419,7 +447,6 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			const expectedRegistry = discovered.filter(
 				(file) => !Object.hasOwn(TREE_SCANNER_EXEMPTIONS, file),
 			);
-
 			// Mechanical equality in both directions: an unregistered scanner reds,
 			// including one that calls a walk helper through an import alias
 			// (`fg("clients/**")`, #3448), and a registry entry that is no longer a
@@ -746,6 +773,59 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 				},
 			),
 		).toBe(false);
+	});
+
+	it("records a missing relative support import read by the real reader", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const index = createSupportWalkIndex(readWalkedFile);
+		const source =
+			'import { counts } from "../support/__census_gap_probe__.js";\ncounts();';
+
+		expect(index.callsSupportWalker(testFile, source)).toBe(false);
+		expect(index.gapEvidence()).toEqual({
+			paths: [resolve(SUPPORT_ROOT, "__census_gap_probe__.ts")],
+			dropped: 0,
+			total: 1,
+		});
+		expect(() => index.assertComplete()).toThrow(
+			/support import coverage incomplete \(1 unreadable path\(s\); 0 omitted\)/,
+		);
+	});
+
+	it("caps missing-import paths and counts every distinct omitted path", () => {
+		const count = 20;
+		const source = Array.from({ length: count }, (_, index) => {
+			const name = `count${index}`;
+			return `import { scan as ${name} } from "../support/gap-${index}.js";\n${name}();`;
+		}).join("\n");
+		const index = createSupportWalkIndex(() => undefined);
+
+		expect(index.callsSupportWalker(TEST_FILE, source)).toBe(false);
+		const evidence = index.gapEvidence();
+		expect(evidence.paths).toHaveLength(16);
+		expect(evidence.dropped).toBe(4);
+		expect(evidence.total).toBe(count);
+	});
+
+	it("retries a missing support module in the next census request", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const source =
+			'import { counts } from "../support/appears_later.js";\ncounts();';
+		const first = createSupportWalkIndex(readWalkedFile);
+		const second = createSupportWalkIndex(
+			() => "export function counts() { return listSourceFiles(ROOT); }",
+		);
+
+		expect(first.callsSupportWalker(testFile, source)).toBe(false);
+		expect(first.gapEvidence().total).toBe(1);
+		expect(second.callsSupportWalker(testFile, source)).toBe(true);
+		expect(second.gapEvidence()).toEqual({ paths: [], dropped: 0, total: 0 });
 	});
 
 	it("resolves countsByDetector to the real tests-tree walk behind it", () => {
