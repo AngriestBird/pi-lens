@@ -59,8 +59,14 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   observability, and class-sweep coverage. The issue reference goes in the PR
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
-- Every `Mutation diff` survivor on an added line is killed or shown
-  equivalent.
+- Mutation acceptance has two layers (#3973): every new guard, branch,
+  filter, cap, or fallback has bounded compile-valid hand-mutation proof under
+  the engineering principles; sampled Stryker is exploratory and advisory.
+  Triage exact-head behavioural survivors through real callers as killed,
+  equivalent (with bounded evidence), or unresolved (with reason and owner).
+  A demonstrated correctness gap or missing required guard proof blocks merge;
+  score, incidental survivors, and unevaluated population alone do not. Disclose
+  stale, absent, partial, and zero-mutant reports; never call them clean.
 - A declared behaviour-preserving refactor proves itself with an old-versus-new
   probe table through the built seam plus a shared-seam mutation that reds a
   caller-side witness; a passing pre-fix run is expected there.

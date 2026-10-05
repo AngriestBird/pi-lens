@@ -785,6 +785,81 @@ describe("driver selection stage, spawned for real (#3810)", () => {
 });
 
 describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
+	it("narrows a sampled source command and fingerprints the source it does not mutate", () => {
+		// #3973: real Git/build/Vitest coverage are required to witness the
+		// post-sampling command; only the external Stryker cost/result is controlled.
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: true,
+		});
+		try {
+			const binary = join(fixture.root, "node_modules", ".bin", "stryker");
+			writeFileSync(
+				binary,
+				readFileSync(binary, "utf8").replace(
+					"in 1 seconds (net 12 ms",
+					"in 5000 seconds (net 5000000 ms",
+				),
+			);
+			const first = runDriver(fixture.root, ["--base", "main"], 120_000);
+			expect(first).toContain("1 of 2 measured tests retained");
+			expect(first).not.toContain("source scoping found no kept tests");
+			const calls = fakeStrykerInvocations(fixture.root);
+			const attempt = calls.find((call) => !call.dryRun);
+			expect(attempt.patterns).toHaveLength(1);
+			const scriptActive = attempt.patterns[0].startsWith("scripts/thing.mjs:");
+			const kept = scriptActive
+				? "tests/scripts/thing.test.ts"
+				: "tests/clients/thing.test.ts";
+			const omitted = scriptActive
+				? "tests/clients/thing.test.ts"
+				: "tests/scripts/thing.test.ts";
+			expect(attempt.command).toContain(kept);
+			expect(attempt.command).not.toContain(omitted);
+			const report = JSON.parse(
+				readFileSync(
+					join(fixture.root, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			);
+			expect(report.piLensMutationDiff.testsRun).toEqual([kept]);
+			expect(report.piLensMutationDiff.testSelection.kept).toBe(1);
+			const other = join(
+				fixture.root,
+				scriptActive ? "clients/thing.ts" : "scripts/thing.mjs",
+			);
+			writeFileSync(
+				other,
+				readFileSync(other, "utf8") + "\nexport const dependency = 1;\n",
+			);
+			const next = runDriver(fixture.root, ["--base", "main"], 120_000);
+			expect(next).toContain("incremental cache cold-inputs-changed");
+			const finalAttempt = fakeStrykerInvocations(fixture.root)
+				.filter((call) => !call.dryRun)
+				.at(-1);
+			expect(finalAttempt.force).toBe(true);
+			// The same real sample can select a source whose probe now proves zero;
+			// keep the measured nonempty command instead of launching the whole suite.
+			writeFileSync(
+				join(fixture.root, kept),
+				`import { expect, it } from "vitest";\nimport { changed } from "${scriptActive ? "../../scripts/thing.mjs" : "../../clients/thing.js"}";\nit("loads without calling the changed body", () => expect(typeof changed).toBe("function"));\n`,
+			);
+			const empty = runDriver(fixture.root, ["--base", "main"], 120_000);
+			expect(empty).toContain(
+				"source scoping found no kept tests; retaining the measured nonempty population",
+			);
+			const fallbackReport = JSON.parse(
+				readFileSync(
+					join(fixture.root, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			);
+			expect(fallbackReport.piLensMutationDiff.testsRun).toEqual([omitted]);
+			expect(fallbackReport.piLensMutationDiff.testSelection.kept).toBe(1);
+		} finally {
+			fixture.cleanup();
+		}
+	});
 	// Recurrence this guards (#3810 F3): the driver's fingerprint, incremental
 	// decision, generated Stryker config and run loop sat past the zero-mutant
 	// exits, so mutants on those added lines survived. This fixture installs a
@@ -1871,8 +1946,8 @@ describe.skipIf(underStryker)(
 			expect(code).toMatch(/process\.versions\.node\.split\("\s*"\)\[0\]/);
 			expect(code).toMatch(/headShaArg \?\? "\s*"/);
 			expect(code).not.toContain("gitRevision(");
-			expect(code).toContain("keptTests: tests,");
-			expect(code).toContain("mutatedFiles: files,");
+			// The real spawned cold/warm/input-change and sampled-source cases
+			// now pin fingerprint ownership; textual operand spellings cannot.
 		});
 
 		it("does not keep the old alphabetical cap", () => {
