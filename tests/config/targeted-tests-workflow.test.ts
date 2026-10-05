@@ -686,6 +686,22 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			},
 		],
 		[
+			"an anonymous default function import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function(d: string) {\n\treturn listSourceFiles(d);\n}",
+			},
+		],
+		[
+			"a default import of a local function assignment",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"function counts(d: string) {\n\treturn listSourceFiles(d);\n}\nexport default counts;",
+			},
+		],
+		[
 			"a default import of a named export alias",
 			'import scan from "../support/scan.js";\nscan("x");',
 			{
