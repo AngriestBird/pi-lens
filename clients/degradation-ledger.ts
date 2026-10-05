@@ -948,6 +948,13 @@ export type DegradationKind =
 	 */
 	| "query-predicates-invalid"
 	/**
+	 * #3652: a co-process extension reported a zero-line read
+	 * (`requestedLimit: 0`) of a target that is not empty, or whose size could
+	 * not be read, so the bridge dropped the observation. Subject is the file
+	 * path. Counted. The accepted empty-file case emits nothing.
+	 */
+	| "read-bridge-zero-line-dropped"
+	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and
 	 * far more frequent budget than the orphan backstop's one-per-cooldown
@@ -1551,13 +1558,17 @@ export type DegradationKind =
 	 */
 	| "wasm-trap"
 	/**
-	 * #2626: `resources_discover` (#205) resolved `<packageRoot>/skills` to a
-	 * directory that is absent, unreadable, or holds no `SKILL.md` — pi then
-	 * registers zero skills with no extension error and no stderr. Fires on
-	 * an installed copy missing `skills/`, or on the entry file having been
-	 * copied out of the package tree by a managed extension cache (so the
-	 * nearest `package.json` is the cache's own). Subject is the resolved
-	 * `skills/` path; see `clients/skills-resolver.ts`.
+	 * #2626: the `resources_discover` handler (#205) resolves
+	 * `<packageRoot>/skills` and checks it — absent, unreadable, or holding no
+	 * `SKILL.md`. Before #1416 it also contributed the resolved path to pi, so
+	 * this record meant pi registered zero skills with no extension error and
+	 * no stderr; the contribution is gone, so it now reports only the
+	 * entry-relative health of that directory (the `pi.skills` manifest is the
+	 * registrar and may still deliver the skills). Fires on an installed copy
+	 * missing `skills/`, or on the entry file having been copied out of the
+	 * package tree by a managed extension cache (so the nearest `package.json`
+	 * is the cache's own). Subject is the resolved `skills/` path; see
+	 * `clients/skills-resolver.ts`.
 	 */
 	| "web-tree-sitter-load-failed"
 	| "widget-disposition-reconcile-fallback"
