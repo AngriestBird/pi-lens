@@ -570,9 +570,7 @@ describe("renderMutationMarkdown", () => {
 		expect(render(["a", "b", "c", "d", "e"])).toMatch(/`d`, `e`$/m);
 		expect(render(["a", 7, null])).toMatch(/: `a`$/m);
 		for (const none of [[], undefined, "node", [7]]) {
-			expect(render(none)).toMatch(
-				new RegExp(`${plain.replace(/[()*]/g, "\\$&")}$`, "m"),
-			);
+			expect(render(none).split("\n")).toContain(plain);
 		}
 	});
 

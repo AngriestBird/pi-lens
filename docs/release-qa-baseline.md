@@ -77,7 +77,7 @@ PR's packed tarball (#2700, the check #2587 was missing). `attw`
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | pack-skills-payload | the four shipped skills and the compiled entry are IN the published artifact | npm-pack | `npm pack --json` on the release candidate | packed file list contains `dist/index.js` and at least 4 `skills/**/SKILL.md` | pack listing JSON | new — `tests/packaging.test.ts` asserts `files[]` NAMES `skills/`, never that the pack carries SKILL.md files | — |
 | install-selftest | the runtime dependency graph and the `pi.skills` manifest resolve AS INSTALLED | npm-install | `node <installed>/scripts/install-selftest.mjs --allow-soft` | process exits 0 and no `[FAIL]` line | selftest stdout | `scripts/install-selftest.mjs` verbatim — install-smoke's `smoke` job | #1605 lane 5 (real-host install), narrower: this row asserts the packaged artifact resolves, not that a host classifier parses |
-| skills-registered | a real pi registers the four pi-lens skills from the installed package | pi-rpc | `pi install <installed pkg>` then `pi --mode rpc` plus `{"type":"get_commands"}` | at least 4 commands with `source` `skill`; every `sourceInfo.path` inside the installed package AND every `sourceInfo.source` equal to `extension:index` | get_commands response JSON | new probe on the #2589 mechanism — the recurrence is #2587 | — |
+| skills-registered | a real pi registers the four pi-lens skills from the installed package | pi-rpc | `pi install <installed pkg>` then `pi --mode rpc` plus `{"type":"get_commands"}` | at least 4 commands with `source` `skill`; every `sourceInfo.path` inside the installed package AND no `sourceInfo.source` is `extension:index` (pi's `pi.skills` manifest is the only registrar; the extension's `resources_discover` handler used to re-add the whole directory and undo settings package filters, #1416) | get_commands response JSON | new probe on the #2589 mechanism — the recurrence is #2587; #1416 widened it to the manifest-registrar direction | — |
 | commands-registered | the extension loads and registers its `lens-*` slash commands | pi-rpc | same RPC session as above | at least 1 command with `source` `extension` named `lens-*`, and zero `extension_error` events | same get_commands response plus the event stream | `scripts/rpc-load-check.mjs` assertion — install-smoke's `pi-load` job, which runs it against the PUBLISHED package only | #1605 lane 1 (real-host): the same real-host principle, applied to extension registration rather than stderr classification |
 | mcp-tools-registered | the MCP mirror advertises the `pilens_*` tool surface | mcp-stdio | `node <installed>/dist/mcp/server.js` then `initialize` plus `tools/list` | every advertised tool name starts `pilens_`, and the set contains analyze, diagnostics, turn_end, lsp_navigation, health | tools/list response JSON | new — no smoke drives the MCP mirror from an install | — |
 | mcp-diagnostics-full | `lens_diagnostics` full mode answers on a fixture repo | mcp-stdio | `tools/call` `pilens_diagnostics` with `mode` `full` and `refreshRunners` `cheap`, POLLED | text carries a `Summary (N files diagnosed this session)` line with N at least 1 | tool result text | new — `tests/clients` covers the handler, nothing covers it through a packaged install | — |
@@ -158,22 +158,24 @@ claims that minor too.
 
 ## Why `skills-registered` pins the registrar
 
-pi-lens has **two independent skill registrars**: the `pi.skills` manifest, and
-`index.ts`'s own `resources_discover` handler (#205,
+pi-lens's skills are declared by the `pi.skills` manifest (`./skills`) and were
+ALSO registered by `index.ts`'s own `resources_discover` handler (#205,
 `resolvePackagePath(import.meta.url, "skills")`), which never reads the
 manifest. #2587 is the proof that one half can be broken for four releases while
 the other silently covers for it — driving published pi-lens 4.1.3, with the
 broken `["../../skills"]` manifest, through a real pi registers all four skills,
 via `extension:index`.
 
-So the row asserts `sourceInfo.source === "extension:index"` on every skill, not
-merely that four skills appeared. The cost is stated plainly: a future release
-that deliberately moved registration to the manifest would FAIL this row until
-the criterion is updated. That is the intended trade — the row's job is to name
-which half is load-bearing, and a row that accepts "some path worked" is exactly
-the check that was missing for four releases. The observed registrar values are
-printed in the witness either way, so a pi-side rename reads as a diagnosable
-mismatch rather than a mystery.
+#1416 then made the second registrar a defect rather than a safety net: pi
+applies the settings package filters (`packages[].skills`) only to
+manifest-declared resources, and merges a handler-contributed path raw, so a
+user's `-skills/<name>/SKILL.md` was re-added at bind time. The handler now
+contributes no skill paths, the manifest is the only registrar, and the row
+asserts `sourceInfo.source !== "extension:index"` on every skill, not merely
+that four skills appeared. A surviving `extension:index` skill means a raw
+handler contribution came back and the filters are being undone again. The
+observed registrar values are printed in the witness either way, so a pi-side
+rename reads as a diagnosable mismatch rather than a mystery.
 
 ## Outcomes
 
