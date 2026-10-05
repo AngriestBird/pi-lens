@@ -2864,6 +2864,13 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(findDeny(command)).toBe("stash");
 	});
 
+	it("accepts digits and underscores in named coproc labels", () => {
+		// Bash labels permit identifier tails; keep the guard from dropping a
+		// valid label when a future identifier regex mutation rejects them.
+		const command = 'coproc _C9 { git stash; }; wait "$COPROC_PID"';
+		expect(findDeny(command)).toBe("stash");
+	});
+
 	it.each([
 		["git stash --include-untracked", "stash"],
 		["git commit -n -m x", "hookBypass"],
