@@ -96,9 +96,11 @@ function walkHelperAliases(source: string): string[] {
 
 const SUPPORT_ROOT = resolve(TESTS_ROOT, "support");
 const DECLARATION =
-	/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=])/gm;
+	/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)?|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=])/gm;
 const RELATIVE_IMPORT =
 	/\bimport\s+(?:type\s+)?([^;"']*?)\s*from\s*["'](\.[^"']*)["']/g;
+const DEFAULT_EXPORT_ALIAS = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g;
+const DEFAULT_EXPORT_SPECIFIER = /\bexport\s*\{([^}]*)\}/g;
 const DIRECT_HELPER = new RegExp(`^(?:${WALK_HELPERS})$`);
 const CALLEE = /\b([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*\(/g;
 
@@ -129,6 +131,9 @@ function supportImports(
 		const resolved = resolve(dirname(from), match[2]).replace(/\.js$/, ".ts");
 		if (!resolved.startsWith(`${SUPPORT_ROOT}${sep}`)) continue;
 		const clause = match[1];
+		const defaultImport = /^([A-Za-z_$][\w$]*)/.exec(clause.trim());
+		if (defaultImport)
+			bindings.set(defaultImport[1], { file: resolved, imported: "default" });
 		const namespace = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause);
 		if (namespace)
 			bindings.set(namespace[1], { file: resolved, imported: "*" });
@@ -150,8 +155,27 @@ function supportModule(file: string, source: string): SupportModule {
 	const chunks = new Map<string, string>();
 	starts.forEach((start, index) => {
 		const end = starts[index + 1]?.index ?? blanked.length;
-		chunks.set(start[1] ?? start[2], blanked.slice(start.index, end));
+		const chunk = blanked.slice(start.index, end);
+		const name = start[1] ?? start[2];
+		if (name) chunks.set(name, chunk);
+		if (/^(?:export\s+)?default\b/.test(start[0])) chunks.set("default", chunk);
 	});
+	for (const [, name] of codeMatches(source, DEFAULT_EXPORT_ALIAS)) {
+		const chunk = chunks.get(name);
+		if (chunk !== undefined) chunks.set("default", chunk);
+	}
+	for (const [, specifiers] of codeMatches(source, DEFAULT_EXPORT_SPECIFIER)) {
+		for (const specifier of specifiers.split(",")) {
+			const [local, exported = local] = specifier
+				.trim()
+				.replace(/^type\s+/, "")
+				.split(/\s+as\s+/);
+			if (exported === "default") {
+				const chunk = chunks.get(local);
+				if (chunk !== undefined) chunks.set("default", chunk);
+			}
+		}
+	}
 	const helpers = [WALK_HELPERS, ...walkHelperAliases(source)].join("|");
 	return {
 		chunks,
@@ -654,6 +678,22 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			{ "scan.ts": WALKING_SCAN },
 		],
 		[
+			"a named default export import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function counts(d: string) {\n\treturn listSourceFiles(d);\n}",
+			},
+		],
+		[
+			"a default import of a named export alias",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"const counts = (d: string) => listSourceFiles(d);\nexport { counts as default };",
+			},
+		],
+		[
 			"a namespace import",
 			'import * as scan from "../support/scan.js";\nscan.counts("x");',
 			{ "scan.ts": WALKING_SCAN },
@@ -686,6 +726,14 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			'import { counts } from "../support/scan.js";\ncounts("x");',
 			{
 				"scan.ts": "export function counts(d: string) {\n	return d.length;\n}",
+			},
+		],
+		[
+			"a default export whose body does not walk",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function counts(d: string) {\n\treturn d.length;\n}",
 			},
 		],
 		[
