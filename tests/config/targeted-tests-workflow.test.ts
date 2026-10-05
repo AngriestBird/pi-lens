@@ -97,10 +97,14 @@ function walkHelperAliases(source: string): string[] {
 const SUPPORT_ROOT = resolve(TESTS_ROOT, "support");
 const DECLARATION =
 	/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)?|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=])/gm;
+const DEFAULT_ARROW_DECLARATION =
+	/^export\s+default\s+(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/gm;
 const RELATIVE_IMPORT =
 	/\bimport\s+(?:type\s+)?([^;"']*?)\s*from\s*["'](\.[^"']*)["']/g;
 const DEFAULT_EXPORT_ALIAS = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g;
-const DEFAULT_EXPORT_SPECIFIER = /\bexport\s*\{([^}]*)\}/g;
+const DEFAULT_EXPORT_SPECIFIER = /\bexport\s*\{([^}]*)\}(?!\s*from\b)/g;
+const REEXPORT_SPECIFIER =
+	/\bexport\s*\{([^}]*)\}\s*from\s*["'](\.[^"']*)["']/g;
 const DIRECT_HELPER = new RegExp(`^(?:${WALK_HELPERS})$`);
 const CALLEE = /\b([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*\(/g;
 
@@ -116,6 +120,7 @@ interface ImportBinding {
 interface SupportModule {
 	chunks: Map<string, string>;
 	imports: Map<string, ImportBinding>;
+	reexports: Map<string, ImportBinding>;
 	helpers: RegExp;
 }
 
@@ -151,7 +156,10 @@ function supportImports(
 
 function supportModule(file: string, source: string): SupportModule {
 	const blanked = stripSource(source, { strings: "blank" });
-	const starts = [...blanked.matchAll(DECLARATION)];
+	const starts = [
+		...blanked.matchAll(DECLARATION),
+		...blanked.matchAll(DEFAULT_ARROW_DECLARATION),
+	].sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
 	const chunks = new Map<string, string>();
 	starts.forEach((start, index) => {
 		const end = starts[index + 1]?.index ?? blanked.length;
@@ -176,10 +184,27 @@ function supportModule(file: string, source: string): SupportModule {
 			}
 		}
 	}
+	const reexports = new Map<string, ImportBinding>();
+	for (const [, specifiers, specifier] of codeMatches(
+		source,
+		REEXPORT_SPECIFIER,
+	)) {
+		const resolved = resolve(dirname(file), specifier).replace(/\.js$/, ".ts");
+		if (!resolved.startsWith(`${SUPPORT_ROOT}${sep}`)) continue;
+		for (const entry of specifiers.split(",")) {
+			const [imported, exported = imported] = entry
+				.trim()
+				.replace(/^type\s+/, "")
+				.split(/\s+as\s+/);
+			if (imported && exported)
+				reexports.set(exported, { file: resolved, imported });
+		}
+	}
 	const helpers = [WALK_HELPERS, ...walkHelperAliases(source)].join("|");
 	return {
 		chunks,
 		imports: supportImports(file, source),
+		reexports,
 		helpers: new RegExp(`\\b(?:${helpers})\\s*\\(`),
 	};
 }
@@ -214,18 +239,23 @@ function createSupportWalkIndex(read: SourceReader) {
 		if (known !== undefined) return known;
 		verdicts.set(key, false);
 		const module = load(file);
-		const chunk = module?.chunks.get(name);
 		let verdict = false;
-		if (module && chunk !== undefined) {
-			verdict = module.helpers.test(chunk);
-			for (const [, callee, member] of chunk.matchAll(CALLEE)) {
-				if (verdict) break;
-				const binding = module.imports.get(callee);
-				if (binding?.imported === "*" && member)
-					verdict = walks(binding.file, member);
-				else if (binding) verdict = walks(binding.file, binding.imported);
-				else if (callee !== name && module.chunks.has(callee))
-					verdict = walks(file, callee);
+		const reexport = module?.reexports.get(name);
+		if (reexport) {
+			verdict = walks(reexport.file, reexport.imported);
+		} else {
+			const chunk = module?.chunks.get(name);
+			if (module && chunk !== undefined) {
+				verdict = module.helpers.test(chunk);
+				for (const [, callee, member] of chunk.matchAll(CALLEE)) {
+					if (verdict) break;
+					const binding = module.imports.get(callee);
+					if (binding?.imported === "*" && member)
+						verdict = walks(binding.file, member);
+					else if (binding) verdict = walks(binding.file, binding.imported);
+					else if (callee !== name && module.chunks.has(callee))
+						verdict = walks(file, callee);
+				}
 			}
 		}
 		// A false reached through a cycle is provisional, not proof of no walk.
@@ -694,6 +724,13 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			},
 		],
 		[
+			"a default arrow expression import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts": "export default (d: string) => listSourceFiles(d);",
+			},
+		],
+		[
 			"a default import of a local function assignment",
 			'import scan from "../support/scan.js";\nscan("x");',
 			{
@@ -732,6 +769,14 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 					'import { readdirSync as ls } from "node:fs";\nexport function counts(d: string) {\n	return ls(d);\n}',
 			},
 		],
+		[
+			"a walking default re-export",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts": 'export { default } from "./inner.js";',
+				"inner.ts": "export default (d: string) => listSourceFiles(d);",
+			},
+		],
 	])("detects %s", (_label, source, modules) => {
 		expect(candidate(source, modules)).toBe(true);
 	});
@@ -750,6 +795,16 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			{
 				"scan.ts":
 					"export default function counts(d: string) {\n\treturn d.length;\n}",
+			},
+		],
+		[
+			"a sourced default re-export instead of a same-name local walker",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					'function scan(d: string) { return listSourceFiles(d); }\nexport { scan as default } from "./inner.js";',
+				"inner.ts":
+					"export default function scan(d: string) { return d.length; }",
 			},
 		],
 		[
