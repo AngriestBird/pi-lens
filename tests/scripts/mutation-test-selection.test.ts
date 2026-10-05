@@ -391,6 +391,110 @@ describe("selectMutationTests", () => {
 	const lines = (entries: Record<string, number | null>) =>
 		new Map(Object.entries(entries));
 
+	it.each([
+		["failed", { status: 1 }],
+		["timed out", { status: null, timedOut: true }],
+		["aborted", { status: null, aborted: true }],
+	] as const)(
+		"keeps a %s probe's explicit null source evidence",
+		async (_name, outcome) => {
+			// #3978 R1-F1: failed probes publish explicit null, not a missing map
+			// entry; narrowing must retain their witness beside a fresh answer.
+			const rangesByFile = new Map<string, Array<[number, number]>>([
+				["clients/active.ts", [[1, 20]]],
+			]);
+			const counts = new Map([["clients/active.ts", 0]]);
+			const result = await probeTestCoverage("failed", {
+				run: async () => outcome,
+				readCoverage: () => null,
+				rangesByFile,
+				root: "/repo",
+				sourceCounts: counts,
+			});
+			const sourceCoverage = new Map<string, Map<string, number> | null>([
+				["direct", new Map([["clients/active.ts", 1]])],
+				["failed", "unknown" in result ? null : counts],
+			]);
+			const selection = selectMutationTests({
+				related: ["direct", "failed"],
+				lines: new Map([
+					["direct", 1],
+					["failed", "unknown" in result ? null : result.lines],
+				]),
+				maxTests: 47,
+				activeSources: ["clients/active.ts"],
+				sourceCoverage,
+			});
+			expect(selection.kept).toEqual(["direct", "failed"]);
+			expect(selection.unknown).toEqual(["failed"]);
+		},
+	);
+
+	it("drops only proven coverage of unsampled sources while retaining shared, unknown, and own witnesses", async () => {
+		// #3973: range sampling must not repeat tests that only cover another
+		// source, or drop a transitive witness just because its import is indirect.
+		const sourceCoverage = new Map<string, Map<string, number>>();
+		const rangesByFile = new Map<string, Array<[number, number]>>([
+			["clients/active.ts", [[1, 20]]],
+			["clients/other.ts", [[1, 20]]],
+		]);
+		const reports: Array<[string, Record<string, ReturnType<typeof entryOf>>]> =
+			[
+				[
+					"direct",
+					{ "/repo/clients/active.ts": entryOf([{ start: 1, hits: 1 }]) },
+				],
+				[
+					"shared",
+					{
+						"/repo/clients/active.ts": entryOf([{ start: 1, hits: 1 }]),
+						"/repo/clients/other.ts": entryOf([{ start: 1, hits: 1 }]),
+					},
+				],
+				[
+					"unrelated",
+					{
+						"/repo/clients/other.ts": entryOf([{ start: 1, end: 20, hits: 1 }]),
+					},
+				],
+			];
+		for (const [test, report] of reports) {
+			// The coverage owner also supports a fresh accumulator: absent report
+			// entries then remain absent, rather than becoming positive evidence.
+			const counts = new Map<string, number>();
+			const probe = {
+				run: async () => ({ status: 0 }),
+				readCoverage: () => report,
+				rangesByFile,
+				root: "/repo",
+				sourceCounts: counts,
+			};
+			await probeTestCoverage(test, probe);
+			sourceCoverage.set(test, counts);
+		}
+		const input = {
+			related: ["direct", "shared", "unrelated", "unknown", "legacy"],
+			ownTests: ["own"],
+			lines: lines({
+				direct: 1,
+				shared: 2,
+				unrelated: 20,
+				unknown: null,
+				legacy: 3,
+				own: 0,
+			}),
+			maxTests: 47,
+			activeSources: ["clients/active.ts"],
+			sourceCoverage,
+		};
+		const selection = selectMutationTests(input);
+		expect(selection.kept).not.toContain("unrelated");
+		for (const witness of ["direct", "shared", "unknown", "legacy", "own"]) {
+			expect(selection.kept).toContain(witness);
+		}
+		expect(selection.covering).toBe(3);
+	});
+
 	it("keeps the PR's own tests although the cap is smaller than the covering set (S1: the #3794 shape)", () => {
 		const selection = selectMutationTests({
 			related: ["tests/z-other.test.ts", "tests/y-other.test.ts"],
