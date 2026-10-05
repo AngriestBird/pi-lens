@@ -218,7 +218,7 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "lens-compact-tool-line",
 		description:
-			"Opt-in (#1327): collapse a pi-lens tool's call+result rows into ONE theme-aware line (status glyph + name + summary) instead of two. Preserves expand-to-view-full-output. Default off. Also via ui.compactToolLine=true in ~/.pi-lens/config.json.",
+			"Opt-in (#1327): collapse a tool's call+result rows into ONE theme-aware line. Default off. ui.compactToolLine=true in ~/.pi-lens/config.json.",
 		configKey: "ui.compactToolLine",
 		negated: false,
 		default: false,
@@ -227,7 +227,7 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "lens-compact-lsp-status",
 		description:
-			"Opt-in (#3099): collapse the footer LSP status to one state glyph per group (LSP ✓ green, LSP ✗ red, dim LSP ✗ when nothing is warm) instead of listing the active server names. Default off. Also via ui.compactLspStatus=true in ~/.pi-lens/config.json.",
+			"Opt-in (#3099): collapse the footer LSP status to one state glyph. Default off. ui.compactLspStatus=true in ~/.pi-lens/config.json.",
 		configKey: "ui.compactLspStatus",
 		negated: false,
 		default: false,
@@ -236,7 +236,7 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "lens-hide-lsp-status",
 		description:
-			"Opt-in (#3099): publish no pi-lens-lsp footer status at all, so a host that renders extension statuses stops showing the key. Outranks lens-compact-lsp-status when both are set. Default off. Also via ui.hideLspStatus=true in ~/.pi-lens/config.json.",
+			"Opt-in (#3099): publish no pi-lens-lsp footer status at all. Outranks lens-compact-lsp-status when both set. Default off. ui.hideLspStatus=true in ~/.pi-lens/config.json.",
 		configKey: "ui.hideLspStatus",
 		negated: false,
 		default: false,
@@ -245,7 +245,7 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "lens-compact-widget",
 		description:
-			"Opt-in (#3959): render the pi-lens widget as ONE summary line (languages + error/warning totals) instead of also stacking file rows, the suppressed count and blocker details below it. Default off. Also via ui.compactWidget=true in ~/.pi-lens/config.json.",
+			"Opt-in (#3959): render the widget as ONE summary line (languages + totals). Default off. ui.compactWidget=true in ~/.pi-lens/config.json.",
 		configKey: "ui.compactWidget",
 		negated: false,
 		default: false,
