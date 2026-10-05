@@ -859,7 +859,10 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 		} finally {
 			fixture.cleanup();
 		}
-	});
+		// Real Git/build/V8 command witnesses need three serial driver runs. CI's
+		// implicit 5s expires this new case (#3978); use the mutation-comparable 30s,
+		// without changing the campaign, per-mutant, or coverage-probe budgets.
+	}, 30_000);
 	// Recurrence this guards (#3810 F3): the driver's fingerprint, incremental
 	// decision, generated Stryker config and run loop sat past the zero-mutant
 	// exits, so mutants on those added lines survived. This fixture installs a
