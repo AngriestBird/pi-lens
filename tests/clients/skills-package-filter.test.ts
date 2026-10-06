@@ -29,7 +29,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import extension from "../../index.js";
 import { setupTestEnvironment } from "./test-utils.js";
-import { _resetInstanceRegistryEnabledForTests } from "../../clients/instance-registry.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REPO_SKILLS = path.join(REPO_ROOT, "skills");
@@ -44,30 +43,13 @@ const SHIPPED = [
 const EXCLUDED = "pi-lens-ast-grep";
 
 let env: ReturnType<typeof setupTestEnvironment>;
-let originalHome: string | undefined;
-let originalRegistry: string | undefined;
 
 beforeEach(() => {
 	env = setupTestEnvironment("pi-lens-1416-");
-	// #3917: bindExtensions emits a real session_start. This file asserts
-	// resource filtering, not registry behavior, so keep the scheduled orphan
-	// backstop out of the host process table and isolate its home.
-	originalRegistry = process.env.PI_LENS_INSTANCE_REGISTRY;
-	process.env.PI_LENS_INSTANCE_REGISTRY = "0";
-	_resetInstanceRegistryEnabledForTests();
-	originalHome = process.env.PI_LENS_HOME;
-	process.env.PI_LENS_HOME = path.join(env.tmpDir, "home");
-	fs.mkdirSync(process.env.PI_LENS_HOME, { recursive: true });
 });
 
 afterEach(() => {
 	env.cleanup();
-	if (originalRegistry === undefined)
-		delete process.env.PI_LENS_INSTANCE_REGISTRY;
-	else process.env.PI_LENS_INSTANCE_REGISTRY = originalRegistry;
-	_resetInstanceRegistryEnabledForTests();
-	if (originalHome === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = originalHome;
 });
 
 type PackageFilter = string[] | undefined;

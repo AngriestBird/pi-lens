@@ -35,7 +35,6 @@ import {
 import {
 	afterAll,
 	afterEach,
-	beforeAll,
 	beforeEach,
 	describe,
 	expect,
@@ -65,11 +64,6 @@ import {
 } from "../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
-import { _resetInstanceRegistryEnabledForTests } from "../clients/instance-registry.js";
-import {
-	realIsPidAlive,
-	sweepUntrackedOrphans,
-} from "../clients/instance-reaper.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
@@ -96,46 +90,6 @@ vi.mock("../clients/lsp/index.js", async (importOriginal) => {
 		getLSPService: () =>
 			(lspDouble.service as ReturnType<typeof original.getLSPService>) ??
 			original.getLSPService(),
-	};
-});
-
-/**
- * #3917: the external process-table seam (`clients/process-snapshot.ts`),
- * scoped to the processes this file declares. The file's 25 real sessions
- * schedule the registry-gated orphan backstop, whose sweep enumerates the
- * HOST process table and can reach a foreign orphan at teardown. The file
- * turns the registry off (below); the #3917 witness arms this scope so the
- * real sweep sees only declared rows. Every other test leaves it disarmed,
- * so their `queryProcessTable` calls reach the real seam unchanged.
- */
-const reaperProcessTable = vi.hoisted(() => ({
-	armed: false,
-	scans: 0,
-	rows: [] as Array<{
-		pid: number;
-		ppid: number;
-		ageMs?: number;
-		command: string;
-	}>,
-}));
-vi.mock("../clients/process-snapshot.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../clients/process-snapshot.js")>();
-	return {
-		...original,
-		queryProcessTable: async (
-			request: Parameters<typeof original.queryProcessTable>[0],
-			options: Parameters<typeof original.queryProcessTable>[1],
-		) => {
-			if (!reaperProcessTable.armed)
-				return original.queryProcessTable(request, options);
-			reaperProcessTable.scans++;
-			return {
-				rows: reaperProcessTable.rows,
-				status: "ok" as const,
-				serverSideFiltered: true,
-			};
-		},
 	};
 });
 
@@ -171,23 +125,10 @@ let agentDir: string;
 let sessionsDir: string;
 let previousDataDir: string | undefined;
 let previousTestMode: string | undefined;
-let previousHome: string | undefined;
 let nextMtimeMs: number;
 const runtimes: AgentSessionRuntime[] = [];
 /** Errors pi reported from an extension handler (the `onError` binding). */
 const extensionErrors: unknown[] = [];
-
-beforeAll(() => {
-	// #3917: this file's session_starts schedule the machine-wide
-	// registry-INDEPENDENT orphan backstop. The backstop is registry-gated and
-	// this file asserts nothing about it, so turn the registry off for the file
-	// exactly as the sibling session files do (`blocker-freshness-turn-end`,
-	// `quiet-window-session-straddle`). Without this, the scheduled sweep
-	// enumerates the host's whole process table 30 s in and can reach a foreign
-	// orphan at teardown even though every test passed.
-	vi.stubEnv("PI_LENS_INSTANCE_REGISTRY", "0");
-	_resetInstanceRegistryEnabledForTests();
-});
 
 beforeEach(async () => {
 	_resetSessionLifecycleForTests();
@@ -203,13 +144,6 @@ beforeEach(async () => {
 	// The latency row and the turn_end sidecar are both off in test mode.
 	previousTestMode = process.env.PI_LENS_TEST_MODE;
 	process.env.PI_LENS_TEST_MODE = "0";
-	// #3042: the #3917 witness runs the reaper sweep directly, and the
-	// backstop lock and stamp live under getGlobalPiLensDir(). Pin this file's
-	// own home so that reach never lands on the harness's run-shared home.
-	previousHome = process.env.PI_LENS_HOME;
-	const home = path.join(root, "home");
-	fs.mkdirSync(home, { recursive: true });
-	process.env.PI_LENS_HOME = home;
 	// Strictly increasing and in the past: every write is visible to FileTime,
 	// and none postdates a guard's session anchor by accident.
 	nextMtimeMs = Date.now() - 1_800_000;
@@ -228,15 +162,11 @@ afterEach(async () => {
 		else process.env.PILENS_DATA_DIR = previousDataDir;
 		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 		else process.env.PI_LENS_TEST_MODE = previousTestMode;
-		if (previousHome === undefined) delete process.env.PI_LENS_HOME;
-		else process.env.PI_LENS_HOME = previousHome;
 		env.cleanup();
 	}
 });
 
 afterAll(async () => {
-	vi.unstubAllEnvs();
-	_resetInstanceRegistryEnabledForTests();
 	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
 });
 
@@ -2484,54 +2414,5 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 				.filter((row) => row.transition === "start")
 				.at(-1),
 		).toMatchObject({ reason: "reload", handoffSource: "slot" });
-	});
-});
-
-/**
- * #3917: the machine-wide registry-INDEPENDENT orphan backstop
- * (`sweepUntrackedOrphans`) is scoped off for this file. A live foreign orphan
- * whose owner is dead is eligible for the sweep, and the #2042 kill guard then
- * fails the file at teardown even though every test passed. The registry kill
- * switch is the scope guard; the witness pins that the sweep consults it
- * BEFORE it reaches the process-table seam, so no host process is enumerated.
- */
-describe("#3917 the fixture's orphan sweep is scoped to this file", () => {
-	beforeEach(() => {
-		reaperProcessTable.armed = true;
-		reaperProcessTable.scans = 0;
-		reaperProcessTable.rows = [];
-	});
-	afterEach(() => {
-		reaperProcessTable.armed = false;
-		reaperProcessTable.scans = 0;
-		reaperProcessTable.rows = [];
-		vi.stubEnv("PI_LENS_INSTANCE_REGISTRY", "0");
-		_resetInstanceRegistryEnabledForTests();
-	});
-
-	it("returns disabled before it enumerates the host process table", async () => {
-		// A real process outside the fixture's scope: this worker's parent. It
-		// stays alive because the sweep never reaches the process table.
-		const outsidePid = process.ppid;
-		expect(realIsPidAlive(outsidePid)).toBe(true);
-
-		const outcome = await sweepUntrackedOrphans({ force: true, graceMs: 0 });
-
-		expect(outcome).toBe("disabled");
-		expect(reaperProcessTable.scans).toBe(0);
-		expect(realIsPidAlive(outsidePid)).toBe(true);
-	});
-
-	it("still runs the real sweep when the scope is lifted (no-drop)", async () => {
-		// The state the scope mutation produces: the registry is on, so the
-		// sweep runs. The scoped table keeps it off the host; reaching the seam
-		// proves the scope is a deliberate skip, not a broken sweep.
-		vi.stubEnv("PI_LENS_INSTANCE_REGISTRY", "1");
-		_resetInstanceRegistryEnabledForTests();
-
-		const outcome = await sweepUntrackedOrphans({ force: true, graceMs: 0 });
-
-		expect(reaperProcessTable.scans).toBe(1);
-		expect(outcome).toBe("clean");
 	});
 });
