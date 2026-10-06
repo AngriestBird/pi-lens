@@ -2069,8 +2069,8 @@ const COMMAND_KEYWORDS = new Set([
 
 /**
  * Compound-command words a coproc name may precede and whose next word bash
- * runs (#3787 review, each probed in bash 5.3). `for`, `case`, `select` and
- * `(` take a name too, but their commands land in later segments.
+ * runs (#3787 review, each probed in bash 5.3). `for`, `case` and `(` take
+ * a name too, but their commands land in later segments.
  */
 const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
 
