@@ -107,7 +107,12 @@ tracks. A sweep from another home is the backstop with no `tracked` guard,
 which `CrossHome` checks: the owner tag alone keeps a live instance's
 child, whose launcher has exited and whose ppid names neither owner, safe
 (#3986). `CrossHomeOrphanOnly` removes the owner test as well, judging by
-orphan status alone, and kills that child.
+orphan status alone, and kills that child; it is a sanity control. The
+model assumes the tag is truthful (`PPDead == Orphan` under `Tag`), so
+`CrossHome` checks the guard ordering, not tag truthfulness. #3986's F1
+was the untruthful-tag case (a host that could not read its own start
+passed a dead foreign owner's tag on to its server); the model cannot see
+it, and a test through `launchLSP` pins it.
 
 The two-read race between the owner tag and
 the start (F2) is closed by re-reading the tag in the re-check, which the
