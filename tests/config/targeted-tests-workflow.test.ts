@@ -443,7 +443,7 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 	"tests/real-harness/fixture-shape.test.ts":
 		"enumerates a production path for behavior/fixture assertions, not a production population scan",
 	"tests/scripts/pre-push-targeted-tests.test.ts":
-		"enumerates a production path for behavior/fixture assertions, not a production population scan",
+		"pins the pre-push selector's production-versus-tests scanner arming against the live collectTestFiles inventory; it checks hook selection classes, not a tests-tree defect population",
 	"tests/support/tests-tree-write-guard-race.test.ts":
 		"exercises the tests-tree write guard against a temp root the test creates; the live tests/ tree is not the population",
 	"tests/support/tests-tree-write-guard.test.ts":
@@ -517,7 +517,7 @@ const REVIEWED_EXEMPTION_REASON_SHA256: Readonly<Record<string, string>> = {
 	"tests/real-harness/fixture-shape.test.ts":
 		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
 	"tests/scripts/pre-push-targeted-tests.test.ts":
-		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+		"16cca8c9c3dc8ab143a20b9464160dc66889beff2afa1e442a5a2bf6e4ef0a59",
 	"tests/support/tests-tree-write-guard-race.test.ts":
 		"80ad6f38da37fe72579a02e932e78067e7d8dbb3fcc288547ccf68b805780833",
 	"tests/support/tests-tree-write-guard.test.ts":
@@ -542,9 +542,6 @@ function exemptionAdmissionDrift(
 					([file, digest]) => REVIEWED_EXEMPTION_REASON_SHA256[file] !== digest,
 				)
 				.map(([file]) => file),
-			...Object.keys(current).filter(
-				(file) => !Object.hasOwn(REVIEWED_EXEMPTION_REASON_SHA256, file),
-			),
 		]),
 	].sort();
 }
@@ -647,6 +644,24 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				.map(([file]) => file);
 			expect(reasonless).toEqual([]);
 			expect(exemptionAdmissionDrift()).toEqual([]);
+			// #3951 N1: a reworded reviewed reason must fail its digest pin.
+			const reviewedRow = "tests/build-freshness-guard.test.ts";
+			expect(
+				exemptionAdmissionDrift({
+					...TREE_SCANNER_EXEMPTIONS,
+					[reviewedRow]: `${TREE_SCANNER_EXEMPTIONS[reviewedRow]}.`,
+				}),
+			).toEqual([reviewedRow]);
+
+			// #3951 N1: a missing reviewed row must be reported.
+			const withoutReviewedRow = Object.fromEntries(
+				Object.entries(TREE_SCANNER_EXEMPTIONS).filter(
+					([file]) => file !== reviewedRow,
+				),
+			);
+			expect(exemptionAdmissionDrift(withoutReviewedRow)).toEqual([
+				reviewedRow,
+			]);
 			// #3951 F2: plausible prose must not let a live scanner migrate into
 			// exemptions and disappear from the independently reviewed admission.
 			expect(
@@ -950,6 +965,15 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			"a module outside tests/support",
 			'import { counts } from "../../clients/scan.js";\ncounts("x");',
 			{ "../../clients/scan.ts": WALKING_SCAN },
+		],
+		[
+			"a re-export target outside tests/support",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					'export { counts } from "../../clients/string-utils.js";',
+				"../../clients/string-utils.ts": WALKING_SCAN,
+			},
 		],
 		[
 			"a direct helper name, which the production-root shapes judge",
