@@ -3752,7 +3752,12 @@ export const DockerServer: LSPServerInfo = {
  * that spec's `args` are shared by every candidate and omit `start` (#3939).
  *
  * It is acquired only through the registry's `fallbackFor` owner when `docker`
- * declines (binary absent, spawn throws, or the id is denied). Its capabilities,
+ * declines (binary absent, spawn throws, or the id is denied). The argv vector
+ * is a third-party CLI contract (AGENTS.md shape 16), pinned at upstream
+ * docker/docker-language-server commit 5187ff578db630f5df5b5922a10d8415a5bb7d32
+ * (main, 26 commits after tag v0.20.1 = cb62b8b3710e81988521238c89232e95ef728111;
+ * `internal/pkg/cli/start.go` declares `Use: "start"` and the `--stdio` flag at
+ * both commits). Its capabilities,
  * publish order, and idle cost are UNMEASURED: no official binary is installed
  * on CI, so the legacy row's measurements must not be attributed here, and it
  * declares no `managedToolId` (no installer entry and no automatic download).

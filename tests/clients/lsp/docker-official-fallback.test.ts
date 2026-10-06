@@ -5,6 +5,13 @@
  * argv differ, so it cannot ride DockerServer's shared-args candidate chain
  * (#3939); it is registered as a `fallbackFor: "docker"` alternate instead.
  *
+ * Upstream provenance of the argv vector asserted below (AGENTS.md shape 16):
+ * docker/docker-language-server commit 5187ff578db630f5df5b5922a10d8415a5bb7d32
+ * (main, 26 commits after tag v0.20.1 = cb62b8b3710e81988521238c89232e95ef728111).
+ * `internal/pkg/cli/start.go` at both commits declares the `start` subcommand
+ * and its `--stdio` flag, so `["start", "--stdio"]` is the upstream contract,
+ * not a guess from the issue text.
+ *
  * This is the REAL registry + REAL config + REAL LSPService acquisition path:
  * only the two external boundaries are doubled — the child launcher
  * (`clients/lsp/launch.js`) and the JSON-RPC transport
