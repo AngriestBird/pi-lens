@@ -527,6 +527,35 @@ describe.skipIf(process.platform !== "linux")(
 			expect(signalledPids().has(child.pid as number)).toBe(false);
 		});
 
+		// #3986 recurrence: a cross-session or cross-worker kill. The backstop
+		// is machine-wide, so the sweeping session's home tracks none of another
+		// live session's (or plegma worker's) children, and a POSIX child whose
+		// launcher exited has a ppid that names neither owner. Only the owner
+		// tag says it is still owned; a rule that shields only the sweeper's own
+		// children would kill it.
+		it("[CrossHome] a live owner in another home keeps its reparented child until that owner dies", async () => {
+			const owner = spawnHost(); // another home's live session
+			const ownerPid = owner.pid as number;
+			const child = spawnLsp(tag(ownerPid, startOf(ownerPid)));
+			const pid = child.pid as number;
+			// This home's registry is empty: nothing here tracks the child.
+
+			await backstop();
+			expect(signalledPids().has(pid)).toBe(false);
+			expect(
+				h.latency.find((r) => r.phase === "orphan_backstop_reaped")?.metadata,
+			).toMatchObject({ eligible: 0, killed: 0 });
+
+			const ownerExited = once(owner, "exit");
+			owner.kill("SIGKILL"); // the other session dies
+			await ownerExited;
+			const exited = once(child, "exit");
+			await backstop();
+			expect(signalledPids().has(pid)).toBe(true);
+			expect((await exited)[1]).toBe("SIGKILL");
+			expect(signalledPids().has(ownerPid)).toBe(false);
+		});
+
 		it("an owner pid now held by a process with another start is a dead owner", async () => {
 			const stranger = spawnHost();
 			const orphan = spawnLsp(tag(stranger.pid as number, OTHER_START));
