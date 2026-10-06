@@ -7,7 +7,9 @@ audience: internal
   git global option that takes a separate value. `for … do git push
   --no-verify`, `if … then git stash` and `! git reset --hard` were allowed
   because `do`, `then`, `else`, `elif`, `if`, `while`, `until`, `!` and
-  `coproc` were not skipped before the command word. `git --git-dir x stash`
+  `coproc` were not skipped before the command word. A coproc name, literal
+  or expanded, before a brace group or `if`/`while`/`until` is skipped
+  too. `git --git-dir x stash`
   and `git --config-env core.hooksPath=H commit` were misread because
   `--git-dir`, `--work-tree`, `--namespace`, `--config-env` and
   `--attr-source` were not skipped with their value. `sh -c`, `eval`,

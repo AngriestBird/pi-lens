@@ -651,8 +651,9 @@ export function scannableRegions(commandText) {
 const COPROC_WORD_INFO = Symbol("coprocWordInfo");
 
 /**
- * Return the end offset for a live parameter or command expansion beginning
- * at `start`, or `start` when the dollar is literal.
+ * Return the end offset for a live parameter, command or arithmetic
+ * expansion (`$[…]` is the old arithmetic spelling) beginning at `start`,
+ * or `start` when the dollar is literal.
  *
  * @param {string} text
  * @param {number} start
@@ -660,8 +661,8 @@ const COPROC_WORD_INFO = Symbol("coprocWordInfo");
  */
 function runtimeExpansionEnd(text, start) {
 	const next = text[start + 1];
-	if (next === "{" || next === "(") {
-		const close = next === "{" ? "}" : ")";
+	const close = { "{": "}", "(": ")", "[": "]" }[next];
+	if (close) {
 		let depth = 1;
 		let quote = null;
 		for (let i = start + 2; i < text.length; i++) {
@@ -702,7 +703,7 @@ function runtimeExpansionEnd(text, start) {
 function runtimeExpansionKind(text, start) {
 	const next = text[start + 1];
 	if (next === "!") return "nullableNumeric";
-	return (next === "(" && text[start + 2] === "(") || /[?#$]/.test(next ?? "")
+	return (next === "(" && text[start + 2] === "(") || /[?#$[]/.test(next ?? "")
 		? "numeric"
 		: "dynamic";
 }
@@ -2067,6 +2068,13 @@ const COMMAND_KEYWORDS = new Set([
 ]);
 
 /**
+ * Compound-command words a coproc name may precede and whose next word bash
+ * runs (#3787 review, each probed in bash 5.3). `for`, `case`, `select` and
+ * `(` take a name too, but their commands land in later segments.
+ */
+const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
+
+/**
  * Strip any leading `{` brace, shell keyword ({@link COMMAND_KEYWORDS}) and
  * runner-prefix words, in any order and repeated, so `command env git stash`,
  * `{ sudo git stash` and `do git stash` all resolve to `git stash`. `env`'s
@@ -2080,14 +2088,15 @@ function stripCommandGroupAndRunnerPrefixes(words) {
 	let i = 0;
 	while (i < words.length) {
 		if (words[i] === "coproc") {
-			// A coprocess may have an optional name before a brace command
-			// group: `coproc C { git stash; }`. Strip that name only when
-			// the following brace makes the form unambiguous; the ordinary
-			// `coproc git stash` keeps `git` as the command word.
+			// A coprocess may have an optional name before a compound
+			// command: `coproc C { git stash; }`, `coproc C if git stash`.
+			// Strip that name only when the following word makes the form
+			// unambiguous; the ordinary `coproc git stash` keeps `git` as
+			// the command word.
 			const coprocLabel = words[i + 1];
 			const labelInfo = words[COPROC_WORD_INFO]?.[i + 1];
 			if (
-				words[i + 2] === "{" &&
+				COPROC_NAMED_BODY_WORDS.has(words[i + 2]) &&
 				(/^[A-Za-z_][A-Za-z0-9_]*$/.test(coprocLabel) ||
 					(labelInfo?.hasRuntimeExpansion === true &&
 						canFormCoprocIdentifier(labelInfo.identifierParts)))

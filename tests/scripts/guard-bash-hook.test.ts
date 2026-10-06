@@ -2933,6 +2933,10 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 			"nullable process with prefix",
 		],
 		['coproc C$((65)) { git stash; }; wait "$COPROC_PID"', "arithmetic suffix"],
+		[
+			'coproc C$[65] { git stash; }; wait "$COPROC_PID"',
+			"old arithmetic suffix",
+		],
 	])(
 		"denies git stash through the real hook for a %s coproc label",
 		(command) => {
@@ -2952,6 +2956,34 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(result.status).toBe(2);
 		expect(result.stderr).toContain("stash");
 	});
+
+	it.each([
+		["if", "coproc C if git stash; then :; fi"],
+		["while", "coproc C while git stash; do break; done"],
+		["until", "coproc C until git stash; do break; done"],
+		["a subshell", "coproc C ( git stash )"],
+		["for", "coproc C for x in 1; do git stash; done"],
+		["case", "coproc C case x in x) git stash;; esac"],
+		["if, with an expanded label", "coproc $USER if git stash; then :; fi"],
+	])(
+		"denies git stash through the real hook in a named coproc before %s",
+		(_body, command) => {
+			// Bash takes the optional label before any compound command, not only
+			// a brace group: each form ran its body in a bash 5.3 probe.
+			const result = runHook(command);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("stash");
+		},
+	);
+
+	it.each(["coproc C git stash", "coproc C ! git stash"])(
+		"allows %j, which bash never runs as git",
+		(command) => {
+			// Probed in bash 5.3: the first runs `C` (command not found), the
+			// second is a syntax error.
+			expect(findDeny(command)).toBeNull();
+		},
+	);
 
 	it.each([
 		["coproc '$USER' { git stash; }; wait \"$COPROC_PID\"", "single-quoted"],
@@ -2995,6 +3027,7 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		['coproc $?A { git stash; }; wait "$COPROC_PID"', "status plus suffix"],
 		['coproc $#A { git stash; }; wait "$COPROC_PID"', "count plus suffix"],
 		['coproc $$A { git stash; }; wait "$COPROC_PID"', "pid plus suffix"],
+		['coproc $[65] { git stash; }; wait "$COPROC_PID"', "old arithmetic"],
 	])("allows a fixed non-identifier coproc expansion: %s", (command) => {
 		expect(runHook(command).status).toBe(0);
 	});
