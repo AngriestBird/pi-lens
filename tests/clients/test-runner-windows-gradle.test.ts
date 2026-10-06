@@ -71,6 +71,9 @@ const targetSpawns: Array<{
 	args: string[];
 	options: Record<string, unknown>;
 }> = [];
+/** Resolves on the first target spawn; reset per test (no wall-clock wait). */
+let resolveTargetSpawn: () => void = () => {};
+let targetSpawned: Promise<void> = Promise.resolve();
 
 function makeRoot(prefix = "pi-lens-3956-"): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -131,15 +134,20 @@ function installSpawnBoundary(): void {
 			}
 			targetChildren.push(child);
 			targetSpawns.push({ command, args, options });
+			resolveTargetSpawn();
 			return child;
 		},
 	);
 }
 
 async function runAndSettle(promise: Promise<unknown>): Promise<void> {
-	await vi.waitFor(() => expect(targetSpawns.length).toBeGreaterThan(0), {
-		timeout: 3000,
-	});
+	// The run settling before any target spawn is itself the failure.
+	await Promise.race([
+		targetSpawned,
+		promise.then(() => {
+			throw new Error("run settled without a target spawn");
+		}),
+	]);
 	const child = targetChildren[0];
 	if (!child) throw new Error("expected a target child spawn");
 	child.emit("exit", 0, null);
@@ -153,6 +161,9 @@ beforeEach(() => {
 	spawnSyncMock.mockReset();
 	targetChildren.length = 0;
 	targetSpawns.length = 0;
+	targetSpawned = new Promise<void>((resolve) => {
+		resolveTargetSpawn = resolve;
+	});
 	installSpawnBoundary();
 });
 
