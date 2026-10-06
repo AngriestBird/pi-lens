@@ -1121,7 +1121,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	status: {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
 		// no longer compares the bare `status` field at four sites (37 -> 32), and
-		// the predicate that owns the rule names it once in types.ts (2 -> 5).
+		// the claimSource admission guard (#3968 F2) reads it once more (32 -> 33).
 		"clients/actionable-warnings.ts": 5,
 		"clients/advisory-provenance.ts": 5,
 		"clients/ast-grep-client.ts": 7,
@@ -1133,7 +1133,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 6,
 		"clients/config-resolve.ts": 11,
 		"clients/dead-code-client.ts": 3,
-		"clients/dispatch/dispatcher.ts": 32,
+		"clients/dispatch/dispatcher.ts": 33,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
