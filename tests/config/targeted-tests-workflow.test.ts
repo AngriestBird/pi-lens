@@ -970,8 +970,7 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			"a re-export target outside tests/support",
 			'import { counts } from "../support/scan.js";\ncounts("x");',
 			{
-				"scan.ts":
-					'export { counts } from "../../clients/string-utils.js";',
+				"scan.ts": 'export { counts } from "../../clients/string-utils.js";',
 				"../../clients/string-utils.ts": WALKING_SCAN,
 			},
 		],
