@@ -228,6 +228,44 @@ describe("#3968 fold arms — dispatch-level delivery", () => {
 		}
 	});
 
+	it("custom builtin-id overlay without covers does not defer shellcheck", async () => {
+		const env = setupTestEnvironment("pi-lens-fold-");
+		try {
+			// Regression for the #3969 F2 review finding: a custom row that
+			// overlays a builtin id must not inherit that builtin's covers fact.
+			fs.mkdirSync(env.tmpDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					lsp: {
+						servers: {
+							bash: {
+								name: "foreign shell server",
+								extensions: [".zsh"],
+								command: "my-shell-lsp",
+							},
+						},
+						disabledServers: ["shuck"],
+					},
+				}),
+			);
+			const out = await arm(env.tmpDir, "dotfiles/zshrc.zsh", SHEBANG_ZSH, {
+				initLspConfig: true,
+				present: { shellcheck: true },
+			});
+			expect(out.latency).toMatchObject({
+				runnerId: "shellcheck",
+				status: "skipped",
+				skipReason: "dialect-unsupported",
+			});
+			expect(out.latency).not.toMatchObject({
+				skipReason: "covered-by-primary",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("shuck-absent arm: a .zsh still skips (dialect gate) and the dispatch surface discloses coverage-unavailable — never a silent clean", async () => {
 		const env = setupTestEnvironment("pi-lens-fold-");
 		try {

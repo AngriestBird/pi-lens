@@ -140,7 +140,9 @@ export function lspPrimaryCoversFile(
 		(s) => s.role !== "auxiliary",
 	);
 	if (!primary) return undefined;
-	const fact = BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
+	const fact = primary.custom
+		? undefined
+		: BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
 	const covers = primary.covers ?? fact?.runnerIds;
 	if (!covers?.includes(runnerId)) return undefined;
 	return {
