@@ -131,6 +131,8 @@
  *   - A command word assembled by expansion (`git st$(echo a)sh`,
  *     `${G} stash`, `$(which git) stash`): no static text scan can resolve
  *     a runtime-computed word.
+ *   - A word spelled with ANSI-C escapes (`$'\x67it' stash`): the escapes
+ *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
  *   - A hook bypass spelled some other way (#3778):
  *     `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of `.git/config`, or
@@ -645,10 +647,11 @@ export function scannableRegions(commandText) {
 	return [retained, ...substitutions];
 }
 
-// `splitWords` returns quote-stripped strings. Keep each word's parts so
-// coproc label validation can distinguish actual expansions from literal
-// characters that happen to look like expansion syntax after quote removal.
-const COPROC_WORD_INFO = Symbol("coprocWordInfo");
+// `splitWords` returns quote-stripped strings. For a word holding a live
+// expansion it also keeps where each one sits, so coproc label validation can
+// distinguish actual expansions from literal characters that happen to look
+// like expansion syntax after quote removal.
+const WORD_EXPANSIONS = Symbol("wordExpansions");
 
 /**
  * Return the end offset for a live parameter, command or arithmetic
@@ -709,14 +712,23 @@ function runtimeExpansionKind(text, start) {
 }
 
 /**
- * Whether ordered literal and expansion parts can form a Bash coproc
- * identifier. Dynamic expansions may supply a valid first character;
- * numeric expansions cannot start an identifier but can extend one.
+ * Whether a coproc label can form a Bash identifier, given where its live
+ * expansions sit. Dynamic expansions may supply a valid first character;
+ * numeric expansions cannot start an identifier but can extend one. With no
+ * expansion the label itself must be an identifier.
  *
- * @param {Array<string | { kind: "dynamic"|"numeric"|"nullableNumeric" }>} parts
+ * @param {string} label
+ * @param {Array<{ kind: "dynamic"|"numeric"|"nullableNumeric"; start: number; end: number }>} expansions
  * @returns {boolean}
  */
-function canFormCoprocIdentifier(parts) {
+function canFormCoprocIdentifier(label, expansions) {
+	const parts = [];
+	let at = 0;
+	for (const expansion of expansions) {
+		parts.push(label.slice(at, expansion.start), expansion);
+		at = expansion.end;
+	}
+	parts.push(label.slice(at));
 	let hasIdentifierStart = false;
 	for (const part of parts) {
 		if (typeof part !== "string") {
@@ -739,85 +751,6 @@ function canFormCoprocIdentifier(parts) {
 		}
 	}
 	return hasIdentifierStart;
-}
-
-/**
- * Decode the contents of a Bash ANSI-C quoted string beginning after `$'`.
- *
- * @param {string} text
- * @param {number} start
- * @returns {{ value: string; end: number }}
- */
-function decodeAnsiCQuotedWord(text, start) {
-	let value = "";
-	let i = start;
-	while (i < text.length) {
-		const ch = text[i];
-		if (ch === "'") return { value: value.replace(/\0/g, ""), end: i + 1 };
-		if (ch !== "\\" || i + 1 >= text.length) {
-			value += ch;
-			i++;
-			continue;
-		}
-		const escape = text[i + 1];
-		const standardEscapes = {
-			a: "\x07",
-			b: "\b",
-			e: "\x1b",
-			E: "\x1b",
-			f: "\f",
-			n: "\n",
-			r: "\r",
-			t: "\t",
-			v: "\v",
-			"\\": "\\",
-			"'": "'",
-			'"': '"',
-			"?": "?",
-		};
-		if (Object.hasOwn(standardEscapes, escape)) {
-			value += standardEscapes[escape];
-			i += 2;
-			continue;
-		}
-		if (escape === "\n") {
-			i += 2;
-			continue;
-		}
-		if (escape === "c" && i + 2 < text.length) {
-			value += String.fromCharCode(text.charCodeAt(i + 2) & 0x1f);
-			i += 3;
-			continue;
-		}
-		const digitCount =
-			escape === "x" ? 2 : escape === "u" ? 4 : escape === "U" ? 8 : 0;
-		if (digitCount > 0) {
-			const digits = text.slice(i + 2, i + 2 + digitCount);
-			const matched = digits.match(
-				escape === "x"
-					? /^[0-9A-Fa-f]{1,2}/
-					: new RegExp(`^[0-9A-Fa-f]{${digitCount}}`),
-			);
-			if (matched) {
-				const codePoint = Number.parseInt(matched[0], 16);
-				value +=
-					codePoint <= 0x10ffff
-						? String.fromCodePoint(codePoint)
-						: `\\${escape}${matched[0]}`;
-				i += 2 + matched[0].length;
-				continue;
-			}
-		}
-		if (/[0-7]/.test(escape)) {
-			const digits = text.slice(i + 1).match(/^[0-7]{1,3}/)?.[0] ?? escape;
-			value += String.fromCodePoint(Number.parseInt(digits, 8));
-			i += 1 + digits.length;
-			continue;
-		}
-		value += `\\${escape}`;
-		i += 2;
-	}
-	return { value: value.replace(/\0/g, ""), end: i };
 }
 
 /**
@@ -852,35 +785,47 @@ export function splitSegments(region) {
 export function splitWords(segment) {
 	/** @type {string[]} */
 	const words = [];
-	const coprocWordInfo = [];
-	/** @type {Array<string | { kind: "dynamic"|"numeric"|"nullableNumeric" }>} */
-	let identifierParts = [];
+	// Sparse: an entry only for a word that holds a live expansion.
+	const wordExpansions = [];
+	let expansions = null;
 	let buf = "";
-	let hasRuntimeExpansion = false;
 	/** @type {"single"|"double"|null} */
 	let quote = null;
 	let started = false;
 	let i = 0;
-	const addLiteral = (text) => {
-		const lastPart = identifierParts.at(-1);
-		if (typeof lastPart === "string") {
-			identifierParts[identifierParts.length - 1] = lastPart + text;
-		} else {
-			identifierParts.push(text);
-		}
+	const addExpansion = (kind, text) => {
+		(expansions ??= []).push({
+			kind,
+			start: buf.length,
+			end: buf.length + text.length,
+		});
+		buf += text;
+		started = true;
 	};
-	const addExpansion = (kind) => {
-		hasRuntimeExpansion = true;
-		identifierParts.push({ kind });
+	// Consume the live `$…` or backtick expansion at `i`, if there is one.
+	const takeExpansion = () => {
+		let end;
+		if (segment[i] === "`") {
+			const close = segment.indexOf("`", i + 1);
+			end = close < 0 ? segment.length : close + 1;
+		} else {
+			end = runtimeExpansionEnd(segment, i);
+			if (end === i) return false;
+		}
+		addExpansion(
+			segment[i] === "`" ? "dynamic" : runtimeExpansionKind(segment, i),
+			segment.slice(i, end),
+		);
+		i = end;
+		return true;
 	};
 	const flush = () => {
 		if (started) {
+			if (expansions) wordExpansions[words.length] = expansions;
 			words.push(buf);
-			coprocWordInfo.push({ hasRuntimeExpansion, identifierParts });
 		}
 		buf = "";
-		identifierParts = [];
-		hasRuntimeExpansion = false;
+		expansions = null;
 		started = false;
 	};
 	while (i < segment.length) {
@@ -893,7 +838,6 @@ export function splitWords(segment) {
 				continue;
 			}
 			buf += ch;
-			addLiteral(ch);
 			i++;
 			continue;
 		}
@@ -901,7 +845,6 @@ export function splitWords(segment) {
 			started = true;
 			if (ch === "\\" && DOUBLE_QUOTE_ESCAPABLE.has(segment[i + 1])) {
 				buf += segment[i + 1];
-				addLiteral(segment[i + 1]);
 				i += 2;
 				continue;
 			}
@@ -910,41 +853,29 @@ export function splitWords(segment) {
 				i++;
 				continue;
 			}
-			if (ch === "$") {
-				const end = runtimeExpansionEnd(segment, i);
-				if (end > i) {
-					addExpansion(runtimeExpansionKind(segment, i));
-					buf += segment.slice(i, end);
-					i = end;
-					continue;
-				}
-			}
-			if (ch === "`") {
-				addExpansion("dynamic");
-				const end = segment.indexOf("`", i + 1);
-				const stop = end < 0 ? segment.length : end + 1;
-				buf += segment.slice(i, stop);
-				i = stop;
-				continue;
-			}
+			if ((ch === "$" || ch === "`") && takeExpansion()) continue;
 			buf += ch;
-			addLiteral(ch);
 			i++;
 			continue;
 		}
 		if (ch === "\\" && i + 1 < segment.length) {
 			started = true;
 			buf += segment[i + 1];
-			addLiteral(segment[i + 1]);
 			i += 2;
 			continue;
 		}
 		if (ch === "$" && segment[i + 1] === "'") {
-			const decoded = decodeAnsiCQuotedWord(segment, i + 2);
-			buf += decoded.value;
-			addLiteral(decoded.value);
+			// ANSI-C quoting. Its escapes are not decoded, so a span holding
+			// one counts as a live expansion: it could spell anything.
+			let end = i + 2;
+			while (end < segment.length && segment[end] !== "'") {
+				end += segment[end] === "\\" ? 2 : 1;
+			}
+			const content = segment.slice(i + 2, end);
+			if (content.includes("\\")) addExpansion("dynamic", content);
+			else buf += content;
 			started = true;
-			i = decoded.end;
+			i = end + 1;
 			continue;
 		}
 		if (ch === "$" && segment[i + 1] === '"') {
@@ -970,34 +901,15 @@ export function splitWords(segment) {
 			i++;
 			continue;
 		}
-		if (ch === "$") {
-			const end = runtimeExpansionEnd(segment, i);
-			if (end > i) {
-				addExpansion(runtimeExpansionKind(segment, i));
-				started = true;
-				buf += segment.slice(i, end);
-				i = end;
-				continue;
-			}
-		}
-		if (ch === "`") {
-			addExpansion("dynamic");
-			const end = segment.indexOf("`", i + 1);
-			const stop = end < 0 ? segment.length : end + 1;
-			started = true;
-			buf += segment.slice(i, stop);
-			i = stop;
-			continue;
-		}
+		if ((ch === "$" || ch === "`") && takeExpansion()) continue;
 		started = true;
 		buf += ch;
-		addLiteral(ch);
 		i++;
 	}
 	flush();
-	Object.defineProperty(words, COPROC_WORD_INFO, {
-		value: coprocWordInfo,
-	});
+	if (wordExpansions.length > 0) {
+		Object.defineProperty(words, WORD_EXPANSIONS, { value: wordExpansions });
+	}
 	return words;
 }
 
@@ -2093,13 +2005,12 @@ function stripCommandGroupAndRunnerPrefixes(words) {
 			// Strip that name only when the following word makes the form
 			// unambiguous; the ordinary `coproc git stash` keeps `git` as
 			// the command word.
-			const coprocLabel = words[i + 1];
-			const labelInfo = words[COPROC_WORD_INFO]?.[i + 1];
 			if (
 				COPROC_NAMED_BODY_WORDS.has(words[i + 2]) &&
-				(/^[A-Za-z_][A-Za-z0-9_]*$/.test(coprocLabel) ||
-					(labelInfo?.hasRuntimeExpansion === true &&
-						canFormCoprocIdentifier(labelInfo.identifierParts)))
+				canFormCoprocIdentifier(
+					words[i + 1],
+					words[WORD_EXPANSIONS]?.[i + 1] ?? [],
+				)
 			) {
 				// Runtime expansions may form a valid name; literal text around
 				// them must remain identifier characters.

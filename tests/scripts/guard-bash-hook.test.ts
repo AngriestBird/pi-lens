@@ -2875,32 +2875,16 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 			"ANSI-C hexadecimal escape",
 		],
 		[
-			"coproc $'\\103' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C octal escape",
+			"coproc $'\\u43' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C short Unicode escape",
 		],
 		[
-			"coproc $'\\u0043' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C Unicode escape",
+			"coproc $'C\\0!' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C NUL-truncated",
 		],
 		[
-			"coproc $'\\U00000043' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C long Unicode escape",
-		],
-		[
-			"coproc $'C\\000' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C octal NUL escape",
-		],
-		[
-			"coproc $'C\\x00' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C hexadecimal NUL escape",
-		],
-		[
-			"coproc $'C\\u0000' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C Unicode NUL escape",
-		],
-		[
-			"coproc $'C\\c@' { git stash; }; wait \"$COPROC_PID\"",
-			"ANSI-C control NUL escape",
+			"coproc $'\\x{43}' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C braced hexadecimal escape",
 		],
 		['coproc $@ { git stash; }; wait "$COPROC_PID"', "positional list"],
 		['coproc $* { git stash; }; wait "$COPROC_PID"', "positional star"],
@@ -3012,11 +2996,10 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(result.status).toBe(0);
 	});
 
-	it("allows a coproc label with an out-of-range ANSI-C Unicode escape", () => {
-		const result = runHook(
-			"coproc C$'\\U00110000' { git stash; }; wait \"$COPROC_PID\"",
-		);
-		expect(result.status).toBe(0);
+	it("denies an ANSI-C escape in a coproc label without decoding it", () => {
+		// Fails closed: bash rejects this label, but the hook does not decode
+		// escapes, so an escaped span could spell anything.
+		expect(findDeny("coproc C$'\\U00110000' { git stash; }")).toBe("stash");
 	});
 
 	it.each([
@@ -3039,7 +3022,7 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(findDeny(command)).toBe("stash");
 	});
 
-	it.each(["!C", "C!"])(
+	it.each(["!C", "C!", "$'C!'"])(
 		"does not treat the invalid coproc label %j as a named brace group",
 		(label) => {
 			// Bash reports these as invalid identifiers and does not run the body;
@@ -3184,6 +3167,11 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(findDeny("timeout 30 git stash")).toBeNull();
 		expect(findDeny("env -i git stash")).toBeNull();
 		expect(findDeny("GIT_CONFIG_KEY_0=core.hooksPath git commit")).toBeNull();
+	});
+
+	it("reads a plain ANSI-C quoted command word but decodes no escape", () => {
+		expect(findDeny("$'git' stash")).toBe("stash");
+		expect(findDeny("$'\\x67it' stash")).toBeNull();
 	});
 });
 
