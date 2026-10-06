@@ -973,6 +973,25 @@ function expandHomePrefix(pathArg) {
 }
 
 /**
+ * {@link expandHomePrefix} plus a leading `$HOME` or `${HOME}`, which bash
+ * expands to the same directory before `git` sees the argument (#3988).
+ * Kept apart from {@link expandHomePrefix} so {@link substituteTempDirPrefix}
+ * still resolves `$HOME` through its own variable lookup. `HOME` unset leaves
+ * the text literal, as in {@link expandHomePrefix}.
+ *
+ * @param {string} pathArg
+ * @returns {string}
+ */
+function expandShellHome(pathArg) {
+	const home = process.env.HOME;
+	if (home !== undefined) {
+		const m = /^\$HOME(?![A-Za-z0-9_])|^\$\{HOME\}/.exec(pathArg);
+		if (m) return home + pathArg.slice(m[0].length);
+	}
+	return expandHomePrefix(pathArg);
+}
+
+/**
  * Does `pathArg` (a `git worktree add`/`git clone` destination, or an
  * `mktemp` `-p`/`--tmpdir=` value or absolute template's directory) resolve
  * under `/tmp`, after {@link substituteTempDirPrefix} expands a leading `~`
@@ -1271,7 +1290,7 @@ function classifyGit(args, cwd, env = {}) {
 			else if (!a.startsWith("-")) positionals.push(a);
 		}
 		if (forceCount >= 2) return "worktreeForce";
-		const worktreeArg = positionals[0];
+		const worktreeArg = positionals[0] && expandShellHome(positionals[0]);
 		if (worktreeArg) {
 			const worktreeDir = isAbsolute(worktreeArg)
 				? worktreeArg

@@ -720,6 +720,38 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		}
 	});
 
+	it.each([
+		["~", (rel: string) => `~/${rel}`],
+		["$HOME", (rel: string) => `$HOME/${rel}`],
+		["${HOME}", (rel: string) => `\${HOME}/${rel}`],
+		["chained `echo x;` with ~", (rel: string) => `echo x; git worktree remove --force ~/${rel}`],
+	])(
+		"denies a shell-expanded %s spelling of the worktree path (#3988)",
+		(_label, spell) => {
+			const home = mkdtempSync(join(tmpdir(), "guard-bash-home-3988-"));
+			const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
+			const tree = join(home, "scratch", "wt");
+			mkdirSync(tree, { recursive: true });
+			writeFileSync(
+				join(tree, ".git"),
+				"gitdir: /some/main/checkout/.git/worktrees/fixture\n",
+			);
+			symlinkSync(shared, join(tree, "node_modules"));
+			try {
+				const arg = spell("scratch/wt");
+				const command = arg.startsWith("echo")
+					? arg
+					: `git worktree remove --force ${arg}`;
+				const result = runHook(command, { ...BASE_ENV, HOME: home });
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#3173");
+			} finally {
+				rmSync(home, { recursive: true, force: true });
+				rmSync(shared, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
 		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
