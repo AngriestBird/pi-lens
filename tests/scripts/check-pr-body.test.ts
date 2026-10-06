@@ -251,8 +251,13 @@ function createOriginMasterFixture(
 	const postImageSegment = postImage
 		? ` && ${writePostImageContent(postImage.post, ".fixture-post")} && git -C '${directory}' add '${postImage.path}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-post-image && ${writePostImageContent(postImage.dirty, ".fixture-dirty")}`
 		: "";
+	// Spawn from the repository root: every command in the chain addresses the
+	// fixture by absolute path, so the caller's cwd must not decide which
+	// repository the commit chain moves. A caller already inside another fixture
+	// repo made that fixture's branch the HEAD-moving target of this chain.
 	gitExecSync(
 		`git init --quiet --initial-branch=main '${directory}' && ${preImage}git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}${postImageSegment}`,
+		{ cwd: repositoryRoot },
 	);
 	return directory;
 }
@@ -621,8 +626,13 @@ describe("test-reference shape and placement", () => {
 			writeFileSync(join(fixtureRepo, "tests", "fixture.test.ts"), "fixture\n");
 			initFixtureRepo(fixtureRepo);
 			gitExecFileSync(["add", "tests/fixture.test.ts"], { cwd: fixtureRepo });
+			// `-C` keeps the path resolution in the fixture; the spawn cwd stays at
+			// the repository root so the commit's HEAD-moving target is not the
+			// fixture repo's own branch.
 			gitExecFileSync(
 				[
+					"-C",
+					fixtureRepo,
 					"-c",
 					"user.email=pi-lens-test@example.com",
 					"-c",
@@ -631,7 +641,7 @@ describe("test-reference shape and placement", () => {
 					"-qm",
 					"fixture",
 				],
-				{ cwd: fixtureRepo },
+				{ cwd: repositoryRoot },
 			);
 			const direct = lintPrBody(fixture).errors.join(" ");
 			const local = lintLocalPrBody(fixture, fixtureRepo).errors.join(" ");
@@ -1660,6 +1670,46 @@ describe("PR body lint (#1844)", () => {
 			).toBe(false);
 		});
 
+		it("reads a real Git C-quoted runtime path with an embedded quote", () => {
+			// Recurrence: #3945 mutations 64/66/67 — without the `\\` escape branch
+			// in `readQuotedPath`, Git's `"a/clients/we\"ird.ts"` token ends at the
+			// escaped quote, `gitHeaderPaths` returns null, the file reads as
+			// non-runtime, and the denial body becomes a false clean.
+			const fixture = createOriginMasterFixture(undefined, {
+				path: 'clients/we"ird.ts',
+				pre: ["export let x = 0;"],
+				post: [
+					"export let x = 0;",
+					'\trecordDegradationOnce({ kind: "quote-kind" });',
+				],
+				dirty: [
+					"export let x = 0;",
+					'\trecordDegradationOnce({ kind: "quote-kind" });',
+				],
+			});
+			try {
+				const diff = localDiff(fixture);
+				// The producer must actually C-quote the embedded quote; otherwise the
+				// fixture is not the shape this escape branch exists for.
+				expect(diff).toContain('"a/clients/we\\"ird.ts"');
+				expect(
+					lintPrBody(withObservability("The record is quote-kind."), {
+						diff,
+						cwd: fixture,
+						workingTree: true,
+					}),
+				).toEqual({ valid: true, errors: [] });
+				const denied = lintPrBody(
+					withObservability("No new failure path; no record added."),
+					{ diff, cwd: fixture, workingTree: true },
+				);
+				expect(denied.valid).toBe(false);
+				expect(denied.errors.join(" ")).toContain("failure path");
+			} finally {
+				rmSync(fixture, { recursive: true, force: true });
+			}
+		});
+
 		it("reads an unquoted path that contains a space", () => {
 			const diff = [
 				"diff --git a/clients/brand new.ts b/clients/brand new.ts",
@@ -1731,6 +1781,28 @@ describe("PR body lint (#1844)", () => {
 			expect(result.valid).toBe(false);
 			expect(result.errors.join(" ")).toContain("could not classify");
 			expect(result.errors.join(" ")).toContain("clients/ghost-post-image.ts");
+		});
+
+		it("refuses an unreadable post-image whose only added line is blank", () => {
+			// Recurrence: #3945 mutations 140/143 — skipping the unavailable-source
+			// guard lets `sourceLines(null)` produce `[""]`, the blank added line
+			// "matches" it, and `blankCommentsAndStrings(null)` throws instead of
+			// refusing with "could not classify".
+			const diff = [
+				"diff --git a/clients/unreadable-blank.ts b/clients/unreadable-blank.ts",
+				"@@ -1 +1 @@",
+				"-export const before = 1;",
+				"+",
+			].join("\n");
+			// The enclosing fixture repository has no such file, so the real
+			// working-tree read fails and the post-image is genuinely unavailable.
+			const result = lintPrBody(
+				withObservability("No new failure path; no record added."),
+				{ diff, cwd: process.cwd(), workingTree: true },
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain("could not classify");
+			expect(result.errors.join(" ")).toContain("clients/unreadable-blank.ts");
 		});
 
 		it("refuses visibly when the post-image does not match the diff", () => {
