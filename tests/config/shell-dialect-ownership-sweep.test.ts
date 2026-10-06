@@ -20,6 +20,15 @@
  *      resolver; a new runner gaining a dialect selector reds until it
  *      resolves dialects too.
  *
+ *   C. **builtin covers-fact consultation by id collision** (F2) — the
+ *      runner-coverage seam must resolve a claim's provenance from the ROW
+ *      (`primary.custom`), never consult `BUILTIN_SERVER_RUNNER_COVERS` for
+ *      a custom primary: a `lsp.servers.<id>` overlay collides with the
+ *      builtin id, and an id-keyed fact lookup inherits a claim the declared
+ *      server never made (the lane the user registered silently suppresses
+ *      the CLI runner). The census pins ONE consultation site in the tree,
+ *      guarded on row provenance; a second consult site reds the floor.
+ *
  * Sources are comment-and-string-blanked (`stripSource`) so prose or a
  * string literal can never satisfy a requirement, and the floors are real
  * populations (an empty census fails loud, defect shape 10).
@@ -33,6 +42,8 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+
+const ROOT = path.resolve(import.meta.dirname, "../..");
 
 const RUNNERS_DIR = path.resolve(
 	import.meta.dirname,
@@ -123,6 +134,47 @@ describe("#3968 class sweep — dialect/capability ownership over the runners", 
 				`${emitter.file}: --shell value must come from resolveShellFileDialect (#3968) — a hardcoded dialect literal is the reported defect`,
 			).toBe(true);
 		}
+	});
+
+	it("the covers seam consults the builtin facts table only for non-custom primaries (F2)", () => {
+		// Family C. Census one: over the whole client tree, the builtin
+		// covers-fact table is consulted at RUNTIME in exactly one file — the
+		// seam. A second consultation site (a runner or LSP module keying
+		// cover facts by server id) re-creates the F2 id-collision defect
+		// outside the one place the provenance rule is enforced.
+		const clientFiles = listSourceFiles(path.join(ROOT, "clients"), {
+			extensions: [".ts"],
+			skipTests: true,
+		});
+		const consultSites = clientFiles
+			.filter((file) =>
+				stripSource(fs.readFileSync(file, "utf8")).includes(
+					"BUILTIN_SERVER_RUNNER_COVERS.get(",
+				),
+			)
+			.map((file) => relativePosix(ROOT, file));
+		assertNonEmptyScan(
+			"builtin covers-fact consultation sites",
+			consultSites.length,
+			1,
+		);
+		expect(consultSites).toEqual([
+			"clients/dispatch/runners/utils/runner-helpers.ts",
+		]);
+		// Census two: structural, on the blanked seam — the ONE lookup is the
+		// false-arm of the row-provenance conditional, so a custom primary
+		// never reaches the builtin table. Comment-blanked: quoting the guard
+		// in prose cannot satisfy it.
+		const blanked = stripSource(
+			fs.readFileSync(
+				path.join(ROOT, "clients/dispatch/runners/utils/runner-helpers.ts"),
+				"utf8",
+			),
+			{ strings: "keep" },
+		);
+		expect(blanked).toMatch(
+			/primary\.custom\s*\?\s*undefined\s*:\s*BUILTIN_SERVER_RUNNER_COVERS\.get\(primary\.id\)/,
+		);
 	});
 
 	it("pins the shell runner's supported-dialect set to the upstream fact", async () => {

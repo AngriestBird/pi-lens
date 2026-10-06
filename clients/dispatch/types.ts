@@ -172,6 +172,23 @@ export function isRunnerSkipReason(value: unknown): value is RunnerSkipReason {
 	return RUNNER_SKIP_REASONS.some((reason) => reason === value);
 }
 
+/**
+ * Closed taxonomy for WHO supplied a `covered-by-primary` claim (#3968 F2):
+ * `"declared"` — the server row's own `covers` (config channel); `"builtin-fact"`
+ * — the builtin facts table (`clients/lsp/server-covers.ts`). Admitted into
+ * durable latency metadata through {@link isRunnerClaimSource}'s guard, the
+ * same gate {@link isRunnerSkipReason} runs, so free text cannot enter.
+ */
+export const RUNNER_CLAIM_SOURCES = ["declared", "builtin-fact"] as const;
+export type RunnerClaimSource = (typeof RUNNER_CLAIM_SOURCES)[number];
+
+/** Runtime guard for untyped/plugin-provided runner results. */
+export function isRunnerClaimSource(
+	value: unknown,
+): value is RunnerClaimSource {
+	return RUNNER_CLAIM_SOURCES.some((source) => source === value);
+}
+
 export interface RunnerResult {
 	status: "succeeded" | "failed" | "skipped" | "deferred";
 	/** Diagnostics found */
@@ -199,6 +216,13 @@ export interface RunnerResult {
 	failureMessage?: string;
 	/** Bounded machine-readable reason when status is an expected skip. */
 	skipReason?: RunnerSkipReason;
+	/**
+	 * When the skip is `covered-by-primary`: which fact source supplied the
+	 * claim (`declared` — the row's own `covers`; `builtin-fact` — the facts
+	 * table). The dispatcher admits it into latency metadata only on actual
+	 * skips and only through the closed-taxonomy guard (#3968 F2).
+	 */
+	claimSource?: RunnerClaimSource;
 	/** Correlated scanner ids whose findings are absent from this result. */
 	unconfirmedServerIds?: readonly string[];
 	/**

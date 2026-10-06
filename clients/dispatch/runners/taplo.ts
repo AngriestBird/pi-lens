@@ -152,7 +152,17 @@ const taploRunner: RunnerDefinition = {
 		// never regresses.
 		const cover = lspPrimaryCoversFile(ctx, "taplo");
 		if (cover && (await coveringLaneAvailable(ctx, cover))) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				// The closed skip taxonomy — the shellcheck lane named its skip
+				// since #3968; this lane's identical skip was bare, reading as
+				// an unexplained empty output on the delivery surfaces
+				// (defect shape 10). F2 adds the claim's provenance beside it.
+				skipReason: "covered-by-primary",
+				claimSource: cover.claimSource,
+			};
 		}
 
 		// Project binary first (#1731, discipline B): `taplo.isAvailableAsync`

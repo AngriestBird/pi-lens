@@ -53,7 +53,7 @@ import {
 	getToolCommandSpec,
 	shouldAutoInstallTool,
 } from "../../../tool-policy.js";
-import type { DispatchContext } from "../../types.js";
+import type { DispatchContext, RunnerClaimSource } from "../../types.js";
 import { isInSpawnTimeoutCooldown } from "../../../spawn-timeout-cooldown.js";
 import { resolveToolCwd } from "../../../tool-cwd.js";
 import { createAvailabilityProbeFlight } from "../../../availability-probe-flight.js";
@@ -100,11 +100,22 @@ export interface PrimaryRunnerCoverage {
 	/** The covering server's id (the file's selected primary). */
 	serverId: string;
 	/**
-	 * Probeable commands gating the covering lane, from the builtin covers
-	 * fact. A config-declared `covers` (the stacked PR) carries none — its
-	 * producer owns its availability story.
+	 * Probeable commands gating the covering lane. A builtin fact gates on
+	 * the fact's own commands; a CUSTOM row's declared claim gates on that
+	 * row's own command (projected from `CustomServerConfig.command`),
+	 * symmetric with the builtin facts — an absent custom binary means the
+	 * claim is not honored and the CLI runner runs, so coverage never
+	 * silently drops to a config typo (#3968 F2). A builtin-shaped row whose
+	 * claim comes only from a config-declared `covers` (never produced by the
+	 * real pipeline) carries none.
 	 */
 	gateCommands: readonly string[];
+	/**
+	 * Which fact source supplied the claim — row provenance, never an id
+	 * lookup (#3968 F2). The runners stamp it on the skip so the durable
+	 * latency row shows who claimed (`covered-by-primary` + `claimSource`).
+	 */
+	claimSource: RunnerClaimSource;
 }
 
 /**
@@ -140,14 +151,37 @@ export function lspPrimaryCoversFile(
 		(s) => s.role !== "auxiliary",
 	);
 	if (!primary) return undefined;
+	// Claim provenance is resolved by ROW provenance, never by id lookup
+	// (#3968 F2): a custom row (`lsp.servers.<id>`) shares its id's namespace
+	// with the builtin table, so an id-keyed fact lookup would inherit a
+	// claim the declared server never made — a `lsp.servers.bash` overlay is
+	// NOT the builtin bash server, and its bare registration must never
+	// suppress the CLI runner. eab4bcc12 dropped the false claim; this also
+	// scopes the GATE, which that round left ungated (a custom row's declared
+	// skip carried no probe at all).
 	const fact = primary.custom
 		? undefined
 		: BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
 	const covers = primary.covers ?? fact?.runnerIds;
 	if (!covers?.includes(runnerId)) return undefined;
+	// The gate follows the claim's source. A builtin fact probes the fact's
+	// commands; a custom claim probes the covering lane's own binary — the
+	// same shape `launchLSP` resolves, `command` being the binary token with
+	// args a separate field. A custom row whose command projection is absent
+	// (an older released writer's shape) cannot name a gate binary, so the
+	// claim is not honored at all: fail closed to the CLI runner.
+	const gateCommands = fact
+		? fact.gateCommands
+		: primary.custom
+			? primary.command
+				? [primary.command]
+				: undefined
+			: [];
+	if (gateCommands === undefined) return undefined;
 	return {
 		serverId: primary.id,
-		gateCommands: fact?.gateCommands ?? [],
+		gateCommands,
+		claimSource: fact ? "builtin-fact" : "declared",
 	};
 }
 

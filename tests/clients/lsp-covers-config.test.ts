@@ -443,4 +443,53 @@ describe("lsp.servers.<id>.covers — the config-declared claim (#3968)", () => 
 			homeEnv.restore();
 		}
 	});
+
+	it("the registration projects the custom command onto the server info (the covers-claim gate source, #3968 F2)", async () => {
+		const { home, projectDir } = makeLayout({
+			project: { ".pi-lens.json": coversConfig({ covers: ["shellcheck"] }) },
+		});
+		const homeEnv = homeEnvFor(home);
+		try {
+			const cfg = await loadLSPConfig(projectDir, home);
+			const registered = registerLSPConfig(cfg).customServers;
+			expect(registered[0]?.command).toBe("mysh-lsp");
+		} finally {
+			homeEnv.restore();
+		}
+	});
+
+	it("an id colliding with a builtin server registers as a custom row with no covers claim (the F2 collision surface)", async () => {
+		// The F2 defect shape at the registration edge: `lsp.servers.bash` is
+		// a CUSTOM row that happens to share the builtin bash row's id. It
+		// must register with `custom: true` and NO covers claim — the facts
+		// the builtin table holds for id `bash` belong to the builtin row,
+		// and the seam reads claim provenance from the row itself.
+		const { home, projectDir } = makeLayout({
+			project: {
+				".pi-lens.json": {
+					lsp: {
+						servers: {
+							bash: {
+								name: "foreign shell server",
+								extensions: [".zsh"],
+								command: "my-shell-lsp",
+							},
+						},
+					},
+				},
+			},
+		});
+		const homeEnv = homeEnvFor(home);
+		try {
+			const cfg = await loadLSPConfig(projectDir, home);
+			const registered = registerLSPConfig(cfg).customServers;
+			expect(registered).toHaveLength(1);
+			expect(registered[0]?.id).toBe("bash");
+			expect(registered[0]?.custom).toBe(true);
+			expect(registered[0]?.command).toBe("my-shell-lsp");
+			expect(registered[0]?.covers).toBeUndefined();
+		} finally {
+			homeEnv.restore();
+		}
+	});
 });

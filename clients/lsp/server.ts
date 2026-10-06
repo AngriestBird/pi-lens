@@ -486,6 +486,17 @@ export interface LSPServerInfo {
 	/** True for entries supplied through `lsp.servers.*`, not the built-in table. */
 	custom?: boolean;
 	/**
+	 * The server's own binary command token (args are a separate field, so
+	 * the token IS what an availability probe would ask for). Present on
+	 * custom rows — projected from `CustomServerConfig.command` at
+	 * registration — and read by the runner-coverage seam as the availability
+	 * gate for that row's config-declared `covers` claim: a custom command
+	 * the probe cannot find fails the claim closed and the CLI runner runs.
+	 * Builtin rows leave this undefined; their lane availability speaks
+	 * through {@link BUILTIN_SERVER_RUNNER_COVERS}'s gate commands.
+	 */
+	command?: string;
+	/**
 	 * Dispatch runner ids this server subsumes (`#233` dormant-when-LSP-covers).
 	 * Config-supplied for custom servers (`lsp.servers.<id>.covers`, the stacked
 	 * PR); BUILTIN rows keep this undefined and declare the same fact through

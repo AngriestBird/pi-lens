@@ -266,6 +266,9 @@ const shellcheckRunner: RunnerDefinition = {
 				diagnostics: [],
 				semantic: "none",
 				skipReason: "covered-by-primary",
+				// WHO claimed (#3968 F2): declared (the row's own covers, gated
+				// on the custom row's own command) or builtin-fact.
+				claimSource: cover.claimSource,
 			};
 		}
 

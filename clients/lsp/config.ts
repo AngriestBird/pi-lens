@@ -754,6 +754,10 @@ export function createCustomServer(
 		id,
 		name: config.name,
 		custom: true,
+		// The own-command token the runner-coverage seam gates this row's
+		// covers claim on (#3968 F2): the declared covering lane's binary must
+		// be probeable before the claim can defer a CLI runner.
+		command: config.command,
 		extensions: config.extensions,
 		idleEviction: "unmeasured",
 		// The config-declared covers channel (#3968): the claim the loader

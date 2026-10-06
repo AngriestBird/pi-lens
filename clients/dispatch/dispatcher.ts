@@ -70,7 +70,11 @@ import { deferRunnerFindings } from "./pending-runner-findings.js";
 
 import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
-import { hasUsableResult, isRunnerSkipReason } from "./types.js";
+import {
+	hasUsableResult,
+	isRunnerClaimSource,
+	isRunnerSkipReason,
+} from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
 	Awaited<ReturnType<typeof probeToolAsync>>
@@ -85,6 +89,7 @@ import type {
 	RunnerGroup,
 	RunnerRegistry as RunnerRegistryContract,
 	RunnerResult,
+	RunnerClaimSource,
 	RunnerSkipReason,
 } from "./types.js";
 import {
@@ -593,6 +598,8 @@ export interface RunnerLatency {
 	/** The runner's own `failureKind`, when it set one (#3781). */
 	failureKind?: string;
 	skipReason?: RunnerSkipReason;
+	/** WHO supplied the `covered-by-primary` claim (#3968 F2). */
+	claimSource?: RunnerClaimSource;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
 }
@@ -1120,6 +1127,13 @@ async function runGroup(
 			result.status === "skipped" && isRunnerSkipReason(result.skipReason)
 				? result.skipReason
 				: undefined;
+		// WHO claimed, for `covered-by-primary` (#3968 F2). Admitted only on
+		// actual skips and only through the closed-taxonomy guard, like
+		// skipReason, so free text cannot enter durable latency metadata.
+		const claimSource =
+			result.status === "skipped" && isRunnerClaimSource(result.claimSource)
+				? result.claimSource
+				: undefined;
 
 		latencies.push({
 			runnerId,
@@ -1134,6 +1148,9 @@ async function runGroup(
 			}),
 			...(skipReason !== undefined && {
 				skipReason,
+			}),
+			...(claimSource !== undefined && {
+				claimSource,
 			}),
 			...(result.unconfirmedServerIds !== undefined && {
 				unconfirmedServerIds: result.unconfirmedServerIds,
@@ -1167,7 +1184,7 @@ async function runGroup(
 							failureMessage: result.failureMessage,
 						}
 					: skipReason
-						? { skipReason }
+						? { skipReason, ...(claimSource !== undefined && { claimSource }) }
 						: undefined,
 		});
 		recordRunner(
