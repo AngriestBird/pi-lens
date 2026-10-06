@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -449,6 +450,105 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"exercises the tests-tree write guard against a temp root the test creates; the live tests/ tree is not the population",
 };
 
+// Independently reviewed admissions for the current exemption set. The reason
+// text above explains each status; its digest pins that reviewed explanation
+// so plausible but unrelated prose cannot silently excuse a live scanner.
+// Adding, deleting, or rewording an exemption requires an explicit admission
+// review here as well as the stale-entry/census checks below.
+const REVIEWED_EXEMPTION_REASON_SHA256: Readonly<Record<string, string>> = {
+	"tests/build-freshness-guard.test.ts":
+		"ea497d088a210d85cef8f2e67ce466fb9bfb9d6e354ab44503b7fbcf61dc6f09",
+	"tests/clients/analyzed-files-producer-coverage.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/bus-producer-coverage.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/cargo-manifest.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/config-diagnostic-codes.test.ts":
+		"328eedc0f2ae31de9712393c0b6bb60bed4b2b7ee26f33e331ea9a8dd9bd9640",
+	"tests/clients/config-notice-bounds.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/data-dir-display-path-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/deps-centralization.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/dispatch/runners/exit-table-governance.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/lsp/launch.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/mutating-tool-classification.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/ndjson-writer-conformance.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/pi-lens-home-hermeticity.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/safe-spawn-default-output-cap.test.ts":
+		"962f7e39a3c4804aa1a9a15ab5716bab85cae3094e46f983444c81c219934703",
+	"tests/clients/socket-error-listener-sweep.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/workspace-topology-conformance.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/bounded-eviction-idiom-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/gitignore-tracked-shadow.test.ts":
+		"328eedc0f2ae31de9712393c0b6bb60bed4b2b7ee26f33e331ea9a8dd9bd9640",
+	"tests/config/lsp-advertised-capability-senders.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/lsp-service-double-sweep.test.ts":
+		"603e6212ad082ac4ed3c67fb1a7e1520c7caeb948dc81b0dbefb6b789fc1e459",
+	"tests/config/path-key-fold-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/process-table-seam.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/script-entry-portability.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/config/sync-child-process-timeout.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/test-shard-assignment.test.ts":
+		"60a56bf699306e0bc49c7170e00f7dafd11b34b67f1793c2d5e89d2cd5d19a0e",
+	"tests/config/win32-gate-lane.test.ts":
+		"603e6212ad082ac4ed3c67fb1a7e1520c7caeb948dc81b0dbefb6b789fc1e459",
+	"tests/host-sdk-type-only.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/packaging-pack-manifest.test.ts":
+		"a23d57340227888c7a1cdef6804380a521059657a230689a9f04cc1f14b36823",
+	"tests/real-harness/fixture-shape.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/scripts/pre-push-targeted-tests.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/support/tests-tree-write-guard-race.test.ts":
+		"80ad6f38da37fe72579a02e932e78067e7d8dbb3fcc288547ccf68b805780833",
+	"tests/support/tests-tree-write-guard.test.ts":
+		"80ad6f38da37fe72579a02e932e78067e7d8dbb3fcc288547ccf68b805780833",
+};
+
+function exemptionAdmissionDrift(
+	exemptions: Readonly<Record<string, string>> = TREE_SCANNER_EXEMPTIONS,
+): string[] {
+	const admitted = Object.entries(exemptions).map(
+		([file, reason]) =>
+			[file, createHash("sha256").update(reason).digest("hex")] as const,
+	);
+	const current = Object.fromEntries(admitted);
+	return [
+		...new Set([
+			...Object.keys(REVIEWED_EXEMPTION_REASON_SHA256).filter(
+				(file) => !Object.hasOwn(current, file),
+			),
+			...Object.entries(current)
+				.filter(
+					([file, digest]) => REVIEWED_EXEMPTION_REASON_SHA256[file] !== digest,
+				)
+				.map(([file]) => file),
+			...Object.keys(current).filter(
+				(file) => !Object.hasOwn(REVIEWED_EXEMPTION_REASON_SHA256, file),
+			),
+		]),
+	].sort();
+}
+
 function discoverTreeScannersFromWalk(
 	walked: readonly { file: string; source: string }[],
 	readSupport: SourceReader,
@@ -546,6 +646,16 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				.filter(([, reason]) => reason.trim().length < 20)
 				.map(([file]) => file);
 			expect(reasonless).toEqual([]);
+			expect(exemptionAdmissionDrift()).toEqual([]);
+			// #3951 F2: plausible prose must not let a live scanner migrate into
+			// exemptions and disappear from the independently reviewed admission.
+			expect(
+				exemptionAdmissionDrift({
+					...TREE_SCANNER_EXEMPTIONS,
+					"tests/config/tmp-fixture-hygiene.test.ts":
+						"this is a plausible but unreviewed reason for exemption",
+				}),
+			).toEqual(["tests/config/tmp-fixture-hygiene.test.ts"]);
 			const stale = Object.keys(TREE_SCANNER_EXEMPTIONS).filter(
 				(file) => !discovered.has(file),
 			);
