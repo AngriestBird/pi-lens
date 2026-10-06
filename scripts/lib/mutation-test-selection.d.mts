@@ -13,6 +13,7 @@ export declare function coveredChangedLinesInReport(
 	coverage: Record<string, object>,
 	rangesByFile: Map<string, ChangedRanges>,
 	root?: string,
+	sourceCounts?: Map<string, number>,
 ): number;
 export declare const INCREMENTAL_FINGERPRINT_PATH: string;
 export declare const PROBE_REPORTS_ROOT: string;
@@ -27,12 +28,15 @@ export type TestProbeResult = { lines: number } | { unknown: string };
 export declare function probeTestCoverage(
 	test: string,
 	deps: {
-		run: (
-			test: string,
-		) => Promise<{ status: number | null; timedOut?: boolean }>;
+		run: (test: string) => Promise<{
+			status: number | null;
+			timedOut?: boolean;
+			aborted?: boolean;
+		}>;
 		readCoverage: (test: string) => Record<string, object> | null;
 		rangesByFile: Map<string, ChangedRanges>;
 		root?: string;
+		sourceCounts?: Map<string, number>;
 	},
 ): Promise<TestProbeResult>;
 export declare function probeAllTests(
@@ -65,6 +69,8 @@ export declare function selectMutationTests(args: {
 	priorities?: Map<string, number>;
 	lines: Map<string, number | null> | null;
 	maxTests: number;
+	activeSources?: string[];
+	sourceCoverage?: Map<string, Map<string, number> | null>;
 }): TestSelection;
 export declare function fingerprintPaths(args: {
 	changedFiles: string[];
