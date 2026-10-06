@@ -94,6 +94,17 @@ describe("findIgnoredArguments", () => {
 		]);
 	});
 
+	it("keeps nearest schema-key suggestions available for arbitrary schemas", () => {
+		// The public helper accepts caller-supplied schemas, so an otherwise-nearest
+		// property must remain eligible even when its name is absent from live tools.
+		expect(
+			findIgnoredArguments(
+				{ properties: { "Stryker was here": {} } },
+				{ maxStrykerWasHereX: "x" },
+			)?.ignored,
+		).toEqual([{ key: "maxStrykerWasHereX", suggestion: "Stryker was here" }]);
+	});
+
 	it("reports a required key as missing only when a key was ignored", () => {
 		// The key IS sent next to a stray one: the tool runs, nothing is missing.
 		expect(
