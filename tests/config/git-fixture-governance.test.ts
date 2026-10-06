@@ -451,6 +451,8 @@ function scriptFiles(root: string): Array<{ file: string; source: string }> {
 }
 
 describe("real Git fixture governance", () => {
+	// This scans every TypeScript test source. Its cost grows with the test tree
+	// and can exceed Vitest's default timeout on Windows.
 	it("routes every direct Git spawn through git-fixture-env", () => {
 		const offenders = findGitSpawnOffenders(
 			testFiles(path.resolve(__dirname, "..")),
@@ -459,7 +461,7 @@ describe("real Git fixture governance", () => {
 			offenders,
 			`Bare Git spawns found:\n${offenders.join("\n")}`,
 		).toEqual([]);
-	});
+	}, 30_000);
 
 	it("routes every direct Git spawn in scripts/**/*.mjs through git-fixture-env", () => {
 		const offenders = findGitSpawnOffenders(
