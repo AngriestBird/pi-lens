@@ -19,6 +19,7 @@ import { makeSessionStartEvent } from "./support/host-event-factory.js";
 // no longer clears it — that is the fix, not a regression. This suite gives
 // every case a cold extension graph, so it must reset the process state too.
 import { _resetProcessSingletonsForTests } from "../clients/process-singletons.js";
+import { _resetInstanceRegistryEnabledForTests } from "../clients/instance-registry.js";
 
 const r6Mocks = vi.hoisted(() => ({
 	incrementDegradationCount: vi.fn(),
@@ -220,12 +221,24 @@ afterEach(() => {
 describe("index.ts integration", () => {
 	let tmpDir: string;
 	let originalStartupMode: string | undefined;
+	let originalHome: string | undefined;
+	let originalRegistry: string | undefined;
 
 	beforeEach(() => {
 		vi.resetModules();
 		vi.clearAllMocks();
 		_resetProcessSingletonsForTests();
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-index-int-"));
+		// #3917: these real session_start calls arm the machine-wide orphan
+		// backstop, but this integration file asserts extension behavior rather
+		// than registry behavior. Keep its reaper out of the host process table
+		// and keep its lock/stamp in this case's home.
+		originalRegistry = process.env.PI_LENS_INSTANCE_REGISTRY;
+		process.env.PI_LENS_INSTANCE_REGISTRY = "0";
+		_resetInstanceRegistryEnabledForTests();
+		originalHome = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = path.join(tmpDir, "home");
+		fs.mkdirSync(process.env.PI_LENS_HOME, { recursive: true });
 		originalStartupMode = process.env.PI_LENS_STARTUP_MODE;
 		process.env.PI_LENS_STARTUP_MODE = "quick";
 	});
@@ -235,6 +248,12 @@ describe("index.ts integration", () => {
 		if (originalStartupMode === undefined)
 			delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = originalStartupMode;
+		if (originalRegistry === undefined)
+			delete process.env.PI_LENS_INSTANCE_REGISTRY;
+		else process.env.PI_LENS_INSTANCE_REGISTRY = originalRegistry;
+		_resetInstanceRegistryEnabledForTests();
+		if (originalHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = originalHome;
 		vi.restoreAllMocks();
 	});
 
