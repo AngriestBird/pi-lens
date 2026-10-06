@@ -532,7 +532,11 @@ the surface they bite; each block loads only when its trigger applies.
   server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
   registry server's eviction cost and respawn safety into
   `docs/lsp-idle-eviction.md` and changes no policy; a declaration change is a
-  follow-up that cites its row. `tests/config/lsp-idle-eviction-measurement.test.ts`
+  follow-up that cites its row, or the nightly's draft promotion PR
+  (`bot/lsp-idle-evict-promote`, #3989: two consecutive eligible nights, idle
+  RSS floor, cold-start cap, hold list in
+  `scripts/lib/lsp-idle-eviction-promote.mjs`; night memory in the matrix doc's
+  refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses

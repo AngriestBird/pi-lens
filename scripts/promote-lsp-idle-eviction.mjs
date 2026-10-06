@@ -1,0 +1,129 @@
+#!/usr/bin/env node
+/**
+ * Nightly idle-eviction PROMOTION step (#3989).
+ *
+ * Reads the measurement's `--summary` JSON, advances the per-server
+ * consecutive-night memory kept in the `## Capability matrix refresh state`
+ * block of docs/lsp-capability-matrix.md (#3401's bookkeeping seam, so the
+ * existing docs-refresh PR carries the state forward and the existing seed step
+ * restores it each night), and, for every server that now satisfies the rule in
+ * scripts/lib/lsp-idle-eviction-promote.mjs, flips its `idleEviction:
+ * "unmeasured"` line to `"transparent"` in clients/lsp/server.ts and adds its
+ * reason row to tests/config/lsp-idle-eviction-reasons.json, in the working
+ * tree. The workflow's second create-pull-request step commits only those two
+ * paths to `bot/lsp-idle-evict-promote` as a DRAFT PR; it is never merged here.
+ *
+ *   node scripts/promote-lsp-idle-eviction.mjs --summary <path> [--body <path>]
+ *       [--matrix <path>] [--server-src <path>] [--reasons <path>] [--today <YYYY-MM-DD>]
+ *
+ * Fail closed and best-effort: a missing or unparsable summary clears the night
+ * memory (a night that measured nothing is not a consecutive eligible night)
+ * and promotes nothing; the script always exits 0. With `GITHUB_OUTPUT` set it
+ * writes `promoted=true|false`.
+ */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { planPromotions } from "./lib/lsp-idle-eviction-promote.mjs";
+import {
+	IDLE_EVICTION_KEY,
+	parseRefreshState,
+	setIdleEvictionState,
+} from "./lib/md-matrix.mjs";
+
+/**
+ * One nightly run. Returns the promoted server ids; never throws.
+ *
+ * @param {{ summaryPath?: string, bodyPath?: string, matrixPath: string, serverPath: string, reasonsPath: string, today: string, runUrl?: string | null, log?: (line: string) => void }} opts
+ * @returns {string[]}
+ */
+export function promoteFromSummary(opts) {
+	const log = opts.log ?? ((line) => console.error(line));
+	try {
+		const matrixText = fs.readFileSync(opts.matrixPath, "utf8");
+		let rows = null;
+		try {
+			const parsed = JSON.parse(
+				fs.readFileSync(opts.summaryPath ?? "", "utf8"),
+			);
+			if (Array.isArray(parsed?.rows)) rows = parsed.rows;
+		} catch {
+			// handled below: no summary is a night that measured nothing.
+		}
+		if (!rows) {
+			log(
+				"idle-eviction promotion: no readable measurement summary; clearing the night memory and promoting nothing",
+			);
+			fs.writeFileSync(opts.matrixPath, setIdleEvictionState(matrixText, {}));
+			return [];
+		}
+		const plan = planPromotions({
+			rows,
+			prior: parseRefreshState(matrixText)[IDLE_EVICTION_KEY],
+			today: opts.today,
+			serverSource: fs.readFileSync(opts.serverPath, "utf8"),
+			reasonsText: fs.readFileSync(opts.reasonsPath, "utf8"),
+			runUrl: opts.runUrl,
+		});
+		fs.writeFileSync(
+			opts.matrixPath,
+			setIdleEvictionState(matrixText, plan.state),
+		);
+		for (const s of plan.skipped)
+			log(`idle-eviction promotion: skip ${s.serverId}: ${s.reason}`);
+		for (const p of plan.promoted)
+			log(
+				`idle-eviction promotion: promote ${p.serverId} (rss ${p.minRssMb} MB, cold start ${p.worstColdMs} ms)`,
+			);
+		if (plan.promoted.length === 0) return [];
+		fs.writeFileSync(opts.serverPath, plan.serverSource);
+		fs.writeFileSync(opts.reasonsPath, plan.reasonsText);
+		if (opts.bodyPath && plan.body) fs.writeFileSync(opts.bodyPath, plan.body);
+		return plan.promoted.map((p) => p.serverId);
+	} catch (error) {
+		log(`idle-eviction promotion: ${error?.message ?? error}`);
+		return [];
+	}
+}
+
+if (
+	process.argv[1] &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+	const repoRoot = path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"..",
+	);
+	const argv = process.argv.slice(2);
+	const flag = (name, fallback) => {
+		const at = argv.indexOf(name);
+		return at >= 0 ? argv[at + 1] : fallback;
+	};
+	const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env;
+	const promoted = promoteFromSummary({
+		summaryPath: flag("--summary", undefined),
+		bodyPath: flag("--body", undefined),
+		matrixPath: flag(
+			"--matrix",
+			path.join(repoRoot, "docs", "lsp-capability-matrix.md"),
+		),
+		serverPath: flag(
+			"--server-src",
+			path.join(repoRoot, "clients", "lsp", "server.ts"),
+		),
+		reasonsPath: flag(
+			"--reasons",
+			path.join(repoRoot, "tests", "config", "lsp-idle-eviction-reasons.json"),
+		),
+		today: flag("--today", new Date().toISOString().slice(0, 10)),
+		runUrl:
+			GITHUB_SERVER_URL && GITHUB_REPOSITORY && GITHUB_RUN_ID
+				? `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`
+				: null,
+	});
+	if (process.env.GITHUB_OUTPUT)
+		fs.appendFileSync(
+			process.env.GITHUB_OUTPUT,
+			`promoted=${promoted.length > 0}\n`,
+		);
+}

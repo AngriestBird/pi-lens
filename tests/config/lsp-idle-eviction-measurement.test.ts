@@ -298,6 +298,65 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect(notify.run).toContain(IDLE_EVICTION_DRIFT_TITLE);
 	});
 
+	// #3989 recurrences: (a) the promotion step placed after the docs diff would
+	// advance the night memory in a doc nothing compares or commits, so the count
+	// never survives a night; (b) a promotion edit added to the docs-refresh PR's
+	// add-paths would break that PR's "changes no policy" promise; (c) a PR step
+	// that is not draft, or not scoped to schedule/master, could open or arm a
+	// policy change from a branch dispatch.
+	it("advances the night memory before the docs diff, and opens a separate draft PR that commits only the declaration edit", () => {
+		const promoteAt = steps.findIndex((s) => s.id === "idle_promote");
+		expect(promoteAt).toBeGreaterThan(measureAt);
+		expect(promoteAt).toBeLessThan(diffAt);
+		const promote = steps[promoteAt];
+		const docsPr = steps.find((s) =>
+			s.uses?.startsWith("peter-evans/create-pull-request"),
+		);
+		expect(promote["continue-on-error"]).toBe(true);
+		expect(promote.if).toBe(docsPr?.if?.split(" && steps.")[0]);
+		for (const path of [
+			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
+			"$RUNNER_TEMP/lsp-idle-eviction-promote.md",
+		]) {
+			expect(promote.run, `promotion reads/writes ${path}`).toContain(path);
+		}
+		expect(steps[measureAt].run).toContain(
+			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
+		);
+
+		const prs = steps.filter((s) =>
+			s.uses?.startsWith("peter-evans/create-pull-request"),
+		);
+		const promotionPr = prs.find(
+			(s) => s.with?.branch === "bot/lsp-idle-evict-promote",
+		);
+		expect(promotionPr, "promotion PR step").toBeDefined();
+		expect(
+			steps.indexOf(promotionPr as (typeof steps)[number]),
+		).toBeGreaterThan(steps.indexOf(docsPr as (typeof steps)[number]));
+		expect(promotionPr?.with?.branch).not.toBe(docsPr?.with?.branch);
+		expect(String(promotionPr?.with?.draft)).toBe("true");
+		expect(promotionPr?.if).toContain(
+			"steps.idle_promote.outputs.promoted == 'true'",
+		);
+		expect(promotionPr?.if).toContain("github.event_name == 'schedule'");
+		expect(promotionPr?.["continue-on-error"]).toBe(true);
+		expect(
+			(promotionPr?.with?.["add-paths"] ?? "")
+				.split("\n")
+				.map((l) => l.trim())
+				.filter(Boolean)
+				.sort(),
+		).toEqual([
+			"clients/lsp/server.ts",
+			"tests/config/lsp-idle-eviction-reasons.json",
+		]);
+		expect(promotionPr?.with?.["body-path"]).toContain(
+			"lsp-idle-eviction-promote.md",
+		);
+		expect(promotionPr?.with?.token).toBe(docsPr?.with?.token);
+	});
+
 	it("keeps the measurement non-gating and bounded well under the job cap", () => {
 		const step = steps[measureAt];
 		expect(step["continue-on-error"]).toBe(true);
