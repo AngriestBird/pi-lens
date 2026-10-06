@@ -107,6 +107,8 @@ describe("ReadGuard", () => {
 	describe("content-binding supersession (#3962)", () => {
 		const before = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
 		const after = "const a = 99;\nconst b = 2;\nconst c = 3;\n";
+		const span20 = `${Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")}\n`;
+		const span20GapChanged = span20.replace("line10", "line10-changed");
 
 		function recordBridgeBinding(
 			guard: ReturnType<typeof createReadGuard>,
@@ -252,6 +254,127 @@ describe("ReadGuard", () => {
 				recordNativeRead(guard, filePath, 1, 3);
 
 				const verdict = guard.checkEdit(filePath);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("allows when a newer covering read matches both edited ranges but a gap line changed", () => {
+			// Kills mutation IDs 7 and 11, which collapse `editRanges` into the
+			// bounding box: lines 2 and 20 are the edit, both fresh in the newer
+			// read, and only the gap line 10 between them is stale. A box check
+			// would drop the one fresh answer this filter exists to keep.
+			const env = setupTestEnvironment("read-guard-supersede-gap-");
+			try {
+				const filePath = path.join(env.tmpDir, "gap.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-gap-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// The newer delivered read covers the whole span the edit brackets.
+				recordNativeRead(guard, filePath, 2, 19);
+				// Only the GAP line 10 changes; the edited lines 2 and 20 stay fresh.
+				fs.writeFileSync(filePath, span20GapChanged);
+
+				expect(
+					guard.checkEdit(
+						filePath,
+						[2, 20],
+						[
+							[2, 2],
+							[20, 20],
+						],
+					),
+				).toEqual({
+					action: "allow",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only the bound read's own hashes match (no newer read)", () => {
+			// Kills mutation ID 20 (`boundIndex + 1` -> `boundIndex - 1`), which
+			// reaches back to the bound read itself. Its whitespace-stripped line
+			// hash survives a whitespace-only reformat, so the stale binding would
+			// clear its own anchor instead of asking for the re-read it remediates.
+			const env = setupTestEnvironment("read-guard-supersede-self-");
+			try {
+				const filePath = path.join(env.tmpDir, "self.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-self-session");
+				recordBridgeBinding(guard, filePath, 3);
+				fs.writeFileSync(
+					filePath,
+					"const  a = 1;\nconst  b = 2;\nconst  c = 3;\n",
+				);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only a provisional newer read covers the line", () => {
+			// Kills mutation IDs 23 and 25 (the provisional skip). A host with no
+			// correlation id records the read probe as a source-less provisional
+			// (runtime-tool-call.ts) and the clipped delivery beside it without
+			// `supersedes` (runtime-tool-result.ts); evidence the agent never saw
+			// must not clear the anchor.
+			const env = setupTestEnvironment("read-guard-supersede-provisional-");
+			try {
+				const filePath = path.join(env.tmpDir, "provisional.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-provisional-session");
+				recordBridgeBinding(guard, filePath, 3);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, after);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						provisional: true,
+					}),
+				);
+				// The delivered record is clipped to line 1, so the provisional
+				// beside it is the only record that covers the edited line 3.
+				recordNativeRead(guard, filePath, 1, 1);
+
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when two partial newer reads cover the edit ranges separately", () => {
+			// Kills mutation ID 26 (`.every` -> `.some`): one fresh partial read
+			// per edited range does not make a single record that delivered both,
+			// so the binding is not superseded by combining them.
+			const env = setupTestEnvironment("read-guard-supersede-partials-");
+			try {
+				const filePath = path.join(env.tmpDir, "partials.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-partials-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, span20GapChanged);
+				// One fresh partial read per edited range; neither covers both.
+				recordNativeRead(guard, filePath, 2, 1);
+				recordNativeRead(guard, filePath, 20, 1);
+
+				const verdict = guard.checkEdit(
+					filePath,
+					[2, 20],
+					[
+						[2, 2],
+						[20, 20],
+					],
+				);
 				expect(verdict.action).toBe("block");
 				expect(verdict.reason).toContain("content no longer matches");
 			} finally {
