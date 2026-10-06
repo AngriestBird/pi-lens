@@ -151,7 +151,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.15",
-		"@earendil-works/pi-coding-agent": "^0.99.2",
+		"@earendil-works/pi-coding-agent": "^1.0.0",
 		"@earendil-works/pi-tui": "^0.99.2",
 		"@jridgewell/sourcemap-codec": "^1.6.0",
 		"@jridgewell/trace-mapping": "^0.3.31",
