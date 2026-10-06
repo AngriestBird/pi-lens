@@ -1140,6 +1140,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		setWidget(
 			"pi-lens",
 			(tui: LensWidgetTui, theme: LensWidgetTheme) => {
+				// #3959: read once per mount, like the other session-scoped flags.
+				const compactWidget = getLensFlag("lens-compact-widget") === true;
 				renderInvalidator = () => tui.requestRender();
 				setRenderCallback(() => {
 					scheduleStaleReconcile();
@@ -1148,7 +1150,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return {
 					render: (width: number) => {
 						scheduleStaleReconcile();
-						return renderWidget(width, theme);
+						return renderWidget(width, theme, { compact: compactWidget });
 					},
 					invalidate: () => {
 						renderInvalidator = undefined;
@@ -2000,22 +2002,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	// Project rules scan result and per-turn state live in RuntimeCoordinator.
 
-	// --- Register skills with pi ---
+	// --- Skills ---
+	// The four shipped skills are declared by the `pi.skills` manifest
+	// (`./skills`), which pi loads for every package install and filters with
+	// the settings package filters (`packages[].skills`: `[]`, `!pattern`,
+	// `-path`) — those filters narrow manifest resources only.
+	//
+	// This handler used to contribute `skillPaths: [<packageRoot>/skills]`. pi
+	// merges extension-contributed paths raw (`ResourceLoader.extendResources`
+	// -> `loadSkills`, which loads a directory wholesale), bypassing the
+	// `enabled` flag the package filter sets, so it re-added every skill the
+	// user excluded (#1416, observed on 4.3.0 against pi 0.99.2 and 1.0.0).
+	// It contributes nothing now; a direct `extensions`/`-e` load never reads
+	// the manifest and so delivers no skills, but that is not a documented
+	// install (`pi install npm:` / `git:` / `./path`, README "Install").
+	//
+	// The call is kept for #2626: `resolveSkillPaths` records ONE bounded
+	// `skills-dir-missing` degradation and one `skills_resolved` latency row
+	// when pi's own discovery rule would load nothing there, so a missing
+	// manifest skills dir stays visible. Its path result is deliberately not
+	// contributed (#1416).
 	pi.on("resources_discover", async (_event, _ctx) => {
-		// Resolve skills relative to the package root (nearest package.json), not the
-		// module's own directory — under the compiled dist/ layout (#182) the module
-		// lives in dist/ but skills/ stays at the package root, so a module-relative
-		// join lands on the non-existent dist/skills/ and skills silently fail to load
-		// (#205). resolveSkillPaths walks up to package.json (same as
-		// resolvePackagePath) and ALWAYS returns that path — pi handles an absent
-		// directory gracefully and the manifest may register the same dir — while
-		// separately recording a bounded skills-dir-missing degradation when pi's
-		// own discovery rule (root SKILL.md, nested SKILL.md, loose root .md) would
-		// load nothing there (#2626). Never turn the health check into a [] return:
-		// that inversion dropped real skills on four pi layouts in #2637 round 1.
-		return {
-			skillPaths: resolveSkillPaths(import.meta.url),
-		};
+		void resolveSkillPaths(import.meta.url);
 	});
 
 	// --- Events ---

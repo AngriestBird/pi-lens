@@ -24,6 +24,67 @@ const reasons = JSON.parse(
 	),
 ) as Record<string, string>;
 
+/**
+ * #3952 decision classes over the whole registry. A change to any row's
+ * `idleEviction` has to move an id between these lists in the same PR, so the
+ * excluded default (`unmeasured`, resident) and the held/unsupported population
+ * cannot drift silently.
+ */
+const TRANSPARENT_IDS = [
+	"typescript",
+	"python",
+	"marksman",
+	"opengrep",
+	"bash",
+	"clojure",
+	"cpp",
+	"css",
+	"deno",
+	"fish",
+	"html",
+	"php",
+	"prisma",
+	"yaml",
+] as const;
+const NEXT_PHASE_ELIGIBLE_IDS = [
+	"ast-grep",
+	"cue",
+	"docker",
+	"gleam",
+	"json",
+	"lua",
+	"python-jedi",
+	"terraform",
+	"tinymist",
+	"toml",
+	"typos",
+	"zig",
+	"zizmor",
+] as const;
+const HOLD_INDEXER_IDS = [
+	"expert",
+	"kotlin",
+	"powershell",
+	"rust",
+	"svelte",
+] as const;
+const UNPROVEN_IDS = [
+	"cmake",
+	"vue",
+	"csharp",
+	"dart",
+	"elixir",
+	"fsharp",
+	"go",
+	"haskell",
+	"java",
+	"nix",
+	"ocaml",
+	"ruby",
+	"swift",
+	"omnisharp",
+] as const;
+
 export function idleEvictionRegistryIssues(
 	servers: readonly RegistryEntry[],
 	reasonTable: Record<string, string>,
@@ -61,6 +122,29 @@ describe("LSP idle-eviction registry (#3622)", () => {
 	it("declares and explains every policy without orphan reasons", () => {
 		expect(idleEvictionRegistryIssues(LSP_SERVERS, reasons)).toEqual([]);
 		expect(LSP_SERVERS.length).toBeGreaterThan(40);
+	});
+
+	it("pins the 46-server registry by idle-eviction decision class (#3952)", () => {
+		const declared = new Map(LSP_SERVERS.map((s) => [s.id, s.idleEviction]));
+		const classified = [
+			...TRANSPARENT_IDS,
+			...NEXT_PHASE_ELIGIBLE_IDS,
+			...HOLD_INDEXER_IDS,
+			...UNPROVEN_IDS,
+		];
+		// No unclassified and no duplicate id: the classes partition the registry.
+		expect([...classified].sort()).toEqual(LSP_SERVERS.map((s) => s.id).sort());
+		expect(new Set(classified).size).toBe(classified.length);
+		for (const id of TRANSPARENT_IDS) {
+			expect(declared.get(id), `${id} is transparent`).toBe("transparent");
+		}
+		for (const id of [
+			...NEXT_PHASE_ELIGIBLE_IDS,
+			...HOLD_INDEXER_IDS,
+			...UNPROVEN_IDS,
+		]) {
+			expect(declared.get(id), `${id} stays unmeasured`).toBe("unmeasured");
+		}
 	});
 
 	it("keeps both missing-declaration and missing-reason boundaries red", () => {

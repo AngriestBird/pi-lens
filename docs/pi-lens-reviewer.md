@@ -67,10 +67,12 @@ issue's acceptance criteria, the full merge-base diff
   `origin/master` and the head.
 - Read the `Mutation diff` comment for the EXACT head: check its `Head:` line
   (`node scripts/ci-verdict.mjs <pr>` prints `MUTATION` with `STALE` or
-  `PENDING`). Every survivor on an added line is killed by a folded test or
-  shown equivalent with a reason; triage "truncated test population"
-  survivors, never auto-accept them. Spot-check at most one of the fixer's
-  hand mutations. When the comment is absent or stale, read the
+  `PENDING`). Apply AGENTS.md's two-layer acceptance: required new-guard proof
+  and demonstrated correctness gaps gate the review; exploratory score,
+  incidental survivors, and unevaluated population do not. Attack behavioural
+  survivor dispositions with bounded real-caller probes and name unresolved
+  cases with reason and owner. A truncated population is not equivalence and
+  never auto-clears a guard. Spot-check at most one of the fixer's hand mutations. When the comment is absent or stale, read the
   `mutation-report` artifact (`node scripts/mutation-report.mjs --report
   <mutation.json>`). Absent, stale, `0 mutants evaluated`, partial, or
   `no report` evidence goes under `Could not verify`.
