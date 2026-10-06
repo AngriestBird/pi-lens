@@ -2871,6 +2871,15 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 		expect(findDeny(command)).toBe("stash");
 	});
 
+	it.each(["!C", "C!"])(
+		"does not treat the invalid coproc label %j as a named brace group",
+		(label) => {
+			// Bash reports these as invalid identifiers and does not run the body;
+			// both regex anchors must therefore remain exact.
+			expect(findDeny(`coproc ${label} { git stash; }`)).toBeNull();
+		},
+	);
+
 	it.each([
 		["git stash --include-untracked", "stash"],
 		["git commit -n -m x", "hookBypass"],
