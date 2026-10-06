@@ -84,18 +84,23 @@ export function coveredChangedLines(entry, ranges) {
  * @param {Record<string, object>} coverage parsed coverage-final.json
  * @param {Map<string, Array<[number, number]>>} rangesByFile repo-relative path -> changed ranges
  * @param {string} [root]
+ * @param {Map<string, number>} [sourceCounts] request-local per-source evidence
  */
 export function coveredChangedLinesInReport(
 	coverage,
 	rangesByFile,
 	root = process.cwd(),
+	sourceCounts,
 ) {
 	let total = 0;
 	for (const [file, entry] of Object.entries(coverage)) {
 		const relative = path.relative(root, file).replaceAll("\\", "/");
 		const ranges = rangesByFile.get(relative);
-		if (ranges) total += coveredChangedLines(entry, ranges);
-		else if (rangesByFile.has(relative.replace(/\.js$/, ".ts"))) {
+		if (ranges) {
+			const count = coveredChangedLines(entry, ranges);
+			total += count;
+			sourceCounts?.set(relative, (sourceCounts.get(relative) ?? 0) + count);
+		} else if (rangesByFile.has(relative.replace(/\.js$/, ".ts"))) {
 			// The compiled sibling of a changed `.ts` reported under its own `.js`
 			// name: no source map was applied, so its line numbers are not the
 			// diff's. Reading that as "0 changed lines executed" would drop every
@@ -169,7 +174,7 @@ export function buildCoverageProbeArgs(
  */
 export async function probeTestCoverage(
 	test,
-	{ run, readCoverage, rangesByFile, root },
+	{ run, readCoverage, rangesByFile, root, sourceCounts = undefined },
 ) {
 	const result = await run(test);
 	if (result.timedOut) return { unknown: "probe timed out" };
@@ -185,7 +190,14 @@ export async function probeTestCoverage(
 	}
 	if (!coverage) return { lines: 0 };
 	try {
-		return { lines: coveredChangedLinesInReport(coverage, rangesByFile, root) };
+		return {
+			lines: coveredChangedLinesInReport(
+				coverage,
+				rangesByFile,
+				root,
+				sourceCounts,
+			),
+		};
 	} catch (error) {
 		return { unknown: error.message };
 	}
@@ -286,6 +298,8 @@ export function probeConcurrency(cpus) {
  *   priorities?: Map<string, number>,
  *   lines: Map<string, number | null> | null,
  *   maxTests: number,
+ *   activeSources?: string[],
+ *   sourceCoverage?: Map<string, Map<string, number> | null>,
  * }} args
  * @returns {{
  *   mode: "coverage" | "import-graph",
@@ -303,6 +317,8 @@ export function selectMutationTests({
 	priorities = new Map(),
 	lines: probed,
 	maxTests,
+	activeSources,
+	sourceCoverage,
 }) {
 	if (!Number.isInteger(maxTests) || maxTests < 0) {
 		throw new RangeError("maxTests must be a non-negative integer");
@@ -314,7 +330,18 @@ export function selectMutationTests({
 			: null;
 	const pool = [...new Set([...related, ...ownTests])];
 	const ownSet = new Set(ownTests);
-	const known = (test) => lines?.get(test) ?? null;
+	const known = (test) => {
+		const counts = sourceCoverage?.get(test);
+		// Missing or failed per-source evidence retains the legacy population;
+		// an indirect caller is dropped only when its measured active coverage is zero.
+		if (activeSources && counts) {
+			return activeSources.reduce(
+				(sum, file) => sum + (counts.get(file) ?? 0),
+				0,
+			);
+		}
+		return lines?.get(test) ?? null;
+	};
 	const rank = (a, b) =>
 		(known(b) ?? -1) - (known(a) ?? -1) ||
 		(priorities.get(a) ?? 2) - (priorities.get(b) ?? 2);
