@@ -37,6 +37,7 @@ import {
 import type { IdleEvictionRow } from "../../scripts/lib/lsp-idle-eviction-doc.mjs";
 import {
 	IDLE_EVICTION_KEY,
+	type IdleEvictionNight,
 	parseRefreshState,
 	refreshCapabilityMatrix,
 	setIdleEvictionState,
@@ -90,6 +91,16 @@ describe("consecutive-night hysteresis (#3989)", () => {
 		]);
 	});
 
+	it("counts a night at exactly the RSS floor and at exactly the cold-start cap", () => {
+		const state = nights([D1], () => [
+			row("rust", {
+				rssBytes: IDLE_EVICTION_MIN_RSS_BYTES,
+				coldStartMs: COLD_START_MAX_MS,
+			}),
+		]);
+		expect(state.rust.nights).toHaveLength(1);
+	});
+
 	it("counts two runs on one UTC day once (a manual dispatch is not a second night)", () => {
 		const state = nights([D1, D1], () => [row("rust")]);
 		expect(state.rust.nights).toHaveLength(1);
@@ -105,6 +116,8 @@ describe("consecutive-night hysteresis (#3989)", () => {
 		["vetoed", { result: "vetoed", reason: "respawn-failed" }],
 		["respawn failed", { respawn: "failed" }],
 		["coverage narrowed", { coverage: "narrowed" }],
+		["idle RSS below the floor", { rssBytes: IDLE_EVICTION_MIN_RSS_BYTES - 1 }],
+		["idle RSS not measured", { rssBytes: null }],
 		["cold start n/a", { coldStartMs: undefined }],
 		["cold start over the cap", { coldStartMs: COLD_START_MAX_MS + 1 }],
 		["no row at all", null],
@@ -137,7 +150,10 @@ describe("consecutive-night hysteresis (#3989)", () => {
 });
 
 describe("RSS floor, cold-start cap and hold list (#3989)", () => {
-	const pair = (a: object, b: object): NightState => ({
+	const pair = (
+		a: Partial<IdleEvictionNight>,
+		b: Partial<IdleEvictionNight>,
+	): NightState => ({
 		rust: {
 			nights: [
 				{ day: D1, rssMb: 120, coldMs: 1500, ...a },
@@ -448,7 +464,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 	});
 
 	function workspace() {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "idle-promote-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-idle-promote-"));
 		dirs.push(dir);
 		const file = (name: string, text: string) => {
 			fs.writeFileSync(path.join(dir, name), text);

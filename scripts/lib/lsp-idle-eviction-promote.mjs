@@ -57,6 +57,11 @@ function qualifies(row) {
 		row.coverage === "preserved" &&
 		// A night with cold start `n/a` does not count, and one over the cap breaks
 		// the run of nights: the pair must both be acceptable.
+		// Idle RSS below the floor (or unmeasured) does not count either: a server
+		// that is small tonight keeps no memory, so the entry cannot freeze on two
+		// small nights and then ignore a later large one.
+		typeof row.rssBytes === "number" &&
+		row.rssBytes >= IDLE_EVICTION_MIN_RSS_BYTES &&
 		typeof row.coldStartMs === "number" &&
 		Number.isFinite(row.coldStartMs) &&
 		row.coldStartMs <= COLD_START_MAX_MS
@@ -67,7 +72,7 @@ function qualifies(row) {
  * Advance the per-server night memory by one run. A server keeps (or gains) a
  * night only when this run's row qualifies; every other outcome (vetoed,
  * inconclusive, unavailable, budget-exhausted, no row, over the cold-start cap,
- * no longer `unmeasured`) drops its entry, so the nights held are consecutive.
+ * under the RSS floor, no longer `unmeasured`) drops its entry, so the nights held are consecutive.
  * Two runs on one UTC day count once (a manual dispatch must not satisfy the
  * rule), and an entry that already holds `PROMOTE_NIGHTS` nights is left
  * untouched, so a settled server writes a byte-identical block and the refresh
@@ -149,8 +154,6 @@ export function selectPromotions(state) {
 	return { promote, skipped };
 }
 
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 /**
  * Flip ONE server's `idleEviction: "unmeasured"` line to `"transparent"` in
  * `clients/lsp/server.ts`, fail closed. The line is located structurally: the
@@ -164,8 +167,8 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  */
 export function promoteDeclaration(source, serverId) {
 	const lines = source.split("\n");
-	const idLine = new RegExp(`^\\tid: "${escapeRe(serverId)}",$`);
-	const at = lines.flatMap((l, i) => (idLine.test(l) ? [i] : []));
+	const idLine = `\tid: "${serverId}",`;
+	const at = lines.flatMap((l, i) => (l === idLine ? [i] : []));
 	if (at.length === 0)
 		return { ok: false, reason: `no \`id: "${serverId}",\` definition found` };
 	if (at.length > 1)
