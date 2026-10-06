@@ -645,7 +645,7 @@ export function scannableRegions(commandText) {
 	return [retained, ...substitutions];
 }
 
-// `splitWords` returns quote-stripped strings. Keep per-word residue so
+// `splitWords` returns quote-stripped strings. Keep each word's parts so
 // coproc label validation can distinguish actual expansions from literal
 // characters that happen to look like expansion syntax after quote removal.
 const COPROC_WORD_INFO = Symbol("coprocWordInfo");
@@ -855,14 +855,12 @@ export function splitWords(segment) {
 	/** @type {Array<string | { kind: "dynamic"|"numeric"|"nullableNumeric" }>} */
 	let identifierParts = [];
 	let buf = "";
-	let identifierResidue = "";
 	let hasRuntimeExpansion = false;
 	/** @type {"single"|"double"|null} */
 	let quote = null;
 	let started = false;
 	let i = 0;
 	const addLiteral = (text) => {
-		identifierResidue += text;
 		const lastPart = identifierParts.at(-1);
 		if (typeof lastPart === "string") {
 			identifierParts[identifierParts.length - 1] = lastPart + text;
@@ -877,14 +875,9 @@ export function splitWords(segment) {
 	const flush = () => {
 		if (started) {
 			words.push(buf);
-			coprocWordInfo.push({
-				hasRuntimeExpansion,
-				identifierResidue,
-				identifierParts,
-			});
+			coprocWordInfo.push({ hasRuntimeExpansion, identifierParts });
 		}
 		buf = "";
-		identifierResidue = "";
 		identifierParts = [];
 		hasRuntimeExpansion = false;
 		started = false;
@@ -2091,20 +2084,13 @@ function stripCommandGroupAndRunnerPrefixes(words) {
 			// group: `coproc C { git stash; }`. Strip that name only when
 			// the following brace makes the form unambiguous; the ordinary
 			// `coproc git stash` keeps `git` as the command word.
-			if (words[i + 1] === "{") {
-				i++;
-				continue;
-			}
-			const coprocLabel = words[i + 1] ?? "";
+			const coprocLabel = words[i + 1];
 			const labelInfo = words[COPROC_WORD_INFO]?.[i + 1];
-			const labelResidue = labelInfo?.identifierResidue ?? coprocLabel;
 			if (
 				words[i + 2] === "{" &&
 				(/^[A-Za-z_][A-Za-z0-9_]*$/.test(coprocLabel) ||
 					(labelInfo?.hasRuntimeExpansion === true &&
-						canFormCoprocIdentifier(
-							labelInfo.identifierParts ?? [labelResidue],
-						)))
+						canFormCoprocIdentifier(labelInfo.identifierParts)))
 			) {
 				// Runtime expansions may form a valid name; literal text around
 				// them must remain identifier characters.
