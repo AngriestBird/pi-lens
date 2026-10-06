@@ -541,14 +541,22 @@ const probePool = [...new Set([...selection.tests, ...ownTests])];
 console.log(
 	`mutation diff: measuring which of ${probePool.length} candidate test file(s) execute a changed line (${PROBE_CONCURRENCY} at a time)`,
 );
+const sourceCoverage = new Map();
 const probeLines = await probeAllTests(
 	probePool,
-	(test) =>
-		probeTestCoverage(test, {
+	async (test) => {
+		const sourceCounts = new Map(
+			[...probeRanges.keys()].map((file) => [file, 0]),
+		);
+		const result = await probeTestCoverage(test, {
 			run: runProbe,
 			readCoverage: readCoverageOf,
 			rangesByFile: probeRanges,
-		}),
+			sourceCounts,
+		});
+		sourceCoverage.set(test, "unknown" in result ? null : sourceCounts);
+		return result;
+	},
 	{
 		concurrency: PROBE_CONCURRENCY,
 		signal: probeSignal,
@@ -561,7 +569,8 @@ const choice = selectMutationTests({
 	lines: probeLines,
 	maxTests: DEFAULT_MAX_TESTS,
 });
-const tests = choice.kept;
+let tests = choice.kept;
+const measuredTests = tests;
 testSelectionMeta = {
 	mode: choice.mode,
 	pool: choice.pool,
@@ -730,39 +739,14 @@ if (!cost) {
 // handed to Stryker? Only when the fingerprint of everything a reused result
 // depends on matches the one stored beside it (see fingerprintPaths for why
 // Stryker's own differ cannot be trusted with the command runner).
-const fingerprint = buildFingerprint({
-	forkPoint: forkPointOf(
-		(args) => execFileSync("git", args, { encoding: "utf8" }),
-		baseRef,
-		headShaArg ?? "HEAD",
-	),
-	// The major only: a runner image's patch release of node is not an input.
-	nodeVersion: process.versions.node.split(".")[0],
-	read: (file) => readFileSync(file, "utf8"),
-	changedFiles: allChangedPaths,
-	mutatedFiles: files,
-	keptTests: tests,
-});
+const forkPoint = forkPointOf(
+	(args) => execFileSync("git", args, { encoding: "utf8" }),
+	baseRef,
+	headShaArg ?? "HEAD",
+);
 const restoredFingerprint = existsSync(INCREMENTAL_FINGERPRINT_PATH)
 	? parseFingerprint(readFileSync(INCREMENTAL_FINGERPRINT_PATH, "utf8"))
 	: null;
-const incrementalDecision = {
-	...decideIncrementalReuse({
-		hasIncrementalFile: existsSync(INCREMENTAL_PATH),
-		previous: restoredFingerprint?.digest ?? null,
-		current: fingerprint.digest,
-	}),
-	changed: [],
-};
-if (incrementalDecision.state === "cold-inputs-changed") {
-	incrementalDecision.changed = changedFingerprintInputs(
-		restoredFingerprint.inputs,
-		fingerprint.inputs,
-	);
-}
-console.log(
-	`mutation diff: incremental cache ${incrementalDecision.state}${incrementalDecision.changed.length > 0 ? ` (${incrementalDecision.changed.join(", ")})` : ""}`,
-);
 
 // round 2 R2-1: a deterministic sample can land entirely on ranges Stryker's
 // mutator set has none for -- a real #3579 replay at a 15-minute budget
@@ -779,6 +763,67 @@ let triedPatterns = [];
 let attempt = 0;
 
 for (;;) {
+	const activeSources = files.filter((file) => {
+		const target = isCompiledMutationSource(file) ? compiledJsPath(file) : file;
+		return patterns.some(
+			(pattern) => pattern === target || pattern.startsWith(`${target}:`),
+		);
+	});
+	const scopedChoice = selectMutationTests({
+		related: measuredTests,
+		ownTests,
+		priorities: selection.priorities,
+		lines: probeLines,
+		maxTests: DEFAULT_MAX_TESTS,
+		activeSources,
+		sourceCoverage,
+	});
+	const attemptChoice = scopedChoice.kept.length > 0 ? scopedChoice : choice;
+	if (scopedChoice.kept.length === 0) {
+		console.log(
+			"mutation diff: source scoping found no kept tests; retaining the measured nonempty population",
+		);
+	}
+	tests = attemptChoice.kept;
+	testSelectionMeta = {
+		mode: attemptChoice.mode,
+		pool: choice.pool,
+		covering: attemptChoice.covering,
+		kept: tests.length,
+		dropped: new Set([...choice.dropped, ...attemptChoice.dropped]).size,
+		own: attemptChoice.own.length,
+		unknown: attemptChoice.unknown.length,
+	};
+	for (const note of selectionNotes(attemptChoice, DEFAULT_MAX_TESTS))
+		console.log(`mutation diff: ${note}`);
+	console.log(
+		`mutation diff: selected-source batch ${activeSources.join(", ")}; ${tests.length} of ${measuredTests.length} measured tests retained`,
+	);
+	const fingerprint = buildFingerprint({
+		forkPoint,
+		nodeVersion: process.versions.node.split(".")[0],
+		read: (file) => readFileSync(file, "utf8"),
+		changedFiles: allChangedPaths,
+		mutatedFiles: activeSources,
+		keptTests: tests,
+	});
+	const incrementalDecision = {
+		...decideIncrementalReuse({
+			hasIncrementalFile: existsSync(INCREMENTAL_PATH),
+			previous: restoredFingerprint?.digest ?? null,
+			current: fingerprint.digest,
+		}),
+		changed: [],
+	};
+	if (incrementalDecision.state === "cold-inputs-changed") {
+		incrementalDecision.changed = changedFingerprintInputs(
+			restoredFingerprint.inputs,
+			fingerprint.inputs,
+		);
+	}
+	console.log(
+		`mutation diff: incremental cache ${incrementalDecision.state}${incrementalDecision.changed.length > 0 ? ` (${incrementalDecision.changed.join(", ")})` : ""}`,
+	);
 	for (const pattern of patterns) triedPatternSet.add(pattern);
 	triedPatterns = [...triedPatternSet];
 	// The incremental file is rewritten below regardless (force, round 2 T4),
