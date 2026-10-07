@@ -836,6 +836,10 @@ Never hand-edit generated `.js` or `dist/`. Open and close PR worktrees with
 `node scripts/pr-worktree.mjs open <PR|branch> [--merge|--head]` and
 `close <path>`; close unlinks a symlinked `node_modules` before removal
 (#2704) and refuses the main checkout, a dirty tree, or a real `node_modules`.
+Open refuses (exit 2, before any fetch or mkdir) a destination at or inside a
+registered checkout, symlinks resolved: a probe HOME pinned under the source
+makes the default root a child of it (#3981). Set `PI_LENS_WORKTREES_ROOT` to a
+directory outside every checkout.
 
 <important if="relocating project data, machine state, or telemetry">
 

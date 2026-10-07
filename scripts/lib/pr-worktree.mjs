@@ -22,7 +22,7 @@
  * out as-is and left alone.
  */
 
-import { basename, join, relative as pathRelative, sep } from "node:path";
+import path, { basename, join, relative as pathRelative, sep } from "node:path";
 
 /** Namespace of the local branches this tool creates and may delete. */
 export const WORKTREE_BRANCH_PREFIX = "pr-worktree/";
@@ -130,6 +130,40 @@ export function deriveOpenPlan({
 		commitish: "FETCH_HEAD",
 		fetchRefspec: `pull/${target}/${resolvedMode === "merge" ? "merge" : "head"}`,
 	};
+}
+
+/**
+ * Refuse a destination that IS a registered checkout or sits inside one (#3981).
+ * The default root derives from HOME, and a HOME pinned under the source
+ * checkout puts a second registered tree inside it, which test and governance
+ * discovery then walk as part of the source. Both sides are expected canonical
+ * (the CLI realpaths them); `pathApi` is injectable for win32 rows. A path on
+ * another win32 drive makes `relative` return an absolute path, which is
+ * outside, not inside.
+ *
+ * @param {{ destination: string, checkouts: string[], pathApi?: typeof path }} input
+ * @returns {string|null} the refusal message, or null when the destination is clear
+ */
+export function nestedDestinationError({
+	destination,
+	checkouts,
+	pathApi = path,
+}) {
+	for (const checkout of checkouts) {
+		const relative = pathApi.relative(checkout, destination);
+		const outside =
+			relative === ".." ||
+			relative.startsWith(`..${pathApi.sep}`) ||
+			pathApi.isAbsolute(relative);
+		if (!outside) {
+			return (
+				`refusing ${destination}: it is at or inside the registered checkout ${checkout}, ` +
+				"where test and governance discovery would walk it as part of that checkout; " +
+				"set PI_LENS_WORKTREES_ROOT to a directory outside every checkout"
+			);
+		}
+	}
+	return null;
 }
 
 /**

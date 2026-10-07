@@ -12,7 +12,11 @@
  * the default name needs it), fetches `pull/<n>/head`
  * (or `pull/<n>/merge` under `--merge`) from `origin`, creates a worktree
  * under `~/Desktop/pi-lens-worktrees/<name>`, and symlinks the main
- * checkout's `node_modules`. It prints the absolute path.
+ * checkout's `node_modules`. It prints the absolute path. Before the fetch it
+ * refuses (exit 2, nothing created) a destination at or inside any registered
+ * checkout, symlinks resolved: a HOME pinned under the source checkout would
+ * otherwise nest a second tree in it (#3981). `PI_LENS_WORKTREES_ROOT` is the
+ * way out.
  *
  * `close` first checks every rail (registered worktree, not the main
  * checkout, inside the worktrees root, clean tree), all before touching
@@ -45,6 +49,7 @@ import {
 	classifyNodeModules,
 	deriveClosePlan,
 	deriveOpenPlan,
+	nestedDestinationError,
 	worktreeBranchName,
 } from "./lib/pr-worktree.mjs";
 import { parseWorktreeList } from "./lib/worktree-hygiene.mjs";
@@ -99,6 +104,29 @@ function canonicalPath(p) {
 		return fs.realpathSync(p);
 	} catch {
 		return path.resolve(p);
+	}
+}
+
+/**
+ * Realpath of the nearest existing ancestor with the missing tail re-joined:
+ * `open` judges a destination it has not created yet, which `canonicalPath`
+ * would only `path.resolve`, leaving a symlinked HOME or root unresolved.
+ *
+ * @param {string} p absolute path
+ * @returns {string}
+ */
+function canonicalDestination(p) {
+	const missing = [];
+	let existing = p;
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(existing), ...missing);
+		} catch {
+			const parent = path.dirname(existing);
+			if (parent === existing) return p;
+			missing.unshift(path.basename(existing));
+			existing = parent;
+		}
 	}
 }
 
@@ -193,6 +221,25 @@ function executeOpen(options, io) {
 		stderr(plan.error);
 		return 2;
 	}
+	// Judged before the fetch, the mkdir and the add so a refusal leaves nothing
+	// behind. Relative to `cwd`, the directory `git worktree add` resolves from.
+	let rows;
+	try {
+		rows = parseWorktreeList(
+			gitExec(["worktree", "list", "--porcelain"], { cwd }),
+		);
+	} catch (error) {
+		stderr(`failed to list worktrees: ${error.message}`);
+		return 1;
+	}
+	const refusal = nestedDestinationError({
+		destination: canonicalDestination(path.resolve(cwd, plan.path)),
+		checkouts: rows.map((row) => canonicalPath(row.path)),
+	});
+	if (refusal) {
+		stderr(refusal);
+		return 2;
+	}
 	try {
 		if (plan.fetchRefspec) {
 			gitExec(["fetch", "origin", plan.fetchRefspec], { cwd });
@@ -212,9 +259,7 @@ function executeOpen(options, io) {
 		stderr(`failed to create worktree ${plan.path}: ${error.message}`);
 		return 1;
 	}
-	const mainRoot = parseWorktreeList(
-		gitExec(["worktree", "list", "--porcelain"], { cwd }),
-	)[0]?.path;
+	const mainRoot = rows[0]?.path;
 	if (mainRoot) {
 		const source = path.join(mainRoot, "node_modules");
 		const link = path.join(plan.path, "node_modules");
