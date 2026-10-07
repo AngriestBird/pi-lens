@@ -13,9 +13,15 @@ import yaml from "../../clients/deps/js-yaml.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
-type Step = { name?: string; run?: string };
+type Step = {
+	name?: string;
+	run?: string;
+	uses?: string;
+	with?: Record<string, string>;
+};
 type Job = {
 	if?: unknown;
+	env?: Record<string, string>;
 	"continue-on-error"?: unknown;
 	steps?: Step[];
 };
@@ -58,6 +64,30 @@ function pinnedInstalls(workflow: Workflow, job: string): string[] {
 }
 
 describe("strict lifecycle-script policy in CI installs (#1185)", () => {
+	// Recurrence: #4064/#4028. A warm npm/npx cache let a nested exec skip the
+	// install whose lifecycle script the strict policy was meant to inspect.
+	it("ci.yml has a PR-reachable cold-cache strict-install fast-fail", () => {
+		const workflow = load("ci.yml");
+		const job = workflow.jobs?.["strict-install-cold-cache"];
+		expect(job, "strict-install-cold-cache").toBeDefined();
+		expect(job?.if).toBeUndefined();
+		expect(job?.["continue-on-error"]).toBeUndefined();
+		expect(job?.env?.npm_config_cache).toContain("runner.temp");
+		const checkout = steps(workflow, "strict-install-cold-cache").find((s) =>
+			s.uses?.startsWith("actions/checkout@"),
+		);
+		expect(checkout?.with?.ref).toContain("github.event.pull_request.head.sha");
+		const install = steps(workflow, "strict-install-cold-cache").find((s) =>
+			s.name?.includes("cold cache"),
+		);
+		expect(code(install?.run)).toMatch(
+			/npx -y "npm@\$\{npm_pin\}" install --strict-allow-scripts\b/,
+		);
+		for (const s of steps(workflow, "strict-install-cold-cache")) {
+			expect(s.with?.cache, s.name).toBeUndefined();
+		}
+	});
+
 	// Recurrence: #1176. The tree installed with the runner's bundled npm, which
 	// does not enforce allowScripts, so an undecided script was never refused.
 	it("ci.yml installs the lint job's dependency tree through the pinned npm, strictly", () => {

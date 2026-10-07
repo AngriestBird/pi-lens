@@ -65,6 +65,46 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: node scripts/ci-changed-files.mjs --event "$EVENT_NAME" --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
 
+  # #4064: the ordinary strict installs can inherit a warm runner/npm cache,
+  # which lets a nested `npm exec --package` skip its install and hide an
+  # uncovered lifecycle script (#4028). Keep this early PR/push signal
+  # independent of the required install lanes and make the cache boundary
+  # explicit: the job-local directory starts empty and setup-node has no npm
+  # cache input. The exact PR head is checked out because `github.ref` is the
+  # mutable pull-request merge ref and can disappear after the run starts.
+  strict-install-cold-cache:
+    name: Strict install (cold npm cache) (fast-fail)
+    runs-on: ubuntu-latest
+    # refs #3123: this is a single dependency install plus prepare; keep a
+    # bounded runner even if the registry or a lifecycle child hangs.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      npm_config_cache: ${{ runner.temp }}/pi-lens-empty-npm-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+
+      - name: Create empty job-local npm cache
+        run: |
+          set -eu
+          test ! -e "$npm_config_cache"
+          mkdir -p "$npm_config_cache"
+          test -z "$(find "$npm_config_cache" -mindepth 1 -print -quit)"
+
+      - name: Install dependencies with the pinned npm (cold cache)
+        run: |
+          set -euxo pipefail
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts
+
   dependency-boundaries:
     name: Dependency boundaries
     runs-on: ubuntu-latest
