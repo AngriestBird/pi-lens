@@ -18,7 +18,7 @@
 // contains the base: the diff starts at the base itself, because that
 // checkout is depth 1 and has no merge-base (#3795 verify r3).
 //
-// Usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]]
+// Usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref> | --merge-ref]]
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,10 +36,10 @@ const runGit = (args, options) => gitExecFileSync(args, options);
 
 /**
  * The `.changelog/*.md` files the range adds between its start and the
- * working tree, or `null` when no base was supplied or Git could not answer (a
- * missing ref, a shallow checkout without `mergeRef`). The start is `base`
- * when `mergeRef` says HEAD already contains it, else `git merge-base HEAD
- * base`, so a local branch behind master does not count master's fragments.
+ * working tree, or `null` when no base was supplied or Git could not answer. A
+ * supplied PR `head` uses `git merge-base base head` as its start, so a local
+ * branch behind master does not count master's fragments; the legacy
+ * `mergeRef` mode starts at `base`.
  * The working tree is the end point, not HEAD, so a fragment a worker has
  * written but not committed is still counted before push; untracked files are
  * added for the same reason (`git diff` lists only tracked paths, so the two
@@ -47,25 +47,38 @@ const runGit = (args, options) => gitExecFileSync(args, options);
  */
 export function addedChangelogFragments({
 	base,
+	head,
 	cwd,
 	git = runGit,
 	mergeRef = false,
 } = {}) {
 	if (!base) return null;
 	try {
-		const from = mergeRef
-			? base
-			: String(
-					git(["merge-base", "HEAD", base], {
+		const from = head
+			? String(
+					git(["merge-base", base, head], {
 						cwd,
 						encoding: "utf8",
 						stdio: ["ignore", "pipe", "pipe"],
 					}),
-				).trim();
-		const diff = git(
-			["diff", "--diff-filter=A", "--name-only", from, "--", ".changelog/"],
-			{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-		);
+				).trim()
+			: mergeRef
+				? base
+				: String(
+						git(["merge-base", "HEAD", base], {
+							cwd,
+							encoding: "utf8",
+							stdio: ["ignore", "pipe", "pipe"],
+						}),
+					).trim();
+		const diffArgs = ["diff", "--diff-filter=A", "--name-only", from];
+		if (head) diffArgs.push(head);
+		diffArgs.push("--", ".changelog/");
+		const diff = git(diffArgs, {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		const untracked = git(
 			["ls-files", "--others", "--exclude-standard", "--", ".changelog/"],
 			{ cwd, encoding: "utf8" },
@@ -94,8 +107,9 @@ export function checkChangelogFragments({
 	cwd,
 	git = runGit,
 	mergeRef = false,
+	head,
 } = {}) {
-	const fragments = addedChangelogFragments({ base, cwd, git, mergeRef });
+	const fragments = addedChangelogFragments({ base, cwd, git, mergeRef, head });
 	if (base && fragments === null) {
 		return {
 			valid: false,
@@ -135,18 +149,21 @@ if (
 	const cwdIndex = process.argv.indexOf("--cwd");
 	const mergeRef = process.argv.includes("--merge-ref");
 	const base = baseIndex === -1 ? undefined : process.argv[baseIndex + 1];
+	const headIndex = process.argv.indexOf("--head");
+	const head = headIndex === -1 ? undefined : process.argv[headIndex + 1];
 	const cwd = cwdIndex === -1 ? SCRIPT_ROOT : process.argv[cwdIndex + 1];
 	const invalidArgument =
 		(baseIndex !== -1 && (!base || base.startsWith("--"))) ||
+		(headIndex !== -1 && (!head || head.startsWith("--"))) ||
 		(cwdIndex !== -1 && (!cwd || cwd.startsWith("--"))) ||
 		(mergeRef && baseIndex === -1);
 	const result = invalidArgument
 		? {
 				valid: false,
 				message:
-					"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]] [--cwd <dir>]",
+					"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref> | --merge-ref]] [--cwd <dir>]",
 			}
-		: checkChangelogFragments({ base, cwd, mergeRef });
+		: checkChangelogFragments({ base, cwd, mergeRef, head });
 	if (result.valid) {
 		console.log(result.message);
 	} else {

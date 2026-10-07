@@ -55,7 +55,9 @@ describe("one changelog fragment per PR (#3795)", () => {
 			path.join(process.cwd(), ".tmp-changelog-frag-"),
 		);
 		dirs.push(dir);
-		gitExecFileSync(["init", "-q"], { cwd: dir });
+		gitExecFileSync(["init", "-q", "-b", "sub-muxta5iv-30/fixture-master"], {
+			cwd: dir,
+		});
 		fs.mkdirSync(path.join(dir, ".changelog"), { recursive: true });
 		fs.writeFileSync(
 			path.join(dir, ".changelog", "old.md"),
@@ -123,12 +125,12 @@ describe("one changelog fragment per PR (#3795)", () => {
 		);
 		gitExecFileSync(["add", "."], { cwd: dir });
 		commit(dir, "rollup");
-		gitExecFileSync(["branch", "rollup"], { cwd: dir });
+		gitExecFileSync(["branch", "sub-muxta5iv-30/rollup"], { cwd: dir });
 		gitExecFileSync(["checkout", "-q", branchPoint], { cwd: dir });
 		addFragment(dir, "pr-a.md", "the branch change");
 		commit(dir, "head");
 		const result = checkChangelogFragments({
-			base: "rollup",
+			base: "sub-muxta5iv-30/rollup",
 			cwd: dir,
 			git: gitFor(dir),
 		});
@@ -184,7 +186,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 	const runCli = (args: string[], cwd: string) =>
 		spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8" });
 	const usage =
-		"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--merge-ref]] [--cwd <dir>]";
+		"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref> | --merge-ref]] [--cwd <dir>]";
 
 	it("spawns the CLI in a fixture repo and fails closed on its real output", () => {
 		const dir = makeRepo();
@@ -227,7 +229,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 
 		for (const args of [
 			["--base", "--cwd", dir],
-			["--merge-ref", "--cwd", dir],
+			["--head", "--cwd", dir],
 		]) {
 			const misuse = runCli(args, dir);
 			expect(misuse.status).toBe(1);
@@ -296,21 +298,24 @@ describe("one changelog fragment per PR (#3795)", () => {
 			fs.mkdirSync(path.dirname(path.join(origin, name)), { recursive: true });
 			fs.writeFileSync(path.join(origin, name), text);
 		};
-		run(["init", "-q", "-b", "master"]);
+		run(["init", "-q", "-b", "sub-muxta5iv-30/fixture-master"]);
 		write(".changelog/old.md", fragment("released before the branch"));
 		run(["add", "."]);
 		commit(origin, "base");
-		run(["checkout", "-q", "-b", "pr"]);
+		const branchPoint = run(["rev-parse", "HEAD"]);
+		run(["checkout", "-q", "-b", "sub-muxta5iv-30/fixture-pr"]);
 		for (const [name, text] of Object.entries(branchFiles)) write(name, text);
 		run(["add", "."]);
 		commit(origin, "pr");
-		run(["checkout", "-q", "master"]);
+		const headSha = run(["rev-parse", "HEAD"]);
+		run(["checkout", "-q", "sub-muxta5iv-30/fixture-master"]);
 		fs.rmSync(path.join(origin, ".changelog", "old.md"));
-		write(".changelog/master.md", fragment("merged on master"));
+		write(".changelog/master-a.md", fragment("merged on master one"));
+		write(".changelog/master-b.md", fragment("merged on master two"));
 		run(["add", "-A"]);
 		commit(origin, "rollup");
 		const baseSha = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "-b", "merge-ref"]);
+		run(["checkout", "-q", "-b", "sub-muxta5iv-30/fixture-merge-ref"]);
 		run([
 			"-c",
 			"user.email=pi-lens-test@example.com",
@@ -321,7 +326,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"--no-ff",
 			"-m",
 			"merge",
-			"pr",
+			"sub-muxta5iv-30/fixture-pr",
 		]);
 		const clone = fs.mkdtempSync(
 			path.join(process.cwd(), ".tmp-changelog-clone-"),
@@ -333,13 +338,16 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"-q",
 			...depthArgs,
 			"--branch",
-			"merge-ref",
+			"sub-muxta5iv-30/fixture-merge-ref",
 			`file://${origin}`,
 			clone,
 		]);
 		if (depth === "depth-1")
-			run(["fetch", "-q", "--no-tags", "--depth=1", "origin", baseSha], clone);
-		return { clone, baseSha };
+			run(
+				["fetch", "-q", "--no-tags", "origin", baseSha, headSha, branchPoint],
+				clone,
+			);
+		return { clone, baseSha, headSha, branchPoint };
 	};
 
 	it.each([
@@ -347,14 +355,14 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"no fragment",
 			{ "notes.md": "docs\n" },
 			0,
-			"changelog fragments OK (1 entry in .changelog/)\n",
+			"changelog fragments OK (2 entries in .changelog/)\n",
 			"",
 		],
 		[
 			"one fragment",
 			{ ".changelog/pr-a.md": fragment("change") },
 			0,
-			"changelog fragments OK (2 entries in .changelog/)\n",
+			"changelog fragments OK (3 entries in .changelog/)\n",
 			"",
 		],
 		[
@@ -374,14 +382,17 @@ describe("one changelog fragment per PR (#3795)", () => {
 				".changelog/pr-a.md": fragment("change"),
 			},
 			0,
-			"changelog fragments OK (2 entries in .changelog/)\n",
+			"changelog fragments OK (3 entries in .changelog/)\n",
 			"",
 		],
 	] as const)(
 		"counts only the PR's additions in a merge-ref checkout: %s",
 		(_state, branchFiles, status, stdout, stderr) => {
 			for (const depth of ["depth-1", "full"] as const) {
-				const { clone, baseSha } = mergeRefCheckout(branchFiles, depth);
+				const { clone, baseSha, headSha, branchPoint } = mergeRefCheckout(
+					branchFiles,
+					depth,
+				);
 				const result = runCli(
 					["--base", baseSha, "--merge-ref", "--cwd", clone],
 					clone,
@@ -391,6 +402,16 @@ describe("one changelog fragment per PR (#3795)", () => {
 					status: result.status,
 					stdout: result.stdout,
 					stderr: result.stderr,
+				}).toEqual({ depth, status, stdout, stderr });
+				const headResult = runCli(
+					["--base", branchPoint, "--head", headSha, "--cwd", clone],
+					clone,
+				);
+				expect({
+					depth,
+					status: headResult.status,
+					stdout: headResult.stdout,
+					stderr: headResult.stderr,
 				}).toEqual({ depth, status, stdout, stderr });
 			}
 		},
