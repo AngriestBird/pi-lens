@@ -849,6 +849,9 @@ npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
+node scripts/guard-bash-probe.mjs <matrix.jsonl> [--base <ref>] [--lane linked|real|both]
+                                        real-hook differential corpus probe (#4071); use a
+                                        scratch main for linked node_modules fixtures
 ```
 
 CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,

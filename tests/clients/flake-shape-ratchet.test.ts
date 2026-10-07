@@ -451,6 +451,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the hook's real stdin/exit-code/stderr contract is unobservable from an in-process call to the exported classify functions",
 	},
+	"real-process-spawn:scripts/guard-bash-probe.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real hook stdin/exit-code contract and head-to-head differential are unobservable through an in-process classifier call",
+	},
 	// #2698: gitignore/tracked-vs-untracked resolution (git init/add/commit/
 	// ls-files against a throwaway fixture repo) is the exact mechanism
 	// scripts/lib/knip-sibling-purge.mjs depends on and this file tests.
