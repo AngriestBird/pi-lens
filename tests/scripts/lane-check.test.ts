@@ -607,6 +607,46 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 		TIMEOUT,
 	);
 
+	// Recurrence (#4074 verify r3 F3/F4): `--body=/nonexistent` was not a
+	// recognised spelling, so the lane ran on and silently skipped the lint.
+	it.each([
+		[["--body", "--other"], "lane-check: --body needs a file path"],
+		[["--body="], "lane-check: --body needs a file path"],
+		[["--body=/nonexistent/body.md"], "lane-check: --body file does not exist"],
+		[
+			["--body", "/nonexistent/body.md"],
+			"lane-check: --body file does not exist",
+		],
+		[["--bodyx", "body.md"], "lane-check: unknown argument --bodyx"],
+	])(
+		"a bad body argument %j is a usage error: exit 2, and no step runs",
+		(args, message) => {
+			const lane = makeLane({ base: BASE_FILES });
+			const run = runLane(lane, {}, args);
+			expect(run.status).toBe(2);
+			expect(run.out).toContain(message);
+			expect(run.record).toBeUndefined();
+			expect(fs.existsSync(path.join(lane.home, "builds.log"))).toBe(false);
+		},
+		TIMEOUT,
+	);
+
+	it.each(["--body", "--body="])(
+		"%s <path> is accepted in both spellings and the body lint runs",
+		(flag) => {
+			const lane = makeLane({ base: BASE_FILES });
+			const body = path.join(lane.tmp, "body.md");
+			fs.writeFileSync(body, "## Why\n\nx\n");
+			const args = flag === "--body" ? [flag, body] : [`${flag}${body}`];
+			const run = runLane(lane, {}, args);
+			// The fixture body is not a valid PR body: the lint ran and failed.
+			expect(run.record.checks.body).not.toBeNull();
+			expect(run.record.checks.body).not.toBe(0);
+			expect(run.status).toBe(3);
+		},
+		TIMEOUT,
+	);
+
 	it(
 		"a tracked root handoff file is red-caused, exit 1",
 		() => {

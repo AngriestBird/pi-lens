@@ -171,7 +171,8 @@ sets the exit code and only `clean` exits 0:
   governance suites ran). That is not evidence of unrelated: report it and
   stop, or fix the cause. The summary prints `selection: selected S, matched
   M, capped C`.
-- `2`: usage error (`--body` without a path); nothing ran.
+- `2`: usage error (`--body <path>` or `--body=<path>` missing, unknown, or the
+  file absent); nothing ran.
 
 The change set is the committed diff plus uncommitted tracked edits and
 untracked files, so a lane without Git authority is checked too. In a lane that

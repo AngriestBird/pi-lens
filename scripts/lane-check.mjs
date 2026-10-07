@@ -127,13 +127,31 @@ const git = (root, args) =>
 
 export function main(argv = process.argv.slice(2)) {
 	const root = process.cwd();
-	const bodyIndex = argv.indexOf("--body");
-	const body = bodyIndex === -1 ? null : argv[bodyIndex + 1];
-	// A flag that was given and has no value must not read as "no body": the
-	// lint would be skipped and the lane could still come out clean.
-	if (bodyIndex !== -1 && (!body || body.startsWith("--"))) {
-		console.error("lane-check: --body needs a file path");
-		return USAGE_EXIT;
+	// Both `--body <path>` and `--body=<path>`. A `--body*` argument with no
+	// usable path, an unknown spelling or a missing file must not read as "no
+	// body": the lint would be skipped and the lane could still come out clean.
+	let body = null;
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (!arg.startsWith("--body")) continue;
+		let value;
+		if (arg === "--body") {
+			value = argv[index + 1];
+			index += 1;
+		} else if (arg.startsWith("--body=")) value = arg.slice("--body=".length);
+		else {
+			console.error(`lane-check: unknown argument ${arg}`);
+			return USAGE_EXIT;
+		}
+		if (!value || value.startsWith("--")) {
+			console.error("lane-check: --body needs a file path");
+			return USAGE_EXIT;
+		}
+		if (!existsSync(path.resolve(root, value))) {
+			console.error(`lane-check: --body file does not exist: ${value}`);
+			return USAGE_EXIT;
+		}
+		body = value;
 	}
 	const findings = [];
 	const unproven = (reason) => findings.push({ kind: "unproven", reason });
