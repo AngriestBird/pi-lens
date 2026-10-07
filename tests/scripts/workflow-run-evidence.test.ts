@@ -236,6 +236,12 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		expect(
 			run("Workflow run unaffected: other.yml \u2014 comment-only edit."),
 		).toHaveLength(1);
+		// A longer name sharing the prefix must not declare this file unaffected.
+		expect(
+			run(
+				"Workflow run unaffected: stryker-nightly.yml-old \u2014 comment-only edit.",
+			),
+		).toHaveLength(1);
 	});
 
 	it("asks for a workflow_dispatch trigger when the file has none", () => {
