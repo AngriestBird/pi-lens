@@ -87,6 +87,14 @@ function nightlyFindings(text: string): string[] {
 	];
 	const run = (step: Step) => step.run ?? "";
 	const window = (prepare.steps ?? []).find((step) => step.id === "window");
+	const windowIndex = (prepare.steps ?? []).indexOf(window ?? ({} as Step));
+	if (
+		windowIndex < 0 ||
+		!(prepare.steps ?? [])
+			.slice(0, windowIndex)
+			.some((step) => run(step).includes("npm ci --ignore-scripts"))
+	)
+		findings.push("window step runs before dependencies are installed");
 	if (!/-- clients tools mcp index\.ts\b/.test(run(window ?? {})))
 		findings.push("window step does not scope the diff to the runtime paths");
 	if (

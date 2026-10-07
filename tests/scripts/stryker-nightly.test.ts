@@ -189,6 +189,56 @@ describe("nightly shard partition and publication", () => {
 		});
 	});
 
+	// Recurrence (#4038 F1): publish must not treat the artifacts that happened
+	// to arrive as the matrix. A missing shard must hold the queue and marker.
+	it("`combine` fails closed when an expected shard artifact is missing", () => {
+		const combineDir = mkdtempSync(join(tmpdir(), "pi-lens-stryker-combine-"));
+		try {
+			const inputs = join(combineDir, "inputs.json");
+			const out = join(combineDir, "report.json");
+			const outcomes = join(combineDir, "outcomes.json");
+			writeFileSync(
+				inputs,
+				JSON.stringify([{ shard: 0, outcome: "complete", report: out }]),
+			);
+			const result = main([
+				"combine",
+				"--inputs",
+				inputs,
+				"--expected-shards",
+				"0,1",
+				"--out",
+				out,
+				"--outcomes",
+				outcomes,
+			]);
+			const combineStatus = (result as { status: "ok" | "failed" }).status;
+			expect(result).toMatchObject({ status: "failed", report: undefined });
+			expect(JSON.parse(readFileSync(outcomes, "utf8"))).toMatchObject({
+				status: "failed",
+				report: false,
+			});
+			const oldEntries = [{ file: "clients/missing.ts", base: SHA_A }];
+			expect(
+				nextQueue({
+					oldEntries,
+					base: SHA_B,
+					status: combineStatus,
+					exists: () => true,
+				}).entries,
+			).toEqual(oldEntries);
+			const body = buildNightlyBody({
+				base: SHA_A,
+				head: SHA_B,
+				source: "issue",
+				status: combineStatus,
+			});
+			expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
+		} finally {
+			rmSync(combineDir, { recursive: true, force: true });
+		}
+	});
+
 	it.each(SHARD_STATE_SPACE)(
 		"records the state space: %s + %s",
 		(left, right, queue, report) => {

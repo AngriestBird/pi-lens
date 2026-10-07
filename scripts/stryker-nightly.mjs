@@ -132,21 +132,53 @@ export function combineShardReports(reports) {
 	};
 }
 
-/** @param {Array<"complete" | "budget-cut" | "failed">} outcomes */
-export function combinedShardStatus(outcomes) {
+/**
+ * @param {Array<"complete" | "budget-cut" | "failed">} outcomes
+ * @param {number[]} [shardIndices]
+ * @param {number[]} [expectedShardIndices]
+ */
+export function combinedShardStatus(
+	outcomes,
+	shardIndices,
+	expectedShardIndices,
+) {
+	if (
+		expectedShardIndices &&
+		(!shardIndices ||
+			shardIndices.length !== expectedShardIndices.length ||
+			new Set(shardIndices).size !== shardIndices.length ||
+			!expectedShardIndices.every((index) => shardIndices.includes(index)))
+	) {
+		return "failed";
+	}
 	if (outcomes.some((outcome) => outcome === "failed")) return "failed";
 	return "ok";
 }
 
 function runCombine(argv) {
 	const inputs = JSON.parse(readFileSync(valueAfter(argv, "--inputs"), "utf8"));
+	const expectedShardIndices = valueAfter(argv, "--expected-shards")
+		.split(",")
+		.filter(Boolean)
+		.map(Number);
+	if (
+		expectedShardIndices.length === 0 ||
+		expectedShardIndices.some((index) => !Number.isInteger(index) || index < 0)
+	) {
+		throw new Error("--expected-shards must be a comma-separated list");
+	}
+	const shardIndices = inputs.map((entry) => entry.shard);
 	const outcomes = inputs.map((entry) => entry.outcome);
 	const reports = inputs.map((entry) =>
 		entry.report && existsSync(entry.report)
 			? JSON.parse(readFileSync(entry.report, "utf8"))
 			: undefined,
 	);
-	const status = combinedShardStatus(outcomes);
+	const status = combinedShardStatus(
+		outcomes,
+		shardIndices,
+		expectedShardIndices,
+	);
 	const report = status === "ok" ? combineShardReports(reports) : undefined;
 	writeFileSync(valueAfter(argv, "--out"), JSON.stringify(report ?? null));
 	writeFileSync(

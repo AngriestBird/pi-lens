@@ -27,6 +27,8 @@ export declare function combineShardReports(
 ): unknown | undefined;
 export declare function combinedShardStatus(
 	outcomes: Array<"complete" | "budget-cut" | "failed">,
+	shardIndices?: number[],
+	expectedShardIndices?: number[],
 ): "ok" | "failed";
 export type QueueEntry = { file: string; base: string | null };
 export type QueueOracle = {

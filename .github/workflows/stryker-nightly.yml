@@ -57,6 +57,7 @@ jobs:
       # (scripts/stryker-nightly.mjs). Nothing under the runtime paths changed in
       # the window AND an empty queue means there is nothing to mutate: no run,
       # no issue edit, and the marker stays where it is.
+      - run: npm ci --ignore-scripts
       - name: Resolve the window since the last report
         id: window
         run: |
@@ -188,8 +189,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          node -e 'const fs=require("fs"); const path=require("path"); const root=process.env.RUNNER_TEMP+"/mutation-shards"; const rows=fs.readdirSync(root).sort().map(d=>({outcome:fs.readFileSync(path.join(root,d,"shard-outcome"),"utf8").trim(),report:path.join(root,d,"reports/mutation/mutation.json")})); fs.writeFileSync(process.env.RUNNER_TEMP+"/shard-input.json",JSON.stringify(rows));'
-          node scripts/stryker-nightly.mjs combine --inputs "$RUNNER_TEMP/shard-input.json" --out "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json"
+          node -e 'const fs=require("fs"); const path=require("path"); const root=process.env.RUNNER_TEMP+"/mutation-shards"; const rows=fs.readdirSync(root).sort().map(d=>({shard:Number(d.match(/mutation-shard-(\d+)$/)?.[1]),outcome:fs.readFileSync(path.join(root,d,"shard-outcome"),"utf8").trim(),report:path.join(root,d,"reports/mutation/mutation.json")})); fs.writeFileSync(process.env.RUNNER_TEMP+"/shard-input.json",JSON.stringify(rows));'
+          node scripts/stryker-nightly.mjs combine --inputs "$RUNNER_TEMP/shard-input.json" --expected-shards 0,1 --out "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json"
           STATUS=$(node -e 'const x=require(process.env.RUNNER_TEMP+"/combined-outcomes.json"); process.stdout.write(x.status)')
           node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report "$RUNNER_TEMP/combined-report.json" --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
       - name: Update the single tracking issue

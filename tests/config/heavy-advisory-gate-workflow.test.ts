@@ -656,7 +656,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B2/C13/D23
+		// 57 checkout sites across the tree; 62 non-gate job rows (A22/B2/C13/D25
 		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
 		// from C to D, #4005 removed the pull_request `mutation` (B) and
 		// `mutation comment` (C) jobs and added the schedule-only nightly report
@@ -668,16 +668,16 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			55,
+			57,
 		);
-		expect(CENSUS_SITES.length).toBe(55);
+		expect(CENSUS_SITES.length).toBe(57);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(60);
+		).toBe(62);
 		expect(stageJobs("A")).toBe(22);
 		expect(stageJobs("B")).toBe(2);
 		expect(stageJobs("C")).toBe(13);
-		expect(stageJobs("D")).toBe(23);
+		expect(stageJobs("D")).toBe(25);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
