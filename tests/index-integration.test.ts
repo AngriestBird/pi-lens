@@ -1977,6 +1977,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2079,6 +2082,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2187,6 +2193,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2308,6 +2317,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2412,6 +2424,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2511,6 +2526,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2586,6 +2604,9 @@ describe("index.ts integration", () => {
 						return [[path.join(tmpDir, "src", "boom.ts"), 3]];
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					complexityBaselines = new Map();
 					projectRulesScan = { hasCustomRules: false, rules: [] };
