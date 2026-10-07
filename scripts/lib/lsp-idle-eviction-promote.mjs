@@ -165,26 +165,40 @@ export function selectPromotions(state, hold) {
 
 /**
  * Read one `const NAME = [ "id", ... ] as const;` class array out of
- * tests/config/lsp-idle-eviction-registry.test.ts (#3952). Fail closed: any
- * line inside the array that is not exactly `\t"<id>",` returns null, so a
- * reshaped file turns into "unknown", never a partial list.
+ * tests/config/lsp-idle-eviction-registry.test.ts (#3952), independent of
+ * layout: oxfmt collapses a short array onto one line, so the reader takes
+ * everything between `[` and `] as const;`. Fail closed: the declaration must be
+ * unique and the body must be nothing but comma-separated string literals (a
+ * comment, spread, identifier or missing comma returns null), so a reshaped
+ * file turns into "unknown", never a partial list.
  *
- * @returns {{ start: number, end: number, ids: string[] } | null}  `start` is the
- *   `const` line, `end` the closing `] as const;` line
+ * @returns {{ start: number, end: number, ids: string[] } | null}  `start` and
+ *   `end` are the offsets of the whole `const ... as const;` statement
  */
-function classArray(lines, name) {
-	const start = lines.indexOf(`const ${name} = [`);
-	if (start < 0 || lines.indexOf(`const ${name} = [`, start + 1) >= 0)
+function classArray(source, name) {
+	const open = `const ${name} = [`;
+	const start = source.indexOf(open);
+	if (start < 0 || source.indexOf(open, start + 1) >= 0) return null;
+	const close = "] as const;";
+	const bodyEnd = source.indexOf(close, start);
+	if (bodyEnd < 0) return null;
+	const body = source.slice(start + open.length, bodyEnd);
+	if (!/^\s*(?:"[^"\\\n]+"\s*,\s*)*(?:"[^"\\\n]+"\s*)?$/.test(body))
 		return null;
-	const end = lines.indexOf("] as const;", start);
-	if (end < 0) return null;
-	const ids = [];
-	for (const line of lines.slice(start + 1, end)) {
-		const m = /^\t"([^"]+)",$/.exec(line);
-		if (!m) return null;
-		ids.push(m[1]);
-	}
-	return { start, end, ids };
+	const ids = [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+	return { start, end: bodyEnd + close.length, ids };
+}
+
+/**
+ * Render a class array in the layout oxfmt (printWidth 80, tabs) accepts: one
+ * line while the statement fits in 80 columns, else one id per line with a
+ * trailing comma.
+ */
+function renderClassArray(name, ids) {
+	const quoted = ids.map((id) => `"${id}"`);
+	const oneLine = `const ${name} = [${quoted.join(", ")}] as const;`;
+	if (oneLine.length <= 80) return oneLine;
+	return `const ${name} = [\n${quoted.map((q) => `\t${q},\n`).join("")}] as const;`;
 }
 
 /**
@@ -195,7 +209,7 @@ function classArray(lines, name) {
  * @returns {Map<string, string> | null}
  */
 export function holdList(registrySource) {
-	const indexers = classArray(registrySource.split("\n"), "HOLD_INDEXER_IDS");
+	const indexers = classArray(registrySource, "HOLD_INDEXER_IDS");
 	if (!indexers || indexers.ids.length === 0) return null;
 	const hold = new Map(HELD_UNTIL_3966);
 	for (const id of indexers.ids) hold.set(id, INDEXER_HOLD);
@@ -207,14 +221,14 @@ export function holdList(registrySource) {
  * registry test (#3952 pins every id to one class and requires the
  * non-transparent classes to stay `unmeasured`, so a declaration flip without
  * this move reds CI). Fail closed unless the id is in NEXT_PHASE_ELIGIBLE_IDS
- * exactly once and in no other class.
+ * exactly once and in no other class. Only those two statements are rewritten,
+ * in oxfmt's layout.
  *
  * @returns {{ ok: true, text: string } | { ok: false, reason: string }}
  */
 export function moveClassId(registrySource, serverId) {
-	const lines = registrySource.split("\n");
-	const from = classArray(lines, "NEXT_PHASE_ELIGIBLE_IDS");
-	const to = classArray(lines, "TRANSPARENT_IDS");
+	const from = classArray(registrySource, "NEXT_PHASE_ELIGIBLE_IDS");
+	const to = classArray(registrySource, "TRANSPARENT_IDS");
 	if (!from || !to)
 		return { ok: false, reason: "registry test class arrays not found" };
 	if (!from.ids.includes(serverId))
@@ -225,34 +239,46 @@ export function moveClassId(registrySource, serverId) {
 	if (from.ids.filter((id) => id === serverId).length !== 1)
 		return { ok: false, reason: "listed twice in NEXT_PHASE_ELIGIBLE_IDS" };
 	for (const name of ["TRANSPARENT_IDS", "HOLD_INDEXER_IDS", "UNPROVEN_IDS"]) {
-		const other = classArray(lines, name);
+		const other = classArray(registrySource, name);
 		if (!other)
 			return { ok: false, reason: `registry test ${name} array not found` };
 		if (other.ids.includes(serverId))
 			return { ok: false, reason: `also listed in ${name}` };
 	}
-	const line = `\t"${serverId}",`;
-	const removeAt = lines.findIndex(
-		(l, i) => i > from.start && i < from.end && l === line,
-	);
-	const out = lines.filter((_, i) => i !== removeAt);
-	out.splice(to.end > removeAt ? to.end - 1 : to.end, 0, line);
-	return { ok: true, text: out.join("\n") };
+	const edits = [
+		{
+			...from,
+			text: renderClassArray(
+				"NEXT_PHASE_ELIGIBLE_IDS",
+				from.ids.filter((id) => id !== serverId),
+			),
+		},
+		{
+			...to,
+			text: renderClassArray("TRANSPARENT_IDS", [...to.ids, serverId]),
+		},
+	].sort((x, y) => y.start - x.start);
+	let out = registrySource;
+	for (const e of edits)
+		out = out.slice(0, e.start) + e.text + out.slice(e.end);
+	return { ok: true, text: out };
 }
 
 /**
- * The server sets of closed-unmerged promotion PRs, read from their bodies'
- * `<!-- idle-evict-set: a,b -->` marker. Each is the sorted comma list.
+ * The servers of every closed-unmerged promotion PR, read from their bodies'
+ * `<!-- idle-evict-set: a,b -->` markers: closing a PR rejects each server in
+ * its marker, whatever set tonight's plan has. To allow one again, delete the
+ * marker from the closed PR's body.
  *
  * @returns {Set<string>}
  */
-export function parseRejectedSets(text) {
-	const sets = new Set();
+export function parseRejectedServers(text) {
+	const servers = new Set();
 	for (const m of String(text ?? "").matchAll(
 		/<!-- idle-evict-set: ([^>\s]+) -->/g,
 	))
-		sets.add(m[1]);
-	return sets;
+		for (const id of m[1].split(",")) if (id) servers.add(id);
+	return servers;
 }
 
 /**
@@ -356,11 +382,30 @@ export function planPromotions({
 		);
 	}
 	const { promote, skipped } = selectPromotions(state, hold);
+	if (rejected === null && promote.length > 0) {
+		// The closed-PR list could not be read: reopening a closed PR is the failure
+		// to avoid, so promote nothing tonight.
+		return none([
+			...skipped,
+			...promote.map((p) => ({
+				serverId: p.serverId,
+				reason: "closed-PR list unreadable; promoting nothing tonight",
+			})),
+		]);
+	}
 	let source = serverSource;
 	let registry = registrySource;
 	const promoted = [];
 	const reasons = {};
 	for (const p of promote) {
+		if (rejected?.has(p.serverId)) {
+			skipped.push({
+				serverId: p.serverId,
+				reason:
+					"a promotion PR containing this server was closed unmerged (delete its idle-evict-set marker to allow it again)",
+			});
+			continue;
+		}
 		const decl = promoteDeclaration(source, p.serverId);
 		if (!decl.ok) {
 			skipped.push({ serverId: p.serverId, reason: decl.reason });
@@ -378,30 +423,6 @@ export function planPromotions({
 			`Nightly measurement (#3989): eligible, respawn ok and findings preserved on ${PROMOTE_NIGHTS} consecutive runs, idle RSS ${p.minRssMb} MB, cold start ${p.worstColdMs} ms.`;
 	}
 	if (promoted.length === 0) return none(skipped);
-	const set = promoted
-		.map((p) => p.serverId)
-		.sort()
-		.join(",");
-	if (rejected === null) {
-		// The rejected-set list could not be read: reopening a closed PR is the
-		// failure to avoid, so promote nothing tonight.
-		return none([
-			...skipped,
-			...promoted.map((p) => ({
-				serverId: p.serverId,
-				reason: "closed-PR list unreadable; promoting nothing tonight",
-			})),
-		]);
-	}
-	if (rejected?.has(set)) {
-		return none([
-			...skipped,
-			...promoted.map((p) => ({
-				serverId: p.serverId,
-				reason: `the promotion PR for this exact set (${set}) was closed unmerged`,
-			})),
-		]);
-	}
 	const added = addReasons(reasonsText, reasons);
 	if (!added.ok) {
 		// Without the reason rows the registry test would red: promote nothing.

@@ -17,7 +17,9 @@ export function moveClassId(
 	serverId: string,
 ): { ok: true; text: string } | { ok: false; reason: string };
 
-export function parseRejectedSets(text: string | null | undefined): Set<string>;
+export function parseRejectedServers(
+	text: string | null | undefined,
+): Set<string>;
 
 export function advanceNights(
 	prior: NightState | undefined,

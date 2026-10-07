@@ -322,8 +322,11 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			expect(promote.run, `promotion reads/writes ${path}`).toContain(path);
 		}
 		// F4: the closed-PR listing is read-only and scoped to the promotion branch.
+		// r3: `gh pr list --head` cannot take `<owner>:<branch>`, so a fork PR with the
+		// same branch name would match; `--app github-actions` keeps the lookup to
+		// the PRs the workflow's own token opened.
 		expect(promote.run).toContain(
-			"gh pr list --head bot/lsp-idle-evict-promote --state closed",
+			"gh pr list --app github-actions --head bot/lsp-idle-evict-promote --state closed",
 		);
 		expect(promote.run).toContain(
 			'--rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"',

@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-	parseRejectedSets,
+	parseRejectedServers,
 	planPromotions,
 } from "./lib/lsp-idle-eviction-promote.mjs";
 import {
@@ -35,14 +35,14 @@ import {
 } from "./lib/md-matrix.mjs";
 
 /**
- * The server sets of closed-unmerged promotion PRs, from the file the workflow
+ * The servers of closed-unmerged promotion PRs, from the file the workflow
  * wrote (`gh pr list --state closed`). No path given: nothing was rejected. A
  * path that cannot be read is `null` ("unknown"), and the plan promotes nothing.
  */
 function readRejected(file) {
 	if (!file) return new Set();
 	try {
-		return parseRejectedSets(fs.readFileSync(file, "utf8"));
+		return parseRejectedServers(fs.readFileSync(file, "utf8"));
 	} catch {
 		return null;
 	}

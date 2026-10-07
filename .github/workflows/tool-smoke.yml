@@ -366,12 +366,14 @@ jobs:
         timeout-minutes: 2
         run: |
           set -uo pipefail
-          # F4 (#3989): the server sets of promotion PRs closed unmerged, read from
-          # the `idle-evict-set` marker in their bodies, so a PR a maintainer closed
-          # is not re-created nightly. The job's GITHUB_TOKEN already holds
+          # F4 (#3989): the servers of promotion PRs closed unmerged, read from the
+          # `idle-evict-set` marker in their bodies, so a PR a maintainer closed is
+          # not re-created nightly. `--app github-actions` keeps the lookup to PRs
+          # this workflow's own token opened (`--head` cannot take owner:branch, so
+          # a fork PR with the same branch name would otherwise match). The job's GITHUB_TOKEN already holds
           # `pull-requests: write`; this only reads. A failed listing leaves no
           # file, which the script reads as "unknown" and promotes nothing.
-          gh pr list --head bot/lsp-idle-evict-promote --state closed --limit 30 --json body --jq '.[].body' > "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt" || rm -f "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
+          gh pr list --app github-actions --head bot/lsp-idle-evict-promote --state closed --limit 30 --json body --jq '.[].body' > "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt" || rm -f "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
           node scripts/promote-lsp-idle-eviction.mjs --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json" --body "$RUNNER_TEMP/lsp-idle-eviction-promote.md" --rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
 
       - name: Check LSP docs refresh diff

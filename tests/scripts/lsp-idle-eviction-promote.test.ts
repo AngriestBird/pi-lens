@@ -31,7 +31,7 @@ import {
 	advanceNights,
 	holdList,
 	moveClassId,
-	parseRejectedSets,
+	parseRejectedServers,
 	planPromotions,
 	promoteDeclaration,
 	selectPromotions,
@@ -93,6 +93,7 @@ const FIXTURE_REGISTRY_TS = `const TRANSPARENT_IDS = [
 const NEXT_PHASE_ELIGIBLE_IDS = [
 \t"java",
 \t"json",
+\t"toml",
 \t"zizmor",
 ] as const;
 const HOLD_INDEXER_IDS = [
@@ -315,6 +316,11 @@ export const DupB: LSPServerInfo = {
 export const Reordered: LSPServerInfo = {
 \tid: "reordered",
 \tname: "Reordered",
+\tidleEviction: "unmeasured",
+};
+
+export const Toml: LSPServerInfo = {
+\tid: "toml",
 \tidleEviction: "unmeasured",
 };
 
@@ -692,7 +698,7 @@ describe("the registry test's class pin (#3989 F1)", () => {
 	const ids = (src: string, name: string) =>
 		[
 			...(
-				new RegExp(`const ${name} = \\[\\n([^\\]]*)\\] as const;`).exec(
+				new RegExp(`const ${name} = \\[([^\\]]*)\\] as const;`).exec(
 					src,
 				)?.[1] ?? ""
 			).matchAll(/"([^"]+)"/g),
@@ -703,7 +709,11 @@ describe("the registry test's class pin (#3989 F1)", () => {
 		expect(out.ok).toBe(true);
 		const text = (out as { text: string }).text;
 		expect(ids(text, "TRANSPARENT_IDS")).toEqual(["marksman", "json"]);
-		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual(["java", "zizmor"]);
+		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual([
+			"java",
+			"toml",
+			"zizmor",
+		]);
 		expect(ids(text, "HOLD_INDEXER_IDS")).toEqual(["indexer"]);
 		expect(ids(text, "UNPROVEN_IDS")).toEqual(["dup", "reordered"]);
 	});
@@ -715,7 +725,11 @@ describe("the registry test's class pin (#3989 F1)", () => {
 		expect(out.ok).toBe(true);
 		const text = (out as { text: string }).text;
 		expect(ids(text, "TRANSPARENT_IDS")).toEqual(["marksman", "zizmor"]);
-		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual(["java", "json"]);
+		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual([
+			"java",
+			"json",
+			"toml",
+		]);
 	});
 
 	it.each([
@@ -845,8 +859,8 @@ describe("a promotion PR closed unmerged is not re-created (#3989 F4)", () => {
 	// Recurrence: create-pull-request force-rebuilds its branch nightly, so a PR a
 	// maintainer closed would reopen the next night for the same servers.
 	const base = {
-		prior: nights([D1], () => [row("json"), row("zizmor")]),
-		rows: [row("json"), row("zizmor")],
+		prior: nights([D1], () => [row("json"), row("toml"), row("zizmor")]),
+		rows: [row("json"), row("toml"), row("zizmor")],
 		today: D2,
 		serverSource: FIXTURE_SERVER_TS,
 		reasonsText: `{\n\t"typescript": "x"\n}\n`,
@@ -855,28 +869,153 @@ describe("a promotion PR closed unmerged is not re-created (#3989 F4)", () => {
 
 	it("writes the server set into the body as a marker the next night can read", () => {
 		const plan = planPromotions(base);
-		expect(plan.body).toContain("<!-- idle-evict-set: json,zizmor -->");
+		expect(plan.body).toContain("<!-- idle-evict-set: json,toml,zizmor -->");
 		expect(
-			parseRejectedSets(`noise\n${plan.body}\n<!-- idle-evict-set: a,b -->`),
-		).toEqual(new Set(["json,zizmor", "a,b"]));
+			parseRejectedServers(`noise\n${plan.body}\n<!-- idle-evict-set: a,b -->`),
+		).toEqual(new Set(["json", "toml", "zizmor", "a", "b"]));
 	});
 
-	it("skips exactly the rejected set, and allows a different one", () => {
-		const same = planPromotions({
+	// #3989 r3 (orchestrator decision): closing a promotion PR rejects each server
+	// in its marker. Recurrence: matching only the exact set let `json,zizmor`
+	// come back the night `toml` qualified, as `json,toml,zizmor`.
+	it("skips every server of a closed set even when tonight's set differs", () => {
+		const plan = planPromotions({
 			...base,
-			rejected: new Set(["json,zizmor"]),
+			rejected: new Set(["json", "zizmor"]),
 		});
-		expect(same.promoted).toEqual([]);
-		expect(same.serverSource).toBe(FIXTURE_SERVER_TS);
-		expect(same.skipped[0].reason).toContain("closed unmerged");
-		expect(
-			planPromotions({ ...base, rejected: new Set(["json"]) }).promoted,
-		).toHaveLength(2);
+		expect(plan.promoted.map((p) => p.serverId)).toEqual(["toml"]);
+		expect(plan.skipped).toEqual(
+			expect.arrayContaining([
+				{
+					serverId: "json",
+					reason: expect.stringContaining("closed unmerged"),
+				},
+				{
+					serverId: "zizmor",
+					reason: expect.stringContaining("closed unmerged"),
+				},
+			]),
+		);
+		expect(plan.serverSource).toContain(
+			'\tid: "toml",\n\tidleEviction: "transparent",',
+		);
+		expect(plan.serverSource).toContain(
+			'\tid: "json",\n\tidleEviction: "unmeasured",',
+		);
+		expect(plan.body).toContain("<!-- idle-evict-set: toml -->");
+	});
+
+	it("promotes nothing when every qualifying server was rejected", () => {
+		const plan = planPromotions({
+			...base,
+			rejected: new Set(["json", "toml", "zizmor"]),
+		});
+		expect(plan.promoted).toEqual([]);
+		expect(plan.serverSource).toBe(FIXTURE_SERVER_TS);
+		expect(plan.body).toBeNull();
 	});
 
 	it("promotes nothing when the closed-PR list could not be read", () => {
 		const plan = planPromotions({ ...base, rejected: null });
 		expect(plan.promoted).toEqual([]);
 		expect(plan.skipped[0].reason).toContain("closed-PR list unreadable");
+	});
+});
+
+describe("class arrays parse and write independent of layout (#3989 r3)", () => {
+	// Recurrence: oxfmt collapses a short array onto one line, and the line-based
+	// reader returned null for it, so a formatted registry test would silently
+	// stop every promotion (or worse, a hold list read as absent).
+	const arr = (name: string, ids: string[], oneLine: boolean) =>
+		oneLine
+			? `const ${name} = [${ids.map((i) => `"${i}"`).join(", ")}] as const;\n`
+			: `const ${name} = [\n${ids.map((i) => `\t"${i}",\n`).join("")}] as const;\n`;
+
+	it("reads the hold list from a one-line, multi-line and reformatted real array alike", () => {
+		const one = holdList(arr("HOLD_INDEXER_IDS", ["a", "b"], true));
+		const multi = holdList(arr("HOLD_INDEXER_IDS", ["a", "b"], false));
+		expect([...(one as Map<string, string>).keys()].sort()).toEqual([
+			"a",
+			"b",
+			"docker",
+			"python-jedi",
+		]);
+		expect([...(multi as Map<string, string>).keys()]).toEqual([
+			...(one as Map<string, string>).keys(),
+		]);
+		const real = REAL_REGISTRY_TS.replace(
+			/const HOLD_INDEXER_IDS = \[[^\]]*\] as const;/,
+			(m) =>
+				`const HOLD_INDEXER_IDS = [${[...m.matchAll(/"([^"]+)"/g)].map((x) => `"${x[1]}"`).join(", ")}] as const;`,
+		);
+		expect(real).not.toBe(REAL_REGISTRY_TS);
+		expect([...(holdList(real) as Map<string, string>).keys()].sort()).toEqual(
+			[...(holdList(REAL_REGISTRY_TS) as Map<string, string>).keys()].sort(),
+		);
+	});
+
+	it.each([
+		[
+			"a trailing comment",
+			'const HOLD_INDEXER_IDS = [\n\t"a", // why\n] as const;\n',
+		],
+		["a missing comma", 'const HOLD_INDEXER_IDS = ["a" "b"] as const;\n'],
+		["a non-string element", 'const HOLD_INDEXER_IDS = ["a", b] as const;\n'],
+		["a spread", "const HOLD_INDEXER_IDS = [...X] as const;\n"],
+		[
+			"a duplicated declaration",
+			`${arr("HOLD_INDEXER_IDS", ["a"], true)}${arr("HOLD_INDEXER_IDS", ["b"], true)}`,
+		],
+		["an unterminated array", 'const HOLD_INDEXER_IDS = ["a",\n'],
+	])("stays fail-closed on %s", (_n, src) => {
+		expect(holdList(src)).toBeNull();
+	});
+
+	it("moves an id between arrays in any input layout and writes oxfmt's layout", () => {
+		for (const oneLine of [true, false]) {
+			const src = [
+				arr("TRANSPARENT_IDS", ["marksman"], oneLine),
+				arr("NEXT_PHASE_ELIGIBLE_IDS", ["json", "zizmor"], oneLine),
+				arr("HOLD_INDEXER_IDS", ["indexer"], oneLine),
+				arr("UNPROVEN_IDS", ["dup"], oneLine),
+			].join("");
+			const out = moveClassId(src, "json");
+			expect(out).toEqual({
+				ok: true,
+				text: [
+					'const TRANSPARENT_IDS = ["marksman", "json"] as const;\n',
+					'const NEXT_PHASE_ELIGIBLE_IDS = ["zizmor"] as const;\n',
+					arr("HOLD_INDEXER_IDS", ["indexer"], oneLine),
+					arr("UNPROVEN_IDS", ["dup"], oneLine),
+				].join(""),
+			});
+		}
+	});
+
+	// oxfmt (printWidth 80, tabs) keeps a top-level array on one line exactly while
+	// the line fits in 80 columns; checked against the real binary in the PR
+	// probe, pinned here at the boundary.
+	it("breaks an array over 80 columns into one id per line, and keeps 80 on one line", () => {
+		const stmt = (ids: string[]) =>
+			`const TRANSPARENT_IDS = [${ids.map((i) => `"${i}"`).join(", ")}] as const;`;
+		// The statement after the move is `["<pad>", "x"]`; size the pad so it is
+		// exactly 80, then 81, columns.
+		const pad = (cols: number) => "b".repeat(cols - stmt(["", "x"]).length);
+		const src = (padId: string) =>
+			[
+				arr("TRANSPARENT_IDS", [padId], true),
+				arr("NEXT_PHASE_ELIGIBLE_IDS", ["x"], true),
+				arr("HOLD_INDEXER_IDS", ["h"], true),
+				arr("UNPROVEN_IDS", [], true),
+			].join("");
+		const at80 = (moveClassId(src(pad(80)), "x") as { text: string }).text;
+		expect(stmt([pad(80), "x"]).length).toBe(80);
+		expect(at80).toContain(`${stmt([pad(80), "x"])}\n`);
+		const at81 = (moveClassId(src(pad(81)), "x") as { text: string }).text;
+		expect(at81).toContain(
+			`const TRANSPARENT_IDS = [\n\t"${pad(81)}",\n\t"x",\n] as const;`,
+		);
+		// The emptied source array renders as `[]`, not a blank multi-line body.
+		expect(at80).toContain("const NEXT_PHASE_ELIGIBLE_IDS = [] as const;");
 	});
 });
