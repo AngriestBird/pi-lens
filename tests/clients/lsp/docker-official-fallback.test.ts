@@ -174,6 +174,8 @@ describe("docker official alternate registry (#3939)", () => {
 		expect(DockerOfficialServer.fallbackFor).toBe("docker");
 		// Introduced unmeasured; the nightly promotion PR (#3989) may later flip it to
 		// transparent on evidence, so only `resident` (never evicted) is wrong here.
+		// The promoter cannot attribute docker's numbers to docker-official; a bare flip
+		// still reds the registry reason and class pins, so this stays relaxed.
 		expect(["unmeasured", "transparent"]).toContain(
 			DockerOfficialServer.idleEviction,
 		);

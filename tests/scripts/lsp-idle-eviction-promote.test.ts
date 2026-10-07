@@ -850,6 +850,43 @@ describe("the registry test's class pin (#3989 F1)", () => {
 		expect(plan.registrySource).toContain("const TRANSPARENT_IDS = [\n");
 	});
 
+	// #3994 r4: `id: "docker"` is a prefix of `id: "docker-official"`. A prefix
+	// matcher sees two definitions and refuses the real docker promotion; an exact
+	// one edits docker's own line and leaves docker-official's byte-identical.
+	it("promotes docker alone on the real source and leaves docker-official's line untouched", () => {
+		const realServer = fs.readFileSync(
+			path.join(repoRoot, "clients/lsp/server.ts"),
+			"utf8",
+		);
+		const plan = planPromotions({
+			rows: [row("docker")],
+			prior: nights([D1], () => [row("docker")]),
+			today: D2,
+			serverSource: realServer,
+			reasonsText: fs.readFileSync(
+				path.join(repoRoot, "tests/config/lsp-idle-eviction-reasons.json"),
+				"utf8",
+			),
+			registrySource: REAL_REGISTRY_TS,
+		});
+		expect(plan.promoted.map((p) => p.serverId)).toEqual(["docker"]);
+		const lineAfter = (text: string, id: string) => {
+			const lines = text.split("\n");
+			return lines[lines.indexOf(`\tid: "${id}",`) + 1];
+		};
+		expect(lineAfter(plan.serverSource, "docker")).toBe(
+			'\tidleEviction: "transparent",',
+		);
+		expect(lineAfter(plan.serverSource, "docker-official")).toBe(
+			lineAfter(realServer, "docker-official"),
+		);
+		const before = realServer.split("\n");
+		const changed = plan.serverSource
+			.split("\n")
+			.filter((l, i) => l !== before[i]);
+		expect(changed).toEqual(['\tidleEviction: "transparent",']);
+	});
+
 	it("promotes nothing when the registry test cannot take the move", () => {
 		const plan = planPromotions({
 			rows: [row("json")],
