@@ -83,6 +83,13 @@ the brief gives.
   and `AGENTS.md` "Commands and gates" says how `pr-worktree.mjs close` does
   it). A real `node_modules` directory is removed only after confirming the
   main checkout's install is intact.
+- **Linked installs.** Never run a mutating npm verb (`ci`, `install`,
+  `update`, `uninstall`, `prune`, `dedupe`, `rebuild`), even `--dry-run`, where
+  `node_modules` is a link: `npm ci` empties the shared install under every
+  lane (#4044, 2026-10-07; `guard-bash.mjs` denies it). Answer install-flag
+  questions in a scratch copy under `$TMPDIR`, never in the linked lane.
+  Unlink with `rm node_modules` (no trailing slash or glob): `rm -rf
+  node_modules/` and `find node_modules/ -delete` empty the target too.
 - **TMPDIR.** Export
   `TMPDIR=~/.local/share/pi-lens-orchestrator/tmp/<lane>-tmp` for every command
   in the lane, including checks that spawn npm, git hooks, or a child
