@@ -1059,22 +1059,27 @@ function looksLikeGitWorktree(dir) {
  * measured directly, `readlinkSync` throws ENOENT for a missing entry and
  * EINVAL for a REAL directory or file, both caught below, so a pre-check
  * never changed the verdict and mutating it out left every test green. Its
- * raw link text (not `realpathSync`'s resolved target), so a dangling
- * symlink (target does not exist) is still classified correctly instead of
- * throwing ENOENT on the target.
+ * raw link text proves that the entry is a symlink, then `realpathSync`
+ * follows the complete chain before the containment check. An unreadable or
+ * dangling target fails closed: this classifier protects destructive callers,
+ * so uncertainty is the outside-link verdict rather than an allow.
  *
  * @param {string} worktreeDir
  * @returns {boolean}
  */
 function hasNodeModulesSymlinkOutside(worktreeDir) {
 	const nodeModulesPath = join(worktreeDir, "node_modules");
-	let target;
 	try {
-		target = readlinkSync(nodeModulesPath);
+		readlinkSync(nodeModulesPath);
 	} catch {
 		return false;
 	}
-	const resolvedTarget = resolve(dirname(nodeModulesPath), target);
+	let resolvedTarget;
+	try {
+		resolvedTarget = realpathSync(nodeModulesPath);
+	} catch {
+		return true;
+	}
 	const rel = relative(worktreeDir, resolvedTarget);
 	return rel === ".." || rel.startsWith(`..${SEP}`) || isAbsolute(rel);
 }

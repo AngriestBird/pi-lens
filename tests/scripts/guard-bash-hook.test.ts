@@ -785,6 +785,22 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		}
 	});
 
+	it("denies git worktree remove through a two-hop node_modules symlink (#4080)", () => {
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-two-hop-");
+		const inner = join(tree, "inner");
+		symlinkSync(inner, join(tree, "node_modules"));
+		symlinkSync(shared, inner);
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("worktree");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
 	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
 		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
@@ -961,6 +977,28 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 			}
 		},
 	);
+
+	it("denies npm writers and deletes through a two-hop node_modules symlink (#4080)", () => {
+		const { tree, shared, cleanup } = makeLane(true);
+		const nodeModules = join(tree, "node_modules");
+		const inner = join(tree, "inner");
+		unlinkSync(nodeModules);
+		symlinkSync(inner, nodeModules);
+		symlinkSync(shared, inner);
+		try {
+			for (const command of [
+				"npm ci",
+				"rm -rf node_modules/",
+				"rm -rf node_modules/*",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
 
 	it("denies the incident's own shape: `cd <lane> && npm ci --dry-run` from an unrelated payload cwd", () => {
 		const { tree, cleanup } = makeLane(true);
