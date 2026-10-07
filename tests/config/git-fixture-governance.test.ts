@@ -32,6 +32,12 @@ const OWN_IMPLEMENTATION_FILES = [
 // alias config all have to apply).
 const NOT_A_FIXTURE = [
 	"scripts/pre-push-targeted-tests.mjs",
+	// #3215 lane 3: the pre-push selector's history pass, which reads past
+	// heads' paths and the data-branch summary out of THIS clone
+	// (`git cat-file`/`git log`/`git show`) -- the same "drives the real repo"
+	// shape as the hook that calls it; its tests run it against a throwaway
+	// repo through gitFixtureEnv.
+	"scripts/lib/test-history-selection.mjs",
 	"scripts/prune-agent-worktrees.mjs",
 	// #2698: reads THIS checkout's own `git ls-files` state (untracked+
 	// ignored .js siblings, tracked .ts sources) before `knip` runs — same

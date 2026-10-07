@@ -184,7 +184,6 @@ const timingSensitiveInclude = [
 	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cooperative-budget.test.ts",
 	"tests/clients/instance-registry-lock.test.ts",
-	"tests/clients/instance-registry-race.test.ts",
 	"tests/clients/loop-block-stall-discrimination.test.ts",
 	// Workspace-edit planning also uses the independent occupancy sampler; keep
 	// its measurement window out of the default fork storm while the guard still
@@ -397,6 +396,12 @@ export const wallClockBudgetInclude = [
 	// #3538/#3539: real children stand for the pids the reaper judges and
 	// kills (flake-shape admission).
 	"tests/clients/instance-reaper-pid-reuse.test.ts",
+	// #4046 interim: six real Node writers rendezvous on an OS barrier and
+	// contend through the production cross-process registry lock. Keep this
+	// real-spawn race in the fully serialized phase so it cannot overlap the
+	// timing-sensitive occupancy sampler; the investigation estimates ~4 s
+	// of serial cost.
+	"tests/clients/instance-registry-race.test.ts",
 	// #2507: a real headless child whose own exit decision is the subject — it
 	// must not drain mid `lsp_diagnostics`, and must still exit by itself
 	// afterwards. Real child spawn (flake-shape admission), and it also spawns a
