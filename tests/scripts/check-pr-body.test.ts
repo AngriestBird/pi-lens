@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
 import {
 	gitExecFileSync,
@@ -3506,6 +3507,67 @@ describe("head-tree citations and test references", () => {
 			{ quote: '"', text: "a\\b" },
 			{ quote: "`", text: "value" },
 		]);
+	});
+
+	// Pins what `prefix` means (the up-to-256 blanked characters before the
+	// opening quote, trailing blanks trimmed) so the lexer's single-pass
+	// rewrite for #4088 cannot drift: `testCorpus` classifies `it(`/`.each(`
+	// titles from exactly this text.
+	it("reports each string's blanked 256-character prefix, trailing blanks trimmed", () => {
+		const result = blankCommentsAndStrings(
+			`it(/* note */ "first");\n${"a".repeat(300)}("second", 'third');`,
+		);
+		const [first, second, third] = result.strings.map(({ prefix }) => prefix);
+		expect(first).toBe("it(");
+		// 256 characters end at the blanked opening quote; the trim drops it.
+		expect(second).toBe(`${"a".repeat(254)}(`);
+		// "second" is blanked to eight spaces, then the comma; the two blanks
+		// before the quote are trimmed.
+		expect(third).toBe(`${"a".repeat(244)}(${" ".repeat(8)},`);
+	});
+
+	// Recurrence: #4088. The lexer sliced its growing output string once per
+	// string literal; each slice flattened the whole concatenation and its
+	// parent stayed alive through `prefix`, so memory grew with strings x
+	// bytes (the PR-body corpus lexed 20 MB of tests into ~900 MB, and
+	// check-pr-body.test.ts peaked at 1883 of 2048 MB on CI). Measured on 8000
+	// string literals in a worker: 6-24 MB retained on the single-pass lexer,
+	// 1533 MB on the quadratic one (an unflagged host kills it at the 128 MB
+	// cap with ERR_WORKER_OUT_OF_MEMORY; the suite's own --max-old-space-size
+	// lifts that cap, so the retained heap is asserted too).
+	it("lexes thousands of string literals within a bounded heap", async () => {
+		const lexerUrl = new URL("../../scripts/check-pr-body.mjs", import.meta.url)
+			.href;
+		const code = `
+			const { parentPort, workerData } = require("node:worker_threads");
+			import(workerData.lexerUrl).then(({ blankCommentsAndStrings }) => {
+				const source = Array.from(
+					{ length: 8000 },
+					(_, index) => 'it("title ' + index + '", () => { expect(a).toBe(1); });',
+				).join("\\n");
+				const lexed = blankCommentsAndStrings(source);
+				parentPort.postMessage({
+					count: lexed.strings.length,
+					heapMb: process.memoryUsage().heapUsed / 1048576,
+				});
+			});
+		`;
+		const result = await new Promise<{ count: number; heapMb: number }>(
+			(resolvePromise, reject) => {
+				const worker = new Worker(code, {
+					eval: true,
+					workerData: { lexerUrl },
+					resourceLimits: { maxOldGenerationSizeMb: 128 },
+				});
+				worker.once("message", (value) => {
+					resolvePromise(value);
+					void worker.terminate();
+				});
+				worker.once("error", reject);
+			},
+		);
+		expect(result.count).toBe(8000);
+		expect(result.heapMb).toBeLessThan(256);
 	});
 
 	it("rejects a citation to a missing or out-of-range head file", () => {

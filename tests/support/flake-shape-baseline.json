@@ -76,6 +76,7 @@
 		"scripts/download-test-history-artifacts.test.ts": 2,
 		"scripts/git-fixture-env.test.ts": 5,
 		"scripts/guard-bash-hook.test.ts": 19,
+		"scripts/guard-bash-probe.test.ts": 4,
 		"scripts/knip-sibling-purge.test.ts": 1,
 		"scripts/lane-check.test.ts": 4,
 		"scripts/lint-js.test.ts": 6,
