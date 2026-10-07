@@ -188,8 +188,12 @@ const SCRIPT_NON_WRITERS: Record<string, string> = {
 		"the hook parses git subcommands (`push`) to deny them; it runs none",
 	"scripts/lib/workflow-run-evidence.mjs":
 		"`gh workflow run` appears only in a remediation message it prints",
+	"scripts/lib/windows-vitest-failure-count.mjs":
+		"imports only parseVitestSummary (a pure parser) from the classifier; it prints a count",
 	"scripts/npm-retry.mjs":
 		"imports only NET_PATTERN (a regex) from the classifier; it runs npm",
+	"scripts/pre-push-targeted-tests.mjs":
+		"imports only parseVitestSummary (a pure parser) from the classifier; it runs vitest",
 	"scripts/release-qa.mjs": "its only `publish` is `npm publish --dry-run`",
 };
 

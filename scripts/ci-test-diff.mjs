@@ -2,10 +2,8 @@
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
-	extractVitestFailureIds,
-	OVERALL_TESTS_FAILED,
-	stripAnsi,
-	stripLineTimestamps,
+	normalizeVitestOutput,
+	parseVitestSummary,
 } from "./lib/ci-failure-classifier.mjs";
 
 const DEFAULT_REPOSITORY = "apmantza/pi-lens";
@@ -14,40 +12,36 @@ export function stripLogDecorations(log) {
 		/^[^\t\r\n]+\t[^\t\r\n]+\t(?=\d{4}-\d\d-\d\dT)/gm,
 		"",
 	);
-	return stripLineTimestamps(stripAnsi(withoutFallbackPrefix))
+	return normalizeVitestOutput(withoutFallbackPrefix)
 		.replace(/^\uFEFF/, "")
-		.replace(/^[ \t]+(?=FAIL\b)/gm, "")
-		.replace(/\r\n?/g, "\n");
+		.replace(/^[ \t]+(?=FAIL\b)/gm, "");
 }
 
 export function extractFailingTestIds(log) {
-	return extractVitestFailureIds(log);
+	return parseVitestSummary(log).failureIds;
 }
 
 export function summarizeLog(log, side = "job") {
-	const failedMatch = OVERALL_TESTS_FAILED.exec(log);
-	const passedMatch = log.match(/^\s*Tests\s+(\d+)\s+passed\b/m);
-	const skippedMatch = log.match(/^\s*Tests\s+(\d+)\s+skipped\b/m);
-	const testsFailed = Number(failedMatch?.[1] ?? 0);
-	const failedTestsHeader = Number(
-		log.match(/\bFailed Tests\s+(\d+)\b/i)?.[1] ?? NaN,
-	);
-	const suitesFailed = Number(
-		log.match(/\bFailed Suites\s+(\d+)\b/i)?.[1] ?? 0,
-	);
-	const unhandledErrors = Number(
-		log.match(/\bErrors\s+(\d+)\s+error(?:s)?\b/i)?.[1] ?? 0,
-	);
-	if (!failedMatch && !passedMatch && !skippedMatch) {
+	const parsed = parseVitestSummary(log);
+	if (
+		parsed.testsFailed === null &&
+		parsed.testsPassed === null &&
+		parsed.testsSkipped === null
+	) {
 		throw new Error(`${side} log incomplete (no Vitest Tests summary)`);
 	}
+	const testsFailed = parsed.testsFailed ?? 0;
 	if (
-		Number.isInteger(failedTestsHeader) &&
-		failedTestsHeader !== testsFailed
+		parsed.failedTestsHeader !== null &&
+		parsed.failedTestsHeader !== testsFailed
 	) {
 		throw new Error(`${side} log has mismatched Vitest failure summaries`);
 	}
-	return { testsFailed, suitesFailed, unhandledErrors };
+	return {
+		testsFailed,
+		suitesFailed: parsed.suitesFailed ?? 0,
+		unhandledErrors: parsed.unhandledErrors ?? 0,
+	};
 }
 
 export function validateLog(log, side = "job") {

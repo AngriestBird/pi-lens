@@ -456,6 +456,7 @@ export declare function formatFailureLines(
 export declare function formatGatingSplit(
 	rows: VerdictRow[],
 	failingRows?: VerdictRow[],
+	details?: Pick<FailedJobDetail, "rowId" | "summary">[],
 ): string[];
 
 export interface OpenPr {

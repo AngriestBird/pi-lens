@@ -315,8 +315,8 @@ the surface they bite; each block loads only when its trigger applies.
     evidence; preserve the classifier and evidence when a caller asserts a fact.
     Runner log parsers tolerate ANSI control sequences, padding, and CRLF before
     extracting a count; the exact Windows bytes are pinned by
-    `tests/config/windows-vitest-failure-count.test.ts` and the shared parser is
-    `scripts/lib/windows-vitest-failure-count.mjs`.
+    `tests/config/windows-vitest-failure-count.test.ts`, and the parser is
+    `parseVitestSummary` (shape 63).
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -391,6 +391,22 @@ the surface they bite; each block loads only when its trigger applies.
     lane only. `find -L|-follow` also counts an operand that holds the link.
     Unguarded, listed in the header's not-handled list: a glob that expands to
     the link (`rm -rf */`), `xargs rm`, `rsync --delete`, `mv`, `npx rimraf`.
+
+63. **Tool console output parsed unstripped:** parsing Vitest or any tool's
+    console output: strip ANSI first, and test with `FORCE_COLOR=1`. CI runs
+    Vitest with colour, and escape codes split `Tests` from its counts and
+    `FAIL` from its file, so a parser reads "no tests", "no red" or the wrong
+    class (#4074, #4075, #4079, #4087: the pre-push hook recorded `failed: 0`
+    for a red run). Read a Vitest transcript only through `parseVitestSummary`
+    in `scripts/lib/ci-failure-classifier.mjs`; its consumers are guarded over
+    a real coloured run by `tests/scripts/vitest-summary-consumers.test.ts`.
+    Consolidation verdict: folded onto that seam (deleting it would send six
+    scripts back to six private regexes). Sweep 2026-10-07 over `scripts/`,
+    `scripts/lib/`, `tests/support/` and `.github/`
+    (`grep -rnE "Tests\s|Test Files|stripVTControl|u001b|x1b"`): the other
+    hits are the classifier's own already-normalized patterns, `ci-verdict`'s
+    line classifier (strips before it matches), `check-pr-body`'s lint of pasted
+    body text, and readers of Vitest's JSON report.
 
 </important>
 

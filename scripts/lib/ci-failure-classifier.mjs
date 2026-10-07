@@ -88,7 +88,7 @@ const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 const VITEST_TEST_FILE = /\S+\.(?:test|spec)\.[cm]?[jt]sx?/;
 
 /** Extract Vitest failure-banner identities from an already-normalized log. */
-export function extractVitestFailureIds(log) {
+function extractVitestFailureIds(log) {
 	const ids = new Set();
 	for (const rawLine of log.split("\n")) {
 		const line = rawLine.match(/^\s*FAIL\b\s+(.*)$/)?.[1];
@@ -161,7 +161,59 @@ const TYPESCRIPT_ERROR =
 // The run's own final tally line (real log, same run): " Tests  1 failed |
 // 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
 // failed count here is unambiguous.
-export const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
+const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
+// The one parser for Vitest's console summary (#4087). Every script that reads
+// a Vitest transcript (pre-push counts, lane-check, mutate, ci-test-diff, the
+// Windows failure count, ci-verdict's red-row label) asks this function, so
+// ANSI colour, Actions timestamps and padding are removed in exactly one place.
+// CI runs Vitest with colour: escape codes split `Tests` from its counts and
+// `FAIL` from its file, which read as "no tests" or "no red" (#4074, #4075,
+// #4079, #4087). Test any new caller with FORCE_COLOR=1 output.
+const VITEST_TESTS_LINE = /^\s*Tests\s+(.+)$/m;
+// A reporter line naming a failing test FILE: `FAIL <project> <file> > name`
+// or the inline `❯ <project> <file> (N tests | M failed)`. A stack frame
+// `❯ <file>:5:35` ends in `:line`, which the trailing `\s|\(` rejects.
+const VITEST_FAILED_FILE_LINE =
+	/^\s*(?:❯|FAIL)\s+(?:\S+\s+)?(\S+?\.test\.tsx?)(?:\s|\()/gm;
+
+/** A Vitest transcript with ANSI, Actions timestamps and CRLF removed. */
+export function normalizeVitestOutput(text) {
+	return stripLineTimestamps(stripAnsi(text)).replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Counts and failure identities of one Vitest transcript. A count is `null`
+ * when the transcript does not print it (the reporter omits a zero), so a
+ * caller can tell "0" from "no summary".
+ *
+ * @param {string} output raw console output, coloured or not
+ */
+export function parseVitestSummary(output) {
+	const text = normalizeVitestOutput(String(output));
+	const testsLine = text.match(VITEST_TESTS_LINE)?.[1] ?? "";
+	const count = (source, pattern) => {
+		const value = source.match(pattern)?.[1];
+		return value === undefined ? null : Number(value);
+	};
+	const inTestsLine = (word) =>
+		count(testsLine, new RegExp(`(\\d+)\\s+${word}\\b`));
+	return {
+		noTests: /^(?:no tests|0 tests)\b/.test(testsLine),
+		testsFailed: inTestsLine("failed"),
+		testsPassed: inTestsLine("passed"),
+		testsSkipped: inTestsLine("skipped"),
+		failedTestsHeader: count(text, /\bFailed Tests\s+(\d+)\b/i),
+		suitesFailed: count(text, /\bFailed Suites\s+(\d+)\b/i),
+		filesFailed: count(text, /^\s*Test Files\s+(\d+)\s+failed\b/m),
+		unhandledErrors: count(text, /\bErrors\s+(\d+)\s+error(?:s)?\b/i),
+		failureIds: extractVitestFailureIds(text),
+		failedFiles: [
+			...new Set(
+				[...text.matchAll(VITEST_FAILED_FILE_LINE)].map((match) => match[1]),
+			),
+		],
+	};
+}
 // #2839: vitest's timeout failure text (real log, run 34389495533 attempt 1,
 // job 102594125043, PR #2834): "Error: Test timed out in 5000ms." Vitest's
 // runner uses the same template for hooks: "Error: Hook timed out in 300ms."

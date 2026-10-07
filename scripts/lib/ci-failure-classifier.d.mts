@@ -39,10 +39,23 @@ export interface ClassifierDecision {
 export declare const NET_PATTERN: RegExp;
 export declare const BARE_FAIL_LINE: RegExp;
 export declare const ASSERTION_LINE: RegExp;
-export declare const OVERALL_TESTS_FAILED: RegExp;
 export declare function stripAnsi(text: string): string;
 export declare function stripLineTimestamps(text: string): string;
-export declare function extractVitestFailureIds(log: string): string[];
+export declare function normalizeVitestOutput(text: string): string;
+/** A count is `null` when the transcript does not print it. */
+export interface VitestSummary {
+	noTests: boolean;
+	testsFailed: number | null;
+	testsPassed: number | null;
+	testsSkipped: number | null;
+	failedTestsHeader: number | null;
+	suitesFailed: number | null;
+	filesFailed: number | null;
+	unhandledErrors: number | null;
+	failureIds: string[];
+	failedFiles: string[];
+}
+export declare function parseVitestSummary(output: string): VitestSummary;
 export declare function classifyFailureLog(rawLog: string): Classification;
 export declare function readCgroupOomKillCount(log: string): number | null;
 export declare function describeKernelKillEvidence(log: string): string | null;

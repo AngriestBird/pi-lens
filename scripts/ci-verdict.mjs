@@ -208,6 +208,7 @@ import { fileURLToPath } from "node:url";
 import {
 	ASSERTION_LINE,
 	BARE_FAIL_LINE,
+	parseVitestSummary,
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
@@ -2015,11 +2016,10 @@ export function formatGatingSplit(rows, failingRows = [], details = []) {
 	const label = (row) => `${row.name} (${row.conclusion})`;
 	const failedTestCount = (row) => {
 		const detail = details.find((candidate) => candidate.rowId === row.id);
-		const summary = detail?.summary?.find((line) =>
-			/^Tests\s+\d+\s+failed\b/.test(line),
-		);
-		const count = summary?.match(/^Tests\s+(\d+)\s+failed\b/)?.[1];
-		return count === undefined ? null : `${count} failed`;
+		const count = parseVitestSummary(
+			(detail?.summary ?? []).join("\n"),
+		).testsFailed;
+		return count === null ? null : `${count} failed`;
 	};
 	const gating = rows.filter((row) => row.gating);
 	const advisory = rows.filter((row) => !row.gating);

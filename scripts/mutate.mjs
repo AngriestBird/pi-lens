@@ -17,7 +17,10 @@ import {
 } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { stripVTControlCharacters } from "node:util";
+import {
+	normalizeVitestOutput,
+	parseVitestSummary,
+} from "./lib/ci-failure-classifier.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -42,8 +45,10 @@ function argsFrom(argv) {
 			arg === "--allow-comment"
 		)
 			values[arg.slice(2)] = true;
-		else if (arg === "--tests") values.tests = argv.slice(++index);
-		else if (["--file", "--find", "--replace"].includes(arg)) {
+		else if (arg === "--tests") {
+			values.tests = argv.slice(++index);
+			index = argv.length;
+		} else if (["--file", "--find", "--replace"].includes(arg)) {
 			if (arg === "--file" && fileSeen)
 				throw new Error(
 					"repeated --file is not supported; provide one file per run",
@@ -292,8 +297,7 @@ function failedTitles(output) {
 }
 
 function classifyTestRun(testRun) {
-	if (/(?:Tests\s+no tests|Tests\s+0 tests)/.test(testRun.output))
-		return "ERROR";
+	if (parseVitestSummary(testRun.output).noTests) return "ERROR";
 	return testRun.code === 0 ? "SURVIVED" : "RED";
 }
 
@@ -327,12 +331,12 @@ function runTests(files, onSignal) {
 		child.once("close", (code, signal) => {
 			activeChild = null;
 			process.removeListener("SIGINT", stop);
-			// Colour codes split "Tests" from "no tests" on CI; classify and
-			// report the plain text.
+			// The shared Vitest parser strips colour for the classification;
+			// report the same plain text in the table.
 			resolve({
 				code: code ?? 130,
 				signal,
-				output: stripVTControlCharacters(output),
+				output: normalizeVitestOutput(output),
 			});
 		});
 	});
