@@ -474,10 +474,27 @@ export function toProjectRelativePath(
 ): string {
 	const p = isWindowsPath(filePath) ? win32 : path;
 	if (!p.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
-	const relative = p.relative(p.resolve(projectRoot), filePath);
-	return relative && !relative.startsWith("..") && !p.isAbsolute(relative)
-		? relative.replace(/\\/g, "/")
-		: filePath.replace(/\\/g, "/");
+	const inside = (root: string, file: string): string | undefined => {
+		const relative = p.relative(p.resolve(root), file);
+		return relative &&
+			relative !== ".." &&
+			!relative.startsWith(`..${p.sep}`) &&
+			!p.isAbsolute(relative)
+			? relative.replace(/\\/g, "/")
+			: undefined;
+	};
+	const direct = inside(projectRoot, filePath);
+	if (direct !== undefined) return direct;
+	// #4101: a canonical key (`normalizeMapKey`: realpath on win32, so 8.3 names,
+	// junctions and subst drives are expanded) set against a root the caller
+	// spelled differently. Canonicalize both sides before giving up; a file
+	// that really is outside the root stays outside.
+	const canonical = inside(
+		normalizeFilePath(projectRoot),
+		normalizeFilePath(filePath),
+	);
+	if (canonical !== undefined) return canonical;
+	return filePath.replace(/\\/g, "/");
 }
 
 /**
