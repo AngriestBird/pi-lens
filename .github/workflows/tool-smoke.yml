@@ -149,6 +149,7 @@ jobs:
           cli="$RUNNER_TEMP/history-scripts/upsert-tracking-issue.mjs"
           if [ "$JOB_STATUS" = failure ]; then
             body="$RUNNER_TEMP/test-history-red.md"
+            # shellcheck disable=SC2016  # backticks are literal Markdown in the issue body
             printf 'The `Roll up durable unit-test history` job failed: %s\n\n`data/test-history` did not advance, so the shard weights, flake candidates and the pre-push history selector read stale data (#4030).\n' "$RUN_URL" > "$body"
             gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
             node "$cli" --title "$TITLE" --label nightly-drift --body-file "$body"
