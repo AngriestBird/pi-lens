@@ -340,6 +340,11 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
 
+61. **Colored CI summary misparse:** runner log parsers tolerate ANSI control
+    sequences, padding, and CRLF before extracting a count; the exact runner
+    bytes are pinned by `tests/config/windows-vitest-failure-count.test.ts` and
+    the shared parser is `scripts/lib/windows-vitest-failure-count.mjs`.
+
 </important>
 
 <important if="a test double, ratchet or sweep">

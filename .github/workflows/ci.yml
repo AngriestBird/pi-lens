@@ -761,7 +761,7 @@ jobs:
               echo "Not executed: no executed-file list was produced (the checkout or enumeration step did not complete), so the Windows subset summary is unavailable."
             fi
             if [[ -f "$RUNNER_TEMP/windows-vitest.log" ]]; then
-              failures="$(sed -nE 's/^Tests[[:space:]]+([0-9]+)[[:space:]]+failed.*/\1/p' "$RUNNER_TEMP/windows-vitest.log" | tail -n 1)"
+              failures="$(node scripts/lib/windows-vitest-failure-count.mjs "$RUNNER_TEMP/windows-vitest.log")"
               echo "Windows Vitest failures: ${failures:-unknown}"
             else
               echo "Windows Vitest failures: unavailable"
@@ -775,7 +775,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ steps.windows-vitest.outcome }}" == "failure" ]]; then
-            failures="$(sed -nE 's/^Tests[[:space:]]+([0-9]+)[[:space:]]+failed.*/\1/p' "$RUNNER_TEMP/windows-vitest.log" | tail -n 1)"
+            failures="$(node scripts/lib/windows-vitest-failure-count.mjs "$RUNNER_TEMP/windows-vitest.log")"
             echo "::error title=Windows advisory::${failures:-unknown} Vitest tests failed"
             exit 1
           fi

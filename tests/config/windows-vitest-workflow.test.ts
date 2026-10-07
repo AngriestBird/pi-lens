@@ -111,8 +111,9 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 
 		// Recurrence: #4019's continue-on-error made 56 failed Windows tests read
 		// as a green job, hiding the red from both reviewers and ci-verdict.
-		expect(record?.run).toContain("Tests");
-		expect(record?.run).toMatch(/failed/);
+		expect(record?.run).toContain(
+			'windows-vitest-failure-count.mjs "$RUNNER_TEMP/windows-vitest.log"',
+		);
 		expect(record?.run).toContain("Windows Vitest failures:");
 		expect(failure?.if).toBe("always()");
 		expect(failure?.run).toContain("steps.windows-vitest.outcome");
