@@ -10,19 +10,22 @@ import { spawn, spawnSync } from "node:child_process";
 import {
 	readFileSync,
 	readdirSync,
+	renameSync,
 	statSync,
 	writeFileSync,
 	unlinkSync,
 } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage(message) {
 	if (message) console.error(`mutate.mjs: ${message}`);
 	console.error(
-		"usage: scripts/mutate.mjs --file <path> --find <text|/regex/> --replace <text> --tests <files…> [--built] [--table] [--restore]",
+		"usage: scripts/mutate.mjs --file <path> --find <text|/regex/> --replace <text> --tests <files…> [--built] [--table] [--allow-comment]\n       scripts/mutate.mjs --restore [--file <path>]\n" +
+			"exit codes: 0 or the test runner's code, 1 refused or failed, 2 usage, 4 the run could not restore its file (a journal remains)",
 	);
 	process.exitCode = 2;
 }
@@ -100,9 +103,8 @@ function parseFind(value) {
 	return value;
 }
 
-function mutationFor(original, find, replacement, allowComment = false) {
+function mutationFor(original, searchable, find, replacement, allowComment) {
 	const needle = parseFind(find);
-	const searchable = blankCommentsAndStrings(original);
 	const codeIndex =
 		typeof needle === "string"
 			? searchable.indexOf(needle)
@@ -112,7 +114,7 @@ function mutationFor(original, find, replacement, allowComment = false) {
 				})();
 	if (codeIndex < 0 && !allowComment)
 		throw new Error(
-			"refusing no-op edit: --find matches only comments/strings or is absent",
+			"refusing no-op edit: --find matches only comments/strings/regex literals or is absent",
 		);
 	const originalIndex =
 		codeIndex >= 0
@@ -141,90 +143,131 @@ function mutationFor(original, find, replacement, allowComment = false) {
 	return mutated;
 }
 
-function blankCommentsAndStrings(source) {
-	let state = "code";
-	let quote = "";
-	let escaped = false;
-	let output = "";
-	for (let index = 0; index < source.length; index += 1) {
-		const current = source[index];
-		const next = source[index + 1];
-		if (state === "line") {
-			output += current === "\n" ? "\n" : " ";
-			if (current === "\n") state = "code";
-			continue;
-		}
-		if (state === "block") {
-			output += current === "\n" ? "\n" : " ";
-			if (current === "*" && next === "/") {
-				output += " ";
-				index += 1;
-				state = "code";
-			}
-			continue;
-		}
-		if (state === "string") {
-			output += current === "\n" ? "\n" : " ";
-			if (escaped) escaped = false;
-			else if (current === "\\") escaped = true;
-			else if (current === quote) state = "code";
-			continue;
-		}
-		if (current === "/" && next === "/") {
-			output += "  ";
-			index += 1;
-			state = "line";
-			continue;
-		}
-		if (current === "/" && next === "*") {
-			output += "  ";
-			index += 1;
-			state = "block";
-			continue;
-		}
-		if (current === '"' || current === "'" || current === "`") {
-			output += " ";
-			state = "string";
-			quote = current;
-			continue;
-		}
-		output += current;
+// The grammar @ast-grep/napi (a direct dependency) parses each JS/TS family
+// file with; any other file type is matched raw, because a JS lexer would
+// misread its comments and quotes.
+const LEXER_LANGUAGES = {
+	".ts": "TypeScript",
+	".mts": "TypeScript",
+	".cts": "TypeScript",
+	".tsx": "Tsx",
+	".js": "JavaScript",
+	".mjs": "JavaScript",
+	".cjs": "JavaScript",
+	".jsx": "JavaScript",
+};
+
+const lexerLanguage = (file) => LEXER_LANGUAGES[path.extname(file)];
+
+/** `source` with comments, strings, regex literals and a template's text blanked to spaces (newlines kept), so a needle can only match code. */
+function blankNonCode(source, file, astGrep) {
+	const language = lexerLanguage(file);
+	if (!language) return source;
+	const units = source.split(""); // UTF-16 units, the unit ast-grep reports
+	const blank = (node) => {
+		const { start, end } = node.range();
+		for (let index = start.index; index < end.index; index += 1)
+			if (units[index] !== "\n" && units[index] !== "\r") units[index] = " ";
+	};
+	const nonCode = ["comment", "string", "regex", "template_string"].map(
+		(kind) => ({ kind }),
+	);
+	for (const node of astGrep
+		.parse(language, source)
+		.root()
+		.findAll({ rule: { any: nonCode } })) {
+		if (node.kind() !== "template_string") blank(node);
+		else
+			// A `${…}` substitution is code; the text around it is not.
+			for (const part of node.children())
+				if (part.kind() !== "template_substitution") blank(part);
 	}
-	return output;
+	return units.join("");
 }
 
-function restoreFile(file, bytes, expectedHash) {
-	writeFileSync(file, bytes);
-	const actual = digest(readFileSync(file));
-	if (actual !== expectedHash)
-		throw new Error(`restore sha256 mismatch for ${file}`);
-}
+// The restore rule (#4048 round 3). A journal holds the original bytes and the
+// sha256 of both the original and the mutated bytes. The file is written back
+// only when its current sha256 equals the mutated sha256. Every other state
+// writes nothing and reports the journal path and the three hashes.
+const JOURNAL_SUFFIX = ".mutate-backup";
 
 function journalFor(file) {
-	return `${file}.mutate-backup`;
+	return `${file}${JOURNAL_SUFFIX}`;
 }
 
-function journalHashFor(file) {
-	return `${journalFor(file)}.sha256`;
+function journalOf(file, original, mutated) {
+	return {
+		version: 1,
+		file: path.relative(root, file),
+		originalSha256: digest(original),
+		mutatedSha256: digest(mutated),
+		original: original.toString("base64"),
+	};
 }
 
-function writeJournal(file, bytes) {
-	writeFileSync(journalFor(file), bytes, { flag: "wx" });
-	writeFileSync(journalHashFor(file), digest(bytes), { flag: "wx" });
+// `wx`: creating the journal is the lock that keeps a second run off this file.
+function writeJournal(file, journal) {
+	writeFileSync(journalFor(file), JSON.stringify(journal), { flag: "wx" });
 }
 
+function replaceJournal(file, journal) {
+	const temporary = `${journalFor(file)}.${process.pid}.tmp`;
+	writeFileSync(temporary, JSON.stringify(journal));
+	renameSync(temporary, journalFor(file));
+}
+
+function readJournal(file) {
+	const journal = JSON.parse(readFileSync(journalFor(file), "utf8"));
+	const original = Buffer.from(journal.original, "base64");
+	if (
+		journal.version !== 1 ||
+		typeof journal.originalSha256 !== "string" ||
+		typeof journal.mutatedSha256 !== "string" ||
+		digest(original) !== journal.originalSha256
+	)
+		throw new Error(
+			"unknown version or original bytes do not match their hash",
+		);
+	return { ...journal, original };
+}
+
+function journalReport(file) {
+	const current = statExists(file) ? digest(readFileSync(file)) : "absent";
+	try {
+		const journal = readJournal(file);
+		return {
+			journal,
+			current,
+			text: `original sha256 ${journal.originalSha256}; mutated sha256 ${journal.mutatedSha256}; current sha256 ${current}; journal ${journalFor(file)}`,
+		};
+	} catch (error) {
+		return {
+			journal: null,
+			current,
+			text: `journal ${journalFor(file)} is unreadable (${error.message}); current sha256 ${current}`,
+		};
+	}
+}
+
+/** Restores `file` from its journal under the rule above. Never throws and never writes on a refusal. */
 function restoreJournal(file) {
-	const backup = journalFor(file);
-	const hashFile = journalHashFor(file);
-	if (!statExists(backup) || !statExists(hashFile)) return false;
-	const bytes = readFileSync(backup);
-	const expectedHash = readFileSync(hashFile, "utf8").trim();
-	if (digest(bytes) !== expectedHash)
-		throw new Error(`backup sha256 mismatch for ${file}`);
-	restoreFile(file, bytes, expectedHash);
-	unlinkSync(backup);
-	unlinkSync(hashFile);
-	return true;
+	if (!statExists(journalFor(file))) return { restored: false, refusal: null };
+	const { journal, current, text } = journalReport(file);
+	const name = path.relative(root, file);
+	if (!journal || current !== journal.mutatedSha256)
+		return { restored: false, refusal: `refusing to restore ${name}: ${text}` };
+	try {
+		writeFileSync(file, journal.original);
+		if (digest(readFileSync(file)) !== journal.originalSha256)
+			throw new Error("restored bytes do not match the original sha256");
+		unlinkSync(journalFor(file));
+		return { restored: true, refusal: null };
+	} catch (error) {
+		return {
+			restored: false,
+			refusal: `restore of ${name} failed (${error.message}): ${text}`,
+		};
+	}
 }
 
 function journalFiles(directory) {
@@ -233,8 +276,8 @@ function journalFiles(directory) {
 		const full = path.join(directory, entry.name);
 		if (entry.isDirectory() && entry.name !== "node_modules")
 			found.push(...journalFiles(full));
-		else if (entry.isFile() && entry.name.endsWith(".mutate-backup"))
-			found.push(full.slice(0, -".mutate-backup".length));
+		else if (entry.isFile() && entry.name.endsWith(JOURNAL_SUFFIX))
+			found.push(full.slice(0, -JOURNAL_SUFFIX.length));
 	}
 	return found;
 }
@@ -284,7 +327,13 @@ function runTests(files, onSignal) {
 		child.once("close", (code, signal) => {
 			activeChild = null;
 			process.removeListener("SIGINT", stop);
-			resolve({ code: code ?? 130, signal, output });
+			// Colour codes split "Tests" from "no tests" on CI; classify and
+			// report the plain text.
+			resolve({
+				code: code ?? 130,
+				signal,
+				output: stripVTControlCharacters(output),
+			});
 		});
 	});
 }
@@ -323,6 +372,24 @@ function statExists(file) {
 	}
 }
 
+function restoreCommand(options) {
+	const source = options.file ? path.resolve(root, options.file) : null;
+	const twin = source && !options.built ? twinFor(source) : null;
+	const files = source ? [source, ...(twin ? [twin] : [])] : journalFiles(root);
+	let restored = 0;
+	let refused = 0;
+	for (const file of files) {
+		const outcome = restoreJournal(file);
+		if (outcome.restored) restored += 1;
+		if (outcome.refusal) {
+			refused += 1;
+			console.error(`mutate.mjs: ${outcome.refusal}`);
+		}
+	}
+	console.log(`restored ${restored} mutation journal(s)`);
+	return refused === 0 ? 0 : 1;
+}
+
 async function main() {
 	let options;
 	try {
@@ -331,39 +398,41 @@ async function main() {
 		usage(error.message);
 		return 2;
 	}
-	if (options.restore) {
-		const files = options.file
-			? [path.resolve(root, options.file)]
-			: journalFiles(root);
-		let restored = 0;
-		for (const file of files) restored += restoreJournal(file) ? 1 : 0;
-		console.log(`restored ${restored} mutation journal(s)`);
-		return 0;
-	}
+	if (options.restore) return restoreCommand(options);
 	const source = path.resolve(root, options.file);
-	const target = options.built ? source : source;
+	const target = source;
 	const candidateTwin = options.built ? null : twinFor(source);
 	const twin =
 		candidateTwin && statExists(candidateTwin) ? candidateTwin : null;
 	const files = [target, ...(twin ? [twin] : [])];
-	for (const file of files) {
-		if (!statExists(file))
-			throw new Error(`file does not exist: ${path.relative(root, file)}`);
-		restoreJournal(file);
-		if (!gitClean(path.relative(root, file)))
-			throw new Error(`refusing dirty file: ${path.relative(root, file)}`);
+	try {
+		for (const file of files) {
+			const name = path.relative(root, file);
+			if (!statExists(file)) throw new Error(`file does not exist: ${name}`);
+			// A journal is a live run's lock or a dead run's evidence; this run
+			// cannot tell which, so only --restore ever consumes one.
+			if (statExists(journalFor(file)))
+				throw new Error(
+					`refusing to start on ${name}: a mutation journal exists (a live run, or a run that died; recover with --restore): ${journalReport(file).text}`,
+				);
+			if (!gitClean(name)) throw new Error(`refusing dirty file: ${name}`);
+		}
+	} catch (error) {
+		console.error(`mutate.mjs: ${error.message}`);
+		return 1;
 	}
-	const originals = new Map(files.map((file) => [file, readFileSync(file)]));
-	let activeFiles = [];
+	// Files whose journal this run created, in creation order.
+	const owned = [];
 	let result = { code: 2, failed: [], status: "RED" };
 	let interrupted = false;
 	let handlingSignal = false;
-	const restoreAll = () => {
-		for (const [file, bytes] of originals)
-			restoreFile(file, bytes, digest(bytes));
-		for (const file of activeFiles) {
-			if (statExists(journalFor(file))) restoreJournal(file);
+	const restoreOwned = () => {
+		const refusals = [];
+		for (const file of owned) {
+			const { refusal } = restoreJournal(file);
+			if (refusal) refusals.push(refusal);
 		}
+		return refusals;
 	};
 	const signalHandler = (signal) => {
 		if (handlingSignal) return;
@@ -371,7 +440,8 @@ async function main() {
 		interrupted = true;
 		try {
 			if (activeChild) activeChild.kill("SIGKILL");
-			restoreAll();
+			for (const refusal of restoreOwned())
+				console.error(`mutate.mjs: ${refusal}`);
 		} finally {
 			process.removeAllListeners(signal);
 			process.kill(process.pid, signal);
@@ -381,26 +451,45 @@ async function main() {
 		process.once(signal, () => signalHandler(signal));
 	process.once("uncaughtException", (error) => {
 		try {
-			restoreAll();
+			for (const refusal of restoreOwned())
+				console.error(`mutate.mjs: ${refusal}`);
 		} finally {
 			console.error(error.stack ?? error);
 			process.exit(1);
 		}
 	});
 	try {
+		const originals = new Map(files.map((file) => [file, readFileSync(file)]));
 		const original = originals.get(target);
-		for (const [file, bytes] of originals) writeJournal(file, bytes);
-		activeFiles = [...originals.keys()];
-		writeFileSync(
-			target,
+		const lexer = lexerLanguage(target) ? await import("@ast-grep/napi") : null;
+		const text = original.toString("utf8");
+		const mutated = Buffer.from(
 			mutationFor(
-				original.toString("utf8"),
+				text,
+				lexer ? blankNonCode(text, target, lexer) : text,
 				options.find,
 				options.replace,
 				options["allow-comment"],
 			),
+			"utf8",
 		);
-		if (!options.built) build();
+		writeJournal(target, journalOf(target, original, mutated));
+		owned.push(target);
+		writeFileSync(target, mutated);
+		if (twin) {
+			// The build has not rewritten the twin yet, so "mutated" is what it
+			// is now; the real mutated hash is recorded the moment the build ends.
+			const twinBytes = originals.get(twin);
+			writeJournal(twin, journalOf(twin, twinBytes, twinBytes));
+			owned.push(twin);
+			try {
+				build();
+			} finally {
+				// Nothing else runs between the build and this record, so the
+				// twin's current bytes are the build's output, failed build included.
+				replaceJournal(twin, journalOf(twin, twinBytes, readFileSync(twin)));
+			}
+		}
 		if (interrupted)
 			result = { code: 130, failed: ["interrupted"], status: "RED" };
 		else {
@@ -415,10 +504,13 @@ async function main() {
 		}
 	} catch (error) {
 		result = { code: 1, failed: [error.message], status: "RED" };
-	} finally {
-		restoreAll();
-		for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
-			process.removeAllListeners(signal);
+	}
+	const refusals = restoreOwned();
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+		process.removeAllListeners(signal);
+	if (refusals.length > 0) {
+		for (const refusal of refusals) console.error(`mutate.mjs: ${refusal}`);
+		result = { code: 4, failed: refusals, status: "ERROR" };
 	}
 	console.log("--- mutation transcript ---");
 	console.log(

@@ -60,7 +60,7 @@ mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Evidence
 
-- Use `scripts/mutate.mjs` for bounded hand mutations; it restores and verifies the target automatically.
+- Use `scripts/mutate.mjs` for bounded hand mutations; it restores the target automatically, but only while the file still holds the mutated bytes. A leftover journal (`<file>.mutate-backup`) blocks the next run on that file; recover with `--restore`, which refuses and prints the three hashes when the file was edited since.
 
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
   live under `tests/fixtures/witness/<slice>/`.
