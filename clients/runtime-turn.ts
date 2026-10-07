@@ -1033,6 +1033,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	/** A session replaced mid-turn owns none of the held state any more. */
 	const holdGeneration = runtime.sessionGeneration;
 	/**
+	 * #3813/#3901: a parked lane belongs to the session that cut it. The runtime
+	 * is a process singleton and a concurrent secondary (subagent) activation
+	 * runs this function on it, so `holdGeneration` (the runtime's scope id) is
+	 * the same for both; the turn's own session id, the one the deferred-test
+	 * list is keyed by, is not. A secondary neither takes nor shows the
+	 * primary's parked items.
+	 */
+	const carryScope = sessionId ?? runtime.telemetrySessionId;
+	const carryLane = (...parts: string[]): string =>
+		[carryScope, ...parts].join(":");
+	/**
 	 * #3813/#3901: the hold for an item-bearing advisory whose producer has no
 	 * queue to restore (knip, dead-code, call-graph impact). `shown` are the
 	 * items the part names. A cut part parks the ones that were new this turn
@@ -2070,9 +2081,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// #3901: items the cap cut on the previous turn. A scan that did not
 		// succeed leaves them parked for the next one; a successful scan takes
 		// them (offered once) and re-checks each below.
-		const knipLane = `knip:${scanRoot}`;
+		// One lane per part kind: both parts of one scan are cut together (the cap
+		// that cuts a blocker always cuts the advisory behind it), and a park
+		// REPLACES its lane's entry (review r1 F1).
+		const knipBlockerLane = carryLane("knip", scanRoot, "blocker");
+		const knipAdvisoryLane = carryLane("knip", scanRoot, "advisory");
 		const parkedKnip = knipResult.success
-			? runtime.takeCutAdvisoryItems<KnipIssue>(knipLane)
+			? [
+					...runtime.takeCutAdvisoryItems<KnipIssue>(knipBlockerLane),
+					...runtime.takeCutAdvisoryItems<KnipIssue>(knipAdvisoryLane),
+				]
 			: [];
 		if (knipResult.success && knipResult.issues.length > 0) {
 			// Deliberately excludes the line number — see stableFindingKey's
@@ -2165,7 +2183,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				deliveryHolds.push(
 					cutAdvisoryHold(
 						"knip",
-						knipLane,
+						knipBlockerLane,
 						report,
 						blockerIssues.slice(0, KNIP_MAX_SHOWN),
 						(issue) => reOfferedKeys.has(issueKey(issue)),
@@ -2196,7 +2214,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				deliveryHolds.push(
 					cutAdvisoryHold(
 						"knip",
-						knipLane,
+						knipAdvisoryLane,
 						report,
 						unusedExportDelta.slice(0, KNIP_MAX_SHOWN),
 						(issue) => reOfferedKeys.has(issueKey(issue)),
@@ -2400,7 +2418,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					}
 					// #3901: items the cap cut on the previous turn. A failed scan
 					// leaves them parked; a successful one takes them (offered once).
-					const deadCodeLane = `dead-code:${client.id}`;
+					const deadCodeLane = carryLane("dead-code", client.id);
 					const parkedDeadCode =
 						runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
 					deadCodeMeta.totalIssues =
@@ -3851,7 +3869,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					),
 				);
 				const reOfferedImpactFiles = runtime
-					.takeCutAdvisoryItems<string>("call-graph")
+					.takeCutAdvisoryItems<string>(carryLane("call-graph"))
 					.filter(
 						(file) =>
 							!impactFileKeys.has(
@@ -3947,7 +3965,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					deliveryHolds.push(
 						cutAdvisoryHold(
 							"call-graph",
-							"call-graph",
+							carryLane("call-graph"),
 							impactPart,
 							shownImpactFiles,
 							(file) => !impactFiles.includes(file),

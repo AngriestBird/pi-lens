@@ -8,8 +8,9 @@
  * next turn. The call-graph impact lines are derived from the turn's edited
  * files, which the worklist retires once a turn ends without blockers. The
  * `planDeliveryHolds` seam (#3900) restores drained queues; these producers
- * have no queue, so a cut part parks its items in `runtime.advisoryCarry`
- * (one turn, re-checked against the next scan) instead.
+ * have no queue, so a cut part parks its items on the coordinator
+ * (`runtime.parkCutAdvisoryItems`; offered once, re-checked against the next
+ * scan, keyed by part kind AND by the session that cut it) instead.
  *
  * Every test drives the REAL `handleTurnEnd` and reads the delivered message
  * the way production does. The cap is never mocked.
@@ -106,9 +107,10 @@ function makeRig(prefix: string): Rig {
 	};
 }
 
-function makeDeps(rig: Rig) {
+function makeDeps(rig: Rig, sessionId?: string) {
 	return {
 		ctxCwd: rig.cwd,
+		...(sessionId === undefined ? {} : { sessionId }),
 		getFlag: (name: string) => rig.scan.flags?.has(name) ?? false,
 		dbg: () => {},
 		runtime: rig.runtime,
@@ -160,8 +162,9 @@ function touch(rig: Rig, name: string, content = "export const a = 1;\n") {
 	return file;
 }
 
-async function endTurn(rig: Rig): Promise<string> {
-	await handleTurnEnd(makeDeps(rig));
+/** `sessionId`: the stable id index.ts passes; a concurrent secondary has its own. */
+async function endTurn(rig: Rig, sessionId?: string): Promise<string> {
+	await handleTurnEnd(makeDeps(rig, sessionId));
 	return (
 		consumeTurnEndFindings(rig.cacheManager, rig.cwd, rig.runtime)
 			?.messages?.[0]?.content ?? ""
@@ -471,6 +474,64 @@ describe("knip carry bounds and neighbours (#3901)", () => {
 		}
 	});
 
+	// Recurrence guard (review r1 F1): the blocker and the advisory share a
+	// scan, hold order is part order, and the cap that cuts a blocker always
+	// cuts the advisory behind it. One lane for both parts let the advisory's
+	// park REPLACE the blocker's, so the unresolved-import blocker (the exact
+	// #3901 case) never came back, uncounted.
+	it("re-offers a cut blocker AND a cut advisory of one scan, each once", async () => {
+		const rig = makeRig("pi-lens-3901-knip-both-parts-");
+		try {
+			const fillerFile = fillerBlocker(rig, 1000);
+			touch(rig, "edited.ts");
+			rig.scan.knip = [
+				issue("left-pad"),
+				{ type: "export", name: "orphanFn", file: "edited.ts", line: 1 },
+			];
+			const first = await endTurn(rig);
+			expect(first).not.toContain("left-pad");
+			expect(first).not.toContain("orphanFn");
+
+			clearFiller(rig, fillerFile);
+			nextTurn(rig, 2);
+			const second = await endTurn(rig);
+			expect(second).toContain("left-pad");
+			expect(second).toContain("orphanFn");
+
+			nextTurn(rig, 3);
+			const third = await endTurn(rig);
+			expect(third).not.toContain("left-pad");
+			expect(third).not.toContain("orphanFn");
+			expect(ledgerCount("turn-end-advisory-carry-dropped")).toBe(0);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence guard (review r1 F2): the runtime is a process singleton and a
+	// concurrent secondary (subagent) activation runs handleTurnEnd on it with
+	// its own session id. #3900's `holdGeneration` is the runtime's scope id, the
+	// same for both, so it cannot tell them apart; the turn's session id can.
+	it("a same-root secondary turn neither takes nor shows the primary's parked item", async () => {
+		const rig = makeRig("pi-lens-3901-knip-secondary-");
+		try {
+			const fillerFile = fillerBlocker(rig, 1000);
+			touch(rig, "edited.ts");
+			rig.scan.knip = [issue("left-pad")];
+			await endTurn(rig);
+
+			clearFiller(rig, fillerFile);
+			nextTurn(rig, 2);
+			const secondary = await endTurn(rig, "secondary-session");
+			expect(secondary).not.toContain("left-pad");
+
+			nextTurn(rig, 3);
+			expect(await endTurn(rig)).toContain("left-pad");
+		} finally {
+			rig.cleanup();
+		}
+	});
+
 	// Recurrence guard: the parked-lane store is bounded on the lane axis too.
 	it("evicts the oldest parked lane past 16 lanes", () => {
 		const runtime = new RuntimeCoordinator();
@@ -568,6 +629,43 @@ describe("dead-code advisory vs the cap (#3901)", () => {
 			expect(await endTurn(rig)).not.toContain("orphanPy");
 		} finally {
 			rig.cleanup();
+		}
+	});
+});
+
+describe("a concurrent secondary does not spend the primary's parked items (review r1 F2)", () => {
+	// Dead-code and call-graph lanes carry no scan root, so a secondary on a
+	// DIFFERENT root reached them too: its scan found nothing, and the take
+	// dropped the primary's item.
+	it("dead-code: primary cut, secondary turn on another root, primary re-offers", async () => {
+		const primary = makeRig("pi-lens-3901-dead-code-primary-");
+		const secondary = makeRig("pi-lens-3901-dead-code-secondary-");
+		try {
+			secondary.runtime = primary.runtime;
+			const fillerFile = fillerBlocker(primary, 1000);
+			const edited = touch(primary, "edited.py", "def orphanPy():\n    pass\n");
+			primary.scan.deadCode = [
+				{
+					category: "export",
+					kind: "function",
+					name: "orphanPy",
+					file: edited,
+					line: 1,
+				},
+			];
+			expect(await endTurn(primary)).not.toContain("orphanPy");
+
+			clearFiller(primary, fillerFile);
+			touch(secondary, "other.py", "def other():\n    pass\n");
+			expect(await endTurn(secondary, "secondary-session")).not.toContain(
+				"orphanPy",
+			);
+
+			nextTurn(primary, 2);
+			expect(await endTurn(primary)).toContain("orphanPy");
+		} finally {
+			secondary.cleanup();
+			primary.cleanup();
 		}
 	});
 });
