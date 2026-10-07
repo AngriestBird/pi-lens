@@ -445,6 +445,7 @@ describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
 	});
 
 	it("a forward re-keys the slot as a forwarded row and keeps the snapshot's age", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
 		const manager = {};
 		stashHandoff(beginScope({ role: "primary" }), {
 			reason: "reload",
@@ -452,6 +453,7 @@ describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
 			targetSessionFile: undefined,
 			sessionManager: manager,
 		});
+		vi.advanceTimersByTime(5_000);
 		forwardHandoff({
 			startReason: "reload",
 			reason: "reload",
@@ -459,6 +461,7 @@ describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
 			targetSessionFile: undefined,
 			sessionManager: manager,
 		});
+		vi.useRealTimers();
 
 		const slot = await rows("session_handoff_slot");
 		expect(slot.map((row) => [row.op, row.by])).toEqual([
@@ -467,6 +470,8 @@ describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
 			["forwarded", undefined],
 		]);
 		expect(slot[2]?.keyHash).toMatch(/^ticket:\d+$/);
+		// Re-keyed, not re-stashed: the forwarded slot is as old as the snapshot.
+		expect(slot[2]?.ageMs).toBe(5_000);
 	});
 });
 
@@ -804,6 +809,22 @@ describe("#3873 O5: the fence rollup", () => {
 		expect(rollups[1]?.sources).toEqual([]);
 	});
 
+	it("folds sources past the declaration cap into one (other) entry instead of growing the tally", async () => {
+		// `declare` keeps 128 names; 130 more guarantee the last are undeclared.
+		for (let i = 0; i < 130; i += 1)
+			createGenerationSource(`fence-cap-probe-${i}`)
+				.capture()
+				.guardedWrite("w", () => i);
+
+		emitFenceRollupAtSessionEnd(cwd);
+
+		const [rollup] = await rows("session_end_fence_rollup");
+		const sources: Array<{ source: string }> = rollup?.sources ?? [];
+		const names = sources.map((entry) => entry.source);
+		expect(names).toContain("(other)");
+		expect(names).not.toContain("fence-cap-probe-129");
+	});
+
 	it("writes exactly one rollup row at a primary session_shutdown, even when no fence was used", async () => {
 		const runtime = await startRuntime(SessionManager.inMemory(cwd));
 		await runtime.dispose();
@@ -852,7 +873,8 @@ describe("#3873 O7: the agent_nudge row names what it delivered", () => {
 	it("carries hashed file keys, the writers' session ids, the consuming scope and a drain epoch", async () => {
 		const scope = beginScope({ role: "primary" });
 		recordCrossProcessTouches([
-			{ path: "/repo/a.ts", reason: "format", sessionId: "other-session" },
+			// Not in key form: the row hashes the accumulator key, not this spelling.
+			{ path: "/repo/./a.ts", reason: "format", sessionId: "other-session" },
 			{ path: "/repo/b.ts", reason: "autofix" },
 		]);
 		consumeAgentNudge(undefined, scope);
