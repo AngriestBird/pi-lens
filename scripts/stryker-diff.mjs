@@ -642,7 +642,10 @@ const runtimeCap = {
 };
 
 rmSync(PROBE_REPORTS_ROOT, { recursive: true, force: true });
-const probePool = [...new Set([...selection.tests, ...ownTests])];
+// Own tests first: probing is sequential and ends at its budget share, so the
+// unprobed tail is unknown-cost, and the own tests are the ones the runtime cap
+// most needs timed (shard 1 of run 37629970371 left 194 of 565 unprobed).
+const probePool = [...new Set([...ownTests, ...selection.tests])];
 console.log(
 	`mutation diff: measuring which of ${probePool.length} candidate test file(s) execute a changed line (${PROBE_CONCURRENCY} at a time)`,
 );

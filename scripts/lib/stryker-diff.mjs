@@ -82,12 +82,15 @@ export const DEFAULT_MAX_TESTS = 47;
 // MAX_DRY_RUN_SECONDS. 240 s is where the four initial runs that passed in CI
 // sat (231 to 254 s, run 37605896822), and stryker.config.mjs's
 // `dryRunTimeoutMinutes` (10) is 2.5x it. A test with no timing counts
-// UNKNOWN_TEST_SECONDS (the mean over the 122 measured files, 3.2 s) and every
-// file adds TEST_FILE_OVERHEAD_SECONDS (import and transform; 58 s over 122
-// files at 2 cores). Raw measurements:
+// UNKNOWN_TEST_SECONDS and every file adds TEST_FILE_OVERHEAD_SECONDS (import
+// and transform; 58 s over 122 files at 2 cores). The unknown cost is the p95 of
+// the 122 measured files (12 s), not their mean (3.2 s, half of it one 169 s
+// file; median 0.13 s): an all-unknown own set costed at the mean kept 64 files
+// of which the actual seconds reached 360 s (p95 over 400 shuffles), costed at
+// 12 s the p95 is 221 s, inside the cap (R2 F2 of #4108). Raw measurements:
 // tests/fixtures/mutation-dry-run-measurement.json.
 export const MAX_DRY_RUN_SECONDS = 240;
-export const UNKNOWN_TEST_SECONDS = 3.2;
+export const UNKNOWN_TEST_SECONDS = 12;
 export const TEST_FILE_OVERHEAD_SECONDS = 0.5;
 
 /**
@@ -473,13 +476,27 @@ function strykerFailureCause(result, budgetMinutes, dryRunTimeout = null) {
 // Stryker's DryRunExecutor logs this at ERROR when the initial test run passes
 // `dryRunTimeoutMinutes` (@stryker-mutator/core 3-dry-run-executor.js
 // logTimeoutInitialRun), then throws, so the child exits 1 like any other
-// dry-run failure; the text is the only discriminator (#4092).
-const DRY_RUN_TIMEOUT_RE = /Initial test run timed out!/;
+// dry-run failure; the text is the only discriminator (#4092). Anchored to the
+// logger's own line (`HH:MM:SS (pid) ERROR DryRunExecutor <message>`, with the
+// ANSI colour codes chalk adds, verbatim from run 37629970371): Stryker's
+// command runner puts the whole vitest output into the "One or more tests
+// failed in the initial test run" log, and a test that asserts or prints the
+// literal (this lane's own tests do) would otherwise read as a timeout and hide
+// a real failure. The two logs are exclusive in Stryker (a Complete run with
+// failures, or a Timeout), so the failed-tests line also vetoes.
+const ANSI = String.raw`(?:\x1b\[[0-9;]*m)*`;
+const DRY_RUN_TIMEOUT_RE = new RegExp(
+	String.raw`^${ANSI}\d{2}:\d{2}:\d{2} \(\d+\) ERROR DryRunExecutor${ANSI} Initial test run timed out!\s*$`,
+	"m",
+);
+const DRY_RUN_TESTS_FAILED_RE =
+	/One or more tests failed in the initial test run/;
 
 /**
  * @param {string} [output] Stryker's console output or its file log
  */
-export const isDryRunTimeout = (output = "") => DRY_RUN_TIMEOUT_RE.test(output);
+export const isDryRunTimeout = (output = "") =>
+	DRY_RUN_TIMEOUT_RE.test(output) && !DRY_RUN_TESTS_FAILED_RE.test(output);
 
 /**
  * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result

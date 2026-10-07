@@ -217,6 +217,19 @@ const DRY_RUN_ERRORS = {
 	timeout: "14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
 	tests: "14:00:14 (1) ERROR DryRunExecutor One or more tests failed in the initial test run:",
 };
+// R2 F1 of #4108: Stryker's command runner puts the whole vitest output into the
+// failed-tests log, and this lane's own tests assert the timeout line, so a
+// vitest diff (and a console echo of a child's stderr) carries it. Shaped like
+// vitest's own diff, with one copy at the start of a line.
+DRY_RUN_ERRORS.testsQuotingTimeout = [
+	DRY_RUN_ERRORS.tests,
+	" FAIL  tests/scripts/stryker-diff.test.ts > describeStrykerFailure",
+	"AssertionError: expected 'x' to be 'y'",
+	"- Expected",
+	"+ 14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+	"stderr | tests/scripts/stryker-diff.test.ts > a child",
+	DRY_RUN_ERRORS.timeout,
+].join("\n");
 if (dryRun) {
 	if (control.dryRunFails) {
 		console.error(DRY_RUN_ERRORS[control.dryRunFails]);
@@ -1587,6 +1600,14 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 	it.each([
 		["the measuring dry run", { dryRunFails: "tests" }],
 		["the real run", { realRunFails: "tests" }],
+		[
+			"the measuring dry run, vitest output quoting the timeout line",
+			{ dryRunFails: "testsQuotingTimeout" },
+		],
+		[
+			"the real run, vitest output quoting the timeout line",
+			{ realRunFails: "testsQuotingTimeout" },
+		],
 	])(
 		"leaves a failed initial test run that did not time out unnamed (%s)",
 		(_where, control) => {
@@ -1832,6 +1853,35 @@ describe("driver stage dispositions, spawned for real (#3856 F3 arm)", () => {
 			);
 			const present = runDriver(fixture.root, ["--base", "main"], 120_000);
 			expect(present).not.toContain("no coverage answer for");
+		} finally {
+			fixture.cleanup();
+		}
+	}, 120_000);
+
+	// Recurrence (R2 F2 of #4108): probing is sequential and stops at its budget
+	// share, so the pool's tail goes unprobed (194 of 565 in shard 1 of run
+	// 37629970371). The own tests were last in the pool, and they are the tests
+	// the runtime cap most needs timed.
+	it("probes the PR's own tests before the import-related ones", () => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: false,
+			fakeVitest: true,
+		});
+		try {
+			// The related tests list as thing-other.test.ts then thing.test.ts
+			// (directory order); thing.test.ts becomes the PR's own.
+			const own = join(fixture.root, "tests", "scripts", "thing.test.ts");
+			writeFileSync(own, `${readFileSync(own, "utf8")}// touched by the PR\n`);
+			fixture.git(["commit", "-qam", "touch a test"]);
+			runDriver(fixture.root, ["--base", "main"], 120_000);
+			const probed = fakeVitestInvocations(fixture.root).map((invocation) =>
+				invocation.args.find((arg: string) => arg.startsWith("tests/")),
+			);
+			expect(probed.slice(0, 2)).toEqual([
+				"tests/scripts/thing.test.ts",
+				"tests/scripts/thing-other.test.ts",
+			]);
 		} finally {
 			fixture.cleanup();
 		}
@@ -2191,9 +2241,12 @@ describe("stryker diff selection", () => {
 		const sum = seconds.reduce((a, b) => a + b, 0);
 		expect(seconds).toHaveLength(measured.local.runs[0].files);
 		expect(sum).toBeCloseTo(measured.local.runs[0].sumFileSeconds, 0);
+		// The unknown cost is the p95 of the measured files, not their mean (R2 F2).
+		const sorted = [...seconds].sort((a, b) => a - b);
 		expect(UNKNOWN_TEST_SECONDS).toBe(
-			Math.round((sum / seconds.length) * 10) / 10,
+			Math.round(sorted[Math.floor(0.95 * (sorted.length - 1))]),
 		);
+		expect(measured.derived.p95FileSeconds).toBe(UNKNOWN_TEST_SECONDS);
 		expect(TEST_FILE_OVERHEAD_SECONDS).toBeGreaterThanOrEqual(
 			(measured.local.runs[0].wallSeconds - sum) / seconds.length - 0.1,
 		);
@@ -2214,10 +2267,38 @@ describe("stryker diff selection", () => {
 		).toBe(false);
 		expect(isDryRunTimeout("")).toBe(false);
 		expect(isDryRunTimeout()).toBe(false);
+		// The line as run 37629970371 logged it (job 112823805274, cat -v), colour
+		// codes around the logger prefix: the one real shape.
+		expect(
+			isDryRunTimeout(
+				"\u001b[91m14:00:14 (44599) ERROR DryRunExecutor\u001b[39m Initial test run timed out!\n",
+			),
+		).toBe(true);
+		// Recurrence (R2 F1 of #4108): vitest output inside the failed-tests log
+		// carries the literal (this lane's tests assert it); only the logger's own
+		// line, and no failed-tests line, is a timeout.
+		const vitestDiff = [
+			"+ 14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+			"    at tests/scripts/stryker-diff.test.ts:1  Initial test run timed out!",
+			"Initial test run timed out!",
+		].join("\n");
+		expect(isDryRunTimeout(vitestDiff)).toBe(false);
+		const failedTests = [
+			"14:00:14 (1) ERROR DryRunExecutor One or more tests failed in the initial test run:",
+			"14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+		].join("\n");
+		expect(isDryRunTimeout(failedTests)).toBe(false);
+		expect(
+			describeStrykerFailure({ status: 1 }, 60, {
+				output: vitestDiff,
+				dryRunTimeoutMinutes: 10,
+			}),
+		).toContain("dry run failed");
 		const failure = { status: 1 };
 		expect(
 			describeStrykerFailure(failure, 60, {
-				output: "ERROR DryRunExecutor Initial test run timed out!",
+				output:
+					"14:00:14 (44599) ERROR DryRunExecutor Initial test run timed out!",
 				dryRunTimeoutMinutes: 10,
 				tests: ["tests/a.test.ts"],
 			}),

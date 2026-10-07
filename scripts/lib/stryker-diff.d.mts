@@ -2,7 +2,7 @@ export declare const DEFAULT_MAX_FILES: 6;
 export declare const DEFAULT_MAX_RANGES: 40;
 export declare const DEFAULT_MAX_TESTS: 47;
 export declare const MAX_DRY_RUN_SECONDS: 240;
-export declare const UNKNOWN_TEST_SECONDS: 3.2;
+export declare const UNKNOWN_TEST_SECONDS: 12;
 export declare const TEST_FILE_OVERHEAD_SECONDS: 0.5;
 export declare const isDryRunTimeout: (output?: string) => boolean;
 export declare const MUTATION_BUDGET_MINUTES: 60;

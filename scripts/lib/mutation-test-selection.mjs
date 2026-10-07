@@ -300,10 +300,11 @@ export function probeConcurrency(cpus) {
  * `lines` null, or a map in which every probe failed, selects by the
  * import-graph priority alone: `mode: "import-graph"`.
  *
- * `runtime` bounds the run by estimated time as well (#4092). The count cap
- * leaves the own tests out of its arithmetic, so in the nightly (where every
- * test file changed in the window is "own") it bound nothing: both shards of
- * run 37629970371 ran 122 files. When the kept tests' estimated seconds exceed
+ * `runtime` bounds the run by estimated time (#4092) and then replaces the count
+ * cap. The count cap leaves the own tests out of its arithmetic, so in the
+ * nightly (where every test file changed in the window is "own") it bound
+ * nothing: both shards of run 37629970371 ran 122 files, and at 47 own tests
+ * it dropped every other covering test. When the candidates' estimated seconds exceed
  * `maxSeconds`, they are fitted first-fit in rank order: own tests that
  * execute a changed line (or whose probe failed), then the other tests, then
  * the own tests proven to execute none. A test that does not fit is skipped
@@ -386,7 +387,11 @@ export function selectMutationTests({
 	);
 	const own = candidates.filter((test) => ownSet.has(test)).sort(rank);
 	const rest = candidates.filter((test) => !ownSet.has(test)).sort(rank);
-	const slots = Math.max(0, maxTests - own.length);
+	// With a runtime budget the time fit below is the only limit: the count slice
+	// is `maxTests - own.length`, which is 0 whenever the own tests reach the cap,
+	// so it kept every zero-coverage own test and dropped every covering test that
+	// is not own before the time fit saw it (R2 F3 of #4108).
+	const slots = runtime ? rest.length : Math.max(0, maxTests - own.length);
 	let kept = [...own, ...rest.slice(0, slots)];
 	const overBudget = [];
 	let estimatedSeconds = null;
