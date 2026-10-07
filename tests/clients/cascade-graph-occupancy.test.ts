@@ -26,12 +26,12 @@
  *
  * The replacement counts behaviour the host cannot change:
  *   - cold and warm builds: the number of `setImmediate` yields the real
- *     build makes. It is 2 x floor(files / STAT_YIELD_EVERY) (two stat loops
- *     walk every file; measured 18 at 900 files and cadence 100, 36 at 50,
- *     12 at 150, 8 at 200, 0 with the yield off). The floor is derived from
- *     the fixture and the cadence READ FROM THE BUILDER SOURCE, so it
- *     tracks a legitimate cadence change but not a mutation of the built
- *     output. Also zero synchronous `readdirSync` calls on the warm path
+ *     build makes. It is 2 x floor(files / cadence) (two stat loops walk
+ *     every file; measured 18 at 900 files and cadence 100, 36 at 50, 12 at
+ *     150, 8 at 200, 0 with the yield off). The floor is derived from the
+ *     fixture and a cadence PINNED IN THIS FILE, so neither a source edit of
+ *     the builder cadence nor a mutation of the built output can move it.
+ *     Also zero synchronous `readdirSync` calls on the warm path
  *     (healthy 0, synchronous walk 154), on a fixture under the cap whose
  *     build mode is asserted not `skipped`;
  *   - the pure-sync operations: the MEDIAN of per-pair ratios t(4N)/t(N) over
@@ -48,7 +48,6 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
 	afterAll,
 	beforeAll,
@@ -77,27 +76,14 @@ import { removeTempDirSync } from "./test-utils.js";
 // is how the previous 1200-file fixture went vacuous. The precondition in each
 // build test fails loudly if the fixture ever crosses the cap again.
 const TREE_SIZE = 900;
-const repoRoot = path.resolve(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"../..",
-);
-// The builder yields to the event loop every STAT_YIELD_EVERY stats. Read from
-// the TypeScript SOURCE, not the compiled twin the tests run and the
-// mutations edit: a floor derived from the built constant (or an export of it)
-// would shrink with a mutation (cadence 1000000 gives floor 0) and stay green.
-function builderStatYieldEvery(): number {
-	const source = fs.readFileSync(
-		path.join(repoRoot, "clients/review-graph/builder.ts"),
-		"utf8",
-	);
-	const match = /^const STAT_YIELD_EVERY = (\d+);/m.exec(source);
-	if (!match) {
-		throw new Error(
-			"clients/review-graph/builder.ts no longer declares `const STAT_YIELD_EVERY = <n>;`: update this guard with it",
-		);
-	}
-	return Number(match[1]);
-}
+// The cadence the per-edit builder is EXPECTED to yield at, pinned here and
+// deliberately not read from `clients/review-graph/builder.ts` or its build:
+// an oracle that reads the constant it guards moves with it, so a source edit
+// (100 -> 200) plus a rebuild halves the yields and the floor together and
+// stays green (the round-2 review reproduced exactly that). A deliberate
+// cadence change must update this pin, which is the review moment; a
+// compiled-output mutation cannot move it either.
+const EXPECTED_STAT_YIELD_EVERY = 100;
 // Two stat loops walk every source file in a build (cold and warm alike), each
 // yielding once per STAT_YIELD_EVERY files: measured 18 yields at 900 files and
 // cadence 100, 36 at 50, 12 at 150, 8 at 200, 6 at 300, 0 with the yield off.
@@ -109,7 +95,7 @@ const STAT_LOOPS = 2;
 const YIELD_SLACK = 2;
 function minBuildYields(walkedFiles: number): number {
 	const floor =
-		STAT_LOOPS * Math.floor(walkedFiles / builderStatYieldEvery()) -
+		STAT_LOOPS * Math.floor(walkedFiles / EXPECTED_STAT_YIELD_EVERY) -
 		YIELD_SLACK;
 	// A floor of zero or less would pass a build that never yields.
 	if (floor <= 0) {
