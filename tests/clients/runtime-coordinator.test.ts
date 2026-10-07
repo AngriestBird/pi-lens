@@ -56,12 +56,14 @@ describe("RuntimeCoordinator", () => {
 	it("resetForSession drops the outgoing session's turn warnings and keeps a concurrent session's (#3613)", () => {
 		// The recurrences: a reset that clears every partition drops a live
 		// subagent's warnings at the primary's /new, and one that clears none
-		// carries the ended session's warnings into the new session's turn.
+		// carries a /reload's (same session id) old warnings into its turn.
 		const runtime = new RuntimeCoordinator();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
 		runtime.recordCodeQualityWarnings([quality("own")]);
 		runtime.recordCodeQualityWarnings([quality("sub")], "subagent-session");
 
 		runtime.resetForSession();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
 
 		expect({
 			own: rules(runtime.peekCodeQualityWarnings()),
