@@ -57,6 +57,7 @@ import { takeHandoff } from "../clients/session-scope.js";
 import { exportWidgetState } from "../clients/widget-state.js";
 import { queueAgentAdvisory } from "../clients/agent-nudge.js";
 import { AstGrepClient } from "../clients/ast-grep-client.js";
+import { CacheManager } from "../clients/cache-manager.js";
 import {
 	deferRunnerFindings,
 	pendingRunnerFindingsSize,
@@ -2991,6 +2992,11 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		pipelineDouble.result = (filePath) => {
 			const rule =
 				path.basename(filePath) === "sub.ts" ? SUBAGENT_RULE : PRIMARY_RULE;
+			// `key.ts` holds a hardcoded secret the ast-grep rule flags.
+			const awRule =
+				path.basename(filePath) === "key.ts"
+					? "ts-hardcoded-secret-assignment"
+					: "no-var";
 			return {
 				output: "",
 				hasBlockers: false,
@@ -3004,7 +3010,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 						line: 1,
 						severity: "warning",
 						tool: "ast-grep",
-						rule: "no-var",
+						rule: awRule,
 						message: `AW-${rule}`,
 						actions: [],
 						suppressed: false,
@@ -3170,6 +3176,38 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			subagentSees: shown(await contextText(subagent)),
 			primaryKeeps: held(coordinator),
 		}).toEqual({ subagentSees: [], primaryKeeps: PRIMARY });
+	});
+
+	it("enriches only the primary's secret report with the primary's ast-grep match", async () => {
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const key = path.join(cwd, "key.ts");
+		await startTurn(primary);
+		await startTurn(subagent);
+		await edit(primary, key);
+		// A gitleaks scan after the edit: its finding is live for both
+		// sessions, which share the project's scan cache.
+		new CacheManager(false).writeCache(
+			"gitleaks",
+			{
+				success: true,
+				scannedAt: new Date().toISOString(),
+				findings: [{ ruleId: "aws-access-token", file: key, startLine: 1 }],
+			},
+			cwd,
+		);
+
+		await endTurn(subagent);
+		const subagentSees = await contextText(subagent);
+		await endTurn(primary);
+		const primarySees = await contextText(primary);
+
+		const provenance = (text: string) =>
+			/key\.ts:1 — aws-access-token \[([^\]]*)\]/.exec(text)?.[1];
+		expect({
+			subagent: provenance(subagentSees),
+			primary: provenance(primarySees),
+		}).toEqual({ subagent: "gitleaks", primary: "gitleaks + ast-grep" });
 	});
 
 	it("starts a subagent's turn without the warnings its previous turn left undelivered", async () => {
