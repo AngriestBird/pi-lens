@@ -38,8 +38,6 @@ const timingMeasurementOnly = ["tests/support/perf-harness.test.ts"];
 const timingSensitiveNonSamplerMembers: Readonly<Record<string, string>> = {
 	"tests/clients/instance-registry-lock.test.ts":
 		"real child-process lock contention with a scheduling budget; unsuitable for the default fork storm (#2173)",
-	"tests/clients/instance-registry-race.test.ts":
-		"real node child-process barrier race; process scheduling makes this unsuitable for the default fork storm (#2173)",
 	"tests/clients/review-graph-retention.test.ts":
 		"forced-GC heap-retention guard whose MiB deltas need a quiet host (#2073)",
 	"tests/clients/review-graph-superseded-persist.test.ts":

@@ -180,7 +180,8 @@ expects to be operated.
 > `postinstall`) now require explicit approval — if `npm install` warns about
 > unreviewed install scripts, review and allow them with
 > `npm approve-scripts`, or trust the `allowScripts` entries already declared
-> in this package's `package.json`. Installing from a git source (`pi install
+> in this package's `package.json` (maintainers: see CONTRIBUTING.md
+> "Lifecycle-script approvals"). Installing from a git source (`pi install
 > git:...` / `pi update --extension git:...`) may similarly prompt for
 > git-dependency approval; accept it to let the `prepare` build step run.
 

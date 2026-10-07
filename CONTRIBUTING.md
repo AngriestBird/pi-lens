@@ -71,11 +71,13 @@ every `Bash` call, `scripts/hooks/guard-bash.mjs` (wired in
 `.claude/settings.json`), which denies `git stash` in any form, a `git reset
 --soft`/`--hard`, a hand-typed `git worktree remove` with two force flags (use
 `node scripts/prune-agent-worktrees.mjs` instead), any `git worktree remove`
-on a worktree whose `node_modules` is a symlink pointing outside it, a
-mutating `npm` verb (`ci`, `install`, `update`, `prune`, …) run where
-`node_modules` is such a symlink, `--dry-run` or not (#4044: `npm ci` empties
-the shared install through the link), a delete through that link
-(`rm -rf node_modules/`, `find node_modules/ -delete`), an unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
+on a worktree whose `node_modules` is a symlink pointing outside it (or on a
+path the hook cannot resolve statically; `~`, `$HOME` and relative paths are
+resolved first, #3988), a mutating `npm` verb (`ci`, `install`, `update`,
+`prune`, …) run where `node_modules` is such a symlink, `--dry-run` or not
+(#4044: `npm ci` empties the shared install through the link), a delete through
+that link (`rm -rf node_modules/`, `find node_modules/ -delete`), an
+unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
 without a `PI_LENS_HOME` pin, and a `TMPDIR`/`TMP`/`TEMP` aimed at the vitest
 harness's own home. It exists so these six rules (previously prose-only) are
 mechanically enforced rather than relied on.
@@ -140,9 +142,44 @@ This avoids spending time on a direction the maintainers may not accept.
 - [ ] Targeted test files for the touched seams pass locally after `npm run build`; the full suite is CI's job
 - [ ] `npm run build:dist` succeeds if you changed code under `clients/`, `commands/`, `tools/`, or `index.ts`
 - [ ] `package-lock.json` is in sync with `package.json` (run `npm install` after dep changes)
+- [ ] `npm run check:allow-scripts` passes (a dependency bump that changes a lifecycle-script package moves its `allowScripts` entry in the same PR)
 - [ ] New rules, runners, or LSP servers follow the wiring checklists below
 - [ ] Commit subject includes the issue number: `(closes #NNN)` or `(refs #NNN)`
 - [ ] `AGENTS.md` is updated if your change changes behavior, commands, conventions, or invariants documented there
+
+## Lifecycle-script approvals
+
+`package.json` `allowScripts` is the reviewed list of dependencies whose
+install-time scripts (`preinstall`, `install`, `postinstall`, an implicit
+`node-gyp rebuild`) may run. CI installs through the pinned npm with
+`--strict-allow-scripts`, so an undecided script fails the install, and
+`npm run check:allow-scripts` reconciles the map with the resolved
+`package-lock.json`. It names the package, resolved version, phase and the fix
+for each of these:
+
+- **missing-decision**: a resolved package has an install script and no entry.
+- **version-mismatch**: the entry pins another version (the `@ast-grep/cli`
+  0.44.1 against 0.45.x drift of #1176).
+- **stale-approval**: an entry decides no resolved version of its package while
+  every resolved version is decided anyway (the package no longer resolves with
+  a script, or an old-version entry sits beside the current one).
+- **unpinned-approval**: a positive entry is name-only or a range. Approvals are
+  exact `name@x.y.z`.
+- **floating-direct**: a direct dependency that runs a script is on a range
+  (`@ast-grep/cli` is pinned exactly for this reason).
+
+To review a change: read the package's script (`npm view <name>@<version> scripts`),
+then write `"name@x.y.z": true` to let it run or `false` to skip it. Skip only
+when the script is an optimisation or notice (`fsevents` ships its binary
+prebuilt; `node-gyp rebuild` is not needed). An approval is not an endorsement
+of the dependency, and it moves in the same PR as the lockfile bump; a
+Dependabot bump of a script-bearing package needs that maintainer commit.
+
+A consumer's own `allowScripts` is read from the install root, never from an
+installed dependency. pi's generated root declares none, so under
+`--strict-allow-scripts` an install of `pi-lens` there fails closed on
+`@ast-grep/cli`; the `npm-strict` job in `install-smoke.yml` pins that and the
+approved-root install.
 
 ## How the codebase is organized
 

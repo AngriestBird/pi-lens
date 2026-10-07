@@ -277,6 +277,17 @@ the surface they bite; each block loads only when its trigger applies.
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
+61. **Stand-in for unknown text stripped per consumer:** when a lexer leaves a
+    placeholder for text it cannot know (a command substitution's output),
+    read the input under each bounding assumption rather than teaching each
+    consumer to ignore the placeholder: empty (the text the rules matched
+    before it existed) and opaque (no rule word matches it, no path resolves
+    through it), denying if either reading denies. Enforced by `findDeny` in
+    `scripts/hooks/guard-bash.mjs`, pinned by the "substitution next to a rule
+    word (#3997)" rows in `tests/scripts/guard-bash-hook.test.ts`. Recurrence:
+    #3997 round 3 stripped the mark at three call sites and left
+    `checkUngated`, `mktemp` flags, and `git $(:) stash` open.
+
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit (call continuations, block-comment and
     template-literal interiors; #3038, #3039, #3052, #3059, #3116). Name which
@@ -340,7 +351,7 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
 
-61. **Delete or rewrite through a dependency link:** a lane's `node_modules` is
+62. **Delete or rewrite through a dependency link:** a lane's `node_modules` is
     a symlink to the main checkout's install, so any verb that removes or
     rewrites under it reaches every lane (#3173: `git worktree remove` followed
     the link twice; #4044: a worker's `npm ci --dry-run` emptied it under ~7
@@ -742,7 +753,8 @@ the surface they bite; each block loads only when its trigger applies.
 
 - Git command classification has one lexer and one guarded-verb matcher seam.
   Unknown wrappers and indirect guarded verbs fail closed. Text-consumer
-  allowances recurse through command substitutions and execution contexts.
+  allowances recurse through command substitutions and execution contexts. A
+  substitution's output is read both empty and opaque (shape 61).
 - The commit gate reads two states: the inline-blocker map's latch
   (`RuntimeCoordinator`), then the persisted `turn-end-findings` record. A
   collect-later runner's blocking findings join the map through
@@ -847,6 +859,7 @@ npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
 npm run check:lockfile                lockfile consistency
+npm run check:allow-scripts           allowScripts policy vs the resolved lockfile (#1185)
 npm run changelog:check               rollup check; fragments use check-changelog-fragments.mjs
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
@@ -1066,14 +1079,17 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 Every agent `Bash` call under Claude Code runs through
 `scripts/hooks/guard-bash.mjs` (`PreToolUse`), which denies with its reason:
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
-or any remove over a symlinked `node_modules`; a mutating `npm` verb (`ci`,
-`install`, `update`, `prune`, …, or `npx npm@… ci`) where `node_modules` is a
-symlink out of the project, `--dry-run` or not, and a delete through such a
-link (`rm -rf node_modules/`, `node_modules/*`, `find node_modules/ -delete`;
-unlinking it with `rm node_modules` stays allowed; #4044); an unpinned `node`
-probe loading `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the
-harness home; bare `pkill`/`killall` patterns (#3556); worktrees, clones, or
-`mktemp -d` under `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
+or any remove over a symlinked `node_modules` or over a path it cannot resolve
+statically (`$(…)`, `~user`, an unset `$VAR`, a glob; #3988), where `~`, `$HOME`
+and relative paths (against a preceding `cd`/`git -C`) are resolved first; a
+mutating `npm` verb (`ci`, `install`, `update`, `prune`, …, or `npx npm@… ci`)
+where `node_modules` is a symlink out of the project, `--dry-run` or not, and a
+delete through such a link (`rm -rf node_modules/`, `node_modules/*`, `find
+node_modules/ -delete`; unlinking it with `rm node_modules` stays allowed;
+#4044); an unpinned `node` probe loading
+`clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
+`pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
+`/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
 instead of `&&` (#3471); and every hook bypass (`--no-verify`, commit `-n`,
 `core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`; #3778). `kill $(pgrep -f …)`
 is a known blind spot; kill your own recorded PID. For a red that looks
