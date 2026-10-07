@@ -111,7 +111,7 @@ pi-lens builds a review graph (`file → symbol → dependency`) during session 
 
 ### Knip at turn end and linked worktrees
 
-knip reads `.gitignore` and nothing else, so linked worktrees that live inside the project (for example `.worktrees/*`) are walked as project files: on a pi-lens clone with six of them, 83 percent of the project paths knip saw were worktree files, and a scan took 10.9 s cold and 3.1 s warm instead of 2.6 s and 0.6 s. pi-lens drops their issues from the verdict, runs knip in the worktree that owns an edit, and stops waiting for a root whose last two scans both outlasted the turn_end budget (the knip row then reads `reason: "scan-exceeds-budget"` and the ledger counts `turn-end-knip-nested-worktrees`). It does not edit your repository: to remove the cost, add `/.worktrees/` (or your worktree directory) to the project's `.gitignore`.
+knip follows git ignore rules (`.gitignore` and `.git/info/exclude`) and nothing else, so linked worktrees that live inside the project (for example `.worktrees/*`) are walked as project files: on a pi-lens clone with six of them, 83 percent of the project paths knip saw were worktree files, and a scan took 10.9 s cold and 3.1 s warm instead of 2.6 s and 0.6 s. pi-lens drops their issues from the verdict, runs knip in the worktree that owns an edit, and stops waiting for a root whose last two scans both outlasted the turn_end budget (the knip row then reads `reason: "scan-exceeds-budget"` and the ledger counts `turn-end-knip-nested-worktrees`). It does not edit your repository: to remove the cost, add `/.worktrees/` (or your worktree directory) to the project's `.gitignore`.
 
 ### Read-Before-Edit Guard
 
