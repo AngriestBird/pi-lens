@@ -93,6 +93,27 @@ vi.mock("../clients/lsp/index.js", async (importOriginal) => {
 	};
 });
 
+/**
+ * #3613: the dispatch pipeline is doubled at its boundary for the S4 turn
+ * describe only, so a tool result carries a known code-quality warning
+ * through the real tool_result, turn_start and turn_end handlers. Every other
+ * test sees the real pipeline.
+ */
+const pipelineDouble = vi.hoisted(() => ({
+	result: undefined as undefined | ((filePath: string) => unknown),
+}));
+vi.mock("../clients/pipeline.js", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("../clients/pipeline.js")>();
+	return {
+		...original,
+		runPipeline: (async (ctx, deps) =>
+			pipelineDouble.result
+				? pipelineDouble.result(ctx.filePath)
+				: original.runPipeline(ctx, deps)) as typeof original.runPipeline,
+	};
+});
+
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
 	["no-autofix", true],
@@ -2943,5 +2964,213 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 				.filter((row) => row.transition === "start")
 				.at(-1),
 		).toMatchObject({ reason: "reload", handoffSource: "slot" });
+	});
+});
+
+/**
+ * #3613 (session-scope S4, N2): the coordinator's turn state is the
+ * primary's, and a concurrent secondary (an in-process subagent) runs its own
+ * turn_start, tool results and turn_end on the same module-level runtime. The
+ * recurrence: the subagent's turn_start advanced the primary's turn and
+ * cleared the warnings the primary's tool results had recorded for this turn,
+ * so the primary's turn_end delivered none of them; and the per-turn records
+ * were one map, so either session's turn end delivered and cleared the
+ * other's.
+ */
+describe("#3613 a concurrent secondary's turn leaves the primary's turn state alone", () => {
+	const PRIMARY_RULE = "probe-3613-primary";
+	const SUBAGENT_RULE = "probe-3613-subagent";
+
+	beforeEach(() => {
+		// A code-quality warning on line 1 of every analysed file, named by
+		// the session that edits it: the subagent edits `sub.ts`.
+		pipelineDouble.result = (filePath) => {
+			const rule =
+				path.basename(filePath) === "sub.ts" ? SUBAGENT_RULE : PRIMARY_RULE;
+			return {
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+				codeQualityWarnings: [
+					{
+						id: `cq:${rule}`,
+						filePath,
+						displayPath: path.basename(filePath),
+						line: 1,
+						severity: "warning",
+						tool: "ast-grep",
+						rule,
+						message: `${rule} fired`,
+						category: "maintainability",
+						origin: "dispatch",
+					},
+				],
+			};
+		};
+	});
+
+	afterEach(() => {
+		pipelineDouble.result = undefined;
+		vi.restoreAllMocks();
+	});
+
+	/**
+	 * A concurrent secondary in the primary's project: pi-lens analyses only
+	 * files under the primary's root.
+	 */
+	function startSubagent(): Promise<AgentSessionRuntime> {
+		return startRuntime(SessionManager.inMemory(cwd));
+	}
+
+	async function startTurn(runtime: AgentSessionRuntime): Promise<void> {
+		await runtime.session.extensionRunner.emit({
+			type: "turn_start",
+			turnIndex: 0,
+			timestamp: Date.now(),
+		} as never);
+	}
+
+	async function endTurn(runtime: AgentSessionRuntime): Promise<void> {
+		await runtime.session.extensionRunner.emit({
+			type: "turn_end",
+			turnIndex: 0,
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: "x",
+				provider: "x",
+				model: "x",
+				usage,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			toolResults: [],
+		} as never);
+	}
+
+	/** One edit through the session's real tool_call and tool_result hooks. */
+	async function edit(runtime: AgentSessionRuntime, file: string) {
+		const c = conversation(runtime);
+		c.user(`edit ${path.basename(file)}`);
+		await c.write(`call_${path.basename(file)}`, file, "const a = 1;\n");
+	}
+
+	const sessionIdOf = (runtime: AgentSessionRuntime) =>
+		runtime.session.sessionManager.getSessionId();
+
+	it("keeps the primary's warnings, turn and write order when a subagent's turn starts", async () => {
+		const seen = coordinators();
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const coordinator = seen[0]!;
+		await startTurn(primary);
+		await edit(primary, path.join(cwd, "a.ts"));
+		const turnState = () => ({
+			turnIndex: coordinator.turnIndex,
+			orderTurn: coordinator.writeOrderTurn,
+			writeIndex: coordinator.peekWriteIndex(),
+			turnStartProjectSeq: coordinator.turnStartProjectSeq,
+			warnings: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
+		});
+		const before = turnState();
+		expect(before.warnings).toEqual([PRIMARY_RULE]);
+		const subagent = await startSubagent();
+
+		await startTurn(subagent);
+
+		expect(turnState()).toEqual(before);
+		await endTurn(primary);
+		expect(await contextText(primary)).toContain(PRIMARY_RULE);
+	});
+
+	it("delivers a subagent's own warnings at its turn end, after the primary's next turn starts", async () => {
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(subagent);
+		await edit(subagent, path.join(cwd, "sub.ts"));
+		await startTurn(primary);
+
+		await endTurn(subagent);
+		const subagentSees = await contextText(subagent);
+		await edit(primary, path.join(cwd, "a.ts"));
+		await endTurn(primary);
+		const primarySees = await contextText(primary);
+
+		const shown = (text: string) =>
+			[PRIMARY_RULE, SUBAGENT_RULE].filter((rule) => text.includes(rule));
+		expect({
+			subagent: shown(subagentSees),
+			primary: shown(primarySees),
+		}).toEqual({ subagent: [SUBAGENT_RULE], primary: [PRIMARY_RULE] });
+	});
+
+	it("keeps the primary's warnings out of a subagent's turn end", async () => {
+		const seen = coordinators();
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const coordinator = seen[0]!;
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		await edit(primary, path.join(cwd, "a.ts"));
+		await startTurn(subagent);
+
+		await endTurn(subagent);
+
+		expect({
+			subagentSees: (await contextText(subagent)).includes(PRIMARY_RULE),
+			primaryKeeps: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
+		}).toEqual({ subagentSees: false, primaryKeeps: [PRIMARY_RULE] });
+	});
+
+	it("advances a subagent's own turn id and leaves the primary's", async () => {
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		await startTurn(subagent);
+		await startTurn(subagent);
+
+		await edit(subagent, path.join(cwd, "sub.ts"));
+		await edit(primary, path.join(cwd, "a.ts"));
+
+		await flushLatencyLog();
+		const turnIds = new Set(
+			fs
+				.readFileSync(getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => (JSON.parse(line) as { turnId?: string }).turnId),
+		);
+		expect({
+			subagent: turnIds.has(`${sessionIdOf(subagent)}:2`),
+			primary: turnIds.has(`${sessionIdOf(primary)}:1`),
+			primaryMoved: turnIds.has(`${sessionIdOf(primary)}:3`),
+		}).toEqual({ subagent: true, primary: true, primaryMoved: false });
+	});
+
+	it("drops a subagent's per-turn records when it shuts down before its turn end", async () => {
+		const seen = coordinators();
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const coordinator = seen[0]!;
+		const subagent = await startSubagent();
+		const subagentId = sessionIdOf(subagent);
+		await startTurn(primary);
+		await startTurn(subagent);
+		await edit(subagent, path.join(cwd, "sub.ts"));
+		await edit(primary, path.join(cwd, "a.ts"));
+		const recorded = coordinator
+			.peekCodeQualityWarnings(subagentId)
+			.map((w) => w.rule);
+
+		await subagent.dispose();
+		runtimes.splice(runtimes.indexOf(subagent), 1);
+
+		expect({
+			recorded,
+			left: coordinator.peekCodeQualityWarnings(subagentId).map((w) => w.rule),
+			primary: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
+		}).toEqual({
+			recorded: [SUBAGENT_RULE],
+			left: [],
+			primary: [PRIMARY_RULE],
+		});
 	});
 });

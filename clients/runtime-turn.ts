@@ -2601,7 +2601,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 		signal: deps.signal,
 		readScannerCache,
-		peekActionableWarnings: () => runtime.peekActionableWarnings(),
+		peekActionableWarnings: () => runtime.peekActionableWarnings(sessionId),
 	};
 
 	// govulncheck — the session_start-cached Go CVE store, delivered as ONE
@@ -4082,7 +4082,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				turnIndex: runtime.turnIndex,
 				files,
 				modifiedRangesByFile,
-				dispatchWarnings: runtime.peekActionableWarnings(),
+				dispatchWarnings: runtime.peekActionableWarnings(sessionId),
 				includeLspCodeActions: !!getFlag("lens-actionable-warning-actions"),
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
@@ -4301,7 +4301,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// view all agree; the delta view's own filter then re-applies to the same
 		// set and is idempotent. Per file, because the anchor is content-bound.
 		const qualityWarningsByFile = new Map<string, CodeQualityWarningRecord[]>();
-		for (const warning of runtime.peekCodeQualityWarnings()) {
+		for (const warning of runtime.peekCodeQualityWarnings(sessionId)) {
 			const group = qualityWarningsByFile.get(warning.filePath);
 			if (group) group.push(warning);
 			else qualityWarningsByFile.set(warning.filePath, [warning]);
@@ -5157,8 +5157,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 
 	runtime.fixedThisTurn.clear();
-	runtime.clearActionableWarnings();
-	runtime.clearCodeQualityWarnings();
+	// #3613: only this turn's session's records; a concurrent session drains
+	// its own at its own turn end.
+	runtime.clearActionableWarnings(sessionId);
+	runtime.clearCodeQualityWarnings(sessionId);
 	if (demotedFindingsRetired > 0) {
 		// #1944: the retired payload must not survive as a SUPPRESSION key.
 		// `turn-end-findings-last` holds a content signature used to silence a

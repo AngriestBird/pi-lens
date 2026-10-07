@@ -450,6 +450,34 @@ const TOOL_CALL_ATTRIBUTION_CAPACITY = 256;
  */
 const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
 
+/**
+ * #3613 (session-scope S4): per-turn records partitioned by the session whose
+ * turn produced them. A concurrent secondary (an in-process subagent) records,
+ * reads and clears its own partition on the primary's coordinator, so neither
+ * session's turn moves the other's records. A partition is removed when its
+ * turn drains it, at its session's shutdown, or at the primary's reset.
+ */
+class TurnRecordsBySession<T extends { id: string }> {
+	private readonly bySession = new Map<string, Map<string, T>>();
+
+	record(sessionId: string, records: readonly T[]): void {
+		let partition = this.bySession.get(sessionId);
+		if (!partition) {
+			partition = new Map();
+			this.bySession.set(sessionId, partition);
+		}
+		for (const record of records) partition.set(record.id, record);
+	}
+
+	peek(sessionId: string): T[] {
+		return [...(this.bySession.get(sessionId)?.values() ?? [])];
+	}
+
+	clear(sessionId: string): void {
+		this.bySession.delete(sessionId);
+	}
+}
+
 export class RuntimeCoordinator {
 	private _projectRoot = normalizeMapKey(process.cwd());
 	// #3611: the session generation is this scope's ticket, drawn from one
@@ -591,14 +619,10 @@ export class RuntimeCoordinator {
 	private readonly _resolvedBlockerFilesThisTurn =
 		new PathKeyedMap<ResolvedBlockerFile>(normalizeMapKey);
 	private _resolvedBlockerFilesDropped = 0;
-	private readonly _actionableWarningsThisTurn = new Map<
-		string,
-		ActionableWarningRecord
-	>();
-	private readonly _codeQualityWarningsThisTurn = new Map<
-		string,
-		CodeQualityWarningRecord
-	>();
+	private readonly _actionableWarningsThisTurn =
+		new TurnRecordsBySession<ActionableWarningRecord>();
+	private readonly _codeQualityWarningsThisTurn =
+		new TurnRecordsBySession<CodeQualityWarningRecord>();
 	// #484: opt-in per-RUN summary of diagnostics/autofixes/formats,
 	// accumulated across the run's turns and consumed once at the
 	// agent_settled quiet window. The collector itself is always constructed
@@ -640,6 +664,10 @@ export class RuntimeCoordinator {
 		this._reportedThisTurn.clear();
 		this._mutationReceipts = [];
 		this._droppedMutationReceipts = 0;
+		// #3613: the outgoing session's per-turn records; a live secondary's
+		// partition is its own and survives the primary's replacement.
+		this._actionableWarningsThisTurn.clear(this._telemetrySessionId);
+		this._codeQualityWarningsThisTurn.clear(this._telemetrySessionId);
 		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
@@ -669,8 +697,6 @@ export class RuntimeCoordinator {
 		this._inlineBlockerWriteOrder.clear();
 		this._resolvedBlockerFilesThisTurn.clear();
 		this._resolvedBlockerFilesDropped = 0;
-		this._actionableWarningsThisTurn.clear();
-		this._codeQualityWarningsThisTurn.clear();
 		this._turnSummary.clear();
 		// #2402: an applied-edit record is a fact about the session that applied
 		// it; a new session must re-resolve identical payloads from content.
@@ -777,7 +803,22 @@ export class RuntimeCoordinator {
 		return this._gitGuardCacheUnknownReason;
 	}
 
-	beginTurn(): void {
+	/**
+	 * Start a turn. `sessionId` is the turn's own session (its ctx's stable id);
+	 * omitted, or equal to this coordinator's session, the turn is the
+	 * coordinator's own. #3613 (S4, N2): a concurrent secondary's turn on this
+	 * coordinator advances only its own turn identity and its own per-turn
+	 * records. The turn counter, the write-order turn, the turn's change
+	 * window and the carried cascade runs are the primary's.
+	 */
+	beginTurn(sessionId?: string): void {
+		const turnSession = this.turnSession(sessionId);
+		if (turnSession !== this._telemetrySessionId) {
+			beginTurnContext(turnSession);
+			this._actionableWarningsThisTurn.clear(turnSession);
+			this._codeQualityWarningsThisTurn.clear(turnSession);
+			return;
+		}
 		// #1443: runs sitting here at turn_start were appended AFTER the last
 		// turn_end drained them (consumeCascadeRuns) — the quiet-window reconcile's
 		// late re-injection (`onResolvedFound`, clients/lsp/cascade-tier.ts) lands
@@ -810,8 +851,8 @@ export class RuntimeCoordinator {
 		// Inline blockers are session-scoped per-file state. They are cleared only
 		// when that file is re-analyzed clean or the session resets; a new turn must
 		// not let a clean unrelated file erase an unresolved blocker.
-		this._actionableWarningsThisTurn.clear();
-		this._codeQualityWarningsThisTurn.clear();
+		this._actionableWarningsThisTurn.clear(turnSession);
+		this._codeQualityWarningsThisTurn.clear(turnSession);
 		// _turnSummary is deliberately NOT cleared here (#484 rework): the
 		// summary entry is emitted once per RUN at the agent_settled quiet
 		// window (sendMessage during a live stream would STEER the agent, and
@@ -2008,32 +2049,61 @@ export class RuntimeCoordinator {
 		return entries;
 	}
 
-	recordActionableWarnings(warnings: ActionableWarningRecord[]): void {
-		for (const warning of warnings) {
-			this._actionableWarningsThisTurn.set(warning.id, warning);
-		}
+	/**
+	 * #3613: the partition a per-turn record of `sessionId`'s turn lives in,
+	 * the rule {@link beginTurn} applies too: a turn with no session id of its
+	 * own is this coordinator's.
+	 */
+	private turnSession(sessionId: string | undefined): string {
+		return sessionId ?? this._telemetrySessionId;
 	}
 
-	peekActionableWarnings(): ActionableWarningRecord[] {
-		return [...this._actionableWarningsThisTurn.values()];
+	recordActionableWarnings(
+		warnings: ActionableWarningRecord[],
+		sessionId?: string,
+	): void {
+		this._actionableWarningsThisTurn.record(
+			this.turnSession(sessionId),
+			warnings,
+		);
 	}
 
-	clearActionableWarnings(): void {
-		this._actionableWarningsThisTurn.clear();
+	peekActionableWarnings(sessionId?: string): ActionableWarningRecord[] {
+		return this._actionableWarningsThisTurn.peek(this.turnSession(sessionId));
 	}
 
-	recordCodeQualityWarnings(warnings: CodeQualityWarningRecord[]): void {
-		for (const warning of warnings) {
-			this._codeQualityWarningsThisTurn.set(warning.id, warning);
-		}
+	clearActionableWarnings(sessionId?: string): void {
+		this._actionableWarningsThisTurn.clear(this.turnSession(sessionId));
 	}
 
-	peekCodeQualityWarnings(): CodeQualityWarningRecord[] {
-		return [...this._codeQualityWarningsThisTurn.values()];
+	recordCodeQualityWarnings(
+		warnings: CodeQualityWarningRecord[],
+		sessionId?: string,
+	): void {
+		this._codeQualityWarningsThisTurn.record(
+			this.turnSession(sessionId),
+			warnings,
+		);
 	}
 
-	clearCodeQualityWarnings(): void {
-		this._codeQualityWarningsThisTurn.clear();
+	peekCodeQualityWarnings(sessionId?: string): CodeQualityWarningRecord[] {
+		return this._codeQualityWarningsThisTurn.peek(this.turnSession(sessionId));
+	}
+
+	clearCodeQualityWarnings(sessionId?: string): void {
+		this._codeQualityWarningsThisTurn.clear(this.turnSession(sessionId));
+	}
+
+	/**
+	 * #3613: a concurrent session's per-turn records end with its session, so
+	 * a subagent that shuts down before its turn end leaves no partition
+	 * behind. This coordinator's own records are reset by `resetForSession`.
+	 */
+	forgetTurnSession(sessionId: string | undefined): void {
+		const turnSession = this.turnSession(sessionId);
+		if (turnSession === this._telemetrySessionId) return;
+		this._actionableWarningsThisTurn.clear(turnSession);
+		this._codeQualityWarningsThisTurn.clear(turnSession);
 	}
 
 	/** #484: the per-run diagnostics/autofix/format collector (accumulates

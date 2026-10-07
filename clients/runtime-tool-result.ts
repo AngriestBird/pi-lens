@@ -2923,13 +2923,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #3568: per-turn maps the replacement's reset cleared.
 	const { actionableWarnings, codeQualityWarnings } = result;
 	if (actionableWarnings?.length) {
+		// #3613: in the partition of the session whose turn this result is.
 		writeSession.guardedWrite(filePath, () =>
-			runtime.recordActionableWarnings(actionableWarnings),
+			runtime.recordActionableWarnings(actionableWarnings, deps.sessionId),
 		);
 	}
 	if (codeQualityWarnings?.length) {
 		writeSession.guardedWrite(filePath, () =>
-			runtime.recordCodeQualityWarnings(codeQualityWarnings),
+			runtime.recordCodeQualityWarnings(codeQualityWarnings, deps.sessionId),
 		);
 	}
 

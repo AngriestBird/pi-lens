@@ -2856,7 +2856,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 		) {
 			mountLensWidget(ctx.ui, readExtensionMode(ctx));
 		}
-		runtime.beginTurn();
+		// #3613 (S4, N2): the turn's own session. A concurrent secondary's turn
+		// advances only its own turn identity and per-turn records; the
+		// coordinator's turn state is the primary's.
+		runtime.beginTurn(getStableSessionId(ctx));
+		// Every turn, a secondary's too: clearing only re-runs a duplicate
+		// same-state analysis, while keeping it would skip a secondary's next
+		// turn (the dedupe keys on the primary's turn index).
 		clearLastAnalyzedStateCache();
 
 		// #492: parent-at-turn_start cross-process nudge consumer — the "parent
@@ -3730,6 +3736,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				"concurrent-secondary",
 			);
 			clearCachePrefixSession(stableSessionId, "concurrent-secondary");
+			// #3613: its per-turn records end with it.
+			runtime.forgetTurnSession(stableSessionId);
 			decrementSecondarySessionCount();
 			// #2130: scoped deregistration. A secondary's shutdown must never run
 			// `deregisterInstance()` — the process lives on and the primary still
