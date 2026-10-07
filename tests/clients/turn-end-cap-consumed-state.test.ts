@@ -791,6 +791,34 @@ describe("M3c: late runner findings vs the cap (#3813)", () => {
 			rig.cleanup();
 		}
 	});
+	// #3796 item 3. Recurrence prevented: the requeued findings kept `failed`
+	// but lost the kind, so once a kindless `failed` read as broken the next
+	// turn end announced a runner failure that never happened.
+	it("re-offers a cut findings-failed entry's findings without a broken-runner note", async () => {
+		const rig = makeRig("pi-lens-3813-m3c-findings-failed-");
+		try {
+			const fillerFile = fillerBlocker(rig, 1000);
+			const file = path.join(rig.cwd, "run-a.ts");
+			deferSettled(rig, "run-a.ts", {
+				status: "failed",
+				semantic: "warning",
+				failureKind: "blocking_diagnostics",
+				diagnostics: [runnerDiagnostic(file, `${PAD}${RUNNER_END}`)],
+			});
+			const first = await endTurn(rig);
+			expect(first).not.toContain(RUNNER_END);
+			expect(pendingRunnerFindingsSize()).toBe(1);
+
+			clearFiller(rig, fillerFile);
+			nextTurn(rig, 2);
+			const second = await endTurn(rig);
+			expect(second).toContain(RUNNER_END);
+			expect(second).not.toContain("Deferred runner slow-runner failed");
+		} finally {
+			rig.cleanup();
+		}
+	});
+
 	it("re-offers a failed entry's note and findings once each when both were cut", async () => {
 		const rig = makeRig("pi-lens-3813-m3c-both-");
 		try {
