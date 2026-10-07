@@ -11,6 +11,7 @@ export interface GzipStageWriteMetrics {
 	rawBytes: number;
 	/** On-disk size of the gzipped stage file. */
 	gzBytes: number;
+	/** Always 0: the caller serializes and reports its own time (#3913). */
 	serializeMs: number;
 	writeMs: number;
 	/** Wall-clock duration of the complete stage operation. */
@@ -23,7 +24,7 @@ export interface GzipStageWriteMetrics {
 
 export interface GzipStageWriteOptions {
 	/** Runs on the worker thread over the serialized body, never on the caller. */
-	semanticFingerprint?: (body: string | Uint8Array) => string;
+	semanticFingerprint?: (body: Uint8Array) => string;
 	/** Return before gzip/write when the derived digest equals one of these. */
 	skipIfFingerprints?: readonly string[];
 }
@@ -35,13 +36,13 @@ export interface GzipStageWorkerRequest {
 	generation: number;
 	stagePath: string;
 	/**
-	 * Either an object the worker serializes itself (the structured clone of the
-	 * whole graph rides the message), or already-serialized JSON as UTF-8 bytes
-	 * whose `ArrayBuffer` the caller lists in `postMessage`'s transfer list, so
-	 * the body crosses the thread boundary zero-copy (#3789). The project
-	 * snapshot uses the bytes form; the review graph still sends objects.
+	 * The body, already serialized to JSON as UTF-8 bytes. The caller lists its
+	 * `ArrayBuffer` in `postMessage`'s transfer list, so the body crosses the
+	 * thread boundary zero-copy and no object graph is structured-cloned
+	 * (#3789 project snapshot, #3913 review graph). A string body would be
+	 * chunked by UTF-16 unit and could split a surrogate pair.
 	 */
-	data: unknown;
+	data: Uint8Array;
 	testDelayMs?: number;
 }
 
@@ -63,7 +64,7 @@ export interface GzipStageWorkerResult {
 
 /**
  * Shared worker-thread body-persist core (#958, single source of truth #883):
- * `JSON.stringify` (or pre-serialized bytes, #3789) → chunked `createGzip`
+ * pre-serialized JSON bytes (#3789, #3913) → chunked `createGzip`
  * pipeline → a per-call staging file
  * from `atomic-write.ts`'s {@link stagePathFor} → atomic rename to
  * `stagePath`, returning byte/timing metrics. Both
@@ -71,9 +72,9 @@ export interface GzipStageWorkerResult {
  * `clients/project-snapshot-persist-worker.ts` call this so the streamed-gzip
  * write lives in exactly one place; each worker's `parentPort` wiring owns its
  * own request/result envelope and maps a thrown error onto its own `error`
- * field. The chunked generator keeps the whole JSON string off a single giant
- * Buffer (the whole reason the write is on a worker thread — a naïve sync gzip
- * on the main save path regressed host memory by +656MB, per the #950 review).
+ * field. The chunked generator feeds gzip one 256 KiB view at a time (the
+ * whole reason the write is on a worker thread — a naïve sync gzip on the main
+ * save path regressed host memory by +656MB, per the #950 review).
  *
  * On failure the partial `.tmp` is removed and the error is rethrown for the
  * caller to record; the `stagePath` itself is only ever created by the atomic
@@ -96,25 +97,22 @@ export interface GzipStageWorkerResult {
  * to a main-thread rewrite on an error result).
  */
 export async function writeGzipStageFile(
-	data: unknown,
+	body: Uint8Array,
 	stagePath: string,
 	testDelayMs?: number,
 	options?: GzipStageWriteOptions,
 ): Promise<GzipStageWriteMetrics> {
 	// Worker-path duration starts inside this stage, so it includes the worker's
-	// test delay, serialization, gzip, and rename, but excludes postMessage queue
-	// latency. Main-thread callers measure from their inclusive persist entry.
+	// test delay, gzip, and rename, but excludes postMessage queue latency and
+	// the caller's serialization. Main-thread callers measure from their
+	// inclusive persist entry.
 	const startedAt = performance.now();
 	const tmpPath = stagePathFor(stagePath);
 	try {
 		if (testDelayMs) {
 			await new Promise((resolve) => setTimeout(resolve, testDelayMs));
 		}
-		const serializeStarted = performance.now();
-		// Pre-serialized bytes cost the worker no stringify and no copy (#3789).
-		const body = data instanceof Uint8Array ? data : JSON.stringify(data);
-		const serializeMs = performance.now() - serializeStarted;
-		const rawBytes = Buffer.byteLength(body);
+		const rawBytes = body.byteLength;
 		const semanticFingerprint = options?.semanticFingerprint?.(body);
 		if (
 			semanticFingerprint !== undefined &&
@@ -123,7 +121,7 @@ export async function writeGzipStageFile(
 			return {
 				rawBytes,
 				gzBytes: 0,
-				serializeMs,
+				serializeMs: 0,
 				writeMs: 0,
 				durationMs: performance.now() - startedAt,
 				semanticFingerprint,
@@ -136,9 +134,7 @@ export async function writeGzipStageFile(
 		const chunks = function* () {
 			const chunkSize = 256 * 1024;
 			for (let offset = 0; offset < body.length; offset += chunkSize) {
-				yield typeof body === "string"
-					? body.slice(offset, offset + chunkSize)
-					: body.subarray(offset, offset + chunkSize);
+				yield body.subarray(offset, offset + chunkSize);
 			}
 		};
 		await pipeline(
@@ -152,7 +148,7 @@ export async function writeGzipStageFile(
 		return {
 			rawBytes,
 			gzBytes,
-			serializeMs,
+			serializeMs: 0,
 			writeMs,
 			durationMs: performance.now() - startedAt,
 			semanticFingerprint,
@@ -178,7 +174,7 @@ export function serveGzipStageWorker<
 >(
 	buildBaseResult: (request: Req) => Base,
 	options?: {
-		semanticFingerprint?: (request: Req, body: string | Uint8Array) => string;
+		semanticFingerprint?: (request: Req, body: Uint8Array) => string;
 		skipIfFingerprints?: (request: Req) => readonly string[] | undefined;
 	},
 ): void {

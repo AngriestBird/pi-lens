@@ -32,6 +32,11 @@ function readStage(stagePath: string): unknown {
 	return JSON.parse(gunzipSync(fs.readFileSync(stagePath)).toString("utf-8"));
 }
 
+/** The body the callers hand the worker: JSON as UTF-8 bytes (#3913). */
+function bytesOf(value: unknown): Uint8Array {
+	return new TextEncoder().encode(JSON.stringify(value));
+}
+
 function tmpLeftovers(): string[] {
 	return fs.readdirSync(dir).filter((name) => STAGE_TMP_PATTERN.test(name));
 }
@@ -48,7 +53,7 @@ describe("writeGzipStageFile", () => {
 	it("writes gzipped JSON to the stage path and reports metrics", async () => {
 		const stagePath = path.join(dir, "review-graph.json.gz.stage-1-0");
 		const data = { nodes: ["a", "b"], gen: 1 };
-		const metrics = await writeGzipStageFile(data, stagePath);
+		const metrics = await writeGzipStageFile(bytesOf(data), stagePath);
 
 		expect(readStage(stagePath)).toEqual(data);
 		expect(metrics.rawBytes).toBe(Buffer.byteLength(JSON.stringify(data)));
@@ -57,7 +62,7 @@ describe("writeGzipStageFile", () => {
 
 	it("creates the parent directory and leaves no staging file behind", async () => {
 		const stagePath = path.join(dir, "nested", "snapshot.json.gz.stage-1-0");
-		await writeGzipStageFile({ ok: true }, stagePath);
+		await writeGzipStageFile(bytesOf({ ok: true }), stagePath);
 
 		expect(readStage(stagePath)).toEqual({ ok: true });
 		expect(fs.readdirSync(path.dirname(stagePath))).toEqual([
@@ -69,7 +74,7 @@ describe("writeGzipStageFile", () => {
 		const stagePath = path.join(dir, "snapshot.json.gz.stage-1-0");
 		const fingerprint = vi.fn(() => "same-body");
 		const metrics = await writeGzipStageFile(
-			{ generatedAt: "volatile", value: 1 },
+			bytesOf({ generatedAt: "volatile", value: 1 }),
 			stagePath,
 			undefined,
 			{
@@ -92,10 +97,15 @@ describe("writeGzipStageFile", () => {
 	it("writes when the semantic fingerprint is new", async () => {
 		const stagePath = path.join(dir, "snapshot.json.gz.stage-1-0");
 		const data = { generatedAt: "volatile", value: 2 };
-		const metrics = await writeGzipStageFile(data, stagePath, undefined, {
-			semanticFingerprint: () => "new-body",
-			skipIfFingerprints: ["old-body"],
-		});
+		const metrics = await writeGzipStageFile(
+			bytesOf(data),
+			stagePath,
+			undefined,
+			{
+				semanticFingerprint: () => "new-body",
+				skipIfFingerprints: ["old-body"],
+			},
+		);
 
 		expect(metrics.skippedUnchanged).toBeUndefined();
 		expect(metrics.semanticFingerprint).toBe("new-body");
@@ -109,17 +119,20 @@ describe("writeGzipStageFile", () => {
 		fs.writeFileSync(blocker, "not a directory");
 		const stagePath = path.join(blocker, "review-graph.json.gz.stage-1-0");
 
-		await expect(writeGzipStageFile({ a: 1 }, stagePath)).rejects.toThrow();
+		await expect(
+			writeGzipStageFile(bytesOf({ a: 1 }), stagePath),
+		).rejects.toThrow();
 		expect(tmpLeftovers()).toEqual([]);
 	});
 });
 
 /**
- * #3789: the project-snapshot dispatcher serializes once and transfers UTF-8
- * bytes, so the worker core must accept bytes (and still the object form the
- * review graph sends). Recurrence: a core that re-stringified bytes, or that
- * chunked a view by its whole backing buffer, would publish a corrupt stage
- * file the load path then rejects.
+ * #3789, #3913: the project-snapshot and review-graph dispatchers serialize
+ * once and transfer UTF-8 bytes, so the worker core takes bytes only.
+ * Recurrence: a core that re-stringified bytes, or that chunked a view by its
+ * whole backing buffer, would publish a corrupt stage file the load path then
+ * rejects; one that chunked by string slices would split a surrogate pair
+ * that straddles a 256 KiB boundary (#3913).
  */
 describe("writeGzipStageFile with pre-serialized bytes (#3789)", () => {
 	// Non-ASCII so byte length and string length differ, over several 256 KiB
@@ -147,6 +160,19 @@ describe("writeGzipStageFile with pre-serialized bytes (#3789)", () => {
 		expect(gunzipSync(fs.readFileSync(stagePath)).toString("utf-8")).toBe(json);
 		expect(metrics.rawBytes).toBe(Buffer.byteLength(json));
 		expect(metrics.gzBytes).toBe(fs.statSync(stagePath).size);
+	});
+
+	it("keeps a surrogate pair whose high half sits on the last unit of a chunk", async () => {
+		const stagePath = path.join(dir, "review-graph.json.gz.stage-1-0");
+		// `{"s":"` is 6 units, so this pad puts the emoji's high half on unit 262143.
+		const pad = "a".repeat(256 * 1024 - 1 - 6);
+		const straddling = JSON.stringify({ s: `${pad}😀` });
+		expect(straddling.charCodeAt(256 * 1024 - 1)).toBe(0xd83d);
+		await writeGzipStageFile(new TextEncoder().encode(straddling), stagePath);
+
+		expect(gunzipSync(fs.readFileSync(stagePath)).toString("utf-8")).toBe(
+			straddling,
+		);
 	});
 
 	it("hands the semantic fingerprint the bytes and skips gzip on a match", async () => {
@@ -183,8 +209,10 @@ describe("writeGzipStageFile with pre-serialized bytes (#3789)", () => {
  */
 describe("concurrent writes to one stagePath (#1217)", () => {
 	const ITERATIONS = 40;
-	const BIG = { kind: "big", pad: "A".repeat(2 * 1024 * 1024) };
-	const SMALL = { kind: "small", pad: "B".repeat(50 * 1024) };
+	const BIG_VALUE = { kind: "big", pad: "A".repeat(2 * 1024 * 1024) };
+	const SMALL_VALUE = { kind: "small", pad: "B".repeat(50 * 1024) };
+	const BIG = bytesOf(BIG_VALUE);
+	const SMALL = bytesOf(SMALL_VALUE);
 
 	/**
 	 * Tolerate a concurrent replace-rename rejection on Windows only, and only
@@ -231,8 +259,10 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 					writeGzipStageFile(second, stagePath),
 				]),
 			);
-			const published = readStage(stagePath) as typeof BIG;
-			expect(published).toEqual(published.kind === "big" ? BIG : SMALL);
+			const published = readStage(stagePath) as typeof BIG_VALUE;
+			expect(published).toEqual(
+				published.kind === "big" ? BIG_VALUE : SMALL_VALUE,
+			);
 			outcomes.push(published.kind);
 		}
 		// Both payloads round-tripped whole across the run; neither is required to
