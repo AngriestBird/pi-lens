@@ -2139,6 +2139,17 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * #3613 G2: whether `key` is a live turn key: this coordinator's current
+	 * turn, or a live concurrent session's current one.
+	 */
+	isLiveTurnKey(key: number): boolean {
+		if (key === this._turnIndex) return true;
+		for (const live of this._foreignTurnKeys.values())
+			if (live === key) return true;
+		return false;
+	}
+
+	/**
 	 * #3613: a concurrent session's per-turn records end with its session, so
 	 * a subagent that shuts down before its turn end leaves no partition
 	 * behind. This coordinator's own records are reset by `resetForSession`.

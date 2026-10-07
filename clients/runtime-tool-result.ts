@@ -2085,6 +2085,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			sessionGeneration: runtime.sessionGeneration,
 			// #3613 F2: the budget of this session's own turn.
 			turnIndex: runtime.turnKey(deps.sessionId),
+			isLiveTurn: (key) => runtime.isLiveTurnKey(key),
 			signal: getAmbientAbortSignal(),
 			// #3596: the replay lands after the settle's own awaits.
 			record: (entry) =>

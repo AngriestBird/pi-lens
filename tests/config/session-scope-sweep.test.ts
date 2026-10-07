@@ -199,6 +199,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_turnEndCascadeSettleStarts: "reset",
 	_turnIndex: "reset",
 	_turnStartProjectSeq: "reset",
+	_turnStarts: "reset",
 	_turnSummary: "reset",
 	_viewLogEntries: "reset",
 	_viewMissingThrough: "reset",

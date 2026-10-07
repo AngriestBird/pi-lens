@@ -468,7 +468,10 @@ export function hasPendingObservation(toolCallId: string | undefined): boolean {
 }
 
 /** The net's state with `turnIndex`'s spend in the budget slot. */
-function budgetFor(turnIndex: number): ObservedNetState {
+function budgetFor(
+	turnIndex: number,
+	isLiveTurn: (turnIndex: number) => boolean = () => false,
+): ObservedNetState {
 	const current = state();
 	if (current.turnIndex !== turnIndex) {
 		const parked = current.parkedSpendMs;
@@ -477,21 +480,34 @@ function budgetFor(turnIndex: number): ObservedNetState {
 		current.turnSpentMs = parked.get(turnIndex) ?? 0;
 		parked.delete(turnIndex);
 		current.turnIndex = turnIndex;
-		while (parked.size > OBSERVED_PARKED_TURNS_MAX)
-			parked.delete(Math.min(...parked.keys()));
+		while (parked.size > OBSERVED_PARKED_TURNS_MAX) {
+			// Oldest dead turn first; the oldest live one only when all are live.
+			let victim: number | undefined;
+			for (const key of parked.keys())
+				if (!isLiveTurn(key) && (victim === undefined || key < victim))
+					victim = key;
+			parked.delete(victim ?? Math.min(...parked.keys()));
+		}
 	}
 	return current;
 }
 
-function remainingTurnBudgetMs(turnIndex: number): number {
+function remainingTurnBudgetMs(
+	turnIndex: number,
+	isLiveTurn?: (turnIndex: number) => boolean,
+): number {
 	return Math.max(
 		0,
-		OBSERVED_TURN_BUDGET_MS - budgetFor(turnIndex).turnSpentMs,
+		OBSERVED_TURN_BUDGET_MS - budgetFor(turnIndex, isLiveTurn).turnSpentMs,
 	);
 }
 
-function chargeTurnBudget(turnIndex: number, spentMs: number): void {
-	budgetFor(turnIndex).turnSpentMs += Math.max(0, spentMs);
+function chargeTurnBudget(
+	turnIndex: number,
+	spentMs: number,
+	isLiveTurn?: (turnIndex: number) => boolean,
+): void {
+	budgetFor(turnIndex, isLiveTurn).turnSpentMs += Math.max(0, spentMs);
 }
 
 /** Test seam: force the per-turn budget to a known state. */
@@ -752,6 +768,13 @@ export interface ArmObservationArgs {
 	cwd: string | undefined;
 	sessionGeneration: number;
 	turnIndex: number;
+	/**
+	 * #3613 G2: whether a turn key is a live session turn (the primary's, or
+	 * a live subagent's current one). Parking evicts dead turns first, so a
+	 * subagent's run cannot push out the primary's spent turn. Omitted, every
+	 * parked turn counts as dead.
+	 */
+	isLiveTurn?: (turnIndex: number) => boolean;
 	signal?: AbortSignal;
 	dbg?: (msg: string) => void;
 }
@@ -783,7 +806,7 @@ export async function armObservedMutation(
 		return { armed: false, reason: "not-eligible" };
 	if (!args.toolCallId) return { armed: false, reason: "no-tool-call-id" };
 
-	const remaining = remainingTurnBudgetMs(args.turnIndex);
+	const remaining = remainingTurnBudgetMs(args.turnIndex, args.isLiveTurn);
 	if (remaining <= 0) {
 		emitBounded(
 			"observed_mutation_budget_exhausted",
@@ -837,7 +860,7 @@ export async function armObservedMutation(
 		// blown capture budget is attributable.
 		{ hook: "tool_call", label: "armObservedMutation" },
 	);
-	chargeTurnBudget(args.turnIndex, Date.now() - started);
+	chargeTurnBudget(args.turnIndex, Date.now() - started, args.isLiveTurn);
 
 	if (!outcome.ok) {
 		emitBounded(
@@ -950,6 +973,13 @@ export interface SettleObservationArgs {
 	toolName: string;
 	sessionGeneration: number;
 	turnIndex: number;
+	/**
+	 * #3613 G2: whether a turn key is a live session turn (the primary's, or
+	 * a live subagent's current one). Parking evicts dead turns first, so a
+	 * subagent's run cannot push out the primary's spent turn. Omitted, every
+	 * parked turn counts as dead.
+	 */
+	isLiveTurn?: (turnIndex: number) => boolean;
 	signal?: AbortSignal;
 	record: ObservedReplayRecorder;
 	/** Read-guard read history for a file, for range derivation without a baseline. */
@@ -1069,7 +1099,7 @@ export async function settleObservedMutation(
 		args.signal,
 		{ hook: "tool_result_edit", label: "settleObservedMutation" },
 	);
-	chargeTurnBudget(args.turnIndex, Date.now() - started);
+	chargeTurnBudget(args.turnIndex, Date.now() - started, args.isLiveTurn);
 	if (!capture.ok) {
 		// A wedged filesystem call. There is no diff to report and, critically,
 		// no evidence the tool was clean — so the clean latch is not advanced.

@@ -3509,6 +3509,27 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}).toEqual({ subagentArms: true, primaryArmsAgain: false });
 	});
 
+	it("keeps the primary's spent budget spent when subagent calls settle between its calls", async () => {
+		// #3613 G2, the settle's half: the settle in tool_result parks and
+		// evicts too. The recurrence: a settle that switched the net back to a
+		// subagent's turn evicted the primary's live spent turn.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await opaqueCall(primary, target);
+		exhaustBudget();
+		for (let turn = 1; turn <= 10; turn += 1) {
+			await startTurn(subagent);
+			const { id } = await opaqueCallId(subagent, target);
+			await opaqueCall(primary, target);
+			await opaqueResult(subagent, id, target);
+		}
+
+		expect(await opaqueCall(primary, target)).toBe(false);
+	});
+
 	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
 		// #3613 F2. The recurrence it guards: per-session budget keys over the
 		// net's one budget slot, so every switch between the two sessions'

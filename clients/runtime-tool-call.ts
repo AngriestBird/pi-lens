@@ -654,6 +654,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				sessionGeneration: runtime.sessionGeneration,
 				// #3613 F2: the budget of this session's own turn.
 				turnIndex: runtime.turnKey(deps.sessionId),
+				isLiveTurn: (key) => runtime.isLiveTurnKey(key),
 				signal: ctx.signal,
 				dbg,
 			});
