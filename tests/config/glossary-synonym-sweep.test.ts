@@ -1353,7 +1353,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-coordinator.ts": 6,
 		"clients/runtime-turn.ts": 21,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
