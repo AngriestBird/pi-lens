@@ -713,6 +713,8 @@ export type DegradationKind =
 	 * "hung" server is truly hung or just answering late.
 	 */
 	| "lsp-pull-unconfirmed"
+	/** A host-created pi-agent staging root was declined as an LSP root. */
+	| "lsp-root-declined"
 	/**
 	 * The abandoned request behind an `lsp-pull-late-answer` timeout REJECTED
 	 * instead of answering (#1774) — e.g. a permanent server error such as

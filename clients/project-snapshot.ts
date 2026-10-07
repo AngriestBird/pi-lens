@@ -6,6 +6,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { writeFileAtomic } from "./atomic-write.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { getProjectDataDir } from "./file-utils.js";
+import { isEphemeralCheckoutRoot } from "./ephemeral-root.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { withGenerationLockSync } from "./generation-lock.js";
 import { isStaleStageFile } from "./instance-reaper.js";
@@ -870,6 +871,7 @@ function readSnapshotExportsAndRulesBody(
 export function loadProjectSnapshotExportsAndRules(
 	cwd: string,
 ): ProjectSnapshotExportsAndRules | null {
+	if (isEphemeralCheckoutRoot(cwd)) return null;
 	const key = normalizeMapKey(cwd);
 	const body = resolveSnapshotBodyPath(cwd);
 	const authoritative = authoritativeSnapshots.get(key);
@@ -972,6 +974,7 @@ function loadProjectSnapshotInternal(
 
 /** Load the canonical body, including serialized postings when present. */
 export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
+	if (isEphemeralCheckoutRoot(cwd)) return null;
 	return loadProjectSnapshotInternal(cwd, true);
 }
 
@@ -982,6 +985,7 @@ export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 export function loadProjectSnapshotWithoutWordIndex(
 	cwd: string,
 ): ProjectSnapshot | null {
+	if (isEphemeralCheckoutRoot(cwd)) return null;
 	return loadProjectSnapshotInternal(cwd, false);
 }
 
@@ -2021,6 +2025,7 @@ export function saveProjectSnapshot(
 	cwd: string,
 	snapshot: ProjectSnapshot,
 ): void {
+	if (isEphemeralCheckoutRoot(cwd)) return;
 	const gzPath = getProjectSnapshotPath(cwd);
 	const legacyPath = getProjectSnapshotLegacyPath(cwd);
 	const metaPath = getProjectSnapshotMetaPath(cwd);

@@ -88,6 +88,7 @@ import {
 	safeSpawnAsync,
 } from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
+import { ephemeralStagingRoot } from "../ephemeral-root.js";
 import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -154,6 +155,15 @@ export async function resolveLspServerCwd(
 	onRootFailure?: (reason: string) => void,
 	onRootFallback?: (fallback: LspRootFallback) => void,
 ): Promise<string | undefined> {
+	const stagingRoot = ephemeralStagingRoot(filePath);
+	if (stagingRoot) {
+		recordDegradationOnce({
+			kind: "lsp-root-declined",
+			subject: stagingRoot,
+			reason: "LSP root declined for host pi-agent staging directory",
+		});
+		return undefined;
+	}
 	const rootMarkers = server.rootMarkers ?? server.root.rootMarkers;
 	let serverRoot: string | undefined;
 	let rootFailed = false;
@@ -435,6 +445,7 @@ async function findGitBoundary(dir: string): Promise<string | undefined> {
 
 async function isExcludedLspRoot(dir: string): Promise<boolean> {
 	const candidate = path.resolve(dir);
+	if (ephemeralStagingRoot(candidate)) return true;
 	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate))
 		return true;
 	const gitRoot = await findGitBoundary(candidate);
@@ -1585,6 +1596,7 @@ export function PriorityRoot(
 
 export const FileDirRoot: RootFunction = async (file: string) => {
 	const candidate = path.resolve(path.dirname(file));
+	if (ephemeralStagingRoot(candidate)) return undefined;
 	return nearestNonExcludedFallbackRoot(candidate);
 };
 

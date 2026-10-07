@@ -36,6 +36,7 @@ import {
 	loadPiLensProjectConfig,
 } from "./project-lens-config.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { isEphemeralCheckoutRoot } from "./ephemeral-root.js";
 
 /**
  * Return the directory where pi-lens stores project-specific data
@@ -53,6 +54,11 @@ import { safeSpawnAsync } from "./safe-spawn.js";
  * inside user projects.
  */
 export function getProjectDataDir(cwd: string): string {
+	if (isEphemeralCheckoutRoot(cwd)) {
+		// Temporary checkouts must not mint a durable per-cwd project directory.
+		// Callers still receive a writable process-local target for volatile caches.
+		return path.join(os.tmpdir(), "pi-lens-ephemeral", String(process.pid));
+	}
 	const legacyProjectDir = path.join(cwd, ".pi-lens");
 	const configuredBase = process.env.PILENS_DATA_DIR?.trim();
 	if (!configuredBase && fs.existsSync(legacyProjectDir)) {

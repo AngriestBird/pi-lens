@@ -635,6 +635,12 @@ the surface they bite; each block loads only when its trigger applies.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
+- Host-created `pi-agent-*` paths below `os.tmpdir()` are declined at the
+  shared `resolveLspServerCwd` seam and emit one `lsp-root-declined` record per
+  staging root per session. Real checkouts below `os.tmpdir()` remain normal
+  LSP roots but are ephemeral: their project snapshot is not persisted, their
+  project data target is process-local, and transparent clients use the
+  aggressive ephemeral idle window.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.

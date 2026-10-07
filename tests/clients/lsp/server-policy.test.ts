@@ -774,6 +774,36 @@ describe("lsp server policy", () => {
 		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
 	});
 
+	it("declines pi-agent staging roots and records the declined root (#1129)", async () => {
+		const { resolveLspServerCwd } =
+			await import("../../../clients/lsp/server.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+		const fixtureRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-1129-agent-"),
+		);
+		const tmp = path.join(fixtureRoot, "pi-agent-1129");
+		fs.mkdirSync(tmp);
+		dirs.push(fixtureRoot);
+		const file = path.join(tmp, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "export const value = 1;\n");
+		resetDegradationLedger();
+
+		const server = {
+			id: "test",
+			root: async () => tmp,
+			rootMarkers: ["package.json"],
+		};
+		expect(await resolveLspServerCwd(server, file, tmp)).toBeUndefined();
+		expect(await resolveLspServerCwd(server, file, tmp)).toBeUndefined();
+		const declined = getDegradationSummary().find(
+			(group) => group.kind === "lsp-root-declined",
+		);
+		expect(declined?.count).toBe(1);
+		expect(declined?.latestReasons[0]?.subject).toBe(tmp);
+	});
+
 	it("does not classify a testdata substring as a fixture segment (#1328)", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(
