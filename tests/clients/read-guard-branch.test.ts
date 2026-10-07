@@ -106,6 +106,22 @@ describe("ReadGuard.retainBranch (#3521)", () => {
 		expect(verdict(guard, b, 2)).toMatch(/^block: .*Edit without read/);
 	});
 
+	// #3520: the idle-expiry marker describes the branch that wrote the file.
+	// Recurrence: a /tree cleared the write record, and the old marker then
+	// blamed an expiry that never happened on this branch.
+	it("forgets an idle-expired write record, so the block names no expiry (#3520)", () => {
+		vi.useFakeTimers();
+		const a = oldFile("a.ts", 6);
+		const guard = createReadGuard("retain-expired-write");
+		guard.recordWritten(a);
+		vi.advanceTimersByTime(31 * 60_000);
+		expect(verdict(guard, a, 2)).toMatch(/^block: .*write record/);
+
+		guard.retainBranch(new Set());
+
+		expect(verdict(guard, a, 2)).toMatch(/^block: .*you have not read/);
+	});
+
 	it("deletes a record with no tool-call id (a bridge read)", () => {
 		const a = oldFile("a.ts", 6);
 		const guard = createReadGuard("retain-no-id");

@@ -601,6 +601,13 @@ export class ReadGuard {
 	// of session authorship, independent of filesystem mtime granularity or
 	// clock skew (NFS, FAT32, etc.) and of other writers' mtimes (#3520).
 	private readonly writtenThisSession = new Set<string>();
+	// Files whose write record idle-expired (#3520): `evictFile` drops the
+	// authorship with the rest of the file's state, and a later zero-read edit
+	// must say so instead of "you have not read" (false for a file the agent
+	// wrote). Insertion order is eviction order; a branch move clears it with
+	// the authorship it describes. Session-scoped like the guard: `/new` and
+	// `/fork` build a fresh one, and a `/reload` does not carry it.
+	private readonly expiredWrites = new Set<string>();
 	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
 	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
 	// currently exists on disk, on EVERY platform since #3098 — an existing
@@ -702,14 +709,16 @@ export class ReadGuard {
 	 * on the rising edge, so a file evicted repeatedly across a session can't
 	 * flood the log.
 	 *
-	 * `idle-timeout` is deliberately excluded from both the ledger tally and
-	 * the log line (#1918 review F2): idle eviction is designed housekeeping,
-	 * not a fault signal — a read-only session that idles out N files is
-	 * healthy, ordinary behavior, and N is unbounded (every distinct file path
-	 * touched that session is its own ledger subject). Recording it here would
-	 * grow the ledger's tally map without bound and spam `pilens_health` in
-	 * every healthy session, unlike the other three reasons, which are rare by
-	 * construction (only real pressure or an explicit delete reaches them).
+	 * `idle-timeout` is deliberately excluded from the ledger tally and, for a
+	 * file that carried no write record, from the log line (#1918 review F2):
+	 * idle eviction is designed housekeeping, not a fault signal — N is
+	 * unbounded (every distinct file path touched that session is its own
+	 * ledger subject). Recording it here would grow the ledger's tally map
+	 * without bound and spam `pilens_health` in every healthy session, unlike
+	 * the other three reasons, which are rare by construction (only real
+	 * pressure or an explicit delete reaches them). The one exception is a
+	 * dropped write record (#3520): it changes the next edit's verdict, so
+	 * {@link noteExpiredWrite} logs it once per file, outside the ledger.
 	 */
 	private evictFile(filePath: string, reason: FileEvictionReason): void {
 		this.clearFileTimer(filePath);
@@ -717,13 +726,16 @@ export class ReadGuard {
 		this.edits.delete(filePath);
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
-		this.writtenThisSession.delete(filePath);
+		const droppedAuthorship = this.writtenThisSession.delete(filePath);
 		// #1668 review F1: prune the reverse-pointing knownPathIndex entries
 		// too, so it never outlives the record it points at.
 		for (const [syntacticKey, stored] of this.knownPathIndex) {
 			if (stored === filePath) this.knownPathIndex.delete(syntacticKey);
 		}
-		if (reason === "idle-timeout") return;
+		if (reason === "idle-timeout") {
+			if (droppedAuthorship) this.noteExpiredWrite(filePath);
+			return;
+		}
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-file-evicted",
 			subject: filePath,
@@ -737,6 +749,26 @@ export class ReadGuard {
 				metadata: { reason },
 			});
 		}
+	}
+
+	/**
+	 * #3520: remember that an idle eviction dropped this file's write record,
+	 * and log it once per file (the set is the once-only gate). The set holds
+	 * at most `READ_GUARD_MAX_FILES` files, oldest dropped first.
+	 */
+	private noteExpiredWrite(filePath: string): void {
+		if (this.expiredWrites.has(filePath)) return;
+		if (this.expiredWrites.size >= READ_GUARD_MAX_FILES) {
+			const oldest = this.expiredWrites.values().next().value;
+			if (oldest !== undefined) this.expiredWrites.delete(oldest);
+		}
+		this.expiredWrites.add(filePath);
+		logReadGuardEvent({
+			event: "read_file_evicted",
+			sessionId: this.sessionId,
+			filePath,
+			metadata: { reason: "idle-timeout", authorshipDropped: true },
+		});
 	}
 
 	private touchFile(filePath: string): void {
@@ -1069,14 +1101,20 @@ export class ReadGuard {
 				});
 				return verdict;
 			}
+			// #3520: an idle eviction dropped the agent's own write record, so
+			// "you have not read" would be false.
+			const writeRecordExpired = this.expiredWrites.has(filePath);
 			const verdict = this.blockOrWarn(
 				"zero-read",
-				`🔄 RETRYABLE — Edit without read: you have not read \`${filePath}\` in this conversation. Read it first, then retry: \`read path="${filePath}"\`.`,
+				writeRecordExpired
+					? `🔄 RETRYABLE — Edit without read: the earlier write record for \`${filePath}\` expired, so it needs a read again. Read it first, then retry: \`read path="${filePath}"\`.`
+					: `🔄 RETRYABLE — Edit without read: you have not read \`${filePath}\` in this conversation. Read it first, then retry: \`read path="${filePath}"\`.`,
 				undefined,
 				effectiveMode,
 			);
 			this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 				reasonKind: "zero_read",
+				...(writeRecordExpired ? { writeRecordExpired } : {}),
 			});
 			return verdict;
 		}
@@ -1603,6 +1641,7 @@ export class ReadGuard {
 		}
 		this.edits.clear();
 		this.writtenThisSession.clear();
+		this.expiredWrites.clear();
 		this.pendingCreations.clear();
 		this.fileTime.clear();
 		moveBranch(this.scope);
