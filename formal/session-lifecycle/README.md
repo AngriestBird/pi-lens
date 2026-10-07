@@ -217,6 +217,15 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   drift between what a shutdown names and what its successor computes
   (#3855 verify r2 V2). `SecBind` is an SDK subagent's first bind with a
   replacement reason (verify r2 PR8).
+- `rolelessKey` (#4106, V7 of #3855): `SecRoleless` is a gap subagent's own
+  `/new` whose start its own `/reload` interrupts before pi-lens's start
+  handler runs, so that activation shuts down with no recorded role while no
+  primary is registered. Without this part it fails safe to primary, names
+  the gap by a ticket on its own manager, and its reload successor takes the
+  primary slot (`Mut4106RolelessShutdown`). With it, such a shutdown is the
+  primary's only when its own key is the named one (`noteSessionShutdown`,
+  `clients/session-lifecycle.ts`); a key of none against a name of none, the
+  primary's in-memory `/new` gap, is residual R3 (`AcceptedR3RolelessNewGap`).
 - `nameAtShutdown` (#3855 round 5, merged; verify r4 V6): the naming site
   (`successorStartKey`) binds a fresh process-unique ticket to a file-less
   `reload`/`fork` session's manager that carries none, in every window of an
@@ -325,6 +334,9 @@ counterexample.
 | `H3InMemoryNewGapReload` | #3855 r2, row 12: in an in-memory `/new` gap a key-less subagent `/reload` is told apart by its reason | pass | 16 |
 | `H3InterruptedNewGap` | #3855 r4, verify r3 V3 (PR12): an in-memory `/new` interrupted by its own `/reload`; a gap subagent's own in-memory `/reload` or an SDK reload bind stays secondary | pass | 500 |
 | `Mut3855r3InterruptedNewGap` | #3855 r3, code-faithful `Interrupt` without a binding rule: the key-less start takes the slot | violated `PrimaryIsUsers` | 17 |
+| `H3RolelessShutdown` | #4106: the gap subagent's role-less `/new` shutdown keeps the secondary role in the primary's `/reload`, `/fork` or file-backed `/new` gap | pass | 4462 |
+| `Mut4106RolelessShutdown` | pre-#4106: the role-less shutdown fails safe to primary and its successor takes the slot | violated `PrimaryIsUsers` | 75 |
+| `AcceptedR3RolelessNewGap` | #4106 residual R3: the same in the primary's in-memory `/new` gap | violated `PrimaryIsUsers` | 28 |
 | `Mut3855r4PreScope` | #3855 r4, the forward-path bind, with a reload that lands before the start held its scope (verify r4 V6) | violated `PrimaryIsUsers` | 19 |
 | `H3SdkBind` | #3855 r3, verify r2 PR8: an SDK subagent's in-memory first bind with reason `reload`/`fork` in an in-memory primary's gap stays secondary; the real successor keeps its activations | pass | 236 |
 | `H3SdkBindFileBacked` | the same, file-backed | pass | 236 |
@@ -390,6 +402,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Mut3855r1DemotedReplaces` | #3855 review F2 | #3855 r1 (6ae7e2716): every secondary-role activation left a note, the demoted real successor's too | The primary's `/new`; R1 makes the subagent's `/new` primary and demotes the real successor; the subagent primary reloads; the demoted conversation reloads in that gap, finds its own note and is declined. |
 | `Mut3855r1StaleNote` | #3855 review F3 | #3855 r1 (6ae7e2716): notes had no time bound | A subagent reloads and its start never comes; the primary resumes the subagent's file; its successor matches the stale note and is declined. |
 | `Mut3855r1Evicted` | #3855 r1 | #3855 r1 (6ae7e2716): `SECONDARY_SUCCESSOR_NOTE_CAP` | A read lands; `/reload`; the gap subagent's note is evicted; its own `/reload` start classifies primary and the real successor is demoted. |
+| `Mut4106RolelessShutdown` | #4106 | pre-#4106 (8d030fa27): `noteSessionShutdown` returned primary whenever no primary was registered | The primary's `/reload`; a subagent binds and runs a `/new`; its start is interrupted by its own `/reload` before pi-lens's handler (`SecRoleless`); the role-less shutdown is primary and its reload successor takes the slot. |
 | `Mut3855r4PreScope` | #3855 verify r4 V6 | #3855 r4 (0b8ee3ca4): `forwardHandoff` bound the interrupted scope's ticket, which a start interrupted before `scope = runtime.sessionScope` does not hold | The primary's in-memory `/new`; a `/reload` lands before its start held its scope (`InterruptAt(TRUE)`); an SDK reload bind (no key) takes the slot. |
 | `Mut3855r3InterruptedNewGap` | #3855 verify r3 V3 | #3855 r3 (53ef06147): `forwardHandoff` bound no ticket | The primary's in-memory `/new`; its start is interrupted by its own `/reload`; an SDK subagent binds with reason `reload` and no key; the gap was named `(reload, none)`, so it is primary. |
 | `Mut3855r2KeylessFailSafe` | #3855 verify r2 V1 | #3855 r2 (317ffae8a): J6's `key === undefined && typeof namedKey === "number"` | An in-memory primary's `/reload` or `/fork`; an SDK subagent binds with that reason and no key; J6 admits it and the real successor is demoted. |

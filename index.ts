@@ -792,7 +792,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			? "secondary"
 			: ownedSessionRole === "primary"
 				? "primary"
-				: noteSessionShutdown(ctx, sessionId, root);
+				: noteSessionShutdown(
+						ctx,
+						sessionId,
+						root,
+						// #4106: a role-less shutdown in a named gap is told
+						// apart by this session's key.
+						startKey(getSessionFile(ctx), getSessionManager(ctx)),
+					);
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
 	const rememberOwnEventCtx = (ctx: any): void => {
 		if (!ctx) return;

@@ -103,6 +103,9 @@
 (*                       (Begin) is declined if its own key differs.       *)
 (*                       Without either, any non-startup gap start is      *)
 (*                       primary (#3668 row 17)                            *)
+(*   "rolelessKey"       #4106: a shutdown whose start never ran, in a     *)
+(*                       named gap, is the primary's only when its own     *)
+(*                       manager's key is the named one (SecRoleless)      *)
 (*   "nameAtShutdown"    #3855 r5 (merged): the naming site binds a fresh  *)
 (*                       ticket to a file-less reload/fork session's       *)
 (*                       manager that carries none, in every window        *)
@@ -1061,6 +1064,48 @@ SecUp ==
                    wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, dupDone,
                    landed, reads, acts, advOut, advDrop, steps, used, fwd, preScope>>
 
+\* #4106 (V7 of #3855): the gap subagent's own /new start (SecDown(new) done,
+\* its SecUp not yet) is interrupted by its own /reload before pi-lens's start
+\* handler ran (micro:0), so that activation t shuts down with no recorded
+\* role, in the primary's gap (no primary registered). Without "rolelessKey"
+\* it fails safe to primary: it names the gap by a fresh ticket on its own
+\* manager, and its reload successor t2 matches that name and is primary, so
+\* the real successor is demoted later (BeginDemoted). With it, the shutdown
+\* is the primary's only when its own key (its file, else none: nothing bound
+\* its new manager) is the named key; otherwise it is a secondary's, the gap
+\* keeps its name, and t2 (reload, its key) is declined. A key of none in a
+\* gap named (new, none) still matches: residual R3.
+SecRoleless ==
+    /\ "SecRoleless" \in Transitions /\ "secRoleless" \notin used
+    /\ steps < MaxSteps
+    /\ spend.k = "new" /\ primary = 0
+    /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
+    /\ LET t == nxt
+           t2 == nxt + 1
+           f == spend.file
+           own == IF f \in FileLess THEN NoKey ELSE [f |-> f, t |-> 0]
+           asPrimary == ~Has("rolelessKey") \/ own = pend.key
+       IN
+       /\ st' = [st EXCEPT ![t] = "retired", ![t2] = "live"]
+       /\ why' = [why EXCEPT ![t] = "reload"]
+       /\ role' = [role EXCEPT ![t] = IF asPrimary THEN "primary" ELSE "secondary",
+                                 ![t2] = IF asPrimary THEN "primary" ELSE "secondary"]
+       /\ sess' = [sess EXCEPT ![t] = f, ![t2] = f]
+       /\ lin' = [lin EXCEPT ![f] = @ \cup {t, t2}]
+       /\ nxt' = t + 2
+       /\ primary' = IF asPrimary THEN t2 ELSE primary
+       /\ last' = IF asPrimary THEN t2 ELSE last
+       /\ resets' = IF asPrimary THEN [resets EXCEPT ![t2] = 1] ELSE resets
+       /\ predOf' = [predOf EXCEPT ![t] = spend.from, ![t2] = t]
+       /\ subBorn' = subBorn \cup {t, t2}
+       /\ spend' = NoSpend
+    /\ steps' = steps + 1 /\ used' = used \cup {"secRoleless"}
+    /\ UNCHANGED <<ep, pend, forking, branch, cell, imp, slot, taken, side,
+                   sideAct, wr, entry, intent, reg, svc, fleet, turn, begun,
+                   turns, procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
+                   ownDrop, recorded, dupDone, landed, reads, lzV, adV, notes,
+                   userDeclined, fwd, preScope>>
+
 \* #3855 r1: a note is evicted over the cap. With one modelled subagent the
 \* cap is never reached by its own notes, so this models the unmodelled
 \* subagents' notes pushing it out: any note, at any time, once.
@@ -1328,6 +1373,7 @@ Next ==
     \/ SecEnd /\ UNCHANGED r2V
     \/ \E k \in {"reload", "fork", "new"} : SecDown(k)
     \/ SecUp
+    \/ SecRoleless
     \/ Evict
     \/ Dup /\ UNCHANGED r2V
     \/ TurnStart /\ UNCHANGED r2V
