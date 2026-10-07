@@ -605,10 +605,13 @@ export function deadCodeIssueKey(issue: DeadCodeIssue): string {
  * per turn (hundreds of pre-existing findings would drown the blockers and burn
  * context every turn), it stays available on demand via lens_diagnostics.
  */
+/** Issues `formatDeadCodeDelta` names; the turn-end cap hold parks exactly these. */
+export const DEAD_CODE_DELTA_MAX_SHOWN = 5;
+
 export function formatDeadCodeDelta(
 	issues: DeadCodeIssue[],
 	language: string,
-	max = 5,
+	max = DEAD_CODE_DELTA_MAX_SHOWN,
 ): string {
 	if (issues.length === 0) return "";
 	let report = `💀 Newly unused ${language} symbols in files you edited — check if callers need updating (dead-code):\n`;

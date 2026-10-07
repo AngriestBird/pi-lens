@@ -1511,6 +1511,15 @@ export type DegradationKind =
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
 	/**
+	 * #3901: the turn-end cap cut an item-bearing advisory (knip, dead-code,
+	 * call-graph impact) that showed only items already re-offered once, or the
+	 * per-session parked-lane bound evicted a lane, so those items were NOT
+	 * parked again. A part showing a new item is parked and counted under
+	 * `turn-end-sections-held`. Counted; subject is the family
+	 * (`knip` | `dead-code` | `call-graph`), a fixed set.
+	 */
+	| "turn-end-advisory-carry-dropped"
+	/**
 	 * turn_end did not run knip in a checkout whose edit it was handed (#3872):
 	 * the per-turn root cap was reached, or an earlier scan had already spent
 	 * the turn_end budget. The subject is the reason (`root-cap` | `budget`);

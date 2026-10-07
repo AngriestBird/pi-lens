@@ -22,7 +22,7 @@ import type { FileComplexity } from "./complexity-client.js";
 import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
-import { BoundedLruCache } from "./bounded-cache.js";
+import { BoundedFifoMap, BoundedLruCache } from "./bounded-cache.js";
 import { PartialApplyRecordStore } from "./partial-edit-apply.js";
 import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
@@ -43,6 +43,13 @@ import {
 
 /** Keep deferred cascade admission bounded without dropping late findings. */
 export const MAX_PENDING_CASCADE_RUNS = 32;
+
+/**
+ * Lanes whose cut advisory items may be parked at once (#3813/#3901): the
+ * knip roots, dead-code clients and the call-graph lane of one session. The
+ * oldest is evicted past it, and the eviction is counted by the caller.
+ */
+export const MAX_CUT_ADVISORY_LANES = 16;
 
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
@@ -457,6 +464,12 @@ export class RuntimeCoordinator {
 	private _cachedExports = new Map<string, string>();
 	private _startupScansInFlight = new Map<string, number>();
 	private _cascadeRuns: CascadeRun[] = [];
+	// #3813/#3901: items an item-bearing turn-end advisory showed and the cap
+	// cut (knip, dead-code, call-graph impact), keyed by lane. Parked once,
+	// taken once; see `parkCutAdvisoryItems`.
+	private readonly _cutAdvisoryItems = new BoundedFifoMap<string, unknown[]>(
+		MAX_CUT_ADVISORY_LANES,
+	);
 	private _turnEndCascadeSettleStarts = new Map<number, number>();
 	private _nextCascadeSettleToken = 0;
 	// Cascade computes are kicked off unawaited by the pipeline (#450); their
@@ -613,6 +626,7 @@ export class RuntimeCoordinator {
 		this.wordIndex = null;
 		this._startupScansInFlight.clear();
 		this._cascadeRuns = [];
+		this._cutAdvisoryItems.clear();
 		this._pendingCascadeRuns = [];
 		this._turnEndCascadeSettleStarts.clear();
 		this._cascadeSessionStats = {
@@ -1377,6 +1391,27 @@ export class RuntimeCoordinator {
 				this._turnEndCascadeSettleStarts.delete(settleToken);
 			}
 		}
+	}
+
+	/**
+	 * #3813/#3901: park the items a lane's advisory showed and the turn-end cap
+	 * cut. Their producers have no queue to restore (the scan cache is
+	 * overwritten and the edited-file worklist retired before the cap runs), so
+	 * the lane re-checks each parked item against its next fresh run. Replaces
+	 * the lane's earlier entry. Returns the lane evicted to stay within
+	 * `MAX_CUT_ADVISORY_LANES`, if any.
+	 */
+	parkCutAdvisoryItems(lane: string, items: readonly unknown[]): string[] {
+		this._cutAdvisoryItems.delete(lane);
+		if (items.length === 0) return [];
+		return this._cutAdvisoryItems.set(lane, [...items]).map(([key]) => key);
+	}
+
+	/** Remove and return a lane's parked items: they are offered once. */
+	takeCutAdvisoryItems<T>(lane: string): T[] {
+		const items = this._cutAdvisoryItems.get(lane);
+		this._cutAdvisoryItems.delete(lane);
+		return (items ?? []) as T[];
 	}
 
 	consumeCascadeRuns(): CascadeRun[] {
