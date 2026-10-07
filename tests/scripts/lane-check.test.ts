@@ -47,7 +47,8 @@ const packageJson = (buildExit = 0) =>
 		name: "lane-fixture",
 		private: true,
 		scripts: {
-			build: `node -e "process.exit(${buildExit})"`,
+			// BUILD_LOG counts builds: lane-check builds once, not once more in the selector.
+			build: `node -e "process.env.BUILD_LOG && require('fs').appendFileSync(process.env.BUILD_LOG, 'b\\n'); process.exit(${buildExit})"`,
 			"test:targeted": "node scripts/with-test-lock.mjs --shared -- vitest run",
 			"astgrep:self-scan": 'node -e ""',
 		},
@@ -160,6 +161,7 @@ function runLane(lane: Lane, extraEnv: Record<string, string> = {}) {
 		TMPDIR: lane.tmp,
 		PI_LENS_HOME: lane.home,
 		FLAKE_DIR: lane.tmp,
+		BUILD_LOG: path.join(lane.home, "builds.log"),
 		PI_LENS_TEST_MAX_WORKERS: "2",
 		...extraEnv,
 	};
@@ -211,6 +213,10 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.record.checks.targeted).toEqual({ status: 0, failed: [] });
 			expect(run.out).toContain("verdict: clean (exit 0)");
 			expect(run.out).toContain("branch: lane/fixture");
+			// One build for the lane: no red to compare, so red-on-base builds none.
+			expect(fs.readFileSync(path.join(lane.home, "builds.log"), "utf8")).toBe(
+				"b\n",
+			);
 			expect(run.out).not.toContain("tools/4047-lane-check");
 		},
 		TIMEOUT,
