@@ -22,6 +22,12 @@
 //      files for a 43-file commit, ~10 minutes, because of exactly that).
 // A changed test file is always included directly.
 //
+// A third pass adds history (#3215 lane 3, scripts/lib/test-history-selection.mjs):
+// the tests that failed on past heads which touched the changed files'
+// directories, from the nightly `data/test-history` summary. It only adds, is
+// bounded by its own cap, survives the cap below, and says when the history is
+// stale or unavailable and the selection is import-only.
+//
 // Selection is capped at MAX_SELECTED_TESTS: past that, "targeted" has
 // stopped meaning anything cheaper than the full suite, so this degrades to
 // the armed governance registries alone (bounded by construction; build-only
@@ -32,13 +38,27 @@
 // covering test), this builds only and skips the test run — never silently
 // skips the build too.
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
+import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
+const PREPUSH_RECORD_DIR = "pi-lens-prepush";
+const PREPUSH_RECORD_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+let recordWriteWarningEmitted = false;
 
 // Pre-push budget: 120s. Measured on the built tree on 2026-09-25, the ten
 // registry suites took 32.68s (vi-domock-undo, added after, runs in ~3.5s), so
@@ -142,6 +162,7 @@ function writeSelectionSummary({
 	totalBeforeCap,
 	status,
 	excludedCiOnly = [],
+	history = null,
 }) {
 	const lines = [
 		"### Targeted test selection",
@@ -152,6 +173,7 @@ function writeSelectionSummary({
 		`- CI-only suites deferred: ${excludedCiOnly.length}`,
 		`- Result: ${status}`,
 	];
+	if (history) lines.push(`- History: ${history.status} (${history.detail})`);
 	for (const test of excludedCiOnly)
 		lines.push(`- CI-only: ${test} (runs in CI)`);
 	writeStepSummary(lines.join("\n"));
@@ -284,10 +306,14 @@ function buildTestImportIndex(allTests) {
 /**
  * @param {string[]} changed
  * @param {string[]} allTests
- * @param {{ includeCiOnly?: boolean }} [options] `includeCiOnly` admits the
- *   `CI_ONLY_PRE_PUSH_TESTS` tier (the CI job passes it); the local pre-push
- *   caller leaves it false so a budget-busting suite never runs there.
- * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number, excludedCiOnly: string[] }}
+ * @param {{ includeCiOnly?: boolean, historyPicks?: string[] }} [options]
+ *   `includeCiOnly` admits the `CI_ONLY_PRE_PUSH_TESTS` tier (the CI job passes
+ *   it); the local pre-push caller leaves it false so a budget-busting suite
+ *   never runs there. `historyPicks` are the history pass's additions
+ *   (`loadHistorySelection`): bounded by their own cap, so they join the
+ *   registries in surviving the import cap, and they are never counted toward
+ *   it.
+ * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number, excludedCiOnly: string[], fromHistory: string[] }}
  */
 export function selectTargetedTests(changed, allTests, options = {}) {
 	const testImportIndex = buildTestImportIndex(allTests);
@@ -326,7 +352,18 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 	if (changed.some(changesProductionFile)) arm(TREE_SCANNING_GOVERNANCE_TESTS);
 	if (changed.some(changesTestTreeFile)) arm(TEST_TREE_GOVERNANCE_TESTS);
 
-	const selected = new Set([...heuristic, ...armed]);
+	// The picks arrive already filtered to `allTests` by `selectFromHistory`.
+	const history = new Set(options.historyPicks ?? []);
+	const selected = new Set([...heuristic, ...armed, ...history]);
+	const selectionReasons = new Map();
+	for (const test of selected) {
+		// Governance and history are deliberate additions to the import heuristic.
+		// Prefer the most specific reason when a test belongs to more than one set.
+		selectionReasons.set(
+			test,
+			armed.has(test) ? "governance" : history.has(test) ? "history" : "import",
+		);
+	}
 
 	// CI-only tier (#3426 H3432-1): remove the suites measured to exceed the
 	// pre-push budget unless the caller is the CI job that owns them. The
@@ -351,13 +388,131 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 
 	return {
 		selected: capped
-			? [...selected].filter((test) => armed.has(test))
+			? [...selected].filter((test) => armed.has(test) || history.has(test))
 			: [...selected],
 		unmatched,
 		capped,
 		totalBeforeCap,
 		excludedCiOnly,
+		// What history alone put in the selection: not a registry suite, and not
+		// an import match that survives (on a capped selection the import matches
+		// are dropped, so a history pick is there because of history).
+		fromHistory: [...history].filter(
+			(test) =>
+				selected.has(test) &&
+				!armed.has(test) &&
+				(capped || !heuristic.has(test)),
+		),
+		selectionReasons,
 	};
+}
+
+function recordDir(commonDir) {
+	return path.join(path.resolve(commonDir), PREPUSH_RECORD_DIR);
+}
+
+export function readPrePushRecord(commonDir, head) {
+	try {
+		return JSON.parse(
+			readFileSync(path.join(recordDir(commonDir), `${head}.json`), "utf8"),
+		);
+	} catch {
+		return null;
+	}
+}
+
+export function writePrePushRecord({
+	commonDir,
+	head,
+	base,
+	at = new Date(),
+	selected,
+	passed,
+	failed,
+	skipped,
+	vitestExitCode,
+	wallTimeMs,
+	outcome = "tests-not-started",
+}) {
+	const dir = recordDir(commonDir);
+	mkdirSync(dir, { recursive: true });
+	const cutoff = at.getTime() - PREPUSH_RECORD_MAX_AGE_MS;
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+		const file = path.join(dir, entry.name);
+		try {
+			if (statSync(file).mtimeMs < cutoff) unlinkSync(file);
+		} catch {
+			// A concurrent prune or filesystem race must not lose the current record.
+		}
+	}
+	const record = {
+		head,
+		base,
+		timestamp: at.toISOString(),
+		selected,
+		passed,
+		failed,
+		skipped,
+		vitestExitCode,
+		wallTimeMs,
+		outcome,
+	};
+	const target = path.join(dir, `${head}.json`);
+	const temporary = path.join(dir, `.${head}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		writeFileSync(temporary, `${JSON.stringify(record)}\n`, "utf8");
+		renameSync(temporary, target);
+	} finally {
+		try {
+			unlinkSync(temporary);
+		} catch {
+			// The rename succeeded, or the temporary file was never created.
+		}
+	}
+	return record;
+}
+
+function pushHeads(input) {
+	return input
+		.trim()
+		.split(/\r?\n/)
+		.map((line) => line.trim().split(/\s+/))
+		.filter((parts) => parts.length >= 4 && !/^0+$/.test(parts[1]))
+		.map(([localRef, head, , base]) => ({ localRef, head, base }));
+}
+
+function gitCommonDir() {
+	return execFileSync("git", ["rev-parse", "--git-common-dir"], {
+		encoding: "utf8",
+	}).trim();
+}
+
+function parseVitestCounts(output) {
+	const line = output.match(/^\s*Tests\s+(.+)$/m)?.[1] ?? "";
+	const count = (word) =>
+		Number(line.match(new RegExp(`(\\d+)\\s+${word}`))?.[1] ?? 0);
+	return {
+		passed: count("passed"),
+		failed: count("failed"),
+		skipped: count("skipped"),
+	};
+}
+
+function writeHeadRecords(heads, values) {
+	if (heads.length === 0) return;
+	try {
+		const commonDir = gitCommonDir();
+		for (const { head, base } of heads)
+			writePrePushRecord({ commonDir, head, base, ...values });
+	} catch (error) {
+		if (!recordWriteWarningEmitted) {
+			recordWriteWarningEmitted = true;
+			console.warn(
+				`[pre-push] could not persist targeted-test record; continuing with hook result: ${error instanceof Error ? error.message : error}`,
+			);
+		}
+	}
 }
 
 // Windows CreateProcess can't exec .cmd shims (npm) directly, so those need
@@ -407,6 +562,7 @@ function matchLockTimeout(stderr) {
 // always blocks the push.
 function runTargetedTests(selected) {
 	return new Promise((resolve) => {
+		const started = performance.now();
 		const child = spawn(
 			process.execPath,
 			[
@@ -418,26 +574,44 @@ function runTargetedTests(selected) {
 				...selected,
 			],
 			{
-				stdio: ["ignore", "inherit", "pipe"],
+				stdio: ["ignore", "pipe", "pipe"],
 			},
 		);
+		let stdoutBuffer = "";
 		let stderrBuffer = "";
+		child.stdout.on("data", (chunk) => {
+			process.stdout.write(chunk);
+			stdoutBuffer += chunk.toString();
+		});
 		child.stderr.on("data", (chunk) => {
 			process.stderr.write(chunk);
 			stderrBuffer += chunk.toString();
 		});
 		child.on("error", (error) => {
-			resolve({ code: 1, lockTimeout: null, error });
+			resolve({
+				code: 1,
+				lockTimeout: null,
+				error,
+				...parseVitestCounts(stdoutBuffer),
+				wallTimeMs: performance.now() - started,
+			});
 		});
 		child.on("close", (code) => {
 			const lockTimeout = code !== 0 ? matchLockTimeout(stderrBuffer) : null;
-			resolve({ code: code ?? 1, lockTimeout });
+			resolve({
+				code: code ?? 1,
+				lockTimeout,
+				...parseVitestCounts(stdoutBuffer),
+				wallTimeMs: performance.now() - started,
+			});
 		});
 	});
 }
 
 export async function main() {
-	const ranges = resolveDiffRange();
+	const input = readStdin();
+	const heads = pushHeads(input);
+	const ranges = resolveDiffRange(input);
 	if (ranges === null) {
 		console.log("[pre-push] deletion-only push; skipping build and tests.");
 		return 0;
@@ -455,79 +629,136 @@ export async function main() {
 	}
 	const skipBuild = process.argv.includes("--skip-build");
 
+	let selected = [];
+	let selectedRecords = [];
+	let unmatched = [];
+	let capped = false;
+	let totalBeforeCap = 0;
+	let excludedCiOnly = [];
+	let fromHistory = [];
+	let history = null;
+	const includeCiOnly = process.argv.includes("--include-ci-only");
+	if (changed !== null && changed.length > 0) {
+		const allTests = collectTestFiles("tests");
+		const summaryArg = process.argv.indexOf("--history-summary");
+		history = loadHistorySelection({
+			changed,
+			allTests,
+			file: summaryArg === -1 ? undefined : process.argv[summaryArg + 1],
+		});
+		// One line per push, whatever the history said: a silent import-only
+		// fallback would read as "history found nothing".
+		console.log(
+			`[pre-push] history selection ${history.status}: ${history.detail}`,
+		);
+		const selection = selectTargetedTests(changed, allTests, {
+			includeCiOnly,
+			historyPicks: history.picks,
+		});
+		({
+			selected,
+			unmatched,
+			capped,
+			totalBeforeCap,
+			excludedCiOnly,
+			fromHistory,
+		} = selection);
+		selectedRecords = selected.map((file) => ({
+			file,
+			reason: selection.selectionReasons.get(file),
+		}));
+		for (const test of fromHistory)
+			console.log(`[pre-push] history added ${test}`);
+		for (const file of unmatched)
+			console.log(`[pre-push] no tests matched ${file}`);
+		for (const file of excludedCiOnly)
+			console.log(
+				`[pre-push] CI-only suite deferred to CI (${CI_ONLY_PRE_PUSH_TESTS[file]}): ${file}`,
+			);
+		if (includeCiOnly)
+			console.log("[pre-push] --include-ci-only: admitting the CI-only tier.");
+		if (capped)
+			console.warn(
+				`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length - fromHistory.length} governance registry suite(s) and ${fromHistory.length} history pick(s)` : ""}.`,
+			);
+	}
+
+	// The record exists before any build/self-scan work can fail. A later write
+	// replaces this provisional observation with the preparation or test result.
+	writeHeadRecords(heads, {
+		selected: selectedRecords,
+		passed: 0,
+		failed: 0,
+		skipped: 0,
+		vitestExitCode: null,
+		wallTimeMs: 0,
+		outcome: "tests-not-started",
+	});
+
+	let preparationFailure = null;
 	if (skipBuild) {
 		console.log(
 			"[pre-push] build already completed; skipping duplicate build.",
 		);
 	} else {
-		console.log("[pre-push] building...");
-		runInherit("npm", ["run", "build"], { needsShimShell: true });
-		// #3886: the self-scan imports compiled `clients/` modules, so it must
-		// follow the build. `--skip-build` (CI's Targeted-tests job) means the
-		// Unit-tests job already ran the scan, so it is skipped too.
-		console.log("[pre-push] running ast-grep self-scan...");
-		runInherit("npm", ["run", "astgrep:self-scan"], { needsShimShell: true });
+		try {
+			console.log("[pre-push] building...");
+			runInherit("npm", ["run", "build"], { needsShimShell: true });
+		} catch (error) {
+			preparationFailure = { outcome: "build-failed", error };
+		}
+		if (!preparationFailure) {
+			try {
+				// #3886: the self-scan imports compiled `clients/` modules, so it
+				// must follow the build.
+				console.log("[pre-push] running ast-grep self-scan...");
+				runInherit("npm", ["run", "astgrep:self-scan"], {
+					needsShimShell: true,
+				});
+			} catch (error) {
+				preparationFailure = { outcome: "self-scan-failed", error };
+			}
+		}
+	}
+	if (preparationFailure) {
+		writeHeadRecords(heads, {
+			selected: selectedRecords,
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
+			outcome: preparationFailure.outcome,
+		});
+		throw preparationFailure.error;
 	}
 
-	if (changed === null || changed.length === 0) {
-		console.log(
-			"[pre-push] no source changes to target; build-only pass complete.",
-		);
+	if (changed === null || changed.length === 0 || selected.length === 0) {
+		const status =
+			changed === null
+				? "selection unavailable; build-only"
+				: changed.length === 0
+					? "no TypeScript changes; build-only"
+					: capped
+						? `cap exceeded (${MAX_SELECTED_TESTS}); build-only`
+						: "no matches; build-only";
+		console.log(`[pre-push] ${status} pass complete.`);
 		writeSelectionSummary({
 			changedCount: changed?.length ?? 0,
 			selectedCount: 0,
-			totalBeforeCap: 0,
-			status:
-				changed === null
-					? "selection unavailable; build-only"
-					: "no TypeScript changes; build-only",
-		});
-		return 0;
-	}
-
-	const includeCiOnly = process.argv.includes("--include-ci-only");
-	const allTests = collectTestFiles("tests");
-	const { selected, unmatched, capped, totalBeforeCap, excludedCiOnly } =
-		selectTargetedTests(changed, allTests, { includeCiOnly });
-
-	for (const file of unmatched)
-		console.log(`[pre-push] no tests matched ${file}`);
-
-	// Disclosure, not silence (#3426 H3432-1 / defect shape 10): the caller
-	// sees which suites were deferred to CI and why.
-	for (const file of excludedCiOnly)
-		console.log(
-			`[pre-push] CI-only suite deferred to CI (${CI_ONLY_PRE_PUSH_TESTS[file]}): ${file}`,
-		);
-	if (includeCiOnly)
-		console.log("[pre-push] --include-ci-only: admitting the CI-only tier.");
-
-	if (capped) {
-		console.warn(
-			`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length} governance registry suite(s)` : ""}.`,
-		);
-		if (selected.length === 0) {
-			writeSelectionSummary({
-				changedCount: changed.length,
-				selectedCount: 0,
-				totalBeforeCap,
-				status: `cap exceeded (${MAX_SELECTED_TESTS}); build-only`,
-				excludedCiOnly,
-			});
-			return 0;
-		}
-	}
-
-	if (selected.length === 0) {
-		console.log(
-			`[pre-push] no test files matched ${changed.length} changed .ts file(s); build-only pass complete.`,
-		);
-		writeSelectionSummary({
-			changedCount: changed.length,
-			selectedCount: 0,
 			totalBeforeCap,
-			status: "no matches; build-only",
+			status,
 			excludedCiOnly,
+			history,
+		});
+		writeHeadRecords(heads, {
+			selected: selectedRecords,
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
+			outcome: "build-only",
 		});
 		return 0;
 	}
@@ -537,9 +768,10 @@ export async function main() {
 		selectedCount: selected.length,
 		totalBeforeCap,
 		status: capped
-			? `cap exceeded (${MAX_SELECTED_TESTS}); governance registries only`
+			? `cap exceeded (${MAX_SELECTED_TESTS}); ${selected.length - fromHistory.length} governance registries and ${fromHistory.length} history pick(s) only`
 			: "selected",
 		excludedCiOnly,
+		history,
 	});
 
 	console.log(
@@ -547,7 +779,24 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
-	const { code, lockTimeout, error } = await runTargetedTests(selected);
+	const result = await runTargetedTests(selected);
+	const { code, lockTimeout, error } = result;
+	const outcome = error
+		? "tests-runner-failed"
+		: lockTimeout
+			? "tests-lock-timeout"
+			: code === 0
+				? "tests-complete"
+				: "tests-failed";
+	writeHeadRecords(heads, {
+		selected: selectedRecords,
+		passed: result.passed,
+		failed: result.failed,
+		skipped: result.skipped,
+		vitestExitCode: code,
+		wallTimeMs: Math.round(result.wallTimeMs),
+		outcome,
+	});
 	if (lockTimeout) {
 		const waitedMs = Number(lockTimeout[1]);
 		const holder = lockTimeout[2];
