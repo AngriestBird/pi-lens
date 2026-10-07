@@ -401,6 +401,8 @@ describe("kill-guard ownership (#2042)", () => {
 					return true;
 				}
 			});
+			// A delivered SIGTERM lands asynchronously; give it 100 ms to show.
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
 			expect({
 				thrown,
 				strangerAlive: isProcessAlive(stranger.pid),
