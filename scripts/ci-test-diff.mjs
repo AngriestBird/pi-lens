@@ -27,6 +27,7 @@ export function extractFailingTestIds(log) {
 export function summarizeLog(log, side = "job") {
 	const failedMatch = OVERALL_TESTS_FAILED.exec(log);
 	const passedMatch = log.match(/^\s*Tests\s+(\d+)\s+passed\b/m);
+	const skippedMatch = log.match(/^\s*Tests\s+(\d+)\s+skipped\b/m);
 	const testsFailed = Number(failedMatch?.[1] ?? 0);
 	const failedTestsHeader = Number(
 		log.match(/\bFailed Tests\s+(\d+)\b/i)?.[1] ?? NaN,
@@ -37,7 +38,7 @@ export function summarizeLog(log, side = "job") {
 	const unhandledErrors = Number(
 		log.match(/\bErrors\s+(\d+)\s+error(?:s)?\b/i)?.[1] ?? 0,
 	);
-	if (!failedMatch && !passedMatch) {
+	if (!failedMatch && !passedMatch && !skippedMatch) {
 		throw new Error(`${side} log incomplete (no Vitest Tests summary)`);
 	}
 	if (
@@ -140,6 +141,13 @@ export function main(argv = process.argv.slice(2)) {
 	const previous = previousReport.ids;
 	const current = currentReport.ids;
 	const diff = compareFailureSets(previous, current);
+	const newUnhandledErrors = Math.max(
+		currentReport.unhandledErrors - previousReport.unhandledErrors,
+		0,
+	);
+	for (let index = 1; index <= newUnhandledErrors; index += 1) {
+		diff.newFailures.push(`unhandled error ${index}`);
+	}
 	console.log(
 		`Input: ${jobA} tests=${previousReport.testsFailed} suites=${previousReport.suitesFailed} errors=${previousReport.unhandledErrors}; ${jobB} tests=${currentReport.testsFailed} suites=${currentReport.suitesFailed} errors=${currentReport.unhandledErrors}`,
 	);

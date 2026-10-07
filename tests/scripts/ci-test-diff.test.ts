@@ -14,6 +14,7 @@ import {
 const fixture = (name: string) =>
 	fs.readFileSync(path.join("tests/fixtures/ci-test-diff", name), "utf8");
 
+// The green fixture is hand-composed in Vitest 5.0.3's real summary shape.
 describe("ci-test-diff failure extraction", () => {
 	// Recurrence: #4072's Windows logs contain ANSI, CRLF, and Actions timestamps;
 	// the tool must compare test identities rather than the aggregate failure count.
@@ -99,6 +100,10 @@ describe("ci-test-diff failure extraction", () => {
 		).toMatchObject({ testsFailed: 1, suitesFailed: 0, unhandledErrors: 1 });
 	});
 
+	it("accepts a skipped-only run as a zero-failure side", () => {
+		expect(validateLog("Tests 2 skipped\n").ids).toEqual([]);
+	});
+
 	it("rejects a failure count with too few extracted IDs", () => {
 		expect(() =>
 			validateLog(
@@ -118,7 +123,11 @@ describe("ci-test-diff failure extraction", () => {
 		const fixtureB = path.join(fixtureDir, "job-112734370876.log");
 		fs.writeFileSync(
 			gh,
-			`#!/usr/bin/env node\nconst fs = require("node:fs");\nconst request = process.argv.find((value) => value.includes("/jobs/")) ?? "";\nconst id = request.match(/\\/jobs\\/(\\d+)\\//)?.[1];\nconst file = id === "0" ? null : id === "3" ? ${JSON.stringify(path.join(fixtureDir, "job-green-vitest.log"))} : id === "2" ? ${JSON.stringify(fixtureB)} : ${JSON.stringify(fixtureA)};\nif (file) process.stdout.write(fs.readFileSync(file, "utf8"));\n`,
+			`#!/usr/bin/env node\nconst fs = require("node:fs");\nconst request = process.argv.find((value) => value.includes("/jobs/")) ?? "";\nconst id = request.match(/\\/jobs\\/(\\d+)\\//)?.[1];\nconst file = id === "0" ? null : id === "3" ? ${JSON.stringify(path.join(fixtureDir, "job-green-vitest.log"))} : id === "4" ? ${JSON.stringify(path.join(scratch, "job-unhandled.log"))} : id === "2" ? ${JSON.stringify(fixtureB)} : ${JSON.stringify(fixtureA)};\nif (file) process.stdout.write(fs.readFileSync(file, "utf8"));\n`,
+		);
+		fs.writeFileSync(
+			path.join(scratch, "job-unhandled.log"),
+			"Tests 1 passed\nErrors 1 error\n",
 		);
 		fs.chmodSync(gh, 0o755);
 		const env = { ...process.env, PATH: `${scratch}:${process.env.PATH}` };
@@ -134,6 +143,10 @@ describe("ci-test-diff failure extraction", () => {
 		// A→GREEN is clean, while GREEN→B is NEW; direction is the CLI contract.
 		expect(run("1", "3").status).toBe(0);
 		expect(run("3", "2").status).toBe(1);
+		const unhandled = run("3", "4");
+		expect(unhandled.status).toBe(1);
+		expect(unhandled.stdout).toContain("NEW (1)");
+		expect(unhandled.stdout).toContain("unhandled error 1");
 		fs.rmSync(scratch, { recursive: true, force: true });
 	});
 });
