@@ -273,6 +273,22 @@ const tick = () => {
 console.log("go");
 tick();`;
 
+// A mid shell that starts three sleepers and then exits ON ITS OWN after
+// argv[1] seconds, staggered by the test across the kill: some runs it exits
+// after the kill's snapshot listed its children but before they are frozen,
+// the window in which only adoption keeps them ours (state table row 4).
+const RACER = `
+const { spawn } = require("child_process");
+setTimeout(() => process.exit(0), 20000);
+const mid = spawn("sh", ["-c", "for i in 1 2 3; do sleep 5 & echo $!; done; sleep " + process.argv[1]],
+  { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+let out = "";
+mid.stdout.on("data", (chunk) => {
+  out += chunk;
+  const grand = out.split("\\n").filter(Boolean).map(Number);
+  if (grand.length === 3) console.log(JSON.stringify(grand));
+});`;
+
 const firstLine = (child: ChildProcess) =>
 	new Promise<string>((resolve) => {
 		let out = "";
@@ -434,6 +450,38 @@ describe("killProcessTree under the kill guard (#2042, #4081)", () => {
 				survivors: 0,
 				killed: 20 * 6,
 				decoy: true,
+				report: undefined,
+			});
+		},
+		60_000,
+	);
+
+	// Recurrence (#4082 verify r2, V1, state table row 4): a mid process that
+	// exits by itself after the snapshot reparents its children before they
+	// are signalled; a guard that re-derives ancestry then refuses them (with
+	// round 2's ancestry rule and no adoption: 10 and 20 records in two runs).
+	// Children of a mid that exited before the snapshot are never listed
+	// (row 5, the stated limit), so only the listed pids are asserted.
+	it.skipIf(process.platform !== "linux")(
+		"kills every listed pid when a mid process exits by itself around the kill",
+		async () => {
+			let listedGrandchildren = 0;
+			let survivors = 0;
+			for (let run = 0; run < 40; run++) {
+				const root = spawnNode(RACER, ((run % 20) * 0.003).toFixed(3));
+				stray.push(root);
+				const grandchildren = JSON.parse(await firstLine(root)) as number[];
+				const listed = killProcessTree(root);
+				await exited(root);
+				await waitForChildExit(root, listed, 2_000);
+				listedGrandchildren += grandchildren.filter((pid) =>
+					listed.includes(pid),
+				).length;
+				survivors += listed.filter((pid) => isProcessAlive(pid)).length;
+			}
+			expect(listedGrandchildren).toBeGreaterThan(0);
+			expect({ survivors, report: killGuardReport() }).toEqual({
+				survivors: 0,
 				report: undefined,
 			});
 		},
