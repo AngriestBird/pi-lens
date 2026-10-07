@@ -505,7 +505,8 @@ describe("bash grep searchReads registration", () => {
 
 			expect(recordRead).toHaveBeenCalledWith(
 				expect.objectContaining({
-					filePath,
+					// The spelling the command carried (forward slashes above).
+					filePath: shellPath,
 					effectiveOffset: 1001,
 					effectiveLimit: 2000,
 				}),
@@ -614,11 +615,14 @@ describe("bash grep searchReads registration", () => {
 				agentBehaviorRecord: () => [],
 				formatBehaviorWarnings: () => "",
 			} as any);
-			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
+			// The set holds the guard's canonical KEY (lower-cased forward slashes on
+			// win32), not the raw spelling the test wrote (#4019).
+			const guardKey = (runtime.readGuard as any).key(filePath);
+			expect((runtime.readGuard as any).wasWrittenThisSession(guardKey)).toBe(
 				false,
 			);
 			expect(
-				(runtime.readGuard as any).unchangedThisSession.has(filePath),
+				(runtime.readGuard as any).unchangedThisSession.has(guardKey),
 			).toBe(true);
 			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
 				"block",

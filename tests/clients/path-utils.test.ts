@@ -310,12 +310,14 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// Nothing on disk can say which spelling is real, and on a
 			// case-sensitive filesystem `NOPE` and `nope` are two different
 			// directories — folding one into the other is the #3098 non-goal.
-			// win32 map keys are lowercased by design (`normalizeMapKey`'s win32
-			// arm); that is a spelling rule of the key, not an on-disk guess, so the
-			// directory casing is still not adopted from anything (#4019).
-			const spelled = absent.replace(/\\/g, "/");
+			// win32 folds the part of the key that names nothing on disk to lower
+			// case (`normalizeMapKey`'s win32 arm, a spelling rule of the key rather
+			// than an on-disk guess) while the existing ancestor keeps its on-disk
+			// spelling, so only the absent tail changes there (#4019).
+			const spelled = tmpDir.replace(/\\/g, "/");
+			const tail = "NOPE/b.ts";
 			expect(normalizeMapKey(absent)).toBe(
-				process.platform === "win32" ? spelled.toLowerCase() : spelled,
+				`${spelled}/${process.platform === "win32" ? tail.toLowerCase() : tail}`,
 			);
 		} finally {
 			cleanup();
