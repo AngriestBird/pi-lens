@@ -70,15 +70,27 @@ function copyPackSource(dest: string): string {
 	return dest;
 }
 
-/** The live checkout's own state, which no pack in this file may touch. */
+/**
+ * The live checkout's own state, which no pack in this file may touch.
+ * `dist/index.js` is recorded by inode and mtime, not existence: where `dist/`
+ * already exists (CI, any built tree) a pack that ran `prepare` in the
+ * checkout deletes and rebuilds it, which an existence check cannot see.
+ */
 function liveCheckoutState(): {
 	manifest: string;
 	lock: string;
+	distIndex: { ino: number; mtimeMs: number } | null;
+	packBackupExists: boolean;
 	distExists: boolean;
 } {
+	const index = fs.statSync(path.join(root, "dist", "index.js"), {
+		throwIfNoEntry: false,
+	});
 	return {
 		manifest: fs.readFileSync(path.join(root, "package.json"), "utf8"),
 		lock: fs.readFileSync(path.join(root, "package-lock.json"), "utf8"),
+		distIndex: index ? { ino: index.ino, mtimeMs: index.mtimeMs } : null,
+		packBackupExists: fs.existsSync(path.join(root, ".pack-backup")),
 		distExists: fs.existsSync(path.join(root, "dist")),
 	};
 }
@@ -87,7 +99,8 @@ function expectLiveCheckoutUntouched(
 	before: ReturnType<typeof liveCheckoutState>,
 ): void {
 	expect(liveCheckoutState()).toEqual(before);
-	expect(fs.existsSync(path.join(root, ".pack-backup"))).toBe(false);
+	expect(before.packBackupExists).toBe(false);
+	expect(liveCheckoutState().packBackupExists).toBe(false);
 }
 
 /**
@@ -126,6 +139,7 @@ const pkg = JSON.parse(
 	dependencies?: Record<string, string>;
 	scripts: Record<string, string>;
 	packageManager?: string;
+	files?: string[];
 };
 // #3885: run the real pack through the repo's pinned npm -- the same
 // `npx -y "npm@<packageManager>"` argv `release.yml` and `ci.yml` publish and
@@ -161,6 +175,19 @@ describe("published manifest carries no devDependencies", () => {
 			dependencies: { a: "1" },
 			scripts: { prepack: "p" },
 		});
+	});
+
+	// #4003 recurrence: a name added to PACK_COPY_SKIP that `files[]` ships would
+	// pack a tarball silently missing that tree, from a copy that dropped it.
+	// `dist` is skipped on purpose: `prepare` rebuilds it inside the copy.
+	it("copies every top-level tree package.json files[] ships", () => {
+		const shipped = new Set(
+			(pkg.files ?? []).map((entry) => entry.split("/")[0] ?? ""),
+		);
+		assertNonEmptyScan("files[] top-level entries", shipped.size, 5);
+		expect(
+			[...shipped].filter((top) => PACK_COPY_SKIP.has(top) && top !== "dist"),
+		).toEqual([]);
 	});
 
 	it("prepack strips and postpack restores, wired in package.json", () => {

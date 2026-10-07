@@ -596,6 +596,22 @@ describe("tmp-fixture-hygiene", () => {
 		}
 	});
 
+	// #4003: a build-output leak must survive the cell where git cannot answer
+	// for the OTHER new entries; reporting only `unknown` there would let a new
+	// dist/ pass in a tree git cannot read.
+	it("still flags a new dist/ when git cannot classify another new entry", () => {
+		const env = setupTestEnvironment("pi-lens-4003-build-output-unknown-");
+		try {
+			for (const name of ["dist", "stray"])
+				fs.mkdirSync(path.join(env.tmpDir, name));
+			const census = unadmittedRepoRootEntries([], env.tmpDir);
+			expect(census.leaked).toEqual(["dist"]);
+			expect(census.unknown).toContain("stray");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("reports unknown, never clean, when git cannot classify, and when the baseline predates the census", () => {
 		const env = setupTestEnvironment("pi-lens-3715-no-git-");
 		try {
