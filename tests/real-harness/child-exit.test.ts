@@ -27,7 +27,9 @@ const WRITER = `
 const fs = require("fs"), p = require("path");
 const dir = process.argv[1], end = Date.now() + Number(process.argv[2]);
 let i = 0;
-fs.writeFileSync(p.join(dir, "f0"), "x");
+// Enough files that one removal pass outlasts a few writes (a near-empty
+// directory can be removed between two of them, which is not the race).
+for (; i < 2000; i++) fs.writeFileSync(p.join(dir, "f" + i), "x");
 console.log("ready");
 while (Date.now() < end) {
   try { fs.writeFileSync(p.join(dir, "f" + ++i), "x"); } catch {}
@@ -35,8 +37,11 @@ while (Date.now() < end) {
 
 // Creates argv[1] and writes into it every 2 ms until it is killed: the
 // reparented grandchild the real pi leaves behind (knip, ast-grep, tsserver).
+// It exits by itself after 30 s: when close() fails to reap it, the test must
+// not signal a pid the kill-guard no longer sees as this worker's (#2042).
 const ORPHAN_WRITER = `
 const fs = require("fs");
+setTimeout(() => process.exit(0), 30000);
 fs.mkdirSync(process.argv[1], { recursive: true });
 setInterval(() => {
   try { fs.writeFileSync(process.argv[1] + "/f" + Math.random(), "x"); } catch {}
@@ -140,13 +145,6 @@ export default function () {
 				expect(isProcessAlive(writer)).toBe(false);
 				expect(existsSync(home)).toBe(false);
 			} finally {
-				if (writer) {
-					try {
-						process.kill(writer, "SIGKILL");
-					} catch {
-						/* already gone */
-					}
-				}
 				cleanup();
 			}
 		},
