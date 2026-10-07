@@ -284,6 +284,9 @@ function grammarFileStamp(filePath: string): string | undefined {
 	}
 }
 
+/** The loader's unresolved-import stub error (#3996); see the classifier. */
+const UNRESOLVED_IMPORT_MESSAGE = "resolved is not a function";
+
 /**
  * V8's messages for the three traps the #3605 log shows, as a fallback for
  * one rewrapped on a plain `Error`. The `instanceof` check below is the
@@ -318,6 +321,15 @@ export function classifyTreeSitterWasmError(
 		WebAssembly: { RuntimeError: new () => Error };
 	};
 	if (thrown instanceof WebAssembly.RuntimeError) return "trap";
+	// #3996: a grammar that imports a libc symbol web-tree-sitter's main module
+	// does not export (the tree-sitter-wasms@0.1.13 bash wasm imports
+	// `isalpha`) gets an unresolved-import stub from the emscripten loader
+	// (`resolved(...args)` in tree-sitter.js `resolveSymbol`). Calling it throws
+	// a plain TypeError out of wasm mid-call, with the same damage as a trap.
+	// Exact message and class only: a bare "is not a function" is a JS bug.
+	if (thrown instanceof TypeError && message === UNRESOLVED_IMPORT_MESSAGE) {
+		return "trap";
+	}
 	return WASM_TRAP_MESSAGES.some((trap) => message.includes(trap))
 		? "trap"
 		: undefined;
