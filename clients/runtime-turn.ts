@@ -127,6 +127,7 @@ import {
 import type { LSPDiagnostic } from "./lsp/client.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
+import { findingsResult, hasUsableResult } from "./dispatch/types.js";
 import {
 	type PersistentReverifyResult,
 	runPersistentReverify,
@@ -1067,17 +1068,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			Date.now() - pending.markedAtMs,
 			pending.writeIndex,
 		);
-		// #3796: a runner whose findings fail its check reports `failed` WITH
-		// diagnostics and no fault kind (or `blocking_diagnostics`); that goes
-		// through the freshness gate and delivery like a success. A failed result
-		// with no diagnostics, or with a fault kind (timeout, server_error), is a
-		// broken runner: the note is kept and any partial findings still deliver.
-		if (
-			result.status === "failed" &&
-			(result.diagnostics.length === 0 ||
-				(result.failureKind !== undefined &&
-					result.failureKind !== "blocking_diagnostics"))
-		) {
+		// #3796: a runner whose findings fail its check reports `failed` with
+		// `blocking_diagnostics`; that goes through the freshness gate and
+		// delivery like a success. Any other failed result (a fault kind, or
+		// none) is a broken runner, whatever it carries: the note is kept and
+		// any partial findings still deliver. `hasUsableResult` owns the rule.
+		if (result.status === "failed" && !hasUsableResult(result)) {
 			runnerFindingsFailed += 1;
 			const detail = result.failureMessage ? `: ${result.failureMessage}` : "";
 			const failedNote = `❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`;
@@ -1163,7 +1159,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			onHeld: () =>
 				requeueRunnerFindings({
 					...pending,
-					result: { ...findingsOnly, diagnostics: advisoryKept },
+					result: findingsResult(advisoryKept, findingsOnly),
 				}),
 		});
 		// @delivery-surface: runtime-turn:late-runner-findings
