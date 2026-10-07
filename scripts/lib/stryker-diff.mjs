@@ -104,6 +104,46 @@ export const isCompiledMutationSource = (file) =>
 	!file.endsWith(".test.ts") &&
 	!file.endsWith(".d.ts");
 
+/**
+ * A path that may sit on the nightly carry-over queue (#4005): a runtime source
+ * spelled as a plain repository-relative path. The queue lives in an issue body
+ * a maintainer can edit, so the list is validated on read: no `..`, absolute,
+ * backslash, comma, `-->` or whitespace spelling gets through.
+ */
+export const isQueueablePath = (file) =>
+	typeof file === "string" &&
+	/^[A-Za-z0-9_./@+-]+$/.test(file) &&
+	file
+		.split("/")
+		.every((part) => part !== "" && part !== "." && part !== "..") &&
+	isCompiledMutationSource(file);
+
+const QUEUE_BASE_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * One carry-over queue entry (#4005 r4): `path@sha`, the sha being the base the
+ * file's unevaluated changes start from, or a bare `path` (no base: read
+ * against the window base). Only a full lowercase sha is split off; any other
+ * suffix stays part of the spelling, which then has to be a queueable path by
+ * itself. Returns null when the spelling is not an entry.
+ *
+ * @param {unknown} spelling
+ * @returns {{file: string, base: string | null} | null}
+ */
+export function parseQueueEntry(spelling) {
+	const text = typeof spelling === "string" ? spelling.trim() : "";
+	const at = text.lastIndexOf("@");
+	const split = at > 0 && QUEUE_BASE_RE.test(text.slice(at + 1));
+	const file = split ? text.slice(0, at) : text;
+	return isQueueablePath(file)
+		? { file, base: split ? text.slice(at + 1) : null }
+		: null;
+}
+
+/** @param {{file: string, base: string | null}} entry */
+export const formatQueueEntry = ({ file, base }) =>
+	base ? `${file}@${base}` : file;
+
 export const isMutationSourceFile = (file) =>
 	isScriptMutationFile(file) || isCompiledMutationSource(file);
 
@@ -181,6 +221,63 @@ export function capMutationFiles(
 		selected: ordered.slice(0, maxFiles),
 		skipped: ordered.slice(maxFiles),
 	};
+}
+
+/**
+ * The mutate set of one nightly run (#4005): files carried over from earlier
+ * nights first, in their queue order, then the new window's files by changed-
+ * line weight, under the one `maxFiles` cap. What the cap leaves out, pending
+ * files first, is `skipped` and goes back on the queue.
+ *
+ * @param {{pending?: string[], windowFiles: string[], maxFiles?: number, weights?: Map<string, number>}} options
+ */
+export function selectMutationFiles({
+	pending = [],
+	windowFiles,
+	maxFiles = DEFAULT_MAX_FILES,
+	weights = new Map(),
+}) {
+	const queue = [...new Set(pending)];
+	const queued = new Set(queue);
+	const head = queue.slice(0, maxFiles);
+	const rest = capMutationFiles(
+		windowFiles.filter((file) => !queued.has(file)),
+		maxFiles - head.length,
+		weights,
+	);
+	return {
+		selected: [...head, ...rest.selected],
+		skipped: [...queue.slice(maxFiles), ...rest.skipped],
+	};
+}
+
+/**
+ * Changed line ranges per file, each file against its own base (#4005 r4): a
+ * carried-over file against the base its queue entry carries (its earlier
+ * changes are outside the current window), every other file against the
+ * window base. One `diff(base, files)` call per distinct base; it is the git
+ * call, injected so the split is testable.
+ *
+ * @param {{files: string[], baseRef: string, baseOf?: Map<string, string>, diff: (base: string, files: string[]) => Map<string, Array<[number, number]>>}} options
+ */
+export function collectChangedRanges({
+	files,
+	baseRef,
+	baseOf = new Map(),
+	diff,
+}) {
+	const groups = new Map([[baseRef, []]]);
+	for (const file of files) {
+		const base = baseOf.get(file) ?? baseRef;
+		if (!groups.has(base)) groups.set(base, []);
+		groups.get(base).push(file);
+	}
+	const out = new Map();
+	for (const [base, subset] of groups) {
+		if (subset.length === 0) continue;
+		for (const [k, v] of diff(base, subset)) out.set(k, v);
+	}
+	return out;
 }
 
 /**

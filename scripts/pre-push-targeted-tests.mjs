@@ -22,6 +22,12 @@
 //      files for a 43-file commit, ~10 minutes, because of exactly that).
 // A changed test file is always included directly.
 //
+// A third pass adds history (#3215 lane 3, scripts/lib/test-history-selection.mjs):
+// the tests that failed on past heads which touched the changed files'
+// directories, from the nightly `data/test-history` summary. It only adds, is
+// bounded by its own cap, survives the cap below, and says when the history is
+// stale or unavailable and the selection is import-only.
+//
 // Selection is capped at MAX_SELECTED_TESTS: past that, "targeted" has
 // stopped meaning anything cheaper than the full suite, so this degrades to
 // the armed governance registries alone (bounded by construction; build-only
@@ -36,6 +42,7 @@ import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
+import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
@@ -142,6 +149,7 @@ function writeSelectionSummary({
 	totalBeforeCap,
 	status,
 	excludedCiOnly = [],
+	history = null,
 }) {
 	const lines = [
 		"### Targeted test selection",
@@ -152,6 +160,7 @@ function writeSelectionSummary({
 		`- CI-only suites deferred: ${excludedCiOnly.length}`,
 		`- Result: ${status}`,
 	];
+	if (history) lines.push(`- History: ${history.status} (${history.detail})`);
 	for (const test of excludedCiOnly)
 		lines.push(`- CI-only: ${test} (runs in CI)`);
 	writeStepSummary(lines.join("\n"));
@@ -284,10 +293,14 @@ function buildTestImportIndex(allTests) {
 /**
  * @param {string[]} changed
  * @param {string[]} allTests
- * @param {{ includeCiOnly?: boolean }} [options] `includeCiOnly` admits the
- *   `CI_ONLY_PRE_PUSH_TESTS` tier (the CI job passes it); the local pre-push
- *   caller leaves it false so a budget-busting suite never runs there.
- * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number, excludedCiOnly: string[] }}
+ * @param {{ includeCiOnly?: boolean, historyPicks?: string[] }} [options]
+ *   `includeCiOnly` admits the `CI_ONLY_PRE_PUSH_TESTS` tier (the CI job passes
+ *   it); the local pre-push caller leaves it false so a budget-busting suite
+ *   never runs there. `historyPicks` are the history pass's additions
+ *   (`loadHistorySelection`): bounded by their own cap, so they join the
+ *   registries in surviving the import cap, and they are never counted toward
+ *   it.
+ * @returns {{ selected: string[], unmatched: string[], capped: boolean, totalBeforeCap: number, excludedCiOnly: string[], fromHistory: string[] }}
  */
 export function selectTargetedTests(changed, allTests, options = {}) {
 	const testImportIndex = buildTestImportIndex(allTests);
@@ -326,7 +339,9 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 	if (changed.some(changesProductionFile)) arm(TREE_SCANNING_GOVERNANCE_TESTS);
 	if (changed.some(changesTestTreeFile)) arm(TEST_TREE_GOVERNANCE_TESTS);
 
-	const selected = new Set([...heuristic, ...armed]);
+	// The picks arrive already filtered to `allTests` by `selectFromHistory`.
+	const history = new Set(options.historyPicks ?? []);
+	const selected = new Set([...heuristic, ...armed, ...history]);
 
 	// CI-only tier (#3426 H3432-1): remove the suites measured to exceed the
 	// pre-push budget unless the caller is the CI job that owns them. The
@@ -351,12 +366,21 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 
 	return {
 		selected: capped
-			? [...selected].filter((test) => armed.has(test))
+			? [...selected].filter((test) => armed.has(test) || history.has(test))
 			: [...selected],
 		unmatched,
 		capped,
 		totalBeforeCap,
 		excludedCiOnly,
+		// What history alone put in the selection: not a registry suite, and not
+		// an import match that survives (on a capped selection the import matches
+		// are dropped, so a history pick is there because of history).
+		fromHistory: [...history].filter(
+			(test) =>
+				selected.has(test) &&
+				!armed.has(test) &&
+				(capped || !heuristic.has(test)),
+		),
 	};
 }
 
@@ -487,8 +511,30 @@ export async function main() {
 
 	const includeCiOnly = process.argv.includes("--include-ci-only");
 	const allTests = collectTestFiles("tests");
-	const { selected, unmatched, capped, totalBeforeCap, excludedCiOnly } =
-		selectTargetedTests(changed, allTests, { includeCiOnly });
+	const summaryArg = process.argv.indexOf("--history-summary");
+	const history = loadHistorySelection({
+		changed,
+		allTests,
+		file: summaryArg === -1 ? undefined : process.argv[summaryArg + 1],
+	});
+	// One line per push, whatever the history said: a silent import-only
+	// fallback would read as "history found nothing".
+	console.log(
+		`[pre-push] history selection ${history.status}: ${history.detail}`,
+	);
+	const {
+		selected,
+		unmatched,
+		capped,
+		totalBeforeCap,
+		excludedCiOnly,
+		fromHistory,
+	} = selectTargetedTests(changed, allTests, {
+		includeCiOnly,
+		historyPicks: history.picks,
+	});
+	for (const test of fromHistory)
+		console.log(`[pre-push] history added ${test}`);
 
 	for (const file of unmatched)
 		console.log(`[pre-push] no tests matched ${file}`);
@@ -504,7 +550,7 @@ export async function main() {
 
 	if (capped) {
 		console.warn(
-			`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length} governance registry suite(s)` : ""}.`,
+			`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length - fromHistory.length} governance registry suite(s) and ${fromHistory.length} history pick(s)` : ""}.`,
 		);
 		if (selected.length === 0) {
 			writeSelectionSummary({
@@ -513,6 +559,7 @@ export async function main() {
 				totalBeforeCap,
 				status: `cap exceeded (${MAX_SELECTED_TESTS}); build-only`,
 				excludedCiOnly,
+				history,
 			});
 			return 0;
 		}
@@ -528,6 +575,7 @@ export async function main() {
 			totalBeforeCap,
 			status: "no matches; build-only",
 			excludedCiOnly,
+			history,
 		});
 		return 0;
 	}
@@ -537,9 +585,10 @@ export async function main() {
 		selectedCount: selected.length,
 		totalBeforeCap,
 		status: capped
-			? `cap exceeded (${MAX_SELECTED_TESTS}); governance registries only`
+			? `cap exceeded (${MAX_SELECTED_TESTS}); ${selected.length - fromHistory.length} governance registries and ${fromHistory.length} history pick(s) only`
 			: "selected",
 		excludedCiOnly,
+		history,
 	});
 
 	console.log(

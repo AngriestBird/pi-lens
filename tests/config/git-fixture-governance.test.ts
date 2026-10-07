@@ -32,6 +32,12 @@ const OWN_IMPLEMENTATION_FILES = [
 // alias config all have to apply).
 const NOT_A_FIXTURE = [
 	"scripts/pre-push-targeted-tests.mjs",
+	// #3215 lane 3: the pre-push selector's history pass, which reads past
+	// heads' paths and the data-branch summary out of THIS clone
+	// (`git cat-file`/`git log`/`git show`) -- the same "drives the real repo"
+	// shape as the hook that calls it; its tests run it against a throwaway
+	// repo through gitFixtureEnv.
+	"scripts/lib/test-history-selection.mjs",
 	"scripts/prune-agent-worktrees.mjs",
 	// #2698: reads THIS checkout's own `git ls-files` state (untracked+
 	// ignored .js siblings, tracked .ts sources) before `knip` runs — same
@@ -107,10 +113,18 @@ const HISTORY_SUBCOMMANDS = new Set([
 
 /**
  * Global git options that consume a SEPARATE following token, so the
- * subcommand search steps over their value -- the same two
+ * subcommand search steps over their value -- the same seven
  * `scripts/hooks/guard-bash.mjs`'s `classifyGit` walks past.
  */
-const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
+const GIT_TWO_TOKEN_FLAGS = new Set([
+	"-C",
+	"-c",
+	"--git-dir",
+	"--work-tree",
+	"--namespace",
+	"--config-env",
+	"--attr-source",
+]);
 
 const QUOTED_ITEM = /^(["'`])((?:\\.|(?!\1)[\s\S])*)\1$/;
 
@@ -775,16 +789,31 @@ describe("real Git fixture governance", () => {
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
 	});
 
-	it("steps over git global options to find the subcommand", () => {
+	it("steps over every separate-value git global to find the subcommand", () => {
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
-					source:
+					source: [
 						'execFileSync("git", ["-C", dir, "show", "ca2639524:clients/x.ts"]);',
+						'execFileSync("git", ["-c", config, "show", "20896a56b:clients/y.ts"]);',
+						'execFileSync("git", ["--git-dir", dir, "show", "deadbeef1:clients/z.ts"]);',
+						'execFileSync("git", ["--work-tree", dir, "show", "abcdef12:clients/a.ts"]);',
+						'execFileSync("git", ["--namespace", namespace, "show", "1234567:clients/b.ts"]);',
+						'execFileSync("git", ["--config-env", key, "show", "fedcba98:clients/c.ts"]);',
+						'execFileSync("git", ["--attr-source", source, "show", "7654321:clients/d.ts"]);',
+					].join("\\n"),
 				},
 			]),
-		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+		).toEqual([
+			"tests/clients/synthetic.test.ts:1 ca2639524",
+			"tests/clients/synthetic.test.ts:1 20896a56b",
+			"tests/clients/synthetic.test.ts:1 deadbeef1",
+			"tests/clients/synthetic.test.ts:1 abcdef12",
+			"tests/clients/synthetic.test.ts:1 1234567",
+			"tests/clients/synthetic.test.ts:1 fedcba98",
+			"tests/clients/synthetic.test.ts:1 7654321",
+		]);
 	});
 
 	it("steps over --git-dir=<path> and --work-tree=<path> to find the subcommand", () => {

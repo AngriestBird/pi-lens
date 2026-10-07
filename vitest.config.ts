@@ -572,6 +572,10 @@ export const wallClockBudgetInclude = [
 	// exists in its real top-level execution order; a real child process
 	// against a throwaway git fixture is the only thing that reproduces it.
 	"tests/scripts/stryker-diff.test.ts",
+	// #4005: the nightly report's window resolution asks real git for ancestry
+	// and commit dates in a throwaway repo (flake-shape admission; no wall-clock
+	// budget assertion).
+	"tests/scripts/stryker-nightly.test.ts",
 	// #2586 review F1: proves the ACTUAL stdout bytes supply-host-provided-deps.mjs
 	// prints (real child process, flake-shape admission).
 	"tests/scripts/supply-host-provided-deps.test.ts",

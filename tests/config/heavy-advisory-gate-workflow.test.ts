@@ -32,7 +32,7 @@ import { DEFAULT_DEADLINE_SECONDS } from "../../scripts/ci-heavy-gate.mjs";
 
 const byCodeUnit = (a = "", b = "") => (a < b ? -1 : a > b ? 1 : 0);
 
-// #3801: the heavy advisory jobs (mutation, the Windows Vitest subset) start
+// #3801: the heavy advisory jobs (CodeQL, the Windows Vitest subset) start
 // only after the required checks passed on the same head. Each case names the
 // regression it keeps out; the real YAML is loaded, never a source regex.
 
@@ -370,7 +370,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	});
 
 	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff
-	// would launch mutation and the Windows run for a change the maintainer wants
+	// would launch CodeQL and the Windows run for a change the maintainer wants
 	// spared them. And a status function in the gate's `if` (always(),
 	// cancelled(), failure()) would replace the implicit success() over its
 	// needs, releasing the heavy jobs on a head whose required job is red.
@@ -456,8 +456,6 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		expect(isAdvisoryCheck(gate.name ?? "")).toBe(true);
 		for (const [, job] of gated)
 			expect(isAdvisoryCheck(job.name ?? "")).toBe(true);
-		const mutation = CI.jobs.mutation;
-		expect(mutation["continue-on-error"]).toBe(true);
 	});
 
 	// Recurrence: a gate that polls a merge-ref sha finds no check-runs (they
@@ -478,26 +476,22 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		);
 	});
 
-	// Recurrence: the lane kept also running from its own ungated workflow. A
-	// second `pull_request` mutation workflow would start the heavy run at once.
-	it("has no ungated mutation workflow left beside the gated job", () => {
+	// Recurrence (#4005): the Stryker mutation lane came back onto the pull_request
+	// path (a `mutation` job in ci.yml or its own workflow) and bought 11-18% of CI
+	// job-minutes per push for no product defect. It is the nightly report in
+	// stryker-nightly.yml; tests/config/stryker-nightly-workflow.test.ts pins that
+	// shape, and this pins the absence from the PR path and the gate.
+	it("has no mutation job behind the gate and no mutation workflow on the pull_request path", () => {
+		expect(Object.keys(CI.jobs).filter((id) => /mutation/i.test(id))).toEqual(
+			[],
+		);
+		expect(gated.map(([id]) => id).sort(byCodeUnit)).toEqual([
+			"codeql",
+			"unit-tests-windows",
+		]);
 		expect(existsSync(resolve(ROOT, ".github/workflows/mutation.yml"))).toBe(
 			false,
 		);
-		expect(CI.jobs.mutation.name).toBe("mutation (advisory)");
-		expect(CI.jobs.mutation.if).toContain(
-			"github.event_name == 'pull_request'",
-		);
-	});
-
-	// Recurrence: the sticky-comment job running (and marking a stale comment)
-	// on every red head, where the gate skipped mutation: a runner slot per red
-	// push for no report.
-	it("skips the sticky-comment job when mutation itself was skipped", () => {
-		const comment = CI.jobs["mutation-comment"];
-		expect(asList(comment.needs)).toEqual(["mutation"]);
-		expect(comment.if).toContain("needs.mutation.result != 'skipped'");
-		expect(comment.if).toContain("always()");
 	});
 
 	// Recurrence: #3756's aggregate lesson. A skipped required check counts as
@@ -513,7 +507,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 // auto-merge may already have deleted the mutable `refs/pull/<n>/merge` that
 // `github.ref` names. A gated checkout must rely on the action's default
 // captured commit (`github.sha`, the validated test-merge tree), never on the
-// ephemeral ref. The sibling gated jobs `mutation` and `codeql` already do.
+// ephemeral ref. The sibling gated job `codeql` already does.
 // The rule is derived from `needs`, so a future gated job is covered.
 describe("#3926 a gated checkout pins the captured commit, never the merge ref", () => {
 	const checkoutSteps = (id: string): Step[] =>
@@ -662,9 +656,11 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 56 checkout sites across the tree; 61 non-gate job rows (A22/B3/C14/D22
+		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B2/C13/D23
 		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
-		// from C to D, and #3916 added tool-smoke's schedule/dispatch-only
+		// from C to D, #4005 removed the pull_request `mutation` (B) and
+		// `mutation comment` (C) jobs and added the schedule-only nightly report
+		// job (D), and #3916 added tool-smoke's schedule/dispatch-only
 		// `snapshot-persist-bench`, also D). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
@@ -672,16 +668,16 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			56,
+			55,
 		);
-		expect(CENSUS_SITES.length).toBe(56);
+		expect(CENSUS_SITES.length).toBe(55);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(61);
+		).toBe(60);
 		expect(stageJobs("A")).toBe(22);
-		expect(stageJobs("B")).toBe(3);
-		expect(stageJobs("C")).toBe(14);
-		expect(stageJobs("D")).toBe(22);
+		expect(stageJobs("B")).toBe(2);
+		expect(stageJobs("C")).toBe(13);
+		expect(stageJobs("D")).toBe(23);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
