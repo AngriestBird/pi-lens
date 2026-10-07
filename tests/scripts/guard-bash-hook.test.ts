@@ -30,7 +30,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -785,6 +785,91 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		}
 	});
 
+	it("denies git worktree remove through a two-hop node_modules symlink (#4080)", () => {
+		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
+		const tree = makeWorktreeDir("guard-bash-worktree-two-hop-");
+		const inner = join(tree, "inner");
+		symlinkSync(inner, join(tree, "node_modules"));
+		symlinkSync(shared, inner);
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("rm <tree>/node_modules");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	const BROKEN_CHAIN_ROWS = [
+		{
+			label: "self-loop",
+			setup: (tree: string) =>
+				symlinkSync("node_modules", join(tree, "node_modules")),
+		},
+		{
+			label: "two-cycle",
+			setup: (tree: string) => {
+				const nodeModules = join(tree, "node_modules");
+				const inner = join(tree, "inner");
+				symlinkSync("inner", nodeModules);
+				symlinkSync("node_modules", inner);
+			},
+		},
+		{
+			label: "dangling in-project link",
+			setup: (tree: string) => {
+				const inner = join(tree, "inner");
+				symlinkSync("inner", join(tree, "node_modules"));
+				symlinkSync("missing", inner);
+			},
+		},
+		{
+			label: "ENOTDIR",
+			setup: (tree: string) => {
+				writeFileSync(join(tree, "package.json"), "{}\n");
+				symlinkSync("package.json/child", join(tree, "node_modules"));
+			},
+		},
+	] as const;
+
+	it.each(BROKEN_CHAIN_ROWS)(
+		"fails closed for $label chains across npm and delete callers (#4080)",
+		({ setup }) => {
+			const tree = mkdtempSync(
+				join(tmpdir(), "pi-lens-guard-bash-broken-chain-"),
+			);
+			writeFileSync(join(tree, "package.json"), "{}\n");
+			setup(tree);
+			try {
+				for (const command of [
+					"npm ci",
+					"rm -rf node_modules/",
+					"rm -rf node_modules/*",
+				]) {
+					const result = runHook(command, BASE_ENV, tree);
+					expect(result.status, command).toBe(2);
+					expect(result.stderr, command).toMatch(/#4044|#3173/);
+				}
+			} finally {
+				rmSync(tree, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("fails closed for a dangling in-project chain on git worktree remove (#4080)", () => {
+		const tree = makeWorktreeDir("guard-bash-worktree-dangling-chain-");
+		symlinkSync("inner", join(tree, "node_modules"));
+		symlinkSync("missing", join(tree, "inner"));
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#3173");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+		}
+	});
+
 	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
 		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
@@ -889,6 +974,990 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 			rmSync(tree, { recursive: true, force: true });
 			rmSync(shared, { recursive: true, force: true });
 		}
+	});
+});
+
+// #4044 (2026-10-07 09:16:22Z): a worker ran `npm ci --ignore-scripts
+// --dry-run` in a lane whose node_modules was a symlink to the main
+// checkout's install. npm 9.2.0 ignores --dry-run for the clean-install
+// family and removes node_modules/* through the link, so every lane lost its
+// dependencies. Recurrence these cases catch: the #3173 shape (a delete
+// through a node_modules link) reached by a different verb, or by a spelling
+// the first guard missed (`cd <lane> && …`, `--prefix`, `npx npm@…`, a
+// subdirectory of the lane). Real filesystem fixtures, driven through the
+// real hook entry.
+describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a linked node_modules (#4044)", () => {
+	function makeLane(linked: boolean): {
+		tree: string;
+		shared: string;
+		cleanup: () => void;
+	} {
+		const shared = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-npm-shared-nm-"),
+		);
+		const tree = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-npm-lane-"));
+		writeFileSync(join(tree, "package.json"), "{}\n");
+		if (linked) symlinkSync(shared, join(tree, "node_modules"));
+		else mkdirSync(join(tree, "node_modules"));
+		return {
+			tree,
+			shared,
+			cleanup: () => {
+				rmSync(tree, { recursive: true, force: true });
+				rmSync(shared, { recursive: true, force: true });
+			},
+		};
+	}
+
+	const MUTATING = [
+		"npm ci",
+		"npm ci --ignore-scripts --dry-run",
+		"npm clean-install",
+		"npm install",
+		"npm i",
+		"npm add left-pad",
+		"npm uninstall left-pad",
+		"npm rm left-pad",
+		"npm update",
+		"npm up",
+		"npm prune",
+		"npm dedupe",
+		"npm rebuild",
+		"npm install-ci-test",
+		"npm cit",
+		"npm audit fix",
+		"npm link",
+		"npm install --no-save oxfmt",
+		"npm install --dry-run",
+	];
+
+	it.each(MUTATING)(
+		"denies `%s` when node_modules links outside the lane, and names the safe forms",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+				expect(result.stderr).toContain("scratch copy");
+				expect(result.stderr).toContain("--prefix");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("denies npm writers and deletes through a two-hop node_modules symlink (#4080)", () => {
+		const { tree, shared, cleanup } = makeLane(true);
+		const nodeModules = join(tree, "node_modules");
+		const inner = join(tree, "inner");
+		unlinkSync(nodeModules);
+		symlinkSync(inner, nodeModules);
+		symlinkSync(shared, inner);
+		try {
+			for (const command of [
+				"npm ci",
+				"rm -rf node_modules/",
+				"rm -rf node_modules/*",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows a chain whose first hop leaves the lane but resolves back inside (#4080)", () => {
+		const tree = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-inside-chain-"),
+		);
+		const outsideSpelling = join(dirname(tree), `${basename(tree)}-link`);
+		mkdirSync(join(tree, "inner"));
+		symlinkSync(tree, outsideSpelling);
+		symlinkSync(
+			join("..", basename(outsideSpelling), "inner"),
+			join(tree, "node_modules"),
+		);
+		try {
+			const result = runHook("npm ci", BASE_ENV, tree);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			unlinkSync(outsideSpelling);
+		}
+	});
+
+	it("denies the incident's own shape: `cd <lane> && npm ci --dry-run` from an unrelated payload cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook(`cd ${tree} && npm ci --dry-run`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies `npm --prefix <linked lane> ci` and `npm ci --prefix=<linked lane>` from another cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				`npm --prefix ${tree} ci`,
+				`npm ci --prefix=${tree}`,
+				`npm ci --prefix ${tree}`,
+			]) {
+				const result = runHook(command);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("resolves a relative --prefix against the payload cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook(
+				`npm --prefix ./${tree.split("/").pop()} ci`,
+				BASE_ENV,
+				dirname(tree),
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies `npx -y npm@11.18.0 ci` and bare `npx npm ci` in a linked lane", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"npx -y npm@11.18.0 ci",
+				"npx --yes npm@11 ci --dry-run",
+				"npx npm ci",
+				"npx -p npm@11.18.0 -y npm ci",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies from a subdirectory of the lane, where npm walks up to the lane's node_modules", () => {
+		const { tree, cleanup } = makeLane(true);
+		const sub = join(tree, "scripts", "deep");
+		mkdirSync(sub, { recursive: true });
+		try {
+			const result = runHook("npm ci", BASE_ENV, sub);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies behind an env assignment and a runner prefix", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of ["CI=1 npm ci", "env npm ci", "echo go; npm ci"]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows every mutating verb where node_modules is a REAL directory", () => {
+		const { tree, cleanup } = makeLane(false);
+		try {
+			for (const command of [
+				...MUTATING,
+				"npx -y npm@11.18.0 ci",
+				`cd ${tree} && npm ci`,
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows read-only and non-install npm/npx verbs through a linked node_modules", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"npm ls",
+				"npm run build",
+				"npm test",
+				"npm view left-pad version",
+				"npm audit",
+				"npm outdated",
+				"npm pack --dry-run",
+				"npm exec vitest",
+				"npx vitest run tests/x.test.ts",
+				"npx -y tsc --noEmit",
+				"npm config get registry",
+				"npm --prefix . ls",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows the message's own safe forms: --prefix into a real directory, and a global install", () => {
+		const linked = makeLane(true);
+		const real = makeLane(false);
+		try {
+			for (const command of [
+				`npm --prefix ${real.tree} ci`,
+				`npm ci --prefix=${real.tree}`,
+				"npm install -g left-pad",
+			]) {
+				const result = runHook(command, BASE_ENV, linked.tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			linked.cleanup();
+			real.cleanup();
+		}
+	});
+
+	it("allows `npm ci` in a lane with no node_modules yet, and where the link stays INSIDE the lane", () => {
+		const bare = makeLane(false);
+		rmSync(join(bare.tree, "node_modules"), { recursive: true });
+		const inside = makeLane(false);
+		rmSync(join(inside.tree, "node_modules"), { recursive: true });
+		const vendor = join(inside.tree, "vendor", "node_modules");
+		mkdirSync(vendor, { recursive: true });
+		symlinkSync(vendor, join(inside.tree, "node_modules"));
+		try {
+			for (const tree of [bare.tree, inside.tree]) {
+				const result = runHook("npm ci", BASE_ENV, tree);
+				expect(result.status, tree).toBe(0);
+				expect(result.stderr, tree).toBe("");
+			}
+		} finally {
+			bare.cleanup();
+			inside.cleanup();
+		}
+	});
+
+	it("stops the walk-up at the nearest package.json, so a nested project with its own install is judged on its own", () => {
+		const { tree, cleanup } = makeLane(true);
+		const nested = join(tree, "packages", "x");
+		mkdirSync(join(nested, "node_modules"), { recursive: true });
+		writeFileSync(join(nested, "package.json"), "{}\n");
+		try {
+			const result = runHook("npm ci", BASE_ENV, nested);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Recurrence: the #4044 sibling measured with GNU coreutils on 2026-10-07:
+	// `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/
+	// -delete` follow a link and empty its target, while the no-slash forms
+	// only unlink the link. The npm rule alone left these open, and each is
+	// one keystroke from the form that is safe.
+	const DELETES_THROUGH = [
+		"rm -rf node_modules/",
+		"rm -rf node_modules/*",
+		"rm -rf ./node_modules/",
+		"rm -rf -- node_modules/",
+		"rm -r node_modules/.cache",
+		"rmdir node_modules/x",
+		"unlink node_modules/x",
+		"env rm -rf node_modules/",
+		"find node_modules/ -delete",
+		"find node_modules/ -type f -delete",
+		"find -L node_modules -delete",
+		"find -H node_modules -delete",
+		"find node_modules/ -exec rm -rf {} +",
+		"find node_modules/ -execdir unlink {} ;",
+	];
+
+	it.each(DELETES_THROUGH)(
+		"denies `%s` when node_modules links outside the lane, and names the unlink form",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+				expect(result.stderr).toContain("rm node_modules");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("resolves the operand through the cwd the command really runs in: cd, absolute, relative and subdirectory spellings", () => {
+		const { tree, cleanup } = makeLane(true);
+		const sub = join(tree, "scripts");
+		mkdirSync(sub);
+		const laneName = tree.split("/").pop();
+		try {
+			const cases: Array<[string, string]> = [
+				[`cd ${tree} && rm -rf node_modules/`, PAYLOAD_CWD],
+				[`rm -rf ${tree}/node_modules/`, PAYLOAD_CWD],
+				[`rm -rf ${tree}/node_modules/*`, PAYLOAD_CWD],
+				[`find ${tree}/node_modules/ -delete`, PAYLOAD_CWD],
+				[`rm -rf ./${laneName}/node_modules/`, dirname(tree)],
+				["rm -rf ../node_modules/", sub],
+				["rm -rf ../node_modules/*", sub],
+				// cd INTO the link, then delete by glob or by `.`.
+				[`cd ${tree}/node_modules && rm -rf ./*`, PAYLOAD_CWD],
+				[`cd ${tree}/node_modules && find . -delete`, PAYLOAD_CWD],
+				[`cd ${tree}/node_modules && find -delete`, PAYLOAD_CWD],
+			];
+			for (const [command, cwd] of cases) {
+				const result = runHook(command, BASE_ENV, cwd);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows unlinking the link itself and every delete that does not pass through it", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"rm node_modules",
+				"rm -rf node_modules",
+				"rm -f ./node_modules",
+				"unlink node_modules",
+				`rm -rf ${tree}/node_modules`,
+				"find node_modules -delete",
+				"find node_modules -name x -print",
+				"find node_modules/ -name x -print",
+				"find . -delete",
+				"find node_modules/ -exec ls {} +",
+				"rm -rf dist src/*",
+				"ls node_modules/",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows `rm -rf node_modules/` where node_modules is a real directory, absent, or links INSIDE the lane", () => {
+		const real = makeLane(false);
+		const bare = makeLane(false);
+		rmSync(join(bare.tree, "node_modules"), { recursive: true });
+		const inside = makeLane(false);
+		rmSync(join(inside.tree, "node_modules"), { recursive: true });
+		const vendor = join(inside.tree, "vendor", "node_modules");
+		mkdirSync(vendor, { recursive: true });
+		symlinkSync(vendor, join(inside.tree, "node_modules"));
+		try {
+			for (const tree of [real.tree, bare.tree, inside.tree]) {
+				for (const command of [
+					"rm -rf node_modules/",
+					"rm -rf node_modules/*",
+					"find node_modules/ -delete",
+				]) {
+					const result = runHook(command, BASE_ENV, tree);
+					expect(result.status, `${tree} ${command}`).toBe(0);
+					expect(result.stderr, `${tree} ${command}`).toBe("");
+				}
+			}
+		} finally {
+			real.cleanup();
+			bare.cleanup();
+			inside.cleanup();
+		}
+	});
+
+	// Round 3 (#3997 merged). Recurrence: #3997's `cwdAfterSegment` hands a rule
+	// `cwd === null` after a `cd` it cannot resolve, and the #4054 rules read
+	// `cwd ?? process.cwd()` -- the HOOK's cwd, a real node_modules -- so
+	// `cd $(pwd) && npm ci` in a linked lane allowed (verify-3997-r4 section 5).
+	// An unknown cwd is judged as the payload's own cwd, failing closed.
+	it.each([
+		"cd $UNSET_4044_DIR && npm ci",
+		"popd; npm ci",
+		"cd - ; npm ci",
+		"cd $(pwd) && npm ci",
+		"cd `pwd` && npm install",
+		"cd $(pwd) && rm -rf node_modules/",
+		"cd $(pwd) && find node_modules/ -delete",
+	])(
+		"denies `%s` in a linked lane: an unknown cwd is the payload cwd",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("allows the same unknown-cwd commands when the payload cwd holds a real node_modules", () => {
+		const { tree, cleanup } = makeLane(false);
+		try {
+			for (const command of [
+				"cd $UNSET_4044_DIR && npm ci",
+				"popd; npm ci",
+				"cd $(pwd) && rm -rf node_modules/",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Recurrence: the rules resolved operands with plain `resolve`, so a
+	// `$PWD`/`$VAR`/`~` spelling of the same path was allowed (#3988's one
+	// resolver, #3997). Logical mode: a physical realpath collapses
+	// `lane/node_modules/` onto the target and the link vanishes from the path.
+	it("resolves `$PWD`, exported/assigned variables and `~` in delete operands and --prefix", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const cases: Array<[string, NodeJS.ProcessEnv]> = [
+				["rm -rf $PWD/node_modules/", BASE_ENV],
+				["rm -rf ${PWD}/node_modules/*", BASE_ENV],
+				["npm ci --prefix $PWD", BASE_ENV],
+				["npm --prefix=$PWD ci", BASE_ENV],
+				["D=node_modules; rm -rf $D/", BASE_ENV],
+				["export NM=$PWD/node_modules; rm -rf $NM/", BASE_ENV],
+				["P=$PWD; npm --prefix $P ci", BASE_ENV],
+				["cd $PWD && rm -rf node_modules/", BASE_ENV],
+				["rm -rf ~/node_modules/", { ...BASE_ENV, HOME: tree }],
+				["npm ci --prefix ~", { ...BASE_ENV, HOME: tree }],
+			];
+			for (const [command, env] of cases) {
+				const result = runHook(command, env, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows in-lane deletes that resolve past the link without passing through it", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"rm -rf $PWD/dist/",
+				"rm -rf $PWD/node_modules",
+				"rm -rf ~/dist/",
+			]) {
+				const result = runHook(command, { ...BASE_ENV, HOME: tree }, tree);
+				expect(result.stderr, command).toBe("");
+				expect(result.status, command).toBe(0);
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Round 4 state table (PR #4054 body, "Round 4"): value form x lane x verb.
+	// Recurrence: round 3 let `npm --prefix "$(pwd)" ci` through in a linked
+	// lane while `D=$(pwd); npm --prefix $D ci` denied (R3-1, a regression it
+	// introduced), and resolved `../lnk/../node_modules/` lexically while the
+	// kernel follows `lnk` first (R3-2). One rule covers every row: a directory
+	// is tested where the program lands (kernel walk for deletes, npm's own
+	// resolution for --prefix and the walk-up), and a part the resolver cannot
+	// read is the project the command runs in.
+	function makeTableFixture(): { root: string; cleanup: () => void } {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-r4-"));
+		const shared = join(root, "main", "node_modules");
+		mkdirSync(shared, { recursive: true });
+		for (const name of ["lane", "real"]) {
+			mkdirSync(join(root, name, "scripts"), { recursive: true });
+			writeFileSync(join(root, name, "package.json"), "{}\n");
+		}
+		symlinkSync(shared, join(root, "lane", "node_modules"));
+		mkdirSync(join(root, "real", "node_modules"));
+		mkdirSync(join(root, "sib"));
+		mkdirSync(join(root, "scratch"));
+		symlinkSync(join(root, "lane", "scripts"), join(root, "lnk"));
+		symlinkSync(join(root, "real", "scripts"), join(root, "rlnk"));
+		return {
+			root,
+			cleanup: () => rmSync(root, { recursive: true, force: true }),
+		};
+	}
+
+	const OFF_TMP_SCRATCH = "/home/dev/pi-lens-guard-bash-r4-scratch";
+
+	// [id, command ({dir} = the lane, {lnk} = its scripts link), payload cwd,
+	//  HOME is the lane, expected in the linked lane, expected in the real one]
+	const ROUND4_TABLE: Array<
+		[string, string, "lane" | "sib", boolean, "deny" | "allow", "allow"]
+	> = [
+		["N1 literal", "npm --prefix {dir} ci", "sib", false, "deny", "allow"],
+		[
+			"N2 known var",
+			"P={dir}; npm --prefix $P ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N3 unknown var",
+			'npm --prefix "$UNSET_4054_R4" ci',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N3b unknown var",
+			"npm ci --prefix $UNSET_4054_R4/x",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["N4 $(cmd)", 'npm --prefix "$(pwd)" ci', "lane", false, "deny", "allow"],
+		["N4b $(cmd)", "npm ci --prefix=$(pwd)", "lane", false, "deny", "allow"],
+		[
+			"N4c $(cmd)",
+			'npm ci --prefix "$(git rev-parse --show-toplevel)"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N4d $(cmd)",
+			'npm --prefix "$(mktemp -d)" ci',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N4e $(cmd) via var",
+			"D=$(pwd); npm --prefix $D ci",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["N5 backtick", "npm ci --prefix `pwd`", "lane", false, "deny", "allow"],
+		["N6 ~", "npm --prefix ~ ci", "sib", true, "deny", "allow"],
+		["N6b $HOME", "npm --prefix $HOME ci", "sib", true, "deny", "allow"],
+		[
+			"N6c ~+ (bash: $PWD)",
+			"npm --prefix ~+ ci",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N7 $TMPDIR",
+			"npm --prefix $TMPDIR/s ci",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"N7b $TMPDIR cd",
+			"cd $TMPDIR/s && npm ci",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		["N8 $PWD", "npm --prefix $PWD ci", "lane", false, "deny", "allow"],
+		[
+			"N9 symlink+.. cd",
+			"cd ../{lnk} && npm ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N9b symlink+.. prefix",
+			"npm --prefix ../{lnk}/.. ci",
+			"sib",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"N10 cwd inside the link",
+			"cd {dir}/node_modules && npm ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N10b prefix inside the link",
+			"npm --prefix {dir}/node_modules ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		["D1 literal", "rm -rf node_modules/", "lane", false, "deny", "allow"],
+		[
+			"D1b literal link only",
+			"rm -rf node_modules",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"D2 known var",
+			"D={dir}; rm -rf $D/node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D3 unknown var",
+			'rm -rf "$UNSET_4054_R4/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4 $(cmd)",
+			'rm -rf "$(pwd)/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4b $(cmd)",
+			'rm -rf "$(git rev-parse --show-toplevel)/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4c $(cmd) via var",
+			"S=$(pwd); rm -rf $S/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4d $(cmd) find",
+			'find "$(pwd)/node_modules/" -delete',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4e $(cmd) find -L",
+			"find -L $(pwd) -delete",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D5 backtick",
+			"rm -rf `pwd`/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["D6 ~", "rm -rf ~/node_modules/", "sib", true, "deny", "allow"],
+		["D6b $HOME", "rm -rf $HOME/node_modules/*", "sib", true, "deny", "allow"],
+		[
+			"D6c ~+ (bash: $PWD)",
+			"rm -rf ~+/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D7 $TMPDIR",
+			"rm -rf $TMPDIR/s/node_modules/",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		["D8 $PWD", "rm -rf $PWD/node_modules/", "lane", false, "deny", "allow"],
+		[
+			"D9 symlink+..",
+			"rm -rf ../{lnk}/../node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D9b symlink+.. cd",
+			"cd ../{lnk} && rm -rf ../node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+	];
+
+	it.each(ROUND4_TABLE)(
+		"round-4 state table %s: `%s` (cwd %s) in a linked and a real lane",
+		(_id, template, cwdKind, homeIsLane, linkedVerdict, realVerdict) => {
+			const { root, cleanup } = makeTableFixture();
+			try {
+				for (const [lane, link, verdict] of [
+					["lane", "lnk", linkedVerdict],
+					["real", "rlnk", realVerdict],
+				] as const) {
+					const dir = join(root, lane);
+					const command = template
+						.replaceAll("{dir}", dir)
+						.replaceAll("{lnk}", link);
+					const { UNSET_4054_R4: _unset, ...env } = BASE_ENV;
+					const result = runHook(
+						command,
+						{
+							...env,
+							// A `mktemp` row reads TMPDIR as where mktemp lands: a
+							// fixture root under /tmp (the CI runner's os.tmpdir())
+							// would add the unrelated #3526 tmpCheckout deny to the
+							// real-lane allow (round 5, N4d). The hook only reads the
+							// string, so those rows get a path off /tmp.
+							TMPDIR: template.includes("mktemp")
+								? OFF_TMP_SCRATCH
+								: join(root, "scratch"),
+							...(homeIsLane ? { HOME: dir } : {}),
+						},
+						cwdKind === "sib" ? join(root, "sib") : dir,
+					);
+					if (verdict === "deny") {
+						expect(result.status, `${lane}: ${command}`).toBe(2);
+						expect(result.stderr, `${lane}: ${command}`).toContain("#4044");
+					} else {
+						expect(result.stderr, `${lane}: ${command}`).toBe("");
+						expect(result.status, `${lane}: ${command}`).toBe(0);
+					}
+				}
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	// Recurrence (round 5, CI on 4440b2e8): N4d passed locally and reds on the
+	// runner, because the table's real-lane allow silently depended on the
+	// host's os.tmpdir(). The /tmp half of that dependence is pinned here by
+	// reason: a `mktemp -d` prefix lands under TMPDIR, and under /tmp it is the
+	// #3526 tmpCheckout deny, never the #4044 one, in a real lane.
+	it("names the #3526 reason for a mktemp -d --prefix when TMPDIR is under /tmp", () => {
+		const { root, cleanup } = makeTableFixture();
+		try {
+			const { UNSET_4054_R4: _unset, ...env } = BASE_ENV;
+			const result = runHook(
+				'npm --prefix "$(mktemp -d)" ci',
+				{ ...env, TMPDIR: "/tmp/pi-lens-guard-bash-r5-scratch" },
+				join(root, "real"),
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toBe(`${RULE_MESSAGES.tmpCheckout}\n`);
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Recurrence: round 3 resolved `node_modules/..` lexically to the lane,
+	// while the kernel follows the link first and lands in the shared
+	// install's parent (`find node_modules/.. -delete` would empty the main
+	// checkout); the same holds for a relative path from a cwd inside the link.
+	it("denies a path the kernel resolves through the link before a `..`, and not through a real node_modules", () => {
+		const linked = makeLane(true);
+		const real = makeLane(false);
+		try {
+			for (const [command, cwd] of [
+				["find node_modules/.. -delete", linked.tree],
+				["rm -rf node_modules/../x", linked.tree],
+				[`cd ${linked.tree}/node_modules && rm -rf ../x`, PAYLOAD_CWD],
+			]) {
+				const result = runHook(command, BASE_ENV, cwd);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+			for (const command of [
+				"find node_modules/.. -delete",
+				`cd ${real.tree}/node_modules && rm -rf ../x`,
+			]) {
+				const result = runHook(command, BASE_ENV, real.tree);
+				expect(result.stderr, command).toBe("");
+				expect(result.status, command).toBe(0);
+			}
+		} finally {
+			linked.cleanup();
+			real.cleanup();
+		}
+	});
+
+	it("points an unreadable --prefix at a $TMPDIR scratch directory", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook('npm --prefix "$(pwd)" ci', BASE_ENV, tree);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("--prefix $TMPDIR/<name>");
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Recurrence (review-4054 F1): `find -L .`/`-follow` descend INTO the link
+	// from any operand that merely holds it, and the PR claimed `-L/-H` were
+	// covered only for an operand named node_modules itself.
+	it.each([
+		"find -L . -delete",
+		"find -L . -name f -delete",
+		"find . -follow -delete",
+		"find node_modules -follow -delete",
+		"find -L . -exec rm -f {} +",
+	])("denies `%s` in a linked lane", (command) => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook(command, BASE_ENV, tree);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows following find forms that do not delete, or whose operand holds no link, and the same in a real lane", () => {
+		const linked = makeLane(true);
+		mkdirSync(join(linked.tree, "dist"));
+		const real = makeLane(false);
+		try {
+			for (const [command, cwd] of [
+				["find -L . -name f -print", linked.tree],
+				["find -L dist -delete", linked.tree],
+				["find . -follow -name f", linked.tree],
+				["find . -delete", linked.tree],
+				["find -L . -delete", real.tree],
+				["find . -follow -delete", real.tree],
+			]) {
+				const result = runHook(command, BASE_ENV, cwd);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			linked.cleanup();
+			real.cleanup();
+		}
+	});
+
+	// Recurrence (review-4054 F4): `NPM_VALUE_FLAGS` was a closed list, so an
+	// unlisted value flag ("--audit false", "--maxsockets 3") became the verb.
+	it.each([
+		"npm --audit false ci",
+		"npm --fund false ci",
+		"npm --ignore-scripts false ci",
+		"npm --fetch-retries 3 ci",
+		"npm --maxsockets 3 install",
+		"npm --audit-level high ci",
+		"npm --lockfile-version 3 install",
+		"npm --proxy http://x:8080 ci",
+	])(
+		"denies `%s` in a linked lane: an unlisted value flag does not hide the verb",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("allows read-only verbs and a script named like a writer behind unlisted value flags", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"npm --audit false ls",
+				"npm --maxsockets 3 run build",
+				"npm run ci",
+				"npm run install",
+				"npm test ci",
+				"npm view install version",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Recurrence (review-4054 F6): the message said "or `rm node_modules`
+	// first", but `rm node_modules && npm ci` is judged statically and denied
+	// as one command; the remedy needs two calls.
+	it("tells the reader the unlink and the install are separate commands", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook("npm ci", BASE_ENV, tree);
+			expect(result.stderr).toContain("in a separate command");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("declares linkedNodeModulesDelete in the DenyRule union the .d.mts exports", () => {
+		// Same typed-binding guard as npmLinkedInstall below.
+		const rule: DenyRule = "linkedNodeModulesDelete";
+		expect(RULE_MESSAGES[rule]).toContain("unlink");
+	});
+
+	it("declares npmLinkedInstall in the DenyRule union the .d.mts exports", () => {
+		// Same typed-binding guard as the rule declarations above: remove the
+		// member from scripts/hooks/guard-bash.d.mts and `npm run lint` reds.
+		const rule: DenyRule = "npmLinkedInstall";
+		expect(RULE_MESSAGES[rule]).toContain("node_modules");
 	});
 });
 
