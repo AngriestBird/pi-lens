@@ -1022,6 +1022,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
 			"scripts/lib/test-history-selection.mjs",
+			"scripts/lib/vitest-summary.mjs",
 		])
 			put(root, rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
 		put(
@@ -1125,6 +1126,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
 			"scripts/lib/test-history-selection.mjs",
+			"scripts/lib/vitest-summary.mjs",
 			"scripts/run-astgrep-pi-lens.mjs",
 			"scripts/lib/astgrep-self-scan.mjs",
 			"scripts/lib/git-fixture-env.mjs",
@@ -1279,6 +1281,7 @@ if (isEntryPoint(import.meta.url)) process.kill(process.pid, "SIGKILL");
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
 			"scripts/lib/test-history-selection.mjs",
+			"scripts/lib/vitest-summary.mjs",
 		])
 			put(rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
 		if (stubLock) put("scripts/with-test-lock.mjs", stubLock);
