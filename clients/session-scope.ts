@@ -531,7 +531,7 @@ function describeKey(key: string | number | undefined): string | undefined {
  * is provable from `latency.log`. Bound: at most one row per primary
  * shutdown (`stashed`, `replaced`, `forwarded`, `unconsumed-at-exit`) and per
  * primary or demoted start (`taken`, `key-mismatch-left`); each is a distinct
- * lifecycle event with no loop behind it, about 250 B.
+ * lifecycle event with no loop behind it, about 350 B.
  */
 function logSlotOp(
 	op: SlotOp,
@@ -786,7 +786,7 @@ function heldStoreNames(stores: Record<string, unknown>): string[] {
  *
  * #3873 O2, O3: one `session_handoff_adopt` row (every candidate tried and
  * why it fell through) and one `session_store_action` row per declared store
- * per primary start; bounded by primary starts, about 300 B each, and
+ * per primary start; bounded by primary starts, about 400 B each, and
  * `dbg` gets the one-line per-store carry summary.
  */
 export async function adoptHandoff(

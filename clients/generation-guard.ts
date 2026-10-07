@@ -220,8 +220,8 @@ function tallyFence(sourceName: string, dropped: boolean): void {
  * One `session_end_fence_rollup` row at a primary `session_shutdown`, next to
  * `session_end_bus_rollup`: per generation source, the writes its fence
  * admitted or dropped this session. Written even when empty, so a session
- * that exercised no fence is distinguishable from a flush gap. About 120 B
- * per source, 16 sources at most; clears the tallies.
+ * that exercised no fence is distinguishable from a flush gap. About 350 B
+ * plus 60 B per source, 16 sources at most; clears the tallies.
  */
 export function emitFenceRollupAtSessionEnd(cwd: string): void {
 	const tallies = fenceTallies();
