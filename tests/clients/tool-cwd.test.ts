@@ -9,6 +9,7 @@ import {
 	type LSPServerInfo,
 } from "../../clients/lsp/server.js";
 import { LSPService } from "../../clients/lsp/index.js";
+import { withPlatform } from "../support/platform-stub.js";
 import { setupTestEnvironment, useTrackedTempDirs } from "./test-utils.js";
 
 let home: string;
@@ -46,12 +47,7 @@ describe("resolveToolCwd (#2777)", () => {
 	it("folds Win32 case and separator variants into one ephemeral key", () => {
 		// #2782 win-shape review: divergent Win32 spellings must not duplicate
 		// the marker-walk memo or once-per-session resolution log record.
-		const originalPlatform = process.platform;
-		Object.defineProperty(process, "platform", {
-			configurable: true,
-			value: "win32",
-		});
-		try {
+		withPlatform("win32", () => {
 			const fileKey = toolCwd._toolCwdEphemeralKey([
 				path.win32.resolve("C:\\proj\\src\\a.ts"),
 			]);
@@ -76,12 +72,7 @@ describe("resolveToolCwd (#2777)", () => {
 			expect(fileKey).toBe(
 				pathUtils.normalizeEphemeralMapKey("C:\\proj\\src\\a.ts"),
 			);
-		} finally {
-			Object.defineProperty(process, "platform", {
-				configurable: true,
-				value: originalPlatform,
-			});
-		}
+		});
 	});
 
 	it("selects a nearer marker through the real synchronous seam", () => {

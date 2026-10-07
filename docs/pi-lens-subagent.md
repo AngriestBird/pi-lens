@@ -125,9 +125,20 @@ the brief gives.
   30 lines: the PR (or branch), the head SHA, the change or verdict in a few
   lines, red and green evidence as counts with the quoted transcript below it,
   every skipped check or environment block, and what the orchestrator must
-  decide. The full evidence follows the summary; it never replaces it. The
-  orchestrator reads the summary alone to route the lane, so a claim made only
-  below it does not route.
+  decide. The RETURNED message (the agent's final reply, or the plegma answer)
+  is that summary and nothing else: the full evidence (probe transcripts,
+  tables, mutation logs) goes in the declared deliverable file or, when there
+  is none, `~/.local/share/pi-lens-orchestrator/tmp/<lane>-tmp/REPORT.md`, and
+  the summary names that path. The orchestrator reads the summary alone to
+  route the lane and opens the file only when routing a fix round, so a claim
+  made only in the file does not route. (Full reports pasted into the reply
+  were the largest orchestrator token cost on 2026-10-07.)
+- **Handbacks between rounds.** Every lane's returned summary for PR #N is
+  kept at `~/.local/share/pi-lens-orchestrator/tmp/handbacks/pr-<N>.md` (the
+  orchestrator's hooks write it; a fixer may also write it). A reviewer or
+  verifier of PR #N reads that file FIRST and attacks its claims, so the brief
+  carries only the attack angles, never a restatement of what the fixer
+  claims.
 
 ## Tests and probes
 
