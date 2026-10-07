@@ -337,12 +337,12 @@ function censusPins(
 }
 
 const PINNED_PRINT = [
-	"expect(CENSUS_SITES.length).toBe(56);",
-	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(61);',
+	"expect(CENSUS_SITES.length).toBe(58);",
+	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(63);',
 	'expect(stageJobs("A")).toBe(23);',
 	'expect(stageJobs("B")).toBe(2);',
 	'expect(stageJobs("C")).toBe(13);',
-	'expect(stageJobs("D")).toBe(23);',
+	'expect(stageJobs("D")).toBe(25);',
 	"expect(CENSUS_SITES.filter((site) => site.ref !== undefined).length).toBe(20);",
 	"expect(CENSUS_SITES.filter((site) => site.ref === EPHEMERAL_PULL_REF).length).toBe(17);",
 	'expect(stageRefs("A")).toBe(16);',
@@ -789,31 +789,32 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 56 checkout sites across the tree; 61 non-gate job rows (A23/B2/C13/D23
+		// 58 checkout sites across the tree; 63 non-gate job rows (A23/B2/C13/D25
 		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
 		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
 		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
 		// and added the schedule-only nightly report job (D), and #3916 added
-		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D).
-		// Sites and jobs are counted separately so a no-checkout
+		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D, and
+		// #4035 split the nightly report into two mutate shards and a publish job,
+		// also D). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			56,
+			58,
 		);
-		pinnedNumber("checkout sites", CENSUS_SITES.length, 56);
+		pinnedNumber("checkout sites", CENSUS_SITES.length, 58);
 		pinnedNumber(
 			"non-gate job rows",
 			CENSUS_ROWS.filter((row) => row.stage !== "gate").length,
-			61,
+			63,
 		);
 		pinnedNumber("stage A rows", stageJobs("A"), 23);
 		pinnedNumber("stage B rows", stageJobs("B"), 2);
 		pinnedNumber("stage C rows", stageJobs("C"), 13);
-		pinnedNumber("stage D rows", stageJobs("D"), 23);
+		pinnedNumber("stage D rows", stageJobs("D"), 25);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		pinnedNumber("gate checkout sites", summary.get("gate")?.sites ?? 0, 1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,

@@ -36,6 +36,7 @@ import {
 	mutationRangePatterns,
 	parseChangedLineRanges,
 	parseDryRunCost,
+	partitionMutationFiles,
 	planResample,
 	sampleRangesDeterministically,
 } from "./lib/stryker-diff.mjs";
@@ -105,6 +106,9 @@ function argumentValue(name, fallback) {
 
 const baseRef = argumentValue("--base", "origin/master");
 const maxFiles = Number(argumentValue("--max-files", DEFAULT_MAX_FILES));
+const totalMaxFiles = Number(argumentValue("--total-max-files", maxFiles));
+const shardIndex = Number(argumentValue("--shard-index", 0));
+const shardCount = Number(argumentValue("--shard-count", 1));
 const maxRanges = Number(argumentValue("--max-ranges", DEFAULT_MAX_RANGES));
 const budgetMinutes = Number(
 	argumentValue("--budget-minutes", MUTATION_BUDGET_MINUTES),
@@ -322,6 +326,9 @@ function baseMeta(extra) {
 		headSha: sha,
 		budgetMinutes,
 		maxFiles,
+		totalMaxFiles,
+		shardIndex,
+		shardCount,
 		maxRanges,
 		partial: null,
 		// #3592 item 2: the dry-run measurement's total (set once the
@@ -359,11 +366,19 @@ const allFiles = [...new Set([...pendingFiles, ...changedMutationFiles()])];
 const { selected: files, skipped } = selectMutationFiles({
 	pending: pendingFiles,
 	windowFiles: allFiles,
-	maxFiles,
+	maxFiles: totalMaxFiles,
 	weights: changedLineWeights(
 		changedLineRanges(allFiles, { ignoreWhitespace: true }),
 	),
 });
+const partitioned = partitionMutationFiles({
+	selected: files,
+	skipped,
+	shardIndex,
+	shardCount,
+});
+files.splice(0, files.length, ...partitioned.selected);
+skipped.splice(0, skipped.length, ...partitioned.skipped);
 if (skipped.length > 0) {
 	console.log(formatCapNotice(files.length, allFiles.length, skipped));
 }
