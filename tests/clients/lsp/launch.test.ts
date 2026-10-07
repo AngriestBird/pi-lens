@@ -326,8 +326,13 @@ describe("lsp launch", () => {
 		async () => {
 			vi.useFakeTimers();
 			const dir = setupTestEnvironment("pi-lens-ps1-").tmpDir;
-			const ps1 = path.join(dir, "test.ps1");
-			const jsTarget = path.join(dir, "..", "pkg", "bin", "cli.js");
+			// The wrapper resolves `$basedir/../pkg/bin/cli.js`: keep both under the
+			// fixture root. `path.join(dir, "..", "pkg")` put the package directly in
+			// the shared tmpdir, outside the root `useTrackedTempDirs` removes, so it
+			// outlived the file (#4019).
+			const ps1 = path.join(dir, "bin", "test.ps1");
+			const jsTarget = path.join(dir, "pkg", "bin", "cli.js");
+			fs.mkdirSync(path.dirname(ps1), { recursive: true });
 			fs.mkdirSync(path.dirname(jsTarget), { recursive: true });
 			fs.writeFileSync(jsTarget, "console.log('hello')");
 			fs.writeFileSync(ps1, `"$basedir/../pkg/bin/cli.js" "$@"`);
