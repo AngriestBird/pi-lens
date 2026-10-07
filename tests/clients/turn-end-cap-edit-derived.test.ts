@@ -47,10 +47,7 @@ import {
 import { _resetStateCacheForTests } from "../../clients/diagnostic-dispositions.js";
 import { loadProjectDiagnosticsDeltaReport } from "../../clients/project-diagnostics/cache.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
-import {
-	MAX_CUT_ADVISORY_LANES,
-	RuntimeCoordinator,
-} from "../../clients/runtime-coordinator.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	cancelLSPIdleReset,
 	handleTurnEnd,
@@ -455,10 +452,29 @@ describe("knip carry bounds and neighbours (#3901)", () => {
 		}
 	});
 
+	// Recurrence guard: an eviction the bound forces is a lost item; it is
+	// counted, not silent (shape 9, a resource bounded on one axis only).
+	it("counts the parked lane the bound evicts when a cut part parks its items", async () => {
+		const rig = makeRig("pi-lens-3901-knip-evict-");
+		try {
+			for (let i = 0; i < 16; i += 1) {
+				rig.runtime.parkCutAdvisoryItems(`other-${i}`, [i]);
+			}
+			fillerBlocker(rig, 1000);
+			touch(rig, "edited.ts");
+			rig.scan.knip = [issue("left-pad")];
+			await endTurn(rig);
+			expect(ledgerCount("turn-end-advisory-carry-dropped")).toBe(1);
+			expect(rig.runtime.takeCutAdvisoryItems("other-0")).toEqual([]);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
 	// Recurrence guard: the parked-lane store is bounded on the lane axis too.
-	it("evicts the oldest parked lane past the bound and says so", () => {
+	it("evicts the oldest parked lane past 16 lanes", () => {
 		const runtime = new RuntimeCoordinator();
-		for (let i = 0; i < MAX_CUT_ADVISORY_LANES; i += 1) {
+		for (let i = 0; i < 16; i += 1) {
 			expect(runtime.parkCutAdvisoryItems(`lane-${i}`, [i])).toEqual([]);
 		}
 		expect(runtime.parkCutAdvisoryItems("lane-over", [1])).toEqual(["lane-0"]);
