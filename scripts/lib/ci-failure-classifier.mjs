@@ -2,9 +2,8 @@
 //
 // Kept separate from the CLI so the log-reading heuristics and the
 // once-per-sequential-invocation rerun guard are unit-testable without a
-// GitHub event or a network call (the check-pr-title.mjs /
-// merge-train-warden.mjs pattern). The guard does not serialize CONCURRENT
-// invocations -- see the REAL SCOPE note on shouldTriggerRerun (review
+// GitHub event or a network call (the check-pr-title.mjs pattern). The guard does not serialize
+// CONCURRENT invocations -- see the REAL SCOPE note on shouldTriggerRerun (review
 // round 2, V2/V3) for exactly what is and isn't guaranteed under
 // concurrency.
 //
@@ -764,8 +763,7 @@ export function buildCommentBody({
 }
 
 // ---------------------------------------------------------------------------
-// I/O layer. Every function below takes an injected `fetcher` (the
-// merge-train-warden.mjs pattern, scripts/lib/merge-train-warden.mjs:138) so
+// I/O layer. Every function below takes an injected `fetcher` so
 // the orchestration in runClassifier is testable against a mocked GitHub API
 // with no network call and no gh CLI dependency.
 // ---------------------------------------------------------------------------

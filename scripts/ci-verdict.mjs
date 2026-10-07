@@ -17,8 +17,7 @@
  * containing spaces, word-split by `read -ra`) sat red. Every check-run
  * GitHub reports on the head is now a row, and every row GATES unless it is
  * on the advisory allowlist (`scripts/lib/ci-checks.mjs`'s
- * `isAdvisoryCheck` -- the SAME list the merge-train warden (#2185) already
- * uses). `run()` also attempts a LIVE read of `master`'s branch-protection
+ * `isAdvisoryCheck`). `run()` also attempts a LIVE read of `master`'s branch-protection
  * required-status-check names via `gh api`, and treats those names as
  * gating unconditionally (never excusable by the static advisory allowlist)
  * when that read succeeds; when it does not (no permission, no ruleset,
@@ -253,7 +252,7 @@ const VERDICT_KIND_BY_EXIT = new Map([
 /** The kind a plain verdict exit code prints; modes override with their own.
  * The exit-code table is deliberately coarse: `cancelled`, `infra-rerun`,
  * `absent-rearm` and `fork-approval` all print `(pending)`, which existing
- * shell and warden readers match on. The one verdict kind the CLI documents
+ * shell readers match on. The one verdict kind the CLI documents
  * as readable on this surface is `in-queue` (#3754): a queued PR is exit 3,
  * and the plain line must not read as an ordinary `pending` (#3883 F4). */
 function verdictExitKind(exitCode, verdictKind) {

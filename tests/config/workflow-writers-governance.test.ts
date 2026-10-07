@@ -172,8 +172,6 @@ const SCRIPT_WRITERS: Record<string, string> = {
 	"scripts/detect-stale-open-issues.mjs": "issue comment POST/PATCH",
 	"scripts/lib/ci-failure-classifier.mjs": "PR label/comment/run writes",
 	"scripts/lib/drift-issue.mjs": "gh issue create/edit/comment/close",
-	"scripts/lib/merge-train-warden.mjs": "PR label/comment/update-branch/run",
-	"scripts/merge-train-warden.mjs": "PR label/comment/update-branch/run",
 	"scripts/notify-clean-signal-drift.mjs": "tracking issue",
 	"scripts/notify-install-smoke-drift.mjs": "tracking issue",
 	"scripts/notify-tool-smoke-red.mjs": "gh issue create/edit/close",
@@ -418,15 +416,14 @@ function withVariableFindings(source: string, workflowPath: string): string[] {
 
 // A dispatchable writer that is deliberately NOT guarded. Each entry must still
 // be flagged (a stale entry reds) and carries its reason.
-const REGISTERED_EXCEPTIONS: Record<string, string> = {
-	".github/workflows/merge-train-warden.yml:warden/Sweep open PRs for DIRTY / BEHIND / red-CI / starved / stalled / absent runs":
-		"the workflow header documents on-demand workflow_dispatch smoke runs of the warden; it labels and comments on PRs and re-runs or cancels stalled runs, and is meant to run from any ref the maintainer dispatches",
-};
+// Empty since the merge-train warden's retirement (#4105): its entry was the
+// only one.
+const REGISTERED_EXCEPTIONS: Record<string, string> = {};
 
 // The census as counts: dispatchable workflows, and writer steps per workflow.
 // A new writer (even a guarded one) or a new dispatchable workflow reds here so
 // its author reviews the guard; the failure prints the re-pin.
-const DISPATCHABLE_WORKFLOWS = 15;
+const DISPATCHABLE_WORKFLOWS = 14;
 // #4077: the split moved every writer step into its own job without adding one,
 // except codeql.yml, whose SARIF upload moved into the `upload` job as the
 // `github/codeql-action/upload-sarif` writer action (+1).
@@ -435,7 +432,6 @@ const WRITER_STEPS: Record<string, number> = {
 	".github/workflows/compat-smoke.yml": 1,
 	".github/workflows/install-smoke.yml": 1,
 	".github/workflows/labels.yml": 1,
-	".github/workflows/merge-train-warden.yml": 1,
 	".github/workflows/release.yml": 3,
 	".github/workflows/stale-open-issues.yml": 1,
 	".github/workflows/stale.yml": 1,
@@ -454,8 +450,6 @@ const WRITE_SCOPED_JOBS: Record<string, string> = {
 	".github/workflows/compat-smoke.yml:compat-smoke-alert": "issues",
 	".github/workflows/install-smoke.yml:host-latest-notify": "issues",
 	".github/workflows/labels.yml:sync": "issues",
-	".github/workflows/merge-train-warden.yml:warden":
-		"actions, contents, pull-requests",
 	".github/workflows/release.yml:publish-npm": "id-token",
 	".github/workflows/release.yml:release": "contents",
 	".github/workflows/stale-open-issues.yml:detect": "issues",
@@ -600,7 +594,7 @@ const WRITER_RUNS: Array<[string, string]> = [
 		"script via a variable path",
 		'cli="$RUNNER_TEMP/history-scripts/upsert-tracking-issue.mjs"\nnode "$cli"',
 	],
-	["script via lib path", "node scripts/lib/merge-train-warden.mjs"],
+	["script via lib path", "node scripts/lib/drift-issue.mjs"],
 	[
 		"script detect-stale-open-issues",
 		"node scripts/detect-stale-open-issues.mjs",
@@ -1077,17 +1071,24 @@ describe("workflow writer governance (#4053)", () => {
 		const real = () => workflowFiles().map(readWorkflow);
 
 		it("guards every dispatchable writer, bar the registered exceptions", () => {
-			const unguarded = real().flatMap(({ source, path }) =>
-				workflowWriters(source, path)
-					.filter((record) => !record.guard.guarded)
-					.map((record) => record.id),
+			const writers = real().flatMap(({ source, path }) =>
+				workflowWriters(source, path),
 			);
+			const unguarded = writers
+				.filter((record) => !record.guard.guarded)
+				.map((record) => record.id);
+			// No exception is registered since #4105, so a clean tree flags 0: the
+			// floor moves from "matched something" to "walked the writers" (the
+			// detector itself is pinned by the fixture rows above).
 			const audit = auditRegistry({
 				sweepName: "unguarded dispatchable writers",
 				flagged: unguarded,
 				registered: [],
 				exemptions: REGISTERED_EXCEPTIONS,
 				minReasonLength: 30,
+				minFlagged: 0,
+				scannedCount: writers.length,
+				minScanned: 10,
 			});
 			expect(audit.problems).toEqual([]);
 		});
@@ -1096,16 +1097,18 @@ describe("workflow writer governance (#4053)", () => {
 			const unguarded = real().flatMap(({ source, path }) =>
 				writeScopedJobFindings(source, path),
 			);
-			const permissionExceptions = {
-				".github/workflows/merge-train-warden.yml:warden: write scopes actions, contents, pull-requests":
-					REGISTERED_EXCEPTIONS[Object.keys(REGISTERED_EXCEPTIONS)[0]],
-			};
+			const writeScoped = real().flatMap(({ source, path }) =>
+				dispatchableJobs(source, path).filter(hasWriteToken),
+			);
 			const audit = auditRegistry({
 				sweepName: "unguarded write-scoped dispatchable jobs",
 				flagged: unguarded,
 				registered: [],
-				exemptions: permissionExceptions,
+				exemptions: REGISTERED_EXCEPTIONS,
 				minReasonLength: 30,
+				minFlagged: 0,
+				scannedCount: writeScoped.length,
+				minScanned: 10,
 			});
 			expect(audit.problems).toEqual([]);
 		});
@@ -1182,8 +1185,8 @@ describe("workflow writer governance (#4053)", () => {
 		}
 
 		// A script a workflow runs that directly imports a registered writer writes
-		// through it, whether or not its own text carries a marker (the thin
-		// `scripts/merge-train-warden.mjs` over its lib is the case this catches).
+		// through it, whether or not its own text carries a marker (a thin
+		// workflow entry over a registered lib is the case this catches).
 		function detectedWriters(): string[] {
 			const sources = new Map(
 				files.map((file) => [

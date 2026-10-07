@@ -33,7 +33,7 @@ jobs:
   #
   # `TLA+ models` is a REQUIRED check and never skips at job level: a job `if:`
   # that evaluates false reports `skipped`, which GitHub counts as passing, but
-  # ci-verdict and the merge-train warden demand a literal `success` on a
+  # ci-verdict demands a literal `success` on a
   # required row (#2618). It always starts and skips its STEPS. The name ends
   # in `(advisory)`: this job reports, never gates.
   changes:
@@ -654,7 +654,7 @@ jobs:
           exit 0
 
   # #3753: the ONE check-run named exactly `Unit tests`, the name the ruleset
-  # requires and every tool (ci-verdict, merge-train-warden) keys on. A job
+  # requires and every tool (ci-verdict) keys on. A job
   # whose `needs` failed is SKIPPED by default, and GitHub
   # counts a skipped required check as passing, so `if: always()` is what
   # makes a red or cancelled shard red here instead of green-by-skip.
@@ -696,7 +696,7 @@ jobs:
   # check, the gate step reports `ready=false` and FAILS, so the row is red and a
   # run that was deferred for that reason is visible and distinguishable from a
   # dropped one (ci-verdict reads it). The job name ends in `(advisory)` so
-  # ci-verdict and the merge-train warden never gate on it, red or not.
+  # ci-verdict never gates on it, red or not.
   heavy-gate:
     name: Heavy advisory gate (advisory)
     needs:
