@@ -1435,6 +1435,8 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		"strictness (advisory)",
 		"Targeted tests (advisory)",
 		"host latest nightly (advisory)",
+		// #4077: its tracking-issue writer job, same suffix rule.
+		"host latest notify (advisory)",
 		// #3801: PR-time CodeQL (advanced setup), matrix-expanded from ci.yml's
 		// `codeql` job. Classified by the suffix; tests/config/codeql-workflow
 		// pins the job shape.

@@ -298,6 +298,9 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		"timeout-minutes"?: number;
 	};
 	type Job = {
+		if?: string;
+		needs?: string;
+		"continue-on-error"?: boolean;
 		permissions?: Record<string, string>;
 		"timeout-minutes"?: number;
 		steps: Step[];
@@ -308,22 +311,31 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 	);
 	const jobs = (yaml.load(source) as { jobs: Record<string, Job> }).jobs;
 	const job = jobs["snapshot-persist-bench"];
-	const step = (needle: string) => {
-		const found = job.steps.find((candidate) =>
+	// #4077: the bench job is read-only; the tracking issue is the writer job's.
+	const writer = jobs["snapshot-persist-notify"];
+	const step = (needle: string, from: Job = job) => {
+		const found = from.steps.find((candidate) =>
 			String(candidate.run ?? "").includes(needle),
 		);
 		if (!found) throw new Error(`no step runs ${needle}`);
 		return found;
 	};
 
-	it("is a nightly job with the narrowest permissions that can write the tracking issue", () => {
+	// Recurrence: #4077, a write scope on the job that runs the bench, so a
+	// branch dispatch held it; the issue writer is its own guarded job.
+	it("keeps the bench read-only and gives the tracking issue its own narrow writer job", () => {
 		expect(job).toBeDefined();
-		expect(job.permissions).toEqual({ contents: "read", issues: "write" });
-		// The tool-smoke job's own grant is unchanged: this lane widens nothing.
+		expect(job.permissions).toEqual({ contents: "read" });
+		expect(job.if).toBeUndefined();
+		expect(writer.permissions).toEqual({ contents: "read", issues: "write" });
+		expect(writer.needs).toBe("snapshot-persist-bench");
+		expect(writer.if).toBe(
+			"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')",
+		);
+		// The tool-smoke job's own grant is read-only now: this lane widens nothing.
 		expect(jobs["tool-smoke"].permissions).toEqual({
-			contents: "write",
-			"pull-requests": "write",
-			issues: "write",
+			contents: "read",
+			"pull-requests": "read",
 		});
 	});
 
@@ -343,12 +355,18 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		expect(at("check-snapshot-persist-ratio.mjs")).toBeGreaterThan(
 			at("bench-snapshot-persist.mjs"),
 		);
-		expect(at("upsert-tracking-issue.mjs")).toBeGreaterThan(
+		// The check's files are staged for the writer job after it, on every outcome.
+		const stageStep = job.steps.find(
+			(s) => s.name === "Stage the notifier inputs",
+		) as Step;
+		expect(at("snapshot-persist-notify-inputs")).toBeGreaterThan(
 			at("check-snapshot-persist-ratio.mjs"),
 		);
+		expect(stageStep.if).toBe("always()");
 		const bench = step("bench-snapshot-persist.mjs").run as string;
 		const check = step("check-snapshot-persist-ratio.mjs").run as string;
-		const notify = step("upsert-tracking-issue.mjs").run as string;
+		const notify = step("upsert-tracking-issue.mjs", writer).run as string;
+		const stage = stageStep.run as string;
 		// N independent bench invocations (a loop, not later persists of one
 		// child), each writing the report the checker is given.
 		const indices = /for i in ([\d ]+); do/.exec(bench)?.[1].trim().split(" ");
@@ -367,6 +385,10 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		const body = /--body "([^"]+)"/.exec(check)?.[1];
 		expect(state && notify.includes(state)).toBe(true);
 		expect(body && notify.includes(body)).toBe(true);
+		// Recurrence: #4077, a staged name that drifts from the checker's file
+		// reaches the writer as "missing" and never files the issue.
+		expect(state && stage.includes(state)).toBe(true);
+		expect(body && stage.includes(body)).toBe(true);
 	});
 
 	it("lets a drift or unusable verdict red the job but never lets the notifier do so", () => {
@@ -375,11 +397,9 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		// The checker's exit code survives the `| tee` that feeds the step summary.
 		expect(check.run).toContain("PIPESTATUS[0]");
 		expect(check.run).toContain('exit "$CODE"');
-		const notify = step("upsert-tracking-issue.mjs");
-		expect(notify["continue-on-error"]).toBe(true);
-		expect(notify.if).toBe(
-			"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')",
-		);
+		const notify = writer.steps.find((s) => s.name?.startsWith("Notify on"));
+		expect(notify?.["continue-on-error"]).toBe(true);
+		expect(writer["continue-on-error"]).toBe(true);
 	});
 
 	it("runs the check after a failed bench (a missing report is the unusable case) but not after a failed build", () => {
@@ -392,13 +412,15 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 	});
 
 	it("files the tracking issue for an unusable measurement as well as for drift", () => {
-		const notify = step("upsert-tracking-issue.mjs").run as string;
+		const notify = step("upsert-tracking-issue.mjs", writer).run as string;
 		expect(notify).toContain('[ "$STATE" = drift ] || [ "$STATE" = error ]');
 		expect(notify).toMatch(/elif \[ "\$STATE" = clean \]/);
 	});
 
 	it("reaches the tracking issue only through the shared CLI", () => {
-		const own = job.steps.map((s) => String(s.run ?? "")).join("\n");
+		const own = [...job.steps, ...writer.steps]
+			.map((s) => String(s.run ?? ""))
+			.join("\n");
 		expect(own).toContain("--label nightly-drift");
 		expect(own).toContain("--close-when-clean");
 		expect(own).not.toMatch(/gh issue (create|edit|comment|close)/);

@@ -337,12 +337,12 @@ function censusPins(
 }
 
 const PINNED_PRINT = [
-	"expect(CENSUS_SITES.length).toBe(60);",
-	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(65);',
+	"expect(CENSUS_SITES.length).toBe(69);",
+	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(74);',
 	'expect(stageJobs("A")).toBe(25);',
 	'expect(stageJobs("B")).toBe(2);',
-	'expect(stageJobs("C")).toBe(13);',
-	'expect(stageJobs("D")).toBe(25);',
+	'expect(stageJobs("C")).toBe(14);',
+	'expect(stageJobs("D")).toBe(33);',
 	"expect(CENSUS_SITES.filter((site) => site.ref !== undefined).length).toBe(21);",
 	"expect(CENSUS_SITES.filter((site) => site.ref === EPHEMERAL_PULL_REF).length).toBe(17);",
 	'expect(stageRefs("A")).toBe(16);',
@@ -352,7 +352,7 @@ const PINNED_PRINT = [
 // Snapshot identities make a pin failure actionable. Counts alone say that a
 // row moved; these keys say which job added or removed it.
 const PINNED_ROW_KEYS =
-	"ci-infra-kill-rerun.yml::clear-stale-verdict-labels::A|ci-infra-kill-rerun.yml::classify::A|ci-infra-kill-rerun.yml::finalize-rerun::A|ci.yml::changes::C|ci.yml::dependency-boundaries::A|ci.yml::changelog-fragment-fastfail::A|ci.yml::tla-shards::A|ci.yml::tla-models::A|ci.yml::lint-and-typecheck::A|ci.yml::targeted-tests-advisory::C|ci.yml::test::A|ci.yml::unit-tests::A|ci.yml::heavy-gate::gate|ci.yml::unit-tests-windows::B|ci.yml::prod-install-build::A|ci.yml::install-test::A|ci.yml::codeql::B|close-keyword-verification.yml::verify::D|codeql.yml::analyze::D|compat-smoke.yml::compat-smoke::D|grammar-health.yml::guard::D|grammar-health.yml::swift-crash-watch::D|greetings.yml::greeting::D|install-smoke.yml::smoke::A|install-smoke.yml::npm-strict::A|install-smoke.yml::pi-load::A|install-smoke.yml::mise-repro::C|install-smoke.yml::host-range-smoke::A|install-smoke.yml::host-latest-smoke::D|labels.yml::sync::D|lifecycle-smoke.yml::psscriptanalyzer-classification::D|lifecycle-smoke.yml::availability-lifecycle::D|lifecycle-smoke.yml::gitleaks-scratch-exclusion::D|lint.yml::actionlint::A|lint.yml::oxfmt::A|lint.yml::knip::A|lint.yml::markdownlint::A|lint.yml::vale::C|lint.yml::oxlint-advisory::C|lint.yml::jscpd::C|lint.yml::complexity::C|lint.yml::strictness::C|lint.yml::yamllint::C|lint.yml::typos::C|lint.yml::taplo::C|merge-train-warden.yml::warden::D|osv-scan.yml::detect-lockfile-change::A|osv-scan.yml::osv-scan::C|parser-smoke.yml::parser-smoke::D|pr-metadata.yml::pr-title-lint::A|pr-metadata.yml::pr-body-lint::C|pr-metadata.yml::close-keyword-lint::A|release.yml::prepare::D|release.yml::release::D|release.yml::publish-npm::D|stale-open-issues.yml::detect::D|stale.yml::stale::D|stryker-nightly.yml::report::D|tool-smoke.yml::test-history-rollup::D|tool-smoke.yml::tool-smoke::D|tool-smoke.yml::snapshot-persist-bench::D|untriaged-issues.yml::detect::D".split(
+	"action-pins.yml::check::A|ci-infra-kill-rerun.yml::clear-stale-verdict-labels::A|ci-infra-kill-rerun.yml::classify::A|ci-infra-kill-rerun.yml::finalize-rerun::A|ci.yml::changes::C|ci.yml::strict-install-cold-cache::A|ci.yml::dependency-boundaries::A|ci.yml::changelog-fragment-fastfail::A|ci.yml::tla-shards::A|ci.yml::tla-models::A|ci.yml::lint-and-typecheck::A|ci.yml::targeted-tests-advisory::C|ci.yml::test::A|ci.yml::unit-tests::A|ci.yml::heavy-gate::gate|ci.yml::unit-tests-windows::B|ci.yml::prod-install-build::A|ci.yml::install-test::A|ci.yml::codeql::B|close-keyword-verification.yml::verify::D|codeql.yml::analyze::D|codeql.yml::upload::D|compat-smoke.yml::compat-smoke::D|compat-smoke.yml::compat-smoke-alert::D|grammar-health.yml::guard::D|grammar-health.yml::swift-crash-watch::D|greetings.yml::greeting::D|install-smoke.yml::smoke::A|install-smoke.yml::npm-strict::A|install-smoke.yml::pi-load::A|install-smoke.yml::mise-repro::C|install-smoke.yml::host-range-smoke::A|install-smoke.yml::host-latest-smoke::D|install-smoke.yml::host-latest-notify::C|labels.yml::sync::D|lifecycle-smoke.yml::psscriptanalyzer-classification::D|lifecycle-smoke.yml::availability-lifecycle::D|lifecycle-smoke.yml::gitleaks-scratch-exclusion::D|lint.yml::actionlint::A|lint.yml::oxfmt::A|lint.yml::knip::A|lint.yml::markdownlint::A|lint.yml::vale::C|lint.yml::oxlint-advisory::C|lint.yml::jscpd::C|lint.yml::complexity::C|lint.yml::strictness::C|lint.yml::yamllint::C|lint.yml::typos::C|lint.yml::taplo::C|merge-train-warden.yml::warden::D|osv-scan.yml::detect-lockfile-change::A|osv-scan.yml::osv-scan::C|parser-smoke.yml::parser-smoke::D|pr-metadata.yml::pr-title-lint::A|pr-metadata.yml::pr-body-lint::C|pr-metadata.yml::close-keyword-lint::A|release.yml::prepare::D|release.yml::release::D|release.yml::publish-npm::D|stale-open-issues.yml::detect::D|stale.yml::stale::D|stryker-nightly.yml::prepare::D|stryker-nightly.yml::mutate::D|stryker-nightly.yml::publish::D|stryker-nightly.yml::publish-issue::D|tool-smoke.yml::test-history-rollup::D|tool-smoke.yml::test-history-publish::D|tool-smoke.yml::test-history-notify::D|tool-smoke.yml::tool-smoke::D|tool-smoke.yml::tool-smoke-prs::D|tool-smoke.yml::tool-smoke-notify::D|tool-smoke.yml::snapshot-persist-bench::D|tool-smoke.yml::snapshot-persist-notify::D|untriaged-issues.yml::detect::D".split(
 		"|",
 	);
 const PINNED_NO_CHECKOUT_KEYS = new Set([
@@ -789,32 +789,39 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 60 checkout sites across the tree; 65 non-gate job rows (A25/B2/C13/D25
+		// 69 checkout sites across the tree; 74 non-gate job rows (A25/B2/C14/D33
 		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
 		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
 		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
 		// and added the schedule-only nightly report job (D), and #3916 added
 		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D, and
 		// #4035 split the nightly report into two mutate shards and a publish job,
-		// also D). Sites and jobs are counted separately so a no-checkout
+		// also D, and #4077 split every write-scoped job into a read-only producer
+		// plus a guarded writer: eight new D jobs (codeql `upload`, compat-smoke
+		// `compat-smoke-alert`, stryker-nightly `publish-issue`, tool-smoke
+		// `test-history-publish`, `test-history-notify`, `tool-smoke-prs`,
+		// `tool-smoke-notify` and `snapshot-persist-notify`) and one C job,
+		// install-smoke's `host-latest-notify`: its `if:` carries a status
+		// function and `github.ref`, which the event-only projection cannot prove
+		// non-pull_request, and its name is advisory, so it is stage C). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			60,
+			69,
 		);
-		pinnedNumber("checkout sites", CENSUS_SITES.length, 60);
+		pinnedNumber("checkout sites", CENSUS_SITES.length, 69);
 		pinnedNumber(
 			"non-gate job rows",
 			CENSUS_ROWS.filter((row) => row.stage !== "gate").length,
-			65,
+			74,
 		);
 		pinnedNumber("stage A rows", stageJobs("A"), 25);
 		pinnedNumber("stage B rows", stageJobs("B"), 2);
-		pinnedNumber("stage C rows", stageJobs("C"), 13);
-		pinnedNumber("stage D rows", stageJobs("D"), 25);
+		pinnedNumber("stage C rows", stageJobs("C"), 14);
+		pinnedNumber("stage D rows", stageJobs("D"), 33);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		pinnedNumber("gate checkout sites", summary.get("gate")?.sites ?? 0, 1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
