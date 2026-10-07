@@ -1593,10 +1593,7 @@ function classifyNodeModulesDelete(cmd, args, cwd) {
 		if (!deletes) return null;
 		operands = end > i ? args.slice(i, end) : ["."];
 	} else {
-		const dashDash = args.indexOf("--");
-		operands = args.filter((a, j) =>
-			dashDash >= 0 ? j > dashDash : !a.startsWith("-"),
-		);
+		operands = args.filter((a) => !a.startsWith("-"));
 	}
 	return operands.some((o) =>
 		operandThroughNodeModulesLink(o, cwd, followFinal),

@@ -74,7 +74,8 @@ every `Bash` call, `scripts/hooks/guard-bash.mjs` (wired in
 on a worktree whose `node_modules` is a symlink pointing outside it, a
 mutating `npm` verb (`ci`, `install`, `update`, `prune`, …) run where
 `node_modules` is such a symlink, `--dry-run` or not (#4044: `npm ci` empties
-the shared install through the link), an unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
+the shared install through the link), a delete through that link
+(`rm -rf node_modules/`, `find node_modules/ -delete`), an unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
 without a `PI_LENS_HOME` pin, and a `TMPDIR`/`TMP`/`TEMP` aimed at the vitest
 harness's own home. It exists so these six rules (previously prose-only) are
 mechanically enforced rather than relied on.

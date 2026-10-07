@@ -94,6 +94,10 @@ describe("orchestrator lane mechanics contract (#4007)", () => {
 		);
 		expect(body).toContain("#4044");
 		expect(body).toContain("Answer install-flag questions in a scratch copy");
+		// #4044 sibling: the slash/glob delete forms empty the link target.
+		expect(body).toContain(
+			"Unlink with `rm node_modules` (no trailing slash or glob)",
+		);
 	});
 
 	// Recurrence: the section is only useful when the role contracts point to

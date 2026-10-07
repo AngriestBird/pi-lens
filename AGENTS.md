@@ -353,10 +353,16 @@ the surface they bite; each block loads only when its trigger applies.
     (apmantza/plegma#693). Sweep 2026-10-07, clean in the repo's own scripts
     (`grep -rnE "rmSync\(.*node_modules|rm -rf .*node_modules|npm ci"
     scripts clients tools`): no script runs a writer in a lane tree.
-    Unguarded siblings, measured with GNU coreutils on 2026-10-07:
-    `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/
-    -delete` empty the link target, while `rm -rf node_modules` (no slash)
-    removes only the link; a lane unlinks without a slash or glob.
+    Deletes are the second member, measured with GNU coreutils on 2026-10-07:
+    `rm -rf node_modules/`, `rm -rf node_modules/*`, `find node_modules/
+    -delete`, `find -L|-H node_modules -delete`, `find node_modules/ -exec rm`
+    and `cd node_modules && rm -rf ./*` empty the link target, while `rm -rf
+    node_modules` (no slash) removes only the link. `classifyNodeModulesDelete`
+    denies the first set through the same `hasNodeModulesSymlinkOutside` seam;
+    a lane unlinks without a slash or glob. Consolidation verdict: two rules on
+    one classifier seam, kept apart because the npm rule judges a verb and the
+    delete rule a path operand (deleting the delete rule relocates nothing the
+    npm rule could absorb). Unguarded: `xargs rm`, `rsync --delete`, `mv`.
 
 </important>
 
@@ -1062,7 +1068,9 @@ Every agent `Bash` call under Claude Code runs through
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
 or any remove over a symlinked `node_modules`; a mutating `npm` verb (`ci`,
 `install`, `update`, `prune`, …, or `npx npm@… ci`) where `node_modules` is a
-symlink out of the project, `--dry-run` or not (#4044); an unpinned `node`
+symlink out of the project, `--dry-run` or not, and a delete through such a
+link (`rm -rf node_modules/`, `node_modules/*`, `find node_modules/ -delete`;
+unlinking it with `rm node_modules` stays allowed; #4044); an unpinned `node`
 probe loading `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the
 harness home; bare `pkill`/`killall` patterns (#3556); worktrees, clones, or
 `mktemp -d` under `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
