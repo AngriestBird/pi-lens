@@ -253,6 +253,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the reaper's evidence is a real pid's command line, kernel start time and inherited environment; a double would encode the very identity guess the fix removes",
 	},
+	// #4046 interim: six real Node writers rendezvous on an OS barrier and
+	// persist registrations through the production cross-process lock; an
+	// in-process double cannot reproduce the race, and serialization prevents
+	// it from overlapping the timing-sensitive occupancy sampler.
+	"real-process-spawn:clients/instance-registry-race.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"six real Node writers must rendezvous on an OS barrier and contend through the production cross-process lock; an in-process double cannot reproduce the race",
+	},
 	"real-process-spawn:clients/lsp/headless-tool-call-keepalive.test.ts": {
 		detector: "real-process-spawn",
 		reason:
