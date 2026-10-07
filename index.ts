@@ -140,6 +140,7 @@ import { wireDiagnosticsBusEmitterGetter } from "./clients/diagnostics-publish.j
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
+import { emitFenceRollupAtSessionEnd } from "./clients/generation-guard.js";
 import {
 	emitVerifiedPathAttributionRollup,
 	resetVerifiedPathAttributionGuessCount,
@@ -2340,7 +2341,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3819 r2: a demoted real successor (a row-17 start holds the
 						// primary registration) discards the slot left for it, so the
 						// session cannot take it stale once it classifies primary again.
-						discardHandoff({
+						const discardedSlot = discardHandoff({
 							reason: sessionReason,
 							sessionFile: getSessionFile(ctx),
 							sessionManager: getSessionManager(ctx),
@@ -2354,6 +2355,23 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionId: stableSessionId,
 							cwd: sessionStartCwd ?? runtime.projectRoot,
 						});
+						// #3873 O4: a start the replacement gap declined because it is
+						// not the successor the shutdown named (#3855) is a demotion; a
+						// plain concurrent subagent is not, and writes only its `start`.
+						if (sessionStartDecision.basis === "successor-pending")
+							logScopeTransition(scope, {
+								transition: "demote",
+								reason: sessionReason,
+								sessionId: stableSessionId,
+								cwd: sessionStartCwd ?? runtime.projectRoot,
+								detail: {
+									classification: sessionStartDecision.classification,
+									basis: sessionStartDecision.basis,
+									gapMs: sessionStartDecision.gapMs,
+									lineageMatch: sessionStartDecision.lineageMatch,
+									discardedSlot,
+								},
+							});
 						return;
 					}
 
@@ -2475,7 +2493,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						.then((entries) => {
 							if (entries.length === 0) return;
 							recordCrossProcessTouches(
-								entries.map((e) => ({ path: e.path, reason: e.reason })),
+								entries.map((e) => ({
+									path: e.path,
+									reason: e.reason,
+									sessionId: e.sessionId,
+								})),
 							);
 							dbg(
 								`session_start: cross-process nudge — ${entries.length} file(s) from other instance(s)`,
@@ -2524,6 +2546,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// "sequential-replacement" — a declined start returned above.
 						sessionStartClassification: sessionStartDecision.classification,
 						sessionStartSameRoot: sessionStartDecision.sameRoot,
+						sessionStartBasis: sessionStartDecision.basis,
+						sessionStartGapMs: sessionStartDecision.gapMs,
+						sessionStartLineageMatch: sessionStartDecision.lineageMatch,
 						getFlag: (name: string) => getLensFlag(name),
 						notify: (msg, level) => notifyUi(ctx, msg, level),
 						dbg,
@@ -2576,6 +2601,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionFile: getSessionFile(ctx),
 						sessionManager: ctx.sessionManager,
 						cwd: stateCwd,
+						dbg,
 						loadOwnSidecar: () => loadSessionState(stateCwd, stableSessionId),
 						loadParentSidecar: async () => {
 							const parentFile = (() => {
@@ -2887,7 +2913,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// drop path — every entry that reaches this point is relevant by
 				// construction.
 				recordCrossProcessTouches(
-					entries.map((e) => ({ path: e.path, reason: e.reason })),
+					entries.map((e) => ({
+						path: e.path,
+						reason: e.reason,
+						sessionId: e.sessionId,
+					})),
 				);
 				dbg(
 					`turn_start: cross-process nudge — ${entries.length} file(s) from other instance(s)`,
@@ -3892,6 +3922,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// returned before reaching here), since the rollup counters are
 			// process-wide module state a live secondary would still need.
 			emitBusEventRollupAtSessionEnd(runtime.projectRoot);
+			// #3873 O5: the fence side of the same rollup. The bus row proves
+			// `skipped_stale_session`; this one gives each generation fence its
+			// guarded and dropped counts, so zero drops is distinguishable from
+			// a fence nothing exercised.
+			emitFenceRollupAtSessionEnd(runtime.projectRoot);
 			emitVerifiedPathAttributionRollup(runtime.projectRoot);
 			// #2249: same primary-only placement — one concurrent_session_bind_rollup
 			// row summarizing this session's declined binds by classification, a

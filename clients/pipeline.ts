@@ -1321,7 +1321,9 @@ export async function resyncHeldLspDocument(
  * Escape must not stop it). It never stamps the read guard or a `FileTime`,
  * so the formatter's bytes stay unseen by the agent. The row names what
  * happened to F; a throw is one bounded `hook-handler-crash` and no rethrow:
- * nothing awaits this.
+ * nothing awaits this. A `format_late_resync_chained` row (#3873) marks the
+ * give-up at chain time, for both callers, so a never-settling formatter is
+ * countable by file.
  */
 export function chainLateFormatResync(
 	settled: Promise<unknown>,
@@ -1343,6 +1345,18 @@ export function chainLateFormatResync(
 		if (inband) logLatency({ ...common, phase: "inband_format_late_resync" });
 		else logLatency({ ...common, phase: "deferred_format_late_resync" });
 	};
+	// #3873 F1: the give-up itself, one row per file at chain time. The late
+	// rows below come only when the formatter settles; a formatter that never
+	// does, or an Escape, left no per-file record of the give-up at all.
+	// Bound: one per abandoned formatter run.
+	logLatency({
+		type: "phase",
+		phase: "format_late_resync_chained",
+		toolName: row.toolName,
+		filePath: row.filePath,
+		durationMs: Date.now() - row.startedAt,
+		metadata: { which },
+	});
 	void settled
 		.then(async () => {
 			logLate(await resyncHeldLspDocument(row.filePath));
