@@ -1430,10 +1430,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		"yamllint (advisory)",
 		"typos (advisory)",
 		"taplo (advisory)",
-		"mutation (advisory)",
-		// #3531: posts the mutation job's survivors as a sticky PR comment;
-		// continue-on-error like the job it reports on, so never gating.
-		"mutation comment (advisory)",
 		"complexity (advisory)",
 		// #2697 item 9: the strictness census lane (two scratch tsconfigs) is advisory.
 		"strictness (advisory)",
@@ -1525,7 +1521,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 			"yamllint (advisory)",
 			"typos (advisory)",
 			"taplo (advisory)",
-			"mutation (advisory)",
 		]) {
 			expect(isAdvisoryCheck(name)).toBe(true);
 		}
@@ -1552,7 +1547,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 				"yamllint (advisory)",
 				"typos (advisory)",
 				"taplo (advisory)",
-				"mutation (advisory)",
 				"complexity (advisory)",
 				"Targeted tests (advisory)",
 			]),
@@ -2233,8 +2227,6 @@ describe("run --wait — transient gh errors back off instead of exiting 70 (#29
 						},
 					},
 				});
-			// #3779: the advisory MUTATION read is not a check-runs call.
-			if (String(args[1]).endsWith("/comments")) return "[]";
 			checkRunsCalls += 1;
 			const failure = failures[checkRunsCalls - 1];
 			if (failure) throw failure;

@@ -24,10 +24,7 @@ import { join, resolve } from "node:path";
 import yaml from "../../clients/deps/js-yaml.js";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { acquireTestLock, getLockPath } from "../../scripts/lib/suite-lock.mjs";
-import {
-	INCREMENTAL_FINGERPRINT_PATH,
-	probeReportsDirectory,
-} from "../../scripts/lib/mutation-test-selection.mjs";
+import { probeReportsDirectory } from "../../scripts/lib/mutation-test-selection.mjs";
 import {
 	augmentAndSummarize,
 	buildRunConfig,
@@ -73,19 +70,21 @@ const driver = readFileSync(
 	resolve(import.meta.dirname, "../../scripts/stryker-diff.mjs"),
 	"utf8",
 );
-// #3801: the `mutation (advisory)` job moved from mutation.yml into ci.yml (so
-// `needs:` can hold it behind the required checks); the cap is read from that
-// job, never from the first `timeout-minutes:` in the file.
+// #4005: the driver's only scheduled caller is the nightly job; the cap is read
+// from that job, never from the first `timeout-minutes:` in the file.
 const mutationJob = (
 	yaml.load(
 		readFileSync(
-			resolve(import.meta.dirname, "../../.github/workflows/ci.yml"),
+			resolve(
+				import.meta.dirname,
+				"../../.github/workflows/stryker-nightly.yml",
+			),
 			"utf8",
 		),
 	) as { jobs: Record<string, { "timeout-minutes"?: number }> }
-).jobs.mutation;
+).jobs.report;
 
-// lane: mutation (advisory) -- dry run and mutant runs. That lane mutates the
+// lane: the nightly Stryker report -- dry run and mutant runs. That lane mutates the
 // driver in place (stryker.config.mjs `inPlace: true`) and every expression of
 // an instrumented file is rewritten to
 // `stryMutAct_<ns>("<id>") ? <mutant> : (stryCov_<ns>("<id>"), <original>)`
@@ -1736,7 +1735,7 @@ describe("stryker diff mutation ranges", () => {
 });
 
 describe("stryker diff wall-clock budget", () => {
-	it("bounds the driver strictly below the advisory job cap", () => {
+	it("bounds the driver strictly below the nightly job cap", () => {
 		// Recurrence: run 36098718085 was cancelled by the runner at
 		// timeout-minutes, so the driver never regained control and its
 		// "no mutants evaluated" message never printed. The driver's own bound
@@ -1959,78 +1958,6 @@ describe.skipIf(underStryker)(
 		});
 	},
 );
-
-describe("mutation workflow incremental cache (#3810 item 2)", () => {
-	type Step = {
-		name?: string;
-		uses?: string;
-		run?: string;
-		if?: string;
-		with?: { path?: string; key?: string; "restore-keys"?: string };
-	};
-	const steps = (
-		yaml.load(
-			readFileSync(
-				resolve(import.meta.dirname, "../../.github/workflows/ci.yml"),
-				"utf8",
-			),
-		) as { jobs: { mutation: { steps: Step[] } } }
-	).jobs.mutation.steps;
-	const restoreIndex = steps.findIndex((step) =>
-		step.uses?.startsWith("actions/cache/restore@"),
-	);
-	const saveIndex = steps.findIndex((step) =>
-		step.uses?.startsWith("actions/cache/save@"),
-	);
-	const driverIndex = steps.findIndex((step) =>
-		step.run?.includes("scripts/stryker-diff.mjs"),
-	);
-
-	it("restores before the driver and saves after it, even when the driver fails", () => {
-		expect(restoreIndex).toBeGreaterThan(-1);
-		expect(restoreIndex).toBeLessThan(driverIndex);
-		expect(saveIndex).toBeGreaterThan(driverIndex);
-		expect(steps[saveIndex]?.if).toBe("always()");
-	});
-
-	it("keys on the PR number and the base sha, restoring by that prefix (C3, C7)", () => {
-		const restore = steps[restoreIndex]?.with;
-		const save = steps[saveIndex]?.with;
-		const prefix =
-			"mutation-incremental-${{ github.event.pull_request.number }}-${{ github.event.pull_request.base.sha }}-";
-		expect(restore?.["restore-keys"]?.trim()).toBe(prefix);
-		expect(restore?.key).toBe(
-			`${prefix}\${{ github.event.pull_request.head.sha }}`,
-		);
-		expect(save?.key).toBe(restore?.key);
-	});
-
-	it("caches exactly the incremental file and the fingerprint the driver writes beside it", () => {
-		for (const index of [restoreIndex, saveIndex]) {
-			expect(steps[index]?.with?.path?.trim().split("\n")).toEqual([
-				".stryker/incremental.json",
-				INCREMENTAL_FINGERPRINT_PATH,
-			]);
-		}
-	});
-
-	it.skipIf(underStryker)(
-		"has the driver read and write the same incremental file the workflow caches",
-		() => {
-			expect(/INCREMENTAL_PATH = "([^"]+)"/.exec(driver)?.[1]).toBe(
-				".stryker/incremental.json",
-			);
-		},
-	);
-
-	it("pins both cache actions by commit sha", () => {
-		for (const index of [restoreIndex, saveIndex]) {
-			expect(steps[index]?.uses).toMatch(
-				/^actions\/cache\/(?:restore|save)@[0-9a-f]{40}$/,
-			);
-		}
-	});
-});
 
 describe("compiled-source mutation targets (#3531 rescope)", () => {
 	it("classifies clients/tools/mcp .ts sources and the root index.ts, excluding tests and .d.ts", () => {

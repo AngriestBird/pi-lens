@@ -6,11 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	renderMutationMarkdown,
-	renderStaleMarkdown,
-	STICKY_MARKER,
-} from "../../scripts/lib/mutation-report-render.mjs";
+import { renderMutationMarkdown } from "../../scripts/lib/mutation-report-render.mjs";
 
 describe("renderMutationMarkdown", () => {
 	it("never reads a 0-mutant run as a clean pass, and states the reason", () => {
@@ -626,12 +622,6 @@ describe("renderMutationMarkdown", () => {
 		expect(render(null)).not.toContain("Incremental");
 	});
 
-	it("carries the sticky-comment marker so the workflow can find and update its own comment", () => {
-		expect(
-			renderMutationMarkdown({ files: {}, piLensMutationDiff: {} }),
-		).toContain(STICKY_MARKER);
-	});
-
 	it("round 2 S2: labels a partial (budget-killed) run distinctly, alongside whatever DID run", () => {
 		const markdown = renderMutationMarkdown({
 			files: {
@@ -915,70 +905,6 @@ describe("renderMutationMarkdown", () => {
 		expect(markdown).toContain("Partial run");
 		expect(markdown).not.toContain("Incomplete run");
 		expect(markdown).toContain("#### Survivors (1)");
-	});
-});
-
-describe("renderStaleMarkdown (#3531 round 2 T6, round 3/4 R2-4 wording)", () => {
-	it("names the head that produced no report, and carries the sticky marker so a later run finds and updates it", () => {
-		const markdown = renderStaleMarkdown({
-			headSha: "deadbeef00001234",
-			runUrl: undefined,
-		});
-
-		expect(markdown).toContain(STICKY_MARKER);
-		expect(markdown).toContain("Stale");
-		expect(markdown).toContain("deadbeef0000");
-		expect(markdown).toContain("no longer reflects this PR's current head");
-		// Recurrence (round 3 R2-4): the PATCH this very call produces
-		// OVERWRITES the comment with this notice -- "left over" implied no
-		// action was taken, when the update is happening right now.
-		expect(markdown).not.toContain("left over");
-		// Recurrence (round 4, cosmetic): the neutral cause clause used to
-		// read "produced no mutation report -- it did not produce one (…)",
-		// a doubled sentence.
-		expect(markdown).not.toContain("it did not produce one");
-	});
-
-	it("links the job run when a run URL is given", () => {
-		const markdown = renderStaleMarkdown({
-			headSha: "abc123",
-			runUrl: "https://github.com/apmantza/pi-lens/actions/runs/123",
-		});
-
-		expect(markdown).toContain(
-			"[Job run](https://github.com/apmantza/pi-lens/actions/runs/123)",
-		);
-	});
-
-	it("renders without throwing when given no context at all", () => {
-		expect(() => renderStaleMarkdown()).not.toThrow();
-		expect(renderStaleMarkdown()).toContain(STICKY_MARKER);
-	});
-
-	it("names BOTH possible causes of a 'cancelled' upstream result -- a superseding push or the job's own time limit", () => {
-		// Recurrence (round 4): `needs.mutation.result` reads "cancelled" both
-		// when the workflow's own per-PR concurrency group supersedes a run
-		// AND when the job runs past its `timeout-minutes` -- this job cannot
-		// tell those two apart, so naming only "superseded" would misattribute
-		// a genuine timeout to a push that never happened.
-		const markdown = renderStaleMarkdown({
-			headSha: "abc123",
-			upstreamResult: "cancelled",
-		});
-
-		expect(markdown).toContain(
-			"cancelled: a newer push superseded it, or the job hit its time limit",
-		);
-		expect(markdown).not.toContain("crash");
-	});
-
-	it("words it neutrally (not a specific crash/cancellation claim) when the upstream result is unknown or a genuine failure", () => {
-		const markdown = renderStaleMarkdown({
-			headSha: "abc123",
-			upstreamResult: "failure",
-		});
-
-		expect(markdown).not.toContain("superseded");
 	});
 });
 

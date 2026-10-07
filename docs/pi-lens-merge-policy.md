@@ -73,13 +73,9 @@ moved lines; include only structural views that changed.
    log read and the judgment recorded). A PR that is green on its head but
    whose merge with `origin/master` was not tested against the exact-pin
    sweeps is not green — run the sweep on the merge before merging. Apply
-   AGENTS.md's two-layer mutation acceptance: new-guard proof and demonstrated
-   correctness gaps gate the review; exploratory score, incidental survivors,
-   and unevaluated population do not. Read exact-head behavioural survivor
-   dispositions and name unresolved cases with reason and owner. `ci-verdict`
-   prints the advisory `MUTATION` line; PENDING, STALE, partial, `0 mutants
-   evaluated`, and `no report` are not clean evidence. Name their limits in the
-   merge note; do not wait for a broad campaign merely to exhaust its population.
+   AGENTS.md's one mutation layer (#4005): new-guard proof and demonstrated
+   correctness gaps gate the merge. `ci-verdict` prints no mutation line, and
+   the nightly Stryker report is not a merge input.
 5. **Merge.** `gh pr merge <N> --merge` (merge commit, repo convention).
    If "not up to date", `gh api -X PUT .../pulls/<N>/update-branch`, wait for
    CI, re-gate, merge. On GitHub 503s: retry with backoff, never switch to
@@ -692,7 +688,6 @@ Each row cost a lane at least once; the prose above carries the record.
 | Explaining why an agent stopped without checking its status | Check the agent's status before attributing its stop (#3695 handoff 7) |
 | Starting agents against an ambiguous target | Confirm the target before dispatching agents (#3695 handoff 8) |
 | Letting strictness-ratchet and glossary pins collide on one change | Run both pin sweeps before pushing (#3455/#3643) |
-| Merging with `Mutation diff` survivors on added lines unread | #3755 merged with `value > 0` → `>= 0` surviving at `clients/lsp/server.ts:555`; #3757 with 8 survivors on the `why === "cap"` branch. Read the exact-head comment and apply bounded behavioural triage under AGENTS.md: demand guard proof and fix demonstrated gaps, disclose unresolved incidental evidence with reason and owner |
 | Re-running a `pull_request` job against the old merge SHA | Use `gh pr update-branch` to rebuild the merge ref (#3660; 2026-09-30) |
 | Fixing a hooks or lint gate without sweeping older open branches | Sweep open branches committed before the fix (#3675; 2026-09-30) |
 | Enabling auto-merge before local HEAD equals the pushed SHA | Verify the pushed SHA before enabling auto-merge (#3671) |
