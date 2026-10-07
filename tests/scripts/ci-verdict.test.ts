@@ -632,8 +632,7 @@ describe("computeVerdict — rerun de-duplication (latest-started wins)", () => 
 	// #2539 round 2, F2/F5: the shared `resolveLatestByName` tie policy
 	// (scripts/lib/ci-checks.mjs) is fail-closed, not id-based. A superseded
 	// SUCCESS carrying the HIGHER id, or a duplicate with no `started_at` at
-	// all, must not read as success -- both are covered again here (beyond
-	// merge-train-warden.test.ts's own coverage of the shared resolver)
+	// all, must not read as success -- both are covered here
 	// because ci-verdict.mjs is what actually calls it with REST-shaped runs.
 	it("does not let a superseded success with the higher id win an unorderable tie (in_progress first)", () => {
 		const payload = {

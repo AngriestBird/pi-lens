@@ -2,16 +2,14 @@
  * scripts/lib/ci-checks.mjs (#2539 round 2, F2): the ONE required-checks name
  * list and the ONE fail-closed "latest check-run per name" resolver, shared
  * by every consumer that reads GitHub check-runs for this repo's two gating
- * checks -- merge-train-warden.mjs (GraphQL rollup: `startedAt`, UPPERCASE
- * `status`/`conclusion`) and ci-verdict.mjs (REST `commits/<sha>/check-runs`:
- * `started_at`, lowercase `status`/`conclusion`). A third consumer,
- * The retired merge lane no longer consumes this module.
+ * checks -- ci-verdict.mjs (REST `commits/<sha>/check-runs`: `started_at`,
+ * lowercase `status`/`conclusion`). The retired merge lane and the retired
+ * merge-train warden (#4105) no longer consume this module.
  *
  * Before this round, ci-verdict.mjs hand-rolled its own `latestRunNamed`
  * with an `id`-as-tiebreak policy that is NOT fail-closed (a superseded
- * SUCCESS with the higher id could win a tie over an unresolved duplicate),
- * while merge-train-warden.mjs already carried the correct policy. Two
- * required-check name lists and two different tie policies for the same
+ * SUCCESS with the higher id could win a tie over an unresolved duplicate).
+ * Two required-check name lists and two different tie policies for the same
  * real-world duplicate-check-run shape (a rerun, or the classify-ci-failure
  * auto-rerun, #2103) is the single-source-of-truth defect this module fixes.
  */

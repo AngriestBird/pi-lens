@@ -124,8 +124,7 @@ unchanged. With the queue on:
 - **Retire update-branch and BEHIND.** The queue tests against the latest
   master itself, so `gh pr update-branch`, "not up to date" retries, and the
   `gh run rerun` replays-the-old-merge-commit workaround are moot. Worse, any
-  push to a queued PR re-runs every check and EJECTS it. The warden no longer
-  kicks update-branch for a PR in the queue or anywhere master has a queue, and
+  push to a queued PR re-runs every check and EJECTS it. The merge-train warden is retired (#4105);
   ci-verdict's update-branch hint reads "do not update-branch" when master has a
   queue. The pre-queue rules for retargeting (push to re-arm CI) still apply to
   the PR's own `pull_request` run.
