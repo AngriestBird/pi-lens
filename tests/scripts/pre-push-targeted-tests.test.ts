@@ -254,13 +254,17 @@ describe("entry-point guard through the real CLIs (#4086)", () => {
 		["with-test-lock", lockScript],
 		["pre-push-targeted-tests", selectorScript],
 	])(
-		"importing %s from `node -e` and from stdin is not the entry point and exits 0",
+		"importing %s from `node -e` (bare and with an argument) and from stdin is not the entry point and exits 0",
 		(_name, script) => {
 			// #4086 review F2 recurrence: an entry check that threw on an
 			// unresolvable argv[1] made merely importing a script exit 1 under
 			// `node -e foo` (argv[1] = "foo") or stdin (argv[1] = "-"). The negative
 			// direction too: a guard that is always true would run main() on import
 			// (with-test-lock prints its usage and exits 2).
+			const bare = run(["-e", importProbe(script)]);
+			expect(bare.stderr).toBe("");
+			expect(bare.stdout).toBe("IMPORT-OK\n");
+			expect(bare.status).toBe(0);
 			const viaEval = run(["-e", importProbe(script), "foo"]);
 			expect(viaEval.stderr).toBe("");
 			expect(viaEval.stdout).toBe("IMPORT-OK\n");

@@ -323,7 +323,6 @@ export function isEntryPoint(
 	selfUrl,
 	{ argv1 = process.argv[1], realpath = fs.realpathSync.native } = {},
 ) {
-	if (!argv1) return false;
 	let invoked;
 	try {
 		invoked = realpath(argv1);

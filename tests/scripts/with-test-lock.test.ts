@@ -203,16 +203,19 @@ describe("isEntryPoint (#4086)", () => {
 	});
 
 	it.each([
-		["undefined (stdin / REPL)", undefined],
 		["empty", ""],
-		["not a real path (node -e foo)", "foo"],
-	])("returns false, never throws, when argv[1] is %s", (_name, argv1) => {
-		// #4086 review F2 recurrence: throwing on an unresolvable argv[1] made
-		// merely importing the script throw under `node -e` and stdin.
-		expect(
-			isEntryPoint(selfUrl, { argv1, realpath: resolveIn({ [self]: self }) }),
-		).toBe(false);
-	});
+		["stdin marker", "-"],
+		["not a real path (node -e foo)", "pi-lens-no-such-entry-point"],
+	])(
+		"returns false, never throws, when argv[1] is %s (default resolver)",
+		(_name, argv1) => {
+			// #4086 review F2 recurrence: throwing on an unresolvable argv[1] made
+			// merely importing the script throw under `node -e` and stdin. Uses the
+			// real fs.realpathSync.native (the undefined argv[1] of a bare `node -e`
+			// is covered through a real child in pre-push-targeted-tests.test.ts).
+			expect(isEntryPoint(selfUrl, { argv1 })).toBe(false);
+		},
+	);
 
 	it("fails closed when its own path cannot be resolved", () => {
 		// #4086 review F3 recurrence: returning false here would silently skip
