@@ -2985,8 +2985,9 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 	const SUBAGENT_RULE = "probe-3613-subagent";
 
 	beforeEach(() => {
-		// A code-quality warning on line 1 of every analysed file, named by
-		// the session that edits it: the subagent edits `sub.ts`.
+		FLAGS.set("lens-actionable-warnings", true);
+		// An actionable and a code-quality warning on line 1 of every analysed
+		// file, named by the session that edits it: the subagent edits `sub.ts`.
 		pipelineDouble.result = (filePath) => {
 			const rule =
 				path.basename(filePath) === "sub.ts" ? SUBAGENT_RULE : PRIMARY_RULE;
@@ -2995,6 +2996,21 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				actionableWarnings: [
+					{
+						id: `aw:${rule}`,
+						filePath,
+						displayPath: path.basename(filePath),
+						line: 1,
+						severity: "warning",
+						tool: "ast-grep",
+						rule: "no-var",
+						message: `AW-${rule}`,
+						actions: [],
+						suppressed: false,
+						origin: "dispatch",
+					},
+				],
 				codeQualityWarnings: [
 					{
 						id: `cq:${rule}`,
@@ -3014,6 +3030,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 	});
 
 	afterEach(() => {
+		FLAGS.delete("lens-actionable-warnings");
 		pipelineDouble.result = undefined;
 		pipelineDouble.analysed = [];
 		vi.restoreAllMocks();
@@ -3064,6 +3081,37 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 	const sessionIdOf = (runtime: AgentSessionRuntime) =>
 		runtime.session.sessionManager.getSessionId();
 
+	/**
+	 * Which session's warnings a context shows: `cq:<rule>` from the
+	 * code-quality advisory, `aw:<file>` from the actionable one.
+	 */
+	function shown(text: string): string[] {
+		const actionable =
+			/Fixable warnings introduced this turn[\s\S]*?If continuing/.exec(
+				text,
+			)?.[0] ?? "";
+		return [
+			...[PRIMARY_RULE, SUBAGENT_RULE]
+				.filter((rule) => text.includes(`${rule}×`))
+				.map((rule) => `cq:${rule}`),
+			...["a.ts", "sub.ts"]
+				.filter((file) => actionable.includes(`  ${file}: `))
+				.map((file) => `aw:${file}`),
+		];
+	}
+
+	/** The per-turn records a coordinator holds for one session's turn. */
+	const held = (coordinator: RuntimeCoordinator, sessionId?: string) => [
+		...coordinator
+			.peekCodeQualityWarnings(sessionId)
+			.map((w) => `cq:${w.rule}`),
+		...coordinator
+			.peekActionableWarnings(sessionId)
+			.map((w) => `aw:${path.basename(w.filePath)}`),
+	];
+	const PRIMARY = [`cq:${PRIMARY_RULE}`, "aw:a.ts"];
+	const SUBAGENT = [`cq:${SUBAGENT_RULE}`, "aw:sub.ts"];
+
 	it("keeps the primary's warnings, turn and write order when a subagent's turn starts", async () => {
 		const seen = coordinators();
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
@@ -3075,17 +3123,17 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			orderTurn: coordinator.writeOrderTurn,
 			writeIndex: coordinator.peekWriteIndex(),
 			turnStartProjectSeq: coordinator.turnStartProjectSeq,
-			warnings: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
+			warnings: held(coordinator),
 		});
 		const before = turnState();
-		expect(before.warnings).toEqual([PRIMARY_RULE]);
+		expect(before.warnings).toEqual(PRIMARY);
 		const subagent = await startSubagent();
 
 		await startTurn(subagent);
 
 		expect(turnState()).toEqual(before);
 		await endTurn(primary);
-		expect(await contextText(primary)).toContain(PRIMARY_RULE);
+		expect(shown(await contextText(primary))).toEqual(PRIMARY);
 	});
 
 	it("delivers a subagent's own warnings at its turn end, after the primary's next turn starts", async () => {
@@ -3101,12 +3149,10 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		await endTurn(primary);
 		const primarySees = await contextText(primary);
 
-		const shown = (text: string) =>
-			[PRIMARY_RULE, SUBAGENT_RULE].filter((rule) => text.includes(rule));
 		expect({
 			subagent: shown(subagentSees),
 			primary: shown(primarySees),
-		}).toEqual({ subagent: [SUBAGENT_RULE], primary: [PRIMARY_RULE] });
+		}).toEqual({ subagent: SUBAGENT, primary: PRIMARY });
 	});
 
 	it("keeps the primary's warnings out of a subagent's turn end", async () => {
@@ -3121,9 +3167,9 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		await endTurn(subagent);
 
 		expect({
-			subagentSees: (await contextText(subagent)).includes(PRIMARY_RULE),
-			primaryKeeps: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
-		}).toEqual({ subagentSees: false, primaryKeeps: [PRIMARY_RULE] });
+			subagentSees: shown(await contextText(subagent)),
+			primaryKeeps: held(coordinator),
+		}).toEqual({ subagentSees: [], primaryKeeps: PRIMARY });
 	});
 
 	it("starts a subagent's turn without the warnings its previous turn left undelivered", async () => {
@@ -3137,7 +3183,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		await startTurn(subagent);
 		await endTurn(subagent);
 
-		expect((await contextText(subagent)).includes(SUBAGENT_RULE)).toBe(false);
+		expect(shown(await contextText(subagent))).toEqual([]);
 	});
 
 	it("keeps a subagent's warnings across the primary's /new", async () => {
@@ -3150,7 +3196,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		await primary.newSession();
 		await endTurn(subagent);
 
-		expect((await contextText(subagent)).includes(SUBAGENT_RULE)).toBe(true);
+		expect(shown(await contextText(subagent))).toEqual(SUBAGENT);
 	});
 
 	it("re-analyses a subagent's unchanged file on its next turn", async () => {
@@ -3206,21 +3252,15 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		await startTurn(subagent);
 		await edit(subagent, path.join(cwd, "sub.ts"));
 		await edit(primary, path.join(cwd, "a.ts"));
-		const recorded = coordinator
-			.peekCodeQualityWarnings(subagentId)
-			.map((w) => w.rule);
+		const recorded = held(coordinator, subagentId);
 
 		await subagent.dispose();
 		runtimes.splice(runtimes.indexOf(subagent), 1);
 
 		expect({
 			recorded,
-			left: coordinator.peekCodeQualityWarnings(subagentId).map((w) => w.rule),
-			primary: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
-		}).toEqual({
-			recorded: [SUBAGENT_RULE],
-			left: [],
-			primary: [PRIMARY_RULE],
-		});
+			left: held(coordinator, subagentId),
+			primary: held(coordinator),
+		}).toEqual({ recorded: SUBAGENT, left: [], primary: PRIMARY });
 	});
 });
