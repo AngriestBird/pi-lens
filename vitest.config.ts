@@ -518,6 +518,9 @@ export const wallClockBudgetInclude = [
 	// call to the exported classify functions can see a drift in that
 	// contract (flake-shape admission).
 	"tests/scripts/guard-bash-hook.test.ts",
+	// #4071: the probe's real hook stdin/exit-code contract and ref diff are
+	// unobservable through an in-process classifier call.
+	"tests/scripts/guard-bash-probe.test.ts",
 	// #2698: real `git init`/`add`/`commit`/`ls-files` calls against a
 	// throwaway fixture repo — gitignore/tracked-vs-untracked resolution is
 	// the exact mechanism under test, which no mock reproduces faithfully.

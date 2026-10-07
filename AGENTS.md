@@ -374,6 +374,8 @@ the surface they bite; each block loads only when its trigger applies.
     and `cd node_modules && rm -rf ./*` empty the link target, while `rm -rf
     node_modules` (no slash) removes only the link. `classifyNodeModulesDelete`
     denies the first set through the same `hasNodeModulesSymlinkOutside` seam;
+    that seam follows the complete symlink chain with a fail-closed fallback
+    when the target cannot be resolved (#4080).
     a lane unlinks without a slash or glob. Consolidation verdict: two rules on
     one classifier seam, kept apart because the npm rule judges a verb and the
     delete rule a path operand (deleting the delete rule relocates nothing the
@@ -884,6 +886,11 @@ npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
+node scripts/guard-bash-probe.mjs <matrix.jsonl> [--head <ref|file>] [--base <ref|file>]
+                                  [--lane linked|real|both]
+                                        real-hook corpus probe (#4071): per-row verdicts
+                                        against tests/fixtures/guard-bash-probes; --base
+                                        prints only the rows that changed head vs base
 ```
 
 CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
