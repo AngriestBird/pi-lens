@@ -14,11 +14,7 @@
 // that already had one (#3774, #3768), against the one-fragment-per-change
 // rule the PR template states. `--base <ref>` supplies the PR base; when it
 // is absent the count rule is skipped and only the shape check runs.
-// `--merge-ref` says HEAD is CI's pull_request merge ref, which already
-// contains the base: the diff starts at the base itself, because that
-// checkout is depth 1 and has no merge-base (#3795 verify r3).
-//
-// Usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref> | --merge-ref]]
+// Usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref>]]
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -38,8 +34,7 @@ const runGit = (args, options) => gitExecFileSync(args, options);
  * The `.changelog/*.md` files the range adds between its start and the
  * working tree, or `null` when no base was supplied or Git could not answer. A
  * supplied PR `head` uses `git merge-base base head` as its start, so a local
- * branch behind master does not count master's fragments; the legacy
- * `mergeRef` mode starts at `base`.
+ * branch behind master does not count master's fragments.
  * The working tree is the end point, not HEAD, so a fragment a worker has
  * written but not committed is still counted before push; untracked files are
  * added for the same reason (`git diff` lists only tracked paths, so the two
@@ -50,7 +45,6 @@ export function addedChangelogFragments({
 	head,
 	cwd,
 	git = runGit,
-	mergeRef = false,
 } = {}) {
 	if (!base) return null;
 	try {
@@ -62,15 +56,13 @@ export function addedChangelogFragments({
 						stdio: ["ignore", "pipe", "pipe"],
 					}),
 				).trim()
-			: mergeRef
-				? base
-				: String(
-						git(["merge-base", "HEAD", base], {
-							cwd,
-							encoding: "utf8",
-							stdio: ["ignore", "pipe", "pipe"],
-						}),
-					).trim();
+			: String(
+					git(["merge-base", "HEAD", base], {
+						cwd,
+						encoding: "utf8",
+						stdio: ["ignore", "pipe", "pipe"],
+					}),
+				).trim();
 		const diffArgs = ["diff", "--diff-filter=A", "--name-only", from];
 		if (head) diffArgs.push(head);
 		diffArgs.push("--", ".changelog/");
@@ -106,10 +98,9 @@ export function checkChangelogFragments({
 	base,
 	cwd,
 	git = runGit,
-	mergeRef = false,
 	head,
 } = {}) {
-	const fragments = addedChangelogFragments({ base, cwd, git, mergeRef, head });
+	const fragments = addedChangelogFragments({ base, cwd, git, head });
 	if (base && fragments === null) {
 		return {
 			valid: false,
@@ -147,7 +138,6 @@ if (
 ) {
 	const baseIndex = process.argv.indexOf("--base");
 	const cwdIndex = process.argv.indexOf("--cwd");
-	const mergeRef = process.argv.includes("--merge-ref");
 	const base = baseIndex === -1 ? undefined : process.argv[baseIndex + 1];
 	const headIndex = process.argv.indexOf("--head");
 	const head = headIndex === -1 ? undefined : process.argv[headIndex + 1];
@@ -155,15 +145,14 @@ if (
 	const invalidArgument =
 		(baseIndex !== -1 && (!base || base.startsWith("--"))) ||
 		(headIndex !== -1 && (!head || head.startsWith("--"))) ||
-		(cwdIndex !== -1 && (!cwd || cwd.startsWith("--"))) ||
-		(mergeRef && baseIndex === -1);
+		(cwdIndex !== -1 && (!cwd || cwd.startsWith("--")));
 	const result = invalidArgument
 		? {
 				valid: false,
 				message:
-					"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref> | --merge-ref]] [--cwd <dir>]",
+					"usage: node scripts/check-changelog-fragments.mjs [--base <ref> [--head <ref>]] [--cwd <dir>]",
 			}
-		: checkChangelogFragments({ base, cwd, mergeRef, head });
+		: checkChangelogFragments({ base, cwd, head });
 	if (result.valid) {
 		console.log(result.message);
 	} else {
