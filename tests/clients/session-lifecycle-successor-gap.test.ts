@@ -30,6 +30,7 @@ import {
 	decideSessionStart,
 	getActiveSessionId,
 	getSecondarySessionCount,
+	noteSessionShutdown,
 	releasePrimarySession,
 	SUCCESSOR_PENDING_TTL_MS,
 } from "../../clients/session-lifecycle.js";
@@ -320,5 +321,105 @@ describe("only the named successor is primary in the gap (#3855)", () => {
 		} finally {
 			delete process.env.PI_LENS_CONCURRENT_SESSION_GUARD;
 		}
+	});
+});
+
+/**
+ * #4106 (V7 of #3855): an activation whose session_start never ran (its own
+ * /reload landed before pi-lens's start handler) shuts down with no recorded
+ * role. With no primary registered it failed safe to primary, so a gap
+ * subagent's activation renamed the primary's gap and its own successor took
+ * the slot. The recurrences: that shutdown classified primary in a named gap
+ * it is not the successor of, or the named successor's own role-less
+ * shutdown classified secondary (no primary would remain).
+ */
+describe("a role-less shutdown in a named gap (#4106)", () => {
+	beforeEach(() => {
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+
+	function primaryNames(reason: string, key: string | number | undefined) {
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		releasePrimarySession(reason, key);
+	}
+	const shutdown = (key: string | number | undefined) =>
+		noteSessionShutdown(liveCtx(), `roleless-${String(key)}`, REPO, key);
+
+	for (const [reason, named] of [
+		["reload", 7],
+		["reload", "/s/host.jsonl"],
+		["fork", "/s/fork.jsonl"],
+		["new", "/s/new.jsonl"],
+	] as const) {
+		it(`is a secondary's unless it carries the named key (${reason}, ${String(named)})`, () => {
+			primaryNames(reason, named);
+
+			expect(shutdown(undefined)).toBe("secondary");
+			expect(shutdown(99)).toBe("secondary");
+			expect(shutdown("/s/sub.jsonl")).toBe("secondary");
+			expect(shutdown(named)).toBe("primary");
+			expect(successorPendingReasons().map((entry) => entry.subject)).toEqual([
+				"roleless-shutdown",
+			]);
+		});
+	}
+
+	it("is the primary's for a key of none in an in-memory /new gap (residual R3)", () => {
+		primaryNames("new", undefined);
+		expect(shutdown(undefined)).toBe("primary");
+	});
+
+	it("keeps the fail-safe where nothing is named: after a quit, or with no reason", () => {
+		primaryNames("quit", undefined);
+		expect(shutdown(99)).toBe("primary");
+		_resetSessionLifecycleForTests();
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		releasePrimarySession(undefined, 7);
+		expect(shutdown(99)).toBe("primary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
+	it("keeps the fail-safe once the marker expired", () => {
+		vi.useFakeTimers();
+		primaryNames("reload", 7);
+		vi.advanceTimersByTime(SUCCESSOR_PENDING_TTL_MS);
+		expect(shutdown(99)).toBe("primary");
+	});
+
+	it("keeps the fail-safe for a marker a build without the name rewrote", () => {
+		const now = Date.now();
+		_seedProcessSingletonCellForTests(
+			"session-lifecycle.primary-registration",
+			{
+				schema: "pi-lens.process-singletons",
+				version: 1,
+				value: {
+					activeCtx: undefined,
+					activeSessionId: undefined,
+					activeRoot: undefined,
+					secondarySessionCount: 0,
+					successorPendingSince: now,
+					successorNamed: { since: now - 1, reason: "reload", key: 7 },
+				},
+			},
+		);
+		expect(shutdown(99)).toBe("primary");
+	});
+
+	it("leaves a shutdown beside a registered primary to the id and probe rules", () => {
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		// Same id as the registered primary: primary, whatever key it carries.
+		expect(noteSessionShutdown(liveCtx(), "host-session", REPO, 99)).toBe(
+			"primary",
+		);
+		// Another id beside a live primary: secondary, as before #4106.
+		expect(noteSessionShutdown(liveCtx(), "other", REPO, 7)).toBe("secondary");
+		expect(successorPendingReasons()).toEqual([]);
 	});
 });

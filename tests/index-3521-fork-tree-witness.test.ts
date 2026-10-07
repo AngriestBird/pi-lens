@@ -2395,6 +2395,126 @@ describe("#3855 only the successor the primary named is primary in its gap", () 
 	}
 
 	/**
+	 * #4106 (V7 of #3855, verify r5 PR16): a gap subagent's own /new start is
+	 * interrupted by its own /reload before pi-lens's start handler runs
+	 * (micro:0), so that activation records no role. With no primary
+	 * registered (the primary's gap), its shutdown failed safe to primary,
+	 * named the gap by its own fresh ticket, and the subagent's reload start
+	 * took the slot: the user's P' was declined and lost its activation. At
+	 * micro:1 the role is recorded (secondary), and it was already right.
+	 */
+	for (const [move, store] of [
+		["reload", "in-memory"],
+		["reload", "file-backed"],
+		["fork", "in-memory"],
+		["fork", "file-backed"],
+		["new", "file-backed"],
+	] as const) {
+		for (const hops of [0, 1] as const) {
+			it(`keeps the ${store} ${move} successor primary when a gap subagent's /new is interrupted by its own /reload at micro:${hops}`, async () => {
+				let sub: AgentSessionRuntime | undefined;
+				let inner: Promise<void> | undefined;
+				let armed = false;
+				const subReloadDuringNew = (pi: ExtensionAPI) => {
+					pi.on("session_start", (event) => {
+						if (!armed || (event as { reason?: string }).reason !== "new")
+							return;
+						if (inner) return;
+						inner = new Promise<void>((resolve, reject) => {
+							const hop = (n: number): void =>
+								n === 0
+									? queueMicrotask(() =>
+											sub!.session.reload().then(resolve, reject),
+										)
+									: queueMicrotask(() => hop(n - 1));
+							hop(hops);
+						});
+					});
+				};
+				let acted = false;
+				const inGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== move || acted) return;
+						acted = true;
+						sub = await startRuntime(
+							SessionManager.inMemory(cwd),
+							[],
+							[subReloadDuringNew],
+						);
+						armed = true;
+						await sub.newSession();
+						await inner;
+					});
+				};
+				const primary = await startRuntime(managerFor(store), [inGap]);
+				await activateTools(primary, "act", ["ast_grep_search"]);
+				const before = (await startRows()).length;
+
+				await replace(primary, move);
+
+				expect(acted).toBe(true);
+				const rows = (await startRows()).slice(before);
+				expect.soft(rows.at(-1)).toEqual([move, "primary"]);
+				expect
+					.soft(rows.slice(0, -1).filter(([, role]) => role === "primary"))
+					.toEqual([]);
+				if (move !== "new")
+					expect.soft(activeSituational(primary)).toEqual(["ast_grep_search"]);
+				// One bounded record names the role-less decline (micro:0 only;
+				// at micro:1 the activation's role is recorded).
+				const roleless = (await subjects("session-successor-pending")).filter(
+					(subject) => subject === "roleless-shutdown",
+				);
+				expect(roleless).toEqual(hops === 0 ? ["roleless-shutdown"] : []);
+			});
+		}
+	}
+
+	/**
+	 * #4106 row 5, the other direction: the user's own /new interrupted at
+	 * micro:0 by its own /reload is also role-less at its shutdown, and it IS
+	 * the named successor (its manager is the one the /new named, by file or
+	 * by none). It must stay primary, or no session would be.
+	 */
+	for (const store of ["in-memory", "file-backed"] as const) {
+		it(`keeps the user's own ${store} /new primary when its own /reload interrupts its start at micro:0`, async () => {
+			let runtime: AgentSessionRuntime | undefined;
+			let inner: Promise<void> | undefined;
+			let armed = false;
+			const reloadDuringNew = (pi: ExtensionAPI) => {
+				pi.on("session_start", (event) => {
+					if (!armed || (event as { reason?: string }).reason !== "new") return;
+					if (inner) return;
+					inner = new Promise<void>((resolve, reject) =>
+						queueMicrotask(() =>
+							runtime!.session.reload().then(resolve, reject),
+						),
+					);
+				});
+			};
+			runtime = await startRuntime(managerFor(store), [], [reloadDuringNew]);
+			armed = true;
+			const before = (await startRows()).length;
+
+			await runtime.newSession();
+			expect(inner).toBeDefined();
+			await inner;
+
+			const rows = (await startRows()).slice(before);
+			expect.soft(rows.at(-1)).toEqual(["reload", "primary"]);
+			expect
+				.soft(rows.slice(0, -1).filter(([, role]) => role === "primary"))
+				.toEqual([]);
+			// Its role-less shutdown is the named successor's: classified
+			// primary, it runs the primary teardown, so no role-less decline is
+			// recorded (a decline would skip that teardown).
+			expect(await subjects("session-successor-pending")).not.toContain(
+				"roleless-shutdown",
+			);
+		});
+	}
+
+	/**
 	 * #2129 F3: after a primary quit nothing is pending, so a subagent's own
 	 * replacement re-arms the process as its primary. The recurrence this
 	 * guards: a start declined outside a primary's gap, which leaves the

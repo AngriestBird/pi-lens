@@ -456,12 +456,29 @@ export function noteSessionShutdown(
 	/** This session's own project root (`ctx.cwd`), when readable. `undefined`
 	 *  means "root unknown" and never on its own changes a verdict. */
 	root?: string | undefined,
+	/** #4106: this session's `startKey` (`clients/session-scope.ts`). */
+	key?: string | number,
 ): SessionShutdownClassification {
 	const s = state();
 	if (ctx !== undefined && ctx === s.activeCtx) {
 		return "primary";
 	}
 	if (s.activeCtx === undefined && s.activeSessionId === undefined) {
+		// #4106: no primary is registered because a replacement named its
+		// successor. Only that successor's activation can carry the named key
+		// (its manager is the one the name was derived from); an activation
+		// whose start never ran on any other manager is a secondary's, and must
+		// not rename the gap. An unnamed or expired gap keeps the fail-safe.
+		const named = namedSuccessorOf(s);
+		if (named !== undefined && key !== named.key && successorStillPending(s)) {
+			recordDegradationOnce({
+				kind: "session-successor-pending",
+				subject: "roleless-shutdown",
+				reason:
+					"a session_shutdown whose session_start never ran arrived in a primary replacement gap with a key the gap does not name; classified secondary, so the gap keeps its name",
+			});
+			return "secondary";
+		}
 		return "primary";
 	}
 	if (sessionId !== undefined && sessionId === s.activeSessionId) {
@@ -613,10 +630,7 @@ export function decideSessionStart(
 	// #3855: in a replacement gap only the start the shutdown named, by reason
 	// and key, is the successor. A start with no reason fails safe to primary
 	// (#3662 F8); a marker without a name keeps #3662's rule.
-	const named =
-		s.successorNamed?.since === s.successorPendingSince
-			? s.successorNamed
-			: undefined;
+	const named = namedSuccessorOf(s);
 	const notTheSuccessor =
 		named === undefined
 			? reason === "startup"
@@ -690,6 +704,16 @@ export function decideSessionStart(
 		sameRoot,
 		primaryRoot: primaryRootAtDecision,
 	};
+}
+
+/** #3855: the successor the pending replacement named, when this build's
+ *  release wrote it with the marker it stands beside. */
+function namedSuccessorOf(
+	s: SessionLifecycleState,
+): { reason: string; key: string | number | undefined } | undefined {
+	return s.successorNamed?.since === s.successorPendingSince
+		? s.successorNamed
+		: undefined;
 }
 
 /** #3662: whether a replacement shutdown's marker is younger than the bound.
