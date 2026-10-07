@@ -529,6 +529,10 @@ export const wallClockBudgetInclude = [
 	// spawns of scripts/classify-ci-failure.mjs, asserting exit code and argv
 	// wiring the library-level suite (in-process) cannot see.
 	"tests/scripts/classify-ci-failure-cli.test.ts",
+	// #4076 D2: the dispatch-safety CLI's main-module guard, stdout/stderr split
+	// and exit code are what a dispatch decision reads; an in-process call of
+	// runCli cannot prove the entry wiring (flake-shape admission).
+	"tests/scripts/dispatch-safety.test.ts",
 	// #4030: the real `gh` process boundary is the subject of the retry test;
 	// serialize it with other child-process admissions.
 	"tests/scripts/download-test-history-artifacts.test.ts",

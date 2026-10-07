@@ -48,7 +48,7 @@ Branch protection on `master` today is classic (no ruleset exists).
 `scripts/ci-verdict.mjs` reads the live required-check names from classic
 branch protection; if you move the required checks into the ruleset it falls
 back to the static list (`Unit tests`, `Lint & type-check`) and still gates on
-every non-advisory check-run it discovers. Either keep the classic rule
+every non-advisory check-run from a PR/push run it discovers. Either keep the classic rule
 (enable "Require merge queue" there) or accept the narrower absent-check
 detection.
 

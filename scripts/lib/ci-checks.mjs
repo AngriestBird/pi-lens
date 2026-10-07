@@ -107,6 +107,22 @@ export const DEFERRED_ADVISORY_CHECKS = Object.freeze([
 	"CodeQL (javascript-typescript) (advisory)",
 ]);
 
+// #4090: the events whose workflow runs are NOT a commit's PR/push CI. A
+// scheduled run attaches its check-runs to master's head and a dispatched run
+// to the dispatched branch's head, so without this a nightly lane or a
+// label-triage job turns a PR or master red. A run of any other (or unknown)
+// event keeps today's gating.
+const NON_PR_CI_EVENTS = new Set([
+	"schedule",
+	"workflow_dispatch",
+	"repository_dispatch",
+	"workflow_run",
+]);
+
+export function isNonPrCiEvent(event) {
+	return NON_PR_CI_EVENTS.has(String(event ?? ""));
+}
+
 export function isAdvisoryCheck(name) {
 	return (
 		ADVISORY_CHECKS.has(name) || String(name ?? "").endsWith(ADVISORY_SUFFIX)

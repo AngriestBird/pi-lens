@@ -13,7 +13,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import yaml from "../../clients/deps/js-yaml.js";
+import {
+	dispatchableJobs,
+	guardOf,
+	hasWriteToken,
+	WRITE_SCOPES,
+	workflowDocument,
+	workflowTriggers,
+} from "../../scripts/dispatch-safety.mjs";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -36,28 +43,20 @@ type Job = {
 	if?: unknown;
 	uses?: unknown;
 	with?: unknown;
+	permissions?: unknown;
 	steps?: Step[];
 };
 type Workflow = {
 	on?: unknown;
+	permissions?: unknown;
 	jobs?: Record<string, Job>;
 };
 
 function load(source: string): Workflow {
-	return (yaml.load(source) ?? {}) as Workflow;
+	return workflowDocument(source) as Workflow;
 }
 
 // <impl>
-// ── `on:` ───────────────────────────────────────────────────────────────────
-
-/** GitHub accepts `on:` as a string, an array of names, or a map. */
-function triggers(on: unknown): string[] {
-	if (typeof on === "string") return [on];
-	if (Array.isArray(on)) return on.filter((t) => typeof t === "string");
-	if (on && typeof on === "object") return Object.keys(on);
-	return [];
-}
-
 // ── `run:` text ─────────────────────────────────────────────────────────────
 
 // Shell comments are not executable evidence. Keep quoted # characters so a
@@ -272,171 +271,12 @@ function isReusableWorkflow(uses: unknown): boolean {
 	return typeof uses === "string" && /(^|\/)\.github\/workflows\//.test(uses);
 }
 
-// ── `if:` expressions ───────────────────────────────────────────────────────
-
-type Expr =
-	| { t: "or" | "and"; l: Expr; r: Expr }
-	| { t: "not"; e: Expr }
-	| { t: "cmp"; op: string; l: Expr; r: Expr }
-	| { t: "str" | "lit" | "ref"; v: string }
-	| { t: "call"; name: string; args: Expr[] };
-
-function tokenize(src: string): string[] {
-	const token =
-		/\s*('(?:[^']|'')*'|&&|\|\||==|!=|<=|>=|[!<>(),.[\]*]|[A-Za-z_][\w-]*|\d+(?:\.\d+)?)/y;
-	const tokens: string[] = [];
-	let at = 0;
-	while (at < src.length) {
-		if (/^\s*$/.test(src.slice(at))) break;
-		token.lastIndex = at;
-		const m = token.exec(src);
-		if (!m) throw new Error(`unexpected character at ${at}: ${src.slice(at)}`);
-		tokens.push(m[1]);
-		at = token.lastIndex;
-	}
-	return tokens;
-}
-
-// GitHub precedence, loosest first: `||`, `&&`, comparison, `!`.
-function parseExpression(src: string): Expr {
-	const tokens = tokenize(src);
-	let at = 0;
-	const next = (): string => {
-		if (at >= tokens.length) throw new Error("unexpected end of expression");
-		return tokens[at++];
-	};
-	const expect = (want: string) => {
-		const got = next();
-		if (got !== want) throw new Error(`expected ${want}, got ${got}`);
-	};
-	const parseOr = (): Expr => {
-		let l = parseAnd();
-		while (tokens[at] === "||") {
-			at += 1;
-			l = { t: "or", l, r: parseAnd() };
-		}
-		return l;
-	};
-	const parseAnd = (): Expr => {
-		let l = parseCmp();
-		while (tokens[at] === "&&") {
-			at += 1;
-			l = { t: "and", l, r: parseCmp() };
-		}
-		return l;
-	};
-	const parseCmp = (): Expr => {
-		const l = parseUnary();
-		const op = tokens[at];
-		if (op && ["==", "!=", "<", ">", "<=", ">="].includes(op)) {
-			at += 1;
-			return { t: "cmp", op, l, r: parseUnary() };
-		}
-		return l;
-	};
-	const parseUnary = (): Expr => {
-		if (tokens[at] === "!") {
-			at += 1;
-			return { t: "not", e: parseUnary() };
-		}
-		return parsePrimary();
-	};
-	const parsePrimary = (): Expr => {
-		const tok = next();
-		if (tok === "(") {
-			const inner = parseOr();
-			expect(")");
-			return inner;
-		}
-		if (tok.startsWith("'"))
-			return { t: "str", v: tok.slice(1, -1).replaceAll("''", "'") };
-		if (/^\d/.test(tok)) return { t: "lit", v: tok };
-		if (!/^[A-Za-z_]/.test(tok)) throw new Error(`unexpected token ${tok}`);
-		if (["true", "false", "null"].includes(tok)) return { t: "lit", v: tok };
-		if (tokens[at] === "(") {
-			at += 1;
-			const args: Expr[] = [];
-			while (tokens[at] !== ")") {
-				args.push(parseOr());
-				if (tokens[at] === ",") at += 1;
-				else if (tokens[at] !== ")") throw new Error("bad call arguments");
-			}
-			expect(")");
-			return { t: "call", name: tok.toLowerCase(), args };
-		}
-		let path = tok;
-		for (;;) {
-			if (tokens[at] === "." && tokens[at + 1]) {
-				path += `.${tokens[at + 1]}`;
-				at += 2;
-			} else if (tokens[at] === "[") {
-				at += 1;
-				const index = parseOr();
-				expect("]");
-				path += index.t === "str" ? `.${index.v}` : ".*";
-			} else break;
-		}
-		return { t: "ref", v: path };
-	};
-	const result = parseOr();
-	if (at !== tokens.length) throw new Error(`trailing token ${tokens[at]}`);
-	return result;
-}
-
-function operands(expr: Expr, op: "or" | "and"): Expr[] {
-	return expr.t === op
-		? [...operands(expr.l, op), ...operands(expr.r, op)]
-		: [expr];
-}
-
-function isEquality(expr: Expr, context: string, value: string): boolean {
-	if (expr.t !== "cmp" || expr.op !== "==") return false;
-	const pair = (a: Expr, b: Expr) =>
-		a.t === "ref" && a.v === context && b.t === "str" && b.v === value;
-	return pair(expr.l, expr.r) || pair(expr.r, expr.l);
-}
-
-const isSchedule = (e: Expr) => isEquality(e, "github.event_name", "schedule");
-const isMaster = (e: Expr) => isEquality(e, "github.ref", "refs/heads/master");
-
-// `schedule || master`, or either half alone: a stricter guard that a branch
-// dispatch cannot satisfy either.
-function isGuardConjunct(expr: Expr): boolean {
-	if (isSchedule(expr) || isMaster(expr)) return true;
-	const ors = operands(expr, "or");
-	return ors.length === 2 && ors.some(isSchedule) && ors.some(isMaster);
-}
-
-type Guard = { guarded: true } | { guarded: false; reason: string };
-
-// A step runs only when its job's `if:` AND its own `if:` hold, so the guard
-// must be a conjunct of one of them: `always() || guard`, `inputs.x || guard`
-// and `!(guard)` are not.
-function guardOf(...conditions: unknown[]): Guard {
-	for (const condition of conditions) {
-		if (typeof condition !== "string") continue;
-		const body =
-			/^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(condition)?.[1] ?? condition;
-		let expr: Expr;
-		try {
-			expr = parseExpression(body);
-		} catch (error) {
-			return {
-				guarded: false,
-				reason: `unparseable if (${(error as Error).message})`,
-			};
-		}
-		if (operands(expr, "and").some(isGuardConjunct)) return { guarded: true };
-	}
-	return { guarded: false, reason: "lacks ref guard" };
-}
-
 // ── census ──────────────────────────────────────────────────────────────────
 
 interface WriterRecord {
 	id: string;
 	kinds: string[];
-	guard: Guard;
+	guard: ReturnType<typeof guardOf>;
 }
 
 function stepKinds(step: Step): string[] {
@@ -459,7 +299,7 @@ function stepLabel(step: Step, index: number): string {
 /** Every writer step (and writer job) of a dispatchable workflow. */
 function workflowWriters(source: string, workflowPath: string): WriterRecord[] {
 	const workflow = load(source);
-	if (!triggers(workflow.on).includes("workflow_dispatch")) return [];
+	if (!workflowTriggers(workflow.on).includes("workflow_dispatch")) return [];
 	const records: WriterRecord[] = [];
 	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
 		if (isReusableWorkflow(job.uses))
@@ -490,10 +330,20 @@ function writerFindings(source: string, workflowPath: string): string[] {
 	);
 }
 
+function writeScopedJobFindings(
+	source: string,
+	workflowPath: string,
+): string[] {
+	return dispatchableJobs(source, workflowPath)
+		.filter((job) => hasWriteToken(job))
+		.filter((job) => !guardOf(job.job.if).guarded)
+		.map((job) => `${job.id}: write scopes ${job.writeScopes.join(", ")}`);
+}
+
 /** Actions a dispatchable workflow uses that no list classifies. */
 function unclassifiedActions(source: string, workflowPath: string): string[] {
 	const workflow = load(source);
-	if (!triggers(workflow.on).includes("workflow_dispatch")) return [];
+	if (!workflowTriggers(workflow.on).includes("workflow_dispatch")) return [];
 	return Object.entries(workflow.jobs ?? {}).flatMap(([jobName, job]) =>
 		(job.steps ?? []).flatMap((step) => {
 			const action = actionName(step.uses);
@@ -515,7 +365,7 @@ function unclassifiedActions(source: string, workflowPath: string): string[] {
 // first so `format('$X')` is not a hit, `\$` is an escaped literal, and a
 // braced variable may carry an expansion operator (`${VAR:-d}`).
 const SHELL_VARIABLE =
-	/(?<!\\)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*[}:#%/^,@+=?-])/;
+	/(?<!\\)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[!#]?[A-Za-z_][A-Za-z0-9_]*[}:#%/^,@+=?-]|\([^)]*\))/;
 
 function* inputStrings(
 	value: unknown,
@@ -573,7 +423,11 @@ const REGISTERED_EXCEPTIONS: Record<string, string> = {
 // A new writer (even a guarded one) or a new dispatchable workflow reds here so
 // its author reviews the guard; the failure prints the re-pin.
 const DISPATCHABLE_WORKFLOWS = 15;
+// #4077: the split moved every writer step into its own job without adding one,
+// except codeql.yml, whose SARIF upload moved into the `upload` job as the
+// `github/codeql-action/upload-sarif` writer action (+1).
 const WRITER_STEPS: Record<string, number> = {
+	".github/workflows/codeql.yml": 1,
 	".github/workflows/compat-smoke.yml": 1,
 	".github/workflows/install-smoke.yml": 1,
 	".github/workflows/labels.yml": 1,
@@ -583,6 +437,31 @@ const WRITER_STEPS: Record<string, number> = {
 	".github/workflows/stale.yml": 1,
 	".github/workflows/stryker-nightly.yml": 1,
 	".github/workflows/tool-smoke.yml": 8,
+};
+
+// Every dispatchable job that holds a write scope, with the scopes it holds.
+// #4077: each is a small guarded writer (or a registered exception) that takes
+// its producer's result through an artifact or job output, so the job that runs
+// branch code holds none. A new write scope, a widened scope, or a write scope
+// back on a producer reds here with the re-pin printed; the unguarded direction
+// also reds `guards every dispatchable job with an effective write token`.
+const WRITE_SCOPED_JOBS: Record<string, string> = {
+	".github/workflows/codeql.yml:upload": "security-events",
+	".github/workflows/compat-smoke.yml:compat-smoke-alert": "issues",
+	".github/workflows/install-smoke.yml:host-latest-notify": "issues",
+	".github/workflows/labels.yml:sync": "issues",
+	".github/workflows/merge-train-warden.yml:warden":
+		"actions, contents, pull-requests",
+	".github/workflows/release.yml:publish-npm": "id-token",
+	".github/workflows/release.yml:release": "contents",
+	".github/workflows/stale-open-issues.yml:detect": "issues",
+	".github/workflows/stale.yml:stale": "issues, pull-requests",
+	".github/workflows/stryker-nightly.yml:publish-issue": "issues",
+	".github/workflows/tool-smoke.yml:snapshot-persist-notify": "issues",
+	".github/workflows/tool-smoke.yml:test-history-notify": "issues",
+	".github/workflows/tool-smoke.yml:test-history-publish": "contents",
+	".github/workflows/tool-smoke.yml:tool-smoke-notify": "issues",
+	".github/workflows/tool-smoke.yml:tool-smoke-prs": "contents, pull-requests",
 };
 
 function workflowFiles(): string[] {
@@ -614,6 +493,8 @@ function workflowWith(options: {
 	run?: string;
 	uses?: string;
 	jobUses?: string;
+	permissions?: string;
+	jobPermissions?: string;
 }): string {
 	const indent = (text: string, n: number) =>
 		text
@@ -629,11 +510,17 @@ function workflowWith(options: {
 		.join("\n");
 	return [
 		options.on ?? "on: workflow_dispatch",
+		options.permissions === undefined
+			? ""
+			: `permissions: ${options.permissions}`,
 		"jobs:",
 		"  fixture:",
 		options.jobIf === undefined
 			? ""
 			: `    if: ${JSON.stringify(options.jobIf)}`,
+		options.jobPermissions === undefined
+			? ""
+			: `    permissions: ${options.jobPermissions}`,
 		options.jobUses === undefined ? "" : `    uses: ${options.jobUses}`,
 		options.jobUses === undefined
 			? `    steps:\n      - name: Writer\n${indent(step, 8)}`
@@ -751,6 +638,203 @@ const WRITER_ACTION_FIXTURES = [
 ];
 
 describe("workflow writer governance (#4053)", () => {
+	describe("effective permission resolution (#4065)", () => {
+		// Recurrence: #4076 review r2, L3. These are spellings the text census
+		// cannot see (a variable git, a variable method, wget, python, a node
+		// fetch, npm dist-tag, a shell script, a script it does not register).
+		// Each row runs the SAME text three ways: the text census stays silent, the
+		// permission census reds the unguarded write-scoped job, and the same text
+		// is clean as a read-only job or behind the guard. The finding keys on the
+		// token, never on the spelling, so a spelling nobody listed cannot hide.
+		it.each([
+			["variable git push", "$GIT push origin HEAD"],
+			["variable gh method", 'gh api -X "$M" repos/o/r/issues'],
+			["wget post", "wget --post-data=x https://example.test"],
+			["python requests", "python -c 'requests.post(url)'"],
+			["node fetch", "node -e 'fetch(url, { method: \"POST\" })'"],
+			["npm dist-tag", "npm dist-tag add pkg latest"],
+			["shell writer", "scripts/publish.sh"],
+			["two-hop re-export", "node scripts/zz-a.mjs"],
+		])("catches silent spelling by permission: %s", (_name, run) => {
+			const unguarded = workflowWith({
+				run,
+				jobPermissions: "{ contents: write }",
+			});
+			expect(flag({ run }), "the text census is silent on this run").toEqual(
+				[],
+			);
+			expect(writeScopedJobFindings(unguarded, "fixture.yml")).toEqual([
+				"fixture.yml:fixture: write scopes contents",
+			]);
+			expect(
+				writeScopedJobFindings(
+					workflowWith({ run, jobPermissions: "{ contents: read }" }),
+					"fixture.yml",
+				),
+			).toEqual([]);
+			expect(
+				writeScopedJobFindings(
+					workflowWith({
+						run,
+						jobPermissions: "{ contents: write }",
+						jobIf: GUARD_SRC,
+					}),
+					"fixture.yml",
+				),
+			).toEqual([]);
+		});
+
+		const ALL_SCOPES = [...WRITE_SCOPES].sort();
+		it.each([
+			[
+				"job overrides workflow",
+				"{ issues: read }",
+				"{ issues: write }",
+				["issues"],
+			],
+			[
+				"workflow overrides repository default",
+				"{ issues: read }",
+				undefined,
+				[],
+			],
+			// Recurrence: #4076 review r2, L2. The repository's Actions setting is
+			// `default_workflow_permissions: read` (`gh api
+			// repos/apmantza/pi-lens/actions/permissions/workflow`), so a workflow
+			// with no `permissions:` holds no write scope; the old row pinned a
+			// write-all assumption the repository does not have.
+			["repository default holds no write scope", undefined, undefined, []],
+			["empty job permissions deny inherited writes", "write-all", "{}", []],
+			// Recurrence: #4076 review r2, L1. These three GitHub permission names
+			// were missing from WRITE_SCOPES, so a workflow-level grant resolved to
+			// no write scope and the census stayed silent.
+			["attestations", "{ attestations: write }", undefined, ["attestations"]],
+			["models", "{ models: write }", undefined, ["models"]],
+			[
+				"artifact-metadata",
+				"{ artifact-metadata: write }",
+				undefined,
+				["artifact-metadata"],
+			],
+			// L1: an empty `permissions:` parses to null and is "not set", so it
+			// falls to the next level instead of resolving to a token-less job.
+			[
+				"null job permissions fall to the workflow",
+				"write-all",
+				"null",
+				ALL_SCOPES,
+			],
+			[
+				"null workflow permissions fall to the repository default",
+				"null",
+				undefined,
+				[],
+			],
+			// L1: a shape GitHub rejects resolves to the worst case, never to none.
+			["a list as job permissions", undefined, "[contents]", ALL_SCOPES],
+			[
+				"an unknown word as workflow permissions",
+				"everything",
+				undefined,
+				ALL_SCOPES,
+			],
+		])("resolves %s", (_name, permissions, jobPermissions, expected) => {
+			const jobs = dispatchableJobs(
+				workflowWith({ run: "echo ok", permissions, jobPermissions }),
+				"fixture.yml",
+			);
+			expect(jobs[0]?.writeScopes).toEqual(expected);
+		});
+
+		it("requires the job guard even when the writer spelling is unknown", () => {
+			const source = workflowWith({
+				run: "python -c 'requests.post(url)'",
+				jobPermissions: "{ issues: write }",
+			});
+			const jobs = dispatchableJobs(source, "fixture.yml");
+			expect(hasWriteToken(jobs[0])).toBe(true);
+			expect(writeScopedJobFindings(source, "fixture.yml")).toEqual([
+				"fixture.yml:fixture: write scopes issues",
+			]);
+		});
+	});
+
+	// #4077: GitHub permissions are job-scoped, so the way to let a branch
+	// dispatch run a smoke is a read-only job plus a small guarded writer that
+	// `needs:` it. These fixtures are that shape, and each rejection is the
+	// regression that undoes it.
+	describe("read-only producer plus guarded writer (#4077)", () => {
+		const split = (options: {
+			smokePermissions?: string;
+			writerIf?: string;
+			writerStepIf?: string;
+		}) =>
+			[
+				"on: workflow_dispatch",
+				"jobs:",
+				"  smoke:",
+				`    permissions: ${options.smokePermissions ?? "{ contents: read }"}`,
+				"    steps:",
+				"      - run: node scripts/smoke.mjs",
+				"  writer:",
+				"    needs: smoke",
+				options.writerIf === undefined
+					? ""
+					: `    if: ${JSON.stringify(options.writerIf)}`,
+				"    permissions: { issues: write }",
+				"    steps:",
+				options.writerStepIf === undefined
+					? "      - run: node scripts/upsert-tracking-issue.mjs"
+					: `      - if: ${JSON.stringify(options.writerStepIf)}\n        run: node scripts/upsert-tracking-issue.mjs`,
+			]
+				.filter(Boolean)
+				.join("\n");
+
+		it("accepts a read-only smoke and a job-guarded writer", () => {
+			expect(
+				writeScopedJobFindings(split({ writerIf: GUARD_SRC }), "fixture.yml"),
+			).toEqual([]);
+			expect(
+				writeScopedJobFindings(
+					split({ writerIf: `always() && (${GUARD_SRC})` }),
+					"fixture.yml",
+				),
+			).toEqual([]);
+		});
+
+		// Recurrence: the pre-split compat-smoke shape, one job holding the write
+		// token with only the writer STEP guarded.
+		it("rejects a writer whose guard is only on its step", () => {
+			expect(
+				writeScopedJobFindings(
+					split({ writerStepIf: GUARD_SRC }),
+					"fixture.yml",
+				),
+			).toEqual(["fixture.yml:writer: write scopes issues"]);
+		});
+
+		it("rejects a writer with no guard or a spoofed one", () => {
+			for (const writerIf of [undefined, `always() || (${GUARD_SRC})`])
+				expect(
+					writeScopedJobFindings(split({ writerIf }), "fixture.yml"),
+				).toEqual(["fixture.yml:writer: write scopes issues"]);
+		});
+
+		// Recurrence: a write scope creeping back onto the job that runs branch
+		// code, even with the writer correctly guarded beside it.
+		it("rejects a write scope on the producer", () => {
+			expect(
+				writeScopedJobFindings(
+					split({
+						writerIf: GUARD_SRC,
+						smokePermissions: "{ contents: read, issues: write }",
+					}),
+					"fixture.yml",
+				),
+			).toEqual(["fixture.yml:smoke: write scopes issues"]);
+		});
+	});
+
 	describe("`on:` forms", () => {
 		// Recurrence: round 1 read `on` with hasOwnProperty, so the string and
 		// array forms made a dispatchable workflow look non-dispatchable and
@@ -951,9 +1035,16 @@ describe("workflow writer governance (#4053)", () => {
 			],
 			["a regex anchor", '          path: "^foo$"'],
 			["a price", '          path: "cost $5"'],
-			["a command substitution", '          path: "$(pwd)/x"'],
 		])("accepts %s", (_name, block) => {
 			expect(hits(block)).toEqual([]);
+		});
+
+		it.each([
+			["length expansion", '          path: "${#PATH}"'],
+			["indirect expansion", '          path: "${!PATH}"'],
+			["command substitution", '          path: "$(pwd)/x"'],
+		])("flags shell expansion: %s", (_name, block) => {
+			expect(hits(block)).toHaveLength(1);
 		});
 
 		it("does not read github-script's JavaScript template literals as shell", () => {
@@ -997,11 +1088,43 @@ describe("workflow writer governance (#4053)", () => {
 			expect(audit.problems).toEqual([]);
 		});
 
+		it("guards every dispatchable job with an effective write token", () => {
+			const unguarded = real().flatMap(({ source, path }) =>
+				writeScopedJobFindings(source, path),
+			);
+			const permissionExceptions = {
+				".github/workflows/merge-train-warden.yml:warden: write scopes actions, contents, pull-requests":
+					REGISTERED_EXCEPTIONS[Object.keys(REGISTERED_EXCEPTIONS)[0]],
+			};
+			const audit = auditRegistry({
+				sweepName: "unguarded write-scoped dispatchable jobs",
+				flagged: unguarded,
+				registered: [],
+				exemptions: permissionExceptions,
+				minReasonLength: 30,
+			});
+			expect(audit.problems).toEqual([]);
+		});
+
+		// Recurrence: #4077, a write scope back on a job that runs branch code (the
+		// guard census above catches it only when the job is also unguarded), or a
+		// writer quietly widened (`contents: write` beside `issues: write`).
+		it("pins every write-scoped dispatchable job and the scopes it holds", () => {
+			const actual: Record<string, string> = {};
+			for (const { source, path } of real())
+				for (const job of dispatchableJobs(source, path))
+					if (hasWriteToken(job)) actual[job.id] = job.writeScopes.join(", ");
+			expect(
+				actual,
+				`re-pin to:\nconst WRITE_SCOPED_JOBS = ${JSON.stringify(actual, null, "\t")};`,
+			).toEqual(WRITE_SCOPED_JOBS);
+		});
+
 		it("pins the census", () => {
 			const writers: Record<string, number> = {};
 			let dispatchable = 0;
 			for (const { source, path } of real()) {
-				if (triggers(load(source).on).includes("workflow_dispatch"))
+				if (workflowTriggers(load(source).on).includes("workflow_dispatch"))
 					dispatchable += 1;
 				const count = workflowWriters(source, path).length;
 				if (count > 0) writers[path] = count;

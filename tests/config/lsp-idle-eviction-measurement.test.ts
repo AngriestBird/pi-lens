@@ -208,6 +208,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		jobs: Record<
 			string,
 			{
+				if?: string;
 				"timeout-minutes"?: number;
 				steps: Array<{
 					id?: string;
@@ -224,6 +225,14 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 	};
 	const job = workflow.jobs["tool-smoke"];
 	const steps = job.steps;
+	// #4077: the read-only smoke job regenerates and stages; the refresh PRs and
+	// the tracking issue are written by their own guarded jobs.
+	const prSteps = workflow.jobs["tool-smoke-prs"].steps;
+	const notifySteps = workflow.jobs["tool-smoke-notify"].steps;
+	const GUARD =
+		"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')";
+	const stageRun = (name: string) =>
+		steps.find((s) => s.name === name)?.run ?? "";
 	const measureAt = steps.findIndex((s) =>
 		s.run?.includes("scripts/measure-lsp-idle-eviction.mjs"),
 	);
@@ -234,7 +243,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 	});
 
 	it("puts the document in the refresh PR's add-paths, matching the compared list exactly", () => {
-		const step = steps.find((s) =>
+		const step = prSteps.find((s) =>
 			s.uses?.startsWith("peter-evans/create-pull-request"),
 		);
 		const addPaths = (step?.with?.["add-paths"] ?? "")
@@ -242,6 +251,20 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			.map((line) => line.trim())
 			.filter(Boolean);
 		expect([...addPaths].sort()).toEqual([...GENERATED_LSP_DOCS].sort());
+	});
+
+	// Recurrence: #4077, the PR job commits what the smoke job staged. A doc in
+	// `add-paths` that the staging step does not copy is never in the PR's tree.
+	it("stages every compared doc and every promotion path for the PR job", () => {
+		const stage = stageRun("Stage the refresh-PR inputs");
+		for (const doc of GENERATED_LSP_DOCS) expect(stage).toContain(doc);
+		for (const path of [
+			"clients/lsp/server.ts",
+			"tests/config/lsp-idle-eviction-reasons.json",
+			"tests/config/lsp-idle-eviction-registry.test.ts",
+			"$RUNNER_TEMP/lsp-idle-eviction-promote.md",
+		])
+			expect(stage).toContain(path);
 	});
 
 	// Review round 1: the script defaulted to 780 s while the workflow passed 600.
@@ -266,18 +289,13 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 
 	it("files the drift issue from the files the measurement step writes, and only on schedule or master", () => {
 		const measure = steps[measureAt];
-		const notifyAt = steps.findIndex((s) =>
+		const notify = notifySteps.find((s) =>
 			s.name?.startsWith("Notify on idle-eviction drift"),
-		);
-		const driftSibling = steps.find((s) =>
-			s.name?.startsWith("Notify on silentOnClean drift"),
-		);
-		expect(notifyAt).toBeGreaterThan(measureAt);
-		const notify = steps[notifyAt];
+		) as (typeof steps)[number];
 		expect(notify["continue-on-error"]).toBe(true);
-		// Same scoping as the other tracking-issue writer: a branch dispatch must
-		// not file or close issues.
-		expect(notify.if).toBe(driftSibling?.if);
+		// A branch dispatch must not file or close issues: the writer job (shared
+		// with the other tracking-issue writers) carries the scope.
+		expect(workflow.jobs["tool-smoke-notify"].if).toBe(GUARD);
 		for (const path of [
 			"$RUNNER_TEMP/lsp-idle-eviction-drift.md",
 			"$RUNNER_TEMP/lsp-idle-eviction-drift-state",
@@ -285,6 +303,10 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			expect(measure.run, `measurement writes ${path}`).toContain(path);
 			expect(notify.run, `notifier reads ${path}`).toContain(path);
 		}
+		// Recurrence: #4077, the staging glob must cover both files, or the writer
+		// reads `missing` and leaves a drift issue untouched.
+		const stage = stageRun("Stage the notifier inputs");
+		expect(stage).toContain('"$RUNNER_TEMP"/lsp-idle-eviction-drift*');
 		// The body handed to the issue CLI is the file the measurement wrote, not
 		// merely a path the script happens to mention.
 		expect(notify.run).toContain(
@@ -311,11 +333,11 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect(promoteAt).toBeGreaterThan(measureAt);
 		expect(promoteAt).toBeLessThan(diffAt);
 		const promote = steps[promoteAt];
-		const docsPr = steps.find((s) =>
+		const docsPr = prSteps.find((s) =>
 			s.uses?.startsWith("peter-evans/create-pull-request"),
 		);
 		expect(promote["continue-on-error"]).toBe(true);
-		expect(promote.if).toBe(docsPr?.if?.split(" && steps.")[0]);
+		expect(promote.if).toBe(GUARD);
 		for (const path of [
 			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
 			"$RUNNER_TEMP/lsp-idle-eviction-promote.md",
@@ -341,7 +363,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
 		);
 
-		const prs = steps.filter((s) =>
+		const prs = prSteps.filter((s) =>
 			s.uses?.startsWith("peter-evans/create-pull-request"),
 		);
 		const promotionPr = prs.find(
@@ -349,14 +371,14 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		);
 		expect(promotionPr, "promotion PR step").toBeDefined();
 		expect(
-			steps.indexOf(promotionPr as (typeof steps)[number]),
-		).toBeGreaterThan(steps.indexOf(docsPr as (typeof steps)[number]));
+			prSteps.indexOf(promotionPr as (typeof steps)[number]),
+		).toBeGreaterThan(prSteps.indexOf(docsPr as (typeof steps)[number]));
 		expect(promotionPr?.with?.branch).not.toBe(docsPr?.with?.branch);
 		expect(String(promotionPr?.with?.draft)).toBe("true");
-		expect(promotionPr?.if).toContain(
-			"steps.idle_promote.outputs.promoted == 'true'",
-		);
-		expect(promotionPr?.if).toContain("github.event_name == 'schedule'");
+		expect(promotionPr?.if).toBe("needs.tool-smoke.outputs.promoted == 'true'");
+		// Scoped to schedule or master by the job, so a branch dispatch cannot
+		// open or arm a policy change.
+		expect(workflow.jobs["tool-smoke-prs"].if).toContain(GUARD);
 		expect(promotionPr?.["continue-on-error"]).toBe(true);
 		expect(
 			(promotionPr?.with?.["add-paths"] ?? "")
@@ -370,7 +392,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 			"tests/config/lsp-idle-eviction-registry.test.ts",
 		]);
 		expect(promotionPr?.with?.["body-path"]).toContain(
-			"lsp-idle-eviction-promote.md",
+			"idle-eviction-promote.md",
 		);
 		expect(promotionPr?.with?.token).toBe(docsPr?.with?.token);
 	});
