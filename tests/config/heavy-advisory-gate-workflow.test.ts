@@ -656,25 +656,26 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B2/C13/D23
+		// 56 checkout sites across the tree; 61 non-gate job rows (A23/B2/C13/D23
 		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
 		// from C to D, #4005 removed the pull_request `mutation` (B) and
 		// `mutation comment` (C) jobs and added the schedule-only nightly report
 		// job (D), and #3916 added tool-smoke's schedule/dispatch-only
-		// `snapshot-persist-bench`, also D). Sites and jobs are counted separately so a no-checkout
+		// `snapshot-persist-bench`, also D, and #4043 added the pull_request
+		// `Action pin comments` job, A). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			55,
+			56,
 		);
-		expect(CENSUS_SITES.length).toBe(55);
+		expect(CENSUS_SITES.length).toBe(56);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(60);
-		expect(stageJobs("A")).toBe(22);
+		).toBe(61);
+		expect(stageJobs("A")).toBe(23);
 		expect(stageJobs("B")).toBe(2);
 		expect(stageJobs("C")).toBe(13);
 		expect(stageJobs("D")).toBe(23);
