@@ -2036,8 +2036,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cacheKept?: boolean;
 		/** The hook's own signal fired while the scan was awaited (Escape). */
 		aborted?: boolean;
-		/** #3872: this root's last scan outlasted the budget left, so it was not awaited. */
-		lastScanMs?: number;
+		/** #3872: this root's last two scans both outlasted the budget left (this is the shorter), so it was not awaited. */
+		scanFloorMs?: number;
 		/** #3872: linked worktrees nested under the root, which knip walks as project files. */
 		nestedWorktrees?: number;
 		/** #3872: files with issues dropped from the result for living in one. */
@@ -2302,8 +2302,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// turn. Its late result is never written or delivered here -- the turn
 				// it was computed for has already ended.
 				//
-				// A root whose last scan took longer than the budget left is not
-				// awaited again: the wait would end in the same deferral, three
+				// A root whose last TWO scans both took longer than the budget left
+				// is not awaited again (one cold scan is not a measurement): the wait would end in the same deferral, three
 				// seconds later on every turn (live clone with six unignored
 				// worktrees: the handler sat at 3000 ms on each of three turns). The
 				// scan is still started, so a root that became fast is noticed on the
@@ -2313,8 +2313,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					0,
 					HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
 				);
-				const lastScanMs = knipClient.lastScanMs?.(scanRoot);
-				const knownSlow = lastScanMs !== undefined && lastScanMs > remainingMs;
+				const scanFloorMs = knipClient.scanFloorMs?.(scanRoot);
+				const knownSlow =
+					scanFloorMs !== undefined && scanFloorMs > remainingMs;
 				const scanned = await bounded(
 					knipClient.analyze(scanRoot, getKnipIgnorePatterns(), {
 						projectSeq: runtime.projectSeq,
@@ -2335,7 +2336,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						aborted,
 						...(knownSlow && {
 							reason: "scan-exceeds-budget",
-							lastScanMs,
+							scanFloorMs,
 						}),
 						...(nestedWorktrees > 0 && { nestedWorktrees }),
 					};
@@ -2347,7 +2348,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						incrementDegradationCount({
 							kind: "turn-end-knip-nested-worktrees",
 							subject: toRunnerDisplayPath(cwd, scanRoot),
-							reason: `${nestedWorktrees} linked worktree(s) nested under the scan root: knip walks them as project files and the scan did not fit the turn_end budget; ignore their directory in .gitignore to drop the cost`,
+							reason: `${nestedWorktrees} linked worktree(s) nested under the scan root: knip walks them as project files and the scan did not fit the turn_end budget; add their directory (for example /.worktrees/) to .gitignore to drop the cost`,
 						});
 					}
 				} else {
@@ -2358,7 +2359,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// checkout still gets its scan (an Escape ends the loop either way).
 			budgetSpent =
 				metadata.execution === "deferred" &&
-				(metadata.lastScanMs === undefined || metadata.aborted === true);
+				(metadata.scanFloorMs === undefined || metadata.aborted === true);
 			logKnipRow(scanRoot, startedAt, metadata);
 		}
 	}

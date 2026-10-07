@@ -380,12 +380,16 @@ export class KnipClient {
 	>();
 
 	/**
-	 * Per project root, how long its last successful scan took (#3872). turn_end
-	 * reads it to stop awaiting a scan that cannot fit the hook budget: the scan
-	 * still runs (it re-measures, and warms knip's own cache), the hook just no
-	 * longer waits for it. Cleared with the other per-session state.
+	 * Per project root, how long its last two successful scans took (#3872).
+	 * turn_end reads the shorter of the two to stop awaiting a scan that cannot
+	 * fit the hook budget: the scan still runs (it re-measures, and warms knip's
+	 * own cache), the hook just no longer waits for it. Two samples, because a
+	 * session's first scan of a root is cold and its second is not (3.3 s then
+	 * 1.3 s on pi-lens itself): one cold sample must not cost the next turn its
+	 * advisory. A scan that failed, was killed or never completed is no sample.
+	 * Cleared with the other per-session state.
 	 */
-	private readonly scanDurations = new Map<string, number>();
+	private readonly scanDurations = new Map<string, number[]>();
 
 	/** Last successful result per project and runtime content generation. */
 	private completedByProject = new Map<
@@ -528,12 +532,13 @@ export class KnipClient {
 	}
 
 	/**
-	 * How long this root's last successful scan took, or `undefined` when none
-	 * settled this session (#3872). The root is resolved the way `analyze`
-	 * resolves it.
+	 * The shorter of this root's last two successful scans, or `undefined` while
+	 * fewer than two settled this session (#3872). The root is resolved the way
+	 * `analyze` resolves it.
 	 */
-	lastScanMs(cwd: string): number | undefined {
-		return this.scanDurations.get(this.resolveProjectRoot(cwd) ?? cwd);
+	scanFloorMs(cwd: string): number | undefined {
+		const samples = this.scanDurations.get(this.resolveProjectRoot(cwd) ?? cwd);
+		return samples?.length === 2 ? Math.min(...samples) : undefined;
 	}
 
 	/** Linked worktrees nested under this root, which knip walks as project files (#3872). */
@@ -614,7 +619,10 @@ export class KnipClient {
 		const promise = this.runAnalyze(key).then((result) => {
 			if (result.success) {
 				this.hardFailures.delete(key);
-				this.scanDurations.set(key, Date.now() - startedAt);
+				this.scanDurations.set(key, [
+					...(this.scanDurations.get(key) ?? []).slice(-1),
+					Date.now() - startedAt,
+				]);
 			} else if (isHardFailureSummary(result.summary)) {
 				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
 			}
