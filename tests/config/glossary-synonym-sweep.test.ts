@@ -879,7 +879,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/grammar-source.ts": 4,
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
-		"clients/install-diagnostics.ts": 12,
+		"clients/install-diagnostics.ts": 11,
 		"clients/installer/index.ts": 107,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
