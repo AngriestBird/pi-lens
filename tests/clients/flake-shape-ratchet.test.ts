@@ -128,6 +128,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	"never-settling-wait:scripts/mutate-fixture.test.ts": {
+		detector: "never-settling-wait",
+		reason:
+			"the interrupt witness must hold a real child open until SIGINT; replacing the wait with a settled promise would erase the lifecycle under test",
+	},
 	// 2026-09-07 (#2703 review r1): an unhandled derived-promise rejection is
 	// only observable through Node's `unhandledRejection` event, which fires
 	// on a real macrotask; the file drains one real `setImmediate` tick.
@@ -431,6 +436,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
+	// contract; an in-process main() call cannot prove the entry-point boundary.
+	"real-process-spawn:scripts/ci-test-diff.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the executable CLI exit status is the contract; an in-process main call cannot prove the entry-point boundary",
+	},
 	"real-process-spawn:scripts/ci-verdict.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -454,6 +466,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the hook's real stdin/exit-code/stderr contract is unobservable from an in-process call to the exported classify functions",
+	},
+	"real-process-spawn:scripts/guard-bash-probe.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real hook stdin/exit-code contract and head-to-head differential are unobservable through an in-process classifier call",
 	},
 	// #2698: gitignore/tracked-vs-untracked resolution (git init/add/commit/
 	// ls-files against a throwaway fixture repo) is the exact mechanism
@@ -482,6 +499,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and
 	// file I/O; an in-process call would just re-exercise the exported render
 	// function the other describe block already covers.
+	"real-process-spawn:scripts/mutate.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the mutation CLI's child Vitest process and signal path are the process boundary; an in-process call cannot prove restoration after SIGINT",
+	},
 	"real-process-spawn:scripts/mutation-report-render.test.ts": {
 		detector: "real-process-spawn",
 		reason:

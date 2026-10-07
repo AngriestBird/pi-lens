@@ -163,8 +163,9 @@ function blankCommentsAndStrings(source) {
 	let result = "";
 	const strings = [];
 	let stringStart = -1;
+	let stringPrefixEnd = 0;
 	let previousToken = null;
-	let stringPrefix = "";
+	const prefixEnds = [];
 	// ECMAScript's lexical grammar permits a RegularExpressionLiteral where an
 	// expression starts. Classify the preceding token by whether it can end an
 	// expression; this covers expression-start keywords and punctuators without
@@ -239,8 +240,9 @@ function blankCommentsAndStrings(source) {
 					end: index + 1,
 					quote: state,
 					text: decoded(source.slice(stringStart + 1, index)),
-					prefix: stringPrefix,
+					prefix: "",
 				});
+				prefixEnds.push(stringPrefixEnd);
 				state = "code";
 				previousToken = "value";
 			}
@@ -260,7 +262,7 @@ function blankCommentsAndStrings(source) {
 		} else if (char === "'" || char === '"' || char === "`") {
 			result += " ";
 			stringStart = index;
-			stringPrefix = result.slice(-256).trimEnd();
+			stringPrefixEnd = result.length;
 			state = char;
 			previousToken = "string";
 		} else {
@@ -279,6 +281,13 @@ function blankCommentsAndStrings(source) {
 			} else if (!/\s/.test(char)) previousToken = char;
 		}
 	}
+	// The 256 blanked characters before each string's opening quote are read
+	// from the finished text: slicing `result` inside the loop flattened the
+	// whole concatenation per string, quadratic in the file (#4088).
+	strings.forEach((string, at) => {
+		const end = prefixEnds[at];
+		string.prefix = result.slice(Math.max(0, end - 256), end).trimEnd();
+	});
 	return { text: result, strings };
 }
 
