@@ -241,14 +241,19 @@ describe("entry-point guard through the real CLIs (#4086)", () => {
 	);
 	const importProbe = (script: string) =>
 		`import(${JSON.stringify(pathToFileURL(script).href)}).then(() => console.log("IMPORT-OK"));`;
-	const run = (args: string[], input?: string) =>
+	const run = (args: string[], input?: string, cwd = repoRoot) =>
 		spawnSync(process.execPath, args, {
-			cwd: repoRoot,
+			cwd,
 			encoding: "utf8",
 			input,
 			timeout: 30_000,
 			env: { ...process.env, PI_LENS_TEST_NO_LOCK: "1" },
 		});
+
+	// Outside any repo: a guard that wrongly runs the selector's main() on import
+	// then fails fast on git instead of running the real hook over this checkout.
+	const runAway = (args: string[], input?: string) =>
+		run(args, input, os.tmpdir());
 
 	it.each([
 		["with-test-lock", lockScript],
@@ -261,15 +266,26 @@ describe("entry-point guard through the real CLIs (#4086)", () => {
 			// `node -e foo` (argv[1] = "foo") or stdin (argv[1] = "-"). The negative
 			// direction too: a guard that is always true would run main() on import
 			// (with-test-lock prints its usage and exits 2).
-			const bare = run(["-e", importProbe(script)]);
+			const bare = runAway(["-e", importProbe(script)]);
 			expect(bare.stderr).toBe("");
 			expect(bare.stdout).toBe("IMPORT-OK\n");
 			expect(bare.status).toBe(0);
-			const viaEval = run(["-e", importProbe(script), "foo"]);
+			// A real file that is not this script: the only shape that reaches the
+			// compare with a resolvable argv[1], so it is the one an always-true
+			// guard cannot hide behind a failed realpath.
+			const otherFile = runAway([
+				"-e",
+				importProbe(script),
+				path.join(repoRoot, "package.json"),
+			]);
+			expect(otherFile.stderr).toBe("");
+			expect(otherFile.stdout).toBe("IMPORT-OK\n");
+			expect(otherFile.status).toBe(0);
+			const viaEval = runAway(["-e", importProbe(script), "foo"]);
 			expect(viaEval.stderr).toBe("");
 			expect(viaEval.stdout).toBe("IMPORT-OK\n");
 			expect(viaEval.status).toBe(0);
-			const viaStdin = run(["-"], importProbe(script));
+			const viaStdin = runAway(["-"], importProbe(script));
 			expect(viaStdin.stderr).toBe("");
 			expect(viaStdin.stdout).toBe("IMPORT-OK\n");
 			expect(viaStdin.status).toBe(0);
