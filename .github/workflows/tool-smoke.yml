@@ -27,7 +27,7 @@ jobs:
     # History is a nightly concern. In particular, a PR must never become red
     # because its historical artifacts are unavailable or a data-branch push
     # loses a race with another bot.
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -45,21 +45,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-history-artifacts"
-          # #3753: ci.yml uploads one artifact per Unit tests shard. The
-          # unsuffixed name is what runs before the sharding uploaded, still
-          # unexpired for up to 90 days. The shard list mirrors ci.yml's
-          # matrix; tests/config/test-history-workflow.test.ts pins the two.
-          : > "$RUNNER_TEMP/test-history-artifact-ids"
-          for artifact_name in unit-test-results-linux unit-test-results-linux-shard-1 unit-test-results-linux-shard-2 unit-test-results-linux-shard-3 unit-test-results-linux-shard-4 unit-test-results-linux-shard-5; do
-            gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \
-              --jq '.artifacts[] | select(.expired == false) | .id' >> "$RUNNER_TEMP/test-history-artifact-ids"
-          done
-          while read -r artifact_id; do
-            [ -n "$artifact_id" ] || continue
+          # #4030: retry transient GitHub 5xx responses and select only the
+          # newest artifact per shard. Downloading every unexpired artifact
+          # grew until this step OOMed (runs 36860553809–37316090921).
+          node scripts/download-test-history-artifacts.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --output-dir "$RUNNER_TEMP/test-history-artifact-zips"
+          for zip in "$RUNNER_TEMP"/test-history-artifact-zips/*.zip; do
+            [ -e "$zip" ] || continue
+            artifact_id="$(basename "$zip" .zip)"
             mkdir -p "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
-            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/$artifact_id.zip"
-            unzip -q "$RUNNER_TEMP/$artifact_id.zip" -d "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
-          done < "$RUNNER_TEMP/test-history-artifact-ids"
+            unzip -q "$zip" -d "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
+          done
       - name: Append history and publish data branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

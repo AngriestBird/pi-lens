@@ -71,6 +71,7 @@
 		"scripts/ci-verdict.test.ts": 4,
 		"scripts/classify-ci-failure-cli.test.ts": 2,
 		"scripts/download-grammars.test.ts": 2,
+		"scripts/download-test-history-artifacts.test.ts": 3,
 		"scripts/git-fixture-env.test.ts": 5,
 		"scripts/guard-bash-hook.test.ts": 19,
 		"scripts/knip-sibling-purge.test.ts": 1,

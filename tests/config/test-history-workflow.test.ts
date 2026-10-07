@@ -150,7 +150,9 @@ describe("#3215 durable test-history workflow contract", () => {
 		const workflow = load(".github/workflows/tool-smoke.yml");
 		const jobs = workflow.jobs as Record<string, unknown>;
 		const rollup = jobs["test-history-rollup"] as Record<string, unknown>;
-		expect(rollup.if).toBe("github.event_name == 'schedule'");
+		expect(rollup.if).toBe(
+			"github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+		);
 		const permissions = rollup.permissions as Record<string, unknown>;
 		expect(permissions.contents).toBe("write");
 	});
