@@ -65,6 +65,7 @@ import {
 	captureReadContentBinding,
 	type ReadContentBinding,
 } from "./read-guard.js";
+import { getIOBridge } from "./io-bridge-contract.js";
 
 export const READ_BRIDGE_KEY: unique symbol = Symbol.for("pi-lens:read-bridge");
 
@@ -185,6 +186,32 @@ export function registerReadBridge(deps: BridgeDeps): void {
 			// Validate the payload before doing anything else — this catches
 			// integration bugs in callers (malformed fields, bad numbers).
 			if (!isValidEntry(entry)) return;
+
+			// #3654: in a pi-lens process the unified bridge is mounted in the same
+			// first-wins pass, so delegate to it. This body stays as the fallback for
+			// an isolated unit-test mount or a dirty process that mounted only v1.
+			const ioBridge = getIOBridge();
+			if (ioBridge !== undefined) {
+				const offset = entry.requestedOffset;
+				const requested = entry.requestedLimit;
+				// `undefined` means whole-file; the guard's own file-length probe clips
+				// the effective limit. MAX_SAFE_INTEGER avoids an unsafe `offset + …`.
+				const limit = requested ?? Number.MAX_SAFE_INTEGER;
+				const end =
+					limit === Number.MAX_SAFE_INTEGER
+						? Number.MAX_SAFE_INTEGER
+						: offset + limit - 1;
+				ioBridge.record({
+					filePath: entry.filePath,
+					...(entry.consumer !== undefined && { consumer: entry.consumer }),
+					read: {
+						ranges: [[offset, end]],
+						evidence: "disk",
+						source: `bridge:${entry.consumer ?? "unknown"}`,
+					},
+				});
+				return;
+			}
 
 			if (!deps.isRecordable(entry.filePath)) return;
 			// A zero-line read vouches for nothing unless the file is really

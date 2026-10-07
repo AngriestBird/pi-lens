@@ -85,6 +85,10 @@
       "session-lifecycle",
       "read-guard"
     ],
+    "clients/io-bridge.ts": [
+      "session-lifecycle",
+      "read-guard"
+    ],
     "clients/observed-mutation.ts": [
       "session-lifecycle"
     ],

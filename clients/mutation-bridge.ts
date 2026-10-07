@@ -62,6 +62,11 @@ import { noteMutationHandled } from "./observed-mutation.js";
 import type { ProjectChangeSource } from "./project-changes.js";
 import { getProcessBridge, registerProcessBridge } from "./process-bridge.js";
 import { recordDroppedRead } from "./session-scope.js";
+import {
+	getIOBridge,
+	type BridgeEntry,
+	type MutationFacet,
+} from "./io-bridge-contract.js";
 
 /** Stable Symbol key — identical across module reloads in the same process. */
 export const MUTATION_BRIDGE_KEY: unique symbol = Symbol.for(
@@ -294,22 +299,67 @@ function resolveChangedRange(
 	return { start: 1, end: Math.max(1, deps.countFileLines(filePath)) };
 }
 
+/** Why a mutation record was not credited to live session state (#3654). */
+export type MutationRecordReason =
+	| "malformed"
+	| "out-of-scope"
+	| "stale-lineage"
+	| "bookkeeping-error";
+
+/** The full answer {@link recordMutationOutcome} gives (#3654). */
+export interface MutationRecordOutcome {
+	/** v1 `recordMutation()`'s boolean: the receipt/bookkeeping was taken. */
+	recorded: boolean;
+	/**
+	 * v2 live-state acceptance. False only for a drop, or for a retired lineage
+	 * when the caller asked to reject one (`rejectStaleLineage`).
+	 */
+	accepted: boolean;
+	/** Present when `accepted` is false. */
+	reason?: MutationRecordReason;
+	/**
+	 * Deferred kinds this call newly enqueued (a same-kind re-touch is silent),
+	 * the exact population `clients/io-bridge.ts` publishes on `pi.events`.
+	 */
+	queued: ReadonlyArray<"autofix" | "format">;
+}
+
 /**
  * The mutation-recording body, exported so tests drive it against a real
  * `RuntimeCoordinator` and `CacheManager` without mounting the global
  * singleton.
+ *
+ * Returns the richer outcome (#3654) the unified bridge needs: the v1 boolean
+ * the frozen shim still returns, the v2 live-state acceptance, and the kinds
+ * this call newly enqueued for the deferred pass.
+ *
+ * `rejectStaleLineage` is the one behavioral knob. A retired lineage still
+ * runs the same bookkeeping (receipt, handled mark, deferral skip) either way;
+ * v2 reports it as `accepted:false, reason:"stale-lineage"` while the frozen
+ * v1 shim keeps the historical `recorded:true` it has always returned.
  */
-export function recordMutationThroughSeam(
+export function recordMutationOutcome(
 	entry: unknown,
 	deps: MutationBridgeDeps,
-): boolean {
+	opts?: { rejectStaleLineage?: boolean },
+): MutationRecordOutcome {
 	if (!isValidMutationEntry(entry)) {
 		deps.dbg?.("mutation_bridge: dropped malformed entry");
-		return false;
+		return {
+			recorded: false,
+			accepted: false,
+			reason: "malformed",
+			queued: [],
+		};
 	}
 	if (!deps.isRecordable(entry.filePath)) {
 		deps.dbg?.(`mutation_bridge: out of scope ${entry.filePath}`);
-		return false;
+		return {
+			recorded: false,
+			accepted: false,
+			reason: "out-of-scope",
+			queued: [],
+		};
 	}
 
 	// #3598: an observed or bridged producer's write is an agent mutation a
@@ -322,6 +372,11 @@ export function recordMutationThroughSeam(
 	const projectRoot = deps.getProjectRoot();
 	const dispatchCwd = deps.getDispatchCwd(filePath);
 
+	const queued: Array<"autofix" | "format"> = [];
+
+	// Live-state acceptance is decided inside the try; declared out here so the
+	// outcome below can read it after the catch.
+	let sessionLive = true;
 	try {
 		const stampReadGuard = deps.shouldStampReadGuard?.() ?? true;
 		// #3620/#3709: once the producer's scope has retired, the replay writes
@@ -330,7 +385,6 @@ export function recordMutationThroughSeam(
 		// epoch alone cannot refuse it: it restarts at 0 in every scope. No
 		// lineage (every external producer): fail-open, as before.
 		const lineage = entry.lineage;
-		let sessionLive = true;
 		if (
 			lineage !== undefined &&
 			lineage.guardedWrite(filePath, () => true) !== true
@@ -423,7 +477,7 @@ export function recordMutationThroughSeam(
 		//    keeps deferring, unchanged.
 		if (sessionLive && entry.deferAutofix !== false) {
 			for (const kind of ["autofix", "format"] as const) {
-				runtime.deferMutation?.(
+				const landed = runtime.deferMutation?.(
 					filePath,
 					dispatchCwd,
 					classification.toolName,
@@ -437,14 +491,74 @@ export function recordMutationThroughSeam(
 					// current epoch.
 					stamp,
 				);
+				if (landed) queued.push(kind);
 			}
 		}
 	} catch (err) {
 		// Bookkeeping must never break a producer's own write path.
 		deps.dbg?.(`mutation_bridge: recording failed for ${filePath}: ${err}`);
-		return false;
+		return {
+			recorded: false,
+			accepted: false,
+			reason: "bookkeeping-error",
+			queued,
+		};
 	}
-	return true;
+	const accepted = sessionLive || opts?.rejectStaleLineage !== true;
+	return accepted
+		? { recorded: true, accepted: true, queued }
+		: { recorded: true, accepted: false, reason: "stale-lineage", queued };
+}
+
+/** The v1 `recordMutation()` boolean answer, over the same one body. */
+export function recordMutationThroughSeam(
+	entry: unknown,
+	deps: MutationBridgeDeps,
+): boolean {
+	return recordMutationOutcome(entry, deps).recorded;
+}
+
+/** The v1-compat fields every v2 mutation facet threads through unchanged. */
+function mutationPassthrough(entry: MutationBridgeEntry) {
+	return {
+		...(entry.deferAutofix !== undefined && {
+			deferAutofix: entry.deferAutofix,
+		}),
+		...(entry.importsChanged !== undefined && {
+			importsChanged: entry.importsChanged,
+		}),
+		...(entry.touchedLines !== undefined && {
+			touchedLines: entry.touchedLines,
+		}),
+		...(entry.provenance !== undefined && {
+			provenance: entry.provenance,
+		}),
+		...(entry.readGuardBranchEpoch !== undefined && {
+			readGuardBranchEpoch: entry.readGuardBranchEpoch,
+		}),
+		...(entry.lineage !== undefined && { lineage: entry.lineage }),
+	};
+}
+
+/**
+ * The v1 entry as a v2 entry (#3654, D14). The frozen shim only calls this for
+ * entries v2 can express (a `write`, or an `edit` that named its ranges), so
+ * `editRanges` is always present on the `edit` branch.
+ */
+function toIOBridgeEntry(entry: MutationBridgeEntry): BridgeEntry {
+	const mutate: MutationFacet =
+		entry.kind === "write"
+			? { kind: "write", ...mutationPassthrough(entry) }
+			: {
+					kind: "edit",
+					ranges: entry.editRanges ?? [],
+					...mutationPassthrough(entry),
+				};
+	return {
+		filePath: entry.filePath,
+		...(entry.consumer !== undefined && { consumer: entry.consumer }),
+		mutate,
+	};
 }
 
 /**
@@ -457,7 +571,26 @@ export function registerMutationBridge(deps: MutationBridgeDeps): void {
 	registerProcessBridge(MUTATION_BRIDGE_KEY, (): MutationBridge => ({
 		version: 1 as const,
 		recordMutation(entry: MutationBridgeEntry): boolean {
-			return recordMutationThroughSeam(entry, deps);
+			// #3654: in a pi-lens process the unified bridge is mounted in the
+			// same first-wins pass, so the frozen v1 shim gains v2 behavior
+			// underneath (the `pilens:format:queued` publish, the richer drop
+			// reasons). Malformed input and the one v1 shape v2 cannot express
+			// (an `edit` with no named range) keep the original body, so no v1
+			// observable changes (D14).
+			const ioBridge = getIOBridge();
+			if (ioBridge === undefined || !isValidMutationEntry(entry)) {
+				return recordMutationThroughSeam(entry, deps);
+			}
+			if (entry.kind === "edit" && entry.editRanges === undefined) {
+				return recordMutationThroughSeam(entry, deps);
+			}
+			const result = ioBridge.record(toIOBridgeEntry(entry));
+			// v1 records a retired lineage's receipt and returns true; v2 reports
+			// it as a live-state rejection. The shim keeps the v1 answer.
+			return (
+				result.mutate?.accepted === true ||
+				result.mutate?.reason === "stale-lineage"
+			);
 		},
 	}));
 }
