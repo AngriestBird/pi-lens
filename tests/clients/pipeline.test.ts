@@ -817,7 +817,11 @@ describe("Pipeline", () => {
 				retainedEntries: 0,
 			});
 			expect(getDegradationSummary()).toEqual([]);
-		});
+			// 10,000 sequential real pipeline runs: ~0.7 s on Linux, past Vitest's
+			// 5 s default on the Windows runner where every run pays native
+			// path-canonicalization syscalls (#4019). The population is the claim, so
+			// the budget grows rather than the population shrinking.
+		}, 60_000);
 
 		it("surfaces formatter failures instead of plain clean output", async () => {
 			const filePath = createTempFile(

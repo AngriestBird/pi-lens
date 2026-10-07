@@ -26,7 +26,7 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 // Spawn-heavy MCP smokes keep a tight local deadline, while CI can compensate
 // for a loaded runner without changing the production server's budgets.
-const testTimeoutScale = (() => {
+export const testTimeoutScale = (() => {
 	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 })();

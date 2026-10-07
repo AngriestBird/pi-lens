@@ -310,7 +310,15 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// Nothing on disk can say which spelling is real, and on a
 			// case-sensitive filesystem `NOPE` and `nope` are two different
 			// directories — folding one into the other is the #3098 non-goal.
-			expect(normalizeMapKey(absent)).toBe(absent.replace(/\\/g, "/"));
+			// win32 folds the part of the key that names nothing on disk to lower
+			// case (`normalizeMapKey`'s win32 arm, a spelling rule of the key rather
+			// than an on-disk guess) while the existing ancestor keeps its on-disk
+			// spelling, so only the absent tail changes there (#4019).
+			const spelled = tmpDir.replace(/\\/g, "/");
+			const tail = "NOPE/b.ts";
+			expect(normalizeMapKey(absent)).toBe(
+				`${spelled}/${process.platform === "win32" ? tail.toLowerCase() : tail}`,
+			);
 		} finally {
 			cleanup();
 		}
@@ -2369,7 +2377,15 @@ describe("the uv-members dialect reproduces the pre-fold minimatch answers (#259
 					relativePath,
 					UV_WORKSPACE_MEMBERS_DIALECT,
 				);
-				const preFold = minimatch(relativePath, normalized, { dot: true });
+				// `platform: "linux"`: minimatch otherwise reads `process.platform` and
+				// on win32 treats the `\` in the `x\y` cell as a separator, while the
+				// matcher under test (which only ever sees `toPosix` output) keeps it a
+				// literal character. The pre-fold answers being reproduced are the
+				// POSIX ones (#4019).
+				const preFold = minimatch(relativePath, normalized, {
+					dot: true,
+					platform: "linux",
+				});
 				if (folded !== preFold && !UV_MINIMATCH_DIVERGENCES.has(key)) {
 					unexpected.push(`${key} folded=${folded} minimatch=${preFold}`);
 				}

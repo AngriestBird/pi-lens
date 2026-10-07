@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
@@ -180,18 +181,21 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			path.join(fixtureDir as string, "node_modules"),
 			"dir",
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "vitest.config.ts"),
-			path.join(fixtureDir as string, "vitest.config.ts"),
+		write(
+			"vitest.config.ts",
+			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "package.json"),
-			path.join(fixtureDir as string, "package.json"),
-		);
+		write("package.json", '{"type":"module"}\n');
 		write("clients/first.ts", "export const first = true;\n");
-		write("tests/clients/first.test.ts", "it('first', () => {});\n");
+		write(
+			"tests/clients/first.test.ts",
+			"import { it } from 'vitest'; it('first', () => {});\n",
+		);
 		write("clients/second.ts", "export const second = true;\n");
-		write("tests/clients/second.test.ts", "it('second', () => {});\n");
+		write(
+			"tests/clients/second.test.ts",
+			"import { it } from 'vitest'; it('second', () => {});\n",
+		);
 		const git = (args: string[]) =>
 			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
 		git(["init", "--quiet", "--initial-branch=main"]);
@@ -212,10 +216,7 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 
 		const result = spawnSync(
 			process.execPath,
-			[
-				path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
-				"--skip-build",
-			],
+			[path.join(scriptDir, "pre-push-targeted-tests.mjs"), "--skip-build"],
 			{
 				cwd: fixtureDir,
 				encoding: "utf8",
@@ -225,6 +226,10 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("tests/clients/first.test.ts");
 		expect(result.stdout).toContain("tests/clients/second.test.ts");
+		// #4086 recurrence: a fixture suite reports green without running vitest
+		// when the pre-push script reaches with-test-lock through a symlinked
+		// scripts/ directory. The known fixture test must appear in real output.
+		expect(result.stdout).toContain("2 passed");
 	});
 
 	// Recurrence (#4047 review H3): `lane:check` was blind to a grant-none lane,
@@ -244,16 +249,20 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			path.join(fixtureDir as string, "node_modules"),
 			"dir",
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "vitest.config.ts"),
-			path.join(fixtureDir as string, "vitest.config.ts"),
+		// Not the repo's vitest.config.ts: its globalSetup file does not exist in
+		// this fixture (#4086 recurrence: the same shape as the history-pass
+		// fixture, missed by the first sweep). The tests import vitest because
+		// the minimal config enables no globals.
+		write(
+			"vitest.config.ts",
+			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "package.json"),
-			path.join(fixtureDir as string, "package.json"),
-		);
+		write("package.json", '{"type":"module"}\n');
 		write("clients/first.ts", "export const first = true;\n");
-		write("tests/clients/first.test.ts", "it('first', () => {});\n");
+		write(
+			"tests/clients/first.test.ts",
+			"import { it } from 'vitest'; it('first', () => {});\n",
+		);
 		const git = (args: string[]) =>
 			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
 		git(["init", "--quiet", "--initial-branch=main"]);
@@ -268,7 +277,10 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		]);
 		// Nothing committed past origin/master: only the working tree differs.
 		write("clients/first.ts", "export const first = false;\n");
-		write("tests/clients/third.test.ts", "it('third', () => {});\n");
+		write(
+			"tests/clients/third.test.ts",
+			"import { it } from 'vitest'; it('third', () => {});\n",
+		);
 
 		const run = (extra: string[]) =>
 			spawnSync(
@@ -288,6 +300,99 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(withTree.status).toBe(0);
 		expect(withTree.stdout).toContain("  - tests/clients/first.test.ts");
 		expect(withTree.stdout).toContain("  - tests/clients/third.test.ts");
+	});
+});
+
+describe("entry-point guard through the real CLIs (#4086)", () => {
+	const lockScript = path.join(repoRoot, "scripts/with-test-lock.mjs");
+	const selectorScript = path.join(
+		repoRoot,
+		"scripts/pre-push-targeted-tests.mjs",
+	);
+	const importProbe = (script: string) =>
+		`import(${JSON.stringify(pathToFileURL(script).href)}).then(() => console.log("IMPORT-OK"));`;
+	const run = (args: string[], input?: string, cwd = repoRoot) =>
+		spawnSync(process.execPath, args, {
+			cwd,
+			encoding: "utf8",
+			input,
+			timeout: 30_000,
+			env: { ...process.env, PI_LENS_TEST_NO_LOCK: "1" },
+		});
+
+	// Outside any repo: a guard that wrongly runs the selector's main() on import
+	// then fails fast on git instead of running the real hook over this checkout.
+	const runAway = (args: string[], input?: string) =>
+		run(args, input, os.tmpdir());
+
+	it.each([
+		["with-test-lock", lockScript],
+		["pre-push-targeted-tests", selectorScript],
+	])(
+		"importing %s from `node -e` (bare and with an argument) and from stdin is not the entry point and exits 0",
+		(_name, script) => {
+			// #4086 review F2 recurrence: an entry check that threw on an
+			// unresolvable argv[1] made merely importing a script exit 1 under
+			// `node -e foo` (argv[1] = "foo") or stdin (argv[1] = "-"). The negative
+			// direction too: a guard that is always true would run main() on import
+			// (with-test-lock prints its usage and exits 2).
+			const bare = runAway(["-e", importProbe(script)]);
+			expect(bare.stderr).toBe("");
+			expect(bare.stdout).toBe("IMPORT-OK\n");
+			expect(bare.status).toBe(0);
+			// A real file that is not this script: the only shape that reaches the
+			// compare with a resolvable argv[1], so it is the one an always-true
+			// guard cannot hide behind a failed realpath.
+			const otherFile = runAway([
+				"-e",
+				importProbe(script),
+				path.join(repoRoot, "package.json"),
+			]);
+			expect(otherFile.stderr).toBe("");
+			expect(otherFile.stdout).toBe("IMPORT-OK\n");
+			expect(otherFile.status).toBe(0);
+			const viaEval = runAway(["-e", importProbe(script), "foo"]);
+			expect(viaEval.stderr).toBe("");
+			expect(viaEval.stdout).toBe("IMPORT-OK\n");
+			expect(viaEval.status).toBe(0);
+			const viaStdin = runAway(["-"], importProbe(script));
+			expect(viaStdin.stderr).toBe("");
+			expect(viaStdin.stdout).toBe("IMPORT-OK\n");
+			expect(viaStdin.status).toBe(0);
+		},
+	);
+
+	it("reaches both CLIs through a symlinked scripts/ under --preserve-symlinks-main", () => {
+		// #4086 review F5 recurrence: under --preserve-symlinks-main the main
+		// module's import.meta.url keeps its symlinked spelling, so a guard that
+		// realpaths only argv[1] sees a lexical self path, returns false, and the
+		// CLI exits 0 having done nothing. Default Node already realpaths the
+		// main URL, which is why the default-mode witness above cannot see this.
+		enterFixture();
+		const linked = path.join(fixtureDir as string, "scripts");
+		fs.symlinkSync(path.join(repoRoot, "scripts"), linked, "dir");
+		const lock = run([
+			"--preserve-symlinks-main",
+			path.join(linked, "with-test-lock.mjs"),
+			"--",
+			process.execPath,
+			"-e",
+			"console.log('RAN')",
+		]);
+		expect(lock.stdout).toContain("RAN");
+		expect(lock.status).toBe(0);
+		const selector = run(
+			[
+				"--preserve-symlinks-main",
+				path.join(linked, "pre-push-targeted-tests.mjs"),
+				"--skip-build",
+			],
+			`(delete) ${"0".repeat(40)} refs/heads/removed abc123\n`,
+		);
+		expect(selector.stdout).toContain(
+			"deletion-only push; skipping build and tests",
+		);
+		expect(selector.status).toBe(0);
 	});
 });
 
@@ -1142,7 +1247,8 @@ describe("pre-push lock admission (#3717)", () => {
 	const STUB_LOCK = `import path from "node:path";
 import { fileURLToPath } from "node:url";
 export function quoteForWindowsCmd(arg) { return arg; }
-if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function isEntryPoint(url) { return path.resolve(process.argv[1]) === fileURLToPath(url); }
+if (isEntryPoint(import.meta.url)) {
 	console.error(\`[with-test-lock] timed out after \${process.env.PI_LENS_TEST_LOCK_TIMEOUT_MS}ms waiting for test-suite lock held by PID 4242 since 2026-01-01T00:00:00.000Z\`);
 	process.exitCode = 1;
 }
@@ -1152,7 +1258,8 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const KILLED_LOCK = `import path from "node:path";
 import { fileURLToPath } from "node:url";
 export function quoteForWindowsCmd(arg) { return arg; }
-if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.kill(process.pid, "SIGKILL");
+export function isEntryPoint(url) { return path.resolve(process.argv[1]) === fileURLToPath(url); }
+if (isEntryPoint(import.meta.url)) process.kill(process.pid, "SIGKILL");
 `;
 
 	function makeFixture(
@@ -1615,8 +1722,14 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		const { cwd, commit } = repo();
 		for (const link of ["scripts", "node_modules"])
 			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link), "dir");
-		for (const link of ["vitest.config.ts", "package.json"])
-			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link));
+		// Not the repo's vitest.config.ts: its globalSetup file does not exist in
+		// this fixture. #4086 recurrence: the symlinked lock wrapper was a silent
+		// no-op, so the repo config was never loaded and exit 0 was an artifact.
+		fs.writeFileSync(
+			path.join(cwd, "vitest.config.ts"),
+			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
+		);
+		fs.writeFileSync(path.join(cwd, "package.json"), '{"type":"module"}\n');
 		const passing = "import { it } from 'vitest';\nit('ok', () => {});\n";
 		commit(
 			{
