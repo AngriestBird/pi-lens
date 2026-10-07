@@ -161,9 +161,7 @@ class Scope implements SessionScope {
 		parentScopeId?: number;
 		coordinatorId?: number;
 	}) {
-		const state = registry();
-		state.nextTicket += 1;
-		this.scopeId = state.nextTicket;
+		this.scopeId = drawTicket();
 		this.role = args.role;
 		this.parentScopeId = args.parentScopeId;
 		this.coordinatorId = args.coordinatorId;
@@ -206,6 +204,13 @@ class Scope implements SessionScope {
 			[CAPTURED_SCOPE]: { scope: this, branch },
 		} as LineageHandle;
 	}
+}
+
+/** The next process-unique ticket (scopes and #3855's successor names). */
+function drawTicket(): number {
+	const state = registry();
+	state.nextTicket += 1;
+	return state.nextTicket;
 }
 
 /**
@@ -526,14 +531,47 @@ export function takeHandoff(
 /**
  * A start's slot key: its session file, or, file-less, the ticket its session
  * manager left (#3819). pi hands a file-less `/reload` or in-memory `/fork`
- * successor its predecessor's manager.
+ * successor its predecessor's manager. #3855: also the identity a primary's
+ * replacement gap admits ({@link successorStartKey}).
  */
-function startKey(
+export function startKey(
 	sessionFile: string | undefined,
 	sessionManager: unknown,
 ): string | number | undefined {
 	const manager = asManager(sessionManager);
 	return sessionFile ?? (manager && handoffSlot().left.get(manager));
+}
+
+/**
+ * #3855: at a primary replacement `session_shutdown`, after its own
+ * {@link stashHandoff} or {@link forwardHandoff}: the {@link startKey} its
+ * successor's start will compute. pi names a `/new`, resume or persisted
+ * `/fork` successor's file (`targetSessionFile`), and hands a `/reload` or
+ * in-memory `/fork` successor the same session, so its own file or the ticket
+ * bound to its manager. An in-memory `/new` gets a new manager and no file:
+ * nothing links it, and the key is `undefined`.
+ *
+ * #3855 r5: a file-less `/reload` or `/fork` is always named by a ticket. When
+ * the manager carries none (the shutdown of a start that has not stashed: an
+ * in-memory `/new` or startup interrupted in any window of its start, #3881),
+ * a fresh one is bound to it here, so the gap is never named by no key, which
+ * every key-less start would match. A manager that carries one keeps it.
+ */
+export function successorStartKey(args: {
+	reason: string | undefined;
+	sessionFile: string | undefined;
+	targetSessionFile: string | undefined;
+	sessionManager: unknown;
+}): string | number | undefined {
+	if (args.targetSessionFile !== undefined) return args.targetSessionFile;
+	const reason = toStartReason(args.reason);
+	if (reason !== "reload" && reason !== "fork") return undefined;
+	const key = startKey(args.sessionFile, args.sessionManager);
+	const manager = asManager(args.sessionManager);
+	if (key !== undefined || manager === undefined) return key;
+	const ticket = drawTicket();
+	handoffSlot().left.set(manager, ticket);
+	return ticket;
 }
 
 /**
