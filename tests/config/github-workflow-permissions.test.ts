@@ -50,6 +50,7 @@ const EXPECTED_PERMISSIONS: Record<
 		workflow: {},
 		jobs: {
 			smoke: { contents: "read" },
+			"npm-strict": { contents: "read" },
 			"pi-load": { contents: "read" },
 			"mise-repro": { contents: "read" },
 			"host-range-smoke": { contents: "read", actions: "read" },

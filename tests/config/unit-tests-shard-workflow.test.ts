@@ -177,6 +177,10 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		const upload = step(shard, "Upload per-file test results");
 		const name = String(upload.with?.name);
 		expect(name).toBe("unit-test-results-linux-shard-${{ matrix.shard }}");
+		const downloader = readFileSync(
+			resolve(ROOT, "scripts/download-test-history-artifacts.mjs"),
+			"utf8",
+		);
 		const rollup = String(
 			step(
 				jobsOf(".github/workflows/tool-smoke.yml")["test-history-rollup"],
@@ -184,9 +188,10 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 			).run,
 		);
 		for (const index of shard.strategy?.matrix?.shard ?? []) {
-			expect(rollup).toContain(` unit-test-results-linux-shard-${index}`);
+			expect(downloader).toContain(`"unit-test-results-linux-shard-${index}"`);
 		}
 		// Artifacts uploaded before the sharding keep the unsuffixed name.
-		expect(rollup).toContain("for artifact_name in unit-test-results-linux ");
+		expect(downloader).toContain('"unit-test-results-linux"');
+		expect(rollup).toContain("download-test-history-artifacts.mjs");
 	});
 });

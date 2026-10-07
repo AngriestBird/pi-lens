@@ -26,12 +26,22 @@ jobs:
     name: Roll up durable unit-test history
     # History is a nightly concern. In particular, a PR must never become red
     # because its historical artifacts are unavailable or a data-branch push
-    # loses a race with another bot.
-    if: github.event_name == 'schedule'
+    # loses a race with another bot. A dispatch on any ref may download and
+    # roll up (the branch check of this job); only the publish and notify
+    # steps are scoped to schedule or master (#4030 F1: a branch dispatch
+    # reached the push with unreviewed rollup code).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # #4030: bounds a hang against GitHub's 360-min default. Measured from a
+    # dev host: listing plus 194 ZIPs took 361 s (about 1.7 s a ZIP), and the
+    # rollup of 191 new parts 3.4 s. At the nightly cap (100 shard-era runs,
+    # about 400 ZIPs) that is about 11 min; the PR body quotes the runner's
+    # own time from a branch dispatch.
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write
+      issues: write # the red-night tracking issue (#4030 detection retrospective)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -39,59 +49,113 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
+      # The publish step checks out the data branch over this tree, so the
+      # scripts every later step runs are staged first, from this ref.
+      - name: Read the history watermark
+        id: watermark
+        run: |
+          set -euo pipefail
+          cp -r scripts "$RUNNER_TEMP/history-scripts"
+          git fetch origin data/test-history || true
+          prior="$RUNNER_TEMP/test-history-prior.ndjson"
+          # Day lines, or (one time, #4030) the raw journal they migrate from.
+          git show origin/data/test-history:history/test-daily.ndjson > "$prior" 2>/dev/null \
+            || git show origin/data/test-history:history/test-results.ndjson > "$prior" 2>/dev/null \
+            || : > "$prior"
+          since="$(node "$RUNNER_TEMP/history-scripts/test-history-rollup.mjs" --print-watermark --history "$prior")"
+          echo "watermark: ${since:-none}"
+          echo "since=${since}" >> "$GITHUB_OUTPUT"
       - name: Download unit-test result artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SINCE: ${{ steps.watermark.outputs.since }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-history-artifacts"
-          # #3753: ci.yml uploads one artifact per Unit tests shard. The
-          # unsuffixed name is what runs before the sharding uploaded, still
-          # unexpired for up to 90 days. The shard list mirrors ci.yml's
-          # matrix; tests/config/test-history-workflow.test.ts pins the two.
-          : > "$RUNNER_TEMP/test-history-artifact-ids"
-          for artifact_name in unit-test-results-linux unit-test-results-linux-shard-1 unit-test-results-linux-shard-2 unit-test-results-linux-shard-3 unit-test-results-linux-shard-4 unit-test-results-linux-shard-5; do
-            gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \
-              --jq '.artifacts[] | select(.expired == false) | .id' >> "$RUNNER_TEMP/test-history-artifact-ids"
-          done
-          while read -r artifact_id; do
-            [ -n "$artifact_id" ] || continue
+          # #4030: incremental ingest. Whole CI runs newer than the watermark,
+          # at most 100 a night, oldest first; 5xx responses retry.
+          node "$RUNNER_TEMP/history-scripts/download-test-history-artifacts.mjs" \
+            --repository "$GITHUB_REPOSITORY" \
+            --since "$SINCE" \
+            --output-dir "$RUNNER_TEMP/test-history-artifact-zips"
+          for zip in "$RUNNER_TEMP"/test-history-artifact-zips/*.zip; do
+            [ -e "$zip" ] || continue
+            artifact_id="$(basename "$zip" .zip)"
             mkdir -p "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
-            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/$artifact_id.zip"
-            unzip -q "$RUNNER_TEMP/$artifact_id.zip" -d "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
-          done < "$RUNNER_TEMP/test-history-artifact-ids"
-      - name: Append history and publish data branch
+            unzip -q "$zip" -d "$RUNNER_TEMP/test-history-artifacts/$artifact_id"
+          done
+      # Runs on every ref, so a branch dispatch proves the rollup without
+      # touching the data branch. Its output is never published.
+      - name: Roll up test history
+        run: |
+          set -euo pipefail
+          dry="$RUNNER_TEMP/test-history-dry.ndjson"
+          cp "$RUNNER_TEMP/test-history-prior.ndjson" "$dry"
+          node "$RUNNER_TEMP/history-scripts/test-history-rollup.mjs" \
+            --artifact-dir "$RUNNER_TEMP/test-history-artifacts" \
+            --history "$dry" --summary "$RUNNER_TEMP/test-history-dry-summary.json"
+      # The only writer of data/test-history, and only from master code. Each
+      # attempt re-rolls onto the tip it is about to push over; the part ledger
+      # makes that re-roll exactly-once.
+      - name: Publish data branch
+        if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          script_copy="$RUNNER_TEMP/test-history-rollup.mjs"
-          cp scripts/test-history-rollup.mjs "$script_copy"
-          git fetch origin data/test-history || true
+          prior="$RUNNER_TEMP/test-history-prior.ndjson"
           for attempt in 1 2 3; do
             echo "test-history push attempt ${attempt}/3"
-            git checkout --detach "$GITHUB_SHA"
-            old_history="$RUNNER_TEMP/test-history.ndjson"
-            : > "$old_history"
-            if git show origin/data/test-history:history/test-results.ndjson > "$old_history" 2>/dev/null; then :; fi
-            node "$script_copy" --artifact-dir "$RUNNER_TEMP/test-history-artifacts" \
-              --history "$old_history" --summary "$RUNNER_TEMP/test-history-summary.json"
+            git fetch origin data/test-history || true
+            git show origin/data/test-history:history/test-daily.ndjson > "$prior" 2>/dev/null \
+              || git show origin/data/test-history:history/test-results.ndjson > "$prior" 2>/dev/null \
+              || : > "$prior"
+            GITHUB_STEP_SUMMARY='' node "$RUNNER_TEMP/history-scripts/test-history-rollup.mjs" \
+              --artifact-dir "$RUNNER_TEMP/test-history-artifacts" \
+              --history "$prior" --summary "$RUNNER_TEMP/test-history-summary.json"
             if git show-ref --verify --quiet refs/remotes/origin/data/test-history; then
-              git checkout -B data/test-history origin/data/test-history
+              git checkout -f -B data/test-history origin/data/test-history
             else
               git checkout --orphan data/test-history
               git rm -rf . >/dev/null 2>&1 || true
             fi
             mkdir -p history
-            cp "$old_history" history/test-results.ndjson
+            cp "$prior" history/test-daily.ndjson
             cp "$RUNNER_TEMP/test-history-summary.json" history/summary.json
+            # The raw journal is migrated into the day lines above; its last
+            # version stays in this branch's history.
+            git rm -q --ignore-unmatch history/test-results.ndjson
             git add history
             git -c user.name='pi-lens nightly' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'chore(nightly): append test history' || true
             if git push origin HEAD:data/test-history; then exit 0; fi
-            git fetch origin data/test-history
           done
           echo 'data/test-history push lost three consecutive races' >&2
           exit 1
+      # #4030 detection retrospective: six red nights went unalerted because
+      # the tool-smoke notifier reads only its own job. Same shared CLI, label
+      # and scope as the drift steps below (a branch dispatch must not touch
+      # issues): a red job files or refreshes the issue, a green one closes it,
+      # a cancelled one leaves it.
+      - name: Notify on test-history rollup red (file/update/close tracking issue)
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE='nightly: test-history rollup red'
+          cli="$RUNNER_TEMP/history-scripts/upsert-tracking-issue.mjs"
+          if [ "$JOB_STATUS" = failure ]; then
+            body="$RUNNER_TEMP/test-history-red.md"
+            # shellcheck disable=SC2016  # backticks are literal Markdown in the issue body
+            printf 'The `Roll up durable unit-test history` job failed: %s\n\n`data/test-history` did not advance, so the shard weights, flake candidates and the pre-push history selector read stale data (#4030).\n' "$RUN_URL" > "$body"
+            gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
+            node "$cli" --title "$TITLE" --label nightly-drift --body-file "$body"
+          elif [ "$JOB_STATUS" = success ]; then
+            node "$cli" --title "$TITLE" --label nightly-drift --clean --close-when-clean
+          fi
 
   tool-smoke:
     name: Live tool + LSP smoke
