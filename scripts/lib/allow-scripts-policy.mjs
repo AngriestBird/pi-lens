@@ -112,6 +112,10 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 		if (name !== p.name) return false;
 		return version === undefined ? value === false : version === p.version;
 	};
+	const isDecided = (p) =>
+		entries.some(
+			([key, value]) => typeof value === "boolean" && covers(key, value, p),
+		);
 
 	for (const [key, value] of entries) {
 		const { name, version } = splitPolicyKey(key);
@@ -149,23 +153,17 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 			);
 			continue;
 		}
-		// A name that resolved only at other, still-undecided versions is reported
-		// once, against the resolved package (version-mismatch below). The entry
-		// is stale when the name no longer resolves with a script, or when the
-		// OTHER entries already decide every resolved version of it (#1185 review
-		// F1: an old-version approval kept beside the new one).
+		// Stale: the entry decides no resolved version of its name, and every
+		// resolved version of that name is decided anyway (vacuously when the
+		// name no longer resolves). An entry that decides a resolved version is
+		// never stale (#1185 verify N-1: a bare skip beside an exact key); one
+		// that decides none while a version is undecided is reported once,
+		// against that package, as version-mismatch below (#1185 review F1).
 		const sameName = resolved.filter((p) => p.name === name);
-		const othersCoverAll =
-			sameName.length > 0 &&
-			sameName.every((p) =>
-				entries.some(
-					([other, otherValue]) =>
-						other !== key &&
-						typeof otherValue === "boolean" &&
-						covers(other, otherValue, p),
-				),
-			);
-		if (sameName.length === 0 || othersCoverAll) {
+		if (
+			!sameName.some((p) => covers(key, value, p)) &&
+			sameName.every(isDecided)
+		) {
 			add(
 				"stale-approval",
 				key,
@@ -178,13 +176,7 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 	}
 
 	for (const p of resolved) {
-		if (
-			entries.some(
-				([key, value]) => typeof value === "boolean" && covers(key, value, p),
-			)
-		) {
-			continue;
-		}
+		if (isDecided(p)) continue;
 		const where = `${p.paths[0]}${p.paths.length > 1 ? ` (+${p.paths.length - 1} more)` : ""}`;
 		const id = `${p.name}@${p.version}`;
 		const stale = entries

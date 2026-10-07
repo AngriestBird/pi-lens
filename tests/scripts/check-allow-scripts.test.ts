@@ -170,6 +170,68 @@ describe("allowScripts policy failure list (#1185)", () => {
 		).toEqual(["stale-approval:dep-a@0.9.0"]);
 	});
 
+	// Recurrence (#1185 verify N-1): round 2 judged a key stale when the OTHER
+	// keys decided every resolved version, so a bare skip and an exact key for
+	// the same resolved version covered each other and both read stale.
+	const fooLock = lockWith({ "node_modules/foo": script("2.0.0") });
+
+	it("keeps a bare-name skip and a versioned key that matches a resolved version both live", () => {
+		expect(
+			kinds({ allowScripts: { foo: false, "foo@2.0.0": true } }, fooLock),
+		).toEqual([]);
+	});
+
+	it("reports only the unmatched versioned key beside a bare-name skip", () => {
+		expect(
+			kinds({ allowScripts: { foo: false, "foo@1.0.0": true } }, fooLock),
+		).toEqual(["stale-approval:foo@1.0.0"]);
+	});
+
+	// The PR #4028 round-3 table: one key kind (bare true, bare false, exact
+	// version that resolves) against one name's resolved set. The other cells
+	// are the named tests around this one.
+	it("decides staleness by one rule in every cell of the key-kind by resolved-set table", () => {
+		const none = lockWith({ "node_modules/other": script("1.0.0") });
+		const several = lockWith({
+			"node_modules/foo": script("2.0.0"),
+			"node_modules/x/node_modules/foo": script("1.0.0"),
+		});
+		const other = { "other@1.0.0": true };
+		const cells: Array<[string, Json, Json, string[]]> = [
+			["T0", { ...other, foo: true }, none, ["unpinned-approval:foo"]],
+			[
+				"T1k",
+				{ foo: true, "foo@2.0.0": true },
+				fooLock,
+				["unpinned-approval:foo"],
+			],
+			[
+				"Tnk",
+				{ foo: true, "foo@1.0.0": true, "foo@2.0.0": true },
+				several,
+				["unpinned-approval:foo"],
+			],
+			[
+				"Tnu",
+				{ foo: true, "foo@2.0.0": true },
+				several,
+				["unpinned-approval:foo", "version-mismatch:foo@1.0.0"],
+			],
+			["F0", { ...other, foo: false }, none, ["stale-approval:foo"]],
+			[
+				"Fnk",
+				{ foo: false, "foo@1.0.0": true, "foo@2.0.0": false },
+				several,
+				[],
+			],
+			["Fnu", { foo: false, "foo@2.0.0": true }, several, []],
+			["Hnk", { "foo@1.0.0": true, "foo@2.0.0": false }, several, []],
+		];
+		for (const [cell, allowScripts, cellLock, want] of cells) {
+			expect(kinds({ allowScripts }, cellLock), cell).toEqual(want);
+		}
+	});
+
 	// Recurrence: a new transitive script dependency lands unreviewed.
 	it("fails a resolved script with no decision and names package, version, path and fix", () => {
 		const out = runChecker({ allowScripts: { "dep-a@1.2.3": true } }, lock);

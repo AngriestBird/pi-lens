@@ -153,7 +153,9 @@ for each of these:
 - **missing-decision**: a resolved package has an install script and no entry.
 - **version-mismatch**: the entry pins another version (the `@ast-grep/cli`
   0.44.1 against 0.45.x drift of #1176).
-- **stale-approval**: an entry names a package that no longer resolves with a script.
+- **stale-approval**: an entry decides no resolved version of its package while
+  every resolved version is decided anyway (the package no longer resolves with
+  a script, or an old-version entry sits beside the current one).
 - **unpinned-approval**: a positive entry is name-only or a range. Approvals are
   exact `name@x.y.z`.
 - **floating-direct**: a direct dependency that runs a script is on a range
