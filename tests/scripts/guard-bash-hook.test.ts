@@ -1660,7 +1660,7 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 	// host's os.tmpdir(). The /tmp half of that dependence is pinned here by
 	// reason: a `mktemp -d` prefix lands under TMPDIR, and under /tmp it is the
 	// #3526 tmpCheckout deny, never the #4044 one, in a real lane.
-	it("names the #3526 reason for a `mktemp -d` --prefix when TMPDIR is under /tmp", () => {
+	it("names the #3526 reason for a mktemp -d --prefix when TMPDIR is under /tmp", () => {
 		const { root, cleanup } = makeTableFixture();
 		try {
 			const { UNSET_4054_R4: _unset, ...env } = BASE_ENV;
