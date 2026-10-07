@@ -94,8 +94,12 @@ function gitBlob(file: string) {
 		.digest("hex");
 }
 
+// Every test here spawns real children. The round-1 CI run took 15.5 s for
+// 384 rows on the 4-core runner (job 112781918398) and failed on vitest's 5 s
+// default, so the budget is explicit for the whole file.
 describe.skipIf(process.platform === "win32")(
 	"guard-bash differential corpus (#4071)",
+	{ timeout: 120_000 },
 	() => {
 		it("judges every corpus row against the real hook of this checkout", () => {
 			// Recurrence: review-4078 F3. The round-1 test pinned exit status 1
@@ -142,7 +146,7 @@ describe.skipIf(process.platform === "win32")(
 					),
 					prefix,
 				).toBe(true);
-		}, 120_000);
+		});
 
 		it("keeps the corpus free of round-1 padding", () => {
 			// Recurrence: review-4078 F4. Round 1 shipped 344 rows that were 53
@@ -201,7 +205,7 @@ describe.skipIf(process.platform === "win32")(
 			const back = run([...args, "--base", R3.file, "--head", R2.file]);
 			expect(back.stdout).toContain("fixed\tnpm --prefix");
 			expect(back.stdout).not.toContain("REGRESSION\tnpm --prefix");
-		}, 120_000);
+		});
 
 		it("judges rows per verdict with allow-all and deny-all heads", () => {
 			// Recurrence: review-4078 F3 (see the corpus test). Stub hooks make
