@@ -6,6 +6,7 @@ import { selectTargetedTests } from "../../scripts/pre-push-targeted-tests.mjs";
 import {
 	HISTORY_MAX_SELECTED,
 	HISTORY_STALE_MS,
+	HUB_MIN_HEADS,
 	loadHistorySelection,
 	selectFromHistory,
 } from "../../scripts/lib/test-history-selection.mjs";
@@ -356,6 +357,68 @@ describe("hub directories carry no locality signal (#3215 lane 3, review F1)", (
 		expect(result.picks).toEqual([]);
 		expect(result.status).toBe("none");
 		expect(result.detail).toContain("hub");
+	});
+
+	// Recurrence: PR #4026 verify V1. The share's denominator is the heads whose
+	// paths resolve; heads git cannot resolve (merge commits, heads missing from
+	// the clone: 120 of 307 on the real journal) have unknown directories and
+	// must not dilute it. Dividing by `summary.heads.length` instead turned the
+	// repo root and `.changelog` back into signal on real data.
+	it("measures the hub share over resolvable heads, not over every head in the summary", () => {
+		const touchers = Array.from({ length: 12 }, (_, i) => ({
+			file: `tests/diluted/t${i}.test.ts`,
+			headSha: head(500 + i),
+		}));
+		const resolvable = [
+			...touchers.map((f) => f.headSha),
+			...Array.from({ length: 28 }, (_, i) => head(600 + i)),
+		];
+		// 12 of 40 resolvable heads (30%) touch `.changelog`; against all 240
+		// heads in the summary it would be 5%.
+		const unresolvable = Array.from({ length: 200 }, (_, i) => head(700 + i));
+		const map: Record<string, string[]> = Object.fromEntries(
+			resolvable.map((h, i) => [
+				h,
+				i < 12 ? [".changelog/f.md"] : ["docs/q.md"],
+			]),
+		);
+		const result = selectFromHistory({
+			summary: summary(touchers, fresh, [
+				...resolvable.slice(12),
+				...unresolvable,
+			]),
+			changed: [".changelog/x.md"],
+			allTests: [...allTests, ...touchers.map((f) => f.file)],
+			pathsForHeads: touching(map).pathsForHeads,
+			now,
+		});
+		expect(result.picks).toEqual([]);
+		expect(result.detail).toContain("hub");
+	});
+
+	// Recurrence: PR #4026 verify D2. The minimum is inclusive: exactly
+	// HUB_MIN_HEADS touching heads is a hub, one fewer is not.
+	it.each([
+		[HUB_MIN_HEADS, true],
+		[HUB_MIN_HEADS - 1, false],
+	])("treats a directory touched by %i of 40 heads as hub=%s", (n, isHub) => {
+		const touchers = Array.from({ length: n }, (_, i) => ({
+			file: `tests/edge/t${i}.test.ts`,
+			headSha: head(800 + i),
+		}));
+		const others = Array.from({ length: 40 - n }, (_, i) => head(900 + i));
+		const map: Record<string, string[]> = {
+			...Object.fromEntries(touchers.map((f) => [f.headSha, ["edge/f.md"]])),
+			...Object.fromEntries(others.map((h) => [h, ["docs/q.md"]])),
+		};
+		const result = selectFromHistory({
+			summary: summary(touchers, fresh, others),
+			changed: ["edge/x.md"],
+			allTests: [...allTests, ...touchers.map((f) => f.file)],
+			pathsForHeads: touching(map).pathsForHeads,
+			now,
+		});
+		expect(result.picks.length > 0).toBe(!isHub);
 	});
 
 	it("does not call a directory a hub on a small history", () => {
