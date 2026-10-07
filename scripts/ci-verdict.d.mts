@@ -60,6 +60,8 @@ export interface VerdictRow {
 	url: string | null;
 	detailsUrl?: string | null;
 	gating: boolean;
+	/** #4090: set when every run of this name came from a non-PR/push event. */
+	triggerEvent?: string;
 }
 
 export interface FailedJobDetail {
@@ -237,6 +239,8 @@ export declare function fetchHeadRuns(
 		id: number | null;
 		startedAtMs: number | null;
 	};
+	/** #4090: check suite id to the event of its workflow run. */
+	suiteEvents: Map<number | string, string>;
 };
 
 export declare function fetchAutoMergeAge(

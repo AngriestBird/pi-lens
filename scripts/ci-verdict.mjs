@@ -25,6 +25,19 @@
  * transport error), the constant `REQUIRED_CHECKS` pair is the fallback --
  * either way, "every check-run not on the advisory allowlist gates" holds.
  *
+ * #4090: the allowlist is not the only exemption. A check-run whose workflow
+ * run came from `schedule`/`workflow_dispatch`/`repository_dispatch`/
+ * `workflow_run` is not this commit's PR/push CI: a scheduled run attaches to
+ * master's head and a dispatched run to the dispatched branch's head, and
+ * neither says anything about the change. Each check-run is joined to its
+ * workflow run's `event` through the check suite (`actions/runs?head_sha=`,
+ * the read `fetchHeadRuns` already owns), not guessed from the `on:` list of
+ * the workflow files: one workflow (`install-smoke.yml`) is on `push` and
+ * `schedule` at once, and only the run's own event says which attached to this
+ * head. A name gates unless EVERY run of it is non-PR; a branch-protection
+ * required name always gates; an unmatched or unreadable row (another app, a
+ * failed read) keeps today's gating, with a `Trigger scope:` line saying so.
+ *
  * #2618 fix-round-2: a gating row's conclusion is judged differently
  * depending on whether it is one of those confirmed-required names or
  * merely discovered. A REQUIRED row must reach a literal "success" --
@@ -197,6 +210,7 @@ import {
 	HEAVY_GATE_CHECK,
 	isAdvisoryCheck,
 	isBlockingConclusion,
+	isNonPrCiEvent,
 	isUncertainConclusion,
 	isUnitTestsJobName,
 	REQUIRED_CHECKS,
@@ -454,6 +468,102 @@ function deferredStateFor(gate) {
 	};
 }
 
+// Conclusions that can never fail or hold a verdict: the trigger scope below
+// is read only when a row outside them could (#4090).
+const SETTLED_OK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
+
+/**
+ * #4090: does any check-run on this payload need the trigger scope? A
+ * required name always gates and an allowlisted-advisory name never does, so
+ * neither can change by the scope; a row that already concluded
+ * success/skipped/neutral cannot fail the verdict either. A green head
+ * therefore costs no extra read.
+ */
+function needsTriggerScope(payload, requiredChecks = REQUIRED_CHECKS) {
+	const required = new Set(requiredChecks);
+	return (payload?.check_runs ?? []).some(
+		(run) =>
+			run?.check_suite?.id != null &&
+			!required.has(run.name) &&
+			!isAdvisoryCheck(run.name) &&
+			!(
+				run.status === "completed" && SETTLED_OK_CONCLUSIONS.has(run.conclusion)
+			),
+	);
+}
+
+/** The full head SHA the check-runs report. A bare-SHA target may be a short
+ * SHA, which `actions/runs?head_sha=` never matches (#4090). */
+function headShaOf(payload, fallback) {
+	return (
+		payload?.check_runs?.find((run) => run?.head_sha)?.head_sha ?? fallback
+	);
+}
+
+/**
+ * #4090: stamps each check-run with the event of the workflow run that
+ * produced it (`workflow_event`), joined on the check suite. A check-run from
+ * another app, or from a run the read did not return, gets no stamp and keeps
+ * today's gating. Pure: returns a new payload.
+ *
+ * @param {{ check_runs?: object[] }} payload
+ * @param {Map<number|string, string>} suiteEvents
+ */
+function annotateTriggerEvents(payload, suiteEvents) {
+	return {
+		...payload,
+		check_runs: (payload?.check_runs ?? []).map((run) => {
+			const event = suiteEvents.get(run?.check_suite?.id);
+			return event === undefined ? run : { ...run, workflow_event: event };
+		}),
+	};
+}
+
+/**
+ * #4090: the one `Trigger scope:` line `run()` prints when the scope could not
+ * classify a GitHub Actions check-run that would otherwise be advisory-able
+ * (the runs read failed, or the head's runs overflowed one page). Those rows
+ * gate as before; the line makes that visible. `null` when nothing is
+ * unclassified.
+ */
+function formatTriggerScopeNote(
+	payload,
+	requiredChecks = REQUIRED_CHECKS,
+	readError = null,
+) {
+	const unclassified = (payload?.check_runs ?? []).filter(
+		(run) =>
+			run?.app?.slug === "github-actions" &&
+			run.workflow_event === undefined &&
+			needsTriggerScope({ check_runs: [run] }, requiredChecks),
+	);
+	if (unclassified.length === 0) return null;
+	const names = [...new Set(unclassified.map((run) => run.name))].sort();
+	const why = readError
+		? `the workflow-run read failed: ${readError}`
+		: "no workflow run matched";
+	return `Trigger scope: could not classify ${names.length} check(s) (${why}); they gate as before: ${names.join(", ")}`;
+}
+
+/**
+ * #4090: the advisory-by-trigger rows that are not green, one line each, so a
+ * schedule or dispatch red is reported and never silently dropped.
+ */
+function formatTriggerAdvisoryLines(rows) {
+	return rows
+		.filter(
+			(row) =>
+				row.triggerEvent &&
+				row.present &&
+				(row.status !== "completed" ||
+					!SETTLED_OK_CONCLUSIONS.has(row.conclusion)),
+		)
+		.map(
+			(row) =>
+				`Advisory by trigger (${row.triggerEvent} run, not this commit's PR/push CI): ${row.name} (${row.status === "completed" ? row.conclusion : row.status})`,
+		);
+}
+
 /**
  * Pure verdict over one commit's check-runs payload -- the literal
  * `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` response shape,
@@ -528,13 +638,30 @@ export function computeVerdict(
 		: [];
 	const byName = resolveLatestByName(checkRuns);
 	const requiredNameSet = new Set(requiredChecks);
+	// #4090: a name every one of whose runs came from a schedule/dispatch/
+	// workflow_run workflow is not part of this commit's PR/push CI. One run of
+	// the name from any other (or unknown) event keeps it gating, and a
+	// required name is never excused.
+	const eventsByName = new Map();
+	for (const checkRun of checkRuns) {
+		const events = eventsByName.get(checkRun.name) ?? [];
+		events.push(checkRun.workflow_event);
+		eventsByName.set(checkRun.name, events);
+	}
+	const triggerAdvisoryNames = new Set(
+		[...eventsByName]
+			.filter(([, events]) => events.every((event) => isNonPrCiEvent(event)))
+			.map(([name]) => name),
+	);
 
 	const buildRow = (name) => {
 		const run = byName.get(name);
 		// requiredNameSet.has(name): see the doc comment above -- a name GitHub
 		// itself confirms as required always gates, even if it were also (by
 		// mistake) on the static advisory allowlist.
-		const gating = requiredNameSet.has(name) || !isAdvisoryCheck(name);
+		const gating =
+			requiredNameSet.has(name) ||
+			(!isAdvisoryCheck(name) && !triggerAdvisoryNames.has(name));
 		if (!run) {
 			return {
 				name,
@@ -555,6 +682,9 @@ export function computeVerdict(
 			url: run.html_url ?? run.details_url ?? null,
 			detailsUrl: run.details_url ?? null,
 			gating,
+			...(!gating && triggerAdvisoryNames.has(name)
+				? { triggerEvent: run.workflow_event }
+				: {}),
 		};
 	};
 
@@ -1169,41 +1299,59 @@ export function fetchHeadRuns(
 	failOpen = true,
 ) {
 	try {
-		const payload = JSON.parse(
-			ghExec(
-				[
-					"api",
-					`repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`,
-				],
-				{ timeoutMs },
+		return readHeadRunsPayload(
+			JSON.parse(
+				ghExec(
+					[
+						"api",
+						`repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`,
+					],
+					{ timeoutMs },
+				),
 			),
+			sha,
 		);
-		if (!Array.isArray(payload?.workflow_runs)) {
-			// #3861 F1: a 200 that violates the documented shape (no
-			// `workflow_runs` array) is a contract violation, not the empty
-			// success answer; the catch below fails open to `unknown`, which
-			// never authorizes a re-arm. A genuine "no run for the head" answer
-			// carries `workflow_runs: []` (verified live), which the array path
-			// below still resolves to `none`.
-			throw new Error(
-				"malformed actions/runs response: workflow_runs is not an array",
-			);
-		}
-		const runs = payload.workflow_runs.filter((run) => run?.head_sha === sha);
-		return {
-			actionRequiredRuns: runs
-				.filter((run) => run?.conclusion === "action_required")
-				.map((run) => ({ id: run.id })),
-			headRun: summarizeHeadRun(runs),
-		};
 	} catch (error) {
 		// The verdict text fails open to "unknown"; an approval must not.
 		if (!failOpen) throw error;
 		return {
 			actionRequiredRuns: [],
 			headRun: { state: "unknown", id: null, startedAtMs: null },
+			suiteEvents: new Map(),
 		};
 	}
+}
+
+/**
+ * The pure half of `fetchHeadRuns` (gh transport) and `restFetchHeadRuns`
+ * (REST transport): one `actions/runs?head_sha=` payload to the fork-approval
+ * runs, the ci.yml run state, and (#4090) the event each check suite's
+ * workflow run was triggered by.
+ */
+function readHeadRunsPayload(payload, sha) {
+	if (!Array.isArray(payload?.workflow_runs)) {
+		// #3861 F1: a 200 that violates the documented shape (no
+		// `workflow_runs` array) is a contract violation, not the empty
+		// success answer; the catch in `fetchHeadRuns` fails open to `unknown`,
+		// which never authorizes a re-arm. A genuine "no run for the head"
+		// answer carries `workflow_runs: []` (verified live), which the array
+		// path below still resolves to `none`.
+		throw new Error(
+			"malformed actions/runs response: workflow_runs is not an array",
+		);
+	}
+	const runs = payload.workflow_runs.filter((run) => run?.head_sha === sha);
+	return {
+		actionRequiredRuns: runs
+			.filter((run) => run?.conclusion === "action_required")
+			.map((run) => ({ id: run.id })),
+		headRun: summarizeHeadRun(runs),
+		suiteEvents: new Map(
+			runs
+				.filter((run) => run?.check_suite_id != null && run?.event)
+				.map((run) => [run.check_suite_id, String(run.event)]),
+		),
+	};
 }
 
 /** Fork-approval runs for `sha`. GitHub reports one as `status: "completed"`
@@ -2022,6 +2170,19 @@ export async function restFetchCheckRunsPayload(repository, sha, options = {}) {
 		page += 1;
 	}
 	return { total_count: totalCount ?? checkRuns.length, check_runs: checkRuns };
+}
+
+/** REST equivalent of `fetchHeadRuns(..., failOpen = false)` (#4090): the
+ * same endpoint and the same pure parse, so the trigger scope is identical on
+ * both transports. */
+async function restFetchHeadRuns(repository, sha, options = {}) {
+	return readHeadRunsPayload(
+		await restGet(
+			`repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`,
+			options,
+		),
+		sha,
+	);
 }
 
 /** REST equivalent of `resolveRequiredCheckNames` (#3497): same endpoint,
@@ -2967,13 +3128,14 @@ export async function run({
 				: resolveRequiredCheckNames(repository, ghExec, initialTimeoutMs);
 		const requiredChecks = liveRequiredChecks ?? REQUIRED_CHECKS;
 		const gatingSource = liveRequiredChecks
-			? `branch protection required_status_checks on ${PROTECTED_BRANCH} (${liveRequiredChecks.join(", ")}) -- every other check-run gates unless it is on the advisory allowlist`
+			? `branch protection required_status_checks on ${PROTECTED_BRANCH} (${liveRequiredChecks.join(", ")}) -- every other check-run gates unless it is on the advisory allowlist or every run of it came from a schedule/dispatch workflow (#4090)`
 			: `advisory allowlist only -- branch protection on ${PROTECTED_BRANCH} was unreadable, falling back to the constant required-check list (${REQUIRED_CHECKS.join(", ")})`;
 
 		let lastPayload = null;
+		let triggerScopeNote = null;
 		let { verdict, polls } = await pollVerdict({
 			fetchPayload: async (remainingMs) => {
-				lastPayload = await (transport === TRANSPORT_REST
+				const raw = await (transport === TRANSPORT_REST
 					? restFetchCheckRunsPayload(repository, sha, {
 							...restOptions,
 							timeoutMs: resolveGhTimeoutMs(remainingMs),
@@ -2984,6 +3146,38 @@ export async function run({
 							ghExec,
 							resolveGhTimeoutMs(remainingMs),
 						));
+				// #4090: stamp each check-run with its workflow run's event, so a
+				// schedule/dispatch-only check is advisory. An unreadable run list
+				// leaves every row unstamped, i.e. gating as before.
+				lastPayload = raw;
+				triggerScopeNote = null;
+				if (needsTriggerScope(raw, requiredChecks)) {
+					let readError = null;
+					try {
+						const headSha = headShaOf(raw, sha);
+						const { suiteEvents } =
+							transport === TRANSPORT_REST
+								? await restFetchHeadRuns(repository, headSha, {
+										...restOptions,
+										timeoutMs: resolveGhTimeoutMs(remainingMs),
+									})
+								: fetchHeadRuns(
+										repository,
+										headSha,
+										ghExec,
+										resolveGhTimeoutMs(remainingMs),
+										false,
+									);
+						lastPayload = annotateTriggerEvents(raw, suiteEvents);
+					} catch (error) {
+						readError = firstLine(error);
+					}
+					triggerScopeNote = formatTriggerScopeNote(
+						lastPayload,
+						requiredChecks,
+						readError,
+					);
+				}
 				return lastPayload;
 			},
 			waitSeconds:
@@ -3055,6 +3249,8 @@ export async function run({
 		)) {
 			stdout(line);
 		}
+		for (const line of formatTriggerAdvisoryLines(verdict.rows)) stdout(line);
+		if (triggerScopeNote) stdout(triggerScopeNote);
 		for (const line of formatFailureLines(verdict)) stdout(line);
 		// Merge state is always printed, not just when it drives the verdict
 		// (round 3, F1) -- a reviewer reading the report should never have to
