@@ -37,6 +37,8 @@ export function rollupTestHistory(options: {
 	flakeCandidates: Array<{ file: string; headSha: string }>;
 	/** One row per failing (file, head); `flake` when the head also passed it. */
 	failures: Array<{ file: string; headSha: string; flake: boolean }>;
+	/** Every distinct head in the window (failing or not). */
+	heads: string[];
 	/** ISO time of this rollup: the history selector's staleness clock. */
 	generatedAt: string;
 };

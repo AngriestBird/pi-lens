@@ -51,7 +51,7 @@ export const METADATA_FILENAME = "test-history-metadata.json";
 export function normalizeTestFile(name) {
 	const posix = String(name).replaceAll("\\", "/");
 	const at = posix.lastIndexOf("/tests/");
-	return at === -1 ? posix.replace(/^\.\//, "") : posix.slice(at + 1);
+	return at === -1 ? posix : posix.slice(at + 1);
 }
 
 function parseArgs(argv) {
@@ -287,6 +287,10 @@ export function rollupTestHistory({
 		files: summary,
 		flakeCandidates: flakes,
 		failures,
+		// Every distinct head in the window, failing or not: the selector's
+		// population for deciding which directories are touched by too many heads
+		// to say anything about a failure (#3215 lane 3 review F1).
+		heads: [...new Set(liveObservations.map((row) => row.headSha))].sort(),
 		// When this rollup ran: the selector's staleness clock (a quiet repo with
 		// no CI rows is not lagging data, a rollup that stopped running is).
 		generatedAt: new Date(now).toISOString(),

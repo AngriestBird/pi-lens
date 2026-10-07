@@ -17,7 +17,12 @@
  * Rules, each pinned by tests/scripts/test-history-selection.test.ts:
  * - A change matches a past failing head when one of the head's touched
  *   directories equals the directory of a changed file. Equality, not a prefix:
- *   a prefix would match every head under `clients/` for any `clients/**` change.
+ *   a prefix would match every head under `clients/` for any `clients/**` change
+ *   (the issue says "by directory prefix"; this is a declared deviation).
+ * - Hub directories (HUB_SHARE) are dropped from both sides: `.changelog/` and
+ *   the repo root are touched by unrelated heads, so a fragment would otherwise
+ *   add the same globally failing tests to every change. The share is computed
+ *   from the summary's `heads` view, the journal's own population.
  * - Heads that git cannot resolve (not in this clone, or a merge commit, which
  *   has no first-parent diff to attribute) are skipped and counted.
  * - Changed `tests/` files never consult history: they are selected directly.
@@ -35,6 +40,18 @@ import path from "node:path";
 
 export const HISTORY_STALE_MS = 3 * 24 * 60 * 60 * 1000;
 export const HISTORY_MAX_SELECTED = 10;
+/**
+ * A directory touched by more than this share of the journal's resolvable heads
+ * (and by at least HUB_MIN_HEADS of them) says nothing about which test fails:
+ * unrelated heads all touch it. Measured on the real journal (187 resolvable of
+ * 307 heads, 2026-10-07): .changelog 38%, tests/clients 36%, tests/config 28%,
+ * scripts 19%, clients 18%, the repo root 13%, tests/clients/lsp 10%,
+ * scripts/lib 8%, docs 6%; a rules directory is touched by a handful. 10% takes
+ * in the changelog and the root; the minimum keeps a short history from calling
+ * everything a hub.
+ */
+export const HUB_SHARE = 0.1;
+export const HUB_MIN_HEADS = 10;
 export const HISTORY_REF = "origin/data/test-history";
 export const HISTORY_SUMMARY_PATH = "history/summary.json";
 
@@ -47,6 +64,8 @@ function parseSummary(summary, now) {
 		!Array.isArray(summary.failures)
 	)
 		return { reason: "no failures view in the history summary" };
+	if (!Array.isArray(summary.heads))
+		return { reason: "no heads view in the history summary" };
 	const generated = Date.parse(summary.generatedAt);
 	if (!Number.isFinite(generated))
 		return { reason: "history summary has no generation time" };
@@ -84,17 +103,39 @@ export function selectFromHistory({
 	if (changedDirs.size === 0)
 		return { status: "none", picks: [], detail: "history: no non-test change" };
 	const failures = summary.failures.filter(
-		(failure) =>
-			failure && failure.flake !== true && typeof failure.file === "string",
+		(failure) => failure && failure.flake !== true,
 	);
-	const heads = [...new Set(failures.map((failure) => failure.headSha))];
-	const touched = heads.length > 0 ? pathsForHeads(heads) : new Map();
+	const failingHeads = [...new Set(failures.map((failure) => failure.headSha))];
+	const touched = pathsForHeads([
+		...new Set([...summary.heads, ...failingHeads]),
+	]);
+	const dirsOf = new Map(
+		[...touched].map(([sha, files]) => [sha, new Set(files.map(dirOf))]),
+	);
+	const touchCount = new Map();
+	for (const dirs of dirsOf.values())
+		for (const dir of dirs) touchCount.set(dir, (touchCount.get(dir) ?? 0) + 1);
+	const hubs = new Set(
+		[...touchCount]
+			.filter(
+				([, count]) =>
+					count >= HUB_MIN_HEADS && count / dirsOf.size > HUB_SHARE,
+			)
+			.map(([dir]) => dir),
+	);
+	const usable = [...changedDirs].filter((dir) => !hubs.has(dir));
+	if (usable.length === 0)
+		return {
+			status: "none",
+			picks: [],
+			detail: `history: only hub director${changedDirs.size === 1 ? "y" : "ies"} changed (${[...changedDirs].join(", ")}); no locality signal`,
+		};
 	const matching = new Set(
-		heads.filter((sha) =>
-			(touched.get(sha) ?? []).some((file) => changedDirs.has(dirOf(file))),
+		failingHeads.filter((sha) =>
+			[...(dirsOf.get(sha) ?? [])].some((dir) => usable.includes(dir)),
 		),
 	);
-	const unresolved = heads.filter((sha) => !touched.has(sha)).length;
+	const unresolved = failingHeads.filter((sha) => !dirsOf.has(sha)).length;
 	const available = new Set(allTests);
 	const score = new Map();
 	for (const failure of failures) {
@@ -112,12 +153,12 @@ export function selectFromHistory({
 		.slice(0, HISTORY_MAX_SELECTED)
 		.map(([file]) => file);
 	const note = unresolved
-		? `; ${unresolved} of ${heads.length} failing head(s) unresolved`
+		? `; ${unresolved} of ${failingHeads.length} failing head(s) unresolved`
 		: "";
 	return {
 		status: picks.length > 0 ? "selected" : "none",
 		picks,
-		detail: `history added ${picks.length} test file(s) from ${matching.size} matching head(s)${note}`,
+		detail: `history added ${picks.length} test file(s) from ${matching.size} matching head(s)${hubs.size > 0 && usable.length < changedDirs.size ? `; ${changedDirs.size - usable.length} hub director(ies) ignored` : ""}${note}`,
 	};
 }
 
@@ -164,17 +205,28 @@ export function resolveHeadPaths(heads, { cwd } = {}) {
 }
 
 /**
- * Reads the summary from a file (`--history-summary`) or the data branch ref.
- * Returns null, never throws: the caller degrades to import-only and discloses.
+ * Reads the summary from a file (`--history-summary`) or the data-branch ref.
+ * Returns `{ summary }` or `{ error }` with a reason that names which of the
+ * three failures happened (absent ref or file, unreadable file, bad JSON).
  */
 export function readHistorySummary({ file, cwd } = {}) {
+	let text;
 	try {
-		const text = file
+		text = file
 			? readFileSync(file, "utf8")
 			: git(["show", `${HISTORY_REF}:${HISTORY_SUMMARY_PATH}`], { cwd });
-		return JSON.parse(text);
+	} catch (cause) {
+		const detail = cause instanceof Error ? cause.message.split("\n")[0] : "";
+		return {
+			error: file
+				? `cannot read ${file} (${detail})`
+				: `no ${HISTORY_REF}:${HISTORY_SUMMARY_PATH} (absent ref or file)`,
+		};
+	}
+	try {
+		return { summary: JSON.parse(text) };
 	} catch {
-		return null;
+		return { error: `${file ?? HISTORY_REF} is not valid JSON` };
 	}
 }
 
@@ -185,8 +237,15 @@ export function readHistorySummary({ file, cwd } = {}) {
  */
 export function loadHistorySelection({ changed, allTests, now, file, cwd }) {
 	try {
+		const read = readHistorySummary({ file, cwd });
+		if ("error" in read)
+			return {
+				status: "unavailable",
+				picks: [],
+				detail: `history unreadable (${read.error}); import-only`,
+			};
 		return selectFromHistory({
-			summary: readHistorySummary({ file, cwd }),
+			summary: read.summary,
 			changed,
 			allTests,
 			pathsForHeads: (heads) => resolveHeadPaths(heads, { cwd }),

@@ -339,9 +339,8 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 	if (changed.some(changesProductionFile)) arm(TREE_SCANNING_GOVERNANCE_TESTS);
 	if (changed.some(changesTestTreeFile)) arm(TEST_TREE_GOVERNANCE_TESTS);
 
-	const history = new Set(
-		(options.historyPicks ?? []).filter((test) => available.has(test)),
-	);
+	// The picks arrive already filtered to `allTests` by `selectFromHistory`.
+	const history = new Set(options.historyPicks ?? []);
 	const selected = new Set([...heuristic, ...armed, ...history]);
 
 	// CI-only tier (#3426 H3432-1): remove the suites measured to exceed the
@@ -373,10 +372,14 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 		capped,
 		totalBeforeCap,
 		excludedCiOnly,
-		// What only history added: neither import resolution nor a registry
-		// already had it, and the CI-only tier did not remove it.
+		// What history alone put in the selection: not a registry suite, and not
+		// an import match that survives (on a capped selection the import matches
+		// are dropped, so a history pick is there because of history).
 		fromHistory: [...history].filter(
-			(test) => selected.has(test) && !heuristic.has(test) && !armed.has(test),
+			(test) =>
+				selected.has(test) &&
+				!armed.has(test) &&
+				(capped || !heuristic.has(test)),
 		),
 	};
 }
@@ -547,7 +550,7 @@ export async function main() {
 
 	if (capped) {
 		console.warn(
-			`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length} governance registry suite(s)` : ""}.`,
+			`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); rely on CI${selected.length > 0 ? `, running only the ${selected.length - fromHistory.length} governance registry suite(s) and ${fromHistory.length} history pick(s)` : ""}.`,
 		);
 		if (selected.length === 0) {
 			writeSelectionSummary({
@@ -582,7 +585,7 @@ export async function main() {
 		selectedCount: selected.length,
 		totalBeforeCap,
 		status: capped
-			? `cap exceeded (${MAX_SELECTED_TESTS}); governance registries only`
+			? `cap exceeded (${MAX_SELECTED_TESTS}); ${selected.length - fromHistory.length} governance registries and ${fromHistory.length} history pick(s) only`
 			: "selected",
 		excludedCiOnly,
 		history,

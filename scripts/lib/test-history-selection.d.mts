@@ -1,5 +1,7 @@
 export const HISTORY_STALE_MS: number;
 export const HISTORY_MAX_SELECTED: number;
+export const HUB_SHARE: number;
+export const HUB_MIN_HEADS: number;
 export const HISTORY_REF: string;
 export const HISTORY_SUMMARY_PATH: string;
 
@@ -26,7 +28,7 @@ export function resolveHeadPaths(
 export function readHistorySummary(options?: {
 	file?: string;
 	cwd?: string;
-}): unknown;
+}): { summary: unknown } | { error: string };
 
 export function loadHistorySelection(input: {
 	changed: string[];

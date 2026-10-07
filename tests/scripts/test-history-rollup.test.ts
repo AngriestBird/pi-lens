@@ -670,6 +670,8 @@ describe("summary failures view for the history selector (#3215 lane 3)", () => 
 			{ file: "tests/solid.test.ts", headSha: otherHead, flake: false },
 		]);
 		expect(written.generatedAt).toBe("2026-09-23T00:00:00.000Z");
+		// Every head in the window, failing or not: the selector's hub population.
+		expect(written.heads).toEqual([validHead, otherHead].sort());
 		// The flake list is the flagged subset of the same view, one derivation.
 		expect(written.flakeCandidates).toEqual([
 			{ file: "tests/flaky.test.ts", headSha: validHead },

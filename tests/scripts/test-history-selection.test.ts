@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { selectTargetedTests } from "../../scripts/pre-push-targeted-tests.mjs";
 import {
 	HISTORY_MAX_SELECTED,
 	HISTORY_STALE_MS,
+	loadHistorySelection,
 	selectFromHistory,
 } from "../../scripts/lib/test-history-selection.mjs";
 
@@ -28,9 +32,11 @@ const allTests = [
 function summary(
 	failures: Array<{ file: string; headSha: string; flake?: boolean }>,
 	generatedAt = fresh,
+	otherHeads: string[] = [],
 ) {
 	return {
 		generatedAt,
+		heads: [...new Set([...failures.map((f) => f.headSha), ...otherHeads])],
 		failures: failures.map((f) => ({ flake: false, ...f })),
 	};
 }
@@ -143,6 +149,10 @@ describe("selectFromHistory (#3215 lane 3)", () => {
 		["no summary", null],
 		["a pre-lane-3 summary without a failures view", { rowCount: 3 }],
 		["a fresh summary without a failures view", { generatedAt: fresh }],
+		[
+			"a fresh summary without a heads view",
+			{ generatedAt: fresh, failures: [] },
+		],
 		["a summary with no generation time", { failures: [] }],
 		["an unparseable generation time", { failures: [], generatedAt: "soon" }],
 	])("is unavailable, never stale-guessed, for %s", (_name, value) => {
@@ -212,11 +222,16 @@ describe("selectFromHistory (#3215 lane 3)", () => {
 			...allTests,
 			...many.map((f) => f.file).filter((f, i, a) => a.indexOf(f) === i),
 		];
-		const touched = Object.fromEntries(
-			many.map((f) => [f.headSha, ["rules/ast-grep-rules/rules/z.yml"]]),
-		);
+		const quiet200 = Array.from({ length: 200 }, (_, i) => head(1000 + i));
+		const touched = {
+			...Object.fromEntries(
+				many.map((f) => [f.headSha, ["rules/ast-grep-rules/rules/z.yml"]]),
+			),
+			...Object.fromEntries(quiet200.map((h) => [h, ["docs/q.md"]])),
+		};
 		const result = selectFromHistory({
-			summary: summary(many),
+			// Enough quiet heads that the rules directory stays under the hub share.
+			summary: summary(many, fresh, quiet200),
 			changed: yamlChange,
 			allTests: tests,
 			pathsForHeads: touching(touched).pathsForHeads,
@@ -239,6 +254,20 @@ describe("selectTargetedTests with history picks (#3215 lane 3)", () => {
 		expect(result.fromHistory).toEqual(["tests/scripts/rule-catalogs.test.ts"]);
 	});
 
+	it("does not report a registry-armed suite as added by history", () => {
+		// Recurrence: a history pick that the governance registry already armed
+		// (strictness-ratchet fails on many unrelated pushes) was printed as
+		// "history added" for a production change that arms it anyway.
+		const armedSuite = "tests/config/strictness-ratchet.test.ts";
+		const result = selectTargetedTests(
+			["clients/hub.ts"],
+			[...allTests, armedSuite],
+			{ historyPicks: [armedSuite] },
+		);
+		expect(result.selected).toContain(armedSuite);
+		expect(result.fromHistory).toEqual([]);
+	});
+
 	it("does not report an import-selected test as added by history", () => {
 		// A changed test file is selected directly (it must exist on disk).
 		const self = "tests/scripts/test-history-selection.test.ts";
@@ -247,5 +276,149 @@ describe("selectTargetedTests with history picks (#3215 lane 3)", () => {
 		});
 		expect(result.selected).toContain(self);
 		expect(result.fromHistory).toEqual([]);
+	});
+});
+
+const repoRoot = path.resolve(import.meta.dirname, "../..");
+const tmpRoots: string[] = [];
+afterEach(() => {
+	tmpRoots
+		.splice(0)
+		.forEach((root) => fs.rmSync(root, { recursive: true, force: true }));
+});
+const tmpFile = (name: string, content: string) => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-history-sel-"));
+	tmpRoots.push(root);
+	const file = path.join(root, name);
+	fs.writeFileSync(file, content);
+	return file;
+};
+
+describe("hub directories carry no locality signal (#3215 lane 3, review F1)", () => {
+	// Recurrence: PR #4026 review. `.changelog/` is touched by 13 of the 37
+	// resolvable failing heads (105 of the last 300 master commits) and the repo
+	// root by 7, so equality on directories made every fragment-carrying change
+	// add the same ten globally-failing tests and displace the directory's own
+	// failures; on the issue's own #3214 case it dropped rule-catalogs.test.ts.
+	const rulesHead = "3aa900d7e".padEnd(40, "0");
+	const yaml = "rules/ast-grep-rules/rules/advisory-registry-subset.yml";
+	const hubFailures = (touch: string, n: number, base: number, label: string) =>
+		Array.from({ length: n }, (_, i) => ({
+			file: `tests/${label}/t${String(i).padStart(2, "0")}.test.ts`,
+			headSha: head(base + i),
+			touch,
+		}));
+	const changelogHeads = hubFailures(".changelog/f.md", 15, 100, "changelog");
+	const rootHeads = hubFailures("package.json", 12, 200, "root");
+	const quiet = Array.from({ length: 10 }, (_, i) => head(300 + i));
+	const crowded = [...changelogHeads, ...rootHeads];
+	const touched = {
+		[rulesHead]: [yaml.replace("advisory-registry-subset", "other")],
+		...Object.fromEntries(crowded.map((f) => [f.headSha, [f.touch]])),
+		...Object.fromEntries(quiet.map((h) => [h, ["docs/q.md"]])),
+	};
+	const history = summary(
+		[
+			{ file: "tests/scripts/rule-catalogs.test.ts", headSha: rulesHead },
+			{ file: "tests/config/sweep-floor-coverage.test.ts", headSha: rulesHead },
+			...crowded.map(({ file, headSha }) => ({ file, headSha })),
+		],
+		fresh,
+		quiet,
+	);
+	const tests = [...allTests, ...crowded.map((f) => f.file)];
+	const run = (changed: string[]) =>
+		selectFromHistory({
+			summary: history,
+			changed,
+			allTests: tests,
+			pathsForHeads: touching(touched).pathsForHeads,
+			now,
+		});
+
+	it.each([
+		["a changelog fragment", [yaml, ".changelog/x.md"]],
+		["a root file", [yaml, "package.json"]],
+		["both", [yaml, ".changelog/x.md", "package.json"]],
+	])(
+		"keeps the #3214 selection when the change also carries %s",
+		(_n, changed) => {
+			const result = run(changed);
+			expect([...result.picks].sort()).toEqual([
+				"tests/config/sweep-floor-coverage.test.ts",
+				"tests/scripts/rule-catalogs.test.ts",
+			]);
+		},
+	);
+
+	it("adds nothing for a change that touches only hub directories, and says so", () => {
+		const result = run([".changelog/x.md", "package.json"]);
+		expect(result.picks).toEqual([]);
+		expect(result.status).toBe("none");
+		expect(result.detail).toContain("hub");
+	});
+
+	it("does not call a directory a hub on a small history", () => {
+		// A directory needs a minimum head count before its share means anything:
+		// with three heads, one touching a directory is a third of history.
+		const small = summary(
+			[{ file: "tests/scripts/rule-catalogs.test.ts", headSha: head(1) }],
+			fresh,
+			[head(2), head(3)],
+		);
+		const result = selectFromHistory({
+			summary: small,
+			changed: [".changelog/x.md"],
+			allTests,
+			pathsForHeads: touching({
+				[head(1)]: [".changelog/y.md"],
+				[head(2)]: ["docs/a.md"],
+				[head(3)]: ["docs/b.md"],
+			}).pathsForHeads,
+			now,
+		});
+		expect(result.picks).toEqual(["tests/scripts/rule-catalogs.test.ts"]);
+	});
+});
+
+describe("an unreadable history gets its own reason (#3215 lane 3, review F3 and F5)", () => {
+	// Recurrence: PR #4026 review. An absent ref, a missing file and garbage JSON
+	// all printed "no failures view in the history summary", so a fork or fresh
+	// clone read like a pre-lane-3 summary.
+	const base = { changed: yamlChange, allTests, now };
+
+	it("names a missing --history-summary file", () => {
+		const result = loadHistorySelection({
+			...base,
+			file: path.join(os.tmpdir(), "pi-lens-no-such-summary.json"),
+		});
+		expect(result.status).toBe("unavailable");
+		expect(result.detail).toContain("history unreadable");
+		expect(result.detail).toContain("pi-lens-no-such-summary.json");
+	});
+
+	it("names a summary that is not JSON", () => {
+		const result = loadHistorySelection({
+			...base,
+			file: tmpFile("summary.json", "{not json"),
+		});
+		expect(result.status).toBe("unavailable");
+		expect(result.detail).toContain("history unreadable");
+		expect(result.detail).toContain("not valid JSON");
+	});
+
+	it("reads the real pre-lane-3 summary as 'no failures view', not as unreadable", () => {
+		// The old shape of history/summary.json, trimmed from the real
+		// data/test-history branch (rowCount, files, flakeCandidates).
+		const result = loadHistorySelection({
+			...base,
+			file: path.join(
+				repoRoot,
+				"tests/fixtures/test-history/summary-schema-pre-lane3/summary.json",
+			),
+		});
+		expect(result.status).toBe("unavailable");
+		expect(result.detail).toContain("no failures view");
+		expect(result.detail).not.toContain("unreadable");
 	});
 });

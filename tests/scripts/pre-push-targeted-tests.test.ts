@@ -534,6 +534,27 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		expect(capped.fromHistory).toEqual(["tests/by-history.test.ts"]);
 	});
 
+	it("counts an import match that only history kept as a history pick on a capped selection", () => {
+		// Recurrence: PR #4026 review F4. A capped selection drops the import
+		// matches; a pick that history also named is kept because of history, and
+		// the hook's capped line must count it as one.
+		enterFixture();
+		write("clients/shared.ts", "export const shared = 1;\n");
+		for (let i = 0; i <= MAX_SELECTED_TESTS; i++)
+			write(
+				`tests/generated-${i}.test.ts`,
+				`import { shared } from '../clients/shared.js';\n`,
+			);
+		const result = selectTargetedTests(
+			["clients/shared.ts"],
+			collectTestFiles("tests"),
+			{ historyPicks: ["tests/generated-3.test.ts"] },
+		);
+		expect(result.capped).toBe(true);
+		expect(result.selected).toEqual(["tests/generated-3.test.ts"]);
+		expect(result.fromHistory).toEqual(["tests/generated-3.test.ts"]);
+	});
+
 	it("does not let a history pick smuggle a CI-only suite into the local pre-push run", () => {
 		// Recurrence: #3426 H3432-1 kept budget-busting suites out of the hook;
 		// the history pass must go through the same exclusion.
@@ -1395,10 +1416,13 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			cwd,
 		});
 		expect(noRef.status).toBe("unavailable");
+		expect(noRef.detail).toContain("history unreadable");
+		expect(noRef.detail).toContain("origin/data/test-history");
 		write(
 			"history/summary.json",
 			JSON.stringify({
 				generatedAt: new Date().toISOString(),
+				heads: [failing],
 				failures: [
 					{
 						file: "tests/scripts/rule-catalogs.test.ts",
@@ -1421,41 +1445,34 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		expect(viaRef.picks).toEqual(["tests/scripts/rule-catalogs.test.ts"]);
 	});
 
-	it("adds the tests that failed on a past head touching the same directory, from a summary the real rollup wrote", () => {
-		// #3214 round 1: a rule YAML change reds only rule-catalogs.test.ts, which
-		// imports nothing the YAML is; the hook must select it from history. The
-		// journal rows come from a Windows-rooted artifact, so the selection also
-		// proves #3367's repo-relative key is what the checkout's paths match.
-		const { cwd, git, commit } = repo();
-		fs.symlinkSync(
-			path.join(repoRoot, "scripts"),
-			path.join(cwd, "scripts"),
-			"dir",
-		);
-		fs.symlinkSync(
-			path.join(repoRoot, "node_modules"),
-			path.join(cwd, "node_modules"),
-			"dir",
-		);
-		fs.symlinkSync(
-			path.join(repoRoot, "vitest.config.ts"),
-			path.join(cwd, "vitest.config.ts"),
-		);
-		fs.symlinkSync(
-			path.join(repoRoot, "package.json"),
-			path.join(cwd, "package.json"),
-		);
+	/** Runs the real hook over a real git fixture whose history summary the real
+	 * rollup wrote from a Windows-rooted artifact (so the selection also proves
+	 * #3367's repo-relative key is what the checkout's paths match). */
+	function runHookWithHistory({
+		baseFiles,
+		failingChange,
+		pushedChange,
+	}: {
+		baseFiles: Record<string, string>;
+		failingChange: Record<string, string>;
+		pushedChange: Record<string, string>;
+	}) {
+		const { cwd, commit } = repo();
+		for (const link of ["scripts", "node_modules"])
+			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link), "dir");
+		for (const link of ["vitest.config.ts", "package.json"])
+			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link));
 		const passing = "import { it } from 'vitest';\nit('ok', () => {});\n";
 		commit(
 			{
-				"rules/x/seed.yml": "seed\n",
 				"tests/scripts/rule-catalogs.test.ts": passing,
 				"tests/config/sweep-floor-coverage.test.ts": passing,
+				...baseFiles,
 			},
 			"base",
 		);
-		const failingHead = commit({ "rules/x/a.yml": "a\n" }, "round 1");
-		const pushed = commit({ "rules/x/b.yml": "b\n" }, "round 2");
+		const failingHead = commit(failingChange, "round 1");
+		const pushed = commit(pushedChange, "round 2");
 		const artifact = path.join(cwd, ".history-artifact");
 		fs.mkdirSync(artifact);
 		fs.writeFileSync(
@@ -1486,7 +1503,7 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			historyPath: path.join(cwd, ".history.ndjson"),
 			summaryPath: summary,
 		});
-		void git;
+		const stepSummary = path.join(cwd, ".step-summary.md");
 		const result = spawnSync(
 			process.execPath,
 			[
@@ -1498,9 +1515,24 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			{
 				cwd,
 				encoding: "utf8",
+				env: { ...process.env, GITHUB_STEP_SUMMARY: stepSummary },
 				input: `refs/heads/topic ${pushed} refs/heads/topic ${failingHead}\n`,
 			},
 		);
+		const stepText = fs.existsSync(stepSummary)
+			? fs.readFileSync(stepSummary, "utf8")
+			: "";
+		return { result, stepText };
+	}
+
+	it("adds the tests that failed on a past head touching the same directory, from a summary the real rollup wrote", () => {
+		// #3214 round 1: a rule YAML change reds only rule-catalogs.test.ts, which
+		// imports nothing the YAML is; the hook must select it from history.
+		const { result } = runHookWithHistory({
+			baseFiles: { "rules/x/seed.yml": "seed\n" },
+			failingChange: { "rules/x/a.yml": "a\n" },
+			pushedChange: { "rules/x/b.yml": "b\n" },
+		});
 		expect(result.stdout).toContain("history selection selected");
 		expect(result.stdout).toContain(
 			"history added tests/scripts/rule-catalogs.test.ts",
@@ -1509,6 +1541,33 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			"history added tests/config/sweep-floor-coverage.test.ts",
 		);
 		expect(result.stdout).toContain("running 2 targeted test file(s)");
+		expect(result.status).toBe(0);
+	}, 120_000);
+
+	it("labels a capped selection's history picks as history picks, not governance registry suites", () => {
+		// Recurrence: PR #4026 review F4. On the capped path `selected` is the
+		// armed registries plus the history picks, and the console line and the
+		// step summary called all of it "governance registry suite(s)".
+		const importers = Object.fromEntries(
+			Array.from({ length: MAX_SELECTED_TESTS + 1 }, (_, i) => [
+				`tests/gen-${i}.test.ts`,
+				"import { hub } from '../clients/hub.js';\nimport { it } from 'vitest';\nvoid hub;\nit('ok', () => {});\n",
+			]),
+		);
+		const { result, stepText } = runHookWithHistory({
+			baseFiles: { "clients/hub.ts": "export const hub = 1;\n", ...importers },
+			failingChange: { "clients/other.ts": "a\n" },
+			pushedChange: { "clients/hub.ts": "export const hub = 2;\n" },
+		});
+		// sweep-floor-coverage is an armed registry suite; rule-catalogs is the
+		// history pick.
+		expect(result.stdout + result.stderr).toContain(
+			"running only the 1 governance registry suite(s) and 1 history pick(s)",
+		);
+		expect(stepText).toContain(
+			"1 governance registries and 1 history pick(s) only",
+		);
+		expect(stepText).not.toContain("governance registries only");
 		expect(result.status).toBe(0);
 	}, 120_000);
 });
