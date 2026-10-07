@@ -62,12 +62,26 @@ import {
 	_resetProjectSnapshotParseCacheForTests,
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
+import {
+	getProjectSnapshotPersistWorkerHeapStatistics,
+	refreshProjectSnapshotPersistWorkerHeapStatistics,
+} from "../../clients/project-snapshot.js";
+import { collectMemorySampleSubsystems } from "../../clients/memory-sampler.js";
+import {
+	buildWordIndex,
+	serializeWordIndex,
+} from "../../clients/word-index.js";
 import { fingerprintProjectSnapshotJson } from "../../clients/project-snapshot-fingerprint.js";
 // @ts-expect-error -- bare-node script, no declaration file
 import { buildSyntheticSnapshot } from "../../scripts/bench-snapshot-persist.mjs";
 import { waitFor } from "./interleaving-kit.js";
+import {
+	fileFromScriptUrl,
+	withPreciseCoverage,
+} from "../support/v8-coverage.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
+const REPO_ROOT = path.join(import.meta.dirname, "../..");
 const CORPUS = path.join(
 	import.meta.dirname,
 	"../fixtures/snapshot-persist/released-4.3.0",
@@ -348,6 +362,148 @@ describe.each([
 				releasedMeta.timestamp,
 			);
 			expect(fs.readFileSync(getProjectSnapshotPath(cwd))).toEqual(bodyBefore);
+		}));
+});
+
+describe("word-index wire bytes stay off the main-thread hot path (#4129)", () => {
+	/** A real word index whose wire form is about 2 MB, with non-ASCII paths. */
+	function wordIndexedSnapshot(cwd: string) {
+		const index = buildWordIndex(
+			Array.from({ length: 200 }, (_, doc) => ({
+				path: `src/m\u00fcdule${doc}.ts`,
+				content: Array.from(
+					{ length: 300 },
+					(_, token) => `tok${(doc * 31 + token * 7) % 5000}`,
+				).join(" "),
+			})),
+		);
+		const serialized = serializeWordIndex(index);
+		const snapshot = {
+			...releasedSnapshot(),
+			projectRoot: cwd,
+			wordIndex: serialized,
+		} as ProjectSnapshot;
+		return { index, serialized, snapshot };
+	}
+
+	it("dispatches the persist with no JavaScript pass over the body", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			// Recurrences: round 1 of #4129 stringified the word index a second
+			// time inside its serializer (an extra whole-index stringify per
+			// persist); round 2 walked the snapshot string character by character
+			// in JavaScript to find the word index's span (+110-160 ms per
+			// persist at a 57 MB index, VERIFY_4129). Both are counts, not times:
+			// V8 block coverage counts every JavaScript block the dispatch runs,
+			// and a scan of the body runs one block per character; the stringify
+			// spy counts the characters JSON.stringify produced.
+			const { snapshot } = wordIndexedSnapshot(cwd);
+			const bodyChars = JSON.stringify(snapshot).length;
+			expect(bodyChars).toBeGreaterThan(1_000_000);
+			const realStringify = JSON.stringify;
+			let stringifiedChars = 0;
+			const { scripts } = await withPreciseCoverage(async () => {
+				const spy = vi
+					.spyOn(JSON, "stringify")
+					.mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
+						const out = realStringify(...args);
+						if (typeof out === "string") stringifiedChars += out.length;
+						return out;
+					});
+				try {
+					saveProjectSnapshot(cwd, snapshot);
+				} finally {
+					spy.mockRestore();
+				}
+			});
+			await settle(cwd);
+
+			let hottest = { count: 0, where: "none" };
+			for (const script of scripts) {
+				const file = fileFromScriptUrl(script.url, REPO_ROOT);
+				if (!file?.startsWith("clients/")) continue;
+				for (const fn of script.functions) {
+					for (const range of fn.ranges) {
+						if (range.count > hottest.count) {
+							hottest = {
+								count: range.count,
+								where: `${file}#${fn.functionName}`,
+							};
+						}
+					}
+				}
+			}
+			// Healthy: 788 at most (log redaction over fixed-size records). The
+			// round-2 scan: 2,258,635 in skipJsonValue for a 2,258,861-char body.
+			expect(hottest.count, hottest.where).toBeLessThan(bodyChars / 100);
+			// Healthy: 1.000 (the word index once, the rest once, small records).
+			// Round 1: about 2 (the serializer stringified the index again).
+			expect(stringifiedChars / bodyChars).toBeLessThan(1.1);
+			expect(getProjectSnapshotPersistStateForTests(cwd).workerBodyWrites).toBe(
+				1,
+			);
+		}));
+
+	it.each([
+		["worker", undefined],
+		["sync", "1"],
+	])(
+		"publishes the persisted wire bytes byte-identically (%s writer)",
+		async (_mode, syncFlag) =>
+			withProjectDataDirAsync(async (cwd) => {
+				if (syncFlag) process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = syncFlag;
+				const { index, serialized, snapshot } = wordIndexedSnapshot(cwd);
+				expect(collectMemorySampleSubsystems(index).wordIndex?.wireBytes).toBe(
+					null,
+				);
+				saveProjectSnapshot(cwd, snapshot);
+				await settle(cwd);
+
+				// Independent oracles: the released writer's bytes and the UTF-8
+				// length of the index's own JSON.
+				expect(gunzippedBody(cwd)).toBe(JSON.stringify(snapshot));
+				expect(collectMemorySampleSubsystems(index).wordIndex?.wireBytes).toBe(
+					Buffer.byteLength(JSON.stringify(serialized)),
+				);
+			}),
+	);
+});
+
+describe("project-snapshot persist-worker heap slot (#4129)", () => {
+	it("memory samples observe the real worker and clear on its exit", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			// Recurrence (VERIFY_4129 M3): removing this slot's three clears
+			// (exit, death, test reset) left every test green; only the
+			// review-graph slot was pinned.
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.projectSnapshot,
+			).toBeNull();
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			await settle(cwd);
+			await refreshProjectSnapshotPersistWorkerHeapStatistics();
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.projectSnapshot
+					?.heapUsedBytes,
+			).toBeGreaterThan(0);
+
+			await terminateProjectSnapshotPersistWorkerForTests();
+			await waitFor(
+				() => getProjectSnapshotPersistWorkerHeapStatistics(),
+				(stats) => stats === null,
+				{ timeoutMs: 5_000 },
+			);
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.projectSnapshot,
+			).toBeNull();
+		}));
+
+	it("clears the reading on the test reset", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			await settle(cwd);
+			await refreshProjectSnapshotPersistWorkerHeapStatistics();
+			expect(getProjectSnapshotPersistWorkerHeapStatistics()).not.toBeNull();
+			resetProjectSnapshotPersistWorkerForTests();
+			expect(getProjectSnapshotPersistWorkerHeapStatistics()).toBeNull();
 		}));
 });
 

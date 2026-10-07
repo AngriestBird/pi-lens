@@ -19,6 +19,7 @@ import {
 	getReviewGraphWorkerFallbackReasonForTests,
 	GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT,
 	type GraphSeqHint,
+	refreshReviewGraphPersistWorkerHeapStatistics,
 	resetReviewGraphPersistWorkerForTests,
 	terminateReviewGraphPersistWorkerForTests,
 	waitForReviewGraphPersistsForTests,
@@ -153,13 +154,12 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			).toBeNull();
 			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
 			await waitForReviewGraphPersistsForTests();
-			let sampled =
+			// The worker answers asynchronously. Await that answer, never a
+			// count of ticks: CI shard 3 (job 113054297476) went red when 20
+			// setImmediate turns ran out before the worker's reply landed.
+			await refreshReviewGraphPersistWorkerHeapStatistics();
+			const sampled =
 				collectMemorySampleSubsystems(null).persistWorkers.reviewGraph;
-			for (let attempt = 0; attempt < 20 && !sampled; attempt += 1) {
-				await new Promise((resolve) => setImmediate(resolve));
-				sampled =
-					collectMemorySampleSubsystems(null).persistWorkers.reviewGraph;
-			}
 			expect(sampled?.heapUsedBytes).toBeGreaterThan(0);
 			await terminateReviewGraphPersistWorkerForTests();
 			expect(

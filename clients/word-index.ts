@@ -1931,7 +1931,7 @@ export function getWordIndexWireBytes(index: WordIndex): number | null {
 	return serializedWordIndexCaches.get(index)?.wireBytes ?? null;
 }
 
-/** Record the byte span measured by the snapshot persist's existing stringify. */
+/** Record the UTF-8 length the snapshot persist took while encoding this serialized index. */
 export function recordPersistedWordIndexWireBytes(
 	serialized: SerializedWordIndex | undefined,
 	wireBytes: number | undefined,

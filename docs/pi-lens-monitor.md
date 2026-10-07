@@ -1,5 +1,16 @@
 # pi-lens monitor — role contract
 
+Read a LIVE pi-lens session's logs and report what the numbers say, so the
+maintainer does not have to. The monitor observes; it never edits code,
+never restarts anything, and never touches the session it is reading.
+
+Read first: the engineering principles (`docs/engineering-principles.md`),
+then `AGENTS.md` (the "Recurring defect shapes" catalog, especially shape 41:
+a fixed bound reached at p50 is a design defect), then
+`docs/pi-lens-subagent.md` and `docs/pi-lens-investigator.md` for the
+forensics conventions this role inherits. This contract adds the standing
+readout.
+
 ## Memory samples
 
 memory_sample records include bounded attribution fields for diagnosing host
@@ -16,24 +27,14 @@ memory growth:
 - subsystems.treeSitter.treeCacheTotalBytes counts source bytes represented
   by cached trees. Native/WASM growth is attributed by
   process.externalNonBufferBytes; no tree-count estimate is emitted.
-- subsystems.wordIndex.wireBytes is the byte length measured from the existing
-  snapshot persist's JSON string, and is null until that index is persisted.
+- subsystems.wordIndex.wireBytes is the UTF-8 length of the word index's JSON,
+  taken natively while the snapshot persist encodes the body, and is null
+  until that index's current serialized form is persisted.
 - samplerDurationMs measures the sampler's own record-assembly wall time,
   excluding the surrounding turn.
 
 All fields are in the existing record and are O(1) reads or latest-value
 snapshots; no additional telemetry sink is created.
-
-Read a LIVE pi-lens session's logs and report what the numbers say, so the
-maintainer does not have to. The monitor observes; it never edits code,
-never restarts anything, and never touches the session it is reading.
-
-Read first: the engineering principles (`docs/engineering-principles.md`),
-then `AGENTS.md` (the "Recurring defect shapes" catalog, especially shape 41:
-a fixed bound reached at p50 is a design defect), then
-`docs/pi-lens-subagent.md` and `docs/pi-lens-investigator.md` for the
-forensics conventions this role inherits. This contract adds the standing
-readout.
 
 ## Inputs
 

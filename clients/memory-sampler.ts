@@ -60,10 +60,6 @@ function recordMajorGc(): void {
 	settledHeapUsedBytes = process.memoryUsage().heapUsed;
 	majorGcCount += 1;
 }
-/** Test seam for the major-GC state transition. */
-export function recordMajorGcForTests(): void {
-	recordMajorGc();
-}
 try {
 	const gcObserver = new PerformanceObserver((list) => {
 		for (const entry of list.getEntries()) {
@@ -229,7 +225,8 @@ export interface MemorySampleSubsystems {
 		/** Estimated resident bytes of the index’s packed stores (#2069). */
 		residentBytes: number;
 		forwardEntries: number;
-		/** JSON wire form retained by the existing serializer cache. */
+		/** UTF-8 bytes of the index's JSON as last persisted; null until the
+		 *  current serialized form has been persisted (#4129). */
 		wireBytes: number | null;
 	} | null;
 	/** `null` when the shared tree-sitter client hasn't been created yet
@@ -307,8 +304,8 @@ export function estimateDispatchCacheBytes(stats: {
 export function collectMemorySampleSubsystems(
 	wordIndex: WordIndex | null,
 ): MemorySampleSubsystems {
-	refreshReviewGraphPersistWorkerHeapStatistics();
-	refreshProjectSnapshotPersistWorkerHeapStatistics();
+	void refreshReviewGraphPersistWorkerHeapStatistics();
+	void refreshProjectSnapshotPersistWorkerHeapStatistics();
 	const reviewGraph = getReviewGraphWorkspaceCacheSnapshot();
 	const reviewGraphWorker = getReviewGraphPersistWorkerHeapStatistics();
 	const projectSnapshotWorker = getProjectSnapshotPersistWorkerHeapStatistics();

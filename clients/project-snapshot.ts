@@ -1013,7 +1013,7 @@ interface PendingSnapshotBody {
 	dedupeFingerprints: string[];
 	/** Main-thread serialize time of the worker dispatch (#3789); the worker's own is 0. */
 	serializeMs?: number;
-	/** Word-index value length measured in the same snapshot JSON string. */
+	/** UTF-8 length of the word index's JSON, taken while encoding the body. */
 	wordIndexWireBytes?: number | undefined;
 }
 
@@ -1060,11 +1060,17 @@ let _snapshotWorkerBodyWritesForTests = 0;
 let _snapshotPersistWorkerHeapStatistics: PersistWorkerHeapStatistics | null =
 	null;
 
-/** Refreshes a bounded, last-known view; Worker#getHeapStatistics is async. */
-export function refreshProjectSnapshotPersistWorkerHeapStatistics(): void {
+/**
+ * Refreshes a bounded, last-known view; Worker#getHeapStatistics is async.
+ * The sampler does not await the result (the reading lags one sample); tests
+ * await it instead of polling ticks.
+ */
+export function refreshProjectSnapshotPersistWorkerHeapStatistics(): Promise<void> {
 	const worker = _snapshotPersistWorker;
-	if (!worker || typeof worker.getHeapStatistics !== "function") return;
-	void readWorkerHeapStatistics(worker)
+	if (!worker || typeof worker.getHeapStatistics !== "function") {
+		return Promise.resolve();
+	}
+	return readWorkerHeapStatistics(worker)
 		.then((stats) => {
 			_snapshotPersistWorkerHeapStatistics = stats;
 		})
@@ -1580,43 +1586,58 @@ function serializeSnapshotBody(snapshot: ProjectSnapshot): {
 	wordIndexWireBytes?: number | undefined;
 } {
 	const started = performance.now();
-	const json = JSON.stringify(storedSnapshot(snapshot));
-	const wordIndexWireBytes = measureTopLevelJsonValueBytes(json, "wordIndex");
-	const bytes = new TextEncoder().encode(json);
+	const stored = storedSnapshot(snapshot) as { wordIndex?: unknown };
+	const spliced =
+		stored.wordIndex === undefined ? undefined : spliceWordIndexBody(stored);
+	const bytes =
+		spliced?.bytes ?? new TextEncoder().encode(JSON.stringify(stored));
 	return {
 		bytes,
 		serializeMs: performance.now() - started,
-		wordIndexWireBytes,
+		wordIndexWireBytes: spliced?.wordIndexWireBytes,
 	};
 }
 
-/** Measure an already-stringified top-level JSON value without stringifying it again. */
-function measureTopLevelJsonValueBytes(
-	json: string,
-	key: string,
-): number | undefined {
-	let cursor = 1;
-	while (cursor < json.length && json[cursor] !== "}") {
-		if (json[cursor] === ",") cursor += 1;
-		while (/\s/.test(json[cursor] ?? "")) cursor += 1;
-		const keyEnd = skipJsonValue(json, cursor);
-		let parsedKey: unknown;
-		try {
-			parsedKey = JSON.parse(json.slice(cursor, keyEnd));
-		} catch {
-			return undefined;
-		}
-		cursor = keyEnd;
-		while (/\s/.test(json[cursor] ?? "")) cursor += 1;
-		if (json[cursor] !== ":") return undefined;
-		const valueStart = cursor + 1;
-		const valueEnd = skipJsonValue(json, valueStart);
-		if (parsedKey === key) {
-			return Buffer.byteLength(json.slice(valueStart, valueEnd), "utf8");
-		}
-		cursor = valueEnd;
-	}
-	return undefined;
+/** Stands in for the word index while the rest of the body is stringified. */
+const WORD_INDEX_PLACEHOLDER = `\u0000pi-lens-word-index-${process.pid}-${Date.now()}\u0000`;
+const WORD_INDEX_KEY_JSON = '"wordIndex":';
+const WORD_INDEX_PLACEHOLDER_JSON = `${WORD_INDEX_KEY_JSON}${JSON.stringify(
+	WORD_INDEX_PLACEHOLDER,
+)}`;
+
+/**
+ * Encode the stored body with the word index stringified on its own, so its
+ * UTF-8 length is known without reading the body in JavaScript (#4129). The
+ * index is stringified once, the rest of the body once with a placeholder in
+ * its slot; native `indexOf` finds the placeholder and `encodeInto` writes the
+ * three pieces into one buffer, byte-identical to encoding
+ * `JSON.stringify(stored)`. Returns undefined when the placeholder is not
+ * found exactly once (a `toJSON` that rewrites the body), and the caller
+ * encodes the plain stringify.
+ */
+function spliceWordIndexBody(stored: {
+	wordIndex?: unknown;
+}): { bytes: Uint8Array<ArrayBuffer>; wordIndexWireBytes: number } | undefined {
+	const marker = WORD_INDEX_PLACEHOLDER_JSON;
+	const head = JSON.stringify({ ...stored, wordIndex: WORD_INDEX_PLACEHOLDER });
+	const at = head.indexOf(marker);
+	if (at < 0 || head.indexOf(marker, at + 1) >= 0) return undefined;
+	const prefix = head.slice(0, at + WORD_INDEX_KEY_JSON.length);
+	const suffix = head.slice(at + marker.length);
+	const wordIndex = JSON.stringify(stored.wordIndex);
+	const prefixBytes = Buffer.byteLength(prefix);
+	const wordIndexWireBytes = Buffer.byteLength(wordIndex);
+	const bytes = new Uint8Array(
+		prefixBytes + wordIndexWireBytes + Buffer.byteLength(suffix),
+	);
+	const encoder = new TextEncoder();
+	encoder.encodeInto(prefix, bytes.subarray(0, prefixBytes));
+	encoder.encodeInto(
+		wordIndex,
+		bytes.subarray(prefixBytes, prefixBytes + wordIndexWireBytes),
+	);
+	encoder.encodeInto(suffix, bytes.subarray(prefixBytes + wordIndexWireBytes));
+	return { bytes, wordIndexWireBytes };
 }
 
 function writeSnapshotBodyOnMainThread(

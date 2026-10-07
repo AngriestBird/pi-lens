@@ -2098,11 +2098,17 @@ let _lastWorkerFallbackReasonForTests: string | undefined;
 
 let _persistWorkerHeapStatistics: PersistWorkerHeapStatistics | null = null;
 
-/** Refreshes a bounded, last-known view; Worker#getHeapStatistics is async. */
-export function refreshReviewGraphPersistWorkerHeapStatistics(): void {
+/**
+ * Refreshes a bounded, last-known view; Worker#getHeapStatistics is async.
+ * The sampler does not await the result (the reading lags one sample); tests
+ * await it instead of polling ticks.
+ */
+export function refreshReviewGraphPersistWorkerHeapStatistics(): Promise<void> {
 	const worker = _persistWorker;
-	if (!worker || typeof worker.getHeapStatistics !== "function") return;
-	void readWorkerHeapStatistics(worker)
+	if (!worker || typeof worker.getHeapStatistics !== "function") {
+		return Promise.resolve();
+	}
+	return readWorkerHeapStatistics(worker)
 		.then((stats) => {
 			_persistWorkerHeapStatistics = stats;
 		})
