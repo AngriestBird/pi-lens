@@ -152,6 +152,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_complexityBaselines: "reset",
 	_coordinatorId:
 		"kept: the construction scope's ticket names this coordinator on every session_scope_transition row (#3611)",
+	_cutAdvisoryItems: "reset",
 	_droppedMutationReceipts: "reset",
 	_errorDebtBaseline:
 		"kept: a project baseline (design A14), re-derived by its own producer",

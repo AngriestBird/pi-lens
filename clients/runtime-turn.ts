@@ -54,6 +54,7 @@ import {
 	type ComposedPart,
 	type DeliveryHold,
 	planDeliveryHolds,
+	stillReportedParked,
 } from "./turn-end/delivery-holds.js";
 import type { TurnEndLaneContext } from "./turn-end/lane.js";
 import { isHardFailureSummary } from "./hard-failure-summary.js";
@@ -62,8 +63,13 @@ import {
 	MAX_KNIP_ROOTS_PER_TURN,
 	resolveKnipScanRoots,
 } from "./knip-scan-roots.js";
-import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
+import type {
+	DeadCodeClient,
+	DeadCodeIssue,
+	DeadCodeResult,
+} from "./dead-code-client.js";
 import {
+	DEAD_CODE_DELTA_MAX_SHOWN,
 	deadCodeIssueKey,
 	deadCodeIssues,
 	formatDeadCodeDelta,
@@ -1026,6 +1032,62 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const deliveryHolds: DeliveryHold[] = [];
 	/** A session replaced mid-turn owns none of the held state any more. */
 	const holdGeneration = runtime.sessionGeneration;
+	/**
+	 * #3813/#3901: a parked lane belongs to the session that cut it. The runtime
+	 * is a process singleton and a concurrent secondary (subagent) activation
+	 * runs this function on it, so `holdGeneration` (the runtime's scope id) is
+	 * the same for both; the turn's own session id, the one the deferred-test
+	 * list is keyed by, is not. A secondary neither takes nor shows the
+	 * primary's parked items.
+	 */
+	const carryScope = sessionId ?? runtime.telemetrySessionId;
+	const carryLane = (...parts: string[]): string =>
+		[carryScope, ...parts].join(":");
+	/**
+	 * #3813/#3901: the hold for an item-bearing advisory whose producer has no
+	 * queue to restore (knip, dead-code, call-graph impact). `shown` are the
+	 * items the part names. A cut part parks the ones that were new this turn
+	 * for the lane's next run, which re-checks each against its own fresh data.
+	 * An item that is itself a re-offer (`isReOffer`) is not parked again, so
+	 * nothing rides every turn: it is counted instead, and a part showing only
+	 * re-offers cannot be held at all.
+	 */
+	const cutAdvisoryHold = <T>(
+		family: "knip" | "dead-code" | "call-graph",
+		lane: string,
+		part: string,
+		shown: readonly T[],
+		isReOffer: (item: T) => boolean,
+	): DeliveryHold => {
+		const fresh = shown.filter((item) => !isReOffer(item));
+		const recordDropped = (reason: string): void => {
+			incrementDegradationCount({
+				kind: "turn-end-advisory-carry-dropped",
+				subject: family,
+				reason,
+			});
+		};
+		return {
+			part,
+			canHold: () => fresh.length > 0,
+			onHeld: () => {
+				for (const evicted of runtime.parkCutAdvisoryItems(lane, fresh)) {
+					recordDropped(
+						`${evicted} evicted: more lanes had cut items parked than the carry bound keeps`,
+					);
+				}
+				if (fresh.length < shown.length) {
+					recordDropped(
+						"the cap cut items this lane had already re-offered once",
+					);
+				}
+			},
+			onDropped: () =>
+				recordDropped(
+					"the cap cut a part that showed only items it had already re-offered once",
+				),
+		};
+	};
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
 
@@ -1960,6 +2022,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		success?: boolean;
 		totalIssues?: number;
 		newIssues?: number;
+		/** #3901: items re-offered because the cap cut them on the previous turn. */
+		reOffered?: number;
 		blockerIssues?: number;
 		/** #3248: findings dropped by a stored disposition before rendering. */
 		dispositionSuppressed?: number;
@@ -1982,6 +2046,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			reason: `${toRunnerDisplayPath(cwd, root)} not scanned: more than ${MAX_KNIP_ROOTS_PER_TURN} checkouts edited this turn`,
 		});
 	}
+	/** Issues each knip section names; a cut section parks exactly these (#3901). */
+	const KNIP_MAX_SHOWN = 5;
 	/** One checkout's finished scan: cache write, delta, delivery. `scanRoot === cwd` is the session checkout. */
 	const applyKnipResult = (
 		scanRoot: string,
@@ -2012,6 +2078,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			...(knipWouldPoison && { cacheKept: true }),
 		};
 
+		// #3901: items the cap cut on the previous turn. A scan that did not
+		// succeed leaves them parked for the next one; a successful scan takes
+		// them (offered once) and re-checks each below.
+		// One lane per part kind: both parts of one scan are cut together (the cap
+		// that cuts a blocker always cuts the advisory behind it), and a park
+		// REPLACES its lane's entry (review r1 F1).
+		const knipBlockerLane = carryLane("knip", scanRoot, "blocker");
+		const knipAdvisoryLane = carryLane("knip", scanRoot, "advisory");
+		const parkedKnip = knipResult.success
+			? [
+					...runtime.takeCutAdvisoryItems<KnipIssue>(knipBlockerLane),
+					...runtime.takeCutAdvisoryItems<KnipIssue>(knipAdvisoryLane),
+				]
+			: [];
 		if (knipResult.success && knipResult.issues.length > 0) {
 			// Deliberately excludes the line number — see stableFindingKey's
 			// doc comment (#1483: mirrors the dead-code fix in #1477).
@@ -2027,6 +2107,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				return modifiedSet.has(abs);
 			});
 			knipMeta.newIssues = newIssues.length;
+			// #3901: a parked item is offered again only while this scan still
+			// reports it (a fixed one is not re-announced), as this scan's own
+			// record of it. It bypasses the baseline and the edited-file gate: the
+			// cut turn overwrote the one and may have retired the other.
+			const reOffered = stillReportedParked(
+				parkedKnip,
+				knipResult.issues,
+				issueKey,
+				new Set(newIssues.map(issueKey)),
+			);
+			const reOfferedKeys = new Set(reOffered.map(issueKey));
+			if (reOffered.length > 0) knipMeta.reOffered = reOffered.length;
 			if (newIssues.length > 0) {
 				projectDiagnosticsDelta.push(
 					...knipIssuesToProjectDiagnostics(scanRoot, newIssues),
@@ -2047,7 +2139,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// `knipIssuesToProjectDiagnostics` is a straight `issues.map(...)`
 			// (one diagnostic per issue, never empty), so this keeps the pairing
 			// total while staying honest under `noUncheckedIndexedAccess`.
-			const knipPaired = newIssues.flatMap((issue) =>
+			const knipPaired = [...newIssues, ...reOffered].flatMap((issue) =>
 				knipIssuesToProjectDiagnostics(scanRoot, [issue]).map((diagnostic) => ({
 					issue,
 					diagnostic,
@@ -2078,7 +2170,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				let report =
 					"🔴 New unresolved imports/deps in modified code (Knip):\n";
 				let firstPath: string | null = null;
-				for (const issue of blockerIssues.slice(0, 5)) {
+				for (const issue of blockerIssues.slice(0, KNIP_MAX_SHOWN)) {
 					const display = displayPath(issue);
 					if (!firstPath && display !== "(unknown)") firstPath = display;
 					report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.type}: ${issue.name}\n`;
@@ -2088,6 +2180,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				// @delivery-surface: runtime-turn:knip-blocker
 				blockerParts.push(report);
+				deliveryHolds.push(
+					cutAdvisoryHold(
+						"knip",
+						knipBlockerLane,
+						report,
+						blockerIssues.slice(0, KNIP_MAX_SHOWN),
+						(issue) => reOfferedKeys.has(issueKey(issue)),
+					),
+				);
 			}
 
 			// Turn-end injects only this turn's HIGH-CONFIDENCE, ATTRIBUTABLE
@@ -2104,12 +2205,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			if (unusedExportDelta.length > 0) {
 				let report =
 					"⚠️ Newly unused exports in files you edited — check if callers need updating (Knip):\n";
-				for (const issue of unusedExportDelta.slice(0, 5)) {
+				for (const issue of unusedExportDelta.slice(0, KNIP_MAX_SHOWN)) {
 					const display = displayPath(issue);
 					report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.name}\n`;
 				}
 				// @delivery-surface: runtime-turn:knip-advisory
 				advisoryParts.push(report);
+				deliveryHolds.push(
+					cutAdvisoryHold(
+						"knip",
+						knipAdvisoryLane,
+						report,
+						unusedExportDelta.slice(0, KNIP_MAX_SHOWN),
+						(issue) => reOfferedKeys.has(issueKey(issue)),
+					),
+				);
 			}
 		}
 		return knipMeta;
@@ -2306,6 +2416,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						reasons.push(`${client.id}:scan_failed:${result.summary}`);
 						continue;
 					}
+					// #3901: items the cap cut on the previous turn. A failed scan
+					// leaves them parked; a successful one takes them (offered once).
+					const deadCodeLane = carryLane("dead-code", client.id);
+					const parkedDeadCode =
+						runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
 					deadCodeMeta.totalIssues =
 						(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
 					// No baseline means every finding looks new. Report nothing rather
@@ -2323,23 +2438,34 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						if (!issue.file) return false;
 						return modified.has(resolveRunnerPath(cwd, issue.file));
 					});
-					if (newIssues.length === 0) {
+					// #3901: a parked item is offered again only while this scan still
+					// reports it, as this scan's own record of it; it bypasses the
+					// baseline and the edited-file gate the cut turn overwrote.
+					const reOffered = stillReportedParked(
+						parkedDeadCode,
+						deadCodeIssues(result),
+						deadCodeIssueKey,
+						new Set(newIssues.map(deadCodeIssueKey)),
+					);
+					if (newIssues.length === 0 && reOffered.length === 0) {
 						reasons.push(`${client.id}:clean`);
 						continue;
 					}
 					newIssueTotal += newIssues.length;
-					projectDiagnosticsDelta.push(
-						...newIssues.map((issue) =>
-							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-						),
-					);
-					projectDiagnosticsSources.add("dead-code");
+					if (newIssues.length > 0) {
+						projectDiagnosticsDelta.push(
+							...newIssues.map((issue) =>
+								deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+							),
+						);
+						projectDiagnosticsSources.add("dead-code");
+					}
 					// #3248: the rendered advisory takes the stored-disposition
 					// filter, keyed off this lane's OWN adapter. The delta record
 					// above keeps the unfiltered set — its reader applies the policy
 					// on read, so filtering both would double-apply on one lane.
 					const deadCodeDeliverable = filterFindingsByDisposition(
-						newIssues,
+						[...newIssues, ...reOffered],
 						cwd,
 						(issue) =>
 							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
@@ -2352,9 +2478,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						reasons.push(`${client.id}:all_disposed`);
 						continue;
 					}
+					const deadCodePart = formatDeadCodeDelta(
+						deadCodeDeliverable.kept,
+						result.language,
+					);
 					// @delivery-surface: runtime-turn:dead-code-advisory
-					advisoryParts.push(
-						formatDeadCodeDelta(deadCodeDeliverable.kept, result.language),
+					advisoryParts.push(deadCodePart);
+					const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
+					deliveryHolds.push(
+						cutAdvisoryHold(
+							"dead-code",
+							deadCodeLane,
+							deadCodePart,
+							deadCodeDeliverable.kept.slice(0, DEAD_CODE_DELTA_MAX_SHOWN),
+							(issue) => reOfferedKeys.has(deadCodeIssueKey(issue)),
+						),
 					);
 				} catch (err) {
 					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
@@ -3721,7 +3859,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					calleeKey: string;
 					results: ReturnType<typeof impact>;
 				}[] = [];
-				for (const filePath of files.slice(0, 5)) {
+				// #3813: files whose impact lines the cap cut on the previous turn.
+				// Impact is recomputed from the CURRENT graph, so a re-offer is as
+				// fresh as any line; a file edited again this turn is simply fresh.
+				const impactFiles = files.slice(0, 5);
+				const impactFileKeys = new Set(
+					impactFiles.map((file) =>
+						normalizeMapKey(resolveRunnerPath(cwd, file)),
+					),
+				);
+				const reOfferedImpactFiles = runtime
+					.takeCutAdvisoryItems<string>(carryLane("call-graph"))
+					.filter(
+						(file) =>
+							!impactFileKeys.has(
+								normalizeMapKey(resolveRunnerPath(cwd, file)),
+							),
+					);
+				/** Files that contributed a line to the part. */
+				const shownImpactFiles: string[] = [];
+				for (const filePath of [...impactFiles, ...reOfferedImpactFiles]) {
+					const linesBefore = impactLines.length;
 					// Turn-state files may be cwd-relative while graph keys are absolute,
 					// and persisted graphs can contain either slash style/casing. Compare
 					// through the shared normalized path seam; keep the original filePath
@@ -3798,11 +3956,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 								);
 						}
 					}
+					if (impactLines.length > linesBefore) shownImpactFiles.push(filePath);
 				}
 				if (impactLines.length > 0) {
+					const impactPart = `📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`;
 					// @delivery-surface: runtime-turn:call-graph-advisory
-					advisoryParts.push(
-						`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
+					advisoryParts.push(impactPart);
+					deliveryHolds.push(
+						cutAdvisoryHold(
+							"call-graph",
+							carryLane("call-graph"),
+							impactPart,
+							shownImpactFiles,
+							(file) => !impactFiles.includes(file),
+						),
 					);
 				}
 				if (impactFindings.length > 0) {

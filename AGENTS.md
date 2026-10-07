@@ -863,7 +863,12 @@ The four primary host hooks are:
   run the test/actionable-warning drains. One-shot state a producer consumes
   for a part of the message (a retirement, a delivery count, a drained run)
   commits only when that part reaches the capped message; a cut part stays
-  pending for the next turn (`clients/turn-end/delivery-holds.ts`, #3813).
+  pending for the next turn (`clients/turn-end/delivery-holds.ts`, #3813). An
+  item-bearing advisory with no queue to restore (knip, dead-code, call-graph
+  impact) parks the items it showed on the coordinator for ONE re-offer, taken
+  by the lane's next successful run and offered only while that run still
+  reports them (#3901); count-and-pointer advisories (actionable and
+  code-quality warnings) are not held, their report is the pull record.
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
