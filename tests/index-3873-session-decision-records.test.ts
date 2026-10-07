@@ -60,6 +60,10 @@ import {
 	getLatencyLogPath,
 } from "../clients/latency-logger.js";
 import { chainLateFormatResync } from "../clients/pipeline.js";
+import {
+	flushSessionStartLog,
+	SESSIONSTART_LOG_FILE,
+} from "../clients/sessionstart-logger.js";
 import { normalizeMapKey } from "../clients/path-utils.js";
 import { createReadGuard } from "../clients/read-guard.js";
 import { READ_GUARD_CELL } from "../clients/read-guard-branch.js";
@@ -540,6 +544,12 @@ describe("#3873 O2, O3: the adopt walk and each store's action", () => {
 			dropped: 0,
 			payloadReads: 1,
 		});
+		// The restart readout (B2 printed `rehydrated N file(s)`): one line a
+		// start in sessionstart.log, naming each store's items kept of items in.
+		await flushSessionStartLog();
+		expect(fs.readFileSync(SESSIONSTART_LOG_FILE, "utf8")).toMatch(
+			/session_start: stores from slot — widget skip, read-guard adopt 1\/1, .*agent-advisories adopt 1\/1, lazy-tool-memory adopt 1\/1/,
+		);
 	});
 
 	it("a resume from the sidecar names the sidecar it read, and a branch move shows in payloadReads", async () => {
