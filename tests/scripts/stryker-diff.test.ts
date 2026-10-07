@@ -6,6 +6,9 @@
 // #3592 item 2 checked the literal text existed, not that calling
 // `baseMeta` before it ran was safe). Only spawning the real script against
 // a real, throwaway git fixture reproduces the actual TDZ ordering bug.
+// #4108 round 2 adds one more: Stryker's in-place rewrite of every tracked file
+// is the real Stryker's own behaviour (run 37650871948), so only the real
+// Stryker binary over a throwaway fixture reproduces it.
 import { describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -20,7 +23,9 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import yaml from "../../clients/deps/js-yaml.js";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { acquireTestLock, getLockPath } from "../../scripts/lib/suite-lock.mjs";
@@ -45,10 +50,12 @@ import {
 	formatCapNotice,
 	formatQueueEntry,
 	isCompiledMutationSource,
+	isDryRunTimeout,
 	isMutationSourceFile,
 	isQueueablePath,
 	isScriptMutationFile,
 	mapRelatedTests,
+	MAX_DRY_RUN_SECONDS,
 	mutationLaneExclusion,
 	MutationLaneExclusionError,
 	MUTATION_BUDGET_MINUTES,
@@ -59,6 +66,8 @@ import {
 	planResample,
 	sampleRangesDeterministically,
 	selectMutationFiles,
+	TEST_FILE_OVERHEAD_SECONDS,
+	UNKNOWN_TEST_SECONDS,
 } from "../../scripts/lib/stryker-diff.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 import {
@@ -202,15 +211,42 @@ fs.appendFileSync(
 		noLock: process.env.PI_LENS_TEST_NO_LOCK ?? null,
 	}) + "\n",
 );
-if (dryRun) {
-	console.log("Instrumented 3 source file(s) with " + patterns.length * 3 + " mutant(s)");
-	console.log("Initial test run succeeded. Ran 1 tests in 1 seconds (net 12 ms, overhead 0 ms).");
-	process.exit(0);
-}
 let control = {};
 try {
 	control = JSON.parse(fs.readFileSync(".fake-stryker/control.json", "utf8"));
 } catch {}
+// The two dry-run failures Stryker 10.0.0 logs at ERROR (3-dry-run-executor.js
+// logTimeoutInitialRun / logFailedTestsInInitialRun), then exits 1.
+const DRY_RUN_ERRORS = {
+	timeout: "14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+	tests: "14:00:14 (1) ERROR DryRunExecutor One or more tests failed in the initial test run:",
+};
+// R2 F1 of #4108: Stryker's command runner puts the whole vitest output into the
+// failed-tests log, and this lane's own tests assert the timeout line, so a
+// vitest diff (and a console echo of a child's stderr) carries it. Shaped like
+// vitest's own diff, with one copy at the start of a line.
+DRY_RUN_ERRORS.testsQuotingTimeout = [
+	DRY_RUN_ERRORS.tests,
+	" FAIL  tests/scripts/stryker-diff.test.ts > describeStrykerFailure",
+	"AssertionError: expected 'x' to be 'y'",
+	"- Expected",
+	"+ 14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+	"stderr | tests/scripts/stryker-diff.test.ts > a child",
+	DRY_RUN_ERRORS.timeout,
+].join("\n");
+if (dryRun) {
+	if (control.dryRunFails) {
+		console.error(DRY_RUN_ERRORS[control.dryRunFails]);
+		process.exit(1);
+	}
+	console.log("Instrumented 3 source file(s) with " + patterns.length * 3 + " mutant(s)");
+	console.log("Initial test run succeeded. Ran 1 tests in 1 seconds (net 12 ms, overhead 0 ms).");
+	process.exit(0);
+}
+if (control.realRunFails) {
+	fs.writeFileSync("stryker.log", DRY_RUN_ERRORS[control.realRunFails] + "\n");
+	process.exit(1);
+}
 const files = {};
 for (const pattern of patterns) {
 	const match = /^(.*):(\d+)-(\d+)$/.exec(pattern);
@@ -1095,6 +1131,8 @@ describe("driver selection stage, spawned for real (#3810)", () => {
 				covering: 0,
 				kept: 0,
 				dropped: 0,
+				overBudget: 0,
+				estimatedSeconds: 0,
 				own: 0,
 				unknown: 0,
 			});
@@ -1204,6 +1242,9 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 				covering: 2,
 				kept: 2,
 				dropped: 0,
+				overBudget: 0,
+				// Measured by the real probes, so it differs run to run.
+				estimatedSeconds: expect.any(Number),
 				own: 0,
 				unknown: 0,
 			};
@@ -1416,6 +1457,260 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 		}
 	}, 150_000);
 
+	// Recurrence (#4092, run 37629970371): the count cap never bound the run --
+	// the window's own test files are exempt from it -- so both shards ran 122
+	// test files and the initial test run outlasted Stryker's bound. The kept
+	// tests are now fitted into an estimated-seconds cap from the time each
+	// coverage probe measured, through the real probes, selector and run loop.
+	const fitsTheRuntimeCap = (own: boolean) => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: true,
+		});
+		try {
+			// Both covering tests take about 1.2 s in vitest's own timing, so about
+			// 1.7 s each with the per-file overhead: a cap of three seconds fits
+			// one. A probe whose time went unread would cost the unknown default
+			// (3.7 s), which no estimate below can be.
+			const slow = (importLine: string, call: string) =>
+				`import { expect, it } from "vitest";\n${importLine}\nit("executes the changed line slowly", async () => {\n\texpect(${call}).toBe(2);\n\tawait new Promise((done) => setTimeout(done, 1200));\n});\n`;
+			writeFileSync(
+				join(fixture.root, "tests", "scripts", "thing.test.ts"),
+				slow('import { changed } from "../../scripts/thing.mjs";', "changed()"),
+			);
+			writeFileSync(
+				join(fixture.root, "tests", "clients", "thing.test.ts"),
+				slow('import { changed } from "../../clients/thing.js";', "changed()"),
+			);
+			if (own) fixture.git(["commit", "-qam", "make both tests slow"]);
+			const output = runDriver(
+				fixture.root,
+				["--base", "main", "--max-dry-run-seconds", "3"],
+				120_000,
+			);
+			expect(output).toMatch(
+				/runtime-capped at 3 s of estimated test time \(kept \d+ s\); dropped, in rank order: tests\/(scripts|clients)\/thing\.test\.ts\n/,
+			);
+			const report = JSON.parse(
+				readFileSync(
+					join(fixture.root, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			);
+			const meta = report.piLensMutationDiff;
+			expect(meta.testsRun).toHaveLength(1);
+			expect(meta.testSelection).toMatchObject({
+				kept: 1,
+				overBudget: 1,
+				own: own ? 1 : 0,
+			});
+			expect(meta.testSelection.estimatedSeconds).toBeGreaterThanOrEqual(2);
+			expect(meta.testSelection.estimatedSeconds).toBeLessThanOrEqual(3);
+			const command = fakeStrykerInvocations(fixture.root).find(
+				(call) => !call.dryRun,
+			).command;
+			expect(command).toContain(meta.testsRun[0]);
+			expect(
+				["tests/scripts/thing.test.ts", "tests/clients/thing.test.ts"].filter(
+					(test) => command.includes(test),
+				),
+			).toEqual(meta.testsRun);
+		} finally {
+			fixture.cleanup();
+		}
+	};
+	it("fits the kept tests into the runtime cap from the seconds the real probes measured, for related tests", () => {
+		fitsTheRuntimeCap(false);
+	}, 150_000);
+	// Committed, so they are the PR's own tests: exempt from the count cap and
+	// from the zero-coverage drop, and re-added to the pool of the run loop's
+	// second selection, which must apply the cap again.
+	it("fits the kept tests into the runtime cap from the seconds the real probes measured, for the PR's own tests", () => {
+		fitsTheRuntimeCap(true);
+	}, 150_000);
+
+	// Recurrence (R2 of #4108, run 37650871948): Stryker's in-place mode wrote
+	// `// @ts-nocheck` into every tracked file before the initial run, so
+	// tests/scripts/mutate.test.ts ("mutate.mjs: refusing dirty file") failed 16
+	// of 33 cases and both shards sat in the initial run for 460 and 525 s. The
+	// REAL Stryker (only its sandbox is small) runs the repo's own config over a
+	// fixture whose test fails if a tracked file was rewritten.
+	// lane: Unit tests (ubuntu shards); the mutation lane runs on ubuntu only.
+	it.skipIf(process.platform === "win32")(
+		"leaves tracked files unrewritten in the real Stryker's initial run",
+		() => {
+			const fixture = buildDriverFixture({
+				covering: true,
+				includeCompiled: false,
+			});
+			try {
+				writeFileSync(
+					join(fixture.root, "tracked.ts"),
+					"export const t = 1;\n",
+				);
+				writeFileSync(
+					join(fixture.root, "tests", "scripts", "untouched.test.ts"),
+					'import { readFileSync } from "node:fs";\nimport { expect, it } from "vitest";\nit("finds a tracked file as committed", () => {\n\texpect(readFileSync("tracked.ts", "utf8")).toBe("export const t = 1;\\n");\n});\n',
+				);
+				fixture.git(["add", "tracked.ts", "tests/scripts/untouched.test.ts"]);
+				fixture.git(["commit", "-qm", "tracked file and its test"]);
+				const configFile = join(fixture.root, ".stryker-real.config.mjs");
+				writeFileSync(
+					configFile,
+					[
+						`import base from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "stryker.config.mjs")).href)};`,
+						`import { buildRunConfig } from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "scripts", "lib", "stryker-diff.mjs")).href)};`,
+						'export default { ...buildRunConfig(base, { command: "node_modules/.bin/vitest run --configLoader runner tests/scripts/untouched.test.ts" }), buildCommand: "node -e 0" };',
+						"",
+					].join("\n"),
+				);
+				const result = spawnSync(
+					process.execPath,
+					[
+						join(
+							repositoryRoot,
+							"node_modules",
+							"@stryker-mutator",
+							"core",
+							"bin",
+							"stryker.js",
+						),
+						"run",
+						"--mutate",
+						"scripts/thing.mjs:1-3",
+						"--dryRunOnly",
+						configFile,
+					],
+					{ cwd: fixture.root, encoding: "utf8", timeout: 120_000 },
+				);
+				const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+				expect(output).toContain("Initial test run succeeded");
+				expect(result.status).toBe(0);
+			} finally {
+				fixture.cleanup();
+			}
+		},
+		150_000,
+	);
+
+	// Recurrence (#4092): a mistyped cap read as NaN, and every comparison with
+	// NaN is false, so the runtime cap would have silently stopped binding.
+	it.each(["abc", "0", "-5"])(
+		"refuses --max-dry-run-seconds %s before touching the repo",
+		(value) => {
+			const cwd = mkdtempSync(join(tmpdir(), "pi-lens-stryker-flag-"));
+			try {
+				const result = runDriverResult(
+					cwd,
+					["--max-dry-run-seconds", value],
+					30_000,
+				);
+				expect(result.status).toBe(1);
+				expect(result.stderr).toContain(
+					"--max-dry-run-seconds must be a positive number",
+				);
+			} finally {
+				rmSync(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	// Recurrence (#4092): a dry run past `dryRunTimeoutMinutes` exited 1 with the
+	// words of any dry-run failure, and the night could not tell it from a crash.
+	// Stryker logs "Initial test run timed out!" -- the only discriminator -- on
+	// the console for the measuring dry run and in stryker.log for the real run.
+	it.each([
+		["the measuring dry run", { dryRunFails: "timeout" }],
+		["the real run", { realRunFails: "timeout" }],
+	])(
+		"records a named dry-run timeout when %s outlasts Stryker's bound",
+		(_where, control) => {
+			const fixture = buildDriverFixture({
+				covering: true,
+				includeCompiled: true,
+			});
+			try {
+				mkdirSync(join(fixture.root, ".fake-stryker"), { recursive: true });
+				writeFileSync(
+					join(fixture.root, ".fake-stryker", "control.json"),
+					JSON.stringify(control),
+				);
+				const result = runDriverResult(
+					fixture.root,
+					["--base", "main"],
+					120_000,
+				);
+				expect(result.status).toBe(1);
+				const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+				expect(output).toContain(
+					"mutation diff: dry run timed out; no mutants evaluated; the initial test run exceeded Stryker's dryRunTimeoutMinutes (10) before any mutant was evaluated",
+				);
+				const meta = JSON.parse(
+					readFileSync(
+						join(fixture.root, "reports", "mutation", "mutation.json"),
+						"utf8",
+					),
+				).piLensMutationDiff;
+				expect(meta.dryRunTimeout).toEqual({
+					minutes: 10,
+					tests: meta.testsRun.length,
+					estimatedSeconds: meta.testSelection.estimatedSeconds,
+				});
+				expect(meta.dryRunTimeout.tests).toBeGreaterThan(0);
+				expect(meta.zeroMutants.reason).toContain("dry run timed out");
+			} finally {
+				fixture.cleanup();
+			}
+		},
+		150_000,
+	);
+
+	it.each([
+		["the measuring dry run", { dryRunFails: "tests" }],
+		["the real run", { realRunFails: "tests" }],
+		[
+			"the measuring dry run, vitest output quoting the timeout line",
+			{ dryRunFails: "testsQuotingTimeout" },
+		],
+		[
+			"the real run, vitest output quoting the timeout line",
+			{ realRunFails: "testsQuotingTimeout" },
+		],
+	])(
+		"leaves a failed initial test run that did not time out unnamed (%s)",
+		(_where, control) => {
+			const fixture = buildDriverFixture({
+				covering: true,
+				includeCompiled: true,
+			});
+			try {
+				mkdirSync(join(fixture.root, ".fake-stryker"), { recursive: true });
+				writeFileSync(
+					join(fixture.root, ".fake-stryker", "control.json"),
+					JSON.stringify(control),
+				);
+				const result = runDriverResult(
+					fixture.root,
+					["--base", "main"],
+					120_000,
+				);
+				expect(result.status).toBe(1);
+				const meta = JSON.parse(
+					readFileSync(
+						join(fixture.root, "reports", "mutation", "mutation.json"),
+						"utf8",
+					),
+				).piLensMutationDiff;
+				expect(meta.dryRunTimeout ?? null).toBeNull();
+				expect(meta.zeroMutants.reason).toContain("dry run failed");
+				expect(meta.zeroMutants.reason).not.toContain("dryRunTimeoutMinutes");
+			} finally {
+				fixture.cleanup();
+			}
+		},
+		150_000,
+	);
+
 	it("reports a partial run when the Stryker child fails after writing an incremental report", () => {
 		const fixture = buildDriverFixture({
 			covering: true,
@@ -1626,6 +1921,35 @@ describe("driver stage dispositions, spawned for real (#3856 F3 arm)", () => {
 			);
 			const present = runDriver(fixture.root, ["--base", "main"], 120_000);
 			expect(present).not.toContain("no coverage answer for");
+		} finally {
+			fixture.cleanup();
+		}
+	}, 120_000);
+
+	// Recurrence (R2 F2 of #4108): probing is sequential and stops at its budget
+	// share, so the pool's tail goes unprobed (194 of 565 in shard 1 of run
+	// 37629970371). The own tests were last in the pool, and they are the tests
+	// the runtime cap most needs timed.
+	it("probes the PR's own tests before the import-related ones", () => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: false,
+			fakeVitest: true,
+		});
+		try {
+			// The related tests list as thing-other.test.ts then thing.test.ts
+			// (directory order); thing.test.ts becomes the PR's own.
+			const own = join(fixture.root, "tests", "scripts", "thing.test.ts");
+			writeFileSync(own, `${readFileSync(own, "utf8")}// touched by the PR\n`);
+			fixture.git(["commit", "-qam", "touch a test"]);
+			runDriver(fixture.root, ["--base", "main"], 120_000);
+			const probed = fakeVitestInvocations(fixture.root).map((invocation) =>
+				invocation.args.find((arg: string) => arg.startsWith("tests/")),
+			);
+			expect(probed.slice(0, 2)).toEqual([
+				"tests/scripts/thing.test.ts",
+				"tests/scripts/thing-other.test.ts",
+			]);
 		} finally {
 			fixture.cleanup();
 		}
@@ -1935,6 +2259,133 @@ describe("stryker diff selection", () => {
 				measurement.proxy.projectedElapsedSeconds,
 		);
 		expect(DEFAULT_MAX_TESTS).toBe(measurement.recommendedMaxTests);
+	});
+
+	// Recurrence (#4092): `dryRunTimeoutMinutes` was Stryker's default (5), under
+	// the 358 s (4 cores) and 449 s (2 cores) the nightly's 122-file initial run
+	// measured, and nothing tied the selection's size to the bound. The constants
+	// and the config value must stay the ones the recorded measurement sizes.
+	it("sizes the runtime cap and Stryker's initial-run bound from the recorded measurement", () => {
+		const measured = JSON.parse(
+			readFileSync(
+				resolve(
+					import.meta.dirname,
+					"../fixtures/mutation-dry-run-measurement.json",
+				),
+				"utf8",
+			),
+		);
+		const minutes = Number(/dryRunTimeoutMinutes:\s*(\d+)/.exec(config)?.[1]);
+		expect(minutes).toBe(measured.recommended.dryRunTimeoutMinutes);
+		expect(MAX_DRY_RUN_SECONDS).toBe(measured.recommended.maxDryRunSeconds);
+		expect(UNKNOWN_TEST_SECONDS).toBe(measured.recommended.unknownTestSeconds);
+		expect(TEST_FILE_OVERHEAD_SECONDS).toBe(
+			measured.recommended.testFileOverheadSeconds,
+		);
+		// The failing selection outlasted the default bound at both core counts.
+		for (const run of measured.local.runs) {
+			expect(run.wallSeconds).toBeGreaterThan(
+				measured.ci.failing.defaultTimeoutSeconds,
+			);
+			expect(minutes * 60).toBeGreaterThan(run.wallSeconds);
+		}
+		// The cap sits where the CI dry runs that passed sat, and the bound keeps
+		// a stated margin over it.
+		const passing = Object.values<number[]>(measured.ci.passing.dryRunNetMs)
+			.flat()
+			.map((ms) => ms / 1000);
+		expect(MAX_DRY_RUN_SECONDS).toBeGreaterThanOrEqual(Math.min(...passing));
+		expect(MAX_DRY_RUN_SECONDS).toBeLessThanOrEqual(Math.max(...passing));
+		expect(minutes * 60).toBeGreaterThanOrEqual(2 * MAX_DRY_RUN_SECONDS);
+		// The capped replay of the failing selection ran inside both bounds.
+		expect(measured.cappedReplay.estimatedSeconds).toBeLessThanOrEqual(
+			MAX_DRY_RUN_SECONDS,
+		);
+		// The real Stryker over the capped replay: inside the bound with margin.
+		expect(measured.cappedReplay.strykerDryRun.wallSeconds).toBeLessThan(
+			(minutes * 60) / 2,
+		);
+		expect(measured.cappedReplay.wallSeconds).toBeLessThan(
+			measured.ci.failing.defaultTimeoutSeconds,
+		);
+		// The recorded constants follow from the recorded raw files.
+		const seconds = Object.values<number>(measured.local.fileSecondsAtTwoCores);
+		const sum = seconds.reduce((a, b) => a + b, 0);
+		expect(seconds).toHaveLength(measured.local.runs[0].files);
+		expect(sum).toBeCloseTo(measured.local.runs[0].sumFileSeconds, 0);
+		// The unknown cost is the p95 of the measured files, not their mean (R2 F2).
+		const sorted = [...seconds].sort((a, b) => a - b);
+		expect(UNKNOWN_TEST_SECONDS).toBe(
+			Math.round(sorted[Math.floor(0.95 * (sorted.length - 1))]),
+		);
+		expect(measured.derived.p95FileSeconds).toBe(UNKNOWN_TEST_SECONDS);
+		expect(TEST_FILE_OVERHEAD_SECONDS).toBeGreaterThanOrEqual(
+			(measured.local.runs[0].wallSeconds - sum) / seconds.length - 0.1,
+		);
+	});
+
+	it("tells Stryker's initial-run timeout from its other dry-run failures by the line it logs", () => {
+		// Stryker 10.0.0, 3-dry-run-executor.js logTimeoutInitialRun and
+		// logFailedTestsInInitialRun.
+		expect(
+			isDryRunTimeout(
+				"14:00:14 (44599) ERROR DryRunExecutor Initial test run timed out!",
+			),
+		).toBe(true);
+		expect(
+			isDryRunTimeout(
+				"10:00:32 (21575) ERROR DryRunExecutor One or more tests failed in the initial test run:",
+			),
+		).toBe(false);
+		expect(isDryRunTimeout("")).toBe(false);
+		expect(isDryRunTimeout()).toBe(false);
+		// The line as run 37629970371 logged it (job 112823805274, cat -v), colour
+		// codes around the logger prefix: the one real shape.
+		expect(
+			isDryRunTimeout(
+				"\u001b[91m14:00:14 (44599) ERROR DryRunExecutor\u001b[39m Initial test run timed out!\n",
+			),
+		).toBe(true);
+		// Recurrence (R2 F1 of #4108): vitest output inside the failed-tests log
+		// carries the literal (this lane's tests assert it); only the logger's own
+		// line, and no failed-tests line, is a timeout.
+		const vitestDiff = [
+			"+ 14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+			"    at tests/scripts/stryker-diff.test.ts:1  Initial test run timed out!",
+			"Initial test run timed out!",
+		].join("\n");
+		expect(isDryRunTimeout(vitestDiff)).toBe(false);
+		const failedTests = [
+			"14:00:14 (1) ERROR DryRunExecutor One or more tests failed in the initial test run:",
+			"14:00:14 (1) ERROR DryRunExecutor Initial test run timed out!",
+		].join("\n");
+		expect(isDryRunTimeout(failedTests)).toBe(false);
+		expect(
+			describeStrykerFailure({ status: 1 }, 60, {
+				output: vitestDiff,
+				dryRunTimeoutMinutes: 10,
+			}),
+		).toContain("dry run failed");
+		const failure = { status: 1 };
+		expect(
+			describeStrykerFailure(failure, 60, {
+				output:
+					"14:00:14 (44599) ERROR DryRunExecutor Initial test run timed out!",
+				dryRunTimeoutMinutes: 10,
+				tests: ["tests/a.test.ts"],
+			}),
+		).toBe(
+			"mutation diff: dry run timed out; no mutants evaluated; the initial test run exceeded Stryker's dryRunTimeoutMinutes (10) before any mutant was evaluated; tests involved: tests/a.test.ts",
+		);
+		expect(
+			describeStrykerFailure(failure, 60, {
+				output:
+					"ERROR DryRunExecutor One or more tests failed in the initial test run:",
+				dryRunTimeoutMinutes: 10,
+			}),
+		).toBe(
+			"mutation diff: dry run failed; no mutants evaluated; dry run or mutation execution failed (Stryker status 1); no related test file was identified",
+		);
 	});
 
 	it("keeps the mutation population on scripts mjs files", () => {
