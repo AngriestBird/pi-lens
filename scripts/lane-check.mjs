@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // One pre-handback gate for delegated lanes (#4047).
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASE = "origin/master";
@@ -35,13 +36,11 @@ function command(commandName, args, { inherit = false } = {}) {
 }
 
 function changedFiles() {
-	const tracked = execFileSync(
-		"git",
-		["diff", "--name-only", `${BASE}...HEAD`],
-		{ cwd: ROOT, encoding: "utf8" },
-	);
-	const untracked = execFileSync(
-		"git",
+	const tracked = gitExecFileSync(["diff", "--name-only", `${BASE}...HEAD`], {
+		cwd: ROOT,
+		encoding: "utf8",
+	});
+	const untracked = gitExecFileSync(
 		["ls-files", "--others", "--exclude-standard"],
 		{ cwd: ROOT, encoding: "utf8" },
 	);
@@ -89,6 +88,17 @@ function redOnBase(files) {
 	return verdicts;
 }
 
+function capturedCommand(commandName, args) {
+	const result = spawnSync(commandName, args, {
+		cwd: ROOT,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	process.stdout.write(output);
+	return { status: result.status ?? 1, output };
+}
+
 export function main(argv = process.argv.slice(2)) {
 	const bodyIndex = argv.indexOf("--body");
 	const body = bodyIndex === -1 ? null : argv[bodyIndex + 1];
@@ -108,12 +118,17 @@ export function main(argv = process.argv.slice(2)) {
 	const verdicts = redOnBase(failing);
 	const governance = governanceFiles();
 	console.log(`\n[lane-check] governance batch (${governance.length} files)`);
-	const governanceStatus = command("npm", [
+	const governanceRun = capturedCommand("npm", [
 		"run",
 		"test:targeted",
 		"--",
 		...governance,
 	]);
+	const governanceFailures =
+		governanceRun.status === 0
+			? []
+			: governance.filter((file) => governanceRun.output.includes(file));
+	const governanceVerdicts = redOnBase(governanceFailures);
 	const bodyStatus = body
 		? command(process.execPath, [
 				"scripts/check-pr-body.mjs",
@@ -131,29 +146,37 @@ export function main(argv = process.argv.slice(2)) {
 		? command("npx", ["oxfmt", "--check", ...touched])
 		: 0;
 	const astgrep = command("npm", ["run", "astgrep:self-scan"]);
-	const status = execFileSync("git", ["status", "--porcelain"], {
+	const status = gitExecFileSync(["status", "--porcelain"], {
 		cwd: ROOT,
 		encoding: "utf8",
 	}).trim();
-	const trackedHandoff = execFileSync(
-		"git",
+	const trackedHandoff = gitExecFileSync(
 		["ls-files", "--", "PR_BODY.md", "COMMIT_MSG.txt", "HANDBACK_4047.md"],
 		{ cwd: ROOT, encoding: "utf8" },
 	).trim();
-	const classifications = classifyFailureFiles(failing, verdicts);
+	const classifications = classifyFailureFiles(
+		[...new Set([...failing, ...governanceFailures])],
+		{ ...governanceVerdicts, ...verdicts },
+	);
 	const record = {
 		base: BASE,
 		changed: changed.length,
 		governance: governance.length,
 		failedFiles: classifications,
-		checks: { governanceStatus, bodyStatus, changelog, format, astgrep },
+		checks: {
+			governanceStatus: governanceRun.status,
+			bodyStatus,
+			changelog,
+			format,
+			astgrep,
+		},
 		clean: !status && !trackedHandoff,
 	};
 	console.log(JSON.stringify(record));
 	console.log("ORCHESTRATOR SUMMARY");
 	console.log(`branch: tools/4047-lane-check`);
 	console.log(
-		`head: ${execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim()}`,
+		`head: ${gitExecFileSync(["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim()}`,
 	);
 	console.log(
 		`red files: ${classifications.length}; CAUSED-BY-CHANGE: ${classifications.filter((x) => x.verdict === "CAUSED-BY-CHANGE").length}`,
