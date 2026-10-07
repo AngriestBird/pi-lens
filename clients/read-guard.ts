@@ -178,7 +178,6 @@ export interface PersistedReadGuardState {
 /** A session's authorship ({@link ReadGuard.exportAuthorship}), keys in `normalizeFilePath` form. */
 export interface PersistedReadGuardAuthorship {
 	written: string[];
-	sessionStartMs: number;
 }
 
 /**
@@ -598,12 +597,10 @@ export class ReadGuard {
 		string,
 		{ turnIndex: number; writeIndex: number; toolCallId?: string }
 	>();
-	// Files that recordWritten() has fired on this session. Lets
-	// wasWrittenThisSession() return a deterministic answer for files the
-	// pi Write tool authored, independent of filesystem mtime granularity
-	// or clock skew (NFS, FAT32, etc.).
+	// Files that recordWritten() has fired on this session: the only evidence
+	// of session authorship, independent of filesystem mtime granularity or
+	// clock skew (NFS, FAT32, etc.) and of other writers' mtimes (#3520).
 	private readonly writtenThisSession = new Set<string>();
-	private readonly unchangedThisSession = new Set<string>();
 	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
 	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
 	// currently exists on disk, on EVERY platform since #3098 — an existing
@@ -638,8 +635,6 @@ export class ReadGuard {
 	/** Running per-file record-cap trim totals for this session (#1913 F1). */
 	private readonly trimAccumulators = new Map<string, FileTrimStats>();
 	private readonly sessionId: string;
-	/** Re-anchored at every conversation move (#3521); see `retainBranch`. */
-	private sessionStartMs: number;
 	/**
 	 * The scope whose branch epoch this guard reads (#3611). Every
 	 * `retainBranch` moves it (#3521). A deferred writer captures the epoch
@@ -656,7 +651,6 @@ export class ReadGuard {
 	) {
 		this.scope = scope;
 		this.sessionId = sessionId;
-		this.sessionStartMs = Date.now();
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.fileTime = createFileTime(sessionId);
 	}
@@ -1064,11 +1058,8 @@ export class ReadGuard {
 		// 1. Zero-read check
 		const fileReads = this.reads.get(filePath);
 		if (!fileReads || fileReads.length === 0) {
-			// If the file was written after this session started, the agent authored
-			// it in this session (via Write or any other mechanism). Allow the edit —
-			// a synthetic read would have been injected for Write tool calls, but
-			// this catches cases where the write bypassed the hook or the session
-			// restarted between write and edit.
+			// A write pi-lens observed this session (recordWritten, from any
+			// producer) is the agent's own; a synthetic read is injected for it.
 			if (this.wasWrittenThisSession(filePath)) {
 				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
@@ -1418,7 +1409,6 @@ export class ReadGuard {
 			return;
 		}
 		const filePath = this.key(rawFilePath);
-		this.unchangedThisSession.delete(filePath);
 		// #1668 review F1: index by the existence-independent syntactic key
 		// (see `knownPathIndex`) so a later hasKnownPath/forgetPath lookup
 		// after an external delete can still find this entry's real key.
@@ -1444,15 +1434,6 @@ export class ReadGuard {
 				opts?.writtenContent,
 			);
 		}
-	}
-
-	/** Record that a recognized mutation had complete evidence but changed no bytes. */
-	recordUnchanged(rawFilePath: string): void {
-		const filePath = this.key(rawFilePath);
-		// A no-op command is scoped to this command. It must not erase a
-		// confirmed Write from earlier in the session.
-		if (!this.writtenThisSession.has(filePath))
-			this.unchangedThisSession.add(filePath);
 	}
 
 	/**
@@ -1567,20 +1548,19 @@ export class ReadGuard {
 	 * reloaded guard keeps them; every other start resets them.
 	 */
 	exportAuthorship(): PersistedReadGuardAuthorship {
-		return {
-			written: [...this.writtenThisSession],
-			sessionStartMs: this.sessionStartMs,
-		};
+		return { written: [...this.writtenThisSession] };
 	}
 
-	/** Restore {@link exportAuthorship}'s output. Null-safe on a malformed payload. */
+	/**
+	 * Restore {@link exportAuthorship}'s output. Null-safe on a malformed
+	 * payload; a row from a released writer may carry a `sessionStartMs`, which
+	 * is ignored.
+	 */
 	importAuthorship(state: unknown): void {
 		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
 		if (Array.isArray(authorship?.written))
 			for (const filePath of authorship.written)
 				if (typeof filePath === "string") this.writtenThisSession.add(filePath);
-		if (typeof authorship?.sessionStartMs === "number")
-			this.sessionStartMs = authorship.sessionStartMs;
 	}
 
 	/**
@@ -1593,8 +1573,7 @@ export class ReadGuard {
 	 * each kept record must pass the per-line hash check against disk at the
 	 * next edit. A stamp taken on the abandoned branch would otherwise vouch
 	 * for bytes this branch never showed. Edits, authored-write and
-	 * pending-creation state came from the old branch too, so they go, and the
-	 * mtime fallback of `wasWrittenThisSession` is re-anchored to now.
+	 * pending-creation state came from the old branch too, so they go.
 	 */
 	retainBranch(onBranch: ReadonlySet<string>): {
 		kept: number;
@@ -1618,9 +1597,6 @@ export class ReadGuard {
 		this.writtenThisSession.clear();
 		this.pendingCreations.clear();
 		this.fileTime.clear();
-		// #3520 owns deleting this fallback; until then a write made on the
-		// abandoned branch must not read as authored on this one.
-		this.sessionStartMs = Date.now();
 		moveBranch(this.scope);
 		return result;
 	}
@@ -1740,17 +1716,10 @@ export class ReadGuard {
 		});
 	}
 
+	// Only a write pi-lens observed (recordWritten) is authorship; a newer mtime
+	// is any writer's (#3520).
 	private wasWrittenThisSession(filePath: string): boolean {
-		if (this.unchangedThisSession.has(filePath)) return false;
-		// Authoritative path: we observed a write of this file via recordWritten.
-		// Survives mtime granularity (FAT32 ~2s), clock skew (NFS), and external
-		// tools that touch mtime backward.
-		if (this.writtenThisSession.has(filePath)) return true;
-		try {
-			return fs.statSync(filePath).mtimeMs >= this.sessionStartMs;
-		} catch {
-			return false;
-		}
+		return this.writtenThisSession.has(filePath);
 	}
 
 	private canIgnoreStalenessByHashes(

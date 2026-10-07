@@ -265,6 +265,32 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		it("blocks zero-read edit on a file another writer touched after the guard started (#3520)", () => {
+			const env = setupTestEnvironment("read-guard-foreign-write-");
+			try {
+				const guard = createReadGuard("test-session");
+				// An external editor, a second pi-lens or git wrote it: no recordWritten.
+				const filePath = path.join(env.tmpDir, "foreign.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const later = new Date(Date.now() + 60_000);
+				fs.utimesSync(filePath, later, later);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("Edit without read");
+				expect(guard.getReadHistory(filePath)).toEqual([]);
+				expect(logReadGuardEvent).toHaveBeenCalledWith(
+					expect.objectContaining({
+						event: "edit_blocked",
+						metadata: expect.objectContaining({ reasonKind: "zero_read" }),
+					}),
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("ignores mtime staleness when read line hashes still match", () => {
 			const env = setupTestEnvironment("read-guard-hash-");
 			try {
@@ -1862,6 +1888,27 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 			expect(guard.checkEdit(recentPath).action).toBe("allow");
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it("forgets the authorship of an idle-evicted file, so it needs a read again (#3520)", () => {
+		const env = setupTestEnvironment("read-guard-idle-authorship-");
+		vi.useFakeTimers();
+		try {
+			const filePath = path.join(env.tmpDir, "idle.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			const guard = createReadGuard("tier2-idle-authorship");
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath); // consumes the read; arms the idle timer
+			expect(guard.exportAuthorship().written).toHaveLength(1);
+
+			vi.advanceTimersByTime(31 * 60_000);
+
+			expect(guard.exportAuthorship().written).toEqual([]);
+			expect(guard.checkEdit(filePath).action).toBe("block");
+		} finally {
+			vi.useRealTimers();
+			env.cleanup();
 		}
 	});
 

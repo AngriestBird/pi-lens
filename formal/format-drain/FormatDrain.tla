@@ -80,7 +80,7 @@ CONSTANTS
     ExtWrites,        \* formats of F by another pi-lens process
     Overlap,          \* TRUE: next run may start while the drain runs (RPC / waitForIdle hosts)
     Orphan,           \* TRUE: the 10 s bound may abandon the formatter child
-    MtimeAuthored,    \* TRUE: wasWrittenThisSession's mtime >= sessionStart fallback (#3520)
+    MtimeAuthored,    \* TRUE: wasWrittenThisSession's mtime >= sessionStart fallback (the code before #3520)
     ResetClearsGuard, \* FALSE: mutant, /new keeps the read guard
     FixQueue,         \* fix: contentBefore..fileContent (incl. the child) under withFileMutationQueue(F)
     FixQueueHold,     \* fix: an abandoned child keeps the queue until it exits

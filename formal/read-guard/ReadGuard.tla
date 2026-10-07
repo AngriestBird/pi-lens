@@ -72,7 +72,7 @@ CONSTANTS
     \* ---- current-code switches ----
     HandlerEvidence,\* TRUE (pre-#3524 code): a native read's hashes, range and FileTime come from disk at tool_result
     CreationHandlerEvidence, \* TRUE (code before #3524's remainder): the injected creation read is hashed from disk at tool_result
-    MtimeAuthored,  \* TRUE (code): zero-read allow when mtime >= guard construction
+    MtimeAuthored,  \* TRUE (code before #3520): zero-read allow when mtime >= guard construction; FALSE: only `written` authors
     OwnEditRescue,  \* TRUE (code before #3525): canTreatStalenessAsOwnPriorEdit
     ForkImport,     \* FALSE (code before #3521): pi re-runs the factory for a fork, so the closure stash died and the fork imported nothing
     SuppressByNewerContext, \* TRUE (code before #3522): a newer context-only candidate cancels a snapshot mismatch; read only when SpanSnapshot = FALSE
@@ -86,7 +86,7 @@ CONSTANTS
     RelocFromLatest,     \* TRUE (code since #3522): relocate only from a read that is the agent's latest view of every line
     WholeVouchesPastEnd, \* FALSE (code): a whole-file view also vouches that lines past its end do not exist (#3522 part 3; no invariant needs it)
     ForkAtBoundary,      \* fork/tree: forget reads made after the fork point
-    BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born
+    BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born (read only when MtimeAuthored)
     DrainMode,           \* "atomic": the format drain runs inside Turn (no /tree can interleave);
                          \* "unfenced": it is queued at settle and may land after a /tree (code before #3521 round 2);
                          \* "settle": the same, and its recordWritten is refused once a /tree moved the branch
@@ -521,8 +521,9 @@ Fork ==
 \* /tree: the conversation moves to an earlier point in the same activation.
 \* BranchFilter (#3521, retainBranch): keep the branch's records whole, clear
 \* the FileTime stamp (so each kept record passes the per-line hash rescue),
-\* writtenThisSession, pending creations and the edit history, and re-anchor
-\* the mtime fallback. Without it (the code before #3521), no handler.
+\* writtenThisSession, pending creations and the edit history, and (only under
+\* MtimeAuthored, the code before #3520) re-anchor the mtime fallback. Without
+\* it (the code before #3521), no handler.
 Tree ==
     /\ Idle /\ "tree" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ know' = kTurn
