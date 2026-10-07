@@ -169,6 +169,7 @@ function runLane(lane: Lane, extraEnv: Record<string, string> = {}) {
 		cwd: lane.root,
 		encoding: "utf8",
 		timeout: 150_000,
+		maxBuffer: 64 * 1024 * 1024,
 		env,
 	});
 	const out = `${result.stdout}${result.stderr}`;
@@ -492,6 +493,40 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 					reason: expect.stringMatching(/^check format failed \(exit \d+\)$/),
 				},
 			]);
+		},
+		TIMEOUT,
+	);
+
+	it(
+		"an unformatted untracked file is checked too: unproven, exit 3",
+		() => {
+			const lane = makeLane({
+				base: BASE_FILES,
+				untracked: { "clients/unformatted.ts": "export   const   x=1\n" },
+			});
+			const run = runLane(lane);
+			expect(run.status).toBe(3);
+			expect(run.record.checks.format).not.toBe(0);
+		},
+		TIMEOUT,
+	);
+
+	// Recurrence: spawnSync's 1 MiB default kills the child on a long
+	// transcript, which then reads as a failed run with no named file.
+	it(
+		"a green run whose transcript is over 1 MiB is still clean",
+		() => {
+			const lane = makeLane({
+				base: BASE_FILES,
+				head: {
+					"tests/config/noisy.test.ts":
+						'import { it } from "vitest";\nit("noisy", () => {\n\tprocess.stdout.write("x".repeat(1_500_000));\n});\n',
+				},
+			});
+			const run = runLane(lane);
+			expect(run.out.length).toBeGreaterThan(1_048_576);
+			expect(run.status).toBe(0);
+			expect(run.record.verdict).toBe("clean");
 		},
 		TIMEOUT,
 	);
