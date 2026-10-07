@@ -179,9 +179,6 @@ const grammarHeavyInclude = [
 // smaller one) has already fully drained, so the sampler only ever
 // contends with (at most) one other file in this group.
 const timingSensitiveInclude = [
-	// Real node child-process barrier race for #2173; process scheduling makes
-	// this unsuitable for the default fork storm.
-	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cooperative-budget.test.ts",
 	"tests/clients/instance-registry-lock.test.ts",
 	"tests/clients/loop-block-stall-discrimination.test.ts",
@@ -383,6 +380,10 @@ export const realHarnessInclude = [
 export const wallClockBudgetInclude = [
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
+	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)
+	// scaling ratio of real clock deltas (flake-shape admission); the yield-count
+	// cases ride along. No sampler, so it does not belong in the timing-sensitive lane.
+	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",
 	"tests/clients/config-diagnostic-codes.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts",
