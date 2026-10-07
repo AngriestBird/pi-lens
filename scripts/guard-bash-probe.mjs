@@ -32,7 +32,8 @@
  * whose `node_modules` is a symlink into `main`; `real` is the same shape with
  * its own `node_modules` directory. `lanelink`, `lnk`, `other/hop` and `ch1`
  * (-> `ch2` -> lane) are symlinks into the lane, its `scripts`, the lane and
- * the lane. Each child runs with its cwd set to the row's payload cwd and a
+ * the lane. `chain` is a lane whose `node_modules` is a two-hop link
+ * (-> `chain/inner` -> `main/node_modules`). Each child runs with its cwd set to the row's payload cwd and a
  * minimal private env (PATH, HOME, TMPDIR and the row's `env`; no PI_LENS_HOME
  * or other ambient pins), as Claude Code runs it. The child's TMPDIR is a
  * fixed path outside /tmp (see CHILD_TMPDIR).
@@ -40,7 +41,7 @@
  * Row fields: command, lane (linked|real|both), expect (allow|deny), source
  * (file plus section), optional cwd (template), env (object), gap (#N, only
  * with expect deny) and reason. Placeholders: {{LINKED}} {{REAL}} {{MAIN}}
- * {{LANELINK}} {{LNK}} {{HOP}} {{CH1}} {{SIB}} {{OTHER}} {{ROOT}}
+ * {{LANELINK}} {{LNK}} {{HOP}} {{CH1}} {{CHAIN}} {{SIB}} {{OTHER}} {{ROOT}}
  * {{TMPDIR}} {{HOME}}.
  */
 import {
@@ -114,6 +115,12 @@ export function makeFixtures() {
 	);
 	symlinkSync(linked, join(root, "lanelink"), linkType);
 	symlinkSync(join(linked, "scripts"), join(root, "lnk"), linkType);
+	// R4-2 shape: node_modules -> chain/inner -> main/node_modules (two hops,
+	// the first of which stays inside the project).
+	const chain = dir("chain");
+	writeFileSync(join(chain, "package.json"), "{}\n");
+	symlinkSync(join(main, "node_modules"), join(chain, "inner"), linkType);
+	symlinkSync(join(chain, "inner"), join(chain, "node_modules"), linkType);
 	const other = dir("other");
 	// A link whose lexical parent differs from its target's parent: `hop/..`
 	// is `other` lexically and `root` physically (#3997 H3 shape).
@@ -133,6 +140,7 @@ export function makeFixtures() {
 			"{{SIB}}": dir("sib"),
 			"{{OTHER}}": other,
 			"{{CH1}}": join(root, "ch1"),
+			"{{CHAIN}}": chain,
 			"{{TMPDIR}}": CHILD_TMPDIR,
 			"{{HOME}}": dir("home"),
 		},

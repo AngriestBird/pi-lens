@@ -563,3 +563,8 @@
 {"command":"cd hop/.. && git worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"allow","source":"verify-3997-r4.md § (3) Physical vs logical (cd is logical in bash)"}
 {"command":"cd -P hop/.. && git worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","gap":"#4060","source":"verify-3997-r4.md § (3) Physical vs logical residual (a) cd -P"}
 {"command":"git worktree remove --force $(printf linked)","lane":"both","expect":"deny","source":"review-4078.md § F4 (round-1 row 48, labelled a #4025 gap but master denies it)"}
+{"command":"rm -rf node_modules/..","lane":"linked","expect":"deny","gap":"#4044","source":"review-4054.md \u00a7 Bypass matrix, deletes / verify-4054-r4.md \u00a7 (1); decision on PR #4078 comment 6038238221","reason":"over-denial accepted: GNU rm refuses `..` operands anyway"}
+{"command":"rm -rf node_modules/a/..","lane":"linked","expect":"deny","gap":"#4044","source":"review-4054.md \u00a7 Bypass matrix, deletes / verify-4054-r4.md \u00a7 (1); decision on PR #4078 comment 6038238221","reason":"over-denial accepted: GNU rm refuses `..` operands anyway"}
+{"command":"npm ci","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","gap":"#4080","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}
+{"command":"rm -rf node_modules/","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","gap":"#4080","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}
+{"command":"rm -rf node_modules/*","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","gap":"#4080","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}
