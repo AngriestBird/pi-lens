@@ -235,7 +235,7 @@ describe("label manifest coverage (#2553)", () => {
 
 		const required = requiredLabels();
 		// Same reasoning, for the derived requirement side: today's derived
-		// set is 27 labels (4 TYPE + 12 AREA + 5 reuse-defaults + 5
+		// set is 26 labels (4 TYPE + 12 AREA + 5 reuse-defaults + 4
 		// merge-train literals + the drift label) — a floor near that catches the derivation
 		// itself silently collapsing, not just a manifest that dropped one.
 		assertNonEmptyScan(
