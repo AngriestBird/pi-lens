@@ -321,7 +321,7 @@ export function formatAbsentRunReason({ state, id, ageMinutes, sha }) {
 			id == null ? "" : ` or re-run it manually (gh run rerun ${id})`;
 		return `ci.yml ${idText} is ${label}${ageText} for ${sha}: the run is terminal and cannot produce the missing check-runs -- inspect it${rerunText}; the verdict never re-arms automatically`;
 	}
-	return `ci.yml ${idText} is ${label}${ageText} for ${sha}: the run is registered, so no re-arm is needed`;
+	return `ci.yml ${idText} is ${label}${ageText} for ${sha}: wait for the registered run to finish; no re-arm is needed`;
 }
 
 /**
