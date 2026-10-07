@@ -555,6 +555,8 @@ function readEnvAuxGraceMs(): number | undefined {
 }
 const DEFAULT_AUX_GRACE_CEILING_MS = 2000;
 const MAX_ADAPTIVE_AUX_GRACE_CEILING_MS = 8000;
+/** Servers named in one no-client `lsp_touch_file` row (#3873 O9). */
+const MAX_TOUCH_CANDIDATES = 8;
 const ADAPTIVE_AUX_GRACE_MARGIN_MS = 500;
 
 export function auxWaitBudgetMs(
@@ -4940,6 +4942,11 @@ export class LSPService {
 					...(waitSkipReasons.size > 0
 						? { reason: [...waitSkipReasons][0] }
 						: {}),
+					// #3873 O9: part of the touch's one row, so no extra record per touch.
+					candidates: this.describeTouchCandidates(
+						filePath,
+						resolvedPrimaryRoots,
+					),
 				},
 			});
 			return;
@@ -10341,6 +10348,43 @@ export class LSPService {
 			if (this.state.inFlight.has(`${serverId}:${root}`)) return true;
 		}
 		return false;
+	}
+
+	/**
+	 * #3873 O9: what a touch that found no client had to choose from. One entry
+	 * per language server configured for the file: whether a root resolved for
+	 * it (`rooted`), what this service held for that server and root
+	 * (`clientFound`: `alive`, `dead` or `none`), and that client's spawn time
+	 * (`generation`, epoch ms; a replaced client has a new one). Pure lookup
+	 * over the roots the touch already resolved, so `rooted: false` means no
+	 * root was found for it (or its wait timed out first), and an `alive` client
+	 * next to a no-client verdict is the contradiction worth reading.
+	 * Bounded at {@link MAX_TOUCH_CANDIDATES} entries.
+	 */
+	describeTouchCandidates(
+		filePath: string,
+		resolvedRoots: ReadonlyMap<string, string>,
+	): Array<{
+		serverId: string;
+		rooted: boolean;
+		clientFound: "alive" | "dead" | "none";
+		generation: number | undefined;
+	}> {
+		return getServersForFileWithConfig(filePath)
+			.slice(0, MAX_TOUCH_CANDIDATES)
+			.map((server) => {
+				const root = resolvedRoots.get(server.id);
+				const key = root === undefined ? undefined : `${server.id}:${root}`;
+				const client =
+					key === undefined ? undefined : this.state.clients.get(key);
+				return {
+					serverId: server.id,
+					rooted: root !== undefined,
+					clientFound: client ? (client.isAlive() ? "alive" : "dead") : "none",
+					generation:
+						key === undefined ? undefined : this.state.clientSpawnedAt.get(key),
+				};
+			});
 	}
 
 	/**

@@ -1,0 +1,904 @@
+/**
+ * #3873: the session-scope hand-off and its neighbours leave one record per
+ * decision in `latency.log`.
+ *
+ * Recurrence prevented (live dogfood session 2026-09-30, builds B2/B3): S2's
+ * fixes fired once and could not be shown firing again. #3819 (stale slot),
+ * #3855 (demoted successor), #3759 (late-write fence) and #3705 left zero
+ * rows, so "the fix fired" was indistinguishable from a logging gap, and
+ * `read_guard_branch_retained {kept: 0, dropped: 0}` read the same for a
+ * missing sidecar, an empty read set and a payload the importer ignored.
+ *
+ * The lifecycle cases (O1-O6) drive pi 0.85's REAL `AgentSessionRuntime`, as
+ * `tests/index-3521-fork-tree-witness.test.ts` does (#2825): pi itself runs
+ * the factory and emits every lifecycle event, and each assertion reads a row
+ * back from the real `latency.log`. The slot, nudge, fence and chain cases
+ * call the real module functions. Nothing is mocked; the only process
+ * boundary a case crosses is none.
+ *
+ * Not shared with the witness file on purpose: #4114 and #4118 are editing it,
+ * so the harness below is a copy of the parts these cases need; fold the two
+ * after both land.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import {
+	type AgentSessionRuntime,
+	type ExtensionAPI,
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
+	createReadToolDefinition,
+	SessionManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+import extension from "../index.js";
+import {
+	consumeAgentNudge,
+	queueAgentAdvisory,
+	recordCrossProcessTouches,
+	_resetAgentNudgeForTests,
+} from "../clients/agent-nudge.js";
+import { hashText } from "../clients/finding-identity.js";
+import { getProjectDataDir } from "../clients/file-utils.js";
+import {
+	createGenerationSource,
+	emitFenceRollupAtSessionEnd,
+} from "../clients/generation-guard.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../clients/latency-logger.js";
+import { chainLateFormatResync } from "../clients/pipeline.js";
+import { normalizeMapKey } from "../clients/path-utils.js";
+import { createReadGuard } from "../clients/read-guard.js";
+import { READ_GUARD_CELL } from "../clients/read-guard-branch.js";
+import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
+import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
+import {
+	adoptHandoff,
+	beginScope,
+	forwardHandoff,
+	retireScope,
+	scopeCell,
+	stashHandoff,
+	takeHandoff,
+} from "../clients/session-scope.js";
+import {
+	cleanupTestEnvironmentsDrained,
+	drainBackgroundWritesForTests,
+	setupTestEnvironment,
+} from "./clients/test-utils.js";
+
+const FLAGS = new Map<string, boolean>([
+	["no-lsp", true],
+	["no-autofix", true],
+	["no-autoformat", true],
+	["no-tests", true],
+	["no-opengrep", true],
+	["no-delta", true],
+]);
+
+const usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+const TMP_PREFIX = "pi-lens-3873-";
+let env: ReturnType<typeof setupTestEnvironment>;
+let root: string;
+let cwd: string;
+let agentDir: string;
+let sessionsDir: string;
+let previousDataDir: string | undefined;
+let previousTestMode: string | undefined;
+const runtimes: AgentSessionRuntime[] = [];
+const extensionErrors: unknown[] = [];
+
+beforeEach(async () => {
+	_resetSessionLifecycleForTests();
+	_resetAgentNudgeForTests();
+	env = setupTestEnvironment(TMP_PREFIX);
+	root = env.tmpDir;
+	cwd = path.join(root, "proj");
+	agentDir = path.join(root, "agent");
+	sessionsDir = path.join(root, "sessions");
+	for (const dir of [cwd, path.join(cwd, ".git"), agentDir, sessionsDir])
+		fs.mkdirSync(dir, { recursive: true });
+	previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(root, "data");
+	// `logLatency` writes nothing in test mode.
+	previousTestMode = process.env.PI_LENS_TEST_MODE;
+	process.env.PI_LENS_TEST_MODE = "0";
+	// The hand-off slot is a process singleton: leave none from an earlier
+	// case, then start each case from an empty log.
+	const clearing = beginScope({ role: "primary" });
+	stashHandoff(clearing, {
+		reason: "reload",
+		sessionFile: "/s/clear.jsonl",
+		targetSessionFile: undefined,
+	});
+	takeHandoff("reload", "/s/clear.jsonl");
+	clearLatencyLog();
+	await flushLatencyLog();
+});
+
+afterEach(async () => {
+	try {
+		for (const runtime of runtimes.splice(0)) await runtime.dispose();
+		await drainBackgroundWritesForTests();
+		expect(extensionErrors.splice(0)).toEqual([]);
+	} finally {
+		vi.restoreAllMocks();
+		_resetSessionLifecycleForTests();
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = previousDataDir;
+		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		env.cleanup();
+	}
+});
+
+afterAll(async () => {
+	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
+});
+
+async function startRuntime(
+	sessionManager: SessionManager,
+	alongside: Array<(pi: ExtensionAPI) => void> = [],
+): Promise<AgentSessionRuntime> {
+	const runtime = await createAgentSessionRuntime(
+		async ({
+			cwd: runtimeCwd,
+			sessionManager: sm,
+			sessionStartEvent: event,
+		}) => {
+			const services = await createAgentSessionServices({
+				cwd: runtimeCwd,
+				agentDir,
+				extensionFlagValues: FLAGS,
+				resourceLoaderOptions: {
+					extensionFactories: [extension, ...alongside],
+				},
+			});
+			return {
+				...(await createAgentSessionFromServices({
+					services,
+					sessionManager: sm,
+					sessionStartEvent: event,
+				})),
+				services,
+				diagnostics: services.diagnostics,
+			};
+		},
+		{ cwd, agentDir, sessionManager },
+	);
+	const bindings = { onError: (error: unknown) => extensionErrors.push(error) };
+	runtime.setRebindSession(async () => {
+		await runtime.session.bindExtensions(bindings);
+	});
+	await runtime.session.bindExtensions(bindings);
+	runtimes.push(runtime);
+	return runtime;
+}
+
+/** A user prompt, an assistant text turn and one `read` of `file`, on the live session. */
+function conversation(runtime: AgentSessionRuntime) {
+	const S = () => runtime.session;
+	const assistant = (
+		content: unknown[],
+		stopReason: "toolUse" | "stop" = "toolUse",
+	) => ({
+		role: "assistant" as const,
+		content,
+		api: "x",
+		provider: "x",
+		model: "x",
+		usage,
+		stopReason,
+		timestamp: Date.now(),
+	});
+	const append = (message: unknown): string =>
+		S().sessionManager.appendMessage(
+			message as Parameters<SessionManager["appendMessage"]>[0],
+		);
+	return {
+		S,
+		user: (text: string): string =>
+			append({ role: "user", content: text, timestamp: Date.now() }),
+		done: (): string =>
+			append(assistant([{ type: "text", text: "done" }], "stop")),
+		async read(id: string, file: string) {
+			const args = { path: file };
+			append(
+				assistant([{ type: "toolCall", id, name: "read", arguments: args }]),
+			);
+			await S().agent.beforeToolCall?.({
+				toolCall: { type: "toolCall", id, name: "read", arguments: args },
+				args,
+			} as never);
+			const result = await createReadToolDefinition(cwd).execute(
+				id,
+				args,
+				undefined,
+				undefined,
+				{ cwd } as never,
+			);
+			const patched = (await S().agent.afterToolCall?.({
+				toolCall: { type: "toolCall", id, name: "read", arguments: args },
+				args,
+				result: { content: result.content, details: undefined },
+				isError: false,
+			} as never)) as { content?: unknown[] } | undefined;
+			append({
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "read",
+				content: patched?.content ?? result.content,
+				isError: false,
+				timestamp: Date.now(),
+			});
+		},
+	};
+}
+
+/** A file authored before this session: its mtime is an hour old. */
+function fixture(name: string, lines: number): string {
+	const file = path.join(cwd, name);
+	fs.writeFileSync(
+		file,
+		Array.from({ length: lines }, (_, i) => `${name}-line${i + 1}`).join("\n"),
+	);
+	const old = (Date.now() - 3_600_000) / 1000;
+	fs.utimesSync(file, old, old);
+	return file;
+}
+
+/** The metadata of every `phase` row in `latency.log`, in write order. */
+async function rows(phase: string): Promise<Record<string, any>[]> {
+	await flushLatencyLog();
+	const text = fs.existsSync(getLatencyLogPath())
+		? fs.readFileSync(getLatencyLogPath(), "utf8")
+		: "";
+	return text
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as Record<string, any>)
+		.filter((row) => row.phase === phase)
+		.map((row) => row.metadata as Record<string, any>);
+}
+
+async function reload(runtime: AgentSessionRuntime): Promise<void> {
+	await runtime.session.reload();
+}
+
+/** Let a fire-and-forget sidecar write land (no timer: yield the loop). */
+async function sidecarSettled(sessionId: string): Promise<void> {
+	const file = path.join(
+		getProjectDataDir(cwd),
+		"sessions",
+		`${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`,
+	);
+	for (let i = 0; i < 5000 && !fs.existsSync(file); i++)
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(fs.existsSync(file), `sidecar ${file}`).toBe(true);
+}
+
+async function turnEnd(runtime: AgentSessionRuntime): Promise<void> {
+	await runtime.session.extensionRunner.emit({
+		type: "turn_end",
+		turnIndex: 0,
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+			api: "x",
+			provider: "x",
+			model: "x",
+			usage,
+			stopReason: "stop",
+			timestamp: Date.now(),
+		},
+		toolResults: [],
+	} as never);
+	await sidecarSettled(runtime.session.sessionManager.getSessionId());
+}
+
+async function activateTools(
+	runtime: AgentSessionRuntime,
+	id: string,
+	tools: string[],
+): Promise<void> {
+	const tool = runtime.session.getToolDefinition("pi_lens_activate_tools");
+	if (!tool) throw new Error("pi_lens_activate_tools is not registered");
+	await tool.execute(
+		id,
+		{ tools } as never,
+		undefined,
+		undefined,
+		runtime.session.extensionRunner.createToolContext(id, undefined),
+	);
+}
+
+/** Observe (not replace) the coordinators index.ts resets. */
+function coordinators(): RuntimeCoordinator[] {
+	const seen: RuntimeCoordinator[] = [];
+	const reset = RuntimeCoordinator.prototype.resetForSession;
+	vi.spyOn(RuntimeCoordinator.prototype, "resetForSession").mockImplementation(
+		function (this: RuntimeCoordinator, ...args) {
+			seen.push(this);
+			return reset.apply(this, args);
+		},
+	);
+	return seen;
+}
+
+describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
+	// Recurrence: #3819's stale slot had no witness. A slot left and taken, or
+	// left and never taken, left no trace at all.
+	it("/reload writes one stashed row and one taken row naming the same slot", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		await c.read("call_read_a", fixture("a.conf", 6));
+		c.done();
+
+		await reload(runtime);
+
+		const slot = await rows("session_handoff_slot");
+		expect(slot.map((row) => [row.op, row.reason, row.by])).toEqual([
+			["stashed", "reload", undefined],
+			["taken", "reload", "adopt"],
+		]);
+		expect(slot[0]?.keyHash).toMatch(/^file:[0-9a-f]{8}$/);
+		expect(slot[1]?.keyHash).toBe(slot[0]?.keyHash);
+		expect(slot[0]?.storeNames).toEqual(
+			expect.arrayContaining(["read-guard", "read-guard-authorship"]),
+		);
+		expect(slot[1]?.ageMs).toEqual(expect.any(Number));
+	});
+
+	it("a slot replaced before any start took it names the slot it replaced and its age", () => {
+		const first = beginScope({ role: "primary" });
+		const second = beginScope({ role: "primary" });
+		stashHandoff(first, {
+			reason: "fork",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: "/s/b.jsonl",
+		});
+		stashHandoff(second, {
+			reason: "reload",
+			sessionFile: "/s/c.jsonl",
+			targetSessionFile: undefined,
+		});
+
+		return rows("session_handoff_slot").then((slot) => {
+			expect(slot.map((row) => row.op)).toEqual(["stashed", "replaced"]);
+			expect(slot[1]).toMatchObject({
+				reason: "reload",
+				replacedReason: "fork",
+				replacedKeyHash: slot[0]?.keyHash,
+			});
+			expect(slot[1]?.replacedAgeMs).toEqual(expect.any(Number));
+		});
+	});
+
+	it("a start whose key is not the slot's leaves the slot and names who asked", async () => {
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "fork",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: "/s/b.jsonl",
+		});
+
+		expect(takeHandoff("fork", "/s/other.jsonl", "discard")).toBeUndefined();
+		expect(takeHandoff("fork", "/s/b.jsonl", "adopt")).toBeDefined();
+
+		const slot = await rows("session_handoff_slot");
+		expect(slot.map((row) => [row.op, row.by])).toEqual([
+			["stashed", undefined],
+			["key-mismatch-left", "discard"],
+			["taken", "adopt"],
+		]);
+		expect(slot[1]).toMatchObject({
+			reason: "fork",
+			askedReason: "fork",
+		});
+		expect(slot[1]?.askedKeyHash).not.toBe(slot[1]?.keyHash);
+	});
+
+	it("a quit with a slot nobody took writes unconsumed-at-exit, and a /new shutdown writes nothing", async () => {
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "reload",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: undefined,
+		});
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "new",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: "/s/new.jsonl",
+		});
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "quit",
+			sessionFile: "/s/a.jsonl",
+			targetSessionFile: undefined,
+		});
+
+		const slot = await rows("session_handoff_slot");
+		expect(slot.map((row) => row.op)).toEqual([
+			"stashed",
+			"unconsumed-at-exit",
+		]);
+		expect(slot[1]?.reason).toBe("reload");
+	});
+
+	it("a forward re-keys the slot as a forwarded row and keeps the snapshot's age", async () => {
+		const manager = {};
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: manager,
+		});
+		forwardHandoff({
+			startReason: "reload",
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: manager,
+		});
+
+		const slot = await rows("session_handoff_slot");
+		expect(slot.map((row) => [row.op, row.by])).toEqual([
+			["stashed", undefined],
+			["taken", "forward"],
+			["forwarded", undefined],
+		]);
+		expect(slot[2]?.keyHash).toMatch(/^ticket:\d+$/);
+	});
+});
+
+describe("#3873 O2, O3: the adopt walk and each store's action", () => {
+	// Recurrence: B3 logged `read_guard_branch_retained {kept: 0, dropped: 0,
+	// branchToolResults: 1034}` and nothing else, which read the same for a
+	// missing sidecar, a version-1 payload and an empty read set; the other
+	// stores logged nothing at all on adopt or reset.
+	it("/reload adopts the slot and reports each store's items in and kept", async () => {
+		const seen = coordinators();
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		c.user("prompt 1");
+		await c.read("call_read_a", fixture("a.conf", 6));
+		c.done();
+		await activateTools(runtime, "act", ["ast_grep_search"]);
+		queueAgentAdvisory(
+			"lost edit in a.rs",
+			seen[0]!.captureSessionGeneration(),
+		);
+
+		await reload(runtime);
+
+		const adopt = (await rows("session_handoff_adopt")).at(-1);
+		expect(adopt).toMatchObject({ reason: "reload", chosen: "slot" });
+		expect(adopt?.tried).toEqual([
+			expect.objectContaining({ source: "slot", found: true }),
+		]);
+		expect(adopt?.tried[0].storeNames).toEqual(
+			expect.arrayContaining([
+				"read-guard",
+				"lazy-tool-memory",
+				"agent-advisories",
+			]),
+		);
+		const actions = new Map(
+			(await rows("session_store_action"))
+				.filter((row) => row.reason === "reload")
+				.map((row) => [row.store, row]),
+		);
+		expect(actions.get("widget")).toMatchObject({ action: "skip" });
+		expect(actions.get("read-guard")).toMatchObject({
+			action: "adopt",
+			source: "slot",
+			itemsIn: 1,
+			itemsKept: 1,
+			itemsDropped: 0,
+		});
+		expect(actions.get("lazy-tool-memory")).toMatchObject({
+			action: "adopt",
+			itemsIn: 1,
+			itemsKept: 1,
+		});
+		expect(actions.get("agent-advisories")).toMatchObject({
+			action: "adopt",
+			itemsIn: 1,
+			itemsKept: 1,
+		});
+		expect(actions.get("read-guard-authorship")).toMatchObject({
+			action: "adopt",
+			itemsIn: 0,
+		});
+		expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
+			trigger: "reload",
+			kept: 1,
+			dropped: 0,
+			payloadReads: 1,
+		});
+	});
+
+	it("a resume from the sidecar names the sidecar it read, and a branch move shows in payloadReads", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		const a = fixture("a.conf", 6);
+		const b = fixture("b.conf", 6);
+		c.user("prompt 1");
+		await c.read("call_read_a", a);
+		const p1Done = c.done();
+		c.user("prompt 2");
+		await c.read("call_read_b", b);
+		c.done();
+		await turnEnd(runtime);
+		await c.S().navigateTree(p1Done);
+		c.user("prompt 2 on branch Y");
+		c.done();
+
+		await runtime.switchSession(c.S().sessionManager.getSessionFile()!);
+
+		const adopt = (await rows("session_handoff_adopt")).at(-1);
+		expect(adopt).toMatchObject({ reason: "resume", chosen: "own-sidecar" });
+		expect(adopt?.tried).toEqual([
+			expect.objectContaining({
+				source: "own-sidecar",
+				found: true,
+				version: 2,
+				ageMs: expect.any(Number),
+			}),
+		]);
+		expect(adopt?.tried[0].storeNames).toEqual(
+			expect.arrayContaining(["widget", "read-guard"]),
+		);
+		expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
+			trigger: "resume",
+			source: "own-sidecar",
+			kept: 1,
+			dropped: 1,
+			payloadReads: 2,
+		});
+		expect(
+			(await rows("session_store_action")).filter(
+				(row) => row.reason === "resume" && row.store === "read-guard",
+			),
+		).toEqual([
+			expect.objectContaining({ itemsIn: 2, itemsKept: 1, itemsDropped: 1 }),
+		]);
+	});
+
+	it("a launch with no sidecar says both candidates were absent, and kept 0 reads payloadReads null", async () => {
+		await startRuntime(SessionManager.create(cwd, sessionsDir));
+
+		const adopt = (await rows("session_handoff_adopt")).at(-1);
+		expect(adopt).toMatchObject({ reason: "startup", chosen: "none" });
+		expect(adopt?.tried).toEqual([
+			{ source: "own-sidecar", found: false },
+			{ source: "parent-sidecar", found: false },
+		]);
+		expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
+			kept: 0,
+			dropped: 0,
+			payloadReads: null,
+		});
+	});
+
+	it("tells an empty read set, an ignored version-1 payload and a missing payload apart", async () => {
+		const sidecar = (stores: Record<string, unknown>) => ({
+			savedAt: Date.now(),
+			stores,
+		});
+		const start = async (stores: Record<string, unknown> | undefined) => {
+			const scope = beginScope({ role: "primary" });
+			scopeCell(scope, READ_GUARD_CELL, () => createReadGuard("o2"));
+			await adoptHandoff(scope, {
+				reason: "resume",
+				sessionFile: "/s/a.jsonl",
+				sessionManager: undefined,
+				cwd,
+				loadOwnSidecar: async () => stores && sidecar(stores),
+				loadParentSidecar: async () => undefined,
+			});
+		};
+		const v1Record = {
+			filePath: "/x/a.ts",
+			requestedOffset: 1,
+			requestedLimit: 3,
+			effectiveOffset: 1,
+			effectiveLimit: 3,
+			expandedByLsp: false,
+			turnIndex: 1,
+			writeIndex: 1,
+			timestamp: Date.now(),
+		};
+
+		const empty = createReadGuard("empty").exportState();
+		await start({ "read-guard": empty });
+		await start({
+			"read-guard": { version: 1, reads: [["/x/a.ts", [v1Record]]] },
+		});
+		await start(undefined);
+
+		const moves = (await rows("read_guard_branch_retained")).map((row) => ({
+			kept: row.kept,
+			dropped: row.dropped,
+			payloadReads: row.payloadReads,
+			payloadVersion: row.payloadVersion,
+		}));
+		// The three look identical in `kept`/`dropped`; `payloadReads` splits them.
+		expect(moves).toEqual([
+			{ kept: 0, dropped: 0, payloadReads: 0, payloadVersion: empty.version },
+			{ kept: 0, dropped: 0, payloadReads: 1, payloadVersion: 1 },
+			{ kept: 0, dropped: 0, payloadReads: null, payloadVersion: null },
+		]);
+	});
+
+	it("a migrated version-1 envelope reports version 1 and the stores it actually held", async () => {
+		const scope = beginScope({ role: "primary" });
+		scopeCell(scope, READ_GUARD_CELL, () => createReadGuard("v1"));
+		const { loadSessionState } =
+			await import("../clients/session-state-store.js");
+		const dir = path.join(getProjectDataDir(cwd), "sessions");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.copyFileSync(
+			path.join(__dirname, "fixtures", "session-state", "v1-widget.json"),
+			path.join(dir, "v1-widget.json"),
+		);
+
+		await adoptHandoff(scope, {
+			reason: "resume",
+			sessionFile: "/s/a.jsonl",
+			sessionManager: undefined,
+			cwd,
+			loadOwnSidecar: () => loadSessionState(cwd, "v1-widget"),
+			loadParentSidecar: async () => undefined,
+		});
+
+		const adopt = (await rows("session_handoff_adopt")).at(-1);
+		expect(adopt?.tried).toEqual([
+			expect.objectContaining({
+				source: "own-sidecar",
+				found: true,
+				version: 1,
+				// The v1 file has no read-set: `read-guard` is absent, not empty.
+				storeNames: ["widget"],
+			}),
+		]);
+	});
+
+	it("hands the per-store summary to dbg, one line a start", async () => {
+		const scope = beginScope({ role: "primary" });
+		scopeCell(scope, READ_GUARD_CELL, () => createReadGuard("dbg"));
+		const lines: string[] = [];
+
+		await adoptHandoff(scope, {
+			reason: "new",
+			sessionFile: undefined,
+			sessionManager: undefined,
+			cwd,
+			loadOwnSidecar: async () => undefined,
+			loadParentSidecar: async () => undefined,
+			dbg: (line) => lines.push(line),
+		});
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatch(
+			/^session_start: stores from none — widget reset, read-guard reset/,
+		);
+	});
+});
+
+describe("#3873 O4: a scope's end and a gap demotion", () => {
+	// Recurrence: `session_scope_transition` only ever said `start`, `shutdown`
+	// and `tree`. A scope superseded without a shutdown, and a start the gap
+	// demoted to secondary (#3855), left no row that said so.
+	it("writes an end row for a scope its coordinator superseded, and none for one a shutdown already retired", async () => {
+		const coordinator = new RuntimeCoordinator();
+		// The scope the coordinator was constructed with; its first reset supersedes it.
+		const constructed = coordinator.sessionScope;
+		coordinator.resetForSession();
+		const orphan = coordinator.sessionScope;
+		coordinator.resetForSession();
+		const retired = coordinator.sessionScope;
+		retireScope(retired, "fork");
+		coordinator.resetForSession();
+
+		const ends = (await rows("session_scope_transition")).filter(
+			(row) => row.transition === "end",
+		);
+		// `retired` ended by a shutdown (its row is `logScopeTransition`'s at the
+		// call site in index.ts), so superseding it again writes nothing.
+		expect(ends.map((row) => [row.scopeId, row.reason, row.role])).toEqual([
+			[constructed.scopeId, "superseded", "primary"],
+			[orphan.scopeId, "superseded", "primary"],
+		]);
+	});
+
+	it("writes a demote row for a gap start that is not the named successor, and none for a plain concurrent subagent", async () => {
+		const subagentInGap = (pi: ExtensionAPI) => {
+			let ran = false;
+			pi.on("session_shutdown", async (event) => {
+				if ((event as { reason?: string }).reason !== "reload" || ran) return;
+				ran = true;
+				await startRuntime(SessionManager.inMemory(cwd));
+			});
+		};
+		const primary = await startRuntime(
+			SessionManager.create(cwd, sessionsDir),
+			[subagentInGap],
+		);
+
+		await reload(primary);
+
+		const demotes = (await rows("session_scope_transition")).filter(
+			(row) => row.transition === "demote",
+		);
+		expect(demotes).toEqual([
+			expect.objectContaining({
+				role: "secondary",
+				reason: "startup",
+				basis: "successor-pending",
+				lineageMatch: "not-named",
+				classification: "concurrent-secondary",
+				gapMs: expect.any(Number),
+				discardedSlot: false,
+			}),
+		]);
+	});
+
+	it("writes no demote row for a subagent that binds beside a live primary", async () => {
+		await startRuntime(SessionManager.inMemory(cwd));
+		await startRuntime(SessionManager.inMemory(cwd));
+
+		const transitions = await rows("session_scope_transition");
+		expect(transitions.map((row) => [row.transition, row.role])).toEqual([
+			["start", "primary"],
+			["start", "secondary"],
+		]);
+	});
+});
+
+describe("#3873 O5: the fence rollup", () => {
+	// Recurrence: `generation-guard-stale-write` goes through a power-of-two
+	// ledger, so zero rows meant zero drops or a fence nothing exercised, and
+	// the session-end bus rollup covered only the bus side.
+	it("counts guarded and dropped writes per declared source, once, then starts over", async () => {
+		const source = createGenerationSource("fence-rollup-probe");
+		const early = source.capture();
+		early.guardedWrite("a", () => "kept");
+		source.bump();
+		early.guardedWrite("b", () => "dropped");
+		source.capture().guardedWrite("c", () => "kept");
+
+		emitFenceRollupAtSessionEnd(cwd);
+		emitFenceRollupAtSessionEnd(cwd);
+
+		const rollups = await rows("session_end_fence_rollup");
+		expect(rollups).toHaveLength(2);
+		expect(rollups[0]?.sources).toEqual(
+			expect.arrayContaining([
+				{ source: "fence-rollup-probe", guarded: 3, dropped: 1 },
+			]),
+		);
+		expect(rollups[0]).toMatchObject({
+			guardedTotal: expect.any(Number),
+			droppedTotal: expect.any(Number),
+		});
+		expect(rollups[1]?.sources).toEqual([]);
+	});
+
+	it("writes exactly one rollup row at a primary session_shutdown, even when no fence was used", async () => {
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		await runtime.dispose();
+		runtimes.splice(runtimes.indexOf(runtime), 1);
+
+		expect(await rows("session_end_fence_rollup")).toHaveLength(1);
+	});
+});
+
+describe("#3873 O6: session_start_total names why the start was primary", () => {
+	// Recurrence: all four starts of the B3 window read `classification:
+	// primary, sameRoot: unknown`; the gap age and the lineage input the
+	// decision consulted were not recorded.
+	it("a launch is primary with no prior primary and no gap", async () => {
+		await startRuntime(SessionManager.inMemory(cwd));
+
+		const total = (await rows("session_start_total")).at(-1);
+		expect(total).toMatchObject({
+			classification: "primary",
+			basis: "no-prior-primary",
+			lineageMatch: "none",
+		});
+		expect(total?.gapMs).toBeUndefined();
+	});
+
+	it("a /reload successor reports the gap it started in and that it is the named one", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+
+		await reload(runtime);
+
+		const totals = await rows("session_start_total");
+		expect(totals.at(-1)).toMatchObject({
+			reason: "reload",
+			classification: "primary",
+			basis: "no-prior-primary",
+			lineageMatch: "named",
+			gapMs: expect.any(Number),
+		});
+	});
+});
+
+describe("#3873 O7: the agent_nudge row names what it delivered", () => {
+	// Recurrence: "the same advisory delivered three times" after a restart
+	// replay needed inference from counts; the row held no file identity,
+	// origin session or queue epoch.
+	it("carries hashed file keys, the writers' session ids, the consuming scope and a drain epoch", async () => {
+		const scope = beginScope({ role: "primary" });
+		recordCrossProcessTouches([
+			{ path: "/repo/a.ts", reason: "format", sessionId: "other-session" },
+			{ path: "/repo/b.ts", reason: "autofix" },
+		]);
+		consumeAgentNudge(undefined, scope);
+		recordCrossProcessTouches([
+			{ path: "/repo/a.ts", reason: "format", sessionId: "other-session" },
+		]);
+		consumeAgentNudge(undefined, scope);
+
+		const nudges = await rows("agent_nudge");
+		expect(nudges).toHaveLength(2);
+		expect(nudges[0]).toMatchObject({
+			scopeId: scope.scopeId,
+			queueEpoch: 1,
+			originSessionIds: ["other-session"],
+			originCrossProcess: 2,
+		});
+		expect(nudges[0]?.fileKeys).toHaveLength(2);
+		// The same touch replayed: same file key, a later drain.
+		expect(nudges[1]?.queueEpoch).toBe(2);
+		expect(nudges[0]?.fileKeys).toContain(nudges[1]?.fileKeys[0]);
+		// A hash of the accumulator key, never the path itself.
+		expect(nudges[0]?.fileKeys).toEqual(
+			expect.arrayContaining([hashText(normalizeMapKey("/repo/a.ts"), 8)]),
+		);
+		for (const key of nudges[0]?.fileKeys ?? [])
+			expect(key).toMatch(/^[0-9a-f]{8}$/);
+	});
+});
+
+describe("#3873 F1: a formatter give-up leaves a per-file row at chain time", () => {
+	// Recurrence (#3909 review F1): the in-band path wrote its late row only
+	// on settlement, and an Escape or a formatter that never settles left no
+	// per-file record that the pipeline had given up.
+	for (const which of ["inband", "deferred"] as const) {
+		it(`${which}: one row at chain time, before the formatter settles`, async () => {
+			const never = new Promise<never>(() => {});
+
+			chainLateFormatResync(
+				never,
+				which,
+				{ toolName: "write", filePath: "/repo/f.ts", startedAt: Date.now() },
+				() => {},
+			);
+
+			const chained = await rows("format_late_resync_chained");
+			expect(chained).toEqual([{ which }]);
+		});
+	}
+});

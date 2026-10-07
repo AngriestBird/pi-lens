@@ -560,6 +560,119 @@ describe("LSPService race hardening", () => {
 		release();
 	});
 
+	// #3873 O9: B3 logged 9 of 26 pre-edit touches as `no_clients_none_spawning`
+	// with no word on which servers were considered or why none counted.
+	describe("#3873 the no-client touch row names its candidates", () => {
+		const touch = (service: {
+			touchFile: (...args: any[]) => Promise<unknown>;
+		}) =>
+			service.touchFile("C:/repo-b/README.md", "# repo b\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			});
+		const candidatesOfTouch = (): unknown =>
+			logLatency.mock.calls
+				.map(([entry]) => entry)
+				.find(
+					(entry) =>
+						entry.phase === "lsp_touch_file" &&
+						entry.metadata?.failureKind === "no_clients_none_spawning",
+				)?.metadata?.candidates;
+
+		it("a server whose root resolved but whose spawn gave no client is rooted with no client", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await touch(new LSPService());
+
+			expect(candidatesOfTouch()).toEqual([
+				{ serverId: "marksman", rooted: true, clientFound: "none" },
+			]);
+		});
+
+		it("an alive client beside a no-client verdict, and a dead one, are told apart, with their spawn time", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const internal = service as unknown as {
+				state: {
+					clients: Map<string, { isAlive: () => boolean }>;
+					clientSpawnedAt: Map<string, number>;
+				};
+			};
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "typescript",
+					name: "ts",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+				{
+					id: "deno",
+					name: "deno",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+			]);
+			internal.state.clients.set("typescript:C:/a", { isAlive: () => true });
+			internal.state.clientSpawnedAt.set("typescript:C:/a", 1234);
+			internal.state.clients.set("deno:C:/a", { isAlive: () => false });
+
+			expect(
+				service.describeTouchCandidates(
+					"C:/a/x.ts",
+					new Map([
+						["typescript", "C:/a"],
+						["deno", "C:/a"],
+					]),
+				),
+			).toEqual([
+				{
+					serverId: "typescript",
+					rooted: true,
+					clientFound: "alive",
+					generation: 1234,
+				},
+				{
+					serverId: "deno",
+					rooted: true,
+					clientFound: "dead",
+					generation: undefined,
+				},
+			]);
+		});
+
+		it("a server with no resolvable root is listed as unrooted", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => undefined,
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await touch(new LSPService());
+
+			expect(candidatesOfTouch()).toEqual([
+				{ serverId: "marksman", rooted: false, clientFound: "none" },
+			]);
+		});
+	});
+
 	it("isSpawnInFlight is false for a file type with no configured server", () => {
 		getServersForFileWithConfig.mockReturnValue([]);
 		return import("../../../clients/lsp/index.js").then(({ LSPService }) => {
