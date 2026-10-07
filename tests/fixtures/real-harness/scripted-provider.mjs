@@ -1,14 +1,21 @@
-import { readFileSync, appendFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync, appendFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // release-qa (#3805) drives a pi that is not this repo's devDependency, so it
-// names that pi's own pi-ai here; the default is the repo's dev baseline.
+// names that pi's own pi-ai here. The default is the repo's dev baseline,
+// resolved in release-qa's locatePiAiIndex order: pi-ai hoisted beside the host
+// (pi-coding-agent 1.0.1+), then nested under it (1.0.0 shipped a shrinkwrap,
+// #4004). A host that re-nests pi-ai must not red every real-harness test.
+const piAiCandidates = [
+	"../../../node_modules/@earendil-works/pi-ai/dist/index.js",
+	"../../../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
+].map((relative) => new URL(relative, import.meta.url));
 const { createAssistantMessageEventStream } = await import(
 	process.env.REAL_PI_HARNESS_PI_AI_INDEX
 		? pathToFileURL(process.env.REAL_PI_HARNESS_PI_AI_INDEX).href
-		: new URL(
-				"../../../node_modules/@earendil-works/pi-ai/dist/index.js",
-				import.meta.url,
+		: (
+				piAiCandidates.find((url) => existsSync(fileURLToPath(url))) ??
+				piAiCandidates[0]
 			).href
 );
 
