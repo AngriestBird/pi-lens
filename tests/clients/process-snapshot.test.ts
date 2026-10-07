@@ -14,6 +14,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "../support/platform-stub.js";
 
 type SpawnFn = (...args: unknown[]) => unknown;
 let fakeSpawn: SpawnFn = () => makeFakeChild({ stdout: "" });
@@ -79,13 +80,6 @@ function makeFakeChild(opts: {
 		handlers.get("close")?.(opts.code ?? 0, null);
 	});
 	return child;
-}
-
-function setPlatform(platform: NodeJS.Platform): void {
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
 }
 
 const realPlatform = process.platform;

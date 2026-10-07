@@ -1,32 +1,11 @@
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { withPlatform } from "../support/platform-stub.js";
 import { isFullyQualified } from "../../clients/path-utils.js";
 import { getWin32LaneFiles } from "../../scripts/lib/win32-gate-population.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const THIS_FILE = "tests/clients/path-utils-win32-absolute.test.ts";
-
-/**
- * Drive the ambient `isFullyQualified` under a chosen `process.platform`. The
- * seam reads the platform live (clients/path-utils.ts `isFullyQualified`), so
- * the win32 arm is observable on the Linux lane. Same shape as `withPlatform`
- * in tests/scripts/process-scan.test.ts.
- */
-function withPlatform<T>(platform: NodeJS.Platform, body: () => T): T {
-	const original = process.platform;
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
-	try {
-		return body();
-	} finally {
-		Object.defineProperty(process, "platform", {
-			value: original,
-			configurable: true,
-		});
-	}
-}
 
 // The literals #1491 / #1498 found: a bare POSIX path is fully qualified on a
 // POSIX host and only ambient-drive-relative on Windows, so a fixture built from
