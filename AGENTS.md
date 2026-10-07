@@ -340,6 +340,24 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
 
+61. **Delete or rewrite through a dependency link:** a lane's `node_modules` is
+    a symlink to the main checkout's install, so any verb that removes or
+    rewrites under it reaches every lane (#3173: `git worktree remove` followed
+    the link twice; #4044: a worker's `npm ci --dry-run` emptied it under ~7
+    lanes, because npm 9.2.0 ignores `--dry-run` for the clean-install family).
+    Such a verb runs only where `node_modules` is a real directory, or in a
+    scratch copy. The hook's verb list (`NPM_NODE_MODULES_WRITERS` in
+    `scripts/hooks/guard-bash.mjs`) is the catalog: a new verb alias or
+    package manager (pnpm, yarn, bun) needs its own entry, and the hook binds
+    Claude lanes only, so a codex worker's half is the plegma shim
+    (apmantza/plegma#693). Sweep 2026-10-07, clean in the repo's own scripts
+    (`grep -rnE "rmSync\(.*node_modules|rm -rf .*node_modules|npm ci"
+    scripts clients tools`): no script runs a writer in a lane tree.
+    Unguarded siblings, measured with GNU coreutils on 2026-10-07:
+    `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/
+    -delete` empty the link target, while `rm -rf node_modules` (no slash)
+    removes only the link; a lane unlinks without a slash or glob.
+
 </important>
 
 <important if="a test double, ratchet or sweep">
@@ -1042,10 +1060,12 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 Every agent `Bash` call under Claude Code runs through
 `scripts/hooks/guard-bash.mjs` (`PreToolUse`), which denies with its reason:
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
-or any remove over a symlinked `node_modules`; an unpinned `node` probe loading
-`clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
-`pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
-`/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
+or any remove over a symlinked `node_modules`; a mutating `npm` verb (`ci`,
+`install`, `update`, `prune`, …, or `npx npm@… ci`) where `node_modules` is a
+symlink out of the project, `--dry-run` or not (#4044); an unpinned `node`
+probe loading `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the
+harness home; bare `pkill`/`killall` patterns (#3556); worktrees, clones, or
+`mktemp -d` under `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
 instead of `&&` (#3471); and every hook bypass (`--no-verify`, commit `-n`,
 `core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`; #3778). `kill $(pgrep -f …)`
 is a known blind spot; kill your own recorded PID. For a red that looks

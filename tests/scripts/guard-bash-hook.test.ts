@@ -827,6 +827,267 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 	});
 });
 
+// #4044 (2026-10-07 09:16:22Z): a worker ran `npm ci --ignore-scripts
+// --dry-run` in a lane whose node_modules was a symlink to the main
+// checkout's install. npm 9.2.0 ignores --dry-run for the clean-install
+// family and removes node_modules/* through the link, so every lane lost its
+// dependencies. Recurrence these cases catch: the #3173 shape (a delete
+// through a node_modules link) reached by a different verb, or by a spelling
+// the first guard missed (`cd <lane> && …`, `--prefix`, `npx npm@…`, a
+// subdirectory of the lane). Real filesystem fixtures, driven through the
+// real hook entry.
+describe("scripts/hooks/guard-bash.mjs -- mutating npm verbs through a linked node_modules (#4044)", () => {
+	function makeLane(linked: boolean): {
+		tree: string;
+		shared: string;
+		cleanup: () => void;
+	} {
+		const shared = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-npm-shared-nm-"),
+		);
+		const tree = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-npm-lane-"));
+		writeFileSync(join(tree, "package.json"), "{}\n");
+		if (linked) symlinkSync(shared, join(tree, "node_modules"));
+		else mkdirSync(join(tree, "node_modules"));
+		return {
+			tree,
+			shared,
+			cleanup: () => {
+				rmSync(tree, { recursive: true, force: true });
+				rmSync(shared, { recursive: true, force: true });
+			},
+		};
+	}
+
+	const MUTATING = [
+		"npm ci",
+		"npm ci --ignore-scripts --dry-run",
+		"npm clean-install",
+		"npm install",
+		"npm i",
+		"npm add left-pad",
+		"npm uninstall left-pad",
+		"npm rm left-pad",
+		"npm update",
+		"npm up",
+		"npm prune",
+		"npm dedupe",
+		"npm rebuild",
+		"npm install-ci-test",
+		"npm cit",
+		"npm audit fix",
+		"npm link",
+		"npm install --no-save oxfmt",
+		"npm install --dry-run",
+	];
+
+	it.each(MUTATING)(
+		"denies `%s` when node_modules links outside the lane, and names the safe forms",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+				expect(result.stderr).toContain("scratch copy");
+				expect(result.stderr).toContain("--prefix");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("denies the incident's own shape: `cd <lane> && npm ci --dry-run` from an unrelated payload cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook(`cd ${tree} && npm ci --dry-run`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies `npm --prefix <linked lane> ci` and `npm ci --prefix=<linked lane>` from another cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				`npm --prefix ${tree} ci`,
+				`npm ci --prefix=${tree}`,
+				`npm ci --prefix ${tree}`,
+			]) {
+				const result = runHook(command);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("resolves a relative --prefix against the payload cwd", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook(
+				`npm --prefix ./${tree.split("/").pop()} ci`,
+				BASE_ENV,
+				dirname(tree),
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies `npx -y npm@11.18.0 ci` and bare `npx npm ci` in a linked lane", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"npx -y npm@11.18.0 ci",
+				"npx --yes npm@11 ci --dry-run",
+				"npx npm ci",
+				"npx -p npm@11.18.0 -y npm ci",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies from a subdirectory of the lane, where npm walks up to the lane's node_modules", () => {
+		const { tree, cleanup } = makeLane(true);
+		const sub = join(tree, "scripts", "deep");
+		mkdirSync(sub, { recursive: true });
+		try {
+			const result = runHook("npm ci", BASE_ENV, sub);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#4044");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("denies behind an env assignment and a runner prefix", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of ["CI=1 npm ci", "env npm ci", "echo go; npm ci"]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows every mutating verb where node_modules is a REAL directory", () => {
+		const { tree, cleanup } = makeLane(false);
+		try {
+			for (const command of [
+				...MUTATING,
+				"npx -y npm@11.18.0 ci",
+				`cd ${tree} && npm ci`,
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows read-only and non-install npm/npx verbs through a linked node_modules", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"npm ls",
+				"npm run build",
+				"npm test",
+				"npm view left-pad version",
+				"npm audit",
+				"npm outdated",
+				"npm pack --dry-run",
+				"npm exec vitest",
+				"npx vitest run tests/x.test.ts",
+				"npx -y tsc --noEmit",
+				"npm config get registry",
+				"npm --prefix . ls",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows the message's own safe forms: --prefix into a real directory, and a global install", () => {
+		const linked = makeLane(true);
+		const real = makeLane(false);
+		try {
+			for (const command of [
+				`npm --prefix ${real.tree} ci`,
+				`npm ci --prefix=${real.tree}`,
+				"npm install -g left-pad",
+			]) {
+				const result = runHook(command, BASE_ENV, linked.tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			linked.cleanup();
+			real.cleanup();
+		}
+	});
+
+	it("allows `npm ci` in a lane with no node_modules yet, and where the link stays INSIDE the lane", () => {
+		const bare = makeLane(false);
+		rmSync(join(bare.tree, "node_modules"), { recursive: true });
+		const inside = makeLane(false);
+		rmSync(join(inside.tree, "node_modules"), { recursive: true });
+		const vendor = join(inside.tree, "vendor", "node_modules");
+		mkdirSync(vendor, { recursive: true });
+		symlinkSync(vendor, join(inside.tree, "node_modules"));
+		try {
+			for (const tree of [bare.tree, inside.tree]) {
+				const result = runHook("npm ci", BASE_ENV, tree);
+				expect(result.status, tree).toBe(0);
+				expect(result.stderr, tree).toBe("");
+			}
+		} finally {
+			bare.cleanup();
+			inside.cleanup();
+		}
+	});
+
+	it("stops the walk-up at the nearest package.json, so a nested project with its own install is judged on its own", () => {
+		const { tree, cleanup } = makeLane(true);
+		const nested = join(tree, "packages", "x");
+		mkdirSync(join(nested, "node_modules"), { recursive: true });
+		writeFileSync(join(nested, "package.json"), "{}\n");
+		try {
+			const result = runHook("npm ci", BASE_ENV, nested);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("declares npmLinkedInstall in the DenyRule union the .d.mts exports", () => {
+		// Same typed-binding guard as the rule declarations above: remove the
+		// member from scripts/hooks/guard-bash.d.mts and `npm run lint` reds.
+		const rule: DenyRule = "npmLinkedInstall";
+		expect(RULE_MESSAGES[rule]).toContain("node_modules");
+	});
+});
+
 describe("scripts/hooks/guard-bash.mjs -- ambient PI_LENS_HOME (#2699)", () => {
 	it("allows an unpinned-looking node probe when PI_LENS_HOME is only in process.env, not the command text", () => {
 		const result = runHook("node -e \"require('./clients/foo.js')\"", {

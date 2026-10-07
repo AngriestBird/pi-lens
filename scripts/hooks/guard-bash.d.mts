@@ -16,7 +16,8 @@ export type DenyRule =
 	| "hookBypass"
 	| "forcePush"
 	| "ciVerdictStatus"
-	| "rebase";
+	| "rebase"
+	| "npmLinkedInstall";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 

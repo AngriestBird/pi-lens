@@ -20,6 +20,10 @@
  *   - ANY `git worktree remove` (force or not) on a worktree whose
  *     `node_modules` is a symlink pointing OUTSIDE that worktree (#3173,
  *     the #2704 class) -- see {@link hasNodeModulesSymlinkOutside}
+ *   - a MUTATING `npm`/`npx npm@…` verb (`ci`, `install`, `update`,
+ *     `uninstall`, `prune`, `dedupe`, `rebuild`, …), `--dry-run` or not, in
+ *     a project whose `node_modules` is a symlink pointing OUTSIDE it (#4044,
+ *     the #3173 shape on 2026-10-07) -- see {@link classifyNpm}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
@@ -175,7 +179,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -203,6 +207,8 @@ export const RULE_MESSAGES = {
 		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
+	npmLinkedInstall:
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` first and install into the lane's own real directory, or point `--prefix` at a real directory.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -1508,6 +1514,114 @@ function classifyGit(args, cwd, env = {}) {
 	return null;
 }
 
+/** The `npm` verbs (and their aliases) that write `node_modules` (#4044):
+ *  the clean-install family (`ci`, which ignores `--dry-run` on npm 9.2.0 and
+ *  removes `node_modules/*` first), and every verb that runs the reify step.
+ *  Read-only verbs (`ls`, `run`, `test`, `view`, `audit`, `outdated`, `exec`,
+ *  `pack`, `config`) are absent on purpose. */
+const NPM_NODE_MODULES_WRITERS = new Set(
+	[
+		"ci clean-install ic install-clean isntall-clean",
+		"install-ci-test cit clean-install-test sit",
+		"install i in ins inst insta instal add install-test it isntall isnt isnta isntal",
+		"uninstall un unlink remove rm r update up upgrade udpate prune",
+		"rebuild rb link ln dedupe ddp find-dupes",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** `npm`/`npx` flags that consume a separate following token, so the verb
+ *  (or the npx command) is found past them. The `--flag=value` form is one
+ *  token and needs no entry. */
+const NPM_VALUE_FLAGS = new Set([
+	"--prefix",
+	"-w",
+	"--workspace",
+	"-p",
+	"--package",
+	"-c",
+	"--call",
+	"--registry",
+	"--cache",
+	"--userconfig",
+	"--globalconfig",
+	"--loglevel",
+	"--omit",
+	"--include",
+	"--install-strategy",
+	"--tag",
+	"--scope",
+	"--otp",
+	"--before",
+]);
+
+/**
+ * The #4044 rule: is this `npm`/`npx npm@…` invocation a node_modules WRITER
+ * aimed at a project whose `node_modules` is a symlink resolving outside it?
+ * That is the #3173 hazard with a different verb -- on 2026-10-07 a worker's
+ * `npm ci --ignore-scripts --dry-run` in a lane whose `node_modules` linked
+ * the main checkout's install emptied that install for every lane (npm 9.2.0
+ * removes `node_modules/*` before reify, ignores the dry-run, and follows the
+ * link). The clean-install family is denied with or without `--dry-run`; so
+ * is every other writer, which keeps the rule one line: MEASURED on npm 9.2.0
+ * and 11.18.0, `install`/`add`/`uninstall`/`update`/`prune`/`dedupe --dry-run`
+ * leave a linked install intact, but nothing measured covers the next npm,
+ * and the scratch-copy answer costs a worker nothing.
+ *
+ * The project dir is `--prefix` when given, else the cwd -- walked up to the
+ * nearest directory with a `package.json` or `node_modules`, as npm's own
+ * local-prefix lookup does (a lane's `scripts/` subdirectory reaches the
+ * lane's link). The link test is {@link hasNodeModulesSymlinkOutside}, the
+ * #3173 classifier, deliberately without {@link looksLikeGitWorktree}: a
+ * delete through an outside link is the hazard wherever the link sits.
+ * `-g`/`--global` writes the global tree, not the project's, and is allowed.
+ * NOT handled: `npm_config_prefix=` in the env, a `$VAR`/`~` in `--prefix`
+ * (resolved literally, like {@link classifyGit}'s worktree path), `npm exec
+ * -- npm ci`, `timeout 30 npm ci`.
+ *
+ * @param {"npm"|"npx"} cmd
+ * @param {string[]} args
+ * @param {string} [cwd]
+ * @returns {DenyRule | null}
+ */
+function classifyNpm(cmd, args, cwd) {
+	let npmArgs = args;
+	if (cmd === "npx") {
+		let i = 0;
+		while (i < args.length && args[i].startsWith("-")) {
+			i += NPM_VALUE_FLAGS.has(args[i]) ? 2 : 1;
+		}
+		// `npx -y npm@11.18.0 ci`: the command npx runs is npm itself.
+		if (!/^npm(@[^/]*)?$/.test(args[i] ?? "")) return null;
+		npmArgs = args.slice(i + 1);
+	}
+	const [verb, subverb] = collectPositionals(npmArgs, NPM_VALUE_FLAGS);
+	if (
+		!NPM_NODE_MODULES_WRITERS.has(verb) &&
+		!(verb === "audit" && subverb === "fix")
+	)
+		return null;
+	if (npmArgs.some((a) => a === "-g" || a === "--global")) return null;
+	let prefix;
+	for (let i = 0; i < npmArgs.length; i++) {
+		if (npmArgs[i] === "--prefix") prefix = npmArgs[i + 1];
+		else if (npmArgs[i].startsWith("--prefix=")) prefix = npmArgs[i].slice(9);
+	}
+	const base = cwd ?? process.cwd();
+	let dir = prefix === undefined ? base : resolve(base, prefix);
+	for (;;) {
+		if (hasNodeModulesSymlinkOutside(dir)) return "npmLinkedInstall";
+		const parent = dirname(dir);
+		if (
+			prefix !== undefined ||
+			parent === dir ||
+			existsSync(join(dir, "package.json")) ||
+			existsSync(join(dir, "node_modules"))
+		)
+			return null;
+		dir = parent;
+	}
+}
+
 // `-d`/`--directory` (bare or bundled, e.g. `-qd`) are the flags that make
 // `mktemp` create a DIRECTORY -- parsed in {@link forEachBundledMktempFlag}
 // and {@link classifyMktemp}'s own `--directory` check. A bare `mktemp` (no
@@ -2100,6 +2214,7 @@ export function classifySegment(
 			cwd,
 			repositoryIdentity(repositoryRoot(originCwd)),
 		);
+	if (cmd === "npm" || cmd === "npx") return classifyNpm(cmd, args, cwd);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);

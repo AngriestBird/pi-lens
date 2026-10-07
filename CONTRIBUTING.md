@@ -71,8 +71,10 @@ every `Bash` call, `scripts/hooks/guard-bash.mjs` (wired in
 `.claude/settings.json`), which denies `git stash` in any form, a `git reset
 --soft`/`--hard`, a hand-typed `git worktree remove` with two force flags (use
 `node scripts/prune-agent-worktrees.mjs` instead), any `git worktree remove`
-on a worktree whose `node_modules` is a symlink pointing outside it, an
-unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
+on a worktree whose `node_modules` is a symlink pointing outside it, a
+mutating `npm` verb (`ci`, `install`, `update`, `prune`, …) run where
+`node_modules` is such a symlink, `--dry-run` or not (#4044: `npm ci` empties
+the shared install through the link), an unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
 without a `PI_LENS_HOME` pin, and a `TMPDIR`/`TMP`/`TEMP` aimed at the vitest
 harness's own home. It exists so these six rules (previously prose-only) are
 mechanically enforced rather than relied on.
