@@ -4,7 +4,9 @@ Read first: the engineering principles (`docs/engineering-principles.md`), then
 `AGENTS.md`, then `docs/pi-lens-subagent.md`, then this contract. Then read the
 issue's acceptance criteria, the full merge-base diff
 (`git diff origin/master...HEAD`), the PR body, and merge state. Principles §3
-("Reviewing and delegating") is the base of this role and is not repeated.
+("Reviewing and delegating") is the base of this role and is not repeated. Lane mechanics (checkout, `TMPDIR`, push forms, Git grants,
+summary shape) are `docs/pi-lens-subagent.md` "Orchestrator lane mechanics";
+a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Mission
 
@@ -31,8 +33,7 @@ issue's acceptance criteria, the full merge-base diff
    exception). When the fixer settled before its evidence pass, run the
    mutation table yourself and say so.
 4. Attack with probes and quote the output. Probe scripts live outside the
-   worktree (`<worktree>/../probes-<pr>` or
-   `~/.local/share/pi-lens-orchestrator/tmp/<lane>`): an untracked `.mjs`
+   worktree (`<worktree>/../probes-<pr>` or the lane's `$TMPDIR`): an untracked `.mjs`
    inside it reds `tests/scripts/lint-js.test.ts` (#2865). Attack inversions
    (real failures downgraded, healthy paths narrowed); concurrency (shared
    state, retained settled promises, check-then-act across an await); session
