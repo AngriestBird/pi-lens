@@ -474,6 +474,41 @@ vi.mock("../../clients/instance-reaper-state.js", () => ({
 	},
 }));
 
+// #3917: by default no test reaches the HOST process table through the orphan
+// backstop. `index.ts` arms `scheduleUntrackedOrphanSweep` on every real
+// primary `session_start`; 30 s later the sweep enumerates the machine's whole
+// process table and kills a foreign orphan whose owner is dead, and the #2042
+// kill guard then fails the file at teardown although every test passed. The
+// sweep arms in 36 of the 49 files that load `index.ts`; eight reached the
+// table in the r1 census.
+//
+// The backstop's enumeration is the only `queryProcessTable` caller that
+// filters on the image `Name` (the sampler filters `ProcessId`, the Windows
+// marker search `CommandLine`), so that column is the scope: the sweep still
+// runs end to end (lock, stamp, partition) over an empty table and every other
+// process-table query reaches the real seam. A suite whose subject needs the
+// real table opts in with one greppable line, the module's own per-file
+// switch: `vi.unmock("../clients/process-snapshot.js")`.
+// tests/index-3917-orphan-sweep-scope.test.ts witnesses both arms.
+vi.mock("../../clients/process-snapshot.js", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("../../clients/process-snapshot.js")>();
+	return {
+		...original,
+		queryProcessTable: (
+			request: Parameters<typeof original.queryProcessTable>[0],
+			options: Parameters<typeof original.queryProcessTable>[1],
+		): ReturnType<typeof original.queryProcessTable> =>
+			request.filter?.column === "Name"
+				? Promise.resolve({
+						rows: [],
+						status: "ok" as const,
+						serverSideFiltered: true,
+					})
+				: original.queryProcessTable(request, options),
+	};
+});
+
 /**
  * PR #3100 review F2. The run-shared home is NOT removed at run end: nothing in
  * the repo removes `<cwd>/.probe-home`, and `cleanupTmpHygiene` below sweeps

@@ -680,12 +680,15 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "dockerfile",
+		serverId: "docker",
 		lspGate: true,
 		lspGateMarker: "COPY only-one-argument",
 		dir: "tests/fixtures/tool-smoke/dockerfile",
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
 		tools: ["dockerfile-language-server-nodejs"],
+		disableServers: ["docker-official"],
+		expectServerId: "docker",
 	},
 	{
 		lang: "toml",
