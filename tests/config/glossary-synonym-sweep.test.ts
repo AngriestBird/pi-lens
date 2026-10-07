@@ -345,7 +345,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/review-graph/tsconfig-paths.ts": 6,
 		"clients/source-filter.ts": 4,
 		"clients/tree-sitter-cache.ts": 16,
-		"clients/word-index.ts": 11,
+		// #4129 adds cache terminology for the persist-owned serialized view.
+		"clients/word-index.ts": 15,
 	},
 	channel: {
 		"clients/agent-nudge.ts": 1,
@@ -1111,7 +1112,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/cache.ts": 16,
 		"clients/project-diagnostics/scanner.ts": 10,
 		"clients/project-report.ts": 3,
-		"clients/project-snapshot.ts": 128,
+		// #4129 adds the word-index splice and worker heap slot's snapshot uses.
+		"clients/project-snapshot.ts": 130,
 		"clients/read-guard-branch.ts": 2,
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,
@@ -1308,11 +1310,18 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/types.ts": 2,
 		"clients/project-snapshot.ts": 17,
 		"clients/read-bridge.ts": 2,
+		// #3873: the persisted read-set's own schema `version` on the
+		// `read_guard_branch_retained` row (`payloadVersion`), not a generation.
+		"clients/read-guard-branch.ts": 5,
 		"clients/read-guard.ts": 3,
 		"clients/review-graph/builder.ts": 27,
 		"clients/review-graph/types.ts": 1,
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
+		// #3873: the sidecar envelope's schema `version` (and the version a
+		// migrated file was written at) on `session_handoff_adopt`, not a
+		// generation.
+		"clients/session-scope.ts": 5,
 		"clients/session-state-store.ts": 6,
 		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
 		// supplier's resolved `version` (params, `.version` fields, and the
@@ -1350,7 +1359,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-coordinator.ts": 6,
 		"clients/runtime-turn.ts": 21,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
