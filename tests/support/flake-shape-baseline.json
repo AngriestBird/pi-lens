@@ -60,7 +60,7 @@
 		"real-harness/provider-compatibility.test.ts": 5,
 		"real-harness/scenario-1.test.ts": 1,
 		"real-harness/scenario-3.test.ts": 1,
-		"real-harness/tools-enabled.test.ts": 5,
+		"real-harness/tools-enabled.test.ts": 6,
 		"scripts/analyze-config-resolution-smell.test.ts": 2,
 		"scripts/analyze-pi-lens-logs-detectors.test.ts": 2,
 		"scripts/analyze-pi-lens-logs.test.ts": 2,
