@@ -2312,66 +2312,86 @@ describe("#3855 only the successor the primary named is primary in its gap", () 
 	}
 
 	/**
-	 * Verify r3 V3 (probe PR12): an in-memory /new runs on a new session
-	 * manager, so when a /reload lands while its session_start is still in
-	 * flight (#3881) the forward path found no ticket to name the reload gap
-	 * by. The gap was named (reload, none), and a key-less reload start
+	 * Verify r3 V3 (PR12) and verify r4 V6 (PR13): an in-memory /new runs on a
+	 * new session manager, and a /reload can land in any window of its
+	 * session_start (#3881): before pi-lens's start handler runs (W0, micro:0),
+	 * inside its awaits before it holds its scope (W1 micro:1, W2 micro:2), or
+	 * after (W3, setImmediate). The reload's shutdown found no ticket on that
+	 * manager, so the gap was named (reload, none), and a key-less reload start
 	 * passed for the successor: a gap subagent's own in-memory reload, or an
 	 * SDK bind with reason reload. The user's conversation was then demoted.
 	 */
-	for (const gap of ["subagent-reload", "sdk-bind", "none"] as const) {
-		it(`keeps the reload successor of an interrupted in-memory /new primary (gap: ${gap})`, async () => {
-			let runtime: AgentSessionRuntime | undefined;
-			let inner: Promise<void> | undefined;
-			let armed = false;
-			let acted = false;
-			const reloadDuringNew = (pi: ExtensionAPI) => {
-				pi.on("session_start", (event) => {
-					if ((event as { reason?: string }).reason !== "new" || inner) return;
-					inner = new Promise<void>((resolve, reject) =>
-						setImmediate(() => runtime!.session.reload().then(resolve, reject)),
-					);
-				});
-			};
-			const actInReloadGap = (pi: ExtensionAPI) => {
-				pi.on("session_shutdown", async (event) => {
-					if ((event as { reason?: string }).reason !== "reload") return;
-					if (!armed || acted) return;
-					acted = true;
-					if (gap === "subagent-reload")
-						await reload(await startRuntime(SessionManager.inMemory(cwd)));
-					else if (gap === "sdk-bind")
-						await startRuntime(SessionManager.inMemory(cwd), [], [], cwd, {
-							type: "session_start",
-							reason: "reload",
-						});
-				});
-			};
-			runtime = await startRuntime(
-				SessionManager.inMemory(cwd),
-				[actInReloadGap],
-				[reloadDuringNew],
-			);
-			armed = true;
+	type Window = "W0 micro:0" | "W1 micro:1" | "W2 micro:2" | "W3 setImmediate";
+	const scheduleIn = (window: Window, fn: () => void): void => {
+		const hops = { "W0 micro:0": 0, "W1 micro:1": 1, "W2 micro:2": 2 }[
+			window as "W0 micro:0"
+		];
+		if (hops === undefined) return void setImmediate(fn);
+		const micro = (n: number): void =>
+			n === 0 ? queueMicrotask(fn) : queueMicrotask(() => micro(n - 1));
+		micro(hops);
+	};
+	for (const window of [
+		"W0 micro:0",
+		"W1 micro:1",
+		"W2 micro:2",
+		"W3 setImmediate",
+	] as const) {
+		for (const gap of ["subagent-reload", "sdk-bind", "none"] as const) {
+			it(`keeps the reload successor of an interrupted in-memory /new primary (${window}, gap: ${gap})`, async () => {
+				let runtime: AgentSessionRuntime | undefined;
+				let inner: Promise<void> | undefined;
+				let armed = false;
+				let acted = false;
+				const reloadDuringNew = (pi: ExtensionAPI) => {
+					pi.on("session_start", (event) => {
+						if (!armed || (event as { reason?: string }).reason !== "new")
+							return;
+						if (inner) return;
+						inner = new Promise<void>((resolve, reject) =>
+							scheduleIn(window, () =>
+								runtime!.session.reload().then(resolve, reject),
+							),
+						);
+					});
+				};
+				const actInReloadGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== "reload") return;
+						if (!armed || acted) return;
+						acted = true;
+						if (gap === "subagent-reload")
+							await reload(await startRuntime(SessionManager.inMemory(cwd)));
+						else if (gap === "sdk-bind")
+							await startRuntime(SessionManager.inMemory(cwd), [], [], cwd, {
+								type: "session_start",
+								reason: "reload",
+							});
+					});
+				};
+				runtime = await startRuntime(
+					SessionManager.inMemory(cwd),
+					[actInReloadGap],
+					[reloadDuringNew],
+				);
+				armed = true;
+				const before = (await startRows()).length;
 
-			await runtime.newSession();
-			expect(inner).toBeDefined();
-			await inner;
+				await runtime.newSession();
+				expect(inner).toBeDefined();
+				await inner;
 
-			const tail =
-				gap === "subagent-reload"
-					? [
-							["startup", "secondary"],
-							["reload", "secondary"],
-						]
-					: gap === "sdk-bind"
-						? [["reload", "secondary"]]
-						: [];
-			expect((await startRows()).slice(-(tail.length + 1))).toEqual([
-				...tail,
-				["reload", "primary"],
-			]);
-		});
+				// The inner reload's start is the one primary; every gap start,
+				// and in W0 the /new start that ran after its own shutdown, is
+				// secondary.
+				const rows = (await startRows()).slice(before);
+				expect.soft(rows.at(-1)).toEqual(["reload", "primary"]);
+				expect
+					.soft(rows.slice(0, -1).filter(([, role]) => role === "primary"))
+					.toEqual([]);
+				expect(acted).toBe(true);
+			});
+		}
 	}
 
 	/**

@@ -3786,7 +3786,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					sessionFile: getSessionFile(ctx),
 					targetSessionFile: shutdownEvent?.targetSessionFile,
 					sessionManager: getSessionManager(ctx),
-					scope,
 				});
 			} else if (
 				scope &&

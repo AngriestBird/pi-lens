@@ -161,9 +161,7 @@ class Scope implements SessionScope {
 		parentScopeId?: number;
 		coordinatorId?: number;
 	}) {
-		const state = registry();
-		state.nextTicket += 1;
-		this.scopeId = state.nextTicket;
+		this.scopeId = drawTicket();
 		this.role = args.role;
 		this.parentScopeId = args.parentScopeId;
 		this.coordinatorId = args.coordinatorId;
@@ -206,6 +204,13 @@ class Scope implements SessionScope {
 			[CAPTURED_SCOPE]: { scope: this, branch },
 		} as LineageHandle;
 	}
+}
+
+/** The next process-unique ticket (scopes and #3855's successor names). */
+function drawTicket(): number {
+	const state = registry();
+	state.nextTicket += 1;
+	return state.nextTicket;
 }
 
 /**
@@ -545,6 +550,12 @@ export function startKey(
  * in-memory `/fork` successor the same session, so its own file or the ticket
  * bound to its manager. An in-memory `/new` gets a new manager and no file:
  * nothing links it, and the key is `undefined`.
+ *
+ * #3855 r5: a file-less `/reload` or `/fork` is always named by a ticket. When
+ * the manager carries none (the shutdown of a start that has not stashed: an
+ * in-memory `/new` or startup interrupted in any window of its start, #3881),
+ * a fresh one is bound to it here, so the gap is never named by no key, which
+ * every key-less start would match. A manager that carries one keeps it.
  */
 export function successorStartKey(args: {
 	reason: string | undefined;
@@ -555,7 +566,12 @@ export function successorStartKey(args: {
 	if (args.targetSessionFile !== undefined) return args.targetSessionFile;
 	const reason = toStartReason(args.reason);
 	if (reason !== "reload" && reason !== "fork") return undefined;
-	return startKey(args.sessionFile, args.sessionManager);
+	const key = startKey(args.sessionFile, args.sessionManager);
+	const manager = asManager(args.sessionManager);
+	if (key !== undefined || manager === undefined) return key;
+	const ticket = drawTicket();
+	handoffSlot().left.set(manager, ticket);
+	return ticket;
 }
 
 /**
@@ -598,8 +614,6 @@ export function forwardHandoff(args: {
 	sessionFile: string | undefined;
 	targetSessionFile: string | undefined;
 	sessionManager: unknown;
-	/** The interrupted start's scope, once it began (#3855). */
-	scope?: SessionScope;
 }): boolean {
 	const reason = toStartReason(args.reason);
 	const startReason = toStartReason(args.startReason);
@@ -619,16 +633,6 @@ export function forwardHandoff(args: {
 			stores: adopted,
 		};
 	}
-	// #3855: this shutdown names its successor by the ticket on its manager
-	// (`successorStartKey`). An interrupted start on a manager no stash bound
-	// (an in-memory /new or startup) left it without one, and the gap would be
-	// named by no key at all, which any key-less start matches. Bind the
-	// interrupted scope's ticket, as `stashHandoff` binds its own; a manager
-	// that carries one keeps it, since the forwarded slot is keyed by it.
-	const manager = asManager(args.sessionManager);
-	const left = handoffSlot().left;
-	if (args.scope && manager !== undefined && !left.has(manager))
-		left.set(manager, args.scope.scopeId);
 	// The successor's start resets the in-memory ledger; the record's durable
 	// `degradation_ledger` row in latency.log is what outlives it.
 	const outcome = stores ? "forwarded" : "no-slot";
