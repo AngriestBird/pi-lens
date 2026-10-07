@@ -104,6 +104,28 @@ describe("buildEsbuildExecInvocation (#2594 review F2)", () => {
 			fs.rmSync(execPrefix, { recursive: true, force: true });
 		}
 	});
+
+	// Recurrence: master red at b9eda404c (#4028): the nested esbuild install
+	// inherits `--strict-allow-scripts` from the outer `npm install` (via
+	// `prepare`) and has no package.json to find an approval in. Both esbuild
+	// spawns (index bundle and #3219 split bundle) approve the exact spec they
+	// install, so a bump of ESBUILD_VERSION moves the approval with it.
+	it("approves the exact esbuild spec it installs, for the index and the split bundle", () => {
+		const execPrefix = createIsolatedExecPrefix();
+		try {
+			for (const build of [
+				buildEsbuildExecInvocation,
+				buildSplitEsbuildExecInvocation,
+			]) {
+				const { argv } = build({ npmCli: "/fake/npm-cli.js", execPrefix });
+				const spec = argv[argv.indexOf("--package") + 1];
+				expect(spec).toMatch(/^esbuild@\d+\.\d+\.\d+$/);
+				expect(argv).toContain(`--allow-scripts=${spec}`);
+			}
+		} finally {
+			fs.rmSync(execPrefix, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("buildSplitEsbuildExecInvocation (#3219)", () => {
