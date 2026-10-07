@@ -52,7 +52,7 @@ describe("lsp launch", () => {
 			const spawnMock = vi.fn(() => new MockChildProcess(2468));
 
 			vi.doMock("node:child_process", () => ({
-				execSync: vi.fn(() => ""),
+				execFileSync: vi.fn(() => ""),
 				spawn: spawnMock,
 			}));
 
@@ -142,7 +142,7 @@ describe("lsp launch", () => {
 
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn(() => {
 						const proc = new MockChildProcess(4321);
 						setTimeout(() => {
@@ -182,8 +182,8 @@ describe("lsp launch", () => {
 			fs.writeFileSync(resolvedBinary, "");
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn((command: string) => {
-						if (command === "where taplo") {
+					execFileSync: vi.fn((command: string, args: string[]) => {
+						if (command === "where" && args[0] === "taplo") {
 							return `${resolvedBinary}\r\n`;
 						}
 						return "";
@@ -275,7 +275,7 @@ describe("lsp launch", () => {
 			});
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
 					spawn: spawnSpy,
 				};
 			});
@@ -302,7 +302,7 @@ describe("lsp launch", () => {
 			let spawnedCommand: string | undefined;
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn((command: string) => {
 						spawnedCommand = command;
 						return new MockChildProcess(1234);
@@ -336,7 +336,7 @@ describe("lsp launch", () => {
 			let spawnedArgs: string[] | undefined;
 			vi.doMock("node:child_process", () => {
 				return {
-					execSync: vi.fn(() => ""),
+					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn((command: string, args: string[]) => {
 						spawnedCommand = command;
 						spawnedArgs = args;

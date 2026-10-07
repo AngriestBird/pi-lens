@@ -965,7 +965,7 @@ jobs:
       # report mapping and scripts/lib/install-smoke-drift.mjs for the pure
       # body-building logic (tested in tests/scripts/).
       - name: Notify install drift (file/refresh on failure, close on green)
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         # Tracker maintenance must not mask the advisory smoke lane's own
         # verdict; the notifier's gh failure is non-gating at this step.
         continue-on-error: true

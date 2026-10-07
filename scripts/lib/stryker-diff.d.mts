@@ -140,6 +140,12 @@ export declare function selectMutationFiles(options: {
 	maxFiles?: number;
 	weights?: Map<string, number>;
 }): { selected: string[]; skipped: string[] };
+export declare function partitionMutationFiles(options: {
+	selected: string[];
+	skipped: string[];
+	shardIndex?: number;
+	shardCount?: number;
+}): { selected: string[]; skipped: string[] };
 export declare function collectChangedRanges(options: {
 	files: string[];
 	baseRef: string;

@@ -57,23 +57,44 @@ function nightlyFindings(text: string): string[] {
 		findings.push("workflow-level permissions are not {}");
 
 	const jobs = Object.entries(workflow.jobs ?? {});
-	if (jobs.length !== 1) findings.push(`jobs: ${jobs.length}, expected 1`);
-	const [, job] = jobs[0] ?? ["", {} as Job];
-	if (
-		JSON.stringify(Object.entries(job.permissions ?? {}).sort()) !==
-		JSON.stringify([
-			["contents", "read"],
-			["issues", "write"],
-		])
-	) {
-		findings.push(
-			`job permissions ${JSON.stringify(job.permissions)} are not contents:read + issues:write`,
-		);
+	if (jobs.length !== 3) findings.push(`jobs: ${jobs.length}, expected 3`);
+	const prepare = workflow.jobs?.prepare ?? ({} as Job);
+	const mutate = workflow.jobs?.mutate ?? ({} as Job);
+	const publish = workflow.jobs?.publish ?? ({} as Job);
+	for (const [name, job] of [
+		["prepare", prepare],
+		["publish", publish],
+	] as const) {
+		if (
+			JSON.stringify(Object.entries(job.permissions ?? {}).sort()) !==
+			JSON.stringify([
+				["contents", "read"],
+				["issues", "write"],
+			])
+		)
+			findings.push(
+				`job permissions ${name} are not contents:read + issues:write`,
+			);
 	}
-
-	const steps = job.steps ?? [];
+	if (
+		JSON.stringify(mutate.permissions) !== JSON.stringify({ contents: "read" })
+	)
+		findings.push("mutate permissions are not contents:read");
+	const steps = [
+		...(prepare.steps ?? []),
+		...(mutate.steps ?? []),
+		...(publish.steps ?? []),
+	];
 	const run = (step: Step) => step.run ?? "";
-	const window = steps.find((step) => step.id === "window");
+	const window = (prepare.steps ?? []).find((step) => step.id === "window");
+	const windowIndex = (prepare.steps ?? []).indexOf(window ?? ({} as Step));
+	if (
+		windowIndex < 0 ||
+		!(prepare.steps ?? [])
+			.slice(0, windowIndex)
+			.some((step) => run(step).includes("npm ci --ignore-scripts"))
+	)
+		findings.push("window step runs before dependencies are installed");
 	if (!/-- clients tools mcp index\.ts\b/.test(run(window ?? {})))
 		findings.push("window step does not scope the diff to the runtime paths");
 	if (
@@ -90,6 +111,12 @@ function nightlyFindings(text: string): string[] {
 	);
 	if (!driver || !/--base "\$BASE"/.test(run(driver)))
 		findings.push("driver step is not run over the window's base");
+	// Recurrence (#4035): the nightly cap must match the maintainer-approved
+	// 24-file intake; a stale lower pin silently grows the carry-over queue.
+	if (driver && !/--max-files 12\b/.test(run(driver)))
+		findings.push("driver does not use the 12-file shard cap");
+	if (driver && !/--total-max-files 24\b/.test(run(driver)))
+		findings.push("driver does not use the 24-file total cap");
 	if (driver && driver["continue-on-error"] !== true)
 		findings.push("driver failure would skip the tracking-issue step");
 	// Recurrence (#4005 r2): scripts/**/*.mjs competing with runtime files for
@@ -122,7 +149,7 @@ function nightlyFindings(text: string): string[] {
 		findings.push("driver step does not take the queue");
 	// Recurrence (#4005 r3): the body step recomputing the queue from nothing, so
 	// a failed night would clear it.
-	const bodyStep = steps.find((step) =>
+	const bodyStep = (publish.steps ?? []).find((step) =>
 		run(step).includes("stryker-nightly.mjs body"),
 	);
 	if (
@@ -144,26 +171,23 @@ function nightlyFindings(text: string): string[] {
 			"concurrency is not the non-cancelling stryker-nightly group",
 		);
 
-	// Recurrence (#4005 r2 X2): `STATUS=ok` regardless of the driver's outcome
-	// advanced the marker over a failed night.
-	const body = steps.find((step) =>
+	// Recurrence (#4005 r2 X2): publishing a successful status despite a failed
+	// shard advanced the marker over an incomplete night.
+	const body = (publish.steps ?? []).find((step) =>
 		run(step).includes("stryker-nightly.mjs body"),
 	);
 	const bodyRun = run(body ?? {});
 	if (
 		!body ||
-		body.env?.STRYKER_OUTCOME !== "${{ steps.stryker.outcome }}" ||
-		!/^STATUS=failed$/m.test(bodyRun) ||
-		!/^if \[ "\$STRYKER_OUTCOME" = success \]; then STATUS=ok; fi$/m.test(
-			bodyRun,
-		) ||
+		!bodyRun.includes("combined-outcomes.json") ||
+		!bodyRun.includes("process.stdout.write(x.status)") ||
 		!/stryker-nightly\.mjs body .*--status "\$STATUS"/.test(bodyRun)
 	)
 		findings.push(
-			"the body's --status is not derived from the driver's outcome",
+			"the body's --status is not derived from the combined shard outcomes",
 		);
 
-	const upsert = steps.find((step) =>
+	const upsert = (publish.steps ?? []).find((step) =>
 		run(step).includes("scripts/upsert-tracking-issue.mjs"),
 	);
 	if (
@@ -173,7 +197,7 @@ function nightlyFindings(text: string): string[] {
 		)
 	)
 		findings.push("no title-keyed upsert step on the nightly-drift label");
-	if (upsert && !(upsert.if ?? "").includes(WRITE_GUARD))
+	if (upsert && !String(upsert.if ?? "").includes(WRITE_GUARD))
 		findings.push("the issue writer is not scoped to schedule or master");
 	if (/gh issue (create|edit|comment|close)/.test(steps.map(run).join("\n")))
 		findings.push("a raw gh issue write bypasses the shared upsert CLI");
@@ -189,6 +213,60 @@ function nightlyFindings(text: string): string[] {
 	);
 	if (checkout?.with?.["fetch-depth"] !== 0)
 		findings.push("checkout is shallow: git diff <sha>..HEAD needs history");
+
+	// Recurrence (run 37599048379): `path: "$RUNNER_TEMP/..."` on
+	// download-artifact is a literal directory under the workspace, because no
+	// shell expands an action input; both shards and publish found nothing.
+	for (const step of steps)
+		for (const [key, value] of Object.entries(step.with ?? {}))
+			if (/\$[A-Za-z_{]/.test(String(value).replace(/\$\{\{[^}]*\}\}/g, "")))
+				findings.push(`action input ${key} names a shell variable: ${value}`);
+	// Recurrence (#4038 r3): `npm ci --ignore-scripts` skips the `prepare`
+	// grammar download that the Vitest runs under Stryker parse with.
+	const mutateSteps = mutate.steps ?? [];
+	const grammars = mutateSteps.findIndex((step) =>
+		run(step).includes(
+			"node scripts/download-grammars.js --core --dest grammars",
+		),
+	);
+	if (grammars < 0 || grammars > mutateSteps.indexOf(driver ?? {}))
+		findings.push(
+			"the mutate job does not download the core grammars before the driver",
+		);
+	// Recurrence (run 37601788256): the LSP fixture tests in a shard's dry run
+	// import dist/, which `npm run build` does not produce; Stryker's initial
+	// test run failed in both shards.
+	const dist = mutateSteps.findIndex((step) =>
+		/^npm run build:dist$/m.test(run(step)),
+	);
+	if (dist < 0 || dist > mutateSteps.indexOf(driver ?? {}))
+		findings.push("the mutate job does not build dist/ before the driver");
+	// Recurrence (#4038 r4, the re-run cell): a shard artifact an earlier
+	// attempt left must not stand in for this night's shard, and a re-run
+	// attempt must be able to replace it.
+	const stamp = "${{ needs.prepare.outputs.window }}";
+	const combine = (publish.steps ?? []).find((step) =>
+		run(step).includes("stryker-nightly.mjs combine"),
+	);
+	if (
+		driver?.env?.WINDOW !== stamp ||
+		!/"window":"%s"\}\\n' "\$\{\{ matrix\.shard \}\}" "\$rc" "\$WINDOW" > "\$RUNNER_TEMP\/shard\/shard\.json"/.test(
+			run(driver ?? {}),
+		) ||
+		combine?.env?.WINDOW !== stamp ||
+		!run(combine ?? {}).includes('--window "$WINDOW"')
+	)
+		findings.push("shard artifacts are not bound to the night's window");
+	if (
+		steps.some(
+			(step) =>
+				step.uses?.startsWith("actions/upload-artifact@") &&
+				step.with?.overwrite !== true,
+		)
+	)
+		findings.push(
+			"an artifact upload cannot be replaced by a re-run (overwrite)",
+		);
 	return findings;
 }
 
@@ -285,7 +363,7 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"dropping the upsert step's schedule/master scope",
 			(text) =>
 				text.replace(
-					"(github.event_name == 'schedule' || github.ref == 'refs/heads/master')",
+					"github.event_name == 'schedule' || github.ref == 'refs/heads/master'",
 					"true",
 				),
 			/not scoped to schedule or master/,
@@ -309,23 +387,13 @@ describe("stryker-nightly.yml (#4005)", () => {
 			/driver failure would skip/,
 		],
 		[
-			"STATUS=ok unconditionally (X2)",
-			(text) => text.replace("STATUS=failed", "STATUS=ok"),
-			/--status is not derived/,
-		],
-		[
-			"a hard-coded --status ok",
-			(text) => text.replace('--status "$STATUS"', "--status ok"),
-			/--status is not derived/,
-		],
-		[
-			"the outcome env dropped from the body step",
+			"the combined outcome is hard-coded ok",
 			(text) =>
 				text.replace(
-					"          STRYKER_OUTCOME: ${{ steps.stryker.outcome }}\n",
-					"",
+					"process.stdout.write(x.status)",
+					'process.stdout.write("ok")',
 				),
-			/--status is not derived/,
+			/combined shard outcomes/,
 		],
 		[
 			"the concurrency block deleted (X1)",
@@ -346,6 +414,11 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"the driver loses --runtime-only",
 			(text) => text.replace(" --runtime-only", ""),
 			/not restricted to the runtime paths/,
+		],
+		[
+			"the nightly shard cap rises above 12 files",
+			(text) => text.replace("--max-files 12", "--max-files 13"),
+			/does not use the 12-file shard cap/,
 		],
 		[
 			"the queue file not written for the driver",
@@ -387,6 +460,44 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"a shallow checkout",
 			(text) => text.replace("          fetch-depth: 0\n", ""),
 			/checkout is shallow/,
+		],
+		[
+			"a download path written as a shell variable (run 37599048379)",
+			(text) =>
+				text.replace(
+					"path: ${{ runner.temp }}/mutation-shards",
+					'path: "$RUNNER_TEMP/mutation-shards"',
+				),
+			/action input path names a shell variable/,
+		],
+		[
+			"the mutate job's grammar download dropped",
+			(text) =>
+				text.replace(
+					"        run: node scripts/download-grammars.js --core --dest grammars\n",
+					"        run: echo skipped\n",
+				),
+			/does not download the core grammars/,
+		],
+		[
+			"the mutate job's dist build dropped (run 37601788256)",
+			(text) => text.replace("      - run: npm run build:dist\n", ""),
+			/does not build dist\//,
+		],
+		[
+			"combine not given the night's window",
+			(text) => text.replace(' --window "$WINDOW"', ""),
+			/not bound to the night's window/,
+		],
+		[
+			"the shard record written without its window stamp",
+			(text) => text.replace('"$rc" "$WINDOW"', '"$rc" ""'),
+			/not bound to the night's window/,
+		],
+		[
+			"an artifact upload without overwrite",
+			(text) => text.replace("          overwrite: true\n", ""),
+			/cannot be replaced by a re-run/,
 		],
 		[
 			"widening the diff scope away from the runtime paths",

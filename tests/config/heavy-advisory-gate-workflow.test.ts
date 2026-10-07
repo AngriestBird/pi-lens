@@ -656,30 +656,30 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 57 checkout sites across the tree; 62 non-gate job rows (A24/B2/C13/D23
-		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
-		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
-		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
-		// and added the schedule-only nightly report job (D), #3916 added
-		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D,
-		// and #4064 added the cold-cache fast-fail job).
-		// Sites and jobs are counted separately so a no-checkout
+		// The merged workflow currently has 58 checkout sites and 64 non-gate job
+		// rows (A24/B2/C13/D25): #1185 added install-smoke's gating `npm-strict` to
+		// A, #3941 F1 moved install-smoke's schedule-only `host-latest-smoke` from C
+		// to D, #4005 removed the pull_request `mutation` (B) and `mutation comment`
+		// (C) jobs, #3916 added tool-smoke's schedule/dispatch-only
+		// `snapshot-persist-bench` (D), #4035 split the nightly report into two
+		// mutate shards and a publish job (D), and #4064 added the cold-cache
+		// fast-fail job (A). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			57,
+			58,
 		);
-		expect(CENSUS_SITES.length).toBe(57);
+		expect(CENSUS_SITES.length).toBe(58);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(62);
+		).toBe(64);
 		expect(stageJobs("A")).toBe(24);
 		expect(stageJobs("B")).toBe(2);
 		expect(stageJobs("C")).toBe(13);
-		expect(stageJobs("D")).toBe(23);
+		expect(stageJobs("D")).toBe(25);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
