@@ -1304,11 +1304,18 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/types.ts": 2,
 		"clients/project-snapshot.ts": 17,
 		"clients/read-bridge.ts": 2,
+		// #3873: the persisted read-set's own schema `version` on the
+		// `read_guard_branch_retained` row (`payloadVersion`), not a generation.
+		"clients/read-guard-branch.ts": 5,
 		"clients/read-guard.ts": 3,
 		"clients/review-graph/builder.ts": 27,
 		"clients/review-graph/types.ts": 1,
 		"clients/runtime-session.ts": 8,
 		"clients/runtime-turn.ts": 1,
+		// #3873: the sidecar envelope's schema `version` (and the version a
+		// migrated file was written at) on `session_handoff_adopt`, not a
+		// generation.
+		"clients/session-scope.ts": 5,
 		"clients/session-state-store.ts": 6,
 		// 19 -> 52 (#3655): the pnpm/yarn lockfile readers thread each
 		// supplier's resolved `version` (params, `.version` fields, and the

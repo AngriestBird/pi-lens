@@ -206,9 +206,12 @@ export const agentAdvisoryStore = defineSessionStore<string[]>({
 		if (ctx.source !== "slot" || !Array.isArray(payload))
 			return { itemsIn: 0, itemsKept: 0 };
 		const handle = scope.capture();
-		const ownCount = () =>
-			_advisories.filter((entry) => entry.scope.scopeId === scope.scopeId)
-				.length;
+		const ownCount = () => {
+			let count = 0;
+			for (const entry of _advisories)
+				if (entry.scope.scopeId === scope.scopeId) count += 1;
+			return count;
+		};
 		const before = ownCount();
 		for (const text of payload) {
 			if (typeof text !== "string") continue;
@@ -352,7 +355,9 @@ export function recordCrossProcessTouches(
 			_touched.set(mapKey, {
 				key: mapKey,
 				displayPath: entry.path,
-				originSessionId: entry.sessionId,
+				...(entry.sessionId !== undefined && {
+					originSessionId: entry.sessionId,
+				}),
 				reasons: new Set([entry.reason]),
 				origin: "cross-process",
 				contentDelivered: false,

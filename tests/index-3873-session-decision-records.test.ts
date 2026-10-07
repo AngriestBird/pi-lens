@@ -272,8 +272,17 @@ function fixture(name: string, lines: number): string {
 	return file;
 }
 
+/** A row's `metadata`: the fields the cases narrow, and the rest as written. */
+interface Row {
+	[field: string]: unknown;
+	storeNames?: string[];
+	fileKeys?: string[];
+	tried?: Array<{ storeNames?: string[]; [field: string]: unknown }>;
+	sources?: Array<{ source: string }>;
+}
+
 /** The metadata of every `phase` row in `latency.log`, in write order. */
-async function rows(phase: string): Promise<Record<string, any>[]> {
+async function rows(phase: string): Promise<Row[]> {
 	await flushLatencyLog();
 	const text = fs.existsSync(getLatencyLogPath())
 		? fs.readFileSync(getLatencyLogPath(), "utf8")
@@ -281,9 +290,9 @@ async function rows(phase: string): Promise<Record<string, any>[]> {
 	return text
 		.split("\n")
 		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, any>)
+		.map((line) => JSON.parse(line) as { phase?: string; metadata?: Row })
 		.filter((row) => row.phase === phase)
-		.map((row) => row.metadata as Record<string, any>);
+		.map((row) => row.metadata as Row);
 }
 
 async function reload(runtime: AgentSessionRuntime): Promise<void> {
@@ -504,7 +513,7 @@ describe("#3873 O2, O3: the adopt walk and each store's action", () => {
 		expect(adopt?.tried).toEqual([
 			expect.objectContaining({ source: "slot", found: true }),
 		]);
-		expect(adopt?.tried[0].storeNames).toEqual(
+		expect(adopt?.tried?.[0]?.storeNames).toEqual(
 			expect.arrayContaining([
 				"read-guard",
 				"lazy-tool-memory",
@@ -580,7 +589,7 @@ describe("#3873 O2, O3: the adopt walk and each store's action", () => {
 				ageMs: expect.any(Number),
 			}),
 		]);
-		expect(adopt?.tried[0].storeNames).toEqual(
+		expect(adopt?.tried?.[0]?.storeNames).toEqual(
 			expect.arrayContaining(["widget", "read-guard"]),
 		);
 		expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
@@ -904,7 +913,7 @@ describe("#3873 O7: the agent_nudge row names what it delivered", () => {
 		expect(nudges[0]?.fileKeys).toHaveLength(2);
 		// The same touch replayed: same file key, a later drain.
 		expect(nudges[1]?.queueEpoch).toBe(2);
-		expect(nudges[0]?.fileKeys).toContain(nudges[1]?.fileKeys[0]);
+		expect(nudges[0]?.fileKeys).toContain(nudges[1]?.fileKeys?.[0]);
 		// A hash of the accumulator key, never the path itself.
 		expect(nudges[0]?.fileKeys).toEqual(
 			expect.arrayContaining([hashText(normalizeMapKey("/repo/a.ts"), 8)]),
@@ -920,17 +929,27 @@ describe("#3873 F1: a formatter give-up leaves a per-file row at chain time", ()
 	// per-file record that the pipeline had given up.
 	for (const which of ["inband", "deferred"] as const) {
 		it(`${which}: one row at chain time, before the formatter settles`, async () => {
-			const never = new Promise<never>(() => {});
+			let settle!: () => void;
+			const settled = new Promise<void>((resolve) => {
+				settle = resolve;
+			});
+			const late = `${which}_format_late_resync`;
 
 			chainLateFormatResync(
-				never,
+				settled,
 				which,
 				{ toolName: "write", filePath: "/repo/f.ts", startedAt: Date.now() },
 				() => {},
 			);
 
-			const chained = await rows("format_late_resync_chained");
-			expect(chained).toEqual([{ which }]);
+			// The give-up is on record while the formatter is still running.
+			expect(await rows("format_late_resync_chained")).toEqual([{ which }]);
+			expect(await rows(late)).toEqual([]);
+			// Let the chain finish (yielding the loop, no timer) so nothing outlives the case.
+			settle();
+			for (let i = 0; i < 5000 && (await rows(late)).length === 0; i += 1)
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(await rows(late)).toHaveLength(1);
 		});
 	}
 });

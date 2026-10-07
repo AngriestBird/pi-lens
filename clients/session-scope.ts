@@ -774,7 +774,9 @@ export interface PersistedStores {
 
 /** The store names a payload actually holds (`undefined` values are absent). */
 function heldStoreNames(stores: Record<string, unknown>): string[] {
-	return Object.keys(stores).filter((name) => stores[name] !== undefined);
+	return Object.entries(stores).flatMap(([name, payload]) =>
+		payload === undefined ? [] : [name],
+	);
 }
 
 /**
