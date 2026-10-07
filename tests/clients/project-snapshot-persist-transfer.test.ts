@@ -546,6 +546,33 @@ describe("project-snapshot persist-worker heap slot (#4129)", () => {
 			).toBeNull();
 		}));
 
+	it("clears the reading when the live worker reports an error", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			// Fault injection at the host boundary: the real worker object is
+			// captured from a pass-through postMessage spy, and an `error` event
+			// on it drives the module's own death handler.
+			let captured: Worker | undefined;
+			const realPost = Worker.prototype.postMessage;
+			vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (
+				this: Worker,
+				...args: Parameters<Worker["postMessage"]>
+			) {
+				captured = this;
+				return realPost.apply(this, args);
+			});
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			await settle(cwd);
+			await refreshProjectSnapshotPersistWorkerHeapStatistics();
+			expect(getProjectSnapshotPersistWorkerHeapStatistics()).not.toBeNull();
+			expect(captured).toBeDefined();
+			try {
+				captured!.emit("error", new Error("injected worker error"));
+				expect(getProjectSnapshotPersistWorkerHeapStatistics()).toBeNull();
+			} finally {
+				await captured!.terminate();
+			}
+		}));
+
 	it("clears the reading on the test reset", async () =>
 		withProjectDataDirAsync(async (cwd) => {
 			saveProjectSnapshot(cwd, releasedSnapshot());
