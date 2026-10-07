@@ -53,7 +53,7 @@
 		"mcp/analyze-cli.test.ts": 1,
 		"mcp/build-graph-cli.test.ts": 1,
 		"packaging-pack-manifest.test.ts": 6,
-		"real-harness/child-exit.test.ts": 3,
+		"real-harness/child-exit.test.ts": 7,
 		"real-harness/diagnostic-provenance.test.ts": 7,
 		"real-harness/negative.test.ts": 2,
 		"real-harness/provider-compatibility.test.ts": 5,
