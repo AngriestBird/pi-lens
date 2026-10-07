@@ -2408,6 +2408,95 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		/** #3248: bounded per-turn on this lane's own row, never per finding. */
 		let deadCodeDispositionSuppressed = 0;
 		const reasons: string[] = [];
+		/**
+		 * The attributable delta of one finished scan: what became unused in the
+		 * files `modified` names, against `baseline` (the row the scan was
+		 * compared with). Moved out of the per-client loop unchanged (#4117 F1)
+		 * so a scan that finishes after its turn can be delivered by the same
+		 * code.
+		 */
+		const deliverDeadCodeDelta = (
+			client: DeadCodeClient,
+			result: DeadCodeResult,
+			baseline: DeadCodeResult | undefined,
+			modified: ReadonlySet<string>,
+		): void => {
+			// #3901: items the cap cut on the previous turn. A failed scan
+			// leaves them parked; a successful one takes them (offered once).
+			const deadCodeLane = carryLane("dead-code", client.id);
+			const parkedDeadCode =
+				runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
+			deadCodeMeta.totalIssues =
+				(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
+			// No baseline means every finding looks new. Report nothing rather
+			// than blame the edit for the whole project's pre-existing debt.
+			if (!baseline?.success) {
+				reasons.push(`${client.id}:no_previous_scan`);
+				return;
+			}
+			const prevKeys = new Set(deadCodeIssues(baseline).map(deadCodeIssueKey));
+			const newIssues = deadCodeIssues(result).filter((issue) => {
+				if (prevKeys.has(deadCodeIssueKey(issue))) return false;
+				if (!issue.file) return false;
+				return modified.has(resolveRunnerPath(cwd, issue.file));
+			});
+			// #3901: a parked item is offered again only while this scan still
+			// reports it, as this scan's own record of it; it bypasses the
+			// baseline and the edited-file gate the cut turn overwrote.
+			const reOffered = stillReportedParked(
+				parkedDeadCode,
+				deadCodeIssues(result),
+				deadCodeIssueKey,
+				new Set(newIssues.map(deadCodeIssueKey)),
+			);
+			if (newIssues.length === 0 && reOffered.length === 0) {
+				reasons.push(`${client.id}:clean`);
+				return;
+			}
+			newIssueTotal += newIssues.length;
+			if (newIssues.length > 0) {
+				projectDiagnosticsDelta.push(
+					...newIssues.map((issue) =>
+						deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+					),
+				);
+				projectDiagnosticsSources.add("dead-code");
+			}
+			// #3248: the rendered advisory takes the stored-disposition
+			// filter, keyed off this lane's OWN adapter. The delta record
+			// above keeps the unfiltered set — its reader applies the policy
+			// on read, so filtering both would double-apply on one lane.
+			const deadCodeDeliverable = filterFindingsByDisposition(
+				[...newIssues, ...reOffered],
+				cwd,
+				(issue) =>
+					deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+			);
+			deadCodeDispositionSuppressed += deadCodeDeliverable.suppressed;
+			// Every finding on this scan was marked: a PUSH surface stays
+			// silent rather than re-announcing that the mark is working; the
+			// count rides this lane's bounded per-turn row.
+			if (deadCodeDeliverable.kept.length === 0) {
+				reasons.push(`${client.id}:all_disposed`);
+				return;
+			}
+			const deadCodePart = formatDeadCodeDelta(
+				deadCodeDeliverable.kept,
+				result.language,
+			);
+			// @delivery-surface: runtime-turn:dead-code-advisory
+			advisoryParts.push(deadCodePart);
+			const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
+			deliveryHolds.push(
+				cutAdvisoryHold(
+					"dead-code",
+					deadCodeLane,
+					deadCodePart,
+					deadCodeDeliverable.kept.slice(0, DEAD_CODE_DELTA_MAX_SHOWN),
+					(issue) => reOfferedKeys.has(deadCodeIssueKey(issue)),
+				),
+			);
+		};
 		// A malformed client or deps object must never abort turn_end. Before the
 		// per-turn delta this block only read a cache; now it iterates and awaits,
 		// so the whole thing needs the guard, not just `client.analyze`.
@@ -2506,84 +2595,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						reasons.push(`${client.id}:scan_failed:${result.summary}`);
 						continue;
 					}
-					// #3901: items the cap cut on the previous turn. A failed scan
-					// leaves them parked; a successful one takes them (offered once).
-					const deadCodeLane = carryLane("dead-code", client.id);
-					const parkedDeadCode =
-						runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
-					deadCodeMeta.totalIssues =
-						(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
-					// No baseline means every finding looks new. Report nothing rather
-					// than blame the edit for the whole project's pre-existing debt.
-					if (!prev?.data.success) {
-						reasons.push(`${client.id}:no_previous_scan`);
-						continue;
-					}
-					const prevKeys = new Set(
-						deadCodeIssues(prev.data).map(deadCodeIssueKey),
-					);
-					const modified = modifiedFiles();
-					const newIssues = deadCodeIssues(result).filter((issue) => {
-						if (prevKeys.has(deadCodeIssueKey(issue))) return false;
-						if (!issue.file) return false;
-						return modified.has(resolveRunnerPath(cwd, issue.file));
-					});
-					// #3901: a parked item is offered again only while this scan still
-					// reports it, as this scan's own record of it; it bypasses the
-					// baseline and the edited-file gate the cut turn overwrote.
-					const reOffered = stillReportedParked(
-						parkedDeadCode,
-						deadCodeIssues(result),
-						deadCodeIssueKey,
-						new Set(newIssues.map(deadCodeIssueKey)),
-					);
-					if (newIssues.length === 0 && reOffered.length === 0) {
-						reasons.push(`${client.id}:clean`);
-						continue;
-					}
-					newIssueTotal += newIssues.length;
-					if (newIssues.length > 0) {
-						projectDiagnosticsDelta.push(
-							...newIssues.map((issue) =>
-								deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-							),
-						);
-						projectDiagnosticsSources.add("dead-code");
-					}
-					// #3248: the rendered advisory takes the stored-disposition
-					// filter, keyed off this lane's OWN adapter. The delta record
-					// above keeps the unfiltered set — its reader applies the policy
-					// on read, so filtering both would double-apply on one lane.
-					const deadCodeDeliverable = filterFindingsByDisposition(
-						[...newIssues, ...reOffered],
-						cwd,
-						(issue) =>
-							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-					);
-					deadCodeDispositionSuppressed += deadCodeDeliverable.suppressed;
-					// Every finding on this scan was marked: a PUSH surface stays
-					// silent rather than re-announcing that the mark is working; the
-					// count rides this lane's bounded per-turn row.
-					if (deadCodeDeliverable.kept.length === 0) {
-						reasons.push(`${client.id}:all_disposed`);
-						continue;
-					}
-					const deadCodePart = formatDeadCodeDelta(
-						deadCodeDeliverable.kept,
-						result.language,
-					);
-					// @delivery-surface: runtime-turn:dead-code-advisory
-					advisoryParts.push(deadCodePart);
-					const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
-					deliveryHolds.push(
-						cutAdvisoryHold(
-							"dead-code",
-							deadCodeLane,
-							deadCodePart,
-							deadCodeDeliverable.kept.slice(0, DEAD_CODE_DELTA_MAX_SHOWN),
-							(issue) => reOfferedKeys.has(deadCodeIssueKey(issue)),
-						),
-					);
+					deliverDeadCodeDelta(client, result, prev?.data, modifiedFiles());
 				} catch (err) {
 					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
 					reasons.push(`${client.id}:threw`);
