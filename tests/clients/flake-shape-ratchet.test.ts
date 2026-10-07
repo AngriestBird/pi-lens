@@ -128,6 +128,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	"never-settling-wait:scripts/mutate-fixture.test.ts": {
+		detector: "never-settling-wait",
+		reason:
+			"the interrupt witness must hold a real child open until SIGINT; replacing the wait with a settled promise would erase the lifecycle under test",
+	},
 	// 2026-09-07 (#2703 review r1): an unhandled derived-promise rejection is
 	// only observable through Node's `unhandledRejection` event, which fires
 	// on a real macrotask; the file drains one real `setImmediate` tick.
@@ -485,6 +490,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and
 	// file I/O; an in-process call would just re-exercise the exported render
 	// function the other describe block already covers.
+	"real-process-spawn:scripts/mutate.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the mutation CLI's child Vitest process and signal path are the process boundary; an in-process call cannot prove restoration after SIGINT",
+	},
 	"real-process-spawn:scripts/mutation-report-render.test.ts": {
 		detector: "real-process-spawn",
 		reason:
