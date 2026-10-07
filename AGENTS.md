@@ -1007,7 +1007,9 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 Every agent `Bash` call under Claude Code runs through
 `scripts/hooks/guard-bash.mjs` (`PreToolUse`), which denies with its reason:
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
-or any remove over a symlinked `node_modules`; an unpinned `node` probe loading
+or any remove over a symlinked `node_modules` or over a path it cannot resolve
+statically (`$(…)`, `~user`, an unset `$VAR`, a glob; #3988), where `~`, `$HOME`
+and relative paths (against a preceding `cd`/`git -C`) are resolved first; an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
 `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe

@@ -32,7 +32,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	classifySegment,
 	classifyPayload,
@@ -92,6 +92,39 @@ function runHook(
 		encoding: "utf8",
 		env,
 	});
+}
+
+/**
+ * A real `git init` + `git worktree add` fixture: `main` is the main checkout,
+ * `<root>/<linkedRelative>` a linked worktree registered with it. Hoisted from
+ * the pkill block so the #3988 path-resolver rows reuse it (#3556, #3988).
+ */
+function makeLinkedWorktreeFixture(linkedRelative = "linked"): {
+	root: string;
+	main: string;
+	linked: string;
+} {
+	const root = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-git-"));
+	const main = join(root, "main");
+	const linked = join(root, linkedRelative);
+	mkdirSync(main);
+	gitExecFileSync("git", ["init", "-q"], { cwd: main });
+	writeFileSync(join(main, "README.md"), "fixture\n");
+	gitExecFileSync("git", ["add", "README.md"], { cwd: main });
+	gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
+		cwd: main,
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: "pi-lens test",
+			GIT_AUTHOR_EMAIL: "test@example.com",
+			GIT_COMMITTER_NAME: "pi-lens test",
+			GIT_COMMITTER_EMAIL: "test@example.com",
+		},
+	});
+	gitExecFileSync("git", ["worktree", "add", "-q", linked], {
+		cwd: main,
+	});
+	return { root, main, linked };
 }
 
 // Every deny string the issue lists, with the rule keyword its message must
@@ -552,6 +585,19 @@ function commandHash(command: string): string {
 //     set entirely (the `timeout` word was an unrecognized command, not
 //     stripped).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
+	// #3988: six real historical orchestrator commands that run
+	// `git worktree remove --force "$w"` / `…/$w` with a LOOP variable (`for w
+	// in …; do`, `while read w`) or a glob (`.claude/worktrees/agent-2670-*`).
+	// The path is unknowable to a static scan, so the destructive remove now
+	// fails closed with `worktreeUnresolved`; each remove was read in full and
+	// none carries a literal path. The sanctioned bulk removal is `node
+	// scripts/prune-agent-worktrees.mjs`.
+	"8bc8a4c462c564042423fff3baf78f05f2d88b6b2048ada41d5a04ff42047b28",
+	"e70b2e5ae55217946e9eb793a8cf4af8ab0abc8cfa31763c0fa747829e7662ab",
+	"af560ff2bb6809fb75e9ca40ce445e248b43795ff2d7f9532be6cde38290bfcf",
+	"a3576fba5be22edefa148b8a98c06257fe1b01451392c4b33fbc90d598f1beac",
+	"893583dbbe1c42779753301c1af6c9545958e36e492d264dfc537e81fafc8773",
+	"3c4bd55c640f77611b546c28f1fcfa2e2b0045336c5edd3875f37c6e81a0fa8f",
 	// #3888 audit: no executable historical `git push --force`, `+refspec`,
 	// or `git rebase` rows were present; prose and commit-message mentions are
 	// inert and remain correctly allowed by the corpus test.
@@ -720,38 +766,6 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		}
 	});
 
-	it.each([
-		["~", (rel: string) => `~/${rel}`],
-		["$HOME", (rel: string) => `$HOME/${rel}`],
-		["${HOME}", (rel: string) => `\${HOME}/${rel}`],
-		["chained `echo x;` with ~", (rel: string) => `echo x; git worktree remove --force ~/${rel}`],
-	])(
-		"denies a shell-expanded %s spelling of the worktree path (#3988)",
-		(_label, spell) => {
-			const home = mkdtempSync(join(tmpdir(), "guard-bash-home-3988-"));
-			const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
-			const tree = join(home, "scratch", "wt");
-			mkdirSync(tree, { recursive: true });
-			writeFileSync(
-				join(tree, ".git"),
-				"gitdir: /some/main/checkout/.git/worktrees/fixture\n",
-			);
-			symlinkSync(shared, join(tree, "node_modules"));
-			try {
-				const arg = spell("scratch/wt");
-				const command = arg.startsWith("echo")
-					? arg
-					: `git worktree remove --force ${arg}`;
-				const result = runHook(command, { ...BASE_ENV, HOME: home });
-				expect(result.status).toBe(2);
-				expect(result.stderr).toContain("#3173");
-			} finally {
-				rmSync(home, { recursive: true, force: true });
-				rmSync(shared, { recursive: true, force: true });
-			}
-		},
-	);
-
 	it("allows the SAME tree once node_modules is unlinked (the note's own prescribed fix)", () => {
 		const shared = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-shared-nm-"));
 		const tree = makeWorktreeDir("guard-bash-worktree-symlink-");
@@ -856,6 +870,532 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 			rmSync(tree, { recursive: true, force: true });
 			rmSync(shared, { recursive: true, force: true });
 		}
+	});
+});
+
+// #3988: every guard-bash rule that tests a PATH argument resolves it through
+// ONE resolver (`expandShellWord` / `resolveShellPath` in guard-bash.mjs): the
+// shell expansions bash performs before the program sees argv (`~`, `$HOME`,
+// `${HOME}`, `$VAR`, `$PWD`), then the command's effective cwd (a preceding
+// `cd`, `git -C`, else the hook payload's cwd). Recurrence this block names:
+// 2026-10-06, `git worktree remove --force ~/.local/share/.../3967-final` ran
+// unblocked against a tree whose node_modules was a symlink into the main
+// checkout (#3173 hole); the tmp-checkout, mktemp and node-probe rules each
+// carried a partial expander of their own and had the same hole. A path that
+// cannot be resolved statically fails CLOSED for the destructive rule
+// (`git worktree remove`), with its own named rule.
+//
+// Every row goes through the real hook entry (stdin JSON -> exit code ->
+// stderr), against a REAL registered linked worktree whose node_modules is a
+// symlink into a shared directory, the reviewer's probe from the issue body.
+describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () => {
+	type PathRow = {
+		label: string;
+		/** `@W@` symlinked worktree, `@CLEAN@` worktree with a real node_modules, `@HOME@`, `@ROOT@`, `@SCRATCH@` (HOME/scratch). */
+		command: string;
+		/** payload cwd, same placeholders; default PAYLOAD_CWD */
+		cwd?: string;
+		/** extra hook env; `undefined` removes the variable */
+		env?: Record<string, string | undefined>;
+		rule: DenyRule | null;
+	};
+
+	let fixture: ReturnType<typeof makeLinkedWorktreeFixture>;
+	let home: string;
+	let scratch: string;
+	let clean: string;
+	let shared: string;
+
+	beforeAll(() => {
+		fixture = makeLinkedWorktreeFixture(join("home", "scratch", "wt"));
+		home = join(fixture.root, "home");
+		scratch = join(home, "scratch");
+		shared = join(fixture.root, "shared-node-modules");
+		mkdirSync(shared);
+		symlinkSync(shared, join(fixture.linked, "node_modules"));
+		// A second registered-looking tree whose node_modules is a REAL
+		// directory: the allow arm that proves a resolved path is judged, not
+		// blanket-denied.
+		clean = join(scratch, "clean");
+		mkdirSync(join(clean, "node_modules"), { recursive: true });
+		writeFileSync(
+			join(clean, ".git"),
+			"gitdir: /some/main/checkout/.git/worktrees/clean\n",
+		);
+	});
+
+	afterAll(() => {
+		rmSync(fixture.root, { recursive: true, force: true });
+	});
+
+	function fill(text: string): string {
+		return text
+			.replaceAll("@W@", fixture.linked)
+			.replaceAll("@CLEAN@", clean)
+			.replaceAll("@SCRATCH@", scratch)
+			.replaceAll("@HOME@", home)
+			.replaceAll("@ROOT@", fixture.root);
+	}
+
+	function decide(row: PathRow) {
+		const env: NodeJS.ProcessEnv = { ...BASE_ENV, HOME: home };
+		for (const [key, value] of Object.entries(row.env ?? {}))
+			if (value === undefined) delete env[key];
+			else env[key] = fill(value);
+		return runHook(fill(row.command), env, fill(row.cwd ?? PAYLOAD_CWD));
+	}
+
+	function expectRule(row: PathRow) {
+		const result = decide(row);
+		if (row.rule === null) {
+			expect(result.stderr).toBe("");
+			expect(result.status).toBe(0);
+		} else {
+			expect(result.stderr).toBe(`${RULE_MESSAGES[row.rule]}\n`);
+			expect(result.status).toBe(2);
+		}
+	}
+
+	const OFF_TMP_HOME = "/home/dev/guard-bash-3988-home";
+	const TMP_HOME = "/tmp/guard-bash-3988-home";
+
+	// -- git worktree remove: spelling x cwd context -> #3173 deny -----------
+	const REMOVE_DENY_ROWS: PathRow[] = [
+		{
+			label: "absolute path (baseline)",
+			command: "git worktree remove --force @W@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "~/ spelling",
+			command: "git worktree remove ~/scratch/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "$HOME/ spelling",
+			command: "git worktree remove $HOME/scratch/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "${HOME}/ spelling",
+			command: "git worktree remove ${HOME}/scratch/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "~/ spelling after a chained `echo x;`",
+			command: "echo x; git worktree remove --force ~/scratch/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "double-quoted $HOME spelling",
+			command: 'git worktree remove "$HOME/scratch/wt"',
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path from the payload cwd",
+			command: "git worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative ../ path with a trailing slash",
+			command: "git worktree remove ../scratch/wt/",
+			cwd: "@SCRATCH@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "`.` with the payload cwd inside the tree",
+			command: "git worktree remove .",
+			cwd: "@W@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `cd <relative> &&`",
+			command: "cd scratch && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `cd <relative>;`",
+			command: "cd scratch; git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `cd ~/dir &&`",
+			command: "cd ~/scratch && git worktree remove wt",
+			cwd: "@ROOT@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `cd $HOME/dir &&`",
+			command: "cd $HOME/scratch && git worktree remove wt",
+			cwd: "@ROOT@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `cd -P dir &&`",
+			command: "cd -P scratch && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path inside `(cd dir && ...)`",
+			command: "(cd scratch && git worktree remove wt)",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `git -C <relative>`",
+			command: "git -C scratch worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after `git -C ~/dir`",
+			command: "git -C ~/scratch worktree remove wt",
+			cwd: "@ROOT@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "relative path after chained `git -C a -C b`",
+			command: "git -C @HOME@ -C scratch worktree remove wt",
+			cwd: "@ROOT@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "$PWD-anchored path",
+			command: "git worktree remove $PWD/wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "variable assigned earlier in the command (tilde in the value)",
+			command: "S=~/scratch; git worktree remove $S/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "exported variable holding a $HOME path",
+			command: 'export V=$HOME/scratch/wt; git worktree remove "$V"',
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "~/ spelling with HOME exported in the command, not the hook env",
+			command: "export HOME=@HOME@; git worktree remove ~/scratch/wt",
+			env: { HOME: "/nonexistent-3988" },
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "variable that exists only in the hook's ambient env",
+			command: "git worktree remove $WT_3988",
+			env: { WT_3988: "@W@" },
+			rule: "worktreeSymlink",
+		},
+	];
+
+	// -- git worktree remove: unresolvable -> fail CLOSED (#3988) ------------
+	const REMOVE_UNRESOLVED_ROWS: PathRow[] = [
+		{
+			label: "variable with no known value",
+			command: "git worktree remove $OTHERVAR_3988/scratch/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "$(...) inside the path",
+			command: "git worktree remove $(pwd)/scratch/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "whole path from a quoted $(...)",
+			command: 'git worktree remove "$(cat wt.txt)"',
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "backticks inside the path",
+			command: "git worktree remove `pwd`/scratch/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "~user spelling",
+			command: "git worktree remove ~nobody/scratch/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "parameter expansion with an operator",
+			command: "git worktree remove ${HOME:-x}/scratch/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "glob that expands to the tree",
+			command: "git worktree remove ~/scratch/w*",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "HOME unset in the hook env",
+			command: "git worktree remove $HOME/scratch/wt",
+			env: { HOME: undefined },
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "~/ spelling with HOME unset in the hook env",
+			command: "git worktree remove ~/scratch/wt",
+			env: { HOME: undefined },
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "self-referential variable chain",
+			command: "A=$A; git worktree remove $A/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "variable chain that bottoms out in an unknown variable",
+			command: "A=$B_3988; git worktree remove $A/wt",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "relative path after `cd $UNKNOWN &&` (cwd unknown)",
+			command: "cd $OTHERVAR_3988 && git worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "relative path after `cd ~user &&` (cwd unknown)",
+			command: "cd ~nobody && git worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "relative path after `cd $(...) &&` (cwd unknown)",
+			command: "cd $(git rev-parse --show-toplevel) && git worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "relative path after `popd` (cwd unknown)",
+			command: "popd >/dev/null && git worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "relative path after `git -C $UNKNOWN`",
+			command: "git -C $OTHERVAR_3988 worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: 'relative path after `git -C "$(...)"`',
+			command: 'git -C "$(pwd)" worktree remove wt',
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+	];
+
+	// -- git worktree remove: resolved, and judged on its merits -> allow ----
+	const REMOVE_ALLOW_ROWS: PathRow[] = [
+		{
+			label: "~/ spelling of a tree with a real node_modules",
+			command: "git worktree remove ~/scratch/clean",
+			rule: null,
+		},
+		{
+			label: "$HOME/ spelling of a tree with a real node_modules",
+			command: "git worktree remove $HOME/scratch/clean",
+			rule: null,
+		},
+		{
+			label: "relative path of a tree with a real node_modules",
+			command: "git worktree remove clean",
+			cwd: "@SCRATCH@",
+			rule: null,
+		},
+		{
+			label: "`cd dir &&` relative path of a clean tree",
+			command: "cd scratch && git worktree remove clean",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "`git -C dir` relative path of a clean tree",
+			command: "git -C scratch worktree remove clean",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "ambient variable naming a clean tree",
+			command: "git worktree remove $WT_3988",
+			env: { WT_3988: "@CLEAN@" },
+			rule: null,
+		},
+		{
+			label: "~/ path that is not a worktree at all",
+			command: "git worktree remove ~/scratch/gone",
+			rule: null,
+		},
+		{
+			// Recurrence: a `cd` inside `( ... )` leaked its directory to every
+			// later segment, so this resolved `wt` under scratch and denied.
+			label: "a subshell's `cd` does not leak out of its parentheses",
+			command: "(cd scratch && true); git worktree remove wt",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "no path argument at all",
+			command: "git worktree remove --help",
+			rule: null,
+		},
+	];
+
+	it.each(REMOVE_DENY_ROWS)("denies the #3173 hazard through $label", (row) =>
+		expectRule(row),
+	);
+
+	it.each(REMOVE_UNRESOLVED_ROWS)(
+		"fails closed (named rule) on an unresolvable path: $label",
+		(row) => {
+			expectRule(row);
+			expect(RULE_MESSAGES.worktreeUnresolved).toContain("#3988");
+		},
+	);
+
+	it.each(REMOVE_ALLOW_ROWS)("allows a resolved clean path: $label", (row) =>
+		expectRule(row),
+	);
+
+	// -- the other path-taking rules go through the SAME resolver ------------
+	// tmpCheckout (#3526): worktree add, clone, mktemp -d, plus `cd`/`-C`.
+	// An unresolvable variable stays a documented fail-OPEN there: it is a
+	// hygiene rule, and denying every `git worktree add "$WT"` would block
+	// ordinary fixer work for a path that cannot be shown to be under /tmp.
+	const TMP_ROWS: PathRow[] = [
+		{
+			label: "worktree add after `git -C /tmp` with a relative path",
+			command: "git -C /tmp worktree add wt",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "clone into a relative directory after `git -C /tmp`",
+			command: "git -C /tmp clone https://example.invalid/r.git x",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "worktree add after `cd $VAR &&` where VAR=/tmp",
+			command: "T=/tmp; cd $T && git worktree add wt",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "worktree add at $HOME/ with HOME under /tmp",
+			command: "git worktree add $HOME/wt",
+			env: { HOME: TMP_HOME },
+			rule: "tmpCheckout",
+		},
+		{
+			label: "clone into ${HOME}/ with HOME under /tmp",
+			command: "git clone https://example.invalid/r.git ${HOME}/x",
+			env: { HOME: TMP_HOME },
+			rule: "tmpCheckout",
+		},
+		{
+			label: "mktemp -d with a $TMPDIR/ template under /tmp",
+			command: "mktemp -d $TMPDIR/x.XXXXXX",
+			env: { TMPDIR: "/tmp/guard-bash-3988-tmpdir" },
+			rule: "tmpCheckout",
+		},
+		{
+			label: "mktemp -d with a ~/ template and HOME under /tmp",
+			command: "mktemp -d ~/x.XXXXXX",
+			env: { HOME: TMP_HOME },
+			rule: "tmpCheckout",
+		},
+		{
+			label: "worktree add after `cd ~ &&` with HOME under /tmp",
+			command: "cd ~ && git worktree add wt",
+			env: { HOME: TMP_HOME },
+			rule: "tmpCheckout",
+		},
+		{
+			label: "worktree add at $HOME/ with HOME off /tmp",
+			command: "git worktree add $HOME/wt",
+			env: { HOME: OFF_TMP_HOME },
+			rule: null,
+		},
+		{
+			label: "worktree add after `git -C ~/dir` with HOME off /tmp",
+			command: "git -C ~/proj worktree add wt",
+			env: { HOME: OFF_TMP_HOME },
+			rule: null,
+		},
+		{
+			label: "mktemp -d with a ~/ template and HOME off /tmp",
+			command: "mktemp -d ~/x.XXXXXX",
+			env: { HOME: OFF_TMP_HOME },
+			rule: null,
+		},
+		{
+			label: "worktree add at an unresolvable variable (documented fail-open)",
+			command: "git worktree add $OTHERVAR_3988/wt",
+			rule: null,
+		},
+	];
+
+	it.each(TMP_ROWS)(
+		"tmp-checkout rule resolves through the shared resolver: $label",
+		(row) => expectRule(row),
+	);
+
+	// node probe (#3680): a `~`/`$HOME` file argument was resolved as a RELATIVE
+	// path under cwd, so the repository-ownership check judged the wrong file.
+	describe("node probe file argument", () => {
+		let otherRepo: string;
+		let foreignDir: string;
+
+		beforeAll(() => {
+			otherRepo = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-3988-other-"));
+			foreignDir = mkdtempSync(
+				join(tmpdir(), "pi-lens-guard-bash-3988-foreign-"),
+			);
+			mkdirSync(join(otherRepo, "dist"));
+			// An empty `.git` directory is all repositoryRoot/repositoryIdentity read;
+			// no `git init` spawn, so the real-process-spawn ratchet does not rise.
+			mkdirSync(join(otherRepo, ".git"));
+		});
+
+		afterAll(() => {
+			rmSync(otherRepo, { recursive: true, force: true });
+			rmSync(foreignDir, { recursive: true, force: true });
+		});
+
+		it.each([
+			["~", "~/dist/cli.js"],
+			["$HOME", "$HOME/dist/cli.js"],
+		])(
+			"allows a %s spelling of a runtime file in ANOTHER repository",
+			(_label, spelling) => {
+				const result = runHook(
+					`node ${spelling} --help`,
+					{ ...BASE_ENV, HOME: otherRepo },
+					repoRoot,
+				);
+				expect(result.stderr).toBe("");
+				expect(result.status).toBe(0);
+			},
+		);
+
+		it.each([
+			["~", "~/clients/probe.mjs"],
+			["$HOME", "$HOME/clients/probe.mjs"],
+		])(
+			"denies a %s spelling of a runtime file in THIS repository, from a foreign cwd",
+			(_label, spelling) => {
+				const result = runHook(
+					`node ${spelling}`,
+					{ ...BASE_ENV, HOME: repoRoot },
+					foreignDir,
+				);
+				expect(result.stderr).toBe(`${RULE_MESSAGES.probe}\n`);
+				expect(result.status).toBe(2);
+			},
+		);
 	});
 });
 
@@ -1258,18 +1798,21 @@ describe("scripts/hooks/guard-bash.mjs -- tokenizer unit behavior (#2699)", () =
 	});
 
 	it("scannableRegions returns the top level first, then every substitution body, flattened", () => {
+		// Each subtracted span leaves one SUBSTITUTION_MARK (U+E000) behind
+		// (#3988), so a word that held a `$( … )`/backtick span is known to be
+		// incomplete instead of collapsing into a shorter, wrong path.
 		expect(scannableRegions("echo $(git stash) `git log`")).toEqual([
-			"echo  ",
+			"echo \uE000 \uE000",
 			"git stash",
 			"git log",
 		]);
 		// Flattened at ANY depth -- round 2 recursed with a depth cap of 8,
 		// which silently ALLOWED anything nested deeper.
 		expect(scannableRegions("echo $(echo $(echo $(git stash)))")).toEqual([
-			"echo ",
+			"echo \uE000",
 			"git stash",
-			"echo ",
-			"echo ",
+			"echo \uE000",
+			"echo \uE000",
 		]);
 	});
 
@@ -1925,34 +2468,6 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 // a real linked worktree -- #3526/#3556 review F6 needs a REAL one for the
 // scoped-allow direction).
 describe("scripts/hooks/guard-bash.mjs -- pkill/killall shared-tool kill guard (#3556)", () => {
-	function makeLinkedWorktreeFixture(): {
-		root: string;
-		main: string;
-		linked: string;
-	} {
-		const root = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-git-"));
-		const main = join(root, "main");
-		const linked = join(root, "linked");
-		mkdirSync(main);
-		gitExecFileSync("git", ["init", "-q"], { cwd: main });
-		writeFileSync(join(main, "README.md"), "fixture\n");
-		gitExecFileSync("git", ["add", "README.md"], { cwd: main });
-		gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
-			cwd: main,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: "pi-lens test",
-				GIT_AUTHOR_EMAIL: "test@example.com",
-				GIT_COMMITTER_NAME: "pi-lens test",
-				GIT_COMMITTER_EMAIL: "test@example.com",
-			},
-		});
-		gitExecFileSync("git", ["worktree", "add", "-q", linked], {
-			cwd: main,
-		});
-		return { root, main, linked };
-	}
-
 	it("denies a scoped pattern from the fixture's non-linked main checkout", () => {
 		// #3663: keep the CI/plain-clone negative arm explicit so a test cannot
 		// pass merely because this suite happens to run in a linked worktree.
