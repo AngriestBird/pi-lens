@@ -19,10 +19,16 @@
  *
  *   node scripts/stryker-nightly.mjs body --issues FILE --title TITLE
  *     --base SHA --head SHA --source S --status ok|failed --out FILE
- *     [--report JSON] [--run-url URL]
+ *     [--report JSON] [--outcomes JSON] [--run-url URL]
  *     Writes the issue body. After a COMPLETED run (status ok and a report) the
  *     marker advances to HEAD; a FAILED run leaves the marker and the queue as
  *     they were, so tomorrow's window covers it again.
+ *
+ *   node scripts/stryker-nightly.mjs combine --shards-dir DIR
+ *     --expected-shards 0,1 --window W --out JSON --outcomes JSON
+ *     Applies the completeness rule (`combineShards`) to the shard artifacts
+ *     under DIR: `--out` gets every shard's report in shard order, or null on a
+ *     failed night; `--outcomes` gets the status and per-shard verdicts.
  *
  * Carry-over queue: files a run skipped over the --max-files cap, or took but
  * could not finish (ranges sampled away, a budget-ended run), go on a FIFO
@@ -46,7 +52,7 @@
  * a protected master), it is durable (artifacts expire), and a maintainer can
  * reset the window by editing the marker.
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
@@ -74,118 +80,149 @@ export const SOURCES = Object.freeze([
 	"fallback-bad-sha",
 ]);
 
-// The publish job is the only issue writer. A budget-cut shard still has a
-// usable partial report and advances the marker while re-queuing its selected
-// files; a failed shard makes the whole night fail closed and preserves the
-// prior marker/queue. This is the complete two-shard state space.
-export const SHARD_STATE_SPACE = Object.freeze([
-	["complete", "complete", "advance + merge", "combined complete report"],
-	["complete", "budget-cut", "advance + requeue", "combined partial report"],
-	["complete", "failed", "hold", "failure report; queue unchanged"],
-	["budget-cut", "budget-cut", "advance + requeue", "combined partial report"],
-	["budget-cut", "failed", "hold", "failure report; queue unchanged"],
-	["failed", "failed", "hold", "failure report; queue unchanged"],
-]);
+const isPlainObject = (value) =>
+	value !== null && typeof value === "object" && !Array.isArray(value);
 
 /**
- * Combine independent shard reports without allowing either writer to replace
- * the other's selected or queued population. Reports are already scoped to
- * disjoint files by `partitionMutationFiles`.
+ * One shard artifact's verdict under the completeness rule (#4038 r4). An
+ * artifact is usable only when all four hold: its record (`shard.json`) parses
+ * and names a shard; the record's window stamp is this night's; its report
+ * (`mutation.json`) is a mutation report for that shard (object `files`,
+ * object `piLensMutationDiff` whose `shardIndex` is the record's); and the
+ * driver exited 0 (`complete`) or exited non-zero with `partial` set
+ * (`budget-cut`). Everything else is `failed` with its reason.
  *
- * @param {Array<unknown>} reports
- * @returns {unknown | undefined}
+ * @param {{record?: unknown, report?: unknown, reportError?: string}} artifact
+ * @param {string} window
  */
-export function combineShardReports(reports) {
-	const usable = reports.filter(
-		(report) => report && typeof report === "object",
+export function classifyShardArtifact({ record, report, reportError }, window) {
+	if (!isPlainObject(record) || !Number.isInteger(record.shard)) {
+		return {
+			shard: null,
+			outcome: "failed",
+			reason: "no readable shard record",
+		};
+	}
+	const { shard, exitCode } = record;
+	const failed = (reason) => ({ shard, outcome: "failed", reason });
+	if (record.window !== window)
+		return failed("artifact is from another window");
+	if (reportError !== undefined)
+		return failed(`report unreadable: ${reportError}`);
+	if (report === undefined)
+		return failed(`driver exited ${exitCode} with no report`);
+	const meta = report?.piLensMutationDiff;
+	if (
+		!isPlainObject(report) ||
+		!isPlainObject(report.files) ||
+		!isPlainObject(meta)
+	) {
+		return failed("report is not a mutation report");
+	}
+	if (meta.shardIndex !== shard) {
+		return failed(`report is shard ${meta.shardIndex}'s`);
+	}
+	if (exitCode === 0)
+		return { shard, outcome: "complete", reason: null, report };
+	if (meta.partial) {
+		return { shard, outcome: "budget-cut", reason: null, report };
+	}
+	return failed(`driver exited ${exitCode} without a partial result`);
+}
+
+/**
+ * The night's status: `ok` only when each expected shard index has exactly one
+ * artifact and it is usable (`classifyShardArtifact`); an unexpected or
+ * unreadable artifact fails it too. A failed night carries no reports, so the
+ * body keeps the marker and every queued `path@sha`.
+ *
+ * @param {{artifacts: Array<{record?: unknown, report?: unknown, reportError?: string}>, expectedShards: number[], window: string}} options
+ */
+export function combineShards({ artifacts, expectedShards, window }) {
+	const verdicts = artifacts.map((artifact) =>
+		classifyShardArtifact(artifact, window),
 	);
-	if (usable.length === 0) return undefined;
-	const metas = usable.map((report) => report.piLensMutationDiff ?? {});
-	const sum = (key) =>
-		metas.reduce((total, meta) => total + (Number(meta[key]) || 0), 0);
-	const union = (key) => [
-		...new Set(
-			metas.flatMap((meta) => (Array.isArray(meta[key]) ? meta[key] : [])),
-		),
-	];
-	const counts = {};
-	for (const meta of metas)
-		for (const [key, value] of Object.entries(meta.counts ?? {}))
-			counts[key] = (counts[key] ?? 0) + value;
+	const expected = expectedShards.map((shard) => {
+		const mine = verdicts.filter((verdict) => verdict.shard === shard);
+		if (mine.length === 1) return mine[0];
+		return {
+			shard,
+			outcome: "failed",
+			reason: mine.length === 0 ? "missing" : `${mine.length} artifacts`,
+		};
+	});
+	const strays = verdicts
+		.filter((verdict) => !expectedShards.includes(verdict.shard))
+		.map((verdict) =>
+			verdict.outcome === "failed"
+				? verdict
+				: { ...verdict, outcome: "failed", reason: "unexpected shard" },
+		);
+	const shards = [...expected, ...strays];
+	const status = shards.every((shard) => shard.outcome !== "failed")
+		? "ok"
+		: "failed";
 	return {
-		...usable[0],
-		files: Object.assign({}, ...usable.map((report) => report.files ?? {})),
-		piLensMutationDiff: {
-			...metas[0],
-			shardCount: usable.length,
-			filesSelected: union("filesSelected"),
-			filesSkippedOverCap: union("filesSkippedOverCap"),
-			filesUncovered: union("filesUncovered"),
-			filesNoSourceMap: union("filesNoSourceMap"),
-			filesNoMutableLines: union("filesNoMutableLines"),
-			rangesTotal: sum("rangesTotal"),
-			rangesEvaluated: sum("rangesEvaluated"),
-			measuredTotalMutants: sum("measuredTotalMutants"),
-			partial: metas.some((meta) => Boolean(meta.partial)),
-			counts,
-		},
+		status,
+		shards: shards.map(({ shard, outcome, reason }) => ({
+			shard,
+			outcome,
+			reason,
+		})),
+		reports:
+			status === "ok" ? expected.map((verdict) => verdict.report) : undefined,
 	};
 }
 
-/**
- * @param {Array<"complete" | "budget-cut" | "failed">} outcomes
- * @param {number[]} [shardIndices]
- * @param {number[]} [expectedShardIndices]
- */
-export function combinedShardStatus(
-	outcomes,
-	shardIndices,
-	expectedShardIndices,
-) {
-	if (
-		expectedShardIndices &&
-		(!shardIndices ||
-			shardIndices.length !== expectedShardIndices.length ||
-			new Set(shardIndices).size !== shardIndices.length ||
-			!expectedShardIndices.every((index) => shardIndices.includes(index)))
-	) {
-		return "failed";
-	}
-	if (outcomes.some((outcome) => outcome === "failed")) return "failed";
-	return "ok";
+// Each `mutation-shard-<n>` directory the publish job downloaded holds the
+// shard's `shard.json` record and, when the driver wrote one, `mutation.json`.
+function readShardArtifacts(dir) {
+	if (!existsSync(dir)) return [];
+	const read = (file) => {
+		if (!existsSync(file)) return {};
+		try {
+			return { value: JSON.parse(readFileSync(file, "utf8")) };
+		} catch (error) {
+			return { error: error?.message ?? String(error) };
+		}
+	};
+	return readdirSync(dir)
+		.sort()
+		.map((name) => {
+			const report = read(join(dir, name, "mutation.json"));
+			return {
+				record: read(join(dir, name, "shard.json")).value,
+				report: report.value,
+				reportError: report.error,
+			};
+		});
 }
 
 function runCombine(argv) {
-	const inputs = JSON.parse(readFileSync(valueAfter(argv, "--inputs"), "utf8"));
-	const expectedShardIndices = valueAfter(argv, "--expected-shards")
+	const expectedShards = valueAfter(argv, "--expected-shards")
 		.split(",")
 		.filter(Boolean)
 		.map(Number);
 	if (
-		expectedShardIndices.length === 0 ||
-		expectedShardIndices.some((index) => !Number.isInteger(index) || index < 0)
+		expectedShards.length === 0 ||
+		expectedShards.some((index) => !Number.isInteger(index) || index < 0)
 	) {
 		throw new Error("--expected-shards must be a comma-separated list");
 	}
-	const shardIndices = inputs.map((entry) => entry.shard);
-	const outcomes = inputs.map((entry) => entry.outcome);
-	const reports = inputs.map((entry) =>
-		entry.report && existsSync(entry.report)
-			? JSON.parse(readFileSync(entry.report, "utf8"))
-			: undefined,
+	const result = combineShards({
+		artifacts: readShardArtifacts(valueAfter(argv, "--shards-dir")),
+		expectedShards,
+		window: valueAfter(argv, "--window"),
+	});
+	writeFileSync(
+		valueAfter(argv, "--out"),
+		JSON.stringify(result.reports ?? null),
 	);
-	const status = combinedShardStatus(
-		outcomes,
-		shardIndices,
-		expectedShardIndices,
-	);
-	const report = status === "ok" ? combineShardReports(reports) : undefined;
-	writeFileSync(valueAfter(argv, "--out"), JSON.stringify(report ?? null));
 	writeFileSync(
 		valueAfter(argv, "--outcomes"),
-		JSON.stringify({ status, outcomes, report: report !== undefined }),
+		JSON.stringify({ status: result.status, shards: result.shards }),
 	);
-	return { status, outcomes, report };
+	return result;
 }
 
 export const markerOf = (sha) =>
@@ -298,17 +335,44 @@ export function gitQueueOracle(cwd) {
 }
 
 /**
- * What a COMPLETED report left undone. `capped` files were never taken;
- * `unfinished` says the files it did take were not fully evaluated (ranges
- * sampled away, a budget-ended run, ranges not all tried, or a zero-mutant run
- * cut short). Both go on the queue; neither holds the marker.
+ * What a COMPLETED night left undone, decided per shard report (#4038 r4):
+ * `report` is one report or every shard's, in shard order. `capped` files were
+ * never taken; `unfinished` says a report's taken files were not fully
+ * evaluated (ranges sampled away, a budget-ended run, ranges not all tried, or
+ * a zero-mutant run cut short), and `retry` is those files, minus the ones it
+ * could not evaluate at all. All go on the queue; none holds the marker.
  *
  * @param {unknown} report
- * @returns {{capped: string[], unfinished: string[]}}
+ * @returns {{capped: string[], unfinished: string[], retry: string[]}}
  */
 export function coverageGaps(report) {
-	const meta = report?.piLensMutationDiff ?? {};
-	const capped = (meta.filesSkippedOverCap ?? []).filter(isQueueablePath);
+	const reports = [report].flat();
+	const capped = [];
+	const unfinished = [];
+	const retry = [];
+	reports.forEach((shardReport, index) => {
+		const meta = shardReport?.piLensMutationDiff ?? {};
+		const notes = shardGaps(meta);
+		const prefix =
+			reports.length > 1 ? `shard ${meta.shardIndex ?? index}: ` : "";
+		capped.push(...(meta.filesSkippedOverCap ?? []).filter(isQueueablePath));
+		unfinished.push(...notes.map((note) => `${prefix}${note}`));
+		if (notes.length === 0) return;
+		const notEvaluable = new Set([
+			...(meta.filesUncovered ?? []),
+			...(meta.filesNoSourceMap ?? []),
+			...(meta.filesNoMutableLines ?? []),
+		]);
+		retry.push(
+			...(meta.filesSelected ?? []).filter(
+				(file) => isQueueablePath(file) && !notEvaluable.has(file),
+			),
+		);
+	});
+	return { capped, unfinished, retry };
+}
+
+function shardGaps(meta) {
 	const unfinished = [];
 	if (meta.rangesSampled) {
 		unfinished.push(
@@ -339,12 +403,13 @@ export function coverageGaps(report) {
 	) {
 		unfinished.push("no mutant was evaluated and the dry run measured some");
 	}
-	return { capped, unfinished };
+	return unfinished;
 }
 
 /**
- * The queue after a night. A FAILED run (anything but status ok with a report)
- * changes nothing. A completed run drops the queued files it took, queues the
+ * The queue after a night; `report` is one report or every shard's. A FAILED
+ * run (anything but status ok with a report per shard) changes nothing. A
+ * completed run drops the queued files it took, queues the
  * files it skipped over the cap, and re-queues at the back the files it took
  * but could not finish. Entries that no longer exist or are no longer
  * runtime-scoped drop silently; beyond MAX_PENDING the oldest drop and are
@@ -356,23 +421,21 @@ export function coverageGaps(report) {
  * @returns {{entries: {file: string, base: string | null}[], dropped: number, completed: boolean}}
  */
 export function nextQueue({ oldEntries, base, status, report, exists }) {
-	const meta = report?.piLensMutationDiff;
-	if (status !== "ok" || !meta) {
+	const reports = [report].flat();
+	if (
+		status !== "ok" ||
+		reports.length === 0 ||
+		reports.some((entry) => !entry?.piLensMutationDiff)
+	) {
 		return { entries: oldEntries, dropped: 0, completed: false };
 	}
 	const oldBase = new Map(oldEntries.map((entry) => [entry.file, entry.base]));
-	const { capped, unfinished } = coverageGaps(report);
-	const selected = (meta.filesSelected ?? []).filter(isQueueablePath);
-	const taken = new Set(selected);
-	const notEvaluable = new Set([
-		...(meta.filesUncovered ?? []),
-		...(meta.filesNoSourceMap ?? []),
-		...(meta.filesNoMutableLines ?? []),
-	]);
-	const retry =
-		unfinished.length > 0
-			? selected.filter((file) => !notEvaluable.has(file))
-			: [];
+	const { capped, retry } = coverageGaps(reports);
+	const taken = new Set(
+		reports.flatMap((entry) =>
+			(entry.piLensMutationDiff.filesSelected ?? []).filter(isQueueablePath),
+		),
+	);
 	const kept = [...oldBase.keys()].filter((file) => !taken.has(file));
 	const all = [...new Set([...kept, ...capped, ...retry])].filter(
 		(file) => isQueueablePath(file) && exists(file),
@@ -424,8 +487,10 @@ const MAX_SURVIVORS = 50;
 
 /**
  * `previous` is the queue as `parsePending` read it, with its counts.
+ * `report` is one report or every shard's; `shards` is `combineShards`'
+ * per-shard verdicts, rendered so a failed night names its cause.
  *
- * @param {{base: string, head: string, source: string, status: "ok" | "failed", report?: unknown, runUrl?: string, previous?: ReturnType<typeof parsePending>, exists?: (file: string) => boolean}} options
+ * @param {{base: string, head: string, source: string, status: "ok" | "failed", report?: unknown, shards?: {shard: number | null, outcome: string, reason: string | null}[], runUrl?: string, previous?: ReturnType<typeof parsePending>, exists?: (file: string) => boolean}} options
  * @returns {string}
  */
 export function buildNightlyBody({
@@ -434,6 +499,7 @@ export function buildNightlyBody({
 	source,
 	status,
 	report,
+	shards,
 	runUrl,
 	previous = { entries: [], rebased: 0, unknownBase: 0, floor: null },
 	exists = () => true,
@@ -466,6 +532,11 @@ export function buildNightlyBody({
 		`- **Coverage:** ${queue.completed ? (notes.length === 0 ? "the whole window was evaluated" : `not complete: ${notes.join("; ")}`) : "n/a"}`,
 		`- **Carry-over queue:** ${queue.entries.length} file(s) (FIFO, at most ${MAX_PENDING}; the next night mutates these first, under the same cap, each against its own base, at most ${MAX_BASE_AGE_DAYS} days old)${queue.dropped > 0 ? `; ${queue.dropped} oldest file(s) were dropped because the queue overflowed` : ""}${previous.rebased > 0 ? `; ${previous.rebased} queued file(s) had a base older than ${MAX_BASE_AGE_DAYS} days and were re-based onto \`${previous.floor?.slice(0, 12)}\`, so their earlier changes are not evaluated` : ""}${previous.unknownBase > 0 ? `; ${previous.unknownBase} queued file(s) had no base git knows as an ancestor and were read against the window base` : ""}`,
 	];
+	if (shards?.length) {
+		lines.push(
+			`- **Shards:** ${shards.map(({ shard, outcome, reason }) => `${shard ?? "?"} ${outcome}${reason ? ` (${reason})` : ""}`).join("; ")}`,
+		);
+	}
 	if (runUrl) lines.push(`- **Run:** ${runUrl}`);
 	if (queue.entries.length > 0) {
 		lines.push(
@@ -478,10 +549,21 @@ export function buildNightlyBody({
 		"Kill criterion (#4005): remove this lane when two consecutive reports record no product defect and the #3982 benchmark does not make it cheap.",
 		"",
 	);
+	const reports = [report ?? []].flat();
 	lines.push(
-		report === undefined
+		reports.length === 0
 			? "No mutation report was produced for this window."
-			: renderMutationMarkdown(report, { maxSurvivors: MAX_SURVIVORS }),
+			: reports.length === 1
+				? renderMutationMarkdown(reports[0], { maxSurvivors: MAX_SURVIVORS })
+				: reports
+						.map(
+							(shardReport, index) =>
+								`### Shard ${shardReport.piLensMutationDiff?.shardIndex ?? index}\n\n${renderMutationMarkdown(
+									shardReport,
+									{ maxSurvivors: Math.ceil(MAX_SURVIVORS / reports.length) },
+								)}`,
+						)
+						.join("\n\n"),
 	);
 	const body = `${lines.join("\n")}\n`;
 	if (body.length <= MAX_BODY_CHARS) return body;
@@ -535,6 +617,7 @@ function runBase(argv, cwd) {
 
 function runBody(argv, cwd) {
 	const reportPath = valueAfter(argv, "--report", "");
+	const outcomesPath = valueAfter(argv, "--outcomes", "");
 	const status = valueAfter(argv, "--status");
 	if (status !== "ok" && status !== "failed") {
 		throw new Error("--status must be ok or failed");
@@ -557,6 +640,9 @@ function runBody(argv, cwd) {
 			reportPath && existsSync(reportPath)
 				? JSON.parse(readFileSync(reportPath, "utf8")) || undefined
 				: undefined,
+		shards: outcomesPath
+			? JSON.parse(readFileSync(outcomesPath, "utf8")).shards
+			: undefined,
 		runUrl: valueAfter(argv, "--run-url", ""),
 	});
 	writeFileSync(valueAfter(argv, "--out"), body);

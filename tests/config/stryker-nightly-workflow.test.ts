@@ -213,6 +213,52 @@ function nightlyFindings(text: string): string[] {
 	);
 	if (checkout?.with?.["fetch-depth"] !== 0)
 		findings.push("checkout is shallow: git diff <sha>..HEAD needs history");
+
+	// Recurrence (run 37599048379): `path: "$RUNNER_TEMP/..."` on
+	// download-artifact is a literal directory under the workspace, because no
+	// shell expands an action input; both shards and publish found nothing.
+	for (const step of steps)
+		for (const [key, value] of Object.entries(step.with ?? {}))
+			if (/\$[A-Za-z_{]/.test(String(value).replace(/\$\{\{[^}]*\}\}/g, "")))
+				findings.push(`action input ${key} names a shell variable: ${value}`);
+	// Recurrence (#4038 r3): `npm ci --ignore-scripts` skips the `prepare`
+	// grammar download that the Vitest runs under Stryker parse with.
+	const mutateSteps = mutate.steps ?? [];
+	const grammars = mutateSteps.findIndex((step) =>
+		run(step).includes(
+			"node scripts/download-grammars.js --core --dest grammars",
+		),
+	);
+	if (grammars < 0 || grammars > mutateSteps.indexOf(driver ?? {}))
+		findings.push(
+			"the mutate job does not download the core grammars before the driver",
+		);
+	// Recurrence (#4038 r4, the re-run cell): a shard artifact an earlier
+	// attempt left must not stand in for this night's shard, and a re-run
+	// attempt must be able to replace it.
+	const stamp = "${{ needs.prepare.outputs.window }}";
+	const combine = (publish.steps ?? []).find((step) =>
+		run(step).includes("stryker-nightly.mjs combine"),
+	);
+	if (
+		driver?.env?.WINDOW !== stamp ||
+		!/"window":"%s"\}\\n' "\$\{\{ matrix\.shard \}\}" "\$rc" "\$WINDOW" > "\$RUNNER_TEMP\/shard\/shard\.json"/.test(
+			run(driver ?? {}),
+		) ||
+		combine?.env?.WINDOW !== stamp ||
+		!run(combine ?? {}).includes('--window "$WINDOW"')
+	)
+		findings.push("shard artifacts are not bound to the night's window");
+	if (
+		steps.some(
+			(step) =>
+				step.uses?.startsWith("actions/upload-artifact@") &&
+				step.with?.overwrite !== true,
+		)
+	)
+		findings.push(
+			"an artifact upload cannot be replaced by a re-run (overwrite)",
+		);
 	return findings;
 }
 
@@ -406,6 +452,39 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"a shallow checkout",
 			(text) => text.replace("          fetch-depth: 0\n", ""),
 			/checkout is shallow/,
+		],
+		[
+			"a download path written as a shell variable (run 37599048379)",
+			(text) =>
+				text.replace(
+					"path: ${{ runner.temp }}/mutation-shards",
+					'path: "$RUNNER_TEMP/mutation-shards"',
+				),
+			/action input path names a shell variable/,
+		],
+		[
+			"the mutate job's grammar download dropped",
+			(text) =>
+				text.replace(
+					"        run: node scripts/download-grammars.js --core --dest grammars\n",
+					"        run: echo skipped\n",
+				),
+			/does not download the core grammars/,
+		],
+		[
+			"combine not given the night's window",
+			(text) => text.replace(' --window "$WINDOW"', ""),
+			/not bound to the night's window/,
+		],
+		[
+			"the shard record written without its window stamp",
+			(text) => text.replace('"$rc" "$WINDOW"', '"$rc" ""'),
+			/not bound to the night's window/,
+		],
+		[
+			"an artifact upload without overwrite",
+			(text) => text.replace("          overwrite: true\n", ""),
+			/cannot be replaced by a re-run/,
 		],
 		[
 			"widening the diff scope away from the runtime paths",
