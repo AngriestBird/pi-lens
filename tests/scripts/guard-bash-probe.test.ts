@@ -106,8 +106,8 @@ describe.skipIf(process.platform === "win32")(
 			// because 12 known-gap rows always failed; neutering the git
 			// stash/reset/push guards added 53 more allowed rows and the test
 			// stayed green. Per-row verdicts: an unexpected allow reds here, an
-			// expect-allow row that denies reds, and a gap row that now denies is
-			// reported without failing.
+			// expect-allow row that denies reds, and a gap row that now denies reds
+			// too (its label must go).
 			const started = Date.now();
 			const { child, outcome } = json([corpus]);
 			const elapsed = Date.now() - started;
@@ -117,13 +117,32 @@ describe.skipIf(process.platform === "win32")(
 			expect(failures).toEqual([]);
 			expect(child.status).toBe(0);
 			expect(child.leaked).toEqual([]);
-			const enforced = outcome.results.filter((r) => r.status === "enforced");
-			if (enforced.length > 0)
-				console.info(
-					`guard-bash corpus: ${enforced.length} known-gap row(s) now enforced; drop their gap label: ${enforced
-						.map((r) => r.id)
-						.join(", ")}`,
-				);
+			// Recurrence: verify-4078-r2 V1. After #4054 merged, 296 rows still
+			// carried gap labels; neutering every npm/rm/find guard left the test
+			// green because a gap row that denies only printed a note. A gap row
+			// that now denies must have its label dropped in the same change.
+			const enforced = outcome.results
+				.filter((r) => r.status === "enforced")
+				.map((r) => `${r.id} (${r.gap}) ${r.command}`);
+			expect(
+				enforced,
+				"known-gap rows now enforced; drop their gap label in the corpus",
+			).toEqual([]);
+			// The remaining known gaps are exactly the open issues' rows.
+			const gaps = outcome.results.filter((r) => r.gap !== null);
+			expect(gaps.every((r) => r.status === "gap")).toBe(true);
+			expect(
+				Object.entries(
+					gaps.reduce<Record<string, number>>((count, r) => {
+						count[r.gap as string] = (count[r.gap as string] ?? 0) + 1;
+						return count;
+					}, {}),
+				).sort(),
+			).toEqual([
+				["#4025", 3],
+				["#4060", 3],
+				["#4080", 3],
+			]);
 			console.info(
 				`guard-bash corpus: ${outcome.results.length} rows in ${elapsed} ms`,
 			);

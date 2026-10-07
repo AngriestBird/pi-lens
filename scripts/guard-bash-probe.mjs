@@ -38,6 +38,31 @@
  * or other ambient pins), as Claude Code runs it. The child's TMPDIR is a
  * fixed path outside /tmp (see CHILD_TMPDIR).
  *
+ * Not coverable from a fixture cwd: the hook's unpinned-node-probe rule
+ * (`node -e` loading `clients/` or `dist/` code with PI_LENS_HOME unset)
+ * decides from the process cwd and the repository identity of the loaded
+ * path, and a fixture cwd outside a repository is the reviewed allow case
+ * (#3680). No row can reach it; the probe only guarantees PI_LENS_HOME is
+ * unset in the child.
+ *
+ * Row `source` names agent hand-backs that live outside the repository
+ * (under the orchestrator's handbacks directory). What they are:
+ *   review-4054.md      adversarial review of #4054 (guard-bash npm and delete
+ *                       rules): the bypass matrix, F1-F7 and the false-positive set
+ *   verify-4054-r3.md   verify round 3 of #4054: null-cwd, `$PWD`/`~`
+ *                       resolution, F4 value flags, R3-1 (swallowed `--prefix`),
+ *                       R3-2 (symlink then `..`), R3-3 (substitution operands)
+ *   verify-4054-r4.md   verify round 4 of #4054: attacks on the one rule, the
+ *                       real-worktree allow set, R4-2 (two-hop link chain)
+ *   fix-4054-r4.md      fixer round 4 of #4054: the 37-row state table
+ *   verify-3997-r4.md   verify round 4 of #3997 (two-reading rule): the
+ *                       before/after table and a representative subset of its
+ *                       5720-command generator (5 guarded actions x spellings x
+ *                       shapes); the verifier's own matrix files were not kept
+ *   review-4078.md      review of this probe's round 1 (row 48 label)
+ * The 408-row matrix of verify-4054-r4 was not retained; the corpus holds the
+ * rows its hand-back lists literally.
+ *
  * Row fields: command, lane (linked|real|both), expect (allow|deny), source
  * (file plus section), optional cwd (template), env (object), gap (#N, only
  * with expect deny) and reason. Placeholders: {{LINKED}} {{REAL}} {{MAIN}}
