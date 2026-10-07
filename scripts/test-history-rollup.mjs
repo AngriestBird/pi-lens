@@ -255,21 +255,26 @@ export function rollupTestHistory({
 				meanDurationMs,
 			};
 		});
-	const flakes = [...summaryGroups.keys()].sort().flatMap((file) => {
+	// One row per failing (file, head); `flake` is the owner's rule (#3215): the
+	// same head also passed that file. The history selector reads this view.
+	const failures = [...summaryGroups.keys()].sort().flatMap((file) => {
 		const fileRows = summaryGroups.get(file);
 		const heads = new Set(
 			fileRows
 				.filter((row) => row.outcome === "failed")
 				.map((row) => row.headSha),
 		);
-		return [...heads]
-			.filter((head) =>
-				fileRows.some(
-					(row) => row.headSha === head && row.outcome === "passed",
-				),
-			)
-			.map((headSha) => ({ file, headSha }));
+		return [...heads].map((headSha) => ({
+			file,
+			headSha,
+			flake: fileRows.some(
+				(row) => row.headSha === headSha && row.outcome === "passed",
+			),
+		}));
 	});
+	const flakes = failures
+		.filter((failure) => failure.flake)
+		.map(({ file, headSha }) => ({ file, headSha }));
 	fs.mkdirSync(path.dirname(historyPath), { recursive: true });
 	fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
 	fs.writeFileSync(
@@ -281,6 +286,10 @@ export function rollupTestHistory({
 		rowCount: rows.length,
 		files: summary,
 		flakeCandidates: flakes,
+		failures,
+		// When this rollup ran: the selector's staleness clock (a quiet repo with
+		// no CI rows is not lagging data, a rollup that stopped running is).
+		generatedAt: new Date(now).toISOString(),
 	};
 	fs.writeFileSync(summaryPath, `${JSON.stringify(output, null, 2)}\n`);
 	return output;

@@ -30,6 +30,14 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
+	loadHistorySelection,
+	resolveHeadPaths,
+} from "../../scripts/lib/test-history-selection.mjs";
+import {
+	METADATA_FILENAME,
+	rollupTestHistory,
+} from "../../scripts/test-history-rollup.mjs";
+import {
 	CI_ONLY_PRE_PUSH_TESTS,
 	collectTestFiles,
 	MAX_SELECTED_TESTS,
@@ -492,6 +500,60 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		expect(result.totalBeforeCap).toBe(testCount);
 	});
 
+	// #3215 lane 3: history picks are bounded by their own cap, so a hub-module
+	// change that caps the import selection must still run them, and the
+	// import-only tests it dropped stay dropped (the cap's own contract).
+	it("keeps history picks when the import selection caps, and counts none of them toward the cap", () => {
+		enterFixture();
+		write("clients/shared.ts", "export const shared = 1;\n");
+		for (let i = 0; i < MAX_SELECTED_TESTS; i++)
+			write(
+				`tests/generated-${i}.test.ts`,
+				`import { shared } from '../clients/shared.js';\n`,
+			);
+		write("tests/by-history.test.ts", "export const h = 1;\n");
+		const allTests = collectTestFiles("tests");
+		const result = selectTargetedTests(["clients/shared.ts"], allTests, {
+			historyPicks: ["tests/by-history.test.ts"],
+		});
+		// 25 import matches do not cap; one more would. The history pick is the
+		// 26th selected file and must not trip the cap by itself.
+		expect(result.capped).toBe(false);
+		expect(result.selected).toHaveLength(MAX_SELECTED_TESTS + 1);
+		write(
+			`tests/generated-${MAX_SELECTED_TESTS}.test.ts`,
+			`import { shared } from '../clients/shared.js';\n`,
+		);
+		const capped = selectTargetedTests(
+			["clients/shared.ts"],
+			collectTestFiles("tests"),
+			{ historyPicks: ["tests/by-history.test.ts"] },
+		);
+		expect(capped.capped).toBe(true);
+		expect(capped.selected).toEqual(["tests/by-history.test.ts"]);
+		expect(capped.fromHistory).toEqual(["tests/by-history.test.ts"]);
+	});
+
+	it("does not let a history pick smuggle a CI-only suite into the local pre-push run", () => {
+		// Recurrence: #3426 H3432-1 kept budget-busting suites out of the hook;
+		// the history pass must go through the same exclusion.
+		enterFixture();
+		const [ciOnly] = Object.keys(CI_ONLY_PRE_PUSH_TESTS);
+		write(ciOnly as string, "export const t = 1;\n");
+		write("clients/x.ts", "export const x = 1;\n");
+		const allTests = collectTestFiles("tests");
+		const local = selectTargetedTests(["clients/x.ts"], allTests, {
+			historyPicks: [ciOnly as string],
+		});
+		expect(local.selected).not.toContain(ciOnly);
+		expect(local.fromHistory).toEqual([]);
+		const ci = selectTargetedTests(["clients/x.ts"], allTests, {
+			historyPicks: [ciOnly as string],
+			includeCiOnly: true,
+		});
+		expect(ci.selected).toContain(ciOnly);
+	});
+
 	// #3492 (2026-09-26): 0b5cb182a changed clients/lsp/client.ts, which 71
 	// test files match, so the heuristic selection capped and the hook ran
 	// NOTHING; the raw 60 s timer it added reached CI. The registries are
@@ -695,6 +757,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			"scripts/pre-push-targeted-tests.mjs",
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
+			"scripts/lib/test-history-selection.mjs",
 		])
 			put(root, rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
 		put(
@@ -780,6 +843,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			"scripts/pre-push-targeted-tests.mjs",
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
+			"scripts/lib/test-history-selection.mjs",
 			"scripts/run-astgrep-pi-lens.mjs",
 			"scripts/lib/astgrep-self-scan.mjs",
 			"scripts/lib/git-fixture-env.mjs",
@@ -931,6 +995,7 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.ki
 			"scripts/pre-push-targeted-tests.mjs",
 			"scripts/with-test-lock.mjs",
 			"scripts/lib/suite-lock.mjs",
+			"scripts/lib/test-history-selection.mjs",
 		])
 			put(rel, fs.readFileSync(path.join(repoRoot, rel), "utf8"));
 		if (stubLock) put("scripts/with-test-lock.mjs", stubLock);
@@ -1273,4 +1338,177 @@ if (process.argv[1] && process.argv[1].endsWith("pre-push-targeted-tests.mjs")) 
 		expect(result.stderr).toContain("could not run targeted tests");
 		expect(result.stderr).toContain("push blocked");
 	});
+});
+
+describe("history pass through the real hook and real git (#3215 lane 3)", () => {
+	function repo() {
+		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-history-pass-test-"));
+		const cwd = fixtureDir as string;
+		const git = (args: string[]) =>
+			String(gitExecFileSync(args, { cwd, encoding: "utf8" }));
+		git(["init", "--quiet", "--initial-branch=main"]);
+		git(["config", "user.name", "pi-lens test"]);
+		git(["config", "user.email", "test@example.com"]);
+		const commit = (files: Record<string, string>, message: string) => {
+			for (const [file, content] of Object.entries(files)) write(file, content);
+			git(["add", "."]);
+			git(["commit", "--quiet", "-m", message]);
+			return git(["rev-parse", "HEAD"]).trim();
+		};
+		return { cwd, git, commit };
+	}
+
+	it("resolves each head to its own first-parent paths, and omits a merge commit and a head the clone lacks", () => {
+		// Recurrence: the selector attributes a failing head to the paths it
+		// changed; a merge commit has no such diff (its paths would be the whole
+		// of master's side) and an unmerged PR head is simply not in the clone.
+		const { cwd, git, commit } = repo();
+		const base = commit(
+			{ "rules/x/a.yml": "a\n", "docs/readme.md": "r\n" },
+			"base",
+		);
+		const topic = commit(
+			{ "rules/x/b.yml": "b\n", "docs/z.md": "z\n" },
+			"topic",
+		);
+		git(["checkout", "--quiet", "-b", "side", base]);
+		const side = commit({ "side.txt": "s\n" }, "side");
+		git(["checkout", "--quiet", "main"]);
+		git(["merge", "--quiet", "--no-ff", "-m", "merge side", side]);
+		const merge = git(["rev-parse", "HEAD"]).trim();
+		const missing = "f".repeat(40);
+		const resolved = resolveHeadPaths([topic, merge, missing, side], { cwd });
+		expect([...resolved.keys()].sort()).toEqual([side, topic].sort());
+		expect(resolved.get(topic)).toEqual(["docs/z.md", "rules/x/b.yml"]);
+		expect(resolved.get(side)).toEqual(["side.txt"]);
+	});
+
+	it("reads the summary from the data-branch ref, and degrades to unavailable when the ref is absent", () => {
+		// Recurrence: the CI advisory job and a developer clone have only the
+		// `origin/data/test-history` remote-tracking ref; a missing ref (a fresh
+		// clone, a fork) must disclose "unavailable", never throw into the hook.
+		const { cwd, git, commit } = repo();
+		const failing = commit({ "rules/x/a.yml": "a\n" }, "round 1");
+		const noRef = loadHistorySelection({
+			changed: ["rules/x/b.yml"],
+			allTests: ["tests/scripts/rule-catalogs.test.ts"],
+			cwd,
+		});
+		expect(noRef.status).toBe("unavailable");
+		write(
+			"history/summary.json",
+			JSON.stringify({
+				generatedAt: new Date().toISOString(),
+				failures: [
+					{
+						file: "tests/scripts/rule-catalogs.test.ts",
+						headSha: failing,
+						flake: false,
+					},
+				],
+			}),
+		);
+		git(["add", "history/summary.json"]);
+		git(["commit", "--quiet", "-m", "data"]);
+		git(["update-ref", "refs/remotes/origin/data/test-history", "HEAD"]);
+		// The checked-out tree no longer holds the summary: only the ref does.
+		git(["reset", "--quiet", "--hard", "HEAD~1"]);
+		const viaRef = loadHistorySelection({
+			changed: ["rules/x/b.yml"],
+			allTests: ["tests/scripts/rule-catalogs.test.ts"],
+			cwd,
+		});
+		expect(viaRef.picks).toEqual(["tests/scripts/rule-catalogs.test.ts"]);
+	});
+
+	it("adds the tests that failed on a past head touching the same directory, from a summary the real rollup wrote", () => {
+		// #3214 round 1: a rule YAML change reds only rule-catalogs.test.ts, which
+		// imports nothing the YAML is; the hook must select it from history. The
+		// journal rows come from a Windows-rooted artifact, so the selection also
+		// proves #3367's repo-relative key is what the checkout's paths match.
+		const { cwd, git, commit } = repo();
+		fs.symlinkSync(
+			path.join(repoRoot, "scripts"),
+			path.join(cwd, "scripts"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(cwd, "node_modules"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "vitest.config.ts"),
+			path.join(cwd, "vitest.config.ts"),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "package.json"),
+			path.join(cwd, "package.json"),
+		);
+		const passing = "import { it } from 'vitest';\nit('ok', () => {});\n";
+		commit(
+			{
+				"rules/x/seed.yml": "seed\n",
+				"tests/scripts/rule-catalogs.test.ts": passing,
+				"tests/config/sweep-floor-coverage.test.ts": passing,
+			},
+			"base",
+		);
+		const failingHead = commit({ "rules/x/a.yml": "a\n" }, "round 1");
+		const pushed = commit({ "rules/x/b.yml": "b\n" }, "round 2");
+		const artifact = path.join(cwd, ".history-artifact");
+		fs.mkdirSync(artifact);
+		fs.writeFileSync(
+			path.join(artifact, METADATA_FILENAME),
+			JSON.stringify({
+				headSha: failingHead,
+				runId: "1",
+				lane: "win32",
+				recordedAt: new Date().toISOString(),
+			}),
+		);
+		fs.writeFileSync(
+			path.join(artifact, "vitest-results.json"),
+			JSON.stringify({
+				testResults: [
+					"scripts\\rule-catalogs",
+					"config\\sweep-floor-coverage",
+				].map((name) => ({
+					name: `D:\\a\\pi-lens\\pi-lens\\tests\\${name}.test.ts`,
+					status: "failed",
+					duration: 5,
+				})),
+			}),
+		);
+		const summary = path.join(cwd, ".history-summary.json");
+		rollupTestHistory({
+			artifactPaths: [artifact],
+			historyPath: path.join(cwd, ".history.ndjson"),
+			summaryPath: summary,
+		});
+		void git;
+		const result = spawnSync(
+			process.execPath,
+			[
+				path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
+				"--skip-build",
+				"--history-summary",
+				summary,
+			],
+			{
+				cwd,
+				encoding: "utf8",
+				input: `refs/heads/topic ${pushed} refs/heads/topic ${failingHead}\n`,
+			},
+		);
+		expect(result.stdout).toContain("history selection selected");
+		expect(result.stdout).toContain(
+			"history added tests/scripts/rule-catalogs.test.ts",
+		);
+		expect(result.stdout).toContain(
+			"history added tests/config/sweep-floor-coverage.test.ts",
+		);
+		expect(result.stdout).toContain("running 2 targeted test file(s)");
+		expect(result.status).toBe(0);
+	}, 120_000);
 });

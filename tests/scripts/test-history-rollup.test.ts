@@ -613,3 +613,66 @@ describe("journal identity is the repo-relative path (#3367)", () => {
 		]);
 	});
 });
+
+/**
+ * #3215 lane 3 consumes the summary, not the 100 MB journal: the rollup owns
+ * the flake rule, so it publishes one `failures` row per (file, head) with the
+ * flake mark, and the selector asks that view instead of re-deriving the rule.
+ */
+describe("summary failures view for the history selector (#3215 lane 3)", () => {
+	it("lists each failing (file, head) with its flake mark and stamps the generation time", () => {
+		const { root, artifact } = fixture();
+		const second = path.join(root, "artifact-2");
+		fs.mkdirSync(second);
+		writeMetadata(second, {
+			headSha: validHead,
+			runId: 102,
+			lane: "linux",
+			recordedAt: "2026-09-22T01:00:00.000Z",
+		});
+		fs.writeFileSync(
+			path.join(second, "vitest.json"),
+			JSON.stringify({
+				testResults: [
+					{ name: "tests/flaky.test.ts", status: "passed", duration: 10 },
+				],
+			}),
+		);
+		// A second head where `solid` fails and never passes: a real failure.
+		const third = path.join(root, "artifact-3");
+		fs.mkdirSync(third);
+		const otherHead = "b".repeat(40);
+		writeMetadata(third, {
+			headSha: otherHead,
+			runId: 103,
+			lane: "linux",
+			recordedAt: "2026-09-22T02:00:00.000Z",
+		});
+		fs.writeFileSync(
+			path.join(third, "vitest.json"),
+			JSON.stringify({
+				testResults: [
+					{ name: "tests/solid.test.ts", status: "failed", duration: 2 },
+				],
+			}),
+		);
+		const summaryPath = path.join(root, "summary.json");
+		const now = Date.parse("2026-09-23T00:00:00.000Z");
+		rollupTestHistory({
+			artifactPaths: [artifact, second, third],
+			historyPath: path.join(root, "history.ndjson"),
+			summaryPath,
+			now,
+		});
+		const written = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+		expect(written.failures).toEqual([
+			{ file: "tests/flaky.test.ts", headSha: validHead, flake: true },
+			{ file: "tests/solid.test.ts", headSha: otherHead, flake: false },
+		]);
+		expect(written.generatedAt).toBe("2026-09-23T00:00:00.000Z");
+		// The flake list is the flagged subset of the same view, one derivation.
+		expect(written.flakeCandidates).toEqual([
+			{ file: "tests/flaky.test.ts", headSha: validHead },
+		]);
+	});
+});
