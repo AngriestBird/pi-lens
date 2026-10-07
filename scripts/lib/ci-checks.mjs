@@ -72,7 +72,6 @@ export const ADVISORY_CHECKS = new Set([
 	"yamllint (advisory)",
 	"typos (advisory)",
 	"taplo (advisory)",
-	"mutation (advisory)",
 	"complexity (advisory)",
 	"Targeted tests (advisory)",
 	// Stale verdict labels are bookkeeping only. Their cleanup asserts no
@@ -102,7 +101,6 @@ export const ADVISORY_CHECKS = new Set([
 export const HEAVY_GATE_CHECK = "Heavy advisory gate (advisory)";
 export const CHANGES_CHECK = "Changed files (advisory)";
 export const DEFERRED_ADVISORY_CHECKS = Object.freeze([
-	"mutation (advisory)",
 	"Unit tests Windows (advisory)",
 	// #3801: ci.yml's PR-time CodeQL matrix (one check-run per language).
 	"CodeQL (actions) (advisory)",

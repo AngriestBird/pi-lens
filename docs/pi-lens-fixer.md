@@ -75,21 +75,11 @@ mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
   restore. Without Git authority, use a saved patch.
 - Hand-mutate only the NEW guard, branch, filter, or cap the PR is about, both
   directions, one row per direction, and quote the compile-valid red. The new
-  test is the only red under at least one mutation. Stryker samples at most 6
-  files and cannot give the red-first proof, so it does not replace this.
-- After the push, read the `Mutation diff` comment for your exact head (its
-  `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
-  `MUTATION` line). Apply AGENTS.md's two-layer mutation acceptance: required
-  guard proof stays mandatory; exploratory behavioural survivors get bounded
-  caller probes and killed/equivalent/unresolved dispositions with reason and
-  owner. Fix demonstrated correctness gaps; do not turn score or unevaluated
-  population into a second merge gate. Name a 0-mutant, partial, stale, or
-  absent report in the body, never read it as clean. Use bounded hand probes
-  locally; a full Stryker campaign belongs to the CI advisory job. Render its
-  artifact with `node scripts/mutation-report.mjs --report <mutation.json>`.
-  The `mutation` job starts only after every required check passed on the head
-  (#3801): until then the `MUTATION` line reads `PENDING`, and after a red
-  required check or a red gate it reads `NOT RUN` with the reason.
+  test is the only red under at least one mutation. This is the whole PR
+  mutation layer (AGENTS.md, #4005): there is no per-PR Stryker job, comment, or
+  `MUTATION` line, and no survivor triage. The nightly Stryker report on master
+  is exploratory and is not read here. Use bounded hand probes locally; never
+  run a full Stryker campaign in a worktree.
 - Every record the `Observability` section names is asserted by a test in the
   diff and quoted in the body (#2642, #2647, #2649, #2654).
 - Every behavioural sentence (a docstring invariant, a memo, a registry
