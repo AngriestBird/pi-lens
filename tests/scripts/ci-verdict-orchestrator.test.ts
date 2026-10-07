@@ -558,6 +558,28 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 		);
 	});
 
+	it("includes the failed Vitest count for a red Windows advisory", async () => {
+		const windows = job(
+			"unit-tests-fail-101554674114",
+			"Tests  56 failed | 1593 passed | 19 skipped (1668)\n",
+		);
+		windows.json.name = "Unit tests Windows (advisory)";
+		const w = world({
+			prs: [
+				{
+					number: 5,
+					checkRuns: [...GREEN, jobRow(windows)],
+				},
+			],
+			jobs: [windows],
+		});
+		const { exitCode, lines } = await cli(["5"], w);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(lines).toContain(
+			"Advisory (never gates): 1 checks, 1 red: Unit tests Windows (advisory) (failure, 56 failed)",
+		);
+	});
+
 	it("keeps a gating red out of the advisory line and an advisory red out of the gating line", async () => {
 		const w = world({
 			prs: [

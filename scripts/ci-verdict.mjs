@@ -1784,8 +1784,16 @@ export function formatFailureLines(verdict) {
 /** Gating rows and advisory rows reported apart (#3700): an advisory red
  * (OSV, PR body) is information that never gates, and it must not
  * read as the reason a verdict is red -- nor vanish into the table. */
-export function formatGatingSplit(rows, failingRows = []) {
+export function formatGatingSplit(rows, failingRows = [], details = []) {
 	const label = (row) => `${row.name} (${row.conclusion})`;
+	const failedTestCount = (row) => {
+		const detail = details.find((candidate) => candidate.rowId === row.id);
+		const summary = detail?.summary?.find((line) =>
+			/^Tests\s+\d+\s+failed\b/.test(line),
+		);
+		const count = summary?.match(/^Tests\s+(\d+)\s+failed\b/)?.[1];
+		return count === undefined ? null : `${count} failed`;
+	};
 	const gating = rows.filter((row) => row.gating);
 	const advisory = rows.filter((row) => !row.gating);
 	const reds = advisory.filter(
@@ -1796,7 +1804,18 @@ export function formatGatingSplit(rows, failingRows = []) {
 	);
 	return [
 		`Gating: ${gating.length} checks, ${failingRows.length} failing${failingRows.length > 0 ? `: ${failingRows.map(label).join(", ")}` : ""}`,
-		`Advisory (never gates): ${advisory.length} checks, ${reds.length} red${reds.length > 0 ? `: ${reds.map(label).join(", ")}` : ""}`,
+		`Advisory (never gates): ${advisory.length} checks, ${reds.length} red${
+			reds.length > 0
+				? `: ${reds
+						.map((row) => {
+							const count = failedTestCount(row);
+							return count === null
+								? label(row)
+								: `${label(row).replace(/\)$/, `, ${count})`)}`;
+						})
+						.join(", ")}`
+				: ""
+		}`,
 	];
 }
 
@@ -2979,9 +2998,19 @@ export async function run({
 		// are post-merge noise are dropped, and the right remedy is hinted -- also
 		// under a DIRTY or rerun-pending verdict that outranks the failure. gh
 		// only: the REST transport has no `gh api --allow-escape-sequences` read.
-		if (verdict.failingRows.length > 0 && transport === TRANSPORT_GH) {
+		const advisoryRedRows = verdict.rows.filter(
+			(row) =>
+				!row.gating &&
+				row.present &&
+				row.status === "completed" &&
+				isBlockingConclusion(row.conclusion),
+		);
+		if (
+			(verdict.failingRows.length > 0 || advisoryRedRows.length > 0) &&
+			transport === TRANSPORT_GH
+		) {
 			const found = readFailureDetails({
-				rows: verdict.failingRows,
+				rows: [...verdict.failingRows, ...advisoryRedRows],
 				target,
 				repository,
 				ghExec,
@@ -3007,7 +3036,11 @@ export async function run({
 			`CI verdict for ${repository}@${sha}${polls > 1 ? ` (${polls} reads)` : ""}`,
 		);
 		stdout(formatVerdictTable(verdict.rows));
-		for (const line of formatGatingSplit(verdict.rows, verdict.failingRows)) {
+		for (const line of formatGatingSplit(
+			verdict.rows,
+			verdict.failingRows,
+			verdict.details,
+		)) {
 			stdout(line);
 		}
 		for (const line of formatFailureLines(verdict)) stdout(line);

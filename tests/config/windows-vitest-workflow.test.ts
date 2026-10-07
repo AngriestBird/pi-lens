@@ -98,6 +98,28 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		expect(key).toBeGreaterThan(-1);
 	});
 
+	it("publishes a visible red after recording the failed Vitest count", () => {
+		const raw = readFileSync(WORKFLOW_PATH, "utf8");
+		const job = readWorkflow().jobs["unit-tests-windows"];
+		const steps = job?.steps ?? [];
+		const record = steps.find(
+			(step) => step.name === "Record Windows Vitest outcome",
+		);
+		const failure = steps.find(
+			(step) => step.name === "Fail Windows advisory when Vitest fails",
+		);
+
+		// Recurrence: #4019's continue-on-error made 56 failed Windows tests read
+		// as a green job, hiding the red from both reviewers and ci-verdict.
+		expect(record?.run).toContain("Tests");
+		expect(record?.run).toMatch(/failed/);
+		expect(record?.run).toContain("Windows Vitest failures:");
+		expect(failure?.if).toBe("always()");
+		expect(failure?.run).toContain("steps.windows-vitest.outcome");
+		expect(failure?.run).toContain("exit 1");
+		expect(raw).toContain("continue-on-error: true");
+	});
+
 	it("pins the sibling action revisions and the isolated home", () => {
 		const job = readWorkflow().jobs["unit-tests-windows"];
 		const steps = job?.steps ?? [];

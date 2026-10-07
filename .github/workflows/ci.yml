@@ -743,7 +743,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t FILES < "$RUNNER_TEMP/windows-vitest-files.txt"
-          node_modules/.bin/vitest run "${FILES[@]}" --configLoader runner
+          node_modules/.bin/vitest run "${FILES[@]}" --configLoader runner 2>&1 | tee "$RUNNER_TEMP/windows-vitest.log"
 
       - name: Record Windows Vitest outcome
         # #3926: a failed checkout leaves no repository, so the summary must not
@@ -760,9 +760,25 @@ jobs:
             else
               echo "Not executed: no executed-file list was produced (the checkout or enumeration step did not complete), so the Windows subset summary is unavailable."
             fi
+            if [[ -f "$RUNNER_TEMP/windows-vitest.log" ]]; then
+              failures="$(sed -nE 's/^Tests[[:space:]]+([0-9]+)[[:space:]]+failed.*/\1/p' "$RUNNER_TEMP/windows-vitest.log" | tail -n 1)"
+              echo "Windows Vitest failures: ${failures:-0}"
+            else
+              echo "Windows Vitest failures: unavailable"
+            fi
             echo "Windows Vitest subset step outcome: $outcome"
             echo "windows_vitest=$outcome"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail Windows advisory when Vitest fails
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.windows-vitest.outcome }}" == "failure" ]]; then
+            failures="$(sed -nE 's/^Tests[[:space:]]+([0-9]+)[[:space:]]+failed.*/\1/p' "$RUNNER_TEMP/windows-vitest.log" | tail -n 1)"
+            echo "::error title=Windows advisory::${failures:-unknown} Vitest tests failed"
+            exit 1
+          fi
 
   # Simulates pi's real install path: a `git:` install runs `npm install
   # --omit=dev`, which triggers `prepare` → `build:dist` FROM SOURCE with the
