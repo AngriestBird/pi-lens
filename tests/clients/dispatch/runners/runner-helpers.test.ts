@@ -965,36 +965,63 @@ describe("runner-helpers availability checker", () => {
 		);
 	});
 
-	it("lspPrimaryCoversFile: true when the named server is the file's primary (#233)", () => {
+	it("lspPrimaryCoversFile: matches the builtin covers fact for the file's primary (#233, #3968)", () => {
 		const ctx = {
 			filePath: "/proj/config.toml",
 			pi: { getFlag: () => false },
 		} as unknown as DispatchContext;
-		// the `toml` LSP server (taplo lsp) is the sole primary for .toml
-		expect(lspPrimaryCoversFile(ctx, "toml")).toBe(true);
+		// the `toml` LSP server (taplo lsp) is the sole primary for .toml, and
+		// the fact table maps it onto the taplo RUNNER capability with that
+		// binary as the availability gate.
+		const taploCover = lspPrimaryCoversFile(ctx, "taplo");
+		expect(taploCover?.serverId).toBe("toml");
+		expect(taploCover?.gateCommands).toEqual(["taplo"]);
 		const sh = {
 			filePath: "/proj/deploy.sh",
 			pi: { getFlag: () => false },
 		} as unknown as DispatchContext;
-		expect(lspPrimaryCoversFile(sh, "bash")).toBe(true);
+		const shellCover = lspPrimaryCoversFile(sh, "shellcheck");
+		expect(shellCover?.serverId).toBe("bash");
+		expect(shellCover?.gateCommands).toEqual(["bash-language-server"]);
 	});
 
-	it("lspPrimaryCoversFile: false when no-lsp kills the runner (#233)", () => {
+	it("lspPrimaryCoversFile: the shuck builtin fact covers shellcheck for .zsh (no-lsp stays kill-switched) (#3968)", () => {
+		const ctx = {
+			filePath: "/proj/zshrc.zsh",
+			pi: { getFlag: () => false },
+		} as unknown as DispatchContext;
+		// bash's `.zsh` claim narrowed (#3968), so shuck is the lone primary.
+		const cover = lspPrimaryCoversFile(ctx, "shellcheck");
+		expect(cover?.serverId).toBe("shuck");
+		expect(cover?.gateCommands).toEqual(["shuck"]);
+	});
+
+	it("lspPrimaryCoversFile: undefined when no-lsp kills the runner (#233)", () => {
 		const ctx = {
 			filePath: "/proj/config.toml",
 			pi: { getFlag: (f: string) => f === "no-lsp" },
 		} as unknown as DispatchContext;
-		expect(lspPrimaryCoversFile(ctx, "toml")).toBe(false);
+		expect(lspPrimaryCoversFile(ctx, "taplo")).toBeUndefined();
 	});
 
-	it("lspPrimaryCoversFile: false when the server is not this file's primary (#233)", () => {
+	it("lspPrimaryCoversFile: undefined when the covering server is not this file's primary (#233)", () => {
 		// a .py file's primary is the python server, not toml — so the taplo CLI
 		// must NOT self-skip on it.
 		const ctx = {
 			filePath: "/proj/main.py",
 			pi: { getFlag: () => false },
 		} as unknown as DispatchContext;
-		expect(lspPrimaryCoversFile(ctx, "toml")).toBe(false);
+		expect(lspPrimaryCoversFile(ctx, "taplo")).toBeUndefined();
+	});
+
+	it("lspPrimaryCoversFile: undefined when the primary claims no such runner capability (#3968)", () => {
+		// a .sh file's primary (bash) covers shellcheck but NOT taplo — the
+		// capability question is per-runner, never per-server-id.
+		const ctx = {
+			filePath: "/proj/deploy.sh",
+			pi: { getFlag: () => false },
+		} as unknown as DispatchContext;
+		expect(lspPrimaryCoversFile(ctx, "taplo")).toBeUndefined();
 	});
 
 	it("resolveLocalFirstAsync: local node_modules/.bin wins without any probe", async () => {

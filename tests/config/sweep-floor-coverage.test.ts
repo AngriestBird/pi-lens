@@ -104,6 +104,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"policy unit cases over synthetic language definitions, not a production walk",
 	"tests/clients/lsp/lsp-primary-reachability.test.ts":
 		"synthetic candidate-routing behavior tests; server population coverage is lsp-fixture-coverage",
+	"tests/clients/lsp/docker-official-fallback.test.ts":
+		"docker-official acquisition and argv behavior matrix; the registry/admission population is guarded by lsp-gate-population, lsp-fixture-coverage and the idle-eviction census",
 	"tests/clients/lsp/lsp-registry-consistency.test.ts":
 		"registry relation assertions without a blindable source walk",
 	"tests/clients/lsp/server-policy.test.ts":

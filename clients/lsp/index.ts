@@ -8823,7 +8823,9 @@ export class LSPService {
 	 * "Failed warm-up" is measured per non-auxiliary server via the SAME
 	 * `demonstratedReady` signal `touchFile` marks on a confirmed round trip: a
 	 * server whose key is still absent from `demonstratedReady` after both
-	 * attempts never proved it can answer diagnostics. Warm-up stays
+	 * attempts never proved it can answer diagnostics, unless another rooted
+	 * member of its `fallbackFor` family did (#3939: a never-spawned alternate or
+	 * a preferred that lost to its working alternate is not a failure). Warm-up stays
 	 * `clientScope:"primary"` (not the sweep's `"all"`) on purpose: `"all"`
 	 * would additionally spawn the sweep-EXCLUDED auxiliaries
 	 * (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`), which is work this warm-up does not
@@ -8870,9 +8872,41 @@ export class LSPService {
 				this.demonstratedReadyKeyFor(server, representativeFile),
 			),
 		);
-		const alreadyWarm = keys.every(
-			(key) => key === undefined || this.state.demonstratedReady.has(key),
-		);
+		// #3939 F1: a `fallbackFor` pair is ONE family. Acquisition serves the file
+		// from the first member that spawns (`getClientForFile`) and starts an
+		// alternate only when its preferred declines (`getClientsForFile`), so the
+		// member that never served is cold by construction, not by failure. Any
+		// rooted member that demonstrated readiness satisfies the whole family; a
+		// family with no ready member keeps every rooted member cold, so a selected
+		// fallback that fails to answer still counts. Same identity rule as
+		// `getClientsForFile`: an alternate joins an EARLIER attached preferred
+		// (registry order); one whose preferred is not attached (denied, wrong
+		// extension) heads its own family. Walking only backwards cannot cycle.
+		const headOf = new Map<string, string>();
+		const familyHead = servers.map((server) => {
+			const preferredHead =
+				server.fallbackFor === undefined
+					? undefined
+					: headOf.get(server.fallbackFor);
+			const head = preferredHead ?? server.id;
+			headOf.set(server.id, head);
+			return head;
+		});
+		const isColdAt = (i: number): boolean => {
+			const key = keys[i];
+			if (key === undefined || this.state.demonstratedReady.has(key)) {
+				return false;
+			}
+			return !servers.some((_, j) => {
+				const peerKey = keys[j];
+				return (
+					peerKey !== undefined &&
+					familyHead[j] === familyHead[i] &&
+					this.state.demonstratedReady.has(peerKey)
+				);
+			});
+		};
+		const alreadyWarm = servers.every((_, i) => !isColdAt(i));
 		if (alreadyWarm) return { performedWarmup: false, failedServerIds: [] };
 
 		// #799: negative cache. Every server that still needs warming (not
@@ -8888,7 +8922,7 @@ export class LSPService {
 		let allNonWarmCached = true;
 		for (let i = 0; i < servers.length; i++) {
 			const key = keys[i];
-			if (key === undefined || this.state.demonstratedReady.has(key)) continue;
+			if (key === undefined || !isColdAt(i)) continue;
 			if (this.state.demonstratedCold.has(key)) {
 				cachedColdServerIds.push(servers[i].id);
 			} else {
@@ -8948,10 +8982,7 @@ export class LSPService {
 		const stillColdServerIds = (): string[] => {
 			const cold: string[] = [];
 			for (let i = 0; i < servers.length; i++) {
-				const key = keys[i];
-				if (key !== undefined && !this.state.demonstratedReady.has(key)) {
-					cold.push(servers[i].id);
-				}
+				if (isColdAt(i)) cold.push(servers[i].id);
 			}
 			return cold;
 		};
@@ -9841,7 +9872,8 @@ export class LSPService {
 						// So skip this group's files and record each as UNCONFIRMED
 						// (timedOut + skippedWarmupFailure), never as confirmed-clean `[]`:
 						// the group is keyed by its primary server, so a non-empty
-						// `failedServerIds` means that primary is the one that couldn't warm.
+						// `failedServerIds` means that primary's `fallbackFor` family (the
+						// primary alone, when it has no alternate) couldn't warm.
 						if (warmup.failedServerIds.length > 0) {
 							logLatency({
 								type: "phase",

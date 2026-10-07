@@ -105,9 +105,25 @@ export interface RefreshState {
 		string,
 		{ pendingBehavior: string; pendingTier: string; runs: number }
 	>;
+	"idle-eviction"?: Record<string, { nights: IdleEvictionNight[] }>;
 }
 
 export function parseRefreshState(text: string): RefreshState;
+
+/** #3989: the refresh-state key holding the idle-eviction promotion bookkeeping. */
+export const IDLE_EVICTION_KEY: "idle-eviction";
+
+export interface IdleEvictionNight {
+	day: string;
+	rssMb: number | null;
+	coldMs: number;
+}
+
+/** #3989: replace the `idle-eviction` key of the refresh-state block. */
+export function setIdleEvictionState(
+	text: string,
+	idleEviction: Record<string, { nights: IdleEvictionNight[] }>,
+): string;
 
 export function refreshCapabilityMatrix(
 	text: string,
