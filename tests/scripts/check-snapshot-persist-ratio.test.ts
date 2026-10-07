@@ -9,6 +9,12 @@
  *    require the committed threshold to separate them with a margin, so a
  *    threshold edit that no longer separates the measured trees reds here;
  *  - a threshold loosened (or tightened) without a measurement behind it;
+ *  - one noisy first persist deciding a nightly (round 2: the first hosted
+ *    sample, 1.822, sat at the dev box's healthy ceiling of 1.831), so the
+ *    verdict is the median of five independent samples and a single outlier
+ *    must not flip it either way;
+ *  - an unusable measurement going red with no tracking issue (round 2), and
+ *    a provisional threshold presented as settled (round 2);
  *  - the nightly job rewired so it no longer reds on drift, reaches the
  *    tracking issue through a second mechanism, or widens its permissions.
  *
@@ -26,11 +32,13 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
-	buildDriftBody,
+	buildIssueBody,
 	DRIFT_THRESHOLD,
 	evaluate,
 	firstPersistRatio,
+	HOSTED_NIGHTS_BEFORE_RECALIBRATION,
 	main,
+	SAMPLE_COUNT,
 } from "../../scripts/check-snapshot-persist-ratio.mjs";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -50,6 +58,9 @@ const measurement = fixture("snapshot-persist-measurement.json") as {
 const healthy = [...calibration.healthy, ...measurement.rounds.after];
 const regressed = [...calibration.regressed, ...measurement.rounds.before];
 
+const one = (r: Report) => evaluate([r], { samples: 1 });
+const five = (...ratios: number[]) =>
+	evaluate(ratios.map((ratio) => report(ratio * 100, 100)));
 const report = (workerMB: number, syncMB: number): Report => ({
 	results: [
 		{ mode: "worker", runs: [{ persist: 0, rssJumpMB: workerMB }] },
@@ -75,27 +86,54 @@ describe("DRIFT_THRESHOLD separates the measured trees (#3916)", () => {
 	});
 
 	it("calls every fixed-tree run clean and every cloning-tree run drift", () => {
-		expect(healthy.map((r) => evaluate(r).state)).toEqual(
+		expect(healthy.map((r) => one(r).state)).toEqual(
 			healthy.map(() => "clean"),
 		);
-		expect(regressed.map((r) => evaluate(r).state)).toEqual(
+		expect(regressed.map((r) => one(r).state)).toEqual(
 			regressed.map(() => "drift"),
 		);
 	});
 });
 
 describe("evaluate", () => {
-	it("treats a ratio exactly at the threshold as clean and anything above as drift", () => {
-		expect(evaluate(report(DRIFT_THRESHOLD * 100, 100)).state).toBe("clean");
-		expect(evaluate(report(DRIFT_THRESHOLD * 100 + 1, 100)).state).toBe(
+	it("treats a median exactly at the threshold as clean and anything above as drift", () => {
+		const t = DRIFT_THRESHOLD;
+		expect(five(t, t, t, t, t).state).toBe("clean");
+		expect(five(t + 0.01, t + 0.01, t + 0.01, t + 0.01, t + 0.01).state).toBe(
 			"drift",
 		);
+	});
+
+	it("lets one outlier sample flip the verdict in neither direction", () => {
+		// Round 2: a healthy worker spiked once (146-149 MB, ratio 1.54-1.60) in
+		// 2 of 8 local runs, and a single clone-shaped sample must not red a
+		// healthy night; four cloning samples and one lucky low sample must not
+		// pass a regressed night.
+		expect(five(1.8, 1.8, 1.8, 1.8, 3.5).state).toBe("clean");
+		expect(five(2.3, 2.3, 2.3, 2.3, 1.2).state).toBe("drift");
+		expect(five(1.8, 1.8, 3.5, 3.5, 3.5).state).toBe("drift");
+		expect(five(2.3, 2.3, 1.2, 1.2, 1.2).state).toBe("clean");
+	});
+
+	it("reports the median, min and max of the sample ratios, not the mean", () => {
+		const verdict = five(1.5, 1.7, 1.8, 1.9, 4.0);
+		expect(verdict.median).toBeCloseTo(1.8, 10);
+		expect(verdict.min).toBeCloseTo(1.5, 10);
+		expect(verdict.max).toBeCloseTo(4.0, 10);
+		expect(verdict.samples).toHaveLength(5);
 	});
 
 	it("reads persist 0, not a later persist", () => {
 		const warm = report(100, 100);
 		warm.results[0].runs.push({ persist: 1, rssJumpMB: 900 });
-		expect(evaluate(warm)).toMatchObject({ state: "clean", ratio: 1 });
+		expect(one(warm)).toMatchObject({ state: "clean", median: 1 });
+	});
+
+	it("requires SAMPLE_COUNT independent reports", () => {
+		expect(SAMPLE_COUNT).toBe(5);
+		const four = evaluate(Array.from({ length: 4 }, () => report(100, 100)));
+		expect(four.state).toBe("error");
+		expect(four.reason).toContain("need 5 independent bench reports, got 4");
 	});
 
 	it.each([
@@ -113,10 +151,14 @@ describe("evaluate", () => {
 		["a zero sync jump", report(100, 0)],
 		["a non-numeric jump", report(Number.NaN, 100)],
 	])(
-		"reports an unusable report (%s) as error, never as a verdict",
+		"reports an unusable sample (%s) as error, never as a verdict",
 		(_name, bad) => {
-			const verdict = evaluate(bad);
+			const verdict = evaluate([
+				bad,
+				...Array.from({ length: 4 }, () => report(100, 100)),
+			]);
 			expect(verdict.state).toBe("error");
+			expect(verdict.reason).toContain("sample 1:");
 			expect(verdict.reason).toContain("persist 0");
 		},
 	);
@@ -128,21 +170,27 @@ describe("main (the CLI the workflow runs)", () => {
 		for (const dir of dirs.splice(0))
 			rmSync(dir, { recursive: true, force: true });
 	});
-	const run = (bench: unknown, extra: string[] = []) => {
+	/** One bench report per entry; a string is written verbatim, null is never written. */
+	const run = (benches: (unknown | null)[], extra: string[] = []) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-lens-snapshot-ratio-"));
 		dirs.push(dir);
-		const reportPath = join(dir, "report.json");
-		const body = join(dir, "out", "drift.md");
+		const body = join(dir, "out", "issue.md");
 		const state = join(dir, "out", "state");
 		mkdirSync(join(dir, "out"));
-		writeFileSync(
-			reportPath,
-			typeof bench === "string" ? bench : JSON.stringify(bench),
-		);
+		const reportArgs = benches.flatMap((bench, index) => {
+			const reportPath = join(dir, `report-${index + 1}.json`);
+			if (bench !== null) {
+				writeFileSync(
+					reportPath,
+					typeof bench === "string" ? bench : JSON.stringify(bench),
+				);
+			}
+			return ["--report", reportPath];
+		});
 		writeFileSync(body, "stale body from an earlier night");
 		const lines: string[] = [];
 		const code = main(
-			["--report", reportPath, "--body", body, "--state", state, ...extra],
+			[...reportArgs, "--body", body, "--state", state, ...extra],
 			(line: string) => lines.push(line),
 		);
 		const read = (path: string) => {
@@ -154,33 +202,64 @@ describe("main (the CLI the workflow runs)", () => {
 		};
 		return { code, lines, body: read(body), state: read(state)?.trim() };
 	};
+	const samples = (list: Report[], count = SAMPLE_COUNT) =>
+		Array.from({ length: count }, (_, i) => list[i % list.length]);
 
-	it("drift: exit 1, state drift, a body with the figures and the run URL", () => {
-		const out = run(regressed[0], [
+	it("drift: exit 1, state drift, a body with median/min/max, the run URL and the provisional note", () => {
+		const out = run(samples(regressed), [
 			"--run-url",
 			"https://example.invalid/run/1",
 		]);
 		expect(out.code).toBe(1);
 		expect(out.state).toBe("drift");
 		expect(out.body).toContain(String(DRIFT_THRESHOLD));
+		expect(out.body).toMatch(
+			/median .*\*\*2\.\d{3}\*\* \(min 2\.\d{3}, max 2\.\d{3}/,
+		);
 		expect(out.body).toContain("https://example.invalid/run/1");
+		expect(out.body).toContain("PROVISIONAL");
+		expect(out.body).toContain(
+			`re-calibrated after ${HOSTED_NIGHTS_BEFORE_RECALIBRATION} hosted nights`,
+		);
 		expect(out.lines.join("\n")).toContain("::error::");
 	});
 
-	it("clean: exit 0, state clean, and a stale drift body is removed", () => {
-		const out = run(healthy[0]);
+	it("clean: exit 0, state clean, the log line carries median/min/max, and a stale body is removed", () => {
+		const out = run(samples(healthy));
 		expect(out.code).toBe(0);
 		expect(out.state).toBe("clean");
 		expect(out.body).toBeUndefined();
+		expect(out.lines.join("\n")).toMatch(
+			/snapshot-persist ratio: clean median=1\.\d{3} min=1\.\d{3} max=1\.\d{3} n=5 threshold=1\.95 \(PROVISIONAL\)/,
+		);
 	});
 
-	it("unusable report: exit 2, state error, no drift body (the issue is left alone)", () => {
-		for (const bad of ["not json", {}]) {
-			const out = run(bad);
-			expect(out.code).toBe(2);
-			expect(out.state).toBe("error");
-			expect(out.body).toBeUndefined();
+	it("one cloning-shaped sample among five healthy ones stays clean through the real CLI", () => {
+		const out = run([...samples(healthy, 4), regressed[0]]);
+		expect(out.code).toBe(0);
+		expect(out.state).toBe("clean");
+	});
+
+	it("unusable measurement: exit 2, state error, and the issue body carries the reason", () => {
+		// Round 2: exit 2 used to go red with no tracking issue; the body is what
+		// the notifier upserts.
+		const cases: [string, (unknown | null)[]][] = [
+			["not json", [...samples(healthy, 4), "not json"]],
+			["empty report", [...samples(healthy, 4), {}]],
+			["a missing report file", [...samples(healthy, 4), null]],
+			["too few reports", samples(healthy, 3)],
+		];
+		for (const [name, benches] of cases) {
+			const out = run(benches);
+			expect(out.code, name).toBe(2);
+			expect(out.state, name).toBe("error");
+			expect(out.body, name).toContain("unusable tonight");
+			expect(out.body, name).toContain("Reason:");
+			expect(out.body, name).toContain("PROVISIONAL");
+			expect(out.body, name).not.toContain("stale body");
 		}
+		expect(run([...samples(healthy, 4), null]).body).toContain("cannot read");
+		expect(run(samples(healthy, 3)).body).toContain("need 5 independent");
 	});
 
 	it("requires --report", () => {
@@ -188,15 +267,24 @@ describe("main (the CLI the workflow runs)", () => {
 	});
 });
 
-describe("buildDriftBody", () => {
-	it("states the ratio, the threshold and the runner", () => {
-		const verdict = evaluate(report(300, 120));
-		const body = buildDriftBody(verdict, {
+describe("buildIssueBody", () => {
+	it("states the median, min, max, threshold and runner", () => {
+		const verdict = five(2.2, 2.4, 2.5, 2.6, 3.0);
+		const body = buildIssueBody(verdict, {
 			report: { node: "v22.1.0", platform: "linux x64" },
 		});
-		expect(body).toContain("**2.500**");
+		expect(body).toContain("**2.500** (min 2.200, max 3.000;");
 		expect(body).toContain(`**${DRIFT_THRESHOLD}**`);
 		expect(body).toContain("v22.1.0 on linux x64");
+	});
+
+	it("marks the threshold provisional and names the recalibration point in drift and error bodies", () => {
+		for (const verdict of [five(2.5, 2.5, 2.5, 2.5, 2.5), evaluate([])]) {
+			const body = buildIssueBody(verdict);
+			expect(body).toContain("**The threshold is PROVISIONAL.**");
+			expect(body).toContain("after 7 hosted nights");
+		}
+		expect(HOSTED_NIGHTS_BEFORE_RECALIBRATION).toBe(7);
 	});
 });
 
@@ -261,9 +349,19 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		const bench = step("bench-snapshot-persist.mjs").run as string;
 		const check = step("check-snapshot-persist-ratio.mjs").run as string;
 		const notify = step("upsert-tracking-issue.mjs").run as string;
-		expect(bench).toContain('--out "$RUNNER_TEMP/snapshot-persist-bench.json"');
-		expect(check).toContain(
-			'--report "$RUNNER_TEMP/snapshot-persist-bench.json"',
+		// N independent bench invocations (a loop, not later persists of one
+		// child), each writing the report the checker is given.
+		const indices = /for i in ([\d ]+); do/.exec(bench)?.[1].trim().split(" ");
+		expect(indices).toHaveLength(SAMPLE_COUNT);
+		expect(bench).toContain("--persists 1");
+		expect(bench).toContain(
+			'--out "$RUNNER_TEMP/snapshot-persist-bench-$i.json"',
+		);
+		const reports = [...check.matchAll(/--report "([^"]+)"/g)].map((m) => m[1]);
+		expect(reports).toEqual(
+			(indices ?? []).map(
+				(i) => `$RUNNER_TEMP/snapshot-persist-bench-${i}.json`,
+			),
 		);
 		const state = /--state "([^"]+)"/.exec(check)?.[1];
 		const body = /--body "([^"]+)"/.exec(check)?.[1];
@@ -271,15 +369,32 @@ describe("tool-smoke.yml snapshot-persist-bench wiring (#3916)", () => {
 		expect(body && notify.includes(body)).toBe(true);
 	});
 
-	it("lets a drift verdict red the job but never lets the notifier do so", () => {
-		expect(
-			step("check-snapshot-persist-ratio.mjs")["continue-on-error"],
-		).toBeUndefined();
+	it("lets a drift or unusable verdict red the job but never lets the notifier do so", () => {
+		const check = step("check-snapshot-persist-ratio.mjs");
+		expect(check["continue-on-error"]).toBeUndefined();
+		// The checker's exit code survives the `| tee` that feeds the step summary.
+		expect(check.run).toContain("PIPESTATUS[0]");
+		expect(check.run).toContain('exit "$CODE"');
 		const notify = step("upsert-tracking-issue.mjs");
 		expect(notify["continue-on-error"]).toBe(true);
 		expect(notify.if).toBe(
 			"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')",
 		);
+	});
+
+	it("runs the check after a failed bench (a missing report is the unusable case) but not after a failed build", () => {
+		const bench = job.steps.find((candidate) => candidate.id === "bench");
+		expect(bench).toBeDefined();
+		const check = step("check-snapshot-persist-ratio.mjs");
+		expect(check.if).toBe(
+			"${{ !cancelled() && steps.bench.outcome != 'skipped' }}",
+		);
+	});
+
+	it("files the tracking issue for an unusable measurement as well as for drift", () => {
+		const notify = step("upsert-tracking-issue.mjs").run as string;
+		expect(notify).toContain('[ "$STATE" = drift ] || [ "$STATE" = error ]');
+		expect(notify).toMatch(/elif \[ "\$STATE" = clean \]/);
 	});
 
 	it("reaches the tracking issue only through the shared CLI", () => {
