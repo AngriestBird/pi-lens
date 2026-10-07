@@ -277,6 +277,17 @@ the surface they bite; each block loads only when its trigger applies.
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
+61. **Stand-in for unknown text stripped per consumer:** when a lexer leaves a
+    placeholder for text it cannot know (a command substitution's output),
+    read the input under each bounding assumption rather than teaching each
+    consumer to ignore the placeholder: empty (the text the rules matched
+    before it existed) and opaque (no rule word matches it, no path resolves
+    through it), denying if either reading denies. Enforced by `findDeny` in
+    `scripts/hooks/guard-bash.mjs`, pinned by the "substitution next to a rule
+    word (#3997)" rows in `tests/scripts/guard-bash-hook.test.ts`. Recurrence:
+    #3997 round 3 stripped the mark at three call sites and left
+    `checkUngated`, `mktemp` flags, and `git $(:) stash` open.
+
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit (call continuations, block-comment and
     template-literal interiors; #3038, #3039, #3052, #3059, #3116). Name which
@@ -339,12 +350,6 @@ the surface they bite; each block loads only when its trigger applies.
     on every `[ a == b ]`, and a callback-traversal trap surfaced raw).
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
-
-- **Lexer placeholder becomes part of rule-matched text:** represent a
-    placeholder left by lexical subtraction as a dynamic expansion when words
-    are split, so it cannot fuse into a neighbouring command or option and
-    evade an exact rule. Screen placeholder positions at the start, middle,
-    and end of rule-matched words through the real guard entry (#3997).
 
 </important>
 
@@ -724,7 +729,8 @@ the surface they bite; each block loads only when its trigger applies.
 
 - Git command classification has one lexer and one guarded-verb matcher seam.
   Unknown wrappers and indirect guarded verbs fail closed. Text-consumer
-  allowances recurse through command substitutions and execution contexts.
+  allowances recurse through command substitutions and execution contexts. A
+  substitution's output is read both empty and opaque (shape 61).
 - The commit gate reads two states: the inline-blocker map's latch
   (`RuntimeCoordinator`), then the persisted `turn-end-findings` record. A
   collect-later runner's blocking findings join the map through

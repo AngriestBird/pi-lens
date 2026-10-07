@@ -941,6 +941,10 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 			join(clean, ".git"),
 			"gitdir: /some/main/checkout/.git/worktrees/clean\n",
 		);
+		// HOME/away/lnk -> HOME/scratch/wt: `away/lnk/../wt` names the
+		// symlinked tree to the kernel and `away/wt` (absent) lexically (#3997 H3).
+		mkdirSync(join(home, "away"));
+		symlinkSync(join("..", "scratch", "wt"), join(home, "away", "lnk"));
 	});
 
 	afterAll(() => {
@@ -1281,6 +1285,118 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 		expectRule(row),
 	);
 
+	// -- #3997 round 4: the remove rows c0184f1 got wrong ---------------------
+	// Each row is a cell of the PR body's "Round 4" table that c0184f1 allowed
+	// (or denied for the wrong reason). H2: c0184f1 stripped a whole-word
+	// substitution to "", which skipped the check. H3: `path.resolve` drops
+	// `lnk/..` lexically, but git removed the tree `lnk` points at (measured).
+	// F4: bash expands `~` before an inline `HOME=` applies. F5: a real `$`
+	// chain, plus the identifier-valued spelling bash reads as a literal word.
+	const ROUND4_REMOVE_ROWS: PathRow[] = [
+		{
+			label: "H2 unquoted $(...) as the whole path",
+			command: "git worktree remove $(echo wt)",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H2 backticks as the whole path",
+			command: "git worktree remove `echo wt`",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H2 --force, then a quoted $(...)",
+			command: 'git worktree remove --force "$(echo wt)"',
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H2 --, then a quoted $(...)",
+			command: 'git worktree remove -- "$(echo wt)"',
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H2 a $(...) word before the path",
+			command: "git worktree remove $(echo -f) wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H2 an unquoted $(...) as the git -C directory",
+			command: "git -C $(pwd) worktree remove wt",
+			cwd: "@SCRATCH@",
+			rule: "worktreeUnresolved",
+		},
+		{
+			label: "H3 a relative path through a symlink, then ..",
+			command: "git worktree remove away/lnk/../wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "H3 a $PWD path through a symlink, then ..",
+			command: "git worktree remove $PWD/away/lnk/../wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "H3 symlink, then .. after git -C",
+			command: "git -C away worktree remove lnk/../wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "H3 symlink, then .. as the git -C directory",
+			command: "git -C away/lnk/.. worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "H3 symlink, then .. after a cd",
+			command: "cd away; git worktree remove lnk/../wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			// bash's `cd` is logical (`cd away/lnk/.. && pwd` prints HOME/away),
+			// so `wt` names the absent HOME/away/wt, not the symlinked tree.
+			label: "H3 a cd target stays logical",
+			command: "cd away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "F4 an inline HOME= does not change what ~ expands to",
+			command: "HOME=/nonexistent-3997 git worktree remove ~/scratch/wt",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "F5 an 8-variable $ chain ending in ~ resolves",
+			command:
+				"H=~/scratch/wt; G=$H; F=$G; E=$F; D=$E; C=$D; B=$C; A=$B; git worktree remove $A",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "F5 a 9-variable $ chain fails closed at the bound",
+			command:
+				"I=~/scratch/wt; H=$I; G=$H; F=$G; E=$F; D=$E; C=$D; B=$C; A=$B; git worktree remove $A",
+			rule: "worktreeUnresolved",
+		},
+		{
+			// `$A` is the literal word `B` to bash: a relative path that is absent.
+			label: "F5 an identifier-valued variable is a literal word, not a chain",
+			command:
+				"A=B; B=C; C=D; D=E; E=F; F=G; G=H; H=~/scratch/wt; git worktree remove $A",
+			rule: null,
+		},
+	];
+
+	it.each(ROUND4_REMOVE_ROWS)("round 4 remove cell: $label", (row) =>
+		expectRule(row),
+	);
+
 	// -- the other path-taking rules go through the SAME resolver ------------
 	// tmpCheckout (#3526): worktree add, clone, mktemp -d, plus `cd`/`-C`.
 	// An unresolvable variable stays a documented fail-OPEN there: it is a
@@ -1415,6 +1531,43 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 				expect(result.status).toBe(2);
 			},
 		);
+	});
+});
+
+// #3997 round 4: a substitution's output is unknown, so the hook reads it
+// both as empty (the text master scanned) and as one opaque word piece, and
+// denies when either reading denies. Each deny row is a cell master denied and
+// c0184f1 allowed: the substitution's mark split or fused a rule word, or
+// (H1) the inline hook-bypass env never reached classifyGit.
+describe("scripts/hooks/guard-bash.mjs -- substitution next to a rule word (#3997)", () => {
+	it.each([
+		["git $(:) stash", "stash"],
+		["$(:) git stash", "stash"],
+		["sudo $(:) git stash", "stash"],
+		["env $(:) git stash", "stash"],
+		["git -C . $(:) stash", "stash"],
+		["git `:` stash", "stash"],
+		["npm$(:) run lint; git$(:) commit -m x", "checkUngated"],
+		["mktemp $(:)-d /tmp/x.XXXX", "tmpCheckout"],
+		["git worktree add /tm$(:)p/wt", "tmpCheckout"],
+		["git clone r /tm$(:)p/x", "tmpCheckout"],
+		["HUSKY=0 git $(:) commit -m x", "hookBypass"],
+		["PI_LENS_SKIP_HOOKS=1 git co$(:)mmit -m x", "hookBypass"],
+	] as Array<[string, DenyRule]>)("denies %s", (command, rule) => {
+		const result = runHook(command);
+		expect(result.stderr).toBe(`${RULE_MESSAGES[rule]}\n`);
+		expect(result.status).toBe(2);
+	});
+
+	// The opaque reading must not turn an ordinary substitution into a deny.
+	it.each([
+		'git commit -m "$(cat msg.txt)"',
+		"echo $(git rev-parse HEAD)",
+		'git -C "$(git rev-parse --show-toplevel)" status',
+	])("allows %s", (command) => {
+		const result = runHook(command);
+		expect(result.stderr).toBe("");
+		expect(result.status).toBe(0);
 	});
 });
 
@@ -1861,8 +2014,6 @@ describe("scripts/hooks/guard-bash.mjs -- tokenizer unit behavior (#2699)", () =
 	});
 
 	it("keeps a substitution mark from fusing into the surrounding rule word (#3997 F1)", () => {
-		const mark = String.fromCharCode(0xe000);
-		expect(splitWords(`git stash${mark}`)).toEqual(["git", `stash${mark}`]);
 		for (const command of [
 			"git stash$(true)",
 			"git reset --hard$(:)",
@@ -1878,8 +2029,6 @@ describe("scripts/hooks/guard-bash.mjs -- tokenizer unit behavior (#2699)", () =
 			"A=$(pwd); git worktree remove $A/wt",
 			"export A=$(pwd); git worktree remove $A/wt",
 			"git worktree remove $OLDPWD/wt",
-			"HOME=/x git worktree remove ~/wt",
-			"A=B; B=C; C=D; D=E; E=F; F=G; G=H; H=~/wt; git worktree remove $A",
 			"git worktree remove {-q,/path/wt}",
 		]) {
 			expect(
@@ -2732,13 +2881,22 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		expect(result.status).toBe(2);
 	});
 
-	it("the SAME $TMPDIR-shaped destination allows once this command's own TMPDIR= points off /tmp", () => {
-		expect(
-			findDeny(
-				'TMPDIR=/home/dev/scratch git worktree add "$TMPDIR/foo"',
-				PAYLOAD_CWD,
-			),
-		).toBeNull();
+	// Bash expands `$TMPDIR` before the inline `TMPDIR=` reaches git (measured:
+	// `TMPDIR=/home/dev/scratch printf %s "$TMPDIR/foo"` prints the shell's
+	// value), so the destination follows the SHELL's TMPDIR. The ambient TMPDIR
+	// is set explicitly in both rows: the row it replaces read the runner's own
+	// TMPDIR, so it passed with a lane TMPDIR off /tmp and redded in CI (#3997).
+	it("an inline TMPDIR= does not move a $TMPDIR-shaped destination: bash expands the word first", () => {
+		const command = 'TMPDIR=/home/dev/scratch git worktree add "$TMPDIR/foo"';
+		expect(runHook(command, NO_AMBIENT_TMPDIR_ENV).stderr).toBe(
+			`${RULE_MESSAGES.tmpCheckout}\n`,
+		);
+		const offTmp = runHook(command, {
+			...NO_AMBIENT_TMPDIR_ENV,
+			TMPDIR: "/home/dev/elsewhere",
+		});
+		expect(offTmp.stderr).toBe("");
+		expect(offTmp.status).toBe(0);
 	});
 
 	it("a /tmp string inside a comment, a heredoc body, or echo text never trips the rule -- this rule reads argv WORDS, not raw text", () => {

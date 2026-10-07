@@ -102,14 +102,22 @@
  * worktree add`, `git clone`, `mktemp -d`, `node <file>`, a leading `git -C`,
  * and the `cd`/`pushd` that moves the cwd -- resolves it through
  * {@link expandShellWord} / {@link resolveShellPath}: `~`, `$HOME`, `${HOME}`,
- * `$VAR` (command env, then this hook's ambient env) and `$PWD` are expanded
- * the way bash would before the program sees them, then a relative result
- * resolves against the command's EFFECTIVE cwd (a preceding `cd`, a `git -C`,
- * else the payload cwd; a `cd` inside `( … )` does not leak out). A path
- * that cannot be resolved statically (`$(…)`/backticks, `~user`, a variable
- * with no known value, a glob, a cwd made unknown by an unresolvable `cd`)
- * makes `git worktree remove` fail CLOSED (`worktreeUnresolved`); the
- * tmp-checkout hygiene rules stay fail-open on it. Not handled: `cd x &` and
+ * `$VAR` (the command's variables, then this hook's ambient env) and `$PWD`
+ * are expanded the way bash would before the program sees them, then a relative
+ * result resolves against the command's EFFECTIVE cwd (a preceding `cd`, a
+ * `git -C`, else the payload cwd; a `cd` inside `( … )` does not leak out).
+ * Bash expands git's path words before an inline `VAR=val` prefix applies,
+ * so they are expanded without it, while git's own env check (`HUSKY=0`)
+ * still sees it (#3997; `mktemp` and `node` words still see the prefix, as
+ * on master). A path git or mktemp hands the kernel is resolved
+ * physically, a `cd` target logically (#3997 H3). A path that cannot be
+ * resolved statically (`$(…)`/backticks, `~user`, a variable with no known
+ * value, a glob, a cwd made unknown by an unresolvable `cd`) makes
+ * `git worktree remove` fail CLOSED (`worktreeUnresolved`); the tmp-checkout
+ * hygiene rules stay fail-open on it. A substitution's output is unknown, so
+ * {@link findDeny} reads a command holding one twice, with the output opaque
+ * and with it empty, and denies if either reading does (#3997). Not handled:
+ * `cd x &` and
  * `cd x |` (a backgrounded or piped `cd` still moves the tracked cwd), a
  * `cd` inside a `$( … )` span (each span starts from the payload cwd), and a
  * `cd` that fails.
@@ -852,9 +860,10 @@ export function splitWords(segment) {
 		if (quote === "double") {
 			started = true;
 			if (ch === SUBSTITUTION_MARK) {
-				// lexRegions has already removed the live substitution body. Keep
-				// its dynamic-identifier meaning without leaving the private marker
-				// fused into rule-matched text (#3997 F1/F2).
+				// Output this scan cannot know (findDeny's unknown reading). Kept
+				// in the word, so no rule word matches it and no path resolves
+				// through it; recorded as a dynamic expansion, so a coproc label
+				// holding one can still form a name (#3949, #3997).
 				addExpansion("dynamic", ch);
 				i++;
 				continue;
@@ -881,8 +890,7 @@ export function splitWords(segment) {
 			continue;
 		}
 		if (ch === SUBSTITUTION_MARK) {
-			// Treat the lexer placeholder as a dynamic expansion rather than
-			// literal word text, so adjacent command words do not fuse (#3997).
+			// The same opaque, dynamic piece as in a double-quoted span above.
 			addExpansion("dynamic", ch);
 			i++;
 			continue;
@@ -1067,34 +1075,6 @@ function gitSubcommandIndex(args) {
 	return i;
 }
 
-/**
- * The directory `git` actually runs in: `cwd` (the command's effective cwd)
- * moved by every leading `-C <dir>` global option before the subcommand at
- * `subcommandIndex`. Git applies them in order, each relative to the
- * previous (`-C a -C b` is `a/b`), so a relative path argument resolves
- * against THIS directory, not the payload cwd (#3988). Each `<dir>` goes
- * through {@link resolveShellPath}; one that cannot be resolved statically
- * makes the directory `null` (unknown), which {@link resolveShellPath} turns
- * into an unresolvable reason for any relative path that follows.
- *
- * @param {string[]} args
- * @param {number} subcommandIndex index of the subcommand, after {@link gitSubcommandIndex}
- * @param {string | null | undefined} cwd
- * @param {Record<string, string>} env
- * @returns {string | null | undefined}
- */
-function gitInvocationCwd(args, subcommandIndex, cwd, env) {
-	let dir = cwd;
-	for (let k = 0; k < subcommandIndex; k++) {
-		if (args[k] === "-C" && args[k + 1] !== undefined) {
-			const target = resolveShellPath(args[k + 1], dir, env);
-			dir = target.reason === undefined ? target.path : null;
-		}
-		if (GIT_TWO_TOKEN_FLAGS.has(args[k])) k++;
-	}
-	return dir;
-}
-
 /** `/tmp` -- the tmpfs root #3526's `tmpCheckout` rule keeps scratch checkouts
  *  and mktemp directories off of. A literal string, not `os.tmpdir()`: the
  *  rule is specifically about the FILESYSTEM PATH `/tmp` (tmpfs on the
@@ -1122,33 +1102,30 @@ function isUnderTmpRoot(absoluteDir) {
 /** Bounds {@link expandShellWord}'s indirection loop -- generous for the real
  *  shapes this repo's own sessions use (`S=...; W=$S/wt` is one hop) while
  *  still terminating a pathological or self-referential chain (`A=$A`). */
-const VAR_PREFIX_EXPANSION_CAP = 7;
+const VAR_PREFIX_EXPANSION_CAP = 8;
 
 /**
  * The placeholder {@link lexRegions} leaves where it subtracted a `$( … )` or
  * backtick span. A private-use character, not `$()`, so it never reads as a
  * segment separator or as shell syntax downstream. The span's body is scanned
- * as its own region; the MARK only keeps a word that contained one from
- * silently collapsing into a shorter, WRONG path (`$(pwd)/x` -> `/x`) that
- * {@link expandShellWord} would then resolve (#3988).
+ * as its own region. The mark stands for output this scan cannot know:
+ * {@link findDeny} reads a command once with the mark as opaque word text
+ * (so `$(pwd)/x` is not the WRONG path `/x`, and {@link expandShellWord}
+ * refuses to resolve it, #3988) and once with the marks removed (#3997).
  */
 const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
 
-function stripSubstitutionMark(word) {
-	return word?.replaceAll(SUBSTITUTION_MARK, "") ?? word;
-}
-
 /**
  * The value `$NAME` expands to, or `undefined` when this static scan cannot
- * know it. `PWD` is the command's effective cwd. The command's own env
- * assignments (`env`, the same `effectiveEnv` {@link classifyNode} reads,
- * which carries forward standalone `VAR=val` segments via `sharedEnv` --
- * #2699 review round 2 F2) win; then THIS hook's `process.env`, because the
- * guard runs as a real child process inheriting the shell's ambient
- * environment (measured: a bare `mktemp -d` with an ambient, non-command-text
- * `TMPDIR` pointed off /tmp must allow). `TMPDIR`/`TMP`/`TEMP` default to
- * `TMP_ROOT` when unset everywhere -- the real default `os.tmpdir()`, bash
- * and mktemp all fall back to.
+ * know it. `PWD` is the command's effective cwd. The command's variables
+ * (`env`: the `export` and standalone `VAR=val` segments carried forward in
+ * `sharedEnv`, #2699 review round 2 F2, plus the inline prefix for `mktemp`
+ * and `node`; never for git's words, #3997 F4) win; then THIS hook's `process.env`,
+ * because the guard runs as a real child process inheriting the shell's
+ * ambient environment (measured: a bare `mktemp -d` with an ambient,
+ * non-command-text `TMPDIR` pointed off /tmp must allow). `TMPDIR`/`TMP`/
+ * `TEMP` default to `TMP_ROOT` when unset everywhere -- the real default
+ * `os.tmpdir()`, bash and mktemp all fall back to.
  *
  * @param {string} name
  * @param {string | null | undefined} cwd
@@ -1159,7 +1136,6 @@ function lookupShellVariable(name, cwd, env) {
 	if (name === "PWD")
 		return cwd === undefined ? process.cwd() : (cwd ?? undefined);
 	if (name === "_" || name === "OLDPWD") return undefined;
-	if (name === "HOME" && env.__PI_LENS_INLINE_HOME === "1") return undefined;
 	const value = env[name] ?? process.env[name];
 	return value ?? (TEMP_DIR_VARS.includes(name) ? TMP_ROOT : undefined);
 }
@@ -1169,13 +1145,15 @@ function lookupShellVariable(name, cwd, env) {
  * before the program sees argv, so every rule that tests a path argument
  * (`git worktree remove`/`add`, `git clone`, `mktemp`, `node <file>`, `git -C`,
  * `cd`) judges the directory bash would hand it, not the spelling. Handled: a
- * leading `~` or `~/…` (from `HOME`, command env first, then this hook's
- * ambient env); every `$NAME`/`${NAME}` reference anywhere in the word,
- * chased through indirected assignments (bounded by
+ * leading `~` or `~/…` (from `HOME`, the command's variables first, then this
+ * hook's ambient env); every `$NAME`/`${NAME}` reference anywhere in the
+ * word, chased through indirected assignments (bounded by
  * {@link VAR_PREFIX_EXPANSION_CAP}: `S=/tmp/…/scratchpad; W=$S/wt; git
  * worktree add $W` is the ACTUAL shape of all 14 historical `/tmp`
  * worktree-adds in the transcript corpus, #3526 review F1), with a tilde
- * picked up mid-chain (`S=~/.local/…`) expanded too.
+ * picked up mid-chain (`S=~/.local/…`) expanded too, including one the last
+ * hop surfaces (#3997 F5). A variable whose value is a bare name is that
+ * literal word, as in bash (`A=B; … $A` is the relative path `B`).
  *
  * `text` is always the best-effort expansion, with whatever could not be
  * resolved left in place -- a rule whose hazard is a false ALLOW of a resolvable
@@ -1183,9 +1161,9 @@ function lookupShellVariable(name, cwd, env) {
  * exactly as before. `reason` is set when part of the word is NOT statically
  * knowable: a `$( … )`/backtick span ({@link SUBSTITUTION_MARK}), a `~user`/
  * `~+`/`~-` tilde, a variable with no known value (or an unset `HOME`), a
- * `${NAME:-x}`-style or `$1`/`$$` expansion (a self-referential chain ends
- * here too: it is still a `$` reference once the hop cap is spent), or a glob
- * character. A rule whose hazard is a false ALLOW of a
+ * `${NAME:-x}`-style or `$1`/`$$` expansion (a self-referential or
+ * over-long chain ends here too: it is still a `$` reference once the hop cap
+ * is spent), or a glob character. A rule whose hazard is a false ALLOW of a
  * destructive command (`git worktree remove`) fails closed on it.
  *
  * Quote context is gone by the time a word reaches here ({@link splitWords}
@@ -1194,39 +1172,22 @@ function lookupShellVariable(name, cwd, env) {
  *
  * @param {string} word
  * @param {string | null | undefined} cwd `null`: statically unknown (after an unresolvable `cd`)
- * @param {Record<string, string>} env
+ * @param {Record<string, string>} env see {@link lookupShellVariable}
  * @returns {{ text: string; reason?: string }}
  */
 function expandShellWord(word, cwd, env) {
 	/** @type {string | undefined} */
 	let reason;
-	if (word.includes(SUBSTITUTION_MARK)) reason = "a command substitution";
-	const firstReference = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/.exec(word);
-	if (firstReference) {
-		let name = firstReference[1];
-		let hops = 0;
-		while (hops < VAR_PREFIX_EXPANSION_CAP) {
-			const value = lookupShellVariable(name, cwd, env);
-			if (!value || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) break;
-			if (lookupShellVariable(value, cwd, env) === undefined) break;
-			name = value;
-			hops++;
-		}
-		if (hops >= VAR_PREFIX_EXPANSION_CAP - 1)
-			reason ??= "an expansion chain that exceeded the static bound";
-	}
 	let text = word;
-	for (let hop = 0; hop < VAR_PREFIX_EXPANSION_CAP; hop++) {
+	for (let hop = 0; hop <= VAR_PREFIX_EXPANSION_CAP; hop++) {
 		if (text === "~" || text.startsWith("~/")) {
-			const home =
-				env.__PI_LENS_INLINE_HOME === "1"
-					? undefined
-					: (env.HOME ?? process.env.HOME);
+			const home = env.HOME ?? process.env.HOME;
 			if (home === undefined) reason ??= "HOME is not set";
 			else text = home + text.slice(1);
 		} else if (/^~[^/]/.test(text)) {
 			reason ??= "a ~user tilde";
 		}
+		if (hop === VAR_PREFIX_EXPANSION_CAP) break;
 		let changed = false;
 		text = text.replace(
 			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
@@ -1238,14 +1199,9 @@ function expandShellWord(word, cwd, env) {
 				return value;
 			},
 		);
-		if (hop === VAR_PREFIX_EXPANSION_CAP - 1 && changed)
-			reason ??= "an expansion chain that exceeded the static bound";
 		if (!changed) break;
 	}
-	if (text.includes(SUBSTITUTION_MARK))
-		reason ??= "a command substitution in an indirect value";
-	if (/^~(?:\/|$)/.test(text))
-		reason ??= "an expansion chain that exceeded the static bound";
+	if (text.includes(SUBSTITUTION_MARK)) reason ??= "a command substitution";
 	if (/[{}]/.test(text)) reason ??= "brace expansion";
 	if (text.includes("$")) reason ??= "an unresolved or unsupported $ expansion";
 	if (/[*?[]/.test(text)) reason ??= "a glob pattern";
@@ -1260,23 +1216,32 @@ function expandShellWord(word, cwd, env) {
  * effective cwd is itself statically unknown, which makes a RELATIVE result
  * unresolvable (an absolute one is still exact).
  *
+ * A path a program hands the kernel is judged where the kernel puts it, so
+ * it is resolved PHYSICALLY (#3997 H3): the kernel follows `lnk` before the
+ * `..` in `lnk/../wt`, while `path.resolve` (and `fs.realpathSync`, which
+ * normalizes first) drops the pair lexically. Measured: `git worktree remove
+ * scratch/lnk/../linked` removed the tree `lnk` points at. A target that does
+ * not exist keeps the lexical path. `logical` is bash's own `cd`, which
+ * resolves `..` lexically (`cd lnk/.. && pwd` prints the directory holding
+ * `lnk`).
+ *
  * @param {string} word
  * @param {string | null | undefined} cwd
  * @param {Record<string, string>} env
+ * @param {boolean} [logical]
  * @returns {{ path: string; reason?: string }}
  */
-function resolveShellPath(word, cwd, env) {
+function resolveShellPath(word, cwd, env, logical = false) {
 	const { text, reason } = expandShellWord(word, cwd, env);
-	const path = resolve(cwd ?? process.cwd(), text);
+	const anchor = cwd ?? process.cwd();
+	let path = resolve(anchor, text);
 	if (reason === undefined && cwd === null && !isAbsolute(text))
 		return { path, reason: "a working directory that is not statically known" };
-	if (reason === undefined && /(^|\/)\.\.($|\/)/.test(text)) {
+	if (!logical) {
 		try {
-			if (realpathSync(path) !== path)
-				return { path, reason: "lexical parent traversal through a symlink" };
+			path = realpathSync.native(isAbsolute(text) ? text : `${anchor}/${text}`);
 		} catch {
-			// A missing target has no filesystem identity to compare; retain the
-			// ordinary lexical result and let the caller judge its rule.
+			// No such path for the kernel either: the lexical path stands.
 		}
 	}
 	return reason === undefined ? { path } : { path, reason };
@@ -1451,18 +1416,17 @@ function classifyHookBypass(args, i, env) {
  * / `git worktree add <path>` / `git clone … <path>` argument the same way
  * git itself would, through {@link resolveShellPath} (#3988): `~`/`$VAR`
  * spellings are expanded first, and a relative path resolves against the
- * directory git runs in -- `cwd` after every leading `-C <dir>` option
- * ({@link gitInvocationCwd}). A `git worktree remove` path that cannot be
- * resolved statically fails closed (`worktreeUnresolved`).
+ * directory git runs in -- `cwd` after every leading `-C <dir>` option, each
+ * relative to the one before (`-C a -C b` is `a/b`). A `git worktree remove`
+ * path that cannot be resolved statically fails closed (`worktreeUnresolved`).
  *
  * @param {string[]} args
  * @param {string | null} [cwd] `null`: the effective cwd is statically unknown
- * @param {Record<string, string>} [env]
+ * @param {Record<string, string>} [env] git's own env, inline `VAR=val` prefix included (the hook-bypass check reads it)
+ * @param {Record<string, string>} [expansionEnv] the shell variables bash expanded the path words with: the inline prefix applies only after expansion (#3997 F4)
  * @returns {DenyRule | null}
  */
-function classifyGit(args, cwd, env = {}) {
-	const rawArgs = args;
-	args = args.map(stripSubstitutionMark);
+function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 	const isRebaseFalseValue = (value) =>
 		["false", "no", "0", "off"].includes(value.toLowerCase());
 	const i = gitSubcommandIndex(args);
@@ -1548,6 +1512,18 @@ function classifyGit(args, cwd, env = {}) {
 			return "reset";
 		return null;
 	}
+	// The directory git runs in: each leading `-C <dir>` moves it, relative to
+	// the one before; a `<dir>` that cannot be resolved makes it unknown
+	// (`null`), which makes any relative path argument unresolvable (#3988).
+	/** @type {string | null | undefined} */
+	let gitCwd = cwd;
+	for (let k = 0; k < i; k++) {
+		if (args[k] === "-C" && args[k + 1] !== undefined) {
+			const target = resolveShellPath(args[k + 1], gitCwd, expansionEnv);
+			gitCwd = target.reason === undefined ? target.path : null;
+		}
+		if (GIT_TWO_TOKEN_FLAGS.has(args[k])) k++;
+	}
 	if (subcommand === "worktree" && args[i + 1] === "remove") {
 		const rest = args.slice(i + 2);
 		let forceCount = 0;
@@ -1559,14 +1535,12 @@ function classifyGit(args, cwd, env = {}) {
 		}
 		if (forceCount >= 2) return "worktreeForce";
 		if (positionals[0]) {
-			const rawRest = rawArgs.slice(i + 2);
-			const rawPositionals = rawRest.filter((a) => !a.startsWith("-"));
 			// #3988: the path bash would hand git, or a named fail-closed deny --
 			// the #3173 check cannot run on a path this scan cannot resolve.
 			const { path: worktreeDir, reason } = resolveShellPath(
-				rawPositionals[0],
-				gitInvocationCwd(rawArgs, i, cwd, env),
-				env,
+				positionals[0],
+				gitCwd,
+				expansionEnv,
 			);
 			if (reason !== undefined) return "worktreeUnresolved";
 			if (
@@ -1584,20 +1558,17 @@ function classifyGit(args, cwd, env = {}) {
 	// `git worktree add "$WT"` would block ordinary fixer work for a path that
 	// cannot be shown to be under /tmp.
 	if (subcommand === "worktree" && args[i + 1] === "add") {
-		const rest = rawArgs.slice(i + 2);
+		const rest = args.slice(i + 2);
 		const [pathArg] = collectPositionals(rest, WORKTREE_ADD_VALUE_FLAGS);
 		if (
 			pathArg !== undefined &&
-			isUnderTmpRoot(
-				resolveShellPath(pathArg, gitInvocationCwd(rawArgs, i, cwd, env), env)
-					.path,
-			)
+			isUnderTmpRoot(resolveShellPath(pathArg, gitCwd, expansionEnv).path)
 		)
 			return "tmpCheckout";
 		return null;
 	}
 	if (subcommand === "clone") {
-		const rest = rawArgs.slice(i + 1);
+		const rest = args.slice(i + 1);
 		const positionals = collectPositionals(rest, CLONE_VALUE_FLAGS);
 		// Only an EXPLICIT destination directory (the second positional) is
 		// judged -- `git clone <repo>` with no directory derives one from the
@@ -1606,11 +1577,7 @@ function classifyGit(args, cwd, env = {}) {
 		if (
 			positionals.length >= 2 &&
 			isUnderTmpRoot(
-				resolveShellPath(
-					positionals[1],
-					gitInvocationCwd(rawArgs, i, cwd, env),
-					env,
-				).path,
+				resolveShellPath(positionals[1], gitCwd, expansionEnv).path,
 			)
 		)
 			return "tmpCheckout";
@@ -2126,14 +2093,14 @@ const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
 function stripCommandGroupAndRunnerPrefixes(words) {
 	let i = 0;
 	while (i < words.length) {
-		if (stripSubstitutionMark(words[i]) === "coproc") {
+		if (words[i] === "coproc") {
 			// A coprocess may have an optional name before a compound
 			// command: `coproc C { git stash; }`, `coproc C if git stash`.
 			// Strip that name only when the following word makes the form
 			// unambiguous; the ordinary `coproc git stash` keeps `git` as
 			// the command word.
 			if (
-				COPROC_NAMED_BODY_WORDS.has(stripSubstitutionMark(words[i + 2])) &&
+				COPROC_NAMED_BODY_WORDS.has(words[i + 2]) &&
 				canFormCoprocIdentifier(
 					words[i + 1],
 					words[WORD_EXPANSIONS]?.[i + 1] ?? [],
@@ -2145,10 +2112,7 @@ function stripCommandGroupAndRunnerPrefixes(words) {
 				continue;
 			}
 		}
-		if (
-			COMMAND_KEYWORDS.has(stripSubstitutionMark(words[i])) ||
-			RUNNER_PREFIX_WORDS.has(stripSubstitutionMark(words[i]))
-		) {
+		if (COMMAND_KEYWORDS.has(words[i]) || RUNNER_PREFIX_WORDS.has(words[i])) {
 			i++;
 			continue;
 		}
@@ -2219,14 +2183,11 @@ export function classifySegment(
 		return null;
 	}
 	const effectiveEnv = { ...sharedEnv, ...segmentEnv };
-	const cmd = commandBasename(stripSubstitutionMark(rest[0]));
+	const cmd = commandBasename(rest[0]);
 	const args = rest.slice(1);
-	if (cmd === "git") {
-		const gitEnv = { ...sharedEnv };
-		if (segmentEnv.HOME !== undefined && sharedEnv.HOME === undefined)
-			gitEnv.__PI_LENS_INLINE_HOME = "1";
-		return classifyGit(args, cwd, gitEnv);
-	}
+	// git reads its env with the inline prefix (`HUSKY=0 git commit`), but bash
+	// expanded git's path words before that prefix applied (#3997 H1, F4).
+	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv, sharedEnv);
 	if (cmd === "node" || cmd === "nodejs")
 		return classifyNode(
 			args,
@@ -2631,34 +2592,56 @@ function findPipedCiVerdictStatusRead(segments) {
  * per region too, ahead of the per-segment classification, since it needs
  * every segment of the region at once rather than one at a time.
  *
+ * A substitution's output is not statically known (#3997), so a command
+ * holding one is scanned in two readings, and the first deny wins: the
+ * UNKNOWN reading keeps each {@link SUBSTITUTION_MARK} as one opaque piece of
+ * word text (no rule word matches it, and a path holding it cannot be
+ * resolved), then the EMPTY reading removes the marks -- the text master
+ * scanned, where an unquoted word made only of substitutions vanishes, as
+ * bash drops an empty unquoted expansion. Either reading alone misses a
+ * hazard: `git $(:) stash` is only `git stash` when the output is empty, and
+ * `git worktree remove $(echo wt)` only names a path when it is not.
+ *
  * @param {string} commandText
  * @param {string} [cwd] the PreToolUse payload's own cwd, threaded to every segment
  * @returns {DenyRule | null}
  */
 export function findDeny(commandText, cwd) {
-	const regions = scannableRegions(commandText);
-	/** @type {Record<string, string>} */
-	const sharedEnv = {};
-	for (let index = 0; index < regions.length; index++) {
-		const env = index === 0 ? sharedEnv : { ...sharedEnv };
-		/** @type {string | null | undefined} */
-		let effectiveCwd = cwd;
-		/** @type {Array<string | null | undefined>} the cwd to restore at each `)`: a `( cd x && … )` subshell's `cd` never leaks out */
-		const subshellCwds = [];
-		const segments = splitSegmentsWithSeparators(regions[index]);
-		const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
-		if (ciVerdictRule) return ciVerdictRule;
-		const chainRule = findUngatedWriteInChain(segments);
-		if (chainRule) return chainRule;
-		for (const { text: segment, sep } of segments) {
-			for (const ch of sep ?? "") {
-				if (ch === "(") subshellCwds.push(effectiveCwd);
-				else if (ch === ")" && subshellCwds.length > 0)
-					effectiveCwd = subshellCwds.pop();
+	const unknownReading = scannableRegions(commandText);
+	const readings = unknownReading.some((region) =>
+		region.includes(SUBSTITUTION_MARK),
+	)
+		? [
+				unknownReading,
+				unknownReading.map((region) =>
+					region.replaceAll(SUBSTITUTION_MARK, ""),
+				),
+			]
+		: [unknownReading];
+	for (const regions of readings) {
+		/** @type {Record<string, string>} */
+		const sharedEnv = {};
+		for (let index = 0; index < regions.length; index++) {
+			const env = index === 0 ? sharedEnv : { ...sharedEnv };
+			/** @type {string | null | undefined} */
+			let effectiveCwd = cwd;
+			/** @type {Array<string | null | undefined>} the cwd to restore at each `)`: a `( cd x && … )` subshell's `cd` never leaks out */
+			const subshellCwds = [];
+			const segments = splitSegmentsWithSeparators(regions[index]);
+			const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
+			if (ciVerdictRule) return ciVerdictRule;
+			const chainRule = findUngatedWriteInChain(segments);
+			if (chainRule) return chainRule;
+			for (const { text: segment, sep } of segments) {
+				for (const ch of sep ?? "") {
+					if (ch === "(") subshellCwds.push(effectiveCwd);
+					else if (ch === ")" && subshellCwds.length > 0)
+						effectiveCwd = subshellCwds.pop();
+				}
+				const rule = classifySegment(segment, env, effectiveCwd, cwd);
+				if (rule) return rule;
+				effectiveCwd = cwdAfterSegment(segment, effectiveCwd, env);
 			}
-			const rule = classifySegment(segment, env, effectiveCwd, cwd);
-			if (rule) return rule;
-			effectiveCwd = cwdAfterSegment(segment, effectiveCwd, env);
 		}
 	}
 	return null;
@@ -2671,7 +2654,8 @@ export function findDeny(commandText, cwd) {
  * (statically unknown) after a target that cannot be resolved, `cd -`, a bare
  * `pushd` (swaps with the stack) or `popd`; a later absolute `cd` recovers a
  * known cwd. Assumes the `cd` succeeded and is not backgrounded or piped
- * (documented blind spot: `cd x & …`, `cd x | …`).
+ * (documented blind spot: `cd x & …`, `cd x | …`), and resolves the target
+ * logically even after `-P` (documented blind spot: `cd -P lnk/..`).
  *
  * @param {string} segment
  * @param {string | null | undefined} cwd
@@ -2688,7 +2672,8 @@ function cwdAfterSegment(segment, cwd, env) {
 	if (words[k] === "--") k++;
 	const target = words[k] ?? (command === "cd" ? "~" : undefined);
 	if (target === undefined || target === "-") return null;
-	const resolved = resolveShellPath(target, cwd, env);
+	// Logical, like bash's default `cd -L`: `cd lnk/..` lands beside `lnk`.
+	const resolved = resolveShellPath(target, cwd, env, true);
 	return resolved.reason === undefined ? resolved.path : null;
 }
 
