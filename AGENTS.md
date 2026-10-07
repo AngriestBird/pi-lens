@@ -374,6 +374,8 @@ the surface they bite; each block loads only when its trigger applies.
     and `cd node_modules && rm -rf ./*` empty the link target, while `rm -rf
     node_modules` (no slash) removes only the link. `classifyNodeModulesDelete`
     denies the first set through the same `hasNodeModulesSymlinkOutside` seam;
+    that seam follows the complete symlink chain with a fail-closed fallback
+    when the target cannot be resolved (#4080).
     a lane unlinks without a slash or glob. Consolidation verdict: two rules on
     one classifier seam, kept apart because the npm rule judges a verb and the
     delete rule a path operand (deleting the delete rule relocates nothing the

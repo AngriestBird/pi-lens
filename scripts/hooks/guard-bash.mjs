@@ -240,7 +240,7 @@ export const RULE_MESSAGES = {
 	worktreeForce:
 		"a HAND-typed `git worktree remove` with two force flags is forbidden (fixer playbook rule) -- use `node scripts/prune-agent-worktrees.mjs` (liveness-checked; it applies the same double force internally once a tree is confirmed dead) for a stuck worktree, or `git worktree unlock` then a single-force remove.",
 	worktreeSymlink:
-		"git worktree remove on a tree whose node_modules is a symlink into another checkout is forbidden (#3173, the #2704 class -- git follows the link and empties the SHARED install, not just this worktree's copy) -- unlink it first: `rm <tree>/node_modules` (removes only the symlink, not the shared install), then retry the remove; if it is a directory, remove only that worktree copy after confirming the main checkout is intact.",
+		"git worktree remove on a tree whose node_modules symlink chain cannot be safely resolved or leads outside the tree is forbidden (#3173, the #2704 class -- git can follow the link and empty the SHARED install, not just this worktree's copy) -- unlink it first: `rm <tree>/node_modules` (removes only the symlink, not the shared install), then retry the remove; if it is a directory, remove only that worktree copy after confirming the main checkout is intact.",
 	worktreeUnresolved:
 		"git worktree remove on a path this hook cannot resolve statically is forbidden (#3988) -- the #3173 node_modules-symlink check cannot run on it. The path, or the directory it is relative to, comes from a `$(...)`/backtick substitution, a `$VAR` with no value in the command or the hook environment, a `~user` or glob spelling, or an unresolvable `cd`/`git -C`/`popd`. Spell the worktree's absolute path literally (or `cd` to a literal directory first), or use `node scripts/prune-agent-worktrees.mjs`.",
 	probe:
@@ -260,9 +260,9 @@ export const RULE_MESSAGES = {
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
 	npmLinkedInstall:
-		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where the node_modules symlink chain cannot be safely resolved or leads into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
 	linkedNodeModulesDelete:
-		"a delete whose operand passes THROUGH a node_modules symlink into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
+		"a delete whose operand passes THROUGH a node_modules symlink chain that cannot be safely resolved or leads into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -1059,22 +1059,27 @@ function looksLikeGitWorktree(dir) {
  * measured directly, `readlinkSync` throws ENOENT for a missing entry and
  * EINVAL for a REAL directory or file, both caught below, so a pre-check
  * never changed the verdict and mutating it out left every test green. Its
- * raw link text (not `realpathSync`'s resolved target), so a dangling
- * symlink (target does not exist) is still classified correctly instead of
- * throwing ENOENT on the target.
+ * raw link text proves that the entry is a symlink, then `realpathSync`
+ * follows the complete chain before the containment check. An unreadable or
+ * dangling target fails closed: this classifier protects destructive callers,
+ * so uncertainty is the outside-link verdict rather than an allow.
  *
  * @param {string} worktreeDir
  * @returns {boolean}
  */
 function hasNodeModulesSymlinkOutside(worktreeDir) {
 	const nodeModulesPath = join(worktreeDir, "node_modules");
-	let target;
 	try {
-		target = readlinkSync(nodeModulesPath);
+		readlinkSync(nodeModulesPath);
 	} catch {
 		return false;
 	}
-	const resolvedTarget = resolve(dirname(nodeModulesPath), target);
+	let resolvedTarget;
+	try {
+		resolvedTarget = realpathSync(nodeModulesPath);
+	} catch {
+		return true;
+	}
 	const rel = relative(worktreeDir, resolvedTarget);
 	return rel === ".." || rel.startsWith(`..${SEP}`) || isAbsolute(rel);
 }
