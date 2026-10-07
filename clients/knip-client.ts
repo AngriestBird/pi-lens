@@ -272,6 +272,17 @@ function readKnipShimVersion(binary: string): string | null {
 	}
 }
 
+/** The linked worktrees nested under one scan root, and whether a file is in one. */
+interface NestedWorktreeScope {
+	count: number;
+	contains(file: string | undefined): boolean;
+}
+
+const NO_NESTED_WORKTREES: NestedWorktreeScope = {
+	count: 0,
+	contains: () => false,
+};
+
 /**
  * Whether a knip-reported file lies inside a linked worktree nested under
  * `targetDir` (#3872). knip reads the checkout's `.gitignore` and nothing
@@ -286,11 +297,9 @@ function readKnipShimVersion(binary: string): string | null {
  * once; each issue then costs one lexical key and a prefix compare, not a
  * realpath (a 16 000-issue result against 55 worktrees is ~880 000 compares).
  */
-function nestedWorktreeMatcher(
-	targetDir: string,
-): (file: string | undefined) => boolean {
+function nestedWorktreeScope(targetDir: string): NestedWorktreeScope {
 	const checkout = resolveGitCheckout(targetDir);
-	if (!checkout) return () => false;
+	if (!checkout) return NO_NESTED_WORKTREES;
 	const base = normalizeFilePath(canonicalDirectory(targetDir));
 	const baseKey = normalizeEphemeralMapKey(base);
 	const prefixes: string[] = [];
@@ -298,11 +307,14 @@ function nestedWorktreeMatcher(
 		const key = normalizeEphemeralMapKey(normalizeFilePath(root));
 		if (key.startsWith(`${baseKey}/`)) prefixes.push(`${key}/`);
 	}
-	if (prefixes.length === 0) return () => false;
-	return (file) => {
-		if (!file) return false;
-		const key = normalizeEphemeralMapKey(`${base}/${file}`);
-		return prefixes.some((prefix) => key.startsWith(prefix));
+	if (prefixes.length === 0) return NO_NESTED_WORKTREES;
+	return {
+		count: prefixes.length,
+		contains: (file) => {
+			if (!file) return false;
+			const key = normalizeEphemeralMapKey(`${base}/${file}`);
+			return prefixes.some((prefix) => key.startsWith(prefix));
+		},
 	};
 }
 
@@ -786,7 +798,7 @@ export class KnipClient {
 
 		return {
 			...this.dropOverridePinnedDeps(
-				this.parseOutput(output, nestedWorktreeMatcher(targetDir)),
+				this.parseOutput(output, nestedWorktreeScope(targetDir)),
 				targetDir,
 			),
 			scannedAt,
@@ -925,7 +937,7 @@ export class KnipClient {
 
 	private parseOutput(
 		output: string,
-		isInNestedWorktree: (file: string | undefined) => boolean = () => false,
+		nested: NestedWorktreeScope = NO_NESTED_WORKTREES,
 	): KnipResult {
 		try {
 			const data = JSON.parse(output);
@@ -936,7 +948,7 @@ export class KnipClient {
 			const unlistedDeps: KnipIssue[] = [];
 
 			const addIssue = (issue: KnipIssue) => {
-				if (isInNestedWorktree(issue.file)) return;
+				if (nested.contains(issue.file)) return;
 				issues.push(issue);
 				if (issue.type === "export" || issue.type === "enumMember") {
 					unusedExports.push(issue);
