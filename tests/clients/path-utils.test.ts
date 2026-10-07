@@ -290,6 +290,28 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		}
 	});
 
+	it("POSIX relative existing and empty keys keep their prior contract", (ctx) => {
+		// RECURRENCE GUARDED: the Windows-only relative/empty guard once ran on
+		// POSIX too, bypassing realpath casing for relative existing paths and
+		// changing the empty sentinel's owning arm (#4045 F1).
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-relative-");
+		const previousCwd = process.cwd();
+		try {
+			process.chdir(tmpDir);
+			const alias = createCaseAliasFixture(".", { dirName: "subDir" });
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			withPlatform("linux", () => {
+				expect(normalizeFilePath(alias.rawMisCased)).toBe(
+					alias.onDisk.replace(/\\/g, "/"),
+				);
+				expect(normalizeFilePath("")).toBe("");
+			});
+		} finally {
+			process.chdir(previousCwd);
+			cleanup();
+		}
+	});
+
 	// RECURRENCE GUARDED (#3159 review round 2, F1): the casing rewrite is pure
 	// string algebra — it replaces a segment that is a case variant of the
 	// canonical one while KEEPING the caller's parent. For a symlink whose
