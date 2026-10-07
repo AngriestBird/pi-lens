@@ -187,7 +187,7 @@ function removeWorktree(cwd, worktree) {
  *  add -A` (no commit). The index is not optional: without it the governance
  *  suites that read Git state red on a clean base and a real head red would
  *  read RED-ON-BASE (#4047 review H1: 5 false reds in 4 files). */
-function materializeBase(cwd, worktree, baseSha, tarFile) {
+function materializeBase(cwd, worktree, baseSha, tarFile, ref) {
 	try {
 		git(["worktree", "add", "--detach", worktree, baseSha], cwd);
 		return;
@@ -206,6 +206,15 @@ function materializeBase(cwd, worktree, baseSha, tarFile) {
 	rmSync(tarFile, { force: true });
 	git(["init", "-q"], worktree);
 	git(["add", "-A"], worktree);
+	// The archive is only the base if Git reads the same tree back: a file an
+	// `export-ignore`, a tar fault or an ignore rule dropped would make base
+	// reds that are not the base's (or hide the change's).
+	const got = git(["write-tree"], worktree).trim();
+	const want = git(["rev-parse", `${baseSha}^{tree}`], cwd).trim();
+	if (got !== want)
+		throw new Error(
+			`archive base tree ${got} differs from ${ref}^{tree} ${want}; not evidence of unrelated`,
+		);
 	console.log("BASE-TREE git-archive");
 }
 
@@ -394,7 +403,7 @@ export async function main(argv = process.argv.slice(2)) {
 			return EXIT.BUILD;
 		}
 		added = true;
-		materializeBase(cwd, worktree, baseSha, join(runRoot, "base.tar"));
+		materializeBase(cwd, worktree, baseSha, join(runRoot, "base.tar"), base);
 		symlinkSync(
 			resolve(cwd, "node_modules"),
 			join(worktree, "node_modules"),

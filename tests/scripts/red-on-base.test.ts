@@ -74,6 +74,7 @@ function makeRepo(base: Scenario, head: Scenario) {
 			JSON.stringify({ scripts: { build: `node ${FAKE} --build` } }),
 		);
 		fs.writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+		fs.writeFileSync(path.join(root, ".gitattributes"), "*.mjs text eol=lf\n");
 		fs.writeFileSync(
 			path.join(root, "scenario.json"),
 			JSON.stringify(scenario),
@@ -117,6 +118,20 @@ function makeRepo(base: Scenario, head: Scenario) {
 			"if [ \"$1 $2\" = 'worktree add' ] && [ -n \"$FAIL_WORKTREE_ADD\" ]; then echo 'add refused' >&2; exit 92; fi",
 			"if [ \"$1\" = 'archive' ] && [ -n \"$FAIL_ARCHIVE\" ]; then echo 'archive refused' >&2; exit 93; fi",
 			'exec "$real" "$@"',
+		].join("\n"),
+		{ mode: 0o755 },
+	);
+	// `tar` that, on request, drops .gitattributes after extracting: an archive
+	// that loses a file a future `export-ignore` or ignore rule would lose.
+	const realTar = spawnSync("sh", ["-c", "command -v tar"], {
+		encoding: "utf8",
+	}).stdout.trim();
+	fs.writeFileSync(
+		path.join(bin, "tar"),
+		[
+			"#!/bin/sh",
+			`"${realTar}" "$@" || exit $?`,
+			'if [ -n "$DROP_GITATTRIBUTES" ]; then for a; do dir=$a; done; rm -f "$dir/.gitattributes"; fi',
 		].join("\n"),
 		{ mode: 0o755 },
 	);
@@ -529,6 +544,28 @@ describe("red-on-base usage and build failures", () => {
 		expect(result.status).toBe(1);
 		expect(verdictLine(result.stdout)).toBe("VERDICT: CAUSED-BY-CHANGE");
 		expect(result.stdout).not.toContain("RED-ON-BASE");
+	});
+
+	// Recurrence (#4074 verify r2 F2b): the archive tree's fidelity was true
+	// only by luck; a tar that drops a file left all 33 tests green.
+	it("an archive base tree whose Git tree differs from the base's is exit 3 naming both tree ids, never a verdict", () => {
+		const repo = makeRepo(
+			{ files: { [A]: file(pass("t")) } },
+			{ files: { [A]: file(red("t")) } },
+		);
+		const result = run(repo, [A, "--base", "HEAD~1"], {
+			FAIL_WORKTREE_ADD: "1",
+			DROP_GITATTRIBUTES: "1",
+		});
+		const expected = git(repo.root, "rev-parse", "HEAD~1^{tree}");
+		expect(result.status).toBe(3);
+		expect(result.stderr).toMatch(
+			new RegExp(
+				`archive base tree [0-9a-f]{40} differs from HEAD~1\\^\\{tree\\} ${expected}`,
+			),
+		);
+		expect(result.stdout).not.toContain("VERDICT");
+		expectCleanedUp(repo);
 	});
 
 	it("a lane that refuses both `git worktree add` and `git archive` is exit 3, never 0, with no verdict", () => {
