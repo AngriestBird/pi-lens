@@ -662,25 +662,26 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B3/C14/D21
+		// 56 checkout sites across the tree; 61 non-gate job rows (A22/B3/C14/D22
 		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
-		// from C to D). Sites and jobs are counted separately so a no-checkout
+		// from C to D, and #3916 added tool-smoke's schedule/dispatch-only
+		// `snapshot-persist-bench`, also D). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			55,
+			56,
 		);
-		expect(CENSUS_SITES.length).toBe(55);
+		expect(CENSUS_SITES.length).toBe(56);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(60);
+		).toBe(61);
 		expect(stageJobs("A")).toBe(22);
 		expect(stageJobs("B")).toBe(3);
 		expect(stageJobs("C")).toBe(14);
-		expect(stageJobs("D")).toBe(21);
+		expect(stageJobs("D")).toBe(22);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
