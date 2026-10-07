@@ -451,22 +451,23 @@ const TOOL_CALL_ATTRIBUTION_CAPACITY = 256;
 const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
 
 /**
- * #3613 (session-scope S4): per-turn records partitioned by the session whose
- * turn produced them. A concurrent secondary (an in-process subagent) records,
- * reads and clears its own partition on the primary's coordinator, so neither
- * session's turn moves the other's records. A partition is removed when its
- * turn drains it, at its session's shutdown, or at the primary's reset.
+ * #3613 (session-scope S4): per-turn warnings partitioned by the session
+ * whose turn produced them. A concurrent secondary (an in-process subagent)
+ * adds, reads and clears its own partition on the primary's coordinator, so
+ * neither session's turn moves the other's warnings. A partition is removed
+ * when its turn drains it, at its session's shutdown, or at the primary's
+ * reset.
  */
-class TurnRecordsBySession<T extends { id: string }> {
+class TurnWarningsBySession<T extends { id: string }> {
 	private readonly bySession = new Map<string, Map<string, T>>();
 
-	record(sessionId: string, records: readonly T[]): void {
+	add(sessionId: string, items: readonly T[]): void {
 		let partition = this.bySession.get(sessionId);
 		if (!partition) {
 			partition = new Map();
 			this.bySession.set(sessionId, partition);
 		}
-		for (const record of records) partition.set(record.id, record);
+		for (const item of items) partition.set(item.id, item);
 	}
 
 	peek(sessionId: string): T[] {
@@ -620,9 +621,9 @@ export class RuntimeCoordinator {
 		new PathKeyedMap<ResolvedBlockerFile>(normalizeMapKey);
 	private _resolvedBlockerFilesDropped = 0;
 	private readonly _actionableWarningsThisTurn =
-		new TurnRecordsBySession<ActionableWarningRecord>();
+		new TurnWarningsBySession<ActionableWarningRecord>();
 	private readonly _codeQualityWarningsThisTurn =
-		new TurnRecordsBySession<CodeQualityWarningRecord>();
+		new TurnWarningsBySession<CodeQualityWarningRecord>();
 	// #484: opt-in per-RUN summary of diagnostics/autofixes/formats,
 	// accumulated across the run's turns and consumed once at the
 	// agent_settled quiet window. The collector itself is always constructed
@@ -2062,10 +2063,7 @@ export class RuntimeCoordinator {
 		warnings: ActionableWarningRecord[],
 		sessionId?: string,
 	): void {
-		this._actionableWarningsThisTurn.record(
-			this.turnSession(sessionId),
-			warnings,
-		);
+		this._actionableWarningsThisTurn.add(this.turnSession(sessionId), warnings);
 	}
 
 	peekActionableWarnings(sessionId?: string): ActionableWarningRecord[] {
@@ -2080,7 +2078,7 @@ export class RuntimeCoordinator {
 		warnings: CodeQualityWarningRecord[],
 		sessionId?: string,
 	): void {
-		this._codeQualityWarningsThisTurn.record(
+		this._codeQualityWarningsThisTurn.add(
 			this.turnSession(sessionId),
 			warnings,
 		);
