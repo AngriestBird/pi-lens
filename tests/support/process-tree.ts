@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
  * until they are gone. An already-reaped child returns [] and signals nothing:
  * its pid may have been recycled, and its children are no longer discoverable.
  *
- * POSIX: SIGKILL every descendant found, then the child.
+ * POSIX: SIGKILL the child and every descendant one `ps` snapshot lists.
  * Windows: `taskkill /T /F`, the same tree kill the production seam uses.
  */
 export function killProcessTree(child: {
@@ -40,12 +40,10 @@ export function killProcessTree(child: {
 		});
 		return [root];
 	}
-	// Deepest first, the root last: once a parent dies its children are
-	// reparented and the kill-guard no longer sees them as this worker's
-	// descendants. Known limit, stated: a process forked after the `ps` snapshot
-	// is not signalled; the callers' bounded removal retry absorbs its writes.
+	// Known limit, stated: a process forked after the `ps` snapshot is not
+	// signalled; the callers' bounded removal retry absorbs its writes.
 	const tree = [root, ...descendantsOf(root)];
-	for (const pid of [...tree].reverse()) signal(pid, "SIGKILL");
+	for (const pid of tree) signal(pid, "SIGKILL");
 	return tree;
 }
 
