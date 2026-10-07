@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	parseActionPins,
+	resolveGithubMatchingTags,
 	resolveGithubTag,
 	validatePins,
 } from "../../scripts/check-action-pins.mjs";
@@ -52,6 +53,62 @@ describe("check-action-pins parser (#4043)", () => {
 		]);
 	});
 
+	it("accepts a full semver comment only at its exact peeled release", async () => {
+		const pins = parseActionPins(
+			`- uses: actions/cache@${GOOD} # v4.3.0`,
+			"fixture.yml",
+		);
+		await expect(validatePins(pins, async () => GOOD)).resolves.toEqual([]);
+		await expect(validatePins(pins, async () => BAD)).resolves.toEqual([
+			`fixture.yml:1: actions/cache # v4.3.0 resolves to ${BAD}, not ${GOOD}`,
+		]);
+	});
+
+	it("accepts a major-only comment when a release tag carries the pin", async () => {
+		const pins = parseActionPins(
+			`- uses: actions/cache@${GOOD} # v4`,
+			"fixture.yml",
+		);
+		await expect(
+			validatePins(pins, async () => [
+				{ tag: "v4.2.0", sha: GOOD },
+				{ tag: "v4.3.0", sha: BAD },
+			]),
+		).resolves.toEqual([]);
+	});
+
+	it("rejects a major-only comment when no matching release carries the pin", async () => {
+		const pins = parseActionPins(
+			`- uses: actions/cache@${GOOD} # v4`,
+			"fixture.yml",
+		);
+		await expect(
+			validatePins(pins, async () => [{ tag: "v4.3.0", sha: BAD }]),
+		).resolves.toEqual([
+			`fixture.yml:1: actions/cache@${GOOD} is not a v4 release; nearest tags: v4.3.0`,
+		]);
+	});
+
+	it("accepts a minor-only comment when a matching release carries the pin", async () => {
+		const pins = parseActionPins(
+			`- uses: actions/cache@${GOOD} # v4.3`,
+			"fixture.yml",
+		);
+		await expect(
+			validatePins(pins, async () => [{ tag: "v4.3.0", sha: GOOD }]),
+		).resolves.toEqual([]);
+	});
+
+	it("keeps the 6849a648/v4.3.0 mismatch exact", async () => {
+		const pins = parseActionPins(
+			`- uses: actions/cache@${BAD} # v4.3.0`,
+			"fixture.yml",
+		);
+		await expect(validatePins(pins, async () => GOOD)).resolves.toEqual([
+			`fixture.yml:1: actions/cache # v4.3.0 resolves to ${GOOD}, not ${BAD}`,
+		]);
+	});
+
 	it("peels an annotated tag at the GitHub API process boundary", async () => {
 		const calls: string[] = [];
 		const fetchImpl = async (input: string | URL | Request) => {
@@ -71,6 +128,39 @@ describe("check-action-pins parser (#4043)", () => {
 		expect(calls).toEqual([
 			"https://api.github.com/repos/actions/cache/git/ref/tags/v4.3.0",
 			"https://api.github.com/repos/actions/cache/git/tags/tag-object",
+		]);
+	});
+
+	it("resolves matching release refs and peels annotated releases", async () => {
+		const calls: string[] = [];
+		const fetchImpl = async (input: string | URL | Request) => {
+			calls.push(String(input));
+			return calls.length === 1
+				? new Response(
+						JSON.stringify([
+							{ ref: "refs/tags/v6", object: { type: "commit", sha: BAD } },
+							{
+								ref: "refs/tags/v6.5.0",
+								object: { type: "tag", sha: "tag-object" },
+							},
+						]),
+						{ status: 200 },
+					)
+				: new Response(JSON.stringify({ object: { sha: GOOD } }), {
+						status: 200,
+					});
+		};
+		expect(
+			await resolveGithubMatchingTags(
+				"actions/setup-node",
+				"v6",
+				fetchImpl,
+				{},
+			),
+		).toEqual([{ tag: "v6.5.0", sha: GOOD }]);
+		expect(calls).toEqual([
+			"https://api.github.com/repos/actions/setup-node/git/matching-refs/tags/v6.",
+			"https://api.github.com/repos/actions/setup-node/git/tags/tag-object",
 		]);
 	});
 });

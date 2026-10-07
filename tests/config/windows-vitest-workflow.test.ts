@@ -103,7 +103,7 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		const steps = job?.steps ?? [];
 		expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
 			"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-			"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 		]);
 		const raw = readFileSync(WORKFLOW_PATH, "utf8");
 		expect(raw).toContain(

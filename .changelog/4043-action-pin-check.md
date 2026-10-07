@@ -3,4 +3,4 @@ section: Fixed
 audience: internal
 ---
 
-- CI now verifies that pinned GitHub Action SHAs match their version comments.
+- CI now verifies pinned GitHub Action SHAs against exact release comments and release-tag prefixes.

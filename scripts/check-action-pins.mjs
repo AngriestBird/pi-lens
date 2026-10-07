@@ -6,6 +6,8 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SHA = /^[0-9a-f]{40}$/i;
+const FULL_VERSION = /^v?\d+\.\d+\.\d+$/;
+const PREFIX_VERSION = /^v?\d+(?:\.\d+)?$/;
 const USES = /^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#\s*(\S+))?/;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,10 +43,25 @@ export function validatePins(pins, resolveTag, exemptions = {}) {
 				return `${location}: ${pin.action}@${pin.sha} has no version comment`;
 			let resolved;
 			try {
-				resolved = await resolveTag(pin.action, pin.tag);
-				if (!resolved || !SHA.test(resolved))
-					throw new Error("GitHub API response has no commit SHA");
-				resolved = resolved.toLowerCase();
+				if (FULL_VERSION.test(pin.tag)) {
+					resolved = await resolveTag(pin.action, pin.tag);
+					if (!resolved || !SHA.test(resolved))
+						throw new Error("GitHub API response has no commit SHA");
+					resolved = resolved.toLowerCase();
+				} else if (PREFIX_VERSION.test(pin.tag)) {
+					const matches = await resolveTag(pin.action, pin.tag);
+					if (!Array.isArray(matches))
+						throw new Error("GitHub API response has no matching release tags");
+					const matching = matches.filter(
+						(match) => match.sha.toLowerCase() === pin.sha,
+					);
+					if (matching.length) return null;
+					const nearest =
+						matches.map((match) => match.tag).join(", ") || "none";
+					return `${location}: ${pin.action}@${pin.sha} is not a ${pin.tag} release; nearest tags: ${nearest}`;
+				} else {
+					throw new Error(`unsupported version comment ${pin.tag}`);
+				}
 			} catch (error) {
 				return `${location}: cannot resolve ${pin.action} tag ${pin.tag}: ${error.message}`;
 			}
@@ -106,6 +123,60 @@ export async function resolveGithubTag(
 	return (await tagResponse.json()).object?.sha;
 }
 
+export async function resolveGithubMatchingTags(
+	action,
+	prefix,
+	fetchImpl = fetch,
+	env = process.env,
+) {
+	const [owner, repo] = action.split("/");
+	if (!owner || !repo) throw new Error(`invalid action ${action}`);
+	const base = env.GITHUB_API_URL || "https://api.github.com";
+	const headers = { Accept: "application/vnd.github+json" };
+	const token = env.GITHUB_TOKEN || env.GH_TOKEN;
+	if (token) headers.Authorization = `Bearer ${token}`;
+	const url = `${base.replace(/\/$/, "")}/repos/${owner}/${repo}/git/matching-refs/tags/${encodeURIComponent(prefix + ".")}`;
+	const response = await fetchImpl(url, { headers });
+	if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+	const refs = await response.json();
+	if (!Array.isArray(refs))
+		throw new Error("GitHub API response is not a ref list");
+	return Promise.all(
+		refs
+			.filter((ref) => ref.ref?.startsWith(`refs/tags/${prefix}.`))
+			.map(async (ref) => ({
+				tag: ref.ref.slice("refs/tags/".length),
+				sha:
+					ref.object?.type === "tag"
+						? await resolveGithubTagObject(
+								action,
+								ref.object.sha,
+								fetchImpl,
+								env,
+							)
+						: ref.object?.sha,
+			})),
+	).then((tags) => {
+		if (tags.some((tag) => !SHA.test(tag.sha || "")))
+			throw new Error("GitHub API response has a ref without a commit SHA");
+		return tags.map((tag) => ({ ...tag, sha: tag.sha.toLowerCase() }));
+	});
+}
+
+async function resolveGithubTagObject(action, objectSha, fetchImpl, env) {
+	const [owner, repo] = action.split("/");
+	const base = env.GITHUB_API_URL || "https://api.github.com";
+	const headers = { Accept: "application/vnd.github+json" };
+	const token = env.GITHUB_TOKEN || env.GH_TOKEN;
+	if (token) headers.Authorization = `Bearer ${token}`;
+	const response = await fetchImpl(
+		`${base.replace(/\/$/, "")}/repos/${owner}/${repo}/git/tags/${objectSha}`,
+		{ headers },
+	);
+	if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+	return (await response.json()).object?.sha;
+}
+
 export async function checkActionPins({
 	root = ROOT,
 	fetchImpl = fetch,
@@ -147,7 +218,12 @@ export async function checkActionPins({
 		async (action, tag) => {
 			const key = `${action}@${tag}`;
 			if (!resolved.has(key))
-				resolved.set(key, resolveGithubTag(action, tag, fetchImpl, env));
+				resolved.set(
+					key,
+					FULL_VERSION.test(tag)
+						? resolveGithubTag(action, tag, fetchImpl, env)
+						: resolveGithubMatchingTags(action, tag, fetchImpl, env),
+				);
 			return resolved.get(key);
 		},
 		exemptions,

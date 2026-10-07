@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
       - name: Download unit-test result artifacts
@@ -132,7 +132,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -161,7 +161,7 @@ jobs:
           ruby-version: '3.3'
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         continue-on-error: true
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         continue-on-error: true
         with:
           php-version: '8.3'
@@ -568,7 +568,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
       # --ignore-scripts: the bench needs the compiled clients/ only, never the
