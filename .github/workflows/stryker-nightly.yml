@@ -128,6 +128,10 @@ jobs:
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
+      # The other `prepare` piece the Vitest runs read: the LSP fixture tests
+      # import dist/ and fail the dry run without it (run 37601788256; the
+      # same step ci.yml's targeted tests run, #4003).
+      - run: npm run build:dist
       - name: Mutate this shard's half of the deterministic 24-file population
         id: stryker
         continue-on-error: true

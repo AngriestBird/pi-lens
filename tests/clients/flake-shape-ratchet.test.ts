@@ -586,6 +586,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the defect is a temporal-dead-zone crash in the driver's own top-level execution order; the #3853 lock wait/refusal and the #3856 F3 stage dispositions (heartbeat/refusal behind a live holder, the budget-signal abort, the absent and partial coverage reports, the skipped/corrupt compiled source) are only observable by spawning the real script, and no source-text or in-process substitute reproduces them",
 	},
+	// 2026-10-07 (#4038 r5): run 37601788256's publish step crashed in the
+	// script's process-entry block, which only a real `node` process runs;
+	// the in-process `main()` tests never reached it.
+	"real-process-spawn:scripts/stryker-nightly.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the defect lived in the CLI entry block (`import.meta.url === argv[1]`), which only a real node process executes",
+	},
 	// 2026-09-06 (#2586 review F1): proves the actual delimiter
 	// supply-host-provided-deps.mjs prints in its own stdout bytes; an
 	// in-process double would just re-assert the test author's assumption.

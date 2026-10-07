@@ -233,6 +233,14 @@ function nightlyFindings(text: string): string[] {
 		findings.push(
 			"the mutate job does not download the core grammars before the driver",
 		);
+	// Recurrence (run 37601788256): the LSP fixture tests in a shard's dry run
+	// import dist/, which `npm run build` does not produce; Stryker's initial
+	// test run failed in both shards.
+	const dist = mutateSteps.findIndex((step) =>
+		/^npm run build:dist$/m.test(run(step)),
+	);
+	if (dist < 0 || dist > mutateSteps.indexOf(driver ?? {}))
+		findings.push("the mutate job does not build dist/ before the driver");
 	// Recurrence (#4038 r4, the re-run cell): a shard artifact an earlier
 	// attempt left must not stand in for this night's shard, and a re-run
 	// attempt must be able to replace it.
@@ -470,6 +478,11 @@ describe("stryker-nightly.yml (#4005)", () => {
 					"        run: echo skipped\n",
 				),
 			/does not download the core grammars/,
+		],
+		[
+			"the mutate job's dist build dropped (run 37601788256)",
+			(text) => text.replace("      - run: npm run build:dist\n", ""),
+			/does not build dist\//,
 		],
 		[
 			"combine not given the night's window",

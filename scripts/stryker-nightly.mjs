@@ -663,8 +663,11 @@ if (
 ) {
 	try {
 		const result = main();
-		// `base` prints GITHUB_OUTPUT lines for the workflow to append.
-		if (typeof result === "object") {
+		// Only `base` prints: GITHUB_OUTPUT lines for the workflow to append.
+		// `combine` also returns an object, and reading `result.queue` off it
+		// crashed every CLI combine after its files were written (run
+		// 37601788256).
+		if (process.argv[2] === "base") {
 			console.log(
 				`base=${result.base}\nsource=${result.source}\npending=${result.queue.entries.length}`,
 			);

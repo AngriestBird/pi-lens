@@ -2,10 +2,13 @@
 // `git merge-base --is-ancestor` and `git rev-list --before` against a
 // throwaway repo; ancestry and commit dates are the subject, and no in-process
 // double reproduces git's answer for a rewritten or too-young history.
+// The CLI cases spawn `node scripts/stryker-nightly.mjs`: its process-entry
+// block is what crashed in run 37601788256, and only a real process runs it.
 // #4005: the state and body halves of the nightly Stryker report. Recurrences
 // each case keeps out are named in its comment. The git cases run against a
 // throwaway repo through the real `main` seam (no mocked git); the issue list
 // is the one GitHub boundary and is a literal `gh issue list --json` shape.
+import { execFileSync } from "node:child_process";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -14,7 +17,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
@@ -1155,6 +1158,104 @@ describe("main (real git, real files)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	// The process entry point, as the workflow runs it.
+	const NIGHTLY_CLI = resolve(
+		import.meta.dirname,
+		"../../scripts/stryker-nightly.mjs",
+	);
+	const cli = (args: string[]) =>
+		execFileSync(process.execPath, [NIGHTLY_CLI, ...args], {
+			cwd: repo,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	// The two artifacts run 37601788256 uploaded when both shards' Stryker dry
+	// runs failed, verbatim from `gh run download`.
+	const FAILED_RUN = resolve(
+		import.meta.dirname,
+		"../fixtures/stryker-nightly/run-37601788256-failed-dry-run",
+	);
+
+	// Recurrence (run 37601788256): every CLI `combine` crashed after writing
+	// its files ("Cannot read properties of undefined (reading 'entries')"),
+	// so the failed night published no body.
+	it("the CLI publishes a failed night from the artifacts of run 37601788256's failed dry runs", () => {
+		const base = commit("base", new Date().toISOString());
+		mkdirSync(join(repo, "clients"));
+		writeFileSync(join(repo, "clients/queued.ts"), "export {};\n");
+		const { window } = JSON.parse(
+			readFileSync(join(FAILED_RUN, "mutation-shard-0/shard.json"), "utf8"),
+		);
+		const out = join(dir, "report.json");
+		const outcomes = join(dir, "outcomes.json");
+		const bodyFile = join(dir, "body.md");
+		cli([
+			"combine",
+			"--shards-dir",
+			FAILED_RUN,
+			"--expected-shards",
+			"0,1",
+			"--window",
+			window,
+			"--out",
+			out,
+			"--outcomes",
+			outcomes,
+		]);
+		const verdict = JSON.parse(readFileSync(outcomes, "utf8"));
+		const reason = "driver exited 1 without a partial result";
+		expect(verdict).toEqual({
+			status: "failed",
+			shards: [
+				{ shard: 0, outcome: "failed", reason },
+				{ shard: 1, outcome: "failed", reason },
+			],
+		});
+		cli([
+			"body",
+			"--issues",
+			issuesFile([
+				issue(
+					`${markerOf(base)}\n<!-- stryker-nightly:pending=clients/queued.ts@${base} -->`,
+				),
+			]),
+			"--title",
+			TITLE,
+			"--base",
+			base,
+			"--head",
+			SHA_B,
+			"--source",
+			"issue",
+			"--status",
+			verdict.status,
+			"--report",
+			out,
+			"--outcomes",
+			outcomes,
+			"--out",
+			bodyFile,
+		]);
+		const body = readFileSync(bodyFile, "utf8");
+		expect(parseLastReportSha([issue(body)], TITLE)).toBe(base);
+		expect(parsePending([issue(body)], TITLE).entries).toEqual([
+			{ file: "clients/queued.ts", base },
+		]);
+		expect(body).toContain("**Status:** FAILED");
+		expect(body).toContain(
+			`- **Shards:** 0 failed (${reason}); 1 failed (${reason})`,
+		);
+	});
+
+	// The other direction of the same guard: the window step appends exactly
+	// these lines to GITHUB_OUTPUT.
+	it("the CLI base prints the GITHUB_OUTPUT lines the window step appends", () => {
+		const root = commit("root", new Date().toISOString());
+		expect(cli(["base", "--issues", issuesFile([]), "--title", TITLE])).toBe(
+			`base=${root}\nsource=fallback-no-issue\npending=0\n`,
+		);
 	});
 
 	it("`base` returns the recorded ancestor and the bounded window otherwise", () => {
