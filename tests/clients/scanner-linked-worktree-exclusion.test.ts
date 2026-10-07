@@ -238,6 +238,38 @@ describe("#4117 vulture excludes every linked worktree under the scanned root", 
 		]);
 	});
 
+	it("keeps every entry of a project exclude list whose patterns hold a glob class", async () => {
+		// Recurrence prevented (review of #4120, F2): the list was cut at the first
+		// `]` inside a pattern, so "*/skip/*" and everything after a class came
+		// back into the scan.
+		pyproject('exclude = ["*/gen/*", "*/legacy_[ab]*", "*/skip/*"]\n');
+		const alpha = addWorktree("trees/alpha");
+
+		const exclude = optionValue(await vultureArgs(), "--exclude") ?? "";
+
+		expect(exclude.split(",")).toEqual([
+			"*/gen/*",
+			"*/legacy_[ab]*",
+			"*/skip/*",
+			`${realPath(alpha)}/*`,
+		]);
+	});
+
+	it("does not split a project exclude entry that holds a comma, and counts the leak", async () => {
+		// Recurrence prevented (review of #4120, F4): vulture's --exclude is a
+		// comma list, so `a,b/*` would have become two patterns and widened the
+		// user's exclusion.
+		pyproject('exclude = ["a,b/*", "*/gen/*"]\n');
+		addWorktree("trees/alpha");
+
+		const args = await vultureArgs();
+
+		expect(optionValue(args, "--exclude")).toBeUndefined();
+		expect(JSON.stringify(exclusionRows())).toContain(
+			"config-exclude-unreadable",
+		);
+	});
+
 	it("passes the project's config through untouched when it has no worktree to exclude", async () => {
 		pyproject('exclude = ["gen/"]\n');
 
@@ -267,7 +299,7 @@ describe("#4117 vulture excludes every linked worktree under the scanned root", 
 			",",
 		);
 
-		expect(exclude).toContain(`${realPath(odd).replace("[", "[[]")}/*`);
+		expect(exclude).toContain(`${realPath(odd).replaceAll("[", "[[]")}/*`);
 		expect(exclude.some((p) => p.includes("a,b") || p.endsWith("a"))).toBe(
 			false,
 		);

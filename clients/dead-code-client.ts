@@ -509,9 +509,13 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		const exclude = parseTomlStringArray(table, "exclude");
 		const keyed = /^[ \t]*exclude[ \t]*=/m.test(table);
 		const emptyList = /^[ \t]*exclude[ \t]*=[ \t]*\[\s*\]/m.test(table);
-		return {
-			exclude: keyed && exclude.length === 0 && !emptyList ? null : exclude,
-		};
+		// vulture's `--exclude` is a comma list: an entry holding a comma would be
+		// split into two patterns and widen the user's exclusion, so such a list
+		// is left to vulture's own config reader like an unreadable one.
+		const unreadable =
+			(keyed && exclude.length === 0 && !emptyList) ||
+			exclude.some((entry) => entry.includes(","));
+		return { exclude: unreadable ? null : exclude };
 	}
 
 	/**

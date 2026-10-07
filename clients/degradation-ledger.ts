@@ -223,6 +223,14 @@ export type DegradationKind =
 	 */
 	| "data_dir_migrated"
 	/**
+	 * A dead-code scan that missed the turn_end budget finished in the
+	 * background and was NOT used (#4117): its session ended before it settled
+	 * (`session-ended`), or it failed (`scan-failed`; a timeout or kill also
+	 * backs the root off). Subject is the client id; counted, because a slow root
+	 * repeats it every turn.
+	 */
+	| "dead-code-late-scan-dropped"
+	/**
 	 * #3814: the commit gate's pre-check of settled collect-later runner answers
 	 * (`absorbSettledRunnerBlockers`) threw. The gate falls back to the blocker
 	 * map as it stood, and the turn-end drain still records those answers. Subject

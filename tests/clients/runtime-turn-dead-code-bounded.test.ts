@@ -41,12 +41,17 @@ const vultureProcess = vi.hoisted(() => ({
 	onScan: undefined as (() => void) | undefined,
 	/** When set, the scan settles with this error (vulture's own 30 s timeout). */
 	failure: undefined as Error | undefined,
+	/** What scan number `n` (1-based) prints; vulture's output for the project. */
+	stdout: undefined as ((scan: number) => string) | undefined,
+	/** The project root; vulture prints absolute paths so the parse does not depend on the test process's cwd. */
+	root: "",
 }));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync: vi.fn(async (_command: string, args: string[]) => {
 		if (!args.includes(".")) return { stdout: "", stderr: "", status: 0 };
 		vultureProcess.scans += 1;
+		const scanNumber = vultureProcess.scans;
 		vultureProcess.onScan?.();
 		await vultureProcess.gate;
 		if (vultureProcess.failure) {
@@ -58,7 +63,9 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 			};
 		}
 		return {
-			stdout: "mod.py:4: unused function 'late' (60% confidence)\n",
+			stdout:
+				vultureProcess.stdout?.(scanNumber) ??
+				`${vultureProcess.root}/mod.py:4: unused function 'late' (60% confidence)\n`,
 			stderr: "",
 			status: 3,
 		};
@@ -75,6 +82,7 @@ import {
 	type DeadCodeResult,
 	PythonDeadCodeClient,
 } from "../../clients/dead-code-client.js";
+import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -88,8 +96,8 @@ let cacheManager: CacheManager;
 let client: PythonDeadCodeClient;
 let root: string;
 
-function edit(): void {
-	const file = path.join(root, "mod.py");
+function edit(name = "mod.py"): void {
+	const file = path.join(root, name);
 	fs.writeFileSync(file, "x = 1\n");
 	cacheManager.addModifiedRange(file, { start: 1, end: 1 }, false, root);
 }
@@ -133,6 +141,13 @@ function startTurn(
 	return { turn, settled: () => done };
 }
 
+/** The turn_end advisory text the agent would read. */
+function advisory(): string {
+	return (
+		consumeTurnEndFindings(cacheManager, root)?.messages?.[0]?.content ?? ""
+	);
+}
+
 function deadCodeRows(): Array<Record<string, unknown>> {
 	return logLatency.mock.calls
 		.map((call) => call[0] as Record<string, unknown>)
@@ -167,8 +182,10 @@ beforeEach(() => {
 	vultureProcess.gate = undefined;
 	vultureProcess.onScan = undefined;
 	vultureProcess.failure = undefined;
+	vultureProcess.stdout = undefined;
 	env = setupTestEnvironment("pi-lens-4117-bounded-");
 	root = env.tmpDir;
+	vultureProcess.root = root;
 	fs.writeFileSync(path.join(root, "pyproject.toml"), '[project]\nname="x"\n');
 	runtime = new RuntimeCoordinator();
 	cacheManager = new CacheManager(false);
@@ -193,7 +210,7 @@ afterEach(() => {
 });
 
 describe("#4117 turn_end dead-code scan is bounded by the hook budget", () => {
-	it("returns inside the budget when the scan outlives it, records the deferral, and writes no late cache row", async () => {
+	it("returns inside the budget when the scan outlives it and records the deferral", async () => {
 		const slow = await slowTurn();
 
 		// The handler reaches its end with the scan still parked: before #4117 this
@@ -208,14 +225,8 @@ describe("#4117 turn_end dead-code scan is bounded by the hook budget", () => {
 		);
 		expect(JSON.stringify(exceeded)).toContain("turn_end:dead-code");
 
-		// The scan settles late: nothing it computes may replace the baseline.
 		slow.release();
 		await vi.advanceTimersByTimeAsync(10);
-		vi.useRealTimers();
-		await slow.turn;
-		const cached = cacheManager.readCache<DeadCodeResult>(CACHE_KEY, root);
-		expect(cached?.data.summary).toBe("baseline");
-		expect(cached?.data.unusedExports).toEqual([]);
 	});
 
 	it("records an Escape as an abort, not as an exceeded budget", async () => {
@@ -265,6 +276,13 @@ describe("#4117 turn_end dead-code scan is bounded by the hook budget", () => {
 		}
 
 		expect(vultureProcess.scans).toBe(1);
+		expect(
+			JSON.stringify(
+				getDegradationSummary().find(
+					(group) => group.kind === "dead-code-late-scan-dropped",
+				),
+			),
+		).toContain("scan-failed");
 		const rows = deadCodeRows();
 		expect(rows[0]).toMatchObject({ execution: "deferred" });
 		for (const row of rows.slice(1)) {
@@ -312,6 +330,107 @@ describe("#4117 turn_end dead-code scan is bounded by the hook budget", () => {
 
 		expect(second).not.toHaveBeenCalled();
 		release();
+	});
+});
+
+describe("#4117 round 2: a scan that missed the budget still lands", () => {
+	/** Let the parked scan finish, flush its settle handler, and return to the real clock. */
+	async function settle(slow: { release: () => void }): Promise<void> {
+		slow.release();
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+	}
+
+	function names(): string[] {
+		return (
+			cacheManager
+				.readCache<DeadCodeResult>(CACHE_KEY, root)
+				?.data.unusedExports.map((issue) => issue.name) ?? []
+		);
+	}
+
+	it("delivers a slow scan's delta on the turn after it settles, and writes its baseline", async () => {
+		// Recurrence prevented (review of #4120, F1): a root whose vulture scan is
+		// slower than the budget got no per-turn delta and no baseline row for the
+		// rest of the session; master delivered every turn (late).
+		const slow = await slowTurn();
+		await slow.turn;
+		expect(advisory()).toBe("");
+		await settle(slow);
+		// The baseline row is written where the scan settles, not dropped.
+		expect(names()).toEqual(["late"]);
+		// ...and the scan's one dead-code.log event is written where it settles.
+		expect(logDeadCodeScan).toHaveBeenCalledWith(
+			expect.objectContaining({ root, success: true, unusedExports: 1 }),
+		);
+
+		vultureProcess.gate = undefined;
+		edit("other.py");
+		await startTurn().turn;
+		expect(advisory()).toContain("late");
+
+		edit("third.py");
+		await startTurn().turn;
+		expect(advisory()).toBe("");
+		expect(vultureProcess.scans).toBe(3);
+	});
+
+	it("starts no second vulture while one is in flight, and scans the files edited meanwhile next", async () => {
+		vultureProcess.stdout = (scan) =>
+			scan === 1
+				? `${root}/mod.py:4: unused function 'late' (60% confidence)\n`
+				: `${root}/mod.py:4: unused function 'late' (60% confidence)\n${root}/other.py:7: unused function 'carried' (60% confidence)\n`;
+		const slow = await slowTurn();
+		await slow.turn;
+
+		// Turn 2 while the first scan is still parked: one process, no wait.
+		edit("other.py");
+		await startTurn().turn;
+		expect(vultureProcess.scans).toBe(1);
+		expect(String(deadCodeRows()[1]?.reason)).toContain("python:in_flight");
+
+		await settle(slow);
+		vultureProcess.gate = undefined;
+		edit("third.py");
+		await startTurn().turn;
+
+		// Turn 1's delta from the settled scan, turn 2's file from the next one.
+		const text = advisory();
+		expect(text).toContain("late");
+		expect(text).toContain("carried");
+		expect(vultureProcess.scans).toBe(2);
+	});
+
+	it("writes the baseline of a root that had none, and reports nothing for the scan that wrote it", async () => {
+		cacheManager.clearCache(CACHE_KEY, root);
+		const slow = await slowTurn();
+		await slow.turn;
+		await settle(slow);
+		expect(names()).toEqual(["late"]);
+
+		vultureProcess.gate = undefined;
+		edit("other.py");
+		await startTurn().turn;
+
+		expect(advisory()).toBe("");
+		// The late scan had no baseline to be compared with, so it adds no delta;
+		// this turn's own scan is compared with the row it wrote.
+		expect(String(deadCodeRows()[1]?.reason)).toBe(
+			"python:late_scan,python:clean",
+		);
+	});
+
+	it("drops a scan that settles after its session ended, and counts it", async () => {
+		const slow = await slowTurn();
+		await slow.turn;
+		runtime.resetForSession();
+		await settle(slow);
+
+		expect(names()).toEqual([]);
+		const dropped = getDegradationSummary().find(
+			(group) => group.kind === "dead-code-late-scan-dropped",
+		);
+		expect(JSON.stringify(dropped)).toContain("session-ended");
 	});
 });
 

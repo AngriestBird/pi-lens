@@ -654,7 +654,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
 		// share one helper in turn-end/delivery-holds.ts instead of two copies.
-		"clients/runtime-turn.ts": 33,
+		"clients/runtime-turn.ts": 32,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
