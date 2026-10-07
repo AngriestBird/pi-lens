@@ -421,8 +421,6 @@ export function parseArgs(argv) {
 	}
 	if (positional.length !== 1)
 		throw new Error("expected exactly one matrix file");
-	if (!LANES.includes(opts.lane))
-		throw new Error(`--lane must be one of ${LANES.join(", ")}`);
 	return { matrixPath: positional[0], ...opts };
 }
 
