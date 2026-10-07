@@ -424,13 +424,13 @@ describe("#4117 round 2: a scan that missed the budget still lands", () => {
 		);
 	});
 
-	it("counts a scan once when a later session's turn discards it before it settles", async () => {
+	it("counts the old session's scan once when the new session's turn joins it", async () => {
 		const first = await slowTurn();
 		await first.turn;
 		runtime.resetForSession();
 
-		// The new session's turn finds the old session's entry in flight: it is
-		// discarded (counted), and this turn's scan joins the client's single flight.
+		// The new session has no entry (it lives on the old session's scope): its
+		// turn joins the client's single flight and parks an entry of its own.
 		edit("other.py");
 		const second = startTurn();
 		await vi.advanceTimersByTimeAsync(3_100);

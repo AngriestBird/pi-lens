@@ -76,6 +76,7 @@ import {
 	stableFindingKey,
 } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
+import { scopeCell } from "./session-scope.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	writeProjectDiagnosticsDeltaReport,
@@ -515,13 +516,13 @@ function wouldPoisonCache(
  * and vulture keeps no disk cache, so what the abandoned scan computes is
  * written and delivered by the entry below instead of being thrown away: the
  * scan lands its baseline row where it settles, and the next turn_end that
- * reaches the lane delivers its delta. One entry per (runtime, client, root);
- * while it exists no second scan starts, so the settle handler is the only
- * writer of the baseline row. The entry is scoped to the session generation
- * it started in.
+ * reaches the lane delivers its delta. One entry per (client, root) on the
+ * session scope's cell, so it lives and dies with the session: a new session
+ * never sees it, and a scan that settles after its session ended is dropped.
+ * While an entry exists no second scan starts, so the settle handler is the
+ * only writer of the baseline row.
  */
 interface LateDeadCodeScan {
-	generation: number;
 	/** Resolved paths of the files edited in the turn the scan was started for. */
 	files: ReadonlySet<string>;
 	/** The baseline row the scan was started against; absent when there was none. */
@@ -532,25 +533,24 @@ interface LateDeadCodeScan {
 	settled: DeadCodeResult | null;
 }
 
+const LATE_DEAD_CODE_SCANS = "dead-code-late-scans";
+
+function lateDeadCodeScansOf(
+	runtime: RuntimeCoordinator,
+): Map<string, LateDeadCodeScan> {
+	return scopeCell(
+		runtime.sessionScope,
+		LATE_DEAD_CODE_SCANS,
+		() => new Map<string, LateDeadCodeScan>(),
+	) as Map<string, LateDeadCodeScan>;
+}
+
 /** One finished scan and what it is compared with, for the dead-code delta. */
 interface DeadCodeDeltaSource {
 	result: DeadCodeResult;
 	previousScan: DeadCodeResult | undefined;
 	/** Resolved paths of the files whose new findings are attributable to the agent. */
 	modified: ReadonlySet<string>;
-}
-
-const lateDeadCodeScans = new WeakMap<object, Map<string, LateDeadCodeScan>>();
-
-function lateDeadCodeScansOf(
-	runtime: RuntimeCoordinator,
-): Map<string, LateDeadCodeScan> {
-	let scans = lateDeadCodeScans.get(runtime);
-	if (!scans) {
-		scans = new Map();
-		lateDeadCodeScans.set(runtime, scans);
-	}
-	return scans;
 }
 
 function lateDeadCodeScanKey(client: DeadCodeClient, cwd: string): string {
@@ -581,15 +581,13 @@ function deadCodeScanEvent(
 	};
 }
 
-/** Remove a late scan that will not be used and count why (once: only the registered entry). */
+/** Remove a late scan that will not be used, and count why. */
 function dropLateDeadCodeScan(
 	scans: Map<string, LateDeadCodeScan>,
 	key: string,
-	entry: LateDeadCodeScan,
 	client: DeadCodeClient,
 	reason: string,
 ): void {
-	if (scans.get(key) !== entry) return;
 	scans.delete(key);
 	incrementDegradationCount({
 		kind: "dead-code-late-scan-dropped",
@@ -619,8 +617,8 @@ function parkLateDeadCodeScan(args: {
 	const { runtime, cacheManager, client, cwd, cacheKey, startedAt } = args;
 	const scans = lateDeadCodeScansOf(runtime);
 	const key = lateDeadCodeScanKey(client, cwd);
+	const generation = runtime.sessionGeneration;
 	const entry: LateDeadCodeScan = {
-		generation: runtime.sessionGeneration,
 		files: args.files,
 		previousScan: args.previousScan,
 		carry: new Set(),
@@ -629,8 +627,8 @@ function parkLateDeadCodeScan(args: {
 	scans.set(key, entry);
 	void args.scan.then(
 		(result) => {
-			if (!runtime.isCurrentSession(entry.generation)) {
-				dropLateDeadCodeScan(scans, key, entry, client, "session-ended");
+			if (!runtime.isCurrentSession(generation)) {
+				dropLateDeadCodeScan(scans, key, client, "session-ended");
 				return;
 			}
 			const durationMs = Date.now() - startedAt;
@@ -651,7 +649,6 @@ function parkLateDeadCodeScan(args: {
 				dropLateDeadCodeScan(
 					scans,
 					key,
-					entry,
 					client,
 					`scan-failed: ${result.summary}`,
 				);
@@ -660,7 +657,7 @@ function parkLateDeadCodeScan(args: {
 			entry.settled = result;
 		},
 		(err: unknown) =>
-			dropLateDeadCodeScan(scans, key, entry, client, `scan-threw: ${err}`),
+			dropLateDeadCodeScan(scans, key, client, `scan-threw: ${err}`),
 	);
 }
 
@@ -2678,17 +2675,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// session may be over; if it finished, its delta is delivered now
 				// and the files edited meanwhile join this turn's scan; if it still
 				// runs, nothing else starts and this turn's files wait for it.
-				let late = lateScans.get(lateKey);
-				if (late && !runtime.isCurrentSession(late.generation)) {
-					dropLateDeadCodeScan(
-						lateScans,
-						lateKey,
-						late,
-						client,
-						"session-ended",
-					);
-					late = undefined;
-				}
+				const late = lateScans.get(lateKey);
 				let carried: ReadonlySet<string> = new Set();
 				if (late?.settled) {
 					lateScans.delete(lateKey);
