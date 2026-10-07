@@ -652,6 +652,81 @@ describe("toProjectRelativePath: Windows-shaped path relativizes on ANY OS (refs
 	});
 });
 
+describe("toProjectRelativePath: root spelled differently from the canonical key (#4101)", () => {
+	// Recurrence: the review graph keys files with `normalizeMapKey` (realpath on
+	// win32, on-disk casing on POSIX) and set them against the caller's root, so
+	// the `hintPath` of every file under an 8.3/junction/subst/mis-cased root
+	// came back absolute. `createCaseAliasFixture` is the POSIX stand-in.
+	it.skipIf(process.platform === "win32")(
+		"relativizes a canonical key against a root that differs by case alone",
+		(ctx) => {
+			const env = setupTestEnvironment("pi-lens-relroot-");
+			try {
+				const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+				if (fx.skipReason) return ctx.skip(fx.skipReason);
+				const aliasRoot = path.dirname(fx.rawMisCased);
+				expect(normalizeMapKey(fx.rawMisCased)).toBe(fx.onDisk);
+				expect(
+					toProjectRelativePath(normalizeMapKey(fx.rawMisCased), aliasRoot),
+				).toBe("a.ts");
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"relativizes a file spelled with the alias against a canonical root",
+		(ctx) => {
+			const env = setupTestEnvironment("pi-lens-relroot-");
+			try {
+				const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+				if (fx.skipReason) return ctx.skip(fx.skipReason);
+				expect(
+					toProjectRelativePath(fx.rawMisCased, path.dirname(fx.onDisk)),
+				).toBe("a.ts");
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	it("keeps a file that really is outside the root absolute", (ctx) => {
+		const env = setupTestEnvironment("pi-lens-relroot-");
+		try {
+			const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const outside = path.join(env.tmpDir, "elsewhere.ts");
+			fs.writeFileSync(outside, "x\n");
+			expect(
+				toProjectRelativePath(
+					normalizeMapKey(outside),
+					path.dirname(fx.rawMisCased),
+				),
+			).toBe(normalizeMapKey(outside).replace(/\\/g, "/"));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Folded LOW finding: `startsWith("..")` read a directory named `..evil` as an
+	// escape from the root, so its files rendered absolute (the matcher in
+	// `rule-ignores.ts` already pins the same boundary, #3240 r3).
+	it("keeps the root's own parent directory absolute", () => {
+		expect(toProjectRelativePath("/repo", "/repo/sub")).toBe("/repo");
+		expect(toProjectRelativePath("C:\\repo", "C:\\repo\\sub")).toBe("C:/repo");
+	});
+
+	it("treats an in-root directory named with a leading '..' as inside", () => {
+		expect(toProjectRelativePath("/repo/..evil/x.ts", "/repo")).toBe(
+			"..evil/x.ts",
+		);
+		expect(toProjectRelativePath("C:\\repo\\..evil\\x.ts", "C:\\repo")).toBe(
+			"..evil/x.ts",
+		);
+	});
+});
+
 describe("normalizeEphemeralMapKey (refs #191)", () => {
 	it("folds backslash and forward-slash forms to the same key", () => {
 		const forward = "C:/Users/foo/src/plan.js";

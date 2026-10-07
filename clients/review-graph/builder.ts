@@ -30,6 +30,7 @@ import {
 import type { LSPSymbol } from "../lsp/client.js";
 import {
 	isAtOrAboveHomeDir,
+	isUnderDir,
 	normalizeFilePath,
 	normalizeMapKey,
 	toProjectRelativePath,
@@ -3740,17 +3741,16 @@ function localImportToFile(
 		}
 		return undefined;
 	}
+	// #4101: `filePath` is a canonical key (`normalizeMapKey`) and `cwd` is the
+	// caller's spelling of the root. `isUnderDir` canonicalizes BOTH sides, so a
+	// root reached through an 8.3 name, a junction or a subst drive no longer
+	// drops the edge. Existence runs first: it rejects the many absent
+	// source-twin candidates for a stat, before any realpath.
 	const root = path.resolve(cwd);
 	for (const candidate of jsTsCandidatePaths(filePath, source)) {
-		const relative = path.relative(root, candidate);
-		if (
-			(relative.startsWith("..") &&
-				(relative.length === 2 || relative.startsWith(`..${path.sep}`))) ||
-			path.isAbsolute(relative) ||
-			!fs.existsSync(candidate)
-		)
-			continue;
+		if (!fs.existsSync(candidate)) continue;
 		const normalized = normalizeMapKey(candidate);
+		if (!isUnderDir(normalized, root)) continue;
 		if (ignoredIds?.has(normalized)) continue;
 		return normalized;
 	}
