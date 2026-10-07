@@ -126,11 +126,15 @@
  * hygiene rules stay fail-open on it. A substitution's output is unknown, so
  * {@link findDeny} reads a command holding one twice, with the output opaque
  * and with it empty, and denies if either reading does (#3997). Not handled:
- * The #4044 rules (`npmLinkedInstall`, `linkedNodeModulesDelete`) use the
- * same resolver for a delete operand and `--prefix`, in LOGICAL mode (a
- * physical realpath collapses `lane/node_modules/` onto its target and the
- * link leaves the path), and read an unknown cwd as the payload cwd, failing
- * closed, so a linked lane stays denied after `cd $(pwd) && npm ci`. Not
+ * The #4044 rules (`npmLinkedInstall`, `linkedNodeModulesDelete`) test a
+ * directory where the program lands: the holder of each `node_modules` a
+ * delete operand passes through physically, as the kernel does (a symlink
+ * before a later `..` is followed), and `--prefix` lexically, as npm does.
+ * A directory they cannot read -- an unknown cwd, or a value from `$( … )`,
+ * backticks or an unknown variable -- is the project the command runs in
+ * (the payload cwd when the tracked cwd is unknown), failing closed, so a
+ * linked lane stays denied after `cd $(pwd) && npm ci` and for
+ * `npm --prefix "$(pwd)" ci`. Not
  * handled: `cd x &` and
  * `cd x |` (a backgrounded or piped `cd` still moves the tracked cwd), a
  * `cd` inside a `$( … )` span (each span starts from the payload cwd), and a
@@ -175,7 +179,7 @@
  *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
  *   - npm/node_modules rules (#4044): `npm_config_prefix=`/`NPM_CONFIG_PREFIX`
- *     in the env, `npm --prefix "$(cmd)"`; a launcher between the shell and
+ *     in the env; a launcher between the shell and
  *     npm that this file's other rules also miss -- `/usr/bin/env`, `env -i`,
  *     `sudo -E`, `corepack npm`, `nohup`/`nice`/`timeout`, `xargs`, `npm exec
  *     -- npm ci`, `npx -c 'npm ci'`, `node …/npm-cli.js`; pnpm, yarn and bun
@@ -256,7 +260,7 @@ export const RULE_MESSAGES = {
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
 	npmLinkedInstall:
-		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory.",
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
 	linkedNodeModulesDelete:
 		"a delete whose operand passes THROUGH a node_modules symlink into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
@@ -1619,21 +1623,53 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
 
 /**
+ * The #4044 rules' ONE test of a directory (PR #4054 round 4): does the
+ * project `cwd` runs in -- npm's own walk-up from the PHYSICAL cwd to the
+ * nearest directory with a `package.json` or `node_modules` (measured on npm
+ * 9.2.0: from `lnk` -> `lane/scripts`, `npm prefix` prints the lane) -- hold a
+ * `node_modules` that {@link hasNodeModulesSymlinkOutside} calls outside it?
+ * Also the answer for a directory the resolver cannot read (a `$( … )` or
+ * backtick output, an unknown variable, a glob): such a part is judged as the
+ * project the command runs in, so `--prefix "$(pwd)"` and `D=$(pwd);
+ * --prefix $D` get one verdict, and a real lane's project is real.
+ *
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function projectNodeModulesLinked(cwd, env) {
+	let dir = resolveShellPath(".", cwd, env).path;
+	for (;;) {
+		if (hasNodeModulesSymlinkOutside(dir)) return true;
+		const parent = dirname(dir);
+		if (
+			parent === dir ||
+			existsSync(join(dir, "package.json")) ||
+			existsSync(join(dir, "node_modules"))
+		)
+			return false;
+		dir = parent;
+	}
+}
+
+/**
  * Does `operand` pass THROUGH a `node_modules` symlink that
  * {@link hasNodeModulesSymlinkOutside} calls outside its project? The operand
- * is expanded and anchored by {@link resolveShellPath} in LOGICAL mode, like
- * bash's own `cd` (`$PWD/node_modules/`, `~/node_modules/`, an assigned
- * `$D/`, a relative path after `cd`): a PHYSICAL realpath would collapse
- * `lane/node_modules/` onto the link's target and the link would vanish from
- * the path. "Through" means the path continues past the link:
- * `node_modules/x`, `node_modules/*`, a trailing `/` or `/.` (the kernel
- * follows a link spelled with one), or -- with `followFinal`
- * (`find -L|-H|-follow`) -- the link itself; `followAll` (`find -L|-follow`
- * descend every link they meet) also counts an operand that merely HOLDS the
- * link (`find -L . -delete`). The bare link (`rm -rf node_modules`) only
- * unlinks it. The slash is read off the raw operand (resolve drops it). A
- * `cd` INTO the link then `rm -rf ./*` reaches the same test through the
- * tracked cwd.
+ * is expanded by {@link expandShellWord} (`$PWD/node_modules/`,
+ * `~/node_modules/`, an assigned `$D/`) and walked component by component, the
+ * cwd's own components first (a `cd` INTO the link, then `rm -rf ./*`). At each
+ * `node_modules` component that something follows -- a component, `.`, `..`,
+ * a trailing `/` (the kernel follows a link spelled with one), or, with
+ * `followFinal` (`find -L|-H|-follow`), nothing -- the directory HOLDING it is
+ * tested where the kernel lands: {@link resolveShellPath} in physical mode,
+ * which follows a symlink before a later `..` (`../lnk/../node_modules/`
+ * reaches the lane `lnk` points into, R3-2). Only the holder is resolved: a
+ * physical realpath of the whole operand collapses `lane/node_modules/` onto
+ * the link's target and the link leaves the path. A holder the resolver cannot
+ * read is the project the command runs in ({@link projectNodeModulesLinked}).
+ * `followAll` (`find -L|-follow` descend every link they meet) also tests the
+ * operand itself as a holder (`find -L . -delete`). The bare link
+ * (`rm -rf node_modules`) only unlinks it.
  *
  * @param {string} operand
  * @param {string | undefined} cwd
@@ -1649,15 +1685,27 @@ function operandThroughNodeModulesLink(
 	followFinal,
 	followAll,
 ) {
-	const continues = followFinal || /(^|\/)\.$|\/$/.test(operand);
-	const { path: absolute } = resolveShellPath(operand, cwd, env, true);
-	if (followAll && hasNodeModulesSymlinkOutside(absolute)) return true;
-	const parts = absolute.split(SEP);
+	/** @param {string} holder */
+	const holderLinked = (holder) => {
+		const { path, reason } = resolveShellPath(holder, cwd, env);
+		return reason === undefined
+			? hasNodeModulesSymlinkOutside(path)
+			: projectNodeModulesLinked(cwd, env);
+	};
+	if (followAll && holderLinked(operand)) return true;
+	const { text } = expandShellWord(operand, cwd, env);
+	const words = text.split(SEP);
+	const anchor = isAbsolute(text) ? [] : (cwd ?? process.cwd()).split(SEP);
+	const parts = [...anchor, ...words];
 	for (let i = 1; i < parts.length; i++) {
 		if (parts[i] !== "node_modules") continue;
-		if (i === parts.length - 1 && !continues) continue;
-		if (hasNodeModulesSymlinkOutside(parts.slice(0, i).join(SEP) || SEP))
-			return true;
+		if (i === parts.length - 1 && !followFinal) continue;
+		const holder =
+			i < anchor.length
+				? parts.slice(0, i).join(SEP) || SEP
+				: words.slice(0, i - anchor.length).join(SEP) ||
+					(isAbsolute(text) ? SEP : ".");
+		if (holderLinked(holder)) return true;
 	}
 	return false;
 }
@@ -1671,10 +1719,12 @@ function operandThroughNodeModulesLink(
  * `find node_modules/ -exec rm -rf {} +` and `cd node_modules && rm -rf ./*`
  * all empty the link's target; `rm -rf node_modules` and `find node_modules
  * -delete` remove only the link. Operands go through {@link resolveShellPath}
- * (`$PWD`, `~`, assigned variables). NOT handled: a glob that expands TO the
+ * (`$PWD`, `~`, assigned variables); a holder it cannot read
+ * (`"$(pwd)/node_modules/"`, an unknown variable) is the project the command
+ * runs in. NOT handled: a glob that expands TO the
  * link (a star-slash operand, `rm -rf` of every subdirectory or of a `node_m` prefix glob), `find -L` from an ancestor of the lane (only
- * an operand that is, holds, or sits under the link counts), an operand with a
- * substitution or unset variable (judged by its best-effort text), `xargs rm`,
+ * an operand that is, holds, or sits under the link counts), an operand made
+ * only of a substitution (`rm -rf $(ls)`: no `node_modules` component), `xargs rm`,
  * `find -exec sh -c`, `shred`, `mv`, `rsync --delete`, `git clean`,
  * `npx rimraf`, a runtime `rmSync`/`rmtree`.
  *
@@ -1788,14 +1838,16 @@ const NPM_VALUE_FLAGS = new Set([
  * The project dir is `--prefix` when given, else the cwd -- walked up to the
  * nearest directory with a `package.json` or `node_modules`, as npm's own
  * local-prefix lookup does (a lane's `scripts/` subdirectory reaches the
- * lane's link). The link test is {@link hasNodeModulesSymlinkOutside}, the
+ * lane's link; {@link projectNodeModulesLinked}). A `--prefix` the resolver
+ * cannot read (`"$(pwd)"`, backticks, an unknown variable) is that project
+ * too, failing closed in a linked lane (R3-1); `--prefix $TMPDIR/<name>` is
+ * readable. The link test is {@link hasNodeModulesSymlinkOutside}, the
  * #3173 classifier, deliberately without {@link looksLikeGitWorktree}: a
  * delete through an outside link is the hazard wherever the link sits.
  * `-g`/`--global` writes the global tree, not the project's, and is allowed.
  * The verb is the first positional that is a known npm verb, so the value of
  * an unlisted flag (`npm --audit false ci`) does not become the verb; the
- * `--prefix` goes through {@link resolveShellPath} (`$PWD`, `~`); one that a
- * substitution swallowed (`"$(mktemp -d)"`) is not judged. NOT handled: see the
+ * `--prefix` goes through {@link resolveShellPath} (`$PWD`, `~`). NOT handled: see the
  * header's list (`npm_config_prefix=`, launchers, `npm exec -- npm ci`, ...).
  *
  * @param {"npm"|"npx"} cmd
@@ -1827,35 +1879,30 @@ function classifyNpm(cmd, args, cwd, env) {
 		return null;
 	if (npmArgs.some((a) => a === "-g" || a === "--global")) return null;
 	let prefix;
-	let prefixGiven = false;
 	for (let i = 0; i < npmArgs.length; i++) {
-		if (npmArgs[i] === "--prefix") {
-			prefix = npmArgs[i + 1];
-			prefixGiven = true;
-		} else if (npmArgs[i].startsWith("--prefix=")) {
-			prefix = npmArgs[i].slice(9);
-			prefixGiven = true;
-		}
+		if (npmArgs[i] === "--prefix") prefix = npmArgs[i + 1] ?? "";
+		else if (npmArgs[i].startsWith("--prefix=")) prefix = npmArgs[i].slice(9);
 	}
-	// A `--prefix` whose value is missing or empty is a word a substitution
-	// swallowed (`--prefix "$(mktemp -d)"` read with its empty reading): an
-	// unresolvable prefix, not "no prefix".
-	if (prefixGiven && !prefix) return null;
-	let dir = cwd ?? process.cwd();
-	// Logical, like the delete operands: `--prefix $PWD`, `~`, an assigned `$P`.
-	if (prefix !== undefined) dir = resolveShellPath(prefix, cwd, env, true).path;
-	for (;;) {
-		if (hasNodeModulesSymlinkOutside(dir)) return "npmLinkedInstall";
-		const parent = dirname(dir);
-		if (
-			prefix !== undefined ||
-			parent === dir ||
-			existsSync(join(dir, "package.json")) ||
-			existsSync(join(dir, "node_modules"))
-		)
-			return null;
-		dir = parent;
-	}
+	// npm resolves `--prefix` lexically, and an empty one is the cwd (measured
+	// on npm 9.2.0: `--prefix lnk/..` is the directory holding `lnk`). The
+	// path npm writes through is `<prefix>/node_modules/`; without a readable
+	// prefix it is its cwd (a cwd INSIDE the link lands npm in the shared
+	// install's own checkout, measured: `cd lane/node_modules && npm prefix`
+	// prints `main`) and the project the walk-up finds.
+	const resolved =
+		prefix === undefined ? undefined : resolveShellPath(prefix, cwd, env, true);
+	const linked =
+		resolved === undefined || resolved.reason !== undefined
+			? operandThroughNodeModulesLink(".", cwd, env, false, false) ||
+				projectNodeModulesLinked(cwd, env)
+			: operandThroughNodeModulesLink(
+					`${resolved.path}${SEP}node_modules${SEP}`,
+					cwd,
+					env,
+					false,
+					false,
+				);
+	return linked ? "npmLinkedInstall" : null;
 }
 
 // `-d`/`--directory` (bare or bundled, e.g. `-qd`) are the flags that make

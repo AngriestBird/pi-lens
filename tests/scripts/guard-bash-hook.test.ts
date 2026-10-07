@@ -1338,12 +1338,10 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 		}
 	});
 
-	it("still allows an unresolvable --prefix (a scratch dir made on the spot) and in-lane deletes that miss the link", () => {
+	it("allows in-lane deletes that resolve past the link without passing through it", () => {
 		const { tree, cleanup } = makeLane(true);
 		try {
 			for (const command of [
-				'npm ci --prefix "$(echo scratch)"',
-				"npm ci --prefix $UNSET_4044_DIR/x",
 				"rm -rf $PWD/dist/",
 				"rm -rf $PWD/node_modules",
 				"rm -rf ~/dist/",
@@ -1352,6 +1350,323 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 				expect(result.stderr, command).toBe("");
 				expect(result.status, command).toBe(0);
 			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	// Round 4 state table (PR #4054 body, "Round 4"): value form x lane x verb.
+	// Recurrence: round 3 let `npm --prefix "$(pwd)" ci` through in a linked
+	// lane while `D=$(pwd); npm --prefix $D ci` denied (R3-1, a regression it
+	// introduced), and resolved `../lnk/../node_modules/` lexically while the
+	// kernel follows `lnk` first (R3-2). One rule covers every row: a directory
+	// is tested where the program lands (kernel walk for deletes, npm's own
+	// resolution for --prefix and the walk-up), and a part the resolver cannot
+	// read is the project the command runs in.
+	function makeTableFixture(): { root: string; cleanup: () => void } {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-r4-"));
+		const shared = join(root, "main", "node_modules");
+		mkdirSync(shared, { recursive: true });
+		for (const name of ["lane", "real"]) {
+			mkdirSync(join(root, name, "scripts"), { recursive: true });
+			writeFileSync(join(root, name, "package.json"), "{}\n");
+		}
+		symlinkSync(shared, join(root, "lane", "node_modules"));
+		mkdirSync(join(root, "real", "node_modules"));
+		mkdirSync(join(root, "sib"));
+		mkdirSync(join(root, "scratch"));
+		symlinkSync(join(root, "lane", "scripts"), join(root, "lnk"));
+		symlinkSync(join(root, "real", "scripts"), join(root, "rlnk"));
+		return {
+			root,
+			cleanup: () => rmSync(root, { recursive: true, force: true }),
+		};
+	}
+
+	// [id, command ({dir} = the lane, {lnk} = its scripts link), payload cwd,
+	//  HOME is the lane, expected in the linked lane, expected in the real one]
+	const ROUND4_TABLE: Array<
+		[string, string, "lane" | "sib", boolean, "deny" | "allow", "allow"]
+	> = [
+		["N1 literal", "npm --prefix {dir} ci", "sib", false, "deny", "allow"],
+		[
+			"N2 known var",
+			"P={dir}; npm --prefix $P ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N3 unknown var",
+			'npm --prefix "$UNSET_4054_R4" ci',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N3b unknown var",
+			"npm ci --prefix $UNSET_4054_R4/x",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["N4 $(cmd)", 'npm --prefix "$(pwd)" ci', "lane", false, "deny", "allow"],
+		["N4b $(cmd)", "npm ci --prefix=$(pwd)", "lane", false, "deny", "allow"],
+		[
+			"N4c $(cmd)",
+			'npm ci --prefix "$(git rev-parse --show-toplevel)"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N4d $(cmd)",
+			'npm --prefix "$(mktemp -d)" ci',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N4e $(cmd) via var",
+			"D=$(pwd); npm --prefix $D ci",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["N5 backtick", "npm ci --prefix `pwd`", "lane", false, "deny", "allow"],
+		["N6 ~", "npm --prefix ~ ci", "sib", true, "deny", "allow"],
+		["N6b $HOME", "npm --prefix $HOME ci", "sib", true, "deny", "allow"],
+		[
+			"N7 $TMPDIR",
+			"npm --prefix $TMPDIR/s ci",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"N7b $TMPDIR cd",
+			"cd $TMPDIR/s && npm ci",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		["N8 $PWD", "npm --prefix $PWD ci", "lane", false, "deny", "allow"],
+		[
+			"N9 symlink+.. cd",
+			"cd ../{lnk} && npm ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N9b symlink+.. prefix",
+			"npm --prefix ../{lnk}/.. ci",
+			"sib",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"N10 cwd inside the link",
+			"cd {dir}/node_modules && npm ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"N10b prefix inside the link",
+			"npm --prefix {dir}/node_modules ci",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		["D1 literal", "rm -rf node_modules/", "lane", false, "deny", "allow"],
+		[
+			"D1b literal link only",
+			"rm -rf node_modules",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		[
+			"D2 known var",
+			"D={dir}; rm -rf $D/node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D3 unknown var",
+			'rm -rf "$UNSET_4054_R4/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4 $(cmd)",
+			'rm -rf "$(pwd)/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4b $(cmd)",
+			'rm -rf "$(git rev-parse --show-toplevel)/node_modules/"',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4c $(cmd) via var",
+			"S=$(pwd); rm -rf $S/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4d $(cmd) find",
+			'find "$(pwd)/node_modules/" -delete',
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D4e $(cmd) find -L",
+			"find -L $(pwd) -delete",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D5 backtick",
+			"rm -rf `pwd`/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		["D6 ~", "rm -rf ~/node_modules/", "sib", true, "deny", "allow"],
+		["D6b $HOME", "rm -rf $HOME/node_modules/*", "sib", true, "deny", "allow"],
+		[
+			"D7 $TMPDIR",
+			"rm -rf $TMPDIR/s/node_modules/",
+			"lane",
+			false,
+			"allow",
+			"allow",
+		],
+		["D8 $PWD", "rm -rf $PWD/node_modules/", "lane", false, "deny", "allow"],
+		[
+			"D9 symlink+..",
+			"rm -rf ../{lnk}/../node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+		[
+			"D9b symlink+.. cd",
+			"cd ../{lnk} && rm -rf ../node_modules/",
+			"sib",
+			false,
+			"deny",
+			"allow",
+		],
+	];
+
+	it.each(ROUND4_TABLE)(
+		"round-4 state table %s: `%s` (cwd %s) in a linked and a real lane",
+		(_id, template, cwdKind, homeIsLane, linkedVerdict, realVerdict) => {
+			const { root, cleanup } = makeTableFixture();
+			try {
+				for (const [lane, link, verdict] of [
+					["lane", "lnk", linkedVerdict],
+					["real", "rlnk", realVerdict],
+				] as const) {
+					const dir = join(root, lane);
+					const command = template
+						.replaceAll("{dir}", dir)
+						.replaceAll("{lnk}", link);
+					const { UNSET_4054_R4: _unset, ...env } = BASE_ENV;
+					const result = runHook(
+						command,
+						{
+							...env,
+							TMPDIR: join(root, "scratch"),
+							...(homeIsLane ? { HOME: dir } : {}),
+						},
+						cwdKind === "sib" ? join(root, "sib") : dir,
+					);
+					if (verdict === "deny") {
+						expect(result.status, `${lane}: ${command}`).toBe(2);
+						expect(result.stderr, `${lane}: ${command}`).toContain("#4044");
+					} else {
+						expect(result.stderr, `${lane}: ${command}`).toBe("");
+						expect(result.status, `${lane}: ${command}`).toBe(0);
+					}
+				}
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	// Recurrence: round 3 resolved `node_modules/..` lexically to the lane,
+	// while the kernel follows the link first and lands in the shared
+	// install's parent (`find node_modules/.. -delete` would empty the main
+	// checkout); the same holds for a relative path from a cwd inside the link.
+	it("denies a path the kernel resolves through the link before a `..`, and not through a real node_modules", () => {
+		const linked = makeLane(true);
+		const real = makeLane(false);
+		try {
+			for (const [command, cwd] of [
+				["find node_modules/.. -delete", linked.tree],
+				["rm -rf node_modules/../x", linked.tree],
+				[`cd ${linked.tree}/node_modules && rm -rf ../x`, PAYLOAD_CWD],
+			]) {
+				const result = runHook(command, BASE_ENV, cwd);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+			for (const command of [
+				"find node_modules/.. -delete",
+				`cd ${real.tree}/node_modules && rm -rf ../x`,
+			]) {
+				const result = runHook(command, BASE_ENV, real.tree);
+				expect(result.stderr, command).toBe("");
+				expect(result.status, command).toBe(0);
+			}
+		} finally {
+			linked.cleanup();
+			real.cleanup();
+		}
+	});
+
+	it("points an unreadable --prefix at a $TMPDIR scratch directory", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			const result = runHook('npm --prefix "$(pwd)" ci', BASE_ENV, tree);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("--prefix $TMPDIR/<name>");
 		} finally {
 			cleanup();
 		}

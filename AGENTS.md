@@ -373,11 +373,16 @@ the surface they bite; each block loads only when its trigger applies.
     a lane unlinks without a slash or glob. Consolidation verdict: two rules on
     one classifier seam, kept apart because the npm rule judges a verb and the
     delete rule a path operand (deleting the delete rule relocates nothing the
-    npm rule could absorb). Both rules read a `cd` the scan could not resolve
-    (`cwd === null`) as the payload cwd, failing closed, and resolve operands
-    and `--prefix` through `resolveShellPath` in logical mode (a physical
-    realpath collapses `lane/node_modules/` onto its target and the link
-    vanishes). `find -L|-follow` also counts an operand that holds the link.
+    npm rule could absorb). Both share one path test,
+    `operandThroughNodeModulesLink` (npm's is `<prefix>/node_modules/`, or its
+    cwd plus the project its walk-up finds), and one rule for every value form
+    (#4054 round 4, after round 3 regressed `--prefix "$(pwd)"`): a directory
+    is tested where the program lands (the holder of each `node_modules`
+    component physically, as the kernel follows a link before `..`; npm's
+    `--prefix` lexically; npm's walk-up from the physical cwd), and a part
+    the resolver cannot read (an unknown cwd, `$( … )`, backticks, an unknown
+    variable) is the project the command runs in, failing closed in a linked
+    lane only. `find -L|-follow` also counts an operand that holds the link.
     Unguarded, listed in the header's not-handled list: a glob that expands to
     the link (`rm -rf */`), `xargs rm`, `rsync --delete`, `mv`, `npx rimraf`.
 
