@@ -258,6 +258,16 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   comes stays; a primary successor whose key a note holds is declined
   (`BeginDeclined`). `Mut3855r1*` keep its violations.
 
+`startThrows` and `pinAtReset` (#3613 F1, review r1 on #4118) are a fault
+and its fix, not a merged mechanism pair. `startThrows` makes every primary
+start's handler throw after its reset. The code then never pins the stable
+session id if the pin sits after the start's await, and the coordinator
+keeps the reset's random id. `pinAtReset` is the merged pin, placed before
+the await (`index.ts`). `OwnTurn` selects a turn's target by id equality,
+as `beginTurn` does (`turnSession`, `clients/runtime-coordinator.ts`): a
+turn is the coordinator's own only when its session's id is the pinned
+one.
+
 ## Invariants
 
 | Invariant | Meaning |
@@ -316,6 +326,7 @@ counterexample.
 | `Merged` | merged master: every transition but a subagent's turn and its own replacement, the primary's read-guard writer | pass | 11116 |
 | `MergedStores` | merged master: activations and advisories across every transition that moves them, with a subagent | pass | 65248 |
 | `MergedTurns` | merged master with turns (#3613): a subagent's turns and the primary's turns, `/new`, resume, `/fork`, `/reload` and `/tree`, the primary's read-guard writer | pass | 23024 |
+| `H3StartThrows` | #3613 F1 fix: `MergedTurns` with every start throwing after its reset, and the pin before the await | pass | 23024 |
 | `H3FileBacked` | merged slot: a subagent's own `/reload` or `/fork` in the primary's gap, file-backed sessions | pass | 597 |
 | `H3FileLess` | the same, file-less sessions, with #3819's fix | pass | 597 |
 | `H3FileLessStores` | `H3FileLess` with activations and advisories: none crosses | pass | 20834 |
@@ -384,6 +395,7 @@ counterexample.
 | `MutHeartbeatBeforeRegistration` | a heartbeat lands before the new registration | violated `NoCrossSessionState` | 10 |
 | `MutSecondaryTurnStart` | pre-#3613: a subagent's `turn_start` advances the primary's turn | violated `SecondaryIsolation` | 4 |
 | `MutSecondaryTurnReset` | pre-#3613: the primary's turn start or `/new` moves a live subagent's per-turn records | violated `SecondaryIsolation` | 8 |
+| `MutStartThrowsLatePin` | #3613 r1 (F1): the throwing start with the pin after the await; the primary's turns never move its turn state | violated `SecondaryIsolation` | 7 |
 | `MutTreeWipesSecondary` | the primary's `/tree` filters the subagent's reads | violated `SecondaryIsolation` | 9 |
 | `MutSecondaryReadShared` | a subagent's read lands in the primary's read guard | violated `NoCrossSessionState` | 4 |
 | `MutSecondaryTakesHandoff` | a subagent's start takes the slot and discards it | violated `HandoffOnce` | 7 |
@@ -433,6 +445,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `MutHeartbeatBeforeRegistration` | #3498 | pre-#3593 (f2c880012): the heartbeat before #3498's fix; the lock-level detail is `formal/session-registry` | A heartbeat begins, session 1 shuts down, and the heartbeat re-registers session 1's root before session 2's registration lands. |
 | `MutSecondaryTurnStart` | N2, #3613 | pre-#3613 (17b10c027): `onTurnStart` called `runtime.beginTurn()` with no session id (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
 | `MutSecondaryTurnReset` | #3613 | pre-#3613 (17b10c027): one per-turn warning map on the coordinator, cleared by every `beginTurn` and by `resetForSession` | The primary's turn starts while a subagent is live, so the subagent's per-turn records move (the same for the primary's `/new`). |
+| `MutStartThrowsLatePin` | #3613 F1 (review r1 on #4118) | #4118 r1 (c4c4564b6): `setSessionLifecycle` after `await bounded(handleSessionStart …)` | The startup's handler throws after its reset, the pin is skipped, and the primary's first turn takes the other-session path. |
 | `MutSecondaryReadShared` | F4, #3613 | master: a subagent's handlers reach the module-level `runtime.readGuard` | The subagent's read lands in the primary's cell. |
 | `MutTreeWipesSecondary` | #3607 | master, the accepted residual #3521 F2 (the comment on the `session_tree` handler, `index.ts`) | The subagent's read lands, and the primary's `/tree` filters it away. |
 | `MutSettleDuringTree` | #3521 (the G10 F1 review race) | design alternative: fenced at session level with no branch epoch | A read of entry 2 begins, `/tree` drops entry 2, and the read lands. |

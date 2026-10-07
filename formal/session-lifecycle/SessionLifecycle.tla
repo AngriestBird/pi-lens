@@ -374,9 +374,21 @@ CellOf(t) == IF role[t] = "secondary" /\ SecPolicy("RG") = "shared"
              THEN last ELSE t
 ActCell(t) == IF role[t] = "secondary" /\ SecPolicy("LZ") = "shared"
               THEN last ELSE t
-\* The scope whose turn counter and per-turn maps a turn of scope t moves.
+\* The scope whose turn counter and per-turn maps a turn of scope t should
+\* move: its own, or, when the turn state is shared, the module-level
+\* runtime's.
 TurnCellOf(t) == IF role[t] = "secondary" /\ SecPolicy("TC") = "shared"
                  THEN last ELSE t
+\* #3613 F1: the coordinator holds the stable id of the session it serves.
+\* The start pins it; `startThrows` is a start whose handler throws after its
+\* reset, which skips a pin placed after the start's await, so the
+\* coordinator keeps the reset's random id. `pinAtReset` pins it before the
+\* await (merged).
+Pinned == ~Has("startThrows") \/ Has("pinAtReset")
+\* The code's rule (`turnSession`, `beginTurn`): a turn is the coordinator's
+\* own when its session's id equals the id the coordinator holds. Selected by
+\* id, not by role, like the code.
+OwnTurn(t) == Pinned /\ sess[t] = sess[last]
 
 Ents(S) == {x.e : x \in S}
 
@@ -1149,7 +1161,9 @@ Dup ==
 
 TurnStart ==
     /\ turns < MaxTurns /\ primary # 0 /\ pend.k = "none"
-    /\ turn' = [turn EXCEPT ![primary] = @ + 1]
+    \* Not the coordinator's own (F1): only the turn's own id moves.
+    /\ turn' = IF OwnTurn(primary) THEN [turn EXCEPT ![primary] = @ + 1]
+               ELSE turn
     /\ begun' = [begun EXCEPT ![primary] = @ + 1]
     /\ turns' = turns + 1
     /\ Draw
@@ -1166,7 +1180,9 @@ SecTurn ==
     /\ "SecTurn" \in Transitions /\ turns < MaxTurns
     /\ \E s \in Tickets :
           /\ st[s] = "live" /\ role[s] = "secondary"
-          /\ turn' = [turn EXCEPT ![TurnCellOf(s)] = @ + 1]
+          /\ LET tgt == IF SecPolicy("TC") = "shared" \/ OwnTurn(s)
+                        THEN last ELSE s
+             IN turn' = [turn EXCEPT ![tgt] = @ + 1]
           /\ begun' = [begun EXCEPT ![s] = @ + 1]
     /\ turns' = turns + 1
     /\ Draw
