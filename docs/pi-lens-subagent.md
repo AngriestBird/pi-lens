@@ -167,8 +167,11 @@ sets the exit code and only `clean` exits 0:
   file is tracked.
 - `unproven` (3): a step failed or a red could not be attributed (the build, a
   run with no named failing file, an `INCONCLUSIVE` red-on-base verdict, a
-  failed lint or format check). That is not evidence of unrelated: report it
-  and stop, or fix the cause.
+  failed lint or format check, a selection over the 25-file cap where only
+  governance suites ran). That is not evidence of unrelated: report it and
+  stop, or fix the cause. The summary prints `selection: selected S, matched
+  M, capped C`.
+- `2`: usage error (`--body` without a path); nothing ran.
 
 The change set is the committed diff plus uncommitted tracked edits and
 untracked files, so a lane without Git authority is checked too. In a lane that

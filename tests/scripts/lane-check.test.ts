@@ -154,7 +154,11 @@ function makeLane(spec: LaneSpec) {
 }
 type Lane = ReturnType<typeof makeLane>;
 
-function runLane(lane: Lane, extraEnv: Record<string, string> = {}) {
+function runLane(
+	lane: Lane,
+	extraEnv: Record<string, string> = {},
+	args: string[] = [],
+) {
 	const env: NodeJS.ProcessEnv = {
 		...gitFixtureEnv(lane.root),
 		PATH: `${lane.bin}${path.delimiter}${process.env.PATH}`,
@@ -167,7 +171,7 @@ function runLane(lane: Lane, extraEnv: Record<string, string> = {}) {
 	};
 	// The ambient runner's lock bypass must not leak into the hermetic fixture.
 	if (!("PI_LENS_TEST_NO_LOCK" in extraEnv)) delete env.PI_LENS_TEST_NO_LOCK;
-	const result = spawnSync(process.execPath, [LANE_CHECK], {
+	const result = spawnSync(process.execPath, [LANE_CHECK, ...args], {
 		cwd: lane.root,
 		encoding: "utf8",
 		timeout: 150_000,
@@ -210,7 +214,16 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.record.verdict).toBe("clean");
 			expect(run.record.failedFiles).toEqual([]);
 			expect(run.record.checks.build).toBe(0);
-			expect(run.record.checks.targeted).toEqual({ status: 0, failed: [] });
+			expect(run.record.checks.targeted).toEqual({
+				status: 0,
+				failed: [],
+				selected: 1,
+				matched: 1,
+				capped: false,
+			});
+			expect(run.out).toContain(
+				"selection: selected 1, matched 1, capped false",
+			);
 			expect(run.out).toContain("verdict: clean (exit 0)");
 			expect(run.out).toContain("branch: lane/fixture");
 			// One build for the lane: no red to compare, so red-on-base builds none.
@@ -535,6 +548,61 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.out.length).toBeGreaterThan(1_048_576);
 			expect(run.status).toBe(0);
 			expect(run.record.verdict).toBe("clean");
+		},
+		TIMEOUT,
+	);
+
+	// Recurrence (#4074 verify r2 F1): one comment line in a hub file matched 144
+	// test files, the selector ran only the governance registries and exited 0,
+	// and lane:check printed `verdict: clean`.
+	it(
+		"a capped selection is unproven, never clean, and says what ran",
+		() => {
+			const many: Files = {};
+			for (let i = 0; i < 25; i += 1)
+				many[`tests/clients/many-${i}.test.ts`] = FOO_TEST;
+			const lane = makeLane({
+				base: { ...BASE_FILES, ...many },
+				head: { "clients/foo.ts": "export const value = 1; // touched\n" },
+			});
+			const run = runLane(lane);
+			expect(run.status).toBe(3);
+			expect(run.record.verdict).toBe("unproven");
+			expect(run.record.checks.targeted).toEqual({
+				status: 0,
+				failed: [],
+				selected: 0,
+				matched: 26,
+				capped: true,
+			});
+			expect(run.record.findings).toEqual([
+				{
+					kind: "unproven",
+					reason:
+						"selection capped: 26 test files matched, 0 ran; run the full suite or narrow the change",
+				},
+			]);
+			expect(run.out).toContain(
+				"selection: selected 0, matched 26, capped true",
+			);
+			expect(run.out).toContain(
+				"selection capped: run the full suite or narrow the change",
+			);
+		},
+		TIMEOUT,
+	);
+
+	// Recurrence (#4074 verify r2 F2a): `--body` with no path silently skipped
+	// the body lint and the lane could still read clean.
+	it(
+		"--body with no path is a usage error: exit 2, and no step runs",
+		() => {
+			const lane = makeLane({ base: BASE_FILES });
+			const run = runLane(lane, {}, ["--body"]);
+			expect(run.status).toBe(2);
+			expect(run.out).toContain("lane-check: --body needs a file path");
+			expect(run.record).toBeUndefined();
+			expect(fs.existsSync(path.join(lane.home, "builds.log"))).toBe(false);
 		},
 		TIMEOUT,
 	);

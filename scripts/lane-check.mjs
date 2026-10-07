@@ -26,6 +26,9 @@ const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
 const HANDOFF_FILES = ["PR_BODY.md", "COMMIT_MSG.txt"];
 
 export const LANE_EXIT = { clean: 0, "red-caused": 1, unproven: 3 };
+const USAGE_EXIT = 2;
+const CAPPED_REMEDY =
+	"selection capped: run the full suite or narrow the change";
 
 // A red-on-base per-test line: `<VERDICT>  <file> > <test name>`.
 const PER_TEST_LINE =
@@ -126,6 +129,12 @@ export function main(argv = process.argv.slice(2)) {
 	const root = process.cwd();
 	const bodyIndex = argv.indexOf("--body");
 	const body = bodyIndex === -1 ? null : argv[bodyIndex + 1];
+	// A flag that was given and has no value must not read as "no body": the
+	// lint would be skipped and the lane could still come out clean.
+	if (bodyIndex !== -1 && (!body || body.startsWith("--"))) {
+		console.error("lane-check: --body needs a file path");
+		return USAGE_EXIT;
+	}
 	const findings = [];
 	const unproven = (reason) => findings.push({ kind: "unproven", reason });
 	const record = { base: BASE, checks: {}, failedFiles: [], redOnBase: null };
@@ -155,7 +164,24 @@ export function main(argv = process.argv.slice(2)) {
 		...targeted.output.matchAll(/^\s+- (tests\/[^\s]+\.test\.ts)$/gm),
 	].map((match) => match[1]);
 	const targetedFailing = reportedFailureFiles(targeted.output, selected);
-	record.checks.targeted = { status: targeted.status, failed: targetedFailing };
+	// Over the selector's cap only the governance registries and history picks
+	// ran, and the selector still exits 0: that is not a clean targeted run.
+	const cap = targeted.output.match(
+		/selection too broad \((\d+) test files matched/,
+	);
+	const capped = cap !== null;
+	const matched = capped ? Number(cap[1]) : selected.length;
+	record.checks.targeted = {
+		status: targeted.status,
+		failed: targetedFailing,
+		selected: selected.length,
+		matched,
+		capped,
+	};
+	if (capped)
+		unproven(
+			`selection capped: ${matched} test files matched, ${selected.length} ran; run the full suite or narrow the change`,
+		);
 	const targetedGap = unattributedFailure(
 		targeted.status,
 		targeted.output,
@@ -289,6 +315,13 @@ function report(root, record, findings, { governance, changed }) {
 		`red files: ${record.failedFiles.length}; CAUSED-BY-CHANGE: ${count("CAUSED-BY-CHANGE")}; RED-ON-BASE: ${count("RED-ON-BASE")}; INCONCLUSIVE: ${count("INCONCLUSIVE")} (not evidence of unrelated)`,
 	);
 	console.log(`governance files: ${governance}; steps run: ${ran.length}`);
+	const selection = record.checks.targeted;
+	if (selection) {
+		console.log(
+			`selection: selected ${selection.selected}, matched ${selection.matched}, capped ${selection.capped}`,
+		);
+		if (selection.capped) console.log(CAPPED_REMEDY);
+	}
 	for (const finding of findings)
 		console.log(`${finding.kind}: ${finding.reason}`);
 	console.log(`uncommitted: ${uncommitted} file(s)`);
