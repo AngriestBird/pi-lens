@@ -10,6 +10,7 @@ export declare function writeScopes(
 export declare function workflowDocument(
 	source: string,
 ): Record<string, unknown>;
+export declare function workflowTriggers(on: unknown): string[];
 export type DispatchableJob = {
 	id: string;
 	name: string;
@@ -22,8 +23,18 @@ export declare function dispatchableJobs(
 	workflowPath?: string,
 ): DispatchableJob[];
 export declare function hasWriteToken(job: DispatchableJob): boolean;
+export type Guard =
+	| { guarded: true; conjunct: unknown }
+	| { guarded: false; reason: string };
+export declare function guardOf(...conditions: unknown[]): Guard;
 export declare function guardSkipsOnRef(
 	job: DispatchableJob,
 	ref: string,
 ): boolean;
-export declare function writerSteps(job: DispatchableJob): string[];
+export declare function parseArgs(
+	argv: string[],
+): { file: string; ref: string } | { error: string };
+export declare function runCli(
+	argv: string[],
+	cwd?: string,
+): { code: number; stdout: string[]; stderr: string[] };

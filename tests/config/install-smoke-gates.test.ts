@@ -1,6 +1,6 @@
 // Pins install-smoke.yml's job-level `if:` event gates (#2613 review T1).
 // Exactly ONE job still carries one: `host-latest-smoke`'s
-// `schedule`/master gate, the nightly advisory drift lane.
+// `schedule`/`workflow_dispatch` gate, the nightly advisory drift lane.
 // `host-range-smoke` deliberately carries NO gate (it is the PR-gating lane)
 // and is intentionally absent from this table.
 //
@@ -80,13 +80,7 @@ function readStepRun(
 function evaluateIf(expr: string, eventName: string): boolean {
 	const substituted = expr
 		.split("github.event_name")
-		.join(JSON.stringify(eventName))
-		.split("github.ref")
-		.join(
-			JSON.stringify(
-				eventName === "schedule" ? "refs/heads/master" : "refs/heads/feature",
-			),
-		);
+		.join(JSON.stringify(eventName));
 	if (substituted.includes("github.")) {
 		throw new Error(
 			`unsubstituted github.* reference survived evaluation: ${substituted} (this table only understands github.event_name)`,
@@ -107,7 +101,7 @@ const EVENTS = [
 
 // [jobName, expected-eligible-events]
 const GATES: Array<[string, readonly string[]]> = [
-	["host-latest-smoke", ["schedule"]],
+	["host-latest-smoke", ["schedule", "workflow_dispatch"]],
 ];
 
 describe("install-smoke.yml job event gates (#2613 review T1)", () => {
@@ -478,3 +472,62 @@ describe.each(MATRIX_GATED_JOBS)(
 		});
 	},
 );
+
+// #4077: `host-latest-smoke` is read-only and runs on any dispatched ref (the
+// gate table above); its tracking issue is written by `host-latest-notify`,
+// scoped to the schedule or master. GitHub permissions are job-scoped, so the
+// old single job held `issues: write` while it ran unreviewed branch code.
+describe("install-smoke.yml host-latest split (#4077)", () => {
+	type SplitJob = {
+		if?: unknown;
+		needs?: unknown;
+		permissions?: unknown;
+		outputs?: Record<string, string>;
+		steps?: Array<{ id?: string; name?: string; env?: Record<string, string> }>;
+	};
+	const jobs = (loadWorkflow() as unknown as { jobs: Record<string, SplitJob> })
+		.jobs;
+	const smoke = jobs["host-latest-smoke"];
+	const notify = jobs["host-latest-notify"];
+	const notifyStep = notify.steps?.find((s) =>
+		s.name?.startsWith("Notify install drift"),
+	);
+
+	// Recurrence: the write scope sitting on the smoke job, so a branch dispatch
+	// held it while running branch code.
+	it("keeps the smoke read-only and the notify job at issues: write behind the schedule/master guard", () => {
+		expect(smoke.permissions).toEqual({ contents: "read" });
+		expect(notify.permissions).toEqual({ contents: "read", issues: "write" });
+		expect(notify.needs).toBe("host-latest-smoke");
+		// `always()` so a red smoke still files, `!= 'skipped'` so the push and
+		// pull_request events that skip the smoke do not reach the writer.
+		expect(notify.if).toBe(
+			"always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.host-latest-smoke.result != 'skipped'",
+		);
+	});
+
+	// Recurrence: an output wired to the wrong step id, or a notifier env var
+	// left reading `steps.*` (undefined in another job), reaches the notifier as
+	// an empty outcome, which it treats as a wiring bug and takes no action on.
+	it("feeds every notifier outcome from the smoke job's own step outcomes", () => {
+		const env = notifyStep?.env ?? {};
+		const outcomeVars = Object.entries(env).filter(([name]) =>
+			/_OUTCOME$|^RESOLVED_VERSION$/.test(name),
+		);
+		expect(outcomeVars).toHaveLength(9);
+		const stepIds = new Set(smoke.steps?.map((s) => s.id));
+		for (const [, value] of outcomeVars) {
+			const output =
+				/^\$\{\{ needs\.host-latest-smoke\.outputs\.(\w+) \}\}$/.exec(
+					value,
+				)?.[1];
+			expect(output, value).toBeDefined();
+			const source = smoke.outputs?.[output as string] ?? "";
+			const id =
+				/^\$\{\{ steps\.(\w+)\.(?:outcome|outputs\.version) \}\}$/.exec(
+					source,
+				)?.[1];
+			expect(stepIds.has(id), `${output} -> ${source}`).toBe(true);
+		}
+	});
+});

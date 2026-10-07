@@ -853,15 +853,26 @@ jobs:
   # acceptance criterion this lane's first round missed.
   host-latest-smoke:
     name: host latest nightly (advisory)
-    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Only 1 successful master run in the window; measured 40s; timeout = floor
     # of 10 min.
     timeout-minutes: 10
+    # #4077: read-only, so a dispatch on any ref runs the smoke. The tracking
+    # issue is written by `host-latest-notify` below, from these outcomes.
     permissions:
       contents: read
-      issues: write # file/refresh/close the drift tracking issue
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      resolve: ${{ steps.resolve.outcome }}
+      install_ci: ${{ steps.install_ci.outcome }}
+      install_deps: ${{ steps.install_deps.outcome }}
+      grammars: ${{ steps.grammars.outcome }}
+      build_dist: ${{ steps.build_dist.outcome }}
+      pack: ${{ steps.pack.outcome }}
+      install_tarball: ${{ steps.install_tarball.outcome }}
+      selftest: ${{ steps.selftest.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -958,6 +969,30 @@ jobs:
           SELFTEST="$(node -e 'console.log(require.resolve("pi-lens/scripts/install-selftest.mjs"))')"
           bun "$SELFTEST" --allow-soft
 
+  # The only writer (#4077). It runs on the schedule and on master (a branch
+  # dispatch keeps the smoke above and writes nothing), and it keeps the old
+  # step's `always()`: the notifier also CLOSES the tracker on a clean run.
+  # `result != 'skipped'` keeps it off the push and pull_request events that
+  # skip the smoke job.
+  host-latest-notify:
+    name: host latest notify (advisory)
+    needs: host-latest-smoke
+    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.host-latest-smoke.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # file/refresh/close the drift tracking issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
       # Runs every time (always()), success or failure: on drift it files or
       # refreshes the tracker; on a clean run it CLOSES an existing tracker
       # (#2613 acceptance: "closed when green again"). See
@@ -965,20 +1000,19 @@ jobs:
       # report mapping and scripts/lib/install-smoke-drift.mjs for the pure
       # body-building logic (tested in tests/scripts/).
       - name: Notify install drift (file/refresh on failure, close on green)
-        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         # Tracker maintenance must not mask the advisory smoke lane's own
         # verdict; the notifier's gh failure is non-gating at this step.
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
-          RESOLVE_OUTCOME: ${{ steps.resolve.outcome }}
-          INSTALL_CI_OUTCOME: ${{ steps.install_ci.outcome }}
-          INSTALL_DEPS_OUTCOME: ${{ steps.install_deps.outcome }}
-          GRAMMARS_OUTCOME: ${{ steps.grammars.outcome }}
-          BUILD_DIST_OUTCOME: ${{ steps.build_dist.outcome }}
-          PACK_OUTCOME: ${{ steps.pack.outcome }}
-          INSTALL_TARBALL_OUTCOME: ${{ steps.install_tarball.outcome }}
-          SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
+          RESOLVED_VERSION: ${{ needs.host-latest-smoke.outputs.version }}
+          RESOLVE_OUTCOME: ${{ needs.host-latest-smoke.outputs.resolve }}
+          INSTALL_CI_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_ci }}
+          INSTALL_DEPS_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_deps }}
+          GRAMMARS_OUTCOME: ${{ needs.host-latest-smoke.outputs.grammars }}
+          BUILD_DIST_OUTCOME: ${{ needs.host-latest-smoke.outputs.build_dist }}
+          PACK_OUTCOME: ${{ needs.host-latest-smoke.outputs.pack }}
+          INSTALL_TARBALL_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_tarball }}
+          SELFTEST_OUTCOME: ${{ needs.host-latest-smoke.outputs.selftest }}
         run: node scripts/notify-install-smoke-drift.mjs

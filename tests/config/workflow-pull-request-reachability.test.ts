@@ -232,6 +232,8 @@ const EXEMPTIONS: Readonly<Record<string, string>> = {
 		"workflow_run-triggered terminal-label swap, same lane and same reason as classify above; its if: is evaluated pre-merge in tests/config/ci-infra-kill-rerun-gate.test.ts",
 	".github/workflows/close-keyword-verification.yml::verify":
 		"pull_request_target gated on github.event.pull_request.merged == true: it verifies what the close keywords DID once the PR is merged, which cannot be observed before the merge",
+	".github/workflows/install-smoke.yml::host-latest-notify":
+		"the tracking-issue writer for the advisory nightly drift lane above (#4077): it files, refreshes or closes one issue from that lane's outcomes, scoped to the schedule or master, so a pull request has no drift to report and must not write the issue",
 	".github/workflows/install-smoke.yml::host-latest-smoke":
 		"advisory nightly drift lane: it installs the newest published host to detect upstream drift on a schedule, a signal about the ecosystem's state at a point in time rather than about the PR's diff (#2613)",
 };
