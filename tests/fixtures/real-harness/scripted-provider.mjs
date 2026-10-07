@@ -7,7 +7,7 @@ const { createAssistantMessageEventStream } = await import(
 	process.env.REAL_PI_HARNESS_PI_AI_INDEX
 		? pathToFileURL(process.env.REAL_PI_HARNESS_PI_AI_INDEX).href
 		: new URL(
-				"../../../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
+				"../../../node_modules/@earendil-works/pi-ai/dist/index.js",
 				import.meta.url,
 			).href
 );
