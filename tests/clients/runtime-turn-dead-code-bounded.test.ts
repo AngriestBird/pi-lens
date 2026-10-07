@@ -276,6 +276,10 @@ describe("#4117 turn_end dead-code scan is bounded by the hook budget", () => {
 		}
 
 		expect(vultureProcess.scans).toBe(1);
+		// A failure never replaces the good baseline row (#925).
+		expect(
+			cacheManager.readCache<DeadCodeResult>(CACHE_KEY, root)?.data.summary,
+		).toBe("baseline");
 		expect(
 			JSON.stringify(
 				getDegradationSummary().find(
@@ -418,6 +422,28 @@ describe("#4117 round 2: a scan that missed the budget still lands", () => {
 		expect(String(deadCodeRows()[1]?.reason)).toBe(
 			"python:late_scan,python:clean",
 		);
+	});
+
+	it("counts a scan once when a later session's turn discards it before it settles", async () => {
+		const first = await slowTurn();
+		await first.turn;
+		runtime.resetForSession();
+
+		// The new session's turn finds the old session's entry in flight: it is
+		// discarded (counted), and this turn's scan joins the client's single flight.
+		edit("other.py");
+		const second = startTurn();
+		await vi.advanceTimersByTimeAsync(3_100);
+		await second.turn;
+		await settle(first);
+
+		const dropped = getDegradationSummary().find(
+			(group) => group.kind === "dead-code-late-scan-dropped",
+		);
+		expect(dropped?.count).toBe(1);
+		expect(vultureProcess.scans).toBe(1);
+		// The new session's own late scan wrote the row the one process produced.
+		expect(names()).toEqual(["late"]);
 	});
 
 	it("drops a scan that settles after its session ended, and counts it", async () => {

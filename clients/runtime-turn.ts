@@ -629,7 +629,6 @@ function parkLateDeadCodeScan(args: {
 	scans.set(key, entry);
 	void args.scan.then(
 		(result) => {
-			if (scans.get(key) !== entry) return;
 			if (!runtime.isCurrentSession(entry.generation)) {
 				dropLateDeadCodeScan(scans, key, entry, client, "session-ended");
 				return;
