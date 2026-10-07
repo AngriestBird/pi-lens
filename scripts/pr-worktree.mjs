@@ -164,6 +164,33 @@ function resolvePrHead(prNumber, env, ghExec, cwd) {
 }
 
 /**
+ * One stderr line naming the main checkout's shared install, so an emptied one
+ * is visible at the next `open` instead of at the next worker complaint
+ * (#4044: a lane's `npm ci` emptied it on 2026-10-07 and nothing reported it
+ * for a minute). npm's hidden lockfile survives an `npm ci` wipe, so it does
+ * not count as an entry. stderr, because stdout is the path callers capture.
+ *
+ * @param {string} mainRoot
+ * @param {(message: string) => void} stderr
+ */
+function reportMainInstall(mainRoot, stderr) {
+	let entries = null;
+	try {
+		entries = fs
+			.readdirSync(path.join(mainRoot, "node_modules"))
+			.filter((name) => name !== ".package-lock.json").length;
+	} catch {
+		entries = null;
+	}
+	if (entries === null) stderr(`main node_modules: absent (${mainRoot})`);
+	else if (entries === 0)
+		stderr(
+			`WARNING: main node_modules is EMPTY (${mainRoot}): every lane linking it is broken; reinstall in the main checkout (#4044)`,
+		);
+	else stderr(`main node_modules: ${entries} entries`);
+}
+
+/**
  * @param {{ target: string, mode: string|null, name: string|null }} options
  * @param {object} io
  * @returns {number}
@@ -232,6 +259,7 @@ function executeOpen(options, io) {
 				stderr(`warning: could not symlink node_modules: ${error.message}`);
 			}
 		}
+		reportMainInstall(mainRoot, stderr);
 	}
 	stdout(plan.path);
 	return 0;

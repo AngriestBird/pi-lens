@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
       - name: Classify the changed files
@@ -64,6 +64,48 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: node scripts/ci-changed-files.mjs --event "$EVENT_NAME" --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
+
+  # #4064: the ordinary strict installs can inherit a warm runner/npm cache,
+  # which lets a nested `npm exec --package` skip its install and hide an
+  # uncovered lifecycle script (#4028). Keep this early PR/push signal
+  # independent of the required install lanes and make the cache boundary
+  # explicit: the job-local directory starts empty and setup-node has no npm
+  # cache input. The exact PR head is checked out because `github.ref` is the
+  # mutable pull-request merge ref and can disappear after the run starts.
+  strict-install-cold-cache:
+    name: Strict install (cold npm cache) (fast-fail)
+    runs-on: ubuntu-latest
+    # refs #3123: this is a single dependency install plus prepare; keep a
+    # bounded runner even if the registry or a lifecycle child hangs.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
+      # The `runner` context is not available in job-level `env:` (GitHub
+      # rejects the whole workflow), so the cache path is exported here.
+      - name: Create empty job-local npm cache
+        run: |
+          set -eu
+          cache="$RUNNER_TEMP/pi-lens-empty-npm-cache"
+          test ! -e "$cache"
+          mkdir -p "$cache"
+          test -z "$(find "$cache" -mindepth 1 -print -quit)"
+          echo "npm_config_cache=$cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies with the pinned npm (cold cache)
+        run: |
+          set -euxo pipefail
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts --no-audit --no-fund
 
   dependency-boundaries:
     name: Dependency boundaries
@@ -81,7 +123,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -174,7 +216,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         if: needs.changes.outputs.formal != 'false'
         with:
           node-version: '22'
@@ -229,7 +271,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -302,7 +344,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -388,7 +430,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -683,7 +725,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
       - name: Require the lint.yml required checks, then release the heavy advisory jobs
@@ -726,7 +768,7 @@ jobs:
         shell: bash
         run: echo "PI_LENS_HOME=$RUNNER_TEMP/pi-lens-home" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -814,7 +856,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -1008,7 +1050,7 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
