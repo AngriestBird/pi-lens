@@ -8,7 +8,7 @@ fi
 # refusal for the durable handoff names.
 while IFS= read -r file; do
   case "$file" in
-    HANDBACK_*|REVIEW_*|VERIFY_*|INVESTIGATION_*|PR_BODY.md|COMMIT_MSG.txt)
+    HANDBACK_*|REVIEW_*|VERIFY_*|INVESTIGATION_*|REVIEW.md|INVESTIGATION.md|MONITOR.md|PR_BODY.md|COMMIT_MSG.txt)
       echo "[pre-commit] refusing rule handoff-file: $file is a staged root handoff; git rm --cached it." >&2
       exit 1
       ;;

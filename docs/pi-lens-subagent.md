@@ -165,8 +165,12 @@ Each pre-push head has a durable result record at
 head/base, timestamp, selected test files and their `import`, `history`, or
 `governance` reason, plus passed/failed/skipped counts, the Vitest exit code,
 and wall time. Re-pushes overwrite that head's record; writes prune records
-older than fourteen days. Quote this path when reporting targeted-test
-evidence instead of relying on prose.
+older than fourteen days. The provisional record is written before build and
+self-scan work with outcome `tests-not-started`; preparation failures update it
+to `build-failed` or `self-scan-failed`. The write uses a same-directory
+temporary file and rename, and record I/O is best-effort: a warning is emitted
+once and the hook keeps its real build/test result. Quote this path when
+reporting targeted-test evidence instead of relying on prose.
 
 Never park a turn behind a background command. When a run cannot finish in the
 foreground, push with the targeted and governance suites green and say that

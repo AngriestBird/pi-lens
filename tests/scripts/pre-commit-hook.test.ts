@@ -50,6 +50,9 @@ describe.skipIf(process.platform === "win32")(
 			"REVIEW_notes.md",
 			"VERIFY_result.md",
 			"INVESTIGATION_case.md",
+			"REVIEW.md",
+			"INVESTIGATION.md",
+			"MONITOR.md",
 			"PR_BODY.md",
 			"COMMIT_MSG.txt",
 		])("refuses a staged root handoff file with a named rule: %s", (file) => {

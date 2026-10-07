@@ -55,6 +55,15 @@ export interface PrePushRecord {
 	skipped: number;
 	vitestExitCode: number | null;
 	wallTimeMs: number;
+	outcome:
+		| "tests-not-started"
+		| "build-only"
+		| "build-failed"
+		| "self-scan-failed"
+		| "tests-complete"
+		| "tests-failed"
+		| "tests-lock-timeout"
+		| "tests-runner-failed";
 }
 
 export function readPrePushRecord(
@@ -73,6 +82,7 @@ export function writePrePushRecord(input: {
 	skipped: number;
 	vitestExitCode: number | null;
 	wallTimeMs: number;
+	outcome?: PrePushRecord["outcome"];
 }): PrePushRecord;
 
 export function main(): Promise<number>;

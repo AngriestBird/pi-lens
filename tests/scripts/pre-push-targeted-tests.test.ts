@@ -678,6 +678,7 @@ describe("pre-push result records (#4034)", () => {
 			skipped: 3,
 			vitestExitCode: 1,
 			wallTimeMs: 417,
+			outcome: "tests-failed",
 		});
 		const record = readPrePushRecord(commonDir, "a".repeat(40));
 		expect(record).toMatchObject({
@@ -688,6 +689,7 @@ describe("pre-push result records (#4034)", () => {
 			skipped: 3,
 			vitestExitCode: 1,
 			wallTimeMs: 417,
+			outcome: "tests-failed",
 		});
 		expect(record?.selected).toEqual([
 			{ file: "tests/import.test.ts", reason: "import" },
@@ -721,6 +723,7 @@ describe("pre-push result records (#4034)", () => {
 			skipped: 0,
 			vitestExitCode: null,
 			wallTimeMs: 0,
+			outcome: "build-only",
 		});
 		expect(fs.existsSync(old)).toBe(false);
 		fs.rmSync(commonDir, { recursive: true, force: true });
@@ -840,7 +843,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 	 * `built.marker`. `astgrep:self-scan` refuses to run before that marker
 	 * exists, so the test observes the real build-before-scan ordering through
 	 * real npm resolution. */
-	function makeOrderingFixture() {
+	function makeOrderingFixture({ build = "write" } = {}) {
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-prepush-scan-order-"),
 		);
@@ -872,7 +875,9 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			JSON.stringify({
 				scripts: {
 					build:
-						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+						build === "fail"
+							? 'node -e "process.exit(7)"'
+							: "node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
 					"astgrep:self-scan": "node scan.mjs",
 				},
 			}),
@@ -899,6 +904,21 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("[scan] ran after build");
 		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(true);
+	});
+
+	it("records a build failure after the provisional tests-not-started record", () => {
+		const fx = makeOrderingFixture({ build: "fail" });
+		const result = runHook(fx.root, fx.refs);
+		const recordPath = path.join(
+			fx.root,
+			".git",
+			"pi-lens-prepush",
+			`${fx.refs.split(/\s+/)[1]}.json`,
+		);
+		expect(result.status).toBe(1);
+		expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toMatchObject({
+			outcome: "build-failed",
+		});
 	});
 
 	it("a deletion-only push exits 0 before the build or the self-scan", () => {
