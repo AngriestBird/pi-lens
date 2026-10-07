@@ -54,6 +54,10 @@ export declare function lintTlaCoverage(
 	body?: string,
 	options?: { diff?: string; cwd?: string },
 ): { errors: string[]; advisories: string[] };
+export declare function lintWorkflowRunEvidence(
+	body?: string,
+	options?: { diff?: string; cwd?: string },
+): string[];
 export declare function fetchLivePrBody(
 	payloadPr: { number: number; body?: string | null },
 	fetchImpl: typeof fetch,

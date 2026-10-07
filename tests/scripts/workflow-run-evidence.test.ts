@@ -181,6 +181,14 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		).toEqual([]);
 	});
 
+	it("passes a quoted workflow name", () => {
+		expect(
+			run(
+				'gh workflow run "stryker-nightly.yml" --ref b\nhttps://github.com/o/r/actions/runs/12345678901',
+			),
+		).toEqual([]);
+	});
+
 	it("reds the command with no run id", () => {
 		expect(run("gh workflow run stryker-nightly.yml --ref b")).toHaveLength(1);
 	});

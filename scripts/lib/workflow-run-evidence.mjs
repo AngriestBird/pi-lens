@@ -215,33 +215,43 @@ export function classifyWorkflowEdit(text, file) {
 	return { executes: true };
 }
 
-const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// The names a body may use for `file`: the bare name or the full path. Matched
+// as whole tokens, never as a pattern built from the name.
+const namesOf = (file) => [file.slice(file.lastIndexOf("/") + 1), file];
 
 // HTML comments are the one place prose could satisfy the rule invisibly.
 const blankComments = (body) =>
 	String(body ?? "").replace(/<!--[\s\S]*?(?:-->|$)/g, "");
 
 function quotesRunId(lines, file) {
-	const name = escapeRegExp(file.slice(file.lastIndexOf("/") + 1));
-	const command = new RegExp(
-		`\\bgh\\s+workflow\\s+run\\s+(?:\\.github/workflows/)?${name}(?![\\w.-])`,
-	);
-	return lines.some(
-		(line, index) =>
-			command.test(line) &&
+	const names = namesOf(file);
+	return lines.some((line, index) => {
+		const argument = /\bgh\s+workflow\s+run\s+(\S+)/.exec(line)?.[1];
+		return (
+			argument !== undefined &&
+			names.includes(unquote(argument)) &&
 			/--ref\b/.test(line) &&
 			lines
 				.slice(index, index + RUN_ID_WINDOW_LINES)
-				.some((candidate) => RUN_ID.test(candidate)),
-	);
+				.some((candidate) => RUN_ID.test(candidate))
+		);
+	});
 }
 
 function declaresUnaffected(lines, file) {
-	const name = escapeRegExp(file.slice(file.lastIndexOf("/") + 1));
-	const pattern = new RegExp(
-		`^\\s*(?:[-*+]\\s+)?\\**Workflow run unaffected:\\s*(?:\\.github/workflows/)?${name}(?![\\w.-])\\s*[—–-]\\s*\\S`,
-	);
-	return lines.some((line) => pattern.test(line));
+	const names = namesOf(file);
+	return lines.some((line) => {
+		const head = /^\s*(?:[-*+]\s+)?\**Workflow run unaffected:\s*/.exec(line);
+		if (!head) return false;
+		const rest = line.slice(head[0].length);
+		// The name ends at a boundary (`x.yml-old` is another file) and a dash and
+		// a reason follow it.
+		return names.some((name) => {
+			if (!rest.startsWith(name)) return false;
+			const after = rest.slice(name.length);
+			return !/^[\w.-]/.test(after) && /^\s*[\u2014\u2013-]\s*\S/.test(after);
+		});
+	});
 }
 
 /**
