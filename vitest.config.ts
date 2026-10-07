@@ -529,6 +529,11 @@ export const wallClockBudgetInclude = [
 	// admission).
 	"tests/scripts/lint-js.test.ts",
 	"tests/scripts/lockfile-completeness.test.ts",
+	// #4048: the mutation helper's real child and SIGINT restoration witness
+	// require a quiet serialized phase; its bounded timer and never-settling
+	// fixture are the process boundary under test (flake-shape admission).
+	"tests/scripts/mutate-fixture.test.ts",
+	"tests/scripts/mutate.test.ts",
 	// #3531: the mutation-report CLI smoke test spawns a real node child to
 	// prove its own argv parsing (--report/--out), not just the exported
 	// render function (flake-shape admission).

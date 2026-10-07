@@ -60,6 +60,8 @@ mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Evidence
 
+- Use `scripts/mutate.mjs` for bounded hand mutations; it restores and verifies the target automatically.
+
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
   live under `tests/fixtures/witness/<slice>/`.
 - Red-first has one stated exception: when the only red-first path needs broad
