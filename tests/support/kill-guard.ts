@@ -202,11 +202,15 @@ export function killGuardReport(): string | undefined {
 }
 
 /**
- * Take (and clear) this worker's records. Only for the guard's own tests,
- * which provoke violations on purpose and assert on them; any other caller
- * would hide a real #2042 report from the `afterAll` that fails the file.
+ * Take this worker's records whose target is in `targets`, in order, and
+ * leave every other record for the `afterAll` that fails the file. Only for
+ * the guard's own tests, which provoke violations at named pids on purpose.
  */
-export function takeKillGuardViolationsForTest(): KillGuardViolation[] {
-	dropped = 0;
-	return violations.splice(0);
+export function takeKillGuardViolationsForTest(
+	targets: readonly number[],
+): KillGuardViolation[] {
+	const taken = violations.filter((v) => targets.includes(v.target));
+	const kept = violations.filter((v) => !targets.includes(v.target));
+	violations.splice(0, violations.length, ...kept);
+	return taken;
 }

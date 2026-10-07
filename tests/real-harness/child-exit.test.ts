@@ -350,11 +350,9 @@ describe("kill-guard ownership (#2042)", () => {
 			expect({
 				thrown,
 				strangerAlive: isProcessAlive(stranger.pid),
-				recorded: takeKillGuardViolationsForTest().map((v) => [
-					v.site,
-					v.target,
-					v.detail,
-				]),
+				recorded: takeKillGuardViolationsForTest(
+					attempts.map(([pid]) => pid),
+				).map((v) => [v.site, v.target, v.detail]),
 			}).toEqual({
 				thrown: [],
 				strangerAlive: true,
@@ -385,7 +383,9 @@ describe("kill-guard ownership (#2042)", () => {
 			expect({
 				grandchildAlive: isProcessAlive(grandchild),
 				foreignAlive: isProcessAlive(foreign.pid),
-				recorded: takeKillGuardViolationsForTest().map((v) => v.target),
+				recorded: takeKillGuardViolationsForTest([grandchild, foreign.pid]).map(
+					(v) => v.target,
+				),
 			}).toEqual({
 				grandchildAlive: false,
 				foreignAlive: true,
