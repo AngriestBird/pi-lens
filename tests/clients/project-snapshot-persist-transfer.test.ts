@@ -539,12 +539,8 @@ describe("project-snapshot persist-worker heap slot (#4129)", () => {
 					?.heapUsedBytes,
 			).toBeGreaterThan(0);
 
+			// `terminate()` settles after the worker's `exit` listeners ran.
 			await terminateProjectSnapshotPersistWorkerForTests();
-			await waitFor(
-				() => getProjectSnapshotPersistWorkerHeapStatistics(),
-				(stats) => stats === null,
-				{ timeoutMs: 5_000 },
-			);
 			expect(
 				collectMemorySampleSubsystems(null).persistWorkers.projectSnapshot,
 			).toBeNull();
