@@ -831,6 +831,10 @@ npm run fmt:check                     oxfmt gate
 npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
+
+For `tests/config/heavy-advisory-gate-workflow.test.ts`, set
+`PI_LENS_PRINT_PINS=1` to print the current parsed census pins as pasteable
+assertion lines after workflow edits; the assertions remain shrink-only pins.
 npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
