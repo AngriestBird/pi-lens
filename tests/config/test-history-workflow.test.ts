@@ -146,7 +146,7 @@ describe("#3215 durable test-history workflow contract", () => {
 		expect(scripts.test).not.toContain("--outputFile");
 	});
 
-	it("runs rollup only from the scheduled nightly and grants data-branch write access", () => {
+	it("runs the rollup job from the nightly and from a dispatch, with data-branch write access", () => {
 		const workflow = load(".github/workflows/tool-smoke.yml");
 		const jobs = workflow.jobs as Record<string, unknown>;
 		const rollup = jobs["test-history-rollup"] as Record<string, unknown>;
@@ -155,5 +155,126 @@ describe("#3215 durable test-history workflow contract", () => {
 		);
 		const permissions = rollup.permissions as Record<string, unknown>;
 		expect(permissions.contents).toBe("write");
+	});
+});
+
+/**
+ * #4030 review F1: the rollup job ran on any dispatched ref and its one step
+ * pushed `data/test-history`, so a branch dispatch (run 37592572019) reached
+ * the push with unreviewed rollup code; only GitHub's 100 MB limit stopped it.
+ * The push now lives in one step, scoped like every other durable writer in
+ * the file (schedule or master), and a branch dispatch only downloads and
+ * rolls up.
+ */
+describe("test-history publish and notify scope (#4030)", () => {
+	const PUBLISH_IF =
+		"github.event_name == 'schedule' || github.ref == 'refs/heads/master'";
+	const NOTIFY_IF = `always() && (${PUBLISH_IF})`;
+	const rollupSteps = () =>
+		steps(".github/workflows/tool-smoke.yml", "test-history-rollup");
+	// Text a step runs, comments and quoted strings included: a push spelled
+	// anywhere in a run block is a push.
+	const runOf = (entry: Record<string, unknown>) => String(entry.run ?? "");
+
+	it("pushes the data branch from exactly one step, and only on schedule or master", () => {
+		const pushing = rollupSteps().filter((entry) =>
+			/\bgit\s+push\b/.test(runOf(entry)),
+		);
+		expect(pushing.map((entry) => entry.name)).toEqual(["Publish data branch"]);
+		expect(pushing[0].if).toBe(PUBLISH_IF);
+		expect(runOf(pushing[0])).toContain("HEAD:data/test-history");
+	});
+
+	it("rolls up on every ref without touching the data branch", () => {
+		const dry = step(
+			".github/workflows/tool-smoke.yml",
+			"test-history-rollup",
+			"Roll up test history",
+		);
+		expect(dry.if).toBeUndefined();
+		expect(runOf(dry)).toContain("test-history-rollup.mjs");
+		expect(runOf(dry)).not.toMatch(/\bgit\s+(push|checkout|commit)\b/);
+	});
+
+	it("downloads incrementally after the journal's watermark", () => {
+		const watermark = step(
+			".github/workflows/tool-smoke.yml",
+			"test-history-rollup",
+			"Read the history watermark",
+		);
+		expect(watermark.id).toBe("watermark");
+		expect(runOf(watermark)).toContain("--print-watermark");
+		// Day lines first; the raw journal only as the one-time migration input.
+		expect(runOf(watermark).indexOf("history/test-daily.ndjson")).toBeLessThan(
+			runOf(watermark).indexOf("history/test-results.ndjson"),
+		);
+		const download = step(
+			".github/workflows/tool-smoke.yml",
+			"test-history-rollup",
+			"Download unit-test result artifacts",
+		);
+		expect((download.env as Record<string, unknown>).SINCE).toBe(
+			"${{ steps.watermark.outputs.since }}",
+		);
+		expect(runOf(download)).toContain('--since "$SINCE"');
+	});
+
+	it("publishes day lines and retires the raw journal", () => {
+		const publish = runOf(
+			step(
+				".github/workflows/tool-smoke.yml",
+				"test-history-rollup",
+				"Publish data branch",
+			),
+		);
+		expect(publish).toContain("history/test-daily.ndjson");
+		expect(publish).toContain(
+			"git rm -q --ignore-unmatch history/test-results.ndjson",
+		);
+	});
+
+	// #4030 detection retrospective: six red nights were never alerted because
+	// the tool-smoke notifier reads only the tool-smoke job.
+	it("files, refreshes and closes a tracking issue for a red rollup, as the last step", () => {
+		const all = rollupSteps();
+		const notify = all.at(-1) as Record<string, unknown>;
+		expect(notify.name).toBe(
+			"Notify on test-history rollup red (file/update/close tracking issue)",
+		);
+		expect(notify.if).toBe(NOTIFY_IF);
+		expect(notify["continue-on-error"]).toBe(true);
+		expect((notify.env as Record<string, unknown>).JOB_STATUS).toBe(
+			"${{ job.status }}",
+		);
+		const run = runOf(notify);
+		expect(run).toContain('[ "$JOB_STATUS" = failure ]');
+		expect(run).toMatch(
+			/node "\$cli" --title "\$TITLE" --label nightly-drift --body-file/,
+		);
+		expect(run).toMatch(
+			/node "\$cli" --title "\$TITLE" --label nightly-drift --clean --close-when-clean/,
+		);
+		// The publish step checks out the data branch, so the CLI runs from the
+		// scripts staged before it.
+		expect(run).toContain(
+			'cli="$RUNNER_TEMP/history-scripts/upsert-tracking-issue.mjs"',
+		);
+		expect(
+			runOf(
+				step(
+					".github/workflows/tool-smoke.yml",
+					"test-history-rollup",
+					"Read the history watermark",
+				),
+			),
+		).toContain('cp -r scripts "$RUNNER_TEMP/history-scripts"');
+		const jobs = load(".github/workflows/tool-smoke.yml").jobs as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(
+			(jobs["test-history-rollup"].permissions as Record<string, unknown>)
+				.issues,
+		).toBe("write");
 	});
 });

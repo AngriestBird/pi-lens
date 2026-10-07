@@ -426,7 +426,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/download-test-history-artifacts.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"a real gh child is required to prove transient API failure recovery and persistent failure at the process boundary",
+			"a real gh child is required to prove transient API failure recovery, persistent failure, and a ZIP over the default spawn buffer at the process boundary",
 	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
