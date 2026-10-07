@@ -339,6 +339,12 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
 
+- **Lexer placeholder becomes part of rule-matched text:** represent a
+    placeholder left by lexical subtraction as a dynamic expansion when words
+    are split, so it cannot fuse into a neighbouring command or option and
+    evade an exact rule. Screen placeholder positions at the start, middle,
+    and end of rule-matched words through the real guard entry (#3997).
+
 </important>
 
 <important if="a test double, ratchet or sweep">

@@ -851,6 +851,14 @@ export function splitWords(segment) {
 		}
 		if (quote === "double") {
 			started = true;
+			if (ch === SUBSTITUTION_MARK) {
+				// lexRegions has already removed the live substitution body. Keep
+				// its dynamic-identifier meaning without leaving the private marker
+				// fused into rule-matched text (#3997 F1/F2).
+				addExpansion("dynamic", ch);
+				i++;
+				continue;
+			}
 			if (ch === "\\" && DOUBLE_QUOTE_ESCAPABLE.has(segment[i + 1])) {
 				buf += segment[i + 1];
 				i += 2;
@@ -870,6 +878,13 @@ export function splitWords(segment) {
 			started = true;
 			buf += segment[i + 1];
 			i += 2;
+			continue;
+		}
+		if (ch === SUBSTITUTION_MARK) {
+			// Treat the lexer placeholder as a dynamic expansion rather than
+			// literal word text, so adjacent command words do not fuse (#3997).
+			addExpansion("dynamic", ch);
+			i++;
 			continue;
 		}
 		if (ch === "$" && segment[i + 1] === "'") {
@@ -1107,7 +1122,7 @@ function isUnderTmpRoot(absoluteDir) {
 /** Bounds {@link expandShellWord}'s indirection loop -- generous for the real
  *  shapes this repo's own sessions use (`S=...; W=$S/wt` is one hop) while
  *  still terminating a pathological or self-referential chain (`A=$A`). */
-const VAR_PREFIX_EXPANSION_CAP = 8;
+const VAR_PREFIX_EXPANSION_CAP = 7;
 
 /**
  * The placeholder {@link lexRegions} leaves where it subtracted a `$( … )` or
@@ -1118,6 +1133,10 @@ const VAR_PREFIX_EXPANSION_CAP = 8;
  * {@link expandShellWord} would then resolve (#3988).
  */
 const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
+
+function stripSubstitutionMark(word) {
+	return word?.replaceAll(SUBSTITUTION_MARK, "") ?? word;
+}
 
 /**
  * The value `$NAME` expands to, or `undefined` when this static scan cannot
@@ -1139,6 +1158,8 @@ const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
 function lookupShellVariable(name, cwd, env) {
 	if (name === "PWD")
 		return cwd === undefined ? process.cwd() : (cwd ?? undefined);
+	if (name === "_" || name === "OLDPWD") return undefined;
+	if (name === "HOME" && env.__PI_LENS_INLINE_HOME === "1") return undefined;
 	const value = env[name] ?? process.env[name];
 	return value ?? (TEMP_DIR_VARS.includes(name) ? TMP_ROOT : undefined);
 }
@@ -1180,10 +1201,27 @@ function expandShellWord(word, cwd, env) {
 	/** @type {string | undefined} */
 	let reason;
 	if (word.includes(SUBSTITUTION_MARK)) reason = "a command substitution";
+	const firstReference = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/.exec(word);
+	if (firstReference) {
+		let name = firstReference[1];
+		let hops = 0;
+		while (hops < VAR_PREFIX_EXPANSION_CAP) {
+			const value = lookupShellVariable(name, cwd, env);
+			if (!value || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) break;
+			if (lookupShellVariable(value, cwd, env) === undefined) break;
+			name = value;
+			hops++;
+		}
+		if (hops >= VAR_PREFIX_EXPANSION_CAP - 1)
+			reason ??= "an expansion chain that exceeded the static bound";
+	}
 	let text = word;
 	for (let hop = 0; hop < VAR_PREFIX_EXPANSION_CAP; hop++) {
 		if (text === "~" || text.startsWith("~/")) {
-			const home = env.HOME ?? process.env.HOME;
+			const home =
+				env.__PI_LENS_INLINE_HOME === "1"
+					? undefined
+					: (env.HOME ?? process.env.HOME);
 			if (home === undefined) reason ??= "HOME is not set";
 			else text = home + text.slice(1);
 		} else if (/^~[^/]/.test(text)) {
@@ -1200,8 +1238,15 @@ function expandShellWord(word, cwd, env) {
 				return value;
 			},
 		);
+		if (hop === VAR_PREFIX_EXPANSION_CAP - 1 && changed)
+			reason ??= "an expansion chain that exceeded the static bound";
 		if (!changed) break;
 	}
+	if (text.includes(SUBSTITUTION_MARK))
+		reason ??= "a command substitution in an indirect value";
+	if (/^~(?:\/|$)/.test(text))
+		reason ??= "an expansion chain that exceeded the static bound";
+	if (/[{}]/.test(text)) reason ??= "brace expansion";
 	if (text.includes("$")) reason ??= "an unresolved or unsupported $ expansion";
 	if (/[*?[]/.test(text)) reason ??= "a glob pattern";
 	return reason === undefined ? { text } : { text, reason };
@@ -1225,6 +1270,15 @@ function resolveShellPath(word, cwd, env) {
 	const path = resolve(cwd ?? process.cwd(), text);
 	if (reason === undefined && cwd === null && !isAbsolute(text))
 		return { path, reason: "a working directory that is not statically known" };
+	if (reason === undefined && /(^|\/)\.\.($|\/)/.test(text)) {
+		try {
+			if (realpathSync(path) !== path)
+				return { path, reason: "lexical parent traversal through a symlink" };
+		} catch {
+			// A missing target has no filesystem identity to compare; retain the
+			// ordinary lexical result and let the caller judge its rule.
+		}
+	}
 	return reason === undefined ? { path } : { path, reason };
 }
 
@@ -1407,6 +1461,8 @@ function classifyHookBypass(args, i, env) {
  * @returns {DenyRule | null}
  */
 function classifyGit(args, cwd, env = {}) {
+	const rawArgs = args;
+	args = args.map(stripSubstitutionMark);
 	const isRebaseFalseValue = (value) =>
 		["false", "no", "0", "off"].includes(value.toLowerCase());
 	const i = gitSubcommandIndex(args);
@@ -1503,11 +1559,13 @@ function classifyGit(args, cwd, env = {}) {
 		}
 		if (forceCount >= 2) return "worktreeForce";
 		if (positionals[0]) {
+			const rawRest = rawArgs.slice(i + 2);
+			const rawPositionals = rawRest.filter((a) => !a.startsWith("-"));
 			// #3988: the path bash would hand git, or a named fail-closed deny --
 			// the #3173 check cannot run on a path this scan cannot resolve.
 			const { path: worktreeDir, reason } = resolveShellPath(
-				positionals[0],
-				gitInvocationCwd(args, i, cwd, env),
+				rawPositionals[0],
+				gitInvocationCwd(rawArgs, i, cwd, env),
 				env,
 			);
 			if (reason !== undefined) return "worktreeUnresolved";
@@ -1526,12 +1584,12 @@ function classifyGit(args, cwd, env = {}) {
 	// `git worktree add "$WT"` would block ordinary fixer work for a path that
 	// cannot be shown to be under /tmp.
 	if (subcommand === "worktree" && args[i + 1] === "add") {
-		const rest = args.slice(i + 2);
+		const rest = rawArgs.slice(i + 2);
 		const [pathArg] = collectPositionals(rest, WORKTREE_ADD_VALUE_FLAGS);
 		if (
 			pathArg !== undefined &&
 			isUnderTmpRoot(
-				resolveShellPath(pathArg, gitInvocationCwd(args, i, cwd, env), env)
+				resolveShellPath(pathArg, gitInvocationCwd(rawArgs, i, cwd, env), env)
 					.path,
 			)
 		)
@@ -1539,7 +1597,7 @@ function classifyGit(args, cwd, env = {}) {
 		return null;
 	}
 	if (subcommand === "clone") {
-		const rest = args.slice(i + 1);
+		const rest = rawArgs.slice(i + 1);
 		const positionals = collectPositionals(rest, CLONE_VALUE_FLAGS);
 		// Only an EXPLICIT destination directory (the second positional) is
 		// judged -- `git clone <repo>` with no directory derives one from the
@@ -1550,7 +1608,7 @@ function classifyGit(args, cwd, env = {}) {
 			isUnderTmpRoot(
 				resolveShellPath(
 					positionals[1],
-					gitInvocationCwd(args, i, cwd, env),
+					gitInvocationCwd(rawArgs, i, cwd, env),
 					env,
 				).path,
 			)
@@ -2068,14 +2126,14 @@ const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
 function stripCommandGroupAndRunnerPrefixes(words) {
 	let i = 0;
 	while (i < words.length) {
-		if (words[i] === "coproc") {
+		if (stripSubstitutionMark(words[i]) === "coproc") {
 			// A coprocess may have an optional name before a compound
 			// command: `coproc C { git stash; }`, `coproc C if git stash`.
 			// Strip that name only when the following word makes the form
 			// unambiguous; the ordinary `coproc git stash` keeps `git` as
 			// the command word.
 			if (
-				COPROC_NAMED_BODY_WORDS.has(words[i + 2]) &&
+				COPROC_NAMED_BODY_WORDS.has(stripSubstitutionMark(words[i + 2])) &&
 				canFormCoprocIdentifier(
 					words[i + 1],
 					words[WORD_EXPANSIONS]?.[i + 1] ?? [],
@@ -2087,7 +2145,10 @@ function stripCommandGroupAndRunnerPrefixes(words) {
 				continue;
 			}
 		}
-		if (COMMAND_KEYWORDS.has(words[i]) || RUNNER_PREFIX_WORDS.has(words[i])) {
+		if (
+			COMMAND_KEYWORDS.has(stripSubstitutionMark(words[i])) ||
+			RUNNER_PREFIX_WORDS.has(stripSubstitutionMark(words[i]))
+		) {
 			i++;
 			continue;
 		}
@@ -2158,9 +2219,14 @@ export function classifySegment(
 		return null;
 	}
 	const effectiveEnv = { ...sharedEnv, ...segmentEnv };
-	const cmd = commandBasename(rest[0]);
+	const cmd = commandBasename(stripSubstitutionMark(rest[0]));
 	const args = rest.slice(1);
-	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv);
+	if (cmd === "git") {
+		const gitEnv = { ...sharedEnv };
+		if (segmentEnv.HOME !== undefined && sharedEnv.HOME === undefined)
+			gitEnv.__PI_LENS_INLINE_HOME = "1";
+		return classifyGit(args, cwd, gitEnv);
+	}
 	if (cmd === "node" || cmd === "nodejs")
 		return classifyNode(
 			args,

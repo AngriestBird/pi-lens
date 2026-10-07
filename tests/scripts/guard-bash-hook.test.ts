@@ -654,6 +654,25 @@ const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"a22ad5af048cb1448818b448f7c18287dbfeea08df29e05b0bf05e254ca0eaba",
 	"94854ee02d361bd93e7e8b4020fb49cb30573937b576e435abffb6a1734827dd",
 	"6ffdccbc34f482d728a5d85c70a93409ce0fd45ebf315a0fb8c931ef2aa4d4d5",
+	// #3997 review round 3: sixteen real prune-loop removals with a variable
+	// or glob path. The resolver must fail closed on each unknown destination.
+	"b822082d3c03828f5e6589eb36eb83ac6660bd263432f06135c5035cc85e45a3",
+	"afeca36779b64436851458b39454f955acacd385b03daa0b7be858d05723a0d4",
+	"c2f6c24b1f1fdb4838fa9e8693009458671a74ef3f804d6ff2fba2ee371b986e",
+	"4a35050e22495d98d1ebbde8fda95c2d6b96f24eabf726b7fdc8cb759d837128",
+	"4be227e85b9819a6f2c829da3ee9ed1b7c5073ee83dfa3c686583f09d82f3ae3",
+	"74b13dcd7ed03e7dc93d8522267a5f77f00cb98ca2ca3bb362426a294cd112b2",
+	"18d80ce9728adc956d5e5a17538faecf6531ea551d2687ba7d9990b25a8a9b9b",
+	"7e02e1dc1a511467cc0f9313d40f0a12636988eb88cc6cb6a1b895bc81c33f0c",
+	"fe0c92cc4745cfae37cd0c22487a9a3b038358131d80947f2353426278d41370",
+	"a06f9ee2f394ed05803ae46a0229b777051a02e1d34280f1990f32db74a6abf1",
+	"0973763cd67dd37adbdab186ec3249f0215ac3c26b6973644512d9f44273ed0a",
+	"26da3d3934a1a12faed2daeaf5d10738455de223bd86e0290056347df4e5cc5a",
+	"ee140c03b7ca31650f3e72d7bed92cb32f77c45b744894ed7e60993c1d434620",
+	"8fe3ac723bfecd13bbb15cf14fa8483430099c6edf8f0b12e56f46fda5a8271f",
+	"fc4a33caaa9bc458f4dd3a8fafe3bf352d4f06c51917ee176ffb389bafad6c3b",
+	"3ffb74708189595c9f09295c5b4a3725c4c76624b659af7065dea9f385a7056f",
+	"a06f9ee2f394ed05803ae46a0229b777051a02e1d34280f1990f32db74a6abf1",
 ]);
 
 const EXPECTED_TRANSCRIPT_ALLOWS = new Set([
@@ -1839,6 +1858,35 @@ describe("scripts/hooks/guard-bash.mjs -- tokenizer unit behavior (#2699)", () =
 
 	it("splitWords fuses a quoted span into one opaque word", () => {
 		expect(splitWords('echo "git stash"')).toEqual(["echo", "git stash"]);
+	});
+
+	it("keeps a substitution mark from fusing into the surrounding rule word (#3997 F1)", () => {
+		const mark = String.fromCharCode(0xe000);
+		expect(splitWords(`git stash${mark}`)).toEqual(["git", `stash${mark}`]);
+		for (const command of [
+			"git stash$(true)",
+			"git reset --hard$(:)",
+			"git push --force$(:) origin x",
+			"git commit --no-verify$(:) -m x",
+		]) {
+			expect(findDeny(command), command).not.toBeNull();
+		}
+	});
+
+	it("fails closed for the reviewed resolver blind spots (#3997 F3-F6)", () => {
+		for (const command of [
+			"A=$(pwd); git worktree remove $A/wt",
+			"export A=$(pwd); git worktree remove $A/wt",
+			"git worktree remove $OLDPWD/wt",
+			"HOME=/x git worktree remove ~/wt",
+			"A=B; B=C; C=D; D=E; E=F; F=G; G=H; H=~/wt; git worktree remove $A",
+			"git worktree remove {-q,/path/wt}",
+		]) {
+			expect(
+				findDeny(command, "/home/dev/pi-lens-guard-bash-fixed-cwd"),
+				command,
+			).toBe("worktreeUnresolved");
+		}
 	});
 
 	it("(review round 2 F1) drops a QUOTED-delimiter heredoc body -- its backtick span is never collected as a substitution", () => {
