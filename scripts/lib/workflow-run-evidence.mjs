@@ -89,6 +89,9 @@ export function readWorkflowTriggers(text) {
 	if (start < 0) return null;
 	const triggers = new Map();
 	const inline = lines[start].replace(/^[^:]+:\s*/, "").trim();
+	// An anchor or alias on `on:` itself, or a merge key anywhere in the block,
+	// hides triggers this reader cannot see: fail closed (null).
+	if (/^[&*]/.test(inline)) return null;
 	if (inline) {
 		const list = flowList(inline);
 		if (list) {
@@ -106,6 +109,8 @@ export function readWorkflowTriggers(text) {
 		block.push(line);
 	}
 	if (!block.length) return null;
+	if (block.some((line) => /^\s*(?:-\s+)?(?:<<\s*:|[&*])/.test(line)))
+		return null;
 	const base = indentOf(block[0]);
 	if (block[0].trim().startsWith("- ")) {
 		for (const line of block)
@@ -114,11 +119,16 @@ export function readWorkflowTriggers(text) {
 		return triggers;
 	}
 	const anchors = new Map();
+	// Anchored trigger mappings (`defaults: &pr` over a block), kept as the
+	// block's own lines so an alias (`pull_request: *pr`) reads the same filters.
+	const mappings = new Map();
 	let current = null;
+	let anchored = null;
 	let sub = [];
 	const flush = () => {
 		if (!current) return;
 		const entry = triggers.get(current);
+		if (anchored) mappings.set(anchored, sub);
 		for (const [field, key] of [
 			["paths", "paths"],
 			["pathsIgnore", "paths-ignore"],
@@ -136,11 +146,23 @@ export function readWorkflowTriggers(text) {
 			flush();
 			current = unquote(key[1]);
 			sub = [];
+			anchored = null;
+			// The value after an optional `&anchor`: empty (a block follows), an
+			// empty mapping or null, an alias of an anchored block, or anything else
+			// (a flow mapping, a scalar) this reader does not read.
+			const head = /^&(\S+)\s*(.*)$/.exec(key[2].trim());
+			if (head) anchored = head[1];
+			const value = (head ? head[2] : key[2]).trim();
+			const alias = /^\*(\S+)$/.exec(value);
+			const resolved = alias ? mappings.get(alias[1]) : undefined;
+			if (alias && resolved) sub = [...resolved];
 			triggers.set(
 				current,
-				key[2].trim().startsWith("{") && key[2].trim() !== "{}"
-					? { unparsed: true }
-					: {},
+				value === "" || value === "{}" || value === "null" || value === "~"
+					? {}
+					: alias && resolved
+						? {}
+						: { unparsed: true },
 			);
 		} else sub.push(line);
 	}
@@ -254,17 +276,39 @@ function declaresUnaffected(lines, file) {
 	});
 }
 
+// Whole-line comments and blank lines carry no behaviour, and trailing blanks
+// neither. A trailing comment on a content line, indentation and a `#` line
+// inside a block scalar are NOT ignored: the first is not provably a comment
+// inside a quoted string, the others can change what runs.
+const behaviour = (text) =>
+	String(text)
+		.split(/\r?\n/)
+		.filter((line) => !/^\s*(?:#.*)?$/.test(line))
+		.map((line) => line.trimEnd());
+
+/** True when `after` differs from `before` only by whole-line comments and blanks. */
+export function isCommentOrWhitespaceOnlyEdit(before, after) {
+	if (before === null || before === undefined) return false;
+	const a = behaviour(before);
+	const b = behaviour(after);
+	return a.length === b.length && a.every((line, index) => line === b[index]);
+}
+
 /**
  * The rule: every changed workflow file whose edit no pull request executes
  * must have its branch run (`gh workflow run <file> --ref <branch>`) quoted
- * with a run id in the PR body, or a `Workflow run unaffected: <file> —
- * <reason>` line. `readWorkflow(file)` returns the post-image text, or `null`
- * for a file the PR deleted (nothing left to run).
+ * with a run id in the PR body. A `Workflow run unaffected: <file> \u2014
+ * <reason>` line clears it only when the check can verify the claim: the
+ * workflow has no `workflow_dispatch` trigger (it cannot be run on a branch at
+ * all), or the edit is comments and blank lines only. `readWorkflow(file)`
+ * returns the post-image text, or `null` for a file the PR deleted;
+ * `readBaseWorkflow(file)` the merge-base image, or `null` for an added file.
  */
 export function evaluateWorkflowRunEvidence({
 	changedFiles = [],
 	body = "",
 	readWorkflow,
+	readBaseWorkflow = () => null,
 }) {
 	const lines = blankComments(body).split(/\r?\n/);
 	const errors = [];
@@ -274,13 +318,23 @@ export function evaluateWorkflowRunEvidence({
 		if (text === null) continue;
 		const verdict = classifyWorkflowEdit(text, file);
 		if (verdict.executes) continue;
-		if (quotesRunId(lines, file) || declaresUnaffected(lines, file)) continue;
+		if (quotesRunId(lines, file)) continue;
+		const name = file.slice(file.lastIndexOf("/") + 1);
+		const evidence = `run \`gh workflow run ${name} --ref <branch>\` and quote the command with its run id`;
+		const declared = declaresUnaffected(lines, file);
+		if (
+			declared &&
+			(!verdict.dispatchable ||
+				isCommentOrWhitespaceOnlyEdit(readBaseWorkflow(file), text))
+		)
+			continue;
 		errors.push(
 			`Changed workflow ${file} has no pull request run of its edit (${verdict.reason}): ` +
-				(verdict.dispatchable
-					? `run \`gh workflow run ${file.slice(file.lastIndexOf("/") + 1)} --ref <branch>\` and quote the command with its run id`
-					: "it has no workflow_dispatch trigger to run it by hand, so add one and quote its run id") +
-				`, or add "Workflow run unaffected: ${file.slice(file.lastIndexOf("/") + 1)} — <reason>" to the PR body.`,
+				(declared
+					? `its "Workflow run unaffected" line is not accepted because the workflow can be run by hand and the edit is more than comments and blank lines; ${evidence}.`
+					: verdict.dispatchable
+						? `${evidence}; a "Workflow run unaffected: ${name} \u2014 <reason>" line is accepted only for an edit of comments and blank lines.`
+						: `it has no workflow_dispatch trigger to run it by hand: add "Workflow run unaffected: ${name} \u2014 <reason>" to the PR body, or add the trigger and ${evidence}.`),
 		);
 	}
 	return errors;

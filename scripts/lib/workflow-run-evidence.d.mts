@@ -17,4 +17,9 @@ export declare function evaluateWorkflowRunEvidence(input: {
 	changedFiles?: readonly string[];
 	body?: string;
 	readWorkflow: (file: string) => string | null;
+	readBaseWorkflow?: (file: string) => string | null;
 }): string[];
+export declare function isCommentOrWhitespaceOnlyEdit(
+	before: string | null | undefined,
+	after: string,
+): boolean;

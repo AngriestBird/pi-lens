@@ -4951,3 +4951,69 @@ describe("workflow edits with no pull request run (#3085 gap 1)", () => {
 		);
 	});
 });
+
+// #3085 round 2. Recurrence: round 1 accepted any prose after
+// `Workflow run unaffected: <file> —`, so an executable-step edit cleared the
+// rule. Through the real merge-base read (`git merge-base` and `git show` in
+// `lintWorkflowRunEvidence`) the declaration now clears only a comment-only
+// edit or a workflow with no workflow_dispatch trigger.
+describe("Workflow run unaffected declaration is verified (#3085 round 2)", () => {
+	const WORKFLOW = ".github/workflows/stryker-nightly.yml";
+	const rows = (extra: string[] = [], dispatch = true) => [
+		"name: nightly",
+		"on:",
+		"  schedule:",
+		'    - cron: "0 3 * * *"',
+		...(dispatch ? ["  workflow_dispatch:"] : ["  push:"]),
+		"jobs:",
+		"  a:",
+		"    runs-on: ubuntu-latest",
+		...extra,
+	];
+	const declared = `${body}\n\nWorkflow run unaffected: stryker-nightly.yml \u2014 only a comment moved.`;
+	let fixtureCwd = "";
+	const useFixture = (pre: string[], post: string[]) => {
+		fixtureCwd = createOriginMasterFixture(undefined, {
+			path: WORKFLOW,
+			pre,
+			post,
+			dirty: post,
+		});
+	};
+	afterEach(() => {
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+	const errorsFor = (text: string) =>
+		lintLocalPrBody(text, fixtureCwd).errors.join("\n");
+
+	it("accepts the declaration for an edit of comments and blank lines only", () => {
+		useFixture(rows(), ["# header comment", "", ...rows()]);
+		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+
+	it("rejects the declaration when an executable step also changed, naming the evidence form", () => {
+		useFixture(rows(), [
+			"# header comment",
+			...rows(["    steps:", "      - run: echo changed"]),
+		]);
+		const errors = errorsFor(declared);
+		expect(errors).toContain('"Workflow run unaffected" line is not accepted');
+		expect(errors).toContain(
+			"gh workflow run stryker-nightly.yml --ref <branch>",
+		);
+	});
+
+	it("still accepts a quoted run id for the same executable edit", () => {
+		useFixture(rows(), rows(["    steps:", "      - run: echo changed"]));
+		const quoted = `${body}\n\n\`\`\`text\n$ gh workflow run stryker-nightly.yml --ref test/x\nhttps://github.com/o/r/actions/runs/12345678901\n\`\`\``;
+		expect(errorsFor(quoted)).not.toContain("Changed workflow");
+	});
+
+	it("accepts the declaration for a workflow with no workflow_dispatch trigger", () => {
+		useFixture(
+			rows([], false),
+			rows(["    steps:", "      - run: echo changed"], false),
+		);
+		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+});

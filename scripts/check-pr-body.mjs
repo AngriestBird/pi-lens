@@ -1969,7 +1969,8 @@ export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
  * the branch run (`gh workflow run <file> --ref <branch>`) with its run id.
  * The post-image is read from the checkout the lint runs in, which is the PR's
  * own head tree in CI and the working tree locally; `cwd` defaults to the
- * directory `localDiff` diffs, so the diff and the post-image agree.
+ * directory `localDiff` diffs, so the diff and the post-image agree. The
+ * merge-base image lets the rule verify a comment-only edit.
  */
 export function lintWorkflowRunEvidence(
 	body,
@@ -1977,9 +1978,31 @@ export function lintWorkflowRunEvidence(
 ) {
 	if (!diff) return [];
 	const unreadable = [];
+	// The merge base is what `localDiff` diffs from; no base image (an added
+	// file, a shallow checkout) reads as "not a comment-only edit".
+	let mergeBase = null;
+	try {
+		mergeBase = gitExecFileSync(["merge-base", "origin/master", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+		}).trim();
+	} catch {
+		mergeBase = null;
+	}
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
+		readBaseWorkflow: (file) => {
+			if (!mergeBase) return null;
+			try {
+				return gitExecFileSync(["show", `${mergeBase}:${file}`], {
+					cwd,
+					encoding: "utf8",
+				});
+			} catch {
+				return null;
+			}
+		},
 		readWorkflow: (file) => {
 			try {
 				return readFileSync(resolve(cwd, file), "utf8");

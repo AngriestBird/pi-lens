@@ -1110,6 +1110,54 @@ describe("workflow files no pull request executes (#3085 gap 1)", () => {
 		}
 	});
 
+	// Recurrence: PR #4020 round 1 read `pull_request: *pr` as an empty trigger
+	// (a `types: [closed]` workflow avoided the rule). Every alias form the
+	// reader resolves must equal js-yaml's reading; the form it cannot resolve
+	// (a merge key) must fail closed (null) while js-yaml sees the merged keys.
+	const aliasForms: Array<[string, string]> = [
+		[
+			"a mapping alias",
+			"on:\n  defaults: &pr\n    types: [closed]\n  pull_request: *pr\njobs: {}\n",
+		],
+		[
+			"a block-sequence alias",
+			"on:\n  push:\n    paths: &p\n      - 'a/**'\n  pull_request:\n    paths: *p\njobs: {}\n",
+		],
+		[
+			"a flow-sequence alias",
+			"on:\n  workflow_run:\n    types: &t [closed]\n  pull_request:\n    types: *t\njobs: {}\n",
+		],
+	];
+	it.each(aliasForms)("reads %s exactly as js-yaml does", (_name, text) => {
+		const expected = loadWorkflow(text).on as Record<
+			string,
+			Record<string, unknown>
+		>;
+		const triggers = readWorkflowTriggers(text);
+		expect([...(triggers?.keys() ?? [])].sort()).toEqual(
+			Object.keys(expected).sort(),
+		);
+		const pr = triggers?.get("pull_request");
+		expect(pr?.paths).toEqual(expected.pull_request.paths);
+		expect(pr?.types).toEqual(expected.pull_request.types);
+	});
+	it("fails closed on a merge key whose filters js-yaml carries under `<<`", () => {
+		const text =
+			"on:\n  base: &b\n    types: [closed]\n  pull_request:\n    <<: *b\njobs: {}\n";
+		// js-yaml 5 keeps `<<` as a literal key holding the aliased mapping; a
+		// merge-aware parser lifts `types` into the trigger. Either way the
+		// closed-only filter exists and the reader must not read it as empty.
+		expect(
+			JSON.stringify(
+				(loadWorkflow(text).on as Record<string, unknown>).pull_request,
+			),
+		).toContain("closed");
+		expect(readWorkflowTriggers(text)).toBeNull();
+		expect(classifyWorkflowEdit(text, ".github/workflows/x.yml")).toMatchObject(
+			{ executes: false },
+		);
+	});
+
 	it("classifies the real tree into PR-executed and not, with the known members on each side", () => {
 		const notExecuting = files
 			.filter((file) => !classifyWorkflowEdit(file.text, file.path).executes)

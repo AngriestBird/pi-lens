@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	classifyWorkflowEdit,
 	evaluateWorkflowRunEvidence,
+	isCommentOrWhitespaceOnlyEdit,
 	readWorkflowTriggers,
 } from "../../scripts/lib/workflow-run-evidence.mjs";
 
@@ -151,12 +152,16 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		body: string,
 		changedFiles: string[] = [FILE],
 		files: Record<string, string | null> = {},
+		base: string | null = null,
 	) =>
 		evaluateWorkflowRunEvidence({
 			changedFiles,
 			body,
 			readWorkflow: (file) => (file in files ? files[file] : text),
+			readBaseWorkflow: () => base,
 		});
+	// A workflow with no workflow_dispatch trigger cannot be run on a branch.
+	const noDispatch = { [FILE]: wf("  push:") };
 
 	it("reds an edit with no quoted run", () => {
 		const errors = run("## Tests\nTargeted tests pass.");
@@ -232,29 +237,73 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		).toHaveLength(1);
 	});
 
-	it("passes a declared-unaffected line with a reason, reds one without", () => {
+	// Recurrence: PR #4020 round 1 accepted any prose after the dash, so an
+	// edit of executable steps cleared the rule. The declaration is accepted only
+	// when the check can verify it: no workflow_dispatch trigger, or an edit of
+	// comments and blank lines.
+	it("parses the declaration: needs the file name, a boundary and a reason (no-dispatch workflow)", () => {
+		const declare = (line: string) => run(line, [FILE], noDispatch);
 		expect(
-			run(
+			declare(
 				"Workflow run unaffected: stryker-nightly.yml \u2014 comment-only edit.",
 			),
 		).toEqual([]);
 		expect(
-			run("Workflow run unaffected: stryker-nightly.yml \u2014"),
+			declare("Workflow run unaffected: stryker-nightly.yml \u2014"),
 		).toHaveLength(1);
 		expect(
-			run("Workflow run unaffected: other.yml \u2014 comment-only edit."),
+			declare("Workflow run unaffected: other.yml \u2014 comment-only edit."),
 		).toHaveLength(1);
 		// A longer name sharing the prefix must not declare this file unaffected.
 		expect(
-			run(
+			declare(
 				"Workflow run unaffected: stryker-nightly.yml-old \u2014 comment-only edit.",
 			),
 		).toHaveLength(1);
 	});
 
-	it("asks for a workflow_dispatch trigger when the file has none", () => {
-		const errors = run("nothing", [FILE], { [FILE]: wf("  push:") });
+	const DECLARATION =
+		"Workflow run unaffected: stryker-nightly.yml \u2014 only a comment moved.";
+
+	it("rejects a declaration for a dispatchable workflow whose executable steps changed", () => {
+		const before = `${text}# old\n`;
+		const after = text.replace(
+			"runs-on: ubuntu-latest",
+			"runs-on: macos-latest",
+		);
+		const errors = run(DECLARATION, [FILE], { [FILE]: after }, before);
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain(
+			'"Workflow run unaffected" line is not accepted',
+		);
+		expect(errors[0]).toContain(
+			"gh workflow run stryker-nightly.yml --ref <branch>",
+		);
+	});
+
+	it("rejects a declaration for a dispatchable workflow with no base image (an added file)", () => {
+		expect(run(DECLARATION)).toHaveLength(1);
+	});
+
+	it("accepts a declaration for a dispatchable workflow whose edit is comments and blank lines", () => {
+		const after = `# new header\n${text}\n\n  # trailing note\n`;
+		expect(run(DECLARATION, [FILE], { [FILE]: after }, text)).toEqual([]);
+	});
+
+	it("does not accept a comment-only edit with no declaration", () => {
+		const after = `# new header\n${text}`;
+		expect(run("nothing", [FILE], { [FILE]: after }, text)).toHaveLength(1);
+	});
+
+	it("accepts a declaration for a workflow with no workflow_dispatch trigger, with or without a base", () => {
+		expect(run(DECLARATION, [FILE], noDispatch)).toEqual([]);
+		expect(run(DECLARATION, [FILE], noDispatch, "on: push\n")).toEqual([]);
+	});
+
+	it("tells a no-dispatch workflow to declare or add the trigger", () => {
+		const errors = run("nothing", [FILE], noDispatch);
 		expect(errors[0]).toContain("no workflow_dispatch trigger");
+		expect(errors[0]).toContain("Workflow run unaffected: stryker-nightly.yml");
 	});
 
 	it("requires evidence per changed workflow, not one for all", () => {
@@ -276,5 +325,83 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 				".github/workflows/README.md",
 			]),
 		).toEqual([]);
+	});
+});
+
+describe("isCommentOrWhitespaceOnlyEdit (#3085 round 2)", () => {
+	const base = "on:\n  push:\njobs:\n  a:\n    steps:\n      - run: echo hi\n";
+	it.each([
+		["a whole-line comment added", `# c\n${base}`, true],
+		[
+			"blank lines and trailing blanks added",
+			`${base}\n\n`.replace("hi", "hi  "),
+			true,
+		],
+		[
+			"a comment inside the steps removed",
+			base.replace("      - run", "      # x\n      - run"),
+			true,
+		],
+		["a step changed", base.replace("hi", "bye"), false],
+		[
+			"a trailing comment added to a content line",
+			base.replace("hi", "hi # c"),
+			false,
+		],
+		["indentation changed", base.replace("      - run", "     - run"), false],
+		["a step added", `${base}      - run: echo more\n`, false],
+	])("%s", (_name, after, expected) => {
+		expect(isCommentOrWhitespaceOnlyEdit(base, after)).toBe(expected);
+	});
+	it("is false without a base image", () => {
+		expect(isCommentOrWhitespaceOnlyEdit(null, base)).toBe(false);
+		expect(isCommentOrWhitespaceOnlyEdit(undefined, base)).toBe(false);
+	});
+});
+
+// Recurrence: PR #4020 round 1 read `pull_request: *pr` as an empty trigger, so
+// a `types: [closed]` workflow (never runs on an open PR) avoided the rule.
+describe("aliases in the on: block (#3085 round 2)", () => {
+	const alias = (body: string) => wf(body);
+	it("resolves an aliased trigger mapping: types [closed] never runs on a push (the review probe)", () => {
+		const text = alias(
+			"  defaults: &pr\n    types: [closed]\n  pull_request: *pr",
+		);
+		expect(readWorkflowTriggers(text)?.get("pull_request")).toEqual({
+			types: ["closed"],
+		});
+		expect(classifyWorkflowEdit(text, FILE)).toMatchObject({
+			executes: false,
+			reason: expect.stringContaining("`types:` list"),
+		});
+	});
+	it("resolves an aliased mapping whose paths name the file", () => {
+		const text = alias(
+			"  push: &p\n    paths:\n      - '.github/workflows/stryker-nightly.yml'\n  pull_request: *p",
+		);
+		expect(classifyWorkflowEdit(text, FILE)).toEqual({ executes: true });
+	});
+	it("resolves an aliased sequence of types", () => {
+		const text = alias(
+			"  workflow_run:\n    types: &t [closed]\n  pull_request:\n    types: *t",
+		);
+		expect(classifyWorkflowEdit(text, FILE)).toMatchObject({ executes: false });
+	});
+	it.each([
+		["an alias of an anchor never defined", "  pull_request: *missing"],
+		["an anchored flow mapping", "  pull_request: &pr {types: [closed]}"],
+		[
+			"a merge key in a trigger",
+			"  base: &b\n    types: [closed]\n  pull_request:\n    <<: *b",
+		],
+		["a merge key on the on: block", "  <<: *b\n  push:"],
+		["an alias list item", "  - *a"],
+	])("fails closed on %s", (_name, body) => {
+		const verdict = classifyWorkflowEdit(alias(body), FILE);
+		expect(verdict).toMatchObject({ executes: false });
+	});
+	it("fails closed on an alias or anchor of the whole on: value", () => {
+		expect(readWorkflowTriggers("on: *x\njobs: {}\n")).toBeNull();
+		expect(readWorkflowTriggers("on: &x\n  push:\njobs: {}\n")).toBeNull();
 	});
 });
