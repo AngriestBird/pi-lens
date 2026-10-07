@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-07",
+  "command": "node scripts/bench-review-graph-persist.mjs --sites persist,checkpoint,checkpoint-control --files 5000 --persists 5",
+  "node": "v24.19.0",
+  "platform": "linux 7.0.0-34-generic x64",
+  "cpus": 24,
+  "label": "after",
+  "results": [
+    {
+      "site": "persist",
+      "fileCount": 5000,
+      "persistedNodes": 120000,
+      "persistedEdges": 254989,
+      "elements": 374989,
+      "runs": [
+        {
+          "persist": 1,
+          "isBytes": true,
+          "stringifyMs": 311.9,
+          "encodeMs": 87.5,
+          "postMessageMs": 0,
+          "mainThreadMs": 399.4,
+          "worstLoopStallMs": 402.5,
+          "persistWallMs": 988.6,
+          "rssBeforeMB": 761.7,
+          "rssJumpMB": 311.5,
+          "jsonChars": 160482142,
+          "gzBytes": 3964000
+        },
+        {
+          "persist": 2,
+          "isBytes": true,
+          "stringifyMs": 317.1,
+          "encodeMs": 80.4,
+          "postMessageMs": 0,
+          "mainThreadMs": 397.6,
+          "worstLoopStallMs": 403.1,
+          "persistWallMs": 915.4,
+          "rssBeforeMB": 900.1,
+          "rssJumpMB": 306.6,
+          "jsonChars": 160482142,
+          "gzBytes": 3963996
+        },
+        {
+          "persist": 3,
+          "isBytes": true,
+          "stringifyMs": 314.1,
+          "encodeMs": 87.2,
+          "postMessageMs": 0,
+          "mainThreadMs": 401.4,
+          "worstLoopStallMs": 405,
+          "persistWallMs": 900.6,
+          "rssBeforeMB": 1052.9,
+          "rssJumpMB": 307.2,
+          "jsonChars": 160482140,
+          "gzBytes": 3964013
+        },
+        {
+          "persist": 4,
+          "isBytes": true,
+          "stringifyMs": 303.4,
+          "encodeMs": 80.9,
+          "postMessageMs": 0,
+          "mainThreadMs": 384.3,
+          "worstLoopStallMs": 387.3,
+          "persistWallMs": 907.8,
+          "rssBeforeMB": 1206.1,
+          "rssJumpMB": 306.8,
+          "jsonChars": 160482140,
+          "gzBytes": 3964004
+        },
+        {
+          "persist": 5,
+          "isBytes": true,
+          "stringifyMs": 298.9,
+          "encodeMs": 80.6,
+          "postMessageMs": 0,
+          "mainThreadMs": 379.5,
+          "worstLoopStallMs": 383.4,
+          "persistWallMs": 914.1,
+          "rssBeforeMB": 747.1,
+          "rssJumpMB": 306.9,
+          "jsonChars": 160482142,
+          "gzBytes": 3963997
+        }
+      ],
+      "loadavg1mAtStart": 5.92,
+      "summary": {
+        "persists": 5,
+        "medianMainThreadMs": 397.6,
+        "maxMainThreadMs": 401.4,
+        "medianRssJumpMB": 306.9,
+        "maxRssJumpMB": 311.5,
+        "medianWorstLoopStallMs": 402.5
+      }
+    },
+    {
+      "site": "checkpoint",
+      "fileCount": 5000,
+      "buildMs": 9742.2,
+      "backgroundRssDriftMB": [
+        178.8,
+        178.7,
+        178.6,
+        231.6
+      ],
+      "persistedNodes": 120000,
+      "persistedEdges": 254989,
+      "elements": 374989,
+      "runs": [
+        {
+          "persist": 1,
+          "isBytes": true,
+          "stringifyMs": 60.4,
+          "encodeMs": 7.4,
+          "postMessageMs": 0,
+          "mainThreadMs": 67.8,
+          "rssJumpMB": 268.8,
+          "jsonChars": 30695762
+        },
+        {
+          "persist": 2,
+          "isBytes": true,
+          "stringifyMs": 104.2,
+          "encodeMs": 31.7,
+          "postMessageMs": 0,
+          "mainThreadMs": 135.9,
+          "rssJumpMB": 242.4,
+          "jsonChars": 59979060
+        },
+        {
+          "persist": 3,
+          "isBytes": true,
+          "stringifyMs": 175.2,
+          "encodeMs": 43.5,
+          "postMessageMs": 0,
+          "mainThreadMs": 218.7,
+          "rssJumpMB": 176.7,
+          "jsonChars": 88805516
+        },
+        {
+          "persist": 4,
+          "isBytes": true,
+          "stringifyMs": 201.4,
+          "encodeMs": 58.6,
+          "postMessageMs": 0,
+          "mainThreadMs": 260,
+          "rssJumpMB": 228.4,
+          "jsonChars": 117389699
+        }
+      ],
+      "loadavg1mAtStart": 6.98,
+      "summary": {
+        "persists": 4,
+        "medianMainThreadMs": 177.3,
+        "maxMainThreadMs": 260,
+        "medianRssJumpMB": 235.4,
+        "maxRssJumpMB": 268.8,
+        "medianBackgroundRssDriftMB": 178.8,
+        "maxBackgroundRssDriftMB": 231.6
+      }
+    },
+    {
+      "site": "checkpoint-control",
+      "fileCount": 5000,
+      "buildMs": 9273.3,
+      "backgroundRssDriftMB": [
+        155.3,
+        99,
+        87.6,
+        324.1
+      ],
+      "persistedNodes": 120000,
+      "persistedEdges": 254989,
+      "elements": 374989,
+      "runs": [],
+      "loadavg1mAtStart": 6.6,
+      "summary": {
+        "persists": 0,
+        "medianBackgroundRssDriftMB": 127.2,
+        "maxBackgroundRssDriftMB": 324.1
+      }
+    }
+  ]
+}
