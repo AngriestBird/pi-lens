@@ -306,25 +306,39 @@ async function main() {
 	}
 }
 
-// Only run the CLI when this file is the entry point — not when a test
-// imports it to exercise `quoteForWindowsCmd`/`resolveVitestEntry` directly.
-// A silent MISMATCH here is a silent-success failure mode: `npm test` would
-// exit 0 having run zero tests, with nothing printed to say why. Resolve both
-// sides through symlinks before comparing so a linked `scripts/` directory
-// still reaches the CLI, and fail loudly if either path cannot be resolved.
-function isEntryPoint() {
-	if (!process.argv[1]) return false;
+// Whether `selfUrl` (a module's `import.meta.url`) is the process entry
+// point. Not a lexical compare: a silent MISMATCH is a silent-success failure
+// mode (`npm test` exits 0 having run zero tests, nothing printed), and a
+// lexical compare mismatches whenever `scripts/` is reached through a symlink
+// (#4086). Both sides go through `realpath`, so `fs.realpathSync.native` also
+// canonicalises the win32 casing and 8.3 short-name spellings the old
+// lexical/basename fallback handled.
+//  - argv[1] that is not a real path (`node -e`, stdin, a removed file): not
+//    the entry point, so importing a script never throws (#4086 review F2).
+//  - `selfUrl` that cannot be resolved: throw. Returning false would silently
+//    skip the CLI, the failure mode above. The `realpath` of `selfUrl` is
+//    load-bearing only under `--preserve-symlinks-main`, where the main
+//    module's URL keeps its symlinked spelling.
+export function isEntryPoint(
+	selfUrl,
+	{ argv1 = process.argv[1], realpath = fs.realpathSync.native } = {},
+) {
+	if (!argv1) return false;
+	let invoked;
 	try {
-		const invoked = fs.realpathSync.native(process.argv[1]);
-		const self = fs.realpathSync.native(fileURLToPath(import.meta.url));
-		return invoked === self;
+		invoked = realpath(argv1);
+	} catch {
+		return false;
+	}
+	try {
+		return invoked === realpath(fileURLToPath(selfUrl));
 	} catch (error) {
 		throw new Error(
-			`[with-test-lock] cannot resolve its entry-point path: ${error instanceof Error ? error.message : error}`,
+			`[with-test-lock] cannot resolve the entry-point path of ${selfUrl}: ${error instanceof Error ? error.message : error}`,
 		);
 	}
 }
-const isMain = isEntryPoint();
+const isMain = isEntryPoint(import.meta.url);
 if (isMain) {
 	main().catch((error) => {
 		console.error(`[with-test-lock] ${error.message}`);

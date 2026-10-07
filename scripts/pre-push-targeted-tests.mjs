@@ -44,17 +44,15 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
-	realpathSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
 import { loadHistorySelection } from "./lib/test-history-selection.mjs";
-import { quoteForWindowsCmd } from "./with-test-lock.mjs";
+import { isEntryPoint, quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
 const PREPUSH_RECORD_DIR = "pi-lens-prepush";
@@ -836,23 +834,9 @@ export async function main() {
 }
 
 // Only run the CLI when this file is the entry point — not when a test
-// imports it to exercise selectTargetedTests/etc. directly. Resolve both
-// sides through symlinks so a linked `scripts/` directory still reaches the
-// CLI, and fail loudly if either path cannot be resolved.
-function isEntryPoint() {
-	if (!process.argv[1]) return false;
-	try {
-		const invoked = realpathSync.native(process.argv[1]);
-		const self = realpathSync.native(fileURLToPath(import.meta.url));
-		return invoked === self;
-	} catch (error) {
-		throw new Error(
-			`[pre-push] cannot resolve its entry-point path: ${error instanceof Error ? error.message : error}`,
-		);
-	}
-}
-
-if (isEntryPoint()) {
+// imports it to exercise selectTargetedTests/etc. directly. The symlink-safe,
+// fail-closed check is with-test-lock.mjs's `isEntryPoint` (#4086).
+if (isEntryPoint(import.meta.url)) {
 	main()
 		.then((code) => {
 			process.exitCode = code;

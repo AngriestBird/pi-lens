@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
@@ -229,6 +230,79 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		// when the pre-push script reaches with-test-lock through a symlinked
 		// scripts/ directory. The known fixture test must appear in real output.
 		expect(result.stdout).toContain("2 passed");
+	});
+});
+
+describe("entry-point guard through the real CLIs (#4086)", () => {
+	const lockScript = path.join(repoRoot, "scripts/with-test-lock.mjs");
+	const selectorScript = path.join(
+		repoRoot,
+		"scripts/pre-push-targeted-tests.mjs",
+	);
+	const importProbe = (script: string) =>
+		`import(${JSON.stringify(pathToFileURL(script).href)}).then(() => console.log("IMPORT-OK"));`;
+	const run = (args: string[], input?: string) =>
+		spawnSync(process.execPath, args, {
+			cwd: repoRoot,
+			encoding: "utf8",
+			input,
+			timeout: 30_000,
+			env: { ...process.env, PI_LENS_TEST_NO_LOCK: "1" },
+		});
+
+	it.each([
+		["with-test-lock", lockScript],
+		["pre-push-targeted-tests", selectorScript],
+	])(
+		"importing %s from `node -e` and from stdin is not the entry point and exits 0",
+		(_name, script) => {
+			// #4086 review F2 recurrence: an entry check that threw on an
+			// unresolvable argv[1] made merely importing a script exit 1 under
+			// `node -e foo` (argv[1] = "foo") or stdin (argv[1] = "-"). The negative
+			// direction too: a guard that is always true would run main() on import
+			// (with-test-lock prints its usage and exits 2).
+			const viaEval = run(["-e", importProbe(script), "foo"]);
+			expect(viaEval.stderr).toBe("");
+			expect(viaEval.stdout).toBe("IMPORT-OK\n");
+			expect(viaEval.status).toBe(0);
+			const viaStdin = run(["-"], importProbe(script));
+			expect(viaStdin.stderr).toBe("");
+			expect(viaStdin.stdout).toBe("IMPORT-OK\n");
+			expect(viaStdin.status).toBe(0);
+		},
+	);
+
+	it("reaches both CLIs through a symlinked scripts/ under --preserve-symlinks-main", () => {
+		// #4086 review F5 recurrence: under --preserve-symlinks-main the main
+		// module's import.meta.url keeps its symlinked spelling, so a guard that
+		// realpaths only argv[1] sees a lexical self path, returns false, and the
+		// CLI exits 0 having done nothing. Default Node already realpaths the
+		// main URL, which is why the default-mode witness above cannot see this.
+		enterFixture();
+		const linked = path.join(fixtureDir as string, "scripts");
+		fs.symlinkSync(path.join(repoRoot, "scripts"), linked, "dir");
+		const lock = run([
+			"--preserve-symlinks-main",
+			path.join(linked, "with-test-lock.mjs"),
+			"--",
+			process.execPath,
+			"-e",
+			"console.log('RAN')",
+		]);
+		expect(lock.stdout).toContain("RAN");
+		expect(lock.status).toBe(0);
+		const selector = run(
+			[
+				"--preserve-symlinks-main",
+				path.join(linked, "pre-push-targeted-tests.mjs"),
+				"--skip-build",
+			],
+			`(delete) ${"0".repeat(40)} refs/heads/removed abc123\n`,
+		);
+		expect(selector.stdout).toContain(
+			"deletion-only push; skipping build and tests",
+		);
+		expect(selector.status).toBe(0);
 	});
 });
 
@@ -1083,7 +1157,8 @@ describe("pre-push lock admission (#3717)", () => {
 	const STUB_LOCK = `import path from "node:path";
 import { fileURLToPath } from "node:url";
 export function quoteForWindowsCmd(arg) { return arg; }
-if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function isEntryPoint(url) { return path.resolve(process.argv[1]) === fileURLToPath(url); }
+if (isEntryPoint(import.meta.url)) {
 	console.error(\`[with-test-lock] timed out after \${process.env.PI_LENS_TEST_LOCK_TIMEOUT_MS}ms waiting for test-suite lock held by PID 4242 since 2026-01-01T00:00:00.000Z\`);
 	process.exitCode = 1;
 }
@@ -1093,7 +1168,8 @@ if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const KILLED_LOCK = `import path from "node:path";
 import { fileURLToPath } from "node:url";
 export function quoteForWindowsCmd(arg) { return arg; }
-if (path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.kill(process.pid, "SIGKILL");
+export function isEntryPoint(url) { return path.resolve(process.argv[1]) === fileURLToPath(url); }
+if (isEntryPoint(import.meta.url)) process.kill(process.pid, "SIGKILL");
 `;
 
 	function makeFixture(
