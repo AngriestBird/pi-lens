@@ -3164,6 +3164,50 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		expect(shown(await contextText(primary))).toEqual(PRIMARY);
 	});
 
+	it("keeps the primary's turns its own when its session start throws after the reset", async () => {
+		// #3613 F1 (review r1 P1). The recurrence: the stable id was pinned only
+		// after the start's await, so a swallowed throw there left the
+		// coordinator on reset's random id, and every turn of the primary took
+		// the other-session path: its turn index and order turn never moved.
+		const seen: RuntimeCoordinator[] = [];
+		const reset = RuntimeCoordinator.prototype.resetForSession;
+		vi.spyOn(
+			RuntimeCoordinator.prototype,
+			"resetForSession",
+		).mockImplementation(function (this: RuntimeCoordinator, ...args) {
+			seen.push(this);
+			reset.apply(this, args);
+			throw new Error("probe-3613-F1: a session_start step after reset");
+		});
+		// Production swallows a session_start crash (`surfaceHandlerCrash`
+		// rethrows only under Vitest), and the session goes on.
+		const vitest = process.env.VITEST;
+		delete process.env.VITEST;
+		let primary: AgentSessionRuntime;
+		try {
+			primary = await startRuntime(SessionManager.inMemory(cwd));
+		} finally {
+			process.env.VITEST = vitest;
+		}
+		extensionErrors.splice(0);
+		const coordinator = seen[0]!;
+		const before = {
+			turnIndex: coordinator.turnIndex,
+			orderTurn: coordinator.writeOrderTurn,
+		};
+
+		await startTurn(primary);
+		await edit(primary, path.join(cwd, "a.ts"));
+		await endTurn(primary);
+		await startTurn(primary);
+
+		expect({
+			id: coordinator.telemetrySessionId,
+			turns: coordinator.turnIndex - before.turnIndex,
+			orderMoved: coordinator.writeOrderTurn > before.orderTurn,
+		}).toEqual({ id: sessionIdOf(primary), turns: 2, orderMoved: true });
+	});
+
 	it("delivers a subagent's own warnings at its turn end, after the primary's next turn starts", async () => {
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
 		const subagent = await startSubagent();

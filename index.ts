@@ -2541,6 +2541,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					// Pin the stable identity + reason over the fresh random id that
+					// reset drew (#190). #3613 F1: before the await, for the same
+					// reason as the scope: a throw later in the handler must not leave
+					// the coordinator on the random id, or every turn of this primary
+					// would take `beginTurn`'s other-session path.
+					runtime.setSessionLifecycle({
+						sessionId: stableSessionId,
+						reason: sessionReason,
+					});
 					await bounded(sessionStartWork, {
 						ms: HOOK_WALL_BUDGET_MS.session_start,
 						signal: ctx.signal,
@@ -2548,13 +2557,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						label: "handleSessionStart",
 					});
 					if (ctx.ui) updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
-
-					// Pin the stable identity + reason AFTER handleSessionStart (which ran
-					// resetForSession → a fresh random id); the stable id now wins (#190).
-					runtime.setSessionLifecycle({
-						sessionId: stableSessionId,
-						reason: sessionReason,
-					});
 					// #3612: the coordinator's fresh guard is this scope's read-guard
 					// cell, which the read-guard stores snapshot and restore.
 					scopeCell(scope, READ_GUARD_CELL, () => runtime.readGuard);
