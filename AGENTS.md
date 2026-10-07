@@ -758,6 +758,13 @@ the surface they bite; each block loads only when its trigger applies.
   `concurrent-secondary` skips the reset, since a subagent reset tears down the
   primary's warm state. `secondary` belongs to the shutdown classification. A process-lifetime latch cannot store a
   session fact without an explicit reset.
+- Turn state is the turn's session's (#3613): `RuntimeCoordinator.beginTurn`
+  takes the ctx's stable session id and moves the coordinator's counters,
+  write-order turn and change window only for its own session, and per-turn
+  warnings are partitioned by the session that recorded them. Every
+  producer and reader passes that id (`tool_result`, a partial apply's
+  pipeline, `turn_end`). A concurrent secondary still shares the read guard
+  and the turn-end worklist (the open half of #3613).
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
   identity and retain dropped counts.
