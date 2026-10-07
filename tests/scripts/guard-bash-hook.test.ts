@@ -3104,6 +3104,26 @@ describe("scripts/hooks/guard-bash.mjs -- node probe repository ownership (#3680
 		}
 	});
 
+	it("denies a relative node probe after cd fails inside another repository", () => {
+		const foreignRepo = mkdtempSync(
+			join(tmpdir(), "pi-lens-3680-foreign-repo-"),
+		);
+		try {
+			gitExecFileSync("git", ["init", "--quiet", foreignRepo], {
+				stdio: "ignore",
+			});
+			expect(
+				runHook(
+					`cd ${join(foreignRepo, "missing")} && node dist/cli.js --help`,
+					BASE_ENV,
+					repoRoot,
+				).status,
+			).toBe(2);
+		} finally {
+			rmSync(foreignRepo, { recursive: true, force: true });
+		}
+	});
+
 	it("denies a runtime file in this checkout, including a plain clone", () => {
 		expect(
 			runHook(
@@ -3334,6 +3354,379 @@ describe("scripts/hooks/guard-bash.mjs -- git hook bypass (#3778)", () => {
 		);
 		expect(dispatcher).toContain('[ "${HUSKY-}" = "0" ] && exit 0');
 		expect(findDeny("HUSKY=0 git commit -m x")).toBe("hookBypass");
+	});
+});
+
+// #3787: two helpers every git rule shares. Both populations were measured
+// against real bash 5.3 and git 2.53, not read from the issue:
+//   - Keywords that run the NEXT word as a command: do, then, else, elif, if,
+//     while, until, `!`, coproc (each created its side-effect file in a probe).
+//     Excluded on purpose: case/esac/fi/done/in/select and `function f {`,
+//     which run nothing at that word (a `case` arm is split off by `)`).
+//   - Git globals that take a SEPARATE value token: -C, -c, --git-dir,
+//     --work-tree, --namespace, --config-env, --attr-source. Excluded:
+//     --exec-path (its value form is `=` only; a bare one just prints the
+//     path) and --super-prefix (git 2.53 rejects it as an unknown option).
+describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git globals (#3787)", () => {
+	const KEYWORD_SHAPES: Array<[name: string, wrap: (cmd: string) => string]> = [
+		["do", (c) => `for b in x; do ${c}; done`],
+		["then", (c) => `if true; then ${c}; fi`],
+		["else", (c) => `if false; then :; else ${c}; fi`],
+		["elif", (c) => `if false; then :; elif ${c}; then :; fi`],
+		["if", (c) => `if ${c}; then :; fi`],
+		["while", (c) => `while ${c}; do break; done`],
+		["until", (c) => `until ${c}; do break; done`],
+		["bang", (c) => `! ${c}`],
+		["coproc", (c) => `coproc ${c}`],
+		["keyword then runner prefix", (c) => `if true; then command ${c}; fi`],
+		["keyword then brace", (c) => `if true; then { ${c}; }; fi`],
+	];
+	const GUARDED: Array<[command: string, rule: DenyRule]> = [
+		["git stash", "stash"],
+		["git reset --hard", "reset"],
+		["git worktree remove -f -f ../w", "worktreeForce"],
+		["git push --no-verify origin y", "hookBypass"],
+		["git commit -n -m x", "hookBypass"],
+		["git push --force origin y", "forcePush"],
+		["git rebase origin/master", "rebase"],
+	];
+
+	describe.each(KEYWORD_SHAPES)("after %s", (_name, wrap) => {
+		it.each(GUARDED)("denies %j", (command, rule) => {
+			expect(findDeny(wrap(command))).toBe(rule);
+		});
+	});
+
+	it("denies a keyword-led hook bypass through the real hook entry", () => {
+		const result = runHook("for b in x; do git push --no-verify; done");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("scripts/red-on-base.mjs");
+		expect(runHook("if true; then git commit -n; fi").status).toBe(2);
+	});
+
+	it("classifies a guarded command in a named brace-form coproc", () => {
+		// Pure parser seam: neither this fixture nor the test launches Bash or
+		// executes its payload.
+		const command = 'coproc C { git stash; }; wait "$COPROC_PID"';
+		expect(findDeny(command)).toBe("stash");
+	});
+
+	it.each([
+		['coproc $USER { git stash; }; wait "$COPROC_PID"', "USER"],
+		['coproc ${X:-C} { git stash; }; wait "$COPROC_PID"', "X default"],
+		['coproc "$USER" { git stash; }; wait "$COPROC_PID"', "double-quoted USER"],
+		['coproc $1 { git stash; }; wait "$COPROC_PID"', "positional parameter"],
+		['coproc $- { git stash; }; wait "$COPROC_PID"', "shell option flags"],
+		[
+			"coproc $'\\x43' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C hexadecimal escape",
+		],
+		[
+			"coproc $'\\u43' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C short Unicode escape",
+		],
+		[
+			"coproc $'C\\0!' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C NUL-truncated",
+		],
+		[
+			"coproc $'\\x{43}' { git stash; }; wait \"$COPROC_PID\"",
+			"ANSI-C braced hexadecimal escape",
+		],
+		['coproc $@ { git stash; }; wait "$COPROC_PID"', "positional list"],
+		['coproc $* { git stash; }; wait "$COPROC_PID"', "positional star"],
+		[
+			'coproc "$@" { git stash; }; wait "$COPROC_PID"',
+			"quoted positional list",
+		],
+		[
+			'coproc "$*" { git stash; }; wait "$COPROC_PID"',
+			"quoted positional star",
+		],
+		['coproc C$SUFFIX { git stash; }; wait "$COPROC_PID"', "suffix expansion"],
+		["coproc $'C' { git stash; }; wait \"$COPROC_PID\"", "ANSI-C quoted label"],
+		['coproc $"C" { git stash; }; wait "$COPROC_PID"', "locale-quoted label"],
+		[
+			'coproc "$(printf C)" { git stash; }; wait "$COPROC_PID"',
+			"command substitution",
+		],
+		[
+			'coproc "`printf C`" { git stash; }; wait "$COPROC_PID"',
+			"backtick substitution",
+		],
+		[
+			'coproc $(printf C)9 { git stash; }; wait "$COPROC_PID"',
+			"unquoted command substitution with digit suffix",
+		],
+		[
+			'coproc `printf C`9 { git stash; }; wait "$COPROC_PID"',
+			"unquoted backtick substitution with digit suffix",
+		],
+		['coproc C$? { git stash; }; wait "$COPROC_PID"', "status suffix"],
+		[
+			'coproc $!A { git stash; }; wait "$COPROC_PID"',
+			"nullable process suffix",
+		],
+		[
+			'coproc C$! { git stash; }; wait "$COPROC_PID"',
+			"nullable process with prefix",
+		],
+		['coproc C$((65)) { git stash; }; wait "$COPROC_PID"', "arithmetic suffix"],
+		[
+			'coproc C$[65] { git stash; }; wait "$COPROC_PID"',
+			"old arithmetic suffix",
+		],
+	])(
+		"denies git stash through the real hook for a %s coproc label",
+		(command) => {
+			// Review #3949 found Bash accepts expanded and special-quoted
+			// optional labels, so scan their guarded bodies at the real hook.
+			const result = runHook(command);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("stash");
+		},
+	);
+
+	it("denies a coproc label with a dynamic prefix and digit suffix", () => {
+		const result = runHook(
+			'coproc ${PREFIX}1 { git stash; }; wait "$COPROC_PID"',
+			{ ...BASE_ENV, PREFIX: "C" },
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("stash");
+	});
+
+	it.each([
+		["if", "coproc C if git stash; then :; fi"],
+		["while", "coproc C while git stash; do break; done"],
+		["until", "coproc C until git stash; do break; done"],
+		["a subshell", "coproc C ( git stash )"],
+		["for", "coproc C for x in 1; do git stash; done"],
+		["case", "coproc C case x in x) git stash;; esac"],
+		["if, with an expanded label", "coproc $USER if git stash; then :; fi"],
+	])(
+		"denies git stash through the real hook in a named coproc before %s",
+		(_body, command) => {
+			// Bash takes the optional label before any compound command, not only
+			// a brace group: each form ran its body in a bash 5.3 probe.
+			const result = runHook(command);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("stash");
+		},
+	);
+
+	it.each(["coproc C git stash", "coproc C ! git stash"])(
+		"allows %j, which bash never runs as git",
+		(command) => {
+			// Probed in bash 5.3: the first runs `C` (command not found), the
+			// second is a syntax error.
+			expect(findDeny(command)).toBeNull();
+		},
+	);
+
+	it.each([
+		["coproc '$USER' { git stash; }; wait \"$COPROC_PID\"", "single-quoted"],
+		['coproc \\$USER { git stash; }; wait "$COPROC_PID"', "escaped"],
+		[
+			'coproc "$"USER { git stash; }; wait "$COPROC_PID"',
+			"double-quoted dollar boundary",
+		],
+	])(
+		"allows git stash when a coproc label has a %s literal dollar",
+		(command) => {
+			// Bash rejects these labels and skips the body; the hook must retain
+			// quote/escape evidence instead of treating the dollar as expansion.
+			const result = runHook(command);
+			expect(result.status).toBe(0);
+		},
+	);
+
+	it("allows a literal-dollar residue followed by an empty expansion", () => {
+		const env = { ...BASE_ENV };
+		delete env.SUFFIX;
+		const result = runHook(
+			'coproc "$"USER$SUFFIX { git stash; }; wait "$COPROC_PID"',
+			env,
+		);
+		expect(result.status).toBe(0);
+	});
+
+	it("denies an ANSI-C escape in a coproc label without decoding it", () => {
+		// Fails closed: bash rejects this label, but the hook does not decode
+		// escapes, so an escaped span could spell anything.
+		expect(findDeny("coproc C$'\\U00110000' { git stash; }")).toBe("stash");
+	});
+
+	it.each([
+		['coproc $? { git stash; }; wait "$COPROC_PID"', "status"],
+		['coproc $# { git stash; }; wait "$COPROC_PID"', "argument count"],
+		['coproc $$ { git stash; }; wait "$COPROC_PID"', "process id"],
+		['coproc $! { git stash; }; wait "$COPROC_PID"', "last process id"],
+		['coproc $?A { git stash; }; wait "$COPROC_PID"', "status plus suffix"],
+		['coproc $#A { git stash; }; wait "$COPROC_PID"', "count plus suffix"],
+		['coproc $$A { git stash; }; wait "$COPROC_PID"', "pid plus suffix"],
+		['coproc $[65] { git stash; }; wait "$COPROC_PID"', "old arithmetic"],
+	])("allows a fixed non-identifier coproc expansion: %s", (command) => {
+		expect(runHook(command).status).toBe(0);
+	});
+
+	it("accepts digits and underscores in named coproc labels", () => {
+		// Bash labels permit identifier tails; keep the guard from dropping a
+		// valid label when a future identifier regex mutation rejects them.
+		const command = 'coproc _C9 { git stash; }; wait "$COPROC_PID"';
+		expect(findDeny(command)).toBe("stash");
+	});
+
+	it.each(["!C", "C!", "$'C!'"])(
+		"does not treat the invalid coproc label %j as a named brace group",
+		(label) => {
+			// Bash reports these as invalid identifiers and does not run the body;
+			// both regex anchors must therefore remain exact.
+			expect(findDeny(`coproc ${label} { git stash; }`)).toBeNull();
+		},
+	);
+
+	it.each([
+		["git stash --include-untracked", "stash"],
+		["git commit -n -m x", "hookBypass"],
+		["git push --force origin main", "forcePush"],
+	] as const)("keeps git arguments in named coproc groups: %s", (git, rule) => {
+		expect(findDeny(`coproc C { ${git}; }`)).toBe(rule);
+	});
+
+	it.each([
+		["git stash --include-untracked", "stash"],
+		["git commit -n -m x", "hookBypass"],
+		["git push --force origin main", "forcePush"],
+	] as const)(
+		"keeps git arguments in unnamed coproc groups: %s",
+		(git, rule) => {
+			expect(findDeny(`coproc { ${git}; }`)).toBe(rule);
+		},
+	);
+
+	it.each([
+		["git stash '{'", "stash"],
+		["git commit -n '{'", "hookBypass"],
+		["git push --force '{'", "forcePush"],
+	] as const)(
+		"does not treat a quoted brace argument as coproc syntax: %s",
+		(git, rule) => {
+			expect(findDeny(git)).toBe(rule);
+		},
+	);
+
+	// #3787 mutation follow-up: braces group commands but do not gate a
+	// failed check; excluding every keyword must not also exclude `{`.
+	it.each(["git commit -m x", "git push"])(
+		"denies an ungated %s after a brace-led check",
+		(write) => {
+			expect(findDeny(`{ npm test; }; ${write}`)).toBe("checkUngated");
+			expect(findDeny(`{ npm test && ${write}; }`)).toBeNull();
+		},
+	);
+
+	const GLOBAL_FLAGS: string[] = [
+		"--git-dir x",
+		"--work-tree x",
+		"--namespace x",
+		"--config-env k=V",
+		"--attr-source HEAD",
+		"-C x --git-dir y --work-tree z",
+	];
+
+	describe.each(GLOBAL_FLAGS)("after the global %s", (flags) => {
+		it.each(GUARDED)("denies %j", (command, rule) => {
+			const [, ...rest] = command.split(" ");
+			expect(findDeny(`git ${flags} ${rest.join(" ")}`)).toBe(rule);
+		});
+	});
+
+	// The other direction: a global that takes NO separate value must not
+	// swallow the subcommand after it.
+	it.each([
+		"--no-pager",
+		"--bare",
+		"-p",
+		"--literal-pathspecs",
+		"--exec-path=/x",
+		"--git-dir=x",
+	])("a valueless global %s does not hide the subcommand", (flag) => {
+		expect(findDeny(`git ${flag} stash`)).toBe("stash");
+	});
+
+	it("sees core.hooksPath given as a separate --config-env value", () => {
+		expect(
+			findDeny("git --config-env core.hooksPath=NOHOOKS commit -m x"),
+		).toBe("hookBypass");
+		expect(
+			findDeny("git --config-env core.hooksPath=NOHOOKS push origin y"),
+		).toBe("hookBypass");
+		expect(
+			findDeny(
+				"for b in x; do git --git-dir x --config-env core.hooksPath=H commit; done",
+			),
+		).toBe("hookBypass");
+	});
+
+	const ALLOW: string[] = [
+		// the keyword word as an argument, not a command word
+		"echo then git stash",
+		"echo do; git status",
+		'grep -n "then git stash" notes.txt',
+		"printf '%s' else",
+		// keyword-led commands that are not guarded
+		"for b in x; do git status; done",
+		"if true; then git log -n 5; fi",
+		"if git diff --quiet; then git commit -m x; fi",
+		"while git fetch origin; do break; done",
+		"! git diff --quiet",
+		"for b in x; do git push origin y; done",
+		'if true; then git commit -m "mentions --no-verify and -n"; fi',
+		"for b in x; do git reset --mixed HEAD; done",
+		"for b in x; do git worktree remove -f ../w; done",
+		// a loop or branch that gates on a check stays a gate for the chain
+		// scan (#3471): the keyword word is not itself a check segment
+		"if ! npm test; then exit 1; fi; git commit -m x",
+		"if npm test; then echo ok; fi; git commit -m x",
+		"while ! npm test; do sleep 1; done; git push",
+		"until npm test; do sleep 1; done && git commit -m x",
+		// a separate global's value that spells a guarded subcommand
+		"git --git-dir stash status",
+		"git --work-tree stash status",
+		"git --namespace stash log",
+		"git --config-env user.name=stash status",
+		"git --attr-source stash status",
+		// global options that are not a bypass
+		"git --git-dir x commit -m x",
+		"git --work-tree x push origin y",
+		"git --namespace ns push origin y",
+		"git --config-env user.name=NAME commit -m x",
+		'git --git-dir x commit -m "--no-verify"',
+		"git --git-dir=x --work-tree=y status",
+		"git --no-pager log -n 5",
+		"git --config-env core.hooksPath=H status",
+	];
+
+	it.each(ALLOW)("allows %j through the real hook entry", (command) => {
+		const result = runHook(command);
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("still does not claim sh -c, eval, xargs or nice/timeout/env -i prefixes", () => {
+		expect(findDeny("sh -c 'git stash'")).toBeNull();
+		expect(findDeny('eval "git stash"')).toBeNull();
+		expect(findDeny("echo x | xargs git stash")).toBeNull();
+		expect(findDeny("nice -n 10 git stash")).toBeNull();
+		expect(findDeny("timeout 30 git stash")).toBeNull();
+		expect(findDeny("env -i git stash")).toBeNull();
+		expect(findDeny("GIT_CONFIG_KEY_0=core.hooksPath git commit")).toBeNull();
+	});
+
+	it("reads a plain ANSI-C quoted command word but decodes no escape", () => {
+		expect(findDeny("$'git' stash")).toBe("stash");
+		expect(findDeny("$'\\x67it' stash")).toBeNull();
 	});
 });
 

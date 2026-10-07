@@ -329,6 +329,16 @@ the surface they bite; each block loads only when its trigger applies.
     listeners by `tests/clients/socket-error-listener-sweep.test.ts`; screen
     `close` and timer callbacks by hand.
 
+60. **Wasm failure outside the #3605 containment:** every failure thrown out
+    of web-tree-sitter classifies through `classifyTreeSitterWasmError`, and a
+    `catch` inside a `withParsedTree` consumer calls `reportWasmAbort` before it
+    swallows the error. An unclassified or swallowed trap is never counted,
+    charged or recycled, and the runtime later fails elsewhere (#3996: the
+    bash wasm's unresolved `isalpha` import threw an unclassified `TypeError`
+    on every `[ a == b ]`, and a callback-traversal trap surfaced raw).
+    `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
+    that imports a function the runtime does not export.
+
 </important>
 
 <important if="a test double, ratchet or sweep">
@@ -834,7 +844,14 @@ The Unit shards are packed by the per-file seconds in
 
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
-(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043).
+(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043). The
+same quote is enforced per file for an edit to any workflow whose post-image no
+`pull_request` run executes (no trigger, `pull_request_target` only, or a
+filter that excludes the file): `scripts/check-pr-body.mjs` reds the body
+without it. `Workflow run unaffected: <file> — <reason>` clears the rule only
+for a workflow with no `workflow_dispatch` trigger or an edit of comments and
+blank lines, verified against the merge base (#3085). The run id is quoted
+evidence, not verified provenance.
 
 The stale-build guard rejects a missing or older compiled twin. Pre-push fails
 when its bounded test-lock wait times out (#3717); `PI_LENS_PREPUSH_LOCK_SKIP=1`

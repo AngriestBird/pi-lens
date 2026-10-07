@@ -32,6 +32,7 @@ import {
 	TMP_HYGIENE_OWNER_STALE_MS,
 	TMP_HYGIENE_WORKER_HOME,
 	newRepoRootEntries,
+	REPO_ROOT_BUILD_OUTPUT,
 	repoRootBaseline,
 	unadmittedRepoRootEntries,
 	untrackedUnignoredEntries,
@@ -376,6 +377,10 @@ function ownerForTmpEntry(
  *  (`mkdtempSync` appends six random characters): a best-effort pointer so a
  *  leak names a suspect, never a verdict (#3715). */
 function repoRootEntryCandidates(entry: string): string[] {
+	// A build-output name is a literal, not a mkdtemp head: the producer is
+	// whatever spawned `npm pack`, `build:dist` or `prepare` with cwd = checkout.
+	if (REPO_ROOT_BUILD_OUTPUT.includes(entry))
+		return ["a test that ran npm pack / build:dist / prepare in the checkout"];
 	const head = entry.length > 6 ? entry.slice(0, -6) : entry;
 	const hits: string[] = [];
 	for (const { file, source } of readWalkedFiles(
@@ -426,7 +431,7 @@ describe("tmp-fixture-hygiene", () => {
 			).toEqual([]);
 			expect(
 				rootCensus.leaked,
-				`[tmp-hygiene] this run left ${rootCensus.leaked.length} new untracked, unignored entries in the repo root: ${rootCensus.leaked
+				`[tmp-hygiene] this run left ${rootCensus.leaked.length} new untracked, unignored or build-output entries in the repo root: ${rootCensus.leaked
 					.map(
 						(entry) =>
 							`${entry} (candidate owners: ${repoRootEntryCandidates(entry).join(", ") || "unknown"})`,
@@ -567,6 +572,43 @@ describe("tmp-fixture-hygiene", () => {
 		} finally {
 			fs.rmSync(path.join(REPO_ROOT, stray), { recursive: true, force: true });
 			fs.rmSync(path.join(REPO_ROOT, ignored), { force: true });
+		}
+	});
+
+	// #4003 recurrence: `tests/packaging-pack-manifest.test.ts` ran a real
+	// `npm pack` in the checkout, whose `prepare` built `dist/` there; git
+	// ignores `dist/`, so the census above passed while every dist-dependent
+	// file became order-dependent. A new build-output name is a leak even when
+	// ignored, and a pre-existing one is not.
+	it("flags a new dist/ or .pack-backup/ in the repo root even though git ignores it", () => {
+		const env = setupTestEnvironment("pi-lens-4003-build-output-");
+		try {
+			for (const name of ["dist", ".pack-backup", "kept-dist"])
+				fs.mkdirSync(path.join(env.tmpDir, name));
+			const census = unadmittedRepoRootEntries(["kept-dist"], env.tmpDir);
+			expect(census.unknown).toBeUndefined();
+			expect(census.leaked).toEqual([".pack-backup", "dist"]);
+			expect(
+				unadmittedRepoRootEntries(["dist", ".pack-backup"], env.tmpDir).leaked,
+			).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4003: a build-output leak must survive the cell where git cannot answer
+	// for the OTHER new entries; reporting only `unknown` there would let a new
+	// dist/ pass in a tree git cannot read.
+	it("still flags a new dist/ when git cannot classify another new entry", () => {
+		const env = setupTestEnvironment("pi-lens-4003-build-output-unknown-");
+		try {
+			for (const name of ["dist", "stray"])
+				fs.mkdirSync(path.join(env.tmpDir, name));
+			const census = unadmittedRepoRootEntries([], env.tmpDir);
+			expect(census.leaked).toEqual(["dist"]);
+			expect(census.unknown).toContain("stray");
+		} finally {
+			env.cleanup();
 		}
 	});
 

@@ -708,8 +708,21 @@ export function untrackedUnignoredEntries(
 	);
 }
 
+/**
+ * Build output a test run must never create in the checkout (#4003). Git
+ * ignores these, so the untracked-and-unignored census cannot see them, yet a
+ * run that writes `dist/` makes every later `dist/`-dependent file pass by
+ * ordering (the `npm pack` that ran `prepare` -> `build:dist` in place), and a
+ * surviving `.pack-backup/` means a pack left the live manifest stripped.
+ */
+export const REPO_ROOT_BUILD_OUTPUT: readonly string[] = [
+	"dist",
+	".pack-backup",
+];
+
 /** What this run left in the repo root (#3715), or `undefined` when it cannot
- *  be known, with the reason in `unknown`. */
+ *  be known, with the reason in `unknown`. A new build-output name counts as
+ *  leaked whether or not git ignores it (#4003). */
 export function unadmittedRepoRootEntries(
 	before: readonly string[] | undefined,
 	root: string = process.cwd(),
@@ -720,13 +733,15 @@ export function unadmittedRepoRootEntries(
 			leaked: [],
 			unknown: "the run's baseline predates the repo-root census",
 		};
-	const leaked = untrackedUnignoredEntries(added, root);
+	const built = added.filter((name) => REPO_ROOT_BUILD_OUTPUT.includes(name));
+	const rest = added.filter((name) => !REPO_ROOT_BUILD_OUTPUT.includes(name));
+	const leaked = untrackedUnignoredEntries(rest, root);
 	if (leaked === undefined)
 		return {
-			leaked: [],
-			unknown: `git could not classify ${added.length} new entr${added.length === 1 ? "y" : "ies"} (${added.join(", ")})`,
+			leaked: built,
+			unknown: `git could not classify ${rest.length} new entr${rest.length === 1 ? "y" : "ies"} (${rest.join(", ")})`,
 		};
-	return { leaked };
+	return { leaked: [...built, ...leaked].sort() };
 }
 
 // #2042: per-file peak memory, for the files big enough to matter.

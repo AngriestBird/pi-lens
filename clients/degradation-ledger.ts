@@ -588,6 +588,14 @@ export type DegradationKind =
 	/** A retired LSP diagnostics call was redirected to lens_diagnostics. */
 	| "lsp-diagnostics-compatibility"
 	| "lsp-diagnostics-file-too-large"
+	/**
+	 * #3965: a `paths` request's directory expansion reached the shared
+	 * `MAX_FILES` bound, so later entries were not checked. Subject is the
+	 * workspace cwd; `recordDegradationOnce` keeps one row per workspace per
+	 * session, and the rendered result carries the same `(capped at N)`
+	 * disclosure so a caller never reads a truncated scan as a full answer.
+	 */
+	| "lsp-diagnostics-paths-cap"
 	| "lsp-diagnostics-timeout"
 	| "lsp-diagnostics-unsupported"
 	/**

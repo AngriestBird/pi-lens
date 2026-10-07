@@ -126,12 +126,16 @@
  * `<<<` here-strings (content inert, substitutions live); `#` comments,
  * recognized only at a word start the way bash does (`a#b` is not a
  * comment); backslash-newline line continuation; a leading `{`
- * command-group brace and `command`/`exec`/`env`/`sudo`/`time` runner
+ * command-group brace, the shell keywords and operators that run the next
+ * word (`do`, `then`, `else`, `elif`, `if`, `while`, `until`, `!`,
+ * `coproc`; #3787) and `command`/`exec`/`env`/`sudo`/`time` runner
  * prefixes; `export VAR=val` persisted forward to later segments of the
  * same scan; a command word resolved by its final path segment
  * (`/usr/bin/git` == `./git` == `git`); leading `FOO=bar` env assignments
- * and `-c <k>=<v>` / `-C <dir>` git global options; a backslash-escaped
- * command word (`\g\i\t stash`, which bash runs).
+ * and the git global options that take a separate value (`-c <k>=<v>`,
+ * `-C <dir>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`,
+ * `--attr-source`; #3787); a backslash-escaped command word
+ * (`\g\i\t stash`, which bash runs).
  *
  * ## NOT handled (accepted; no test claims otherwise)
  *
@@ -145,11 +149,12 @@
  *   - A command word assembled by expansion (`git st$(echo a)sh`,
  *     `${G} stash`, `$(which git) stash`): no static text scan can resolve
  *     a runtime-computed word.
+ *   - A word spelled with ANSI-C escapes (`$'\x67it' stash`): the escapes
+ *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
  *   - A hook bypass spelled some other way (#3778):
- *     `GIT_CONFIG_KEY_0=core.hooksPath`, the separate-token
- *     `--config-env core.hooksPath=X`, a hand edit of `.git/config`, or `git
- *     commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
+ *     `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of `.git/config`, or
+ *     `git commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
  *     is ambiguous, so git itself rejects it.)
  *   - `kill $(pgrep -f tlc2.TLC)` and `pgrep -f tlc2 | xargs kill` (#3556
  *     review F6): the same machine-wide kill harm `sharedKill` denies, but
@@ -650,6 +655,112 @@ export function scannableRegions(commandText) {
 	return [retained, ...substitutions];
 }
 
+// `splitWords` returns quote-stripped strings. For a word holding a live
+// expansion it also keeps where each one sits, so coproc label validation can
+// distinguish actual expansions from literal characters that happen to look
+// like expansion syntax after quote removal.
+const WORD_EXPANSIONS = Symbol("wordExpansions");
+
+/**
+ * Return the end offset for a live parameter, command or arithmetic
+ * expansion (`$[…]` is the old arithmetic spelling) beginning at `start`,
+ * or `start` when the dollar is literal.
+ *
+ * @param {string} text
+ * @param {number} start
+ * @returns {number}
+ */
+function runtimeExpansionEnd(text, start) {
+	const next = text[start + 1];
+	const close = { "{": "}", "(": ")", "[": "]" }[next];
+	if (close) {
+		let depth = 1;
+		let quote = null;
+		for (let i = start + 2; i < text.length; i++) {
+			const ch = text[i];
+			if (ch === "\\") {
+				i++;
+				continue;
+			}
+			if (quote !== null) {
+				if (ch === quote) quote = null;
+				continue;
+			}
+			if (ch === "'" || ch === '"') {
+				quote = ch;
+				continue;
+			}
+			if (ch === next) depth++;
+			if (ch === close && --depth === 0) return i + 1;
+		}
+		return text.length;
+	}
+	if (/[A-Za-z_]/.test(next ?? "")) {
+		let end = start + 2;
+		while (/[A-Za-z0-9_]/.test(text[end] ?? "")) end++;
+		return end;
+	}
+	if (/[0-9@*#?$!-]/.test(next ?? "")) return start + 2;
+	return start;
+}
+
+/**
+ * Classify the leading character possibilities of a runtime expansion.
+ *
+ * @param {string} text
+ * @param {number} start
+ * @returns {"dynamic"|"numeric"|"nullableNumeric"}
+ */
+function runtimeExpansionKind(text, start) {
+	const next = text[start + 1];
+	if (next === "!") return "nullableNumeric";
+	return (next === "(" && text[start + 2] === "(") || /[?#$[]/.test(next ?? "")
+		? "numeric"
+		: "dynamic";
+}
+
+/**
+ * Whether a coproc label can form a Bash identifier, given where its live
+ * expansions sit. Dynamic expansions may supply a valid first character;
+ * numeric expansions cannot start an identifier but can extend one. With no
+ * expansion the label itself must be an identifier.
+ *
+ * @param {string} label
+ * @param {Array<{ kind: "dynamic"|"numeric"|"nullableNumeric"; start: number; end: number }>} expansions
+ * @returns {boolean}
+ */
+function canFormCoprocIdentifier(label, expansions) {
+	const parts = [];
+	let at = 0;
+	for (const expansion of expansions) {
+		parts.push(label.slice(at, expansion.start), expansion);
+		at = expansion.end;
+	}
+	parts.push(label.slice(at));
+	let hasIdentifierStart = false;
+	for (const part of parts) {
+		if (typeof part !== "string") {
+			if (part.kind === "numeric") {
+				if (!hasIdentifierStart) return false;
+			} else if (part.kind === "dynamic") {
+				hasIdentifierStart = true;
+			}
+			// `nullableNumeric` is `$!`, which may be empty when there is no
+			// recent background process, so a following literal can start it.
+			continue;
+		}
+		for (const ch of part) {
+			if (!hasIdentifierStart) {
+				if (!/[A-Za-z_]/.test(ch)) return false;
+				hasIdentifierStart = true;
+			} else if (!/[A-Za-z0-9_]/.test(ch)) {
+				return false;
+			}
+		}
+	}
+	return hasIdentifierStart;
+}
+
 /**
  * Split one scannable region into simple-command segments -- a one-line map
  * over {@link splitSegmentsWithSeparators} (#3526 review S2: the two lexer
@@ -682,14 +793,47 @@ export function splitSegments(region) {
 export function splitWords(segment) {
 	/** @type {string[]} */
 	const words = [];
+	// Sparse: an entry only for a word that holds a live expansion.
+	const wordExpansions = [];
+	let expansions = null;
 	let buf = "";
 	/** @type {"single"|"double"|null} */
 	let quote = null;
 	let started = false;
 	let i = 0;
+	const addExpansion = (kind, text) => {
+		(expansions ??= []).push({
+			kind,
+			start: buf.length,
+			end: buf.length + text.length,
+		});
+		buf += text;
+		started = true;
+	};
+	// Consume the live `$…` or backtick expansion at `i`, if there is one.
+	const takeExpansion = () => {
+		let end;
+		if (segment[i] === "`") {
+			const close = segment.indexOf("`", i + 1);
+			end = close < 0 ? segment.length : close + 1;
+		} else {
+			end = runtimeExpansionEnd(segment, i);
+			if (end === i) return false;
+		}
+		addExpansion(
+			segment[i] === "`" ? "dynamic" : runtimeExpansionKind(segment, i),
+			segment.slice(i, end),
+		);
+		i = end;
+		return true;
+	};
 	const flush = () => {
-		if (started) words.push(buf);
+		if (started) {
+			if (expansions) wordExpansions[words.length] = expansions;
+			words.push(buf);
+		}
 		buf = "";
+		expansions = null;
 		started = false;
 	};
 	while (i < segment.length) {
@@ -717,6 +861,7 @@ export function splitWords(segment) {
 				i++;
 				continue;
 			}
+			if ((ch === "$" || ch === "`") && takeExpansion()) continue;
 			buf += ch;
 			i++;
 			continue;
@@ -724,6 +869,26 @@ export function splitWords(segment) {
 		if (ch === "\\" && i + 1 < segment.length) {
 			started = true;
 			buf += segment[i + 1];
+			i += 2;
+			continue;
+		}
+		if (ch === "$" && segment[i + 1] === "'") {
+			// ANSI-C quoting. Its escapes are not decoded, so a span holding
+			// one counts as a live expansion: it could spell anything.
+			let end = i + 2;
+			while (end < segment.length && segment[end] !== "'") {
+				end += segment[end] === "\\" ? 2 : 1;
+			}
+			const content = segment.slice(i + 2, end);
+			if (content.includes("\\")) addExpansion("dynamic", content);
+			else buf += content;
+			started = true;
+			i = end + 1;
+			continue;
+		}
+		if (ch === "$" && segment[i + 1] === '"') {
+			quote = "double";
+			started = true;
 			i += 2;
 			continue;
 		}
@@ -744,11 +909,15 @@ export function splitWords(segment) {
 			i++;
 			continue;
 		}
+		if ((ch === "$" || ch === "`") && takeExpansion()) continue;
 		started = true;
 		buf += ch;
 		i++;
 	}
 	flush();
+	if (wordExpansions.length > 0) {
+		Object.defineProperty(words, WORD_EXPANSIONS, { value: wordExpansions });
+	}
 	return words;
 }
 
@@ -775,8 +944,18 @@ export function stripEnvAssignments(words) {
 	return { env, rest: words.slice(i) };
 }
 
-/** Global git flags that consume a SEPARATE following token as their value. */
-const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
+/** Global git flags that consume a SEPARATE following token as their value
+ *  (#3787, each probed against git 2.53: `--exec-path` takes its value only
+ *  as `=`, and `--super-prefix` is rejected as an unknown option). */
+const GIT_TWO_TOKEN_FLAGS = new Set([
+	"-C",
+	"-c",
+	"--git-dir",
+	"--work-tree",
+	"--namespace",
+	"--config-env",
+	"--attr-source",
+]);
 
 /**
  * Does `dir` look like a git WORKTREE checkout -- checked the same way git
@@ -846,10 +1025,10 @@ function hasNodeModulesSymlinkOutside(worktreeDir) {
 }
 
 /**
- * Walk past a `git` invocation's global options (`-C <dir>` and
- * `-c <key>=<value>` take a separate value; every other `-x`/`--x` global
- * option is assumed to take none, which is all #2699's deny/allow strings
- * need) and return the index of the subcommand word. Shared by
+ * Walk past a `git` invocation's global options (the {@link
+ * GIT_TWO_TOKEN_FLAGS} take a separate value; every other `-x`/`--x` global
+ * option is assumed to take none) and return the index of the subcommand
+ * word. Shared by
  * {@link classifyGit} (deciding stash/reset/worktree/clone) and
  * {@link classifyCheckOrWrite} (deciding commit/push for #3471), so the
  * global-option skip lives in exactly one place.
@@ -1658,6 +1837,17 @@ function repositoryIdentity(root) {
  * relative `dist/` spelling.
  */
 function loadsPiLensRuntime(fileOrSpecifier, cwd, initialIdentity) {
+	// A missing `cd` target is not proof that a relative script belongs to
+	// the repository at one of its ancestors. In particular, an unrelated
+	// Git repository above that missing path must not make the probe look
+	// foreign and therefore safe.
+	if (!isAbsolute(fileOrSpecifier) && cwd) {
+		try {
+			realpathSync(cwd);
+		} catch {
+			return true;
+		}
+	}
 	const loadedSpelling = isAbsolute(fileOrSpecifier)
 		? resolve(fileOrSpecifier)
 		: cwd
@@ -1840,19 +2030,69 @@ function classifyTempDirVars(env) {
 const RUNNER_PREFIX_WORDS = new Set(["command", "exec", "env", "sudo", "time"]);
 
 /**
- * Strip a leading `{` command-group brace and any leading runner-prefix
- * words (repeated, so `command env git stash` and `{ sudo git stash` both
- * resolve to `git stash`). `env`'s own `FOO=bar` assignments (if any) still
- * parse correctly afterward via {@link stripEnvAssignments} once `env`
- * itself is dropped.
+ * Reserved words and operators after which bash runs the NEXT word as a
+ * command (#3787, each probed in bash 5.3: the side effect happened). Not
+ * `case`/`esac`/`fi`/`done`/`in`/`select`: they run nothing at that word, and
+ * a `case` arm is split off by its `)`.
+ */
+const COMMAND_KEYWORDS = new Set([
+	"{",
+	"!",
+	"do",
+	"then",
+	"else",
+	"elif",
+	"if",
+	"while",
+	"until",
+	"coproc",
+]);
+
+/**
+ * Compound-command words a coproc name may precede and whose next word bash
+ * runs (#3787 review, each probed in bash 5.3). `for`, `case` and `(` take
+ * a name too, but their commands land in later segments.
+ */
+const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
+
+/**
+ * Strip any leading `{` brace, shell keyword ({@link COMMAND_KEYWORDS}) and
+ * runner-prefix words, in any order and repeated, so `command env git stash`,
+ * `{ sudo git stash` and `do git stash` all resolve to `git stash`. `env`'s
+ * own `FOO=bar` assignments (if any) still parse correctly afterward via
+ * {@link stripEnvAssignments} once `env` itself is dropped.
  *
  * @param {string[]} words
  * @returns {string[]}
  */
 function stripCommandGroupAndRunnerPrefixes(words) {
 	let i = 0;
-	if (words[i] === "{") i++;
-	while (i < words.length && RUNNER_PREFIX_WORDS.has(words[i])) i++;
+	while (i < words.length) {
+		if (words[i] === "coproc") {
+			// A coprocess may have an optional name before a compound
+			// command: `coproc C { git stash; }`, `coproc C if git stash`.
+			// Strip that name only when the following word makes the form
+			// unambiguous; the ordinary `coproc git stash` keeps `git` as
+			// the command word.
+			if (
+				COPROC_NAMED_BODY_WORDS.has(words[i + 2]) &&
+				canFormCoprocIdentifier(
+					words[i + 1],
+					words[WORD_EXPANSIONS]?.[i + 1] ?? [],
+				)
+			) {
+				// Runtime expansions may form a valid name; literal text around
+				// them must remain identifier characters.
+				i += 2;
+				continue;
+			}
+		}
+		if (COMMAND_KEYWORDS.has(words[i]) || RUNNER_PREFIX_WORDS.has(words[i])) {
+			i++;
+			continue;
+		}
+		break;
+	}
 	return words.slice(i);
 }
 
@@ -2047,6 +2287,11 @@ function isCheckScriptPath(fileArg) {
 function classifyCheckOrWrite(rawSegment) {
 	const rawWords = splitWords(rawSegment);
 	if (rawWords.length === 0) return null;
+	// A keyword-led segment is neither (#3787): stripping `if`/`while`/`until`
+	// would turn a loop's own condition into a "check" that its `;`-joined
+	// `done`/`fi` never gates, and deny `until npm test; do …; done && git
+	// push`. Control flow is writeIsInsideControlFlow's job here.
+	if (rawWords[0] !== "{" && COMMAND_KEYWORDS.has(rawWords[0])) return null;
 	const words = stripCommandGroupAndRunnerPrefixes(rawWords);
 	if (words.length === 0) return null;
 	const { rest: afterEnv } = stripEnvAssignments(words);
