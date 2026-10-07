@@ -62,8 +62,8 @@ const PENDING_RE = /<!-- stryker-nightly:pending=([^\n]*?) -->/;
 const FALLBACK_WINDOW = "24 hours ago";
 export const MAX_PENDING = 200;
 // Two weeks of a queued file's history. A first pass through a full queue at
-// the 12-file cap waits at most ceil(200 / 12) = 17 nights, and one below
-// 14 x 12 = 168 entries under 14, so within capacity nothing is re-based; past
+// the 24-file cap waits at most ceil(200 / 24) = 9 nights, and one below
+// 14 x 24 = 336 entries under 14, so within capacity nothing is re-based; past
 // it, a re-queued (unfinished) file or a queue full for two weeks loses its
 // older changes, and the body counts the entries.
 export const MAX_BASE_AGE_DAYS = 14;

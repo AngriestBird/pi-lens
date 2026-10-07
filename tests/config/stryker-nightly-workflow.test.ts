@@ -90,6 +90,10 @@ function nightlyFindings(text: string): string[] {
 	);
 	if (!driver || !/--base "\$BASE"/.test(run(driver)))
 		findings.push("driver step is not run over the window's base");
+	// Recurrence (#4035): the nightly cap must match the maintainer-approved
+	// 24-file intake; a stale lower pin silently grows the carry-over queue.
+	if (driver && !/--max-files 24\b/.test(run(driver)))
+		findings.push("driver does not use the 24-file nightly cap");
 	if (driver && driver["continue-on-error"] !== true)
 		findings.push("driver failure would skip the tracking-issue step");
 	// Recurrence (#4005 r2): scripts/**/*.mjs competing with runtime files for
@@ -346,6 +350,11 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"the driver loses --runtime-only",
 			(text) => text.replace(" --runtime-only", ""),
 			/not restricted to the runtime paths/,
+		],
+		[
+			"the nightly cap drops back below 24 files",
+			(text) => text.replace("--max-files 24", "--max-files 12"),
+			/does not use the 24-file nightly cap/,
 		],
 		[
 			"the queue file not written for the driver",

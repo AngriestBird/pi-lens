@@ -84,7 +84,7 @@ jobs:
           HEAD_SHA: ${{ steps.window.outputs.head }}
         run: |
           set -euo pipefail
-          ARGS=(--base "$BASE" --max-files 12 --runtime-only --head-sha "$HEAD_SHA")
+          ARGS=(--base "$BASE" --max-files 24 --runtime-only --head-sha "$HEAD_SHA")
           # Each queued line is `path@sha`: the driver reads that file against
           # its own base (scripts/stryker-nightly.mjs, the base rule).
           if [ -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]; then

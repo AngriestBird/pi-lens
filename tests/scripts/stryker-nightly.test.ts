@@ -547,7 +547,7 @@ describe("buildNightlyBody", () => {
 	// from the previous body, the real selection under the cap, a report shaped
 	// like the driver's, and the real body.
 	describe("a busy streak", () => {
-		const CAP = 12;
+		const CAP = 24;
 		const files = (n: number) =>
 			Array.from(
 				{ length: n },
@@ -620,7 +620,7 @@ describe("buildNightlyBody", () => {
 		// Model: night n's HEAD is sha(n), its window base sha(n - 1), one night
 		// standing for one day (the floor is sha(n - 14)). A pool of 150 runtime
 		// files, 30 changed a night in rotation (5 to 15 lines a change), so a
-		// file is re-touched every fifth night: 30 a night against a 12-file cap.
+		// file is re-touched every fifth night: 30 a night against a 24-file cap.
 		// A night samples when the taken files' lines exceed `budget`, each
 		// file's lines counted since the base the real collectChangedRanges split
 		// reads it against. The queue is read, selected and written by the real
@@ -671,7 +671,7 @@ describe("buildNightlyBody", () => {
 				const picked = selectMutationFiles({
 					pending,
 					windowFiles: all,
-					maxFiles: 12,
+					maxFiles: 24,
 					weights: new Map(
 						all.map((file) => [
 							file,
