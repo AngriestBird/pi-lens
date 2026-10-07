@@ -378,6 +378,17 @@ the surface they bite; each block loads only when its trigger applies.
     range. Pids are enforced by `tests/support/kill-guard.ts`; screen the
     other identifier kinds by hand.
 
+59. **Generated edit with unlisted consumers:** a bot or generator edit to a
+    value that tests pin (a policy flag, a class list, a count) must edit or
+    leave green every test that names the edited ids, not only the one pin the
+    author knew. Screen: apply the generator's real output to the real tree,
+    all-eligible case included, build, and run every test file that mentions
+    the edited field or the registry. A test that needs "an unmeasured server"
+    takes it from a class the generator never touches, or reads it at runtime,
+    never a hard-coded id (#3994: F1 the registry class pin, r3 the resident
+    witness and the docker-official declaration test). The all-eligible plan
+    over the real tree is exercised by `tests/scripts/lsp-idle-eviction-promote.test.ts`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">

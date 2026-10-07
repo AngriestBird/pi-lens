@@ -333,6 +333,10 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect(promote.run).toContain(
 			'--rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"',
 		);
+		// r4: `--state closed` also returns MERGED PRs, so a merged promotion PR
+		// would mark its servers rejected; only closed-unmerged counts.
+		expect(promote.run).toContain("--json body,mergedAt");
+		expect(promote.run).toContain("select(.mergedAt == null)");
 		expect(steps[measureAt].run).toContain(
 			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
 		);

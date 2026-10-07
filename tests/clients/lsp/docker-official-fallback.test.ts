@@ -167,12 +167,16 @@ afterEach(async () => {
 });
 
 describe("docker official alternate registry (#3939)", () => {
-	it("declares the official binary as an unmeasured fallback of docker", async () => {
+	it("declares the official binary as a fallback of docker that is not resident", async () => {
 		const { DockerOfficialServer, DockerServer, LSP_SERVERS } =
 			await import("../../../clients/lsp/server.js");
 		expect(DockerOfficialServer.id).toBe("docker-official");
 		expect(DockerOfficialServer.fallbackFor).toBe("docker");
-		expect(DockerOfficialServer.idleEviction).toBe("unmeasured");
+		// Introduced unmeasured; the nightly promotion PR (#3989) may later flip it to
+		// transparent on evidence, so only `resident` (never evicted) is wrong here.
+		expect(["unmeasured", "transparent"]).toContain(
+			DockerOfficialServer.idleEviction,
+		);
 		expect(DockerOfficialServer.extensions).toEqual(DockerServer.extensions);
 		// The legacy server must stay the first candidate for the extension.
 		expect(LSP_SERVERS.find((s) => s.id === "docker")).toBe(DockerServer);

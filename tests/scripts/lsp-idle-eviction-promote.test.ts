@@ -54,6 +54,15 @@ const REAL_REGISTRY_TS = fs.readFileSync(
 	path.join(repoRoot, "tests/config/lsp-idle-eviction-registry.test.ts"),
 	"utf8",
 );
+
+/** The ids of one class array in the REAL registry test (#3952), at run time. */
+function realClass(name: string): string[] {
+	const body = new RegExp(`const ${name} = \\[([^\\]]*)\\] as const;`).exec(
+		REAL_REGISTRY_TS,
+	)?.[1];
+	return [...(body ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
 const MB = 1024 * 1024;
 const D1 = "2026-10-06";
 const D2 = "2026-10-07";
@@ -377,12 +386,17 @@ describe("the structured declaration edit (#3989)", () => {
 			path.join(repoRoot, "clients/lsp/server.ts"),
 			"utf8",
 		);
-		const json = promoteDeclaration(real, "json");
-		expect(json.ok).toBe(true);
+		// An id the nightly never promotes (HOLD_INDEXER class), so the witness
+		// cannot go stale when the promotion PR flips NEXT_PHASE servers (#3994 r3:
+		// a hard-coded json here went red after a real plan).
+		const witnessId = realClass("HOLD_INDEXER_IDS")[0];
+		expect(witnessId, "a HOLD_INDEXER id").toBeDefined();
+		const witness = promoteDeclaration(real, witnessId);
+		expect(witness.ok, witnessId).toBe(true);
 		const diff = real
 			.split("\n")
 			.flatMap((l, i) =>
-				l !== (json as { text: string }).text.split("\n")[i] ? [l] : [],
+				l !== (witness as { text: string }).text.split("\n")[i] ? [l] : [],
 			);
 		expect(diff).toEqual(['\tidleEviction: "unmeasured",']);
 		expect(promoteDeclaration(real, "java")).toMatchObject({ ok: false });
@@ -400,10 +414,13 @@ describe("the reasons-file edit (#3989)", () => {
 	);
 
 	it("appends a reason in the file's own canonical format", () => {
-		const out = addReasons(real, { json: "because" });
+		const out = addReasons(real, { "zz-no-such-server": "because" });
 		expect(out.ok).toBe(true);
 		const text = (out as { text: string }).text;
-		expect(JSON.parse(text)).toEqual({ ...JSON.parse(real), json: "because" });
+		expect(JSON.parse(text)).toEqual({
+			...JSON.parse(real),
+			"zz-no-such-server": "because",
+		});
 		expect(text.endsWith('"because"\n}\n')).toBe(true);
 	});
 
@@ -759,20 +776,20 @@ describe("the registry test's class pin (#3989 F1)", () => {
 		});
 	});
 
-	// Real-source witness: apply a plan over the REAL server.ts, reasons file and
-	// registry test, and check what #3952's pin checks, on the edited text.
-	it("keeps the real registry consistent after a real plan (docker, docker-official, json, python-jedi, zizmor)", () => {
+	// Real-source witness, ALL-eligible (#3994 F1/r3): apply a plan in which every
+	// NEXT_PHASE_ELIGIBLE id and every HOLD_INDEXER id qualifies on two adjacent
+	// nights to the REAL server.ts, reasons file and registry test, then check what
+	// the consumers pin: #3952's class pin (here, on the edited text) and the
+	// declaration of every server the plan did not touch. The consumer SUITES were
+	// additionally run over the same plan applied to the tree (PR body, sweep).
+	it("keeps the real registry consistent after an all-eligible plan", () => {
 		const read = (rel: string) =>
 			fs.readFileSync(path.join(repoRoot, rel), "utf8");
 		const realServer = read("clients/lsp/server.ts");
-		const qualifying = [
-			"docker",
-			"docker-official",
-			"json",
-			"python-jedi",
-			"rust",
-			"zizmor",
-		];
+		const nextPhase = realClass("NEXT_PHASE_ELIGIBLE_IDS");
+		const holds = realClass("HOLD_INDEXER_IDS");
+		const qualifying = [...nextPhase, ...holds];
+		expect(holds.length, "indexer holds exist").toBeGreaterThan(0);
 		const plan = planPromotions({
 			rows: qualifying.map((id) => row(id)),
 			prior: nights([D1], () => qualifying.map((id) => row(id))),
@@ -781,56 +798,56 @@ describe("the registry test's class pin (#3989 F1)", () => {
 			reasonsText: read("tests/config/lsp-idle-eviction-reasons.json"),
 			registrySource: REAL_REGISTRY_TS,
 		});
-		expect(plan.promoted.map((p) => p.serverId)).toEqual([
-			"docker",
-			"docker-official",
-			"json",
-			"python-jedi",
-			"zizmor",
-		]);
-		expect(plan.skipped.map((x) => x.serverId)).toEqual(["rust"]);
-		// Exactly the five servers' own idleEviction lines changed, nothing else
+		// Promotable = an eligible id whose own declaration line is locatable;
+		// factory-built ones are skipped with a reason, indexers are held.
+		const locatable = nextPhase.filter(
+			(id) => promoteDeclaration(realServer, id).ok,
+		);
+		expect(plan.promoted.map((p) => p.serverId).sort()).toEqual(
+			[...locatable].sort(),
+		);
+		expect(plan.skipped.map((x) => x.serverId).sort()).toEqual(
+			[...nextPhase.filter((id) => !locatable.includes(id)), ...holds].sort(),
+		);
+		// Exactly the promoted servers' own idleEviction lines changed, nothing else
 		// (`id: "docker"` must not match `id: "docker-official"`).
 		const before = realServer.split("\n");
 		const after = plan.serverSource.split("\n");
 		expect(after).toHaveLength(before.length);
 		expect(after.filter((l, i) => l !== before[i])).toEqual(
-			Array(5).fill('\tidleEviction: "transparent",'),
+			Array(locatable.length).fill('\tidleEviction: "transparent",'),
 		);
 		const declared = (id: string) =>
 			new RegExp(`\\tid: "${id}",\\n\\tidleEviction: "(\\w+)"`).exec(
 				plan.serverSource,
 			)?.[1];
-		for (const id of ids(plan.registrySource, "TRANSPARENT_IDS"))
-			expect(declared(id) ?? "transparent", `${id} is transparent`).toBe(
-				"transparent",
-			);
-		for (const name of [
-			"NEXT_PHASE_ELIGIBLE_IDS",
-			"HOLD_INDEXER_IDS",
-			"UNPROVEN_IDS",
-		])
-			for (const id of ids(plan.registrySource, name))
-				expect(declared(id) ?? "unmeasured", `${id} stays unmeasured`).toBe(
-					"unmeasured",
-				);
-		const all = [
+		const classes = [
 			"TRANSPARENT_IDS",
 			"NEXT_PHASE_ELIGIBLE_IDS",
 			"HOLD_INDEXER_IDS",
 			"UNPROVEN_IDS",
-		].flatMap((n) => ids(plan.registrySource, n));
+		];
+		for (const id of ids(plan.registrySource, "TRANSPARENT_IDS"))
+			expect(declared(id) ?? "transparent", `${id} is transparent`).toBe(
+				"transparent",
+			);
+		for (const name of classes.slice(1))
+			for (const id of ids(plan.registrySource, name))
+				expect(declared(id) ?? "unmeasured", `${id} stays unmeasured`).toBe(
+					"unmeasured",
+				);
+		const all = classes.flatMap((n) => ids(plan.registrySource, n));
 		expect(new Set(all).size).toBe(all.length);
 		expect(all.length).toBe(
-			[
-				"TRANSPARENT_IDS",
-				"NEXT_PHASE_ELIGIBLE_IDS",
-				"HOLD_INDEXER_IDS",
-				"UNPROVEN_IDS",
-			].flatMap((n) => ids(REAL_REGISTRY_TS, n)).length,
+			classes.flatMap((n) => ids(REAL_REGISTRY_TS, n)).length,
 		);
-		expect(declared("json")).toBe("transparent");
-		expect(JSON.parse(plan.reasonsText).zizmor).toContain("#3989");
+		for (const id of locatable) {
+			expect(declared(id), id).toBe("transparent");
+			expect(JSON.parse(plan.reasonsText)[id], id).toContain("#3989");
+		}
+		// The promoted copy of the registry test stays in oxfmt's layout, so the
+		// `oxfmt --check` gate that runs on the bot PR passes (probe in the PR body).
+		expect(plan.registrySource).toContain("const TRANSPARENT_IDS = [\n");
 	});
 
 	it("promotes nothing when the registry test cannot take the move", () => {
