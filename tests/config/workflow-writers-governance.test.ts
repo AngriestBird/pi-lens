@@ -1,33 +1,69 @@
-// #4053: branch workflow_dispatch runs must not write shared issues, branches,
-// releases, registries, or other GitHub state. This census prevents the
-// compat/install tracking-issue recurrence and the #4038 literal path bug.
+// #4053: a branch workflow_dispatch run must not write shared issues, branches,
+// releases, registries, labels or other GitHub state. This census prevents the
+// compat/install tracking-issue recurrence, the stale/labels/stale-open-issues
+// near misses the round-1 review found, and the #4038 literal-path bug.
+//
+// Writers are found three ways, all from the PARSED workflow (never a regex
+// over the YAML text): a mutating command spelling in a step's `run:` (comments
+// blanked), a writer action in a step's `uses:`, and a registered writer
+// SCRIPT named in a `run:`. The script registry is itself checked against a
+// grep of `scripts/`, and the set of actions a dispatchable workflow uses is
+// closed by a registered-or-fail classification, so a new writer cannot hide
+// behind a name this file's author did not think of.
 import { readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
-import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	auditRegistry,
+	listSourceFiles,
+	relativePosix,
+	stripSource,
+} from "../support/sweep-kit.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
-const WRITE_GUARD =
-	"github.event_name == 'schedule' || github.ref == 'refs/heads/master'";
 
 type Step = {
 	name?: unknown;
 	if?: unknown;
 	run?: unknown;
-	with?: Record<string, unknown>;
+	uses?: unknown;
+	with?: unknown;
 };
-type Job = { if?: unknown; steps?: Step[] };
-type Workflow = { on?: Record<string, unknown>; jobs?: Record<string, Job> };
+type Job = {
+	if?: unknown;
+	uses?: unknown;
+	with?: unknown;
+	steps?: Step[];
+};
+type Workflow = {
+	on?: unknown;
+	jobs?: Record<string, Job>;
+};
 
 function load(source: string): Workflow {
-	return yaml.load(source) as Workflow;
+	return (yaml.load(source) ?? {}) as Workflow;
 }
 
+// <impl>
+// ── `on:` ───────────────────────────────────────────────────────────────────
+
+/** GitHub accepts `on:` as a string, an array of names, or a map. */
+function triggers(on: unknown): string[] {
+	if (typeof on === "string") return [on];
+	if (Array.isArray(on)) return on.filter((t) => typeof t === "string");
+	if (on && typeof on === "object") return Object.keys(on);
+	return [];
+}
+
+// ── `run:` text ─────────────────────────────────────────────────────────────
+
 // Shell comments are not executable evidence. Keep quoted # characters so a
-// command such as `echo "#"` remains code, while a prose mention cannot admit
-// a writer or hide one from this census.
+// command such as `echo "#"` remains code, and open a comment only at a word
+// start so `$#` and `${#x}` cannot hide the rest of the line. A prose mention
+// can neither admit a writer nor hide one from this census.
 function withoutShellComments(source: string): string {
 	return source
 		.split("\n")
@@ -43,146 +79,1058 @@ function withoutShellComments(source: string): string {
 					quote = quote ? undefined : char;
 					continue;
 				}
-				if (char === "#" && !quote) return line.slice(0, i);
+				if (char === "#" && !quote && (i === 0 || /\s/.test(line[i - 1])))
+					return line.slice(0, i);
 			}
 			return line;
 		})
 		.join("\n");
 }
 
-const WRITER_PATTERNS: Array<[string, RegExp]> = [
-	["tracking issue", /(?:node\s+)?scripts\/upsert-tracking-issue\.mjs\b/],
-	["gh issue", /\bgh\s+issue\s+(?:create|edit|comment|close)\b/],
-	["data branch push", /\bgit\s+push\b/],
-	["GitHub release", /\bgh\s+release\s+(?:create|edit|delete)\b/],
-	[
-		"npm publish",
-		/\bnpm\s+publish\b(?![^\n]*--dry-run)|\bnpx\s+[^\n]*\bnpm@[^\n]*\bpublish\b(?![^\n]*--dry-run)/,
-	],
-	["GitHub label", /\bgh\s+label\s+create\b/],
-	[
-		"mutating GitHub API",
-		/\bgh\s+api\b[^\n]*--method\s+(?:POST|PATCH|PUT|DELETE)\b/,
-	],
+const PACKAGE_SCRIPTS = (
+	JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as {
+		scripts: Record<string, string>;
+	}
+).scripts;
+
+// `npm run <name>` hides a script behind package.json: append the script body
+// (to a fixed depth) so the writer scan sees the command it runs.
+function expandNpmRuns(run: string): string {
+	let text = run;
+	for (let depth = 0; depth < 3; depth += 1) {
+		const added = [...text.matchAll(/\b(?:npm|pnpm|yarn)\s+run\s+([\w:.-]+)/g)]
+			.map((m) => PACKAGE_SCRIPTS[m[1]])
+			.filter((body): body is string => typeof body === "string");
+		if (added.length === 0) break;
+		text = `${text}\n${added.join("\n")}`;
+	}
+	return text;
+}
+
+function runText(run: string): string {
+	return expandNpmRuns(withoutShellComments(run)).replace(/\\\n\s*/g, " ");
+}
+
+// One shell command: stops at a newline, `;`, `|` or `&`.
+const CMD = String.raw`[^\n;|&]*?`;
+const GH_NOUNS =
+	"issue|pr|label|release|workflow|run|cache|repo|secret|variable|gist|project|ruleset";
+const GH_VERBS =
+	"create|edit|comment|close|reopen|lock|unlock|merge|delete|upload|run|rerun|cancel|enable|disable|set|ready|review|update-branch|transfer|pin|unpin|archive|rename|fork|sync|delete-asset|add|remove";
+const GH_WRITE = new RegExp(
+	String.raw`\bgh\b${CMD}\s(${GH_NOUNS})\s+(${GH_VERBS})(?![\w-])`,
+	"g",
+);
+const GIT_PUSH =
+	/\bgit(?:\s+(?:-[cC]\s+(?:'[^']*'|"[^"]*"|\S)+|--[\w-]+(?:=(?:'[^']*'|"[^"]*"|\S)+)?))*\s+push\b/;
+const PKG_PUBLISH = new RegExp(
+	String.raw`\b(?:npm|pnpm|yarn|bun|npx)\b(${CMD})\bpublish(?![\w:-])([^\n;|&]*)`,
+	"g",
+);
+const METHOD = /(?:^|\s)(?:-X|--method|--request)(?:\s+|=)?['"]?([A-Za-z]+)/;
+const READ_ONLY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// `gh api` and `curl` default to GET and become a POST implicitly when a body
+// flag is present, so the method alone is not enough.
+function mutatingHttp(run: string, command: "gh api" | "curl"): boolean {
+	const head = command === "gh api" ? String.raw`gh\s+api` : "curl";
+	const bodyFlag =
+		command === "gh api"
+			? /(?:^|\s)(?:-[fF]|--field|--raw-field|--input)\b/
+			: /(?:^|\s)(?:-d|--data(?:-[a-z]+)?|-F|--form(?:-string)?|-T|--upload-file|--json)\b/;
+	for (const m of run.matchAll(
+		new RegExp(String.raw`\b${head}\b([^\n;|&]*)`, "g"),
+	)) {
+		const method = METHOD.exec(m[1])?.[1]?.toUpperCase();
+		if (method !== undefined) {
+			if (!READ_ONLY_METHODS.has(method)) return true;
+		} else if (bodyFlag.test(m[1])) return true;
+	}
+	return false;
+}
+
+// Each entry reports the writer kinds it finds in one step's `run:` text.
+const RUN_WRITERS: Array<(run: string) => string[]> = [
+	(run) => [...run.matchAll(GH_WRITE)].map((m) => `gh ${m[1]} ${m[2]}`),
+	(run) => (mutatingHttp(run, "gh api") ? ["mutating gh api"] : []),
+	(run) => (mutatingHttp(run, "curl") ? ["mutating curl"] : []),
+	(run) => (GIT_PUSH.test(run) ? ["git push"] : []),
+	(run) =>
+		[...run.matchAll(PKG_PUBLISH)].some(
+			(m) => !/--dry-run(?!=(?:false|0)\b)/.test(`${m[1]}${m[2]}`),
+		)
+			? ["package publish"]
+			: [],
 ];
 
-function hasWriteGuard(...conditions: unknown[]): boolean {
-	const text = conditions
-		.filter((condition): condition is string => typeof condition === "string")
-		.join(" ");
-	return (
-		text.includes(WRITE_GUARD) ||
-		// A schedule-only job is an equivalent stricter guard: it cannot be
-		// reached by the workflow_dispatch branch path at all.
-		/^\s*github\.event_name\s*==\s*['"]schedule['"]\s*$/.test(text)
+// ── registered writer scripts ───────────────────────────────────────────────
+
+// Every file under scripts/ that writes GitHub state itself or imports a file
+// that does. The registry is audited against a grep of scripts/ below, so a
+// new writer script (or an old one that stops writing) fails there instead of
+// silently falling out of the workflow census.
+const SCRIPT_WRITERS: Record<string, string> = {
+	"scripts/backfill-github-releases.mjs": "gh release edit",
+	"scripts/backfill-release-thanks.mjs": "gh release edit",
+	"scripts/check-close-keywords.mjs": "gh pr comment (close verification)",
+	"scripts/ci-verdict.mjs": "gh api -X POST (run approval)",
+	"scripts/classify-ci-failure.mjs": "PR label/comment/run writes (library)",
+	"scripts/detect-stale-open-issues.mjs": "issue comment POST/PATCH",
+	"scripts/lib/ci-failure-classifier.mjs": "PR label/comment/run writes",
+	"scripts/lib/drift-issue.mjs": "gh issue create/edit/comment/close",
+	"scripts/lib/merge-train-warden.mjs": "PR label/comment/update-branch/run",
+	"scripts/merge-train-warden.mjs": "PR label/comment/update-branch/run",
+	"scripts/notify-clean-signal-drift.mjs": "tracking issue",
+	"scripts/notify-install-smoke-drift.mjs": "tracking issue",
+	"scripts/notify-tool-smoke-red.mjs": "gh issue create/edit/close",
+	"scripts/upsert-tracking-issue.mjs": "tracking issue",
+};
+
+// Files the script grep flags that do not write GitHub state.
+const SCRIPT_NON_WRITERS: Record<string, string> = {
+	"scripts/capture-runner-fixtures.mjs":
+		"the `-f` is yamllint's format flag in a captured-fixture argv",
+	"scripts/hooks/guard-bash.mjs":
+		"the hook parses git subcommands (`push`) to deny them; it runs none",
+	"scripts/lib/workflow-run-evidence.mjs":
+		"`gh workflow run` appears only in a remediation message it prints",
+	"scripts/npm-retry.mjs":
+		"imports only NET_PATTERN (a regex) from the classifier; it runs npm",
+	"scripts/release-qa.mjs": "its only `publish` is `npm publish --dry-run`",
+};
+
+const SCRIPT_WRITER_BASENAMES = new Set(
+	Object.keys(SCRIPT_WRITERS).map((file) => basename(file)),
+);
+
+function scriptWriters(run: string): string[] {
+	return [...run.matchAll(/[\w.-]+\.(?:mjs|cjs|js|ts)\b/g)]
+		.map((m) => m[0])
+		.filter((file) => SCRIPT_WRITER_BASENAMES.has(file))
+		.map((file) => `script ${file}`);
+}
+
+// ── writer actions ──────────────────────────────────────────────────────────
+
+// A trailing slash is a prefix (every action under that owner/repo).
+const WRITER_ACTIONS = [
+	"actions/create-release",
+	"actions/deploy-pages",
+	"actions/first-interaction",
+	"actions/github-script",
+	"actions/labeler",
+	"actions/stale",
+	"actions/upload-release-asset",
+	"crazy-max/ghaction-github-labeler",
+	"endbug/add-and-commit",
+	"endbug/label-sync",
+	"github/codeql-action/upload-sarif",
+	"jamesives/github-pages-deploy-action",
+	"js-devtools/npm-publish",
+	"micnncim/action-label-syncer",
+	"ncipollo/release-action",
+	"peter-evans/",
+	"pypa/gh-action-pypi-publish",
+	"slackapi/slack-github-action",
+	"softprops/action-gh-release",
+	"stefanzweifel/git-auto-commit-action",
+];
+
+// Actions with no shared-state write: toolchain setup, caches and artifacts
+// (scoped to the run or the ref, not shared across refs), CodeQL's analysis
+// upload (a per-ref result), and linters. A new action not in either list
+// reds `classifies every action` so its author decides.
+const READER_ACTIONS = [
+	"actions/cache",
+	"actions/checkout",
+	"actions/download-artifact",
+	"actions/setup-java",
+	"actions/setup-node",
+	"actions/setup-python",
+	"actions/upload-artifact",
+	"crate-ci/typos",
+	"dart-lang/setup-dart",
+	"erlef/setup-beam",
+	"github/codeql-action/analyze",
+	"github/codeql-action/init",
+	"mlugg/setup-zig",
+	"oven-sh/setup-bun",
+	"pnpm/action-setup",
+	"ruby/setup-ruby",
+	"shivammathur/setup-php",
+];
+
+function actionName(uses: unknown): string | undefined {
+	return typeof uses === "string"
+		? uses.split("@")[0].toLowerCase()
+		: undefined;
+}
+
+function matchesAction(name: string, list: readonly string[]): boolean {
+	return list.some((entry) =>
+		entry.endsWith("/") ? name.startsWith(entry) : name === entry,
 	);
 }
 
-function writerFindings(source: string, workflowPath: string): string[] {
-	const workflow = load(source);
-	const findings: string[] = [];
-	const dispatchable = Object.prototype.hasOwnProperty.call(
-		workflow.on ?? {},
-		"workflow_dispatch",
-	);
-	if (!dispatchable) return findings;
-	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
-		for (const [stepIndex, step] of (job.steps ?? []).entries()) {
-			const run =
-				typeof step.run === "string" ? withoutShellComments(step.run) : "";
-			const writers = WRITER_PATTERNS.filter(([, pattern]) =>
-				pattern.test(run),
-			);
-			if (writers.length === 0) continue;
-			if (!hasWriteGuard(job.if, step.if)) {
-				const name =
-					typeof step.name === "string" ? step.name : `step ${stepIndex}`;
-				for (const [kind] of writers)
-					findings.push(
-						`${workflowPath}:${jobName}/${name}: ${kind} lacks ref guard`,
-					);
+// A job-level `uses:` is a reusable workflow: its steps are invisible here.
+function isReusableWorkflow(uses: unknown): boolean {
+	return typeof uses === "string" && /(^|\/)\.github\/workflows\//.test(uses);
+}
+
+// ── `if:` expressions ───────────────────────────────────────────────────────
+
+type Expr =
+	| { t: "or" | "and"; l: Expr; r: Expr }
+	| { t: "not"; e: Expr }
+	| { t: "cmp"; op: string; l: Expr; r: Expr }
+	| { t: "str" | "lit" | "ref"; v: string }
+	| { t: "call"; name: string; args: Expr[] };
+
+function tokenize(src: string): string[] {
+	const token =
+		/\s*('(?:[^']|'')*'|&&|\|\||==|!=|<=|>=|[!<>(),.[\]*]|[A-Za-z_][\w-]*|\d+(?:\.\d+)?)/y;
+	const tokens: string[] = [];
+	let at = 0;
+	while (at < src.length) {
+		if (/^\s*$/.test(src.slice(at))) break;
+		token.lastIndex = at;
+		const m = token.exec(src);
+		if (!m) throw new Error(`unexpected character at ${at}: ${src.slice(at)}`);
+		tokens.push(m[1]);
+		at = token.lastIndex;
+	}
+	return tokens;
+}
+
+// GitHub precedence, loosest first: `||`, `&&`, comparison, `!`.
+function parseExpression(src: string): Expr {
+	const tokens = tokenize(src);
+	let at = 0;
+	const next = (): string => {
+		if (at >= tokens.length) throw new Error("unexpected end of expression");
+		return tokens[at++];
+	};
+	const expect = (want: string) => {
+		const got = next();
+		if (got !== want) throw new Error(`expected ${want}, got ${got}`);
+	};
+	const parseOr = (): Expr => {
+		let l = parseAnd();
+		while (tokens[at] === "||") {
+			at += 1;
+			l = { t: "or", l, r: parseAnd() };
+		}
+		return l;
+	};
+	const parseAnd = (): Expr => {
+		let l = parseCmp();
+		while (tokens[at] === "&&") {
+			at += 1;
+			l = { t: "and", l, r: parseCmp() };
+		}
+		return l;
+	};
+	const parseCmp = (): Expr => {
+		const l = parseUnary();
+		const op = tokens[at];
+		if (op && ["==", "!=", "<", ">", "<=", ">="].includes(op)) {
+			at += 1;
+			return { t: "cmp", op, l, r: parseUnary() };
+		}
+		return l;
+	};
+	const parseUnary = (): Expr => {
+		if (tokens[at] === "!") {
+			at += 1;
+			return { t: "not", e: parseUnary() };
+		}
+		return parsePrimary();
+	};
+	const parsePrimary = (): Expr => {
+		const tok = next();
+		if (tok === "(") {
+			const inner = parseOr();
+			expect(")");
+			return inner;
+		}
+		if (tok.startsWith("'"))
+			return { t: "str", v: tok.slice(1, -1).replaceAll("''", "'") };
+		if (/^\d/.test(tok)) return { t: "lit", v: tok };
+		if (!/^[A-Za-z_]/.test(tok)) throw new Error(`unexpected token ${tok}`);
+		if (["true", "false", "null"].includes(tok)) return { t: "lit", v: tok };
+		if (tokens[at] === "(") {
+			at += 1;
+			const args: Expr[] = [];
+			while (tokens[at] !== ")") {
+				args.push(parseOr());
+				if (tokens[at] === ",") at += 1;
+				else if (tokens[at] !== ")") throw new Error("bad call arguments");
 			}
+			expect(")");
+			return { t: "call", name: tok.toLowerCase(), args };
+		}
+		let path = tok;
+		for (;;) {
+			if (tokens[at] === "." && tokens[at + 1]) {
+				path += `.${tokens[at + 1]}`;
+				at += 2;
+			} else if (tokens[at] === "[") {
+				at += 1;
+				const index = parseOr();
+				expect("]");
+				path += index.t === "str" ? `.${index.v}` : ".*";
+			} else break;
+		}
+		return { t: "ref", v: path };
+	};
+	const result = parseOr();
+	if (at !== tokens.length) throw new Error(`trailing token ${tokens[at]}`);
+	return result;
+}
+
+function operands(expr: Expr, op: "or" | "and"): Expr[] {
+	return expr.t === op
+		? [...operands(expr.l, op), ...operands(expr.r, op)]
+		: [expr];
+}
+
+function isEquality(expr: Expr, context: string, value: string): boolean {
+	if (expr.t !== "cmp" || expr.op !== "==") return false;
+	const pair = (a: Expr, b: Expr) =>
+		a.t === "ref" && a.v === context && b.t === "str" && b.v === value;
+	return pair(expr.l, expr.r) || pair(expr.r, expr.l);
+}
+
+const isSchedule = (e: Expr) => isEquality(e, "github.event_name", "schedule");
+const isMaster = (e: Expr) => isEquality(e, "github.ref", "refs/heads/master");
+
+// `schedule || master`, or either half alone: a stricter guard that a branch
+// dispatch cannot satisfy either.
+function isGuardConjunct(expr: Expr): boolean {
+	if (isSchedule(expr) || isMaster(expr)) return true;
+	const ors = operands(expr, "or");
+	return ors.length === 2 && ors.some(isSchedule) && ors.some(isMaster);
+}
+
+type Guard = { guarded: true } | { guarded: false; reason: string };
+
+// A step runs only when its job's `if:` AND its own `if:` hold, so the guard
+// must be a conjunct of one of them: `always() || guard`, `inputs.x || guard`
+// and `!(guard)` are not.
+function guardOf(...conditions: unknown[]): Guard {
+	for (const condition of conditions) {
+		if (typeof condition !== "string") continue;
+		const body =
+			/^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(condition)?.[1] ?? condition;
+		let expr: Expr;
+		try {
+			expr = parseExpression(body);
+		} catch (error) {
+			return {
+				guarded: false,
+				reason: `unparseable if (${(error as Error).message})`,
+			};
+		}
+		if (operands(expr, "and").some(isGuardConjunct)) return { guarded: true };
+	}
+	return { guarded: false, reason: "lacks ref guard" };
+}
+
+// ── census ──────────────────────────────────────────────────────────────────
+
+interface WriterRecord {
+	id: string;
+	kinds: string[];
+	guard: Guard;
+}
+
+function stepKinds(step: Step): string[] {
+	const kinds: string[] = [];
+	if (typeof step.run === "string") {
+		const run = runText(step.run);
+		for (const detect of RUN_WRITERS) kinds.push(...detect(run));
+		kinds.push(...scriptWriters(run));
+	}
+	const action = actionName(step.uses);
+	if (action !== undefined && matchesAction(action, WRITER_ACTIONS))
+		kinds.push(`action ${action}`);
+	return [...new Set(kinds)];
+}
+
+function stepLabel(step: Step, index: number): string {
+	return typeof step.name === "string" ? step.name : `step ${index}`;
+}
+
+/** Every writer step (and writer job) of a dispatchable workflow. */
+function workflowWriters(source: string, workflowPath: string): WriterRecord[] {
+	const workflow = load(source);
+	if (!triggers(workflow.on).includes("workflow_dispatch")) return [];
+	const records: WriterRecord[] = [];
+	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+		if (isReusableWorkflow(job.uses))
+			records.push({
+				id: `${workflowPath}:${jobName}`,
+				kinds: ["reusable workflow"],
+				guard: guardOf(job.if),
+			});
+		for (const [index, step] of (job.steps ?? []).entries()) {
+			const kinds = stepKinds(step);
+			if (kinds.length === 0) continue;
+			records.push({
+				id: `${workflowPath}:${jobName}/${stepLabel(step, index)}`,
+				kinds,
+				guard: guardOf(job.if, step.if),
+			});
 		}
 	}
-	return findings;
+	return records;
+}
+
+function writerFindings(source: string, workflowPath: string): string[] {
+	return workflowWriters(source, workflowPath).flatMap(
+		({ id, kinds, guard }) =>
+			guard.guarded
+				? []
+				: kinds.map((kind) => `${id}: ${kind} ${guard.reason}`),
+	);
+}
+
+/** Actions a dispatchable workflow uses that no list classifies. */
+function unclassifiedActions(source: string, workflowPath: string): string[] {
+	const workflow = load(source);
+	if (!triggers(workflow.on).includes("workflow_dispatch")) return [];
+	return Object.entries(workflow.jobs ?? {}).flatMap(([jobName, job]) =>
+		(job.steps ?? []).flatMap((step) => {
+			const action = actionName(step.uses);
+			if (
+				action === undefined ||
+				action.startsWith("./") ||
+				matchesAction(action, WRITER_ACTIONS) ||
+				matchesAction(action, READER_ACTIONS)
+			)
+				return [];
+			return [`${workflowPath}:${jobName}: unclassified action ${action}`];
+		}),
+	);
+}
+
+// ── `with:` shell variables ─────────────────────────────────────────────────
+
+// Action inputs are never shell-expanded (#4038 round 4). `${{ … }}` is blanked
+// first so `format('$X')` is not a hit, `\$` is an escaped literal, and a
+// braced variable may carry an expansion operator (`${VAR:-d}`).
+const SHELL_VARIABLE =
+	/(?<!\\)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*[}:#%/^,@+=?-])/;
+
+function* inputStrings(
+	value: unknown,
+	key: string,
+): Generator<[string, string]> {
+	if (typeof value === "string") yield [key, value];
+	else if (Array.isArray(value))
+		for (const item of value) yield* inputStrings(item, key);
+	else if (value && typeof value === "object")
+		for (const [k, v] of Object.entries(value))
+			yield* inputStrings(v, `${key}.${k}`);
 }
 
 function withVariableFindings(source: string, workflowPath: string): string[] {
 	const workflow = load(source);
 	const findings: string[] = [];
-	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
-		for (const [stepIndex, step] of (job.steps ?? []).entries()) {
-			for (const [key, value] of Object.entries(step.with ?? {})) {
-				if (typeof value !== "string") continue;
-				if (
-					/\$(?!\{\{)(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/.test(
-						value,
-					)
-				) {
-					const name =
-						typeof step.name === "string" ? step.name : `step ${stepIndex}`;
+	const scan = (label: string, input: unknown, skipScript: boolean) => {
+		for (const [key, value] of Object.entries(
+			input && typeof input === "object" ? input : {},
+		)) {
+			// `actions/github-script`'s `script` is JavaScript, where `${name}` is a
+			// template literal, not a shell variable.
+			if (skipScript && key === "script") continue;
+			for (const [path, text] of inputStrings(value, key)) {
+				if (SHELL_VARIABLE.test(text.replace(/\$\{\{[\s\S]*?\}\}/g, "")))
 					findings.push(
-						`${workflowPath}:${jobName}/${name}: with.${key} uses shell variable`,
+						`${workflowPath}:${label}: with.${path} uses shell variable`,
 					);
-				}
 			}
 		}
+	};
+	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+		scan(jobName, job.with, false);
+		for (const [index, step] of (job.steps ?? []).entries())
+			scan(
+				`${jobName}/${stepLabel(step, index)}`,
+				step.with,
+				actionName(step.uses) === "actions/github-script",
+			);
 	}
 	return findings;
 }
+// </impl>
 
-function allWorkflowFiles(): string[] {
+// ── registered exceptions ───────────────────────────────────────────────────
+
+// A dispatchable writer that is deliberately NOT guarded. Each entry must still
+// be flagged (a stale entry reds) and carries its reason.
+const REGISTERED_EXCEPTIONS: Record<string, string> = {
+	".github/workflows/merge-train-warden.yml:warden/Sweep open PRs for DIRTY / BEHIND / red-CI / starved / stalled / absent runs":
+		"the workflow header documents on-demand workflow_dispatch smoke runs of the warden; it labels and comments on PRs and re-runs or cancels stalled runs, and is meant to run from any ref the maintainer dispatches",
+};
+
+// The census as counts: dispatchable workflows, and writer steps per workflow.
+// A new writer (even a guarded one) or a new dispatchable workflow reds here so
+// its author reviews the guard; the failure prints the re-pin.
+const DISPATCHABLE_WORKFLOWS = 15;
+const WRITER_STEPS: Record<string, number> = {
+	".github/workflows/compat-smoke.yml": 1,
+	".github/workflows/install-smoke.yml": 1,
+	".github/workflows/labels.yml": 1,
+	".github/workflows/merge-train-warden.yml": 1,
+	".github/workflows/release.yml": 3,
+	".github/workflows/stale-open-issues.yml": 1,
+	".github/workflows/stale.yml": 1,
+	".github/workflows/stryker-nightly.yml": 1,
+	".github/workflows/tool-smoke.yml": 8,
+};
+
+function workflowFiles(): string[] {
 	const files = readdirSync(WORKFLOWS).filter((file) => /\.ya?ml$/.test(file));
 	assertNonEmptyScan(
 		"workflow files walked for writer governance",
 		files.length,
 		10,
 	);
-	return files;
+	return files.sort();
 }
 
-const SHELL_VARIABLE_FIXTURE = `
-jobs:
-  fixture:
-    steps:
-      - name: Bad action input
-        uses: actions/upload-artifact@v1
-        with:
-          path: "$RUNNER_TEMP/report.json"
-      - name: Expression input
-        uses: actions/upload-artifact@v1
-        with:
-          path: "\${{ runner.temp }}"
-      - name: Comment only
-        uses: actions/upload-artifact@v1
-        with:
-          path: report.json # $RUNNER_TEMP is only a comment
-`;
+function readWorkflow(file: string): { source: string; path: string } {
+	return {
+		source: readFileSync(resolve(WORKFLOWS, file), "utf8"),
+		path: `.github/workflows/${file}`,
+	};
+}
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+
+const GUARD_SRC =
+	"github.event_name == 'schedule' || github.ref == 'refs/heads/master'";
+
+function workflowWith(options: {
+	on?: string;
+	jobIf?: string;
+	stepIf?: string;
+	run?: string;
+	uses?: string;
+	jobUses?: string;
+}): string {
+	const indent = (text: string, n: number) =>
+		text
+			.split("\n")
+			.map((line) => " ".repeat(n) + line)
+			.join("\n");
+	const step = [
+		options.run === undefined ? "" : `run: |\n${indent(options.run, 2)}`,
+		options.uses === undefined ? "" : `uses: ${options.uses}`,
+		options.stepIf === undefined ? "" : `if: ${JSON.stringify(options.stepIf)}`,
+	]
+		.filter(Boolean)
+		.join("\n");
+	return [
+		options.on ?? "on: workflow_dispatch",
+		"jobs:",
+		"  fixture:",
+		options.jobIf === undefined
+			? ""
+			: `    if: ${JSON.stringify(options.jobIf)}`,
+		options.jobUses === undefined ? "" : `    uses: ${options.jobUses}`,
+		options.jobUses === undefined
+			? `    steps:\n      - name: Writer\n${indent(step, 8)}`
+			: "",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+const flag = (options: Parameters<typeof workflowWith>[0]) =>
+	writerFindings(workflowWith(options), "fixture.yml");
+
+// #4053 r1 probe set: every spelling the round-1 review found SILENT, plus the
+// spellings the first census already caught. Each is a mutating command that a
+// branch dispatch must not run unguarded.
+const WRITER_RUNS: Array<[string, string]> = [
+	["gh issue create", 'gh issue create --title "x"'],
+	["gh issue comment", "gh issue comment 1 --body x"],
+	["gh issue reopen", "gh issue reopen 1"],
+	["gh issue lock", "gh issue lock 1"],
+	["gh pr comment", "gh pr comment 1 --body x"],
+	["gh pr create", "gh pr create --fill"],
+	["gh pr merge", "gh pr merge 1 --squash"],
+	["gh pr edit", "gh pr edit 1 --add-label x"],
+	["gh pr close", "gh pr close 1"],
+	["gh with global flags", "gh -R owner/repo pr comment 1 --body x"],
+	["gh across a continuation", "gh \\\n  pr merge 1"],
+	["gh label create", "gh label create x"],
+	["gh label edit", "gh label edit x --color fff"],
+	["gh release create", "gh release create v1"],
+	["gh release upload", "gh release upload v1 a.zip"],
+	["gh repo edit", "gh repo edit --description x"],
+	["gh workflow run", "gh workflow run ci.yml --ref master"],
+	["gh cache delete", "gh cache delete --all"],
+	["gh run rerun", "gh run rerun 1"],
+	["gh api -X POST", "gh api -X POST repos/o/r/issues -f title=x"],
+	["gh api --method POST", "gh api --method POST repos/o/r/issues"],
+	["gh api --method=PATCH", "gh api --method=PATCH repos/o/r/issues/1"],
+	["gh api -XDELETE", "gh api -XDELETE repos/o/r/issues/1/labels/x"],
+	["gh api --method after the path", "gh api repos/o/r/issues --method POST"],
+	["gh api implicit POST via -f", "gh api repos/o/r/issues -f title=x"],
+	["gh api implicit POST via -F", "gh api repos/o/r/issues -F n=1"],
+	["gh api implicit POST via --field", "gh api repos/o/r/issues --field a=b"],
+	["git push", "git push origin HEAD:data"],
+	["git -c ... push", "git -c credential.helper= push origin x"],
+	[
+		"git -c quoted helper push",
+		"git -c credential.helper='!gh auth git-credential' push origin x",
+	],
+	["git -C push", 'git -C "$DIR" push'],
+	["git across a continuation", "git \\\n  push origin x"],
+	["npm publish", "npm publish --provenance"],
+	["pnpm publish", "pnpm publish"],
+	["npx npm publish", "npx -y npm@11 publish --access public"],
+	["npm publish --dry-run=false", "npm publish --dry-run=false"],
+	["curl -X POST", "curl -X POST https://api.github.com/repos/o/r/issues"],
+	["curl --request DELETE", "curl --request DELETE https://x.test/a"],
+	["curl implicit POST via -d", "curl -d @body.json https://x.test/a"],
+	[
+		"curl implicit POST via --data-binary",
+		"curl --data-binary @a https://x.test/a",
+	],
+	["writer after $#", "echo $# ; gh issue create --title x"],
+	["writer after a quoted #", 'echo "#" ; gh issue create --title x'],
+	["writer after a mid-word #", "echo a#b ; gh pr merge 1"],
+	["script via node scripts/", "node scripts/notify-install-smoke-drift.mjs"],
+	[
+		"script via node ./scripts/",
+		"node ./scripts/upsert-tracking-issue.mjs --x",
+	],
+	["script via cd scripts", "cd scripts && node upsert-tracking-issue.mjs"],
+	[
+		"script via a variable path",
+		'cli="$RUNNER_TEMP/history-scripts/upsert-tracking-issue.mjs"\nnode "$cli"',
+	],
+	["script via lib path", "node scripts/lib/merge-train-warden.mjs"],
+	[
+		"script detect-stale-open-issues",
+		"node scripts/detect-stale-open-issues.mjs",
+	],
+	["script via npm run", "npm run release:backfill-thanks -- --apply"],
+];
+
+const NON_WRITER_RUNS: Array<[string, string]> = [
+	["gh pr view", "gh pr view 1 --json state"],
+	["gh issue list", "gh issue list --label x"],
+	["gh label list", "gh label list --limit 100"],
+	["gh run view", "gh run view 1"],
+	["gh api GET", "gh api repos/o/r/issues"],
+	["gh api -X GET with -f", "gh api -X GET repos/o/r/issues -f state=open"],
+	["gh api --jq only", "gh api repos/o/r --jq .name"],
+	["git status", "git status"],
+	["git fetch", "git fetch --tags origin"],
+	["git config push.default", "git config push.default simple"],
+	["npm publish --dry-run", "npm publish --dry-run --provenance"],
+	["npm run publish-docs", "npm run publish-docs"],
+	["npm test", "npm test"],
+	["curl GET", "curl -fsSL https://example.test/a"],
+	["curl -X GET", "curl -X GET https://example.test/a"],
+	["comment only", "# gh issue create is documented here\necho ok"],
+	["trailing comment", "echo ok # gh pr merge 1"],
+	["unrelated script", "node scripts/smoke-tools.mjs"],
+];
+
+const WRITER_ACTION_FIXTURES = [
+	"actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93",
+	"micnncim/action-label-syncer@3abd5ab72fda571e69fffd97bd4e0033dd5f495c",
+	"peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+	"peter-evans/create-or-update-comment@v4",
+	"actions/github-script@v7",
+	"softprops/action-gh-release@v2",
+	"ncipollo/release-action@v1",
+	"actions/labeler@v5",
+	"slackapi/slack-github-action@v2",
+];
 
 describe("workflow writer governance (#4053)", () => {
-	it("lists every writer and rejects an unguarded dispatchable writer", () => {
-		const findings = allWorkflowFiles().flatMap((file) =>
-			writerFindings(
-				readFileSync(resolve(WORKFLOWS, file), "utf8"),
-				`.github/workflows/${file}`,
-			),
-		);
-		expect(findings).toEqual([]);
+	describe("`on:` forms", () => {
+		// Recurrence: round 1 read `on` with hasOwnProperty, so the string and
+		// array forms made a dispatchable workflow look non-dispatchable and
+		// exempt.
+		it.each([
+			["string", "on: workflow_dispatch"],
+			["flow array", "on: [push, workflow_dispatch]"],
+			["block array", "on:\n  - push\n  - workflow_dispatch"],
+			["map", "on:\n  push:\n  workflow_dispatch:"],
+			[
+				"map with inputs",
+				"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        type: string",
+			],
+			["empty-map value", "on:\n  workflow_dispatch: {}"],
+		])("treats the %s form as dispatchable", (_name, on) => {
+			expect(flag({ on, run: "gh issue create --title x" })).toHaveLength(1);
+		});
+
+		it.each([
+			["string", "on: push"],
+			["array", "on: [push, pull_request]"],
+			["map", "on:\n  schedule:\n    - cron: '0 0 * * *'"],
+		])("does not census a non-dispatchable %s workflow", (_name, on) => {
+			expect(flag({ on, run: "gh issue create --title x" })).toEqual([]);
+		});
 	});
 
-	it("detects shell variables in with inputs but not expressions or comments", () => {
-		expect(withVariableFindings(SHELL_VARIABLE_FIXTURE, "fixture.yml")).toEqual(
-			["fixture.yml:fixture/Bad action input: with.path uses shell variable"],
-		);
+	describe("writer commands in run:", () => {
+		// Recurrence: round 1 probed all of these SILENT against the shipped
+		// census, which matched only seven spellings.
+		it.each(WRITER_RUNS)("flags %s", (_name, run) => {
+			expect(flag({ run })).not.toEqual([]);
+		});
+
+		it.each(NON_WRITER_RUNS)("does not flag %s", (_name, run) => {
+			expect(flag({ run })).toEqual([]);
+		});
+
+		it("names the kind of every writer in one step", () => {
+			expect(
+				flag({ run: "gh pr comment 1 --body x\ngit push origin x" }),
+			).toEqual([
+				"fixture.yml:fixture/Writer: gh pr comment lacks ref guard",
+				"fixture.yml:fixture/Writer: git push lacks ref guard",
+			]);
+		});
 	});
 
-	it("rejects a shell variable in a real action input", () => {
-		const findings = allWorkflowFiles().flatMap((file) =>
-			withVariableFindings(
-				readFileSync(resolve(WORKFLOWS, file), "utf8"),
-				`.github/workflows/${file}`,
-			),
-		);
-		expect(findings).toEqual([]);
+	describe("writer actions in uses:", () => {
+		// Recurrence: round 1, stale.yml / labels.yml were invisible because the
+		// census read only `run:`.
+		it.each(WRITER_ACTION_FIXTURES)("flags %s", (uses) => {
+			expect(flag({ uses })).toHaveLength(1);
+		});
+
+		it("flags a reusable workflow job it cannot see inside", () => {
+			expect(flag({ jobUses: "./.github/workflows/publish.yml" })).toHaveLength(
+				1,
+			);
+			expect(
+				flag({
+					jobUses: "o/r/.github/workflows/p.yml@main",
+					jobIf: GUARD_SRC,
+				}),
+			).toEqual([]);
+		});
+
+		it("does not flag a reader action", () => {
+			expect(
+				flag({
+					uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+				}),
+			).toEqual([]);
+		});
+
+		it("rejects an action no list classifies", () => {
+			// Recurrence: a census keyed on names only holds the names its author
+			// remembered; an unlisted action must force a writer/reader decision.
+			expect(
+				unclassifiedActions(
+					workflowWith({ uses: "acme/mystery-deploy@v1" }),
+					"fixture.yml",
+				),
+			).toEqual([
+				"fixture.yml:fixture: unclassified action acme/mystery-deploy",
+			]);
+			expect(
+				unclassifiedActions(
+					workflowWith({ uses: "actions/stale@v9" }),
+					"fixture.yml",
+				),
+			).toEqual([]);
+			expect(
+				unclassifiedActions(
+					workflowWith({ on: "on: push", uses: "acme/mystery-deploy@v1" }),
+					"fixture.yml",
+				),
+			).toEqual([]);
+		});
+	});
+
+	describe("the ref guard", () => {
+		// Recurrence: round 1 accepted `always() || (guard)` (the guard text was a
+		// substring), so a branch dispatch still reached the writer.
+		const run = "gh issue create --title x";
+		it.each([
+			["the exact guard", GUARD_SRC],
+			["a parenthesised conjunct", `always() && (${GUARD_SRC}) && x == 'y'`],
+			["a trailing conjunct", `x == 'y' && (${GUARD_SRC})`],
+			["a wrapped expression", `\${{ !cancelled() && (${GUARD_SRC}) }}`],
+			["schedule alone", "github.event_name == 'schedule'"],
+			["master alone", "github.ref == 'refs/heads/master'"],
+			[
+				"reversed operands",
+				"'schedule' == github.event_name || 'refs/heads/master' == github.ref",
+			],
+			[
+				"reversed disjuncts",
+				"github.ref == 'refs/heads/master' || github.event_name == 'schedule'",
+			],
+			["nested conjunction", `(a == 'b' && (${GUARD_SRC})) && c == 'd'`],
+		])("accepts %s as a step guard", (_name, stepIf) => {
+			expect(flag({ run, stepIf })).toEqual([]);
+		});
+
+		it.each([
+			["always() || guard", `always() || (${GUARD_SRC})`],
+			["input || guard", `inputs.force || (${GUARD_SRC})`],
+			["!(guard)", `!(${GUARD_SRC})`],
+			["guard || always()", `(${GUARD_SRC}) || always()`],
+			["guard || other", `${GUARD_SRC} || inputs.x`],
+			["precedence: a && b || guard", `a && b || ${GUARD_SRC}`],
+			["a negated schedule", "github.event_name != 'schedule'"],
+			["workflow_dispatch", "github.event_name == 'workflow_dispatch'"],
+			["a different branch", "github.ref == 'refs/heads/main'"],
+			["ref_name", "github.ref_name == 'master'"],
+			["double quotes", `github.ref == "refs/heads/master"`],
+			["always() alone", "always()"],
+			["a constant", "true"],
+		])("rejects %s", (_name, stepIf) => {
+			expect(flag({ run, stepIf })).toHaveLength(1);
+		});
+
+		it("flags an unparseable if instead of trusting it", () => {
+			expect(flag({ run, stepIf: "github.ref == 'unterminated" })).toEqual([
+				expect.stringContaining("unparseable if"),
+			]);
+		});
+
+		it("accepts the guard on the job or on the step, and ands them", () => {
+			expect(flag({ run, jobIf: GUARD_SRC })).toEqual([]);
+			expect(flag({ run, jobIf: "always() || x", stepIf: GUARD_SRC })).toEqual(
+				[],
+			);
+			expect(flag({ run, jobIf: GUARD_SRC, stepIf: "always()" })).toEqual([]);
+			expect(flag({ run, jobIf: "always()", stepIf: "always()" })).toHaveLength(
+				1,
+			);
+		});
+	});
+
+	describe("with: shell variables", () => {
+		const wrap = (withBlock: string, uses = "actions/upload-artifact@v1") =>
+			`jobs:\n  fixture:\n    steps:\n      - name: Input\n        uses: ${uses}\n        with:\n${withBlock}`;
+		const hits = (withBlock: string, uses?: string) =>
+			withVariableFindings(wrap(withBlock, uses), "fixture.yml");
+
+		// Recurrence: #4038 round 4 shipped a literal "$RUNNER_TEMP/..." path
+		// that no action expands.
+		it.each([
+			["a bare variable", '          path: "$RUNNER_TEMP/r.json"'],
+			["a braced variable", '          path: "${RUNNER_TEMP}/r.json"'],
+			["an expansion operator", '          path: "${DIR:-fallback}/r.json"'],
+			[
+				"a variable next to an expression",
+				'          path: "${{ runner.temp }}/$HOME"',
+			],
+			[
+				"a block scalar",
+				"          path: |\n            a\n            $HOME/b",
+			],
+			["a list value", "          path: ['a', '$HOME']"],
+		])("flags %s", (_name, block) => {
+			expect(hits(block)).toHaveLength(1);
+		});
+
+		it.each([
+			["an expression", '          path: "${{ runner.temp }}/r.json"'],
+			[
+				"a dollar-quoted expression argument",
+				`          path: "\${{ format('$X') }}"`,
+			],
+			["an escaped dollar", "          path: '\\$HOME'"],
+			[
+				"a trailing comment",
+				"          path: r.json # $RUNNER_TEMP is a comment",
+			],
+			["a regex anchor", '          path: "^foo$"'],
+			["a price", '          path: "cost $5"'],
+			["a command substitution", '          path: "$(pwd)/x"'],
+		])("accepts %s", (_name, block) => {
+			expect(hits(block)).toEqual([]);
+		});
+
+		it("does not read github-script's JavaScript template literals as shell", () => {
+			const script = "          script: |\n            core.info(`${name}`)";
+			expect(hits(script, "actions/github-script@v7")).toEqual([]);
+			expect(hits(script)).toHaveLength(1);
+		});
+
+		it("scans a job-level with:", () => {
+			expect(
+				withVariableFindings(
+					"jobs:\n  fixture:\n    uses: ./.github/workflows/x.yml\n    with:\n      dir: $HOME/x\n",
+					"fixture.yml",
+				),
+			).toEqual(["fixture.yml:fixture: with.dir uses shell variable"]);
+		});
+
+		it("names the offending input", () => {
+			expect(hits('          path: "$RUNNER_TEMP/report.json"')).toEqual([
+				"fixture.yml:fixture/Input: with.path uses shell variable",
+			]);
+		});
+	});
+
+	describe("the real workflows", () => {
+		const real = () => workflowFiles().map(readWorkflow);
+
+		it("guards every dispatchable writer, bar the registered exceptions", () => {
+			const unguarded = real().flatMap(({ source, path }) =>
+				workflowWriters(source, path)
+					.filter((record) => !record.guard.guarded)
+					.map((record) => record.id),
+			);
+			const audit = auditRegistry({
+				sweepName: "unguarded dispatchable writers",
+				flagged: unguarded,
+				registered: [],
+				exemptions: REGISTERED_EXCEPTIONS,
+				minReasonLength: 30,
+			});
+			expect(audit.problems).toEqual([]);
+		});
+
+		it("pins the census", () => {
+			const writers: Record<string, number> = {};
+			let dispatchable = 0;
+			for (const { source, path } of real()) {
+				if (triggers(load(source).on).includes("workflow_dispatch"))
+					dispatchable += 1;
+				const count = workflowWriters(source, path).length;
+				if (count > 0) writers[path] = count;
+			}
+			expect(
+				{ dispatchable, writers },
+				`re-pin to:\nconst DISPATCHABLE_WORKFLOWS = ${dispatchable};\nconst WRITER_STEPS = ${JSON.stringify(writers, null, "\t")};`,
+			).toEqual({
+				dispatchable: DISPATCHABLE_WORKFLOWS,
+				writers: WRITER_STEPS,
+			});
+		});
+
+		it("classifies every action a dispatchable workflow uses", () => {
+			expect(
+				real().flatMap(({ source, path }) => unclassifiedActions(source, path)),
+			).toEqual([]);
+		});
+
+		it("rejects a shell variable in a real action input", () => {
+			expect(
+				real().flatMap(({ source, path }) =>
+					withVariableFindings(source, path),
+				),
+			).toEqual([]);
+		});
+	});
+
+	describe("the writer-script registry", () => {
+		const scriptsRoot = resolve(ROOT, "scripts");
+		const files = listSourceFiles(scriptsRoot, {
+			extensions: [".mjs", ".cjs", ".js", ".ts"],
+		});
+		const rel = (file: string) => `scripts/${relativePosix(scriptsRoot, file)}`;
+
+		// String literals are the evidence here (`"POST"`, `["issue", "edit"]`),
+		// so comments are blanked and string contents kept.
+		const MARKERS: RegExp[] = [
+			/\bupsertTrackingIssue\b/,
+			/["'`](?:POST|PATCH|PUT|DELETE)["'`]/,
+			/["'](?:issue|pr|label|release|workflow|run|cache|repo|secret|variable)["']\s*,\s*["'](?:create|edit|comment|close|reopen|lock|merge|upload|delete|rerun|cancel|enable|disable|set|ready|review|update-branch)["']/,
+			/["'](?:-X|--method|--field|--raw-field|-f|-F|push|publish)["']/,
+			/\bgh\s+(?:issue|pr|label|release|workflow|cache|repo)\s+(?:create|edit|comment|close|reopen|lock|merge|upload|delete|run|rerun|cancel)\b/,
+			/\bgh\s+api\s+-X\s+(?:POST|PATCH|PUT|DELETE)\b/,
+		];
+
+		function importsOf(file: string, source: string): string[] {
+			return [...source.matchAll(/from\s+["'](\.[^"']+)["']/g)].map((m) =>
+				rel(resolve(dirname(file), m[1])),
+			);
+		}
+
+		// A script a workflow runs that imports a registered writer writes through
+		// it, whether or not its own text carries a marker (the thin
+		// `scripts/merge-train-warden.mjs` over its lib is the case this catches).
+		function detectedWriters(): string[] {
+			const sources = new Map(
+				files.map((file) => [
+					rel(file),
+					{
+						file,
+						source: stripSource(readFileSync(file, "utf8"), {
+							strings: "keep",
+						}),
+					},
+				]),
+			);
+			const direct = [...sources]
+				.filter(([, { source }]) =>
+					MARKERS.some((marker) => marker.test(source)),
+				)
+				.map(([path]) => path);
+			const runText = workflowFiles()
+				.map((file) => {
+					const workflow = load(readWorkflow(file).source);
+					return Object.values(workflow.jobs ?? {})
+						.flatMap((job) => job.steps ?? [])
+						.map((step) => (typeof step.run === "string" ? step.run : ""))
+						.join("\n");
+				})
+				.join("\n");
+			const invoked = [...sources.keys()].filter((path) =>
+				new RegExp(`(?<![\\w.-])${basename(path).replaceAll(".", "\\.")}`).test(
+					runText,
+				),
+			);
+			const reachesWriter = (start: string): boolean => {
+				const seen = new Set([start]);
+				for (const path of seen) {
+					const entry = sources.get(path);
+					if (!entry) continue;
+					for (const dep of importsOf(entry.file, entry.source)) {
+						if (dep in SCRIPT_WRITERS) return true;
+						seen.add(dep);
+					}
+				}
+				return false;
+			};
+			return [
+				...new Set([
+					...direct,
+					...invoked.filter((path) => reachesWriter(path)),
+				]),
+			];
+		}
+
+		it("registers every script that writes GitHub state", () => {
+			const flagged = detectedWriters();
+			const audit = auditRegistry({
+				sweepName: "writer scripts",
+				flagged,
+				registered: Object.keys(SCRIPT_WRITERS),
+				exemptions: SCRIPT_NON_WRITERS,
+				minScanned: 50,
+				scannedCount: files.length,
+				minFlagged: 10,
+				remediation:
+					"add the file to SCRIPT_WRITERS (it writes) or SCRIPT_NON_WRITERS with a reason",
+			});
+			expect(audit.problems).toEqual([]);
+			// Registered-but-undetected is a stale claim the kit tolerates for other
+			// registries; here the registry IS the detector's output.
+			expect(
+				Object.keys(SCRIPT_WRITERS).filter((path) => !flagged.includes(path)),
+			).toEqual([]);
+		});
 	});
 });
