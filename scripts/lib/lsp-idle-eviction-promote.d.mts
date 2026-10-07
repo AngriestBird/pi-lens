@@ -8,8 +8,6 @@ export type NightState = Record<string, { nights: IdleEvictionNight[] }>;
 export const PROMOTE_NIGHTS: number;
 export const IDLE_EVICTION_MIN_RSS_BYTES: number;
 export const COLD_START_MAX_MS: number;
-export const HELD_UNTIL_3966: ReadonlyMap<string, string>;
-
 export function holdList(registrySource: string): Map<string, string> | null;
 
 export function moveClassId(

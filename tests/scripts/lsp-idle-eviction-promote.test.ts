@@ -24,7 +24,6 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	COLD_START_MAX_MS,
-	HELD_UNTIL_3966,
 	IDLE_EVICTION_MIN_RSS_BYTES,
 	PROMOTE_NIGHTS,
 	addReasons,
@@ -248,33 +247,26 @@ describe("RSS floor, cold-start cap and hold list (#3989)", () => {
 	});
 
 	it("never promotes a held server, and names why", () => {
-		expect([...HELD_UNTIL_3966.keys()].sort()).toEqual([
-			"docker",
-			"python-jedi",
-		]);
-		for (const id of [...HELD_UNTIL_3966.keys(), "indexer"]) {
-			const state = nights([D1, D2], () => [row(id)]);
-			const out = selectPromotions(state, FIXTURE_HOLD);
-			expect(out.promote, id).toEqual([]);
-			expect(out.skipped[0].reason, id).toMatch(/#3966|HOLD_INDEXER/);
-		}
+		const state = nights([D1, D2], () => [row("indexer")]);
+		const out = selectPromotions(state, FIXTURE_HOLD);
+		expect(out.promote).toEqual([]);
+		expect(out.skipped[0].reason).toContain("HOLD_INDEXER");
 	});
 
-	// #3989 F3: the indexer hold is read from #3952's own class array, so the
-	// two cannot drift: the real file's five indexers are all held, and the
-	// non-registry id `docker-official` is not.
-	it("reads the hold list from the real registry test's HOLD_INDEXER class", () => {
+	// #3989 F3, after #3966 merged: the hold list IS #3952's class array, so the
+	// two cannot drift. Recurrence: a second hand list (docker, python-jedi held
+	// "until #3966") outliving the PR it names.
+	it("holds exactly the real registry test's HOLD_INDEXER class, nothing else", () => {
 		const hold = holdList(REAL_REGISTRY_TS) as Map<string, string>;
 		expect([...hold.keys()].sort()).toEqual([
-			"docker",
 			"expert",
 			"kotlin",
 			"powershell",
-			"python-jedi",
 			"rust",
 			"svelte",
 		]);
-		expect(hold.has("docker-official")).toBe(false);
+		for (const id of ["docker", "docker-official", "python-jedi"])
+			expect(hold.has(id), id).toBe(false);
 	});
 
 	it("reads no hold list from a file whose class array is missing, empty or reshaped", () => {
@@ -769,28 +761,42 @@ describe("the registry test's class pin (#3989 F1)", () => {
 
 	// Real-source witness: apply a plan over the REAL server.ts, reasons file and
 	// registry test, and check what #3952's pin checks, on the edited text.
-	it("keeps the real registry consistent after a real plan (json, zizmor)", () => {
+	it("keeps the real registry consistent after a real plan (docker, docker-official, json, python-jedi, zizmor)", () => {
 		const read = (rel: string) =>
 			fs.readFileSync(path.join(repoRoot, rel), "utf8");
 		const realServer = read("clients/lsp/server.ts");
+		const qualifying = [
+			"docker",
+			"docker-official",
+			"json",
+			"python-jedi",
+			"rust",
+			"zizmor",
+		];
 		const plan = planPromotions({
-			rows: [row("json"), row("zizmor"), row("rust"), row("docker")],
-			prior: nights([D1], () => [
-				row("json"),
-				row("zizmor"),
-				row("rust"),
-				row("docker"),
-			]),
+			rows: qualifying.map((id) => row(id)),
+			prior: nights([D1], () => qualifying.map((id) => row(id))),
 			today: D2,
 			serverSource: realServer,
 			reasonsText: read("tests/config/lsp-idle-eviction-reasons.json"),
 			registrySource: REAL_REGISTRY_TS,
 		});
-		expect(plan.promoted.map((p) => p.serverId)).toEqual(["json", "zizmor"]);
-		expect(plan.skipped.map((x) => x.serverId).sort()).toEqual([
+		expect(plan.promoted.map((p) => p.serverId)).toEqual([
 			"docker",
-			"rust",
+			"docker-official",
+			"json",
+			"python-jedi",
+			"zizmor",
 		]);
+		expect(plan.skipped.map((x) => x.serverId)).toEqual(["rust"]);
+		// Exactly the five servers' own idleEviction lines changed, nothing else
+		// (`id: "docker"` must not match `id: "docker-official"`).
+		const before = realServer.split("\n");
+		const after = plan.serverSource.split("\n");
+		expect(after).toHaveLength(before.length);
+		expect(after.filter((l, i) => l !== before[i])).toEqual(
+			Array(5).fill('\tidleEviction: "transparent",'),
+		);
 		const declared = (id: string) =>
 			new RegExp(`\\tid: "${id}",\\n\\tidleEviction: "(\\w+)"`).exec(
 				plan.serverSource,
@@ -934,12 +940,7 @@ describe("class arrays parse and write independent of layout (#3989 r3)", () => 
 	it("reads the hold list from a one-line, multi-line and reformatted real array alike", () => {
 		const one = holdList(arr("HOLD_INDEXER_IDS", ["a", "b"], true));
 		const multi = holdList(arr("HOLD_INDEXER_IDS", ["a", "b"], false));
-		expect([...(one as Map<string, string>).keys()].sort()).toEqual([
-			"a",
-			"b",
-			"docker",
-			"python-jedi",
-		]);
+		expect([...(one as Map<string, string>).keys()].sort()).toEqual(["a", "b"]);
 		expect([...(multi as Map<string, string>).keys()]).toEqual([
 			...(one as Map<string, string>).keys(),
 		]);

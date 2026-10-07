@@ -29,17 +29,6 @@ export const IDLE_EVICTION_MIN_RSS_BYTES = 50 * MB;
  */
 export const COLD_START_MAX_MS = 3000;
 
-/**
- * Servers held until PR #3966 (the shared server-selection seam) merges: it
- * changes which server a language resolves to, so promoting one now would
- * declare the policy on a server whose selection is about to move. Remove an
- * entry in the PR that lifts its hold, never here by hand.
- */
-export const HELD_UNTIL_3966 = new Map([
-	["docker", "held until #3966 (shared server-selection seam) merges"],
-	["python-jedi", "held until #3966 (shared server-selection seam) merges"],
-]);
-
 const INDEXER_HOLD =
 	"held: #3952 HOLD_INDEXER class (re-index cost after eviction is unmeasured; user decision 2026-10-06)";
 
@@ -203,7 +192,7 @@ function renderClassArray(name, ids) {
 
 /**
  * The hold list: #3952's HOLD_INDEXER class (read from the registry test, so
- * there is one source of truth) plus the servers held until #3966. Null when
+ * there is one source of truth). Null when
  * the class cannot be read or is empty, in which case nothing is promoted.
  *
  * @returns {Map<string, string> | null}
@@ -211,7 +200,7 @@ function renderClassArray(name, ids) {
 export function holdList(registrySource) {
 	const indexers = classArray(registrySource, "HOLD_INDEXER_IDS");
 	if (!indexers || indexers.ids.length === 0) return null;
-	const hold = new Map(HELD_UNTIL_3966);
+	const hold = new Map();
 	for (const id of indexers.ids) hold.set(id, INDEXER_HOLD);
 	return hold;
 }

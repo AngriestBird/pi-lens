@@ -536,7 +536,7 @@ the surface they bite; each block loads only when its trigger applies.
   (`bot/lsp-idle-evict-promote`, #3989: two consecutive eligible nights, idle
   RSS floor, cold-start cap, hold list in
   `scripts/lib/lsp-idle-eviction-promote.mjs`, derived from the registry test's
-  `HOLD_INDEXER_IDS` class plus the #3966 holds; the PR also moves the id into
+  `HOLD_INDEXER_IDS` class; the PR also moves the id into
   the registry test's `TRANSPARENT_IDS`; night memory in the matrix doc's
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
