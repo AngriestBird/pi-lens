@@ -234,7 +234,7 @@ export function normalizeFilePath(filePath: string): string {
 		// (#2490). Keep this guard inside the Windows arm so POSIX relative
 		// inputs still receive their realpath/casing treatment.
 		if (filePath === "") return "";
-		if (!isFullyQualifiedWin32(filePath) && !isFullyQualifiedPosix(filePath)) {
+		if (!isFullyQualifiedWin32(filePath)) {
 			return win32.normalize(filePath).replace(/\\/g, "/");
 		}
 	}

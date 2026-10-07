@@ -41,10 +41,12 @@ vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
 }));
 
 function makeCtx(filePath: string, cwd = process.cwd()) {
-	const root = path.resolve(cwd);
 	return {
-		filePath: path.resolve(root, filePath),
-		cwd: root,
+		// These are synthetic POSIX paths. Do not pass them through the host
+		// resolver: on Windows path.resolve("/m") injects the current drive and
+		// changes the fixture's contract rather than testing go-vet attribution.
+		filePath,
+		cwd,
 		kind: "go" as const,
 		fileRole: "source" as const,
 		pi: { getFlag: () => false },

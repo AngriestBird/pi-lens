@@ -168,6 +168,32 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 		);
 	});
 
+	it("treats rooted slash forms as the same Windows key", () => {
+		// RECURRENCE GUARDED: a rooted slash path is drive-relative on Windows,
+		// not a POSIX filesystem identity. Both separator spellings must therefore
+		// stay in the same Windows-only key arm (#4045 R3).
+		const native = vi
+			.spyOn(fs.realpathSync, "native")
+			.mockImplementation((value) => {
+				if (String(value).startsWith("/proj/"))
+					return "D:\\proj\\providers\\model-fetcher.ts";
+				throw new Error("synthetic missing path");
+			});
+		try {
+			expect(
+				withPlatform("win32", () =>
+					normalizeFilePath("\\proj\\providers\\model-fetcher.ts"),
+				),
+			).toBe(
+				withPlatform("win32", () =>
+					normalizeFilePath("/proj/providers/model-fetcher.ts"),
+				),
+			);
+		} finally {
+			native.mockRestore();
+		}
+	});
+
 	it("preserves the path structure and drive-letter shape — never collapses to a cwd-relative key", () => {
 		const key = normalizeFilePath(nonExistent);
 		// Structure preserved: full literal tail survives (drive-letter case may
@@ -297,6 +323,10 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-relative-");
 		const previousCwd = process.cwd();
 		try {
+			ctx.skip(
+				process.platform === "win32",
+				"POSIX realpath/casing fixture requires a POSIX filesystem; Windows arm is covered by rooted-shape tests",
+			);
 			process.chdir(tmpDir);
 			const alias = createCaseAliasFixture(".", { dirName: "subDir" });
 			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
