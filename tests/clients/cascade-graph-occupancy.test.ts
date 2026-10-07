@@ -26,11 +26,18 @@
  *
  * The replacement counts behaviour the host cannot change:
  *   - cold and warm builds: the number of `setImmediate` yields the real
- *     build makes (healthy 18-20, builder yield off 0), plus zero synchronous
- *     `readdirSync` calls on the warm path (healthy 0, synchronous walk 154),
- *     on a fixture under the cap whose build mode is asserted not `skipped`;
- *   - the pure-sync operations: the ratio t(4N)/t(N), min of 5 reps, against
- *     a limit of 7 (measurements are in the PR that introduced this header).
+ *     build makes. It is 2 x floor(files / STAT_YIELD_EVERY) (two stat loops
+ *     walk every file; measured 18 at 900 files and cadence 100, 36 at 50,
+ *     12 at 150, 8 at 200, 0 with the yield off). The floor is derived from
+ *     the fixture and the cadence READ FROM THE BUILDER SOURCE, so it
+ *     tracks a legitimate cadence change but not a mutation of the built
+ *     output. Also zero synchronous `readdirSync` calls on the warm path
+ *     (healthy 0, synchronous walk 154), on a fixture under the cap whose
+ *     build mode is asserted not `skipped`;
+ *   - the pure-sync operations: the MEDIAN of per-pair ratios t(4N)/t(N) over
+ *     interleaved pairs against a limit of 7, aborting as soon as the
+ *     verdict is decided (measurements are in the PR that introduced this
+ *     header).
  *
  * NB: tests run against the COMPILED .js (npm run build emits in-place and
  * vitest resolves the `.js` specifier to it), so a source change only takes
@@ -41,6 +48,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	afterAll,
 	beforeAll,
@@ -69,26 +77,60 @@ import { removeTempDirSync } from "./test-utils.js";
 // is how the previous 1200-file fixture went vacuous. The precondition in each
 // build test fails loudly if the fixture ever crosses the cap again.
 const TREE_SIZE = 900;
-// The builder yields to the event loop every STAT_YIELD_EVERY stats
-// (`clients/review-graph/builder.ts`). Named here as a literal on purpose: a
-// floor derived from an exported constant would shrink with it and stay green
-// under the mutation this guard exists to catch (the cadence raised to
-// 1000000). Changing the builder cadence means changing this number.
-const STAT_YIELD_EVERY = 100;
-// One yield per chunk, minus one for the partial last chunk. Healthy builds
-// make 18-20 yields at TREE_SIZE 900; a build whose chunk yield is off makes 0.
-const MIN_BUILD_YIELDS = Math.floor(TREE_SIZE / STAT_YIELD_EVERY) - 1;
+const repoRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
+// The builder yields to the event loop every STAT_YIELD_EVERY stats. Read from
+// the TypeScript SOURCE, not the compiled twin the tests run and the
+// mutations edit: a floor derived from the built constant (or an export of it)
+// would shrink with a mutation (cadence 1000000 gives floor 0) and stay green.
+function builderStatYieldEvery(): number {
+	const source = fs.readFileSync(
+		path.join(repoRoot, "clients/review-graph/builder.ts"),
+		"utf8",
+	);
+	const match = /^const STAT_YIELD_EVERY = (\d+);/m.exec(source);
+	if (!match) {
+		throw new Error(
+			"clients/review-graph/builder.ts no longer declares `const STAT_YIELD_EVERY = <n>;`: update this guard with it",
+		);
+	}
+	return Number(match[1]);
+}
+// Two stat loops walk every source file in a build (cold and warm alike), each
+// yielding once per STAT_YIELD_EVERY files: measured 18 yields at 900 files and
+// cadence 100, 36 at 50, 12 at 150, 8 at 200, 6 at 300, 0 with the yield off.
+const STAT_LOOPS = 2;
+// Slack under the expected count. Healthy builds hit it exactly (18, up to 21
+// at a 25% CPU share from the walker's own deadline yields, which only add),
+// so the slack tolerates a ~10% cadence drift (cadence 110 gives 16) while
+// cadence 120 (14), 150 (12) and 200 (8-11) go red.
+const YIELD_SLACK = 2;
+function minBuildYields(walkedFiles: number): number {
+	const floor =
+		STAT_LOOPS * Math.floor(walkedFiles / builderStatYieldEvery()) -
+		YIELD_SLACK;
+	// A floor of zero or less would pass a build that never yields.
+	if (floor <= 0) {
+		throw new Error(
+			`yield floor ${floor} is vacuous for ${walkedFiles} files: raise the fixture size`,
+		);
+	}
+	return floor;
+}
 
 // t(4N)/t(N) of linear work is 4 plus noise; the limit sits between the
 // healthy spread and the O(n^2) mutants (4N costs 16x there, noise aside).
 const SCALING_RATIO_LIMIT = 7;
-const SCALING_REPS = 5;
+const SCALING_PAIRS = 5;
 
 let tmpDir: string;
+let walkedFiles = 0;
 
 beforeAll(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cascade-occupancy-"));
-	generateSourceTree(tmpDir, TREE_SIZE);
+	walkedFiles = generateSourceTree(tmpDir, TREE_SIZE);
 }, 60_000);
 
 afterAll(() => {
@@ -145,8 +187,8 @@ describe(`cascade graph rebuild event-loop yields (${TREE_SIZE} files)`, () => {
 			// Precondition (#4046): the fixture reaches the chunked stat loops. A
 			// `skipped` build makes zero yields; fail on that cause, not on the count.
 			expect(getGraphBuildInfoForGraph(graph).mode).not.toBe("skipped");
-			expect(graph.nodes.size).toBeGreaterThan(0);
-			expect(yields).toBeGreaterThanOrEqual(MIN_BUILD_YIELDS);
+			expect(graph.nodes.size).toBe(walkedFiles);
+			expect(yields).toBeGreaterThanOrEqual(minBuildYields(walkedFiles));
 		},
 	);
 
@@ -170,8 +212,8 @@ describe(`cascade graph rebuild event-loop yields (${TREE_SIZE} files)`, () => {
 				buildOrUpdateGraph(tmpDir, changed, facts),
 			);
 			expect(getGraphBuildInfoForGraph(graph).mode).not.toBe("skipped");
-			expect(graph.nodes.size).toBeGreaterThan(0);
-			expect(yields).toBeGreaterThanOrEqual(MIN_BUILD_YIELDS);
+			expect(graph.nodes.size).toBe(walkedFiles);
+			expect(yields).toBeGreaterThanOrEqual(minBuildYields(walkedFiles));
 			// The async walk reads directories through `fs.promises.readdir`, which
 			// yields per directory. A synchronous `readdirSync` here is the
 			// non-yielding walk regression (154 calls when reintroduced); the cold
@@ -234,14 +276,23 @@ describe("pure-synchronous cascade operations scale linearly", () => {
 });
 
 /**
- * Assert `t(4N)/t(N) < SCALING_RATIO_LIMIT`, each time the minimum of
- * SCALING_REPS runs. The minimum rejects descheduling spikes; the ratio cancels
- * the host's CPU share, which an absolute millisecond budget cannot. The two
- * sizes are timed in alternation so a share change mid-test (a neighbour
- * waking up) lands on both, not on one side of the ratio. `prepare(n)` builds
- * the fixture OUTSIDE the timed region and returns the operation to time.
+ * Measure `t(4N)/t(N)` as the MEDIAN of SCALING_PAIRS per-pair ratios. Each
+ * pair times the two sizes back to back (order alternating), so a CPU-share
+ * change mid-test (a neighbour waking up, a frequency step) lands on both sides
+ * of that pair's ratio instead of one side of a ratio of independent minima,
+ * and the median rejects the pairs a change did hit. `prepare(n)` builds the
+ * fixture OUTSIDE the timed region and returns the operation to time.
+ *
+ * Early abort: with an odd pair count, once more than half the pairs exceed the
+ * limit the final median must too, so the verdict is decided and the remaining
+ * pairs are skipped. A quadratic regression therefore reds by assertion after
+ * ~3 pairs instead of paying for all of them (the quadratic mutants cost up to
+ * 8 s per 4N run at a 25% CPU share). The abort never changes a verdict.
  */
-function expectLinearScaling(prepare: (n: number) => () => void, n: number) {
+function measureScalingRatios(
+	prepare: (n: number) => () => void,
+	n: number,
+): { ratios: number[]; decidedEarly: boolean } {
 	const timeOnce = (size: number): number => {
 		const run = prepare(size);
 		const start = performance.now();
@@ -251,15 +302,37 @@ function expectLinearScaling(prepare: (n: number) => () => void, n: number) {
 	// Untimed warm-up of both sizes: JIT and first-touch costs.
 	timeOnce(n);
 	timeOnce(4 * n);
-	let small = Number.POSITIVE_INFINITY;
-	let large = Number.POSITIVE_INFINITY;
-	for (let rep = 0; rep < SCALING_REPS; rep++) {
-		small = Math.min(small, timeOnce(n));
-		large = Math.min(large, timeOnce(4 * n));
+	const ratios: number[] = [];
+	for (let pair = 0; pair < SCALING_PAIRS; pair++) {
+		let small: number;
+		let large: number;
+		if (pair % 2 === 0) {
+			small = timeOnce(n);
+			large = timeOnce(4 * n);
+		} else {
+			large = timeOnce(4 * n);
+			small = timeOnce(n);
+		}
+		ratios.push(large / small);
+		const over = ratios.filter((ratio) => ratio >= SCALING_RATIO_LIMIT).length;
+		if (over > SCALING_PAIRS / 2) return { ratios, decidedEarly: true };
 	}
+	return { ratios, decidedEarly: false };
+}
+
+function expectLinearScaling(prepare: (n: number) => () => void, n: number) {
+	const { ratios, decidedEarly } = measureScalingRatios(prepare, n);
+	// Complete run: the median. Early abort: the smallest exceeding ratio, a
+	// lower bound on the median the full run would have produced.
+	const verdict = decidedEarly
+		? Math.min(...ratios.filter((ratio) => ratio >= SCALING_RATIO_LIMIT))
+		: [...ratios].sort((a, b) => a - b)[Math.floor(ratios.length / 2)];
 	expect(
-		large / small,
-		`t(${4 * n})=${large.toFixed(1)}ms / t(${n})=${small.toFixed(1)}ms`,
+		verdict,
+		`t(${4 * n})/t(${n}) pair ratios [${ratios.map((ratio) => ratio.toFixed(2)).join(", ")}]` +
+			(decidedEarly
+				? ` (aborted after ${ratios.length} of ${SCALING_PAIRS} pairs: most already over the limit)`
+				: ""),
 	).toBeLessThan(SCALING_RATIO_LIMIT);
 }
 
