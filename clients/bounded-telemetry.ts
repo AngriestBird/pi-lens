@@ -110,9 +110,11 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	/**
 	 * #3871: one record per turn naming, per owning checkout root, how many
 	 * edited files it owned and how many test targets were selected in it.
-	 * Bounded by call cadence (one `handleTurnEnd` writes at most one, and
-	 * the worklist is consumed by it), like `loop_block`; no ledger kind,
-	 * because a turn that selected nothing is not a degradation.
+	 * One row per turn that had candidates (about 570 B), bounded by log
+	 * rotation, not by this helper: no ledger kind, rising edge or per-turn
+	 * cap is passed, because a turn that selected nothing is not a
+	 * degradation and the per-turn rows are what the forensics need.
+	 * `selected` counts carried deferred targets too.
 	 */
 	"turn_end_test_selection",
 	/**
