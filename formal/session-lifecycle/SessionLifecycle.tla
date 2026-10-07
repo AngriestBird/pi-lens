@@ -106,6 +106,11 @@
 (*   "rolelessKey"       #4106: a shutdown whose start never ran, in a     *)
 (*                       named gap, is the primary's only when its own     *)
 (*                       manager's key is the named one (SecRoleless)      *)
+(*   "forwardUnstarted"  #4113: a shutdown that lands before pi-lens's     *)
+(*                       start handler ran (W0: no mark, no scope) forwards *)
+(*                       the slot left for the start its gap names, as     *)
+(*                       forwardUnadopted does; without it nothing is      *)
+(*                       written and the slot keeps the start's reason     *)
 (*   "nameAtShutdown"    #3855 r5 (merged): the naming site binds a fresh  *)
 (*                       ticket to a file-less reload/fork session's       *)
 (*                       manager that carries none, in every window        *)
@@ -124,7 +129,7 @@ CONSTANTS
                     \*   {"New","Resume","Fork","Clone","CancelFork","Reload",
                     \*    "Quit","PiFork","Tree","IdleReset","SecStart",
                     \*    "SecEnd","SecTurn","SecReload","SecFork","Dup",
-                    \*    "Interrupt"}
+                    \*    "Interrupt","InterruptPreScope","InterruptUnstarted"}
     Writers,        \* the writers in play, a subset of
                     \*   {"read","secRead","heartbeat","lsp","widget",
                     \*    "advisory","activate"}
@@ -752,13 +757,17 @@ BeginDeclined ==
 \* every action but reset and none).
 Keeps(s, k) == ~Has("forwardPolicy") \/ Policy(s, k) \notin {"reset", "none"}
 
-\* pre: the reload lands before the start held its scope (verify r4 V6):
-\* before pi-lens's start handler ran (W0), or inside its awaits before
-\* `scope = runtime.sessionScope` (W1, W2). Nothing was reset yet, and only
-\* the naming-site rule can bind a ticket to the start's manager.
-InterruptAt(pre) ==
-    /\ \/ ~pre /\ "Interrupt" \in Transitions
-       \/ pre /\ "InterruptPreScope" \in Transitions
+\* w = "pre": the reload lands before the start held its scope (verify r4
+\* V6), inside its awaits before `scope = runtime.sessionScope` (W1, W2).
+\* w = "unstarted" (#4113): before pi-lens's start handler ran (W0), so there
+\* is no in-flight mark either; the shutdown is primary by the gap's named
+\* key (#4106), and the name is the start reason pi-lens never saw. Nothing
+\* was reset yet in either, and only the naming-site rule can bind a ticket
+\* to the start's manager.
+InterruptAt(w) ==
+    /\ \/ w = "post" /\ "Interrupt" \in Transitions
+       \/ w = "pre" /\ "InterruptPreScope" \in Transitions
+       \/ w = "unstarted" /\ "InterruptUnstarted" \in Transitions
     /\ "interrupt" \notin used
     /\ ~RegOn /\ ~LspOn
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
@@ -766,6 +775,11 @@ InterruptAt(pre) ==
     /\ LET k == pend.k
            t == nxt
            f == NewFile(k)
+           pre == w # "post"
+           \* The code's forward: the in-flight mark's reason, or at W0 the
+           \* gap's name (pend.k either way).
+           fwdOn == Has("forwardUnadopted")
+                    /\ (w # "unstarted" \/ Has("forwardUnstarted"))
            left == SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
            \* SameMgr for t: its start kept pend.from's manager.
            keeps == k \in {"reload", "fork", "clone"} /\ (k = "reload" \/ f \in FileLess)
@@ -786,7 +800,7 @@ InterruptAt(pre) ==
        /\ lin' = NewLin(k, t)
        /\ predOf' = [predOf EXCEPT ![t] = pend.from]
        /\ resets' = IF pre THEN resets ELSE [resets EXCEPT ![t] = 1]
-       /\ slot' = IF Has("forwardUnadopted")
+       /\ slot' = IF fwdOn
                   THEN IF left
                        THEN [slot EXCEPT !.from = t, !.reason = "reload",
                                          !.file = Key(f),
@@ -794,6 +808,8 @@ InterruptAt(pre) ==
                                          !.act = IF Keeps("LZ", k) THEN @ ELSE {},
                                          !.adv = IF Keeps("AD", k) THEN @ ELSE {}]
                        ELSE slot
+                  \* W0 without the fix: no mark and no scope, nothing written.
+                  ELSE IF w = "unstarted" THEN slot
                   ELSE [has |-> TRUE, from |-> t, tk |-> t, reason |-> "reload",
                         file |-> Key(f), facts |-> {}, act |-> {}, adv |-> {}]
        \* #3855 r4 (verify r3 V4): the gap is named by the key the code's
@@ -1389,7 +1405,7 @@ Next ==
     \/ Begin
     \/ BeginDemoted
     \/ BeginDeclined
-    \/ \E pre \in BOOLEAN : InterruptAt(pre)
+    \/ \E w \in {"post", "pre", "unstarted"} : InterruptAt(w)
     \/ PiFork
     \/ Tree /\ UNCHANGED r2V
     \/ IdleReset /\ UNCHANGED r2V

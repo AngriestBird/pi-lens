@@ -706,6 +706,22 @@ export function decideSessionStart(
 	};
 }
 
+/**
+ * #4113: in a primary replacement gap (no primary registered, the marker
+ * pending), the start reason its shutdown named. A start interrupted before
+ * pi-lens's handler ran never saw its own reason; when #4106 classifies its
+ * shutdown primary it carries the named key, so it is that start.
+ */
+export function namedSuccessorReason(): string | undefined {
+	const s = state();
+	if (s.activeCtx !== undefined || s.activeSessionId !== undefined)
+		return undefined;
+	const named = namedSuccessorOf(s);
+	return named !== undefined && successorStillPending(s)
+		? named.reason
+		: undefined;
+}
+
 /** #3855: the successor the pending replacement named, when this build's
  *  release wrote it with the marker it stands beside. */
 function namedSuccessorOf(
