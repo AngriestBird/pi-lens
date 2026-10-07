@@ -16,6 +16,18 @@ export declare function pickBase(options: {
 }): { base: string; source: (typeof SOURCES)[number] };
 export declare const MAX_PENDING: number;
 export declare const MAX_BASE_AGE_DAYS: number;
+export declare const SHARD_STATE_SPACE: readonly (readonly [
+	string,
+	string,
+	string,
+	string,
+])[];
+export declare function combineShardReports(
+	reports: unknown[],
+): unknown | undefined;
+export declare function combinedShardStatus(
+	outcomes: Array<"complete" | "budget-cut" | "failed">,
+): "ok" | "failed";
 export type QueueEntry = { file: string; base: string | null };
 export type QueueOracle = {
 	isAncestor: (sha: string) => boolean;
@@ -68,4 +80,5 @@ export declare function main(
 			source: (typeof SOURCES)[number];
 			queue: QueueRead;
 	  }
+	| { status: "ok" | "failed"; outcomes: string[]; report?: unknown }
 	| string;

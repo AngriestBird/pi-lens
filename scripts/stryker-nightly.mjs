@@ -74,6 +74,88 @@ export const SOURCES = Object.freeze([
 	"fallback-bad-sha",
 ]);
 
+// The publish job is the only issue writer. A budget-cut shard still has a
+// usable partial report and advances the marker while re-queuing its selected
+// files; a failed shard makes the whole night fail closed and preserves the
+// prior marker/queue. This is the complete two-shard state space.
+export const SHARD_STATE_SPACE = Object.freeze([
+	["complete", "complete", "advance + merge", "combined complete report"],
+	["complete", "budget-cut", "advance + requeue", "combined partial report"],
+	["complete", "failed", "hold", "failure report; queue unchanged"],
+	["budget-cut", "budget-cut", "advance + requeue", "combined partial report"],
+	["budget-cut", "failed", "hold", "failure report; queue unchanged"],
+	["failed", "failed", "hold", "failure report; queue unchanged"],
+]);
+
+/**
+ * Combine independent shard reports without allowing either writer to replace
+ * the other's selected or queued population. Reports are already scoped to
+ * disjoint files by `partitionMutationFiles`.
+ *
+ * @param {Array<unknown>} reports
+ * @returns {unknown | undefined}
+ */
+export function combineShardReports(reports) {
+	const usable = reports.filter(
+		(report) => report && typeof report === "object",
+	);
+	if (usable.length === 0) return undefined;
+	const metas = usable.map((report) => report.piLensMutationDiff ?? {});
+	const sum = (key) =>
+		metas.reduce((total, meta) => total + (Number(meta[key]) || 0), 0);
+	const union = (key) => [
+		...new Set(
+			metas.flatMap((meta) => (Array.isArray(meta[key]) ? meta[key] : [])),
+		),
+	];
+	const counts = {};
+	for (const meta of metas)
+		for (const [key, value] of Object.entries(meta.counts ?? {}))
+			counts[key] = (counts[key] ?? 0) + value;
+	return {
+		...usable[0],
+		files: Object.assign({}, ...usable.map((report) => report.files ?? {})),
+		piLensMutationDiff: {
+			...metas[0],
+			shardCount: usable.length,
+			filesSelected: union("filesSelected"),
+			filesSkippedOverCap: union("filesSkippedOverCap"),
+			filesUncovered: union("filesUncovered"),
+			filesNoSourceMap: union("filesNoSourceMap"),
+			filesNoMutableLines: union("filesNoMutableLines"),
+			rangesTotal: sum("rangesTotal"),
+			rangesEvaluated: sum("rangesEvaluated"),
+			measuredTotalMutants: sum("measuredTotalMutants"),
+			partial: metas.some((meta) => Boolean(meta.partial)),
+			counts,
+		},
+	};
+}
+
+/** @param {Array<"complete" | "budget-cut" | "failed">} outcomes */
+export function combinedShardStatus(outcomes) {
+	if (outcomes.some((outcome) => outcome === "failed")) return "failed";
+	return "ok";
+}
+
+function runCombine(argv) {
+	const inputs = JSON.parse(readFileSync(valueAfter(argv, "--inputs"), "utf8"));
+	const outcomes = inputs.map((entry) => entry.outcome);
+	const reports = inputs.map((entry) =>
+		entry.report && existsSync(entry.report)
+			? JSON.parse(readFileSync(entry.report, "utf8"))
+			: undefined,
+	);
+	const status = combinedShardStatus(outcomes);
+	const report = status === "ok" ? combineShardReports(reports) : undefined;
+	writeFileSync(valueAfter(argv, "--out"), JSON.stringify(report ?? null));
+	writeFileSync(
+		valueAfter(argv, "--outcomes"),
+		JSON.stringify({ status, outcomes, report: report !== undefined }),
+	);
+	return { status, outcomes, report };
+}
+
 export const markerOf = (sha) =>
 	`<!-- stryker-nightly:last-report-sha=${sha} -->`;
 
@@ -441,7 +523,7 @@ function runBody(argv, cwd) {
 		status,
 		report:
 			reportPath && existsSync(reportPath)
-				? JSON.parse(readFileSync(reportPath, "utf8"))
+				? JSON.parse(readFileSync(reportPath, "utf8")) || undefined
 				: undefined,
 		runUrl: valueAfter(argv, "--run-url", ""),
 	});
@@ -453,7 +535,8 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 	const [command, ...rest] = argv;
 	if (command === "base") return runBase(rest, cwd);
 	if (command === "body") return runBody(rest, cwd);
-	throw new Error("usage: stryker-nightly.mjs base|body ...");
+	if (command === "combine") return runCombine(rest);
+	throw new Error("usage: stryker-nightly.mjs base|body|combine ...");
 }
 
 if (

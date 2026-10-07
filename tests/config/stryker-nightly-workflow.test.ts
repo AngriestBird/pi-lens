@@ -57,23 +57,36 @@ function nightlyFindings(text: string): string[] {
 		findings.push("workflow-level permissions are not {}");
 
 	const jobs = Object.entries(workflow.jobs ?? {});
-	if (jobs.length !== 1) findings.push(`jobs: ${jobs.length}, expected 1`);
-	const [, job] = jobs[0] ?? ["", {} as Job];
-	if (
-		JSON.stringify(Object.entries(job.permissions ?? {}).sort()) !==
-		JSON.stringify([
-			["contents", "read"],
-			["issues", "write"],
-		])
-	) {
-		findings.push(
-			`job permissions ${JSON.stringify(job.permissions)} are not contents:read + issues:write`,
-		);
+	if (jobs.length !== 3) findings.push(`jobs: ${jobs.length}, expected 3`);
+	const prepare = workflow.jobs?.prepare ?? ({} as Job);
+	const mutate = workflow.jobs?.mutate ?? ({} as Job);
+	const publish = workflow.jobs?.publish ?? ({} as Job);
+	for (const [name, job] of [
+		["prepare", prepare],
+		["publish", publish],
+	] as const) {
+		if (
+			JSON.stringify(Object.entries(job.permissions ?? {}).sort()) !==
+			JSON.stringify([
+				["contents", "read"],
+				["issues", "write"],
+			])
+		)
+			findings.push(
+				`job permissions ${name} are not contents:read + issues:write`,
+			);
 	}
-
-	const steps = job.steps ?? [];
+	if (
+		JSON.stringify(mutate.permissions) !== JSON.stringify({ contents: "read" })
+	)
+		findings.push("mutate permissions are not contents:read");
+	const steps = [
+		...(prepare.steps ?? []),
+		...(mutate.steps ?? []),
+		...(publish.steps ?? []),
+	];
 	const run = (step: Step) => step.run ?? "";
-	const window = steps.find((step) => step.id === "window");
+	const window = (prepare.steps ?? []).find((step) => step.id === "window");
 	if (!/-- clients tools mcp index\.ts\b/.test(run(window ?? {})))
 		findings.push("window step does not scope the diff to the runtime paths");
 	if (
@@ -92,8 +105,10 @@ function nightlyFindings(text: string): string[] {
 		findings.push("driver step is not run over the window's base");
 	// Recurrence (#4035): the nightly cap must match the maintainer-approved
 	// 24-file intake; a stale lower pin silently grows the carry-over queue.
-	if (driver && !/--max-files 24\b/.test(run(driver)))
-		findings.push("driver does not use the 24-file nightly cap");
+	if (driver && !/--max-files 12\b/.test(run(driver)))
+		findings.push("driver does not use the 12-file shard cap");
+	if (driver && !/--total-max-files 24\b/.test(run(driver)))
+		findings.push("driver does not use the 24-file total cap");
 	if (driver && driver["continue-on-error"] !== true)
 		findings.push("driver failure would skip the tracking-issue step");
 	// Recurrence (#4005 r2): scripts/**/*.mjs competing with runtime files for
@@ -126,7 +141,7 @@ function nightlyFindings(text: string): string[] {
 		findings.push("driver step does not take the queue");
 	// Recurrence (#4005 r3): the body step recomputing the queue from nothing, so
 	// a failed night would clear it.
-	const bodyStep = steps.find((step) =>
+	const bodyStep = (publish.steps ?? []).find((step) =>
 		run(step).includes("stryker-nightly.mjs body"),
 	);
 	if (
@@ -148,26 +163,23 @@ function nightlyFindings(text: string): string[] {
 			"concurrency is not the non-cancelling stryker-nightly group",
 		);
 
-	// Recurrence (#4005 r2 X2): `STATUS=ok` regardless of the driver's outcome
-	// advanced the marker over a failed night.
-	const body = steps.find((step) =>
+	// Recurrence (#4005 r2 X2): publishing a successful status despite a failed
+	// shard advanced the marker over an incomplete night.
+	const body = (publish.steps ?? []).find((step) =>
 		run(step).includes("stryker-nightly.mjs body"),
 	);
 	const bodyRun = run(body ?? {});
 	if (
 		!body ||
-		body.env?.STRYKER_OUTCOME !== "${{ steps.stryker.outcome }}" ||
-		!/^STATUS=failed$/m.test(bodyRun) ||
-		!/^if \[ "\$STRYKER_OUTCOME" = success \]; then STATUS=ok; fi$/m.test(
-			bodyRun,
-		) ||
+		!bodyRun.includes("combined-outcomes.json") ||
+		!bodyRun.includes("process.stdout.write(x.status)") ||
 		!/stryker-nightly\.mjs body .*--status "\$STATUS"/.test(bodyRun)
 	)
 		findings.push(
-			"the body's --status is not derived from the driver's outcome",
+			"the body's --status is not derived from the combined shard outcomes",
 		);
 
-	const upsert = steps.find((step) =>
+	const upsert = (publish.steps ?? []).find((step) =>
 		run(step).includes("scripts/upsert-tracking-issue.mjs"),
 	);
 	if (
@@ -177,7 +189,7 @@ function nightlyFindings(text: string): string[] {
 		)
 	)
 		findings.push("no title-keyed upsert step on the nightly-drift label");
-	if (upsert && !(upsert.if ?? "").includes(WRITE_GUARD))
+	if (upsert && !String(upsert.if ?? "").includes(WRITE_GUARD))
 		findings.push("the issue writer is not scoped to schedule or master");
 	if (/gh issue (create|edit|comment|close)/.test(steps.map(run).join("\n")))
 		findings.push("a raw gh issue write bypasses the shared upsert CLI");
@@ -289,7 +301,7 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"dropping the upsert step's schedule/master scope",
 			(text) =>
 				text.replace(
-					"(github.event_name == 'schedule' || github.ref == 'refs/heads/master')",
+					"github.event_name == 'schedule' || github.ref == 'refs/heads/master'",
 					"true",
 				),
 			/not scoped to schedule or master/,
@@ -313,23 +325,13 @@ describe("stryker-nightly.yml (#4005)", () => {
 			/driver failure would skip/,
 		],
 		[
-			"STATUS=ok unconditionally (X2)",
-			(text) => text.replace("STATUS=failed", "STATUS=ok"),
-			/--status is not derived/,
-		],
-		[
-			"a hard-coded --status ok",
-			(text) => text.replace('--status "$STATUS"', "--status ok"),
-			/--status is not derived/,
-		],
-		[
-			"the outcome env dropped from the body step",
+			"the combined outcome is hard-coded ok",
 			(text) =>
 				text.replace(
-					"          STRYKER_OUTCOME: ${{ steps.stryker.outcome }}\n",
-					"",
+					"process.stdout.write(x.status)",
+					'process.stdout.write("ok")',
 				),
-			/--status is not derived/,
+			/combined shard outcomes/,
 		],
 		[
 			"the concurrency block deleted (X1)",
@@ -352,9 +354,9 @@ describe("stryker-nightly.yml (#4005)", () => {
 			/not restricted to the runtime paths/,
 		],
 		[
-			"the nightly cap drops back below 24 files",
-			(text) => text.replace("--max-files 24", "--max-files 12"),
-			/does not use the 24-file nightly cap/,
+			"the nightly shard cap rises above 12 files",
+			(text) => text.replace("--max-files 12", "--max-files 13"),
+			/does not use the 12-file shard cap/,
 		],
 		[
 			"the queue file not written for the driver",

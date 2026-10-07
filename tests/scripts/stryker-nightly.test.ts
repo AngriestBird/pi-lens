@@ -19,10 +19,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	collectChangedRanges,
+	partitionMutationFiles,
 	selectMutationFiles,
 } from "../../scripts/lib/stryker-diff.mjs";
 import {
 	buildNightlyBody,
+	combineShardReports,
+	combinedShardStatus,
 	coverageGaps,
 	MAX_BASE_AGE_DAYS,
 	MAX_PENDING,
@@ -32,6 +35,7 @@ import {
 	markerOf,
 	parseLastReportSha,
 	pickBase,
+	SHARD_STATE_SPACE,
 } from "../../scripts/stryker-nightly.mjs";
 
 const TITLE =
@@ -120,6 +124,80 @@ describe("pickBase", () => {
 			}),
 		).toEqual({ base: SHA_B, source: "fallback-bad-sha" });
 	});
+});
+
+describe("nightly shard partition and publication", () => {
+	it("partitions the selected 24 disjointly and preserves the skipped queue owner", () => {
+		const selected = Array.from(
+			{ length: 24 },
+			(_, index) => `clients/f${index}.ts`,
+		);
+		const skipped = ["clients/f24.ts"];
+		const first = partitionMutationFiles({
+			selected,
+			skipped,
+			shardIndex: 0,
+			shardCount: 2,
+		});
+		const second = partitionMutationFiles({
+			selected,
+			skipped,
+			shardIndex: 1,
+			shardCount: 2,
+		});
+		expect(new Set(first.selected).size).toBe(12);
+		expect(new Set(second.selected).size).toBe(12);
+		expect(
+			first.selected.filter((file) => second.selected.includes(file)),
+		).toEqual([]);
+		expect([...first.selected, ...second.selected].sort()).toEqual(
+			[...selected].sort(),
+		);
+		expect(first.skipped).toEqual(skipped);
+		expect(second.skipped).toEqual([]);
+	});
+
+	it("combines reports without losing either shard's files or counts", () => {
+		const report = (file: string, status: string) => ({
+			files: { [file]: { status } },
+			piLensMutationDiff: {
+				filesSelected: [file],
+				filesSkippedOverCap: [],
+				rangesTotal: 2,
+				rangesEvaluated: 1,
+				measuredTotalMutants: 3,
+				counts: { Killed: 1 },
+				partial: false,
+			},
+		});
+		const combined = combineShardReports([
+			report("clients/a.ts", "ok"),
+			report("clients/b.ts", "partial"),
+		]);
+		expect(combined).toMatchObject({
+			files: {
+				"clients/a.ts": { status: "ok" },
+				"clients/b.ts": { status: "partial" },
+			},
+			piLensMutationDiff: {
+				filesSelected: ["clients/a.ts", "clients/b.ts"],
+				rangesTotal: 4,
+				rangesEvaluated: 2,
+				measuredTotalMutants: 6,
+				counts: { Killed: 2 },
+			},
+		});
+	});
+
+	it.each(SHARD_STATE_SPACE)(
+		"records the state space: %s + %s",
+		(left, right, queue, report) => {
+			expect([left, right, queue, report]).toHaveLength(4);
+			expect(combinedShardStatus([left as never, right as never])).toBe(
+				left === "failed" || right === "failed" ? "failed" : "ok",
+			);
+		},
+	);
 });
 
 describe("buildNightlyBody", () => {

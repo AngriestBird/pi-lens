@@ -26,13 +26,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  report:
-    name: Stryker test-adequacy report (nightly)
+  prepare:
+    name: Prepare nightly window
     runs-on: ubuntu-latest
-    # The driver bounds its Stryker child at MUTATION_BUDGET_MINUTES (60), which
-    # must stay strictly below this cap by at least 20 minutes: a runner kill at
-    # the cap would leave the driver no chance to write its report
-    # (tests/config/stryker-nightly-workflow.test.ts pins the relation).
+    outputs:
+      base: ${{ steps.window.outputs.base }}
+      head: ${{ steps.window.outputs.head }}
+      source: ${{ steps.window.outputs.source }}
+      run: ${{ steps.window.outputs.run }}
     timeout-minutes: 90
     # Same grant as the idle-eviction drift step in tool-smoke.yml (`issues:
     # write`) plus the checkout read; nothing wider.
@@ -71,57 +72,129 @@ jobs:
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.window.outputs.run == 'true'
-        run: npm ci --ignore-scripts
-      - if: steps.window.outputs.run == 'true'
-        run: npm run build
-      - name: Mutate the queued files and the window's runtime diff
-        id: stryker
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.window.outputs.run == 'true'
+        with:
+          name: nightly-window
+          path: |
+            ${{ runner.temp }}/stryker-nightly-issues.json
+            ${{ runner.temp }}/stryker-nightly-pending.txt
+          if-no-files-found: error
+
+  mutate:
+    name: Stryker shard ${{ matrix.shard }} (12 files)
+    needs: prepare
+    if: needs.prepare.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      TRACKING_TITLE: "nightly: Stryker test-adequacy report (runtime diff since the last report)"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: nightly-window
+          path: "$RUNNER_TEMP/nightly-window"
+      - run: cp "$RUNNER_TEMP/nightly-window/stryker-nightly-pending.txt" "$RUNNER_TEMP/stryker-nightly-pending.txt"
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Mutate this shard's half of the deterministic 24-file population
+        id: stryker
         continue-on-error: true
         env:
-          BASE: ${{ steps.window.outputs.base }}
-          HEAD_SHA: ${{ steps.window.outputs.head }}
+          BASE: ${{ needs.prepare.outputs.base }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
         run: |
-          set -euo pipefail
-          ARGS=(--base "$BASE" --max-files 24 --runtime-only --head-sha "$HEAD_SHA")
-          # Each queued line is `path@sha`: the driver reads that file against
-          # its own base (scripts/stryker-nightly.mjs, the base rule).
+          set -uo pipefail
+          rc=0
+          ARGS=(--base "$BASE" --max-files 12 --total-max-files 24 --shard-index "${{ matrix.shard }}" --shard-count 2 --runtime-only --head-sha "$HEAD_SHA")
           if [ -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]; then
             ARGS+=(--pending-file "$RUNNER_TEMP/stryker-nightly-pending.txt")
           fi
-          node scripts/stryker-diff.mjs "${ARGS[@]}"
-      - name: Render job summary
-        if: always() && steps.window.outputs.run == 'true' && hashFiles('reports/mutation/mutation.json') != ''
-        run: node scripts/mutation-report.mjs --out "$GITHUB_STEP_SUMMARY"
+          node scripts/stryker-diff.mjs "${ARGS[@]}" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo complete > "$RUNNER_TEMP/shard-outcome"
+          elif [ -s reports/mutation/mutation.json ]; then
+            echo budget-cut > "$RUNNER_TEMP/shard-outcome"
+          else
+            echo failed > "$RUNNER_TEMP/shard-outcome"
+          fi
+          exit "$rc"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && steps.window.outputs.run == 'true'
+        if: always()
         with:
-          name: mutation-report
-          path: reports/mutation/mutation.json
+          name: mutation-shard-${{ matrix.shard }}
+          path: |
+            reports/mutation/mutation.json
+            ${{ runner.temp }}/shard-outcome
           if-no-files-found: ignore
-      # Scoped like tool-smoke's tracking-issue writers: a branch dispatch must
-      # not touch issues. One persistent issue, refreshed in place and never
-      # closed by the job (the kill criterion is a maintainer decision).
-      - name: Update the tracking issue
-        if: always() && steps.window.outputs.run == 'true' && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
-        env:
-          BASE: ${{ steps.window.outputs.base }}
-          HEAD_SHA: ${{ steps.window.outputs.head }}
-          SOURCE: ${{ steps.window.outputs.source }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          STRYKER_OUTCOME: ${{ steps.stryker.outcome }}
-        run: |
-          set -euo pipefail
-          STATUS=failed
-          if [ "$STRYKER_OUTCOME" = success ]; then STATUS=ok; fi
-          node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report reports/mutation/mutation.json --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
-          gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
-          node scripts/upsert-tracking-issue.mjs --title "$TRACKING_TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/stryker-nightly-body.md"
-      # A driver failure must not read as a green night: the issue body says
-      # FAILED and this row is red.
-      - name: Fail the run when the driver failed
+      - name: Fail the shard when the driver failed
         if: steps.stryker.outcome == 'failure'
         run: |
-          echo "::error::scripts/stryker-diff.mjs failed; see the step log and the tracking issue"
+          echo "::error::scripts/stryker-diff.mjs failed; see the shard artifact"
           exit 1
+
+  publish:
+    name: Publish combined nightly report
+    needs: [prepare, mutate]
+    if: always() && needs.prepare.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TRACKING_TITLE: "nightly: Stryker test-adequacy report (runtime diff since the last report)"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: mutation-shard-*
+          path: "$RUNNER_TEMP/mutation-shards"
+          merge-multiple: false
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: nightly-window
+          path: "$RUNNER_TEMP/nightly-window"
+      - run: cp "$RUNNER_TEMP/nightly-window/stryker-nightly-issues.json" "$RUNNER_TEMP/stryker-nightly-issues.json"
+      - run: npm ci --ignore-scripts
+      - name: Combine both shard outcomes and reports
+        env:
+          BASE: ${{ needs.prepare.outputs.base }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          SOURCE: ${{ needs.prepare.outputs.source }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node -e 'const fs=require("fs"); const path=require("path"); const root=process.env.RUNNER_TEMP+"/mutation-shards"; const rows=fs.readdirSync(root).sort().map(d=>({outcome:fs.readFileSync(path.join(root,d,"shard-outcome"),"utf8").trim(),report:path.join(root,d,"reports/mutation/mutation.json")})); fs.writeFileSync(process.env.RUNNER_TEMP+"/shard-input.json",JSON.stringify(rows));'
+          node scripts/stryker-nightly.mjs combine --inputs "$RUNNER_TEMP/shard-input.json" --out "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json"
+          STATUS=$(node -e 'const x=require(process.env.RUNNER_TEMP+"/combined-outcomes.json"); process.stdout.write(x.status)')
+          node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report "$RUNNER_TEMP/combined-report.json" --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
+      - name: Update the single tracking issue
+        if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
+          node scripts/upsert-tracking-issue.mjs --title "$TRACKING_TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/stryker-nightly-body.md"

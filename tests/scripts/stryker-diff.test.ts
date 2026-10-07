@@ -87,7 +87,7 @@ const mutationJob = (
 			"utf8",
 		),
 	) as { jobs: Record<string, { "timeout-minutes"?: number }> }
-).jobs.report;
+).jobs.mutate;
 
 // lane: the nightly Stryker report -- dry run and mutant runs. That lane mutates the
 // driver in place (stryker.config.mjs `inPlace: true`) and every expression of
