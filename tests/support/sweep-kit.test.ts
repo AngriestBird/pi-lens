@@ -430,6 +430,73 @@ describe("sweep-kit: listSourceFiles", () => {
 	});
 });
 
+describe("sweep-kit: listSourceFiles scratch roots (#4097)", () => {
+	// Named recurrence (#4097): tests/config/bounded-container-guard.test.ts
+	// walked the repo root, `.probe-home/` included, and died with
+	// `ENOENT ... scandir '.probe-home/worker-home-ci-...-shard-1-3125'` when a
+	// sibling vitest worker removed its home between the parent's listing and
+	// the descent (job 112833360697 on #4070).
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4097-walk-"));
+	afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+	it("never descends into runtime scratch or third-party trees", () => {
+		for (const dir of [".git", ".probe-home", ".claude", "node_modules"]) {
+			fs.mkdirSync(path.join(root, "pruned", dir, "inner"), {
+				recursive: true,
+			});
+			fs.writeFileSync(path.join(root, "pruned", dir, "inner", "x.ts"), "");
+		}
+		fs.writeFileSync(path.join(root, "pruned", "kept.ts"), "");
+		const found = listSourceFiles(path.join(root, "pruned")).map((p) =>
+			relativePosix(root, p),
+		);
+		expect(found).toEqual(["pruned/kept.ts"]);
+	});
+
+	it("skips a directory that vanished between its parent's listing and its own", () => {
+		const vanishRoot = path.join(root, "vanish");
+		const names = ["d0", "d1", "d2", "d3"];
+		for (const name of names) {
+			fs.mkdirSync(path.join(vanishRoot, name), { recursive: true });
+			fs.writeFileSync(path.join(vanishRoot, name, "f.ts"), "");
+		}
+		// `exclude` runs for a file after the walk root's listing was already
+		// returned and before the sibling directories are descended. The first
+		// directory walked deletes every other one, whatever readdir order
+		// the filesystem uses: a real sibling-removes-its-home schedule.
+		const write = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		let removed = false;
+		try {
+			const found = listSourceFiles(vanishRoot, {
+				exclude: (rel) => {
+					if (removed) return false;
+					removed = true;
+					const keep = rel.split("/")[0];
+					for (const name of names) {
+						if (name !== keep) {
+							fs.rmSync(path.join(vanishRoot, name), { recursive: true });
+						}
+					}
+					return false;
+				},
+			});
+			expect(found).toHaveLength(1);
+			expect(write).toHaveBeenCalledTimes(3);
+			expect(write.mock.calls[0]?.[0]).toMatch(/vanished between the walk/);
+		} finally {
+			write.mockRestore();
+		}
+	});
+
+	it("still throws for a missing walk root", () => {
+		expect(() => listSourceFiles(path.join(root, "no-such-root"))).toThrow(
+			/ENOENT/,
+		);
+	});
+});
+
 describe("sweep-kit: readWalkedFile (#3082)", () => {
 	// Named recurrence: tests/clients/pi-lens-home-hermeticity.test.ts wrote a
 	// scratch *.test.ts into the repo's own tests/ tree and removed it inside
