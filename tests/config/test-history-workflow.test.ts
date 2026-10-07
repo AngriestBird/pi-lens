@@ -263,6 +263,22 @@ describe("test-history publish and notify scope (#4030, #4077)", () => {
 		).toContain('--artifact-dir "$RUNNER_TEMP/test-history-artifacts"');
 	});
 
+	// Recurrence: #4076 verify r3 F1. On a night with no new CI artifacts the
+	// producer's `test-history-artifacts/` is empty and upload-artifact drops an
+	// empty directory, so the publish job's download holds only the manifest;
+	// `test-history-rollup.mjs --artifact-dir <missing>` then exits 2 and the
+	// notifier files a false "rollup red" issue.
+	it("creates the artifact directory in the publish job before the rollup reads it", () => {
+		const publish = runOf(
+			step(WORKFLOW, "test-history-publish", "Publish data branch"),
+		);
+		const mkdirAt = publish.indexOf(
+			'mkdir -p "$RUNNER_TEMP/test-history-artifacts"',
+		);
+		expect(mkdirAt).toBeGreaterThanOrEqual(0);
+		expect(mkdirAt).toBeLessThan(publish.indexOf("test-history-rollup.mjs"));
+	});
+
 	it("publishes day lines and retires the raw journal", () => {
 		const publish = runOf(
 			step(WORKFLOW, "test-history-publish", "Publish data branch"),

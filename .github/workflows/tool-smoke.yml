@@ -152,6 +152,10 @@ jobs:
         run: |
           set -euo pipefail
           prior="$RUNNER_TEMP/test-history-prior.ndjson"
+          # A night with no new CI artifacts uploads no file from this directory
+          # and upload-artifact drops an empty one (#4076 verify r3 F1); the
+          # rollup exits 2 on a missing --artifact-dir.
+          mkdir -p "$RUNNER_TEMP/test-history-artifacts"
           for attempt in 1 2 3; do
             echo "test-history push attempt ${attempt}/3"
             git fetch origin data/test-history || true
