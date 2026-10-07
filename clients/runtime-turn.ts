@@ -2036,6 +2036,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cacheKept?: boolean;
 		/** The hook's own signal fired while the scan was awaited (Escape). */
 		aborted?: boolean;
+		/** #3872: this root's last two scans both outlasted the budget left (this is the shorter), so it was not awaited. */
+		scanFloorMs?: number;
+		/** #3872: linked worktrees nested under the root, which knip walks as project files. */
+		nestedWorktrees?: number;
+		/** #3872: files with issues dropped from the result for living in one. */
+		nestedFilesDropped?: number;
 	};
 	// #3872: knip runs in the checkout that owns each edit. A linked worktree is
 	// its own project; the session root would walk it as a nested copy of the
@@ -2048,6 +2054,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			reason: `${toRunnerDisplayPath(cwd, root)} not scanned: more than ${MAX_KNIP_ROOTS_PER_TURN} checkouts edited this turn`,
 		});
 	}
+	/**
+	 * What a root whose last scan outlasted the budget is still given to answer:
+	 * one timer tick, which a memo hit (microtasks) beats and a real scan loses to.
+	 */
+	const KNOWN_SLOW_KNIP_GRACE_MS = 1;
 	/** Issues each knip section names; a cut section parks exactly these (#3901). */
 	const KNIP_MAX_SHOWN = 5;
 	/** One checkout's finished scan: cache write, delta, delivery. `scanRoot === cwd` is the session checkout. */
@@ -2077,6 +2088,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			dispositionSuppressed: 0,
 			...(!knipResult.success && { reason: knipResult.summary }),
 			...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
+			...(knipResult.nestedWorktrees !== undefined && {
+				nestedWorktrees: knipResult.nestedWorktrees,
+				nestedFilesDropped: knipResult.nestedFilesDropped,
+			}),
 			...(knipWouldPoison && { cacheKept: true }),
 		};
 
@@ -2286,15 +2301,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// the scan finishes off-hook and warms knip's own cache for the next
 				// turn. Its late result is never written or delivered here -- the turn
 				// it was computed for has already ended.
+				//
+				// A root whose last TWO scans both took longer than the budget left
+				// is not awaited again (one cold scan is not a measurement): the wait would end in the same deferral, three
+				// seconds later on every turn (live clone with six unignored
+				// worktrees: the handler sat at 3000 ms on each of three turns). The
+				// scan is still started, so a root that became fast is noticed on the
+				// next turn, and the grace below still answers a memo hit, which
+				// resolves in microtasks.
+				const remainingMs = Math.max(
+					0,
+					HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
+				);
+				const scanFloorMs = knipClient.scanFloorMs?.(scanRoot);
+				const knownSlow =
+					scanFloorMs !== undefined && scanFloorMs > remainingMs;
 				const scanned = await bounded(
 					knipClient.analyze(scanRoot, getKnipIgnorePatterns(), {
 						projectSeq: runtime.projectSeq,
 					}),
 					{
-						ms: Math.max(
-							0,
-							HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
-						),
+						ms: knownSlow ? KNOWN_SLOW_KNIP_GRACE_MS : remainingMs,
 						signal: deps.signal,
 						hook: "turn_end",
 						label: "knip",
@@ -2302,15 +2329,37 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				);
 				if (scanned === undefined) {
 					dbg(`turn_end: knip for ${scanRoot} outlived the turn_end budget`);
+					const aborted = deps.signal?.aborted === true;
+					const nestedWorktrees = knipClient.nestedWorktrees?.(scanRoot) ?? 0;
 					metadata = {
 						execution: "deferred",
-						aborted: deps.signal?.aborted === true,
+						aborted,
+						...(knownSlow && {
+							reason: "scan-exceeds-budget",
+							scanFloorMs,
+						}),
+						...(nestedWorktrees > 0 && { nestedWorktrees }),
 					};
+					// The cause, once per root and counted (the root's rows carry the
+					// per-turn number): knip walks these worktrees because the project
+					// never ignored them, and only the project can stop that. A turn the
+					// user cancelled is not a degradation.
+					if (nestedWorktrees > 0 && !aborted) {
+						incrementDegradationCount({
+							kind: "turn-end-knip-nested-worktrees",
+							subject: toRunnerDisplayPath(cwd, scanRoot),
+							reason: `${nestedWorktrees} linked worktree(s) nested under the scan root: knip walks them as project files and the scan did not fit the turn_end budget; add their directory (for example /.worktrees/) to .gitignore to drop the cost`,
+						});
+					}
 				} else {
 					metadata = applyKnipResult(scanRoot, prevKnip, scanned);
 				}
 			}
-			budgetSpent = metadata.execution === "deferred";
+			// A root that was not awaited spent none of the budget: the next
+			// checkout still gets its scan (an Escape ends the loop either way).
+			budgetSpent =
+				metadata.execution === "deferred" &&
+				(metadata.scanFloorMs === undefined || metadata.aborted === true);
 			logKnipRow(scanRoot, startedAt, metadata);
 		}
 	}

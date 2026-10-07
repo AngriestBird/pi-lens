@@ -2649,6 +2649,18 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"promise per store, so the three turn-end stores spend one budget each " +
 		"per delivery however many lanes await them, and an abandoned read " +
 		"yields null — a cold cache to every lane — never a stale envelope.",
+	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~b310ae4e":
+		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
+		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
+		"wall budget is still live. #3872: this is `knipClient.analyze`, awaited " +
+		"under the budget LEFT after the phases before it (not a fresh 3000 ms), " +
+		"so a slow scan releases the handler instead of holding it past " +
+		"`hook-await-exceeded`; a root whose last scan outlasted that budget is " +
+		"awaited for one timer tick only (a memo hit still answers), so the " +
+		"handler does not sit out the full budget on every turn. It replaces the " +
+		"#2523 exemption for the same " +
+		"await; the scan itself is abandoned, not cancelled, and finishes off-hook " +
+		"under knip's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~be38c3d4":
 		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
 		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
@@ -2657,15 +2669,6 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"before it, as knip's is above. It replaces the #2523 exemption for the " +
 		"same await; the scan is abandoned, not cancelled, and finishes off-hook " +
 		"under vulture's own 30 s spawn timeout and single-flight slot.",
-	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~df074468":
-		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
-		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
-		"wall budget is still live. #3872: this is `knipClient.analyze`, awaited " +
-		"under the budget LEFT after the phases before it (not a fresh 3000 ms), " +
-		"so a slow scan releases the handler instead of holding it past " +
-		"`hook-await-exceeded`. It replaces the #2523 exemption for the same " +
-		"await; the scan itself is abandoned, not cancelled, and finishes off-hook " +
-		"under knip's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#handleTurnEnd:4da1e4ca~7e52ce49":
 		"`getAmbientAbortSignal(): AbortSignal | undefined` (clients/safe-spawn.ts) " +
 		"— the turn's registered abort signal, set from the host's `ctx.signal` " +
