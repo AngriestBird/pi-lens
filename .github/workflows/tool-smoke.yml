@@ -193,7 +193,7 @@ jobs:
       - name: Build dist
         run: npm run build:dist
 
-      # `id:` + a captured log (#2723): this is one of the five steps whose
+      # `id:` + a captured log (#2723): this is one of the six steps whose
       # outcome can actually turn the job red (no continue-on-error), so the
       # final notify step below needs both this step's `outcome` and its raw
       # log text (for the ✗ row detail) to build a useful tracking-issue
@@ -463,6 +463,25 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --lens-full --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lens-full.log"
 
+      # Resolution layer (#1513): every layer above proves a tool RAN, none
+      # proves WHICH binary the resolvers picked, so a dropped venv /
+      # vendor/bin / node_modules/.bin rung fell through to PATH or an install
+      # unseen. This plants stub executables in a scratch project's project-
+      # local bin dirs and asserts the production resolvers return those paths
+      # (and the dispatch-runner venv rung reports `rung: "venv"`). No install,
+      # no network, no spawn of a real tool: `time node scripts/smoke-tools.mjs
+      # --resolution` is 0.19s locally, so the 5 minute cap is only a hang
+      # bound, far under the job's 35. Gating like the
+      # layers it sits beside (own id + log for the notifier below);
+      # `set -o pipefail` is load-bearing for the same reason as on every
+      # layer above. Adds no permission: it runs under the job's existing ones.
+      - name: Resolution layer (project-local venv / vendor/bin / node_modules/.bin)
+        id: resolution_layer
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          node scripts/smoke-tools.mjs --resolution --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-resolution-layer.log"
+
       # #3319: PR analyses cover only their diff, so a master-only SonarCloud
       # quality regression otherwise stays invisible to the merge train. Keep
       # this as a real gate, but let the script classify SonarCloud transport
@@ -490,8 +509,8 @@ jobs:
       # independent notifier scoped to the job's actual pass/fail verdict,
       # placed last and gated on `if: always()` so it runs on every outcome,
       # mirroring install-smoke.yml's `Notify install drift` step. Reads the
-      # five gating layers' outcomes + captured logs (the only five steps
-      # above without `continue-on-error`, so the only five whose outcome
+      # six gating layers' outcomes + captured logs (the only six steps
+      # above without `continue-on-error`, so the only six whose outcome
       # can turn the job red) — see scripts/lib/tool-smoke-drift.mjs's module
       # doc. GITHUB_TOKEN is inherited from this job's own env (`issues:
       # write` already granted at job level, #529/#594). Best-effort:
@@ -512,10 +531,12 @@ jobs:
           LENS_FULL_LOG: ${{ runner.temp }}/tool-smoke-lens-full.log
           FORMAT_LAYER_OUTCOME: ${{ steps.format_layer.outcome }}
           FORMAT_LAYER_LOG: ${{ runner.temp }}/tool-smoke-format-layer.log
-          # #2723 review F3: a job failure BEFORE the five tracked layers
+          RESOLUTION_LAYER_OUTCOME: ${{ steps.resolution_layer.outcome }}
+          RESOLUTION_LAYER_LOG: ${{ runner.temp }}/tool-smoke-resolution-layer.log
+          # #2723 review F3: a job failure BEFORE the six tracked layers
           # even start (checkout, a best-effort setup action, npm install,
           # build:dist — twelve steps, none of which set an *_OUTCOME above)
-          # leaves all five "skipped", identically to a genuine
+          # leaves all six "skipped", identically to a genuine
           # cancellation. `job.status` disambiguates: "failure" only when a
           # non-continue-on-error step actually failed somewhere in the job.
           JOB_STATUS: ${{ job.status }}
