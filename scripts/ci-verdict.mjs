@@ -38,6 +38,13 @@
  * required name always gates; an unmatched or unreadable row (another app, a
  * failed read) keeps today's gating, with a `Trigger scope:` line saying so.
  *
+ * The same run read says which cancelled runs are superseded: the event-scoped
+ * `cancel-in-progress` leaves a cancelled run's failed row as the only row for
+ * its name until the replacement posts one. A gating row that would fail or
+ * read cancelled, from a cancelled run that a LATER open run of the same
+ * workflow and event supersedes, is pending, never red (`supersededRows`).
+ * Once the newer run completes the stamp is gone and the rows gate as usual.
+ *
  * #2618 fix-round-2: a gating row's conclusion is judged differently
  * depending on whether it is one of those confirmed-required names or
  * merely discovered. A REQUIRED row must reach a literal "success" --
@@ -473,23 +480,27 @@ function deferredStateFor(gate) {
 const SETTLED_OK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 
 /**
- * #4090: does any check-run on this payload need the trigger scope? A
- * required name always gates and an allowlisted-advisory name never does, so
- * neither can change by the scope; a row that already concluded
- * success/skipped/neutral cannot fail the verdict either. A green head
- * therefore costs no extra read.
+ * #4090: does any check-run on this payload need the workflow-run read? Two
+ * kinds of row can change by it: a discovered (non-required, non-allowlisted)
+ * row that is not settled-green (the trigger scope), and a REQUIRED row that
+ * is completed and not green (a failure inside a cancelled run that a newer
+ * open run supersedes). An allowlisted-advisory row never gates, and a
+ * settled-green or still-running required row cannot fail, so a green head
+ * costs no extra read.
  */
 function needsTriggerScope(payload, requiredChecks = REQUIRED_CHECKS) {
 	const required = new Set(requiredChecks);
-	return (payload?.check_runs ?? []).some(
-		(run) =>
-			run?.check_suite?.id != null &&
-			!required.has(run.name) &&
+	return (payload?.check_runs ?? []).some((run) => {
+		if (run?.check_suite?.id == null) return false;
+		if (required.has(run.name))
+			return run.status === "completed" && run.conclusion !== "success";
+		return (
 			!isAdvisoryCheck(run.name) &&
 			!(
 				run.status === "completed" && SETTLED_OK_CONCLUSIONS.has(run.conclusion)
-			),
-	);
+			)
+		);
+	});
 }
 
 /** The full head SHA the check-runs report. A bare-SHA target may be a short
@@ -502,19 +513,27 @@ function headShaOf(payload, fallback) {
 
 /**
  * #4090: stamps each check-run with the event of the workflow run that
- * produced it (`workflow_event`), joined on the check suite. A check-run from
- * another app, or from a run the read did not return, gets no stamp and keeps
- * today's gating. Pure: returns a new payload.
+ * produced it (`workflow_event`), joined on the check suite, and with
+ * `superseded_by_run` when that run was cancelled and a newer run of the same
+ * workflow is still open on the head. A check-run from another app, or from a
+ * run the read did not return, gets no stamp and keeps today's gating. Pure:
+ * returns a new payload.
  *
  * @param {{ check_runs?: object[] }} payload
- * @param {Map<number|string, string>} suiteEvents
+ * @param {{ suiteEvents: Map<number|string, string>, supersededSuites: Map<number|string, number|string> }} headRuns
  */
-function annotateTriggerEvents(payload, suiteEvents) {
+function annotateTriggerEvents(payload, { suiteEvents, supersededSuites }) {
 	return {
 		...payload,
 		check_runs: (payload?.check_runs ?? []).map((run) => {
-			const event = suiteEvents.get(run?.check_suite?.id);
-			return event === undefined ? run : { ...run, workflow_event: event };
+			const suite = run?.check_suite?.id;
+			const event = suiteEvents.get(suite);
+			const newerRun = supersededSuites.get(suite);
+			return {
+				...run,
+				...(event === undefined ? {} : { workflow_event: event }),
+				...(newerRun === undefined ? {} : { superseded_by_run: newerRun }),
+			};
 		}),
 	};
 }
@@ -682,6 +701,9 @@ export function computeVerdict(
 			url: run.html_url ?? run.details_url ?? null,
 			detailsUrl: run.details_url ?? null,
 			gating,
+			...(run.superseded_by_run === undefined
+				? {}
+				: { supersededByRun: run.superseded_by_run }),
 			...(!gating && triggerAdvisoryNames.has(name)
 				? { triggerEvent: run.workflow_event }
 				: {}),
@@ -718,11 +740,27 @@ export function computeVerdict(
 		rerunState?.originalFailed === true &&
 		rerunState?.latestAttempt?.run_attempt > 1 &&
 		rerunState.latestAttempt.status !== "completed";
+	// #4090: a row that would fail (or read cancelled) but came from a
+	// cancelled run that a newer open run of the same workflow supersedes is
+	// pending, not red: that run is about to post its own row for the name.
+	const supersededRows = new Set(
+		rows.filter(
+			(row) =>
+				row.gating &&
+				row.present &&
+				row.status === "completed" &&
+				row.supersededByRun !== undefined &&
+				(requiredNameSet.has(row.name)
+					? row.conclusion !== "success"
+					: isBlockingConclusion(row.conclusion)),
+		),
+	);
 	const cancelledLatestRows = rows.filter(
 		(row) =>
 			row.gating &&
 			row.present &&
 			row.status === "completed" &&
+			!supersededRows.has(row) &&
 			isUncertainConclusion(row.conclusion),
 	);
 	// #3700: a row the caller proved is post-merge noise (its job could not
@@ -731,6 +769,7 @@ export function computeVerdict(
 	const isNoiseRow = (row) => noiseRowIds?.has(row.id) === true;
 	const failingGatingRows = rows.filter((row) => {
 		if (!row.gating || !row.present || row.status !== "completed") return false;
+		if (supersededRows.has(row)) return false;
 		if (isUncertainConclusion(row.conclusion)) return false;
 		if (isNoiseRow(row)) return false;
 		// #3753: the aggregate AND every `Unit tests (shard k/N)` row: the kill
@@ -743,7 +782,7 @@ export function computeVerdict(
 	const pendingGatingRows = rows.filter((row) => {
 		if (!row.gating) return false;
 		if (row.status !== "completed") return true;
-		return false;
+		return supersededRows.has(row);
 	});
 
 	let exitCode;
@@ -848,8 +887,9 @@ export function computeVerdict(
 				reason = `one or more required checks are absent but the PR is not merge-conflicted (mergeable=${mergeable}); CI likely hasn't registered yet -- treating as pending, not DIRTY`;
 			}
 		} else {
-			// Only non-completed rows reach this branch; latest cancellations have
-			// already been reported with an explicit rerun command above.
+			// Only non-completed and superseded rows reach this branch; latest
+			// cancellations have already been reported with an explicit rerun
+			// command above.
 			const stillRunning = pendingGatingRows.filter(
 				(row) => row.status !== "completed",
 			);
@@ -857,6 +897,11 @@ export function computeVerdict(
 			if (stillRunning.length > 0) {
 				parts.push(
 					`still queued or in progress: ${stillRunning.map((row) => row.name).join(", ")}`,
+				);
+			}
+			if (supersededRows.size > 0) {
+				parts.push(
+					`superseded by a newer run still in progress (the cancelled run's rows are not final): ${[...supersededRows].map((row) => `${row.name} (${row.conclusion}, newer run ${row.supersededByRun})`).join(", ")}`,
 				);
 			}
 			reason = `gating check(s) ${parts.join("; ")}`;
@@ -1318,8 +1363,41 @@ export function fetchHeadRuns(
 			actionRequiredRuns: [],
 			headRun: { state: "unknown", id: null, startedAtMs: null },
 			suiteEvents: new Map(),
+			supersededSuites: new Map(),
 		};
 	}
+}
+
+/**
+ * #4090: check suite id to the id of the newer run that supersedes it. A
+ * cancelled run is superseded while a LATER run of the same workflow and event
+ * on the head is still open (the event-scoped `cancel-in-progress` shape: the
+ * cancelled run's failed or cancelled rows are the only rows for their names
+ * until the replacement posts them). A completed `failure` run is never
+ * superseded, and once the newer run completes the entry is gone, so a name it
+ * never produced gates again.
+ */
+function supersededSuitesOf(runs) {
+	const open = runs.filter((run) => run && run.status !== "completed");
+	return new Map(
+		runs
+			.filter(
+				(run) =>
+					run?.check_suite_id != null &&
+					run.status === "completed" &&
+					run.conclusion === "cancelled" &&
+					run.workflow_id != null,
+			)
+			.flatMap((run) => {
+				const newer = open.find(
+					(candidate) =>
+						candidate.workflow_id === run.workflow_id &&
+						candidate.event === run.event &&
+						Date.parse(candidate.created_at) > Date.parse(run.created_at),
+				);
+				return newer ? [[run.check_suite_id, newer.id]] : [];
+			}),
+	);
 }
 
 /**
@@ -1351,6 +1429,7 @@ function readHeadRunsPayload(payload, sha) {
 				.filter((run) => run?.check_suite_id != null && run?.event)
 				.map((run) => [run.check_suite_id, String(run.event)]),
 		),
+		supersededSuites: supersededSuitesOf(runs),
 	};
 }
 
@@ -3155,7 +3234,7 @@ export async function run({
 					let readError = null;
 					try {
 						const headSha = headShaOf(raw, sha);
-						const { suiteEvents } =
+						const headRuns =
 							transport === TRANSPORT_REST
 								? await restFetchHeadRuns(repository, headSha, {
 										...restOptions,
@@ -3168,7 +3247,7 @@ export async function run({
 										resolveGhTimeoutMs(remainingMs),
 										false,
 									);
-						lastPayload = annotateTriggerEvents(raw, suiteEvents);
+						lastPayload = annotateTriggerEvents(raw, headRuns);
 					} catch (error) {
 						readError = firstLine(error);
 					}

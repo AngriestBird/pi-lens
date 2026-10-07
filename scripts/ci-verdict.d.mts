@@ -62,6 +62,8 @@ export interface VerdictRow {
 	gating: boolean;
 	/** #4090: set when every run of this name came from a non-PR/push event. */
 	triggerEvent?: string;
+	/** #4090: set when a cancelled run's row is superseded by an open newer run. */
+	supersededByRun?: number | string;
 }
 
 export interface FailedJobDetail {
@@ -241,6 +243,8 @@ export declare function fetchHeadRuns(
 	};
 	/** #4090: check suite id to the event of its workflow run. */
 	suiteEvents: Map<number | string, string>;
+	/** #4090: cancelled run's check suite id to the open newer run's id. */
+	supersededSuites: Map<number | string, number | string>;
 };
 
 export declare function fetchAutoMergeAge(

@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	computeVerdict,
 	EXIT_FAILURE,
+	EXIT_PENDING,
 	EXIT_SUCCESS,
 	run,
 } from "../../scripts/ci-verdict.mjs";
@@ -81,28 +84,50 @@ async function verdictOf({
 	runsThrow = false,
 }: {
 	rows: Row[];
-	runs: ReturnType<typeof workflowRun>[];
+	runs: Array<Record<string, unknown>>;
 	target?: string;
 	runsThrow?: boolean;
 }) {
+	return verdictRaw({
+		checkRuns: rows.map(checkRun),
+		runs,
+		target,
+		runsThrow,
+	});
+}
+
+async function verdictRaw({
+	checkRuns,
+	runs,
+	target = "eb25d80cb",
+	runsThrow = false,
+	required = REQUIRED,
+}: {
+	checkRuns: Array<Record<string, unknown>>;
+	runs: Array<Record<string, unknown>>;
+	target?: string;
+	runsThrow?: boolean;
+	required?: string[];
+}) {
+	const sha = String(checkRuns[0]?.head_sha);
 	const calls: string[] = [];
 	const ghExec = (args: string[]) => {
 		calls.push(args.join(" "));
 		if (args[0] === "repo") return "acme/repo";
 		if (args[0] === "pr")
-			return JSON.stringify({ headRefOid: FULL_SHA, mergeable: "MERGEABLE" });
+			return JSON.stringify({ headRefOid: sha, mergeable: "MERGEABLE" });
 		const endpoint = args[1] ?? "";
 		if (endpoint.endsWith("/protection"))
-			return JSON.stringify({ required_status_checks: { contexts: REQUIRED } });
+			return JSON.stringify({ required_status_checks: { contexts: required } });
 		if (endpoint.includes("/check-runs"))
 			return JSON.stringify({
-				total_count: rows.length,
-				check_runs: rows.map(checkRun),
+				total_count: checkRuns.length,
+				check_runs: checkRuns,
 			});
 		if (endpoint.includes("/actions/runs")) {
 			// A short-SHA target must still ask with the FULL head sha: the API
 			// never matches a short one.
-			expect(endpoint).toContain(`head_sha=${FULL_SHA}`);
+			expect(endpoint).toContain(`head_sha=${sha}`);
 			if (runsThrow) throw new Error("HTTP 502");
 			return JSON.stringify({
 				total_count: runs.length,
@@ -298,6 +323,172 @@ describe("ci-verdict gates only on checks from this commit's PR/push CI (#4090)"
 		});
 		expect(v.code).toBe(EXIT_SUCCESS);
 		expect(v.calls.filter((c) => c.includes("/actions/runs"))).toEqual([]);
+	});
+});
+
+describe("a missing workflow-run event never makes a PR check advisory (#4090 round 2, F1)", () => {
+	it("a PR run reported without an event gates and says it could not classify", async () => {
+		// Recurrence guard: `readHeadRunsPayload` keeps only runs that carry an
+		// `event`. If a run without one were defaulted to a schedule-like event
+		// instead, a pull_request check would turn advisory and a real PR red
+		// would read green.
+		const v = await verdictOf({
+			rows: [
+				...REQUIRED_GREEN,
+				{ name: "PR job", suite: 3, conclusion: "failure" },
+			],
+			runs: [
+				...REQUIRED_RUNS,
+				{ ...workflowRun(3, "pull_request"), event: null },
+			],
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+		expect(v.out).toContain(
+			"Trigger scope: could not classify 1 check(s) (no workflow run matched); they gate as before: PR job",
+		);
+		expect(v.out).not.toContain("Advisory by trigger");
+	});
+});
+
+// #4084 head 18271874a (2026-10-07): CI run 37636737624 was cancelled by the
+// event-scoped cancel-in-progress when run 37637101565 started. Until the newer
+// run posted its own `Unit tests` row, the cancelled run's failed `Unit tests`
+// row was the only one for that required name, so `ci-verdict` read the PR red
+// while the replacement was still running. The fixture is the two runs'
+// real payloads and the check-runs of both suites up to the moment the newer
+// run was still open.
+describe("a failing row from a cancelled run superseded by an open newer run is pending (#4090 round 2, F4)", () => {
+	const fixture = JSON.parse(
+		readFileSync(
+			join(process.cwd(), "tests/fixtures/ci-verdict/superseded-4084.json"),
+			"utf8",
+		),
+	);
+	const CANCELLED = 37636737624;
+	const NEWER = 37637101565;
+	type WorkflowRunFixture = Record<string, unknown> & {
+		id: number;
+		workflow_id?: number;
+	};
+	const withRuns = (edit: (runs: Array<WorkflowRunFixture>) => void) => {
+		const runs = structuredClone(fixture.workflowRuns);
+		edit(runs);
+		return verdictRaw({
+			target: "4084",
+			checkRuns: structuredClone(fixture.checkRuns),
+			runs,
+			required: ["Unit tests", "Lint & type-check", "TLA+ models"],
+		});
+	};
+	const runById = (runs: Array<WorkflowRunFixture>, id: number) =>
+		runs.find((r) => r.id === id)!;
+
+	it("the real shape reads pending, naming the row and the newer run", async () => {
+		const v = await withRuns(() => {});
+		expect(v.code).toBe(EXIT_PENDING);
+		expect(v.out).toContain(
+			`superseded by a newer run still in progress (the cancelled run's rows are not final): Unit tests (failure, newer run ${NEWER})`,
+		);
+	});
+
+	it("a superseded cancelled row reads as superseded, not as a rerun hint", async () => {
+		// Recurrence guard: the cancelled-row branch prints a rerun command, which
+		// is wrong advice while the newer run is still posting its own rows.
+		const v = await verdictRaw({
+			target: "4084",
+			checkRuns: structuredClone(fixture.checkRuns).filter(
+				(c: { name: string; check_suite: { id: number } }) =>
+					!(
+						c.name === "Lint & type-check" && c.check_suite.id === 101957801991
+					),
+			),
+			runs: structuredClone(fixture.workflowRuns),
+			required: ["Unit tests", "Lint & type-check", "TLA+ models"],
+		});
+		expect(v.code).toBe(EXIT_PENDING);
+		expect(v.out).toContain(
+			`Lint & type-check (cancelled, newer run ${NEWER})`,
+		);
+		expect(v.out).not.toContain("superseded run cancelled and not replaced");
+	});
+
+	it("rows of the cancelled run that would not fail do not hold the verdict", async () => {
+		// Recurrence guard: only a row that would fail or read cancelled is
+		// pending; the cancelled run's green rows stay green.
+		const checkRuns = structuredClone(fixture.checkRuns);
+		for (const c of checkRuns) {
+			if (c.name === "Unit tests" && c.check_suite.id === 101956758794)
+				c.conclusion = "success";
+		}
+		const v = await verdictRaw({
+			target: "4084",
+			checkRuns,
+			runs: structuredClone(fixture.workflowRuns),
+			required: ["Unit tests", "Lint & type-check", "TLA+ models"],
+		});
+		expect(v.code).toBe(EXIT_SUCCESS);
+	});
+
+	it("a cancelled run with no newer run stays red", async () => {
+		const v = await withRuns((runs) => {
+			runs.splice(runs.indexOf(runById(runs, NEWER)), 1);
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+		expect(v.out).toContain("Unit tests (failure)");
+	});
+
+	it("a newer run that completed red stays red", async () => {
+		const v = await withRuns((runs) => {
+			Object.assign(runById(runs, NEWER), {
+				status: "completed",
+				conclusion: "failure",
+			});
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+	});
+
+	it("a non-cancelled failure is never masked by an open newer run", async () => {
+		const v = await withRuns((runs) => {
+			runById(runs, CANCELLED).conclusion = "failure";
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+		expect(v.out).toContain("Unit tests (failure)");
+	});
+
+	it.each([
+		["a different workflow", { workflow_id: 1 }],
+		["a different event", { event: "workflow_dispatch" }],
+		["an older created_at", { created_at: "2026-10-07T14:00:00Z" }],
+	])("an open run of %s does not supersede it", async (_label, patch) => {
+		const v = await withRuns((runs) => {
+			Object.assign(runById(runs, NEWER), patch);
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+	});
+
+	it("runs without a workflow_id never supersede each other", async () => {
+		const v = await withRuns((runs) => {
+			for (const r of runs) delete r.workflow_id;
+		});
+		expect(v.code).toBe(EXIT_FAILURE);
+	});
+
+	it("a lone red required row still triggers the workflow-run read and reads pending", async () => {
+		// Recurrence guard: `Unit tests` is a required name, which the lazy read
+		// used to skip, so the superseded stamp could never reach it. Every other
+		// row of the cancelled run is dropped so no discovered row asks for the
+		// read.
+		const v = await verdictRaw({
+			target: "4084",
+			checkRuns: structuredClone(fixture.checkRuns).filter(
+				(c: { name: string; check_suite: { id: number } }) =>
+					c.check_suite.id !== 101956758794 || c.name === "Unit tests",
+			),
+			runs: structuredClone(fixture.workflowRuns),
+			required: ["Unit tests", "Lint & type-check", "TLA+ models"],
+		});
+		expect(v.calls.filter((c) => c.includes("/actions/runs"))).toHaveLength(1);
+		expect(v.code).toBe(EXIT_PENDING);
 	});
 });
 
