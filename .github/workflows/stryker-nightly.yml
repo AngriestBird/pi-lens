@@ -9,10 +9,13 @@ name: Stryker nightly (test-adequacy report)
 # and gates nothing: it is schedule and manual only, so no PR check exists.
 #
 # The last-report sha lives in the tracking issue's body
-# (scripts/stryker-nightly.mjs). The issue permission this job already needs
-# for the upsert is the only one the state needs; an artifact would add
-# `actions: read` and expire, a committed file would add `contents: write`
-# against a protected master.
+# (scripts/stryker-nightly.mjs). Reading it needs `issues: read`; a committed
+# file would add `contents: write` against a protected master.
+#
+# #4077: only `publish-issue` writes (`issues: write`), and only on the
+# schedule or master. `prepare` and `publish` hold read scopes, so a dispatch on
+# any ref still runs the whole pipeline up to the issue edit; `publish` hands the
+# finished body to the writer as an artifact.
 
 on:
   schedule:
@@ -36,11 +39,11 @@ jobs:
       run: ${{ steps.window.outputs.run }}
       window: ${{ steps.window.outputs.window }}
     timeout-minutes: 90
-    # Same grant as the idle-eviction drift step in tool-smoke.yml (`issues:
-    # write`) plus the checkout read; nothing wider.
+    # The window step only LISTS the tracking issue (`gh issue list`), so the
+    # grant is the checkout read plus `issues: read`; nothing wider.
     permissions:
       contents: read
-      issues: write
+      issues: read
     env:
       TRACKING_TITLE: "nightly: Stryker test-adequacy report (runtime diff since the last report)"
       GH_TOKEN: ${{ github.token }}
@@ -172,14 +175,13 @@ jobs:
           exit 1
 
   publish:
-    name: Publish combined nightly report
+    name: Build combined nightly report
     needs: [prepare, mutate]
     if: always() && needs.prepare.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
-      issues: write
     env:
       TRACKING_TITLE: "nightly: Stryker test-adequacy report (runtime diff since the last report)"
       GH_TOKEN: ${{ github.token }}
@@ -214,8 +216,42 @@ jobs:
           node scripts/stryker-nightly.mjs combine --shards-dir "$RUNNER_TEMP/mutation-shards" --expected-shards 0,1 --window "$WINDOW" --out "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json"
           STATUS=$(node -e 'const x=require(process.env.RUNNER_TEMP+"/combined-outcomes.json"); process.stdout.write(x.status)')
           node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json" --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-body
+          path: ${{ runner.temp }}/stryker-nightly-body.md
+          if-no-files-found: error
+          overwrite: true
+
+  # The only writer (#4077). `needs.publish.result == 'success'` is the old
+  # step's implicit success: the combine step must have produced the body.
+  # `always()` is for the same reason `publish` uses it: a failed shard must not
+  # skip the report that says so.
+  publish-issue:
+    name: Update the tracking issue
+    needs: publish
+    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    # One `gh` label call and one upsert; a fraction of publish's 90.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TRACKING_TITLE: "nightly: Stryker test-adequacy report (runtime diff since the last report)"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: nightly-body
+          path: ${{ runner.temp }}
       - name: Update the single tracking issue
-        if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
           gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true

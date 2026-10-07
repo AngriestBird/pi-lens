@@ -72,6 +72,7 @@
 		"scripts/ci-test-diff.test.ts": 2,
 		"scripts/ci-verdict.test.ts": 4,
 		"scripts/classify-ci-failure-cli.test.ts": 2,
+		"scripts/dispatch-safety.test.ts": 2,
 		"scripts/download-grammars.test.ts": 2,
 		"scripts/download-test-history-artifacts.test.ts": 2,
 		"scripts/git-fixture-env.test.ts": 5,
