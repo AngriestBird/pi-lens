@@ -195,7 +195,7 @@ jobs:
   # failure all fail this job.
   tla-models:
     name: TLA+ models
-    needs: test
+    needs: tla-shards
     if: always()
     runs-on: ubuntu-latest
     # Runs one `echo` and a comparison; 10 min is the repo's floor (refs #3123).

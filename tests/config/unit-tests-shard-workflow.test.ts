@@ -67,6 +67,25 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		expect(matrixJobs[0][1].strategy?.matrix?.shard?.length).toBeGreaterThan(1);
 	});
 
+	// Recurrence: #4039 round 2 left `tla-models` with `needs: test` while its
+	// env still read `needs.tla-shards.result`; actionlint caught it on CI only
+	// (run 37599120579). Any job reading `needs.<id>.result` must need <id>.
+	it("every job that reads needs.<id>.result lists <id> in needs", () => {
+		const jobs = CI();
+		const broken: string[] = [];
+		for (const [id, job] of Object.entries(jobs)) {
+			const text = JSON.stringify({
+				env: job.env,
+				if: job.if,
+				steps: (job as { steps?: unknown }).steps,
+			});
+			for (const m of text.matchAll(/needs\.([A-Za-z0-9_-]+)\.result/g))
+				if (!asList(job.needs).includes(m[1]))
+					broken.push(`${id} reads needs.${m[1]} without needing it`);
+		}
+		expect(broken).toEqual([]);
+	});
+
 	// Recurrence: a required check that is SKIPPED (its `needs` failed) counts
 	// as passing in branch protection. An aggregate without `if: always()`
 	// would turn a red shard into a green `Unit tests`.
