@@ -3088,6 +3088,28 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		runtime.session.sessionManager.getSessionId();
 
 	/**
+	 * An edit batch with one stale `oldText`: pi-lens applies the edit that
+	 * still matches and runs the post-edit pipeline itself, from tool_call.
+	 */
+	async function partialEdit(runtime: AgentSessionRuntime, file: string) {
+		const c = conversation(runtime);
+		c.user(`edit ${path.basename(file)}`);
+		await c.read(`call_read_${++edits}`, file);
+		const id = `call_partial_${++edits}`;
+		const args = {
+			path: file,
+			edits: [
+				{ oldText: "const a = 1;", newText: "const a = 2;" },
+				{ oldText: "const gone = 0;", newText: "const gone = 1;" },
+			],
+		};
+		await runtime.session.agent.beforeToolCall?.({
+			toolCall: { type: "toolCall", id, name: "edit", arguments: args },
+			args,
+		} as never);
+	}
+
+	/**
 	 * Which session's warnings a context shows: `cq:<rule>` from the
 	 * code-quality advisory, `aw:<file>` from the actionable one.
 	 */
@@ -3159,6 +3181,28 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			subagent: shown(subagentSees),
 			primary: shown(primarySees),
 		}).toEqual({ subagent: SUBAGENT, primary: PRIMARY });
+	});
+
+	it("delivers a subagent's warnings from an edit pi-lens applied in part at its own turn end", async () => {
+		const seen = coordinators();
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const coordinator = seen[0]!;
+		const subagent = await startSubagent();
+		const sub = path.join(cwd, "sub.ts");
+		fs.writeFileSync(sub, "const a = 1;\n");
+		await startTurn(primary);
+		await startTurn(subagent);
+
+		await partialEdit(subagent, sub);
+		const analysed = [...pipelineDouble.analysed];
+		const primaryHolds = held(coordinator);
+		await endTurn(subagent);
+
+		expect({
+			analysed,
+			primaryHolds,
+			subagentSees: shown(await contextText(subagent)),
+		}).toEqual({ analysed: [sub], primaryHolds: [], subagentSees: SUBAGENT });
 	});
 
 	it("keeps the primary's warnings out of a subagent's turn end", async () => {
