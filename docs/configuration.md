@@ -24,7 +24,8 @@ everything LSP-related lives under an `lsp` namespace inside them.
         "name": "My Custom LSP",
         "extensions": [".myext"],
         "command": "my-lsp-server",
-        "args": ["--stdio"]
+        "args": ["--stdio"],
+        "covers": ["shellcheck"]
       }
     },
     "serverOverrides": {
@@ -44,6 +45,24 @@ names include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
 `latency`, `project_scan`, and `rebuild`. The activation loader and MCP
 lifecycle tools `session_start`, `turn_end`, and `session_end` remain enabled
 because their host protocols require them.
+
+### `lsp.servers.<id>.covers` — declaring which runners a custom server subsumes
+
+A custom server entry accepts an optional `covers` array naming dispatch
+runner ids the server subsumes: while that server is a file's selected primary
+language server, the runners it names defer to the warm lane instead of also
+running as CLI scans. `covers: ["shellcheck"]` on a shell LSP, for example,
+makes the ShellCheck runner report a skip (`covered-by-primary`) for the files
+that server covers instead of double-reporting the same findings.
+
+- Values are runner ids (`shellcheck`, `shfmt`, `taplo`, … — the dispatch
+  registry's ids). A member pi-lens does not recognize is dropped with a
+  `PILENS_CFG_0005` warning naming the entry; the server itself still
+  registers and runs its language-server lane.
+- An empty `covers` array claims nothing and is recorded as configured.
+- Across files, the nearest tier that sets the field supplies the whole
+  array — a project value replaces the user-level value for that server;
+  fields are never united across tiers.
 
 **Some settings are global-only.** A handful of switches — `lsp.enabled`
 (`--no-lsp`), `tests.enabled`, `delta.enabled` and the other session-wide

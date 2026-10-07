@@ -485,6 +485,27 @@ export interface LSPServerInfo {
 	idleEviction: "transparent" | "resident" | "unmeasured";
 	/** True for entries supplied through `lsp.servers.*`, not the built-in table. */
 	custom?: boolean;
+	/**
+	 * The server's own binary command token (args are a separate field, so
+	 * the token IS what an availability probe would ask for). Present on
+	 * custom rows — projected from `CustomServerConfig.command` at
+	 * registration — and read by the runner-coverage seam as the availability
+	 * gate for that row's config-declared `covers` claim: a custom command
+	 * the probe cannot find fails the claim closed and the CLI runner runs.
+	 * Builtin rows leave this undefined; their lane availability speaks
+	 * through {@link BUILTIN_SERVER_RUNNER_COVERS}'s gate commands.
+	 */
+	command?: string;
+	/**
+	 * Dispatch runner ids this server subsumes (`#233` dormant-when-LSP-covers).
+	 * Config-supplied for custom servers (`lsp.servers.<id>.covers`, the stacked
+	 * PR); BUILTIN rows keep this undefined and declare the same fact through
+	 * {@link BUILTIN_SERVER_RUNNER_COVERS}, which also carries the availability
+	 * gates the runner must pass before honouring the fact. Undefined never
+	 * means "covers nothing" — only the facts table may claim a builtin's reach,
+	 * so a covers entry cannot be invented per row without review.
+	 */
+	covers?: readonly string[];
 	root: RootFunction;
 	/** Marker table used by the shared LSP cwd/root seam. */
 	rootMarkers?: readonly string[];
@@ -3647,7 +3668,13 @@ export const BashServer: LSPServerInfo = {
 	id: "bash",
 	idleEviction: "transparent",
 	name: "Bash Language Server",
-	extensions: [".bash", ".sh", ".zsh"],
+	// #3968: narrowed from [".bash", ".sh", ".zsh"] — bash-language-server does
+	// not support zsh (its own analyzer refuses the dialect), and its ≥5.7.0
+	// lint flow even feeds shebang'd zsh to its embedded shellcheck, importing
+	// SC1071-class noise through the LSP lane. `shuck` owns `.zsh` when
+	// installed; when it is not, the shellcheck runner's dialect gate keeps
+	// zsh quiet instead of falling back to a zsh-illiterate analyzer.
+	extensions: [".bash", ".sh"],
 	root: FileDirRoot,
 	// #2194 bounded the installer's own verification at 20s; the dispatch
 	// touch's client-wait floor stayed at the shared 5s default, so a cold
@@ -3674,6 +3701,51 @@ export const BashServer: LSPServerInfo = {
 		);
 	},
 };
+
+/**
+ * Builtin runner-cover facts live in `./server-covers.js` — the leaf the
+ * dispatch seam (`clients/dispatch/runners/utils/runner-helpers.ts`) can
+ * import without pulling this registry in (a registry import closes a cycle
+ * through the installer's graph; `no-client-cycles`, #2125). Re-exported so
+ * the {@link LSPServerInfo} consumers import covers facts from the registry
+ * module like the rest of its surface. See {@link LSPServerInfo.covers}.
+ */
+export type { ServerRunnerCoverFact } from "./server-covers.js";
+export { BUILTIN_SERVER_RUNNER_COVERS } from "./server-covers.js";
+
+/**
+ * Shuck — zsh-aware shell language server (#3968). The builtin primary for
+ * `.zsh`: bash-language-server refuses the dialect outright, and its ≥5.7.0
+ * lint flow even feeds shebang'd zsh to its embedded shellcheck, so the
+ * `.zsh` extension claim moved here from {@link BashServer} (settled with the
+ * maintainer: bash ≠ zsh, and the incumbent cannot parse it).
+ *
+ * Provenance pinned per defect shape 16 to `ewhauser/shuck@21e04198463a54be
+ * 70aa7826acc4dcdbe7996b2b` (v0.2.3, MIT): `shuck server` is a plain stdio
+ * LSP; `textDocumentSync` declares incremental change with `openClose` and
+ * NO `save` capability (a didSave never follows — the capability check in
+ * the shared sync machinery keeps that true); diagnostics carry source
+ * `"shuck"` and native `C/S/P/X/K` codes; `# shellcheck disable=SC…`
+ * directives in owned files are honored by the server itself (suppression
+ * spec 006 maps SC codes through). The builtin covers fact — shuck subsumes
+ * the `shellcheck` runner's lint — lives in the covers-fact leaf
+ * (`clients/lsp/server-covers.ts`), not on the row, so the availability
+ * gates can travel with it without giving the dispatch seam a reason to
+ * import this registry (cycle boundary).
+ *
+ * No managed install and no `shuck check` CLI runner in this work:
+ * distribution is brew/pip/cargo/npm-wasm/release binaries, and the #233
+ * pair between a future shuck runner and this LSP is its own round.
+ */
+export const ShuckServer: LSPServerInfo = createInteractiveServer({
+	id: "shuck",
+	name: "Shuck",
+	extensions: [".zsh"],
+	root: FileDirRoot,
+	language: "shell",
+	command: "shuck",
+	args: ["server"],
+});
 
 export const FishServer: LSPServerInfo = {
 	id: "fish",
@@ -4413,6 +4485,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	TerraformServer,
 	NixServer,
 	BashServer,
+	ShuckServer,
 	FishServer,
 	CMakeServer,
 	DockerServer,

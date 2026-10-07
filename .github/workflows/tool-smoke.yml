@@ -347,6 +347,36 @@ jobs:
             node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --clean --close-when-clean
           fi
 
+      # #3989: act on the measurement's `proposal` rows. Advances the per-server
+      # consecutive-night memory in docs/lsp-capability-matrix.md's refresh-state
+      # block (so the docs-refresh PR below carries it, and the seed step above
+      # restores it each night) and, for a server that meets the promotion rule
+      # (scripts/lib/lsp-idle-eviction-promote.mjs: two consecutive eligible
+      # nights, idle RSS floor, cold-start cap, hold list), flips its
+      # `idleEviction: "unmeasured"` line and moves its id in the registry
+      # test's class pin (#3952) in the working tree. Only the
+      # promotion PR step below commits that edit; the docs-refresh PR's
+      # add-paths never include it. A missing summary (measurement crashed or
+      # timed out) clears the memory and promotes nothing. Scoped like the PR
+      # steps: a branch dispatch must not edit sources or open PRs.
+      - name: Promote idle-eviction candidates (night memory + working-tree edit)
+        id: idle_promote
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          set -uo pipefail
+          # F4 (#3989): the servers of promotion PRs closed unmerged, read from the
+          # `idle-evict-set` marker in their bodies, so a PR a maintainer closed is
+          # not re-created nightly. `--state closed` also lists MERGED PRs, so the
+          # filter keeps only unmerged ones. `--app github-actions` keeps the lookup to PRs
+          # this workflow's own token opened (`--head` cannot take owner:branch, so
+          # a fork PR with the same branch name would otherwise match). The job's GITHUB_TOKEN already holds
+          # `pull-requests: write`; this only reads. A failed listing leaves no
+          # file, which the script reads as "unknown" and promotes nothing.
+          gh pr list --app github-actions --head bot/lsp-idle-evict-promote --state closed --limit 30 --json body,mergedAt --jq '.[] | select(.mergedAt == null) | .body' > "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt" || rm -f "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
+          node scripts/promote-lsp-idle-eviction.mjs --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json" --body "$RUNNER_TEMP/lsp-idle-eviction-promote.md" --rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
+
       - name: Check LSP docs refresh diff
         id: docs_diff
         run: node scripts/check-generated-docs-diff.mjs
@@ -388,6 +418,28 @@ jobs:
             This PR is created with the repository `GITHUB_TOKEN`, which cannot
             trigger workflow runs. After the bot opens or updates it, a
             maintainer must close and reopen the PR to arm CI.
+          delete-branch: false
+
+      # #3989: ONE draft bot PR (own branch, never `bot/lsp-docs-refresh`, whose
+      # body promises no policy change) carrying the promotion edit. Same token
+      # and job permissions as the docs-refresh PR above; nothing widened. Never
+      # auto-merged: the bot cannot arm CI, and a maintainer reviews the table.
+      - name: Open/update idle-eviction promotion PR
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && steps.idle_promote.outputs.promoted == 'true'
+        continue-on-error: true
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: bot/lsp-idle-evict-promote
+          base: master
+          draft: true
+          add-paths: |
+            clients/lsp/server.ts
+            tests/config/lsp-idle-eviction-reasons.json
+            tests/config/lsp-idle-eviction-registry.test.ts
+          commit-message: 'perf(lsp): promote measured idle-eviction servers (refs #3989)'
+          title: 'perf(lsp): promote measured idle-eviction servers (refs #3989)'
+          body-path: ${{ runner.temp }}/lsp-idle-eviction-promote.md
           delete-branch: false
 
       - name: Format layer (select + reformat through formatter pipeline)

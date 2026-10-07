@@ -378,6 +378,13 @@ the surface they bite; each block loads only when its trigger applies.
     range. Pids are enforced by `tests/support/kill-guard.ts`; screen the
     other identifier kinds by hand.
 
+59. **Generated edit with unlisted consumers:** a bot edit to a value that tests
+    pin must leave green every test that names the edited ids. Screen: apply
+    the generator's real output to the real tree (all-eligible case included),
+    build, and run every test that mentions the field or the registry; this
+    sweep is manual (#3994 F1, r3). Tests take "an unmeasured server" from a
+    class the generator never touches, never a hard-coded id.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -532,7 +539,13 @@ the surface they bite; each block loads only when its trigger applies.
   server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
   registry server's eviction cost and respawn safety into
   `docs/lsp-idle-eviction.md` and changes no policy; a declaration change is a
-  follow-up that cites its row. `tests/config/lsp-idle-eviction-measurement.test.ts`
+  follow-up that cites its row, or the nightly's draft promotion PR
+  (`bot/lsp-idle-evict-promote`, #3989: two consecutive eligible nights, idle
+  RSS floor, cold-start cap, hold list in
+  `scripts/lib/lsp-idle-eviction-promote.mjs`, derived from the registry test's
+  `HOLD_INDEXER_IDS` class; the PR also moves the id into
+  the registry test's `TRANSPARENT_IDS`; night memory in the matrix doc's
+  refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses

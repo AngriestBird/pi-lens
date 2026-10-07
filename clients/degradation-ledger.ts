@@ -567,6 +567,17 @@ export type DegradationKind =
 	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
 	| "lsp-client-skipped-unavailable-command"
 	/**
+	 * #3968: a `lsp.servers.<id>.covers` claim was accepted WITHOUT runner-id
+	 * validation, because no runner registry had populated this process yet
+	 * (the first session's `loadLSPConfig` races the fire-and-forget dispatch
+	 * warm-up — the fail-open arm `clients/dispatch/known-runner-ids.ts`
+	 * names). Not an acceptance of unknown data without note: the claim is
+	 * recorded as unvalidated, the next session's load validates it, and the
+	 * record names exactly which claim it was. Subject `<file>\0<covers
+	 * pointer>`; once per session.
+	 */
+	| "lsp-covers-unvalidated"
+	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
 	 * memoizes a module record that threw while evaluating, so re-importing
