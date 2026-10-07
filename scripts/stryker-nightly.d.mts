@@ -15,24 +15,37 @@ export declare function pickBase(options: {
 	fallbackBase: () => string;
 }): { base: string; source: (typeof SOURCES)[number] };
 export declare const MAX_PENDING: number;
+export declare const MAX_BASE_AGE_DAYS: number;
+export type QueueEntry = { file: string; base: string | null };
+export type QueueOracle = {
+	isAncestor: (sha: string) => boolean;
+	floor: string | null;
+	isOlderThanFloor: (sha: string) => boolean;
+};
+export type QueueRead = {
+	entries: QueueEntry[];
+	rebased: number;
+	unknownBase: number;
+	floor: string | null;
+};
 export declare function parsePending(
 	issues: Array<{ title: string; body?: string }>,
 	title: string,
-): { pending: string[]; pendingBase: string | null };
+	git?: QueueOracle,
+): QueueRead;
+export declare function gitQueueOracle(cwd: string): QueueOracle;
 export declare function coverageGaps(report: unknown): {
 	capped: string[];
 	unfinished: string[];
 };
 export declare function nextQueue(options: {
-	oldPending: string[];
-	oldPendingBase: string | null;
+	oldEntries: QueueEntry[];
 	base: string;
 	status: string;
 	report?: unknown;
 	exists: (file: string) => boolean;
 }): {
-	pending: string[];
-	pendingBase: string | null;
+	entries: QueueEntry[];
 	dropped: number;
 	completed: boolean;
 };
@@ -43,8 +56,7 @@ export declare function buildNightlyBody(options: {
 	status: "ok" | "failed";
 	report?: unknown;
 	runUrl?: string;
-	oldPending?: string[];
-	oldPendingBase?: string | null;
+	previous?: QueueRead;
 	exists?: (file: string) => boolean;
 }): string;
 export declare function main(
@@ -54,7 +66,6 @@ export declare function main(
 	| {
 			base: string;
 			source: (typeof SOURCES)[number];
-			pending: string[];
-			pendingBase: string | null;
+			queue: QueueRead;
 	  }
 	| string;

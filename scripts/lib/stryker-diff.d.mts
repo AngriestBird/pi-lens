@@ -142,9 +142,15 @@ export declare function selectMutationFiles(options: {
 }): { selected: string[]; skipped: string[] };
 export declare function collectChangedRanges(options: {
 	files: string[];
-	pending?: Iterable<string>;
 	baseRef: string;
-	pendingBase?: string | null;
+	baseOf?: Map<string, string>;
 	diff: (base: string, files: string[]) => Map<string, Array<[number, number]>>;
 }): Map<string, Array<[number, number]>>;
 export declare const isQueueablePath: (file: unknown) => boolean;
+export declare function parseQueueEntry(
+	spelling: unknown,
+): { file: string; base: string | null } | null;
+export declare const formatQueueEntry: (entry: {
+	file: string;
+	base: string | null;
+}) => string;

@@ -17,10 +17,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
-import { selectMutationFiles } from "../../scripts/lib/stryker-diff.mjs";
+import {
+	collectChangedRanges,
+	selectMutationFiles,
+} from "../../scripts/lib/stryker-diff.mjs";
 import {
 	buildNightlyBody,
 	coverageGaps,
+	MAX_BASE_AGE_DAYS,
 	MAX_PENDING,
 	nextQueue,
 	parsePending,
@@ -34,7 +38,17 @@ const TITLE =
 	"nightly: Stryker test-adequacy report (runtime diff since the last report)";
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
+const SHA_C = "c".repeat(40);
 const issue = (body: string, title = TITLE) => ({ title, body });
+// A queue as `parsePending` reads it: `[file, base]` pairs, nothing re-based.
+const queueOf = (pairs: Array<[string, string | null]>) => ({
+	entries: pairs.map(([file, base]) => ({ file, base })),
+	rebased: 0,
+	unknownBase: 0,
+	floor: null,
+});
+const filesOf = (body: string) =>
+	parsePending([issue(body)], TITLE).entries.map((entry) => entry.file);
 
 describe("parseLastReportSha", () => {
 	it("reads the marker from the tracking issue's body", () => {
@@ -198,7 +212,7 @@ describe("buildNightlyBody", () => {
 		});
 		expect(coverageGaps(covered({}))).toEqual({ capped: [], unfinished: [] });
 		expect(body).toContain("the whole window was evaluated");
-		expect(parsePending([issue(body)], TITLE).pending).toEqual([]);
+		expect(filesOf(body)).toEqual([]);
 	});
 
 	describe("the carry-over queue", () => {
@@ -208,8 +222,7 @@ describe("buildNightlyBody", () => {
 
 		it("queues the files skipped over the cap, in order, and re-queues unfinished ones at the back", () => {
 			const result = night({
-				oldPending: ["clients/old.ts"],
-				oldPendingBase: SHA_A,
+				oldEntries: [{ file: "clients/old.ts", base: SHA_A }],
 				base: SHA_B,
 				status: "ok",
 				report: covered({
@@ -218,61 +231,72 @@ describe("buildNightlyBody", () => {
 				}),
 				exists,
 			});
-			expect(result.pending).toEqual([
+			expect(result.entries.map((entry) => entry.file)).toEqual([
 				"clients/old.ts",
 				"clients/c.ts",
 				"clients/d.ts",
 				"clients/a.ts",
 				"clients/b.ts",
 			]);
-			expect(result.pendingBase).toBe(SHA_A);
 		});
 
 		it("takes a queued file off the queue once it was fully evaluated", () => {
 			const result = night({
-				oldPending: ["clients/a.ts", "clients/z.ts"],
-				oldPendingBase: SHA_A,
+				oldEntries: [
+					{ file: "clients/a.ts", base: SHA_A },
+					{ file: "clients/z.ts", base: SHA_A },
+				],
 				base: SHA_B,
 				status: "ok",
 				report: covered({ filesSelected: ["clients/a.ts"] }),
 				exists,
 			});
-			expect(result.pending).toEqual(["clients/z.ts"]);
-			expect(result.pendingBase).toBe(SHA_A);
+			expect(result.entries).toEqual([{ file: "clients/z.ts", base: SHA_A }]);
 		});
 
-		it("clears the queue base when the queue empties, and starts it at this window's base for new skips", () => {
+		// Recurrence (#4005 r4, N1): one shared queue base, pinned to the oldest
+		// contributing night while any old entry stayed, so under a sustained
+		// overload every carried file (yesterday's too) was re-read from night 0.
+		// The write-side rule: an entry keeps its own base; a file new to the
+		// queue, or one read without a base, gets this night's window base.
+		it("keeps each entry's own base across re-queues and gives a new skip this window's base", () => {
+			const result = night({
+				oldEntries: [
+					{ file: "clients/waiting.ts", base: SHA_A },
+					{ file: "clients/no-base.ts", base: null },
+					{ file: "clients/a.ts", base: SHA_C },
+				],
+				base: SHA_B,
+				status: "ok",
+				report: covered({
+					filesSkippedOverCap: ["clients/new.ts"],
+					rangesSampled: true,
+				}),
+				exists,
+			});
+			expect(result.entries).toEqual([
+				{ file: "clients/waiting.ts", base: SHA_A },
+				{ file: "clients/no-base.ts", base: SHA_B },
+				{ file: "clients/new.ts", base: SHA_B },
+				{ file: "clients/a.ts", base: SHA_C },
+				{ file: "clients/b.ts", base: SHA_B },
+			]);
 			expect(
 				night({
-					oldPending: ["clients/a.ts"],
-					oldPendingBase: SHA_A,
+					oldEntries: [{ file: "clients/a.ts", base: SHA_A }],
 					base: SHA_B,
 					status: "ok",
 					report: covered({ filesSelected: ["clients/a.ts"] }),
 					exists,
-				}),
-			).toMatchObject({ pending: [], pendingBase: null });
-			expect(
-				night({
-					oldPending: ["clients/a.ts"],
-					oldPendingBase: SHA_A,
-					base: SHA_B,
-					status: "ok",
-					report: covered({
-						filesSelected: ["clients/a.ts"],
-						filesSkippedOverCap: ["clients/n.ts"],
-					}),
-					exists,
-				}),
-			).toMatchObject({ pending: ["clients/n.ts"], pendingBase: SHA_B });
+				}).entries,
+			).toEqual([]);
 		});
 
 		// Recurrence: a file nobody can evaluate (no covering test, no source map)
 		// re-queued forever by a sampled night.
 		it("does not re-queue a taken file that could never be evaluated", () => {
 			const result = night({
-				oldPending: [],
-				oldPendingBase: null,
+				oldEntries: [],
 				base: SHA_B,
 				status: "ok",
 				report: covered({
@@ -281,7 +305,9 @@ describe("buildNightlyBody", () => {
 				}),
 				exists,
 			});
-			expect(result.pending).toEqual(["clients/b.ts"]);
+			expect(result.entries.map((entry) => entry.file)).toEqual([
+				"clients/b.ts",
+			]);
 		});
 
 		// Recurrence (#4005 r3): a failed night must leave both the marker and
@@ -296,14 +322,12 @@ describe("buildNightlyBody", () => {
 					...meta,
 					status,
 					report,
-					oldPending: ["clients/q.ts"],
-					oldPendingBase: SHA_A,
+					previous: queueOf([["clients/q.ts", SHA_A]]),
 				});
 				expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
-				expect(parsePending([issue(body)], TITLE)).toEqual({
-					pending: ["clients/q.ts"],
-					pendingBase: SHA_A,
-				});
+				expect(parsePending([issue(body)], TITLE).entries).toEqual([
+					{ file: "clients/q.ts", base: SHA_A },
+				]);
 				expect(body).toContain("**Status:** FAILED");
 			}
 		});
@@ -320,10 +344,9 @@ describe("buildNightlyBody", () => {
 				...meta,
 				status: "ok",
 				report: covered({ filesSkippedOverCap: skipped, filesSelected: [] }),
-				oldPending: old,
-				oldPendingBase: SHA_A,
+				previous: queueOf(old.map((file) => [file, SHA_A])),
 			});
-			const { pending } = parsePending([issue(body)], TITLE);
+			const pending = filesOf(body);
 			expect(MAX_PENDING).toBe(200);
 			expect(pending).toHaveLength(200);
 			expect(pending[0]).toBe("clients/old-20.ts");
@@ -336,14 +359,18 @@ describe("buildNightlyBody", () => {
 
 		it("drops a file that no longer exists, silently", () => {
 			const result = night({
-				oldPending: ["clients/gone.ts", "clients/kept.ts"],
-				oldPendingBase: SHA_A,
+				oldEntries: [
+					{ file: "clients/gone.ts", base: SHA_A },
+					{ file: "clients/kept.ts", base: SHA_A },
+				],
 				base: SHA_B,
 				status: "ok",
 				report: covered({ filesSelected: [] }),
 				exists: (file) => file !== "clients/gone.ts",
 			});
-			expect(result.pending).toEqual(["clients/kept.ts"]);
+			expect(result.entries).toEqual([
+				{ file: "clients/kept.ts", base: SHA_A },
+			]);
 			expect(result.dropped).toBe(0);
 		});
 	});
@@ -352,14 +379,9 @@ describe("buildNightlyBody", () => {
 	// edit, and its paths reach `git diff` and Stryker's --mutate.
 	describe("validating the queue on read", () => {
 		const pendingOf = (entries: string) =>
-			parsePending(
-				[
-					issue(
-						`${markerOf(SHA_A)}\n<!-- stryker-nightly:pending=${entries} -->`,
-					),
-				],
-				TITLE,
-			).pending;
+			filesOf(
+				`${markerOf(SHA_A)}\n<!-- stryker-nightly:pending=${entries} -->`,
+			);
 
 		it.each([
 			["a parent-directory escape", "clients/../../etc/passwd.ts"],
@@ -372,6 +394,10 @@ describe("buildNightlyBody", () => {
 			["an option-looking path", "--output=x.ts"],
 			["a shell-looking path", "clients/a;rm.ts"],
 			["a dot segment", "clients/./a.ts"],
+			["an option-looking base", "clients/a.ts@--output"],
+			["a short base", "clients/a.ts@abc123"],
+			["an uppercase base", `clients/a.ts@${"A".repeat(40)}`],
+			["two bases", `clients/a.ts@${SHA_A}@${SHA_A}`],
 		])("ignores %s", (_label, entry) => {
 			expect(pendingOf(`clients/ok.ts,${entry},tools/also-ok.ts`)).toEqual([
 				"clients/ok.ts",
@@ -419,7 +445,7 @@ describe("buildNightlyBody", () => {
 			});
 			expect(body).toContain("<!-- stryker-nightly:pending= -->");
 			expect(body).toContain("stryker-nightly:pending=clients/evil.ts");
-			expect(parsePending([issue(body)], TITLE).pending).toEqual([]);
+			expect(filesOf(body)).toEqual([]);
 		});
 
 		it("ignores a queue edit on an issue that is not the tracking issue", () => {
@@ -427,8 +453,92 @@ describe("buildNightlyBody", () => {
 				parsePending(
 					[issue("<!-- stryker-nightly:pending=clients/a.ts -->", "other")],
 					TITLE,
-				).pending,
+				).entries,
 			).toEqual([]);
+		});
+
+		// Recurrence (#4005 r4): a per-entry base comes from an editable body
+		// and reaches `git diff <base>...HEAD`. A base git does not know as an
+		// ancestor of HEAD (a rewritten history, a hand edit) drops the base,
+		// never the file, and is counted; so is an entry with no base.
+		it("keeps the file but drops a base git does not know, and counts both kinds", () => {
+			const read = parsePending(
+				[
+					issue(
+						`<!-- stryker-nightly:pending=clients/a.ts@${SHA_A},clients/b.ts@${SHA_C},clients/c.ts -->`,
+					),
+				],
+				TITLE,
+				{
+					isAncestor: (sha) => sha === SHA_A,
+					floor: null,
+					isOlderThanFloor: () => false,
+				},
+			);
+			expect(read).toEqual({
+				entries: [
+					{ file: "clients/a.ts", base: SHA_A },
+					{ file: "clients/b.ts", base: null },
+					{ file: "clients/c.ts", base: null },
+				],
+				rebased: 0,
+				unknownBase: 2,
+				floor: null,
+			});
+			const body = buildNightlyBody({
+				...meta,
+				status: "ok",
+				report: covered({ filesSelected: [] }),
+				previous: read,
+			});
+			expect(body).toContain(
+				"2 queued file(s) had no base git knows as an ancestor and were read against the window base",
+			);
+			// Written back with this night's window base: read once without one.
+			expect(parsePending([issue(body)], TITLE).entries).toEqual([
+				{ file: "clients/a.ts", base: SHA_A },
+				{ file: "clients/b.ts", base: SHA_A },
+				{ file: "clients/c.ts", base: SHA_A },
+			]);
+		});
+
+		// Recurrence (#4005 r4): a re-queued (sampled) file cycling with its
+		// base growing older every night. Past MAX_BASE_AGE_DAYS the base is
+		// moved to the floor and the body says how many lost their history.
+		it("re-bases an entry older than the floor onto it and says so; one at the floor is not counted", () => {
+			const read = parsePending(
+				[
+					issue(
+						`<!-- stryker-nightly:pending=clients/old.ts@${SHA_A},clients/at.ts@${SHA_B},clients/new.ts@${SHA_C} -->`,
+					),
+				],
+				TITLE,
+				{
+					isAncestor: () => true,
+					floor: SHA_B,
+					isOlderThanFloor: (sha) => sha !== SHA_C,
+				},
+			);
+			expect(MAX_BASE_AGE_DAYS).toBe(14);
+			expect(read).toEqual({
+				entries: [
+					{ file: "clients/old.ts", base: SHA_B },
+					{ file: "clients/at.ts", base: SHA_B },
+					{ file: "clients/new.ts", base: SHA_C },
+				],
+				rebased: 1,
+				unknownBase: 0,
+				floor: SHA_B,
+			});
+			const body = buildNightlyBody({
+				...meta,
+				status: "failed",
+				previous: read,
+			});
+			expect(body).toContain(
+				`1 queued file(s) had a base older than 14 days and were re-based onto \`${SHA_B.slice(0, 12)}\`, so their earlier changes are not evaluated`,
+			);
+			expect(parsePending([issue(body)], TITLE).entries).toEqual(read.entries);
 		});
 	});
 
@@ -476,10 +586,8 @@ describe("buildNightlyBody", () => {
 			let base = SHA_A;
 			for (let night = 0; night < 5 + 14; night++) {
 				const intake = night < 5 ? all.slice(night * 30, night * 30 + 30) : [];
-				const { pending, pendingBase } = parsePending(
-					[issue(issueBody)],
-					TITLE,
-				);
+				const previous = parsePending([issue(issueBody)], TITLE);
+				const pending = previous.entries.map((entry) => entry.file);
 				const picked = selectMutationFiles({
 					pending,
 					windowFiles: [...pending, ...intake],
@@ -497,13 +605,124 @@ describe("buildNightlyBody", () => {
 						filesSelected: picked.selected,
 						filesSkippedOverCap: picked.skipped,
 					}),
-					oldPending: pending,
-					oldPendingBase: pendingBase,
+					previous,
 				});
 				base = SHA_B;
 			}
 			expect(all.filter((file) => !evaluated.has(file))).toEqual([]);
-			expect(parsePending([issue(issueBody)], TITLE).pending).toEqual([]);
+			expect(filesOf(issueBody)).toEqual([]);
+		});
+
+		// Recurrence (#4005 r4, N1): under a sustained overload the round-3 shared
+		// queue base stayed at the first overloaded night, so carried files were
+		// re-read against an ever older base, their growing diffs pushed nights
+		// into sampling, and sampling re-queues every taken file.
+		// Model: night n's HEAD is sha(n), its window base sha(n - 1), one night
+		// standing for one day (the floor is sha(n - 14)). A pool of 150 runtime
+		// files, 30 changed a night in rotation (5 to 15 lines a change), so a
+		// file is re-touched every fifth night: 30 a night against a 12-file cap.
+		// A night samples when the taken files' lines exceed `budget`, each
+		// file's lines counted since the base the real collectChangedRanges split
+		// reads it against. The queue is read, selected and written by the real
+		// parsePending, selectMutationFiles and buildNightlyBody.
+		const overload = (budget: number) => {
+			const NIGHTS = 60;
+			const sha = (night: number) => (night + 2).toString(16).padStart(40, "0");
+			const nightOf = (value: string) => Number.parseInt(value, 16) - 2;
+			const changedOn = (night: number) =>
+				Array.from({ length: 30 }, (_, j) => (night * 30 + j) % 150);
+			const nameOf = (i: number) => `clients/pool-${i}.ts`;
+			const linesSince = (file: string, from: string, head: number) => {
+				const i = Number(file.match(/pool-(\d+)\.ts$/)?.[1]);
+				let total = 0;
+				for (let k = nightOf(from) + 1; k <= head; k++)
+					if (changedOn(k).includes(i)) total += 5 + ((i * 7) % 11);
+				return total;
+			};
+			let issueBody = "";
+			let maxAge = 0;
+			let rebased = 0;
+			const evaluatedPerNight: number[] = [];
+			for (let night = 0; night < NIGHTS; night++) {
+				const windowBase = sha(night - 1);
+				const floorNight = night - MAX_BASE_AGE_DAYS;
+				const previous = parsePending([issue(issueBody)], TITLE, {
+					isAncestor: () => true,
+					floor: floorNight >= -1 ? sha(floorNight) : null,
+					isOlderThanFloor: (value) => nightOf(value) <= floorNight,
+				});
+				rebased += previous.rebased;
+				const pending = previous.entries.map((entry) => entry.file);
+				const readBase = new Map<string, string>();
+				const all = [...new Set([...pending, ...changedOn(night).map(nameOf)])];
+				collectChangedRanges({
+					files: all,
+					baseRef: windowBase,
+					baseOf: new Map(
+						previous.entries.flatMap((entry) =>
+							entry.base ? [[entry.file, entry.base] as const] : [],
+						),
+					),
+					diff: (from, subset) => {
+						for (const file of subset) readBase.set(file, from);
+						return new Map();
+					},
+				});
+				const picked = selectMutationFiles({
+					pending,
+					windowFiles: all,
+					maxFiles: 12,
+					weights: new Map(
+						all.map((file) => [
+							file,
+							linesSince(file, readBase.get(file) as string, night),
+						]),
+					),
+				});
+				let lines = 0;
+				for (const file of picked.selected) {
+					const from = readBase.get(file) as string;
+					lines += linesSince(file, from, night);
+					maxAge = Math.max(maxAge, night - nightOf(from));
+				}
+				const sampled = lines > budget;
+				evaluatedPerNight.push(sampled ? 0 : picked.selected.length);
+				issueBody = buildNightlyBody({
+					base: windowBase,
+					head: sha(night),
+					source: "issue",
+					status: "ok",
+					report: covered({
+						filesSelected: picked.selected,
+						filesSkippedOverCap: picked.skipped,
+						rangesTotal: 10,
+						rangesEvaluated: sampled ? 5 : 10,
+						rangesSampled: sampled,
+					}),
+					previous,
+				});
+			}
+			const steady = evaluatedPerNight.slice(20);
+			return {
+				maxAge,
+				rebased,
+				throughput: steady.reduce((sum, n) => sum + n, 0) / steady.length,
+			};
+		};
+
+		it("keeps the base age bounded and the throughput up under a steady overload", () => {
+			const { maxAge, throughput } = overload(600);
+			expect.soft(maxAge).toBeLessThanOrEqual(MAX_BASE_AGE_DAYS + 1);
+			expect.soft(throughput).toBeGreaterThanOrEqual(10);
+		});
+
+		// Recurrence (#4005 r4): per-entry bases alone leave a file that is
+		// re-queued every night (sampled every time) cycling with an ever older
+		// base. The floor bounds it, and the re-basing is counted.
+		it("bounds the base age of files re-queued every night, and counts the re-basing", () => {
+			const { maxAge, rebased } = overload(-1);
+			expect(maxAge).toBeLessThanOrEqual(MAX_BASE_AGE_DAYS + 1);
+			expect(rebased).toBeGreaterThan(0);
 		});
 	});
 
@@ -621,7 +840,7 @@ describe("main (real git, real files)", () => {
 		expect(main(args(issuesFile([])), repo)).toMatchObject({
 			base: mid,
 			source: "fallback-no-issue",
-			pending: [],
+			queue: { entries: [] },
 		});
 		// A sha git does not know (rewritten history, hand-edited marker).
 		expect(
@@ -694,94 +913,147 @@ describe("main (real git, real files)", () => {
 		).toThrow("--status must be ok or failed");
 	});
 
+	const reportFile = (meta: Record<string, unknown>) => {
+		const file = join(dir, "report.json");
+		writeFileSync(
+			file,
+			JSON.stringify({
+				files: {},
+				piLensMutationDiff: {
+					rangesTotal: 1,
+					rangesEvaluated: 1,
+					partial: null,
+					counts: { Killed: 1 },
+					filesSelected: [],
+					...meta,
+				},
+			}),
+		);
+		return file;
+	};
+	const bodyArgs = (issues: string, base: string, report: string) => [
+		"body",
+		"--issues",
+		issues,
+		"--title",
+		TITLE,
+		"--base",
+		base,
+		"--head",
+		SHA_B,
+		"--source",
+		"issue",
+		"--status",
+		"ok",
+		"--report",
+		report,
+		"--out",
+		join(dir, "body.md"),
+	];
+	const baseArgs = (issues: string) => [
+		"base",
+		"--issues",
+		issues,
+		"--title",
+		TITLE,
+		"--pending-out",
+		join(dir, "pending.txt"),
+	];
+
 	// The queue through the real CLI seams: validated on read into the file the
-	// driver gets, the base checked against git, and existence checked in the
-	// checkout the body step runs in.
-	it("`base` writes only the valid queue and a git-known queue base, and `body` drops a vanished file", () => {
+	// driver gets, each entry's base checked against git, and existence checked
+	// in the checkout the body step runs in.
+	it("`base` writes only the valid queue with git-known bases, and `body` drops a vanished file", () => {
 		const first = commit("first", "2026-01-01T00:00:00Z");
 		mkdirSync(join(repo, "clients"));
 		writeFileSync(join(repo, "clients", "alive.ts"), "export {};\n");
-		const stored = [
-			"clients/alive.ts",
-			"clients/vanished.ts",
-			"../../etc/passwd.ts",
-			"scripts/a.mjs",
-		].join(",");
-		const bodyWith = (queueBase: string) =>
-			`${markerOf(first)}\n<!-- stryker-nightly:pending=${stored} -->\n<!-- stryker-nightly:pending-base=${queueBase} -->`;
-		const pendingOut = join(dir, "pending.txt");
-		const args = (file: string) => [
-			"base",
-			"--issues",
-			file,
-			"--title",
-			TITLE,
-			"--pending-out",
-			pendingOut,
-		];
+		const issues = issuesFile([
+			issue(
+				`${markerOf(first)}\n<!-- stryker-nightly:pending=${[
+					`clients/alive.ts@${first}`,
+					`clients/vanished.ts@${"d".repeat(40)}`,
+					`../../etc/passwd.ts@${first}`,
+					"scripts/a.mjs",
+				].join(",")} -->`,
+			),
+		]);
 
-		expect(
-			main(args(issuesFile([issue(bodyWith(first))])), repo),
-		).toMatchObject({
-			pending: ["clients/alive.ts", "clients/vanished.ts"],
-			pendingBase: first,
+		expect(main(baseArgs(issues), repo)).toMatchObject({
+			queue: {
+				entries: [
+					{ file: "clients/alive.ts", base: first },
+					{ file: "clients/vanished.ts", base: null },
+				],
+				unknownBase: 1,
+			},
 		});
-		expect(readFileSync(pendingOut, "utf8")).toBe(
-			"clients/alive.ts\nclients/vanished.ts\n",
+		expect(readFileSync(join(dir, "pending.txt"), "utf8")).toBe(
+			`clients/alive.ts@${first}\nclients/vanished.ts\n`,
 		);
-		// A queue base git does not know falls back (null), the queue stays.
-		expect(
-			main(args(issuesFile([issue(bodyWith("d".repeat(40)))])), repo),
-		).toMatchObject({
-			pending: ["clients/alive.ts", "clients/vanished.ts"],
-			pendingBase: null,
-		});
 
-		const out = join(dir, "body.md");
 		main(
-			[
-				"body",
-				"--issues",
-				issuesFile([issue(bodyWith(first))]),
-				"--title",
-				TITLE,
-				"--base",
+			bodyArgs(
+				issues,
 				first,
-				"--head",
-				SHA_B,
-				"--source",
-				"issue",
-				"--status",
-				"ok",
-				"--report",
-				(() => {
-					const file = join(dir, "report.json");
-					writeFileSync(
-						file,
-						JSON.stringify({
-							files: {},
-							piLensMutationDiff: {
-								rangesTotal: 1,
-								rangesEvaluated: 1,
-								partial: null,
-								counts: { Killed: 1 },
-								filesSelected: [],
-								filesSkippedOverCap: [
-									"clients/alive.ts",
-									"clients/new-gone.ts",
-								],
-							},
-						}),
-					);
-					return file;
-				})(),
-				"--out",
-				out,
-			],
+				reportFile({
+					filesSkippedOverCap: ["clients/alive.ts", "clients/new-gone.ts"],
+				}),
+			),
 			repo,
 		);
-		expect(
-			parsePending([issue(readFileSync(out, "utf8"))], TITLE).pending,
-		).toEqual(["clients/alive.ts"]);
+		const body = readFileSync(join(dir, "body.md"), "utf8");
+		expect(parsePending([issue(body)], TITLE).entries).toEqual([
+			{ file: "clients/alive.ts", base: first },
+		]);
+		expect(body).toContain("1 queued file(s) had no base git knows");
+	});
+
+	// Recurrence (#4005 r4, N1): the base of a queued file growing without
+	// bound. Real commit dates: HEAD is 2026-01-30, so the floor is the newest
+	// first-parent commit on or before 2026-01-16. A merged side branch's commit
+	// dated 01-15 is newer by date but is not on master's line: as the floor it
+	// would diff from its fork point, so it must not be chosen.
+	it("`base` re-bases an entry older than 14 days onto the floor, and `body` writes the same base back", () => {
+		mkdirSync(join(repo, "clients"));
+		for (const name of ["a", "b", "c"])
+			writeFileSync(join(repo, "clients", `${name}.ts`), "export {};\n");
+		const c0 = commit("c0", "2026-01-01T00:00:00Z");
+		const trunk = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+		const c1 = commit("c1", "2026-01-10T00:00:00Z");
+		git(["checkout", "-q", "-b", "side", c0]);
+		commit("side", "2026-01-15T00:00:00Z");
+		git(["checkout", "-q", trunk]);
+		const c2 = commit("c2", "2026-01-20T00:00:00Z");
+		git(
+			["merge", "--no-ff", "-q", "-m", "merge", "side"],
+			"2026-01-25T00:00:00Z",
+		);
+		commit("c3", "2026-01-30T00:00:00Z");
+		const issues = issuesFile([
+			issue(
+				`${markerOf(c2)}\n<!-- stryker-nightly:pending=clients/a.ts@${c0},clients/b.ts@${c1},clients/c.ts@${c2} -->`,
+			),
+		]);
+		const read = {
+			entries: [
+				{ file: "clients/a.ts", base: c1 },
+				{ file: "clients/b.ts", base: c1 },
+				{ file: "clients/c.ts", base: c2 },
+			],
+			rebased: 1,
+			unknownBase: 0,
+			floor: c1,
+		};
+
+		expect(main(baseArgs(issues), repo)).toMatchObject({ queue: read });
+		expect(readFileSync(join(dir, "pending.txt"), "utf8")).toBe(
+			`clients/a.ts@${c1}\nclients/b.ts@${c1}\nclients/c.ts@${c2}\n`,
+		);
+		main(bodyArgs(issues, c2, reportFile({})), repo);
+		const body = readFileSync(join(dir, "body.md"), "utf8");
+		expect(parsePending([issue(body)], TITLE).entries).toEqual(read.entries);
+		expect(body).toContain(
+			`1 queued file(s) had a base older than 14 days and were re-based onto \`${c1.slice(0, 12)}\``,
+		);
 	});
 });

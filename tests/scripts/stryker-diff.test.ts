@@ -43,6 +43,7 @@ import {
 	estimateAffordableMutants,
 	extractSnippet,
 	formatCapNotice,
+	formatQueueEntry,
 	isCompiledMutationSource,
 	isMutationSourceFile,
 	isQueueablePath,
@@ -54,6 +55,7 @@ import {
 	mutationRangePatterns,
 	parseChangedLineRanges,
 	parseDryRunCost,
+	parseQueueEntry,
 	planResample,
 	sampleRangesDeterministically,
 	selectMutationFiles,
@@ -698,6 +700,61 @@ describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
 		}
 	});
 
+	// Recurrence (#4005 r4): one shared queue base pinned to the first
+	// overloaded night. The driver must read a queued file against the base
+	// its own entry carries (the sha reaches git), take a well-formed entry
+	// whose base git knows, and refuse a malformed base suffix outright.
+	it("reads each queued file against its own entry's base", () => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			mkdirSync(join(fixtureRepo, "clients"));
+			for (const file of ["clients/q1.ts", "clients/q2.ts"])
+				writeFileSync(join(fixtureRepo, file), "export const a = 1;\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "."]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			const first = String(
+				fixtureGit(fixtureRepo, ["rev-parse", "HEAD"]),
+			).trim();
+			writeFileSync(join(fixtureRepo, "README.md"), "readme\n");
+			fixtureGit(fixtureRepo, ["add", "README.md"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "readme only"]);
+			const pending = join(fixtureRepo, "pending.txt");
+			const unknown = "e".repeat(40);
+			writeFileSync(
+				pending,
+				[`clients/q1.ts@${first}`, "clients/q2.ts@--output"].join("\n"),
+			);
+			runDriver(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			expect(
+				JSON.parse(
+					readFileSync(
+						join(fixtureRepo, "reports", "mutation", "mutation.json"),
+						"utf8",
+					),
+				).piLensMutationDiff.filesSelected,
+			).toEqual(["clients/q1.ts"]);
+			writeFileSync(pending, `clients/q1.ts@${unknown}\n`);
+			const result = runDriverResult(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain(
+				`could not read changed lines of ${unknown}...HEAD`,
+			);
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	});
+
 	it("still takes the script without the flag (the PR-time behaviour)", () => {
 		expect(reasonFor([])).toContain(
 			"no changed mutation source has a covering test",
@@ -756,8 +813,10 @@ describe("selectMutationFiles (#4005)", () => {
 
 describe("collectChangedRanges (#4005)", () => {
 	// Recurrence: a queued file's earlier changes are outside the current
-	// window, so reading it against the window base left it with no lines.
-	it("reads queued files against the queue base and every other file against the window base", () => {
+	// window, so reading it against the window base left it with no lines; and
+	// (r4) one shared queue base re-read every carried file from the oldest
+	// contributing night.
+	it("reads each queued file against its own base, every other file against the window base, one diff per base", () => {
 		const calls: Array<[string, string[]]> = [];
 		const diff = (base: string, files: string[]) => {
 			calls.push([base, files]);
@@ -766,32 +825,75 @@ describe("collectChangedRanges (#4005)", () => {
 			);
 		};
 		const ranges = collectChangedRanges({
-			files: ["clients/q.ts", "clients/w.ts"],
-			pending: ["clients/q.ts"],
+			files: [
+				"clients/q1.ts",
+				"clients/q2.ts",
+				"clients/w.ts",
+				"clients/q3.ts",
+			],
 			baseRef: "window-base",
-			pendingBase: "queue-base",
+			baseOf: new Map([
+				["clients/q1.ts", "night-1"],
+				["clients/q2.ts", "night-2"],
+				["clients/q3.ts", "night-1"],
+			]),
 			diff,
 		});
 		expect(calls).toEqual([
 			["window-base", ["clients/w.ts"]],
-			["queue-base", ["clients/q.ts"]],
+			["night-1", ["clients/q1.ts", "clients/q3.ts"]],
+			["night-2", ["clients/q2.ts"]],
 		]);
-		expect([...ranges.keys()].sort()).toEqual(["clients/q.ts", "clients/w.ts"]);
+		expect([...ranges.keys()].sort()).toEqual([
+			"clients/q1.ts",
+			"clients/q2.ts",
+			"clients/q3.ts",
+			"clients/w.ts",
+		]);
 	});
 
-	it("uses the window base for everything when there is no queue base", () => {
+	it("uses the window base for a queued file whose entry has no base", () => {
 		const calls: string[] = [];
 		collectChangedRanges({
 			files: ["clients/q.ts"],
-			pending: ["clients/q.ts"],
 			baseRef: "window-base",
-			pendingBase: null,
 			diff: (base) => {
 				calls.push(base);
 				return new Map();
 			},
 		});
 		expect(calls).toEqual(["window-base"]);
+	});
+});
+
+describe("parseQueueEntry (#4005 r4)", () => {
+	const SHA = "a".repeat(40);
+	it.each([
+		[`clients/a.ts@${SHA}`, { file: "clients/a.ts", base: SHA }],
+		["clients/a.ts", { file: "clients/a.ts", base: null }],
+		[" index.ts ", { file: "index.ts", base: null }],
+		["clients/@scope/x.ts", { file: "clients/@scope/x.ts", base: null }],
+		[`clients/@scope/x.ts@${SHA}`, { file: "clients/@scope/x.ts", base: SHA }],
+	])("reads %s", (spelling, entry) => {
+		expect(parseQueueEntry(spelling)).toEqual(entry);
+		expect(parseQueueEntry(formatQueueEntry(entry))).toEqual(entry);
+	});
+
+	// Recurrence: the base suffix reaches `git diff <base>...HEAD` as an
+	// argument; only a full lowercase sha may be split off, and a spelling whose
+	// suffix is anything else is not a runtime path at all.
+	it.each([
+		"clients/a.ts@--output",
+		"clients/a.ts@abc123",
+		`clients/a.ts@${"A".repeat(40)}`,
+		`clients/a.ts@${SHA}@${SHA}`,
+		`../index.ts@${SHA}`,
+		`scripts/a.mjs@${SHA}`,
+		`@${SHA}`,
+		"",
+		undefined,
+	])("refuses %s", (spelling) => {
+		expect(parseQueueEntry(spelling)).toBeNull();
 	});
 });
 

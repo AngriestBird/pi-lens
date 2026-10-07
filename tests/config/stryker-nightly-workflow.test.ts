@@ -114,13 +114,12 @@ function nightlyFindings(text: string): string[] {
 	)
 		findings.push("an empty window would skip a run while files are queued");
 	if (
-		(driver &&
-			!/--pending-file "\$RUNNER_TEMP\/stryker-nightly-pending\.txt"/.test(
-				run(driver),
-			)) ||
-		(driver && !/--pending-base "\$PENDING_BASE"/.test(run(driver)))
+		driver &&
+		!/--pending-file "\$RUNNER_TEMP\/stryker-nightly-pending\.txt"/.test(
+			run(driver),
+		)
 	)
-		findings.push("driver step does not take the queue and its base");
+		findings.push("driver step does not take the queue");
 	// Recurrence (#4005 r3): the body step recomputing the queue from nothing, so
 	// a failed night would clear it.
 	const bodyStep = steps.find((step) =>
@@ -373,11 +372,6 @@ describe("stryker-nightly.yml (#4005)", () => {
 					'ARGS+=(--pending-file "$RUNNER_TEMP/stryker-nightly-pending.txt")',
 					"true",
 				),
-			/does not take the queue/,
-		],
-		[
-			"the driver not given the queue base",
-			(text) => text.replace('ARGS+=(--pending-base "$PENDING_BASE")', "true"),
 			/does not take the queue/,
 		],
 		[

@@ -25,11 +25,11 @@ import {
 	formatCapNotice,
 	collectChangedRanges,
 	isCompiledMutationSource,
-	isQueueablePath,
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
 	mutationLaneExclusion,
+	parseQueueEntry,
 	DEFAULT_MAX_TESTS,
 	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	MUTATION_BUDGET_MINUTES,
@@ -123,13 +123,12 @@ const headShaArg = argumentValue("--head-sha", null);
 // scripts/**/*.mjs, which compete for the --max-files slots by changed-line
 // weight and push runtime files over the cap on a busy day.
 const runtimeOnly = process.argv.includes("--runtime-only");
-// #4005: the nightly's carry-over queue. `--pending-file` lists (one per line)
-// the runtime files earlier nights skipped over the cap or could not finish;
-// they are mutated first, and `--pending-base` is the base of the oldest night
-// that queued one, so their earlier changed lines are in range. The list comes
-// from an issue body a maintainer can edit: every entry is re-validated here.
+// #4005: the nightly's carry-over queue. `--pending-file` lists (one per line,
+// `path@sha` or `path`) the runtime files earlier nights skipped over the cap or
+// could not finish; they are mutated first, each against its own base (r4), so
+// its earlier changed lines are in range. The list comes from an issue body a
+// maintainer can edit: every entry is re-validated here (`parseQueueEntry`).
 const pendingFileArg = argumentValue("--pending-file", null);
-const pendingBaseArg = argumentValue("--pending-base", null);
 
 // #3853: the driver forks vitest pools for the coverage probes and again inside
 // Stryker, so its whole run takes ONE shared test-suite slot, acquired once
@@ -187,16 +186,15 @@ function changedPaths() {
 }
 
 function readPending() {
-	if (!pendingFileArg) return [];
+	if (!pendingFileArg) return new Map();
 	try {
-		return [
-			...new Set(
-				readFileSync(pendingFileArg, "utf8")
-					.split("\n")
-					.map((line) => line.trim())
-					.filter((file) => isQueueablePath(file) && existsSync(file)),
-			),
-		];
+		const entries = new Map();
+		for (const line of readFileSync(pendingFileArg, "utf8").split("\n")) {
+			const entry = parseQueueEntry(line);
+			if (entry && !entries.has(entry.file) && existsSync(entry.file))
+				entries.set(entry.file, entry.base);
+		}
+		return entries;
 	} catch (error) {
 		console.error(
 			`mutation diff: could not read ${pendingFileArg}: ${error.message}`,
@@ -204,15 +202,18 @@ function readPending() {
 		process.exit(1);
 	}
 }
-const pendingFiles = readPending();
+const pendingBases = readPending();
+const pendingFiles = [...pendingBases.keys()];
+const pendingBaseOf = new Map(
+	[...pendingBases].filter(([, queueBase]) => queueBase !== null),
+);
 
 function changedLineRanges(files, { ignoreWhitespace = false } = {}) {
 	if (files.length === 0) return new Map();
 	return collectChangedRanges({
 		files,
-		pending: pendingFiles,
 		baseRef,
-		pendingBase: pendingBaseArg,
+		baseOf: pendingBaseOf,
 		diff: (base, subset) => {
 			try {
 				return parseChangedLineRanges(

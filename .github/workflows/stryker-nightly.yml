@@ -82,13 +82,13 @@ jobs:
         env:
           BASE: ${{ steps.window.outputs.base }}
           HEAD_SHA: ${{ steps.window.outputs.head }}
-          PENDING_BASE: ${{ steps.window.outputs.pending_base }}
         run: |
           set -euo pipefail
           ARGS=(--base "$BASE" --max-files 12 --runtime-only --head-sha "$HEAD_SHA")
+          # Each queued line is `path@sha`: the driver reads that file against
+          # its own base (scripts/stryker-nightly.mjs, the base rule).
           if [ -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]; then
             ARGS+=(--pending-file "$RUNNER_TEMP/stryker-nightly-pending.txt")
-            if [ -n "$PENDING_BASE" ]; then ARGS+=(--pending-base "$PENDING_BASE"); fi
           fi
           node scripts/stryker-diff.mjs "${ARGS[@]}"
       - name: Render job summary
