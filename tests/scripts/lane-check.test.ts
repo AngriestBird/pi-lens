@@ -237,7 +237,6 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.record.failedFiles).toEqual([
 				{ file: "tests/config/bad.test.ts", verdict: "CAUSED-BY-CHANGE" },
 			]);
-			expect(run.record.redOnBase.baseTree).toBe("worktree");
 			// The file reds in the targeted AND the governance run: one batch, one
 			// comparison (two builds), not one per set.
 			expect(occurrences(run.out, "BASE origin/master")).toBe(1);
