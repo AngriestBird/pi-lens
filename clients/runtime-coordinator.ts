@@ -555,11 +555,11 @@ export class RuntimeCoordinator {
 	private _writeIndex = 0;
 	/**
 	 * #3613 F2: the per-turn cap key of each concurrent session's current turn
-	 * (`turnKey`), and how many such turns started inside this coordinator's
-	 * current turn. Entries go at the session's shutdown (`forgetTurnSession`).
+	 * (`turnKey`), and how many such turns have started. Entries go at the
+	 * session's shutdown (`forgetTurnSession`).
 	 */
 	private readonly _foreignTurnKeys = new Map<string, number>();
-	private _foreignTurnsInTurn = 0;
+	private _foreignTurns = 0;
 	private _projectSeq = 0;
 	// #3511: the highest logged seq this runtime's view is known to have missed
 	// (a sibling process logged it above our seq); 0 when none. Cleared by a
@@ -683,7 +683,6 @@ export class RuntimeCoordinator {
 		this._telemetryProvider = "";
 		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
-		this._foreignTurnsInTurn = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
 		this._viewMissingThrough = 0;
@@ -824,13 +823,13 @@ export class RuntimeCoordinator {
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession !== this._telemetrySessionId) {
 			beginTurnContext(turnSession);
-			// A fresh key strictly between this coordinator's turn and its next:
-			// distinct from every other turn's, and drawn in start order.
-			this._foreignTurnsInTurn += 1;
+			// A fresh key strictly between this coordinator's turn and its next
+			// (n / (n + 1) < 1 grows with n): distinct from every other turn's,
+			// and drawn in start order.
+			this._foreignTurns += 1;
 			this._foreignTurnKeys.set(
 				turnSession,
-				this._turnIndex +
-					this._foreignTurnsInTurn / (this._foreignTurnsInTurn + 1),
+				this._turnIndex + this._foreignTurns / (this._foreignTurns + 1),
 			);
 			this._actionableWarningsThisTurn.clear(turnSession);
 			this._codeQualityWarningsThisTurn.clear(turnSession);
@@ -878,7 +877,6 @@ export class RuntimeCoordinator {
 		// by resetForSession().
 		this._turnStartProjectSeq = this._projectSeq;
 		this._turnIndex += 1;
-		this._foreignTurnsInTurn = 0;
 		this._writeOrderTurn = nextOrderTurn();
 		beginTurnContext(this._telemetrySessionId);
 		this._writeIndex = 0;

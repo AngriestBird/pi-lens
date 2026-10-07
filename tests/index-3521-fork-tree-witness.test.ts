@@ -3502,6 +3502,13 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			recorded,
 			left: held(coordinator, subagentId),
 			primary: held(coordinator),
-		}).toEqual({ recorded: SUBAGENT, left: [], primary: PRIMARY });
+			// Its turn key goes too: the session's id now keys the primary's turn.
+			turnKey: coordinator.turnKey(subagentId) === coordinator.turnIndex,
+		}).toEqual({
+			recorded: SUBAGENT,
+			left: [],
+			primary: PRIMARY,
+			turnKey: true,
+		});
 	});
 });
