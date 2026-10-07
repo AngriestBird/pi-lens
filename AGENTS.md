@@ -302,6 +302,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 13. **Wrong failure classification:** derive availability and verdicts from raw
     evidence; preserve the classifier and evidence when a caller asserts a fact.
+    Runner log parsers tolerate ANSI control sequences, padding, and CRLF before
+    extracting a count; the exact Windows bytes are pinned by
+    `tests/config/windows-vitest-failure-count.test.ts` and the shared parser is
+    `scripts/lib/windows-vitest-failure-count.mjs`.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -339,11 +343,6 @@ the surface they bite; each block loads only when its trigger applies.
     on every `[ a == b ]`, and a callback-traversal trap surfaced raw).
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
-
-61. **Colored CI summary misparse:** runner log parsers tolerate ANSI control
-    sequences, padding, and CRLF before extracting a count; the exact runner
-    bytes are pinned by `tests/config/windows-vitest-failure-count.test.ts` and
-    the shared parser is `scripts/lib/windows-vitest-failure-count.mjs`.
 
 </important>
 
