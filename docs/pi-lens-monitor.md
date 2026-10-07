@@ -11,6 +11,31 @@ a fixed bound reached at p50 is a design defect), then
 forensics conventions this role inherits. This contract adds the standing
 readout.
 
+## Memory samples
+
+memory_sample records include bounded attribution fields for diagnosing host
+memory growth:
+
+- process.heapUsedBytes is the reading at sample time;
+  process.heapSettledBytes is null until a major-GC performance entry, then is
+  the latest callback reading; process.heapSettledMajorGcCount makes its age
+  visible.
+- process.externalNonBufferBytes is externalBytes - arrayBuffersBytes.
+- subsystems.persistWorkers.reviewGraph and
+  subsystems.persistWorkers.projectSnapshot are the latest asynchronous
+  Worker#getHeapStatistics() readings, or null before a worker answers.
+- subsystems.treeSitter.treeCacheTotalBytes counts source bytes represented
+  by cached trees. Native/WASM growth is attributed by
+  process.externalNonBufferBytes; no tree-count estimate is emitted.
+- subsystems.wordIndex.wireBytes is the UTF-8 length of the word index's JSON,
+  taken natively while the snapshot persist encodes the body, and is null
+  until that index's current serialized form is persisted.
+- samplerDurationMs measures the sampler's own record-assembly wall time,
+  excluding the surrounding turn.
+
+All fields are in the existing record and are O(1) reads or latest-value
+snapshots; no additional telemetry sink is created.
+
 ## Inputs
 
 - `~/.pi-lens/latency.log` and `~/.pi-lens/extension.log` (JSON lines; every

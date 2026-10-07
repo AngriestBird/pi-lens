@@ -345,7 +345,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/review-graph/tsconfig-paths.ts": 6,
 		"clients/source-filter.ts": 4,
 		"clients/tree-sitter-cache.ts": 16,
-		"clients/word-index.ts": 11,
+		// #4129 adds cache terminology for the persist-owned serialized view.
+		"clients/word-index.ts": 15,
 	},
 	channel: {
 		"clients/agent-nudge.ts": 1,
@@ -1107,7 +1108,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/cache.ts": 16,
 		"clients/project-diagnostics/scanner.ts": 10,
 		"clients/project-report.ts": 3,
-		"clients/project-snapshot.ts": 128,
+		// #4129 adds the word-index splice and worker heap slot's snapshot uses.
+		"clients/project-snapshot.ts": 130,
 		"clients/read-guard-branch.ts": 2,
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,
