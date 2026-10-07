@@ -174,6 +174,12 @@ export async function cleanupTestEnvironmentsDrained(
  */
 export function useTrackedTempDirs(...prefixes: string[]): void {
 	afterEach(async () => {
+		// The drain below parks on `setImmediate`, which a fake-timer test has
+		// replaced. Vitest runs `afterEach` hooks in reverse registration order, so
+		// this hook runs BEFORE the file's own `vi.useRealTimers()` teardown and
+		// hung to the 10 s hook timeout, failing the faking test and every test
+		// after it (launch.test.ts on Windows, #4019). Restore the real clock first.
+		vi.useRealTimers();
 		for (const prefix of prefixes) await cleanupTestEnvironmentsDrained(prefix);
 	});
 }
