@@ -412,6 +412,7 @@ function loadSnapshotBodyUnlessStale(args: {
 	currentProjectSeq: number;
 	unlockedThrough: number;
 	dbg: (msg: string) => void;
+	allowEphemeral?: boolean;
 }): { snapshot: ProjectSnapshot | null; skippedStale: boolean } {
 	const meta = readProjectSnapshotMeta(args.root);
 	if (
@@ -428,7 +429,9 @@ function loadSnapshotBodyUnlessStale(args: {
 		return { snapshot: null, skippedStale: true };
 	}
 	return {
-		snapshot: loadProjectSnapshot(args.root),
+		snapshot: loadProjectSnapshot(args.root, {
+			allowEphemeral: args.allowEphemeral ?? false,
+		}),
 		skippedStale: false,
 	};
 }
@@ -1033,7 +1036,7 @@ async function buildOrRefreshWordIndex(args: {
 	);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshotLoadStartMs = Date.now();
-	const snapshot = loadProjectSnapshot(snapshotRoot);
+	const snapshot = loadProjectSnapshot(snapshotRoot, { allowEphemeral: true });
 	const snapshotLoadMs = Date.now() - snapshotLoadStartMs;
 	if (snapshot?.wordIndex) {
 		const {
@@ -2107,7 +2110,9 @@ export async function handleSessionStart(
 					// (canWarmCaches true OR false) so the NEXT one-shot process can
 					// reuse it instead of re-walking a possibly huge tree from
 					// scratch on every single startup.
-					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot);
+					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot, {
+						allowEphemeral: true,
+					});
 					// #1785 F5 (round 4): publish this ALREADY-loaded read — narrowed
 					// to exports+rules, never a reference to `cachedSnapshot` itself
 					// (which carries `wordIndex`/`files`/`symbols`/`reverseDeps`) — for
@@ -2825,6 +2830,7 @@ export async function handleSessionStart(
 		currentProjectSeq: freshnessSeq,
 		unlockedThrough: latestSeq.unlockedThrough ?? 0,
 		dbg,
+		allowEphemeral: true,
 	});
 	const snapshot = snapshotGate.snapshot;
 	const snapshotFresh = isProjectSnapshotFresh(

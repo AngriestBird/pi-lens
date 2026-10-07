@@ -638,9 +638,10 @@ the surface they bite; each block loads only when its trigger applies.
 - Host-created `pi-agent-*` paths below `os.tmpdir()` are declined at the
   shared `resolveLspServerCwd` seam and emit one `lsp-root-declined` record per
   staging root per session. Real checkouts below `os.tmpdir()` remain normal
-  LSP roots but are ephemeral: their project snapshot is not persisted, their
-  project data target is process-local, and transparent clients use the
-  aggressive ephemeral idle window.
+  LSP roots but are ephemeral: ordinary project snapshots are not persisted;
+  session-start may persist its startup-scan verdict in the process-local
+  project data target, and transparent clients use the aggressive ephemeral
+  idle window.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.

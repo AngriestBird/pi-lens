@@ -973,8 +973,16 @@ function loadProjectSnapshotInternal(
 }
 
 /** Load the canonical body, including serialized postings when present. */
-export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
-	if (isEphemeralCheckoutRoot(cwd)) return null;
+export interface ProjectSnapshotAccessOptions {
+	/** Session-start startup-scan verdicts may use the process-local target. */
+	allowEphemeral?: boolean;
+}
+
+export function loadProjectSnapshot(
+	cwd: string,
+	options: ProjectSnapshotAccessOptions = {},
+): ProjectSnapshot | null {
+	if (isEphemeralCheckoutRoot(cwd) && !options.allowEphemeral) return null;
 	return loadProjectSnapshotInternal(cwd, true);
 }
 
@@ -2024,8 +2032,9 @@ export function runSnapshotPersistExitFlushForTests(): void {
 export function saveProjectSnapshot(
 	cwd: string,
 	snapshot: ProjectSnapshot,
+	options: ProjectSnapshotAccessOptions = {},
 ): void {
-	if (isEphemeralCheckoutRoot(cwd)) return;
+	if (isEphemeralCheckoutRoot(cwd) && !options.allowEphemeral) return;
 	const gzPath = getProjectSnapshotPath(cwd);
 	const legacyPath = getProjectSnapshotLegacyPath(cwd);
 	const metaPath = getProjectSnapshotMetaPath(cwd);
@@ -2405,7 +2414,8 @@ export function saveRuntimeProjectSnapshot(args: {
 }): void {
 	try {
 		if (typeof args.runtime.projectSeq !== "number") return;
-		const existing = loadProjectSnapshot(args.cwd);
+		const allowEphemeral = args.startupScan !== undefined;
+		const existing = loadProjectSnapshot(args.cwd, { allowEphemeral });
 		let conventions = args.conventions ?? existing?.conventions;
 		if (!conventions) {
 			try {
@@ -2443,7 +2453,7 @@ export function saveRuntimeProjectSnapshot(args: {
 				snapshot.wordIndex = existing.wordIndex;
 			}
 		}
-		saveProjectSnapshot(args.cwd, snapshot);
+		saveProjectSnapshot(args.cwd, snapshot, { allowEphemeral });
 		args.dbg?.(
 			`project_snapshot: saved seq=${snapshot.seq} exports=${snapshot.cachedExports.length}`,
 		);
