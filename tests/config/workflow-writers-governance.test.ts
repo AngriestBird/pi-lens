@@ -900,7 +900,7 @@ describe("workflow writer governance (#4053)", () => {
 			]);
 		});
 
-		it("accepts the guard on the job or on the step, and ands them", () => {
+		it("takes the guard from the job or the step", () => {
 			expect(flag({ run, jobIf: GUARD_SRC })).toEqual([]);
 			expect(flag({ run, jobIf: "always() || x", stepIf: GUARD_SRC })).toEqual(
 				[],
