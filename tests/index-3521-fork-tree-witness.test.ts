@@ -3302,6 +3302,23 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}).toEqual({ distinct: true, charged: subagentTurn });
 	});
 
+	it("paces the memory sample by each session's own turns", async () => {
+		// #3613 F2. The recurrence: the cadence keyed on the primary's turn
+		// index, which a subagent's turns no longer move, so while the primary
+		// sat on a sampling turn every subagent turn end wrote a sample.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		for (let turn = 1; turn <= 10; turn += 1) await startTurn(primary);
+		const before = (await latencyRows("memory_sample")).length;
+
+		for (let turn = 1; turn <= 2; turn += 1) {
+			await startTurn(subagent);
+			await endTurn(subagent);
+		}
+
+		expect((await latencyRows("memory_sample")).length - before).toBe(0);
+	});
+
 	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
 		// #3613 F2. The recurrence it guards: per-session budget keys over the
 		// net's one budget slot, so every switch between the two sessions'
