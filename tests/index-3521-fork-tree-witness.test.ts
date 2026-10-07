@@ -2827,6 +2827,151 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 	}
 
 	/**
+	 * #4113 (#3898's T-1): a reload scheduled with zero microtask hops lands
+	 * before pi-lens's `session_start` handler is entered, so the activation
+	 * has no role, no in-flight mark and no scope. The recurrence: that
+	 * shutdown forwarded nothing; the interrupted fork's late start was
+	 * declined and discarded the `(fork, key)` slot, and the inner reload's
+	 * start missed it, losing the conversation's activations. The gap's name
+	 * says which start was interrupted, so the shutdown forwards as the mark
+	 * does. A reload or resume start kept its state here before the fix; it
+	 * pins the same forward (and its bounded record) for every slot kind.
+	 */
+	for (const kind of ["fork", "reload", "resume"] as const) {
+		for (const store of ["in-memory", "file-backed"] as const) {
+			if (kind === "resume" && store === "in-memory") continue;
+			it(`keeps a ${store} session's activations when a reload interrupts its ${kind} start before pi-lens's handler runs (micro:0)`, async () => {
+				let runtime: AgentSessionRuntime | undefined;
+				let armed = false;
+				let inner: Promise<void> | undefined;
+				const reloadAtOnce = (pi: ExtensionAPI) => {
+					pi.on("session_start", (event) => {
+						if (
+							!armed ||
+							(event as { reason?: string }).reason !== kind ||
+							inner
+						)
+							return;
+						inner = new Promise<void>((resolve, reject) =>
+							queueMicrotask(() =>
+								runtime!.session.reload().then(resolve, reject),
+							),
+						);
+					});
+				};
+				runtime = await startRuntime(
+					store === "file-backed"
+						? SessionManager.create(cwd, sessionsDir)
+						: SessionManager.inMemory(cwd),
+					[],
+					[reloadAtOnce],
+				);
+				const c = conversation(runtime);
+				c.user("prompt 1");
+				c.done();
+				await activateTools(runtime, "act", ["ast_grep_search"]);
+				const u2 = c.user("prompt 2");
+				c.done();
+				if (kind === "resume") await turnEnd(runtime);
+				resetDegradationLedger();
+
+				armed = true;
+				if (kind === "reload") await reload(runtime);
+				else if (kind === "fork") await runtime.fork(u2);
+				else
+					await runtime.switchSession(c.S().sessionManager.getSessionFile()!);
+				expect(inner).toBeDefined();
+				await inner;
+
+				expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+				expect(
+					(await scopeTransitionRows())
+						.filter((row) => row.transition === "start")
+						.at(-1),
+				).toMatchObject({
+					reason: "reload",
+					role: "primary",
+					handoffSource: kind === "resume" ? "own-sidecar" : "slot",
+				});
+				const handoffRows = (await latencyRows("degradation_ledger"))
+					.filter((row) =>
+						String(row.kind).startsWith("session-scope-handoff-"),
+					)
+					.map((row) => [row.kind, row.subject, row.outcome]);
+				expect(handoffRows).toContainEqual([
+					"session-scope-handoff-interrupted",
+					kind,
+					kind === "resume" ? "no-slot" : "forwarded",
+				]);
+				// The late declined fork start finds no slot left to discard.
+				expect(
+					handoffRows.filter(
+						([rowKind]) => rowKind === "session-scope-handoff-discarded",
+					),
+				).toEqual([]);
+			});
+		}
+	}
+
+	/**
+	 * #4113 verify X1 (R2, the reviewer's PR20): a gap subagent resumes the
+	 * user's file inside the user's resume gap, so two started primaries run
+	 * on one file. In the user's later reload gap the second runtime reloads
+	 * itself: it is primary with no in-flight mark, and the gap names
+	 * `(reload, its file)`. The recurrence: without the "no scope" half of
+	 * the unstarted rule, that started shutdown forwarded the user's slot
+	 * instead of stashing its own scope, and its reload successor ran with the
+	 * user's activations, not its own.
+	 */
+	it("keeps a same-file second primary's own activations when it reloads in the user's reload gap (R2)", async () => {
+		let second: AgentSessionRuntime | undefined;
+		let target = "";
+		let phase: "resume" | "reload" | "done" = "resume";
+		const gapActor = (pi: ExtensionAPI) => {
+			pi.on("session_shutdown", async (event) => {
+				const reason = (event as { reason?: string }).reason;
+				if (phase === "resume" && reason === "resume" && !second) {
+					second = await startRuntime(SessionManager.inMemory(cwd));
+					await second.switchSession(target);
+				} else if (phase === "reload" && reason === "reload" && second) {
+					phase = "done";
+					await activateTools(second, "act-second", ["lsp_navigation"]);
+					await reload(second);
+				}
+			});
+		};
+		const other = SessionManager.create(cwd, sessionsDir);
+		other.appendMessage({
+			role: "user",
+			content: "other",
+			timestamp: Date.now(),
+		} as never);
+		target = other.getSessionFile()!;
+		const primary = await startRuntime(
+			SessionManager.create(cwd, sessionsDir),
+			[gapActor],
+		);
+		const c = conversation(primary);
+		c.user("prompt 1");
+		c.done();
+		await primary.switchSession(target);
+		expect(second).toBeDefined();
+		await activateTools(primary, "act-user", ["ast_grep_search"]);
+		resetDegradationLedger();
+
+		phase = "reload";
+		await reload(primary);
+
+		expect(phase).toBe("done");
+		expect(activeSituational(second!)).toEqual(["lsp_navigation"]);
+		expect(
+			(await latencyRows("degradation_ledger")).filter(
+				(row) => row.kind === "session-scope-handoff-interrupted",
+			),
+		).toEqual([]);
+	});
+
+	/**
 	 * #3881 r2 F2: a reload scheduled one microtask hop after the fork's
 	 * `session_start` emit lands in t0, after pi-lens's handler was entered
 	 * and before it set its scope. The recurrence: a mark set after the
@@ -2841,7 +2986,7 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 			pi.on("session_start", (event) => {
 				if ((event as { reason?: string }).reason !== "fork" || inner) return;
 				// One hop: zero hops lands before pi-lens's handler is entered
-				// (t-1, a pre-existing loss named in #3898's Remainder).
+				// (T-1, #4113: the micro:0 tests above).
 				inner = Promise.resolve()
 					.then(() => undefined)
 					.then(() => runtime!.session.reload());
