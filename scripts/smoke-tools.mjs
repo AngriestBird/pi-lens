@@ -647,6 +647,20 @@ const LSP_FIXTURES = [
 		tools: ["bash-language-server"],
 	},
 	{
+		lang: "shuck",
+		serverId: "shuck",
+		// #3968: real zsh-only constructs a bash-semantic analyzer misreports,
+		// plus the seeded C006 error the gate looks for. `tools: []` — shuck has
+		// no managed install (brew/cargo distribution, #3968 AC 5 non-goal); on
+		// a host without the binary the row discloses `unavailable` and skips.
+		lspGate: true,
+		lspGateMarker: "echo $undefined_var",
+		dir: "tests/fixtures/tool-smoke/shuck",
+		file: "bad.zsh",
+		serverHint: "shuck",
+		tools: [],
+	},
+	{
 		lang: "css",
 		dir: "tests/fixtures/tool-smoke/css",
 		file: "bad.css",
@@ -666,12 +680,15 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "dockerfile",
+		serverId: "docker",
 		lspGate: true,
 		lspGateMarker: "COPY only-one-argument",
 		dir: "tests/fixtures/tool-smoke/dockerfile",
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
 		tools: ["dockerfile-language-server-nodejs"],
+		disableServers: ["docker-official"],
+		expectServerId: "docker",
 	},
 	{
 		lang: "toml",
@@ -688,6 +705,7 @@ const LSP_FIXTURES = [
 		lspGateMarker: "var.does_not_exist_gate_seed",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
+		smokeHintPlaceholder: undefined,
 		serverHint: "terraform-ls",
 		tools: ["terraform-ls"],
 	},

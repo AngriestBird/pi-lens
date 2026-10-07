@@ -446,7 +446,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/ipc.ts": 8,
 		"clients/mcp/review.ts": 8,
 		"clients/mcp/session.ts": 1,
-		"clients/module-report.ts": 29,
+		"clients/module-report.ts": 27,
 		"clients/opaque-mutation-scan.ts": 3,
 		"clients/opengrep-client.ts": 11,
 		"clients/package-manager.ts": 2,
@@ -834,7 +834,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/prisma-validate.ts": 2,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
 		"clients/dispatch/runners/rubocop.ts": 6,
-		"clients/dispatch/runners/shellcheck.ts": 7,
+		// 7 -> 8 (#3968): `path.extname` inside `resolveShellFileDialect` — one
+		// more `path` use, same sense (a path operation).
+		"clients/dispatch/runners/shellcheck.ts": 8,
 		"clients/dispatch/runners/spellcheck.ts": 6,
 		"clients/dispatch/runners/spotbugs.ts": 4,
 		"clients/dispatch/runners/sqlfluff.ts": 3,
@@ -1040,7 +1042,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/config-core/records.ts": 6,
 		"clients/config-resolve.ts": 16,
 		"clients/degradation-ledger.ts": 16,
-		"clients/effective-config.ts": 10,
+		// #3968 PR 2: +1 — `redactServerSpec` reads `record.covers` (the
+		// rendered claim beside the existing redacted fields).
+		"clients/effective-config.ts": 11,
 		"clients/git-guard.ts": 44,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
@@ -1117,7 +1121,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	status: {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
 		// no longer compares the bare `status` field at four sites (37 -> 32), and
-		// the predicate that owns the rule names it once in types.ts (2 -> 5).
+		// the claimSource admission guard (#3968 F2) reads it once more (32 -> 33).
 		"clients/actionable-warnings.ts": 5,
 		"clients/advisory-provenance.ts": 5,
 		"clients/ast-grep-client.ts": 7,
@@ -1129,7 +1133,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 6,
 		"clients/config-resolve.ts": 11,
 		"clients/dead-code-client.ts": 3,
-		"clients/dispatch/dispatcher.ts": 32,
+		"clients/dispatch/dispatcher.ts": 33,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
@@ -1166,7 +1170,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/rubocop.ts": 2,
 		"clients/dispatch/runners/ruff.ts": 2,
 		"clients/dispatch/runners/rust-clippy.ts": 10,
-		"clients/dispatch/runners/shellcheck.ts": 4,
+		// 4 -> 5 (#3968): one more skip branch (`covered-by-primary`) beside the
+		// existing skipped/no-cmd returns — the same `status:` member sense.
+		"clients/dispatch/runners/shellcheck.ts": 5,
 		"clients/dispatch/runners/shfmt.ts": 8,
 		"clients/dispatch/runners/spellcheck.ts": 3,
 		"clients/dispatch/runners/spotbugs.ts": 8,
@@ -1262,7 +1268,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/call-graph.ts": 4,
 		"clients/codebase-model.ts": 3,
 		"clients/dispatch/runners/oxlint.ts": 3,
-		"clients/grammar-source.ts": 4,
+		"clients/grammar-source.ts": 5,
 		"clients/install-diagnostics.ts": 3,
 		"clients/installer/index.ts": 60,
 		"clients/installer/managed-tool-refresh.ts": 24,

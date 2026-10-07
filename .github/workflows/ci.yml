@@ -304,6 +304,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      # #4003: `--ignore-scripts` above skips `prepare`, so nothing here builds
+      # dist/; the LSP fixture files in the targeted set import it and fail with
+      # a named "run npm run build:dist first" precondition without it.
+      - name: Build dist
+        run: npm run build:dist
+
       - name: Run targeted tests
         # --include-ci-only admits the real-spawn suites that exceed the local
         # pre-push budget (#3426 H3432-1); this job is their CI row.
