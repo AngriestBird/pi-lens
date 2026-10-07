@@ -227,6 +227,14 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  * Always converts backslashes to forward slashes for consistent Map keys.
  */
 export function normalizeFilePath(filePath: string): string {
+	// Relative values and the empty sentinel are not filesystem identities. In
+	// particular, win32.resolve() would silently anchor them to the process cwd,
+	// which makes a path-only key depend on the runner's drive (#2490).
+	if (filePath === "") return "";
+	if (!isFullyQualifiedWin32(filePath) && !isFullyQualifiedPosix(filePath)) {
+		return win32.normalize(filePath).replace(/\\/g, "/");
+	}
+
 	// Convert backslashes to forward slashes first
 	const normalized = filePath.replace(/\\/g, "/");
 

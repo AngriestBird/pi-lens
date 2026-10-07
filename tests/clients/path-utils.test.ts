@@ -52,6 +52,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { createCaseAliasFixture, setupTestEnvironment } from "./test-utils.js";
+import { withPlatform } from "../support/platform-stub.js";
 
 describe("isWindowsPath (#1213 review pins)", () => {
 	it("matches drive-prefixed and UNC shapes only", async () => {
@@ -504,6 +505,11 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		expect(normalizeMapKey("../src/a.ts")).not.toContain(
 			process.cwd().replace(/\\/g, "/"),
 		);
+		// Recurrence: the native Windows arm used win32.resolve() for this
+		// path-only key, making it depend on the runner's current drive.
+		expect(
+			withPlatform("win32", () => normalizeMapKey("src/../src/a.ts")),
+		).toBe("src/a.ts");
 	});
 
 	it("an empty string is returned unchanged, not invented into the cwd", () => {
@@ -511,6 +517,7 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		// documented non-path sentinel in this codebase's path-typed fields
 		// (see `normalizeLoggedPath`'s doc), never a request for the cwd.
 		expect(normalizeMapKey("")).toBe("");
+		expect(withPlatform("win32", () => normalizeMapKey(""))).toBe("");
 	});
 
 	it("a UNC-shaped root keeps its leading double slash on POSIX", (ctx) => {

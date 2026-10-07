@@ -41,9 +41,10 @@ vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
 }));
 
 function makeCtx(filePath: string, cwd = process.cwd()) {
+	const root = path.resolve(cwd);
 	return {
-		filePath,
-		cwd,
+		filePath: path.resolve(root, filePath),
+		cwd: root,
 		kind: "go" as const,
 		fileRole: "source" as const,
 		pi: { getFlag: () => false },

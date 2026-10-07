@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "../support/git-fixture-env.js";
 import { getDegradationSummary } from "../../clients/degradation-ledger.js";
 import { getGlobalPiLensDir } from "../../clients/file-utils.js";
+import { pathsEqual } from "../../clients/path-utils.js";
 import {
 	_resetProbeHomeRedirectStateForTests,
 	getGlobalPiLensLogDir,
@@ -176,6 +177,10 @@ function expectCwdOutsideChildTmpdir(facts: ChildFacts, cwd: string): void {
 	expect(path.resolve(cwd)).not.toBe(normalizedTmp);
 }
 
+function expectSamePath(actual: string, expected: string): void {
+	expect(pathsEqual(actual, expected)).toBe(true);
+}
+
 describe("getGlobalPiLensLogDir probe-home redirect (#2506)", () => {
 	it("redirects a worktree probe's LOGS while leaving tools/registry on the real home", async () => {
 		const { root, fakeHome, isolatedTmp } = makeFixture("probe-worktree");
@@ -193,14 +198,14 @@ describe("getGlobalPiLensLogDir probe-home redirect (#2506)", () => {
 			expectCwdOutsideChildTmpdir(facts, probeCwd);
 
 			// The log root moved — and anchored at the WORKTREE, not at `cwd`.
-			expect(facts.logDir).toBe(path.join(worktree, ".pi-lens-probe-home"));
+			expectSamePath(facts.logDir, path.join(worktree, ".pi-lens-probe-home"));
 
 			// ...while every machine-global path stayed on the (fake) real home.
 			// This is the whole point of the round-3 split: a pi session running
 			// from a worktree must still find the tools it installed and the one
 			// instances.json every other process on the box reads.
-			expect(facts.globalDir).toBe(path.join(fakeHome, ".pi-lens"));
-			expect(facts.toolsDir).toBe(path.join(fakeHome, ".pi-lens", "tools"));
+			expectSamePath(facts.globalDir, path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.toolsDir, path.join(fakeHome, ".pi-lens", "tools"));
 
 			// The degradation row actually landed under the redirected log dir.
 			const probeLatencyLog = path.join(facts.logDir, "latency.log");
@@ -470,14 +475,16 @@ describe("a VITEST-marked process with no PI_LENS_HOME pin (#2516 round 2)", () 
 			// own os.tmpdir() is a sibling of the fixture cwd.
 			expectCwdOutsideChildTmpdir(facts, probeCwd);
 
-			expect(facts.logDir).toBe(path.join(worktree, ".pi-lens-probe-home"));
-			expect(facts.logDir).not.toBe(path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.logDir, path.join(worktree, ".pi-lens-probe-home"));
+			expect(pathsEqual(facts.logDir, path.join(fakeHome, ".pi-lens"))).toBe(
+				false,
+			);
 			// ...and nothing was written into the stand-in for the real home.
 			expect(
 				fs.existsSync(path.join(fakeHome, ".pi-lens", "latency.log")),
 			).toBe(false);
 			// Machine-global state is still NOT redirected, VITEST or not.
-			expect(facts.globalDir).toBe(path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.globalDir, path.join(fakeHome, ".pi-lens"));
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
