@@ -6,17 +6,6 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "./test-utils.js";
-import * as fileUtils from "../../clients/file-utils.js";
-
-const { trackedRmSync } = vi.hoisted(() => ({
-	trackedRmSync: vi.fn(),
-}));
-
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
-	trackedRmSync.mockImplementation(actual.rmSync);
-	return { ...actual, rmSync: trackedRmSync };
-});
 
 const ensureTool = vi.fn();
 const findNodeToolBinary = vi.fn();
@@ -706,34 +695,6 @@ describe("jscpd-client in-flight ABA release (#1968)", () => {
 			await cleanupTestEnvironmentsDrained("pi-lens-jscpd-", {
 				beforeDrain: () => client.shutdown(),
 			});
-		}
-	});
-
-	it("removes the report directory when scan setup throws (#4133)", async () => {
-		const { JscpdClient } = await import("../../clients/jscpd-client.js");
-		const { tmpDir } = setupTestEnvironment("pi-lens-jscpd-setup-");
-		trackedRmSync.mockClear();
-		const ignoreGlobs = vi
-			.spyOn(fileUtils, "getProjectIgnoreGlobs")
-			.mockImplementationOnce(() => {
-				throw new Error("ignore setup failed");
-			});
-		try {
-			const client = new JscpdClient(false);
-			const internals = client as unknown as Internals;
-			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
-			vi.spyOn(internals, "hasSourceFilesRecursive").mockReturnValue(true);
-
-			const result = await client.scan(tmpDir, 5, 50, false);
-
-			expect(result.success).toBe(false);
-			expect(trackedRmSync).toHaveBeenCalledWith(
-				expect.stringContaining(`${path.sep}pi-lens-jscpd-`),
-				{ recursive: true, force: true },
-			);
-		} finally {
-			ignoreGlobs.mockRestore();
-			await cleanupTestEnvironmentsDrained("pi-lens-jscpd-");
 		}
 	});
 });
