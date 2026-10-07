@@ -277,7 +277,10 @@ export function guardOf(...conditions) {
 function holds(conjunct, context) {
 	if (isSchedule(conjunct)) return context.event === "schedule";
 	if (isMaster(conjunct)) return context.ref === "refs/heads/master";
-	return operands(conjunct, "or").some((part) => holds(part, context));
+	return (
+		conjunct.t === "or" &&
+		(holds(conjunct.l, context) || holds(conjunct.r, context))
+	);
 }
 
 /**
