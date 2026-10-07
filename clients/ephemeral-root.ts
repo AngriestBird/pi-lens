@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
@@ -6,7 +7,6 @@ import {
 	isUnderDir,
 	normalizeEphemeralMapKey,
 } from "./path-utils.js";
-import { canonicalDirectory } from "./review-graph/git-identity.js";
 
 /**
  * Where a directory sits relative to the host temporary directory (#1129).
@@ -29,29 +29,53 @@ const NOT_EPHEMERAL: TmpDirClass = { checkout: false };
 const classified = new BoundedFifoMap<string, TmpDirClass>(1024);
 
 /**
- * One upward walk from `realpath(dir)` to `realpath(os.tmpdir())`, both sides
- * canonical through `realpathSync.native` (#1129 F4: macOS `/var` links to
- * `/private/var`, and Windows can report an 8.3 short tmpdir name). The first
- * real git marker (`isRealGitMarker`: a `.git` directory holding HEAD, or a
- * `gitdir:` file) makes the directory part of a temporary checkout, whatever
- * depth it sits at (F7). Without one, a `pi-agent-*` segment below the tmpdir
- * makes it host staging (F5).
+ * `realpathSync.native` of `target`, or of its nearest existing ancestor with
+ * the missing tail re-appended (#1129 F11: a directory not created yet,
+ * spelled through a symlinked tmpdir). The resolved spelling when nothing on
+ * the way up resolves.
+ */
+function realPathOfNearestExisting(target: string): string {
+	const resolved = path.resolve(target);
+	const tail: string[] = [];
+	for (let current = resolved; ; current = path.dirname(current)) {
+		try {
+			return path.join(fs.realpathSync.native(current), ...tail.reverse());
+		} catch {
+			if (path.dirname(current) === current) return resolved;
+			tail.push(path.basename(current));
+		}
+	}
+}
+
+/**
+ * One upward walk from `realpath(dir)` to just below `realpath(os.tmpdir())`,
+ * both sides canonical through `realpathSync.native` (#1129 F4: macOS `/var`
+ * links to `/private/var`, and Windows can report an 8.3 short tmpdir name).
+ * The first real git marker (`isRealGitMarker`: a `.git` directory holding
+ * HEAD, or a `gitdir:` file) makes the directory part of a temporary
+ * checkout, whatever depth it sits at (F7). The tmpdir itself is never probed
+ * (F12): a repository AT the tmpdir (TMPDIR=$HOME with a dotfiles repo) does
+ * not own what is below it. Without a checkout, a `pi-agent-*` segment below
+ * the tmpdir makes the directory host staging (F5).
  */
 function classifyTmpDir(dir: string): TmpDirClass {
 	const tmpSpelling = os.tmpdir();
 	const key = `${normalizeEphemeralMapKey(tmpSpelling)}\0${normalizeEphemeralMapKey(path.resolve(dir))}`;
 	const memo = classified.get(key);
 	if (memo) return memo;
-	const tmpRoot = canonicalDirectory(path.resolve(tmpSpelling));
-	const real = canonicalDirectory(path.resolve(dir));
+	const tmpRoot = realPathOfNearestExisting(tmpSpelling);
+	const real = realPathOfNearestExisting(dir);
 	let result = NOT_EPHEMERAL;
 	if (isUnderDir(real, tmpRoot)) {
-		for (let current = real; ; current = path.dirname(current)) {
+		for (
+			let current = real;
+			current !== tmpRoot && path.dirname(current) !== current;
+			current = path.dirname(current)
+		) {
 			if (isRealGitMarker(path.join(current, ".git"))) {
 				result = { checkout: true };
 				break;
 			}
-			if (current === tmpRoot || path.dirname(current) === current) break;
 		}
 		if (!result.checkout) {
 			const segments = path.relative(tmpRoot, real).split(path.sep);

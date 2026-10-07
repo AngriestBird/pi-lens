@@ -182,6 +182,27 @@ describe("temporary checkout policy (#1129)", () => {
 		}
 	});
 
+	// Recurrence (#1129 F10, verify mutation V8): with the random half of the
+	// token fixed, a process reusing a dead predecessor's pid adopted that
+	// predecessor's ephemeral data (its worklog) before the sweep reaped it.
+	it("never reads a dead predecessor's data that carries the same pid", () => {
+		const checkout = makeCheckout(fixtureRoot("reused-pid"));
+		const dataDir = getProjectDataDir(checkout);
+		const predecessor = path.join(
+			dataRoot,
+			".ephemeral",
+			`${process.pid}-00000000`,
+			path.basename(dataDir),
+		);
+		fs.mkdirSync(predecessor, { recursive: true });
+		fs.writeFileSync(
+			path.join(predecessor, "worklog.jsonl"),
+			`${JSON.stringify({ message: "from a dead process", rule: "r", line: 1 })}\n`,
+		);
+
+		expect(readWorklog(checkout)).toEqual([]);
+	});
+
 	// Recurrence (F3): a process killed before its exit hook ran left its dir
 	// behind forever; a reused pid must not hand it to a new process either.
 	it("sweeps a dead process's data dir and keeps live and unrelated entries", async () => {
@@ -247,6 +268,47 @@ describe("temporary checkout policy (#1129)", () => {
 				path.join(fs.realpathSync(real), "pi-agent-x"),
 			);
 		});
+	});
+
+	// Recurrence (#1129 F11, verify probe q3): a directory that did not exist
+	// yet, spelled through a symlinked tmpdir, fell back to its link spelling
+	// and was not classified at all.
+	// lane: Linux and macOS unit shards; Windows symlinks need privileges.
+	describe.skipIf(process.platform === "win32")("symlinked new paths", () => {
+		it("classifies a not-yet-created directory through a symlinked tmpdir by its nearest existing ancestor", () => {
+			const holder = fixtureRoot("link-new");
+			const real = path.join(holder, "real");
+			const link = path.join(holder, "link");
+			fs.mkdirSync(real);
+			fs.symlinkSync(real, link, "dir");
+			makeCheckout(path.join(real, "repo"));
+			fs.mkdirSync(path.join(real, "pi-agent-y"));
+
+			process.env.TMPDIR = real;
+			expect(
+				isEphemeralCheckoutRoot(path.join(link, "repo", "new", "sub")),
+			).toBe(true);
+			expect(
+				ephemeralStagingRoot(path.join(link, "pi-agent-y", "new", "a.ts")),
+			).toBe(path.join(fs.realpathSync(real), "pi-agent-y"));
+		});
+	});
+
+	// Recurrence (#1129 F12, verify probes q2 and q5): the walk also probed the
+	// tmpdir itself, so a repository AT the tmpdir (TMPDIR=$HOME with a dotfiles
+	// repo) marked every fixture below it ephemeral and hid staging dirs.
+	it("ignores a git repository at the tmpdir itself", () => {
+		const tmpRoot = makeCheckout(fixtureRoot("tmp-is-repo"));
+		const plain = path.join(tmpRoot, "plain");
+		fs.mkdirSync(plain);
+		fs.mkdirSync(path.join(tmpRoot, "pi-agent-z"));
+
+		process.env.TMPDIR = tmpRoot;
+		expect(isEphemeralCheckoutRoot(plain)).toBe(false);
+		expect(isEphemeralCheckoutRoot(tmpRoot)).toBe(false);
+		expect(ephemeralStagingRoot(path.join(tmpRoot, "pi-agent-z", "a.ts"))).toBe(
+			path.join(fs.realpathSync(tmpRoot), "pi-agent-z"),
+		);
 	});
 
 	// Recurrence (F5, review probe p4): a real checkout named pi-agent-sdk was
