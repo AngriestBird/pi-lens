@@ -42,7 +42,6 @@ import {
 	beginScope,
 	discardHandoff,
 	forwardHandoff,
-	leaveTicket,
 	nextOrderTurn,
 	type PersistedStores,
 	retireScope,
@@ -461,30 +460,6 @@ describe("#3855 the successor a primary shutdown names", () => {
 			}),
 		).toBeUndefined();
 		expect(startKey(undefined, {})).toBeUndefined();
-	});
-
-	it("binds a secondary's own ticket at its shutdown, so its file-less successor never carries the primary's key or none", () => {
-		const primaryManager = {};
-		const secondaryManager = {};
-		const left = primaryScope();
-		const args = {
-			reason: "reload",
-			sessionFile: undefined,
-			targetSessionFile: undefined,
-			sessionManager: primaryManager,
-		};
-		stashHandoff(left, args);
-		const secondary = beginScope({ role: "secondary" });
-
-		leaveTicket(secondary, secondaryManager);
-
-		expect(startKey(undefined, secondaryManager)).toBe(secondary.scopeId);
-		expect(startKey(undefined, secondaryManager)).not.toBe(
-			successorStartKey(args),
-		);
-		// A host without a manager object binds nothing and never throws.
-		expect(() => leaveTicket(secondary, null)).not.toThrow();
-		takeHandoff("reload", successorStartKey(args));
 	});
 
 	it("names an interrupted start's successor by the key its forwarded slot keeps (#3881)", () => {

@@ -253,14 +253,13 @@ describe("only the named successor is primary in the gap (#3855)", () => {
 		});
 	}
 
-	it("lets a file-less successor whose manager carries no ticket fail safe to primary", () => {
-		// A host that does not hand the reloaded session its manager: the start
-		// has no key. Only a ticket name admits it, and only for its own reason.
+	it("declines a key-less start of the named reason against a ticket name (verify r2 PR8)", () => {
+		// An SDK subagent's first bind with reason `reload` in an in-memory
+		// primary's /reload gap: pi hands only the real successor the manager
+		// the stash bound, so a fresh session carries no key.
 		primaryNames("reload", 7);
-		expect(start("fork", undefined)).toBe("concurrent-secondary");
-		expect(start("new", undefined)).toBe("concurrent-secondary");
-		expect(start("reload", 8)).toBe("concurrent-secondary");
-		expect(start("reload", undefined)).toBe("primary");
+		expect(start("reload", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", 7)).toBe("primary");
 	});
 
 	it("never lets a key-less start pass for a successor named by its file", () => {

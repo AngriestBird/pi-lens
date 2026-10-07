@@ -21,8 +21,10 @@ Four kinds of config:
   `H3InterruptedFileLess`, with `forwardUnadopted` and `forwardPolicy`), and
   so must #3855's (`H3DemoteCarry`, `H3DemoteAdvisory`, `H3DemoteActivation`,
   `H3DemoteFileLess`, `H3SecNew`, `H3SecNewFileLess`, `H3DemotedReplaces`,
-  `H3StaleNoteResume`, `H3NoteEvicted`, `H3InMemoryNewGapReload`, with
-  `namedSuccessor`). The rest register a known
+  `H3StaleNoteResume`, `H3NoteEvicted`, `H3InMemoryNewGapReload`,
+  `H3SdkBind`, `H3SdkBindFileBacked`, with `namedSuccessor`; `Merged`,
+  `MergedStores`, `H3Interrupted*` and `H3FileLessCarry` carry it too, with
+  `HasPrimary`). The rest register a known
   violation of merged master until its fix flips the config to `pass`:
   `Current` violates `SecondaryIsolation` through N2 (#3613), and
   `AcceptedSecondaryForkActivation` pins the answer #3855 gives for a
@@ -207,12 +209,18 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   `clients/session-scope.ts`). The key is the successor's file, else, for a
   `/reload` or in-memory `/fork`, the primary's ticket bound to the manager pi
   hands that successor, else none (an in-memory `/new`). In the gap a `SecUp`
-  is primary only when its own (reason, key) equals that pair. A subagent's
-  start carries its own file or, file-less, its own ticket, which its
-  shutdown binds to its manager (`leaveTicket`); an in-memory `/new` carries
-  none. A key-less start with the named reason fails safe to a ticket name
-  (a host that did not hand over the manager). `Begin` is the named start by
-  construction (the code's equality is pinned by runtime tests).
+  is primary only when its own (reason, key) equals that pair; a subagent's
+  start carries its own file or, file-less, no key. `Begin`, the real
+  successor, computes its own key from its side (`BeginKey`: its file, else
+  the ticket bound to the manager pi hands it, `Via`) and is declined
+  (`BeginDeclined`) when it is not the named one, so `HasPrimary` catches a
+  drift between what a shutdown names and what its successor computes
+  (#3855 verify r2 V2). `SecBind` is an SDK subagent's first bind with a
+  replacement reason (verify r2 PR8).
+- `keylessFailSafe` (#3855 round 2's J6, rejected in round 3): a key-less gap
+  start with the named reason passes for a ticket name. It existed for a
+  test double that minted a session manager per ctx; in pi it admits PR8's
+  SDK subagent (`Mut3855r2KeylessFailSafe`).
 - `inheritRole` (#3855 round 1, superseded): a secondary's `SecDown` leaves
   a note keyed by its successor's key (file-less: its ticket, bound to its
   manager), and a gap start whose note is still there stays secondary. An
@@ -297,6 +305,10 @@ counterexample.
 | `H3StaleNoteResume` | #3855 r2, review F3: a subagent reload whose start never comes, then the primary resumes its file: the process keeps a primary | pass | 9 |
 | `H3NoteEvicted` | #3855 r2: nothing to evict; a gap subagent's own `/reload` is declined by the pair | pass | 136 |
 | `H3InMemoryNewGapReload` | #3855 r2, row 12: in an in-memory `/new` gap a key-less subagent `/reload` is told apart by its reason | pass | 16 |
+| `H3SdkBind` | #3855 r3, verify r2 PR8: an SDK subagent's in-memory first bind with reason `reload`/`fork` in an in-memory primary's gap stays secondary; the real successor keeps its activations | pass | 236 |
+| `H3SdkBindFileBacked` | the same, file-backed | pass | 236 |
+| `Mut3855r2KeylessFailSafe` | #3855 r2's J6: the SDK subagent takes the primary slot | violated `PrimaryIsUsers` | 11 |
+| `Pre3855SdkBind` | pre-#3855 (#3668 row 17): the same | violated `PrimaryIsUsers` | 10 |
 | `AcceptedR3InMemoryNew` | F7, residual R3: a subagent's own in-memory `/new` in the primary's in-memory `/new` gap is primary first | violated `PrimaryIsUsers` | 13 |
 | `Mut3855r1SecNew` | #3855 r1 (R1): a subagent's own in-memory `/new` leaves no note and takes the primary slot | violated `PrimaryIsUsers` | 103 |
 | `Mut3855r1DemotedReplaces` | #3855 r1 (F2): the demoted user conversation's own `/reload` finds its note and is declined | violated `UserNotDeclined` | 212 |
@@ -357,6 +369,8 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Mut3855r1DemotedReplaces` | #3855 review F2 | #3855 r1 (6ae7e2716): every secondary-role activation left a note, the demoted real successor's too | The primary's `/new`; R1 makes the subagent's `/new` primary and demotes the real successor; the subagent primary reloads; the demoted conversation reloads in that gap, finds its own note and is declined. |
 | `Mut3855r1StaleNote` | #3855 review F3 | #3855 r1 (6ae7e2716): notes had no time bound | A subagent reloads and its start never comes; the primary resumes the subagent's file; its successor matches the stale note and is declined. |
 | `Mut3855r1Evicted` | #3855 r1 | #3855 r1 (6ae7e2716): `SECONDARY_SUCCESSOR_NOTE_CAP` | A read lands; `/reload`; the gap subagent's note is evicted; its own `/reload` start classifies primary and the real successor is demoted. |
+| `Mut3855r2KeylessFailSafe` | #3855 verify r2 V1 | #3855 r2 (317ffae8a): J6's `key === undefined && typeof namedKey === "number"` | An in-memory primary's `/reload` or `/fork`; an SDK subagent binds with that reason and no key; J6 admits it and the real successor is demoted. |
+| `Pre3855SdkBind` | #3855 verify r2 PR8 | pre-#3855 (b9eda404c): #3668 row 17 | As above, with any non-`startup` gap start admitted. |
 | `AcceptedR3InMemoryNew` | #3855 residual R3 | master, accepted | The primary's in-memory `/new`; a subagent's own in-memory `/new` starts first in the gap with the same pair. |
 | `AcceptedSecondaryForkActivation` | #3855 (the #3835 r2 question) | master, accepted: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. |
 | `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
@@ -506,7 +520,12 @@ whose start never comes declines the primary's resume of that file
 (`Mut3855r1StaleNote`); eviction at the cap demotes the real successor
 again (`Mut3855r1Evicted`). The merged rule (`namedSuccessor`) uses the
 identity the primary holds, the hand-off key of the successor it names, and
-passes all four. Its residual R3 (`AcceptedR3InMemoryNew`): in the
+passes all four. Round 3 removed round 2's key-less fail-safe (J6,
+`Mut3855r2KeylessFailSafe`): it compensated for a test double, and pi hands
+a `/reload` or in-memory `/fork` successor its predecessor's manager, so the
+named successor never arrives key-less; in pi it let an SDK subagent's
+replacement-reason bind take the slot (`H3SdkBind`). `Begin` now checks its
+own key, so `HasPrimary` constrains the merged rule. Its residual R3 (`AcceptedR3InMemoryNew`): in the
 primary's own in-memory `/new` gap, a subagent's own in-memory `/new`
 carries the same pair, so the first is primary; the process still has one
 primary.

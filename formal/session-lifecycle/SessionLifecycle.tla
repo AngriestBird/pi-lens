@@ -99,8 +99,13 @@
 (*                       (R1); a note can be evicted, or go stale          *)
 (*   "namedSuccessor"    #3855 r2: a primary replacement shutdown names    *)
 (*                       its successor by (reason, key); in the gap only   *)
-(*                       that start is primary. Without either, any        *)
-(*                       non-startup gap start is primary (#3668 row 17)   *)
+(*                       that start is primary, and the real successor     *)
+(*                       (Begin) is declined if its own key differs.       *)
+(*                       Without either, any non-startup gap start is      *)
+(*                       primary (#3668 row 17)                            *)
+(*   "keylessFailSafe"   #3855 r2's J6, a rejected alternative: a key-less *)
+(*                       gap start with the named reason passes for a      *)
+(*                       ticket name                                       *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -544,10 +549,28 @@ Src(k, match) ==
 R1Declines == Has("inheritRole") /\ ~Has("namedSuccessor")
               /\ pend.key # NoKey /\ pend.key \in notes
 
+\* #3855 r2 (verify V2): the key the real successor's own start computes
+\* (startKey), derived from its side, independently of NamedKey: its file,
+\* else the ticket bound to the manager pi hands a /reload or in-memory
+\* /fork successor (Via, #3819's Carrier), else none.
+BeginKey ==
+    LET f == NewFile(pend.k) IN
+    IF f \notin FileLess THEN [f |-> f, t |-> 0]
+    ELSE IF SR(pend.k) \in SlotReasons
+         THEN [f |-> "-", t |-> Via(pend.k, pend.from)] ELSE NoKey
+
+\* The named pair admits a start key (keylessFailSafe: round 2's J6).
+Admits(key) == key = pend.key
+               \/ (Has("keylessFailSafe") /\ key = NoKey /\ pend.key.t # 0)
+
+\* The real successor's start is declined: round 1's stale note, or, under
+\* #3855 r2, its own key is not the one its predecessor's shutdown named.
+Declines == R1Declines \/ (Has("namedSuccessor") /\ ~Admits(BeginKey))
+
 Begin ==
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
     /\ primary = 0
-    /\ ~R1Declines
+    /\ ~Declines
     /\ LET k == pend.k
            t == nxt
            f == NewFile(k)
@@ -639,7 +662,7 @@ BeginDemoted ==
 \* no primary. Under "demotedDiscard" it discards the slot left for it.
 BeginDeclined ==
     /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
-    /\ primary = 0 /\ R1Declines
+    /\ primary = 0 /\ Declines
     /\ LET k == pend.k
            t == nxt
            f == NewFile(k)
@@ -655,7 +678,7 @@ BeginDeclined ==
        /\ slot' = IF Has("demotedDiscard")
                      /\ SlotMatch(SR(k), f, Via(k, pend.from))
                   THEN NoSlot ELSE slot
-       /\ notes' = notes \ {pend.key}
+       /\ notes' = notes \ {BeginKey}
        /\ subBorn' = Born(t, pend.from)
     /\ UNCHANGED <<ep, why, primary, last, forking, cell, imp, taken,
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
@@ -820,6 +843,40 @@ SecStart ==
                    wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone,
                    landed, reads, predOf, lzV, adV, notes, spend, userDeclined>>
 
+\* #3855 verify r2 (probe PR8): an SDK subagent's FIRST bind with a
+\* replacement reason (createAgentSessionFromServices({ sessionStartEvent }),
+\* pi sdk.js), in memory unless file S is file-backed. No shutdown precedes
+\* it. In the primary's gap #3668 took it for the successor; #3855 r2 admits
+\* it only on the named pair. It never adopts (a fresh session's sources hold
+\* nothing of the primary's).
+SecBind(k) ==
+    /\ "SecBindReplace" \in Transitions /\ steps < MaxSteps
+    /\ "secStart" \notin used /\ pend.k # "quit"
+    /\ LET t == nxt
+           key == IF "S" \in FileLess THEN NoKey ELSE [f |-> "S", t |-> 0]
+           asPrimary ==
+               /\ primary = 0
+               /\ IF Has("namedSuccessor")
+                  THEN pend.k \in {"new", "resume", "fork", "clone", "reload"}
+                       /\ SR(pend.k) = k /\ Admits(key)
+                  ELSE TRUE
+       IN
+       /\ st' = [st EXCEPT ![t] = "live"]
+       /\ role' = [role EXCEPT ![t] = IF asPrimary THEN "primary" ELSE "secondary"]
+       /\ sess' = [sess EXCEPT ![t] = "S"]
+       /\ lin' = [lin EXCEPT !["S"] = {t}]
+       /\ nxt' = t + 1
+       /\ primary' = IF asPrimary THEN t ELSE primary
+       /\ last' = IF asPrimary THEN t ELSE last
+       /\ resets' = IF asPrimary THEN [resets EXCEPT ![t] = 1] ELSE resets
+       /\ subBorn' = subBorn \cup {t}
+    /\ steps' = steps + 1 /\ used' = used \cup {"secStart"}
+    /\ UNCHANGED <<ep, why, pend, forking, branch, cell, imp, slot, taken,
+                   side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
+                   begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
+                   prevMax, ownDrop, recorded, dupDone, landed, reads, predOf,
+                   lzV, adV, notes, spend, userDeclined>>
+
 \* A subagent's session_shutdown: its scope retires and its own cells go.
 SecEnd ==
     /\ "SecEnd" \in Transitions /\ steps < MaxSteps
@@ -855,11 +912,11 @@ SecDown(k) ==
           /\ st[s] = "live" /\ role[s] = "secondary"
           /\ LET f == CASE k = "reload" -> sess[s] [] k = "fork" -> "T"
                          [] OTHER -> "U"
-                 \* #3855 binds a secondary's own ticket to its manager
-                 \* (leaveTicket), which pi hands a /reload or in-memory
-                 \* /fork successor; an in-memory /new gets a new one.
+                 \* Only round 1 binds a secondary's manager (its note's
+                 \* ticket); under #3855 r2 nothing does, so a file-less
+                 \* subagent successor carries no key.
                  key == IF f \notin FileLess THEN [f |-> f, t |-> 0]
-                        ELSE IF (Has("inheritRole") \/ Has("namedSuccessor"))
+                        ELSE IF Has("inheritRole") /\ ~Has("namedSuccessor")
                                 /\ k \in {"reload", "fork"}
                              THEN [f |-> "-", t |-> s] ELSE NoKey
                  noted == Has("inheritRole") /\ ~Has("namedSuccessor")
@@ -899,10 +956,7 @@ SecUp ==
                /\ gap
                /\ CASE Has("namedSuccessor") ->
                         pend.k \in {"new", "resume", "fork", "clone", "reload"}
-                        /\ SR(pend.k) = k
-                        \* J6: a key-less start fails safe to a ticket name.
-                        /\ \/ spend.key = pend.key
-                           \/ spend.key = NoKey /\ pend.key.t # 0
+                        /\ SR(pend.k) = k /\ Admits(spend.key)
                     [] Has("inheritRole") -> spend.key \notin notes
                     [] OTHER -> TRUE
            nb == CASE k = "reload" -> branch[sess[s]]
@@ -1224,6 +1278,7 @@ Next ==
     \/ Tree /\ UNCHANGED r2V
     \/ IdleReset /\ UNCHANGED r2V
     \/ SecStart
+    \/ \E k \in {"reload", "fork"} : SecBind(k)
     \/ SecEnd /\ UNCHANGED r2V
     \/ \E k \in {"reload", "fork", "new"} : SecDown(k)
     \/ SecUp

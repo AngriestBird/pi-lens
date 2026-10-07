@@ -617,17 +617,10 @@ export function decideSessionStart(
 		s.successorNamed?.since === s.successorPendingSince
 			? s.successorNamed
 			: undefined;
-	// A successor named by a file-less ticket whose own manager carries none (a
-	// host that did not hand it the predecessor's manager) fails safe to the
-	// successor: a secondary's own successor carries the ticket its shutdown
-	// bound (`leaveTicket`).
-	const keyMatches = (namedKey: string | number | undefined): boolean =>
-		key === namedKey || (key === undefined && typeof namedKey === "number");
 	const notTheSuccessor =
 		named === undefined
 			? reason === "startup"
-			: reason !== undefined &&
-				(reason !== named.reason || !keyMatches(named.key));
+			: reason !== undefined && (reason !== named.reason || key !== named.key);
 	const successorPending =
 		!hasPrior && notTheSuccessor && successorStillPending(s);
 	const priorCtxActive = hasPrior ? probeCtxActive(s.activeCtx) : undefined;

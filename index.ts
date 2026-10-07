@@ -79,7 +79,6 @@ import {
 	logScopeTransition,
 	retireScope,
 	type SessionScope,
-	leaveTicket,
 	scopeCell,
 	startKey,
 	stashHandoff,
@@ -3755,9 +3754,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// Best-effort observability bookkeeping — a stale ctx or an
 				// unresolvable path must never break teardown.
 			}
-			// #3855: bind this secondary's ticket to its manager, so its own
-			// file-less successor never passes for a primary's.
-			if (scope) leaveTicket(scope, getSessionManager(ctx));
 			// #3611: only this secondary's own scope retires.
 			retireOwnScope(
 				(event as { reason?: string } | undefined)?.reason,

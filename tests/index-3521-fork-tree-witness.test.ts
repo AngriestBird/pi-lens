@@ -176,9 +176,22 @@ async function startRuntime(
 	/** Factories whose handlers pi runs before pi-lens's (#3881). */
 	ahead: Array<(pi: ExtensionAPI) => void> = [],
 	runtimeCwd = cwd,
+	/**
+	 * #3855 PR8: the first bind's `session_start`, as an SDK caller passes
+	 * `createAgentSessionFromServices({ sessionStartEvent })` (pi `sdk.js`).
+	 * Later replacements carry pi's own event.
+	 */
+	firstStartEvent?: { type: "session_start"; reason: "reload" | "fork" },
 ): Promise<AgentSessionRuntime> {
+	let firstEvent = firstStartEvent;
 	const runtime = await createAgentSessionRuntime(
-		async ({ cwd: runtimeCwd, sessionManager: sm, sessionStartEvent }) => {
+		async ({
+			cwd: runtimeCwd,
+			sessionManager: sm,
+			sessionStartEvent: event,
+		}) => {
+			const sessionStartEvent = event ?? firstEvent;
+			firstEvent = undefined;
 			const services = await createAgentSessionServices({
 				cwd: runtimeCwd,
 				agentDir,
@@ -2260,6 +2273,43 @@ describe("#3855 only the successor the primary named is primary in its gap", () 
 			["resume", "primary"],
 		]);
 	});
+
+	/**
+	 * Verify r2 V1 (probe PR8): an SDK subagent's first bind may carry
+	 * `sessionStartEvent` reason `reload` or `fork` (a public option, pi
+	 * `sdk.js`). Inside an in-memory primary's /reload or /fork gap it has no
+	 * key, which is not the ticket the primary's shutdown named. Round 2's
+	 * key-less fail-safe (J6) admitted it, and the real successor was demoted
+	 * and lost its activations.
+	 */
+	for (const store of ["in-memory", "file-backed"] as const) {
+		for (const move of ["reload", "fork"] as const) {
+			it(`keeps the ${store} ${move} successor primary when an SDK subagent binds with reason ${move} in its gap`, async () => {
+				let bound = false;
+				const sdkBindInGap = (pi: ExtensionAPI) => {
+					pi.on("session_shutdown", async (event) => {
+						if ((event as { reason?: string }).reason !== move || bound) return;
+						bound = true;
+						await startRuntime(SessionManager.inMemory(cwd), [], [], cwd, {
+							type: "session_start",
+							reason: move,
+						});
+					});
+				};
+				const primary = await startRuntime(managerFor(store), [sdkBindInGap]);
+				await activateTools(primary, "act", ["ast_grep_search"]);
+
+				await replace(primary, move);
+
+				expect(bound).toBe(true);
+				expect.soft((await startRows()).slice(-2)).toEqual([
+					[move, "secondary"],
+					[move, "primary"],
+				]);
+				expect.soft(activeSituational(primary)).toEqual(["ast_grep_search"]);
+			});
+		}
+	}
 
 	/**
 	 * #2129 F3: after a primary quit nothing is pending, so a subagent's own
