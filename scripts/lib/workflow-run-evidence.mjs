@@ -276,15 +276,35 @@ function declaresUnaffected(lines, file) {
 	});
 }
 
-// Whole-line comments and blank lines carry no behaviour, and trailing blanks
-// neither. A trailing comment on a content line, indentation and a `#` line
-// inside a block scalar are NOT ignored: the first is not provably a comment
-// inside a quoted string, the others can change what runs.
-const behaviour = (text) =>
-	String(text)
-		.split(/\r?\n/)
-		.filter((line) => !/^\s*(?:#.*)?$/.test(line))
-		.map((line) => line.trimEnd());
+// What an image says once the lines that carry no behaviour are dropped:
+// whole-line comments, blank lines and trailing blanks. Everything inside a
+// block scalar body (`run: |`, `>`, `|-`, `>+`, `|2`: the indicator line plus
+// every more-indented line after it) is kept VERBATIM, `#` lines and blanks
+// included, because there it is shell payload (`#!/bin/bash`, a heredoc
+// line), not YAML. A trailing comment on a content line and indentation also
+// count as changes. Limit: a multi-line quoted or plain scalar is not tracked.
+const BLOCK_SCALAR = /[:-]\s+(?:[&!]\S+\s+)*[|>][+-]?\d?[+-]?\s*(?:#.*)?$/;
+const behaviour = (text) => {
+	const lines = String(text).split(/\r?\n/);
+	const out = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (!/^\s*(?:#.*)?$/.test(line)) out.push(line.trimEnd());
+		else continue;
+		if (!BLOCK_SCALAR.test(line)) continue;
+		const indent = indentOf(line);
+		let end = index + 1;
+		let lastContent = index;
+		for (; end < lines.length; end += 1) {
+			if (lines[end].trim() === "") continue;
+			if (indentOf(lines[end]) <= indent) break;
+			lastContent = end;
+		}
+		for (let body = index + 1; body <= lastContent; body += 1)
+			out.push(`\u0000${lines[body]}`);
+	}
+	return out;
+};
 
 /** True when `after` differs from `before` only by whole-line comments and blanks. */
 export function isCommentOrWhitespaceOnlyEdit(before, after) {

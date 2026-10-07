@@ -5003,6 +5003,21 @@ describe("Workflow run unaffected declaration is verified (#3085 round 2)", () =
 		);
 	});
 
+	// Recurrence: PR #4020 round 2 verify. An added `#!/bin/bash` line inside a
+	// `run: |` body is shell payload; through the real merge-base read it must
+	// not pass as a comment-only edit.
+	it("rejects the declaration when the only change is a # line inside a run: | body", () => {
+		const steps = (extra: string[]) => [
+			"    steps:",
+			"      - run: |",
+			"          echo hi",
+			...extra,
+		];
+		useFixture(rows(steps([])), rows(steps(["          #!/bin/bash"])));
+		const errors = errorsFor(declared);
+		expect(errors).toContain('"Workflow run unaffected" line is not accepted');
+	});
+
 	it("still accepts a quoted run id for the same executable edit", () => {
 		useFixture(rows(), rows(["    steps:", "      - run: echo changed"]));
 		const quoted = `${body}\n\n\`\`\`text\n$ gh workflow run stryker-nightly.yml --ref test/x\nhttps://github.com/o/r/actions/runs/12345678901\n\`\`\``;

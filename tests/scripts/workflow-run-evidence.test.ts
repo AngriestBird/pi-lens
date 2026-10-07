@@ -353,6 +353,67 @@ describe("isCommentOrWhitespaceOnlyEdit (#3085 round 2)", () => {
 	])("%s", (_name, after, expected) => {
 		expect(isCommentOrWhitespaceOnlyEdit(base, after)).toBe(expected);
 	});
+	// Recurrence: PR #4020 round 2 ignored every whole-line `#`, so an added
+	// `#!/bin/bash` heredoc line inside `run: |` read as a comment-only edit and
+	// cleared the declaration for a changed shell payload.
+	describe("block scalar bodies are payload, not comments (#3085 round 3)", () => {
+		const scalar = (indicator: string) =>
+			`on:\n  push:\njobs:\n  a:\n    steps:\n      - run: ${indicator}\n          echo hi\n          cat <<EOF\n          body\n          EOF\n      - run: echo after\n`;
+		it.each(["|", ">", "|-", ">+", "|2", "|+ # keep", "&s |"])(
+			"an added whole-line # inside a `%s` body is a change",
+			(indicator) => {
+				const before = scalar(indicator);
+				const after = before.replace(
+					"          echo hi\n",
+					"          echo hi\n          #!/bin/bash\n",
+				);
+				expect(isCommentOrWhitespaceOnlyEdit(before, after)).toBe(false);
+			},
+		);
+		it("a blank line added inside a body is a change", () => {
+			const before = scalar("|");
+			expect(
+				isCommentOrWhitespaceOnlyEdit(
+					before,
+					before.replace("echo hi\n", "echo hi\n\n"),
+				),
+			).toBe(false);
+		});
+		it("a # line removed from a body is a change", () => {
+			const before = scalar("|").replace(
+				"echo hi\n",
+				"echo hi\n          # x\n",
+			);
+			expect(isCommentOrWhitespaceOnlyEdit(before, scalar("|"))).toBe(false);
+		});
+		it("a list-item `- run: |` and a bare `key: |` both open a body", () => {
+			const before = "jobs:\n  a:\n    run: |\n      echo hi\n";
+			expect(
+				isCommentOrWhitespaceOnlyEdit(
+					before,
+					before.replace("echo hi", "echo hi\n      # x"),
+				),
+			).toBe(false);
+		});
+		it("comments and blanks around the body stay comment-only", () => {
+			const before = scalar("|");
+			const after = `# header\n${before
+				.replace("      - run: |", "      # note\n      - run: |")
+				.replace(
+					"      - run: echo after",
+					"\n      # trailing\n\n      - run: echo after",
+				)}`;
+			expect(isCommentOrWhitespaceOnlyEdit(before, after)).toBe(true);
+		});
+		it("a comment less indented than the body ends it and stays comment-only", () => {
+			const before = scalar("|");
+			const after = before.replace(
+				"          EOF\n",
+				"          EOF\n    # after the body\n",
+			);
+			expect(isCommentOrWhitespaceOnlyEdit(before, after)).toBe(true);
+		});
+	});
 	it("is false without a base image", () => {
 		expect(isCommentOrWhitespaceOnlyEdit(null, base)).toBe(false);
 		expect(isCommentOrWhitespaceOnlyEdit(undefined, base)).toBe(false);
