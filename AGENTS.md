@@ -848,7 +848,10 @@ A workflow job no pull request can run needs a registered reason in
 same quote is enforced per file for an edit to any workflow whose post-image no
 `pull_request` run executes (no trigger, `pull_request_target` only, or a
 filter that excludes the file): `scripts/check-pr-body.mjs` reds the body
-without it, or without `Workflow run unaffected: <file> — <reason>` (#3085).
+without it. `Workflow run unaffected: <file> — <reason>` clears the rule only
+for a workflow with no `workflow_dispatch` trigger or an edit of comments and
+blank lines, verified against the merge base (#3085). The run id is quoted
+evidence, not verified provenance.
 
 The stale-build guard rejects a missing or older compiled twin. Pre-push fails
 when its bounded test-lock wait times out (#3717); `PI_LENS_PREPUSH_LOCK_SKIP=1`
