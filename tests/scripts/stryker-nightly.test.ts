@@ -279,7 +279,7 @@ describe("nightly shard partition and publication", () => {
 
 	// Recurrence (#4038 r3 F1): two present shards, one report unusable, read
 	// as `ok` and moved the marker past that shard's files.
-	it.each([
+	const REPORT_AXIS: Array<[string, unknown, string]> = [
 		["an empty object", {}, "report is not a mutation report"],
 		["zero bytes", "", "report unreadable"],
 		["malformed JSON", "{not json", "report unreadable"],
@@ -295,7 +295,8 @@ describe("nightly shard partition and publication", () => {
 			"report is shard 0's",
 		],
 		["absent", undefined, "driver exited 0 with no report"],
-	])(
+	];
+	it.each(REPORT_AXIS)(
 		"holds the marker and the queue when shard 1's report is %s",
 		(_label, report, reason) => {
 			const result = night([
@@ -313,7 +314,7 @@ describe("nightly shard partition and publication", () => {
 
 	// Recurrence (#4038 r2 F1 and r4): the artifacts that happened to arrive
 	// standing in for the matrix; and, on a re-run, an earlier attempt's.
-	it.each([
+	const ARTIFACT_AXIS: Array<[string, Artifact[], string]> = [
 		["shard 1 missing", [complete(0, "clients/a.ts")], "1 failed (missing)"],
 		["no artifact at all", [], "0 failed (missing); 1 failed (missing)"],
 		[
@@ -368,10 +369,11 @@ describe("nightly shard partition and publication", () => {
 			],
 			"1 failed (driver exited 1 without a partial result)",
 		],
-	])(
+	];
+	it.each(ARTIFACT_AXIS)(
 		"holds the marker and the queue when the artifact set has %s",
 		(_label, artifacts, line) => {
-			const result = night(artifacts as Artifact[]);
+			const result = night(artifacts);
 			expect(result.status).toBe("failed");
 			expect(result.marker).toBe(SHA_A);
 			expect(result.queue).toEqual([HELD]);
@@ -1219,7 +1221,7 @@ describe("main (real git, real files)", () => {
 
 	// Recurrence (#4038 r4): a failed night whose body says only "the driver
 	// did not finish" while a shard's report was what failed.
-	it("`body --outcomes` names each shard's verdict in the published body", () => {
+	it("body --outcomes names each shard's verdict in the published body", () => {
 		const out = join(dir, "body.md");
 		const outcomes = join(dir, "outcomes.json");
 		writeFileSync(
