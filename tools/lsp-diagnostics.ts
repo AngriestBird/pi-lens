@@ -2451,8 +2451,8 @@ async function collectDirectoryScanFiles(
 		);
 		return collectedFiles.length > 0;
 	});
-	const fresh = collectedFiles.filter(
-		(file) => !seen.has(normalizeMapKey(file)),
+	const fresh = collectedFiles.flatMap((file) =>
+		seen.has(normalizeMapKey(file)) ? [] : [file],
 	);
 	return {
 		files: fresh.slice(0, maxFiles),
