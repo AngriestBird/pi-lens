@@ -4864,3 +4864,171 @@ describe("post-image mutation witnesses (#3945 survivors)", () => {
 		}
 	});
 });
+
+// #3085 gap 1. Recurrence: #3033 (#3043) edited workflow steps no pull request
+// executed, and AGENTS.md's one-sentence `gh workflow run` rule was the only
+// cover. The rule is only real if BOTH CI's entry (`lintPullRequestEvent`) and
+// the local preflight (`lintLocalPrBody`) refuse a no-PR-trigger workflow edit
+// that quotes no run id; deleting either wire must red here.
+describe("workflow edits with no pull request run (#3085 gap 1)", () => {
+	const WORKFLOW = ".github/workflows/stryker-nightly.yml";
+	const NIGHTLY = [
+		"name: nightly",
+		"on:",
+		"  schedule:",
+		"    - cron: '0 3 * * *'",
+		"  workflow_dispatch:",
+		"jobs:",
+		"  a:",
+		"    runs-on: ubuntu-latest",
+		"",
+	].join("\n");
+	const runBody = `${body}\n\n\`\`\`text\n$ gh workflow run stryker-nightly.yml --ref test/x\nhttps://github.com/o/r/actions/runs/12345678901\n\`\`\``;
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		writeFileSync(join(fixtureCwd, WORKFLOW), NIGHTLY);
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("fails CI's entry on a schedule-only workflow edit with no quoted run", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(body, []), {
+			pull_request: { number: 7, body },
+		});
+		expect(result.valid).toBe(false);
+		expect(errors.mock.calls.flat().join("\n")).toContain(
+			`Changed workflow ${WORKFLOW} has no pull request run of its edit`,
+		);
+	});
+
+	it("passes CI's entry once the body quotes the branch run with its id", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(runBody, []), {
+			pull_request: { number: 7, body: runBody },
+		});
+		expect(errors.mock.calls.flat().join("\n")).not.toContain(
+			"Changed workflow",
+		);
+		expect(result).toMatchObject({ valid: true });
+	});
+
+	it("fails the local preflight the same way and passes with the run id", () => {
+		const bare = lintLocalPrBody(body, fixtureCwd);
+		expect(bare.valid).toBe(false);
+		expect(bare.errors.join("\n")).toContain(`Changed workflow ${WORKFLOW}`);
+		expect(
+			lintLocalPrBody(runBody, fixtureCwd).errors.join("\n"),
+		).not.toContain("Changed workflow");
+	});
+
+	it("does not ask for a run when the edited workflow has a pull_request trigger", () => {
+		writeFileSync(
+			join(fixtureCwd, WORKFLOW),
+			NIGHTLY.replace("  workflow_dispatch:", "  pull_request:"),
+		);
+		expect(lintLocalPrBody(body, fixtureCwd).errors.join("\n")).not.toContain(
+			"Changed workflow",
+		);
+	});
+
+	it("fails closed, naming the file, when the post-image cannot be read", () => {
+		rmSync(join(fixtureCwd, WORKFLOW));
+		mkdirSync(join(fixtureCwd, WORKFLOW));
+		expect(lintLocalPrBody(body, fixtureCwd).errors.join("\n")).toContain(
+			`Changed workflow ${WORKFLOW} could not be read`,
+		);
+	});
+});
+
+// #3085 round 2. Recurrence: round 1 accepted any prose after
+// `Workflow run unaffected: <file> —`, so an executable-step edit cleared the
+// rule. Through the real merge-base read (`git merge-base` and `git show` in
+// `lintWorkflowRunEvidence`) the declaration now clears only a comment-only
+// edit or a workflow with no workflow_dispatch trigger.
+describe("Workflow run unaffected declaration is verified (#3085 round 2)", () => {
+	const WORKFLOW = ".github/workflows/stryker-nightly.yml";
+	const rows = (extra: string[] = [], dispatch = true) => [
+		"name: nightly",
+		"on:",
+		"  schedule:",
+		'    - cron: "0 3 * * *"',
+		...(dispatch ? ["  workflow_dispatch:"] : ["  push:"]),
+		"jobs:",
+		"  a:",
+		"    runs-on: ubuntu-latest",
+		...extra,
+	];
+	const declared = `${body}\n\nWorkflow run unaffected: stryker-nightly.yml \u2014 only a comment moved.`;
+	let fixtureCwd = "";
+	const useFixture = (pre: string[], post: string[]) => {
+		fixtureCwd = createOriginMasterFixture(undefined, {
+			path: WORKFLOW,
+			pre,
+			post,
+			dirty: post,
+		});
+	};
+	afterEach(() => {
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+	const errorsFor = (text: string) =>
+		lintLocalPrBody(text, fixtureCwd).errors.join("\n");
+
+	it("accepts the declaration for an edit of comments and blank lines only", () => {
+		useFixture(rows(), ["# header comment", "", ...rows()]);
+		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+
+	it("rejects the declaration when an executable step also changed, naming the evidence form", () => {
+		useFixture(rows(), [
+			"# header comment",
+			...rows(["    steps:", "      - run: echo changed"]),
+		]);
+		const errors = errorsFor(declared);
+		expect(errors).toContain('"Workflow run unaffected" line is not accepted');
+		expect(errors).toContain(
+			"gh workflow run stryker-nightly.yml --ref <branch>",
+		);
+	});
+
+	// Recurrence: PR #4020 round 2 verify. An added `#!/bin/bash` line inside a
+	// `run: |` body is shell payload; through the real merge-base read it must
+	// not pass as a comment-only edit.
+	it("rejects the declaration when the only change is a # line inside a run: | body", () => {
+		const steps = (extra: string[]) => [
+			"    steps:",
+			"      - run: |",
+			"          echo hi",
+			...extra,
+		];
+		useFixture(rows(steps([])), rows(steps(["          #!/bin/bash"])));
+		const errors = errorsFor(declared);
+		expect(errors).toContain('"Workflow run unaffected" line is not accepted');
+	});
+
+	it("still accepts a quoted run id for the same executable edit", () => {
+		useFixture(rows(), rows(["    steps:", "      - run: echo changed"]));
+		const quoted = `${body}\n\n\`\`\`text\n$ gh workflow run stryker-nightly.yml --ref test/x\nhttps://github.com/o/r/actions/runs/12345678901\n\`\`\``;
+		expect(errorsFor(quoted)).not.toContain("Changed workflow");
+	});
+
+	it("accepts the declaration for a workflow with no workflow_dispatch trigger", () => {
+		useFixture(
+			rows([], false),
+			rows(["    steps:", "      - run: echo changed"], false),
+		);
+		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+});
