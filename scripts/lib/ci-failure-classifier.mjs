@@ -20,35 +20,15 @@ import {
 	isBlockingConclusion,
 	isUnitTestsShardJobName,
 } from "./ci-checks.mjs";
+import {
+	parseVitestSummary,
+	stripAnsi,
+	stripLineTimestamps,
+} from "./vitest-summary.mjs";
 
-/** Strips the ANSI color/cursor codes vitest's reporter and GitHub Actions
- * both wrap every line in. Every pattern below matches against the stripped
- * text -- matching raw escape-coded text is what makes log heuristics
- * brittle across reporter versions. */
-// Every CSI sequence (colour, cursor), not only `m`: `scripts/ci-verdict.mjs`
-// reads job logs through this same helper (#3700).
-// oxlint-disable-next-line no-control-regex -- ESC (\x1b) is the literal ANSI escape-sequence lead byte this pattern strips, not accidental input.
-const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
-export function stripAnsi(text) {
-	return text.replace(ANSI_PATTERN, "");
-}
-
-/**
- * Strips the GitHub Actions per-line ISO-8601 timestamp prefix (real log,
- * every line): "2026-08-26T00:09:00.9329487Z  FAIL ...". Every job log
- * fetched from the real API is prefixed this way on EVERY line -- discovered
- * the hard way in review round 2 (V4): a `^\s*` line-start anchor added to
- * fix a different false-positive (BARE_FAIL_LINE matching "FAIL" inside a
- * passing test's own title) broke on the very real fixtures it was meant to
- * keep working, because "FAIL" is never actually the first character on a
- * real log line -- the timestamp is. Applied before any anchored pattern
- * below, so "line start" means "start of content", not "start of the raw
- * line".
- */
-const LINE_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z ?/gm;
-export function stripLineTimestamps(text) {
-	return text.replace(LINE_TIMESTAMP_PREFIX, "");
-}
+// The strip helpers moved to vitest-summary.mjs (#4087); ci-verdict and the
+// classifier tests keep importing them from here.
+export { stripAnsi, stripLineTimestamps };
 
 /**
  * Normalizes transport details that GitHub's Windows log surface can add to
@@ -84,31 +64,6 @@ const MAX_LOG_BYTES = 2 * 1024 * 1024;
 // FAIL and the file path.
 const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 
-const VITEST_TEST_FILE = /\S+\.(?:test|spec)\.[cm]?[jt]sx?/;
-
-/** Extract Vitest failure-banner identities from an already-normalized log. */
-export function extractVitestFailureIds(log) {
-	const ids = new Set();
-	for (const rawLine of log.split("\n")) {
-		const line = rawLine.match(/^\s*FAIL\b\s+(.*)$/)?.[1];
-		if (!line) continue;
-		const fileMatch = line.match(VITEST_TEST_FILE);
-		if (!fileMatch) continue;
-		const file = fileMatch[0];
-		const prefix = line.slice(0, fileMatch.index).trim();
-		const project = prefix
-			? prefix
-					.split(/\s+/)
-					.at(-1)
-					.replace(/^\|+|\|+$/g, "")
-			: "";
-		const suffix = line.slice(fileMatch.index + file.length);
-		const testName = suffix.match(/^\s*>\s*(.+?)\s*$/)?.[1];
-		const id = `${project ? `${project}::` : ""}${file}${testName ? ` › ${testName.replace(/\s+/g, " ")}` : ""}`;
-		ids.add(id);
-	}
-	return [...ids].sort();
-}
 // A file-level FAIL with no "> testname" -- a collection/import error never
 // reaches a single test, so vitest has no test name to print (review round
 // 1, F2/P2). Deliberately looser than FAIL_LINE: only used when FAIL_LINE
@@ -154,13 +109,8 @@ const INLINE_TEST_FAIL_MARKER = /^\s*×\s+(.+?)\s*\d*m?s?\s*$/m;
 // failure evidence even when an infrastructure-looking line appears later.
 // Keep these explicit: the classifier must not let a new infra needle outrank
 // a genuine assertion or compile failure.
-const TEST_FILES_FAILED = /^\s*Test Files\s+\d+\s+failed\b/im;
 const TYPESCRIPT_ERROR =
 	/^\s*\S+\.tsx?\(\d+,\d+\): error TS\d+:|^\s*\S+\.tsx?:\d+:\d+ - error TS\d+:/m;
-// The run's own final tally line (real log, same run): " Tests  1 failed |
-// 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
-// failed count here is unambiguous.
-export const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
 // #2839: vitest's timeout failure text (real log, run 34389495533 attempt 1,
 // job 102594125043, PR #2834): "Error: Test timed out in 5000ms." Vitest's
 // runner uses the same template for hooks: "Error: Hook timed out in 300ms."
@@ -328,8 +278,9 @@ function findRealFailureSignal(log) {
 	if (assertionMatch) {
 		return { detail: `unknown file > ${assertionMatch[1].trim()}` };
 	}
-	if (TEST_FILES_FAILED.test(log)) {
-		return { detail: log.match(TEST_FILES_FAILED)?.[0] ?? "Test Files failed" };
+	const summary = parseVitestSummary(log);
+	if (summary.filesFailed !== null) {
+		return { detail: `Test Files ${summary.filesFailed} failed` };
 	}
 	const typescriptMatch = TYPESCRIPT_ERROR.exec(log);
 	if (typescriptMatch) {
@@ -347,10 +298,12 @@ function findRealFailureSignal(log) {
 			detail: `${bareFail[1]} (file-level failure -- no ">"-separated test name, e.g. an import/collection error)`,
 		};
 	}
-	const overallFailed = OVERALL_TESTS_FAILED.exec(log);
-	if (overallFailed && Number(overallFailed[1]) > 0) {
+	// The run's own final tally line (real log, same run): " Tests  1 failed |
+	// 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
+	// failed count here is unambiguous.
+	if (summary.testsFailed > 0) {
 		return {
-			detail: `${overallFailed[1]} test(s) failed (overall tally line; no per-file detail found)`,
+			detail: `${summary.testsFailed} test(s) failed (overall tally line; no per-file detail found)`,
 		};
 	}
 	const inlineTest = INLINE_TEST_FAIL_MARKER.exec(log);

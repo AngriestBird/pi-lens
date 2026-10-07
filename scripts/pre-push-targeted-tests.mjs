@@ -55,6 +55,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
 import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { isEntryPoint, quoteForWindowsCmd } from "./with-test-lock.mjs";
@@ -515,14 +516,12 @@ function gitCommonDir() {
 	}).trim();
 }
 
-function parseVitestCounts(output) {
-	const line = output.match(/^\s*Tests\s+(.+)$/m)?.[1] ?? "";
-	const count = (word) =>
-		Number(line.match(new RegExp(`(\\d+)\\s+${word}`))?.[1] ?? 0);
+export function parseVitestCounts(output) {
+	const { testsPassed, testsFailed, testsSkipped } = parseVitestSummary(output);
 	return {
-		passed: count("passed"),
-		failed: count("failed"),
-		skipped: count("skipped"),
+		passed: testsPassed ?? 0,
+		failed: testsFailed ?? 0,
+		skipped: testsSkipped ?? 0,
 	};
 }
 

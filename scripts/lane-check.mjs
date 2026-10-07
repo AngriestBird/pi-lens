@@ -11,8 +11,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { stripVTControlCharacters } from "node:util";
 import { fileURLToPath } from "node:url";
+import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	changedFiles as committedChangedFiles,
@@ -55,9 +55,7 @@ export function laneExitCode(verdict) {
  */
 export function classifyFailureFiles(files, redOnBaseOutput) {
 	const worst = {};
-	for (const [, verdict, file] of stripVTControlCharacters(
-		redOnBaseOutput,
-	).matchAll(PER_TEST_LINE))
+	for (const [, verdict, file] of redOnBaseOutput.matchAll(PER_TEST_LINE))
 		if (!(file in worst) || SEVERITY[verdict] > SEVERITY[worst[file]])
 			worst[file] = verdict;
 	return files.map((file) => ({
@@ -68,12 +66,9 @@ export function classifyFailureFiles(files, redOnBaseOutput) {
 
 /** Test files a vitest transcript names as failing, limited to `candidates`. */
 export function reportedFailureFiles(output, candidates) {
-	const found = [
-		...stripVTControlCharacters(output).matchAll(
-			/^\s*(?:❯|FAIL)\s+(?:\S+\s+)?(tests\/\S+?\.test\.ts)(?:\s|\()/gm,
-		),
-	].map((match) => match[1]);
-	return [...new Set(found)].filter((file) => candidates.includes(file));
+	return parseVitestSummary(output).failedFiles.filter((file) =>
+		candidates.includes(file),
+	);
 }
 
 /**
@@ -86,11 +81,9 @@ export function unattributedFailure(status, output, files) {
 	if (status === 0) return null;
 	if (!files.length)
 		return `exit ${status} and no failing test file named in the output`;
-	const counted = stripVTControlCharacters(output).match(
-		/^\s*Test Files\s+(\d+) failed/m,
-	);
-	if (counted && files.length < Number(counted[1]))
-		return `exit ${status}: vitest counted ${counted[1]} failing file(s), ${files.length} named`;
+	const { filesFailed } = parseVitestSummary(output);
+	if (filesFailed !== null && files.length < filesFailed)
+		return `exit ${status}: vitest counted ${filesFailed} failing file(s), ${files.length} named`;
 	return null;
 }
 

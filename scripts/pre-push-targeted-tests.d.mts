@@ -88,4 +88,10 @@ export function writePrePushRecord(input: {
 	outcome?: PrePushRecord["outcome"];
 }): PrePushRecord;
 
+export function parseVitestCounts(output: string): {
+	passed: number;
+	failed: number;
+	skipped: number;
+};
+
 export function main(): Promise<number>;

@@ -62,6 +62,29 @@ it("restores the source after a successful test run and reports SURVIVED", async
 	expect(digest()).toBe(before);
 });
 
+// The usage line says `--tests <files…>`; the argument loop used to read the
+// rest of argv as the list and then reject its second entry as "unknown
+// argument" (found while mutating #4087 against several test files).
+it("accepts several test files after --tests", async () => {
+	const before = digest();
+	const { stdout } = await invoke(target, target);
+	expect(stdout).toContain("SURVIVED");
+	expect(digest()).toBe(before);
+});
+
+// The usage line puts [--table] after `--tests <files…>`; the list used to run
+// to the end of argv, so the flag reached vitest (CACError) and a surviving
+// mutation read RED (PR #4109 review F2).
+it("ends the --tests list at the next flag", async () => {
+	const before = digest();
+	const { stdout } = await invoke(target, "--table");
+	expect(stdout).toContain("SURVIVED");
+	expect(stdout).toContain(
+		"mutation-table: | tests/scripts/mutate-fixture.test.ts | 0 | SURVIVED",
+	);
+	expect(digest()).toBe(before);
+});
+
 it("restores the source after a failing test run and reports RED with a title", async () => {
 	// Round 2 searched a string-only needle, which the matcher refuses with the
 	// same exit code 1, so this test never reached RED. A code needle does.
@@ -88,6 +111,40 @@ it("restores the source after a failing test run and reports RED with a title", 
 			/mutation fixture remains original[\s\S]*RED/,
 		),
 	});
+	expect(digest()).toBe(before);
+});
+
+// The failed-title row is pasted into PR bodies; under CI's colour the titles
+// must reach it without escape codes (#4087: the strip moved onto the shared
+// Vitest parser).
+it("prints the mutation-table row without colour codes (coloured run)", async () => {
+	const before = digest();
+	const error = await execFileAsync(
+		process.execPath,
+		[
+			cli,
+			"--file",
+			target,
+			"--find",
+			"expect(mutationSafeMarker).toBe(true)",
+			"--replace",
+			"expect(mutationSafeMarker).toBe(false)",
+			"--tests",
+			target,
+		],
+		{
+			cwd: root,
+			env: { ...process.env, NO_COLOR: undefined, FORCE_COLOR: "1" },
+		},
+	).then(
+		() => null,
+		(thrown: { stdout: string }) => thrown,
+	);
+	const row = error?.stdout
+		.split("\n")
+		.find((line) => line.startsWith("mutation-table:"));
+	expect(row).toContain("mutation fixture remains original");
+	expect(row).not.toContain("\u001b");
 	expect(digest()).toBe(before);
 });
 
