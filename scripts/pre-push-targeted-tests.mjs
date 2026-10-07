@@ -38,7 +38,16 @@
 // covering test), this builds only and skips the test run — never silently
 // skips the build too.
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
@@ -46,6 +55,8 @@ import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
+const PREPUSH_RECORD_DIR = "pi-lens-prepush";
+const PREPUSH_RECORD_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 // Pre-push budget: 120s. Measured on the built tree on 2026-09-25, the ten
 // registry suites took 32.68s (vi-domock-undo, added after, runs in ~3.5s), so
@@ -342,6 +353,15 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 	// The picks arrive already filtered to `allTests` by `selectFromHistory`.
 	const history = new Set(options.historyPicks ?? []);
 	const selected = new Set([...heuristic, ...armed, ...history]);
+	const selectionReasons = new Map();
+	for (const test of selected) {
+		// Governance and history are deliberate additions to the import heuristic.
+		// Prefer the most specific reason when a test belongs to more than one set.
+		selectionReasons.set(
+			test,
+			armed.has(test) ? "governance" : history.has(test) ? "history" : "import",
+		);
+	}
 
 	// CI-only tier (#3426 H3432-1): remove the suites measured to exceed the
 	// pre-push budget unless the caller is the CI job that owns them. The
@@ -381,7 +401,98 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 				!armed.has(test) &&
 				(capped || !heuristic.has(test)),
 		),
+		selectionReasons,
 	};
+}
+
+function recordDir(commonDir) {
+	return path.join(path.resolve(commonDir), PREPUSH_RECORD_DIR);
+}
+
+export function readPrePushRecord(commonDir, head) {
+	try {
+		return JSON.parse(
+			readFileSync(path.join(recordDir(commonDir), `${head}.json`), "utf8"),
+		);
+	} catch {
+		return null;
+	}
+}
+
+export function writePrePushRecord({
+	commonDir,
+	head,
+	base,
+	at = new Date(),
+	selected,
+	passed,
+	failed,
+	skipped,
+	vitestExitCode,
+	wallTimeMs,
+}) {
+	const dir = recordDir(commonDir);
+	mkdirSync(dir, { recursive: true });
+	const cutoff = at.getTime() - PREPUSH_RECORD_MAX_AGE_MS;
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+		const file = path.join(dir, entry.name);
+		try {
+			if (statSync(file).mtimeMs < cutoff) unlinkSync(file);
+		} catch {
+			// A concurrent prune or filesystem race must not lose the current record.
+		}
+	}
+	const record = {
+		head,
+		base,
+		timestamp: at.toISOString(),
+		selected,
+		passed,
+		failed,
+		skipped,
+		vitestExitCode,
+		wallTimeMs,
+	};
+	writeFileSync(
+		path.join(dir, `${head}.json`),
+		`${JSON.stringify(record)}\n`,
+		"utf8",
+	);
+	return record;
+}
+
+function pushHeads(input) {
+	return input
+		.trim()
+		.split(/\r?\n/)
+		.map((line) => line.trim().split(/\s+/))
+		.filter((parts) => parts.length >= 4 && !/^0+$/.test(parts[1]))
+		.map(([localRef, head, , base]) => ({ localRef, head, base }));
+}
+
+function gitCommonDir() {
+	return execFileSync("git", ["rev-parse", "--git-common-dir"], {
+		encoding: "utf8",
+	}).trim();
+}
+
+function parseVitestCounts(output) {
+	const line = output.match(/^\s*Tests\s+(.+)$/m)?.[1] ?? "";
+	const count = (word) =>
+		Number(line.match(new RegExp(`(\\d+)\\s+${word}`))?.[1] ?? 0);
+	return {
+		passed: count("passed"),
+		failed: count("failed"),
+		skipped: count("skipped"),
+	};
+}
+
+function writeHeadRecords(heads, values) {
+	if (heads.length === 0) return;
+	const commonDir = gitCommonDir();
+	for (const { head, base } of heads)
+		writePrePushRecord({ commonDir, head, base, ...values });
 }
 
 // Windows CreateProcess can't exec .cmd shims (npm) directly, so those need
@@ -431,6 +542,7 @@ function matchLockTimeout(stderr) {
 // always blocks the push.
 function runTargetedTests(selected) {
 	return new Promise((resolve) => {
+		const started = performance.now();
 		const child = spawn(
 			process.execPath,
 			[
@@ -442,26 +554,44 @@ function runTargetedTests(selected) {
 				...selected,
 			],
 			{
-				stdio: ["ignore", "inherit", "pipe"],
+				stdio: ["ignore", "pipe", "pipe"],
 			},
 		);
+		let stdoutBuffer = "";
 		let stderrBuffer = "";
+		child.stdout.on("data", (chunk) => {
+			process.stdout.write(chunk);
+			stdoutBuffer += chunk.toString();
+		});
 		child.stderr.on("data", (chunk) => {
 			process.stderr.write(chunk);
 			stderrBuffer += chunk.toString();
 		});
 		child.on("error", (error) => {
-			resolve({ code: 1, lockTimeout: null, error });
+			resolve({
+				code: 1,
+				lockTimeout: null,
+				error,
+				...parseVitestCounts(stdoutBuffer),
+				wallTimeMs: performance.now() - started,
+			});
 		});
 		child.on("close", (code) => {
 			const lockTimeout = code !== 0 ? matchLockTimeout(stderrBuffer) : null;
-			resolve({ code: code ?? 1, lockTimeout });
+			resolve({
+				code: code ?? 1,
+				lockTimeout,
+				...parseVitestCounts(stdoutBuffer),
+				wallTimeMs: performance.now() - started,
+			});
 		});
 	});
 }
 
 export async function main() {
-	const ranges = resolveDiffRange();
+	const input = readStdin();
+	const heads = pushHeads(input);
+	const ranges = resolveDiffRange(input);
 	if (ranges === null) {
 		console.log("[pre-push] deletion-only push; skipping build and tests.");
 		return 0;
@@ -506,6 +636,14 @@ export async function main() {
 					? "selection unavailable; build-only"
 					: "no TypeScript changes; build-only",
 		});
+		writeHeadRecords(heads, {
+			selected: [],
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
+		});
 		return 0;
 	}
 
@@ -529,10 +667,15 @@ export async function main() {
 		totalBeforeCap,
 		excludedCiOnly,
 		fromHistory,
+		selectionReasons,
 	} = selectTargetedTests(changed, allTests, {
 		includeCiOnly,
 		historyPicks: history.picks,
 	});
+	const selectedRecords = selected.map((file) => ({
+		file,
+		reason: selectionReasons.get(file),
+	}));
 	for (const test of fromHistory)
 		console.log(`[pre-push] history added ${test}`);
 
@@ -561,6 +704,14 @@ export async function main() {
 				excludedCiOnly,
 				history,
 			});
+			writeHeadRecords(heads, {
+				selected: selectedRecords,
+				passed: 0,
+				failed: 0,
+				skipped: 0,
+				vitestExitCode: null,
+				wallTimeMs: 0,
+			});
 			return 0;
 		}
 	}
@@ -576,6 +727,14 @@ export async function main() {
 			status: "no matches; build-only",
 			excludedCiOnly,
 			history,
+		});
+		writeHeadRecords(heads, {
+			selected: [],
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
 		});
 		return 0;
 	}
@@ -596,7 +755,16 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
-	const { code, lockTimeout, error } = await runTargetedTests(selected);
+	const result = await runTargetedTests(selected);
+	const { code, lockTimeout, error } = result;
+	writeHeadRecords(heads, {
+		selected: selectedRecords,
+		passed: result.passed,
+		failed: result.failed,
+		skipped: result.skipped,
+		vitestExitCode: code,
+		wallTimeMs: Math.round(result.wallTimeMs),
+	});
 	if (lockTimeout) {
 		const waitedMs = Number(lockTimeout[1]);
 		const holder = lockTimeout[2];

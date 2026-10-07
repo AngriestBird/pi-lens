@@ -47,6 +47,8 @@ import {
 	changesTestTreeFile,
 	selectTargetedTests,
 	resolveDiffRange,
+	readPrePushRecord,
+	writePrePushRecord,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -652,6 +654,76 @@ describe("selectTargetedTests — no-match fallback (F7)", () => {
 		expect(result.selected).toEqual([]);
 		expect(result.unmatched).toEqual(["clients/orphan.ts"]);
 		expect(result.capped).toBe(false);
+	});
+});
+
+describe("pre-push result records (#4034)", () => {
+	it("writes selected reasons and vitest counts under the git common dir", () => {
+		const commonDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-record-"),
+		);
+		const now = new Date("2026-10-07T12:00:00.000Z");
+		writePrePushRecord({
+			commonDir,
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			at: now,
+			selected: [
+				{ file: "tests/import.test.ts", reason: "import" },
+				{ file: "tests/history.test.ts", reason: "history" },
+				{ file: "tests/governance.test.ts", reason: "governance" },
+			],
+			passed: 2,
+			failed: 1,
+			skipped: 3,
+			vitestExitCode: 1,
+			wallTimeMs: 417,
+		});
+		const record = readPrePushRecord(commonDir, "a".repeat(40));
+		expect(record).toMatchObject({
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			passed: 2,
+			failed: 1,
+			skipped: 3,
+			vitestExitCode: 1,
+			wallTimeMs: 417,
+		});
+		expect(record?.selected).toEqual([
+			{ file: "tests/import.test.ts", reason: "import" },
+			{ file: "tests/history.test.ts", reason: "history" },
+			{ file: "tests/governance.test.ts", reason: "governance" },
+		]);
+		fs.rmSync(commonDir, { recursive: true, force: true });
+	});
+
+	it("prunes records older than fourteen days when writing", () => {
+		const commonDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-prune-"),
+		);
+		const dir = path.join(commonDir, "pi-lens-prepush");
+		fs.mkdirSync(dir);
+		const old = path.join(dir, `${"c".repeat(40)}.json`);
+		fs.writeFileSync(old, "{}\n");
+		fs.utimesSync(
+			old,
+			new Date("2026-09-01T00:00:00.000Z"),
+			new Date("2026-09-01T00:00:00.000Z"),
+		);
+		writePrePushRecord({
+			commonDir,
+			head: "d".repeat(40),
+			base: "e".repeat(40),
+			at: new Date("2026-10-07T00:00:00.000Z"),
+			selected: [],
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
+		});
+		expect(fs.existsSync(old)).toBe(false);
+		fs.rmSync(commonDir, { recursive: true, force: true });
 	});
 });
 
