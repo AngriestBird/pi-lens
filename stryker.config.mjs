@@ -44,6 +44,13 @@ export default {
 	// that estimate and 1.3x the slowest uncapped run measured; a run still past
 	// it is reported as a named dry-run timeout, not a generic failure.
 	dryRunTimeoutMinutes: 10,
+	// Stryker's in-place mode writes `// @ts-nocheck` into EVERY tracked .js/.ts
+	// file (2306 on a CI checkout) before the initial run, which dirties the tree:
+	// tests/scripts/mutate.test.ts then failed 16 of 33 cases ("mutate.mjs:
+	// refusing dirty file") and held both shards in the initial run for 460 and
+	// 525 s (run 37650871948). Nothing here uses a type checker, so the rewrite
+	// buys nothing (R2 of #4108).
+	disableTypeChecks: false,
 	reporters: ["clear-text", "json", "html"],
 	jsonReporter: { fileName: "reports/mutation/mutation.json" },
 	htmlReporter: { fileName: "reports/mutation/mutation.html" },

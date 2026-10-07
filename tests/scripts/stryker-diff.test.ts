@@ -6,6 +6,9 @@
 // #3592 item 2 checked the literal text existed, not that calling
 // `baseMeta` before it ran was safe). Only spawning the real script against
 // a real, throwaway git fixture reproduces the actual TDZ ordering bug.
+// #4108 round 2 adds one more: Stryker's in-place rewrite of every tracked file
+// is the real Stryker's own behaviour (run 37650871948), so only the real
+// Stryker binary over a throwaway fixture reproduces it.
 import { describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -22,6 +25,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import yaml from "../../clients/deps/js-yaml.js";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { acquireTestLock, getLockPath } from "../../scripts/lib/suite-lock.mjs";
@@ -1525,6 +1529,70 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 		fitsTheRuntimeCap(true);
 	}, 150_000);
 
+	// Recurrence (R2 of #4108, run 37650871948): Stryker's in-place mode wrote
+	// `// @ts-nocheck` into every tracked file before the initial run, so
+	// tests/scripts/mutate.test.ts ("mutate.mjs: refusing dirty file") failed 16
+	// of 33 cases and both shards sat in the initial run for 460 and 525 s. The
+	// REAL Stryker (only its sandbox is small) runs the repo's own config over a
+	// fixture whose test fails if a tracked file was rewritten.
+	// lane: Unit tests (ubuntu shards); the mutation lane runs on ubuntu only.
+	it.skipIf(process.platform === "win32")(
+		"leaves tracked files unrewritten in the real Stryker's initial run",
+		() => {
+			const fixture = buildDriverFixture({
+				covering: true,
+				includeCompiled: false,
+			});
+			try {
+				writeFileSync(
+					join(fixture.root, "tracked.ts"),
+					"export const t = 1;\n",
+				);
+				writeFileSync(
+					join(fixture.root, "tests", "scripts", "untouched.test.ts"),
+					'import { readFileSync } from "node:fs";\nimport { expect, it } from "vitest";\nit("finds a tracked file as committed", () => {\n\texpect(readFileSync("tracked.ts", "utf8")).toBe("export const t = 1;\\n");\n});\n',
+				);
+				fixture.git(["add", "tracked.ts", "tests/scripts/untouched.test.ts"]);
+				fixture.git(["commit", "-qm", "tracked file and its test"]);
+				const configFile = join(fixture.root, ".stryker-real.config.mjs");
+				writeFileSync(
+					configFile,
+					[
+						`import base from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "stryker.config.mjs")).href)};`,
+						`import { buildRunConfig } from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "scripts", "lib", "stryker-diff.mjs")).href)};`,
+						'export default { ...buildRunConfig(base, { command: "node_modules/.bin/vitest run --configLoader runner tests/scripts/untouched.test.ts" }), buildCommand: "node -e 0" };',
+						"",
+					].join("\n"),
+				);
+				const result = spawnSync(
+					process.execPath,
+					[
+						join(
+							repositoryRoot,
+							"node_modules",
+							"@stryker-mutator",
+							"core",
+							"bin",
+							"stryker.js",
+						),
+						"run",
+						"--mutate",
+						"scripts/thing.mjs:1-3",
+						"--dryRunOnly",
+						configFile,
+					],
+					{ cwd: fixture.root, encoding: "utf8", timeout: 120_000 },
+				);
+				const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+				expect(output).toContain("Initial test run succeeded");
+				expect(result.status).toBe(0);
+			} finally {
+				fixture.cleanup();
+			}
+		},
+		150_000,
+	);
+
 	// Recurrence (#4092): a mistyped cap read as NaN, and every comparison with
 	// NaN is false, so the runtime cap would have silently stopped binding.
 	it.each(["abc", "0", "-5"])(
@@ -2232,6 +2300,10 @@ describe("stryker diff selection", () => {
 		// The capped replay of the failing selection ran inside both bounds.
 		expect(measured.cappedReplay.estimatedSeconds).toBeLessThanOrEqual(
 			MAX_DRY_RUN_SECONDS,
+		);
+		// The real Stryker over the capped replay: inside the bound with margin.
+		expect(measured.cappedReplay.strykerDryRun.wallSeconds).toBeLessThan(
+			(minutes * 60) / 2,
 		);
 		expect(measured.cappedReplay.wallSeconds).toBeLessThan(
 			measured.ci.failing.defaultTimeoutSeconds,

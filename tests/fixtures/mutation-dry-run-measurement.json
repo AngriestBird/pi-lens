@@ -35,6 +35,25 @@
         ]
       },
       "log": "INFO DryRunExecutor Initial test run succeeded. Ran 1 tests in 4 minutes and 8 seconds (net 248678 ms, overhead 2 ms)."
+    },
+    "dispatchRound1": {
+      "run": 37650871948,
+      "head": "d9ae33280e408264df7cab4ff9fcc36210b90ccf",
+      "shards": {
+        "0": {
+          "job": 112893826635,
+          "selection": "related 317 -> covering 204 -> kept 60 (60 own, 22 probe failed, 74 over the runtime cap, ~240 s kept)",
+          "vitestDurationSeconds": 459.84,
+          "failed": "tests/scripts/mutate.test.ts 16 of 33 (mutate.mjs: refusing dirty file), 367714 ms"
+        },
+        "1": {
+          "job": 112893826647,
+          "selection": "related 573 -> covering 358 -> kept 74 (74 own, 213 probe failed, 60 over the runtime cap, ~238 s kept)",
+          "vitestDurationSeconds": 524.8,
+          "failed": "tests/scripts/mutate.test.ts, same 16"
+        }
+      },
+      "cause": "Stryker in-place mode wrote // @ts-nocheck into every tracked file (2306 on a checkout), dirtying the tree; fixed by disableTypeChecks: false"
     }
   },
   "local": {
@@ -201,7 +220,14 @@
     "estimatedSeconds": 240,
     "cores": 2,
     "wallSeconds": 243,
-    "sumFileSeconds": 192.3
+    "sumFileSeconds": 192.3,
+    "strykerDryRun": {
+      "description": "The same 101 kept files through the REAL Stryker --dryRunOnly (disableTypeChecks off), taskset -c 0,1, command runner = the vitest dry-run command; vitest Duration line.",
+      "cores": 2,
+      "wallSeconds": 279.6,
+      "factorOverPlainVitest": 1.15,
+      "note": "one failure: tests/clients/flake-shape-ratchet.test.ts, a baseline row this round raised (8 to 9), unrelated to timing"
+    }
   },
   "allUnknownReplay": {
     "description": "All 122 files as own tests with no probe timing, through selectMutationTests with the recommended cap, over 400 renamed populations (path-hash orders); actual = the measured per-file seconds (fileSecondsAtTwoCores) + overhead of the kept files. Replayed by the test.",
