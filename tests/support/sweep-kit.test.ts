@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
+	RUNTIME_SCRATCH_DIRS,
 	assertNonEmptyScan,
 	assignNearestExclusive,
 	auditRegistry,
@@ -488,6 +489,41 @@ describe("sweep-kit: listSourceFiles scratch roots (#4097)", () => {
 		} finally {
 			write.mockRestore();
 		}
+	});
+
+	it("prunes exactly the four runtime scratch names (review F1)", () => {
+		// Recurrence: widening this set silently empties every sweep that walks
+		// a pruned name (adding "tests" reddened nothing in the #4102 review).
+		expect([...RUNTIME_SCRATCH_DIRS].sort()).toEqual([
+			".claude",
+			".git",
+			".probe-home",
+			"node_modules",
+		]);
+	});
+
+	it("rethrows a non-ENOENT readdir failure on a non-root directory (review F2)", () => {
+		// Recurrence: only a vanished directory may be skipped; a directory that
+		// turned into a file (ENOTDIR) is a real fault and must stay loud.
+		const notDirRoot = path.join(root, "notdir");
+		for (const name of ["a", "b"]) {
+			fs.mkdirSync(path.join(notDirRoot, name), { recursive: true });
+			fs.writeFileSync(path.join(notDirRoot, name, "f.ts"), "");
+		}
+		let swapped = false;
+		expect(() =>
+			listSourceFiles(notDirRoot, {
+				exclude: (rel) => {
+					if (!swapped) {
+						swapped = true;
+						const other = rel.split("/")[0] === "a" ? "b" : "a";
+						fs.rmSync(path.join(notDirRoot, other), { recursive: true });
+						fs.writeFileSync(path.join(notDirRoot, other), "not a directory");
+					}
+					return false;
+				},
+			}),
+		).toThrow(/ENOTDIR/);
 	});
 
 	it("still throws for a missing walk root", () => {
