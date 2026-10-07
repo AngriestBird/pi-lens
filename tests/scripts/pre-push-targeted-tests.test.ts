@@ -219,6 +219,66 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 });
 
 describe("selectTargetedTests — path-mirror pass", () => {
+	it("keeps the live production and tests scanner populations on their own change paths", () => {
+		// #3951 F1: the census union allowed a tests-tree scanner to move to the
+		// production registry while a tests-only push stopped selecting it.
+		// These literal populations are independently reviewed against the live
+		// census; exercise the production selector on the real checkout inventory.
+		const productionScanners = [
+			"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
+			"tests/clients/session-state-conformance.test.ts",
+			"tests/config/glossary-synonym-sweep.test.ts",
+			"tests/config/strictness-ratchet.test.ts",
+			"tests/config/hook-await-bounds.test.ts",
+			"tests/config/dmts-export-drift.test.ts",
+			"tests/config/vi-mock-export-sweep.test.ts",
+			"tests/config/vi-domock-undo.test.ts",
+			"tests/config/degradation-kind-coverage.test.ts",
+			"tests/config/degradation-kind-order.test.ts",
+			"tests/config/sweep-floor-coverage.test.ts",
+			"tests/config/tracked-control-bytes.test.ts",
+			"tests/config/session-scope-sweep.test.ts",
+			"tests/config/lsp-idle-eviction-measurement.test.ts",
+			"tests/clients/atomic-write-sweep.test.ts",
+			"tests/clients/availability-classifiedby-ok-sweep.test.ts",
+			"tests/clients/availability-policy-coverage.test.ts",
+			"tests/clients/bounded-telemetry-sweep.test.ts",
+			"tests/clients/single-flight-ratchet.test.ts",
+			"tests/config/bounded-container-guard.test.ts",
+		];
+		const testScanners = [
+			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/config/module-instance-coverage.test.ts",
+			"tests/config/tmp-fixture-hygiene.test.ts",
+			"tests/config/vacuous-skip-coverage.test.ts",
+			"tests/support/host-event-shape-scan.test.ts",
+		];
+		// Pin live scanner shapes behind the independent buckets: direct
+		// production walk, delegated tests/support walk, and the production walk
+		// that enters through a support re-export. The census's import-alias and
+		// default-export fixtures below cover the other resolver entry forms.
+		expect(productionScanners).toContain(
+			"tests/config/hook-await-bounds.test.ts",
+		);
+		expect(testScanners).toContain("tests/clients/flake-shape-ratchet.test.ts");
+		expect(TREE_SCANNING_GOVERNANCE_TESTS).toEqual(productionScanners);
+		expect(TEST_TREE_GOVERNANCE_TESTS).toEqual(testScanners);
+
+		const allTests = collectTestFiles(path.join(repoRoot, "tests")).map(
+			(file) => path.relative(repoRoot, file).split(path.sep).join("/"),
+		);
+		const production = selectTargetedTests(
+			["clients/__production_probe__.ts"],
+			allTests,
+		);
+		const testsOnly = selectTargetedTests(
+			["tests/support/__test_probe__.ts"],
+			allTests,
+		);
+		expect(production.selected).toEqual(productionScanners);
+		expect(testsOnly.selected).toEqual(testScanners);
+	});
+
 	it("selects the registered tree scanners for production changes", () => {
 		enterFixture();
 		for (const test of TREE_SCANNING_GOVERNANCE_TESTS)
