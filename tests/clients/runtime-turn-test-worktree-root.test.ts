@@ -60,6 +60,14 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 			const testFile = args.find((arg) => /\.(test\.ts|py)$/.test(arg));
 			if (testFile === undefined) return { stdout: "", stderr: "", status: 0 };
 			runner.spawns.push({ command, args, cwd: options?.cwd ?? "" });
+			if (args.includes("pytest")) {
+				return {
+					stdout:
+						"FAILED tests/test_widget.py::test_value - AssertionError\n1 failed in 0.01s\n",
+					stderr: "",
+					status: 1,
+				};
+			}
 			const failed = runner.failing.has(path.resolve(testFile)) ? 1 : 0;
 			return {
 				stdout: JSON.stringify({
@@ -789,6 +797,27 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 			expect(
 				JSON.stringify(peekTestFindings(cacheManager, main, runtime, true)),
 			).toContain("at tests/unit/self.test.ts:12");
+		});
+
+		it("rebases a pytest failure through the real turn-end path", async () => {
+			const x = addWorktree("pytest");
+			write(x, "pyproject.toml", "[tool.pytest.ini_options]\n");
+			const python = write(x, ".venv/bin/python", "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(python, 0o755);
+			const xTest = write(
+				x,
+				"tests/test_widget.py",
+				"def test_value(): pass\n",
+			);
+			runner.failing.add(xTest);
+			edit(xTest);
+
+			await turnEnd();
+			await dbgSeen(/failure\(s\) cached for pull diagnostics/);
+
+			expect(
+				JSON.stringify(peekTestFindings(cacheManager, main, runtime, true)),
+			).toContain("at .worktrees/pytest/tests/test_widget.py:test_value");
 		});
 	});
 

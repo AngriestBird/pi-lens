@@ -181,6 +181,7 @@ function isUvWorkspaceMember(
 export async function detectPythonEnvironment(
 	projectRoot: string,
 	homeDir: string = os.homedir(),
+	options: { allowAmbient?: boolean } = {},
 ): Promise<PythonEnvironment | undefined> {
 	// `path.resolve` once at the seam entry so `isStartDir` below compares like
 	// with like: `walkUpDirs` resolves its input, a caller's argument need not
@@ -213,6 +214,7 @@ export async function detectPythonEnvironment(
 	const uvProjectEnvironment = process.env.UV_PROJECT_ENVIRONMENT;
 	// PEP 723 `uv run --script` environments are cache-keyed by script content;
 	// without a stable project marker or explicit path, they remain undiscoverable.
+	const allowAmbient = options.allowAmbient ?? true;
 	const candidates: Array<{
 		root: string | undefined;
 		source: PythonEnvironmentSource;
@@ -243,6 +245,18 @@ export async function detectPythonEnvironment(
 
 	for (const candidate of candidates) {
 		if (!candidate.root) continue;
+		if (
+			!allowAmbient &&
+			(candidate.source === "virtual-env" || candidate.source === "conda")
+		) {
+			const relative = path.relative(root, path.resolve(candidate.root));
+			if (
+				relative === ".." ||
+				relative.startsWith(`..${path.sep}`) ||
+				path.isAbsolute(relative)
+			)
+				continue;
+		}
 		const binDir = path.join(
 			candidate.root,
 			process.platform === "win32" ? "Scripts" : "bin",

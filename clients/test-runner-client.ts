@@ -1789,6 +1789,7 @@ export class TestRunnerClient {
 				absoluteTestFile,
 				cwd,
 				spawnCwd,
+				requireOwnInstall,
 			);
 			if (requireOwnInstall && !ownInstall) {
 				return {
@@ -1850,6 +1851,7 @@ export class TestRunnerClient {
 						absoluteTestFile,
 						cwd,
 						runner,
+						displayRoot ?? cwd,
 					);
 					break;
 				case "phpunit":
@@ -1859,6 +1861,8 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
 					);
 					break;
 				case "mix":
@@ -1868,6 +1872,8 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
 					);
 					break;
 				default:
@@ -1877,6 +1883,8 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
 					);
 					break;
 			}
@@ -2327,8 +2335,9 @@ export class TestRunnerClient {
 		stderr: string,
 		exitCode: number,
 		testFile: string,
-		_cwd: string,
+		cwd: string,
 		runner: string,
+		displayRoot: string = cwd,
 	): TestResult {
 		const failures: TestFailure[] = [];
 		const output = `${stdout}\n${stderr}`;
@@ -2344,7 +2353,13 @@ export class TestRunnerClient {
 			failures.push({
 				name: match[1],
 				message: match[2].trim().slice(0, 500),
-				location: match[1].replace("::", ":"),
+				location: (() => {
+					const [file, ...testParts] = match[1].split("::");
+					const relative = toPosix(
+						path.relative(displayRoot, path.resolve(cwd, file)),
+					);
+					return `${relative}:${testParts.join("::")}`;
+				})(),
 			});
 		}
 
@@ -2383,6 +2398,8 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2417,7 +2434,16 @@ export class TestRunnerClient {
 		const failureRegex = /^\d+\)\s+(\S+)/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
-			failures.push({ name: match[1], message: match[1] });
+			const locationMatch = output
+				.slice(match.index + match[0].length)
+				.match(/(?:^|\n)\s*((?:[^\s:]+\/)*[^\s:]+\.php):(\d+)/);
+			failures.push({
+				name: match[1],
+				message: match[1],
+				location: locationMatch
+					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					: undefined,
+			});
 		}
 
 		// #1452: PHPUnit prints its own elapsed time and this parser dropped it,
@@ -2489,6 +2515,8 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2527,10 +2555,15 @@ export class TestRunnerClient {
 		const failureRegex = /^\s*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
+			const locationMatch = output
+				.slice(match.index + match[0].length)
+				.match(/(?:^|\n)\s*((?:[^\s:]+\/)*[^\s:]+\.exs):(\d+)/);
 			failures.push({
 				name: match[1].trim(),
 				message: match[1].trim(),
-				location: match[2].trim(),
+				location: locationMatch
+					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					: match[2].trim(),
 			});
 		}
 
@@ -2792,6 +2825,8 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		const lower = output.toLowerCase();
@@ -3017,7 +3052,16 @@ export class TestRunnerClient {
 		];
 		for (const m of otherNames) {
 			if (failures.length >= 5) break;
-			failures.push({ name: m[1].trim(), message: m[1].trim() });
+			const locationMatch = m[1].match(
+				/((?:[^\s:]+\/)*[^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/,
+			);
+			failures.push({
+				name: m[1].trim(),
+				message: m[1].trim(),
+				location: locationMatch
+					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					: undefined,
+			});
 		}
 
 		// #1487: gated on `!matched`, not on `failed === 0`. A non-zero exit
@@ -3302,6 +3346,7 @@ export class TestRunnerClient {
 		 * Defaults to `cwd`, which is every call where the two are the same.
 		 */
 		spawnCwd: string = cwd,
+		requireOwnInstall = false,
 	): Promise<{
 		command: string;
 		args: string[];
@@ -3320,7 +3365,9 @@ export class TestRunnerClient {
 		// resolved from the host PATH. The child-only environment also keeps tools
 		// spawned by tests inside the same project environment.
 		if (runner === "pytest") {
-			const pythonEnvironment = await detectPythonEnvironment(cwd);
+			const pythonEnvironment = await detectPythonEnvironment(cwd, undefined, {
+				allowAmbient: !requireOwnInstall,
+			});
 			if (pythonEnvironment) {
 				return {
 					command: pythonEnvironment.pythonPath,

@@ -84,6 +84,57 @@ describe("test-runner-client", () => {
 		expect(result.failed).toBe(1);
 	});
 
+	it("renders text-runner failure locations from the session display root (#3871 V2)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const session = "/repo";
+		const worktree = "/repo/.worktrees/x";
+		const pytest = client.parsePytestOutput(
+			"FAILED tests/test_widget.py::test_value - AssertionError\n1 failed in 0.01s",
+			"",
+			1,
+			`${worktree}/tests/test_widget.py`,
+			worktree,
+			"pytest",
+			session,
+		);
+		const phpunit = client.parsePhpunitOutput(
+			"1) Foo\\BarTest::testValue\nFailed asserting\n\ntests/Foo.php:12\nTests: 1, Assertions: 1, Errors: 1, Failures: 0, Skipped: 0.",
+			"",
+			1,
+			`${worktree}/tests/BarTest.php`,
+			"phpunit",
+			session,
+			worktree,
+		);
+		const mix = client.parseMixTestOutput(
+			"  1) test value (FooTest)\n\n  test/foo_test.exs:12\n3 tests, 1 failure",
+			"",
+			1,
+			`${worktree}/test/foo_test.exs`,
+			"mix",
+			session,
+			worktree,
+		);
+		const generic = client.parseGenericRunnerOutput(
+			"FAILED tests/test_widget.py:12\n1 tests completed, 1 failed",
+			"",
+			1,
+			`${worktree}/tests/test_widget.py`,
+			"generic",
+			session,
+			worktree,
+		);
+
+		expect(pytest.failures[0].location).toBe(
+			".worktrees/x/tests/test_widget.py:test_value",
+		);
+		expect(phpunit.failures[0].location).toBe(".worktrees/x/tests/Foo.php:12");
+		expect(mix.failures[0].location).toBe(".worktrees/x/test/foo_test.exs:12");
+		expect(generic.failures[0].location).toBe(
+			".worktrees/x/tests/test_widget.py:12",
+		);
+	});
+
 	// #1479: the agent-facing surface asks the same "was this measured at all"
 	// question the turn-end log asks, and now reads it from the same predicate.
 	describe("formatResult duration suffix (#1479)", () => {
@@ -2984,7 +3035,7 @@ describe("test-runner-client", () => {
 		expect(result.passed).toBe(2);
 		expect(result.failed).toBe(1);
 		expect(result.failures[0].name).toBe("test creates a user");
-		expect(result.failures[0].location).toBe("Demo.Accounts.UserTest");
+		expect(result.failures[0].location).toBe("test/accounts/user_test.exs:5");
 	});
 });
 

@@ -186,6 +186,44 @@ afterAll(() => {
 });
 
 describe("pytest project environment", () => {
+	it("does not borrow an ambient environment for a linked-worktree root (#3871 V4)", async () => {
+		const project = createProject(false);
+		const ambient = createEnvironment(createTempDir("pi-lens-ambient-"));
+		process.env.VIRTUAL_ENV = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBe("no-runner-install");
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+	});
+
+	it("accepts an ambient environment inside a linked-worktree root (#3871 V4)", async () => {
+		const project = createProject(false);
+		const ambient = createEnvironment(path.join(project.root, ".ambient"));
+		process.env.CONDA_PREFIX = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledOnce();
+		expect(safeSpawnAsync.mock.calls[0][0]).toBe(ambient.pythonPath);
+	});
 	it("runs pytest with an unactivated project .venv", async () => {
 		const { root, testFile, pythonPath, binDir } = createProject(true);
 		const inheritedPath = process.env.PATH;
