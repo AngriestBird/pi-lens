@@ -244,6 +244,9 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.out).toContain("CAUSED-BY-CHANGE: tests/config/bad.test.ts");
 			expect(worktreeCount(lane)).toBe(1);
 			expect(scratch(lane)).toEqual([]);
+			// The lane's own TMPDIR is inherited (red-on-base made its scratch root
+			// there); the old gate forced a shared `../probes-4047` instead.
+			expect(fs.existsSync(path.join(lane.tmp, "pi-lens-scratch"))).toBe(true);
 		},
 		TIMEOUT,
 	);
