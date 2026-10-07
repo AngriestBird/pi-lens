@@ -417,7 +417,13 @@ describe("pr-worktree nested-destination rail (pure)", () => {
 		destination: string,
 		checkouts: string[],
 		pathApi: typeof path = path,
-	) => nestedDestinationError({ destination, checkouts, pathApi });
+	) =>
+		nestedDestinationError({
+			destination,
+			checkouts,
+			mainCheckout: checkouts[0],
+			pathApi,
+		});
 
 	it("refuses a destination at or inside a checkout and names both plus the override", () => {
 		const nested = refuse("/a/main/.probe-home/home/Desktop/wt/r1", [
@@ -436,6 +442,17 @@ describe("pr-worktree nested-destination rail (pure)", () => {
 		expect(refuse("/a/linked/wt/r1", ["/a/main", "/a/linked"])).toContain(
 			"/a/linked",
 		);
+	});
+
+	// Recurrence: PR #3998 review F1 -- equality with a NON-main registered row
+	// (a name already open, or registered with its directory gone) read as
+	// nested and hid git's own "already exists" / "prune" answer.
+	it("refuses equality only against the main checkout, containment against every row", () => {
+		expect(refuse("/a/linked", ["/a/main", "/a/linked"])).toBeNull();
+		expect(refuse("/a/linked/r1", ["/a/main", "/a/linked"])).toContain(
+			"/a/linked",
+		);
+		expect(refuse("/a/main", ["/a/main", "/a/linked"])).toContain("/a/main");
 	});
 
 	it("allows a destination outside every checkout, including a sibling that shares a name prefix", () => {
@@ -560,6 +577,57 @@ describe("pr-worktree CLI open nested-destination rail", () => {
 		expectNothingCreated(fixture, 2);
 	});
 
+	// Recurrence: PR #3998 review F1 -- re-opening a registered name exited 2
+	// with the "nested" text and steered the worker to the env override instead
+	// of git's "already exists" / "prune" answer.
+	it("leaves a reopened registered name to git instead of calling it nested", () => {
+		const fixture = makeFixture();
+		const env = { PI_LENS_WORKTREES_ROOT: fixture.worktreesRoot };
+		expect(openNamed(fixture, env, "r1").status).toBe(0);
+
+		const again = openNamed(fixture, env, "r1");
+		expect(again.status).toBe(1);
+		expect(again.stderr).toContain("failed to create worktree");
+		expect(again.stderr).toContain("already exists");
+		expect(again.stderr).not.toContain("refusing");
+	});
+
+	it("leaves a registered name whose directory is gone to git's prune answer", () => {
+		const fixture = makeFixture();
+		const env = { PI_LENS_WORKTREES_ROOT: fixture.worktreesRoot };
+		expect(openNamed(fixture, env, "r1").status).toBe(0);
+		fs.rmSync(path.join(fixture.worktreesRoot, "r1"), {
+			recursive: true,
+			force: true,
+		});
+
+		const again = openNamed(fixture, env, "r1");
+		expect(again.status).toBe(1);
+		expect(again.stderr).toContain("failed to create worktree");
+		expect(again.stderr).not.toContain("refusing");
+	});
+
+	// Recurrence: PR #3998 review F2 -- a `bare` row from the registry was judged
+	// as a checkout, so the "worktrees inside a bare repository" layout was refused.
+	it("opens a destination under a bare repository's directory", () => {
+		const fixture = makeFixture();
+		const bare = path.join(fixture.root, "bare.git");
+		fixture.git(["clone", "-q", "--bare", fixture.origin, bare], fixture.root);
+		const linked = path.join(fixture.root, "lw");
+		fixture.git(["worktree", "add", linked, "master"], bare);
+		const root = path.join(bare, "wts");
+		const result = openNamed(
+			fixture,
+			{ PI_LENS_WORKTREES_ROOT: root },
+			"r1",
+			linked,
+		);
+
+		expect(result.stderr).not.toContain("refusing");
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(path.join(root, "r1"))).toBe(true);
+	});
+
 	it("opens under a default root whose HOME is outside every checkout", () => {
 		const fixture = makeFixture();
 		const home = path.join(fixture.root, "home");
@@ -602,6 +670,26 @@ describe("pr-worktree CLI open nested-destination rail", () => {
 
 		expect(result.status).toBe(0);
 		expect(fs.existsSync(path.join(fixture.root, "rel-1"))).toBe(true);
+	});
+
+	// Recurrence: PR #3998 review F3 -- `mkdirSync` resolved a relative root
+	// against the process cwd while git and the guard resolve it from the repo
+	// root, leaving an empty directory inside the source for a run from a
+	// subdirectory.
+	it("creates a relative root where git resolves it, not inside the source", () => {
+		const fixture = makeFixture();
+		const sub = path.join(fixture.repo, "sub");
+		fs.mkdirSync(sub);
+		const result = openNamed(
+			fixture,
+			{ PI_LENS_WORKTREES_ROOT: "../root" },
+			"rel-2",
+			sub,
+		);
+
+		expect(result.status).toBe(0);
+		expect(fs.existsSync(path.join(fixture.root, "root", "rel-2"))).toBe(true);
+		expect(fs.existsSync(path.join(fixture.repo, "root"))).toBe(false);
 	});
 });
 

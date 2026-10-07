@@ -38,6 +38,7 @@ export function deriveOpenPlan(input: OpenPlanInput): OpenPlan;
 export function nestedDestinationError(input: {
 	destination: string;
 	checkouts: string[];
+	mainCheckout?: string | null;
 	pathApi?: typeof import("node:path");
 }): string | null;
 

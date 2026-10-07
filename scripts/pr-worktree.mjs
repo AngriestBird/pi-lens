@@ -13,10 +13,11 @@
  * (or `pull/<n>/merge` under `--merge`) from `origin`, creates a worktree
  * under `~/Desktop/pi-lens-worktrees/<name>`, and symlinks the main
  * checkout's `node_modules`. It prints the absolute path. Before the fetch it
- * refuses (exit 2, nothing created) a destination at or inside any registered
- * checkout, symlinks resolved: a HOME pinned under the source checkout would
- * otherwise nest a second tree in it (#3981). `PI_LENS_WORKTREES_ROOT` is the
- * way out.
+ * refuses (exit 2, nothing created) a destination that is the main checkout or
+ * inside a registered non-bare checkout, symlinks resolved: a HOME pinned
+ * under the source checkout would otherwise nest a second tree in it (#3981).
+ * An exact hit on another registered tree is left to git.
+ * `PI_LENS_WORKTREES_ROOT` is the way out.
  *
  * `close` first checks every rail (registered worktree, not the main
  * checkout, inside the worktrees root, clean tree), all before touching
@@ -259,9 +260,13 @@ function executeOpen(options, io) {
 		stderr(`failed to list worktrees: ${error.message}`);
 		return 1;
 	}
+	const checkouts = rows
+		.filter((row) => !row.bare)
+		.map((row) => canonicalPath(row.path));
 	const refusal = nestedDestinationError({
 		destination: canonicalDestination(path.resolve(cwd, plan.path)),
-		checkouts: rows.map((row) => canonicalPath(row.path)),
+		checkouts,
+		mainCheckout: rows[0] && !rows[0].bare ? canonicalPath(rows[0].path) : null,
 	});
 	if (refusal) {
 		stderr(refusal);
@@ -271,7 +276,10 @@ function executeOpen(options, io) {
 		if (plan.fetchRefspec) {
 			gitExec(["fetch", "origin", plan.fetchRefspec], { cwd });
 		}
-		fs.mkdirSync(worktreesRoot, { recursive: true });
+		// Resolved from `cwd` like the guard and `git worktree add`, not from the
+		// process cwd, so a relative root run from a subdirectory leaves no stray
+		// directory inside the source.
+		fs.mkdirSync(path.resolve(cwd, worktreesRoot), { recursive: true });
 		const addArgs = ["worktree", "add"];
 		if (plan.branch) addArgs.push("-b", plan.branch);
 		addArgs.push(plan.path, plan.commitish);

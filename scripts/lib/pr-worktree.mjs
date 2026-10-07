@@ -133,7 +133,12 @@ export function deriveOpenPlan({
 }
 
 /**
- * Refuse a destination that IS a registered checkout or sits inside one (#3981).
+ * Refuse a destination that IS the main checkout or sits inside a registered
+ * checkout (#3981). Equality is judged against `mainCheckout` only: an exact
+ * hit on another registered row (a name already open, or registered with its
+ * directory gone) falls through so git answers with its own "already exists" or
+ * "prune" text. The caller leaves bare rows out of both arguments: nothing walks
+ * a bare repository as a source tree.
  * The default root derives from HOME, and a HOME pinned under the source
  * checkout puts a second registered tree inside it, which test and governance
  * discovery then walk as part of the source. Both sides are expected canonical
@@ -141,16 +146,18 @@ export function deriveOpenPlan({
  * another win32 drive makes `relative` return an absolute path, which is
  * outside, not inside.
  *
- * @param {{ destination: string, checkouts: string[], pathApi?: typeof path }} input
+ * @param {{ destination: string, checkouts: string[], mainCheckout?: string|null, pathApi?: typeof path }} input
  * @returns {string|null} the refusal message, or null when the destination is clear
  */
 export function nestedDestinationError({
 	destination,
 	checkouts,
+	mainCheckout = null,
 	pathApi = path,
 }) {
 	for (const checkout of checkouts) {
 		const relative = pathApi.relative(checkout, destination);
+		if (relative === "" && checkout !== mainCheckout) continue;
 		const outside =
 			relative === ".." ||
 			relative.startsWith(`..${pathApi.sep}`) ||
