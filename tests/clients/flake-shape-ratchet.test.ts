@@ -349,10 +349,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"observes the real npm pack lifecycle (prepack/postpack), and unpacks that real tarball to check what ships (#3219); no in-process double is faithful",
 	},
+	// 2026-10-07 (#4081): 1 -> 3. Whether teardown waits for, tree-kills and
+	// bounds a real child and its detached grandchildren, and whether removal
+	// outlasts a live writer, are only observable against real processes: an
+	// EventEmitter double has no pid, no reparenting and no files to write.
 	"real-process-spawn:real-harness/child-exit.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"real pi child death is the process-boundary failure that must reject a governed waiter promptly",
+			"real pi child death is the process-boundary failure that must reject a governed waiter promptly; real child/grandchild processes are the only evidence that teardown reaps a process tree and that removal outlasts a live writer (#4081)",
 	},
 	// 2026-09-15 (#2154 AC1): 1 -> 3, then 3 -> 7 in #3060 round 2 (review F1 +
 	// F2). The reported defect needs TWO LIVE pi sessions over one project root

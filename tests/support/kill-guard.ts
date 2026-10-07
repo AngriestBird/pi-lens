@@ -75,6 +75,8 @@ let dropped = 0;
  * detector itself.
  */
 const MAX_OWNED_SEEN = 512;
+/** Ancestors walked before a pid is declared not ours (a real tree is shallow). */
+const MAX_ANCESTRY_DEPTH = 16;
 const ownedSeen = new BoundedFifoMap<number, true>(MAX_OWNED_SEEN);
 
 /**
@@ -96,10 +98,28 @@ function ownsPid(pid: number): boolean {
 	} catch {
 		return false;
 	}
-	const match = /^PPid:\s*(\d+)$/m.exec(status);
-	if (!match || Number(match[1]) !== process.pid) return false;
-	ownedSeen.set(pid, true);
-	return true;
+	let parent = /^PPid:\s*(\d+)$/m.exec(status);
+	// A live DESCENDANT of this worker is as much its own as a direct child:
+	// the process tree a real child spawned (a harness tearing down the pi or
+	// MCP server it started, #4081) is signalled by walking parent pids, and
+	// the kernel's ancestry is the same independent evidence as `PPid`. A
+	// reparented orphan is no longer a descendant and still counts as unowned.
+	for (let depth = 0; parent && depth < MAX_ANCESTRY_DEPTH; depth++) {
+		const ppid = Number(parent[1]);
+		if (ppid === process.pid) {
+			ownedSeen.set(pid, true);
+			return true;
+		}
+		if (ppid <= 1) return false;
+		try {
+			parent = /^PPid:\s*(\d+)$/m.exec(
+				fs.readFileSync(`/proc/${ppid}/status`, "utf8"),
+			);
+		} catch {
+			return false;
+		}
+	}
+	return false;
 }
 
 function record(site: "kill" | "register", target: number, detail: string) {

@@ -13,6 +13,7 @@ import {
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { isProcessAlive, killProcessTree } from "./process-tree.js";
 
 // flake-shape: raw-timer-wait — the bounded timeout waits for real child progress
 
@@ -281,6 +282,12 @@ function startRealPi(
 		child.stdin.write(`${JSON.stringify({ id, type, ...fields })}\n`);
 		return response;
 	};
+	// Every pid a tree kill signalled: pi's grandchildren outlive it, reparented,
+	// and write under `home` until they die (#4081), so close() waits on them too.
+	const killed = new Set<number>();
+	const killTree = () => {
+		for (const pid of killProcessTree(child)) killed.add(pid);
+	};
 	return {
 		child,
 		project,
@@ -288,7 +295,7 @@ function startRealPi(
 		events,
 		request,
 		waitFor,
-		killChildForTest: () => child.kill("SIGKILL"),
+		killChildForTest: killTree,
 		providerObservations: () =>
 			readFileSync(providerLog, "utf8")
 				.trim()
@@ -297,8 +304,8 @@ function startRealPi(
 				.map((line) => JSON.parse(line) as JsonObject),
 		async close() {
 			child.stdin.end();
-			child.kill("SIGKILL");
-			await waitForChildExit(child);
+			killTree();
+			await waitForChildExit(child, [...killed]);
 			// A caller-supplied project (and home) outlives this child by
 			// construction — a concurrent sibling session is still reading it.
 			if (!projectOverride) removeTempDirSync(project);
@@ -308,32 +315,37 @@ function startRealPi(
 }
 
 const CHILD_EXIT_WAIT_MS = 5_000;
+const CHILD_EXIT_POLL_MS = 20;
 
 /**
  * SIGKILL is asynchronous: pi can still be releasing files when the signal
- * returns. Wait for the real child boundary before recursive cleanup, but keep
- * teardown bounded if a broken child never reports exit (#4081).
+ * returns, and its grandchildren (`pids`, from {@link killProcessTree}) outlive
+ * it. Wait until the child has reported exit and every pid is gone before
+ * recursive cleanup, but keep teardown bounded if either never happens: one
+ * stderr line, then removal proceeds (#4081).
  */
-export function waitForChildExit(child: ChildProcess): Promise<void> {
-	if (child.exitCode !== null || child.signalCode !== null)
-		return Promise.resolve();
+export function waitForChildExit(
+	child: ChildProcess,
+	pids: readonly number[] = [],
+	timeoutMs = CHILD_EXIT_WAIT_MS,
+): Promise<void> {
+	// A child that never spawned (ENOENT) carries exitCode -2 and resolves here.
+	const settled = () =>
+		(child.exitCode !== null || child.signalCode !== null) &&
+		pids.every((pid) => pid === child.pid || !isProcessAlive(pid));
+	if (settled()) return Promise.resolve();
 	return new Promise((resolve) => {
-		let settled = false;
-		const settle = () => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
+		const deadline = Date.now() + timeoutMs;
+		const poll = setInterval(() => {
+			const done = settled();
+			if (!done && Date.now() < deadline) return;
+			clearInterval(poll);
+			if (!done)
+				process.stderr.write(
+					`[real-pi cleanup] child tree did not exit within ${timeoutMs}ms\n`,
+				);
 			resolve();
-		};
-		const timer = setTimeout(() => {
-			process.stderr.write(
-				`[real-pi cleanup] child did not report exit within ${CHILD_EXIT_WAIT_MS}ms\n`,
-			);
-			settle();
-		}, CHILD_EXIT_WAIT_MS);
-		timer.unref();
-		child.once("exit", settle);
-		child.once("error", settle);
+		}, CHILD_EXIT_POLL_MS);
 	});
 }
 

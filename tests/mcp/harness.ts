@@ -16,6 +16,8 @@ import {
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 } from "../../clients/mcp/ipc.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
+import { killProcessTree } from "../support/process-tree.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -157,16 +159,18 @@ export class McpHarness {
 		};
 		this.child.stdin.end();
 		// The harness is teardown-only. Force the child down so its exit cleanup
-		// runs before Vitest can terminate this worker.
-		this.child.kill("SIGKILL");
+		// runs before Vitest can terminate this worker. The whole tree: the server's
+		// own children outlive a plain SIGKILL and keep writing under PI_LENS_HOME
+		// while the removal below runs (#4081).
+		killProcessTree(this.child);
 		// The server binds a stable per-workspace socket (clients/mcp/ipc.ts).
 		// Unlink before and after child exit: kill() is asynchronous, and the
 		// child can finish binding after the first cleanup (#2912).
 		cleanup();
 		this.child.once("exit", cleanup);
 		if (!this.workspaceDir || this.workspaceDir !== process.cwd()) {
-			fs.rmSync(this.workspaceDir, { recursive: true, force: true });
+			removeTempDirSync(this.workspaceDir);
 		}
-		fs.rmSync(this.isolationDir, { recursive: true, force: true });
+		removeTempDirSync(this.isolationDir);
 	}
 }
