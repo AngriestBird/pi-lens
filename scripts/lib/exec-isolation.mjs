@@ -33,6 +33,13 @@
  * NO walk-up (verified via `@npmcli/config`'s `loadLocalPrefix()`), so it is
  * independent of `cwd`/`runPath` entirely: Arborist's tree at that empty
  * directory is always empty, so npm always installs into its own npx cache.
+ * LIFECYCLE SCRIPTS (#4062): the outer `npm install --strict-allow-scripts`
+ * runs `prepare`, and npm hands the strict policy to every child through its
+ * environment. This nested exec has an empty prefix and so no `package.json`
+ * `allowScripts`; esbuild's `postinstall` was therefore "not covered" and the
+ * whole install failed (ESTRICTALLOWSCRIPTS). The invocation approves exactly
+ * the one spec it installs with `--allow-scripts=<packageSpec>`.
+ *
  * The spawn's `cwd` is left to the caller: esbuild's call site keeps it at
  * `root` because esbuild bakes bundled-module-path banner comments relative
  * to its own cwd (#2594 review F1) — see scripts/bundle-dist.mjs. `tsc` has
@@ -89,6 +96,7 @@ export function buildIsolatedExecInvocation({
 			"--prefix",
 			execPrefix,
 			"--yes",
+			`--allow-scripts=${packageSpec}`,
 			"--package",
 			packageSpec,
 			"--",
