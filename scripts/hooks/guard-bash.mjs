@@ -938,7 +938,7 @@ const VAR_PREFIX_EXPANSION_CAP = 8;
  * silently collapsing into a shorter, WRONG path (`$(pwd)/x` -> `/x`) that
  * {@link expandShellWord} would then resolve (#3988).
  */
-const SUBSTITUTION_MARK = "";
+const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
 
 /**
  * The value `$NAME` expands to, or `undefined` when this static scan cannot
