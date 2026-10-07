@@ -69,6 +69,14 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 	"tests/clients/session-state-conformance.test.ts",
 	"tests/config/glossary-synonym-sweep.test.ts",
+	// #3968: walks the custom-server config fields and the LSP_SERVERS
+	// projection for config claims gating runtime behavior without fail-closed
+	// enum validation (the covers validation row is the pinned member).
+	"tests/config/covers-config-claim-sweep.test.ts",
+	// #3968: walks clients/ for BUILTIN_SERVER_RUNNER_COVERS consultation
+	// sites (family C, F2 round) plus the runners' own self-skip/dialect
+	// argv population — a production-population scanner since the F2 census.
+	"tests/config/shell-dialect-ownership-sweep.test.ts",
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/hook-await-bounds.test.ts",
 	"tests/config/dmts-export-drift.test.ts",

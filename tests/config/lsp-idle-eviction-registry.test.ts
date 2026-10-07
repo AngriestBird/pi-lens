@@ -71,6 +71,7 @@ const HOLD_INDEXER_IDS = [
 ] as const;
 const UNPROVEN_IDS = [
 	"cmake",
+	"shuck",
 	"vue",
 	"csharp",
 	"dart",
@@ -125,7 +126,7 @@ describe("LSP idle-eviction registry (#3622)", () => {
 		expect(LSP_SERVERS.length).toBeGreaterThan(40);
 	});
 
-	it("pins the 47-server registry by idle-eviction decision class (#3952, #3939)", () => {
+	it("pins the 48-server registry by idle-eviction decision class (#3952, #3939)", () => {
 		const declared = new Map(LSP_SERVERS.map((s) => [s.id, s.idleEviction]));
 		const classified = [
 			...TRANSPARENT_IDS,
