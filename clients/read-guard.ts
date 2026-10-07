@@ -11,6 +11,7 @@
  */
 
 import * as fs from "node:fs";
+import { BoundedSet } from "./bounded-cache.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
@@ -607,7 +608,7 @@ export class ReadGuard {
 	// wrote). Insertion order is eviction order; a branch move clears it with
 	// the authorship it describes. Session-scoped like the guard: `/new` and
 	// `/fork` build a fresh one, and a `/reload` does not carry it.
-	private readonly expiredWrites = new Set<string>();
+	private readonly expiredWrites = new BoundedSet<string>(READ_GUARD_MAX_FILES);
 	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
 	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
 	// currently exists on disk, on EVERY platform since #3098 — an existing
@@ -758,10 +759,6 @@ export class ReadGuard {
 	 */
 	private noteExpiredWrite(filePath: string): void {
 		if (this.expiredWrites.has(filePath)) return;
-		if (this.expiredWrites.size >= READ_GUARD_MAX_FILES) {
-			const oldest = this.expiredWrites.values().next().value;
-			if (oldest !== undefined) this.expiredWrites.delete(oldest);
-		}
 		this.expiredWrites.add(filePath);
 		logReadGuardEvent({
 			event: "read_file_evicted",
