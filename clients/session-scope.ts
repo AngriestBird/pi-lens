@@ -482,13 +482,23 @@ interface Handoff {
 	/** The successor's session file; file-less, the stashing scope's ticket. */
 	key: string | number;
 	stores: Record<string, unknown>;
-	/** When the snapshot was taken (#3873): the slot's age in its records. */
-	at: number;
+	/**
+	 * When the snapshot was taken (#3873): the slot's age in its records.
+	 * Optional so a slot a build from before this field stashed (same cell
+	 * version) still reads: its rows carry no age.
+	 */
+	at?: number;
+	/** A `key-mismatch-left` row was written for this slot (#3873): once per slot. */
+	mismatchLogged?: boolean;
 }
 
 const HANDOFF_FAMILY = "session-scope.handoff";
-/** Bump when {@link Handoff}'s or the cell's shape changes. */
-const HANDOFF_VERSION = 3;
+/**
+ * Bump when {@link Handoff}'s or the cell's shape changes incompatibly. The
+ * #3873 fields are optional additions, so the version stays 2 and a slot an
+ * earlier build left is still taken.
+ */
+const HANDOFF_VERSION = 2;
 
 interface HandoffCell {
 	handoff: Handoff | undefined;
@@ -525,6 +535,11 @@ function describeKey(key: string | number | undefined): string | undefined {
 	return typeof key === "number" ? `ticket:${key}` : `file:${hashText(key, 8)}`;
 }
 
+/** A slot's age in ms, `undefined` for one stashed before `at` existed. */
+function ageOf(handoff: Handoff | undefined): number | undefined {
+	return handoff?.at === undefined ? undefined : Date.now() - handoff.at;
+}
+
 /**
  * #3873 O1: one `session_handoff_slot` row per slot transition, so a slot
  * that was left, replaced, taken, left for another start, or never consumed
@@ -548,7 +563,7 @@ function logSlotOp(
 			reason: handoff?.reason,
 			keyHash: describeKey(handoff?.key),
 			storeNames: handoff && Object.keys(handoff.stores),
-			ageMs: handoff && Date.now() - handoff.at,
+			ageMs: ageOf(handoff),
 			...extra,
 		},
 	});
@@ -592,7 +607,7 @@ export function stashHandoff(
 		...(replaced && {
 			replacedReason: replaced.reason,
 			replacedKeyHash: describeKey(replaced.key),
-			replacedAgeMs: Date.now() - replaced.at,
+			replacedAgeMs: ageOf(replaced),
 		}),
 	});
 	return true;
@@ -615,11 +630,16 @@ function takeSlot(
 	const handoff = slot.handoff;
 	if (!handoff) return undefined;
 	if (handoff.reason !== reason || handoff.key !== key) {
-		logSlotOp("key-mismatch-left", handoff, {
-			by,
-			askedReason: reason,
-			askedKeyHash: describeKey(key),
-		});
+		// Once per slot: a stale slot outlives its successor and every later
+		// declined start asks for it, so a row per ask would be a row per start.
+		if (!handoff.mismatchLogged) {
+			handoff.mismatchLogged = true;
+			logSlotOp("key-mismatch-left", handoff, {
+				by,
+				askedReason: reason,
+				askedKeyHash: describeKey(key),
+			});
+		}
 		return undefined;
 	}
 	slot.handoff = undefined;
@@ -746,7 +766,7 @@ export function forwardHandoff(args: {
 			reason,
 			key: args.targetSessionFile ?? (key as string | number),
 			stores: adopted,
-			at: taken.at,
+			...(taken.at !== undefined && { at: taken.at }),
 		};
 		handoffSlot().handoff = forwarded;
 		logSlotOp("forwarded", forwarded);
@@ -816,7 +836,7 @@ export async function adoptHandoff(
 		let ageMs: number | undefined;
 		if (candidate === "slot") {
 			found = slotted && { stores: slotted.stores };
-			if (slotted) ageMs = Date.now() - slotted.at;
+			if (slotted) ageMs = ageOf(slotted);
 		} else {
 			const sidecar =
 				candidate === "own-sidecar"

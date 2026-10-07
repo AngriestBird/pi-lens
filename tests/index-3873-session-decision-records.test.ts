@@ -49,6 +49,7 @@ import {
 	_resetAgentNudgeForTests,
 } from "../clients/agent-nudge.js";
 import { hashText } from "../clients/finding-identity.js";
+import { _seedProcessSingletonCellForTests } from "../clients/process-singletons.js";
 import { getProjectDataDir } from "../clients/file-utils.js";
 import {
 	createGenerationSource,
@@ -57,8 +58,11 @@ import {
 import {
 	clearLatencyLog,
 	flushLatencyLog,
+	getLastLoggedPhase,
 	getLatencyLogPath,
+	logLatency,
 } from "../clients/latency-logger.js";
+import { _resetRecentTouchesForTests } from "../clients/recent-touches.js";
 import { chainLateFormatResync } from "../clients/pipeline.js";
 import {
 	flushSessionStartLog,
@@ -72,6 +76,7 @@ import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js"
 import {
 	adoptHandoff,
 	beginScope,
+	discardHandoff,
 	forwardHandoff,
 	retireScope,
 	scopeCell,
@@ -116,6 +121,7 @@ const extensionErrors: unknown[] = [];
 beforeEach(async () => {
 	_resetSessionLifecycleForTests();
 	_resetAgentNudgeForTests();
+	_resetRecentTouchesForTests();
 	env = setupTestEnvironment(TMP_PREFIX);
 	root = env.tmpDir;
 	cwd = path.join(root, "proj");
@@ -488,6 +494,66 @@ describe("#3873 O1: the hand-off slot leaves a record per transition", () => {
 	});
 });
 
+describe("#3873 round 2: a stale slot, and a slot an earlier build left", () => {
+	// F4. Recurrence: a slot that outlives its successor stays in place ("a slot
+	// left for another start stays"), and every declined start asks for it, so
+	// one stale slot wrote a `key-mismatch-left` row per start (51 rows, 16.6 KB
+	// from one slot and 50 declined starts in the review probe).
+	it("50 declined starts against one stale slot write one key-mismatch-left row; a new slot is told again", async () => {
+		const stash = (file: string) =>
+			stashHandoff(beginScope({ role: "primary" }), {
+				reason: "reload",
+				sessionFile: file,
+				targetSessionFile: undefined,
+			});
+		stash("/s/stale.jsonl");
+		for (let i = 0; i < 50; i += 1)
+			discardHandoff({
+				reason: "startup",
+				sessionFile: `/s/sub-${i}.jsonl`,
+				sessionManager: undefined,
+			});
+		stash("/s/next.jsonl");
+		discardHandoff({
+			reason: "startup",
+			sessionFile: "/s/sub-next.jsonl",
+			sessionManager: undefined,
+		});
+
+		expect((await rows("session_handoff_slot")).map((row) => row.op)).toEqual([
+			"stashed",
+			"key-mismatch-left",
+			"replaced",
+			"key-mismatch-left",
+		]);
+	});
+
+	// F6. Recurrence: a version bump on the hand-off cell made a build that
+	// meets a pre-#3873 cell discard it, so an in-place upgrade's `/reload`
+	// lost the reads, authorship and lazy tools its predecessor had left.
+	it("takes a slot an earlier build stashed (no `at`) and reports no age for it", async () => {
+		_seedProcessSingletonCellForTests("session-scope.handoff", {
+			schema: "pi-lens.process-singletons",
+			version: 2,
+			value: {
+				handoff: {
+					reason: "reload",
+					key: "/s/old.jsonl",
+					stores: { "lazy-tool-memory": ["ast_grep_search"] },
+				},
+				left: new WeakMap(),
+			},
+		});
+
+		expect(takeHandoff("reload", "/s/old.jsonl")).toEqual({
+			"lazy-tool-memory": ["ast_grep_search"],
+		});
+		const [taken] = await rows("session_handoff_slot");
+		expect(taken).toMatchObject({ op: "taken", by: "adopt" });
+		expect(taken?.ageMs).toBeUndefined();
+	});
+});
+
 describe("#3873 O2, O3: the adopt walk and each store's action", () => {
 	// Recurrence: B3 logged `read_guard_branch_retained {kept: 0, dropped: 0,
 	// branchToolResults: 1034}` and nothing else, which read the same for a
@@ -755,7 +821,7 @@ describe("#3873 O4: a scope's end and a gap demotion", () => {
 		]);
 	});
 
-	it("writes a demote row for a gap start that is not the named successor, and none for a plain concurrent subagent", async () => {
+	it("writes a demote row for a gap start that is not the named successor, and none for a subagent beside a live primary", async () => {
 		const subagentInGap = (pi: ExtensionAPI) => {
 			let ran = false;
 			pi.on("session_shutdown", async (event) => {
@@ -826,6 +892,25 @@ describe("#3873 O5: the fence rollup", () => {
 			droppedTotal: expect.any(Number),
 		});
 		expect(rollups[1]?.sources).toEqual([]);
+	});
+
+	// Recurrence: unbounded row growth on a repeat decision. The row names the
+	// 16 busiest fences; the rest are counted. Runs before the declaration-cap
+	// case below, which fills the declaration table.
+	it("names at most 16 sources in a rollup row and counts the rest", async () => {
+		emitFenceRollupAtSessionEnd(cwd);
+		for (let i = 0; i < 20; i += 1)
+			createGenerationSource(`fence-rollup-cap-${String(i).padStart(2, "0")}`)
+				.capture()
+				.guardedWrite("w", () => i);
+		clearLatencyLog();
+		await flushLatencyLog();
+
+		emitFenceRollupAtSessionEnd(cwd);
+
+		const [rollup] = await rows("session_end_fence_rollup");
+		expect(rollup?.sources).toHaveLength(16);
+		expect(rollup).toMatchObject({ guardedTotal: 20, sourcesOmitted: 4 });
 	});
 
 	it("folds sources past the declaration cap into one (other) entry instead of growing the tally", async () => {
@@ -921,6 +1006,120 @@ describe("#3873 O7: the agent_nudge row names what it delivered", () => {
 		for (const key of nudges[0]?.fileKeys ?? [])
 			expect(key).toMatch(/^[0-9a-f]{8}$/);
 	});
+});
+
+describe("#3873 round 2: the agent_nudge row's bounds and producers", () => {
+	// F1. Recurrence: unbounded row growth on a repeat decision. A drain of
+	// many files, from many writer sessions, still writes one bounded row.
+	it("names at most 8 file keys and 4 writer sessions in one row", async () => {
+		recordCrossProcessTouches(
+			Array.from({ length: 9 }, (_, i) => ({
+				path: `/repo/f${i}.ts`,
+				reason: "format" as const,
+				sessionId: `writer-${i % 5}`,
+			})),
+		);
+
+		consumeAgentNudge(undefined, beginScope({ role: "primary" }));
+
+		const [row] = await rows("agent_nudge");
+		expect(row).toMatchObject({ filesTotal: 9 });
+		expect(row?.fileKeys).toHaveLength(8);
+		expect(row?.originSessionIds).toEqual([
+			"writer-0",
+			"writer-1",
+			"writer-2",
+			"writer-3",
+		]);
+	});
+
+	// F2. Recurrence: `originSessionIds` is only ever filled by the two
+	// `index.ts` cross-process readers; without a producer proof both
+	// pass-throughs could be dropped and the field would read `[]` forever.
+	function otherProcessTouched(sessionId: string): string {
+		const file = path.join(cwd, `touched-${sessionId}.ts`);
+		fs.writeFileSync(file, "x");
+		const dir = getProjectDataDir(cwd);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "recent-touches.json"),
+			JSON.stringify({
+				entries: [
+					{
+						path: file,
+						reason: "format",
+						ts: Date.now(),
+						pid: process.pid + 1,
+						sessionId,
+					},
+				],
+			}),
+		);
+		return file;
+	}
+
+	async function drainedNudge(runtime: AgentSessionRuntime): Promise<Row> {
+		for (let i = 0; i < 5000; i += 1) {
+			await runtime.session.extensionRunner.emitContext([
+				{ role: "user", content: "keep working", timestamp: Date.now() },
+			] as never);
+			const [row] = await rows("agent_nudge");
+			if (row) return row;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		throw new Error("no agent_nudge row");
+	}
+
+	it("session_start passes a writer's session id from the shared touch record", async () => {
+		otherProcessTouched("writer-at-start");
+
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+
+		expect((await drainedNudge(runtime)).originSessionIds).toEqual([
+			"writer-at-start",
+		]);
+	});
+
+	it("turn_start passes a writer's session id from the shared touch record", async () => {
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		otherProcessTouched("writer-at-turn");
+
+		await runtime.session.extensionRunner.emit({
+			type: "turn_start",
+			turnIndex: 1,
+			timestamp: Date.now(),
+		} as never);
+
+		expect((await drainedNudge(runtime)).originSessionIds).toEqual([
+			"writer-at-turn",
+		]);
+	});
+});
+
+describe("#3873 round 2: decision rows do not take over stall attribution", () => {
+	// F1. Recurrence: `loop_block` names the last logged phase as its cause. A
+	// zero-duration decision row (or a give-up row whose durationMs is the
+	// formatter's age) that wins that slot blames the record for a stall the
+	// real phase before it owns.
+	for (const phase of [
+		"session_handoff_slot",
+		"session_handoff_adopt",
+		"session_store_action",
+		"session_end_fence_rollup",
+		"format_late_resync_chained",
+	])
+		it(`${phase} is not the last phase after real work`, () => {
+			logLatency({
+				type: "phase",
+				phase: "real_work_for_3873",
+				filePath: "x",
+				durationMs: 5,
+			});
+
+			logLatency({ type: "phase", phase, filePath: "x", durationMs: 0 });
+
+			expect(getLastLoggedPhase()?.phase).toBe("real_work_for_3873");
+		});
 });
 
 describe("#3873 F1: a formatter give-up leaves a per-file row at chain time", () => {

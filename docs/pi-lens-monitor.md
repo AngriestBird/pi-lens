@@ -69,14 +69,18 @@ readout.
    anti-join to report.
    **Session decisions** (#3873; each row is one lifecycle event, none is per
    occurrence in a loop): `session_handoff_slot` (`op`: `stashed`, `replaced`,
-   `taken`, `key-mismatch-left`, `forwarded`, `unconsumed-at-exit`; `by`,
+   `taken`, `key-mismatch-left` (once per stale slot), `forwarded`,
+   `unconsumed-at-exit`; `by`,
    `reason`, `keyHash`, `storeNames`, `ageMs`), `session_handoff_adopt` (one
    per primary start: `tried[]` with `source`, `found`, `version`, `ageMs`,
    `storeNames`, and `chosen`), `session_store_action` (one per declared store
    per primary start: `action` `adopt`/`reset`/`skip`, `payloadPresent`,
    `itemsIn`/`itemsKept`/`itemsDropped`), `session_scope_transition` with the
-   `end` (a scope superseded without a shutdown) and `demote` (a gap start that
-   is not the successor the shutdown named) transitions,
+   `end` (a scope superseded without a shutdown) and `demote` (a start in a
+   replacement gap that is not the successor the shutdown named: a subagent
+   that binds in the gap is one, a real successor an interrupting reload
+   displaced is another; a subagent beside a live primary writes none)
+   transitions,
    `session_end_fence_rollup` (one per primary shutdown: `sources[]` with
    `guarded` and `dropped`, plus totals). Read `read_guard_branch_retained` with
    `payloadReads`: `kept 0, dropped 0` is a missing payload when `payloadReads`
@@ -86,7 +90,8 @@ readout.
    `agent_nudge` carries `fileKeys` (hash8), `originSessionIds`, `scopeId` and
    `queueEpoch`, so one touch delivered in three drains is three epochs;
    a no-client `lsp_touch_file` carries `candidates[]` (`serverId`, `rooted`,
-   `clientFound`, `generation`).
+   `clientFound`, `generation`) for the file's primary servers only, 8 at most;
+   auxiliary servers are in `auxiliary_readiness`.
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,

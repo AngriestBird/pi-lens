@@ -156,6 +156,22 @@ export interface ClassifySessionStartInput {
 }
 
 /**
+ * Which input decided a classification (#3873 O6): the branch of
+ * {@link explainSessionStart} that returned, so a `primary` /
+ * `sequential-replacement` row says whether a prior primary, a dead ctx or an
+ * inconclusive probe led to it.
+ */
+export type ClassificationBasis =
+	| "no-prior-primary"
+	| "successor-pending"
+	| "same-session"
+	| "prior-ctx-live"
+	| "root-differs"
+	| "prior-ctx-dead"
+	| "prior-ctx-unknown"
+	| "guard-disabled";
+
+/**
  * PURE classifier — no I/O, no throws, fully unit-testable in isolation.
  *
  * Branches (fail-safe order matters):
@@ -212,29 +228,7 @@ export interface ClassifySessionStartInput {
  * `PI_LENS_CONCURRENT_SESSION_GUARD=0` disables this branch with the rest of
  * the guard.
  */
-export function classifySessionStart(
-	input: ClassifySessionStartInput,
-): SessionStartClassification {
-	return explainSessionStart(input).classification;
-}
-
-/**
- * Which input decided a classification (#3873 O6): the branch of
- * {@link explainSessionStart} that returned, so a `primary` /
- * `sequential-replacement` row says whether a prior primary, a dead ctx or an
- * inconclusive probe led to it.
- */
-export type ClassificationBasis =
-	| "no-prior-primary"
-	| "successor-pending"
-	| "same-session"
-	| "prior-ctx-live"
-	| "root-differs"
-	| "prior-ctx-dead"
-	| "prior-ctx-unknown"
-	| "guard-disabled";
-
-/** The one implementation of the branch order above; it names the branch taken. */
+/** The one implementation of the branch order above; it names the branch taken (#3873). */
 export function explainSessionStart(input: ClassifySessionStartInput): {
 	classification: SessionStartClassification;
 	basis: ClassificationBasis;
@@ -440,7 +434,7 @@ export type SessionShutdownClassification = "primary" | "secondary";
 
 /**
  * Classifies a `session_shutdown` firing the same fail-safe way as
- * `classifySessionStart`: it is `secondary` ONLY when a DIFFERENT primary is
+ * `explainSessionStart`: it is `secondary` ONLY when a DIFFERENT primary is
  * registered (positively identified — ctx identity differs AND session ids
  * are both known and differ) and that primary's ctx still probes active
  * (positive evidence the shutting-down session is a live sibling, not the
@@ -548,7 +542,7 @@ export function noteSessionShutdown(
 }
 
 /**
- * Read-only counterpart to {@link classifySessionStart}, usable from ANY
+ * Read-only counterpart to {@link explainSessionStart}, usable from ANY
  * event handler (agent_end, turn_end, ...) rather than only session_start.
  * Unlike `decideSessionStart` this never mutates the module-scope
  * registration — repeated calls across a session's many agent_end/turn_end
@@ -599,13 +593,7 @@ export function decrementSecondarySessionCount(): void {
  * one place: when disabled, always report `sequential-replacement` (i.e.
  * behave exactly as if this module didn't exist).
  */
-export function classifySessionStartGuarded(
-	input: ClassifySessionStartInput,
-): SessionStartClassification {
-	return explainSessionStartGuarded(input).classification;
-}
-
-function explainSessionStartGuarded(input: ClassifySessionStartInput): {
+export function explainSessionStartGuarded(input: ClassifySessionStartInput): {
 	classification: SessionStartClassification;
 	basis: ClassificationBasis;
 } {
@@ -710,7 +698,7 @@ export function decideSessionStart(
 
 	// #2129: compare THIS start's cwd against the registered primary's root.
 	// `undefined` on either side means "unknown", never "different" — see
-	// `classifySessionStart`'s fail-safe note.
+	// `explainSessionStart`'s fail-safe note.
 	const incomingRoot = normalizeRootForCompare(root);
 	const sameRoot =
 		hasPrior && s.activeRoot !== undefined && incomingRoot !== undefined

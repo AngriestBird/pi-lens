@@ -10352,14 +10352,19 @@ export class LSPService {
 
 	/**
 	 * #3873 O9: what a touch that found no client had to choose from. One entry
-	 * per language server configured for the file: whether a root resolved for
-	 * it (`rooted`), what this service held for that server and root
-	 * (`clientFound`: `alive`, `dead` or `none`), and that client's spawn time
-	 * (`generation`, epoch ms; a replaced client has a new one). Pure lookup
-	 * over the roots the touch already resolved, so `rooted: false` means no
-	 * root was found for it (or its wait timed out first), and an `alive` client
-	 * next to a no-client verdict is the contradiction worth reading.
-	 * Bounded at {@link MAX_TOUCH_CANDIDATES} entries.
+	 * per PRIMARY language server configured for the file: whether a root
+	 * resolved for it (`rooted`), what this service held for that server and
+	 * root (`clientFound`: `alive`, `dead` or `none`), and that client's spawn
+	 * time (`generation`, epoch ms; a replaced client has a new one). Pure
+	 * lookup over the roots the touch already resolved, so `rooted: false` means
+	 * this touch resolved no root for it (none found, its wait timed out first,
+	 * or it was an alternate never tried), and an `alive` client next to a
+	 * no-client verdict is the contradiction worth reading.
+	 *
+	 * Auxiliary servers (opengrep, ast-grep, typos, ...) are NOT listed: the
+	 * touch resolves roots for primary servers only, so an auxiliary entry
+	 * would read `rooted: false` beside a live client. Their outcome is the
+	 * `auxiliary_readiness` row's. Bounded at {@link MAX_TOUCH_CANDIDATES}.
 	 */
 	describeTouchCandidates(
 		filePath: string,
@@ -10370,21 +10375,28 @@ export class LSPService {
 		clientFound: "alive" | "dead" | "none";
 		generation: number | undefined;
 	}> {
-		return getServersForFileWithConfig(filePath)
-			.slice(0, MAX_TOUCH_CANDIDATES)
-			.map((server) => {
-				const root = resolvedRoots.get(server.id);
-				const key = root === undefined ? undefined : `${server.id}:${root}`;
-				const client =
-					key === undefined ? undefined : this.state.clients.get(key);
-				return {
-					serverId: server.id,
-					rooted: root !== undefined,
-					clientFound: client ? (client.isAlive() ? "alive" : "dead") : "none",
-					generation:
-						key === undefined ? undefined : this.state.clientSpawnedAt.get(key),
-				};
+		const candidates: Array<{
+			serverId: string;
+			rooted: boolean;
+			clientFound: "alive" | "dead" | "none";
+			generation: number | undefined;
+		}> = [];
+		for (const server of getServersForFileWithConfig(filePath)) {
+			if (server.role === "auxiliary") continue;
+			if (candidates.length >= MAX_TOUCH_CANDIDATES) break;
+			const root = resolvedRoots.get(server.id);
+			const key = root === undefined ? undefined : `${server.id}:${root}`;
+			const client =
+				key === undefined ? undefined : this.state.clients.get(key);
+			candidates.push({
+				serverId: server.id,
+				rooted: root !== undefined,
+				clientFound: client ? (client.isAlive() ? "alive" : "dead") : "none",
+				generation:
+					key === undefined ? undefined : this.state.clientSpawnedAt.get(key),
 			});
+		}
+		return candidates;
 	}
 
 	/**
