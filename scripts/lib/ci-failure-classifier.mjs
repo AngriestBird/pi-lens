@@ -84,6 +84,27 @@ const MAX_LOG_BYTES = 2 * 1024 * 1024;
 // snapshot without rebuilding". The project label ("default") sits between
 // FAIL and the file path.
 const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
+
+const VITEST_TEST_FILE = /\S+\.(?:test|spec)\.[cm]?[jt]sx?/;
+
+/** Extract Vitest failure-banner identities from an already-normalized log. */
+export function extractVitestFailureIds(log) {
+	const ids = new Set();
+	for (const rawLine of log.split("\n")) {
+		const line = rawLine.match(/^\s*FAIL\b\s+(.*)$/)?.[1];
+		if (!line) continue;
+		const fileMatch = line.match(VITEST_TEST_FILE);
+		if (!fileMatch) continue;
+		const file = fileMatch[0];
+		const prefix = line.slice(0, fileMatch.index).trim();
+		const project = prefix ? prefix.split(/\s+/).at(-1) : "";
+		const suffix = line.slice(fileMatch.index + file.length);
+		const testName = suffix.match(/^\s*>\s*(.+?)\s*$/)?.[1];
+		const id = `${project ? `${project}::` : ""}${file}${testName ? ` › ${testName.replace(/\s+/g, " ")}` : ""}`;
+		ids.add(id);
+	}
+	return [...ids].sort();
+}
 // A file-level FAIL with no "> testname" -- a collection/import error never
 // reaches a single test, so vitest has no test name to print (review round
 // 1, F2/P2). Deliberately looser than FAIL_LINE: only used when FAIL_LINE

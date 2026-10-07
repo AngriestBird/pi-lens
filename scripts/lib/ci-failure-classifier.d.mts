@@ -41,6 +41,7 @@ export declare const BARE_FAIL_LINE: RegExp;
 export declare const ASSERTION_LINE: RegExp;
 export declare function stripAnsi(text: string): string;
 export declare function stripLineTimestamps(text: string): string;
+export declare function extractVitestFailureIds(log: string): string[];
 export declare function classifyFailureLog(rawLog: string): Classification;
 export declare function readCgroupOomKillCount(log: string): number | null;
 export declare function describeKernelKillEvidence(log: string): string | null;

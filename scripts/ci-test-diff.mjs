@@ -1,37 +1,71 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import {
+	extractVitestFailureIds,
+	stripAnsi,
+	stripLineTimestamps,
+} from "./lib/ci-failure-classifier.mjs";
 
 const DEFAULT_REPOSITORY = "apmantza/pi-lens";
-// oxlint-disable-next-line no-control-regex -- ANSI is the input being removed.
-const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-const ACTIONS_TIMESTAMP = /^\d{4}-\d\d-\d\dT[^ ]+Z\s*/;
-const TEST_PATH = String.raw`(tests/[^\s]+?\.test\.[cm]?[jt]sx?)`;
-
 export function stripLogDecorations(log) {
-	return log
+	const withoutFallbackPrefix = log.replace(
+		/^[^\t\r\n]+\t[^\t\r\n]+\t(?=\d{4}-\d\d-\d\dT)/gm,
+		"",
+	);
+	return stripLineTimestamps(stripAnsi(withoutFallbackPrefix))
 		.replace(/^\uFEFF/, "")
-		.replace(ANSI_ESCAPE, "")
-		.replace(/\r\n?/g, "\n")
-		.split("\n")
-		.map((line) => line.replace(ACTIONS_TIMESTAMP, ""))
-		.join("\n");
+		.replace(/^[ \t]+(?=FAIL\b)/gm, "")
+		.replace(/\r\n?/g, "\n");
 }
 
 export function extractFailingTestIds(log) {
-	const lines = log.split("\n");
-	const ids = new Set();
-	const failurePattern = new RegExp(
-		String.raw`^\s*FAIL\s+\S+\s+${TEST_PATH}(?:\s+>\s+(.+?))?\s*$`,
+	return extractVitestFailureIds(log);
+}
+
+export function summarizeLog(log, side = "job") {
+	const testsFailed = Number(
+		log.match(/\bTests\s+(\d+)\s+failed\b/i)?.[1] ?? NaN,
 	);
-	for (const line of lines) {
-		const match = line.match(failurePattern);
-		if (match) {
-			const details = match[2] ? ` › ${match[2].replace(/\s+/g, " ")}` : "";
-			ids.add(`${match[1]}${details}`);
-		}
+	const failedTestsHeader = Number(
+		log.match(/\bFailed Tests\s+(\d+)\b/i)?.[1] ?? NaN,
+	);
+	const suitesFailed = Number(
+		log.match(/\bFailed Suites\s+(\d+)\b/i)?.[1] ?? 0,
+	);
+	const unhandledErrors = Number(
+		log.match(/\bErrors\s+(\d+)\s+error(?:s)?\b/i)?.[1] ?? 0,
+	);
+	if (!Number.isInteger(testsFailed)) {
+		throw new Error(`${side} log incomplete (no Vitest Tests summary)`);
 	}
-	return [...ids].sort();
+	if (
+		Number.isInteger(failedTestsHeader) &&
+		failedTestsHeader !== testsFailed
+	) {
+		throw new Error(`${side} log has mismatched Vitest failure summaries`);
+	}
+	return { testsFailed, suitesFailed, unhandledErrors };
+}
+
+export function validateLog(log, side = "job") {
+	const summary = summarizeLog(log, side);
+	const ids = extractFailingTestIds(log);
+	const expected = summary.testsFailed + summary.suitesFailed;
+	if (
+		summary.unhandledErrors > summary.suitesFailed &&
+		summary.unhandledErrors > 0
+	) {
+		throw new Error(
+			`${side} log reports ${summary.unhandledErrors} unhandled errors but only ${summary.suitesFailed} failed suites`,
+		);
+	}
+	if (ids.length !== expected) {
+		throw new Error(
+			`${side} log has ${ids.length} failure IDs; Vitest summary reports ${expected}`,
+		);
+	}
+	return { ids, ...summary };
 }
 
 export function compareFailureSets(previous, current) {
@@ -102,13 +136,20 @@ export function parseArgs(argv) {
 
 export function main(argv = process.argv.slice(2)) {
 	const { jobA, jobB, repository } = parseArgs(argv);
-	const previous = extractFailingTestIds(
+	const previousReport = validateLog(
 		stripLogDecorations(fetchJobLog(repository, jobA)),
+		`job ${jobA}`,
 	);
-	const current = extractFailingTestIds(
+	const currentReport = validateLog(
 		stripLogDecorations(fetchJobLog(repository, jobB)),
+		`job ${jobB}`,
 	);
+	const previous = previousReport.ids;
+	const current = currentReport.ids;
 	const diff = compareFailureSets(previous, current);
+	console.log(
+		`Input: ${jobA} tests=${previousReport.testsFailed} suites=${previousReport.suitesFailed} errors=${previousReport.unhandledErrors}; ${jobB} tests=${currentReport.testsFailed} suites=${currentReport.suitesFailed} errors=${currentReport.unhandledErrors}`,
+	);
 	printSet("FIXED", diff.fixed);
 	printSet("NEW", diff.newFailures);
 	printSet("UNCHANGED", diff.unchanged);
