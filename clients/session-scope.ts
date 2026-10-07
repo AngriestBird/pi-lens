@@ -497,14 +497,28 @@ export function stashHandoff(
 	const reason = toStartReason(args.reason);
 	if (!SOURCES[reason].includes("slot")) return false;
 	const cell = handoffSlot();
-	const manager = asManager(args.sessionManager);
-	if (manager !== undefined) cell.left.set(manager, scope.scopeId);
+	leaveTicket(scope, args.sessionManager);
 	cell.handoff = {
 		reason,
 		key: args.targetSessionFile ?? args.sessionFile ?? scope.scopeId,
 		stores: snapshotSessionStores(scope),
 	};
 	return true;
+}
+
+/**
+ * Bind a shutting-down scope's ticket to its pi session manager, which pi hands
+ * a `/reload` or in-memory `/fork` successor: that successor's {@link startKey}
+ * is then the ticket. A primary's stash binds it (#3819). #3855: so does a
+ * secondary's shutdown, so its own file-less successor carries a key, and never
+ * the "no key" a primary's file-less successor may fail safe with.
+ */
+export function leaveTicket(
+	scope: SessionScope,
+	sessionManager: unknown,
+): void {
+	const manager = asManager(sessionManager);
+	if (manager !== undefined) handoffSlot().left.set(manager, scope.scopeId);
 }
 
 /**

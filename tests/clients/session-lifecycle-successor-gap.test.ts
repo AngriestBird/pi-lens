@@ -253,6 +253,22 @@ describe("only the named successor is primary in the gap (#3855)", () => {
 		});
 	}
 
+	it("lets a file-less successor whose manager carries no ticket fail safe to primary", () => {
+		// A host that does not hand the reloaded session its manager: the start
+		// has no key. Only a ticket name admits it, and only for its own reason.
+		primaryNames("reload", 7);
+		expect(start("fork", undefined)).toBe("concurrent-secondary");
+		expect(start("new", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", 8)).toBe("concurrent-secondary");
+		expect(start("reload", undefined)).toBe("primary");
+	});
+
+	it("never lets a key-less start pass for a successor named by its file", () => {
+		primaryNames("reload", "/s/host.jsonl");
+		expect(start("reload", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", "/s/host.jsonl")).toBe("primary");
+	});
+
 	it("lets a start with no reason fail safe to primary in a named gap (#3662 F8)", () => {
 		primaryNames("reload", "/s/host.jsonl");
 		expect(start(undefined, "/s/sub.jsonl")).toBe("primary");

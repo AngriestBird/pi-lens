@@ -855,9 +855,11 @@ SecDown(k) ==
           /\ st[s] = "live" /\ role[s] = "secondary"
           /\ LET f == CASE k = "reload" -> sess[s] [] k = "fork" -> "T"
                          [] OTHER -> "U"
-                 \* Only r1 binds a secondary's manager (its note's ticket).
+                 \* #3855 binds a secondary's own ticket to its manager
+                 \* (leaveTicket), which pi hands a /reload or in-memory
+                 \* /fork successor; an in-memory /new gets a new one.
                  key == IF f \notin FileLess THEN [f |-> f, t |-> 0]
-                        ELSE IF Has("inheritRole") /\ ~Has("namedSuccessor")
+                        ELSE IF (Has("inheritRole") \/ Has("namedSuccessor"))
                                 /\ k \in {"reload", "fork"}
                              THEN [f |-> "-", t |-> s] ELSE NoKey
                  noted == Has("inheritRole") /\ ~Has("namedSuccessor")
@@ -897,7 +899,10 @@ SecUp ==
                /\ gap
                /\ CASE Has("namedSuccessor") ->
                         pend.k \in {"new", "resume", "fork", "clone", "reload"}
-                        /\ SR(pend.k) = k /\ spend.key = pend.key
+                        /\ SR(pend.k) = k
+                        \* J6: a key-less start fails safe to a ticket name.
+                        /\ \/ spend.key = pend.key
+                           \/ spend.key = NoKey /\ pend.key.t # 0
                     [] Has("inheritRole") -> spend.key \notin notes
                     [] OTHER -> TRUE
            nb == CASE k = "reload" -> branch[sess[s]]
