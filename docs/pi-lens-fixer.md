@@ -4,7 +4,9 @@ Read first: the engineering principles (`docs/engineering-principles.md`), then
 `AGENTS.md`, then `docs/pi-lens-subagent.md`, then this contract. Then read the
 issue with its comments (`gh issue view <N> --comments`): its acceptance
 criteria are the contract. Rules the principles or `AGENTS.md` already state
-are not repeated here.
+are not repeated here. Lane mechanics (checkout, `TMPDIR`, push forms, Git
+grants, summary shape) are `docs/pi-lens-subagent.md` "Orchestrator lane
+mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Before code
 
