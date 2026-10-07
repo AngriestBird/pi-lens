@@ -1,11 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
-	cpSync,
-	existsSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+	spawn,
+	type ChildProcess,
+	type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,6 +12,7 @@ import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 // flake-shape: raw-timer-wait — the bounded timeout waits for real child progress
 
@@ -299,12 +298,43 @@ function startRealPi(
 		async close() {
 			child.stdin.end();
 			child.kill("SIGKILL");
+			await waitForChildExit(child);
 			// A caller-supplied project (and home) outlives this child by
 			// construction — a concurrent sibling session is still reading it.
-			if (!projectOverride) rmSync(project, { recursive: true, force: true });
-			if (!homeOverride) rmSync(home, { recursive: true, force: true });
+			if (!projectOverride) removeTempDirSync(project);
+			if (!homeOverride) removeTempDirSync(home);
 		},
 	};
+}
+
+const CHILD_EXIT_WAIT_MS = 5_000;
+
+/**
+ * SIGKILL is asynchronous: pi can still be releasing files when the signal
+ * returns. Wait for the real child boundary before recursive cleanup, but keep
+ * teardown bounded if a broken child never reports exit (#4081).
+ */
+export function waitForChildExit(child: ChildProcess): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null)
+		return Promise.resolve();
+	return new Promise((resolve) => {
+		let settled = false;
+		const settle = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			process.stderr.write(
+				`[real-pi cleanup] child did not report exit within ${CHILD_EXIT_WAIT_MS}ms\n`,
+			);
+			settle();
+		}, CHILD_EXIT_WAIT_MS);
+		timer.unref();
+		child.once("exit", settle);
+		child.once("error", settle);
+	});
 }
 
 export async function withRealPi<T>(
