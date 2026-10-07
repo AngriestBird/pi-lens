@@ -1383,6 +1383,8 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 		};
 	}
 
+	const OFF_TMP_SCRATCH = "/home/dev/pi-lens-guard-bash-r4-scratch";
+
 	// [id, command ({dir} = the lane, {lnk} = its scripts link), payload cwd,
 	//  HOME is the lane, expected in the linked lane, expected in the real one]
 	const ROUND4_TABLE: Array<
@@ -1627,7 +1629,14 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 						command,
 						{
 							...env,
-							TMPDIR: join(root, "scratch"),
+							// A `mktemp` row reads TMPDIR as where mktemp lands: a
+							// fixture root under /tmp (the CI runner's os.tmpdir())
+							// would add the unrelated #3526 tmpCheckout deny to the
+							// real-lane allow (round 5, N4d). The hook only reads the
+							// string, so those rows get a path off /tmp.
+							TMPDIR: template.includes("mktemp")
+								? OFF_TMP_SCRATCH
+								: join(root, "scratch"),
 							...(homeIsLane ? { HOME: dir } : {}),
 						},
 						cwdKind === "sib" ? join(root, "sib") : dir,
@@ -1645,6 +1654,27 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 			}
 		},
 	);
+
+	// Recurrence (round 5, CI on 4440b2e8): N4d passed locally and reds on the
+	// runner, because the table's real-lane allow silently depended on the
+	// host's os.tmpdir(). The /tmp half of that dependence is pinned here by
+	// reason: a `mktemp -d` prefix lands under TMPDIR, and under /tmp it is the
+	// #3526 tmpCheckout deny, never the #4044 one, in a real lane.
+	it("names the #3526 reason for a `mktemp -d` --prefix when TMPDIR is under /tmp", () => {
+		const { root, cleanup } = makeTableFixture();
+		try {
+			const { UNSET_4054_R4: _unset, ...env } = BASE_ENV;
+			const result = runHook(
+				'npm --prefix "$(mktemp -d)" ci',
+				{ ...env, TMPDIR: "/tmp/pi-lens-guard-bash-r5-scratch" },
+				join(root, "real"),
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toBe(`${RULE_MESSAGES.tmpCheckout}\n`);
+		} finally {
+			cleanup();
+		}
+	});
 
 	// Recurrence: round 3 resolved `node_modules/..` lexically to the lane,
 	// while the kernel follows the link first and lands in the shared
