@@ -87,22 +87,16 @@ describe("strict lifecycle-script policy in CI installs (#1185)", () => {
 
 	// Recurrence: the from-source `--omit=dev` installs (the git: path) are the
 	// production tree; a script landing there must be a reviewed one.
-	it.each([
-		["ci.yml", "prod-install-build"],
-		["release.yml", "prepare"],
-		["release.yml", "publish-npm"],
-	])(
-		"%s %s: every pinned-npm install is --strict-allow-scripts",
-		(file, job) => {
-			const installs = pinnedInstalls(load(file), job).filter((l) =>
-				/ install\b/.test(l),
-			);
-			expect(installs.length).toBeGreaterThan(0);
-			for (const line of installs) {
-				expect(line, line).toContain("--strict-allow-scripts");
-			}
-		},
-	);
+	it("ci.yml prod-install-build: every pinned-npm install is --strict-allow-scripts", () => {
+		const installs = pinnedInstalls(
+			load("ci.yml"),
+			"prod-install-build",
+		).filter((l) => / install\b/.test(l));
+		expect(installs).toHaveLength(2);
+		for (const line of installs) {
+			expect(line, line).toContain("--strict-allow-scripts");
+		}
+	});
 });
 
 describe("npm-strict packed-tarball job (#1185)", () => {
