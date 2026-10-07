@@ -1489,12 +1489,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							!isPathIgnoredByProject(wp, workspaceRoot, false),
 					)
 				: [];
-		// Fence the mtime-based session-authored fallback before any async
-		// observation. Only later content evidence may clear this fence.
-		if (!getFlag("no-read-guard")) {
-			for (const recognizedPath of recognizedWritten)
-				deps.readGuard?.recordUnchanged?.(recognizedPath);
-		}
 		// #2000 phase 2: when the extractor recognizes NOTHING, the command is
 		// opaque-candidate — recover its actual changed set by diffing the pre
 		// snapshot taken at tool_call. Partial writes that landed before a
@@ -1641,8 +1635,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// are not: authorship, not FileTime.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
 				deps.readGuard?.recordWritten(wp, { stampFileTime: false });
-			else if (!getFlag("no-read-guard") && recognizedWritten.includes(wp))
-				deps.readGuard?.recordUnchanged?.(wp);
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
 				.recordMutationToolReceipt;
 			// #3763: after the recovery and earlier synthetic awaits, a replaced
