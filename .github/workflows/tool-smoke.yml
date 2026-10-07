@@ -520,3 +520,66 @@ jobs:
           # non-continue-on-error step actually failed somewhere in the job.
           JOB_STATUS: ${{ job.status }}
         run: node scripts/notify-tool-smoke-red.mjs
+
+  # #3916 (recurrence of #3789): the project-snapshot persist bench, run nightly
+  # so a change that puts a clone back on the worker persist path reds master
+  # instead of surfacing as a user's RSS report. Its own job, not a step of
+  # `tool-smoke`: the bench measures process RSS, and a job that has just
+  # spawned dozens of language servers is not a quiet baseline. Permissions are
+  # narrower than `tool-smoke`'s (no contents/pull-requests write): the only
+  # write is the tracking issue, through the same shared CLI as the
+  # idle-eviction drift step above. The verdict, its threshold and the
+  # measurements behind it are in scripts/check-snapshot-persist-ratio.mjs.
+  # Bounds: the bench is ~30 s of work on a dev box (two fresh children, six
+  # persists each); install + build add a few minutes; the bench step is capped
+  # at 10 minutes and the job at 20, so a hang costs one bounded step. The
+  # first scheduled run's log gives the hosted-runner figures.
+  snapshot-persist-bench:
+    name: Snapshot persist RSS ratio
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write # file/update/close the snapshot-persist drift tracking issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+      # --ignore-scripts: the bench needs the compiled clients/ only, never the
+      # `prepare` grammar download; `npm run build` below is the explicit build.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --ignore-scripts
+      - name: Build
+        run: npm run build
+      - name: Bench snapshot persist (worker vs sync)
+        timeout-minutes: 10
+        run: node scripts/bench-snapshot-persist.mjs --persists 5 --label nightly --out "$RUNNER_TEMP/snapshot-persist-bench.json"
+      # Exits 1 on drift (this job goes red), 2 on an unusable report; always
+      # writes the state file the notifier below reads.
+      - name: Check worker/sync RSS ratio against the committed threshold
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/check-snapshot-persist-ratio.mjs --report "$RUNNER_TEMP/snapshot-persist-bench.json" --body "$RUNNER_TEMP/snapshot-persist-drift.md" --state "$RUNNER_TEMP/snapshot-persist-drift-state" --run-url "$RUN_URL"
+      # Same shared CLI and label as the idle-eviction drift step; scoped like
+      # every tracking-issue writer here (a branch dispatch must not touch
+      # issues). `clean` closes the issue, `drift` files/refreshes it, and an
+      # `error` or missing state (the bench never produced a report) leaves it
+      # as it is.
+      - name: Notify on snapshot-persist drift (file/update/close tracking issue)
+        if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE='nightly: snapshot persist RSS drift (worker vs sync ratio)'
+          STATE=$(cat "$RUNNER_TEMP/snapshot-persist-drift-state" 2>/dev/null || echo missing)
+          if [ "$STATE" = drift ]; then
+            gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/snapshot-persist-drift.md"
+          elif [ "$STATE" = clean ]; then
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --clean --close-when-clean
+          fi
