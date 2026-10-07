@@ -42,8 +42,17 @@ export function isEphemeralCheckoutRoot(candidate: string): boolean {
 	const resolved = path.resolve(candidate);
 	if (!isUnderSystemTmpDir(resolved)) return false;
 	try {
-		const git = fs.statSync(path.join(resolved, ".git"));
-		return git.isDirectory() || git.isFile();
+		const gitPath = path.join(resolved, ".git");
+		const git = fs.statSync(gitPath);
+		if (git.isDirectory()) {
+			return (
+				fs.statSync(path.join(gitPath, "HEAD")).isFile() &&
+				fs.statSync(path.join(gitPath, "objects")).isDirectory()
+			);
+		}
+		return (
+			git.isFile() && fs.readFileSync(gitPath, "utf8").startsWith("gitdir:")
+		);
 	} catch {
 		return false;
 	}

@@ -34,7 +34,11 @@ describe("temporary checkout policy (#1129)", () => {
 			path.join(os.tmpdir(), "pi-lens-1129-fixture-"),
 		);
 		roots.push(checkout, fixture);
-		fs.mkdirSync(path.join(checkout, ".git"));
+		fs.mkdirSync(path.join(checkout, ".git", "objects"), { recursive: true });
+		fs.writeFileSync(
+			path.join(checkout, ".git", "HEAD"),
+			"ref: refs/heads/main\n",
+		);
 
 		expect(isEphemeralCheckoutRoot(checkout)).toBe(true);
 		expect(isEphemeralCheckoutRoot(fixture)).toBe(false);
@@ -47,7 +51,11 @@ describe("temporary checkout policy (#1129)", () => {
 			path.join(os.tmpdir(), "pi-lens-1129-snapshot-"),
 		);
 		roots.push(checkout);
-		fs.mkdirSync(path.join(checkout, ".git"));
+		fs.mkdirSync(path.join(checkout, ".git", "objects"), { recursive: true });
+		fs.writeFileSync(
+			path.join(checkout, ".git", "HEAD"),
+			"ref: refs/heads/main\n",
+		);
 		const snapshot = {
 			version: 2,
 			projectRoot: checkout,
@@ -73,7 +81,11 @@ describe("temporary checkout policy (#1129)", () => {
 			path.join(os.tmpdir(), "pi-lens-1129-idle-fixture-"),
 		);
 		roots.push(checkout, fixture);
-		fs.mkdirSync(path.join(checkout, ".git"));
+		fs.mkdirSync(path.join(checkout, ".git", "objects"), { recursive: true });
+		fs.writeFileSync(
+			path.join(checkout, ".git", "HEAD"),
+			"ref: refs/heads/main\n",
+		);
 		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "120000";
 		process.env.PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS = "1000";
 

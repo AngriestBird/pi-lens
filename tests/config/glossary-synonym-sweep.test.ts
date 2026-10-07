@@ -870,7 +870,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/extension-log.ts": 2,
 		"clients/file-kinds.ts": 2,
 		"clients/file-time.ts": 7,
-		"clients/ephemeral-root.ts": 12,
+		"clients/ephemeral-root.ts": 14,
 		"clients/file-utils.ts": 54,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
