@@ -378,11 +378,21 @@ function censusDelta(rows: CensusRow[], sites: CheckoutSite[]): string {
 			(actualSites.get(`${site.file}::${site.jobId}::${site.stage}`) ?? 0) + 1,
 		);
 	const deltas = [...new Set([...PINNED_ROW_KEYS, ...actualRows.keys()])]
-		.map((key) => [key, (actualRows.get(key) ?? 0) - 1] as const)
+		.map(
+			(key) =>
+				[
+					key,
+					(actualRows.get(key) ?? 0) - (PINNED_ROW_KEYS.includes(key) ? 1 : 0),
+				] as const,
+		)
 		.filter(([, delta]) => delta !== 0)
 		.map(([key, delta]) => `row ${key} ${delta > 0 ? "+" : ""}${delta}`);
 	for (const key of [...new Set([...PINNED_ROW_KEYS, ...actualSites.keys()])]) {
-		const expected = PINNED_NO_CHECKOUT_KEYS.has(key) ? 0 : 1;
+		const expected = PINNED_NO_CHECKOUT_KEYS.has(key)
+			? 0
+			: PINNED_ROW_KEYS.includes(key)
+				? 1
+				: 0;
 		const delta = (actualSites.get(key) ?? 0) - expected;
 		if (delta !== 0) deltas.push(`site ${key} ${delta > 0 ? "+" : ""}${delta}`);
 	}
@@ -823,6 +833,29 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		expect(
 			printPins(censusPins(CENSUS_ROWS, CENSUS_SITES, EARLY_START_MEMBERS)),
 		).toBe(PINNED_PRINT);
+	});
+
+	it("names added and removed census rows and sites in the drift delta", () => {
+		// Recurrence (#4068 F-4068-1): a newly added checkout job was present only
+		// in the actual census, so the old implicit expected count of one erased
+		// its +1 row and site deltas. A removed baseline job must remain -1.
+		const addedSource = `${CENSUS_SOURCES.get("ci.yml")}\n  census-review-fake:\n    name: census review fake\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${PINNED_CHECKOUT}\n`;
+		const addedSources = new Map(CENSUS_SOURCES).set("ci.yml", addedSource);
+		const addedRows = censusRows(addedSources);
+		const addedDelta = censusDelta(addedRows, sitesOf(addedRows));
+		expect(addedDelta).toContain("row ci.yml::census-review-fake::A +1");
+		expect(addedDelta).toContain("site ci.yml::census-review-fake::A +1");
+
+		const removedKey = "ci.yml::changes::C";
+		const removedRows = CENSUS_ROWS.filter(
+			(row) => `${row.file}::${row.jobId}::${row.stage}` !== removedKey,
+		);
+		const removedSites = CENSUS_SITES.filter(
+			(site) => `${site.file}::${site.jobId}::${site.stage}` !== removedKey,
+		);
+		const removedDelta = censusDelta(removedRows, removedSites);
+		expect(removedDelta).toContain(`row ${removedKey} -1`);
+		expect(removedDelta).toContain(`site ${removedKey} -1`);
 	});
 
 	it("removes every stage-C merge-ref site and only those", () => {
