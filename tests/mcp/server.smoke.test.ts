@@ -1424,26 +1424,9 @@ describe("McpHarness.dispose tears down the server's process tree", () => {
 		async () => {
 			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-mcp-tree-");
 			const info = path.join(tmpDir, "info.json");
-			const preload = path.join(tmpDir, "orphan-writer.cjs");
-			const writer = `
-const fs = require("fs"), p = require("path");
-setTimeout(() => process.exit(0), 30000);
-const dir = process.argv[1];
-fs.mkdirSync(dir, { recursive: true });
-for (let i = 0; i < 2000; i++) fs.writeFileSync(p.join(dir, "s" + i), "x");
-for (let i = 0; ; i++) { try { fs.writeFileSync(p.join(dir, "f" + i), "x"); } catch {} }`;
-			fs.writeFileSync(
-				preload,
-				`const fs = require("fs");
-if (process.env.ORPHAN_WRITER_INFO && !fs.existsSync(process.env.ORPHAN_WRITER_INFO)) {
-  const env = { ...process.env };
-  delete env.NODE_OPTIONS;
-  const home = process.env.PI_LENS_HOME;
-  const child = require("child_process").spawn(process.execPath, ["-e", ${JSON.stringify(writer)}, home + "/orphan"], { detached: true, stdio: "ignore", env });
-  child.unref();
-  fs.writeFileSync(process.env.ORPHAN_WRITER_INFO, JSON.stringify({ home, writer: child.pid }));
-}
-`,
+			const preload = path.join(
+				repoRoot,
+				"tests/fixtures/mcp-orphan-writer-preload.cjs",
 			);
 			const harness = new McpHarness({
 				cwd: tmpDir,

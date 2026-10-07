@@ -26,13 +26,13 @@ const exited = (child: ChildProcess) =>
 const WRITER = `
 const fs = require("fs"), p = require("path");
 const dir = process.argv[1], end = Date.now() + Number(process.argv[2]);
-let i = 0;
-// Enough files that one removal pass outlasts a few writes (a near-empty
-// directory can be removed between two of them, which is not the race).
-for (; i < 2000; i++) fs.writeFileSync(p.join(dir, "f" + i), "x");
+// 2000 names, rewritten in a cycle: enough files that one removal pass
+// outlasts a few writes (a near-empty directory can be removed between two of
+// them, which is not the race), and bounded on disk however long it runs.
+for (let i = 0; i < 2000; i++) fs.writeFileSync(p.join(dir, "f" + i), "x");
 console.log("ready");
-while (Date.now() < end) {
-  try { fs.writeFileSync(p.join(dir, "f" + ++i), "x"); } catch {}
+for (let i = 0; Date.now() < end; i++) {
+  try { fs.writeFileSync(p.join(dir, "f" + (i % 2000)), "x"); } catch {}
 }`;
 
 // Creates argv[1] and writes into it every 2 ms until it is killed: the
@@ -43,8 +43,9 @@ const ORPHAN_WRITER = `
 const fs = require("fs");
 setTimeout(() => process.exit(0), 30000);
 fs.mkdirSync(process.argv[1], { recursive: true });
+let i = 0;
 setInterval(() => {
-  try { fs.writeFileSync(process.argv[1] + "/f" + Math.random(), "x"); } catch {}
+  try { fs.writeFileSync(process.argv[1] + "/f" + (i++ % 500), "x"); } catch {}
 }, 2);`;
 
 // flake-shape: real-process-spawn — child death is only observable at the real process boundary
