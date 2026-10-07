@@ -77,11 +77,14 @@ are not repeated here.
   files and cannot give the red-first proof, so it does not replace this.
 - After the push, read the `Mutation diff` comment for your exact head (its
   `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
-  `MUTATION` line). Kill every survivor on a line you added with a test in the
-  PR, or show it equivalent with a reason in the PR body. Name a 0-mutant,
-  partial, or absent comment in the body, never read it as clean, and run
-  `node scripts/stryker-diff.mjs --base origin/master --max-files 6`, then
-  `node scripts/mutation-report.mjs` on `reports/mutation/mutation.json`.
+  `MUTATION` line). Apply AGENTS.md's two-layer mutation acceptance: required
+  guard proof stays mandatory; exploratory behavioural survivors get bounded
+  caller probes and killed/equivalent/unresolved dispositions with reason and
+  owner. Fix demonstrated correctness gaps; do not turn score or unevaluated
+  population into a second merge gate. Name a 0-mutant, partial, stale, or
+  absent report in the body, never read it as clean. Use bounded hand probes
+  locally; a full Stryker campaign belongs to the CI advisory job. Render its
+  artifact with `node scripts/mutation-report.mjs --report <mutation.json>`.
   The `mutation` job starts only after every required check passed on the head
   (#3801): until then the `MUTATION` line reads `PENDING`, and after a red
   required check or a red gate it reads `NOT RUN` with the reason.

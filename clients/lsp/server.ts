@@ -2567,7 +2567,7 @@ export const TypeScriptServer: LSPServerInfo = {
 
 export const DenoServer: LSPServerInfo = {
 	id: "deno",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Deno Language Server",
 	fallbackFor: "typescript",
 	extensions: JS_TS_LSP_EXTENSIONS,
@@ -3120,7 +3120,7 @@ export const RubyServer: LSPServerInfo = {
 
 export const PHPServer: LSPServerInfo = {
 	id: "php",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Intelephense",
 	extensions: KIND_EXTENSIONS["php"],
 	root: RootWithFallback(
@@ -3379,12 +3379,14 @@ function createTreeBinaryServer(spec: {
 	/** Path to the executable inside the extracted bundle, e.g. "bin/clangd". */
 	binRelPath: string;
 	args?: string[];
+	/** Idle-eviction policy override; defaults to `unmeasured` (resident). */
+	idleEviction?: "transparent" | "resident" | "unmeasured";
 }): LSPServerInfo {
 	return {
 		id: spec.id,
 		name: spec.name,
 		extensions: spec.extensions,
-		idleEviction: "unmeasured",
+		idleEviction: spec.idleEviction ?? "unmeasured",
 		root: spec.root,
 		spawn(root, options) {
 			return resolveAndLaunchTreeBinary(
@@ -3421,6 +3423,7 @@ export const LuaServer: LSPServerInfo = createTreeBinaryServer({
 // neither is available (→ coverage notice); cpp-check stays the fallback.
 export const CppServer: LSPServerInfo = createTreeBinaryServer({
 	id: "cpp",
+	idleEviction: "transparent",
 	name: "clangd",
 	extensions: KIND_EXTENSIONS["cxx"],
 	root: RootWithFallback(
@@ -3572,7 +3575,7 @@ export const OCamlServer = createInteractiveServer({
 
 export const ClojureServer: LSPServerInfo = {
 	id: "clojure",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Clojure LSP",
 	extensions: KIND_EXTENSIONS["clojure"],
 	root: createRootDetector(["deps.edn", "project.clj"]),
@@ -3642,7 +3645,7 @@ export const NixServer = createInteractiveServer({
 
 export const BashServer: LSPServerInfo = {
 	id: "bash",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Bash Language Server",
 	extensions: [".bash", ".sh", ".zsh"],
 	root: FileDirRoot,
@@ -3674,7 +3677,7 @@ export const BashServer: LSPServerInfo = {
 
 export const FishServer: LSPServerInfo = {
 	id: "fish",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Fish Language Server",
 	extensions: KIND_EXTENSIONS["fish"],
 	root: RootWithFallback(createRootDetector([".git"])),
@@ -3743,7 +3746,7 @@ export const DockerServer: LSPServerInfo = {
 
 export const YamlServer: LSPServerInfo = {
 	id: "yaml",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "YAML Language Server",
 	extensions: KIND_EXTENSIONS["yaml"],
 	root: RootWithFallback(
@@ -3798,7 +3801,7 @@ export const JsonServer: LSPServerInfo = {
 
 export const HtmlServer: LSPServerInfo = {
 	id: "html",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "VSCode HTML Language Server",
 	extensions: KIND_EXTENSIONS["html"],
 	root: RootWithFallback(
@@ -3842,7 +3845,7 @@ export const TomlServer: LSPServerInfo = {
 
 export const PrismaServer: LSPServerInfo = {
 	id: "prisma",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Prisma Language Server",
 	extensions: KIND_EXTENSIONS["prisma"],
 	root: RootWithFallback(
@@ -3985,7 +3988,7 @@ export const SvelteServer: LSPServerInfo = {
 
 export const CssServer: LSPServerInfo = {
 	id: "css",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "CSS Language Server",
 	extensions: KIND_EXTENSIONS["css"],
 	root: RootWithFallback(
