@@ -329,6 +329,9 @@ describe("knip blocker vs the cap (#3901)", () => {
 			nextTurn(rig, 2);
 			expect(await endTurn(rig)).not.toContain("left-pad");
 			expect(ledgerCount("turn-end-advisory-carry-dropped")).toBe(1);
+			// Only the first cut was "held for the next turn"; the second promised
+			// nothing, so the marker and the held row do not claim it.
+			expect(ledgerCount("turn-end-sections-held")).toBe(1);
 
 			nextTurn(rig, 3);
 			expect(await endTurn(rig)).not.toContain("left-pad");
