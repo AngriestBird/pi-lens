@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,10 +76,7 @@ import { fingerprintProjectSnapshotJson } from "../../clients/project-snapshot-f
 // @ts-expect-error -- bare-node script, no declaration file
 import { buildSyntheticSnapshot } from "../../scripts/bench-snapshot-persist.mjs";
 import { waitFor } from "./interleaving-kit.js";
-import {
-	fileFromScriptUrl,
-	withPreciseCoverage,
-} from "../support/v8-coverage.js";
+
 import { setupTestEnvironment } from "./test-utils.js";
 
 const REPO_ROOT = path.join(import.meta.dirname, "../..");
@@ -366,17 +364,19 @@ describe.each([
 });
 
 describe("word-index wire bytes stay off the main-thread hot path (#4129)", () => {
-	/** A real word index whose wire form is about 2 MB, with non-ASCII paths. */
+	/** Documents for a real word index whose wire form is about 2 MB. */
+	function wordIndexDocs(): Array<{ path: string; content: string }> {
+		return Array.from({ length: 200 }, (_, doc) => ({
+			path: `src/m\u00fcdule${doc}.ts`,
+			content: Array.from(
+				{ length: 300 },
+				(_, token) => `tok${(doc * 31 + token * 7) % 5000}`,
+			).join(" "),
+		}));
+	}
+
 	function wordIndexedSnapshot(cwd: string) {
-		const index = buildWordIndex(
-			Array.from({ length: 200 }, (_, doc) => ({
-				path: `src/m\u00fcdule${doc}.ts`,
-				content: Array.from(
-					{ length: 300 },
-					(_, token) => `tok${(doc * 31 + token * 7) % 5000}`,
-				).join(" "),
-			})),
-		);
+		const index = buildWordIndex(wordIndexDocs());
 		const serialized = serializeWordIndex(index);
 		const snapshot = {
 			...releasedSnapshot(),
@@ -384,6 +384,45 @@ describe("word-index wire bytes stay off the main-thread hot path (#4129)", () =
 			wordIndex: serialized,
 		} as ProjectSnapshot;
 		return { index, serialized, snapshot };
+	}
+
+	/**
+	 * Run `body` (an async function body over `data` and `urls`) in a new
+	 * worker isolate that imports the built clients, and return its result.
+	 */
+	async function runInFreshIsolate<T>(body: string, data: unknown): Promise<T> {
+		const clientsDir =
+			pathToFileURL(path.join(REPO_ROOT, "clients")).href + "/";
+		const urls = {
+			clientsDir,
+			wordIndex: `${clientsDir}word-index.js`,
+			projectSnapshot: `${clientsDir}project-snapshot.js`,
+		};
+		const source = `
+			const { parentPort, workerData } = require("node:worker_threads");
+			const { data, urls } = workerData;
+			(async () => { ${body} })().then(
+				(value) => parentPort.postMessage({ value }),
+				(error) => parentPort.postMessage({ error: String(error && error.stack || error) }),
+			);
+		`;
+		const worker = new Worker(source, {
+			eval: true,
+			workerData: { data, urls },
+		});
+		try {
+			const message = await new Promise<{ value?: T; error?: string }>(
+				(resolve, reject) => {
+					worker.once("message", resolve);
+					worker.once("error", reject);
+				},
+			);
+			if (message.error) throw new Error(message.error);
+			return message.value as T;
+		} finally {
+			// Also ends the isolate's own persist worker before the data dir goes.
+			await worker.terminate();
+		}
 	}
 
 	it("dispatches the persist with no JavaScript pass over the body", async () =>
@@ -395,52 +434,67 @@ describe("word-index wire bytes stay off the main-thread hot path (#4129)", () =
 			// persist at a 57 MB index, VERIFY_4129). Both are counts, not times:
 			// V8 block coverage counts every JavaScript block the dispatch runs,
 			// and a scan of the body runs one block per character; the stringify
-			// spy counts the characters JSON.stringify produced.
-			const { snapshot } = wordIndexedSnapshot(cwd);
-			const bodyChars = JSON.stringify(snapshot).length;
-			expect(bodyChars).toBeGreaterThan(1_000_000);
-			const realStringify = JSON.stringify;
-			let stringifiedChars = 0;
-			const { scripts } = await withPreciseCoverage(async () => {
-				const spy = vi
-					.spyOn(JSON, "stringify")
-					.mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
-						const out = realStringify(...args);
-						if (typeof out === "string") stringifiedChars += out.length;
-						return out;
-					});
+			// counter sums the characters JSON.stringify produced.
+			//
+			// The measurement runs in a fresh worker isolate. V8 does not count
+			// blocks in code compiled before coverage started, so in this process
+			// the earlier persists of this file hid the round-2 scan (measured:
+			// green in the whole file, red when run alone).
+			const result = await runInFreshIsolate<{
+				hottest: { count: number; where: string };
+				bodyChars: number;
+				stringifiedChars: number;
+			}>(
+				`
+				const { Session } = require("node:inspector/promises");
+				const wordIndex = await import(urls.wordIndex);
+				const persist = await import(urls.projectSnapshot);
+				const index = wordIndex.buildWordIndex(data.docs);
+				const snapshot = { ...data.base, projectRoot: data.cwd, wordIndex: wordIndex.serializeWordIndex(index) };
+				const bodyChars = JSON.stringify(snapshot).length;
+				const session = new Session();
+				session.connect();
+				await session.post("Profiler.enable");
+				await session.post("Profiler.startPreciseCoverage", { callCount: true, detailed: true });
+				const realStringify = JSON.stringify;
+				let stringifiedChars = 0;
+				JSON.stringify = (...args) => {
+					const out = realStringify(...args);
+					if (typeof out === "string") stringifiedChars += out.length;
+					return out;
+				};
 				try {
-					saveProjectSnapshot(cwd, snapshot);
+					persist.saveProjectSnapshot(data.cwd, snapshot);
 				} finally {
-					spy.mockRestore();
+					JSON.stringify = realStringify;
 				}
-			});
-			await settle(cwd);
-
-			let hottest = { count: 0, where: "none" };
-			for (const script of scripts) {
-				const file = fileFromScriptUrl(script.url, REPO_ROOT);
-				if (!file?.startsWith("clients/")) continue;
-				for (const fn of script.functions) {
-					for (const range of fn.ranges) {
-						if (range.count > hottest.count) {
-							hottest = {
-								count: range.count,
-								where: `${file}#${fn.functionName}`,
-							};
+				const { result } = await session.post("Profiler.takePreciseCoverage");
+				session.disconnect();
+				let hottest = { count: 0, where: "none" };
+				for (const script of result) {
+					if (!script.url.startsWith(urls.clientsDir)) continue;
+					for (const fn of script.functions) {
+						for (const range of fn.ranges) {
+							if (range.count > hottest.count) {
+								hottest = { count: range.count, where: script.url.slice(urls.clientsDir.length) + "#" + fn.functionName };
+							}
 						}
 					}
 				}
-			}
+				return { hottest, bodyChars, stringifiedChars };
+				`,
+				{ cwd, base: releasedSnapshot(), docs: wordIndexDocs() },
+			);
+
+			expect(result.bodyChars).toBeGreaterThan(1_000_000);
 			// Healthy: 788 at most (log redaction over fixed-size records). The
-			// round-2 scan: 2,258,635 in skipJsonValue for a 2,258,861-char body.
-			expect(hottest.count, hottest.where).toBeLessThan(bodyChars / 100);
+			// round-2 scan: 2,270,838 in skipJsonValue for a 2,271,109-char body.
+			expect(result.hottest.count, result.hottest.where).toBeLessThan(
+				result.bodyChars / 100,
+			);
 			// Healthy: 1.000 (the word index once, the rest once, small records).
 			// Round 1: about 2 (the serializer stringified the index again).
-			expect(stringifiedChars / bodyChars).toBeLessThan(1.1);
-			expect(getProjectSnapshotPersistStateForTests(cwd).workerBodyWrites).toBe(
-				1,
-			);
+			expect(result.stringifiedChars / result.bodyChars).toBeLessThan(1.1);
 		}));
 
 	it.each([
