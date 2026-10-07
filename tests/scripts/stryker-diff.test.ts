@@ -29,6 +29,7 @@ import {
 	augmentAndSummarize,
 	buildRunConfig,
 	capMutationFiles,
+	collectChangedRanges,
 	changedLineWeights,
 	compiledJsPath,
 	decideMutationOutcome,
@@ -44,6 +45,7 @@ import {
 	formatCapNotice,
 	isCompiledMutationSource,
 	isMutationSourceFile,
+	isQueueablePath,
 	isScriptMutationFile,
 	mapRelatedTests,
 	mutationLaneExclusion,
@@ -54,6 +56,7 @@ import {
 	parseDryRunCost,
 	planResample,
 	sampleRangesDeterministically,
+	selectMutationFiles,
 } from "../../scripts/lib/stryker-diff.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 import {
@@ -648,10 +651,178 @@ describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
 		);
 	});
 
+	// Recurrence (#4005): the queue is read from an issue body a maintainer can
+	// edit; the driver must take the valid existing runtime entries, in order,
+	// and nothing else, before the cap.
+	it("mutates queued files first and drops every invalid or vanished queue entry", () => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			mkdirSync(join(fixtureRepo, "clients"));
+			mkdirSync(join(fixtureRepo, "scripts"));
+			for (const file of ["clients/q1.ts", "clients/q2.ts", "scripts/s.mjs"])
+				writeFileSync(join(fixtureRepo, file), "export const a = 1;\n");
+			writeFileSync(join(fixtureRepo, "README.md"), "fixture\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "."]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			writeFileSync(join(fixtureRepo, "README.md"), "changed\n");
+			fixtureGit(fixtureRepo, ["commit", "-qam", "readme only"]);
+			const pending = join(fixtureRepo, "pending.txt");
+			writeFileSync(
+				pending,
+				[
+					"clients/q2.ts",
+					"../outside.ts",
+					"clients/gone.ts",
+					"scripts/s.mjs",
+					"clients/q1.ts",
+					"clients/q2.ts",
+				].join("\n"),
+			);
+			runDriver(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			const meta = JSON.parse(
+				readFileSync(
+					join(fixtureRepo, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			).piLensMutationDiff;
+			expect(meta.filesSelected).toEqual(["clients/q2.ts", "clients/q1.ts"]);
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	});
+
 	it("still takes the script without the flag (the PR-time behaviour)", () => {
 		expect(reasonFor([])).toContain(
 			"no changed mutation source has a covering test",
 		);
+	});
+});
+
+// #4005: the nightly's carry-over queue. Recurrence: on a busy streak the
+// same top-weight files won every night and the rest were never mutated.
+describe("selectMutationFiles (#4005)", () => {
+	const weights = new Map([
+		["clients/heavy.ts", 90],
+		["clients/mid.ts", 20],
+		["clients/light.ts", 1],
+	]);
+
+	it("takes queued files first, in queue order, then the window by weight, under one cap", () => {
+		expect(
+			selectMutationFiles({
+				pending: ["clients/light.ts", "clients/queued.ts"],
+				windowFiles: ["clients/mid.ts", "clients/heavy.ts", "clients/light.ts"],
+				maxFiles: 3,
+				weights,
+			}),
+		).toEqual({
+			selected: ["clients/light.ts", "clients/queued.ts", "clients/heavy.ts"],
+			skipped: ["clients/mid.ts"],
+		});
+	});
+
+	it("skips queued files beyond the cap, oldest-first order kept, before any window file", () => {
+		expect(
+			selectMutationFiles({
+				pending: ["clients/q1.ts", "clients/q2.ts", "clients/q3.ts"],
+				windowFiles: ["clients/heavy.ts"],
+				maxFiles: 2,
+				weights,
+			}),
+		).toEqual({
+			selected: ["clients/q1.ts", "clients/q2.ts"],
+			skipped: ["clients/q3.ts", "clients/heavy.ts"],
+		});
+	});
+
+	it("is the plain by-weight cap when nothing is queued", () => {
+		const windowFiles = [
+			"clients/light.ts",
+			"clients/heavy.ts",
+			"clients/mid.ts",
+		];
+		expect(selectMutationFiles({ windowFiles, maxFiles: 2, weights })).toEqual(
+			capMutationFiles(windowFiles, 2, weights),
+		);
+	});
+});
+
+describe("collectChangedRanges (#4005)", () => {
+	// Recurrence: a queued file's earlier changes are outside the current
+	// window, so reading it against the window base left it with no lines.
+	it("reads queued files against the queue base and every other file against the window base", () => {
+		const calls: Array<[string, string[]]> = [];
+		const diff = (base: string, files: string[]) => {
+			calls.push([base, files]);
+			return new Map(
+				files.map((file) => [file, [[1, 1]] as Array<[number, number]>]),
+			);
+		};
+		const ranges = collectChangedRanges({
+			files: ["clients/q.ts", "clients/w.ts"],
+			pending: ["clients/q.ts"],
+			baseRef: "window-base",
+			pendingBase: "queue-base",
+			diff,
+		});
+		expect(calls).toEqual([
+			["window-base", ["clients/w.ts"]],
+			["queue-base", ["clients/q.ts"]],
+		]);
+		expect([...ranges.keys()].sort()).toEqual(["clients/q.ts", "clients/w.ts"]);
+	});
+
+	it("uses the window base for everything when there is no queue base", () => {
+		const calls: string[] = [];
+		collectChangedRanges({
+			files: ["clients/q.ts"],
+			pending: ["clients/q.ts"],
+			baseRef: "window-base",
+			pendingBase: null,
+			diff: (base) => {
+				calls.push(base);
+				return new Map();
+			},
+		});
+		expect(calls).toEqual(["window-base"]);
+	});
+});
+
+describe("isQueueablePath (#4005)", () => {
+	it("admits runtime sources spelled as plain relative paths", () => {
+		for (const file of [
+			"index.ts",
+			"clients/a.ts",
+			"clients/lsp/x.ts",
+			"tools/t.ts",
+			"mcp/m.ts",
+		])
+			expect(isQueueablePath(file), file).toBe(true);
+	});
+
+	// Recurrence: the queue is an editable issue body whose entries reach git
+	// and Stryker's --mutate.
+	it.each([
+		"clients/../index.ts",
+		"/clients/a.ts",
+		"clients//a.ts",
+		"clients/a.ts,tools/b.ts",
+		"clients/a.ts -->",
+		"clients\\a.ts",
+		"scripts/a.mjs",
+		"clients/a.test.ts",
+		"clients/a.d.ts",
+		"",
+		undefined,
+	])("refuses %s", (file) => {
+		expect(isQueueablePath(file)).toBe(false);
 	});
 });
 
@@ -1958,8 +2129,8 @@ describe.skipIf(underStryker)(
 		});
 
 		it("caps the changed files by changed-line weight with whitespace-only lines ignored (#3797 review)", () => {
-			expect(code).toContain(
-				"changedLineWeights(changedLineRanges(allFiles, { ignoreWhitespace: true }))",
+			expect(code).toMatch(
+				/weights: changedLineWeights\(\s*changedLineRanges\(allFiles, \{ ignoreWhitespace: true \}\),?\s*\)/,
 			);
 			expect(code).toMatch(/\.\.\.\(ignoreWhitespace \? \["\s*"\] : \[\]\)/);
 		});

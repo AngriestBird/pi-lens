@@ -51,21 +51,23 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      # The window is the commits since the last report. Nothing under the
-      # runtime paths changed in it (or master did not move) means there is
-      # nothing to mutate: no run, no issue edit, and the marker stays where it is.
+      # The window is the commits since the last report, plus the carry-over
+      # queue: the files earlier nights skipped over the cap or could not finish
+      # (scripts/stryker-nightly.mjs). Nothing under the runtime paths changed in
+      # the window AND an empty queue means there is nothing to mutate: no run,
+      # no issue edit, and the marker stays where it is.
       - name: Resolve the window since the last report
         id: window
         run: |
           set -euo pipefail
           gh issue list --state open --label nightly-drift --search "$TRACKING_TITLE in:title" --json title,body --limit 100 > "$RUNNER_TEMP/stryker-nightly-issues.json"
-          WINDOW=$(node scripts/stryker-nightly.mjs base --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE")
+          WINDOW=$(node scripts/stryker-nightly.mjs base --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --pending-out "$RUNNER_TEMP/stryker-nightly-pending.txt")
           echo "$WINDOW" >> "$GITHUB_OUTPUT"
           BASE=$(echo "$WINDOW" | sed -n 's/^base=//p')
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          if git diff --quiet "$BASE" HEAD -- clients tools mcp index.ts; then
+          if git diff --quiet "$BASE" HEAD -- clients tools mcp index.ts && [ ! -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "no runtime change since $BASE; nothing to report"
+            echo "no runtime change since $BASE and nothing queued; nothing to report"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
@@ -73,14 +75,22 @@ jobs:
         run: npm ci --ignore-scripts
       - if: steps.window.outputs.run == 'true'
         run: npm run build
-      - name: Mutate the window's runtime diff
+      - name: Mutate the queued files and the window's runtime diff
         id: stryker
         if: steps.window.outputs.run == 'true'
         continue-on-error: true
         env:
           BASE: ${{ steps.window.outputs.base }}
           HEAD_SHA: ${{ steps.window.outputs.head }}
-        run: node scripts/stryker-diff.mjs --base "$BASE" --max-files 12 --runtime-only --head-sha "$HEAD_SHA"
+          PENDING_BASE: ${{ steps.window.outputs.pending_base }}
+        run: |
+          set -euo pipefail
+          ARGS=(--base "$BASE" --max-files 12 --runtime-only --head-sha "$HEAD_SHA")
+          if [ -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]; then
+            ARGS+=(--pending-file "$RUNNER_TEMP/stryker-nightly-pending.txt")
+            if [ -n "$PENDING_BASE" ]; then ARGS+=(--pending-base "$PENDING_BASE"); fi
+          fi
+          node scripts/stryker-diff.mjs "${ARGS[@]}"
       - name: Render job summary
         if: always() && steps.window.outputs.run == 'true' && hashFiles('reports/mutation/mutation.json') != ''
         run: node scripts/mutation-report.mjs --out "$GITHUB_STEP_SUMMARY"
@@ -105,7 +115,7 @@ jobs:
           set -euo pipefail
           STATUS=failed
           if [ "$STRYKER_OUTCOME" = success ]; then STATUS=ok; fi
-          node scripts/stryker-nightly.mjs body --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report reports/mutation/mutation.json --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
+          node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report reports/mutation/mutation.json --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
           gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
           node scripts/upsert-tracking-issue.mjs --title "$TRACKING_TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/stryker-nightly-body.md"
       # A driver failure must not read as a green night: the issue body says

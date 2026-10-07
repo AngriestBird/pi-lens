@@ -133,3 +133,18 @@ export declare function augmentAndSummarize(
 	compiledIndexByJsFile: Map<string, { index: object; tsFile: string }>,
 	options?: { readFile?: (file: string) => string },
 ): { mutants: any[]; counts: Record<string, number>; score: string };
+
+export declare function selectMutationFiles(options: {
+	pending?: string[];
+	windowFiles: string[];
+	maxFiles?: number;
+	weights?: Map<string, number>;
+}): { selected: string[]; skipped: string[] };
+export declare function collectChangedRanges(options: {
+	files: string[];
+	pending?: Iterable<string>;
+	baseRef: string;
+	pendingBase?: string | null;
+	diff: (base: string, files: string[]) => Map<string, Array<[number, number]>>;
+}): Map<string, Array<[number, number]>>;
+export declare const isQueueablePath: (file: unknown) => boolean;

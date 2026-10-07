@@ -104,6 +104,20 @@ export const isCompiledMutationSource = (file) =>
 	!file.endsWith(".test.ts") &&
 	!file.endsWith(".d.ts");
 
+/**
+ * A path that may sit on the nightly carry-over queue (#4005): a runtime source
+ * spelled as a plain repository-relative path. The queue lives in an issue body
+ * a maintainer can edit, so the list is validated on read: no `..`, absolute,
+ * backslash, comma, `-->` or whitespace spelling gets through.
+ */
+export const isQueueablePath = (file) =>
+	typeof file === "string" &&
+	/^[A-Za-z0-9_./@+-]+$/.test(file) &&
+	file
+		.split("/")
+		.every((part) => part !== "" && part !== "." && part !== "..") &&
+	isCompiledMutationSource(file);
+
 export const isMutationSourceFile = (file) =>
 	isScriptMutationFile(file) || isCompiledMutationSource(file);
 
@@ -181,6 +195,61 @@ export function capMutationFiles(
 		selected: ordered.slice(0, maxFiles),
 		skipped: ordered.slice(maxFiles),
 	};
+}
+
+/**
+ * The mutate set of one nightly run (#4005): files carried over from earlier
+ * nights first, in their queue order, then the new window's files by changed-
+ * line weight, under the one `maxFiles` cap. What the cap leaves out, pending
+ * files first, is `skipped` and goes back on the queue.
+ *
+ * @param {{pending?: string[], windowFiles: string[], maxFiles?: number, weights?: Map<string, number>}} options
+ */
+export function selectMutationFiles({
+	pending = [],
+	windowFiles,
+	maxFiles = DEFAULT_MAX_FILES,
+	weights = new Map(),
+}) {
+	const queue = [...new Set(pending)];
+	const queued = new Set(queue);
+	const head = queue.slice(0, maxFiles);
+	const rest = capMutationFiles(
+		windowFiles.filter((file) => !queued.has(file)),
+		maxFiles - head.length,
+		weights,
+	);
+	return {
+		selected: [...head, ...rest.selected],
+		skipped: [...queue.slice(maxFiles), ...rest.skipped],
+	};
+}
+
+/**
+ * Changed line ranges per file, each file against its own base: a carried-over
+ * file against the base of the oldest night that queued it (its earlier changes
+ * are outside the current window), every other file against the window base.
+ * `diff(base, files)` is the git call, injected so the split is testable.
+ *
+ * @param {{files: string[], pending?: Iterable<string>, baseRef: string, pendingBase?: string | null, diff: (base: string, files: string[]) => Map<string, Array<[number, number]>>}} options
+ */
+export function collectChangedRanges({
+	files,
+	pending = [],
+	baseRef,
+	pendingBase = null,
+	diff,
+}) {
+	const queued = new Set(pending);
+	const carried = pendingBase ? files.filter((file) => queued.has(file)) : [];
+	const carriedSet = new Set(carried);
+	const fresh = files.filter((file) => !carriedSet.has(file));
+	const out = new Map();
+	if (fresh.length > 0)
+		for (const [k, v] of diff(baseRef, fresh)) out.set(k, v);
+	if (carried.length > 0)
+		for (const [k, v] of diff(pendingBase, carried)) out.set(k, v);
+	return out;
 }
 
 /**

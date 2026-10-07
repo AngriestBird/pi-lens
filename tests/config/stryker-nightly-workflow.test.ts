@@ -97,6 +97,44 @@ function nightlyFindings(text: string): string[] {
 	if (driver && !/--runtime-only\b/.test(run(driver)))
 		findings.push("driver step is not restricted to the runtime paths");
 
+	// Recurrence (#4005 r3): the carry-over queue not reaching the driver, or a
+	// run skipped on an empty window while files are still queued.
+	if (
+		!/stryker-nightly\.mjs base [^\n]*--pending-out "\$RUNNER_TEMP\/stryker-nightly-pending\.txt"/.test(
+			run(window ?? {}),
+		)
+	)
+		findings.push(
+			"window step does not write the carry-over queue for the driver",
+		);
+	if (
+		!/&& \[ ! -s "\$RUNNER_TEMP\/stryker-nightly-pending\.txt" \]/.test(
+			run(window ?? {}),
+		)
+	)
+		findings.push("an empty window would skip a run while files are queued");
+	if (
+		(driver &&
+			!/--pending-file "\$RUNNER_TEMP\/stryker-nightly-pending\.txt"/.test(
+				run(driver),
+			)) ||
+		(driver && !/--pending-base "\$PENDING_BASE"/.test(run(driver)))
+	)
+		findings.push("driver step does not take the queue and its base");
+	// Recurrence (#4005 r3): the body step recomputing the queue from nothing, so
+	// a failed night would clear it.
+	const bodyStep = steps.find((step) =>
+		run(step).includes("stryker-nightly.mjs body"),
+	);
+	if (
+		!/stryker-nightly\.mjs body --issues "\$RUNNER_TEMP\/stryker-nightly-issues\.json" --title "\$TRACKING_TITLE"/.test(
+			run(bodyStep ?? {}),
+		)
+	)
+		findings.push(
+			"the body step does not read the previous queue from the tracking issue",
+		);
+
 	// Recurrence (#4005 r2 X1): two overlapping runs (a dispatch during the
 	// schedule) read the same marker and write the issue out of order.
 	if (
@@ -309,6 +347,47 @@ describe("stryker-nightly.yml (#4005)", () => {
 			"the driver loses --runtime-only",
 			(text) => text.replace(" --runtime-only", ""),
 			/not restricted to the runtime paths/,
+		],
+		[
+			"the queue file not written for the driver",
+			(text) =>
+				text.replace(
+					' --pending-out "$RUNNER_TEMP/stryker-nightly-pending.txt"',
+					"",
+				),
+			/does not write the carry-over queue/,
+		],
+		[
+			"an empty window skipping a run while files are queued",
+			(text) =>
+				text.replace(
+					' && [ ! -s "$RUNNER_TEMP/stryker-nightly-pending.txt" ]',
+					"",
+				),
+			/would skip a run while files are queued/,
+		],
+		[
+			"the driver not given the queue",
+			(text) =>
+				text.replace(
+					'ARGS+=(--pending-file "$RUNNER_TEMP/stryker-nightly-pending.txt")',
+					"true",
+				),
+			/does not take the queue/,
+		],
+		[
+			"the driver not given the queue base",
+			(text) => text.replace('ARGS+=(--pending-base "$PENDING_BASE")', "true"),
+			/does not take the queue/,
+		],
+		[
+			"the body step not reading the previous queue",
+			(text) =>
+				text.replace(
+					' --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base',
+					" --base",
+				),
+			/does not read the previous queue/,
 		],
 		[
 			"a shallow checkout",

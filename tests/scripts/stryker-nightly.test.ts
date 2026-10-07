@@ -17,9 +17,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
+import { selectMutationFiles } from "../../scripts/lib/stryker-diff.mjs";
 import {
 	buildNightlyBody,
-	incompleteReasons,
+	coverageGaps,
+	MAX_PENDING,
+	nextQueue,
+	parsePending,
 	main,
 	markerOf,
 	parseLastReportSha,
@@ -122,10 +126,10 @@ describe("buildNightlyBody", () => {
 		expect(body).toContain("### Mutation diff (advisory)");
 	});
 
-	// Recurrence (#4005 r2): the driver exits 0 when it skipped files over the
-	// cap, sampled ranges away or ran out of budget, so `status=ok` advanced the
-	// marker past files no later night revisits. Real windows: 2026-10-01 had 81
-	// eligible runtime files and the top 12 were evaluated.
+	// Recurrence (#4005 r3): the round-2 hold rule kept the marker whenever
+	// anything was skipped, so on a busy streak (55-81 changed runtime files a
+	// day) the window grew and the same top-weight files won every night. After
+	// a completed run the marker always advances; what was skipped is queued.
 	const covered = (extra: Record<string, unknown>) => ({
 		files: {},
 		piLensMutationDiff: {
@@ -134,13 +138,14 @@ describe("buildNightlyBody", () => {
 			rangesTotal: 4,
 			rangesEvaluated: 4,
 			partial: null,
+			filesSelected: ["clients/a.ts", "clients/b.ts"],
 			...extra,
 		},
 	});
 	it.each([
 		[
 			"files skipped over the cap",
-			covered({ filesSkippedOverCap: ["clients/a.ts"] }),
+			covered({ filesSkippedOverCap: ["clients/c.ts"] }),
 			/1 file\(s\) skipped over the --max-files cap/,
 		],
 		[
@@ -170,55 +175,336 @@ describe("buildNightlyBody", () => {
 			},
 			/no mutant was evaluated and the dry run measured some/,
 		],
-		["no report at all", undefined, /no mutation report/],
 	])(
-		"keeps the marker at BASE and says why for %s",
+		"advances the marker for a completed run and says what was left for %s",
 		(_label, incomplete, why) => {
 			const body = buildNightlyBody({
 				...meta,
 				status: "ok",
 				report: incomplete,
 			});
-			expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
+			expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_B);
 			expect(body).toContain("**Status:** ok");
-			expect(body).toMatch(
-				/\*\*Marker:\*\* held at the window's base, because/,
-			);
+			expect(body).toMatch(/\*\*Coverage:\*\* not complete: /);
 			expect(body).toMatch(why);
 		},
 	);
 
-	it.each([
-		["a fully evaluated window", covered({})],
-		[
-			"an early exit with nothing to mutate",
-			{
-				files: {},
-				piLensMutationDiff: {
-					zeroMutants: { reason: "no covering test" },
+	it("reads a fully evaluated window as complete, with an empty queue", () => {
+		const body = buildNightlyBody({
+			...meta,
+			status: "ok",
+			report: covered({}),
+		});
+		expect(coverageGaps(covered({}))).toEqual({ capped: [], unfinished: [] });
+		expect(body).toContain("the whole window was evaluated");
+		expect(parsePending([issue(body)], TITLE).pending).toEqual([]);
+	});
+
+	describe("the carry-over queue", () => {
+		const exists = () => true;
+		const night = (options: Parameters<typeof nextQueue>[0]) =>
+			nextQueue(options);
+
+		it("queues the files skipped over the cap, in order, and re-queues unfinished ones at the back", () => {
+			const result = night({
+				oldPending: ["clients/old.ts"],
+				oldPendingBase: SHA_A,
+				base: SHA_B,
+				status: "ok",
+				report: covered({
+					filesSkippedOverCap: ["clients/c.ts", "clients/d.ts"],
+					rangesSampled: true,
+				}),
+				exists,
+			});
+			expect(result.pending).toEqual([
+				"clients/old.ts",
+				"clients/c.ts",
+				"clients/d.ts",
+				"clients/a.ts",
+				"clients/b.ts",
+			]);
+			expect(result.pendingBase).toBe(SHA_A);
+		});
+
+		it("takes a queued file off the queue once it was fully evaluated", () => {
+			const result = night({
+				oldPending: ["clients/a.ts", "clients/z.ts"],
+				oldPendingBase: SHA_A,
+				base: SHA_B,
+				status: "ok",
+				report: covered({ filesSelected: ["clients/a.ts"] }),
+				exists,
+			});
+			expect(result.pending).toEqual(["clients/z.ts"]);
+			expect(result.pendingBase).toBe(SHA_A);
+		});
+
+		it("clears the queue base when the queue empties, and starts it at this window's base for new skips", () => {
+			expect(
+				night({
+					oldPending: ["clients/a.ts"],
+					oldPendingBase: SHA_A,
+					base: SHA_B,
+					status: "ok",
+					report: covered({ filesSelected: ["clients/a.ts"] }),
+					exists,
+				}),
+			).toMatchObject({ pending: [], pendingBase: null });
+			expect(
+				night({
+					oldPending: ["clients/a.ts"],
+					oldPendingBase: SHA_A,
+					base: SHA_B,
+					status: "ok",
+					report: covered({
+						filesSelected: ["clients/a.ts"],
+						filesSkippedOverCap: ["clients/n.ts"],
+					}),
+					exists,
+				}),
+			).toMatchObject({ pending: ["clients/n.ts"], pendingBase: SHA_B });
+		});
+
+		// Recurrence: a file nobody can evaluate (no covering test, no source map)
+		// re-queued forever by a sampled night.
+		it("does not re-queue a taken file that could never be evaluated", () => {
+			const result = night({
+				oldPending: [],
+				oldPendingBase: null,
+				base: SHA_B,
+				status: "ok",
+				report: covered({
+					rangesSampled: true,
 					filesUncovered: ["clients/a.ts"],
-				},
-			},
-		],
-		[
-			"a dry run that measured no mutants",
-			{
-				files: {},
-				piLensMutationDiff: {
-					rangesTotal: 4,
-					measuredTotalMutants: 0,
-					zeroMutants: { reason: "none" },
-				},
-			},
-		],
-	])("advances the marker for %s", (_label, complete) => {
-		expect(incompleteReasons(complete)).toEqual([]);
-		expect(
-			parseLastReportSha(
-				[issue(buildNightlyBody({ ...meta, status: "ok", report: complete }))],
+				}),
+				exists,
+			});
+			expect(result.pending).toEqual(["clients/b.ts"]);
+		});
+
+		// Recurrence (#4005 r3): a failed night must leave both the marker and
+		// the queue as they were, or the queued files are lost with the window.
+		it("leaves the marker and the queue unchanged for a failed run, and for an ok run with no report", () => {
+			for (const [status, report] of [
+				["failed", covered({ filesSkippedOverCap: ["clients/c.ts"] })],
+				["failed", undefined],
+				["ok", undefined],
+			] as const) {
+				const body = buildNightlyBody({
+					...meta,
+					status,
+					report,
+					oldPending: ["clients/q.ts"],
+					oldPendingBase: SHA_A,
+				});
+				expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
+				expect(parsePending([issue(body)], TITLE)).toEqual({
+					pending: ["clients/q.ts"],
+					pendingBase: SHA_A,
+				});
+				expect(body).toContain("**Status:** FAILED");
+			}
+		});
+
+		// Recurrence: an overflowing queue growing the issue body, and the new
+		// skips pushing out the oldest silently.
+		it("drops the oldest beyond the bound and says so", () => {
+			const old = Array.from({ length: 190 }, (_, i) => `clients/old-${i}.ts`);
+			const skipped = Array.from(
+				{ length: 30 },
+				(_, i) => `clients/new-${i}.ts`,
+			);
+			const body = buildNightlyBody({
+				...meta,
+				status: "ok",
+				report: covered({ filesSkippedOverCap: skipped, filesSelected: [] }),
+				oldPending: old,
+				oldPendingBase: SHA_A,
+			});
+			const { pending } = parsePending([issue(body)], TITLE);
+			expect(MAX_PENDING).toBe(200);
+			expect(pending).toHaveLength(200);
+			expect(pending[0]).toBe("clients/old-20.ts");
+			expect(pending.at(-1)).toBe("clients/new-29.ts");
+			expect(body).toContain(
+				"20 oldest file(s) were dropped because the queue overflowed",
+			);
+			expect(body.length).toBeLessThan(65_536);
+		});
+
+		it("drops a file that no longer exists, silently", () => {
+			const result = night({
+				oldPending: ["clients/gone.ts", "clients/kept.ts"],
+				oldPendingBase: SHA_A,
+				base: SHA_B,
+				status: "ok",
+				report: covered({ filesSelected: [] }),
+				exists: (file) => file !== "clients/gone.ts",
+			});
+			expect(result.pending).toEqual(["clients/kept.ts"]);
+			expect(result.dropped).toBe(0);
+		});
+	});
+
+	// Recurrence (#4005 r3): the queue lives in an issue body a maintainer can
+	// edit, and its paths reach `git diff` and Stryker's --mutate.
+	describe("validating the queue on read", () => {
+		const pendingOf = (entries: string) =>
+			parsePending(
+				[
+					issue(
+						`${markerOf(SHA_A)}\n<!-- stryker-nightly:pending=${entries} -->`,
+					),
+				],
 				TITLE,
-			),
-		).toBe(SHA_B);
+			).pending;
+
+		it.each([
+			["a parent-directory escape", "clients/../../etc/passwd.ts"],
+			["an absolute path", "/etc/passwd.ts"],
+			["a backslash path", "clients\\a.ts"],
+			["a script outside the runtime tree", "scripts/a.mjs"],
+			["a test file", "clients/a.test.ts"],
+			["a declaration file", "clients/a.d.ts"],
+			["a non-ts file", "clients/a.json"],
+			["an option-looking path", "--output=x.ts"],
+			["a shell-looking path", "clients/a;rm.ts"],
+			["a dot segment", "clients/./a.ts"],
+		])("ignores %s", (_label, entry) => {
+			expect(pendingOf(`clients/ok.ts,${entry},tools/also-ok.ts`)).toEqual([
+				"clients/ok.ts",
+				"tools/also-ok.ts",
+			]);
+		});
+
+		it("cannot be closed early by an injected comment terminator", () => {
+			// Everything after the first terminator is outside the marker.
+			expect(pendingOf("clients/a.ts --> <script>,clients/b.ts")).toEqual([
+				"clients/a.ts",
+			]);
+		});
+
+		it("accepts the runtime tree and dedupes", () => {
+			expect(
+				pendingOf(
+					"index.ts,mcp/s.ts,tools/t.ts,clients/lsp/x.ts,clients/lsp/x.ts",
+				),
+			).toEqual(["index.ts", "mcp/s.ts", "tools/t.ts", "clients/lsp/x.ts"]);
+		});
+
+		// Recurrence: a survivor's source text quoting the marker later in the body
+		// (this very file is mutated by the lane) becoming the queue.
+		it("reads the first marker only, and an empty queue still writes one", () => {
+			const body = buildNightlyBody({
+				...meta,
+				status: "ok",
+				report: {
+					files: {
+						"clients/x.js": {
+							mutants: [
+								{
+									status: "Survived",
+									mutatorName: "M",
+									original: "<!-- stryker-nightly:pending=clients/evil.ts -->",
+									replacement: "x",
+									location: { start: { line: 1 } },
+								},
+							],
+						},
+					},
+					piLensMutationDiff: { counts: { Survived: 1 }, partial: null },
+				},
+			});
+			expect(body).toContain("<!-- stryker-nightly:pending= -->");
+			expect(body).toContain("stryker-nightly:pending=clients/evil.ts");
+			expect(parsePending([issue(body)], TITLE).pending).toEqual([]);
+		});
+
+		it("ignores a queue edit on an issue that is not the tracking issue", () => {
+			expect(
+				parsePending(
+					[issue("<!-- stryker-nightly:pending=clients/a.ts -->", "other")],
+					TITLE,
+				).pending,
+			).toEqual([]);
+		});
+	});
+
+	// The simulation: every changed file is eventually evaluated on a busy
+	// streak. Each night runs the real pieces end to end: the queue read back
+	// from the previous body, the real selection under the cap, a report shaped
+	// like the driver's, and the real body.
+	describe("a busy streak", () => {
+		const CAP = 12;
+		const files = (n: number) =>
+			Array.from(
+				{ length: n },
+				(_, i) => `clients/day-file-${String(i).padStart(3, "0")}.ts`,
+			);
+		// Deterministic uneven weights so the by-weight cut has favourites.
+		const weight = (file: string) =>
+			((Number(file.match(/(\d+)\.ts$/)?.[1]) * 37) % 11) + 1;
+		const holdRule = (windowFiles: string[], seen: Set<string>) => {
+			// The round-2 hold rule as a control: marker held while anything was
+			// skipped, so the window grows and the top weights win again.
+			const picked = selectMutationFiles({
+				windowFiles,
+				maxFiles: CAP,
+				weights: new Map(windowFiles.map((file) => [file, weight(file)])),
+			});
+			for (const file of picked.selected) seen.add(file);
+			return picked.skipped.length === 0;
+		};
+
+		it("never evaluates some low-weight files under the round-2 hold rule (the control)", () => {
+			const all = files(30 * 5);
+			const seen = new Set<string>();
+			let window: string[] = [];
+			for (let day = 0; day < 5; day++) {
+				window = [...window, ...all.slice(day * 30, day * 30 + 30)];
+				if (holdRule(window, seen)) window = [];
+			}
+			expect(all.filter((file) => !seen.has(file)).length).toBeGreaterThan(0);
+		});
+
+		it("evaluates every changed file eventually under the carry-over queue", () => {
+			const all = files(30 * 5);
+			const evaluated = new Set<string>();
+			let issueBody = "";
+			let base = SHA_A;
+			for (let night = 0; night < 5 + 14; night++) {
+				const intake = night < 5 ? all.slice(night * 30, night * 30 + 30) : [];
+				const { pending, pendingBase } = parsePending(
+					[issue(issueBody)],
+					TITLE,
+				);
+				const picked = selectMutationFiles({
+					pending,
+					windowFiles: [...pending, ...intake],
+					maxFiles: CAP,
+					weights: new Map(intake.map((file) => [file, weight(file)])),
+				});
+				expect(picked.selected.length).toBeLessThanOrEqual(CAP);
+				for (const file of picked.selected) evaluated.add(file);
+				issueBody = buildNightlyBody({
+					base,
+					head: SHA_B,
+					source: "issue",
+					status: "ok",
+					report: covered({
+						filesSelected: picked.selected,
+						filesSkippedOverCap: picked.skipped,
+					}),
+					oldPending: pending,
+					oldPendingBase: pendingBase,
+				});
+				base = SHA_B;
+			}
+			expect(all.filter((file) => !evaluated.has(file))).toEqual([]);
+			expect(parsePending([issue(issueBody)], TITLE).pending).toEqual([]);
+		});
 	});
 
 	// Recurrence (#4005 r2): GitHub refuses an issue body over 65536 characters;
@@ -327,19 +613,20 @@ describe("main (real git, real files)", () => {
 		commit("new", new Date().toISOString());
 		const args = (file: string) => ["base", "--issues", file, "--title", TITLE];
 
-		expect(main(args(issuesFile([issue(markerOf(old))])), repo)).toEqual({
+		expect(main(args(issuesFile([issue(markerOf(old))])), repo)).toMatchObject({
 			base: old,
 			source: "issue",
 		});
 		// No issue: the newest commit older than 24 hours.
-		expect(main(args(issuesFile([])), repo)).toEqual({
+		expect(main(args(issuesFile([])), repo)).toMatchObject({
 			base: mid,
 			source: "fallback-no-issue",
+			pending: [],
 		});
 		// A sha git does not know (rewritten history, hand-edited marker).
 		expect(
 			main(args(issuesFile([issue(markerOf("c".repeat(40)))])), repo),
-		).toEqual({ base: mid, source: "fallback-bad-sha" });
+		).toMatchObject({ base: mid, source: "fallback-bad-sha" });
 	});
 
 	// Recurrence: a repository younger than the window (the very first night)
@@ -349,7 +636,7 @@ describe("main (real git, real files)", () => {
 		commit("next", new Date().toISOString());
 		expect(
 			main(["base", "--issues", issuesFile([]), "--title", TITLE], repo),
-		).toEqual({ base: root, source: "fallback-no-issue" });
+		).toMatchObject({ base: root, source: "fallback-no-issue" });
 	});
 
 	it("`body` writes the file the upsert reads, and a missing report degrades to a note", () => {
@@ -357,6 +644,10 @@ describe("main (real git, real files)", () => {
 		main(
 			[
 				"body",
+				"--issues",
+				issuesFile([]),
+				"--title",
+				TITLE,
 				"--base",
 				SHA_A,
 				"--head",
@@ -373,7 +664,7 @@ describe("main (real git, real files)", () => {
 			repo,
 		);
 		const body = readFileSync(out, "utf8");
-		// No report means nothing was covered: the marker stays at BASE.
+		// No report is not a completed run: the marker stays at BASE.
 		expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
 		expect(body).toContain("No mutation report was produced");
 	});
@@ -383,6 +674,10 @@ describe("main (real git, real files)", () => {
 			main(
 				[
 					"body",
+					"--issues",
+					issuesFile([]),
+					"--title",
+					TITLE,
 					"--base",
 					SHA_A,
 					"--head",
@@ -397,5 +692,96 @@ describe("main (real git, real files)", () => {
 				repo,
 			),
 		).toThrow("--status must be ok or failed");
+	});
+
+	// The queue through the real CLI seams: validated on read into the file the
+	// driver gets, the base checked against git, and existence checked in the
+	// checkout the body step runs in.
+	it("`base` writes only the valid queue and a git-known queue base, and `body` drops a vanished file", () => {
+		const first = commit("first", "2026-01-01T00:00:00Z");
+		mkdirSync(join(repo, "clients"));
+		writeFileSync(join(repo, "clients", "alive.ts"), "export {};\n");
+		const stored = [
+			"clients/alive.ts",
+			"clients/vanished.ts",
+			"../../etc/passwd.ts",
+			"scripts/a.mjs",
+		].join(",");
+		const bodyWith = (queueBase: string) =>
+			`${markerOf(first)}\n<!-- stryker-nightly:pending=${stored} -->\n<!-- stryker-nightly:pending-base=${queueBase} -->`;
+		const pendingOut = join(dir, "pending.txt");
+		const args = (file: string) => [
+			"base",
+			"--issues",
+			file,
+			"--title",
+			TITLE,
+			"--pending-out",
+			pendingOut,
+		];
+
+		expect(
+			main(args(issuesFile([issue(bodyWith(first))])), repo),
+		).toMatchObject({
+			pending: ["clients/alive.ts", "clients/vanished.ts"],
+			pendingBase: first,
+		});
+		expect(readFileSync(pendingOut, "utf8")).toBe(
+			"clients/alive.ts\nclients/vanished.ts\n",
+		);
+		// A queue base git does not know falls back (null), the queue stays.
+		expect(
+			main(args(issuesFile([issue(bodyWith("d".repeat(40)))])), repo),
+		).toMatchObject({
+			pending: ["clients/alive.ts", "clients/vanished.ts"],
+			pendingBase: null,
+		});
+
+		const out = join(dir, "body.md");
+		main(
+			[
+				"body",
+				"--issues",
+				issuesFile([issue(bodyWith(first))]),
+				"--title",
+				TITLE,
+				"--base",
+				first,
+				"--head",
+				SHA_B,
+				"--source",
+				"issue",
+				"--status",
+				"ok",
+				"--report",
+				(() => {
+					const file = join(dir, "report.json");
+					writeFileSync(
+						file,
+						JSON.stringify({
+							files: {},
+							piLensMutationDiff: {
+								rangesTotal: 1,
+								rangesEvaluated: 1,
+								partial: null,
+								counts: { Killed: 1 },
+								filesSelected: [],
+								filesSkippedOverCap: [
+									"clients/alive.ts",
+									"clients/new-gone.ts",
+								],
+							},
+						}),
+					);
+					return file;
+				})(),
+				"--out",
+				out,
+			],
+			repo,
+		);
+		expect(
+			parsePending([issue(readFileSync(out, "utf8"))], TITLE).pending,
+		).toEqual(["clients/alive.ts"]);
 	});
 });

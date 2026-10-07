@@ -12,7 +12,7 @@ import base from "../stryker.config.mjs";
 import {
 	augmentAndSummarize,
 	buildRunConfig,
-	capMutationFiles,
+	selectMutationFiles,
 	changedLineWeights,
 	compiledJsPath,
 	decideMutationOutcome,
@@ -23,7 +23,9 @@ import {
 	describeStrykerFailure,
 	estimateAffordableMutants,
 	formatCapNotice,
+	collectChangedRanges,
 	isCompiledMutationSource,
+	isQueueablePath,
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
@@ -121,6 +123,13 @@ const headShaArg = argumentValue("--head-sha", null);
 // scripts/**/*.mjs, which compete for the --max-files slots by changed-line
 // weight and push runtime files over the cap on a busy day.
 const runtimeOnly = process.argv.includes("--runtime-only");
+// #4005: the nightly's carry-over queue. `--pending-file` lists (one per line)
+// the runtime files earlier nights skipped over the cap or could not finish;
+// they are mutated first, and `--pending-base` is the base of the oldest night
+// that queued one, so their earlier changed lines are in range. The list comes
+// from an issue body a maintainer can edit: every entry is re-validated here.
+const pendingFileArg = argumentValue("--pending-file", null);
+const pendingBaseArg = argumentValue("--pending-base", null);
 
 // #3853: the driver forks vitest pools for the coverage probes and again inside
 // Stryker, so its whole run takes ONE shared test-suite slot, acquired once
@@ -177,30 +186,58 @@ function changedPaths() {
 	}
 }
 
-function changedLineRanges(files, { ignoreWhitespace = false } = {}) {
-	if (files.length === 0) return new Map();
+function readPending() {
+	if (!pendingFileArg) return [];
 	try {
-		return parseChangedLineRanges(
-			execFileSync(
-				"git",
-				[
-					"diff",
-					...(ignoreWhitespace ? ["-w"] : []),
-					"--unified=0",
-					"--diff-filter=AM",
-					`${baseRef}...HEAD`,
-					"--",
-					...files,
-				],
-				{ encoding: "utf8" },
+		return [
+			...new Set(
+				readFileSync(pendingFileArg, "utf8")
+					.split("\n")
+					.map((line) => line.trim())
+					.filter((file) => isQueueablePath(file) && existsSync(file)),
 			),
-		);
+		];
 	} catch (error) {
 		console.error(
-			`mutation diff: could not read changed lines of ${baseRef}...HEAD: ${error.message}`,
+			`mutation diff: could not read ${pendingFileArg}: ${error.message}`,
 		);
 		process.exit(1);
 	}
+}
+const pendingFiles = readPending();
+
+function changedLineRanges(files, { ignoreWhitespace = false } = {}) {
+	if (files.length === 0) return new Map();
+	return collectChangedRanges({
+		files,
+		pending: pendingFiles,
+		baseRef,
+		pendingBase: pendingBaseArg,
+		diff: (base, subset) => {
+			try {
+				return parseChangedLineRanges(
+					execFileSync(
+						"git",
+						[
+							"diff",
+							...(ignoreWhitespace ? ["-w"] : []),
+							"--unified=0",
+							"--diff-filter=AM",
+							`${base}...HEAD`,
+							"--",
+							...subset,
+						],
+						{ encoding: "utf8" },
+					),
+				);
+			} catch (error) {
+				console.error(
+					`mutation diff: could not read changed lines of ${base}...HEAD: ${error.message}`,
+				);
+				process.exit(1);
+			}
+		},
+	});
 }
 
 function gitHeadSha() {
@@ -297,6 +334,9 @@ function baseMeta(extra) {
 		measuredTotalMutants: costEstimate?.totalMutants ?? null,
 		testSelection: testSelectionMeta,
 		incremental: incrementalMeta,
+		// #4005: the files this run took, so the nightly can tell which of them
+		// still need another night (sampled, budget-cut) and which are done.
+		filesSelected: files,
 		...extra,
 	};
 }
@@ -311,14 +351,18 @@ function logSurvivors(mutants) {
 }
 
 const allChangedPaths = changedPaths();
-const allFiles = changedMutationFiles();
+const allFiles = [...new Set([...pendingFiles, ...changedMutationFiles()])];
 // #3810 (from the #3797 review): which files the cap keeps is a matter of how
 // much each changed, ignoring whitespace-only lines, not of how it sorts.
-const { selected: files, skipped } = capMutationFiles(
-	allFiles,
+// #4005: carried-over files come first, in queue order, under the same cap.
+const { selected: files, skipped } = selectMutationFiles({
+	pending: pendingFiles,
+	windowFiles: allFiles,
 	maxFiles,
-	changedLineWeights(changedLineRanges(allFiles, { ignoreWhitespace: true })),
-);
+	weights: changedLineWeights(
+		changedLineRanges(allFiles, { ignoreWhitespace: true }),
+	),
+});
 if (skipped.length > 0) {
 	console.log(formatCapNotice(files.length, allFiles.length, skipped));
 }
