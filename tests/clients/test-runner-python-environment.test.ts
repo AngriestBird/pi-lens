@@ -224,6 +224,84 @@ describe("pytest project environment", () => {
 		expect(safeSpawnAsync).toHaveBeenCalledOnce();
 		expect(safeSpawnAsync.mock.calls[0][0]).toBe(ambient.pythonPath);
 	});
+
+	it("rejects an outside UV_PROJECT_ENVIRONMENT for own-install runs (#3871 F4)", async () => {
+		const project = createProject(false);
+		fs.writeFileSync(
+			path.join(project.root, "pyproject.toml"),
+			"[project]\nname='app'\n",
+		);
+		const ambient = createEnvironment(createTempDir("pi-lens-uv-ambient-"));
+		process.env.UV_PROJECT_ENVIRONMENT = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBe("no-runner-install");
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+	});
+
+	it("passes the display root through nested text-runner spawns (#3871 F3)", async () => {
+		const dispatchRoot = createTempDir("pi-lens-3871-f3-");
+		const spawnCwd = path.join(dispatchRoot, "pkg");
+		fs.mkdirSync(path.join(spawnCwd, "tests"), { recursive: true });
+		const cases = [
+			{
+				runner: "phpunit",
+				config: RUNNERS.phpunit,
+				marker: "phpunit.xml",
+				file: "tests/Foo.php",
+				stdout:
+					"1) Foo\\\\BarTest::testValue\n\ntests/Foo.php:12\nTests: 1, Assertions: 1, Errors: 1, Failures: 0, Skipped: 0.",
+			},
+			{
+				runner: "mix",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "test/foo_test.exs",
+				stdout:
+					"  1) test value (FooTest)\n\n  test/foo_test.exs:12\n3 tests, 1 failure",
+			},
+			{
+				runner: "generic",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "tests/widget.py",
+				stdout: "FAILED tests/widget.py:12\n1 tests completed, 1 failed",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			fs.writeFileSync(path.join(spawnCwd, testCase.marker), "");
+			const target = path.join(spawnCwd, testCase.file);
+			fs.mkdirSync(path.dirname(target), { recursive: true });
+			fs.writeFileSync(target, "");
+			safeSpawnAsync.mockImplementationOnce(async () => ({
+				stdout: testCase.stdout,
+				stderr: "",
+				status: 1,
+			}));
+			const result = await new TestRunnerClient(false).runTestFileAsync(
+				target,
+				dispatchRoot,
+				{
+					runner: testCase.runner,
+					config: testCase.config,
+					displayRoot: path.dirname(dispatchRoot),
+				},
+			);
+			expect(result.failures[0]?.location).toBe(
+				`${path.relative(path.dirname(dispatchRoot), target).replaceAll(path.sep, "/")}:12`,
+			);
+		}
+	});
 	it("runs pytest with an unactivated project .venv", async () => {
 		const { root, testFile, pythonPath, binDir } = createProject(true);
 		const inheritedPath = process.env.PATH;

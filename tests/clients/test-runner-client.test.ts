@@ -1,3 +1,4 @@
+// flake-shape: elapsed-time-assertion — depth-30 malformed runner paths are the measured regression witness for exponential regex backtracking
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,8 +87,22 @@ describe("test-runner-client", () => {
 
 	it("renders text-runner failure locations from the session display root (#3871 V2)", () => {
 		const client = new TestRunnerClient(false) as any;
-		const session = "/repo";
-		const worktree = "/repo/.worktrees/x";
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-3871-v2-");
+		cleanups.push(cleanup);
+		const session = tmpDir;
+		const worktree = path.join(session, ".worktrees", "x");
+		// The rebasing contract is existence-aware: materialize the three
+		// runner-reported files so this parser-level characterization exercises
+		// the same positive arm as the production runner.
+		for (const file of [
+			"tests/test_widget.py",
+			"tests/Foo.php",
+			"test/foo_test.exs",
+		]) {
+			const absolute = path.join(worktree, file);
+			fs.mkdirSync(path.dirname(absolute), { recursive: true });
+			fs.writeFileSync(absolute, "");
+		}
 		const pytest = client.parsePytestOutput(
 			"FAILED tests/test_widget.py::test_value - AssertionError\n1 failed in 0.01s",
 			"",
@@ -133,6 +148,99 @@ describe("test-runner-client", () => {
 		expect(generic.failures[0].location).toBe(
 			".worktrees/x/tests/test_widget.py:12",
 		);
+	});
+
+	it("rebases text locations from the runner cwd only when the file exists (#3871 F1)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-3871-f1-");
+		cleanups.push(cleanup);
+		const dispatchRoot = path.join(tmpDir, "worktree");
+		const spawnCwd = path.join(dispatchRoot, "pkg");
+		fs.mkdirSync(path.join(spawnCwd, "tests"), { recursive: true });
+		fs.writeFileSync(path.join(spawnCwd, "tests", "widget.py"), "");
+
+		const result = client.parseGenericRunnerOutput(
+			"FAILED tests/widget.py:12\n1 tests completed, 1 failed",
+			"",
+			1,
+			path.join(spawnCwd, "tests", "widget.py"),
+			"generic",
+			tmpDir,
+			dispatchRoot,
+			spawnCwd,
+		);
+
+		expect(result.failures[0].location).toBe("worktree/pkg/tests/widget.py:12");
+	});
+
+	it("does not rebase a text location that resolves nowhere (#3871 F1)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseGenericRunnerOutput(
+			"FAILED docs.example.test/missing.py:12\n1 tests completed, 1 failed",
+			"",
+			1,
+			"/repo/tests/widget.py",
+			"generic",
+			"/session",
+			"/repo",
+			"/repo/pkg",
+		);
+
+		expect(result.failures[0].location).toBe("docs.example.test/missing.py:12");
+	});
+
+	it("keeps PHPUnit and Mix locations within their own failure block (#3871 F5)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const output =
+			"1) Foo\\\\BarTest::testValue\nFailed asserting\n\n2) Baz\\\\QuxTest::testOther\n\ntests/Baz.php:7\nTests: 2, Assertions: 2, Errors: 2, Failures: 0, Skipped: 0.";
+		const phpunit = client.parsePhpunitOutput(
+			output,
+			"",
+			1,
+			"/repo/tests/Foo.php",
+			"phpunit",
+			"/repo",
+			"/repo",
+		);
+		const mix = client.parseMixTestOutput(
+			"  1) first (FooTest)\n\n  2) second (BarTest)\n\n  test/bar_test.exs:9\n2 tests, 2 failures",
+			"",
+			1,
+			"/repo/test/foo_test.exs",
+			"mix",
+			"/repo",
+			"/repo",
+		);
+
+		expect(
+			phpunit.failures.map(
+				(failure: { location?: string }) => failure.location,
+			),
+		).toEqual([undefined, "tests/Baz.php:7"]);
+		expect(
+			mix.failures.map((failure: { location?: string }) => failure.location),
+		).toEqual(["FooTest", "test/bar_test.exs:9"]);
+	});
+
+	it("keeps depth-30 text location parsing non-blocking (#3871 F2)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const nested = Array.from({ length: 30 }, (_, index) => `d${index}`).join(
+			"/",
+		);
+		const output = `FAILED /${nested}/test.py::test_value\n1 tests completed, 1 failed`;
+		const started = performance.now();
+		client.parseGenericRunnerOutput(
+			output,
+			"",
+			1,
+			"/repo/test.py",
+			"generic",
+			"/repo",
+			"/repo",
+			"/repo",
+		);
+		const elapsed = performance.now() - started;
+		expect(elapsed).toBeLessThan(1000);
 	});
 
 	// #1479: the agent-facing surface asks the same "was this measured at all"

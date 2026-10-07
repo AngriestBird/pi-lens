@@ -215,6 +215,10 @@ export async function detectPythonEnvironment(
 	// PEP 723 `uv run --script` environments are cache-keyed by script content;
 	// without a stable project marker or explicit path, they remain undiscoverable.
 	const allowAmbient = options.allowAmbient ?? true;
+	const isWithinProjectRoot = (candidateRoot: string): boolean => {
+		const relative = path.relative(root, path.resolve(candidateRoot));
+		return relative !== ".." && !relative.startsWith(`..${path.sep}`);
+	};
 	const candidates: Array<{
 		root: string | undefined;
 		source: PythonEnvironmentSource;
@@ -247,16 +251,12 @@ export async function detectPythonEnvironment(
 		if (!candidate.root) continue;
 		if (
 			!allowAmbient &&
-			(candidate.source === "virtual-env" || candidate.source === "conda")
-		) {
-			const relative = path.relative(root, path.resolve(candidate.root));
-			if (
-				relative === ".." ||
-				relative.startsWith(`..${path.sep}`) ||
-				path.isAbsolute(relative)
-			)
-				continue;
-		}
+			(candidate.source === "uv-project-environment" ||
+				candidate.source === "virtual-env" ||
+				candidate.source === "conda") &&
+			!isWithinProjectRoot(candidate.root)
+		)
+			continue;
 		const binDir = path.join(
 			candidate.root,
 			process.platform === "win32" ? "Scripts" : "bin",

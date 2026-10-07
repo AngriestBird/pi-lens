@@ -3435,7 +3435,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						incrementDegradationCount({
 							kind: "turn-end-test-root-skipped",
 							subject: result.value.notRun,
-							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own; its tests were skipped rather than fetched through npx or run in another environment`,
+							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own${result.value.runner === "pytest" ? "; ambient Python environments outside this checkout were not borrowed" : ""}; its tests were skipped rather than fetched through npx or run in another environment`,
 						});
 						dbg(
 							`turn_end: skipped ${toRunnerDisplayPath(cwd, result.value.file)}: ${result.value.notRun} in ${toRunnerDisplayPath(cwd, skippedRoot)}`,

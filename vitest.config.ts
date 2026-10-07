@@ -478,6 +478,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/sgconfig-scratch-bound.test.ts",
 	"tests/clients/shared-checkout-guard.test.ts",
 	"tests/clients/startup-overhead.test.ts",
+	// #3871 r2: the depth-30 malformed runner path is a real event-loop
+	// occupancy witness for exponential regex backtracking.
+	"tests/clients/test-runner-client.test.ts",
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",

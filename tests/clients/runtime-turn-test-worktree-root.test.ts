@@ -847,6 +847,25 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 			).not.toEqual(expect.objectContaining({ results: expect.anything() }));
 		});
 
+		it("explains when a linked-worktree pytest run ignores ambient Python", async () => {
+			const bare = addWorktree("bare-pytest", { install: false });
+			write(bare, "pyproject.toml", "[tool.pytest.ini_options]\n");
+			const testFile = write(
+				bare,
+				"tests/test_widget.py",
+				"def test_value(): pass\n",
+			);
+			edit(testFile);
+
+			await turnEnd();
+			await dbgSeen(/no-runner-install/);
+
+			expect(runner.spawns).toEqual([]);
+			expect(JSON.stringify(skipRows())).toContain(
+				"ambient Python environments outside this checkout were not borrowed",
+			);
+		});
+
 		it("still runs the installed worktree beside the bare one", async () => {
 			const bare = addWorktree("bare", { install: false });
 			const x = addWorktree("x");

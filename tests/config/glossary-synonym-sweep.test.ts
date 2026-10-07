@@ -958,9 +958,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 21,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
-		// 18 -> 22 (#3871): ambient-environment containment uses four additional
-		// path operations at the shared Python resolver seam.
-		"clients/python-environment.ts": 22,
+		// 18 -> 21 (#3871 r2): ambient-environment containment uses three
+		// additional path operations at the shared Python resolver seam.
+		"clients/python-environment.ts": 21,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
@@ -1006,9 +1006,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
 		// exception's physical policy-relative path (R4). These remain filesystem
 		// operations, not delivery lanes; the census measures every use.
-		// 66 -> 80 (#3871): text-runner display rebasing uses path operations for
-		// pytest, PHPUnit, Mix, and generic runner locations.
-		"clients/test-runner-client.ts": 80,
+		// 66 -> 74 (#3871 r2): text-runner display rebasing uses path operations
+		// for pytest, PHPUnit, Mix, and generic runner locations.
+		"clients/test-runner-client.ts": 74,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,

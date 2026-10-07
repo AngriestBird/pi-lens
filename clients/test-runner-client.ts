@@ -1852,6 +1852,7 @@ export class TestRunnerClient {
 						cwd,
 						runner,
 						displayRoot ?? cwd,
+						spawnCwd,
 					);
 					break;
 				case "phpunit":
@@ -1863,6 +1864,7 @@ export class TestRunnerClient {
 						runner,
 						displayRoot ?? cwd,
 						cwd,
+						spawnCwd,
 					);
 					break;
 				case "mix":
@@ -1874,6 +1876,7 @@ export class TestRunnerClient {
 						runner,
 						displayRoot ?? cwd,
 						cwd,
+						spawnCwd,
 					);
 					break;
 				default:
@@ -1885,6 +1888,7 @@ export class TestRunnerClient {
 						runner,
 						displayRoot ?? cwd,
 						cwd,
+						spawnCwd,
 					);
 					break;
 			}
@@ -2330,6 +2334,21 @@ export class TestRunnerClient {
 
 	// --- Pytest Parser (text-based, no JSON dependency) ---
 
+	private renderTextLocation(
+		displayRoot: string,
+		bases: readonly string[],
+		file: string,
+		line: string,
+	): string {
+		for (const base of bases) {
+			const resolved = path.resolve(base, file);
+			if (fs.existsSync(resolved)) {
+				return `${toPosix(path.relative(displayRoot, resolved))}:${line}`;
+			}
+		}
+		return `${file}:${line}`;
+	}
+
 	private parsePytestOutput(
 		stdout: string,
 		stderr: string,
@@ -2338,6 +2357,7 @@ export class TestRunnerClient {
 		cwd: string,
 		runner: string,
 		displayRoot: string = cwd,
+		spawnCwd: string = cwd,
 	): TestResult {
 		const failures: TestFailure[] = [];
 		const output = `${stdout}\n${stderr}`;
@@ -2355,10 +2375,12 @@ export class TestRunnerClient {
 				message: match[2].trim().slice(0, 500),
 				location: (() => {
 					const [file, ...testParts] = match[1].split("::");
-					const relative = toPosix(
-						path.relative(displayRoot, path.resolve(cwd, file)),
+					return this.renderTextLocation(
+						displayRoot,
+						[spawnCwd, cwd],
+						file,
+						testParts.join("::"),
 					);
-					return `${relative}:${testParts.join("::")}`;
 				})(),
 			});
 		}
@@ -2400,6 +2422,7 @@ export class TestRunnerClient {
 		runner: string,
 		displayRoot: string = path.dirname(testFile),
 		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2434,14 +2457,23 @@ export class TestRunnerClient {
 		const failureRegex = /^\d+\)\s+(\S+)/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
-			const locationMatch = output
-				.slice(match.index + match[0].length)
-				.match(/(?:^|\n)\s*((?:[^\s:]+\/)*[^\s:]+\.php):(\d+)/);
+			const afterFailure = output.slice(match.index + match[0].length);
+			const nextFailure = afterFailure.search(/(?:^|\n)\s*\d+\)\s+/);
+			const failureBlock =
+				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
+			const locationMatch = failureBlock.match(
+				/(?:^|\n)\s*([^\s:]+\.php):(\d+)/,
+			);
 			failures.push({
 				name: match[1],
 				message: match[1],
 				location: locationMatch
-					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					? this.renderTextLocation(
+							displayRoot,
+							[spawnCwd, cwd],
+							locationMatch[1],
+							locationMatch[2],
+						)
 					: undefined,
 			});
 		}
@@ -2517,6 +2549,7 @@ export class TestRunnerClient {
 		runner: string,
 		displayRoot: string = path.dirname(testFile),
 		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2555,14 +2588,23 @@ export class TestRunnerClient {
 		const failureRegex = /^\s*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
-			const locationMatch = output
-				.slice(match.index + match[0].length)
-				.match(/(?:^|\n)\s*((?:[^\s:]+\/)*[^\s:]+\.exs):(\d+)/);
+			const afterFailure = output.slice(match.index + match[0].length);
+			const nextFailure = afterFailure.search(/(?:^|\n)\s*\d+\)\s+/);
+			const failureBlock =
+				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
+			const locationMatch = failureBlock.match(
+				/(?:^|\n)\s*([^\s:]+\.exs):(\d+)/,
+			);
 			failures.push({
 				name: match[1].trim(),
 				message: match[1].trim(),
 				location: locationMatch
-					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					? this.renderTextLocation(
+							displayRoot,
+							[spawnCwd, cwd],
+							locationMatch[1],
+							locationMatch[2],
+						)
 					: match[2].trim(),
 			});
 		}
@@ -2827,6 +2869,7 @@ export class TestRunnerClient {
 		runner: string,
 		displayRoot: string = path.dirname(testFile),
 		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		const lower = output.toLowerCase();
@@ -3053,13 +3096,18 @@ export class TestRunnerClient {
 		for (const m of otherNames) {
 			if (failures.length >= 5) break;
 			const locationMatch = m[1].match(
-				/((?:[^\s:]+\/)*[^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/,
+				/([^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/,
 			);
 			failures.push({
 				name: m[1].trim(),
 				message: m[1].trim(),
 				location: locationMatch
-					? `${toPosix(path.relative(displayRoot, path.resolve(cwd, locationMatch[1])))}:${locationMatch[2]}`
+					? this.renderTextLocation(
+							displayRoot,
+							[spawnCwd, cwd],
+							locationMatch[1],
+							locationMatch[2],
+						)
 					: undefined,
 			});
 		}
