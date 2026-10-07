@@ -228,6 +228,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 			"tests/clients/session-state-conformance.test.ts",
 			"tests/config/glossary-synonym-sweep.test.ts",
+			"tests/config/covers-config-claim-sweep.test.ts",
+			"tests/config/shell-dialect-ownership-sweep.test.ts",
 			"tests/config/strictness-ratchet.test.ts",
 			"tests/config/hook-await-bounds.test.ts",
 			"tests/config/dmts-export-drift.test.ts",
