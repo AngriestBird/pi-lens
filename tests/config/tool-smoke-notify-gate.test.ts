@@ -242,17 +242,41 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(upload.with?.name).toBe("tool-smoke-notify-inputs");
 	});
 
+	// Recurrence: #4077, the refresh-PR hand-off staged after the later layers
+	// (Format and the rest) would carry whatever they leave in the tree, where the
+	// old PR steps ran before them; staged under a skipped condition it hands the
+	// writer an empty artifact.
+	it("stages the refresh-PR inputs right after the docs diff, before any later layer, on every outcome", () => {
+		const steps = smokeJob.steps as Step[];
+		const index = (name: string) =>
+			steps.findIndex(
+				(s) => typeof s.name === "string" && s.name.includes(name),
+			);
+		const stage = index("Stage the refresh-PR inputs");
+		expect(stage).toBe(index("Check LSP docs refresh diff") + 1);
+		expect(stage).toBeLessThan(index("Format layer"));
+		const condition =
+			"always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')";
+		expect(steps[stage].if).toBe(condition);
+		expect(steps[stage + 1].if).toBe(condition);
+		expect((steps[stage + 1] as Step).with?.name).toBe("tool-smoke-pr-inputs");
+		// What the PR job downloads is what this step uploads.
+		const prSteps = (workflow.jobs?.[PRS_JOB]?.steps ?? []) as Step[];
+		const download = prSteps.find((s) =>
+			String(s.uses).includes("download-artifact@"),
+		);
+		expect(download?.with?.name).toBe("tool-smoke-pr-inputs");
+	});
+
 	it("keeps the Sonar master gate as a real end-of-layers gate before staging and notification (#3319)", () => {
 		const steps = workflow.jobs?.[JOB_NAME]?.steps as Step[];
 		const sonarIndex = steps.findIndex(
 			(step) => step.name === "SonarCloud master quality gate",
 		);
-		// Only the hand-off steps (stage + upload, twice) follow it.
+		// Only the notifier hand-off (stage + upload) follows it.
 		expect(
 			steps.slice(sonarIndex + 1).map((s) => String(s.name ?? s.uses)),
 		).toEqual([
-			"Stage the refresh-PR inputs",
-			expect.stringContaining("actions/upload-artifact@"),
 			"Stage the notifier inputs",
 			expect.stringContaining("actions/upload-artifact@"),
 		]);

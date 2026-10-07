@@ -484,6 +484,36 @@ jobs:
         id: docs_diff
         run: node scripts/check-generated-docs-diff.mjs
 
+      # The hand-off to `tool-smoke-prs` (#4077), staged where the old PR steps
+      # ran, before any later layer can touch the tree: the files the docs-refresh
+      # and promotion PRs would commit, at their repository paths, plus the
+      # promotion PR's body. Staged on every ref so a branch dispatch proves the
+      # hand-off too; only the writer job's guard keeps a branch from acting on it.
+      - name: Stage the refresh-PR inputs
+        if: always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')
+        env:
+          DOCS_CHANGED: ${{ steps.docs_diff.outputs.changed }}
+          PROMOTED: ${{ steps.idle_promote.outputs.promoted }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/pr-inputs"
+          mkdir -p "$stage/files"
+          if [ "$DOCS_CHANGED" = true ]; then
+            cp --parents docs/lsp-capability-matrix.md docs/servercapabilities.md docs/lsp-idle-eviction.md "$stage/files/"
+          fi
+          if [ "$PROMOTED" = true ]; then
+            cp --parents clients/lsp/server.ts tests/config/lsp-idle-eviction-reasons.json tests/config/lsp-idle-eviction-registry.test.ts "$stage/files/"
+            cp "$RUNNER_TEMP/lsp-idle-eviction-promote.md" "$stage/idle-eviction-promote.md"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')
+        with:
+          name: tool-smoke-pr-inputs
+          path: ${{ runner.temp }}/pr-inputs
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
       - name: Format layer (select + reformat through formatter pipeline)
         id: format_layer
         run: |
@@ -539,37 +569,10 @@ jobs:
         if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         run: node scripts/sonar-master-gate.mjs
 
-      # The hand-off to the guarded writer jobs (#4077). Staged on every ref and
-      # outcome so a branch dispatch proves the hand-off too; only the writers'
-      # guard keeps a branch from acting on it.
+      # The hand-off to `tool-smoke-notify` (#4077). Staged on every ref and
+      # outcome so a branch dispatch proves the hand-off too; only the writer
+      # job's guard keeps a branch from acting on it.
       #
-      # The refresh-PR inputs: the files the docs-refresh and promotion PRs
-      # would commit, at their repository paths, plus the promotion PR's body.
-      - name: Stage the refresh-PR inputs
-        if: always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')
-        env:
-          DOCS_CHANGED: ${{ steps.docs_diff.outputs.changed }}
-          PROMOTED: ${{ steps.idle_promote.outputs.promoted }}
-        run: |
-          set -euo pipefail
-          stage="$RUNNER_TEMP/pr-inputs"
-          mkdir -p "$stage/files"
-          if [ "$DOCS_CHANGED" = true ]; then
-            cp --parents docs/lsp-capability-matrix.md docs/servercapabilities.md docs/lsp-idle-eviction.md "$stage/files/"
-          fi
-          if [ "$PROMOTED" = true ]; then
-            cp --parents clients/lsp/server.ts tests/config/lsp-idle-eviction-reasons.json tests/config/lsp-idle-eviction-registry.test.ts "$stage/files/"
-            cp "$RUNNER_TEMP/lsp-idle-eviction-promote.md" "$stage/idle-eviction-promote.md"
-          fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')
-        with:
-          name: tool-smoke-pr-inputs
-          path: ${{ runner.temp }}/pr-inputs
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
       # The notifier inputs: the six layer logs, the idle-eviction drift state
       # and body, and the clean-signal drift summary, flat in one directory the
       # writer downloads over its own `$RUNNER_TEMP`. `staged.txt` keeps the

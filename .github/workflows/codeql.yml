@@ -63,6 +63,7 @@ jobs:
           name: codeql-sarif-${{ matrix.language }}
           path: ${{ runner.temp }}/codeql-sarif-${{ matrix.language }}
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   # The only writer (#4077): code scanning accepts the baseline from the
