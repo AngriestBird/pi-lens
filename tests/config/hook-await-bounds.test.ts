@@ -2246,7 +2246,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// `applyConservativeActionableWarningFixes`); no hook signal reaches it.
 	"clients/file-mutation-queue.ts": 1,
 	"clients/file-time.ts": 1,
-	"clients/file-utils.ts": 1,
+	// #1129: +4 — `sweepDeadEphemeralDataDirs` awaits the bounded directory
+	// read (opendir, read, close) and each dead-pid removal. session_start
+	// fires it with `void` and never awaits it, so no hook waits on these.
+	"clients/file-utils.ts": 5,
 	// #3598: the pre-run hash of a whole-package fixer's files (stat and read per
 	// file, batched), the settle's compare-and-restore, and the wrapper's
 	// awaits. Each is a local file operation on a file of at most 1 MiB, inside a

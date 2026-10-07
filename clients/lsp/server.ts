@@ -445,7 +445,6 @@ async function findGitBoundary(dir: string): Promise<string | undefined> {
 
 async function isExcludedLspRoot(dir: string): Promise<boolean> {
 	const candidate = path.resolve(dir);
-	if (ephemeralStagingRoot(candidate)) return true;
 	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate))
 		return true;
 	const gitRoot = await findGitBoundary(candidate);
@@ -1596,7 +1595,6 @@ export function PriorityRoot(
 
 export const FileDirRoot: RootFunction = async (file: string) => {
 	const candidate = path.resolve(path.dirname(file));
-	if (ephemeralStagingRoot(candidate)) return undefined;
 	return nearestNonExcludedFallbackRoot(candidate);
 };
 

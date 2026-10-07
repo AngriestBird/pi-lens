@@ -635,13 +635,15 @@ the surface they bite; each block loads only when its trigger applies.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
-- Host-created `pi-agent-*` paths below `os.tmpdir()` are declined at the
-  shared `resolveLspServerCwd` seam and emit one `lsp-root-declined` record per
-  staging root per session. Real checkouts below `os.tmpdir()` remain normal
-  LSP roots but are ephemeral: ordinary project snapshots are not persisted;
-  session-start may persist its startup-scan verdict in the process-local
-  project data target, and transparent clients use the aggressive ephemeral
-  idle window.
+- Temporary roots (#1129) are classified once per process by
+  `clients/ephemeral-root.ts`, on real paths on both sides. A directory inside
+  a real git checkout below `os.tmpdir()` (root or subdirectory) is a normal
+  LSP root with the ephemeral idle window, and `getProjectDataDir` gives it
+  its usual slug under `<base>/.ephemeral/<pid>-<8 hex>/`: normal within the
+  process, never read by another one, removed by the exit hook and, for a
+  dead pid, by the session-start sweep. A `pi-agent-*` path below the tmpdir
+  that no checkout owns is declined at `resolveLspServerCwd` with one
+  `lsp-root-declined` record per staging root per session.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.

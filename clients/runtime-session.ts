@@ -24,6 +24,7 @@ import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
 	drainProjectDataDirMigrations,
+	sweepDeadEphemeralDataDirs,
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
 	getProjectDataDir,
@@ -35,7 +36,7 @@ import {
 	GovulncheckClient,
 	type GovulncheckResult,
 } from "./govulncheck-client.js";
-import { sweepAtomicWriteStages } from "./instance-reaper.js";
+import { realIsPidAlive, sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { JscpdClient } from "./jscpd-client.js";
 import type { KnipResult } from "./knip-client.js";
 import { canRunStartupHeavyScans } from "./language-policy.js";
@@ -412,7 +413,6 @@ function loadSnapshotBodyUnlessStale(args: {
 	currentProjectSeq: number;
 	unlockedThrough: number;
 	dbg: (msg: string) => void;
-	allowEphemeral?: boolean;
 }): { snapshot: ProjectSnapshot | null; skippedStale: boolean } {
 	const meta = readProjectSnapshotMeta(args.root);
 	if (
@@ -429,9 +429,7 @@ function loadSnapshotBodyUnlessStale(args: {
 		return { snapshot: null, skippedStale: true };
 	}
 	return {
-		snapshot: loadProjectSnapshot(args.root, {
-			allowEphemeral: args.allowEphemeral ?? false,
-		}),
+		snapshot: loadProjectSnapshot(args.root),
 		skippedStale: false,
 	};
 }
@@ -1036,7 +1034,7 @@ async function buildOrRefreshWordIndex(args: {
 	);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshotLoadStartMs = Date.now();
-	const snapshot = loadProjectSnapshot(snapshotRoot, { allowEphemeral: true });
+	const snapshot = loadProjectSnapshot(snapshotRoot);
 	const snapshotLoadMs = Date.now() - snapshotLoadStartMs;
 	if (snapshot?.wordIndex) {
 		const {
@@ -2110,9 +2108,7 @@ export async function handleSessionStart(
 					// (canWarmCaches true OR false) so the NEXT one-shot process can
 					// reuse it instead of re-walking a possibly huge tree from
 					// scratch on every single startup.
-					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot, {
-						allowEphemeral: true,
-					});
+					const cachedSnapshot = loadProjectSnapshot(warmupSnapshotRoot);
 					// #1785 F5 (round 4): publish this ALREADY-loaded read — narrowed
 					// to exports+rules, never a reference to `cachedSnapshot` itself
 					// (which carries `wordIndex`/`files`/`symbols`/`reverseDeps`) — for
@@ -2534,6 +2530,16 @@ export async function handleSessionStart(
 	for (const migration of drainProjectDataDirMigrations()) {
 		const targetName = path.basename(migration.to);
 		const hash = targetName.match(/([0-9a-f]{8})$/)?.[1] ?? "unknown";
+		if (migration.outcome === "ephemeral") {
+			// #1129 decision B: say once that this root's state dies with the process.
+			recordDegradationOnce({
+				kind: "data-dir-ephemeral",
+				subject: hash,
+				reason:
+					"temporary checkout: project data lives in a process-owned directory and is not kept after exit",
+			});
+			continue;
+		}
 		recordDegradationOnce({
 			kind: "data_dir_migrated",
 			subject: hash,
@@ -2563,6 +2569,11 @@ export async function handleSessionStart(
 		path.join(globalDir, "bin"),
 		path.join(globalDir, "tools"),
 	]).catch(() => {
+		// best-effort lifecycle cleanup — never fail session_start
+	});
+	// #1129: reap the ephemeral data dirs of processes that died before their
+	// exit hook ran. Fire-and-forget and bounded like the stage sweep above.
+	void sweepDeadEphemeralDataDirs({ isPidAlive: realIsPidAlive }).catch(() => {
 		// best-effort lifecycle cleanup — never fail session_start
 	});
 	if (quickMode) {
@@ -2830,7 +2841,6 @@ export async function handleSessionStart(
 		currentProjectSeq: freshnessSeq,
 		unlockedThrough: latestSeq.unlockedThrough ?? 0,
 		dbg,
-		allowEphemeral: true,
 	});
 	const snapshot = snapshotGate.snapshot;
 	const snapshotFresh = isProjectSnapshotFresh(

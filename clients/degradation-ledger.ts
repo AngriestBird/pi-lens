@@ -215,6 +215,13 @@ export type DegradationKind =
 	 * cannot carry, since the warm-only callers never reach selection.
 	 */
 	/**
+	 * #1129 decision B: a root inside a real git checkout below the host tmpdir
+	 * got a process-owned data dir, so nothing it records outlives the process
+	 * (and a durable dir it may have had before is not read). Subject is the
+	 * slug hash; recorded once per root via the session-start data-dir drain.
+	 */
+	| "data-dir-ephemeral"
+	/**
 	 * #2874: a pre-hash project data-dir slug directory was renamed once to
 	 * its hashed slug (or an old/new pair was found coexisting and the new
 	 * one preferred), so two roots that differ only in separator-vs-hyphen
@@ -2083,6 +2090,8 @@ const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	// doc comment above) and is frequent/self-healing by design — a `⚠` would
 	// cry wolf on the sampler's ordinary best-effort data loss.
 	"resource-sampler-scanner-escalated",
+	// #1129: an ephemeral data dir for a tmp checkout is decision B working.
+	"data-dir-ephemeral",
 	// #2874: a successful legacy-directory migration is an upgrade tally, not
 	// a call to action. The hash-only subject avoids exposing the project path.
 	"data_dir_migrated",
