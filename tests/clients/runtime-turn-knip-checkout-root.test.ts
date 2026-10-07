@@ -272,6 +272,30 @@ afterEach(() => {
 	env.cleanup();
 });
 
+/** Start a turn on a fake clock, with the scan parked until released. */
+function slowTurn(): {
+	turn: Promise<void>;
+	spawned: Promise<void>;
+	release: () => void;
+	settled: () => boolean;
+} {
+	let release!: () => void;
+	knipProcess.gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let spawn!: () => void;
+	const spawned = new Promise<void>((resolve) => {
+		spawn = resolve;
+	});
+	knipProcess.onSpawn = spawn;
+	vi.useFakeTimers();
+	let done = false;
+	const turn = handleTurnEnd(turnEndDeps()).then(() => {
+		done = true;
+	});
+	return { turn, spawned, release, settled: () => done };
+}
+
 describe("#3872 scan root: the checkout that owns the edit", () => {
 	it("scans a linked worktree's own root for an edit there, never the session checkout", async () => {
 		const x = addWorktree("x");
@@ -405,30 +429,6 @@ describe("#3872 delta: a root's first scan still reports this turn's own issues"
 });
 
 describe("#3872 budget: a slow scan no longer holds the turn_end handler", () => {
-	/** Start a turn on a fake clock, with the scan parked until released. */
-	function slowTurn(): {
-		turn: Promise<void>;
-		spawned: Promise<void>;
-		release: () => void;
-		settled: () => boolean;
-	} {
-		let release!: () => void;
-		knipProcess.gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		let spawn!: () => void;
-		const spawned = new Promise<void>((resolve) => {
-			spawn = resolve;
-		});
-		knipProcess.onSpawn = spawn;
-		vi.useFakeTimers();
-		let done = false;
-		const turn = handleTurnEnd(turnEndDeps()).then(() => {
-			done = true;
-		});
-		return { turn, spawned, release, settled: () => done };
-	}
-
 	it("returns inside the turn_end budget, records the deferral, and writes no late cache row", async () => {
 		const x = addWorktree("x");
 		edit(path.join(x, "src", "a.ts"));
@@ -907,5 +907,280 @@ describe("#3872 one hard-failure rule for every back-off reader", () => {
 				readers: [hard, hard, hard],
 			})),
 		);
+	});
+});
+
+/**
+ * #3872 remainder: a root whose scan cannot fit the turn_end budget.
+ *
+ * Recurrence prevented (real binary, real `handleTurnEnd`, a pi-lens clone with
+ * six unignored `.worktrees/*`; transcript in the PR body): the session
+ * checkout's knip took 2.4 s cold / 0.6 s warm without the worktrees and
+ * 10.9 s cold / 3.1 s warm with them. #3893 corrected the verdict (the nested
+ * issues are dropped) but every turn_end still awaited the whole remaining
+ * budget for a scan that settled after it, so the handler sat at 3000 ms on
+ * each of three consecutive turns and the knip row said only `deferred`: no
+ * cause, no count. These cases pin the cheaper, named degradation.
+ */
+describe("#3872 known-slow root: a scan that cannot fit is not awaited again", () => {
+	/** Edit the session checkout's file and run the first, parked, turn. */
+	async function firstDeferredTurn(): Promise<void> {
+		edit(path.join(main, "src", "a.ts"));
+		const slow = slowTurn();
+		await slow.spawned;
+		await vi.advanceTimersByTimeAsync(3_100);
+		await slow.turn;
+		// The abandoned scan settles 7 s after it started: longer than any budget.
+		await vi.advanceTimersByTimeAsync(4_000);
+		slow.release();
+		await vi.advanceTimersByTimeAsync(10);
+	}
+
+	it("returns at once on the next turn, without waiting out the budget, and still starts the scan", async () => {
+		for (const name of ["w1", "w2"]) addWorktree(name);
+		await firstDeferredTurn();
+		expect(spawnCwds()).toEqual([main]);
+
+		edit(path.join(main, "src", "a.ts"));
+		const second = slowTurn();
+		await second.spawned;
+		// The scan is running (parked on its gate). Half a second later, far
+		// short of the 3 s budget, the knip phase must already be over: a row
+		// still missing here is the handler parked on the scan.
+		await vi.advanceTimersByTimeAsync(500);
+		const rowsAfterHalfASecond = knipRows().length;
+		second.release();
+		await vi.advanceTimersByTimeAsync(3_100);
+		await second.turn;
+		vi.useRealTimers();
+
+		expect(rowsAfterHalfASecond).toBe(2);
+		expect(spawnCwds()).toEqual([main, main]);
+		const [first, again] = knipRows().map(
+			(row) => row.metadata as Record<string, unknown>,
+		);
+		expect(first).toMatchObject({ execution: "deferred" });
+		expect(first).not.toHaveProperty("reason");
+		expect(again).toMatchObject({
+			execution: "deferred",
+			reason: "scan-exceeds-budget",
+			nestedWorktrees: 2,
+		});
+		expect(again?.lastScanMs).toBeGreaterThan(3_000);
+	});
+
+	it("awaits and delivers again once a later scan of the root is fast", async () => {
+		await firstDeferredTurn();
+
+		// The no-wait turn's own scan takes 100 ms: the project ignored its
+		// worktrees. Joining the in-flight scan observes exactly when it settled.
+		edit(path.join(main, "src", "a.ts"));
+		const second = slowTurn();
+		await second.spawned;
+		await vi.advanceTimersByTimeAsync(100);
+		const settled = knipClient.analyze(main, [], {
+			projectSeq: runtime.projectSeq,
+		});
+		second.release();
+		await settled;
+		await second.turn;
+		expect(knipClient.lastScanMs(main)).toBeLessThan(1_000);
+
+		// A scan that outlasts the one-tick grace is awaited and delivered again,
+		// not left deferred on a stale measurement.
+		fs.appendFileSync(
+			path.join(main, "src", "a.ts"),
+			"export const unusedB = 2;\n",
+		);
+		edit(path.join(main, "src", "a.ts"));
+		const third = slowTurn();
+		await third.spawned;
+		await vi.advanceTimersByTimeAsync(10);
+		third.release();
+		await vi.advanceTimersByTimeAsync(100);
+		await third.turn;
+		vi.useRealTimers();
+
+		expect(
+			consumeTurnEndFindings(cacheManager, main)?.messages?.[0]?.content,
+		).toContain("unusedB");
+		expect(knipRows().at(-1)?.metadata).toMatchObject({
+			execution: "executed",
+		});
+	});
+
+	it("still delivers a scan that is already complete for the unchanged project", async () => {
+		await firstDeferredTurn();
+		// The slow scan settled for this project state: a turn that changed
+		// nothing (no sequence bump) is answered from it, instantly.
+		cacheManager.addModifiedRange(
+			path.join(main, "src", "a.ts"),
+			{ start: 1, end: 1 },
+			false,
+			main,
+			SESSION,
+		);
+		knipProcess.gate = undefined;
+		vi.useRealTimers();
+		await turnEnd();
+
+		expect(knipRows().at(-1)?.metadata).toMatchObject({ execution: "cache" });
+		expect(spawnCwds()).toEqual([main]);
+	});
+
+	it("keeps scanning the next checkout: a root that was not awaited spent no budget", async () => {
+		const x = addWorktree("x");
+		await firstDeferredTurn();
+		vi.useRealTimers();
+		// The session scan is parked; the worktree's scan (the third spawn) frees
+		// both, so only an await on the session scan could keep it from running.
+		let release!: () => void;
+		knipProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		knipProcess.onSpawn = () => {
+			if (spawnCwds().length === 3) release();
+		};
+
+		edit(path.join(main, "src", "a.ts"));
+		edit(path.join(x, "src", "a.ts"));
+		await turnEnd();
+
+		expect(spawnCwds().map(realPath)).toEqual([
+			realPath(main),
+			realPath(main),
+			realPath(x),
+		]);
+		const rows = knipRows().map((row) => ({
+			root: row.filePath,
+			...(row.metadata as Record<string, unknown>),
+		}));
+		expect(rows.at(-2)).toMatchObject({
+			root: main,
+			execution: "deferred",
+			reason: "scan-exceeds-budget",
+		});
+		expect(rows.at(-1)).toMatchObject({ root: x, execution: "executed" });
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "turn-end-knip-root-skipped",
+			),
+		).toBeUndefined();
+	});
+
+	it("stops at Escape: a cancelled turn scans no further root and records no nested-worktree degradation", async () => {
+		const x = addWorktree("x");
+		await firstDeferredTurn();
+		vi.useRealTimers();
+		const controller = new AbortController();
+		let release!: () => void;
+		knipProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		// Escape lands while the session scan (second spawn) is running.
+		knipProcess.onSpawn = () => {
+			if (spawnCwds().length === 2) controller.abort();
+		};
+
+		edit(path.join(main, "src", "a.ts"));
+		edit(path.join(x, "src", "a.ts"));
+		await handleTurnEnd(turnEndDeps(controller.signal));
+		release();
+
+		// Escape ends the loop, known-slow root or not: the worktree gets no row
+		// and is counted as skipped, instead of being handed to knip.
+		expect(knipRows().map((row) => row.filePath)).toEqual([main, main]);
+		expect(knipRows().at(-1)?.metadata).toMatchObject({
+			execution: "deferred",
+			aborted: true,
+		});
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "turn-end-knip-root-skipped",
+			)?.count,
+		).toBe(1);
+		// One from the first (uncancelled) turn; the cancelled one adds none.
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "turn-end-knip-nested-worktrees",
+			)?.count,
+		).toBe(1);
+	});
+
+	it("forgets the measured duration at the session boundary", async () => {
+		await firstDeferredTurn();
+		vi.useRealTimers();
+		expect(knipClient.lastScanMs(main)).toBeGreaterThan(3_000);
+
+		knipClient.resetSessionState();
+
+		expect(knipClient.lastScanMs(main)).toBeUndefined();
+	});
+});
+
+describe("#3872 records: the knip row names the root and how many nested worktrees it walked", () => {
+	it("names the worktrees a finished scan walked and the files it dropped from them", async () => {
+		for (const name of ["w1", "w2", "w3"]) addWorktree(name);
+		edit(path.join(main, "src", "a.ts"));
+
+		await turnEnd();
+
+		const [row] = knipRows();
+		expect(row?.filePath).toBe(main);
+		expect(row?.metadata).toMatchObject({
+			execution: "executed",
+			totalIssues: 1,
+			nestedWorktrees: 3,
+			nestedFilesDropped: 3,
+		});
+	});
+
+	it("adds no nested-worktree fields to a root that has none", async () => {
+		edit(path.join(main, "src", "a.ts"));
+
+		await turnEnd();
+
+		const metadata = knipRows()[0]?.metadata as Record<string, unknown>;
+		expect(metadata).not.toHaveProperty("nestedWorktrees");
+		expect(metadata).not.toHaveProperty("nestedFilesDropped");
+	});
+
+	it("counts one ledger record per deferred root that walks nested worktrees, naming the cause", async () => {
+		for (const name of ["w1", "w2"]) addWorktree(name);
+		edit(path.join(main, "src", "a.ts"));
+		const slow = slowTurn();
+		await slow.spawned;
+		await vi.advanceTimersByTimeAsync(3_100);
+		await slow.turn;
+		slow.release();
+		vi.useRealTimers();
+
+		expect(knipRows()[0]?.metadata).toMatchObject({
+			execution: "deferred",
+			nestedWorktrees: 2,
+		});
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "turn-end-knip-nested-worktrees",
+		);
+		expect(group?.count).toBe(1);
+		expect(JSON.stringify(group)).toContain("2 linked worktree(s)");
+	});
+
+	it("records no nested-worktree degradation for a deferral in a root without any", async () => {
+		const x = addWorktree("x");
+		edit(path.join(x, "src", "a.ts"));
+		const slow = slowTurn();
+		await slow.spawned;
+		await vi.advanceTimersByTimeAsync(3_100);
+		await slow.turn;
+		slow.release();
+		vi.useRealTimers();
+
+		expect(knipRows()[0]?.metadata).toMatchObject({ execution: "deferred" });
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "turn-end-knip-nested-worktrees",
+			),
+		).toBeUndefined();
 	});
 });

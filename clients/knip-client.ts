@@ -78,6 +78,15 @@ export interface KnipResult extends AnalysedRootSignal {
 	 * result at the supplied project sequence. */
 	execution?: "executed" | "cache";
 	/**
+	 * #3872: linked worktrees nested under the scanned root, which knip walked
+	 * because the project never ignored them, and the files with issues that
+	 * were dropped from the result for living in one. Both are set together,
+	 * only when at least one worktree is nested; a root without any carries
+	 * neither field.
+	 */
+	nestedWorktrees?: number;
+	nestedFilesDropped?: number;
+	/**
 	 * #3600: the wall-clock time this run READ the bytes its issues were
 	 * computed from, stamped at the top of `runAnalyze` before the spawn. A
 	 * caller that JOINS the in-flight promise reads the initiator's stamp, so a
@@ -370,6 +379,14 @@ export class KnipClient {
 		{ at: number; summary: string }
 	>();
 
+	/**
+	 * Per project root, how long its last successful scan took (#3872). turn_end
+	 * reads it to stop awaiting a scan that cannot fit the hook budget: the scan
+	 * still runs (it re-measures, and warms knip's own cache), the hook just no
+	 * longer waits for it. Cleared with the other per-session state.
+	 */
+	private readonly scanDurations = new Map<string, number>();
+
 	/** Last successful result per project and runtime content generation. */
 	private completedByProject = new Map<
 		string,
@@ -390,6 +407,7 @@ export class KnipClient {
 	resetSessionState(): void {
 		this.completedByProject.clear();
 		this.hardFailures.clear();
+		this.scanDurations.clear();
 	}
 
 	/**
@@ -510,6 +528,20 @@ export class KnipClient {
 	}
 
 	/**
+	 * How long this root's last successful scan took, or `undefined` when none
+	 * settled this session (#3872). The root is resolved the way `analyze`
+	 * resolves it.
+	 */
+	lastScanMs(cwd: string): number | undefined {
+		return this.scanDurations.get(this.resolveProjectRoot(cwd) ?? cwd);
+	}
+
+	/** Linked worktrees nested under this root, which knip walks as project files (#3872). */
+	nestedWorktrees(cwd: string): number {
+		return nestedWorktreeScope(this.resolveProjectRoot(cwd) ?? cwd).count;
+	}
+
+	/**
 	 * Run knip analysis on the project.
 	 *
 	 * Async (uses `safeSpawnAsync`) so it never blocks the event loop —
@@ -578,9 +610,12 @@ export class KnipClient {
 			return existing;
 		}
 
+		const startedAt = Date.now();
 		const promise = this.runAnalyze(key).then((result) => {
-			if (result.success) this.hardFailures.delete(key);
-			else if (isHardFailureSummary(result.summary)) {
+			if (result.success) {
+				this.hardFailures.delete(key);
+				this.scanDurations.set(key, Date.now() - startedAt);
+			} else if (isHardFailureSummary(result.summary)) {
 				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
 			}
 			const executed = { ...result, execution: "executed" as const };
@@ -947,8 +982,12 @@ export class KnipClient {
 			const unusedDeps: KnipIssue[] = [];
 			const unlistedDeps: KnipIssue[] = [];
 
+			const droppedFiles = new Set<string>();
 			const addIssue = (issue: KnipIssue) => {
-				if (nested.contains(issue.file)) return;
+				if (nested.contains(issue.file)) {
+					droppedFiles.add(issue.file ?? "");
+					return;
+				}
 				issues.push(issue);
 				if (issue.type === "export" || issue.type === "enumMember") {
 					unusedExports.push(issue);
@@ -1038,6 +1077,10 @@ export class KnipClient {
 				unusedDeps,
 				unlistedDeps,
 				summary: `Found ${issues.length} issues`,
+				...(nested.count > 0 && {
+					nestedWorktrees: nested.count,
+					nestedFilesDropped: droppedFiles.size,
+				}),
 			};
 		} catch (err) {
 			void err;
