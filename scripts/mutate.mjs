@@ -7,7 +7,13 @@
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	readFileSync,
+	readdirSync,
+	statSync,
+	writeFileSync,
+	unlinkSync,
+} from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,23 +22,36 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 function usage(message) {
 	if (message) console.error(`mutate.mjs: ${message}`);
 	console.error(
-		"usage: scripts/mutate.mjs --file <path> --find <text|/regex/> --replace <text> --tests <files…> [--built] [--table]",
+		"usage: scripts/mutate.mjs --file <path> --find <text|/regex/> --replace <text> --tests <files…> [--built] [--table] [--restore]",
 	);
 	process.exitCode = 2;
 }
 
 function argsFrom(argv) {
 	const values = { tests: [] };
+	let fileSeen = false;
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
-		if (arg === "--built" || arg === "--table") values[arg.slice(2)] = true;
+		if (
+			arg === "--built" ||
+			arg === "--table" ||
+			arg === "--restore" ||
+			arg === "--allow-comment"
+		)
+			values[arg.slice(2)] = true;
 		else if (arg === "--tests") values.tests = argv.slice(++index);
 		else if (["--file", "--find", "--replace"].includes(arg)) {
+			if (arg === "--file" && fileSeen)
+				throw new Error(
+					"repeated --file is not supported; provide one file per run",
+				);
+			if (arg === "--file") fileSeen = true;
 			const value = argv[++index];
 			if (value === undefined) throw new Error(`${arg} needs a value`);
 			values[arg.slice(2)] = value;
 		} else throw new Error(`unknown argument ${arg}`);
 	}
+	if (values.restore) return values;
 	if (
 		!values.file ||
 		values.find === undefined ||
@@ -81,15 +100,97 @@ function parseFind(value) {
 	return value;
 }
 
-function mutationFor(original, find, replacement) {
+function mutationFor(original, find, replacement, allowComment = false) {
 	const needle = parseFind(find);
-	const mutated = original.replace(needle, replacement);
+	const searchable = blankCommentsAndStrings(original);
+	const codeIndex =
+		typeof needle === "string"
+			? searchable.indexOf(needle)
+			: (() => {
+					needle.lastIndex = 0;
+					return needle.exec(searchable)?.index ?? -1;
+				})();
+	if (codeIndex < 0 && !allowComment)
+		throw new Error(
+			"refusing no-op edit: --find matches only comments/strings or is absent",
+		);
+	const originalIndex =
+		codeIndex >= 0
+			? codeIndex
+			: typeof needle === "string"
+				? original.indexOf(needle)
+				: original.search(needle);
+	const matchLength =
+		typeof needle === "string"
+			? needle.length
+			: (() => {
+					needle.lastIndex = 0;
+					return needle.exec(original.slice(originalIndex))?.[0].length;
+				})();
+	const mutated =
+		originalIndex >= 0 && matchLength !== undefined
+			? original.slice(0, originalIndex) +
+				replacement +
+				original.slice(originalIndex + matchLength)
+			: original.replace(needle, replacement);
 	if (mutated === original) {
 		throw new Error(
 			"refusing no-op edit: --find is absent or replacement is identical",
 		);
 	}
 	return mutated;
+}
+
+function blankCommentsAndStrings(source) {
+	let state = "code";
+	let quote = "";
+	let escaped = false;
+	let output = "";
+	for (let index = 0; index < source.length; index += 1) {
+		const current = source[index];
+		const next = source[index + 1];
+		if (state === "line") {
+			output += current === "\n" ? "\n" : " ";
+			if (current === "\n") state = "code";
+			continue;
+		}
+		if (state === "block") {
+			output += current === "\n" ? "\n" : " ";
+			if (current === "*" && next === "/") {
+				output += " ";
+				index += 1;
+				state = "code";
+			}
+			continue;
+		}
+		if (state === "string") {
+			output += current === "\n" ? "\n" : " ";
+			if (escaped) escaped = false;
+			else if (current === "\\") escaped = true;
+			else if (current === quote) state = "code";
+			continue;
+		}
+		if (current === "/" && next === "/") {
+			output += "  ";
+			index += 1;
+			state = "line";
+			continue;
+		}
+		if (current === "/" && next === "*") {
+			output += "  ";
+			index += 1;
+			state = "block";
+			continue;
+		}
+		if (current === '"' || current === "'" || current === "`") {
+			output += " ";
+			state = "string";
+			quote = current;
+			continue;
+		}
+		output += current;
+	}
+	return output;
 }
 
 function restoreFile(file, bytes, expectedHash) {
@@ -99,6 +200,45 @@ function restoreFile(file, bytes, expectedHash) {
 		throw new Error(`restore sha256 mismatch for ${file}`);
 }
 
+function journalFor(file) {
+	return `${file}.mutate-backup`;
+}
+
+function journalHashFor(file) {
+	return `${journalFor(file)}.sha256`;
+}
+
+function writeJournal(file, bytes) {
+	writeFileSync(journalFor(file), bytes, { flag: "wx" });
+	writeFileSync(journalHashFor(file), digest(bytes), { flag: "wx" });
+}
+
+function restoreJournal(file) {
+	const backup = journalFor(file);
+	const hashFile = journalHashFor(file);
+	if (!statExists(backup) || !statExists(hashFile)) return false;
+	const bytes = readFileSync(backup);
+	const expectedHash = readFileSync(hashFile, "utf8").trim();
+	if (digest(bytes) !== expectedHash)
+		throw new Error(`backup sha256 mismatch for ${file}`);
+	restoreFile(file, bytes, expectedHash);
+	unlinkSync(backup);
+	unlinkSync(hashFile);
+	return true;
+}
+
+function journalFiles(directory) {
+	const found = [];
+	for (const entry of readdirSync(directory, { withFileTypes: true })) {
+		const full = path.join(directory, entry.name);
+		if (entry.isDirectory() && entry.name !== "node_modules")
+			found.push(...journalFiles(full));
+		else if (entry.isFile() && entry.name.endsWith(".mutate-backup"))
+			found.push(full.slice(0, -".mutate-backup".length));
+	}
+	return found;
+}
+
 function failedTitles(output) {
 	return output
 		.split("\n")
@@ -106,6 +246,12 @@ function failedTitles(output) {
 		.map((line) => line.trim())
 		.filter(Boolean)
 		.slice(0, 20);
+}
+
+function classifyTestRun(testRun) {
+	if (/(?:Tests\s+no tests|Tests\s+0 tests)/.test(testRun.output))
+		return "ERROR";
+	return testRun.code === 0 ? "SURVIVED" : "RED";
 }
 
 function runTests(files, onSignal) {
@@ -120,6 +266,7 @@ function runTests(files, onSignal) {
 				stdio: ["ignore", "pipe", "pipe"],
 			},
 		);
+		activeChild = child;
 		let output = "";
 		child.stdout.on("data", (chunk) => {
 			output += chunk;
@@ -135,11 +282,14 @@ function runTests(files, onSignal) {
 		};
 		process.once("SIGINT", stop);
 		child.once("close", (code, signal) => {
+			activeChild = null;
 			process.removeListener("SIGINT", stop);
 			resolve({ code: code ?? 130, signal, output });
 		});
 	});
 }
+
+let activeChild = null;
 
 function build() {
 	const result = spawnSync(
@@ -181,6 +331,15 @@ async function main() {
 		usage(error.message);
 		return 2;
 	}
+	if (options.restore) {
+		const files = options.file
+			? [path.resolve(root, options.file)]
+			: journalFiles(root);
+		let restored = 0;
+		for (const file of files) restored += restoreJournal(file) ? 1 : 0;
+		console.log(`restored ${restored} mutation journal(s)`);
+		return 0;
+	}
 	const source = path.resolve(root, options.file);
 	const target = options.built ? source : source;
 	const candidateTwin = options.built ? null : twinFor(source);
@@ -190,21 +349,56 @@ async function main() {
 	for (const file of files) {
 		if (!statExists(file))
 			throw new Error(`file does not exist: ${path.relative(root, file)}`);
+		restoreJournal(file);
 		if (!gitClean(path.relative(root, file)))
 			throw new Error(`refusing dirty file: ${path.relative(root, file)}`);
 	}
 	const originals = new Map(files.map((file) => [file, readFileSync(file)]));
+	let activeFiles = [];
 	let result = { code: 2, failed: [], status: "RED" };
 	let interrupted = false;
-	const interrupt = () => {
-		interrupted = true;
+	let handlingSignal = false;
+	const restoreAll = () => {
+		for (const [file, bytes] of originals)
+			restoreFile(file, bytes, digest(bytes));
+		for (const file of activeFiles) {
+			if (statExists(journalFor(file))) restoreJournal(file);
+		}
 	};
-	process.once("SIGINT", interrupt);
+	const signalHandler = (signal) => {
+		if (handlingSignal) return;
+		handlingSignal = true;
+		interrupted = true;
+		try {
+			if (activeChild) activeChild.kill("SIGKILL");
+			restoreAll();
+		} finally {
+			process.removeAllListeners(signal);
+			process.kill(process.pid, signal);
+		}
+	};
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+		process.once(signal, () => signalHandler(signal));
+	process.once("uncaughtException", (error) => {
+		try {
+			restoreAll();
+		} finally {
+			console.error(error.stack ?? error);
+			process.exit(1);
+		}
+	});
 	try {
 		const original = originals.get(target);
+		for (const [file, bytes] of originals) writeJournal(file, bytes);
+		activeFiles = [...originals.keys()];
 		writeFileSync(
 			target,
-			mutationFor(original.toString("utf8"), options.find, options.replace),
+			mutationFor(
+				original.toString("utf8"),
+				options.find,
+				options.replace,
+				options["allow-comment"],
+			),
 		);
 		if (!options.built) build();
 		if (interrupted)
@@ -216,15 +410,15 @@ async function main() {
 			result = {
 				code: testRun.code,
 				failed: failedTitles(testRun.output),
-				status: testRun.code === 0 ? "SURVIVED" : "RED",
+				status: classifyTestRun(testRun),
 			};
 		}
 	} catch (error) {
 		result = { code: 1, failed: [error.message], status: "RED" };
 	} finally {
-		process.removeListener("SIGINT", interrupt);
-		for (const [file, bytes] of originals)
-			restoreFile(file, bytes, digest(bytes));
+		restoreAll();
+		for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+			process.removeAllListeners(signal);
 	}
 	console.log("--- mutation transcript ---");
 	console.log(

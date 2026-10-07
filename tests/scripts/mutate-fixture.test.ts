@@ -1,8 +1,11 @@
 // flake-shape: never-settling-wait — the interrupt witness must keep a real child alive until the CLI sends SIGINT.
 import { expect, it } from "vitest";
 
+const mutationSafeMarker = true;
+
 it("mutation fixture remains original", () => {
-	// mutation-safe-marker
+	// mutation-comment-only-marker
+	expect(mutationSafeMarker).toBe(true);
 	expect("original").toBe("original");
 });
 
