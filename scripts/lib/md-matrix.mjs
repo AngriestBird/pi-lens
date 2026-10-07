@@ -603,6 +603,52 @@ export function parseRefreshState(text) {
 	}
 }
 
+/** The refresh-state key holding the idle-eviction promotion bookkeeping (#3989). */
+export const IDLE_EVICTION_KEY = "idle-eviction";
+
+/**
+ * #3989: keep only well-formed idle-eviction nights, at most two per server
+ * (the promotion window), so a hand-edited or old block cannot carry garbage
+ * into the rendered section. A night is `{ day, rssMb, coldMs }`: `rssMb` may
+ * be null (not measured), `coldMs` is always a number (a night without one
+ * never counts).
+ */
+function sanitizeIdleEvictionState(map) {
+	const out = {};
+	if (!map || typeof map !== "object") return out;
+	for (const serverId of Object.keys(map).sort(compareStableStrings)) {
+		const nights = [];
+		for (const n of Array.isArray(map[serverId]?.nights)
+			? map[serverId].nights
+			: []) {
+			if (
+				isUtcDay(n?.day) &&
+				Number.isFinite(n?.coldMs) &&
+				(n.rssMb === null || Number.isFinite(n.rssMb))
+			)
+				nights.push({ day: n.day, rssMb: n.rssMb, coldMs: n.coldMs });
+		}
+		if (nights.length) out[serverId] = { nights: nights.slice(-2) };
+	}
+	return out;
+}
+
+/**
+ * #3989: replace the `idle-eviction` key of the refresh-state block in `text`,
+ * leaving the other keys as parsed. An empty map removes the key (and the
+ * section when nothing else is left).
+ *
+ * @param {string} text
+ * @param {Record<string, { nights: { day: string, rssMb: number | null, coldMs: number }[] }>} idleEviction
+ */
+export function setIdleEvictionState(text, idleEviction) {
+	const state = {
+		...parseRefreshState(text),
+		[IDLE_EVICTION_KEY]: idleEviction,
+	};
+	return replaceRefreshStateSection(text, renderRefreshStateSection(state));
+}
+
 /**
  * Render the refresh-state section's lines, or `[]` when there is nothing to
  * remember. Keys are sorted and zero counters are dropped so a settled run
@@ -629,17 +675,20 @@ function renderRefreshStateSection(state) {
 			};
 		}
 	}
+	const idleEviction = sanitizeIdleEvictionState(state?.[IDLE_EVICTION_KEY]);
 	const payload = {};
 	if (Object.keys(cleanBehavior).length)
 		payload["clean-behavior"] = cleanBehavior;
 	if (Object.keys(firstPublish).length) payload["first-publish"] = firstPublish;
+	if (Object.keys(idleEviction).length)
+		payload[IDLE_EVICTION_KEY] = idleEviction;
 	if (Object.keys(payload).length === 0) return [];
 	return [
 		REFRESH_STATE_HEADING,
 		"",
-		"Bookkeeping for the date-based `direct` `first-publish` expiry (#3401) and",
-		"the two-run `clean-behavior` hysteresis. Regenerated every run; never a",
-		"measurement.",
+		"Bookkeeping for the date-based `direct` `first-publish` expiry (#3401), the",
+		"two-run `clean-behavior` hysteresis and the consecutive-night `idle-eviction`",
+		"counts (#3989). Regenerated every run; never a measurement.",
 		"",
 		REFRESH_STATE_FENCE,
 		JSON.stringify(payload),
@@ -726,7 +775,13 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 	const prior = parseRefreshState(text);
 	const priorFp = prior["first-publish"] ?? {};
 	const priorCb = prior["clean-behavior"] ?? {};
-	const nextState = { "first-publish": {}, "clean-behavior": {} };
+	const nextState = {
+		"first-publish": {},
+		"clean-behavior": {},
+		// The idle-eviction bookkeeping belongs to its own nightly step; this
+		// refresh must carry it through, not drop it (#3989).
+		[IDLE_EVICTION_KEY]: prior[IDLE_EVICTION_KEY],
+	};
 	const expiredLangs = [];
 	const pendingLangs = [];
 	const committedLangs = [];
