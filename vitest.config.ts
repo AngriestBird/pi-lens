@@ -499,6 +499,9 @@ export const wallClockBudgetInclude = [
 	// subject; an in-process call of the pure policy cannot prove that boundary.
 	"tests/scripts/check-allow-scripts.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
+	// #4072 review F2: the CLI's real exit status is the contract; an
+	// in-process main() call cannot prove the executable entry point.
+	"tests/scripts/ci-test-diff.test.ts",
 	// #3883 F3: the final `ci-verdict: exit` line is emitted by the real
 	// `main()` process; the spawn is the only faithful proof of that boundary.
 	"tests/scripts/ci-verdict.test.ts",

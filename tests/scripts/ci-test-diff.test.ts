@@ -1,3 +1,4 @@
+// flake-shape: real-process-spawn — the CLI's real exit status is the contract; an in-process main() call cannot prove the executable entry point (#4072 review F2).
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";

@@ -427,6 +427,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
+	// contract; an in-process main() call cannot prove the entry-point boundary.
+	"real-process-spawn:scripts/ci-test-diff.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the executable CLI exit status is the contract; an in-process main call cannot prove the entry-point boundary",
+	},
 	"real-process-spawn:scripts/ci-verdict.test.ts": {
 		detector: "real-process-spawn",
 		reason:
