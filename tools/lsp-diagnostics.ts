@@ -481,7 +481,11 @@ export function createLspDiagnosticsTool(
 				}
 				// Preserve input order (including duplicate entries); normalize each
 				// path before grouping so Windows separators and dot segments cannot
-				// change cache/group identity. Explicit lists never enter the walker.
+				// change cache/group identity. `paths` is documented as "Files or
+				// directories to filter", so directory entries expand through the
+				// scalar `path` route's own bounded walk (#3965) — reaching the
+				// per-file collector verbatim counted a `failed` outcome for the
+				// directory and silently dropped its whole subtree.
 				// #3160/#3182: `path.resolve(cwd, entry)` folds dot segments (and
 				// separators) structurally — it ignores `cwd` whenever `entry` is
 				// already absolute, so the old `path.isAbsolute` ternary is
@@ -493,19 +497,45 @@ export function createLspDiagnosticsTool(
 				// stays required for the relative→absolute step: `normalizeMapKey`
 				// folds dot segments itself since #3184, but never resolves against
 				// `cwd` (a cwd fold there broke every monorepo, #2490).
-				const absPaths = rawPaths.map((entry) =>
-					normalizeMapKey(path.resolve(cwd, entry)),
+				const expanded = await expandPathsToFiles(cwd, rawPaths);
+				if (expanded.files.length === 0) {
+					// A requested directory with no eligible file (empty, unreadable,
+					// or fully excluded) is a real "nothing to check" answer, not a
+					// per-file failure — the same sentence the scalar directory route
+					// renders for it.
+					const listed = expanded.directoriesWithoutFiles.slice(0, 5);
+					const more = expanded.directoriesWithoutFiles.length - listed.length;
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `No supported source files found in: ${listed.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`,
+							},
+						],
+						details: {
+							mode: "batch",
+							severity,
+							filesChecked: 0,
+							directoriesWithoutFiles: listed,
+						},
+					};
+				}
+				return runBatchFileDiagnostics(
+					expanded.files,
+					severity,
+					lspService,
+					{
+						concurrency,
+						waitMs,
+						signal,
+						onProgress,
+						nextWriteIndex,
+						serverScope,
+						cwd,
+						onConfirmedNoBlockers,
+					},
+					expanded.capped,
 				);
-				return runBatchFileDiagnostics(absPaths, severity, lspService, {
-					concurrency,
-					waitMs,
-					signal,
-					onProgress,
-					nextWriteIndex,
-					serverScope,
-					cwd,
-					onConfirmedNoBlockers,
-				});
 			}
 
 			const rawPath = typedParams.path;
@@ -2096,11 +2126,96 @@ async function collectBatchDiagnostics(
 	};
 }
 
+/**
+ * #3965: resolve a `paths` entry list into the concrete files a batch check
+ * scans. A directory entry expands through the scalar `path` route's own
+ * bounded walk ({@link collectDirectoryScanFiles}) — same exclusions, same
+ * scan-language decision; a file entry keeps its exact existing semantics
+ * (input order preserved, explicit duplicates kept, a nonexistent entry kept
+ * so the per-file collector's `path not found` failure survives). A file
+ * named explicitly anywhere in the list is never re-added by a directory that
+ * contains it, so overlapping entries check each file once.
+ *
+ * `directoriesWithoutFiles` carries the requested directories that yielded no
+ * eligible file (empty, unreadable, or fully excluded): the caller renders
+ * them as "no supported source files", not as per-file failures.
+ */
+async function expandPathsToFiles(
+	cwd: string,
+	rawPaths: string[],
+): Promise<{
+	files: string[];
+	directoriesWithoutFiles: string[];
+	capped: boolean;
+}> {
+	const explicitFiles: string[] = [];
+	const directories: string[] = [];
+	const seenFileKeys = new Set<string>();
+	for (const entry of rawPaths) {
+		const abs = normalizeMapKey(path.resolve(cwd, entry));
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.statSync(abs);
+		} catch {
+			// Nonexistent on disk. Kept as a file entry below so the per-file
+			// collector still reports `path not found` — a caller that names a
+			// path must never read its absence as a clean answer.
+		}
+		if (stat?.isDirectory()) {
+			directories.push(abs);
+		} else {
+			explicitFiles.push(abs);
+			seenFileKeys.add(abs);
+		}
+	}
+
+	const files = [...explicitFiles];
+	const directoriesWithoutFiles: string[] = [];
+	let capped = false;
+	for (const directory of directories) {
+		// The budget is shared across the whole request: a directory expands only
+		// into what is left of MAX_FILES, so a list of directories cannot exceed
+		// the single-directory route's own bound. `collectDirectoryScanFiles`
+		// reports a zero budget honestly: an empty result, `capped` only when the
+		// directory actually held a file the budget could not take.
+		const collected = await collectDirectoryScanFiles(
+			directory,
+			MAX_FILES - files.length,
+		);
+		capped ||= collected.capped;
+		if (collected.files.length === 0) {
+			directoriesWithoutFiles.push(directory);
+			continue;
+		}
+		for (const file of collected.files) {
+			const key = normalizeMapKey(file);
+			if (seenFileKeys.has(key)) continue;
+			seenFileKeys.add(key);
+			files.push(key);
+		}
+	}
+	if (capped) {
+		// Bounded, once per workspace: the request asked for more eligible files
+		// than the walk bound admits. The rendered result discloses the same cap.
+		recordDegradationOnce({
+			kind: "lsp-diagnostics-paths-cap",
+			subject: cwd,
+			reason: `paths directory expansion reached the ${MAX_FILES}-file cap; later entries were not checked`,
+		});
+	}
+	return { files, directoriesWithoutFiles, capped };
+}
+
 async function runBatchFileDiagnostics(
 	absPaths: string[],
 	severity: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
 	options: BatchOptions,
+	// #3965: true when directory expansion hit the MAX_FILES population bound.
+	// A bounded scan whose truncation is invisible reads as a full answer
+	// (AGENTS.md shape 10), so the render names the cap the same way the
+	// scalar directory route does.
+	capped: boolean = false,
 ) {
 	if (absPaths.length === 0) {
 		return {
@@ -2137,7 +2252,7 @@ async function runBatchFileDiagnostics(
 	);
 
 	const lines: string[] = [
-		`Files checked: ${results.length}`,
+		`Files checked: ${results.length}${capped ? ` (capped at ${MAX_FILES})` : ""}`,
 		`Total diagnostics: ${total}`,
 		`Concurrency: ${options.concurrency}`,
 	];
@@ -2227,6 +2342,7 @@ async function runBatchFileDiagnostics(
 			severity,
 			serverScope: options.serverScope ?? "all",
 			filesChecked: results.length,
+			...(capped ? { capped: true } : {}),
 			concurrency: options.concurrency,
 			waitMs: options.waitMs,
 			diagnostics: display,
@@ -2296,26 +2412,48 @@ export async function resolveDirectoryScanExtensions(
 	return undefined;
 }
 
+/**
+ * #3965: the bounded directory collection the scalar `path` route
+ * ({@link runDirectoryDiagnostics}) and the `paths` batch's directory
+ * expansion ({@link expandPathsToFiles}) both use — ONE walker with the one
+ * exclusion rule (`projectIgnorePredicate`) and the one scan-language decision
+ * (`resolveDirectoryScanExtensions`), never a second traversal. `maxFiles`
+ * bounds the returned list (the caller owns the budget across a multi-entry
+ * `paths` request); `capped` reports that the directory held more eligible
+ * files than that bound, so the caller discloses the truncation instead of
+ * silently narrowing the scan (AGENTS.md shape 10).
+ */
+async function collectDirectoryScanFiles(
+	absPath: string,
+	maxFiles: number,
+): Promise<{ files: string[]; capped: boolean }> {
+	const isIgnored = projectIgnorePredicate(absPath);
+	let collectedFiles: string[] = [];
+	await resolveDirectoryScanExtensions(async (exts) => {
+		collectedFiles = await collectFiles(
+			absPath,
+			[...exts],
+			maxFiles + 1,
+			isIgnored,
+		);
+		return collectedFiles.length > 0;
+	});
+	return {
+		files: collectedFiles.slice(0, maxFiles),
+		capped: collectedFiles.length > maxFiles,
+	};
+}
+
 async function runDirectoryDiagnostics(
 	absPath: string,
 	severity: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
 	options: BatchOptions,
 ) {
-	let collectedFiles: string[] = [];
+	const { files: filesToProcess, capped: wasCapped } =
+		await collectDirectoryScanFiles(absPath, MAX_FILES);
 
-	const isIgnored = projectIgnorePredicate(absPath);
-	await resolveDirectoryScanExtensions(async (exts) => {
-		collectedFiles = await collectFiles(
-			absPath,
-			[...exts],
-			MAX_FILES + 1,
-			isIgnored,
-		);
-		return collectedFiles.length > 0;
-	});
-
-	if (collectedFiles.length === 0) {
+	if (filesToProcess.length === 0) {
 		return {
 			content: [
 				{
@@ -2332,8 +2470,6 @@ async function runDirectoryDiagnostics(
 		};
 	}
 
-	const wasCapped = collectedFiles.length > MAX_FILES;
-	const filesToProcess = collectedFiles.slice(0, MAX_FILES);
 	const {
 		results,
 		fileErrors,
