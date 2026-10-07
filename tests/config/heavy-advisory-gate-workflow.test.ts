@@ -337,9 +337,9 @@ function censusPins(
 }
 
 const PINNED_PRINT = [
-	"expect(CENSUS_SITES.length).toBe(58);",
-	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(63);',
-	'expect(stageJobs("A")).toBe(23);',
+	"expect(CENSUS_SITES.length).toBe(59);",
+	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(64);',
+	'expect(stageJobs("A")).toBe(24);',
 	'expect(stageJobs("B")).toBe(2);',
 	'expect(stageJobs("C")).toBe(13);',
 	'expect(stageJobs("D")).toBe(25);',
@@ -789,7 +789,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 58 checkout sites across the tree; 63 non-gate job rows (A23/B2/C13/D25
+		// 59 checkout sites across the tree; 64 non-gate job rows (A24/B2/C13/D25
 		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
 		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
 		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
@@ -803,15 +803,15 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			58,
+			59,
 		);
-		pinnedNumber("checkout sites", CENSUS_SITES.length, 58);
+		pinnedNumber("checkout sites", CENSUS_SITES.length, 59);
 		pinnedNumber(
 			"non-gate job rows",
 			CENSUS_ROWS.filter((row) => row.stage !== "gate").length,
-			63,
+			64,
 		);
-		pinnedNumber("stage A rows", stageJobs("A"), 23);
+		pinnedNumber("stage A rows", stageJobs("A"), 24);
 		pinnedNumber("stage B rows", stageJobs("B"), 2);
 		pinnedNumber("stage C rows", stageJobs("C"), 13);
 		pinnedNumber("stage D rows", stageJobs("D"), 25);
