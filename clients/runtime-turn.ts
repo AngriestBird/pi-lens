@@ -239,6 +239,8 @@ const LATE_AUX_COVERAGE_GAP_DETAIL_CAP_PER_TURN = 20;
  */
 export const TEST_RUNNER_BATCH_CONCURRENCY = 4;
 export const TEST_RUNNER_MAX_TARGETS = 12;
+/** #3871: owning-checkout rows one `turn_end_test_selection` record carries; the rest are counted in `rootsOmitted`. */
+const TURN_END_SELECTION_ROOT_ROWS = 8;
 export const TEST_RUNNER_BATCH_BUDGET_MS = 20_000;
 /**
  * How many consecutive turn-end batches a target may be cut out of before it
@@ -3215,10 +3217,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let missingTargetFiles = 0;
 		let excludedTargets = 0;
 		let retiredSkips = 0;
+		let noTestFile = 0;
+		const candidatesByRoot = new Map<string, number>();
 		for (const { display, abs, isNeighbor } of candidates) {
 			// #3871: select in the checkout that owns the edit. For an edit the
 			// session owns this is `cwd`, exactly as before.
 			const testRoot = testRootFor(abs);
+			candidatesByRoot.set(testRoot, (candidatesByRoot.get(testRoot) ?? 0) + 1);
 			const target = testRunnerClient.getTestRunTarget(
 				abs,
 				testRoot,
@@ -3275,6 +3280,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					`turn_end: ${display} → test ${target.runner} ${path.relative(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
 				);
 			} else if (!target) {
+				noTestFile++;
 				dbg(
 					`turn_end: ${display} → no test file found${isNeighbor ? " (cascade-neighbor)" : ""}`,
 				);
@@ -3306,6 +3312,49 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 			dbg(
 				`turn_end: test target count capped at ${TEST_RUNNER_MAX_TARGETS}, ${overCapTargets} skipped`,
+			);
+		}
+		if (candidates.length > 0) {
+			// #3871: ONE record per turn, pushed (the MCP / Stop-hook route's dbg
+			// is a no-op), so a turn that ran 0 tests says which checkout owned
+			// each edit and why nothing was selected. The live session that
+			// ran 0 tests in 44 turn-ends left only per-edit dbg lines.
+			const selectedByRoot = new Map<string, number>();
+			for (const target of targets) {
+				selectedByRoot.set(
+					target.testRoot,
+					(selectedByRoot.get(target.testRoot) ?? 0) + 1,
+				);
+			}
+			const roots = [...candidatesByRoot.entries()].map(
+				([root, candidateCount]) => ({
+					root: root === cwd ? "." : toRunnerDisplayPath(cwd, root),
+					candidates: candidateCount,
+					selected: selectedByRoot.get(root) ?? 0,
+				}),
+			);
+			emitBounded(
+				"turn_end_test_selection",
+				`${cwd}:turn:${runtime.turnIndex}`,
+				{
+					filePath: cwd,
+					durationMs: 0,
+					metadata: {
+						sessionId: turnSessionId,
+						candidates: candidates.length,
+						selected: targets.length,
+						noTestFile,
+						excluded: excludedTargets,
+						missing: missingTargetFiles,
+						overCap: overCapTargets,
+						retired: retiredSkips,
+						roots: roots.slice(0, TURN_END_SELECTION_ROOT_ROWS),
+						rootsOmitted: Math.max(
+							0,
+							roots.length - TURN_END_SELECTION_ROOT_ROWS,
+						),
+					},
+				},
 			);
 		}
 		if (targets.length > 0) {
