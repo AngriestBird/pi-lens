@@ -190,7 +190,11 @@ Two fix parts now overlap in the model, and the code keeps both:
   that would close it.
 - **#3520** (`FixMtime`): the read guard's mtime fallback admitted a
   session-2 edit from the drain's write alone. The code no longer has the
-  fallback; `FixMtime` keeps it on as a mutant.
+  fallback; `FixMtime` keeps it on as a mutant. This model has no no-drop
+  witness for the zero-read arm: `EditCheck` counts every zero-read admit as
+  blind (`blind' = blind \/ ~reads`), so any admit that an own-write action
+  earned without a read would count against `NoBlindAllow`. That direction is `formal/read-guard`
+  `BashAuthored`.
 - **The actionable-warnings phase** at the end of the drain writes through
   its own mutation context and is not modelled. Since #3576 it starts only
   while the drain's session and LSP service are current, starts no edit after

@@ -2177,6 +2177,11 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "idle.ts");
 			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// The kernel's coarse clock can stamp the file before the fake clock's
+			// start; pin a newer mtime so the mtime fallback of the code before
+			// #3520 fires on every run.
+			const later = new Date(Date.now() + 60_000);
+			fs.utimesSync(filePath, later, later);
 			const guard = createReadGuard("tier2-idle-authorship");
 			guard.recordRead(createReadRecord(filePath));
 			guard.recordWritten(filePath); // consumes the read; arms the idle timer

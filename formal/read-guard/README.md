@@ -7,9 +7,9 @@ session boundaries. The `TLA+ models` CI job
 (`node scripts/check-tla-models.mjs`) checks every config here against its
 `\* expect:` line.
 
-Issues: #3519, #3521, #3522, #3523, #3524 and #3525 are fixed in the code and
-modelled as such. The configs for #3520 still document its bug against the
-current code (`violated`).
+Issues: #3519, #3520, #3521, #3522, #3523, #3524 and #3525 are fixed in the
+code and modelled as such. The one config that still turns the #3520 mtime
+fallback on (`TreeDrainFencedMtime`) is a mutant of the fix (`violated`).
 
 ## Scope
 
@@ -49,6 +49,15 @@ change.
     (`clients/runtime-tool-result.ts` `handleToolResult`), and attaches the post-fix bytes as
     "authoritative". Since #3519 the attachment, when delivered, is
     recorded as a whole-file read hashed from the attached bytes.
+  - **bash** (a recognized bash write, `BashWrite`): `recordWritten` with
+    `stampFileTime: false` (#3525) and no creation read
+    (`clients/runtime-tool-result.ts` `handleToolResult`). The command is in the
+    conversation, so the agent knows what it wrote; the file gets authorship and
+    no read record. The format drain also sets `written` with no read, but the
+    agent never saw its bytes; `BashWrite` is the one action that authors with
+    no read and with the agent knowing the bytes, so it is the witness that the
+    zero-read arm of `checkEdit` lets an own write through (`BashAuthored`,
+    #3520).
 - **Another writer** (an external editor, a second pi-lens instance, git):
   changes the file between any two steps. With `ExtPhases` it can land inside
   a tool call.
@@ -190,6 +199,7 @@ head that added this model. It is not checked in CI.
 | `Unhashed` / `UnhashedNoFileTime` | current code without line hashes / without FileTime | pass / violated `NoStaleAllow` | 13,370 / 243 |
 | `ContextSlack` | the admitted `contextLines` slack | violated `NoBlindAllow` | 79 |
 | `MtimeAuthored`, `MtimeAuthoredNew` | #3520 fixed: another writer's mtime authors nothing, alone and across `/new` (`MtimeAuthored = TRUE`, the code before it, violated `NoBlindAllow` at 9 / 36 distinct states) | pass | 8 / 378 |
+| `BashAuthored` | #3520 no-drop witness: a recognized bash write authors a never-read file, no other writer, then an edit; three agent ops. With the zero-read check ignoring `written` it violates `NoFalseBlock` (6 distinct states). A fourth op (bash, edit, bash, edit) blocks with `file_modified`, since a bash write leaves FileTime stale by design (#3525), so the bound stays at three | pass | 57 |
 | `TreeFilter` | #3521 fixed: `/tree` with reads, ranged reads, edits and writes | pass | 50,413 |
 | `TreeFilterExt` | #3521 fixed, another writer anywhere | pass | 344,765 |
 | `TreeFilterUnhashed` | #3521 fixed without hashes | pass | 1,174 |
