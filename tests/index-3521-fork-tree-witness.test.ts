@@ -1435,7 +1435,7 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 		expect(await c.editLine("post_new", file, 2, "Y", false)).toBe("ALLOW");
 	});
 
-	it("keeps the session's mtime anchor across /reload, so a file changed after the session began stays authored (D5)", async () => {
+	it("does not call a file changed after the session began authored, before or after /reload (#3520)", async () => {
 		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
 		const c = conversation(runtime);
 		c.user("prompt 1");
@@ -1443,11 +1443,15 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 		// Written after the session began, by nothing the guard records.
 		const file = path.join(cwd, "late.conf");
 		fs.writeFileSync(file, "l1\nl2\nl3");
-		expect(await c.editLine("pre_late", file, 2, "Y", false)).toBe("ALLOW");
+		expect(await c.editLine("pre_late", file, 2, "Y", false)).toEqual(
+			ZERO_READ,
+		);
 
 		await reload(runtime);
 
-		expect(await c.editLine("post_late", file, 2, "Y", false)).toBe("ALLOW");
+		expect(await c.editLine("post_late", file, 2, "Y", false)).toEqual(
+			ZERO_READ,
+		);
 	});
 
 	it("does not carry the parent's authorship into a /fork", async () => {
