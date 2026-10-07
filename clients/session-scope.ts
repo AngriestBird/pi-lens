@@ -459,25 +459,9 @@ const HANDOFF_VERSION = 2;
 
 interface HandoffCell {
 	handoff: Handoff | undefined;
-	/**
-	 * A pi session manager to the ticket of the last scope that left a key from
-	 * it: a slot, or a secondary's successor note (#3855).
-	 */
+	/** A pi session manager to the ticket of the last slot left from it. */
 	left: WeakMap<object, number>;
-	/**
-	 * #3855: the keys secondaries' replacement shutdowns left for their
-	 * successors, oldest first. Additive: a cell from a build without it reads
-	 * `undefined` and gains one on the first note, so the version stays.
-	 */
-	secondary?: Set<string | number>;
 }
-
-/**
- * #3855: notes kept for successors that have not started. Each note is
- * consumed by its start; this bounds the ones whose start never comes (pi
- * `reload()` with no bindings).
- */
-export const SECONDARY_SUCCESSOR_NOTE_CAP = 8;
 
 /** A session manager is a WeakMap key only when it is an object. */
 function asManager(sessionManager: unknown): object | undefined {
@@ -512,80 +496,15 @@ export function stashHandoff(
 	// `quit` and a missing reason have no successor: they read as `startup`.
 	const reason = toStartReason(args.reason);
 	if (!SOURCES[reason].includes("slot")) return false;
-	handoffSlot().handoff = {
+	const cell = handoffSlot();
+	const manager = asManager(args.sessionManager);
+	if (manager !== undefined) cell.left.set(manager, scope.scopeId);
+	cell.handoff = {
 		reason,
-		key: leaveKey(scope, args),
+		key: args.targetSessionFile ?? args.sessionFile ?? scope.scopeId,
 		stores: snapshotSessionStores(scope),
 	};
 	return true;
-}
-
-/**
- * The key a shutdown leaves for its successor's start: the successor's session
- * file (pi's `targetSessionFile`, or on `/reload` the session's own), else the
- * scope's ticket, bound to the session manager, which pi hands a `/reload` or
- * in-memory `/fork` successor unchanged. {@link startKey} reads it back.
- */
-function leaveKey(
-	scope: SessionScope,
-	args: {
-		sessionFile: string | undefined;
-		targetSessionFile: string | undefined;
-		sessionManager?: unknown;
-	},
-): string | number {
-	const manager = asManager(args.sessionManager);
-	if (manager !== undefined) handoffSlot().left.set(manager, scope.scopeId);
-	return args.targetSessionFile ?? args.sessionFile ?? scope.scopeId;
-}
-
-/**
- * #3855: at a secondary's `session_shutdown` (sync), leave its successor's
- * key, so that start is known to continue a secondary's conversation and
- * keeps the secondary role ({@link continuesSecondary}). pi gives a `/new` or
- * resume successor a new session manager, so without a target file (an
- * in-memory `/new`) nothing links the two and no note is left. `quit` and a
- * missing reason read as `startup` and pi names no target for them, so they
- * leave none either. True when a note was left.
- */
-export function noteSecondaryReplacement(
-	scope: SessionScope,
-	args: {
-		reason: string | undefined;
-		sessionFile: string | undefined;
-		targetSessionFile: string | undefined;
-		sessionManager: unknown;
-	},
-): boolean {
-	const reason = toStartReason(args.reason);
-	const keepsManager = reason === "reload" || reason === "fork";
-	if (!keepsManager && args.targetSessionFile === undefined) return false;
-	const cell = handoffSlot();
-	cell.secondary ??= new Set();
-	cell.secondary.add(leaveKey(scope, args));
-	if (cell.secondary.size > SECONDARY_SUCCESSOR_NOTE_CAP) {
-		const [oldest] = cell.secondary;
-		cell.secondary.delete(oldest!);
-		incrementDegradationCount({
-			kind: "session-successor-pending",
-			subject: "note-evicted",
-			reason: `more than ${SECONDARY_SUCCESSOR_NOTE_CAP} secondary replacements were waiting for their start; the oldest note was dropped, so that start, if it comes, is classified without it`,
-		});
-	}
-	return true;
-}
-
-/**
- * #3855: whether this `session_start` continues a secondary's conversation,
- * by the key its shutdown left ({@link noteSecondaryReplacement}). Consumes
- * the note, so no later start reads it.
- */
-export function continuesSecondary(args: {
-	sessionFile: string | undefined;
-	sessionManager: unknown;
-}): boolean {
-	const key = startKey(args.sessionFile, args.sessionManager);
-	return key !== undefined && handoffSlot().secondary?.delete(key) === true;
 }
 
 /**
@@ -607,14 +526,36 @@ export function takeHandoff(
 /**
  * A start's slot key: its session file, or, file-less, the ticket its session
  * manager left (#3819). pi hands a file-less `/reload` or in-memory `/fork`
- * successor its predecessor's manager.
+ * successor its predecessor's manager. #3855: also the identity a primary's
+ * replacement gap admits ({@link successorStartKey}).
  */
-function startKey(
+export function startKey(
 	sessionFile: string | undefined,
 	sessionManager: unknown,
 ): string | number | undefined {
 	const manager = asManager(sessionManager);
 	return sessionFile ?? (manager && handoffSlot().left.get(manager));
+}
+
+/**
+ * #3855: at a primary replacement `session_shutdown`, after its own
+ * {@link stashHandoff} or {@link forwardHandoff}: the {@link startKey} its
+ * successor's start will compute. pi names a `/new`, resume or persisted
+ * `/fork` successor's file (`targetSessionFile`), and hands a `/reload` or
+ * in-memory `/fork` successor the same session, so its own file or the ticket
+ * bound to its manager. An in-memory `/new` gets a new manager and no file:
+ * nothing links it, and the key is `undefined`.
+ */
+export function successorStartKey(args: {
+	reason: string | undefined;
+	sessionFile: string | undefined;
+	targetSessionFile: string | undefined;
+	sessionManager: unknown;
+}): string | number | undefined {
+	if (args.targetSessionFile !== undefined) return args.targetSessionFile;
+	const reason = toStartReason(args.reason);
+	if (reason !== "reload" && reason !== "fork") return undefined;
+	return startKey(args.sessionFile, args.sessionManager);
 }
 
 /**

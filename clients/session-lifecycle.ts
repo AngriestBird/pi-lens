@@ -62,6 +62,16 @@ interface SessionLifecycleState {
 	 * registration on every read.
 	 */
 	successorPendingSince?: number | undefined;
+	/**
+	 * #3855: the start that release named as its successor: pi's shutdown
+	 * reason and the `startKey` its successor will compute (`undefined` when pi
+	 * links nothing, an in-memory `/new`). Trusted only while `since` equals
+	 * `successorPendingSince`, so a marker that a build without this field
+	 * rewrote falls back to #3662's rule. Additive, like the marker.
+	 */
+	successorNamed?:
+		| { since: number; reason: string; key: string | number | undefined }
+		| undefined;
 }
 
 const SESSION_LIFECYCLE_FAMILY = "session-lifecycle.primary-registration";
@@ -138,10 +148,9 @@ export interface ClassifySessionStartInput {
 	sameRoot?: boolean | undefined;
 	/**
 	 * #3662: no primary is registered because a primary replacement shut down,
-	 * its successor has not started yet, and this start cannot be that
-	 * successor: its reason is `startup` (no predecessor), or (#3855) it
-	 * continues a secondary's own replacement. Only consulted when `hasPrior`
-	 * is false.
+	 * its successor has not started yet, and this start is not that successor
+	 * (#3855: its reason and key differ from the ones the shutdown named; a
+	 * `startup` start never matches). Only consulted when `hasPrior` is false.
 	 */
 	successorPending?: boolean;
 }
@@ -155,7 +164,7 @@ export interface ClassifySessionStartInput {
  *     unless `successorPending` → `concurrent-secondary` (#3662: a subagent
  *     binding in a replacement gap must not take the slot the successor is
  *     about to claim, or the successor would probe its live ctx and decline;
- *     #3855: nor may a subagent's own `/reload`, `/fork`, `/new` or resume).
+ *     #3855: only the start the shutdown named is that successor).
  *  2. Prior exists, same stable session id → `sequential-replacement` (the
  *     same session re-announcing itself, e.g. resume/reload paths — must
  *     keep today's behavior, NOT be mistaken for a sibling).
@@ -360,7 +369,12 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
  * than changed, because a count that outlived the registration it is scoped to
  * would disagree with `getActivePrimaryRoot()` in the same record.
  */
-export function releasePrimarySession(shutdownReason?: string): void {
+export function releasePrimarySession(
+	shutdownReason?: string,
+	/** #3855: the `startKey` of the successor this shutdown names
+	 *  (`successorStartKey` in `clients/session-scope.ts`). */
+	successorKey?: string | number,
+): void {
 	const s = state();
 	s.activeCtx = undefined;
 	s.activeSessionId = undefined;
@@ -370,10 +384,13 @@ export function releasePrimarySession(shutdownReason?: string): void {
 	// the same reason (pi 0.85.1 `agent-session-runtime.js`, `reload()`), so the
 	// next primary is that successor. `quit` and a missing reason promise no
 	// successor and keep the #2129 F3 re-arm above.
-	s.successorPendingSince =
-		shutdownReason !== undefined && shutdownReason !== "quit"
-			? Date.now()
-			: undefined;
+	const pending = shutdownReason !== undefined && shutdownReason !== "quit";
+	const since = Date.now();
+	s.successorPendingSince = pending ? since : undefined;
+	// #3855: name the successor, so no other start in the gap can take its slot.
+	s.successorNamed = pending
+		? { since, reason: shutdownReason, key: successorKey }
+		: undefined;
 }
 
 /** Register a concurrently-bound secondary (subagent) session. Does not
@@ -548,6 +565,7 @@ export function _resetSessionLifecycleForTests(): void {
 	s.activeRoot = undefined;
 	s.secondarySessionCount = 0;
 	s.successorPendingSince = undefined;
+	s.successorNamed = undefined;
 }
 
 export interface SessionStartGuardDecision {
@@ -587,16 +605,22 @@ export function decideSessionStart(
 	/** #3662: this start's `event.reason`. pi sends `startup` only for a
 	 *  runtime's first bind, never for a replacement's successor. */
 	reason?: string | undefined,
-	/** #3855: this start continues a secondary's own replacement
-	 *  (`continuesSecondary` in `clients/session-scope.ts`), so it keeps the
-	 *  secondary role and is not the primary's successor either. */
-	continuesSecondary?: boolean,
+	/** #3855: this start's `startKey` (`clients/session-scope.ts`). */
+	key?: string | number,
 ): SessionStartGuardDecision {
 	const s = state();
 	const hasPrior = s.activeCtx !== undefined || s.activeSessionId !== undefined;
-	// In a primary's replacement gap only its successor is primary: a start
-	// takes its predecessor's role, and a `startup` start has none.
-	const notTheSuccessor = reason === "startup" || continuesSecondary === true;
+	// #3855: in a replacement gap only the start the shutdown named, by reason
+	// and key, is the successor. A start with no reason fails safe to primary
+	// (#3662 F8); a marker without a name keeps #3662's rule.
+	const named =
+		s.successorNamed?.since === s.successorPendingSince
+			? s.successorNamed
+			: undefined;
+	const notTheSuccessor =
+		named === undefined
+			? reason === "startup"
+			: reason !== undefined && (reason !== named.reason || key !== named.key);
 	const successorPending =
 		!hasPrior && notTheSuccessor && successorStillPending(s);
 	const priorCtxActive = hasPrior ? probeCtxActive(s.activeCtx) : undefined;
@@ -647,8 +671,8 @@ export function decideSessionStart(
 						}
 					: {
 							kind: "session-successor-pending",
-							subject: "secondary-successor",
-							reason: `a ${reason ?? "reasonless"} session_start that continues a secondary's own replacement arrived in a primary replacement gap; it keeps the secondary role, so the primary's successor is not demoted`,
+							subject: "not-the-successor",
+							reason: `a ${reason} session_start in a primary replacement gap is not the successor that shutdown named; declined as concurrent-secondary`,
 						},
 			);
 		}

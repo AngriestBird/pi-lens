@@ -1820,8 +1820,8 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 	 * start with no primary registered, which classified primary (#3668 row
 	 * 17). The recurrence: that start took the primary's slot and adopted its
 	 * lazy-tool activations, its queued advisory and its authorship. Since
-	 * #3855 that start keeps the secondary role; the subagent's own in-memory
-	 * /new (residual R1) is the one gap start left that classifies primary.
+	 * #3855 that start is not the successor the primary's shutdown named, so it
+	 * stays secondary.
 	 */
 	describe("#3819 a gap subagent's own /reload or /fork takes nothing of the primary's", () => {
 		async function gapSubagentReplaces(kind: "reload" | "fork") {
@@ -1867,7 +1867,7 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 			else await primary.fork(u2);
 
 			expect(subagent).toBeDefined();
-			return { primary, subagent: subagent! };
+			return { primary, subagent: subagent!, written, a };
 		}
 
 		function subjects(kind: string): string[] {
@@ -1879,7 +1879,8 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 
 		for (const kind of ["reload", "fork"] as const) {
 			it(`gives a subagent's own ${kind} in the gap none of the primary's activations or advisories`, async () => {
-				const { primary, subagent } = await gapSubagentReplaces(kind);
+				const { primary, subagent, written, a } =
+					await gapSubagentReplaces(kind);
 
 				// #3855: the subagent's own start stays secondary, and the
 				// primary's real successor takes its slot.
@@ -1895,21 +1896,31 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 				expect
 					.soft(await contextText(subagent))
 					.not.toContain("lost edit in a.rs");
-				// A secondary never looks for a slot. Its edits are judged by the
-				// primary's read guard, which it shares until #3613 (S4, TLC
-				// `MutSecondaryReadShared`), so authorship is not judged here.
+				// A secondary never looks for a slot.
 				expect.soft(missedSubjects()).toEqual([]);
+				// Accepted residual #3613 (S4, TLC `MutSecondaryReadShared`),
+				// pinned so S4 flips it: a secondary's edits are judged by the
+				// primary's read guard, so the primary's read of a.conf allows the
+				// subagent's edit, and the primary's own authorship policy decides
+				// its written file (carried on /reload, reset on /fork, D5). These
+				// read ZERO_READ before #3855 only because the subagent's own start
+				// wrongly took the primary slot and reset the guard.
+				const s = conversation(subagent);
+				expect
+					.soft(await s.editLine("sub_written", written, 2, "Y", false))
+					.toEqual(kind === "reload" ? "ALLOW" : ZERO_READ);
+				expect.soft(await s.editLine("sub_a", a, 2, "Y", false)).toBe("ALLOW");
 			});
 		}
 
 		/**
 		 * The r1 review's F1 probe: option (a) cleared the slot at every
-		 * primary start. A gap subagent's own in-memory /new classifies primary
-		 * (residual R1 of #3855), takes nothing, and quits inside the gap, so
-		 * the real successor still classifies primary. The recurrence: that
-		 * start found the slot cleared, and an in-memory /fork lost its
-		 * activations. A file-backed /new is linked to its shutdown and stays
-		 * secondary (#3855).
+		 * primary start. A gap subagent started a new session, took nothing,
+		 * and quit inside the gap; the real successor still classified primary.
+		 * The recurrence: that start found the slot cleared, and an in-memory
+		 * /fork lost its activations. Since #3855 the subagent's /new is not
+		 * the successor the fork named, so it stays secondary in both variants;
+		 * the fork must still keep its activations.
 		 */
 		for (const store of ["in-memory", "file-backed"] as const) {
 			it(`keeps an in-memory /fork's activations when a gap subagent (${store}) starts a new session and quits inside the gap`, async () => {
@@ -1948,22 +1959,24 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 });
 
 /**
- * #3855 (TLC `H3DemoteCarry`, `H3DemoteAdvisory`, `H3DemoteActivation`):
- * #3668's row 17. A subagent that binds in the primary's /reload gap and then
- * reloads or forks itself sends a non-startup start while no primary is
- * registered. #3668 took every such start for the primary's successor, so the
- * subagent's start registered as primary, and the real successor probed its
- * live ctx and was demoted: it skipped handleSessionStart and adoptHandoff, and
- * the conversation lost its reads, its queued advisory and its activations.
- * The recurrence: a gap start classified primary that does not continue the
- * primary's conversation.
+ * #3855 (TLC `H3DemoteCarry`, `H3DemoteAdvisory`, `H3DemoteActivation`,
+ * `H3SecNew`, `H3DemotedReplaces`, `H3StaleNoteResume`): #3668's row 17. A
+ * subagent that binds in the primary's replacement gap and then replaces itself
+ * sends a non-startup start while no primary is registered. #3668 took every
+ * such start for the primary's successor, so the subagent's start registered
+ * as primary, and the real successor probed its live ctx and was demoted: it
+ * skipped handleSessionStart and adoptHandoff, and the conversation lost its
+ * reads, its queued advisory and its activations. The recurrence: a gap start
+ * classified primary that is not the successor the primary's shutdown named,
+ * or the named successor declined (no primary at all).
  */
-describe("#3855 a gap subagent's own replacement never demotes the real successor", () => {
+describe("#3855 only the successor the primary named is primary in its gap", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
 	type Store = "file-backed" | "in-memory";
+	type Move = "reload" | "fork" | "new" | "resume";
 	const managerFor = (store: Store) =>
 		store === "file-backed"
 			? SessionManager.create(cwd, sessionsDir)
@@ -1986,37 +1999,49 @@ describe("#3855 a gap subagent's own replacement never demotes the real successo
 			.map((row) => [row.reason, row.role]);
 	}
 
+	/** A persisted session file that pi can resume. */
+	function savedSessionFile(): string {
+		const other = SessionManager.create(cwd, sessionsDir);
+		other.appendMessage({
+			role: "user",
+			content: "an earlier conversation",
+			timestamp: Date.now(),
+		} as Parameters<SessionManager["appendMessage"]>[0]);
+		return other.getSessionFile()!;
+	}
+
+	/** A runtime replaces itself the way pi's commands do. */
+	async function replace(runtime: AgentSessionRuntime, move: Move) {
+		if (move === "reload") return reload(runtime);
+		if (move === "new") return void (await runtime.newSession());
+		if (move === "resume")
+			return void (await runtime.switchSession(savedSessionFile()));
+		const s = conversation(runtime);
+		s.user("prompt before the fork");
+		s.done();
+		const target = s.user("prompt the fork restarts");
+		s.done();
+		await runtime.fork(target);
+	}
+
 	/**
 	 * The primary reads a file, activates a tool and has an advisory queued,
-	 * then reloads. Inside its reload shutdown, a subagent binds and replaces
-	 * itself, so the subagent's own start lands in the primary's gap.
+	 * then replaces itself (`move`). Inside its shutdown, each subagent binds
+	 * and replaces itself, so every subagent's own start lands in the gap.
 	 */
-	async function reloadWithGapSubagent(
+	async function gapRun(
 		store: Store,
-		kind: "reload" | "fork" | "new",
-		subagentStore: Store = store,
+		move: Move,
+		subagents: Array<{ store: Store; move: Move }>,
 	) {
 		const seen = coordinators();
-		let subagent: AgentSessionRuntime | undefined;
+		let ran = false;
 		const replaceInGap = (pi: ExtensionAPI) => {
 			pi.on("session_shutdown", async (event) => {
-				if ((event as { reason?: string }).reason !== "reload" || subagent)
-					return;
-				subagent = await startRuntime(managerFor(subagentStore));
-				if (kind === "reload") {
-					await reload(subagent);
-					return;
-				}
-				if (kind === "new") {
-					await subagent.newSession();
-					return;
-				}
-				const s = conversation(subagent);
-				s.user("subagent prompt 1");
-				s.done();
-				const su2 = s.user("subagent prompt 2");
-				s.done();
-				await subagent.fork(su2);
+				if ((event as { reason?: string }).reason !== move || ran) return;
+				ran = true;
+				for (const sub of subagents)
+					await replace(await startRuntime(managerFor(sub.store)), sub.move);
 			});
 		};
 		const primary = await startRuntime(managerFor(store), [replaceInGap]);
@@ -2032,16 +2057,30 @@ describe("#3855 a gap subagent's own replacement never demotes the real successo
 		);
 		resetDegradationLedger();
 
-		await reload(primary);
+		await replace(primary, move);
 
-		expect(subagent).toBeDefined();
+		expect(ran).toBe(true);
 		return { primary, c, a };
+	}
+
+	/** The reloaded session keeps everything its predecessor handed it. */
+	async function keepsConversation(
+		run: Awaited<ReturnType<typeof gapRun>>,
+	): Promise<void> {
+		expect
+			.soft((await scopeTransitionRows()).at(-1))
+			.toMatchObject({ transition: "start", handoffSource: "slot" });
+		expect
+			.soft(await run.c.editLine("post_a", run.a, 2, "Y", false))
+			.toBe("ALLOW");
+		expect.soft(activeSituational(run.primary)).toEqual(["ast_grep_search"]);
+		expect.soft(await contextText(run.primary)).toContain("lost edit in a.rs");
 	}
 
 	for (const store of ["file-backed", "in-memory"] as const) {
 		for (const kind of ["reload", "fork"] as const) {
 			it(`keeps a ${store} session's reads, activations and advisory when a gap subagent's own ${kind} starts first`, async () => {
-				const { primary, c, a } = await reloadWithGapSubagent(store, kind);
+				const run = await gapRun(store, "reload", [{ store, move: kind }]);
 
 				// The subagent's bind and its own replacement stay secondary; the
 				// reloaded session is the primary and adopts its slot.
@@ -2050,74 +2089,183 @@ describe("#3855 a gap subagent's own replacement never demotes the real successo
 					[kind, "secondary"],
 					["reload", "primary"],
 				]);
-				expect
-					.soft((await scopeTransitionRows()).at(-1))
-					.toMatchObject({ transition: "start", handoffSource: "slot" });
-				expect.soft(await c.editLine("post_a", a, 2, "Y", false)).toBe("ALLOW");
-				expect.soft(activeSituational(primary)).toEqual(["ast_grep_search"]);
-				expect.soft(await contextText(primary)).toContain("lost edit in a.rs");
+				await keepsConversation(run);
 				// One record per decline: the bind (#3662) and the subagent's own
-				// successor (#3855).
+				// start (#3855).
 				expect
 					.soft(await subjects("session-successor-pending"))
-					.toEqual(["declined", "secondary-successor"]);
+					.toEqual(["declined", "not-the-successor"]);
 			});
 		}
-	}
 
-	/**
-	 * Residual R1: pi gives an in-memory /new a new session manager and no
-	 * session file, so nothing links the subagent's own /new to its shutdown.
-	 * Its start still classifies primary in the gap and demotes the real
-	 * successor, which discards the slot left for it (#3819 r2). Pinned so
-	 * that closing R1 flips this test on purpose. The discard is what keeps
-	 * the demoted session's later reload, once that gap primary quit, off its
-	 * predecessor's stale slot (TLC `H3StaleSlot`).
-	 */
-	for (const store of ["file-backed", "in-memory"] as const) {
-		it(`still demotes the ${store} successor of a gap subagent's own in-memory /new, and its later reload takes no stale slot (accepted residual R1)`, async () => {
-			const { primary } = await reloadWithGapSubagent(
-				store,
-				"new",
-				"in-memory",
-			);
+		/**
+		 * Round 1's residual R1, fixed (review F1): pi gives an in-memory /new no
+		 * file and a new session manager, so the subagent's start carries no key,
+		 * which is not the key the primary's reload named.
+		 */
+		it(`keeps a ${store} session's reads, activations and advisory when a gap subagent's own in-memory /new starts first (R1 fixed)`, async () => {
+			const run = await gapRun(store, "reload", [
+				{ store: "in-memory", move: "new" },
+			]);
 
 			expect.soft((await startRows()).slice(-3)).toEqual([
 				["startup", "secondary"],
-				["new", "primary"],
-				["reload", "secondary"],
+				["new", "secondary"],
+				["reload", "primary"],
 			]);
-			expect
-				.soft(await subjects("session-scope-handoff-discarded"))
-				.toEqual(["reload"]);
+			await keepsConversation(run);
 			expect
 				.soft(await subjects("session-successor-pending"))
-				.toEqual(["declined"]);
+				.toEqual(["declined", "not-the-successor"]);
+		});
+	}
 
-			// The gap primary quits; nothing is pending, so the demoted
-			// session's own reload is the process's primary again.
-			const gapPrimary = runtimes.at(-1)!;
-			await gapPrimary.dispose();
-			runtimes.splice(runtimes.indexOf(gapPrimary), 1);
+	/**
+	 * Review F5: every primary gap kind, not only /reload. A gap subagent's own
+	 * in-memory reload stays secondary, and the primary's own successor is
+	 * primary.
+	 */
+	for (const [move, store] of [
+		["fork", "file-backed"],
+		["fork", "in-memory"],
+		["new", "file-backed"],
+		["new", "in-memory"],
+		["resume", "file-backed"],
+	] as const) {
+		it(`keeps the ${store} ${move} successor primary when a gap subagent reloads itself first`, async () => {
+			const run = await gapRun(store, move, [
+				{ store: "in-memory", move: "reload" },
+			]);
+
+			expect.soft((await startRows()).slice(-3)).toEqual([
+				["startup", "secondary"],
+				["reload", "secondary"],
+				[move, "primary"],
+			]);
+			if (move === "fork")
+				expect
+					.soft(activeSituational(run.primary))
+					.toEqual(["ast_grep_search"]);
+		});
+	}
+
+	it("keeps the real successor primary when two gap subagents replace themselves at once", async () => {
+		const run = await gapRun("in-memory", "reload", [
+			{ store: "in-memory", move: "reload" },
+			{ store: "file-backed", move: "fork" },
+		]);
+
+		expect.soft((await startRows()).slice(-5)).toEqual([
+			["startup", "secondary"],
+			["reload", "secondary"],
+			["startup", "secondary"],
+			["fork", "secondary"],
+			["reload", "primary"],
+		]);
+		await keepsConversation(run);
+	});
+
+	/**
+	 * Residual R3: inside the primary's own in-memory /new gap, a subagent's
+	 * own in-memory /new is indistinguishable from the successor. Both carry
+	 * reason `new` and no key, so the first one is primary. The process still
+	 * has exactly one primary. Pinned so that closing R3 flips it on purpose.
+	 */
+	it("lets the first in-memory /new be primary in an in-memory /new gap (accepted residual R3)", async () => {
+		await gapRun("in-memory", "new", [{ store: "in-memory", move: "new" }]);
+
+		expect((await startRows()).slice(-3)).toEqual([
+			["startup", "secondary"],
+			["new", "primary"],
+			["new", "secondary"],
+		]);
+	});
+
+	/**
+	 * Review F2 (probe PR1): round 1 let a start inherit its predecessor's role.
+	 * After an R1 demotion, the user's conversation stayed secondary when it
+	 * reloaded inside the gap of the subagent's next /new. Now no demotion
+	 * happens, and the conversation's reload in the subagent's own /new gap is
+	 * the primary's own successor.
+	 */
+	for (const store of ["file-backed", "in-memory"] as const) {
+		it(`keeps the ${store} conversation primary when it reloads inside a gap subagent's next /new`, async () => {
+			let primary: AgentSessionRuntime | undefined;
+			let subagent: AgentSessionRuntime | undefined;
+			let armed = false;
+			const reloadPrimaryOnNew = (pi: ExtensionAPI) => {
+				pi.on("session_shutdown", async (event) => {
+					if ((event as { reason?: string }).reason !== "new" || !armed) return;
+					armed = false;
+					await reload(primary!);
+				});
+			};
+			const newInGap = (pi: ExtensionAPI) => {
+				pi.on("session_shutdown", async (event) => {
+					if ((event as { reason?: string }).reason !== "reload" || subagent)
+						return;
+					subagent = await startRuntime(SessionManager.inMemory(cwd), [
+						reloadPrimaryOnNew,
+					]);
+					await subagent.newSession();
+				});
+			};
+			primary = await startRuntime(managerFor(store), [newInGap]);
+
 			await reload(primary);
+			armed = true;
+			await subagent!.newSession();
 
-			const reloadStarts = (await scopeTransitionRows()).filter(
-				(row) => row.transition === "start" && row.reason === "reload",
-			);
-			expect(reloadStarts.map((row) => [row.role, row.handoffSource])).toEqual([
-				["secondary", undefined],
-				// The sidecar the first reload's shutdown saved, not the slot
-				// that shutdown left for the start it demoted.
-				["primary", "own-sidecar"],
+			expect((await startRows()).slice(-5)).toEqual([
+				["startup", "secondary"],
+				["new", "secondary"],
+				["reload", "primary"],
+				["reload", "primary"],
+				["new", "secondary"],
 			]);
 		});
 	}
 
 	/**
+	 * Review F3 (probe PR7): pi's reload() emits no session_start to a session
+	 * without host bindings, so round 1's note for that subagent's successor
+	 * stayed. When the primary later resumed the subagent's file, its own
+	 * successor matched the stale note and was declined, and no session was
+	 * primary.
+	 */
+	it("keeps the primary's resume successor primary after a subagent reloaded with no start", async () => {
+		const primary = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const subagent = await startRuntime(
+			SessionManager.create(cwd, sessionsDir),
+		);
+		const s = conversation(subagent);
+		s.user("subagent prompt");
+		s.done();
+		const subagentFile = subagent.session.sessionManager.getSessionFile()!;
+		const unbound = subagent.session as unknown as Record<string, unknown>;
+		for (const binding of [
+			"_extensionUIContext",
+			"_extensionCommandContextActions",
+			"_extensionShutdownHandler",
+			"_extensionErrorListener",
+		])
+			unbound[binding] = undefined;
+		await subagent.session.reload();
+
+		await primary.switchSession(subagentFile);
+
+		expect((await startRows()).slice(-3)).toEqual([
+			["startup", "primary"],
+			["startup", "secondary"],
+			["resume", "primary"],
+		]);
+	});
+
+	/**
 	 * #2129 F3: after a primary quit nothing is pending, so a subagent's own
 	 * replacement re-arms the process as its primary. The recurrence this
-	 * guards: a secondary's successor declined outside a primary's gap, which
-	 * leaves the process with no primary at all.
+	 * guards: a start declined outside a primary's gap, which leaves the
+	 * process with no primary at all.
 	 */
 	it("lets a subagent's own /reload become the primary after the primary quit", async () => {
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
