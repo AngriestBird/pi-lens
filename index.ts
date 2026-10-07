@@ -80,7 +80,9 @@ import {
 	retireScope,
 	type SessionScope,
 	scopeCell,
+	startKey,
 	stashHandoff,
+	successorStartKey,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import { registerMutationBridge } from "./clients/mutation-bridge.js";
@@ -2282,6 +2284,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3662: a `startup` start in a replacement gap is not the
 						// successor, so it must not take the primary slot.
 						sessionStartReason,
+						// #3855: nor is any start whose reason and key differ from
+						// the successor the primary's shutdown named.
+						startKey(getSessionFile(ctx), getSessionManager(ctx)),
 					);
 					ownedSessionRole = sessionStartDecision.runFullSessionStart
 						? "primary"
@@ -3834,7 +3839,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// the catalog names. Only the PRIMARY path reaches here; a secondary
 			// returned above precisely because the primary is still live.
 			// #3662: a replacement reason leaves the slot pending for its successor.
-			releasePrimarySession(shutdownReason);
+			// #3855: and names it by the key its start will compute. Read after the
+			// stash or forward above, which bind a file-less successor's ticket.
+			releasePrimarySession(
+				shutdownReason,
+				successorStartKey({
+					reason: shutdownReason,
+					sessionFile: getSessionFile(ctx),
+					targetSessionFile: shutdownEvent?.targetSessionFile,
+					sessionManager: getSessionManager(ctx),
+				}),
+			);
 			// #2467: no analyzer bootstrap may START loading from here on. A demand
 			// already in flight keeps its promise and still settles — the gate is
 			// checked only when no flight exists. Nothing is spawned, which is what

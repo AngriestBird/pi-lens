@@ -24,6 +24,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { _seedProcessSingletonCellForTests } from "../../clients/process-singletons.js";
 import {
 	_resetSessionLifecycleForTests,
 	decideSessionStart,
@@ -190,5 +191,134 @@ describe("successor-pending gap (#3662)", () => {
 			"declined",
 			"expired",
 		]);
+	});
+});
+
+/**
+ * #3855: #3668's row 17. A subagent's own replacement in the primary's gap
+ * carries a non-`startup` reason, so #3668 took it for the successor: it
+ * registered, and the real successor probed its live ctx and was demoted. The
+ * recurrences these guard: a gap start that is not the successor the primary's
+ * shutdown named classified primary, or the named successor declined (no
+ * primary at all).
+ */
+describe("only the named successor is primary in the gap (#3855)", () => {
+	beforeEach(() => {
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+
+	/** The primary starts, then shuts down for `reason`, naming `key`. */
+	function primaryNames(
+		reason: string,
+		key: string | number | undefined,
+	): void {
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		releasePrimarySession(reason, key);
+	}
+
+	const start = (reason: string | undefined, key?: string | number) =>
+		decideSessionStart(liveCtx(), `start-${String(key)}`, REPO, reason, key)
+			.classification;
+
+	for (const [reason, key] of [
+		["reload", "/s/host.jsonl"],
+		["reload", 7],
+		["fork", "/s/fork.jsonl"],
+		["new", "/s/new.jsonl"],
+		["resume", "/s/resumed.jsonl"],
+		["new", undefined],
+	] as const) {
+		it(`declines every other gap start and keeps the named ${reason} successor (${String(key)}) primary`, () => {
+			primaryNames(reason, key);
+
+			// A subagent's own replacement of each kind, with its own key or none.
+			expect(start("reload", "/s/sub.jsonl")).toBe("concurrent-secondary");
+			expect(start("fork", 99)).toBe("concurrent-secondary");
+			expect(start("resume", "/s/sub.jsonl")).toBe("concurrent-secondary");
+			if (key !== undefined)
+				expect(start("new", undefined)).toBe("concurrent-secondary");
+			expect(start("startup", key)).toBe("concurrent-secondary");
+			expect(getActiveSessionId()).toBeUndefined();
+
+			expect(start(reason, key)).toBe("primary");
+			expect(successorPendingReasons().map((entry) => entry.subject)).toEqual([
+				"not-the-successor",
+				"declined",
+			]);
+		});
+	}
+
+	it("declines a key-less start of the named reason against a ticket name (verify r2 PR8)", () => {
+		// An SDK subagent's first bind with reason `reload` in an in-memory
+		// primary's /reload gap: pi hands only the real successor the manager
+		// the stash bound, so a fresh session carries no key.
+		primaryNames("reload", 7);
+		expect(start("reload", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", 7)).toBe("primary");
+	});
+
+	it("never lets a key-less start pass for a successor named by its file", () => {
+		primaryNames("reload", "/s/host.jsonl");
+		expect(start("reload", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", "/s/host.jsonl")).toBe("primary");
+	});
+
+	it("lets a start with no reason fail safe to primary in a named gap (#3662 F8)", () => {
+		primaryNames("reload", "/s/host.jsonl");
+		expect(start(undefined, "/s/sub.jsonl")).toBe("primary");
+	});
+
+	it("keeps #3662's rule for a marker that a build without the name rewrote", () => {
+		// The older build's release rewrote the marker and left this build's
+		// earlier name behind: the name is stale, so only `startup` declines.
+		const now = Date.now();
+		_seedProcessSingletonCellForTests(
+			"session-lifecycle.primary-registration",
+			{
+				schema: "pi-lens.process-singletons",
+				version: 1,
+				value: {
+					activeCtx: undefined,
+					activeSessionId: undefined,
+					activeRoot: undefined,
+					secondarySessionCount: 0,
+					successorPendingSince: now,
+					successorNamed: {
+						since: now - 1,
+						reason: "reload",
+						key: "/s/old.jsonl",
+					},
+				},
+			},
+		);
+		expect(start("startup", undefined)).toBe("concurrent-secondary");
+		expect(start("reload", "/s/sub.jsonl")).toBe("primary");
+	});
+
+	it("names nothing after a quit: a subagent's own reload is primary (#2129 F3)", () => {
+		primaryNames("quit", undefined);
+		expect(start("reload", "/s/sub.jsonl")).toBe("primary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
+	it("records no gap decline for a subagent's own reload beside a live primary", () => {
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		expect(start("reload", "/s/sub.jsonl")).toBe("concurrent-secondary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
+	it("with the guard off a subagent's own reload in the gap is primary, as before #3662", () => {
+		process.env.PI_LENS_CONCURRENT_SESSION_GUARD = "0";
+		try {
+			primaryNames("reload", "/s/host.jsonl");
+			expect(start("reload", "/s/sub.jsonl")).toBe("primary");
+		} finally {
+			delete process.env.PI_LENS_CONCURRENT_SESSION_GUARD;
+		}
 	});
 });

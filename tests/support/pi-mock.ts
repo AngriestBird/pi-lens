@@ -16,7 +16,86 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { afterEach } from "vitest";
 import { withTimeout } from "../../clients/deadline-utils.js";
+
+/**
+ * #3855: the session manager is pi's, not the ctx's. pi 1.0.4 hands a /reload
+ * or in-memory /fork (and /clone) successor its predecessor's manager OBJECT:
+ * `AgentSession.reload()` rebuilds the extension runner from
+ * `this.sessionManager` (`core/agent-session.js`, `_buildRuntime`), the
+ * runner's ctx returns `runner.sessionManager` (`core/extensions/runner.js`,
+ * `get sessionManager()`), and the in-memory `fork()` passes
+ * `this.session.sessionManager` (`core/agent-session-runtime.js`). `/new`,
+ * resume and a persisted fork build a new one (`SessionManager.create`,
+ * `inMemory`, `open`). pi-lens keys a file-less successor by that identity
+ * (`startKey`, `clients/session-scope.ts`), so the mock must not mint a new
+ * manager per ctx there: a replacement shutdown of those kinds hands its
+ * ctx's manager to the next `session_start` of the same reason, which keeps
+ * its own id and file on that one object. Consumed by that start, replaced by
+ * the next such shutdown, and cleared after every test.
+ *
+ * Limit (verify r3 V5): this is ONE slot for the whole process, keyed by
+ * reason, where pi keeps one manager per AgentSession. Any same-kind shutdown
+ * replaces it and any same-reason start consumes it, a gap subagent's
+ * included, so the mock cannot express a subagent replacing itself, or an
+ * SDK-style bind, inside a primary's gap: such a cell reads as a false
+ * demotion here. Those cells are judged only in pi's real runtime
+ * (`tests/index-3521-fork-tree-witness.test.ts`).
+ */
+const MANAGER_STATE = Symbol("pi-mock.session-manager-state");
+interface MockSessionManager {
+	getSessionId(): string | undefined;
+	getSessionFile(): string | undefined;
+	[MANAGER_STATE]: { id: string | undefined; file: string | undefined };
+}
+let managerHandOver:
+	| { reason: string; manager: MockSessionManager }
+	| undefined;
+afterEach(() => {
+	managerHandOver = undefined;
+});
+
+function mockManagerOf(ctx: unknown): MockSessionManager | undefined {
+	try {
+		const manager = (ctx as { sessionManager?: unknown })?.sessionManager;
+		return manager &&
+			typeof manager === "object" &&
+			MANAGER_STATE in (manager as object)
+			? (manager as MockSessionManager)
+			: undefined;
+	} catch {
+		// An invalidated ctx throws on every accessor (`makeStaleCtx`).
+		return undefined;
+	}
+}
+
+function handOverManager(event: string, payload: unknown, ctx: unknown): void {
+	const { reason, targetSessionFile } = (payload ?? {}) as {
+		reason?: string;
+		targetSessionFile?: string;
+	};
+	if (event === "session_shutdown") {
+		const manager = mockManagerOf(ctx);
+		const keeps =
+			reason === "reload" ||
+			(reason === "fork" && targetSessionFile === undefined);
+		if (keeps && manager) managerHandOver = { reason, manager };
+		return;
+	}
+	if (
+		event !== "session_start" ||
+		managerHandOver === undefined ||
+		managerHandOver.reason !== reason
+	)
+		return;
+	const own = mockManagerOf(ctx);
+	if (!own) return;
+	const { manager } = managerHandOver;
+	managerHandOver = undefined;
+	manager[MANAGER_STATE] = { ...own[MANAGER_STATE] };
+	(ctx as { sessionManager: MockSessionManager }).sessionManager = manager;
+}
 
 interface RecordedFlag {
 	description?: string;
@@ -301,6 +380,7 @@ export function createPiMock(
 			await mock.emit("session_start", { type: "session_start", reason }, ctx);
 		},
 		async emit(event, payload, ctx) {
+			handOverManager(event, payload, ctx);
 			let result: unknown;
 			for (const handler of mock.getHandlers(event)) {
 				const r = await handler(payload, ctx);
@@ -395,10 +475,18 @@ export function makeCtx(
 		cwd: overrides.cwd ?? process.cwd(),
 		// Read-only session manager (#190). Tests pass `sessionId` to drive
 		// resume rehydration via `ctx.sessionManager.getSessionId()`.
-		sessionManager: {
-			getSessionId: () => overrides.sessionId,
-			getSessionFile: () => overrides.sessionFile,
-		},
+		// One object per pi session: see `handOverManager` (#3855).
+		sessionManager: (() => {
+			const manager = {
+				[MANAGER_STATE]: {
+					id: overrides.sessionId,
+					file: overrides.sessionFile,
+				},
+				getSessionId: () => manager[MANAGER_STATE].id,
+				getSessionFile: () => manager[MANAGER_STATE].file,
+			} as MockSessionManager;
+			return manager;
+		})(),
 		model: overrides.model,
 		signal: undefined,
 		isIdle: () => true,
