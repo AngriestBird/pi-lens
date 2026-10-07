@@ -206,10 +206,16 @@ LegacyFence(s) == IF s = "RG" THEN "session" ELSE TargetFence(s)
 TargetSec(s) ==
     CASE s \in {"RG", "TC", "LZ"} -> "own" [] OTHER -> "shared"
 
-\* Merged master: S2 gave the lazy-tool memory a cell per scope (#3653); a
-\* subagent's handlers still reach the module-level runtime, so its read
-\* guard and turn counter are the primary's (#3607, N2, #3613 open).
-MergedSec(s) == IF s = "LZ" THEN "own" ELSE "shared"
+\* Merged master: S2 gave the lazy-tool memory a cell per scope (#3653), and
+\* #3613 the turn state: `beginTurn` takes the turn's session id and the
+\* per-turn records are partitioned by it (`clients/runtime-coordinator.ts`).
+\* A subagent's handlers still reach the module-level runtime's read guard
+\* (#3607, F4, the rest of #3613).
+MergedSec(s) == IF s \in {"LZ", "TC"} THEN "own" ELSE "shared"
+
+\* Merged master before #3613: the turn counter and per-turn maps were the
+\* module-level runtime's too (N2).
+PreS4TurnSec(s) == IF s = "LZ" THEN "own" ELSE "shared"
 
 \* Before S2, the subagent shared everything.
 LegacySec(s) == "shared"
@@ -368,6 +374,9 @@ CellOf(t) == IF role[t] = "secondary" /\ SecPolicy("RG") = "shared"
              THEN last ELSE t
 ActCell(t) == IF role[t] = "secondary" /\ SecPolicy("LZ") = "shared"
               THEN last ELSE t
+\* The scope whose turn counter and per-turn maps a turn of scope t moves.
+TurnCellOf(t) == IF role[t] = "secondary" /\ SecPolicy("TC") = "shared"
+                 THEN last ELSE t
 
 Ents(S) == {x.e : x \in S}
 
@@ -1150,14 +1159,14 @@ TurnStart ==
                    resets, dupDone, landed, reads, predOf, lzV, adV, steps,
                    used>>
 
-\* A subagent's turn_start. onTurnStart calls runtime.beginTurn() with no
-\* role gate (onTurnStart in index.ts), which advances the primary's turn (N2).
+\* A subagent's turn_start. onTurnStart passes the turn's session id to
+\* runtime.beginTurn (#3613), which advances only that session's turn state;
+\* before it (TC shared) the call advanced the primary's turn (N2).
 SecTurn ==
     /\ "SecTurn" \in Transitions /\ turns < MaxTurns
     /\ \E s \in Tickets :
           /\ st[s] = "live" /\ role[s] = "secondary"
-          /\ LET tgt == IF SecPolicy("TC") = "own" THEN s ELSE last IN
-             turn' = [turn EXCEPT ![tgt] = @ + 1]
+          /\ turn' = [turn EXCEPT ![TurnCellOf(s)] = @ + 1]
           /\ begun' = [begun EXCEPT ![s] = @ + 1]
     /\ turns' = turns + 1
     /\ Draw
@@ -1451,14 +1460,17 @@ NoUnrecordedFalseBlock ==
 \* No guard drops a write whose own lineage is still current (shape 54).
 NoOwnDrop == ~ownDrop
 
-\* #3607 and N2: a primary transition never removes a live secondary's own
-\* facts, and a secondary's turn never moves a primary's turn.
+\* #3607, N2 and #3613: a primary transition never removes a live
+\* secondary's own facts, and every live scope's turn state is moved by its
+\* own turns only: a secondary's turn never moves the primary's, and the
+\* primary's turns and replacements never move or reset a secondary's (its
+\* per-turn records are not dropped).
 SecondaryIsolation ==
     /\ \A s \in Tickets :
           (st[s] = "live" /\ role[s] = "secondary")
               => {x \in landed : x.o = s} \subseteq cell[CellOf(s)]
-    /\ \A p \in Tickets :
-          (st[p] = "live" /\ role[p] = "primary") => turn[p] = begun[p]
+    /\ \A t \in Tickets :
+          (st[t] = "live" /\ role[t] # "-") => turn[TurnCellOf(t)] = begun[t]
 
 \* F2: the slot is taken only by a primary start that replaced the scope
 \* that wrote it.

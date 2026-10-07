@@ -24,9 +24,10 @@ Four kinds of config:
   `H3StaleNoteResume`, `H3NoteEvicted`, `H3InMemoryNewGapReload`,
   `H3SdkBind`, `H3SdkBindFileBacked`, with `namedSuccessor`; `Merged`,
   `MergedStores`, `H3Interrupted*` and `H3FileLessCarry` carry it too, with
-  `HasPrimary`). The rest register a known
-  violation of merged master until its fix flips the config to `pass`:
-  `Current` violates `SecondaryIsolation` through N2 (#3613), and
+  `HasPrimary`), and so must #3613's turn half (`MergedTurns`). The rest
+  register a known violation of merged master until its fix flips the
+  config to `pass`: `Current` violates `NoCrossSessionState` through F4
+  (the read-guard half of #3613), and
   `AcceptedSecondaryForkActivation` pins the answer #3855 gives for a
   subagent's own `/fork` (finding F6), and `AcceptedR3InMemoryNew` pins
   #3855's residual R3 (finding F7).
@@ -147,13 +148,14 @@ its handler outlived a later entry. Every config uses `TRUE` except
 **Policies are constants.** A config picks `TargetPolicy` (the merged table)
 or `LegacyPolicy` (master at df5fb8abb, before #3669 and S1-S3), `TargetFence`
 or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
-(merged master) or `LegacySec`.
+(merged master), `PreS4TurnSec` (merged master before #3613's turn half) or
+`LegacySec`.
 
 | Store | startup | /new | resume | /fork, /clone, pi --fork | /tree | /reload | shutdown | idle | Secondary: target / merged | Fence |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `RG` target | rehydrate | reset | rehydrate | import-parent | filter-by-branch (D8) | filter-by-branch (D5) | none | none | own / shared (#3613) | branch |
 | `RG` legacy | rehydrate | reset | rehydrate | reset | none | reset (N1) | none | none | shared | session |
-| `TC` | reset | reset | reset | reset | none | reset | none | none | own / shared (N2, #3613) | session |
+| `TC` | reset | reset | reset | reset | none | reset | none | none | own / own (#3613; before it shared, N2) | session |
 | `WG` guards | reset | reset | reset | carry (legacy: reset, #3589) | carry | carry | none | none | shared | none |
 | `LS` | none | none | none | none | none | none | reset | reset | shared | service |
 | `LT` lens toggles | reset | reset | reset | reset | none | reset | none | none | shared | none |
@@ -266,7 +268,7 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
 | `NoFalseBlock` | The same, over every read-guard write that completed, whether it landed or a guard dropped it. The design violates it (F1, accepted), so only `AcceptedLateRead*` and `NewestReadTreeFork` check it. |
 | `NoUnrecordedFalseBlock` | `NoFalseBlock` over the writes that left no drop record: every false block is recorded. |
 | `NoOwnDrop` | No guard drops a write whose own lineage is still current (catalog shape 54). |
-| `SecondaryIsolation` | A primary transition never removes a live subagent's own facts, and a subagent's turn never moves the primary's turn. |
+| `SecondaryIsolation` | A primary transition never removes a live subagent's own facts, and every live scope's turn state is moved by its own turns only: a subagent's turn never moves the primary's, and the primary's turns and replacements never move or reset a live subagent's (#3613). |
 | `HandoffOnce` | Every slot take is by a primary start that replaced the scope that wrote the slot. |
 | `NoCrossSessionAdoption` | Every slot take is by a start whose conversation continues the writer's (the same file on `/reload`, a copy on `/fork`), so no start adopts another session's state through the slot (#3803 hypothesis 3). |
 | `OrderMonotone` | A write-order token drawn later outranks every earlier one, across `/reload` and entry-module evaluations. |
@@ -299,7 +301,7 @@ A pass holds only inside these bounds:
 - **`/tree` only on a two-entry branch**, and it drops the last entry.
 - **One writer of each kind** begins per behaviour, one advisory per producer,
   and one activation per scope. `MaxTurns` is 0 in `Merged`, 1 in `Fix` and
-  `Current`, and 3 in `FixOrder`.
+  `Current`, 2 in `MergedTurns`, and 3 in `FixOrder`.
 - **One subagent** (file `S`, its fork `T`), no time, and tool-call ids unique
   across conversations (D4 is not modelled).
 
@@ -313,6 +315,7 @@ counterexample.
 |---|---|---|---|
 | `Merged` | merged master: every transition but a subagent's turn and its own replacement, the primary's read-guard writer | pass | 11116 |
 | `MergedStores` | merged master: activations and advisories across every transition that moves them, with a subagent | pass | 65248 |
+| `MergedTurns` | merged master with turns (#3613): a subagent's turns and the primary's turns, `/new`, resume, `/fork`, `/reload` and `/tree`, the primary's read-guard writer | pass | 23024 |
 | `H3FileBacked` | merged slot: a subagent's own `/reload` or `/fork` in the primary's gap, file-backed sessions | pass | 597 |
 | `H3FileLess` | the same, file-less sessions, with #3819's fix | pass | 597 |
 | `H3FileLessStores` | `H3FileLess` with activations and advisories: none crosses | pass | 20834 |
@@ -347,7 +350,7 @@ counterexample.
 | `Mut3855r1DemotedReplaces` | #3855 r1 (F2): the demoted user conversation's own `/reload` finds its note and is declined | violated `UserNotDeclined` | 212 |
 | `Mut3855r1StaleNote` | #3855 r1 (F3): a stale note declines the primary's resume successor; no primary | violated `HasPrimary` | 6 |
 | `Mut3855r1Evicted` | #3855 r1: an evicted note lets a gap subagent's start demote the real successor | violated `NoLostCarry` | 225 |
-| `Current` | merged master, every transition: N2, #3613 | violated `SecondaryIsolation` | 54 |
+| `Current` | merged master, every transition: F4, #3613 | violated `NoCrossSessionState` | 257 |
 | `Fix` | adopted design: every transition, a primary and a subagent reader, one turn | pass | 71419 |
 | `FixProcess` | adopted design: heartbeat and LSP work across `/new`, resume, `/reload`, idle reset, quit, `pi --fork` | pass | 24771 |
 | `FixOrder` | adopted design: widget tokens over three turns across `/new`, `/reload`, quit, `pi --fork` | pass | 319 |
@@ -379,7 +382,8 @@ counterexample.
 | `MutSettleDuringTree` | the drain writer races `/tree`, fenced at session level only | violated `NoStaleBranchWrite` | 12 |
 | `MutLspAfterIdleReset` | LSP work spawns after the idle reset | violated `NoCrossSessionState` | 8 |
 | `MutHeartbeatBeforeRegistration` | a heartbeat lands before the new registration | violated `NoCrossSessionState` | 10 |
-| `MutSecondaryTurnStart` | a subagent's `turn_start` advances the primary's turn | violated `SecondaryIsolation` | 5 |
+| `MutSecondaryTurnStart` | pre-#3613: a subagent's `turn_start` advances the primary's turn | violated `SecondaryIsolation` | 4 |
+| `MutSecondaryTurnReset` | pre-#3613: the primary's turn start or `/new` moves a live subagent's per-turn records | violated `SecondaryIsolation` | 8 |
 | `MutTreeWipesSecondary` | the primary's `/tree` filters the subagent's reads | violated `SecondaryIsolation` | 9 |
 | `MutSecondaryReadShared` | a subagent's read lands in the primary's read guard | violated `NoCrossSessionState` | 4 |
 | `MutSecondaryTakesHandoff` | a subagent's start takes the slot and discards it | violated `HandoffOnce` | 7 |
@@ -409,7 +413,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Pre3855SdkBind` | #3855 verify r2 PR8 | pre-#3855 (b9eda404c): #3668 row 17 | As above, with any non-`startup` gap start admitted. |
 | `AcceptedR3InMemoryNew` | #3855 residual R3 | master, accepted | The primary's in-memory `/new`; a subagent's own in-memory `/new` starts first in the gap with the same pair. |
 | `AcceptedSecondaryForkActivation` | #3855 (the #3835 r2 question) | master, accepted: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. |
-| `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
+| `Current` | F4, #3613 | master: a subagent's handlers reach the module-level `runtime.readGuard` | The subagent's read lands in the primary's cell. |
 | `PreS1OrderTurn` | N3; #3540 case A | pre-S1 (b456ff89c): `_writeOrderTurn += 1`, a coordinator field | A turn draws token 1, `/reload` re-evaluates the entry, and the next turn draws token 1 again. |
 | `MutWidgetDropAfterReEval` | N3's harm; #3540 | pre-S1 (b456ff89c), as above | Two turns and a widget write at token 2; after `/reload` with re-evaluation, a turn draws token 1, and the widget guard drops the live session's own write as older. |
 | `PreS2ReloadReset` | N1, under D5 | pre-S2 (ae5396e46): `resetForSession` on every primary start, no reload hand-off | A read lands, and `/reload` starts clean. |
@@ -427,15 +431,20 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `MutTreeCarries` | #3521 tree half | pre-#3669 (df5fb8abb): no `session_tree` handler | A read of entry 2 lands, then `/tree` drops entry 2 and the read stays. |
 | `MutLspAfterIdleReset` | #3576 | pre-#3602 (7101a6766): before G5's `captureLspServiceGeneration` | LSP work begins, the idle reset runs, and the work spawns a server. |
 | `MutHeartbeatBeforeRegistration` | #3498 | pre-#3593 (f2c880012): the heartbeat before #3498's fix; the lock-level detail is `formal/session-registry` | A heartbeat begins, session 1 shuts down, and the heartbeat re-registers session 1's root before session 2's registration lands. |
-| `MutSecondaryTurnStart` | N2 | master (#3613), as `Current` | As `Current`. |
+| `MutSecondaryTurnStart` | N2, #3613 | pre-#3613 (17b10c027): `onTurnStart` called `runtime.beginTurn()` with no session id (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
+| `MutSecondaryTurnReset` | #3613 | pre-#3613 (17b10c027): one per-turn warning map on the coordinator, cleared by every `beginTurn` and by `resetForSession` | The primary's turn starts while a subagent is live, so the subagent's per-turn records move (the same for the primary's `/new`). |
 | `MutSecondaryReadShared` | F4, #3613 | master: a subagent's handlers reach the module-level `runtime.readGuard` | The subagent's read lands in the primary's cell. |
 | `MutTreeWipesSecondary` | #3607 | master, the accepted residual #3521 F2 (the comment on the `session_tree` handler, `index.ts`) | The subagent's read lands, and the primary's `/tree` filters it away. |
 | `MutSettleDuringTree` | #3521 (the G10 F1 review race) | design alternative: fenced at session level with no branch epoch | A read of entry 2 begins, `/tree` drops entry 2, and the read lands. |
 | `MutSecondaryTakesHandoff` | design finding F2 | design alternative: section 3.4 as written | `/reload`'s shutdown fills the slot, and a subagent's `session_start` takes it. |
 | `MutDuplicateStart` | #2890 | pre-#2895 (745020083): no duplicate-start gate | A duplicate start re-runs the reset. |
 
-`Current` with `SecondaryIsolation` removed from its invariant list violates
-`NoCrossSessionState` (257 states): F4, the other half of #3613.
+Since #3613's turn half, `Current` holds `SecondaryIsolation` and violates
+`NoCrossSessionState` (257 states): F4, the read-guard half of #3613, still
+open. `MergedTurns` checked under `PreS4TurnSec` violates
+`SecondaryIsolation` (26 states), and `MutSecondaryTurnReset` passes under
+the invariant before #3613 (19 states): the turn clause for live subagents
+is what sees the primary's turn and reset moving their records.
 
 ## Findings
 
@@ -506,7 +515,7 @@ a file-less successor find its slot at all (`H3FileLessCarry`).
 
 **F4. Today, a subagent's read authorises the primary's edit** (#3613). The
 shared read guard puts a subagent's read in the primary's cell
-(`MutSecondaryReadShared`, and `Current` without `SecondaryIsolation`).
+(`MutSecondaryReadShared` and `Current`).
 
 **F5. An interrupted start's shutdown re-keys the slot; skipping the stash
 is not enough (#3881).** The interrupted start never adopted, so the slot
