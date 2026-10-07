@@ -767,6 +767,13 @@ the surface they bite; each block loads only when its trigger applies.
   `concurrent-secondary` skips the reset, since a subagent reset tears down the
   primary's warm state. `secondary` belongs to the shutdown classification. A process-lifetime latch cannot store a
   session fact without an explicit reset.
+- Every session-scope hand-off decision leaves one `latency.log` row per
+  lifecycle event, never one per occurrence in a loop (#3873):
+  `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`
+  (a store's `restore` returns its `StoreCarry`, items in and kept),
+  `session_scope_transition` (`end`, `demote`) and `session_end_fence_rollup`.
+  `docs/pi-lens-monitor.md` lists the fields; a new session store or hand-off
+  branch adds its row there in the same change.
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
   identity and retain dropped counts.

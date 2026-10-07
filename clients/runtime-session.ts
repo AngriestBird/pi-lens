@@ -131,7 +131,11 @@ import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
 import { resetLspMutationNoBridgeDbgLatch } from "./lsp-mutation.js";
-import type { SessionStartClassification } from "./session-lifecycle.js";
+import type {
+	ClassificationBasis,
+	SessionStartClassification,
+	SessionStartGuardDecision,
+} from "./session-lifecycle.js";
 import type { PiLensGlobalConfig } from "./lens-config.js";
 import type { PiLensProjectConfig } from "./project-lens-config.js";
 
@@ -180,6 +184,11 @@ interface SessionStartDeps {
 	/** The root-identity input that classification consulted (mirrors
 	 *  `ClassifySessionStartInput.sameRoot`). */
 	sessionStartSameRoot?: boolean;
+	/** #3873 O6: which classifier branch decided, the age of a replacement
+	 *  gap's marker and the start's match against the successor it named. */
+	sessionStartBasis?: ClassificationBasis;
+	sessionStartGapMs?: number;
+	sessionStartLineageMatch?: SessionStartGuardDecision["lineageMatch"];
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
 	astGrepClient: AstGrepClient;
@@ -2746,10 +2755,7 @@ export async function handleSessionStart(
 				// alongside `mode` — every start reaching this line already
 				// classified `primary`/`sequential-replacement` (a `secondary-root`
 				// start returns before `handleSessionStart` is ever called).
-				classification: deps.sessionStartClassification,
-				// `undefined` is omitted by JSON.stringify. Keep unknown explicit so
-				// strict log readers can distinguish it from legacy omission.
-				sameRoot: deps.sessionStartSameRoot ?? "unknown",
+				...sessionStartDecisionMetadata(deps),
 			},
 		});
 		logHostReadyDelay(deps, cwd);
@@ -3215,13 +3221,33 @@ export async function handleSessionStart(
 			mode: startupMode,
 			reason: deps.sessionReason,
 			// #2129: see the quick-mode session_start_total record above.
-			classification: deps.sessionStartClassification,
 			// Keep the full path's durable shape identical to quick mode.
-			sameRoot: deps.sessionStartSameRoot ?? "unknown",
+			...sessionStartDecisionMetadata(deps),
 		},
 	});
 	logHostReadyDelay(deps, cwd);
 	emitSmellsSessionStartLine(dbg, sessionStartMs);
+}
+
+/**
+ * What `decideSessionStart` consulted, for both `session_start_total` rows
+ * (#2129, #3873 O6). `sameRoot` is explicit when unknown, because
+ * `JSON.stringify` omits `undefined` and strict log readers must tell unknown
+ * from a legacy row. `basis` names the classifier branch, `gapMs` the age of
+ * a replacement gap's marker and `lineageMatch` the start against the
+ * successor that marker named, so a `primary` with `sameRoot: unknown` says
+ * why it was primary.
+ */
+function sessionStartDecisionMetadata(
+	deps: SessionStartDeps,
+): Record<string, unknown> {
+	return {
+		classification: deps.sessionStartClassification,
+		sameRoot: deps.sessionStartSameRoot ?? "unknown",
+		basis: deps.sessionStartBasis,
+		gapMs: deps.sessionStartGapMs,
+		lineageMatch: deps.sessionStartLineageMatch,
+	};
 }
 
 /**

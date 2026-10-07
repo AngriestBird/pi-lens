@@ -61,10 +61,37 @@ readout.
    `no-service` and `vanished` had nothing to sync; `deferred` is still queued
    for the next drift pass; `failed` did not land. The in-band
    (`--immediate-format`) caller writes the same rows as `inband_format_late_resync`
-   (#3858) with the same outcomes. It has no per-file give-up row: the budget's
-   `hook-await-exceeded` degradation `tool_result_edit:formatter-aggregate` is
-   once per session and names no file, and an Escape leaves none, so a never-settling
-   in-band formatter is not countable by file.
+   (#3858) with the same outcomes. Both callers write one
+   `format_late_resync_chained` row (`metadata.which`: `inband` or `deferred`)
+   when the give-up chains the late resync (#3873), so a give-up is countable by
+   `filePath` even for a formatter that never settles or an Escape; a chained
+   file with no later `*_format_late_resync` row on the same `filePath` is the
+   anti-join to report.
+   **Session decisions** (#3873; each row is one lifecycle event, none is per
+   occurrence in a loop): `session_handoff_slot` (`op`: `stashed`, `replaced`,
+   `taken`, `key-mismatch-left` (once per stale slot), `forwarded`,
+   `unconsumed-at-exit`; `by`,
+   `reason`, `keyHash`, `storeNames`, `ageMs`), `session_handoff_adopt` (one
+   per primary start: `tried[]` with `source`, `found`, `version`, `ageMs`,
+   `storeNames`, and `chosen`), `session_store_action` (one per declared store
+   per primary start: `action` `adopt`/`reset`/`skip`, `payloadPresent`,
+   `itemsIn`/`itemsKept`/`itemsDropped`), `session_scope_transition` with the
+   `end` (a scope superseded without a shutdown) and `demote` (a start in a
+   replacement gap that is not the successor the shutdown named: a subagent
+   that binds in the gap is one, a real successor an interrupting reload
+   displaced is another; a subagent beside a live primary writes none)
+   transitions,
+   `session_end_fence_rollup` (one per primary shutdown: `sources[]` with
+   `guarded` and `dropped`, plus totals). Read `read_guard_branch_retained` with
+   `payloadReads`: `kept 0, dropped 0` is a missing payload when `payloadReads`
+   is `null`, an empty read set at `0`, and an ignored payload when it is above
+   0 beside a `payloadVersion` that is not the current one.
+   `session_start_total` carries `basis`, `gapMs` and `lineageMatch`;
+   `agent_nudge` carries `fileKeys` (hash8), `originSessionIds`, `scopeId` and
+   `queueEpoch`, so one touch delivered in three drains is three epochs;
+   a no-client `lsp_touch_file` carries `candidates[]` (`serverId`, `rooted`,
+   `clientFound`, `generation`) for the file's primary servers only, 8 at most;
+   an auxiliary server is listed only in `clientScope: "all"` touches, the one scope that resolves its root (the with-auxiliary scope reports it in `auxiliary_readiness`).
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,
