@@ -8,4 +8,6 @@ export declare function formatTestSelection(selection: {
 	kept: number;
 	own?: number;
 	unknown?: number;
+	overBudget?: number;
+	estimatedSeconds?: number | null;
 }): string;

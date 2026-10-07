@@ -25,6 +25,7 @@ import {
 	formatCapNotice,
 	collectChangedRanges,
 	isCompiledMutationSource,
+	isDryRunTimeout,
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
@@ -32,6 +33,7 @@ import {
 	parseQueueEntry,
 	DEFAULT_MAX_TESTS,
 	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
+	MAX_DRY_RUN_SECONDS,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
@@ -39,6 +41,8 @@ import {
 	partitionMutationFiles,
 	planResample,
 	sampleRangesDeterministically,
+	TEST_FILE_OVERHEAD_SECONDS,
+	UNKNOWN_TEST_SECONDS,
 } from "./lib/stryker-diff.mjs";
 import {
 	buildCoverageProbeArgs,
@@ -58,6 +62,7 @@ import {
 	probeTestCoverage,
 	pruneIncrementalReport,
 	readProbeCoverage,
+	readProbeSeconds,
 	runProbeProcess,
 	selectionNotes,
 	selectMutationTests,
@@ -110,6 +115,17 @@ const totalMaxFiles = Number(argumentValue("--total-max-files", maxFiles));
 const shardIndex = Number(argumentValue("--shard-index", 0));
 const shardCount = Number(argumentValue("--shard-count", 1));
 const maxRanges = Number(argumentValue("--max-ranges", DEFAULT_MAX_RANGES));
+// #4092: the estimated test seconds the kept tests may add up to.
+const maxDryRunSeconds = Number(
+	argumentValue("--max-dry-run-seconds", MAX_DRY_RUN_SECONDS),
+);
+// A typo must not read as "no cap": every comparison with NaN is false.
+if (!(maxDryRunSeconds > 0)) {
+	console.error(
+		"mutation diff: --max-dry-run-seconds must be a positive number",
+	);
+	process.exit(1);
+}
 const budgetMinutes = Number(
 	argumentValue("--budget-minutes", MUTATION_BUDGET_MINUTES),
 );
@@ -349,6 +365,17 @@ function baseMeta(extra) {
 	};
 }
 
+// #4092: a dry run that outlasts Stryker's `dryRunTimeoutMinutes` is its own
+// outcome in the report (the nightly names it), not one more failed shard.
+function dryRunTimeoutMeta(output) {
+	if (!isDryRunTimeout(output)) return null;
+	return {
+		minutes: base.dryRunTimeoutMinutes,
+		tests: tests.length,
+		estimatedSeconds: testSelectionMeta?.estimatedSeconds ?? null,
+	};
+}
+
 function logSurvivors(mutants) {
 	for (const mutant of mutants.filter((entry) => entry.status === "Survived")) {
 		const location = mutant.tsLocation
@@ -398,8 +425,10 @@ let selection;
 let ownTests = [];
 try {
 	selection = mapRelatedTests(files);
-	// #3810 item 4: the PR's own test files are never dropped -- they are the
-	// tests whose survivors the author can act on. A file carrying the
+	// #3810 item 4: the PR's own test files are exempt from the count cap -- they
+	// are the tests whose survivors the author can act on -- but not from the
+	// runtime cap (#4092: in the nightly every test changed in the window is
+	// "own"). A file carrying the
 	// mutation-lane exclusion marker is excluded for its registered reason, same
 	// as a related one.
 	const partition = partitionOwnTests(allChangedPaths, {
@@ -590,17 +619,27 @@ function runProbe(test) {
 	});
 }
 
+// The test time each passing probe measured for its file (#4092): the input of
+// the runtime cap. A failed probe has no entry and is costed as unknown.
+const probeSeconds = new Map();
+
 function readCoverageOf(test) {
-	return readProbeCoverage(
-		{
-			exists: existsSync,
-			read: (file) => readFileSync(file, "utf8"),
-			remove: (directory) =>
-				rmSync(directory, { recursive: true, force: true }),
-		},
-		probeReportsDirectory(test),
-	);
+	const io = {
+		exists: existsSync,
+		read: (file) => readFileSync(file, "utf8"),
+		remove: (directory) => rmSync(directory, { recursive: true, force: true }),
+	};
+	// Before the coverage read: it removes the probe's scratch directory.
+	probeSeconds.set(test, readProbeSeconds(io, probeReportsDirectory(test)));
+	return readProbeCoverage(io, probeReportsDirectory(test));
 }
+
+const runtimeCap = {
+	seconds: probeSeconds,
+	maxSeconds: maxDryRunSeconds,
+	unknownSeconds: UNKNOWN_TEST_SECONDS,
+	fileOverheadSeconds: TEST_FILE_OVERHEAD_SECONDS,
+};
 
 rmSync(PROBE_REPORTS_ROOT, { recursive: true, force: true });
 const probePool = [...new Set([...selection.tests, ...ownTests])];
@@ -634,6 +673,7 @@ const choice = selectMutationTests({
 	priorities: selection.priorities,
 	lines: probeLines,
 	maxTests: DEFAULT_MAX_TESTS,
+	runtime: runtimeCap,
 });
 let tests = choice.kept;
 const measuredTests = tests;
@@ -643,11 +683,17 @@ testSelectionMeta = {
 	covering: choice.covering,
 	kept: choice.kept.length,
 	dropped: choice.dropped.length,
+	overBudget: choice.overBudget.length,
+	estimatedSeconds: choice.estimatedSeconds,
 	own: choice.own.length,
 	unknown: choice.unknown.length,
 };
 console.log(`mutation diff: ${formatTestSelection(testSelectionMeta)}`);
-for (const note of selectionNotes(choice, DEFAULT_MAX_TESTS)) {
+for (const note of selectionNotes(
+	choice,
+	DEFAULT_MAX_TESTS,
+	maxDryRunSeconds,
+)) {
 	console.log(`mutation diff: ${note}`);
 }
 if (tests.length === 0) {
@@ -702,12 +748,14 @@ if (measureResult.error || measureResult.status !== 0) {
 	const reason = describeStrykerFailure(measureResult, budgetMinutes, {
 		tests,
 		output: measureOutput,
+		dryRunTimeoutMinutes: base.dryRunTimeoutMinutes,
 	});
 	console.error(reason);
 	writeReport(
 		null,
 		baseMeta({
 			zeroMutants: { reason },
+			dryRunTimeout: dryRunTimeoutMeta(measureOutput),
 			filesSkippedOverCap: skipped,
 			filesUncovered: uncovered,
 			rangesTotal: allPatterns.length,
@@ -843,6 +891,7 @@ for (;;) {
 		maxTests: DEFAULT_MAX_TESTS,
 		activeSources,
 		sourceCoverage,
+		runtime: runtimeCap,
 	});
 	const attemptChoice = scopedChoice.kept.length > 0 ? scopedChoice : choice;
 	if (scopedChoice.kept.length === 0) {
@@ -857,10 +906,19 @@ for (;;) {
 		covering: attemptChoice.covering,
 		kept: tests.length,
 		dropped: new Set([...choice.dropped, ...attemptChoice.dropped]).size,
+		// The first pass's drops are not in this pass's pool (`measuredTests` is
+		// what it kept), so the report keeps their count.
+		overBudget: new Set([...choice.overBudget, ...attemptChoice.overBudget])
+			.size,
+		estimatedSeconds: attemptChoice.estimatedSeconds,
 		own: attemptChoice.own.length,
 		unknown: attemptChoice.unknown.length,
 	};
-	for (const note of selectionNotes(attemptChoice, DEFAULT_MAX_TESTS))
+	for (const note of selectionNotes(
+		attemptChoice,
+		DEFAULT_MAX_TESTS,
+		maxDryRunSeconds,
+	))
 		console.log(`mutation diff: ${note}`);
 	console.log(
 		`mutation diff: selected-source batch ${activeSources.join(", ")}; ${tests.length} of ${measuredTests.length} measured tests retained`,
@@ -931,11 +989,16 @@ for (;;) {
 		},
 	);
 
-	incrementalMeta = withReuseCount(
-		incrementalMeta,
-		existsSync(STRYKER_LOG_PATH) ? readFileSync(STRYKER_LOG_PATH, "utf8") : "",
-	);
+	const strykerLog = existsSync(STRYKER_LOG_PATH)
+		? readFileSync(STRYKER_LOG_PATH, "utf8")
+		: "";
+	incrementalMeta = withReuseCount(incrementalMeta, strykerLog);
 	rmSync(STRYKER_LOG_PATH, { force: true });
+	const failureDetails = {
+		tests,
+		output: strykerLog,
+		dryRunTimeoutMinutes: base.dryRunTimeoutMinutes,
+	};
 
 	if (result.error || result.status !== 0) {
 		// round 2 S2: a budget kill (or any other interrupt) can still leave a
@@ -977,7 +1040,11 @@ for (;;) {
 			rangesEvaluated: triedPatterns.length,
 			rangesTotal: allPatterns.length,
 			totalMutants: costEstimate?.totalMutants ?? null,
-			failureReason: describeStrykerFailure(result, budgetMinutes, { tests }),
+			failureReason: describeStrykerFailure(
+				result,
+				budgetMinutes,
+				failureDetails,
+			),
 			partialReason: describePartialMutationOutcome(result, budgetMinutes, {
 				evaluated: partialMutants.length,
 				total: costEstimate?.totalMutants ?? null,
@@ -1005,11 +1072,14 @@ for (;;) {
 				}),
 			);
 		} else {
-			console.error(describeStrykerFailure(result, budgetMinutes, { tests }));
+			console.error(
+				describeStrykerFailure(result, budgetMinutes, failureDetails),
+			);
 			writeReport(
 				null,
 				baseMeta({
 					zeroMutants: outcome.zeroMutants,
+					dryRunTimeout: dryRunTimeoutMeta(strykerLog),
 					filesSkippedOverCap: skipped,
 					filesUncovered: uncovered,
 					rangesTotal: allPatterns.length,

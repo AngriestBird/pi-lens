@@ -73,6 +73,23 @@ export const DEFAULT_MAX_RANGES = 40;
 // about mutant execution cost.
 export const DEFAULT_MAX_TESTS = 47;
 
+// #4092: the count cap above never bound the nightly. The PR's own test files
+// (every test file changed in the window) are exempt from it, so both shards of
+// run 37629970371 ran 122 test files, not 47, and the initial test run took
+// 358 s on 4 cores and 449 s on 2, past Stryker's 5-minute default. The run is
+// now also bounded by estimated runtime: each coverage probe records the test
+// time vitest reports for its file, and the kept tests are fitted into
+// MAX_DRY_RUN_SECONDS. 240 s is where the four initial runs that passed in CI
+// sat (231 to 254 s, run 37605896822), and stryker.config.mjs's
+// `dryRunTimeoutMinutes` (10) is 2.5x it. A test with no timing counts
+// UNKNOWN_TEST_SECONDS (the mean over the 122 measured files, 3.2 s) and every
+// file adds TEST_FILE_OVERHEAD_SECONDS (import and transform; 58 s over 122
+// files at 2 cores). Raw measurements:
+// tests/fixtures/mutation-dry-run-measurement.json.
+export const MAX_DRY_RUN_SECONDS = 240;
+export const UNKNOWN_TEST_SECONDS = 3.2;
+export const TEST_FILE_OVERHEAD_SECONDS = 0.5;
+
 /**
  * Wall-clock bound the driver puts on the Stryker child, in minutes. It must
  * stay strictly below .github/workflows/ci.yml's `mutation` job `timeout-minutes`, or
@@ -441,21 +458,40 @@ export function extractSnippet(sourceLines, location) {
  *
  * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
  * @param {number} budgetMinutes
+ * @param {{minutes?: number} | null} [dryRunTimeout] set when Stryker's own
+ *   initial-test-run bound fired (#4092), which no spawn error reveals
  */
-function strykerFailureCause(result, budgetMinutes) {
+function strykerFailureCause(result, budgetMinutes, dryRunTimeout = null) {
+	if (dryRunTimeout) {
+		return `the initial test run exceeded Stryker's dryRunTimeoutMinutes${dryRunTimeout.minutes === undefined ? "" : ` (${dryRunTimeout.minutes})`} before any mutant was evaluated`;
+	}
 	return result.error?.code === "ETIMEDOUT"
 		? `the ${budgetMinutes}-minute mutation budget expired before Stryker produced a result`
 		: `dry run or mutation execution failed (Stryker status ${result.status ?? "unknown"}${result.error ? `: ${result.error.message}` : ""})`;
 }
 
+// Stryker's DryRunExecutor logs this at ERROR when the initial test run passes
+// `dryRunTimeoutMinutes` (@stryker-mutator/core 3-dry-run-executor.js
+// logTimeoutInitialRun), then throws, so the child exits 1 like any other
+// dry-run failure; the text is the only discriminator (#4092).
+const DRY_RUN_TIMEOUT_RE = /Initial test run timed out!/;
+
+/**
+ * @param {string} [output] Stryker's console output or its file log
+ */
+export const isDryRunTimeout = (output = "") => DRY_RUN_TIMEOUT_RE.test(output);
+
 /**
  * @param {{status: number|null, signal?: string|null, error?: Error & {code?: string}}} result
  * @param {number} budgetMinutes
+ * @param {{tests?: string[], output?: string, dryRunTimeoutMinutes?: number}} [details]
+ *   `output` is Stryker's console text or file log: it names the failing tests
+ *   and tells a dry-run timeout (`isDryRunTimeout`) from any other failure
  */
 export function describeStrykerFailure(
 	result,
 	budgetMinutes,
-	{ tests = [], output = "" } = {},
+	{ tests = [], output = "", dryRunTimeoutMinutes } = {},
 ) {
 	const failed = [
 		...new Set(
@@ -469,7 +505,10 @@ export function describeStrykerFailure(
 		named.length > 0
 			? `; tests involved: ${named.join(", ")}`
 			: "; no related test file was identified";
-	return `mutation diff: dry run failed; no mutants evaluated; ${strykerFailureCause(result, budgetMinutes)}${suffix}`;
+	const dryRunTimeout = isDryRunTimeout(output)
+		? { minutes: dryRunTimeoutMinutes }
+		: null;
+	return `mutation diff: dry run ${dryRunTimeout ? "timed out" : "failed"}; no mutants evaluated; ${strykerFailureCause(result, budgetMinutes, dryRunTimeout)}${suffix}`;
 }
 
 /**

@@ -36,6 +36,14 @@ export default {
 	// the measured baseline before treating the command as hung.
 	timeoutMS: 60000,
 	timeoutFactor: 1.5,
+	// The initial test run's own bound; Stryker's default is 5 minutes (#4092).
+	// The nightly's 122-file selection took 358 s on 4 cores and 449 s on 2
+	// (tests/fixtures/mutation-dry-run-measurement.json), past that default on
+	// both shards of run 37629970371. The driver now caps the selection at
+	// MAX_DRY_RUN_SECONDS (scripts/lib/stryker-diff.mjs), so 10 minutes is 2.5x
+	// that estimate and 1.3x the slowest uncapped run measured; a run still past
+	// it is reported as a named dry-run timeout, not a generic failure.
+	dryRunTimeoutMinutes: 10,
 	reporters: ["clear-text", "json", "html"],
 	jsonReporter: { fileName: "reports/mutation/mutation.json" },
 	htmlReporter: { fileName: "reports/mutation/mutation.html" },
