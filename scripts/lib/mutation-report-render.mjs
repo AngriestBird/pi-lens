@@ -2,15 +2,14 @@
  * Renders the driver's `reports/mutation/mutation.json` (Stryker's own
  * report augmented with a `piLensMutationDiff` key -- see
  * scripts/stryker-diff.mjs's writeReport) as the markdown used for the job
- * summary and the sticky PR comment, and by `scripts/mutation-report.mjs`
- * for a fixer or reviewer citing PR evidence directly (#3531).
+ * summary and the nightly tracking-issue body (scripts/stryker-nightly.mjs,
+ * #4005), and by `scripts/mutation-report.mjs` for citing a report directly
+ * (#3531).
  *
  * Pure and file-I/O-free so it is unit-testable against literal report
  * fixtures; scripts/mutation-report.mjs and the workflow step are the only
  * callers that touch the filesystem.
  */
-
-const STICKY_MARKER = "<!-- pi-lens-mutation-diff -->";
 
 function shortSha(sha) {
 	return typeof sha === "string" ? sha.slice(0, 12) : "unknown";
@@ -120,13 +119,22 @@ function testCapNotice(meta) {
 	return `**Bounded evidence:** ${selection.dropped} ${selection.covering === null ? "related" : "covering"} test(s) dropped by the test cap (${selection.kept} kept). The score is from a truncated test population.`;
 }
 
+const BOUNDED_CELL_CHARS = 160;
+const clipCell = (text) =>
+	text.length > BOUNDED_CELL_CHARS
+		? `${text.slice(0, BOUNDED_CELL_CHARS)}...`
+		: text;
+
 /**
  * @param {object} report a parsed reports/mutation/mutation.json
+ * @param {{maxSurvivors?: number}} [options] `maxSurvivors` bounds the survivor
+ *   table (and clips each cell) for a destination with a size limit, such as a
+ *   GitHub issue body (#4005); the heading keeps the full count.
  * @returns {string} markdown
  */
-export function renderMutationMarkdown(report) {
+export function renderMutationMarkdown(report, { maxSurvivors } = {}) {
 	const meta = report?.piLensMutationDiff ?? {};
-	const lines = [STICKY_MARKER, "### Mutation diff (advisory)", ""];
+	const lines = ["### Mutation diff (advisory)", ""];
 
 	// round 2 R2-1: shared by the zero-mutant and the scored path below, so a
 	// run that sampled ranges down and then found nothing still SAYS it
@@ -262,14 +270,23 @@ export function renderMutationMarkdown(report) {
 		lines.push(`#### Survivors (${survivors.length})`, "");
 		lines.push("| Location | Mutator | Original → Replacement |");
 		lines.push("|---|---|---|");
-		for (const mutant of survivors) {
+		const bounded = typeof maxSurvivors === "number";
+		const shown = bounded ? survivors.slice(0, maxSurvivors) : survivors;
+		const cell = (text) => (bounded ? clipCell(text) : text);
+		for (const mutant of shown) {
 			const location = mutant.tsLocation
 				? `${mutant.tsLocation.fileName}:${mutant.tsLocation.line}`
 				: `${mutant.fileName}:${mutant.location?.start?.line ?? "?"}`;
-			const original = (mutant.original ?? "").replaceAll("|", "\\|");
-			const replacement = (mutant.replacement ?? "").replaceAll("|", "\\|");
+			const original = cell(mutant.original ?? "").replaceAll("|", "\\|");
+			const replacement = cell(mutant.replacement ?? "").replaceAll("|", "\\|");
 			lines.push(
 				`| \`${location}\` | ${mutant.mutatorName} | \`${original}\` → \`${replacement}\` |`,
+			);
+		}
+		if (shown.length < survivors.length) {
+			lines.push(
+				"",
+				`_Showing the first ${shown.length} of ${survivors.length} survivors; the full list is in the \`mutation-report\` workflow artifact (kept 90 days)._`,
 			);
 		}
 		lines.push("");
@@ -287,46 +304,3 @@ export function renderMutationMarkdown(report) {
 
 	return lines.join("\n");
 }
-
-/**
- * Renders the sticky comment's body when THIS head produced no artifact to
- * download at all (round 2 T6): the driver crashed before `writeReport`, or
- * the job hit its 90-minute `timeout-minutes` cap outright. Without this,
- * the comment job's download step simply has nothing to post, and an
- * earlier head's report -- now stale, about a commit this PR no longer is
- * -- stays up with no indication it no longer applies to the current head.
- * Carries the same `STICKY_MARKER` so a later successful run still finds
- * and updates this same comment rather than posting a second one.
- *
- * `upstreamResult` (round 2 R2-4), when the caller can supply it (the
- * `mutation-comment` workflow job passes `needs.mutation.result`),
- * distinguishes a run GitHub reports as `cancelled` from one that failed
- * outright. Round 4: `cancelled` itself is ambiguous -- GitHub reports a job
- * that ran past its own `timeout-minutes` as `cancelled` too, the same
- * result the new per-PR concurrency group produces when a newer push
- * supersedes it, and this job has no way to tell those two apart -- so the
- * `cancelled` wording names both possibilities rather than picking one. With
- * no `cancelled` result at all, the wording stays neutral instead of
- * guessing "crashed" for what may equally be either of those.
- *
- * @param {{headSha?: string, runUrl?: string, upstreamResult?: string}} [context]
- * @returns {string} markdown
- */
-export function renderStaleMarkdown({ headSha, runUrl, upstreamResult } = {}) {
-	const cause =
-		upstreamResult === "cancelled"
-			? "cancelled: a newer push superseded it, or the job hit its time limit"
-			: "a crash or hitting its overall time cap are both possible";
-	const lines = [
-		STICKY_MARKER,
-		"### Mutation diff (advisory)",
-		"",
-		`**Stale.** This head (\`${shortSha(headSha)}\`) produced no mutation report -- ${cause} (distinct from the driver's own, narrower Stryker budget, which always writes a report even when Stryker itself times out).`,
-		"",
-		"This comment has just been updated to say so; any result it previously showed was for a different, earlier commit and no longer reflects this PR's current head.",
-	];
-	if (runUrl) lines.push("", `[Job run](${runUrl})`);
-	return lines.join("\n");
-}
-
-export { STICKY_MARKER };

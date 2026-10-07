@@ -84,12 +84,14 @@ mechanically enforced rather than relied on.
 - **Test workers.** `PI_LENS_TEST_MAX_WORKERS` caps the vitest worker-fork
   count (`vitest.config.ts`); set it (`=6` is what CI and agent worktrees use)
   on a memory-constrained host to avoid an OOM under a full or targeted run.
-- **Mutation testing.** `npm run mutation:diff` runs Stryker over only the
-  lines changed against `origin/master` (`scripts/stryker-diff.mjs
-  --base origin/master --max-files 6`), bounded to a
-  `--budget-minutes`/`MUTATION_BUDGET_MINUTES` wall-clock budget (60 minutes
-  by default). See "Mutation output is quoted, not ticked" in `AGENTS.md` for
-  when a mutation proof is required.
+- **Mutation testing.** The PR proof is hand mutation of each new guard (see
+  "Mutation output is quoted, not ticked" in `AGENTS.md`). Stryker is not a PR
+  check: `.github/workflows/stryker-nightly.yml` runs it nightly on master over
+  the runtime diff since the last report and updates one tracking issue.
+  `npm run mutation:diff` runs the same driver locally
+  (`scripts/stryker-diff.mjs --base origin/master --max-files 6`), bounded to a
+  `--budget-minutes`/`MUTATION_BUDGET_MINUTES` wall-clock budget (60 minutes by
+  default); never run it in a shared worktree.
 - **Release QA.** `node scripts/release-qa.mjs` runs the pre-release
   readiness pass documented in `docs/release-qa-baseline.md` and
   `.claude/skills/release-qa/SKILL.md`; there is no `npm run` alias.

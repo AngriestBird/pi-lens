@@ -30,12 +30,14 @@ export interface TargetedTestSelection {
 	totalBeforeCap: number;
 	/** CI-only suites removed from `selected` for the local pre-push caller. */
 	excludedCiOnly: string[];
+	/** Tests only the history pass added (#3215 lane 3). */
+	fromHistory: string[];
 }
 
 export function selectTargetedTests(
 	changed: string[],
 	allTests: string[],
-	options?: { includeCiOnly?: boolean },
+	options?: { includeCiOnly?: boolean; historyPicks?: string[] },
 ): TargetedTestSelection;
 
 export function main(): Promise<number>;

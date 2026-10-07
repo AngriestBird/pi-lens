@@ -59,14 +59,15 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   observability, and class-sweep coverage. The issue reference goes in the PR
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
-- Mutation acceptance has two layers (#3973): every new guard, branch,
-  filter, cap, or fallback has bounded compile-valid hand-mutation proof under
-  the engineering principles; sampled Stryker is exploratory and advisory.
-  Triage exact-head behavioural survivors through real callers as killed,
-  equivalent (with bounded evidence), or unresolved (with reason and owner).
-  A demonstrated correctness gap or missing required guard proof blocks merge;
-  score, incidental survivors, and unevaluated population alone do not. Disclose
-  stale, absent, partial, and zero-mutant reports; never call them clean.
+- Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
+  new guard, branch, filter, cap, or fallback has bounded compile-valid
+  hand-mutation proof under the engineering principles, and a missing proof or
+  a demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
+  comment, or `MUTATION` line to read. Stryker runs nightly on master as an
+  exploratory test-adequacy report (`.github/workflows/stryker-nightly.yml`,
+  one rolling tracking issue); its survivors are candidates for a missing
+  test, read through real callers by whoever picks them up, and never a merge
+  input or a duty of a fixer or reviewer.
 - A declared behaviour-preserving refactor proves itself with an old-versus-new
   probe table through the built seam plus a shared-seam mutation that reds a
   caller-side witness; a passing pre-fix run is expected there.
@@ -400,6 +401,10 @@ the surface they bite; each block loads only when its trigger applies.
     build, and run every test that mentions the field or the registry; this
     sweep is manual (#3994 F1, r3). Tests take "an unmeasured server" from a
     class the generator never touches, never a hard-coded id.
+    A removed or demoted CI job is the same shape: before deleting it, list
+    every consumer of its check name, comment marker and ci-verdict line (job
+    and gate pins, advisory and deferred allowlists, contracts, PR template) and
+    give each a disposition in the PR body (#4005).
 
 </important>
 
@@ -831,8 +836,8 @@ node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
 ```
 
-CI cost gates (#3801). The heavy advisory jobs (`mutation (advisory)`, `Unit
-tests Windows (advisory)`) start only after every required check passed on the
+CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
+`Unit tests Windows (advisory)`) start only after every required check passed on the
 head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
 or unfinished at its deadline). ci-verdict lists them with their real state
 (PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
