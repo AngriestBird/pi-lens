@@ -180,18 +180,21 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			path.join(fixtureDir as string, "node_modules"),
 			"dir",
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "vitest.config.ts"),
-			path.join(fixtureDir as string, "vitest.config.ts"),
+		write(
+			"vitest.config.ts",
+			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
 		);
-		fs.symlinkSync(
-			path.join(repoRoot, "package.json"),
-			path.join(fixtureDir as string, "package.json"),
-		);
+		write("package.json", '{"type":"module"}\n');
 		write("clients/first.ts", "export const first = true;\n");
-		write("tests/clients/first.test.ts", "it('first', () => {});\n");
+		write(
+			"tests/clients/first.test.ts",
+			"import { it } from 'vitest'; it('first', () => {});\n",
+		);
 		write("clients/second.ts", "export const second = true;\n");
-		write("tests/clients/second.test.ts", "it('second', () => {});\n");
+		write(
+			"tests/clients/second.test.ts",
+			"import { it } from 'vitest'; it('second', () => {});\n",
+		);
 		const git = (args: string[]) =>
 			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
 		git(["init", "--quiet", "--initial-branch=main"]);
@@ -212,10 +215,7 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 
 		const result = spawnSync(
 			process.execPath,
-			[
-				path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
-				"--skip-build",
-			],
+			[path.join(scriptDir, "pre-push-targeted-tests.mjs"), "--skip-build"],
 			{
 				cwd: fixtureDir,
 				encoding: "utf8",
@@ -225,6 +225,10 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("tests/clients/first.test.ts");
 		expect(result.stdout).toContain("tests/clients/second.test.ts");
+		// #4086 recurrence: a fixture suite reports green without running vitest
+		// when the pre-push script reaches with-test-lock through a symlinked
+		// scripts/ directory. The known fixture test must appear in real output.
+		expect(result.stdout).toContain("2 passed");
 	});
 });
 

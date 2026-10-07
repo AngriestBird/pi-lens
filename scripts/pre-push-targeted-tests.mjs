@@ -44,6 +44,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
 	renameSync,
 	statSync,
 	unlinkSync,
@@ -835,17 +836,20 @@ export async function main() {
 }
 
 // Only run the CLI when this file is the entry point — not when a test
-// imports it to exercise selectTargetedTests/etc. directly. Mirrors
-// with-test-lock.mjs's own isEntryPoint (win32 case-insensitive fallback
-// included for the same reason: a differently-cased invocation path still
-// resolves to this file on Windows's default case-insensitive filesystem).
+// imports it to exercise selectTargetedTests/etc. directly. Resolve both
+// sides through symlinks so a linked `scripts/` directory still reaches the
+// CLI, and fail loudly if either path cannot be resolved.
 function isEntryPoint() {
 	if (!process.argv[1]) return false;
-	const invoked = path.resolve(process.argv[1]);
-	const self = fileURLToPath(import.meta.url);
-	if (invoked === self) return true;
-	if (process.platform !== "win32") return false;
-	return invoked.toLowerCase() === self.toLowerCase();
+	try {
+		const invoked = realpathSync.native(process.argv[1]);
+		const self = realpathSync.native(fileURLToPath(import.meta.url));
+		return invoked === self;
+	} catch (error) {
+		throw new Error(
+			`[pre-push] cannot resolve its entry-point path: ${error instanceof Error ? error.message : error}`,
+		);
+	}
 }
 
 if (isEntryPoint()) {

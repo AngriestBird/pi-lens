@@ -309,33 +309,20 @@ async function main() {
 // Only run the CLI when this file is the entry point — not when a test
 // imports it to exercise `quoteForWindowsCmd`/`resolveVitestEntry` directly.
 // A silent MISMATCH here is a silent-success failure mode: `npm test` would
-// exit 0 having run zero tests, with nothing printed to say why. A plain
-// case-sensitive compare is wrong on win32, whose default filesystems are
-// case-insensitive (a differently-cased invocation path, or an 8.3 short
-// name, both resolve to the same file but wouldn't string-equal it).
+// exit 0 having run zero tests, with nothing printed to say why. Resolve both
+// sides through symlinks before comparing so a linked `scripts/` directory
+// still reaches the CLI, and fail loudly if either path cannot be resolved.
 function isEntryPoint() {
 	if (!process.argv[1]) return false;
-	const invoked = path.resolve(process.argv[1]);
-	const self = fileURLToPath(import.meta.url);
-	if (invoked === self) return true;
-	if (process.platform !== "win32") return false;
-	if (invoked.toLowerCase() === self.toLowerCase()) return true;
-	// Casing-fold still misses an 8.3 short-name invocation (e.g.
-	// `WITH-T~1.MJS`), which mangles more than just case. Rather than
-	// silently no-op, fall back to a basename match and warn loudly — a
-	// false positive here (running when we technically shouldn't) is far
-	// safer than the alternative (silently not running at all).
-	if (
-		path.basename(invoked).toLowerCase() === path.basename(self).toLowerCase()
-	) {
-		console.error(
-			"[with-test-lock] warning: argv[1] did not exactly match this file's " +
-				"resolved path (possible Windows 8.3 short-name or casing mismatch) " +
-				"— running anyway based on a basename match",
+	try {
+		const invoked = fs.realpathSync.native(process.argv[1]);
+		const self = fs.realpathSync.native(fileURLToPath(import.meta.url));
+		return invoked === self;
+	} catch (error) {
+		throw new Error(
+			`[with-test-lock] cannot resolve its entry-point path: ${error instanceof Error ? error.message : error}`,
 		);
-		return true;
 	}
-	return false;
 }
 const isMain = isEntryPoint();
 if (isMain) {
