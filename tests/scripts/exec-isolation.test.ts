@@ -86,6 +86,7 @@ describe("buildIsolatedExecInvocation (#2593)", () => {
 			"--prefix",
 			"/fake/prefix",
 			"--yes",
+			"--allow-scripts=some-pkg@1.2.3",
 			"--package",
 			"some-pkg@1.2.3",
 			"--",
@@ -93,5 +94,28 @@ describe("buildIsolatedExecInvocation (#2593)", () => {
 			"--flag",
 		]);
 		expect(options).toEqual({ cwd: "/fake/cwd", stdio: "inherit" });
+	});
+
+	// Recurrence: master red at b9eda404c (#4028). The outer
+	// `npm install --strict-allow-scripts` runs `prepare` -> bundle:dist, and npm
+	// hands the strict policy to every lifecycle child through its environment.
+	// The nested `npm exec --prefix <empty dir>` reads no package.json, so no
+	// allowScripts policy: `esbuild@0.28.1 (postinstall: node install.js)` was
+	// "not covered" and the whole install failed (ESTRICTALLOWSCRIPTS). The spawn
+	// must approve exactly the one package spec it installs: not a wildcard, not
+	// a bypass, and not a version other than the one --package names.
+	it("approves exactly its own package spec for lifecycle scripts, never a wildcard or a bypass", () => {
+		const { argv } = buildIsolatedExecInvocation({
+			npmCli: "/fake/npm-cli.js",
+			execPrefix: "/fake/prefix",
+			cwd: "/fake/cwd",
+			packageSpec: "esbuild@0.28.1",
+			execArgv: ["esbuild"],
+		});
+		const approvals = argv.filter((a) => a.startsWith("--allow-scripts"));
+		expect(approvals).toEqual(["--allow-scripts=esbuild@0.28.1"]);
+		expect(argv).not.toContain("--dangerously-allow-all-scripts");
+		// The approval precedes `--`: after it npm would hand it to the binary.
+		expect(argv.indexOf(approvals[0] ?? "")).toBeLessThan(argv.indexOf("--"));
 	});
 });
