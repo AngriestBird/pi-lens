@@ -30,7 +30,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -794,10 +794,79 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 		try {
 			const result = runHook(`git worktree remove ${tree}`);
 			expect(result.status).toBe(2);
-			expect(result.stderr).toContain("worktree");
+			expect(result.stderr).toContain("rm <tree>/node_modules");
 		} finally {
 			rmSync(tree, { recursive: true, force: true });
 			rmSync(shared, { recursive: true, force: true });
+		}
+	});
+
+	const BROKEN_CHAIN_ROWS = [
+		{
+			label: "self-loop",
+			setup: (tree: string) =>
+				symlinkSync("node_modules", join(tree, "node_modules")),
+		},
+		{
+			label: "two-cycle",
+			setup: (tree: string) => {
+				const nodeModules = join(tree, "node_modules");
+				const inner = join(tree, "inner");
+				symlinkSync("inner", nodeModules);
+				symlinkSync("node_modules", inner);
+			},
+		},
+		{
+			label: "dangling in-project link",
+			setup: (tree: string) => {
+				const inner = join(tree, "inner");
+				symlinkSync("inner", join(tree, "node_modules"));
+				symlinkSync("missing", inner);
+			},
+		},
+		{
+			label: "ENOTDIR",
+			setup: (tree: string) => {
+				writeFileSync(join(tree, "package.json"), "{}\n");
+				symlinkSync("package.json/child", join(tree, "node_modules"));
+			},
+		},
+	] as const;
+
+	it.each(BROKEN_CHAIN_ROWS)(
+		"fails closed for $label chains across npm and delete callers (#4080)",
+		({ setup }) => {
+			const tree = mkdtempSync(
+				join(tmpdir(), "pi-lens-guard-bash-broken-chain-"),
+			);
+			writeFileSync(join(tree, "package.json"), "{}\n");
+			setup(tree);
+			try {
+				for (const command of [
+					"npm ci",
+					"rm -rf node_modules/",
+					"rm -rf node_modules/*",
+				]) {
+					const result = runHook(command, BASE_ENV, tree);
+					expect(result.status, command).toBe(2);
+					expect(result.stderr, command).toMatch(/#4044|#3173/);
+				}
+			} finally {
+				rmSync(tree, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("fails closed for a dangling in-project chain on git worktree remove (#4080)", () => {
+		const tree = makeWorktreeDir("guard-bash-worktree-dangling-chain-");
+		symlinkSync("inner", join(tree, "node_modules"));
+		symlinkSync("missing", join(tree, "inner"));
+		try {
+			const result = runHook(`git worktree remove ${tree}`);
+			expect(result.status).toBe(2);
+			expect(result.stderr).toContain("#3173");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
 		}
 	});
 
@@ -997,6 +1066,27 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 			}
 		} finally {
 			cleanup();
+		}
+	});
+
+	it("allows a chain whose first hop leaves the lane but resolves back inside (#4080)", () => {
+		const tree = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-inside-chain-"),
+		);
+		const outsideSpelling = join(dirname(tree), `${basename(tree)}-link`);
+		mkdirSync(join(tree, "inner"));
+		symlinkSync(tree, outsideSpelling);
+		symlinkSync(
+			join("..", basename(outsideSpelling), "inner"),
+			join(tree, "node_modules"),
+		);
+		try {
+			const result = runHook("npm ci", BASE_ENV, tree);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+			unlinkSync(outsideSpelling);
 		}
 	});
 
