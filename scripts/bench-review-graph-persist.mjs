@@ -12,30 +12,37 @@
  *
  *   - main-thread time: the sum of the phases that hand the graph to the
  *     worker, each timed around its own call (a big `JSON.stringify`, a big
- *     `TextEncoder.encode`, and `Worker.prototype.postMessage`). Before the fix
- *     that is the structured clone inside `postMessage`; after, it is the
- *     stringify plus the encode plus a near-free transfer. The persist site
- *     also reports the worst event-loop gap over the timer callback;
+ *     `TextEncoder.encode`, and `Worker.prototype.postMessage`). In the shipped
+ *     tree that is the structured clone inside `postMessage`. A tree that
+ *     transfers serialized bytes instead (e9dcfaba7, never shipped) pays the
+ *     stringify plus the encode plus a near-free transfer, and its runs read
+ *     `isBytes: true`. The persist site also reports the worst event-loop gap
+ *     over the timer callback;
  *   - RSS jump: peak process RSS (sampled every ~1 ms from a SEPARATE thread, so
  *     a blocked main thread cannot hide a peak) minus the RSS right before the
  *     hand-off, up to the moment the promoted stage file lands.
  *
  * MATERIALITY THRESHOLD, fixed before the first measurement (#3648): moving
  * `JSON.stringify` to the main thread is a regression only if, at a site, the
- * after-tree median main-thread time per persist exceeds 1.5x the before-tree
- * median AND the absolute increase is more than 100 ms. Either condition alone
- * is noise on a shared box. If that fires the change must not ship.
+ * transferring tree's median main-thread time per persist exceeds 1.5x the
+ * structured-clone tree's median AND the absolute increase is more than
+ * 100 ms. Either condition alone is noise on a shared box. If that fires the
+ * transfer must not ship, and it did not (the persist site tripped it in all
+ * three rounds).
  *
  * Run after `npm run build`; one fresh child per site so one site's heap never
  * colours the other:
  *
  *   node scripts/bench-review-graph-persist.mjs \
- *     [--sites persist,checkpoint] [--files 3600] [--persists 5] \
- *     [--label <tree>] [--out <file.json>]
+ *     [--sites persist,checkpoint,checkpoint-control] [--files 5000] \
+ *     [--persists 5] [--label <tree>] [--out <file.json>]
  *
- * The committed artifact `tests/fixtures/review-graph-persist-measurement.json`
- * is this script's raw output for the before and after trees;
- * `tests/clients/review-graph-persist-measurement.test.ts` pins it.
+ * The committed artifacts under `tests/fixtures/review-graph-persist-measurement/`
+ * are this script's raw output: the `before-*` rounds are the shipped
+ * structured-clone code (ca7e89066), the `after-*` rounds are the byte-transfer
+ * tree e9dcfaba7, which is history only. Run on the current tree, this script
+ * measures the clone code, so it reproduces the `before-*` rows, not `after-*`.
+ * `tests/clients/review-graph-persist-measurement.test.ts` pins them.
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -44,6 +51,7 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import { gunzipSync } from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -236,7 +244,7 @@ async function runChild(site, fileCount, persists) {
 	const touched = writeSyntheticTree(cwd, fileCount);
 	// The tree sits under the worktree's ignored `.probe-home/`; its own repo keeps
 	// the source walk from inheriting that ignore rule.
-	spawnSync("git", ["init", "-q"], { cwd });
+	gitExecFileSync(["init", "-q"], { cwd });
 	const builderUrl = pathToFileURL(
 		path.join(root, "clients", "review-graph", "builder.js"),
 	).href;
@@ -430,14 +438,14 @@ async function main() {
 		const site = readArg("--child", "persist");
 		const result = await runChild(
 			site,
-			Number(readArg("--files", "3600")),
+			Number(readArg("--files", "5000")),
 			Number(readArg("--persists", "5")),
 		);
 		process.stdout.write(`${JSON.stringify(result)}\n`);
 		process.exit(0);
 	}
 	const sites = readArg("--sites", "persist,checkpoint").split(",");
-	const fileCount = Number(readArg("--files", "3600"));
+	const fileCount = Number(readArg("--files", "5000"));
 	const persists = Number(readArg("--persists", "5"));
 	const baseHome = path.resolve(
 		readArg("--home", path.join(root, ".probe-home", "bench-review-graph")),

@@ -1,12 +1,17 @@
 /**
- * #3913 measured-constant pin (#3648): the claim "moving the review graph's
- * stringify to the main thread costs about twice the structured clone it
- * replaces at the authoritative-persist site" rests on the raw output of
+ * #3913 measured-constant pin (#3648): the decision NOT to ship a byte transfer
+ * for the review graph's persist sites rests on the raw output of
  * `scripts/bench-review-graph-persist.mjs`, kept in
- * `tests/fixtures/review-graph-persist-measurement/`. This file reads those
- * artifacts; it never re-measures (a wall-clock assertion on a shared runner
- * would flake). It pins the artifacts' provenance and the verdict the bench
- * header's materiality rule gives them, not the code.
+ * `tests/fixtures/review-graph-persist-measurement/`. The `before-*` rounds are
+ * the shipped structured-clone code (ca7e89066); the `after-*` rounds are the
+ * byte-transfer tree e9dcfaba7, kept in history only. At the persist site
+ * stringify plus encode on the main thread cost about twice the clone they
+ * would replace, which trips the pre-registered rule. Nothing here records a
+ * shipped gain.
+ *
+ * This file reads the artifacts; it never re-measures (a wall-clock assertion
+ * on a shared runner would flake). It pins their provenance and the verdict the
+ * bench header's materiality rule gives them, not the code.
  *
  * Recurrences this prevents:
  *  - a hand-edited or stale artifact whose summary no longer follows from its
@@ -72,7 +77,7 @@ const site = (round: Round, name: Result["site"]) => {
 const fires = (afterMs: number, beforeMs: number) =>
 	afterMs > beforeMs * 1.5 && afterMs - beforeMs > 100;
 
-describe("review-graph persist measurement artifacts (#3913)", () => {
+describe("review-graph persist measurement artifacts, transfer not shipped (#3913)", () => {
 	it("holds three rounds per tree from one command on one input", () => {
 		for (const [rounds, label] of [
 			[before, "before"],
@@ -136,7 +141,7 @@ describe("review-graph persist measurement artifacts (#3913)", () => {
 		}
 	});
 
-	it("trips the materiality rule at the persist site in every round", () => {
+	it("trips the rule that blocked the transfer at the persist site in every round", () => {
 		for (const [index, afterRound] of after.entries()) {
 			const afterMs = site(afterRound, "persist").summary.medianMainThreadMs;
 			const beforeMs = site(before[index], "persist").summary
@@ -170,7 +175,7 @@ describe("review-graph persist measurement artifacts (#3913)", () => {
 		}
 	});
 
-	it("shows the persist RSS win is in the tail, not the typical persist", () => {
+	it("shows the transfer's persist RSS gain was in the tail, not the typical persist", () => {
 		for (const [index, afterRound] of after.entries()) {
 			const afterSummary = site(afterRound, "persist").summary;
 			const beforeSummary = site(before[index], "persist").summary;
