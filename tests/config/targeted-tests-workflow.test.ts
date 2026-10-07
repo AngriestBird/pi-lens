@@ -695,7 +695,7 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			step.uses?.startsWith("actions/setup-node@"),
 		);
 		expect(setupNode?.uses).toBe(
-			"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 		);
 	});
 
