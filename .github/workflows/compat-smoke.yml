@@ -115,7 +115,8 @@ jobs:
       # search keeps finding it regardless of which outcome kind is current.
       - name: Alert on contract drift or infra failure (create-or-update tracking issue)
         if: >-
-          always() && (steps.layer_a.outcome == 'failure' ||
+          always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') &&
+          (steps.layer_a.outcome == 'failure' ||
           steps.layer_b.outcome == 'failure' ||
           (steps.layer_a.outcome == 'success' && steps.layer_b.outcome == 'success'))
         # Tracker maintenance must not mask the smoke job's own verdict.

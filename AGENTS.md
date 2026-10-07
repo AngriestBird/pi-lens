@@ -277,6 +277,17 @@ the surface they bite; each block loads only when its trigger applies.
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
+61. **Stand-in for unknown text stripped per consumer:** when a lexer leaves a
+    placeholder for text it cannot know (a command substitution's output),
+    read the input under each bounding assumption rather than teaching each
+    consumer to ignore the placeholder: empty (the text the rules matched
+    before it existed) and opaque (no rule word matches it, no path resolves
+    through it), denying if either reading denies. Enforced by `findDeny` in
+    `scripts/hooks/guard-bash.mjs`, pinned by the "substitution next to a rule
+    word (#3997)" rows in `tests/scripts/guard-bash-hook.test.ts`. Recurrence:
+    #3997 round 3 stripped the mark at three call sites and left
+    `checkUngated`, `mktemp` flags, and `git $(:) stash` open.
+
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit (call continuations, block-comment and
     template-literal interiors; #3038, #3039, #3052, #3059, #3116). Name which
@@ -302,6 +313,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 13. **Wrong failure classification:** derive availability and verdicts from raw
     evidence; preserve the classifier and evidence when a caller asserts a fact.
+    Runner log parsers tolerate ANSI control sequences, padding, and CRLF before
+    extracting a count; the exact Windows bytes are pinned by
+    `tests/config/windows-vitest-failure-count.test.ts` and the shared parser is
+    `scripts/lib/windows-vitest-failure-count.mjs`.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -718,7 +733,8 @@ the surface they bite; each block loads only when its trigger applies.
 
 - Git command classification has one lexer and one guarded-verb matcher seam.
   Unknown wrappers and indirect guarded verbs fail closed. Text-consumer
-  allowances recurse through command substitutions and execution contexts.
+  allowances recurse through command substitutions and execution contexts. A
+  substitution's output is read both empty and opaque (shape 61).
 - The commit gate reads two states: the inline-blocker map's latch
   (`RuntimeCoordinator`), then the persisted `turn-end-findings` record. A
   collect-later runner's blocking findings join the map through
@@ -823,6 +839,7 @@ npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
 npm run check:lockfile                lockfile consistency
+npm run check:allow-scripts           allowScripts policy vs the resolved lockfile (#1185)
 npm run changelog:check               rollup check; fragments use check-changelog-fragments.mjs
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
@@ -1042,7 +1059,9 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 Every agent `Bash` call under Claude Code runs through
 `scripts/hooks/guard-bash.mjs` (`PreToolUse`), which denies with its reason:
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
-or any remove over a symlinked `node_modules`; an unpinned `node` probe loading
+or any remove over a symlinked `node_modules` or over a path it cannot resolve
+statically (`$(…)`, `~user`, an unset `$VAR`, a glob; #3988), where `~`, `$HOME`
+and relative paths (against a preceding `cd`/`git -C`) are resolved first; an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
 `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe

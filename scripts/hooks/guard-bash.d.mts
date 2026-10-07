@@ -8,6 +8,7 @@ export type DenyRule =
 	| "reset"
 	| "worktreeForce"
 	| "worktreeSymlink"
+	| "worktreeUnresolved"
 	| "probe"
 	| "tmpdirCollision"
 	| "sharedKill"

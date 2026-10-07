@@ -179,12 +179,8 @@ const grammarHeavyInclude = [
 // smaller one) has already fully drained, so the sampler only ever
 // contends with (at most) one other file in this group.
 const timingSensitiveInclude = [
-	// Real node child-process barrier race for #2173; process scheduling makes
-	// this unsuitable for the default fork storm.
-	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cooperative-budget.test.ts",
 	"tests/clients/instance-registry-lock.test.ts",
-	"tests/clients/instance-registry-race.test.ts",
 	"tests/clients/loop-block-stall-discrimination.test.ts",
 	// Workspace-edit planning also uses the independent occupancy sampler; keep
 	// its measurement window out of the default fork storm while the guard still
@@ -384,6 +380,10 @@ export const realHarnessInclude = [
 export const wallClockBudgetInclude = [
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
+	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)
+	// scaling ratio of real clock deltas (flake-shape admission); the yield-count
+	// cases ride along. No sampler, so it does not belong in the timing-sensitive lane.
+	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",
 	"tests/clients/config-diagnostic-codes.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts",
@@ -397,6 +397,12 @@ export const wallClockBudgetInclude = [
 	// #3538/#3539: real children stand for the pids the reaper judges and
 	// kills (flake-shape admission).
 	"tests/clients/instance-reaper-pid-reuse.test.ts",
+	// #4046 interim: six real Node writers rendezvous on an OS barrier and
+	// contend through the production cross-process registry lock. Keep this
+	// real-spawn race in the fully serialized phase so it cannot overlap the
+	// timing-sensitive occupancy sampler; the investigation estimates ~4 s
+	// of serial cost.
+	"tests/clients/instance-registry-race.test.ts",
 	// #2507: a real headless child whose own exit decision is the subject — it
 	// must not drain mid `lsp_diagnostics`, and must still exit by itself
 	// afterwards. Real child spawn (flake-shape admission), and it also spawns a
@@ -489,6 +495,9 @@ export const wallClockBudgetInclude = [
 	"tests/scripts/changelog-entries.test.ts",
 	// #2807 review F1/F4: the checker must be exercised through its real local
 	// CLI and a real shallow clone, not an in-process substitute.
+	// #1185: the committed checker CLI (exit code, report, cwd contract) is the
+	// subject; an in-process call of the pure policy cannot prove that boundary.
+	"tests/scripts/check-allow-scripts.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
 	// #3883 F3: the final `ci-verdict: exit` line is emitted by the real
 	// `main()` process; the spawn is the only faithful proof of that boundary.
@@ -497,6 +506,9 @@ export const wallClockBudgetInclude = [
 	// spawns of scripts/classify-ci-failure.mjs, asserting exit code and argv
 	// wiring the library-level suite (in-process) cannot see.
 	"tests/scripts/classify-ci-failure-cli.test.ts",
+	// #4030: the real `gh` process boundary is the subject of the retry test;
+	// serialize it with other child-process admissions.
+	"tests/scripts/download-test-history-artifacts.test.ts",
 	"tests/scripts/git-fixture-env.test.ts",
 	// #2699: the subject is the guard's own stdin/exit-code/stderr contract --
 	// what Claude Code actually invokes for a PreToolUse hook. No in-process

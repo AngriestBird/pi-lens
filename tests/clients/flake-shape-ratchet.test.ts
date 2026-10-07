@@ -253,6 +253,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the reaper's evidence is a real pid's command line, kernel start time and inherited environment; a double would encode the very identity guess the fix removes",
 	},
+	// #4046 interim: six real Node writers rendezvous on an OS barrier and
+	// persist registrations through the production cross-process lock; an
+	// in-process double cannot reproduce the race, and serialization prevents
+	// it from overlapping the timing-sensitive occupancy sampler.
+	"real-process-spawn:clients/instance-registry-race.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"six real Node writers must rendezvous on an OS barrier and contend through the production cross-process lock; an in-process double cannot reproduce the race",
+	},
 	"real-process-spawn:clients/lsp/headless-tool-call-keepalive.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -423,6 +432,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"#3883 F3: the final exit line and process status live at the real main() boundary; only a spawned CLI observes them",
 	},
+	"real-process-spawn:scripts/download-test-history-artifacts.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real gh child is required to prove transient API failure recovery, persistent failure, and a ZIP over the default spawn buffer at the process boundary",
+	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -585,6 +599,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the defect is a temporal-dead-zone crash in the driver's own top-level execution order; the #3853 lock wait/refusal and the #3856 F3 stage dispositions (heartbeat/refusal behind a live holder, the budget-signal abort, the absent and partial coverage reports, the skipped/corrupt compiled source) are only observable by spawning the real script, and no source-text or in-process substitute reproduces them",
+	},
+	// 2026-10-07 (#4038 r5): run 37601788256's publish step crashed in the
+	// script's process-entry block, which only a real `node` process runs;
+	// the in-process `main()` tests never reached it.
+	"real-process-spawn:scripts/stryker-nightly.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the defect lived in the CLI entry block (`import.meta.url === argv[1]`), which only a real node process executes",
 	},
 	// 2026-09-06 (#2586 review F1): proves the actual delimiter
 	// supply-host-provided-deps.mjs prints in its own stdout bytes; an
