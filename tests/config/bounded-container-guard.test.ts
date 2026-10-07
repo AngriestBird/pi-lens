@@ -638,6 +638,32 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
+	it("does not read runtime scratch below the walked root (#4097)", () => {
+		// Named recurrence (#4097): a root-level `index.ts` makes the scan walk
+		// the whole repo root, `.probe-home/` included, and a sibling worker
+		// removing its `worker-home-*` mid-walk killed the file with ENOENT. A
+		// class declared only below `.probe-home/` must not enter the class
+		// index either: the walk never reads scratch.
+		const root = fs.mkdtempSync(
+			path.join(process.cwd(), ".probe-bounded-root-"),
+		);
+		try {
+			const scratch = path.join(root, ".probe-home", "worker-home-a");
+			fs.mkdirSync(scratch, { recursive: true });
+			fs.writeFileSync(
+				path.join(scratch, "planted.ts"),
+				"export class PlantedHomeClass {}\n",
+			);
+			const entry = path.join(root, "index.ts");
+			fs.writeFileSync(
+				entry,
+				"const planted = new PlantedHomeClass();\nexport const touch = () => planted;\n",
+			);
+			expect(scan([entry]).scanned).toBe(0);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 	it("retains arbitrary dynamic identifiers in the real AST population", () => {
 		const root = fs.mkdtempSync(
 			path.join(process.cwd(), ".probe-bounded-dynamic-key-"),
