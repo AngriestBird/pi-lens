@@ -448,7 +448,8 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/python-provenance.ts#b39949e4",
 		"clients/review-graph/builder.ts#CHANGED_SYMBOLS_PREFIX:860385f2",
 		"clients/review-graph/builder.ts#_persistGenerations:fe391d04",
-		"clients/review-graph/builder.ts#_lastWorkerFallbackReasonForTests:ae62be11",
+		// The worker heap reading is one latest-value slot, not a growing container.
+		"clients/review-graph/builder.ts#getReviewGraphPersistWorkerHeapStatistics:ae62be11",
 		"clients/review-graph/builder.ts#_checkpointGenerations:7a0f0107",
 		// #3605: `_wasmTrappedFiles`. An entry exists only for a file whose
 		// extraction a web-tree-sitter trap cost, i.e. a path whose content is

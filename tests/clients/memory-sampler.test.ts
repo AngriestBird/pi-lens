@@ -39,6 +39,7 @@ import {
 	WordIndexFileTable,
 	WordPostingList,
 } from "../../clients/word-index-store.js";
+import { serializeWordIndex } from "../../clients/word-index.js";
 import { PathKeyedMap } from "../../clients/path-keyed-map.js";
 import { normalizeEphemeralMapKey } from "../../clients/path-utils.js";
 import { createLSPClient } from "../../clients/lsp/client.js";
@@ -159,6 +160,8 @@ describe("toMemoryProcessUsage (pure reshape)", () => {
 			heapUsedBytes: 60,
 			externalBytes: 20,
 			arrayBuffersBytes: 10,
+			heapSettledBytes: expect.any(Number),
+			externalNonBufferBytes: 10,
 			peakWorkingSetBytes: null,
 		});
 
@@ -250,7 +253,39 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			// bytes), each carrying the fixed per-list header charge.
 			residentBytes: 2 * (8 + WORD_POSTING_LIST_OVERHEAD_BYTES),
 			forwardEntries: 1,
+			wireBytes: 0,
 		});
+	});
+
+	it("reports the S1 attribution fields through the real sampler", () => {
+		const wordIndex: WordIndex = {
+			postings: new Map([["foo", WordPostingList.fromLanes("foo", [0, 1, 2])]]),
+			fileTable: new WordIndexFileTable(),
+			docLengths: new PathKeyedMap<number>(normalizeEphemeralMapKey),
+			forward: new PathKeyedMap<WordForwardEntry>(normalizeEphemeralMapKey),
+			totalTokens: 3,
+			docCount: 0,
+			fileMtimes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
+			fileSizes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
+		};
+		serializeWordIndex(wordIndex);
+		const sample = buildMemorySample(null, fakeMem());
+		expect(sample.process.heapSettledBytes).toBeGreaterThan(0);
+		expect(Number.isFinite(sample.process.heapSettledBytes)).toBe(true);
+		expect(sample.process.externalNonBufferBytes).toBe(
+			sample.process.externalBytes - sample.process.arrayBuffersBytes,
+		);
+		expect(sample.samplerDurationMs).toBeGreaterThanOrEqual(0);
+		expect(sample.subsystems.wordIndex).toBeNull();
+		const indexed = collectMemorySampleSubsystems(wordIndex).wordIndex;
+		expect(indexed?.wireBytes).toBeGreaterThan(0);
+		if (sample.subsystems.treeSitter) {
+			expect(
+				sample.subsystems.treeSitter.treeCacheWasmEstimateBytes,
+			).toBeGreaterThanOrEqual(0);
+		}
+		expect(sample.subsystems.persistWorkers).toHaveProperty("reviewGraph");
+		expect(sample.subsystems.persistWorkers).toHaveProperty("projectSnapshot");
 	});
 
 	it("reviewGraph/dispatchCaches mirror the live accessors exactly (no extra reads)", () => {
@@ -282,6 +317,19 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		// criterion 3).
 		for (const [name, subsystem] of Object.entries(subsystems)) {
 			if (subsystem === null) continue;
+			if (name === "persistWorkers") {
+				for (const worker of [
+					subsystem.reviewGraph,
+					subsystem.projectSnapshot,
+				]) {
+					if (worker === null) continue;
+					expect(
+						Object.keys(worker).some((key) => /Bytes$/.test(key)),
+						"persist worker must expose byte-denominated fields",
+					).toBe(true);
+				}
+				continue;
+			}
 			expect(
 				Object.keys(subsystem).some((key) => /Bytes$/.test(key)),
 				`${name} must expose a byte-denominated field`,

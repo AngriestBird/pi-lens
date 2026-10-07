@@ -30,18 +30,47 @@
  * memory backs an ArrayBuffer, so it is already included there.
  */
 
-import type { WordIndex } from "./word-index.js";
+import { PerformanceObserver, constants, performance } from "node:perf_hooks";
+import { getWordIndexWireBytes, type WordIndex } from "./word-index.js";
 import {
 	countPostingEntries,
 	estimateWordIndexStoreBytes,
 } from "./word-index-store.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
-import { getReviewGraphWorkspaceCacheSnapshot } from "./review-graph/builder.js";
+import {
+	getReviewGraphPersistWorkerHeapStatistics,
+	getReviewGraphWorkspaceCacheSnapshot,
+	refreshReviewGraphPersistWorkerHeapStatistics,
+} from "./review-graph/builder.js";
+import {
+	getProjectSnapshotPersistWorkerHeapStatistics,
+	refreshProjectSnapshotPersistWorkerHeapStatistics,
+} from "./project-snapshot.js";
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
 import { getLspDocumentTextRetentionSnapshot } from "./lsp/client.js";
 
 /** Every N turns, emit one `memory_sample` latency.log line (#1123 item 2). */
 export const MEMORY_SAMPLE_TURN_INTERVAL = 10;
+
+const MAJOR_GC_KIND = constants.NODE_PERFORMANCE_GC_MAJOR;
+let settledHeapUsedBytes = process.memoryUsage().heapUsed;
+try {
+	const gcObserver = new PerformanceObserver((list) => {
+		for (const entry of list.getEntries()) {
+			const detail = (
+				entry as PerformanceEntry & {
+					detail?: { kind?: number };
+				}
+			).detail;
+			if (detail?.kind === MAJOR_GC_KIND) {
+				settledHeapUsedBytes = process.memoryUsage().heapUsed;
+			}
+		}
+	});
+	gcObserver.observe({ entryTypes: ["gc"] });
+} catch {
+	// Embedded hosts may not expose GC performance entries.
+}
 
 /** True on turn 10, 20, 30, ... — never on turn 0 (nothing meaningful is
  *  resident yet at session start). Pure so the cadence is unit-testable
@@ -114,6 +143,10 @@ export interface MemoryProcessUsage {
 	heapTotalBytes: number;
 	externalBytes: number;
 	arrayBuffersBytes: number;
+	/** Heap used after the most recent major GC performance entry. */
+	heapSettledBytes: number;
+	/** External memory excluding ArrayBuffer-backed memory (WASM proxy). */
+	externalNonBufferBytes: number;
 	/** OS high-water mark (#1999): `process.resourceUsage().maxRSS` × 1024.
 	 *  On Windows libuv backs BOTH this and `rssBytes` with the same
 	 *  `GetProcessMemoryInfo()` call — rss reads `WorkingSetSize` (current),
@@ -143,6 +176,8 @@ export function toMemoryProcessUsage(
 		heapTotalBytes: mem.heapTotal,
 		externalBytes: mem.external,
 		arrayBuffersBytes: mem.arrayBuffers,
+		heapSettledBytes: settledHeapUsedBytes,
+		externalNonBufferBytes: Math.max(0, mem.external - mem.arrayBuffers),
 		peakWorkingSetBytes:
 			typeof maxKb === "number" && Number.isFinite(maxKb) && maxKb > 0
 				? maxKb * 1024
@@ -181,6 +216,8 @@ export interface MemorySampleSubsystems {
 		/** Estimated resident bytes of the index’s packed stores (#2069). */
 		residentBytes: number;
 		forwardEntries: number;
+		/** JSON wire form retained by the existing serializer cache. */
+		wireBytes: number;
 	} | null;
 	/** `null` when the shared tree-sitter client hasn't been created yet
 	 *  (WASM runtime never touched this session) or has aborted. */
@@ -192,7 +229,13 @@ export interface MemorySampleSubsystems {
 		treeCacheSize: number;
 		treeCacheMaxSize: number;
 		treeCacheTotalBytes: number;
+		/** Estimate: resident tree count × measured ~330 KiB/tree WASM high-water. */
+		treeCacheWasmEstimateBytes: number;
 	} | null;
+	persistWorkers: {
+		reviewGraph: PersistWorkerHeapStatistics | null;
+		projectSnapshot: PersistWorkerHeapStatistics | null;
+	};
 	dispatchCaches: {
 		recentlyCleanNeighborCacheSize: number;
 		/** Dispatch `FactStore`'s `sessionFacts` entry count — fixed vocabulary
@@ -201,6 +244,12 @@ export interface MemorySampleSubsystems {
 		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
 		estimatedBytes: number;
 	};
+}
+
+interface PersistWorkerHeapStatistics {
+	heapUsedBytes: number;
+	heapTotalBytes: number;
+	heapSizeLimitBytes: number;
 }
 
 /** Session-age ridealong (#1999): lets growth-vs-age curves be plotted from
@@ -226,6 +275,8 @@ export interface MemorySampleSessionContext {
 export interface MemorySample {
 	process: MemoryProcessUsage;
 	subsystems: MemorySampleSubsystems;
+	/** Measured wall-clock cost of assembling this record, in milliseconds. */
+	samplerDurationMs: number;
 	/** Present only when the caller supplies session context. */
 	session?: MemorySampleSessionContext;
 }
@@ -251,7 +302,11 @@ export function estimateDispatchCacheBytes(stats: {
 export function collectMemorySampleSubsystems(
 	wordIndex: WordIndex | null,
 ): MemorySampleSubsystems {
+	refreshReviewGraphPersistWorkerHeapStatistics();
+	refreshProjectSnapshotPersistWorkerHeapStatistics();
 	const reviewGraph = getReviewGraphWorkspaceCacheSnapshot();
+	const reviewGraphWorker = getReviewGraphPersistWorkerHeapStatistics();
+	const projectSnapshotWorker = getProjectSnapshotPersistWorkerHeapStatistics();
 
 	const treeSitterClient = getSharedTreeSitterClient();
 	const treeSitter = treeSitterClient
@@ -263,6 +318,7 @@ export function collectMemorySampleSubsystems(
 					treeCacheSize: cacheStats.size,
 					treeCacheMaxSize: cacheStats.maxSize,
 					treeCacheTotalBytes: cacheStats.totalBytes,
+					treeCacheWasmEstimateBytes: cacheStats.size * 330 * 1024,
 				};
 			})()
 		: null;
@@ -280,6 +336,10 @@ export function collectMemorySampleSubsystems(
 			};
 		})(),
 		reviewGraph,
+		persistWorkers: {
+			reviewGraph: reviewGraphWorker,
+			projectSnapshot: projectSnapshotWorker,
+		},
 		wordIndex: wordIndex
 			? {
 					docs: wordIndex.docLengths.size,
@@ -291,6 +351,7 @@ export function collectMemorySampleSubsystems(
 					postingEntries: countPostingEntries(wordIndex),
 					residentBytes: estimateWordIndexStoreBytes(wordIndex),
 					forwardEntries: wordIndex.forward?.size ?? 0,
+					wireBytes: getWordIndexWireBytes(wordIndex),
 				}
 			: null,
 		treeSitter,
@@ -311,6 +372,7 @@ export function buildMemorySample(
 	resourceUsage?: Partial<NodeJS.ResourceUsage>,
 	session?: MemorySampleSessionContext,
 ): MemorySample {
+	const startedAt = performance.now();
 	let resolvedResourceUsage = resourceUsage;
 	if (!resolvedResourceUsage) {
 		try {
@@ -319,10 +381,15 @@ export function buildMemorySample(
 			resolvedResourceUsage = undefined;
 		}
 	}
-	return {
+	const sample = {
 		process: toMemoryProcessUsage(mem, resolvedResourceUsage),
 		subsystems: collectMemorySampleSubsystems(wordIndex),
 		session,
+	};
+	return {
+		...sample,
+		/** Sampler work only; excludes the surrounding turn_end phase. */
+		samplerDurationMs: Math.max(0, performance.now() - startedAt),
 	};
 }
 

@@ -1900,6 +1900,7 @@ interface SerializedWordIndexCache {
 	serialized: SerializedWordIndex;
 	slotByFileId: Map<number, number>;
 	tokensByFile: Map<string, Set<string>>;
+	wireBytes: number;
 }
 
 const serializedWordIndexCaches = new WeakMap<
@@ -1919,6 +1920,11 @@ const serializedWordIndexCaches = new WeakMap<
 export interface WordIndexSerializeWork {
 	affectedTokenCount: number;
 	tookFullPath: boolean;
+}
+
+/** Bytes in the JSON wire representation most recently persisted for an index. */
+export function getWordIndexWireBytes(index: WordIndex): number {
+	return serializedWordIndexCaches.get(index)?.wireBytes ?? 0;
 }
 
 let _lastSerializeWork: WordIndexSerializeWork | undefined;
@@ -1986,7 +1992,12 @@ function serializeWordIndexFull(index: WordIndex): SerializedWordIndexCache {
 		affectedTokenCount: postings.length,
 		tookFullPath: true,
 	};
-	return { serialized, slotByFileId, tokensByFile };
+	return {
+		serialized,
+		slotByFileId,
+		tokensByFile,
+		wireBytes: Buffer.byteLength(JSON.stringify(serialized), "utf8"),
+	};
 }
 
 /**
@@ -2108,7 +2119,12 @@ function serializeWordIndexIncrementally(
 		affectedTokenCount: affectedTokens.size,
 		tookFullPath: false,
 	};
-	return { serialized, slotByFileId, tokensByFile };
+	return {
+		serialized,
+		slotByFileId,
+		tokensByFile,
+		wireBytes: Buffer.byteLength(JSON.stringify(serialized), "utf8"),
+	};
 }
 
 export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
@@ -2431,6 +2447,7 @@ export function deserializeWordIndex(
 			serialized: data,
 			slotByFileId,
 			tokensByFile,
+			wireBytes: Buffer.byteLength(JSON.stringify(data), "utf8"),
 		});
 	}
 

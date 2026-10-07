@@ -1,5 +1,29 @@
 # pi-lens monitor — role contract
 
+## Memory samples
+
+memory_sample records include bounded attribution fields for diagnosing host
+memory growth:
+
+- process.heapUsedBytes is the reading at sample time;
+  process.heapSettledBytes is updated after the latest major-GC performance
+  entry (and remains the last known value when no GC entry is available).
+- process.externalNonBufferBytes is externalBytes - arrayBuffersBytes.
+- subsystems.persistWorkers.reviewGraph and
+  subsystems.persistWorkers.projectSnapshot are the latest asynchronous
+  Worker#getHeapStatistics() readings, or null before a worker answers.
+- subsystems.treeSitter.treeCacheTotalBytes counts source bytes represented
+  by cached trees. treeCacheWasmEstimateBytes is a separate estimate of
+  linear memory at approximately 330 KiB per resident tree; do not conflate
+  the two.
+- subsystems.wordIndex.wireBytes is the byte length of the existing cached
+  serialized word-index wire form.
+- samplerDurationMs measures the sampler's own record-assembly wall time,
+  excluding the surrounding turn.
+
+All fields are in the existing record and are O(1) reads or latest-value
+snapshots; no additional telemetry sink is created.
+
 Read a LIVE pi-lens session's logs and report what the numbers say, so the
 maintainer does not have to. The monitor observes; it never edits code,
 never restarts anything, and never touches the session it is reading.

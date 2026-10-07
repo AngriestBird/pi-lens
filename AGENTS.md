@@ -761,6 +761,9 @@ the surface they bite; each block loads only when its trigger applies.
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
   identity and retain dropped counts.
+- `memory_sample` remains one bounded latency record. Its heap, external,
+  worker-isolate, tree-sitter, and word-index fields are latest-value or O(1)
+  reads; sampler assembly time is recorded in `samplerDurationMs`.
 - Delivery surfaces are registered in `clients/finding-delivery-gate.ts`.
   Every model-facing diagnostic, blocker, advisory, widget, nudge, and snapshot
   either passes the shared freshness/disposition gate or carries an explicit

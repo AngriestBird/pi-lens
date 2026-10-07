@@ -1050,6 +1050,34 @@ let _lastSnapshotPersistErrorForTests: string | undefined;
 let _snapshotExiting = false;
 let _snapshotWorkerBodyWritesForTests = 0;
 
+export interface PersistWorkerHeapStatistics {
+	heapUsedBytes: number;
+	heapTotalBytes: number;
+	heapSizeLimitBytes: number;
+}
+let _snapshotPersistWorkerHeapStatistics: PersistWorkerHeapStatistics | null =
+	null;
+
+/** Refreshes a bounded, last-known view; Worker#getHeapStatistics is async. */
+export function refreshProjectSnapshotPersistWorkerHeapStatistics(): void {
+	const worker = _snapshotPersistWorker;
+	if (!worker || typeof worker.getHeapStatistics !== "function") return;
+	void worker
+		.getHeapStatistics()
+		.then((stats) => {
+			_snapshotPersistWorkerHeapStatistics = {
+				heapUsedBytes: stats.used_heap_size,
+				heapTotalBytes: stats.total_heap_size,
+				heapSizeLimitBytes: stats.heap_size_limit,
+			};
+		})
+		.catch(() => {});
+}
+
+export function getProjectSnapshotPersistWorkerHeapStatistics(): PersistWorkerHeapStatistics | null {
+	return _snapshotPersistWorkerHeapStatistics;
+}
+
 function snapshotWorkerEnabled(): boolean {
 	// The synchronous fallback writer is a legitimate degraded mode (hosts that
 	// can't spawn a worker); tests also force it so a save→load is fully
@@ -1854,6 +1882,7 @@ function dispatchSnapshotPersist(pending: PendingSnapshotBody): void {
 
 function handleSnapshotWorkerDeath(reason: string): void {
 	_snapshotPersistWorker = undefined;
+	_snapshotPersistWorkerHeapStatistics = null;
 	_snapshotWorkerDisabled = true;
 	const requests = [..._snapshotWorkerRequests.values()];
 	_snapshotWorkerRequests.clear();
@@ -1913,7 +1942,10 @@ function getSnapshotPersistWorker(): Worker | undefined {
 		});
 		worker.on("error", (err: Error) => handleSnapshotWorkerDeath(err.message));
 		worker.on("exit", (code) => {
-			if (_snapshotPersistWorker === worker) _snapshotPersistWorker = undefined;
+			if (_snapshotPersistWorker === worker) {
+				_snapshotPersistWorker = undefined;
+				_snapshotPersistWorkerHeapStatistics = null;
+			}
 			// Any body still queued when the worker exits was abandoned mid-flight
 			// (a crash, a `terminate()`, or host recycling) — it will never be
 			// promoted by this worker, so fall it back to the sync writer rather
@@ -2167,6 +2199,7 @@ export function resetProjectSnapshotPersistWorkerForTests(): void {
 	_snapshotGenerationGateEnabledForTests = true;
 	_snapshotPromotionSeamForTests = undefined;
 	_snapshotPersistWorker = undefined;
+	_snapshotPersistWorkerHeapStatistics = null;
 	_snapshotWorkerRequests.clear();
 	_snapshotGenerationStates.clear();
 	_successfulSnapshotPersists.clear();
