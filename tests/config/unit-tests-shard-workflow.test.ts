@@ -42,27 +42,29 @@ const step = (job: Job, name: string) => {
 };
 
 describe("#3753 sharded Unit tests workflow contract", () => {
-	it("prepares one exact-commit dependency/build artifact for every shard", () => {
-		const jobs = CI();
-		const prep = jobs["unit-build"];
-		expect(prep?.name).toBe("Unit test dependencies and build");
-		expect(
-			prep?.steps?.some((entry) => entry.name === "Install dependencies"),
-		).toBe(true);
-		expect(prep?.steps?.some((entry) => entry.name === "Build")).toBe(true);
-		const upload = step(prep, "Upload Unit dependencies and build");
-		expect(upload.with?.name).toBe("unit-test-build-${{ github.sha }}");
-		expect(String(upload.with?.path)).toContain("unit-build-sha.txt");
+	it("keeps shard setup local and cache-only", () => {
+		const shard = CI().test;
+		expect(asList(shard.needs)).toEqual([]);
+		expect(step(shard, "Install dependencies").run).toContain("npm install");
+		expect(step(shard, "Build").run).toBe("npm run build");
+		const cache = step(shard, "Cache npm cache");
+		expect(cache.with?.key).toContain("hashFiles('package-lock.json')");
+		expect(cache.with?.path).toBe("~/.npm");
+	});
 
-		const shard = jobs.test;
-		expect(asList(shard.needs)).toEqual(["unit-build"]);
-		const download = step(
-			shard,
-			"Download exact-commit Unit dependencies and build",
+	// Recurrence: changing the matrix job or its shard population without
+	// updating the required aggregate can make branch protection observe the
+	// wrong job. The aggregate must follow the one matrix job by id.
+	it("makes the Unit aggregate depend on the shard matrix job", () => {
+		const jobs = CI();
+		const matrixJobs = Object.entries(jobs).filter(
+			([, job]) =>
+				job.name?.startsWith("Unit tests (shard ") &&
+				job.strategy?.matrix?.shard !== undefined,
 		);
-		expect(download.with?.name).toBe("unit-test-build-${{ github.sha }}");
-		const verify = step(shard, "Verify exact-commit Unit build");
-		expect(verify.run).toContain('"$GITHUB_SHA"');
+		expect(matrixJobs.map(([id]) => id)).toEqual(["test"]);
+		expect(asList(jobs["unit-tests"].needs)).toContain(matrixJobs[0][0]);
+		expect(matrixJobs[0][1].strategy?.matrix?.shard?.length).toBeGreaterThan(1);
 	});
 
 	// Recurrence: a required check that is SKIPPED (its `needs` failed) counts

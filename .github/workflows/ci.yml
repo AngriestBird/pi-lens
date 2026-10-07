@@ -195,7 +195,7 @@ jobs:
   # failure all fail this job.
   tla-models:
     name: TLA+ models
-    needs: tla-shards
+    needs: test
     if: always()
     runs-on: ubuntu-latest
     # Runs one `echo` and a comparison; 10 min is the repo's floor (refs #3123).
@@ -345,48 +345,6 @@ jobs:
   # the measured choice: it buys 53 s over four for 0.8 more runner-minutes.
   # The repo sits at the 20-concurrent-job cap, so this is the largest tested
   # count retained only because its measured slowest shard is 53 s faster.
-  unit-build:
-    name: Unit test dependencies and build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: '22'
-
-      # Build once for every Unit shard. The artifact name and manifest both
-      # bind the reusable output to the exact workflow commit, never a mutable
-      # branch or an earlier cache entry.
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Verify ast-grep CLI is on PATH
-        run: npx ast-grep --version
-
-      - name: Build
-        run: npm run build
-
-      - name: Record exact build commit
-        run: printf '%s\n' "$GITHUB_SHA" > unit-build-sha.txt
-
-      - name: Upload Unit dependencies and build
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: unit-test-build-${{ github.sha }}
-          path: |
-            node_modules
-            dist
-            grammars
-            unit-build-sha.txt
-          if-no-files-found: error
-
   test:
     name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -396,7 +354,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5]
-    needs: unit-build
     # Bounds the job so a reader that is alive but never drains (e.g. an
     # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
     # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
@@ -423,22 +380,20 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Download exact-commit Unit dependencies and build
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Cache npm cache
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.3.0
         with:
-          name: unit-test-build-${{ github.sha }}
+          path: ~/.npm
+          key: npm-${{ runner.os }}-node-22-${{ hashFiles('package-lock.json') }}
 
-      - name: Verify exact-commit Unit build
-        shell: bash
-        run: test "$(cat unit-build-sha.txt)" = "$GITHUB_SHA"
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
 
-      # The #448 CI-loud ast-grep-CLI guard (ast-grep-rule-tests.test.ts's
-      # "ast-grep CLI is installed in CI") depends on `ast-grep` resolving off
-      # PATH, which it does only implicitly today via `npm test`. Make that
-      # dependency explicit so a PATH regression fails here with a legible
-      # error instead of surfacing as an oblique test failure downstream.
       - name: Verify ast-grep CLI is on PATH
         run: npx ast-grep --version
+
+      - name: Build
+        run: npm run build
 
       # #3684: the advisory registry-subset rule reports only in files the PR
       # changed. The checkout is the PR merge commit at depth 1, so fetch the
@@ -560,6 +515,7 @@ jobs:
             ${{ runner.temp }}/vitest-results.json
             ${{ runner.temp }}/test-history-metadata.json
           if-no-files-found: warn
+          retention-days: 14
 
       # #2042 2026-09-15: the wrapper's console line is a step-crossing summary
       # of host memory only — it cannot show per-cgroup RSS, PID-count churn, or
