@@ -119,11 +119,20 @@ function testCapNotice(meta) {
 	return `**Bounded evidence:** ${selection.dropped} ${selection.covering === null ? "related" : "covering"} test(s) dropped by the test cap (${selection.kept} kept). The score is from a truncated test population.`;
 }
 
+const BOUNDED_CELL_CHARS = 160;
+const clipCell = (text) =>
+	text.length > BOUNDED_CELL_CHARS
+		? `${text.slice(0, BOUNDED_CELL_CHARS)}...`
+		: text;
+
 /**
  * @param {object} report a parsed reports/mutation/mutation.json
+ * @param {{maxSurvivors?: number}} [options] `maxSurvivors` bounds the survivor
+ *   table (and clips each cell) for a destination with a size limit, such as a
+ *   GitHub issue body (#4005); the heading keeps the full count.
  * @returns {string} markdown
  */
-export function renderMutationMarkdown(report) {
+export function renderMutationMarkdown(report, { maxSurvivors } = {}) {
 	const meta = report?.piLensMutationDiff ?? {};
 	const lines = ["### Mutation diff (advisory)", ""];
 
@@ -261,14 +270,23 @@ export function renderMutationMarkdown(report) {
 		lines.push(`#### Survivors (${survivors.length})`, "");
 		lines.push("| Location | Mutator | Original → Replacement |");
 		lines.push("|---|---|---|");
-		for (const mutant of survivors) {
+		const bounded = typeof maxSurvivors === "number";
+		const shown = bounded ? survivors.slice(0, maxSurvivors) : survivors;
+		const cell = (text) => (bounded ? clipCell(text) : text);
+		for (const mutant of shown) {
 			const location = mutant.tsLocation
 				? `${mutant.tsLocation.fileName}:${mutant.tsLocation.line}`
 				: `${mutant.fileName}:${mutant.location?.start?.line ?? "?"}`;
-			const original = (mutant.original ?? "").replaceAll("|", "\\|");
-			const replacement = (mutant.replacement ?? "").replaceAll("|", "\\|");
+			const original = cell(mutant.original ?? "").replaceAll("|", "\\|");
+			const replacement = cell(mutant.replacement ?? "").replaceAll("|", "\\|");
 			lines.push(
 				`| \`${location}\` | ${mutant.mutatorName} | \`${original}\` → \`${replacement}\` |`,
+			);
+		}
+		if (shown.length < survivors.length) {
+			lines.push(
+				"",
+				`_Showing the first ${shown.length} of ${survivors.length} survivors; the full list is in the \`mutation-report\` workflow artifact (kept 90 days)._`,
 			);
 		}
 		lines.push("");

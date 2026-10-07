@@ -116,6 +116,11 @@ const budgetMs = Math.round(budgetMinutes * 60_000);
 // `github.event.pull_request.head.sha` from the workflow; local runs (no
 // PR event) fall back to `git rev-parse HEAD`.
 const headShaArg = argumentValue("--head-sha", null);
+// #4005: the nightly report mutates the runtime tree only (clients/, tools/,
+// mcp/, index.ts). Without this flag the driver also mutates changed
+// scripts/**/*.mjs, which compete for the --max-files slots by changed-line
+// weight and push runtime files over the cap on a busy day.
+const runtimeOnly = process.argv.includes("--runtime-only");
 
 // #3853: the driver forks vitest pools for the coverage probes and again inside
 // Stryker, so its whole run takes ONE shared test-suite slot, acquired once
@@ -148,7 +153,7 @@ function changedMutationFiles() {
 			.split("\n")
 			.map((file) => file.trim())
 			.filter(Boolean)
-			.filter(isMutationSourceFile);
+			.filter(runtimeOnly ? isCompiledMutationSource : isMutationSourceFile);
 	} catch (error) {
 		console.error(
 			`mutation diff: could not read ${baseRef}...HEAD: ${error.message}`,
@@ -241,8 +246,8 @@ function writeRunConfig(testFiles, { reuse = false } = {}) {
  * Writes the one canonical `reports/mutation/mutation.json` this run
  * produces, whether or not Stryker itself ran. `piLensMutationDiff` is a
  * non-standard top-level key alongside Stryker's own (schemaVersion, files,
- * …); it carries everything `scripts/mutation-report.mjs` and the sticky PR
- * comment need, most importantly `zeroMutants`, which is set on every path
+ * …); it carries everything `scripts/mutation-report.mjs` and the nightly
+ * tracking-issue body (scripts/stryker-nightly.mjs) need, most importantly `zeroMutants`, which is set on every path
  * that evaluates no mutants so a 0-mutant run can never be rendered as a
  * clean pass, and `partial`, set when a budget kill produced SOME results
  * (round 2 S2) but not all of them.
@@ -318,8 +323,9 @@ if (skipped.length > 0) {
 	console.log(formatCapNotice(files.length, allFiles.length, skipped));
 }
 if (files.length === 0) {
-	const reason =
-		"no PR-changed lines fall under scripts/**/*.mjs, clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts";
+	const reason = runtimeOnly
+		? "no PR-changed lines fall under clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts (--runtime-only)"
+		: "no PR-changed lines fall under scripts/**/*.mjs, clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts";
 	console.log(`mutation diff: no mutants evaluated; ${reason}`);
 	writeReport(
 		null,

@@ -17,7 +17,9 @@
  *   node scripts/stryker-nightly.mjs body --base SHA --head SHA --source S
  *     --status ok|failed --out FILE [--report JSON] [--run-url URL]
  *     Writes the issue body. The marker is advanced to HEAD only for status
- *     `ok`; a failed run keeps BASE so tomorrow's window covers today's too.
+ *     `ok` AND a report that covered the whole window (nothing skipped over
+ *     the file cap, sampled or cut by the budget: `incompleteReasons`);
+ *     otherwise it keeps BASE, so tomorrow's window covers these files again.
  *
  * Why the issue body and not an artifact or a committed file: it needs no
  * permission beyond the `issues: write` the upsert already holds (an artifact
@@ -73,6 +75,60 @@ export function pickBase({ issues, title, isAncestor, fallbackBase }) {
 }
 
 /**
+ * Why the report did not cover its whole window; empty means it did. The
+ * marker advances only for an empty list: a file skipped over the cap, a range
+ * sampled away, a budget-ended run, or no report at all must be revisited, and
+ * the driver exits 0 for every one of those but the last.
+ *
+ * @param {unknown} report a parsed reports/mutation/mutation.json, or undefined
+ * @returns {string[]}
+ */
+export function incompleteReasons(report) {
+	const meta = report?.piLensMutationDiff;
+	if (!meta) return ["no mutation report was produced"];
+	const reasons = [];
+	const capped = meta.filesSkippedOverCap?.length ?? 0;
+	if (capped > 0)
+		reasons.push(`${capped} file(s) skipped over the --max-files cap`);
+	if (meta.rangesSampled) {
+		reasons.push(
+			`sampled ${meta.rangesEvaluated ?? "?"} of ${meta.rangesTotal ?? "?"} changed-line ranges`,
+		);
+	}
+	if (meta.partial) reasons.push("partial run: the budget ended it");
+	const tried = meta.rangesEvaluated;
+	const total = meta.rangesTotal;
+	if (
+		typeof tried === "number" &&
+		typeof total === "number" &&
+		tried < total &&
+		!meta.rangesSampled &&
+		!meta.partial
+	) {
+		reasons.push(`${tried} of ${total} ranges evaluated`);
+	}
+	// Zero mutants is final when there was nothing to mutate (an early exit
+	// carries no range count, or the dry run measured none) or every range was
+	// tried; a dry-run failure or a budget below the fixed overhead measured
+	// mutants it never ran.
+	if (
+		meta.zeroMutants &&
+		reasons.length === 0 &&
+		typeof total === "number" &&
+		meta.measuredTotalMutants !== 0 &&
+		!(typeof tried === "number" && tried >= total)
+	) {
+		reasons.push("no mutant was evaluated and the dry run measured some");
+	}
+	return reasons;
+}
+
+// GitHub rejects an issue body over 65536 characters. The survivor table is
+// bounded below; this is the hard stop for everything else a report can carry.
+const MAX_BODY_CHARS = 60_000;
+const MAX_SURVIVORS = 50;
+
+/**
  * @param {{base: string, head: string, source: string, status: "ok" | "failed", report?: unknown, runUrl?: string}} options
  * @returns {string}
  */
@@ -84,13 +140,16 @@ export function buildNightlyBody({
 	report,
 	runUrl,
 }) {
+	const reasons = status === "ok" ? incompleteReasons(report) : [];
 	const failed = status !== "ok";
+	const advance = !failed && reasons.length === 0;
 	const lines = [
-		markerOf(failed ? base : head),
+		markerOf(advance ? head : base),
 		"Updated nightly by the `Stryker nightly` workflow (#4005). **An exploratory test-adequacy report; it gates nothing.** Survivors on added runtime lines are candidates for a missing test, not defects: read each through a real caller before acting.",
 		"",
 		`- **Window:** \`${base.slice(0, 12)}..${head.slice(0, 12)}\` (base from: ${source})`,
 		`- **Status:** ${failed ? "FAILED -- the driver did not finish; this window is retried tomorrow together with the next one" : "ok"}`,
+		`- **Marker:** ${advance ? "advanced to this window's head" : `held at the window's base${failed ? "" : `, because the report did not cover the whole window: ${reasons.join("; ")}. The next night's window starts at the same base and covers these files again`}`}`,
 	];
 	if (runUrl) lines.push(`- **Run:** ${runUrl}`);
 	lines.push(
@@ -101,9 +160,11 @@ export function buildNightlyBody({
 	lines.push(
 		report === undefined
 			? "No mutation report was produced for this window."
-			: renderMutationMarkdown(report),
+			: renderMutationMarkdown(report, { maxSurvivors: MAX_SURVIVORS }),
 	);
-	return `${lines.join("\n")}\n`;
+	const body = `${lines.join("\n")}\n`;
+	if (body.length <= MAX_BODY_CHARS) return body;
+	return `${body.slice(0, MAX_BODY_CHARS)}\n\n_Report truncated at ${MAX_BODY_CHARS} characters; the full report is in the \`mutation-report\` workflow artifact (kept 90 days)._\n`;
 }
 
 function valueAfter(argv, flag, fallback) {

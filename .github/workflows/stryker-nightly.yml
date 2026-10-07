@@ -80,7 +80,7 @@ jobs:
         env:
           BASE: ${{ steps.window.outputs.base }}
           HEAD_SHA: ${{ steps.window.outputs.head }}
-        run: node scripts/stryker-diff.mjs --base "$BASE" --max-files 12 --head-sha "$HEAD_SHA"
+        run: node scripts/stryker-diff.mjs --base "$BASE" --max-files 12 --runtime-only --head-sha "$HEAD_SHA"
       - name: Render job summary
         if: always() && steps.window.outputs.run == 'true' && hashFiles('reports/mutation/mutation.json') != ''
         run: node scripts/mutation-report.mjs --out "$GITHUB_STEP_SUMMARY"

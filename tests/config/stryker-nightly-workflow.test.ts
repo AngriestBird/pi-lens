@@ -20,6 +20,7 @@ type Step = {
 	if?: string;
 	run?: string;
 	"continue-on-error"?: boolean;
+	env?: Record<string, string>;
 	with?: Record<string, unknown>;
 };
 type Job = {
@@ -29,6 +30,7 @@ type Job = {
 };
 type Workflow = {
 	on?: Record<string, unknown>;
+	concurrency?: { group?: string; "cancel-in-progress"?: boolean };
 	permissions?: unknown;
 	jobs?: Record<string, Job>;
 };
@@ -90,6 +92,39 @@ function nightlyFindings(text: string): string[] {
 		findings.push("driver step is not run over the window's base");
 	if (driver && driver["continue-on-error"] !== true)
 		findings.push("driver failure would skip the tracking-issue step");
+	// Recurrence (#4005 r2): scripts/**/*.mjs competing with runtime files for
+	// the --max-files slots, which pushed runtime files over the cap.
+	if (driver && !/--runtime-only\b/.test(run(driver)))
+		findings.push("driver step is not restricted to the runtime paths");
+
+	// Recurrence (#4005 r2 X1): two overlapping runs (a dispatch during the
+	// schedule) read the same marker and write the issue out of order.
+	if (
+		workflow.concurrency?.group !== "stryker-nightly" ||
+		workflow.concurrency?.["cancel-in-progress"] !== false
+	)
+		findings.push(
+			"concurrency is not the non-cancelling stryker-nightly group",
+		);
+
+	// Recurrence (#4005 r2 X2): `STATUS=ok` regardless of the driver's outcome
+	// advanced the marker over a failed night.
+	const body = steps.find((step) =>
+		run(step).includes("stryker-nightly.mjs body"),
+	);
+	const bodyRun = run(body ?? {});
+	if (
+		!body ||
+		body.env?.STRYKER_OUTCOME !== "${{ steps.stryker.outcome }}" ||
+		!/^STATUS=failed$/m.test(bodyRun) ||
+		!/^if \[ "\$STRYKER_OUTCOME" = success \]; then STATUS=ok; fi$/m.test(
+			bodyRun,
+		) ||
+		!/stryker-nightly\.mjs body .*--status "\$STATUS"/.test(bodyRun)
+	)
+		findings.push(
+			"the body's --status is not derived from the driver's outcome",
+		);
 
 	const upsert = steps.find((step) =>
 		run(step).includes("scripts/upsert-tracking-issue.mjs"),
@@ -235,6 +270,45 @@ describe("stryker-nightly.yml (#4005)", () => {
 					"        env:\n          BASE",
 				),
 			/driver failure would skip/,
+		],
+		[
+			"STATUS=ok unconditionally (X2)",
+			(text) => text.replace("STATUS=failed", "STATUS=ok"),
+			/--status is not derived/,
+		],
+		[
+			"a hard-coded --status ok",
+			(text) => text.replace('--status "$STATUS"', "--status ok"),
+			/--status is not derived/,
+		],
+		[
+			"the outcome env dropped from the body step",
+			(text) =>
+				text.replace(
+					"          STRYKER_OUTCOME: ${{ steps.stryker.outcome }}\n",
+					"",
+				),
+			/--status is not derived/,
+		],
+		[
+			"the concurrency block deleted (X1)",
+			(text) =>
+				text.replace(
+					/concurrency:\n  group: stryker-nightly\n  cancel-in-progress: false\n/,
+					"",
+				),
+			/concurrency is not/,
+		],
+		[
+			"a cancelling concurrency group",
+			(text) =>
+				text.replace("cancel-in-progress: false", "cancel-in-progress: true"),
+			/concurrency is not/,
+		],
+		[
+			"the driver loses --runtime-only",
+			(text) => text.replace(" --runtime-only", ""),
+			/not restricted to the runtime paths/,
 		],
 		[
 			"a shallow checkout",

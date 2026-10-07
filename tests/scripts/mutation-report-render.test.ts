@@ -908,6 +908,46 @@ describe("renderMutationMarkdown", () => {
 	});
 });
 
+describe("renderMutationMarkdown bounded survivors (#4005)", () => {
+	const survivor = (index: number, original = "a") => ({
+		status: "Survived",
+		mutatorName: "ConditionalExpression",
+		original,
+		replacement: "b",
+		location: { start: { line: index + 1 } },
+	});
+	const report = (mutants: unknown[]) => ({
+		files: { "clients/x.js": { mutants } },
+		piLensMutationDiff: { counts: { Survived: mutants.length }, partial: null },
+	});
+
+	// Recurrence: an issue body over GitHub's 65536-character limit failing the
+	// nightly's only write. Unbounded stays the default for every other caller.
+	it("keeps the full count in the heading, shows only maxSurvivors rows and points at the artifact", () => {
+		const markdown = renderMutationMarkdown(
+			report(Array.from({ length: 9 }, (_, i) => survivor(i))),
+			{ maxSurvivors: 3 },
+		);
+		expect(markdown).toContain("#### Survivors (9)");
+		expect(markdown.match(/^\| `clients\/x\.js:/gm)).toHaveLength(3);
+		expect(markdown).toContain("Showing the first 3 of 9 survivors");
+		expect(
+			renderMutationMarkdown(
+				report(Array.from({ length: 9 }, (_, i) => survivor(i))),
+			).match(/^\| `clients\/x\.js:/gm),
+		).toHaveLength(9);
+	});
+
+	it("clips a long replaced expression so one row cannot be the whole budget", () => {
+		const markdown = renderMutationMarkdown(
+			report([survivor(0, "x".repeat(5000))]),
+			{ maxSurvivors: 5 },
+		);
+		expect(markdown).toContain(`${"x".repeat(160)}...`);
+		expect(markdown).not.toContain("x".repeat(161));
+	});
+});
+
 describe("scripts/mutation-report.mjs (CLI)", () => {
 	let dir: string;
 

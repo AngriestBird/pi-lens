@@ -607,6 +607,54 @@ describe("driver early-exit paths, spawned for real (#3592 round 2 F1)", () => {
 	});
 });
 
+// #4005: the nightly passes --runtime-only so changed scripts/**/*.mjs stop
+// competing for the --max-files slots with the runtime files the report is
+// about. Recurrence: a busy window (real data, 2026-10-01: 81 eligible runtime
+// files and 42 scripts, top-12 = 5 runtime + 7 scripts) leaving runtime files
+// over the cap behind a marker that advanced. Real spawn against a throwaway
+// repo: the flag is read in the driver's own top-level flow.
+describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
+	const reasonFor = (extraArgs: string[]) => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			writeFileSync(join(fixtureRepo, "README.md"), "fixture\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "README.md"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			mkdirSync(join(fixtureRepo, "scripts"));
+			writeFileSync(
+				join(fixtureRepo, "scripts", "only.mjs"),
+				"export const a = 1;\n",
+			);
+			fixtureGit(fixtureRepo, ["add", "scripts/only.mjs"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "scripts only"]);
+			runDriver(fixtureRepo, ["--base", "HEAD~1", ...extraArgs], 30_000);
+			return JSON.parse(
+				readFileSync(
+					join(fixtureRepo, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			).piLensMutationDiff.zeroMutants.reason as string;
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	};
+
+	it("drops a changed script from the mutation population", () => {
+		expect(reasonFor(["--runtime-only"])).toContain(
+			"no PR-changed lines fall under clients/**/*.ts",
+		);
+	});
+
+	it("still takes the script without the flag (the PR-time behaviour)", () => {
+		expect(reasonFor([])).toContain(
+			"no changed mutation source has a covering test",
+		);
+	});
+});
+
 describe("instrumentation detection (#3810)", () => {
 	// Recurrence: a skip condition that is always true switches the wiring pins
 	// off in the ordinary lane without a red; one that is never true lets them

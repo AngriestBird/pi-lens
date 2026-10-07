@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	buildNightlyBody,
+	incompleteReasons,
 	main,
 	markerOf,
 	parseLastReportSha,
@@ -119,6 +120,139 @@ describe("buildNightlyBody", () => {
 		expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_B);
 		expect(body).toContain("**Status:** ok");
 		expect(body).toContain("### Mutation diff (advisory)");
+	});
+
+	// Recurrence (#4005 r2): the driver exits 0 when it skipped files over the
+	// cap, sampled ranges away or ran out of budget, so `status=ok` advanced the
+	// marker past files no later night revisits. Real windows: 2026-10-01 had 81
+	// eligible runtime files and the top 12 were evaluated.
+	const covered = (extra: Record<string, unknown>) => ({
+		files: {},
+		piLensMutationDiff: {
+			headSha: SHA_B,
+			counts: { Killed: 3, Survived: 1 },
+			rangesTotal: 4,
+			rangesEvaluated: 4,
+			partial: null,
+			...extra,
+		},
+	});
+	it.each([
+		[
+			"files skipped over the cap",
+			covered({ filesSkippedOverCap: ["clients/a.ts"] }),
+			/1 file\(s\) skipped over the --max-files cap/,
+		],
+		[
+			"sampled ranges",
+			covered({ rangesSampled: true, rangesEvaluated: 2 }),
+			/sampled 2 of 4/,
+		],
+		[
+			"a budget-ended partial run",
+			covered({ partial: { reason: "x", evaluated: 1, total: 9 } }),
+			/partial run/,
+		],
+		[
+			"ranges not all evaluated",
+			covered({ rangesEvaluated: 1 }),
+			/1 of 4 ranges evaluated/,
+		],
+		[
+			"a zero-mutant run cut by the budget",
+			{
+				files: {},
+				piLensMutationDiff: {
+					rangesTotal: 4,
+					measuredTotalMutants: 30,
+					zeroMutants: { reason: "budget" },
+				},
+			},
+			/no mutant was evaluated and the dry run measured some/,
+		],
+		["no report at all", undefined, /no mutation report/],
+	])(
+		"keeps the marker at BASE and says why for %s",
+		(_label, incomplete, why) => {
+			const body = buildNightlyBody({
+				...meta,
+				status: "ok",
+				report: incomplete,
+			});
+			expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
+			expect(body).toContain("**Status:** ok");
+			expect(body).toMatch(
+				/\*\*Marker:\*\* held at the window's base, because/,
+			);
+			expect(body).toMatch(why);
+		},
+	);
+
+	it.each([
+		["a fully evaluated window", covered({})],
+		[
+			"an early exit with nothing to mutate",
+			{
+				files: {},
+				piLensMutationDiff: {
+					zeroMutants: { reason: "no covering test" },
+					filesUncovered: ["clients/a.ts"],
+				},
+			},
+		],
+		[
+			"a dry run that measured no mutants",
+			{
+				files: {},
+				piLensMutationDiff: {
+					rangesTotal: 4,
+					measuredTotalMutants: 0,
+					zeroMutants: { reason: "none" },
+				},
+			},
+		],
+	])("advances the marker for %s", (_label, complete) => {
+		expect(incompleteReasons(complete)).toEqual([]);
+		expect(
+			parseLastReportSha(
+				[issue(buildNightlyBody({ ...meta, status: "ok", report: complete }))],
+				TITLE,
+			),
+		).toBe(SHA_B);
+	});
+
+	// Recurrence (#4005 r2): GitHub refuses an issue body over 65536 characters;
+	// a survivor table of every survivor, or a long tests-run list, would fail
+	// the nightly's only write.
+	it("stays under GitHub's body limit with 2000 survivors, and points at the artifact", () => {
+		const survivors = Array.from({ length: 2000 }, (_, index) => ({
+			status: "Survived",
+			mutatorName: "ConditionalExpression",
+			original: `${"original".repeat(60)}${index}`,
+			replacement: "replacement".repeat(60),
+			fileName: `clients/file-${index}.js`,
+			tsLocation: { fileName: `clients/file-${index}.ts`, line: index + 1 },
+		}));
+		const huge = {
+			files: { "clients/many.js": { mutants: survivors } },
+			piLensMutationDiff: {
+				headSha: SHA_B,
+				rangesTotal: 1,
+				rangesEvaluated: 1,
+				partial: null,
+				counts: { Survived: 2000 },
+				testsRun: Array.from(
+					{ length: 4000 },
+					(_, i) => `tests/clients/t-${i}.test.ts`,
+				),
+			},
+		};
+		const body = buildNightlyBody({ ...meta, status: "ok", report: huge });
+		expect(body.length).toBeLessThan(65_536);
+		expect(body).toContain("#### Survivors (2000)");
+		expect(body).toContain("Showing the first 50 of 2000 survivors");
+		expect(body).toContain("`mutation-report` workflow artifact");
+		expect(body.match(/^\| `clients\/file-/gm)).toHaveLength(50);
 	});
 
 	// Recurrence: a budget-killed or crashed night advancing the marker, so the
@@ -239,7 +373,8 @@ describe("main (real git, real files)", () => {
 			repo,
 		);
 		const body = readFileSync(out, "utf8");
-		expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_B);
+		// No report means nothing was covered: the marker stays at BASE.
+		expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
 		expect(body).toContain("No mutation report was produced");
 	});
 

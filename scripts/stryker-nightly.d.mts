@@ -14,6 +14,7 @@ export declare function pickBase(options: {
 	isAncestor: (sha: string) => boolean;
 	fallbackBase: () => string;
 }): { base: string; source: (typeof SOURCES)[number] };
+export declare function incompleteReasons(report: unknown): string[];
 export declare function buildNightlyBody(options: {
 	base: string;
 	head: string;
