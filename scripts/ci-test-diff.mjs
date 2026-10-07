@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
 	extractVitestFailureIds,
+	OVERALL_TESTS_FAILED,
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
@@ -24,9 +25,9 @@ export function extractFailingTestIds(log) {
 }
 
 export function summarizeLog(log, side = "job") {
-	const testsFailed = Number(
-		log.match(/\bTests\s+(\d+)\s+failed\b/i)?.[1] ?? NaN,
-	);
+	const failedMatch = OVERALL_TESTS_FAILED.exec(log);
+	const passedMatch = log.match(/^\s*Tests\s+(\d+)\s+passed\b/m);
+	const testsFailed = Number(failedMatch?.[1] ?? 0);
 	const failedTestsHeader = Number(
 		log.match(/\bFailed Tests\s+(\d+)\b/i)?.[1] ?? NaN,
 	);
@@ -36,7 +37,7 @@ export function summarizeLog(log, side = "job") {
 	const unhandledErrors = Number(
 		log.match(/\bErrors\s+(\d+)\s+error(?:s)?\b/i)?.[1] ?? 0,
 	);
-	if (!Number.isInteger(testsFailed)) {
+	if (!failedMatch && !passedMatch) {
 		throw new Error(`${side} log incomplete (no Vitest Tests summary)`);
 	}
 	if (
@@ -52,14 +53,6 @@ export function validateLog(log, side = "job") {
 	const summary = summarizeLog(log, side);
 	const ids = extractFailingTestIds(log);
 	const expected = summary.testsFailed + summary.suitesFailed;
-	if (
-		summary.unhandledErrors > summary.suitesFailed &&
-		summary.unhandledErrors > 0
-	) {
-		throw new Error(
-			`${side} log reports ${summary.unhandledErrors} unhandled errors but only ${summary.suitesFailed} failed suites`,
-		);
-	}
 	if (ids.length !== expected) {
 		throw new Error(
 			`${side} log has ${ids.length} failure IDs; Vitest summary reports ${expected}`,

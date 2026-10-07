@@ -79,6 +79,35 @@ describe("ci-test-diff failure extraction", () => {
 		]);
 	});
 
+	it("normalizes Vitest's non-colour pipe project label", () => {
+		const log =
+			"Tests 1 failed\n" +
+			"Failed Tests 1\n" +
+			"FAIL |default| tests/same.test.ts > same\n";
+		expect(validateLog(log).ids).toEqual([
+			"default::tests/same.test.ts › same",
+		]);
+	});
+
+	it("accepts a green run and reconciles an unhandled error without a suite", () => {
+		expect(validateLog(fixture("job-green-vitest.log")).ids).toEqual([]);
+		expect(
+			validateLog(
+				"Tests 1 failed\nFailed Suites 0\nErrors 1 error\n" +
+					"FAIL default tests/late.test.ts > rejects late work",
+			),
+		).toMatchObject({ testsFailed: 1, suitesFailed: 0, unhandledErrors: 1 });
+	});
+
+	it("rejects a failure count with too few extracted IDs", () => {
+		expect(() =>
+			validateLog(
+				"Tests 2 failed\nFailed Tests 2\n" +
+					"FAIL default tests/only.test.ts > only failure",
+			),
+		).toThrow("has 1 failure IDs; Vitest summary reports 2");
+	});
+
 	it("returns 0 for unchanged, 1 for NEW, and 2 for invalid job logs", () => {
 		const scratch = fs.mkdtempSync(
 			path.join(process.env.TMPDIR ?? os.tmpdir(), "ci-test-diff-"),
@@ -89,7 +118,7 @@ describe("ci-test-diff failure extraction", () => {
 		const fixtureB = path.join(fixtureDir, "job-112734370876.log");
 		fs.writeFileSync(
 			gh,
-			`#!/usr/bin/env node\nconst fs = require("node:fs");\nconst request = process.argv.find((value) => value.includes("/jobs/")) ?? "";\nconst id = request.match(/\\/jobs\\/(\\d+)\\//)?.[1];\nconst file = id === "0" ? null : id === "2" ? ${JSON.stringify(fixtureB)} : ${JSON.stringify(fixtureA)};\nif (file) process.stdout.write(fs.readFileSync(file, "utf8"));\n`,
+			`#!/usr/bin/env node\nconst fs = require("node:fs");\nconst request = process.argv.find((value) => value.includes("/jobs/")) ?? "";\nconst id = request.match(/\\/jobs\\/(\\d+)\\//)?.[1];\nconst file = id === "0" ? null : id === "3" ? ${JSON.stringify(path.join(fixtureDir, "job-green-vitest.log"))} : id === "2" ? ${JSON.stringify(fixtureB)} : ${JSON.stringify(fixtureA)};\nif (file) process.stdout.write(fs.readFileSync(file, "utf8"));\n`,
 		);
 		fs.chmodSync(gh, 0o755);
 		const env = { ...process.env, PATH: `${scratch}:${process.env.PATH}` };
@@ -102,6 +131,9 @@ describe("ci-test-diff failure extraction", () => {
 		expect(run("1", "1").status).toBe(0);
 		expect(run("1", "2").status).toBe(1);
 		expect(run("0", "1").status).toBe(2);
+		// A→GREEN is clean, while GREEN→B is NEW; direction is the CLI contract.
+		expect(run("1", "3").status).toBe(0);
+		expect(run("3", "2").status).toBe(1);
 		fs.rmSync(scratch, { recursive: true, force: true });
 	});
 });

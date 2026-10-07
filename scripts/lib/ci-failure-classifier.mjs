@@ -97,7 +97,12 @@ export function extractVitestFailureIds(log) {
 		if (!fileMatch) continue;
 		const file = fileMatch[0];
 		const prefix = line.slice(0, fileMatch.index).trim();
-		const project = prefix ? prefix.split(/\s+/).at(-1) : "";
+		const project = prefix
+			? prefix
+					.split(/\s+/)
+					.at(-1)
+					.replace(/^\|+|\|+$/g, "")
+			: "";
 		const suffix = line.slice(fileMatch.index + file.length);
 		const testName = suffix.match(/^\s*>\s*(.+?)\s*$/)?.[1];
 		const id = `${project ? `${project}::` : ""}${file}${testName ? ` › ${testName.replace(/\s+/g, " ")}` : ""}`;
@@ -156,7 +161,7 @@ const TYPESCRIPT_ERROR =
 // The run's own final tally line (real log, same run): " Tests  1 failed |
 // 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
 // failed count here is unambiguous.
-const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
+export const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
 // #2839: vitest's timeout failure text (real log, run 34389495533 attempt 1,
 // job 102594125043, PR #2834): "Error: Test timed out in 5000ms." Vitest's
 // runner uses the same template for hooks: "Error: Hook timed out in 300ms."
