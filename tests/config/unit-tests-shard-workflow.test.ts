@@ -42,6 +42,29 @@ const step = (job: Job, name: string) => {
 };
 
 describe("#3753 sharded Unit tests workflow contract", () => {
+	it("prepares one exact-commit dependency/build artifact for every shard", () => {
+		const jobs = CI();
+		const prep = jobs["unit-build"];
+		expect(prep?.name).toBe("Unit test dependencies and build");
+		expect(
+			prep?.steps?.some((entry) => entry.name === "Install dependencies"),
+		).toBe(true);
+		expect(prep?.steps?.some((entry) => entry.name === "Build")).toBe(true);
+		const upload = step(prep, "Upload Unit dependencies and build");
+		expect(upload.with?.name).toBe("unit-test-build-${{ github.sha }}");
+		expect(String(upload.with?.path)).toContain("unit-build-sha.txt");
+
+		const shard = jobs.test;
+		expect(asList(shard.needs)).toEqual(["unit-build"]);
+		const download = step(
+			shard,
+			"Download exact-commit Unit dependencies and build",
+		);
+		expect(download.with?.name).toBe("unit-test-build-${{ github.sha }}");
+		const verify = step(shard, "Verify exact-commit Unit build");
+		expect(verify.run).toContain('"$GITHUB_SHA"');
+	});
+
 	// Recurrence: a required check that is SKIPPED (its `needs` failed) counts
 	// as passing in branch protection. An aggregate without `if: always()`
 	// would turn a red shard into a green `Unit tests`.
@@ -76,6 +99,7 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 			Array.from({ length: shards.length }, (_, index) => index + 1),
 		);
 		expect(shards.length).toBeGreaterThan(1);
+		expect(shards.length).toBe(5);
 		expect(shard.strategy?.["fail-fast"]).toBe(false);
 		expect(shard.name).toBe(
 			"Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})",

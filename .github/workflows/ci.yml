@@ -326,7 +326,7 @@ jobs:
   # succeeded). The check-run the ruleset requires is the `unit-tests`
   # aggregate below, named exactly `Unit tests`.
   #
-  # Why four, and why balanced (#3771, #3801): vitest's own `--shard` assigns
+  # Why five, and why balanced (#3771, #3801): vitest's own `--shard` assigns
   # files by sha1 of the path in equal COUNTS, not equal duration, and the
   # serialized projects (wall-clock-budget, real-harness, lsp-spawn-heavy) are a
   # per-shard floor, so #3756's five shards ran `Run tests` from 107 s to 252 s
@@ -341,11 +341,52 @@ jobs:
   #   N=4  301 s  1.09  18.4 min
   #   N=5  248 s  1.07  19.2 min   (hash-count N=5 before: 274-292 s, 1.4, 19.2 min)
   #
-  # Four is the fewest shards that put the slowest job at the 5-minute bar the
-  # sharding was opened for (#3753): three misses it by 90 s. The repo sits at
-  # the 20-concurrent-job cap, where every extra job is its own queue wait, so
-  # the count stays as low as that bar allows. Raising it to five buys 53 s of
-  # critical path for one more job and 0.8 more runner-minutes per push.
+  # The current target is a <=6-minute required-check median (#3801). Five is
+  # the measured choice: it buys 53 s over four for 0.8 more runner-minutes.
+  # The repo sits at the 20-concurrent-job cap, so this is the largest tested
+  # count retained only because its measured slowest shard is 53 s faster.
+  unit-build:
+    name: Unit test dependencies and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+
+      # Build once for every Unit shard. The artifact name and manifest both
+      # bind the reusable output to the exact workflow commit, never a mutable
+      # branch or an earlier cache entry.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify ast-grep CLI is on PATH
+        run: npx ast-grep --version
+
+      - name: Build
+        run: npm run build
+
+      - name: Record exact build commit
+        run: printf '%s\n' "$GITHUB_SHA" > unit-build-sha.txt
+
+      - name: Upload Unit dependencies and build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-test-build-${{ github.sha }}
+          path: |
+            node_modules
+            dist
+            grammars
+            unit-build-sha.txt
+          if-no-files-found: error
+
   test:
     name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -354,7 +395,8 @@ jobs:
       # failing tests of every red shard, not just the first to finish.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
+    needs: unit-build
     # Bounds the job so a reader that is alive but never drains (e.g. an
     # unbounded stdout stall in the mem-watch wrapper, #3106) cannot hold the
     # runner for GitHub's 360-minute default. Sized at measured-max x2 plus margin
@@ -381,8 +423,14 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Download exact-commit Unit dependencies and build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unit-test-build-${{ github.sha }}
+
+      - name: Verify exact-commit Unit build
+        shell: bash
+        run: test "$(cat unit-build-sha.txt)" = "$GITHUB_SHA"
 
       # The #448 CI-loud ast-grep-CLI guard (ast-grep-rule-tests.test.ts's
       # "ast-grep CLI is installed in CI") depends on `ast-grep` resolving off
@@ -391,9 +439,6 @@ jobs:
       # error instead of surfacing as an oblique test failure downstream.
       - name: Verify ast-grep CLI is on PATH
         run: npx ast-grep --version
-
-      - name: Build
-        run: npm run build
 
       # #3684: the advisory registry-subset rule reports only in files the PR
       # changed. The checkout is the PR merge commit at depth 1, so fetch the
