@@ -160,6 +160,7 @@ function startRealPi(
 	args: readonly string[] = [],
 	env: Record<string, string> = {},
 	projectOverride?: string,
+	extensions: readonly string[] = [],
 ) {
 	const scratchRoot = homeOverride ?? SCRATCH_DIR_ROOT;
 	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: SWEEP_ANY_AGE });
@@ -180,6 +181,7 @@ function startRealPi(
 			path.join(repoRoot, "index.js"),
 			"-e",
 			path.join(fixtureRoot, "scripted-provider.mjs"),
+			...extensions.flatMap((extension) => ["-e", extension]),
 			...args,
 		],
 		{
@@ -356,6 +358,7 @@ export async function withRealPi<T>(
 		home?: string;
 		args?: readonly string[];
 		env?: Record<string, string>;
+		extensions?: readonly string[];
 		/**
 		 * Reuse an EXISTING project directory (from {@link createRealPiProject})
 		 * instead of claiming and seeding a fresh one. The caller owns it: it is
@@ -380,6 +383,7 @@ export async function withRealPi<T>(
 		options.args,
 		options.env,
 		options.project,
+		options.extensions,
 	);
 	try {
 		let cursor = harness.events.length;
