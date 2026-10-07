@@ -519,6 +519,9 @@ export const wallClockBudgetInclude = [
 	// subject; an in-process call of the pure policy cannot prove that boundary.
 	"tests/scripts/check-allow-scripts.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
+	// #4072 review F2: the CLI's real exit status is the contract; an
+	// in-process main() call cannot prove the executable entry point.
+	"tests/scripts/ci-test-diff.test.ts",
 	// #3883 F3: the final `ci-verdict: exit` line is emitted by the real
 	// `main()` process; the spawn is the only faithful proof of that boundary.
 	"tests/scripts/ci-verdict.test.ts",
@@ -535,6 +538,9 @@ export const wallClockBudgetInclude = [
 	// call to the exported classify functions can see a drift in that
 	// contract (flake-shape admission).
 	"tests/scripts/guard-bash-hook.test.ts",
+	// #4071: the probe's real hook stdin/exit-code contract and ref diff are
+	// unobservable through an in-process classifier call.
+	"tests/scripts/guard-bash-probe.test.ts",
 	// #2698: real `git init`/`add`/`commit`/`ls-files` calls against a
 	// throwaway fixture repo — gitignore/tracked-vs-untracked resolution is
 	// the exact mechanism under test, which no mock reproduces faithfully.
@@ -549,6 +555,11 @@ export const wallClockBudgetInclude = [
 	// admission).
 	"tests/scripts/lint-js.test.ts",
 	"tests/scripts/lockfile-completeness.test.ts",
+	// #4048: the mutation helper's real child and SIGINT restoration witness
+	// require a quiet serialized phase; its bounded timer and never-settling
+	// fixture are the process boundary under test (flake-shape admission).
+	"tests/scripts/mutate-fixture.test.ts",
+	"tests/scripts/mutate.test.ts",
 	// #3531: the mutation-report CLI smoke test spawns a real node child to
 	// prove its own argv parsing (--report/--out), not just the exported
 	// render function (flake-shape admission).
