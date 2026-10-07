@@ -482,7 +482,7 @@ function lexRegions(text, start, closer, out) {
 			if (ch === "$" && text[i + 1] === "(") {
 				const span = lexRegions(text, i + 2, ")", out);
 				out.push(span.retained);
-				if (retainedEndsWithCoprocLabel(retained)) retained += "$()";
+				if (retainedEndsWithCoprocLabel(retained)) retained += "``";
 				i = span.end;
 				continue;
 			}
@@ -567,7 +567,7 @@ function lexRegions(text, start, closer, out) {
 		if (ch === "$" && text[i + 1] === "(") {
 			const span = lexRegions(text, i + 2, ")", out);
 			out.push(span.retained);
-			if (retainedEndsWithCoprocLabel(retained)) retained += "$()";
+			if (retainedEndsWithCoprocLabel(retained)) retained += "``";
 			atWordStart = false;
 			i = span.end;
 			continue;

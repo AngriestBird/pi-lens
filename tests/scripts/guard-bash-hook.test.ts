@@ -2907,6 +2907,14 @@ describe("scripts/hooks/guard-bash.mjs -- shell keywords and separate-token git 
 			'coproc "`printf C`" { git stash; }; wait "$COPROC_PID"',
 			"backtick substitution",
 		],
+		[
+			'coproc $(printf C)9 { git stash; }; wait "$COPROC_PID"',
+			"unquoted command substitution with digit suffix",
+		],
+		[
+			'coproc `printf C`9 { git stash; }; wait "$COPROC_PID"',
+			"unquoted backtick substitution with digit suffix",
+		],
 		['coproc C$? { git stash; }; wait "$COPROC_PID"', "status suffix"],
 		[
 			'coproc $!A { git stash; }; wait "$COPROC_PID"',
