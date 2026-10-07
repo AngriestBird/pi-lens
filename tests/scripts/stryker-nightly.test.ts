@@ -27,6 +27,7 @@ import {
 } from "../../scripts/lib/stryker-diff.mjs";
 import {
 	buildNightlyBody,
+	combineShards,
 	coverageGaps,
 	MAX_BASE_AGE_DAYS,
 	MAX_PENDING,
@@ -429,6 +430,102 @@ describe("nightly shard partition and publication", () => {
 		expect(result.body).toContain(
 			"shard 1: no mutant was evaluated and the dry run measured some",
 		);
+	});
+
+	// #4092 (run 37629970371): both shards' initial test runs outlasted
+	// Stryker's bound, and the night read "0 failed (driver exited 1 without a
+	// partial result); 1 failed (...)" -- the same words as a crashed driver.
+	// The driver now records `dryRunTimeout` on that report (the shape its own
+	// spawn test pins in stryker-diff.test.ts).
+	const timedOut = (shard: number, file: string): Artifact => ({
+		record: record(shard, 1),
+		report: shardReport(shard, file, {
+			zeroMutants: { reason: "mutation diff: dry run timed out" },
+			dryRunTimeout: { minutes: 10, tests: 87, estimatedSeconds: 231 },
+			rangesEvaluated: undefined,
+			counts: undefined,
+		}),
+	});
+
+	it("names a dry-run timeout in the shard verdict and the status line, and holds the marker and the queue", () => {
+		const result = night([
+			complete(0, "clients/a.ts"),
+			timedOut(1, "clients/b.ts"),
+		]);
+		expect(result.status).toBe("failed");
+		expect(result.shards).toEqual([
+			{ shard: 0, outcome: "complete", reason: null },
+			{
+				shard: 1,
+				outcome: "dry-run-timeout",
+				reason:
+					"the initial test run exceeded dryRunTimeoutMinutes (10) with 87 test file(s), estimated 231 s",
+			},
+		]);
+		expect(result.body).toContain(
+			"- **Status:** FAILED (dry-run timeout in shard 1: no mutant was evaluated)",
+		);
+		expect(result.body).toContain(
+			"- **Shards:** 0 complete; 1 dry-run-timeout (the initial test run exceeded dryRunTimeoutMinutes (10) with 87 test file(s), estimated 231 s)",
+		);
+		expect(result.marker).toBe(SHA_A);
+		expect(result.queue).toEqual([HELD]);
+	});
+
+	it("names both shards when both initial runs time out, and a plain driver failure keeps its generic verdict", () => {
+		const both = night([
+			timedOut(0, "clients/a.ts"),
+			timedOut(1, "clients/b.ts"),
+		]);
+		expect(both.body).toContain(
+			"FAILED (dry-run timeout in shard 0, 1: no mutant was evaluated)",
+		);
+		const crashed = night([
+			complete(0, "clients/a.ts"),
+			{
+				record: record(1, 1),
+				report: shardReport(1, "clients/b.ts", {
+					zeroMutants: { reason: "mutation diff: dry run failed" },
+				}),
+			},
+		]);
+		expect(crashed.shards[1]).toEqual({
+			shard: 1,
+			outcome: "failed",
+			reason: "driver exited 1 without a partial result",
+		});
+		expect(crashed.body).not.toContain("dry-run timeout");
+	});
+
+	it("still reads run 37629970371's artifacts, written before the driver recorded the timeout, as plain failures", () => {
+		// The real artifacts of the run that timed out (`gh run download`): no
+		// `dryRunTimeout` key, so an old record must keep parsing as before.
+		const artifacts = [0, 1].map((shard) => {
+			const dir = resolve(
+				import.meta.dirname,
+				`../fixtures/stryker-nightly/run-37629970371-dry-run-timeout/mutation-shard-${shard}`,
+			);
+			return {
+				dir: `mutation-shard-${shard}`,
+				record: readFileSync(join(dir, "shard.json"), "utf8"),
+				report: readFileSync(join(dir, "mutation.json"), "utf8"),
+			};
+		});
+		const window = JSON.parse(artifacts[0].record).window;
+		const reason = "driver exited 1 without a partial result";
+		const verdict = combineShards({
+			artifacts: artifacts.map(({ record: rec, report }) => ({
+				record: JSON.parse(rec),
+				report: JSON.parse(report),
+			})),
+			expectedShards: [0, 1],
+			window,
+		});
+		expect(verdict.status).toBe("failed");
+		expect(verdict.shards).toEqual([
+			{ shard: 0, outcome: "failed", reason },
+			{ shard: 1, outcome: "failed", reason },
+		]);
 	});
 
 	// The first night: no tracking issue, so no queue; new files queue against

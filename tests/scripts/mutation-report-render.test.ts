@@ -468,6 +468,45 @@ describe("renderMutationMarkdown", () => {
 		expect(truncated).toContain("25 related test(s) dropped by the test cap");
 	});
 
+	// Recurrence (#4092): the runtime cap drops tests the count cap never
+	// does (the window's own tests), and a report that dropped them without a
+	// word would read a truncated test population as the whole one.
+	it("discloses tests dropped by the runtime cap, on its own and beside the count cap", () => {
+		const render = (extra: Record<string, number>) =>
+			renderMutationMarkdown({
+				files: {},
+				piLensMutationDiff: {
+					counts: { Killed: 1 },
+					score: "100.00",
+					testSelection: {
+						mode: "coverage",
+						pool: 122,
+						covering: 100,
+						kept: 90,
+						dropped: 0,
+						overBudget: 0,
+						estimatedSeconds: 239.4,
+						own: 80,
+						unknown: 0,
+						...extra,
+					},
+				},
+			});
+		expect(render({ overBudget: 32 })).toContain(
+			"Bounded evidence: 32 test(s) dropped by the runtime cap (~239 s of estimated test time kept) (90 kept). The score is from a truncated test population.",
+		);
+		expect(render({ overBudget: 32 })).toMatch(
+			/^- \*\*Test selection:\*\* .* kept 90 \(80 own, 32 over the runtime cap, ~239 s kept\)$/m,
+		);
+		expect(render({ dropped: 25, overBudget: 32 })).toContain(
+			"Bounded evidence: 25 covering test(s) dropped by the test cap; 32 test(s) dropped by the runtime cap (~239 s of estimated test time kept) (90 kept).",
+		);
+		// An uncapped report (and a pre-#4092 report with no such field) says nothing.
+		expect(render({})).not.toContain("Bounded evidence");
+		const old = render({});
+		expect(old).not.toContain("runtime cap");
+	});
+
 	it("renders the exact selection line: bare without extras, comma-joined with both", () => {
 		const render = (extra: { own?: number; unknown?: number }) =>
 			renderMutationMarkdown({
