@@ -4864,3 +4864,90 @@ describe("post-image mutation witnesses (#3945 survivors)", () => {
 		}
 	});
 });
+
+// #3085 gap 1. Recurrence: #3033 (#3043) edited workflow steps no pull request
+// executed, and AGENTS.md's one-sentence `gh workflow run` rule was the only
+// cover. The rule is only real if BOTH CI's entry (`lintPullRequestEvent`) and
+// the local preflight (`lintLocalPrBody`) refuse a no-PR-trigger workflow edit
+// that quotes no run id; deleting either wire must red here.
+describe("workflow edits with no pull request run (#3085 gap 1)", () => {
+	const WORKFLOW = ".github/workflows/stryker-nightly.yml";
+	const NIGHTLY = [
+		"name: nightly",
+		"on:",
+		"  schedule:",
+		"    - cron: '0 3 * * *'",
+		"  workflow_dispatch:",
+		"jobs:",
+		"  a:",
+		"    runs-on: ubuntu-latest",
+		"",
+	].join("\n");
+	const runBody = `${body}\n\n\`\`\`text\n$ gh workflow run stryker-nightly.yml --ref test/x\nhttps://github.com/o/r/actions/runs/12345678901\n\`\`\``;
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		writeFileSync(join(fixtureCwd, WORKFLOW), NIGHTLY);
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("fails CI's entry on a schedule-only workflow edit with no quoted run", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(body, []), {
+			pull_request: { number: 7, body },
+		});
+		expect(result.valid).toBe(false);
+		expect(errors.mock.calls.flat().join("\n")).toContain(
+			`Changed workflow ${WORKFLOW} has no pull request run of its edit`,
+		);
+	});
+
+	it("passes CI's entry once the body quotes the branch run with its id", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await lintPullRequestEvent(fetchForEvent(runBody, []), {
+			pull_request: { number: 7, body: runBody },
+		});
+		expect(errors.mock.calls.flat().join("\n")).not.toContain(
+			"Changed workflow",
+		);
+		expect(result).toMatchObject({ valid: true });
+	});
+
+	it("fails the local preflight the same way and passes with the run id", () => {
+		const bare = lintLocalPrBody(body, fixtureCwd);
+		expect(bare.valid).toBe(false);
+		expect(bare.errors.join("\n")).toContain(`Changed workflow ${WORKFLOW}`);
+		expect(
+			lintLocalPrBody(runBody, fixtureCwd).errors.join("\n"),
+		).not.toContain("Changed workflow");
+	});
+
+	it("does not ask for a run when the edited workflow has a pull_request trigger", () => {
+		writeFileSync(
+			join(fixtureCwd, WORKFLOW),
+			NIGHTLY.replace("  workflow_dispatch:", "  pull_request:"),
+		);
+		expect(lintLocalPrBody(body, fixtureCwd).errors.join("\n")).not.toContain(
+			"Changed workflow",
+		);
+	});
+
+	it("fails closed, naming the file, when the post-image cannot be read", () => {
+		rmSync(join(fixtureCwd, WORKFLOW));
+		mkdirSync(join(fixtureCwd, WORKFLOW));
+		expect(lintLocalPrBody(body, fixtureCwd).errors.join("\n")).toContain(
+			`Changed workflow ${WORKFLOW} could not be read`,
+		);
+	});
+});

@@ -844,7 +844,11 @@ The Unit shards are packed by the per-file seconds in
 
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
-(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043).
+(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043). The
+same quote is enforced per file for an edit to any workflow whose post-image no
+`pull_request` run executes (no trigger, `pull_request_target` only, or a
+filter that excludes the file): `scripts/check-pr-body.mjs` reds the body
+without it, or without `Workflow run unaffected: <file> — <reason>` (#3085).
 
 The stale-build guard rejects a missing or older compiled twin. Pre-push fails
 when its bounded test-lock wait times out (#3717); `PI_LENS_PREPUSH_LOCK_SKIP=1`

@@ -1,0 +1,277 @@
+// File-level rule for workflow edits no pull request executes (#3085 gap 1).
+//
+// THE RECURRENCE (#3043). #3033 edited install-smoke.yml steps that only ran
+// on master pushes; six cells then failed on every master push for a day. The
+// job-level sweep (tests/config/workflow-pull-request-reachability.test.ts)
+// judges the jobs of workflows a pull request can trigger. It cannot see a
+// workflow file whose EDIT never executes on the PR at all, so the only cover
+// for those edits was one AGENTS.md sentence nothing enforced.
+//
+// WHAT COUNTS AS "THE EDIT EXECUTES ON THE PR": the post-image of the edited
+// file runs on a `pull_request` event of the PR. Four shapes do not:
+//   - no `pull_request` trigger (schedule, workflow_dispatch, push,
+//     workflow_run, labels, release: tool-smoke, release, stale, ...);
+//   - `pull_request_target` only: GitHub runs the BASE branch's copy of the
+//     file, so the edited lines are not the lines that run (greetings.yml,
+//     close-keyword-verification.yml);
+//   - a `pull_request` trigger whose `paths:`/`paths-ignore:` filter excludes
+//     the workflow file itself;
+//   - a `pull_request` trigger whose `types:` list names neither `opened` nor
+//     `synchronize`, so a push to the PR never starts it.
+// An `on:` block this reader cannot parse is treated as not executing: the
+// rule fails closed and asks for evidence rather than reading clean.
+//
+// The reader is dependency-free on purpose: the PR-body lane runs
+// `node scripts/check-pr-body.mjs` with no `npm install`, so js-yaml is not
+// available there. tests/config/workflow-pull-request-reachability.test.ts
+// pins this reader against js-yaml over every workflow in the tree.
+import { matchGlob } from "./tla-coverage.mjs";
+
+const WORKFLOW_PATH = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+const RUN_ID = /(?:\/actions\/runs\/|\brun[ -]?id\b[^\d\n]{0,4})(\d{8,})/i;
+// Lines after the `gh workflow run` line that may carry its run id. A pasted
+// transcript puts the id on the next line or two; the window is bounded so one
+// run id cannot satisfy every edited workflow in a long body.
+const RUN_ID_WINDOW_LINES = 8;
+
+const stripComment = (line) => line.replace(/(^|\s)#.*$/, "$1").trimEnd();
+const indentOf = (line) => /^ */.exec(line)[0].length;
+const unquote = (value) => value.trim().replace(/^(["'])(.*)\1$/, "$2");
+
+function flowList(value) {
+	const match = /^\[(.*)\]$/.exec(value.trim());
+	return match ? match[1].split(",").map(unquote).filter(Boolean) : null;
+}
+
+// `paths`, `paths-ignore` and `types` of one trigger: a flow list on the key's
+// line, or a block list beneath it, optionally anchored (`&name`) or an alias
+// (`*name`) of an earlier anchored list, the way install-smoke.yml shares one
+// `paths:` between `push` and `pull_request`. Anything else is unparsed (null).
+function readFilter(subLines, key, anchors) {
+	const keyIndex = subLines.findIndex((line) =>
+		new RegExp(`^\\s*${key}\\s*:`).test(line),
+	);
+	if (keyIndex < 0) return undefined;
+	let inline = subLines[keyIndex].replace(/^[^:]+:\s*/, "").trim();
+	const alias = /^\*(\S+)$/.exec(inline);
+	if (alias) return anchors.get(alias[1]) ?? null;
+	const anchor = /^&(\S+)\s*(.*)$/.exec(inline);
+	if (anchor) inline = anchor[2];
+	let value;
+	if (inline) value = flowList(inline);
+	else {
+		const keyIndent = indentOf(subLines[keyIndex]);
+		const items = [];
+		for (const line of subLines.slice(keyIndex + 1)) {
+			const trimmed = line.trim();
+			if (!trimmed.startsWith("- ")) break;
+			if (indentOf(line) < keyIndent) break;
+			items.push(unquote(trimmed.slice(2)));
+		}
+		value = items.length ? items : null;
+	}
+	if (anchor && value) anchors.set(anchor[1], value);
+	return value;
+}
+
+/**
+ * The triggers a workflow file's `on:` declares, as
+ * `Map<name, { paths?, pathsIgnore?, types?, unparsed? }>`, or `null` when the
+ * block is absent or in a spelling this reader does not parse (a flow
+ * mapping). The three spellings GitHub accepts are read: a scalar, a list, a
+ * mapping.
+ */
+export function readWorkflowTriggers(text) {
+	const lines = String(text ?? "")
+		.split(/\r?\n/)
+		.map(stripComment);
+	const start = lines.findIndex((line) => /^(?:on|"on"|'on')\s*:/.test(line));
+	if (start < 0) return null;
+	const triggers = new Map();
+	const inline = lines[start].replace(/^[^:]+:\s*/, "").trim();
+	if (inline) {
+		const list = flowList(inline);
+		if (list) {
+			for (const name of list) triggers.set(name, {});
+			return triggers;
+		}
+		if (/^[{[]/.test(inline)) return null;
+		triggers.set(unquote(inline), {});
+		return triggers;
+	}
+	const block = [];
+	for (const line of lines.slice(start + 1)) {
+		if (!line.trim()) continue;
+		if (indentOf(line) === 0 && !line.startsWith("- ")) break;
+		block.push(line);
+	}
+	if (!block.length) return null;
+	const base = indentOf(block[0]);
+	if (block[0].trim().startsWith("- ")) {
+		for (const line of block)
+			if (indentOf(line) === base && line.trim().startsWith("- "))
+				triggers.set(unquote(line.trim().slice(2)), {});
+		return triggers;
+	}
+	const anchors = new Map();
+	let current = null;
+	let sub = [];
+	const flush = () => {
+		if (!current) return;
+		const entry = triggers.get(current);
+		for (const [field, key] of [
+			["paths", "paths"],
+			["pathsIgnore", "paths-ignore"],
+			["types", "types"],
+		]) {
+			const value = readFilter(sub, key, anchors);
+			if (value === null) entry.unparsed = true;
+			else if (value !== undefined) entry[field] = value;
+		}
+	};
+	for (const line of block) {
+		const key =
+			indentOf(line) === base ? /^(\S+?)\s*:\s*(.*)$/.exec(line.trim()) : null;
+		if (key) {
+			flush();
+			current = unquote(key[1]);
+			sub = [];
+			triggers.set(
+				current,
+				key[2].trim().startsWith("{") && key[2].trim() !== "{}"
+					? { unparsed: true }
+					: {},
+			);
+		} else sub.push(line);
+	}
+	flush();
+	return triggers;
+}
+
+function pathFilterMatches(patterns, file) {
+	let included = false;
+	for (const pattern of patterns) {
+		const negated = pattern.startsWith("!");
+		if (matchGlob(negated ? pattern.slice(1) : pattern, file))
+			included = !negated;
+	}
+	return included;
+}
+
+/**
+ * Does the post-image of `file` execute on a pull request of its own edit?
+ * `{ executes: true }`, or `{ executes: false, reason, dispatchable }` where
+ * `dispatchable` says `gh workflow run` can start it (a `workflow_dispatch`
+ * trigger).
+ */
+export function classifyWorkflowEdit(text, file) {
+	const triggers = readWorkflowTriggers(text);
+	if (!triggers)
+		return {
+			executes: false,
+			reason: "its `on:` block could not be read",
+			dispatchable: true,
+		};
+	const dispatchable = triggers.has("workflow_dispatch");
+	const pr = triggers.get("pull_request");
+	if (!pr)
+		return {
+			executes: false,
+			reason: triggers.has("pull_request_target")
+				? "it has only a pull_request_target trigger, which runs the base branch's copy of the file"
+				: "it has no pull_request trigger",
+			dispatchable,
+		};
+	if (pr.unparsed)
+		return {
+			executes: false,
+			reason: "its pull_request filters could not be read",
+			dispatchable,
+		};
+	if (pr.paths && !pathFilterMatches(pr.paths, file))
+		return {
+			executes: false,
+			reason:
+				"its pull_request `paths:` filter excludes the workflow file itself",
+			dispatchable,
+		};
+	if (pr.pathsIgnore?.some((pattern) => matchGlob(pattern, file)))
+		return {
+			executes: false,
+			reason:
+				"its pull_request `paths-ignore:` filter matches the workflow file itself",
+			dispatchable,
+		};
+	if (
+		pr.types &&
+		!pr.types.some((type) => type === "opened" || type === "synchronize")
+	)
+		return {
+			executes: false,
+			reason:
+				"its pull_request `types:` list never starts it on a push to the PR",
+			dispatchable,
+		};
+	return { executes: true };
+}
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// HTML comments are the one place prose could satisfy the rule invisibly.
+const blankComments = (body) =>
+	String(body ?? "").replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+
+function quotesRunId(lines, file) {
+	const name = escapeRegExp(file.slice(file.lastIndexOf("/") + 1));
+	const command = new RegExp(
+		`\\bgh\\s+workflow\\s+run\\s+(?:\\.github/workflows/)?${name}(?![\\w.-])`,
+	);
+	return lines.some(
+		(line, index) =>
+			command.test(line) &&
+			/--ref\b/.test(line) &&
+			lines
+				.slice(index, index + RUN_ID_WINDOW_LINES)
+				.some((candidate) => RUN_ID.test(candidate)),
+	);
+}
+
+function declaresUnaffected(lines, file) {
+	const name = escapeRegExp(file.slice(file.lastIndexOf("/") + 1));
+	const pattern = new RegExp(
+		`^\\s*(?:[-*+]\\s+)?\\**Workflow run unaffected:\\s*(?:\\.github/workflows/)?${name}(?![\\w.-])\\s*[—–-]\\s*\\S`,
+	);
+	return lines.some((line) => pattern.test(line));
+}
+
+/**
+ * The rule: every changed workflow file whose edit no pull request executes
+ * must have its branch run (`gh workflow run <file> --ref <branch>`) quoted
+ * with a run id in the PR body, or a `Workflow run unaffected: <file> —
+ * <reason>` line. `readWorkflow(file)` returns the post-image text, or `null`
+ * for a file the PR deleted (nothing left to run).
+ */
+export function evaluateWorkflowRunEvidence({
+	changedFiles = [],
+	body = "",
+	readWorkflow,
+}) {
+	const lines = blankComments(body).split(/\r?\n/);
+	const errors = [];
+	for (const file of [...new Set(changedFiles)].sort()) {
+		if (!WORKFLOW_PATH.test(file)) continue;
+		const text = readWorkflow(file);
+		if (text === null) continue;
+		const verdict = classifyWorkflowEdit(text, file);
+		if (verdict.executes) continue;
+		if (quotesRunId(lines, file) || declaresUnaffected(lines, file)) continue;
+		errors.push(
+			`Changed workflow ${file} has no pull request run of its edit (${verdict.reason}): ` +
+				(verdict.dispatchable
+					? `run \`gh workflow run ${file.slice(file.lastIndexOf("/") + 1)} --ref <branch>\` and quote the command with its run id`
+					: "it has no workflow_dispatch trigger to run it by hand, so add one and quote its run id") +
+				`, or add "Workflow run unaffected: ${file.slice(file.lastIndexOf("/") + 1)} — <reason>" to the PR body.`,
+		);
+	}
+	return errors;
+}
