@@ -13,6 +13,7 @@ import "../../index.js";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { MAX_RESULT_BYTES } from "../../tools/render-compact.js";
 import { McpHarness } from "../mcp/harness.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
 import { createPiMock } from "../support/pi-mock.js";
 
 type ToolResult = {
@@ -84,7 +85,10 @@ describe("result contract across registered tool surfaces", () => {
 	afterAll(() => {
 		mcp?.dispose();
 		process.chdir(originalCwd);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		// `dispose()` signals the MCP child but does not wait for it to exit; on
+		// Windows its cwd handle on this directory outlives the call and a bare
+		// `rmSync` threw EBUSY (#4019). The shared helper retries while it drains.
+		removeTempDirSync(cwd);
 	});
 
 	// Whole-roster sweep: drives every paired registry tool through a real pi

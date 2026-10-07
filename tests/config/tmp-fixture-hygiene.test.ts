@@ -1392,7 +1392,15 @@ describe("tmp-fixture-hygiene", () => {
 			expect(
 				classifyTmpHygieneOwner({
 					runMatches: true,
-					marker: { pid: 1, startTime: ownMarker.startTime, file: OWNER },
+					// A pid that is alive on every OS and is not this worker's own:
+					// `1` is init on POSIX but does not exist on Windows, where the
+					// real `isAlive(1)` answers false and the verdict read "orphaned"
+					// (#4019).
+					marker: {
+						pid: process.ppid,
+						startTime: ownMarker.startTime,
+						file: OWNER,
+					},
 					markerMtimeMs: Date.now(),
 					nowMs: Date.now(),
 					selfPid: process.pid,

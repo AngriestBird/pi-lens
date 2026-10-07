@@ -2369,7 +2369,15 @@ describe("the uv-members dialect reproduces the pre-fold minimatch answers (#259
 					relativePath,
 					UV_WORKSPACE_MEMBERS_DIALECT,
 				);
-				const preFold = minimatch(relativePath, normalized, { dot: true });
+				// `platform: "linux"`: minimatch otherwise reads `process.platform` and
+				// on win32 treats the `\` in the `x\y` cell as a separator, while the
+				// matcher under test (which only ever sees `toPosix` output) keeps it a
+				// literal character. The pre-fold answers being reproduced are the
+				// POSIX ones (#4019).
+				const preFold = minimatch(relativePath, normalized, {
+					dot: true,
+					platform: "linux",
+				});
 				if (folded !== preFold && !UV_MINIMATCH_DIVERGENCES.has(key)) {
 					unexpected.push(`${key} folded=${folded} minimatch=${preFold}`);
 				}
