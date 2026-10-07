@@ -2082,7 +2082,7 @@ const _persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const _persistGenerations = new Map<string, number>();
 const _workerRequests = new Map<
 	number,
-	{ key: string; pending: PendingPersist; serializeMs: number }
+	{ key: string; pending: PendingPersist }
 >();
 let _persistWorker: Worker | undefined;
 let _persistWorkerRequestId = 0;
@@ -2450,7 +2450,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		return;
 	}
 	_workerRequests.delete(result.id);
-	const { key, pending, serializeMs } = request;
+	const { key, pending } = request;
 	const currentGeneration = _persistGenerations.get(key);
 	if (currentGeneration !== result.generation) {
 		// Removing the request makes completion observable to test/CLI waiters.
@@ -2515,7 +2515,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 			{
 				rawBytes: result.rawBytes,
 				gzBytes: result.gzBytes,
-				serializeMs,
+				serializeMs: result.serializeMs,
 				writeMs: result.writeMs,
 				durationMs: result.durationMs,
 				offloaded: true,
@@ -2694,25 +2694,6 @@ function getPersistWorker(): Worker | undefined {
 	}
 }
 
-interface SerializedForWorker {
-	bytes: Uint8Array<ArrayBuffer>;
-	/** Main-thread stringify plus UTF-8 encode; the worker no longer serializes. */
-	serializeMs: number;
-}
-
-/**
- * The one place a persist payload becomes the worker's bytes. `TextEncoder`
- * allocates a fresh buffer (`Buffer.from` serves small bodies from Node's pooled
- * slab, which cannot be transferred), so the caller lists `bytes.buffer` in
- * `postMessage`'s transfer list and the body crosses the thread boundary
- * without a structured clone of the graph (#3913).
- */
-function serializeForWorker(data: unknown): SerializedForWorker {
-	const started = performance.now();
-	const bytes = new TextEncoder().encode(JSON.stringify(data));
-	return { bytes, serializeMs: performance.now() - started };
-}
-
 function writePending(key: string): void {
 	const pending = _pendingPersist.get(key);
 	if (!pending) return;
@@ -2733,22 +2714,6 @@ function writePending(key: string): void {
 		});
 		return;
 	}
-	// Runs from an unref'd timer (or inline at debounce 0): a throw here would be
-	// host-fatal, and no request exists yet to leak. The retained `pending`
-	// re-serializes on every fallback, so the bytes are never kept.
-	let serialized: SerializedForWorker;
-	try {
-		serialized = serializeForWorker(persistedData(pending));
-	} catch (err) {
-		recordPersistFailure(
-			key,
-			"serialize_failed",
-			err instanceof Error ? err.message : String(err),
-			pending,
-			{ started: false, completed: false },
-		);
-		return;
-	}
 	const id = ++_persistWorkerRequestId;
 	const stagePath = `${pending.cachePath}.stage-${process.pid}-${pending.generation}`;
 	const request: ReviewGraphPersistWorkerRequest = {
@@ -2756,19 +2721,15 @@ function writePending(key: string): void {
 		cwd: key,
 		generation: pending.generation,
 		stagePath,
-		data: serialized.bytes,
+		data: persistedData(pending),
 		elements: pending.elementCount,
 		testDelayMs:
 			process.env.NODE_ENV === "test"
 				? Number(process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS) || undefined
 				: undefined,
 	};
-	_workerRequests.set(id, {
-		key,
-		pending,
-		serializeMs: serialized.serializeMs,
-	});
-	worker.postMessage(request, [serialized.bytes.buffer]);
+	_workerRequests.set(id, { key, pending });
+	worker.postMessage(request);
 }
 
 // Flush any pending writes synchronously at process teardown so a debounced
@@ -3187,21 +3148,6 @@ function writeReviewGraphCheckpoint(
 	}
 	sweepStaleStageFiles(cacheDir);
 	ensurePersistExitHook();
-	// Serialize before registering the request: a throw (a string past V8's
-	// maximum length, say) must leave no orphan entry for the worker-exit
-	// handler to count as pending.
-	let serialized: SerializedForWorker;
-	try {
-		serialized = serializeForWorker(data);
-	} catch (err) {
-		logReviewGraph({
-			cwd,
-			phase: "checkpoint_write_failed",
-			reason: "serialize_failed",
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return;
-	}
 	const id = ++_persistWorkerRequestId;
 	const stagePath = `${checkpointPath}.stage-${process.pid}-${generation}`;
 	_checkpointWorkerRequests.set(id, {
@@ -3219,14 +3165,14 @@ function writeReviewGraphCheckpoint(
 		cwd,
 		generation,
 		stagePath,
-		data: serialized.bytes,
+		data,
 		elements: graph.nodes.size + graph.edges.length,
 		testDelayMs:
 			process.env.NODE_ENV === "test"
 				? Number(process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS) || undefined
 				: undefined,
 	};
-	worker.postMessage(request, [serialized.bytes.buffer]);
+	worker.postMessage(request);
 	_checkpointOffloadCountForTests++;
 }
 
