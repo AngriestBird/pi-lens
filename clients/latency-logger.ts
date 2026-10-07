@@ -158,6 +158,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"session_end_bus_rollup",
 	"cache_usage_summary",
 	"test_runner_failed_target_state",
+	"turn_end_test_selection",
 	"lsp_aux_wait_outcome",
 	"tool_set_mutation",
 	"availability_decision",

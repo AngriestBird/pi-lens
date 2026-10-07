@@ -90,7 +90,10 @@ const isPlainObject = (value) =>
  * (`mutation.json`) is a mutation report for that shard (object `files`,
  * object `piLensMutationDiff` whose `shardIndex` is the record's); and the
  * driver exited 0 (`complete`) or exited non-zero with `partial` set
- * (`budget-cut`). Everything else is `failed` with its reason.
+ * (`budget-cut`). A non-zero exit whose report carries `dryRunTimeout` is
+ * `dry-run-timeout` (#4092): Stryker's initial test run outlasted
+ * `dryRunTimeoutMinutes`, so no mutant was evaluated, and the night names that
+ * instead of a generic failure. Everything else is `failed` with its reason.
  *
  * @param {{record?: unknown, report?: unknown, reportError?: string}} artifact
  * @param {string} window
@@ -127,6 +130,15 @@ export function classifyShardArtifact({ record, report, reportError }, window) {
 	if (meta.partial) {
 		return { shard, outcome: "budget-cut", reason: null, report };
 	}
+	if (isPlainObject(meta.dryRunTimeout)) {
+		const { minutes, tests, estimatedSeconds } = meta.dryRunTimeout;
+		const count = (value, text) => (Number.isFinite(value) ? text(value) : "");
+		return {
+			shard,
+			outcome: "dry-run-timeout",
+			reason: `the initial test run exceeded dryRunTimeoutMinutes${count(minutes, (value) => ` (${value})`)}${count(tests, (value) => ` with ${value} test file(s)`)}${count(estimatedSeconds, (value) => `, estimated ${Math.round(value)} s`)}`,
+		};
+	}
 	return failed(`driver exited ${exitCode} without a partial result`);
 }
 
@@ -159,7 +171,9 @@ export function combineShards({ artifacts, expectedShards, window }) {
 				: { ...verdict, outcome: "failed", reason: "unexpected shard" },
 		);
 	const shards = [...expected, ...strays];
-	const status = shards.every((shard) => shard.outcome !== "failed")
+	const status = shards.every(
+		({ outcome }) => outcome === "complete" || outcome === "budget-cut",
+	)
 		? "ok"
 		: "failed";
 	return {
@@ -511,6 +525,9 @@ export function buildNightlyBody({
 		report,
 		exists,
 	});
+	const timedOut = (shards ?? [])
+		.filter(({ outcome }) => outcome === "dry-run-timeout")
+		.map(({ shard }) => shard ?? "?");
 	const gaps = queue.completed ? coverageGaps(report) : null;
 	const notes = gaps
 		? [
@@ -528,7 +545,7 @@ export function buildNightlyBody({
 		`- **Window:** \`${base.slice(0, 12)}..${head.slice(0, 12)}\` (base from: ${source})`,
 		queue.completed
 			? "- **Status:** ok"
-			: "- **Status:** FAILED -- the driver did not finish; the marker and the carry-over queue are unchanged, so the next night's window covers this one again",
+			: `- **Status:** FAILED${timedOut.length > 0 ? ` (dry-run timeout in shard ${timedOut.join(", ")}: no mutant was evaluated)` : ""} -- the driver did not finish; the marker and the carry-over queue are unchanged, so the next night's window covers this one again`,
 		`- **Coverage:** ${queue.completed ? (notes.length === 0 ? "the whole window was evaluated" : `not complete: ${notes.join("; ")}`) : "n/a"}`,
 		`- **Carry-over queue:** ${queue.entries.length} file(s) (FIFO, at most ${MAX_PENDING}; the next night mutates these first, under the same cap, each against its own base, at most ${MAX_BASE_AGE_DAYS} days old)${queue.dropped > 0 ? `; ${queue.dropped} oldest file(s) were dropped because the queue overflowed` : ""}${previous.rebased > 0 ? `; ${previous.rebased} queued file(s) had a base older than ${MAX_BASE_AGE_DAYS} days and were re-based onto \`${previous.floor?.slice(0, 12)}\`, so their earlier changes are not evaluated` : ""}${previous.unknownBase > 0 ? `; ${previous.unknownBase} queued file(s) had no base git knows as an ancestor and were read against the window base` : ""}`,
 	];
