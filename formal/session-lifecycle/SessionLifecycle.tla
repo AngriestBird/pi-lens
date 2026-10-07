@@ -103,6 +103,10 @@
 (*                       (Begin) is declined if its own key differs.       *)
 (*                       Without either, any non-startup gap start is      *)
 (*                       primary (#3668 row 17)                            *)
+(*   "bindInterrupted"   #3855 r4: a forward binds the interrupted scope's *)
+(*                       ticket when its manager carries none (an in-memory*)
+(*                       /new or startup), so no reload gap is named by no *)
+(*                       key                                               *)
 (*   "keylessFailSafe"   #3855 r2's J6, a rejected alternative: a key-less *)
 (*                       gap start with the named reason passes for a      *)
 (*                       ticket name                                       *)
@@ -231,7 +235,9 @@ SR(k) == IF k = "clone" THEN "fork" ELSE k
 \* The start reasons whose source list begins with the slot (SOURCES).
 SlotReasons == {"fork", "reload"}
 
-NoSlot == [has |-> FALSE, from |-> 0, reason |-> "-", file |-> "-",
+\* `from` is the scope that wrote the slot (HandoffOnce); `tk` is the ticket
+\* a file-less slot is keyed by (#3819), which a forward keeps (#3881).
+NoSlot == [has |-> FALSE, from |-> 0, tk |-> 0, reason |-> "-", file |-> "-",
            facts |-> {}, act |-> {}, adv |-> {}]
 \* A hand-off key (startKey): a session file, or, file-less, the ticket bound
 \* to the session manager; NoKey when pi links nothing.
@@ -291,20 +297,22 @@ VARIABLES
     notes,                   \* #3855 r1: secondary-successor notes (keys)
     spend,                   \* a subagent replacement between its shutdown and start
     subBorn,                 \* ghost: scopes of the subagent's chain
-    userDeclined             \* ghost: a user scope's own replacement start was
+    userDeclined,            \* ghost: a user scope's own replacement start was
                              \* declined while no scope held the primary slot
+    fwd                      \* scopes whose start a /reload interrupted (#3881):
+                             \* their shutdown forwarded, it stashed nothing
 
 vars == <<st, role, sess, ep, why, primary, last, nxt, pend, forking, branch,
           cell, imp, lin, slot, taken, side, sideAct, wr, entry, intent, reg,
           svc, fleet, turn, begun, turns, procTurn, evalTurn, wgTok, wgDone,
           lastTok, prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
           predOf, act, acts, adv, advOut, advDrop, steps, used, notes, spend,
-          subBorn, userDeclined>>
+          subBorn, userDeclined, fwd>>
 
 \* Groups for UNCHANGED.
 lzV  == <<act, acts>>
 adV  == <<adv, advOut, advDrop>>
-r2V  == <<notes, spend, subBorn, userDeclined>>
+r2V  == <<notes, spend, subBorn, userDeclined, fwd>>
 
 \* The successor born from scope p is of the subagent's chain when p is.
 Born(t, p) == IF p \in subBorn THEN subBorn \cup {t} ELSE subBorn
@@ -341,6 +349,7 @@ Init ==
     /\ adv = {} /\ advOut = {} /\ advDrop = {}
     /\ steps = 0 /\ used = {}
     /\ notes = {} /\ spend = NoSpend /\ subBorn = {} /\ userDeclined = FALSE
+    /\ fwd = {}
 
 -----------------------------------------------------------------------------
 (* Helpers.                                                                *)
@@ -380,9 +389,15 @@ SameMgr(s) ==
 \* scope s's session manager. A primary shutdown that stashes (Retire with a
 \* slot reason) binds its ticket; a secondary's shutdown stashes nothing, so
 \* it binds nothing.
+\* A forwarded scope (#3881) stashed nothing: its manager carries the ticket
+\* its own start's manager carried, its predecessor's when that start kept
+\* the manager, else, under "bindInterrupted" (#3855 r4), its own.
 RECURSIVE Carrier(_)
 Carrier(s) ==
     IF s = 0 THEN 0
+    ELSE IF s \in fwd
+         THEN LET c == IF SameMgr(s) THEN Carrier(predOf[s]) ELSE 0
+              IN IF c = 0 /\ Has("bindInterrupted") THEN s ELSE c
     ELSE IF role[s] = "primary" /\ Has("handoffAtShutdown")
             /\ why[s] \in {"reload", "fork", "clone"} THEN s
     ELSE IF SameMgr(s) THEN Carrier(predOf[s])
@@ -394,11 +409,11 @@ Via(k, s) == IF k \in {"reload", "fork", "clone"} THEN Carrier(s) ELSE 0
 
 \* takeHandoff (clients/session-scope.ts): the slot's key equals the start's
 \* (start reason, session file). A file-less session's file is undefined;
-\* under "ticketKey" its key is the ticket that left the slot (slot.from),
+\* under "ticketKey" its key is the ticket that left the slot (slot.tk),
 \* and the start's is c, the ticket bound to its manager (Via).
 SlotMatch(r, f, c) ==
     /\ slot.has /\ slot.reason = r /\ slot.file = Key(f)
-    /\ (Has("ticketKey") /\ f \in FileLess) => slot.from = c
+    /\ (Has("ticketKey") /\ f \in FileLess) => slot.tk = c
 
 \* The queue after a prune: under #3757, a retired scope's advisories go
 \* (pruneRetiredAdvisories), each with a counted record.
@@ -429,7 +444,7 @@ BeforeFork(k) ==
     /\ HostOk
     /\ forking' = k
     /\ slot' = IF Has("handoffAtShutdown") THEN slot
-               ELSE [has |-> TRUE, from |-> primary, reason |-> "fork",
+               ELSE [has |-> TRUE, from |-> primary, tk |-> primary, reason |-> "fork",
                      file |-> Key(IF k = "fork" THEN "F" ELSE "C"),
                      facts |-> cell[primary], act |-> act[primary],
                      adv |-> {a.o : a \in {b \in adv : b.tag = primary}}]
@@ -482,7 +497,7 @@ RetireTo(k, tgt, tag) ==
        /\ why' = [t \in Tickets |-> IF ends(t) THEN k ELSE why[t]]
        /\ primary' = 0
        /\ slot' = IF stash
-                  THEN [has |-> TRUE, from |-> p, reason |-> SR(k),
+                  THEN [has |-> TRUE, from |-> p, tk |-> p, reason |-> SR(k),
                         file |-> Key(succ), facts |-> cell[p],
                         act |-> act[p],
                         adv |-> {a.o : a \in {b \in adv : b.tag = p}}]
@@ -624,7 +639,7 @@ Begin ==
     /\ UNCHANGED <<ep, why, forking, side, sideAct, wr, entry, intent,
                    svc, fleet, turn, begun, turns, procTurn, wgDone, lastTok,
                    prevMax, ownDrop, recorded, dupDone, landed, reads, steps,
-                   used, acts, advOut, advDrop, notes, spend, userDeclined>>
+                   used, acts, advOut, advDrop, notes, spend, userDeclined, fwd>>
 
 \* The replacement's session_start when another start already registered as
 \* primary in its gap (a subagent's own /reload or /fork, #3668 row 17): the
@@ -654,7 +669,7 @@ BeginDemoted ==
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
                    prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
-                   lzV, adV, steps, used, notes, spend, userDeclined>>
+                   lzV, adV, steps, used, notes, spend, userDeclined, fwd>>
 
 \* #3855 r1 F3: the real successor's start, with no primary registered,
 \* finds its own key in a (stale) secondary note and is declined as that
@@ -684,7 +699,7 @@ BeginDeclined ==
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
                    prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
-                   lzV, adV, steps, used, spend, userDeclined>>
+                   lzV, adV, steps, used, spend, userDeclined, fwd>>
 
 \* #3881: the replacement's primary session_start begins (resetForSession
 \* draws its ticket; the module-level runtime serves it) and, before
@@ -711,6 +726,13 @@ Interrupt ==
            t == nxt
            f == NewFile(k)
            left == SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
+           \* SameMgr for t: its start kept pend.from's manager.
+           keeps == k \in {"reload", "fork", "clone"} /\ (k = "reload" \/ f \in FileLess)
+           tick == IF ~Has("forwardUnadopted") THEN t
+                   ELSE IF keeps THEN Carrier(pend.from)
+                   ELSE IF Has("bindInterrupted") THEN t ELSE 0
+           ikey == IF f \notin FileLess THEN [f |-> f, t |-> 0]
+                   ELSE IF tick = 0 THEN NoKey ELSE [f |-> "-", t |-> tick]
        IN
        /\ st' = [st EXCEPT ![t] = "retired"]
        /\ role' = [role EXCEPT ![t] = "primary"]
@@ -729,11 +751,15 @@ Interrupt ==
                                          !.act = IF Keeps("LZ", k) THEN @ ELSE {},
                                          !.adv = IF Keeps("AD", k) THEN @ ELSE {}]
                        ELSE slot
-                  ELSE [has |-> TRUE, from |-> t, reason |-> "reload",
+                  ELSE [has |-> TRUE, from |-> t, tk |-> t, reason |-> "reload",
                         file |-> Key(f), facts |-> {}, act |-> {}, adv |-> {}]
+       \* #3855 r4 (verify r3 V4): the gap is named by the key the code's
+       \* successorStartKey reads after the forward: the ticket on the
+       \* interrupted start's manager (ikey).
        /\ pend' = [k |-> "reload", from |-> t, file |-> f, target |-> "-",
-                    key |-> NamedKey("reload", t, f)]
+                    key |-> ikey]
        /\ subBorn' = Born(t, pend.from)
+       /\ fwd' = IF Has("forwardUnadopted") THEN fwd \cup {t} ELSE fwd
        /\ steps' = steps + 1
        /\ used' = used \cup {"interrupt"}
     /\ UNCHANGED <<ep, primary, forking, cell, imp, taken, side, sideAct, wr,
@@ -777,7 +803,7 @@ PiFork ==
        /\ steps' = steps + 1 /\ used' = used \cup {"piFork"}
     /\ UNCHANGED <<ep, why, forking, taken, side, sideAct, wr, svc, turn,
                    begun, turns, wgDone, ownDrop, recorded, dupDone, landed,
-                   reads, acts, advOut, advDrop, notes, spend, userDeclined>>
+                   reads, acts, advOut, advDrop, notes, spend, userDeclined, fwd>>
 
 \* /tree: the same activation. The branch loses its last entry and the scope's
 \* branch epoch bumps (S1's moveBranch, from retainBranch). D7: the lazy-tool
@@ -841,7 +867,7 @@ SecStart ==
                    side, sideAct, wr, entry, intent, reg, svc,
                    fleet, turn, begun, turns, procTurn, evalTurn, wgTok,
                    wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone,
-                   landed, reads, predOf, lzV, adV, notes, spend, userDeclined>>
+                   landed, reads, predOf, lzV, adV, notes, spend, userDeclined, fwd>>
 
 \* #3855 verify r2 (probe PR8): an SDK subagent's FIRST bind with a
 \* replacement reason (createAgentSessionFromServices({ sessionStartEvent }),
@@ -875,7 +901,7 @@ SecBind(k) ==
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
                    prevMax, ownDrop, recorded, dupDone, landed, reads, predOf,
-                   lzV, adV, notes, spend, userDeclined>>
+                   lzV, adV, notes, spend, userDeclined, fwd>>
 
 \* A subagent's session_shutdown: its scope retires and its own cells go.
 SecEnd ==
@@ -935,7 +961,7 @@ SecDown(k) ==
                    reg, svc, fleet, turn, begun, turns, procTurn, evalTurn,
                    wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, resets,
                    dupDone, landed, reads, predOf, lzV, adV, subBorn,
-                   userDeclined>>
+                   userDeclined, fwd>>
 
 \* SecUp: the successor's session_start, reason k. With no primary
 \* registered (the primary's replacement gap):
@@ -1013,7 +1039,7 @@ SecUp ==
     /\ UNCHANGED <<ep, why, pend, forking, side, sideAct, wr, entry, intent,
                    reg, svc, fleet, turn, begun, turns, procTurn, evalTurn,
                    wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, dupDone,
-                   landed, reads, acts, advOut, advDrop, steps, used>>
+                   landed, reads, acts, advOut, advDrop, steps, used, fwd>>
 
 \* #3855 r1: a note is evicted over the cap. With one modelled subagent the
 \* cap is never reached by its own notes, so this models the unmodelled
@@ -1027,7 +1053,7 @@ Evict ==
                    entry, intent, reg, svc, fleet, turn, begun, turns,
                    procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
                    ownDrop, recorded, resets, dupDone, landed, reads, predOf,
-                   lzV, adV, steps, spend, subBorn, userDeclined>>
+                   lzV, adV, steps, spend, subBorn, userDeclined, fwd>>
 
 \* A duplicate session_start for the same replacement (I5, #2890).
 Dup ==

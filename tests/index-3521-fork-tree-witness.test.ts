@@ -2312,6 +2312,69 @@ describe("#3855 only the successor the primary named is primary in its gap", () 
 	}
 
 	/**
+	 * Verify r3 V3 (probe PR12): an in-memory /new runs on a new session
+	 * manager, so when a /reload lands while its session_start is still in
+	 * flight (#3881) the forward path found no ticket to name the reload gap
+	 * by. The gap was named (reload, none), and a key-less reload start
+	 * passed for the successor: a gap subagent's own in-memory reload, or an
+	 * SDK bind with reason reload. The user's conversation was then demoted.
+	 */
+	for (const gap of ["subagent-reload", "sdk-bind", "none"] as const) {
+		it(`keeps the reload successor of an interrupted in-memory /new primary (gap: ${gap})`, async () => {
+			let runtime: AgentSessionRuntime | undefined;
+			let inner: Promise<void> | undefined;
+			let armed = false;
+			let acted = false;
+			const reloadDuringNew = (pi: ExtensionAPI) => {
+				pi.on("session_start", (event) => {
+					if ((event as { reason?: string }).reason !== "new" || inner) return;
+					inner = new Promise<void>((resolve, reject) =>
+						setImmediate(() => runtime!.session.reload().then(resolve, reject)),
+					);
+				});
+			};
+			const actInReloadGap = (pi: ExtensionAPI) => {
+				pi.on("session_shutdown", async (event) => {
+					if ((event as { reason?: string }).reason !== "reload") return;
+					if (!armed || acted) return;
+					acted = true;
+					if (gap === "subagent-reload")
+						await reload(await startRuntime(SessionManager.inMemory(cwd)));
+					else if (gap === "sdk-bind")
+						await startRuntime(SessionManager.inMemory(cwd), [], [], cwd, {
+							type: "session_start",
+							reason: "reload",
+						});
+				});
+			};
+			runtime = await startRuntime(
+				SessionManager.inMemory(cwd),
+				[actInReloadGap],
+				[reloadDuringNew],
+			);
+			armed = true;
+
+			await runtime.newSession();
+			expect(inner).toBeDefined();
+			await inner;
+
+			const tail =
+				gap === "subagent-reload"
+					? [
+							["startup", "secondary"],
+							["reload", "secondary"],
+						]
+					: gap === "sdk-bind"
+						? [["reload", "secondary"]]
+						: [];
+			expect((await startRows()).slice(-(tail.length + 1))).toEqual([
+				...tail,
+				["reload", "primary"],
+			]);
+		});
+	}
+
+	/**
 	 * #2129 F3: after a primary quit nothing is pending, so a subagent's own
 	 * replacement re-arms the process as its primary. The recurrence this
 	 * guards: a start declined outside a primary's gap, which leaves the

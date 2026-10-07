@@ -217,6 +217,16 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   drift between what a shutdown names and what its successor computes
   (#3855 verify r2 V2). `SecBind` is an SDK subagent's first bind with a
   replacement reason (verify r2 PR8).
+- `bindInterrupted` (#3855 round 4, verify r3 V3): a primary shutdown that
+  forwards (`Interrupt`, #3881) binds the interrupted scope's ticket when its
+  manager carries none. `Interrupt` names the gap by the key the code reads
+  after the forward: the ticket on the interrupted start's manager, which is
+  its predecessor's when that start kept the manager (`SameMgr`), else, with
+  this part, its own, else none. `Carrier` follows a forwarded scope (`fwd`)
+  to that binding, and a slot's ticket key is `slot.tk`, kept by a forward,
+  apart from its writer `slot.from`. Without it, an interrupted in-memory
+  `/new` names its reload gap `(reload, none)` and a key-less start takes it
+  (`Mut3855r3InterruptedNewGap`).
 - `keylessFailSafe` (#3855 round 2's J6, rejected in round 3): a key-less gap
   start with the named reason passes for a ticket name. It existed for a
   test double that minted a session manager per ctx; in pi it admits PR8's
@@ -292,8 +302,8 @@ counterexample.
 | `H3FileLessCarry` | #3819's ticket key still carries a file-less `/reload`'s activations and advisory while a subagent binds in the gap | pass | 278 |
 | `H3StaleSlot` | file-backed, five transitions with `/new` and resume: the demoted successor discards its slot, so the demoted session's later `/reload` takes nothing, with #3819's fix | pass | 3016 |
 | `H3StaleSlotFileLess` | the same, file-less sessions | pass | 3016 |
-| `H3Interrupted` | file-backed: a `/reload`, `/fork` or resume start is interrupted by its own `/reload` before it adopts, with #3881's fix: the inner reload's start keeps the reads, activations and advisory, and an interrupted `/fork` carries no advisory | pass | 189098 |
-| `H3InterruptedFileLess` | the same, file-less sessions | pass | 189098 |
+| `H3Interrupted` | file-backed: a `/reload`, `/fork` or resume start is interrupted by its own `/reload` before it adopts, with #3881's fix: the inner reload's start keeps the reads, activations and advisory, and an interrupted `/fork` carries no advisory | pass | 189556 |
+| `H3InterruptedFileLess` | the same, file-less sessions | pass | 189556 |
 | `H3DemoteCarry` | file-backed, #3855's fix: a subagent's own `/reload` or `/fork` in the gap stays secondary, so the real successor keeps the reads | pass | 235 |
 | `H3DemoteAdvisory` | the same: the real successor keeps the advisory | pass | 224 |
 | `H3DemoteActivation` | the same: the real successor keeps the conversation's activations | pass | 256 |
@@ -305,6 +315,8 @@ counterexample.
 | `H3StaleNoteResume` | #3855 r2, review F3: a subagent reload whose start never comes, then the primary resumes its file: the process keeps a primary | pass | 9 |
 | `H3NoteEvicted` | #3855 r2: nothing to evict; a gap subagent's own `/reload` is declined by the pair | pass | 136 |
 | `H3InMemoryNewGapReload` | #3855 r2, row 12: in an in-memory `/new` gap a key-less subagent `/reload` is told apart by its reason | pass | 16 |
+| `H3InterruptedNewGap` | #3855 r4, verify r3 V3 (PR12): an in-memory `/new` interrupted by its own `/reload`; a gap subagent's own in-memory `/reload` or an SDK reload bind stays secondary | pass | 310 |
+| `Mut3855r3InterruptedNewGap` | #3855 r3, code-faithful `Interrupt` without `bindInterrupted`: the key-less start takes the slot | violated `PrimaryIsUsers` | 16 |
 | `H3SdkBind` | #3855 r3, verify r2 PR8: an SDK subagent's in-memory first bind with reason `reload`/`fork` in an in-memory primary's gap stays secondary; the real successor keeps its activations | pass | 236 |
 | `H3SdkBindFileBacked` | the same, file-backed | pass | 236 |
 | `Mut3855r2KeylessFailSafe` | #3855 r2's J6: the SDK subagent takes the primary slot | violated `PrimaryIsUsers` | 11 |
@@ -338,7 +350,7 @@ counterexample.
 | `Pre3855DemoteCarry` | pre-#3855, #3668 row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 239 |
 | `Pre3855DemoteAdvisory` | pre-#3855: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 236 |
 | `Pre3855DemoteActivation` | pre-#3855: the demoted real successor loses the conversation's activations | violated `NoLostActivation` | 145 |
-| `MutInterruptedForkPolicy` | #3881 r1: the forward keeps every store, so an interrupted `/fork` is adopted under the `/reload` policy | violated `AdvisoryStaysInSession` | 3388 |
+| `MutInterruptedForkPolicy` | #3881 r1: the forward keeps every store, so an interrupted `/fork` is adopted under the `/reload` policy | violated `AdvisoryStaysInSession` | 3412 |
 | `MutFileLessNoTicketKey` | #3819's fix without `ticketKey` | violated `NoCrossSessionAdoption` | 63 |
 | `MutStaleSlotNoDiscard` | #3819's fix without `demotedDiscard` | violated `HandoffOnce` | 1177 |
 | `MutForkClosureStash` | pre-#3669: the fork stash is per activation | violated `NoLostCarry` | 24 |
@@ -369,6 +381,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Mut3855r1DemotedReplaces` | #3855 review F2 | #3855 r1 (6ae7e2716): every secondary-role activation left a note, the demoted real successor's too | The primary's `/new`; R1 makes the subagent's `/new` primary and demotes the real successor; the subagent primary reloads; the demoted conversation reloads in that gap, finds its own note and is declined. |
 | `Mut3855r1StaleNote` | #3855 review F3 | #3855 r1 (6ae7e2716): notes had no time bound | A subagent reloads and its start never comes; the primary resumes the subagent's file; its successor matches the stale note and is declined. |
 | `Mut3855r1Evicted` | #3855 r1 | #3855 r1 (6ae7e2716): `SECONDARY_SUCCESSOR_NOTE_CAP` | A read lands; `/reload`; the gap subagent's note is evicted; its own `/reload` start classifies primary and the real successor is demoted. |
+| `Mut3855r3InterruptedNewGap` | #3855 verify r3 V3 | #3855 r3 (53ef06147): `forwardHandoff` bound no ticket | The primary's in-memory `/new`; its start is interrupted by its own `/reload`; an SDK subagent binds with reason `reload` and no key; the gap was named `(reload, none)`, so it is primary. |
 | `Mut3855r2KeylessFailSafe` | #3855 verify r2 V1 | #3855 r2 (317ffae8a): J6's `key === undefined && typeof namedKey === "number"` | An in-memory primary's `/reload` or `/fork`; an SDK subagent binds with that reason and no key; J6 admits it and the real successor is demoted. |
 | `Pre3855SdkBind` | #3855 verify r2 PR8 | pre-#3855 (b9eda404c): #3668 row 17 | As above, with any non-`startup` gap start admitted. |
 | `AcceptedR3InMemoryNew` | #3855 residual R3 | master, accepted | The primary's in-memory `/new`; a subagent's own in-memory `/new` starts first in the gap with the same pair. |
@@ -525,7 +538,10 @@ passes all four. Round 3 removed round 2's key-less fail-safe (J6,
 a `/reload` or in-memory `/fork` successor its predecessor's manager, so the
 named successor never arrives key-less; in pi it let an SDK subagent's
 replacement-reason bind take the slot (`H3SdkBind`). `Begin` now checks its
-own key, so `HasPrimary` constrains the merged rule. Its residual R3 (`AcceptedR3InMemoryNew`): in the
+own key, so `HasPrimary` constrains the merged rule. Round 4 made
+`Interrupt` name its gap as the code does (verify r3 V4); the earlier
+abstraction named a ticket the code never bound, which hid V3, and the
+forward now binds one (`bindInterrupted`). Its residual R3 (`AcceptedR3InMemoryNew`): in the
 primary's own in-memory `/new` gap, a subagent's own in-memory `/new`
 carries the same pair, so the first is primary; the process still has one
 primary.

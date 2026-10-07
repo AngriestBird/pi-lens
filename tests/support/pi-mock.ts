@@ -34,6 +34,14 @@ import { withTimeout } from "../../clients/deadline-utils.js";
  * ctx's manager to the next `session_start` of the same reason, which keeps
  * its own id and file on that one object. Consumed by that start, replaced by
  * the next such shutdown, and cleared after every test.
+ *
+ * Limit (verify r3 V5): this is ONE slot for the whole process, keyed by
+ * reason, where pi keeps one manager per AgentSession. Any same-kind shutdown
+ * replaces it and any same-reason start consumes it, a gap subagent's
+ * included, so the mock cannot express a subagent replacing itself, or an
+ * SDK-style bind, inside a primary's gap: such a cell reads as a false
+ * demotion here. Those cells are judged only in pi's real runtime
+ * (`tests/index-3521-fork-tree-witness.test.ts`).
  */
 const MANAGER_STATE = Symbol("pi-mock.session-manager-state");
 interface MockSessionManager {

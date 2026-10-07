@@ -598,6 +598,8 @@ export function forwardHandoff(args: {
 	sessionFile: string | undefined;
 	targetSessionFile: string | undefined;
 	sessionManager: unknown;
+	/** The interrupted start's scope, once it began (#3855). */
+	scope?: SessionScope;
 }): boolean {
 	const reason = toStartReason(args.reason);
 	const startReason = toStartReason(args.startReason);
@@ -617,6 +619,16 @@ export function forwardHandoff(args: {
 			stores: adopted,
 		};
 	}
+	// #3855: this shutdown names its successor by the ticket on its manager
+	// (`successorStartKey`). An interrupted start on a manager no stash bound
+	// (an in-memory /new or startup) left it without one, and the gap would be
+	// named by no key at all, which any key-less start matches. Bind the
+	// interrupted scope's ticket, as `stashHandoff` binds its own; a manager
+	// that carries one keeps it, since the forwarded slot is keyed by it.
+	const manager = asManager(args.sessionManager);
+	const left = handoffSlot().left;
+	if (args.scope && manager !== undefined && !left.has(manager))
+		left.set(manager, args.scope.scopeId);
 	// The successor's start resets the in-memory ledger; the record's durable
 	// `degradation_ledger` row in latency.log is what outlives it.
 	const outcome = stores ? "forwarded" : "no-slot";

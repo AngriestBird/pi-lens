@@ -462,6 +462,41 @@ describe("#3855 the successor a primary shutdown names", () => {
 		expect(startKey(undefined, {})).toBeUndefined();
 	});
 
+	it("names an interrupted in-memory /new's reload successor by the interrupted scope's ticket (verify r3 PR12)", () => {
+		// A /new runs on a new manager no stash bound; its start is in flight
+		// when its own /reload lands, so the forward is the only shutdown.
+		const manager = {};
+		const interrupted = primaryScope();
+		const args = {
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: manager,
+		};
+		forwardHandoff({ ...args, startReason: "new", scope: interrupted });
+
+		expect(successorStartKey(args)).toBe(interrupted.scopeId);
+		expect(startKey(undefined, manager)).toBe(interrupted.scopeId);
+		// A gap subagent's own start, on a manager nothing bound, is not it.
+		expect(startKey(undefined, {})).toBeUndefined();
+	});
+
+	it("keeps the ticket a stash bound when it forwards an interrupted reload (#3881)", () => {
+		const manager = {};
+		const left = primaryScope();
+		const args = {
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: manager,
+		};
+		stashHandoff(left, args);
+		forwardHandoff({ ...args, startReason: "reload", scope: primaryScope() });
+
+		expect(successorStartKey(args)).toBe(left.scopeId);
+		expect(takeHandoff("reload", left.scopeId)).toBeDefined();
+	});
+
 	it("names an interrupted start's successor by the key its forwarded slot keeps (#3881)", () => {
 		const manager = {};
 		const left = primaryScope();
