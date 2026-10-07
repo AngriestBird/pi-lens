@@ -72,11 +72,16 @@ function governanceFiles() {
 
 function redOnBase(files) {
 	const verdicts = {};
+	const redTmp = path.resolve(ROOT, "../probes-4047");
 	for (const file of files) {
 		const result = spawnSync(
 			process.execPath,
 			["scripts/red-on-base.mjs", file, "--base", BASE],
-			{ cwd: ROOT, encoding: "utf8" },
+			{
+				cwd: ROOT,
+				encoding: "utf8",
+				env: { ...process.env, TMPDIR: redTmp },
+			},
 		);
 		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
 		process.stdout.write(output);
@@ -86,6 +91,15 @@ function redOnBase(files) {
 		console.log(`${verdicts[file]}: ${file}`);
 	}
 	return verdicts;
+}
+
+function reportedFailureFiles(output, candidates) {
+	const found = [
+		...output.matchAll(
+			/^\s*(?:❯|FAIL)\s+(?:\|[^|]+\|\s+)?(tests\/\S+?\.test\.ts)(?:\s|\()/gm,
+		),
+	].map((match) => match[1]);
+	return [...new Set(found)].filter((file) => candidates.includes(file));
 }
 
 function capturedCommand(commandName, args) {
@@ -114,7 +128,8 @@ export function main(argv = process.argv.slice(2)) {
 	const selected = [
 		...targetedOutput.matchAll(/^\s+- (tests\/[^\s]+\.test\.ts)$/gm),
 	].map((match) => match[1]);
-	const failing = targeted.status === 0 ? [] : [...new Set(selected)];
+	const failing =
+		targeted.status === 0 ? [] : reportedFailureFiles(targetedOutput, selected);
 	const verdicts = redOnBase(failing);
 	const governance = governanceFiles();
 	console.log(`\n[lane-check] governance batch (${governance.length} files)`);
@@ -127,7 +142,7 @@ export function main(argv = process.argv.slice(2)) {
 	const governanceFailures =
 		governanceRun.status === 0
 			? []
-			: governance.filter((file) => governanceRun.output.includes(file));
+			: reportedFailureFiles(governanceRun.output, governance);
 	const governanceVerdicts = redOnBase(governanceFailures);
 	const bodyStatus = body
 		? command(process.execPath, [
