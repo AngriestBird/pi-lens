@@ -572,14 +572,17 @@ export async function launchLSP(
 	const augmentedPath = await buildAugmentedPath(resolvePathValue(mergedEnv));
 	// #3539: the child names this process's incarnation, so the orphan
 	// backstop can tell whose it is after this process dies and the child is
-	// reparented.
+	// reparented. With no tag of our own the child gets none (#3986): the
+	// host's inherited PI_LENS_OWNER may name a dead foreign owner, and an
+	// untagged server is spared where a wrongly tagged one is reaped.
 	const ownerTag = await ownerTagForChildren({ timeoutMs: OWNER_TAG_READ_MS });
 	const env: NodeJS.ProcessEnv = {
 		...mergedEnv,
 		PATH: augmentedPath,
 		...(isWindows ? { Path: augmentedPath } : {}),
-		...(ownerTag === undefined ? {} : { [OWNER_TAG_ENV]: ownerTag }),
 	};
+	if (ownerTag === undefined) delete env[OWNER_TAG_ENV];
+	else env[OWNER_TAG_ENV] = ownerTag;
 
 	// Resolve command path
 	// - If already absolute, use as-is

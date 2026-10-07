@@ -2234,7 +2234,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// 37 → 35 (#2660): evidence now reuses the resolver's rung instead of
 	// awaiting a second managed-binary lookup, removing the resolver's two
 	// unbounded awaits (the lookup and its caller-side reconstruction).
-	"clients/dispatch/runners/utils/runner-helpers.ts": 35,
+	// #3968: +1 — `coveringLaneAvailable` awaits each covering gate command
+	// (`ctx.hasTool`), whose probe carries the dispatcher's own 5s budget; the
+	// loop is bounded by the fact's fixed gate list, but like every sibling
+	// here it stays unbounded from the hook's signal until #2523 AC4.
+	"clients/dispatch/runners/utils/runner-helpers.ts": 36,
 	// #3541: `withHostFileMutationQueues` awaits the realpath of each path an
 	// LSP workspace edit names, which keys it the way pi keys its queue. It
 	// runs inside `applyWorkspaceEdit`, which the agent_settled actionable fix
@@ -2654,13 +2658,16 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"promise per store, so the three turn-end stores spend one budget each " +
 		"per delivery however many lanes await them, and an abandoned read " +
 		"yields null — a cold cache to every lane — never a stale envelope.",
-	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~df074468":
+	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~b310ae4e":
 		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
 		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
 		"wall budget is still live. #3872: this is `knipClient.analyze`, awaited " +
 		"under the budget LEFT after the phases before it (not a fresh 3000 ms), " +
 		"so a slow scan releases the handler instead of holding it past " +
-		"`hook-await-exceeded`. It replaces the #2523 exemption for the same " +
+		"`hook-await-exceeded`; a root whose last scan outlasted that budget is " +
+		"awaited for one timer tick only (a memo hit still answers), so the " +
+		"handler does not sit out the full budget on every turn. It replaces the " +
+		"#2523 exemption for the same " +
 		"await; the scan itself is abandoned, not cancelled, and finishes off-hook " +
 		"under knip's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#handleTurnEnd:4da1e4ca~7e52ce49":

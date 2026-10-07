@@ -50,10 +50,13 @@ const EXPECTED_PERMISSIONS: Record<
 		workflow: {},
 		jobs: {
 			smoke: { contents: "read" },
+			"npm-strict": { contents: "read" },
 			"pi-load": { contents: "read" },
 			"mise-repro": { contents: "read" },
 			"host-range-smoke": { contents: "read", actions: "read" },
-			"host-latest-smoke": { contents: "read", issues: "write" },
+			"host-latest-smoke": { contents: "read" },
+			// #4077: the tracking issue is written by its own guarded job.
+			"host-latest-notify": { contents: "read", issues: "write" },
 		},
 	},
 	".github/workflows/labels.yml": {

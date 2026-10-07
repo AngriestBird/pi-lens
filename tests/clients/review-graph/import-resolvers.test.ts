@@ -82,6 +82,23 @@ describe("relative-path resolvers (ruby/zig/bash/dart)", () => {
 	});
 });
 
+describe("containment of a resolved file (#4101)", () => {
+	// Recurrence: #4101 moved the containment test onto canonical paths; this
+	// pins the other direction, an EXISTING file outside cwd stays unresolved
+	// (the ruby case above names a path that does not exist, so it cannot).
+	it("never resolves an existing file outside cwd (jsts)", () => {
+		const outside = write("outside/x.ts");
+		const project = path.join(root, "proj");
+		const importer = path.join(project, "src/a.ts");
+		fs.mkdirSync(path.dirname(importer), { recursive: true });
+		fs.writeFileSync(importer, "x\n");
+		expect(fs.existsSync(outside)).toBe(true);
+		expect(
+			resolveImportToFiles(project, importer, "jsts", "../../outside/x"),
+		).toEqual([]);
+	});
+});
+
 describe("jsts resolver — source-twin preference (#694)", () => {
 	it("prefers the .ts source twin over a compiled .js sibling for an explicit .js specifier", () => {
 		write("src/a.ts", "import { b } from './b.js';\n");

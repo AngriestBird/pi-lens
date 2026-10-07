@@ -15,6 +15,7 @@ import type {
 import { findingsResult } from "../types.js";
 import {
 	createAvailabilityChecker,
+	coveringLaneAvailable,
 	lspPrimaryCoversFile,
 	resolveToolCommandWithInstallFallback,
 } from "./utils/runner-helpers.js";
@@ -142,12 +143,26 @@ const taploRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		// #233: the `toml` LSP server IS `taplo lsp` (same binary). When that LSP
-		// covers this file, the warm server already produces these diagnostics —
-		// skip the redundant CLI scan to avoid double-reporting. Stays active when
-		// the LSP is disabled/unavailable so TOML coverage never regresses.
-		if (lspPrimaryCoversFile(ctx, "toml") && (await ctx.hasTool("taplo"))) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+		// #233, generalized (#3968): the `toml` LSP server IS `taplo lsp` (same
+		// binary), so the LSP covers this RUNNER's capability — the covers fact
+		// table (clients/lsp/server.ts `toml` → `taplo`) carries the mapping and
+		// the availability gates are the LSP's own binary. The warm server
+		// already produces these diagnostics — skip the redundant CLI scan.
+		// Stays active when the LSP is disabled/unavailable so TOML coverage
+		// never regresses.
+		const cover = lspPrimaryCoversFile(ctx, "taplo");
+		if (cover && (await coveringLaneAvailable(ctx, cover))) {
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				// The closed skip taxonomy — the shellcheck lane named its skip
+				// since #3968; this lane's identical skip was bare, reading as
+				// an unexplained empty output on the delivery surfaces
+				// (defect shape 10). F2 adds the claim's provenance beside it.
+				skipReason: "covered-by-primary",
+				claimSource: cover.claimSource,
+			};
 		}
 
 		// Project binary first (#1731, discipline B): `taplo.isAvailableAsync`

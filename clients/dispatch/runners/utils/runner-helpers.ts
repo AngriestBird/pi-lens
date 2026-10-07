@@ -32,10 +32,11 @@ import {
 	resetPathWalkMemo,
 	type InstallAttempt,
 } from "../../../installer/index.js";
-import {
-	getServersForFileWithConfig,
-	isServerDisabled,
-} from "../../../lsp/config.js";
+import { getServersForFileWithConfig } from "../../../lsp/config.js";
+// The covers-fact LEAF, not the server registry: importing clients/lsp/server.js
+// here closes a dependency cycle through the installer's graph
+// (`no-client-cycles`, dependency-cruiser #2125).
+import { BUILTIN_SERVER_RUNNER_COVERS } from "../../../lsp/server-covers.js";
 import {
 	findGlobalBinary,
 	findLocalBinAt,
@@ -52,7 +53,7 @@ import {
 	getToolCommandSpec,
 	shouldAutoInstallTool,
 } from "../../../tool-policy.js";
-import type { DispatchContext } from "../../types.js";
+import type { DispatchContext, RunnerClaimSource } from "../../types.js";
 import { isInSpawnTimeoutCooldown } from "../../../spawn-timeout-cooldown.js";
 import { resolveToolCwd } from "../../../tool-cwd.js";
 import { createAvailabilityProbeFlight } from "../../../availability-probe-flight.js";
@@ -89,27 +90,115 @@ export {
 } from "./availability-policy.js";
 
 /**
- * True when the LSP runner will cover `ctx.filePath` via the given PRIMARY server
- * id. Used by CLI runners that duplicate a linter a warm LSP already wraps
- * (taplo↔`toml` LSP = `taplo lsp`; shellcheck↔`bash` LSP runs shellcheck
- * internally) so they SELF-SKIP and stop double-reporting the same findings (#233)
- * — the same dormant-when-LSP-covers pattern the ast-grep napi runner uses.
+ * The covering lane a runner should defer to: the file's SELECTED PRIMARY
+ * server claims one of its declared runner capabilities, with the gate
+ * commands the caller must probe (`DispatchContext.hasTool`) before honoring
+ * the fact — a covering lane that cannot run never defers, so coverage never
+ * regresses.
+ */
+export interface PrimaryRunnerCoverage {
+	/** The covering server's id (the file's selected primary). */
+	serverId: string;
+	/**
+	 * Probeable commands gating the covering lane. A builtin fact gates on
+	 * the fact's own commands; a CUSTOM row's declared claim gates on that
+	 * row's own command (projected from `CustomServerConfig.command`),
+	 * symmetric with the builtin facts — an absent custom binary means the
+	 * claim is not honored and the CLI runner runs, so coverage never
+	 * silently drops to a config typo (#3968 F2). A builtin-shaped row whose
+	 * claim comes only from a config-declared `covers` (never produced by the
+	 * real pipeline) carries none.
+	 */
+	gateCommands: readonly string[];
+	/**
+	 * Which fact source supplied the claim — row provenance, never an id
+	 * lookup (#3968 F2). The runners stamp it on the skip so the durable
+	 * latency row shows who claimed (`covered-by-primary` + `claimSource`).
+	 */
+	claimSource: RunnerClaimSource;
+}
+
+/**
+ * The capability question behind the #233 self-skip: does the file's selected
+ * PRIMARY LSP server subsume `runnerId` (a dispatch runner id — the RUNNER
+ * capability, never a server id)? Used by CLI runners that duplicate a linter
+ * a warm LSP already wraps (shcheck → the `bash`/`shuck` LSPs embed
+ * shellcheck; taplo CLI → the `toml` LSP embeds the taplo linter) so they
+ * SELF-SKIP and stop double-reporting the same findings.
  *
- * Non-spawning and conservative: honors the `no-lsp` kill switch + per-server
- * disable/config, and only matches when this server is the SELECTED primary for
- * the file (first non-auxiliary candidate). The caller additionally gates on tool
- * availability, so coverage never regresses when the LSP is absent/disabled.
+ * The claim has two sources, read in one place: the server row's own
+ * `covers` field (config-declared, the stacked PR's channel) and the builtin
+ * facts table `BUILTIN_SERVER_RUNNER_COVERS` (clients/lsp/server-covers.ts —
+ * the importable leaf, not the registry), which additionally carries the
+ * availability gate commands. Callers gate with `coveringLaneAvailable` so a
+ * missing covering lane never skips.
+ *
+ * The old spelling — `lspPrimaryCoversFile(ctx, "bash")`, a literal SERVER id
+ * at a call site asking about a RUNNER's capability — was #3968's defect: a
+ * custom/covers-capable shell LSP could not defer the runner (the zdot
+ * workaround needed `disabledServers: ["bash"]` to make `bash` NOT the
+ * primary). Non-spawning and conservative: honors the `no-lsp` kill switch;
+ * the primary itself is availability-independent BY SELECTION (disabled
+ * servers never select), and availability gate work happens in
+ * `coveringLaneAvailable`.
  */
 export function lspPrimaryCoversFile(
 	ctx: DispatchContext,
-	serverId: string,
-): boolean {
-	if (ctx.pi?.getFlag?.("no-lsp")) return false;
-	if (isServerDisabled(serverId, ctx.filePath)) return false;
+	runnerId: string,
+): PrimaryRunnerCoverage | undefined {
+	if (ctx.pi?.getFlag?.("no-lsp")) return undefined;
 	const primary = getServersForFileWithConfig(ctx.filePath).find(
 		(s) => s.role !== "auxiliary",
 	);
-	return primary?.id === serverId;
+	if (!primary) return undefined;
+	// Claim provenance is resolved by ROW provenance, never by id lookup
+	// (#3968 F2): a custom row (`lsp.servers.<id>`) shares its id's namespace
+	// with the builtin table, so an id-keyed fact lookup would inherit a
+	// claim the declared server never made — a `lsp.servers.bash` overlay is
+	// NOT the builtin bash server, and its bare registration must never
+	// suppress the CLI runner. eab4bcc12 dropped the false claim; this also
+	// scopes the GATE, which that round left ungated (a custom row's declared
+	// skip carried no probe at all).
+	const fact = primary.custom
+		? undefined
+		: BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
+	const covers = primary.covers ?? fact?.runnerIds;
+	if (!covers?.includes(runnerId)) return undefined;
+	// The gate follows the claim's source. A builtin fact probes the fact's
+	// commands; a custom claim probes the covering lane's own binary — the
+	// same shape `launchLSP` resolves, `command` being the binary token with
+	// args a separate field. A custom row whose command projection is absent
+	// (an older released writer's shape) cannot name a gate binary, so the
+	// claim is not honored at all: fail closed to the CLI runner.
+	const gateCommands = fact
+		? fact.gateCommands
+		: primary.custom
+			? primary.command
+				? [primary.command]
+				: undefined
+			: [];
+	if (gateCommands === undefined) return undefined;
+	return {
+		serverId: primary.id,
+		gateCommands,
+		claimSource: fact ? "builtin-fact" : "declared",
+	};
+}
+
+/**
+ * The availability half of the seam: every gate command the covering fact
+ * names must probe present (`ctx.hasTool`), else the runner must NOT skip —
+ * coverage never regresses (#3968's "when the covering lane is absent, no
+ * skip").
+ */
+export async function coveringLaneAvailable(
+	ctx: DispatchContext,
+	cover: PrimaryRunnerCoverage,
+): Promise<boolean> {
+	for (const gate of cover.gateCommands) {
+		if (!(await ctx.hasTool(gate))) return false;
+	}
+	return true;
 }
 
 const _realThisDir = (() => {

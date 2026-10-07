@@ -136,6 +136,12 @@ describe("oxlint runner", () => {
 		expect(RUNNER_SKIP_REASONS).toEqual([
 			"no-files-matched",
 			"configured-non-biome-linter",
+			// #3968: policy-deferred work, sanctioned — a runner may skip because
+			// its capability is owned by a covering LSP lane, or because its tool
+			// categorically cannot serve the file's dialect. Both are policy
+			// decisions carried to the delivery surface, never a silent clean.
+			"dialect-unsupported",
+			"covered-by-primary",
 		]);
 		const valid: RunnerResult = {
 			status: "skipped",

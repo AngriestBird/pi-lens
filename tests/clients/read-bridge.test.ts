@@ -682,6 +682,101 @@ describe("read-bridge", () => {
 			}
 		});
 
+		it("a native re-read supersedes a stale non-zero bridge content binding (#3962)", () => {
+			const dir = mkdtempSync(
+				join(tmpdir(), "pi-lens-read-bridge-binding-supersede-"),
+			);
+			try {
+				const filePath = join(dir, "binding.ts");
+				writeFileSync(
+					filePath,
+					"const a = 1;\nconst b = 2;\nconst c = 3;\n",
+					"utf-8",
+				);
+				// Backdate mtime so the guard cannot attribute this fixture to the session:
+				// only the bridged read may authorize the first edit.
+				utimesSync(filePath, new Date(0), new Date(0));
+				const guard = new ReadGuard("bridge-binding-supersede", {
+					mode: "block",
+				});
+				_guardFn = (record) => guard.recordRead(record);
+				(globalThis as any)[READ_BRIDGE_KEY].recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: 1,
+				});
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+				// External change the bridge never saw: the binding goes stale.
+				writeFileSync(
+					filePath,
+					"const a = 99;\nconst b = 2;\nconst c = 3;\n",
+					"utf-8",
+				);
+				// A native re-read observes the new bytes; it must supersede the binding.
+				guard.recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: 3,
+					effectiveOffset: 1,
+					effectiveLimit: 3,
+					expandedByLsp: false,
+					turnIndex: 0,
+					writeIndex: 0,
+					timestamp: Date.now(),
+				});
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("allow");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("a native re-read supersedes a stale binding only for the lines it delivered (#3962)", () => {
+			const dir = mkdtempSync(
+				join(tmpdir(), "pi-lens-read-bridge-binding-noncover-"),
+			);
+			try {
+				const filePath = join(dir, "binding.ts");
+				writeFileSync(
+					filePath,
+					"const a = 1;\nconst b = 2;\nconst c = 3;\n",
+					"utf-8",
+				);
+				utimesSync(filePath, new Date(0), new Date(0));
+				const guard = new ReadGuard("bridge-binding-noncover", {
+					mode: "block",
+				});
+				_guardFn = (record) => guard.recordRead(record);
+				(globalThis as any)[READ_BRIDGE_KEY].recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: 1,
+				});
+				writeFileSync(
+					filePath,
+					"const a = 99;\nconst b = 2;\nconst c = 3;\n",
+					"utf-8",
+				);
+				// Newer, but line 1 was not the edited line: the stale binding still blocks it.
+				guard.recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: 1,
+					effectiveOffset: 1,
+					effectiveLimit: 1,
+					expandedByLsp: false,
+					turnIndex: 0,
+					writeIndex: 0,
+					timestamp: Date.now(),
+				});
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("a zero-line read of an empty file does not authorize edits after content appears", () => {
 			const dir = mkdtempSync(
 				join(tmpdir(), "pi-lens-read-bridge-empty-stale-"),

@@ -136,7 +136,7 @@ flowchart TD
 Architecture-level view, updated when a lane changes. Per-tool inventories live
 in [features](docs/features.md) and
 [language coverage](docs/language-coverage.md). Today the edit-time lane carries
-45+ runner modules over 35+ file kinds, and the LSP lane speaks to 46
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to 47
 language server definitions.
 
 The gating box is an abstraction, not a call order. Freshness covers several
@@ -180,7 +180,8 @@ expects to be operated.
 > `postinstall`) now require explicit approval — if `npm install` warns about
 > unreviewed install scripts, review and allow them with
 > `npm approve-scripts`, or trust the `allowScripts` entries already declared
-> in this package's `package.json`. Installing from a git source (`pi install
+> in this package's `package.json` (maintainers: see CONTRIBUTING.md
+> "Lifecycle-script approvals"). Installing from a git source (`pi install
 > git:...` / `pi update --extension git:...`) may similarly prompt for
 > git-dependency approval; accept it to let the `prepare` build step run.
 

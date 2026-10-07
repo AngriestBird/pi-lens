@@ -35,6 +35,7 @@ import {
 	getVerifiedPathAttributionGuessCount,
 	resetVerifiedPathAttributionGuessCount,
 } from "../../clients/path-attribution-telemetry.js";
+import { toPosix } from "../../clients/path-utils.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import {
 	createBashToolDefinition,
@@ -468,12 +469,16 @@ describe("bash grep searchReads registration", () => {
 				Array.from({ length: 3000 }, (_, i) => `line${i + 1}`).join("\n") +
 					"\n",
 			);
+			// This case RUNS the command in the real bash host, where an unquoted
+			// backslash path (`C:\Users\...`) loses its separators and `cat` reads
+			// nothing: the 3000-line file was then registered whole (#4019).
+			const shellPath = toPosix(filePath);
 			const bashTool = createBashToolDefinition(env.tmpDir, {
 				exposeSessionEnvironment: false,
 			});
 			const result = await bashTool.execute(
 				"2802",
-				{ command: `cat ${filePath}` },
+				{ command: `cat ${shellPath}` },
 				undefined,
 				undefined,
 				{ cwd: env.tmpDir } as never,
@@ -485,7 +490,7 @@ describe("bash grep searchReads registration", () => {
 			await handleToolResult({
 				event: {
 					toolName: "bash",
-					input: { command: `cat ${filePath}` },
+					input: { command: `cat ${shellPath}` },
 					content: result.content,
 					details: result.details,
 				},
@@ -501,7 +506,8 @@ describe("bash grep searchReads registration", () => {
 
 			expect(recordRead).toHaveBeenCalledWith(
 				expect.objectContaining({
-					filePath,
+					// The spelling the command carried (forward slashes above).
+					filePath: shellPath,
 					effectiveOffset: 1001,
 					effectiveLimit: 2000,
 				}),
@@ -564,7 +570,9 @@ describe("bash grep searchReads registration", () => {
 			fs.writeFileSync(filePath, "NEVER_PRESENT\n", "utf8");
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			const command = `sed -i 's/ABSENT_VALUE/x/' ${filePath}`;
+			// Run for real by the bash host below: a forward-slash path survives
+			// bash on Windows, a backslash one does not (#4019).
+			const command = `sed -i 's/ABSENT_VALUE/x/' ${toPosix(filePath)}`;
 			await handleToolCall({
 				event: {
 					toolName: "bash",

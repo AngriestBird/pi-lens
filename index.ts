@@ -80,7 +80,9 @@ import {
 	retireScope,
 	type SessionScope,
 	scopeCell,
+	startKey,
 	stashHandoff,
+	successorStartKey,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import { registerMutationBridge } from "./clients/mutation-bridge.js";
@@ -217,6 +219,7 @@ import {
 	decideSessionStart,
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
+	namedSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
 	probeCtxActive,
@@ -790,7 +793,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			? "secondary"
 			: ownedSessionRole === "primary"
 				? "primary"
-				: noteSessionShutdown(ctx, sessionId, root);
+				: noteSessionShutdown(
+						ctx,
+						sessionId,
+						root,
+						// #4106: a role-less shutdown in a named gap is told
+						// apart by this session's key.
+						startKey(getSessionFile(ctx), getSessionManager(ctx)),
+					);
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
 	const rememberOwnEventCtx = (ctx: any): void => {
 		if (!ctx) return;
@@ -2282,6 +2292,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3662: a `startup` start in a replacement gap is not the
 						// successor, so it must not take the primary slot.
 						sessionStartReason,
+						// #3855: nor is any start whose reason and key differ from
+						// the successor the primary's shutdown named.
+						startKey(getSessionFile(ctx), getSessionManager(ctx)),
 					);
 					ownedSessionRole = sessionStartDecision.runFullSessionStart
 						? "primary"
@@ -3773,10 +3786,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
-			if (startInFlight) {
-				startInFlight.shutDown = true;
+			// #4113: a start interrupted before pi-lens's handler ran has no mark
+			// and no scope. Its shutdown is primary only with the gap's named key
+			// (#4106), so the gap's name is the start reason it never saw. A
+			// started activation holds its scope and stashes it, even in a gap
+			// it does not own (a same-file second primary, R2: verify X1).
+			const unstartedReason =
+				startInFlight || scope !== undefined
+					? undefined
+					: namedSuccessorReason();
+			if (startInFlight || unstartedReason !== undefined) {
+				if (startInFlight) startInFlight.shutDown = true;
 				forwardHandoff({
-					startReason: startInFlight.reason,
+					startReason: startInFlight ? startInFlight.reason : unstartedReason,
 					reason: shutdownReason,
 					sessionFile: getSessionFile(ctx),
 					targetSessionFile: shutdownEvent?.targetSessionFile,
@@ -3834,7 +3856,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// the catalog names. Only the PRIMARY path reaches here; a secondary
 			// returned above precisely because the primary is still live.
 			// #3662: a replacement reason leaves the slot pending for its successor.
-			releasePrimarySession(shutdownReason);
+			// #3855: and names it by the key its start will compute. Read after the
+			// stash or forward above, which bind a file-less successor's ticket.
+			releasePrimarySession(
+				shutdownReason,
+				successorStartKey({
+					reason: shutdownReason,
+					sessionFile: getSessionFile(ctx),
+					targetSessionFile: shutdownEvent?.targetSessionFile,
+					sessionManager: getSessionManager(ctx),
+				}),
+			);
 			// #2467: no analyzer bootstrap may START loading from here on. A demand
 			// already in flight keeps its promise and still settles — the gate is
 			// checked only when no flight exists. Nothing is spawned, which is what

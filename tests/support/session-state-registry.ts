@@ -1366,6 +1366,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 		"the #1641 past-EOF line-count memo, keyed on mtime AND size and re-stat'd on every read — a mismatch always recomputes, so it is invalidated by its own freshness check per file, not by the session boundary, same as git-tracked-ignore.ts",
 	"diagnostics-publish.ts":
 		"diagnostics publisher registration and dirty-path dedupe",
+	// #3968: registration identity, not session state — the Set is fed once
+	// per runner definition that enters a RunnerRegistry (the dispatcher's own
+	// population, re-derived at every process start; see the
+	// bounded-container-guard admission for the finite-vocabulary reason).
+	"dispatch/known-runner-ids.ts":
+		"runner-id identity registration state, fed by RunnerRegistry.register, re-derived every process start; not session-scoped",
 	"dispatch/runners/spotbugs.ts": "SpotBugs installation lookup, host-derived",
 	"disposition-publish.ts": "disposition publisher registration",
 
@@ -1539,6 +1545,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// counted (10 -> 11). Import-time frozen vocabulary, same class as this
 	// file's other constant lookups above — SWEEP_HEURISTIC_LIMITS item 5.
 	"dispatch/integration.ts": 11,
+	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
+	// by `RunnerRegistry.register` and re-derived at every process start
+	// (registration state, not session state); see the file-level exemption
+	// above and the bounded-container admission row.
+	"dispatch/known-runner-ids.ts": 1,
 	// #2215 added the language matrix's two derived lookups
 	// (`BINDING_BY_EXTENSION`, `LSP_ONLY_RULE_LANGUAGES`) (5 → 7). Both are
 	// import-time frozen lookups with no session lifetime —

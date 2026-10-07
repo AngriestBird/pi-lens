@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
+	captureReadContentBinding,
 	createReadGuard,
 	currentLinesMatchReadSnapshot,
 	type ReadRecord,
@@ -103,6 +104,285 @@ describe("ReadGuard", () => {
 		expect(guard.checkEdit(filePath, [1500, 1500]).action).toBe("allow");
 		expect(guard.checkEdit(filePath, [2500, 2500]).action).toBe("block");
 	});
+	describe("content-binding supersession (#3962)", () => {
+		const before = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+		const after = "const a = 99;\nconst b = 2;\nconst c = 3;\n";
+		const span20 = `${Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")}\n`;
+		const span20GapChanged = span20.replace("line10", "line10-changed");
+
+		function recordBridgeBinding(
+			guard: ReturnType<typeof createReadGuard>,
+			filePath: string,
+			limit: number,
+		): void {
+			const binding = captureReadContentBinding(filePath, 1, limit);
+			expect(binding).toBeDefined();
+			guard.recordRead(
+				createReadRecord(filePath, {
+					effectiveOffset: 1,
+					effectiveLimit: limit,
+					source: "bridge:test",
+					contentBinding: binding,
+				}),
+			);
+		}
+
+		function recordNativeRead(
+			guard: ReturnType<typeof createReadGuard>,
+			filePath: string,
+			offset: number,
+			limit: number,
+			source = "native-read:test",
+		): void {
+			guard.recordRead(
+				createReadRecord(filePath, {
+					source,
+					effectiveOffset: offset,
+					effectiveLimit: limit,
+				}),
+			);
+		}
+
+		it("allows an edit a newer covering native re-read supersedes", () => {
+			const env = setupTestEnvironment("read-guard-supersede-");
+			try {
+				const filePath = path.join(env.tmpDir, "supersede.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// An external tool changes the bytes after the bridge read.
+				fs.writeFileSync(filePath, after);
+				// The remedy the block message asks for: a native re-read of disk.
+				recordNativeRead(guard, filePath, 1, 3);
+
+				expect(guard.checkEdit(filePath, [1, 1])).toEqual({ action: "allow" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when no newer read covers the edited lines", () => {
+			const env = setupTestEnvironment("read-guard-supersede-noncover-");
+			try {
+				const filePath = path.join(env.tmpDir, "noncover.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-noncover-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				// Newer, but only line 1 was delivered; the edit targets line 3.
+				recordNativeRead(guard, filePath, 1, 1);
+
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when the newer read is stale against disk", () => {
+			const env = setupTestEnvironment("read-guard-supersede-stale-");
+			try {
+				const filePath = path.join(env.tmpDir, "stale.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-stale-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// The newer read happened BEFORE the external change: its hashes
+				// describe the old bytes, so it cannot vouch for the new ones.
+				recordNativeRead(guard, filePath, 1, 3);
+				fs.writeFileSync(filePath, after);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when the newer read carries no hashes for the edit", () => {
+			const env = setupTestEnvironment("read-guard-supersede-unhashed-");
+			try {
+				const filePath = path.join(env.tmpDir, "unhashed.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-unhashed-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						source: "native-read:test",
+						effectiveOffset: 1,
+						effectiveLimit: 1,
+						lineHashes: {},
+					}),
+				);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("allows when a fresh bridge read re-binds the edited bytes", () => {
+			const env = setupTestEnvironment("read-guard-supersede-rebind-");
+			try {
+				const filePath = path.join(env.tmpDir, "rebind.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-rebind-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				// The bridge read that DELIVERED the changed bytes is the newest
+				// bound record, so its binding matches and no block fires.
+				recordBridgeBinding(guard, filePath, 1);
+
+				expect(guard.checkEdit(filePath, [1, 1])).toEqual({ action: "allow" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("keeps the stale block when no edit range is supplied", () => {
+			const env = setupTestEnvironment("read-guard-supersede-norange-");
+			try {
+				const filePath = path.join(env.tmpDir, "norange.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-norange-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				recordNativeRead(guard, filePath, 1, 3);
+
+				const verdict = guard.checkEdit(filePath);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("allows when a newer covering read matches both edited ranges but a gap line changed", () => {
+			// Kills mutation IDs 7 and 11, which collapse `editRanges` into the
+			// bounding box: lines 2 and 20 are the edit, both fresh in the newer
+			// read, and only the gap line 10 between them is stale. A box check
+			// would drop the one fresh answer this filter exists to keep.
+			const env = setupTestEnvironment("read-guard-supersede-gap-");
+			try {
+				const filePath = path.join(env.tmpDir, "gap.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-gap-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// The newer delivered read covers the whole span the edit brackets.
+				recordNativeRead(guard, filePath, 2, 19);
+				// Only the GAP line 10 changes; the edited lines 2 and 20 stay fresh.
+				fs.writeFileSync(filePath, span20GapChanged);
+
+				expect(
+					guard.checkEdit(
+						filePath,
+						[2, 20],
+						[
+							[2, 2],
+							[20, 20],
+						],
+					),
+				).toEqual({
+					action: "allow",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only the bound read's own hashes match (no newer read)", () => {
+			// Kills mutation ID 20 (`boundIndex + 1` -> `boundIndex - 1`), which
+			// reaches back to the bound read itself. Its whitespace-stripped line
+			// hash survives a whitespace-only reformat, so the stale binding would
+			// clear its own anchor instead of asking for the re-read it remediates.
+			const env = setupTestEnvironment("read-guard-supersede-self-");
+			try {
+				const filePath = path.join(env.tmpDir, "self.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-self-session");
+				recordBridgeBinding(guard, filePath, 3);
+				fs.writeFileSync(
+					filePath,
+					"const  a = 1;\nconst  b = 2;\nconst  c = 3;\n",
+				);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only a provisional newer read covers the line", () => {
+			// Kills mutation IDs 23 and 25 (the provisional skip). A host with no
+			// correlation id records the read probe as a source-less provisional
+			// (runtime-tool-call.ts) and the clipped delivery beside it without
+			// `supersedes` (runtime-tool-result.ts); evidence the agent never saw
+			// must not clear the anchor.
+			const env = setupTestEnvironment("read-guard-supersede-provisional-");
+			try {
+				const filePath = path.join(env.tmpDir, "provisional.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-provisional-session");
+				recordBridgeBinding(guard, filePath, 3);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, after);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						provisional: true,
+					}),
+				);
+				// The delivered record is clipped to line 1, so the provisional
+				// beside it is the only record that covers the edited line 3.
+				recordNativeRead(guard, filePath, 1, 1);
+
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when two partial newer reads cover the edit ranges separately", () => {
+			// Kills mutation ID 26 (`.every` -> `.some`): one fresh partial read
+			// per edited range does not make a single record that delivered both,
+			// so the binding is not superseded by combining them.
+			const env = setupTestEnvironment("read-guard-supersede-partials-");
+			try {
+				const filePath = path.join(env.tmpDir, "partials.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-partials-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, span20GapChanged);
+				// One fresh partial read per edited range; neither covers both.
+				recordNativeRead(guard, filePath, 2, 1);
+				recordNativeRead(guard, filePath, 20, 1);
+
+				const verdict = guard.checkEdit(
+					filePath,
+					[2, 20],
+					[
+						[2, 2],
+						[20, 20],
+					],
+				);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
 	describe("Phase 1: Zero-read and FileTime checks", () => {
 		it("blocks edit on never-read file", () => {
 			const guard = createReadGuard("test-session");
