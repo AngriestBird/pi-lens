@@ -20,6 +20,9 @@ export function changesProductionFile(file: string): boolean;
 
 export function changedFiles(range: string): string[] | null;
 
+/** Uncommitted tracked edits plus untracked, non-ignored files (#4047). */
+export function worktreeChangedFiles(): string[] | null;
+
 export function collectTestFiles(dir: string, out?: string[]): string[];
 
 export interface TargetedTestSelection {
