@@ -164,9 +164,19 @@ describe("artifact listing pages (#4030)", () => {
 				cutoff,
 			),
 		).toHaveLength(1);
+		// A listing that never reaches the cutoff stops at the bound, loudly.
+		let asked = 0;
 		expect(() =>
-			listArtifacts(() => [artifact(1, at(HOUR))], cutoff, 3),
+			listArtifacts(
+				() => {
+					asked += 1;
+					return [artifact(1, at(HOUR))];
+				},
+				cutoff,
+				3,
+			),
 		).toThrow(/passed 3 pages without reaching 2026-10-01T06:00:00.000Z/);
+		expect(asked).toBe(3);
 	});
 });
 
