@@ -496,15 +496,31 @@ export function stashHandoff(
 	// `quit` and a missing reason have no successor: they read as `startup`.
 	const reason = toStartReason(args.reason);
 	if (!SOURCES[reason].includes("slot")) return false;
-	const cell = handoffSlot();
-	const manager = asManager(args.sessionManager);
-	if (manager !== undefined) cell.left.set(manager, scope.scopeId);
-	cell.handoff = {
+	handoffSlot().handoff = {
 		reason,
-		key: args.targetSessionFile ?? args.sessionFile ?? scope.scopeId,
+		key: leaveKey(scope, args),
 		stores: snapshotSessionStores(scope),
 	};
 	return true;
+}
+
+/**
+ * The key a shutdown leaves for its successor's start: the successor's session
+ * file (pi's `targetSessionFile`, or on `/reload` the session's own), else the
+ * scope's ticket, bound to the session manager, which pi hands a `/reload` or
+ * in-memory `/fork` successor unchanged. {@link startKey} reads it back.
+ */
+function leaveKey(
+	scope: SessionScope,
+	args: {
+		sessionFile: string | undefined;
+		targetSessionFile: string | undefined;
+		sessionManager?: unknown;
+	},
+): string | number {
+	const manager = asManager(args.sessionManager);
+	if (manager !== undefined) handoffSlot().left.set(manager, scope.scopeId);
+	return args.targetSessionFile ?? args.sessionFile ?? scope.scopeId;
 }
 
 /**
