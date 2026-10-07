@@ -94,7 +94,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(step["continue-on-error"]).toBe(true);
 	});
 
-	it("reads all five gating layers' step outcomes via env, by expression (not hardcoded literals)", () => {
+	it("reads all six gating layers' step outcomes via env, by expression (not hardcoded literals)", () => {
 		const env = notifyStep.env ?? {};
 		expect(env.TOOL_LAYER_OUTCOME).toBe("${{ steps.tool_layer.outcome }}");
 		expect(env.LSP_HANDSHAKE_OUTCOME).toBe(
@@ -103,6 +103,9 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(env.LSP_GATE_OUTCOME).toBe("${{ steps.lsp_gate.outcome }}");
 		expect(env.LENS_FULL_OUTCOME).toBe("${{ steps.lens_full.outcome }}");
 		expect(env.FORMAT_LAYER_OUTCOME).toBe("${{ steps.format_layer.outcome }}");
+		expect(env.RESOLUTION_LAYER_OUTCOME).toBe(
+			"${{ steps.resolution_layer.outcome }}",
+		);
 	});
 
 	it("each referenced layer step actually declares the id the notify step reads", () => {
@@ -115,11 +118,12 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 			"lens_full",
 		);
 		expect(findStep(workflow, "Format layer").id).toBe("format_layer");
+		expect(findStep(workflow, "Resolution layer").id).toBe("resolution_layer");
 	});
 
-	// #2723 review F3: disambiguates "the job failed before the five
+	// #2723 review F3: disambiguates "the job failed before the six
 	// tracked layers even started" from a genuine cancellation -- both
-	// leave all five layers "skipped", which decideAction alone cannot
+	// leave all six layers "skipped", which decideAction alone cannot
 	// tell apart (see scripts/lib/tool-smoke-drift.mjs's decideToolSmokeAction).
 	it("reads GitHub's job.status context so the notifier can tell a genuine failure outside the tracked layers from a cancellation", () => {
 		const env = notifyStep.env ?? {};
@@ -237,7 +241,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 	});
 });
 
-// #2723 review F4: `set -o pipefail` is LOAD-BEARING on each of the five
+// #2723 review F4: `set -o pipefail` is LOAD-BEARING on each of the six
 // gating layer steps, not documentation -- GitHub's default shell for a
 // `run:` step with no `shell:` key is `bash -e {0}` (no pipefail); without
 // this line, `node scripts/smoke-tools.mjs ... | tee logfile`'s exit code
@@ -253,6 +257,7 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 		"LSP diagnostics clean-gate",
 		"lens_diagnostics mode=full row",
 		"Format layer",
+		"Resolution layer",
 	];
 
 	it.each(LAYER_STEP_NAMES)("%s's run script sets pipefail", (name) => {
@@ -274,6 +279,20 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 			expect(mutated).not.toMatch(/^\s*set -o pipefail\s*$/m);
 		},
 	);
+
+	// #1513: the Resolution layer is the only step that runs the resolution
+	// smoke; a swapped flag (--format, --lsp) would keep the step green while
+	// the venv / vendor/bin / node_modules/.bin rungs go unwitnessed, and a
+	// `continue-on-error` would let a lost rung pass the job.
+	it("pins the Resolution layer to the resolution command, gating, with a bounded timeout", () => {
+		const step = findStep(workflow, "Resolution layer") as Step & {
+			"continue-on-error"?: unknown;
+			"timeout-minutes"?: unknown;
+		};
+		expect(step.run).toContain("smoke-tools.mjs --resolution");
+		expect(step["continue-on-error"]).not.toBe(true);
+		expect(step["timeout-minutes"]).toBe(5);
+	});
 
 	it("pins the lens_full run to the full-mode command", () => {
 		const step = findStep(workflow, "lens_diagnostics mode=full row");
@@ -331,6 +350,7 @@ describe("each layer's tee log filename matches the notify step's *_LOG env (#27
 		["LSP diagnostics clean-gate", "LSP_GATE_LOG"],
 		["lens_diagnostics mode=full row", "LENS_FULL_LOG"],
 		["Format layer", "FORMAT_LAYER_LOG"],
+		["Resolution layer", "RESOLUTION_LAYER_LOG"],
 	])("%s's tee target matches env.%s", (stepName, envVar) => {
 		const step = findStep(workflow, stepName);
 		const fromTee = teeLogFilename(step.run as string);
