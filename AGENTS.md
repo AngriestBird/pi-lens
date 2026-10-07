@@ -329,6 +329,16 @@ the surface they bite; each block loads only when its trigger applies.
     listeners by `tests/clients/socket-error-listener-sweep.test.ts`; screen
     `close` and timer callbacks by hand.
 
+60. **Wasm failure outside the #3605 containment:** every failure thrown out
+    of web-tree-sitter classifies through `classifyTreeSitterWasmError`, and a
+    `catch` inside a `withParsedTree` consumer calls `reportWasmAbort` before it
+    swallows the error. An unclassified or swallowed trap is never counted,
+    charged or recycled, and the runtime later fails elsewhere (#3996: the
+    bash wasm's unresolved `isalpha` import threw an unclassified `TypeError`
+    on every `[ a == b ]`, and a callback-traversal trap surfaced raw).
+    `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
+    that imports a function the runtime does not export.
+
 </important>
 
 <important if="a test double, ratchet or sweep">
