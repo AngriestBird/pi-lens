@@ -338,3 +338,40 @@ export function ensureSmokeLombokJar(
 	workspace: string,
 	verbose: boolean,
 ): Promise<string>;
+/** One resolution-layer case (#1513): a stub planted in a project-local bin dir. */
+export interface ResolutionCase {
+	id: string;
+	source: string;
+	seam: "formatter" | "runner";
+	tool: string;
+	bin: string;
+	file?: string;
+}
+/** The production modules the resolution layer drives (dist in the nightly). */
+export interface ResolutionDeps {
+	formatters: Record<
+		string,
+		{ resolveCommand?(file: string, cwd: string): Promise<unknown> }
+	>;
+	createVenvFinder: (
+		command: string,
+	) => (cwd: string) => Promise<{ path: string; rung: string }>;
+}
+/** The project-local resolution rungs the nightly pins (venv, vendor/bin, node_modules/.bin). */
+export const RESOLUTION_CASES: readonly ResolutionCase[];
+/** Write each case's stub executable (and its nested start dir) under `root`. */
+export function plantResolutionFixture(
+	root: string,
+	cases?: readonly ResolutionCase[],
+): void;
+/** Evaluate one resolution case into one smoke row. */
+export function evaluateResolutionCase(
+	deps: ResolutionDeps,
+	root: string,
+	c: ResolutionCase,
+): Promise<Required<SmokeRow>>;
+/** Run the nightly resolution layer; returns its failure count. */
+export function runResolutionSmoke(options?: {
+	verbose?: boolean;
+	deps?: ResolutionDeps;
+}): Promise<number>;

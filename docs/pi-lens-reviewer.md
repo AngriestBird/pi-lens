@@ -4,7 +4,9 @@ Read first: the engineering principles (`docs/engineering-principles.md`), then
 `AGENTS.md`, then `docs/pi-lens-subagent.md`, then this contract. Then read the
 issue's acceptance criteria, the full merge-base diff
 (`git diff origin/master...HEAD`), the PR body, and merge state. Principles §3
-("Reviewing and delegating") is the base of this role and is not repeated.
+("Reviewing and delegating") is the base of this role and is not repeated. Lane mechanics (checkout, `TMPDIR`, push forms, Git grants,
+summary shape) are `docs/pi-lens-subagent.md` "Orchestrator lane mechanics";
+a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Mission
 
@@ -31,8 +33,7 @@ issue's acceptance criteria, the full merge-base diff
    exception). When the fixer settled before its evidence pass, run the
    mutation table yourself and say so.
 4. Attack with probes and quote the output. Probe scripts live outside the
-   worktree (`<worktree>/../probes-<pr>` or
-   `~/.local/share/pi-lens-orchestrator/tmp/<lane>`): an untracked `.mjs`
+   worktree (`<worktree>/../probes-<pr>` or the lane's `$TMPDIR`): an untracked `.mjs`
    inside it reds `tests/scripts/lint-js.test.ts` (#2865). Attack inversions
    (real failures downgraded, healthy paths narrowed); concurrency (shared
    state, retained settled promises, check-then-act across an await); session
@@ -65,17 +66,11 @@ issue's acceptance criteria, the full merge-base diff
   runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
   `origin/master` and the head.
-- Read the `Mutation diff` comment for the EXACT head: check its `Head:` line
-  (`node scripts/ci-verdict.mjs <pr>` prints `MUTATION` with `STALE` or
-  `PENDING`). Apply AGENTS.md's two-layer acceptance: required new-guard proof
-  and demonstrated correctness gaps gate the review; exploratory score,
-  incidental survivors, and unevaluated population do not. Attack behavioural
-  survivor dispositions with bounded real-caller probes and name unresolved
-  cases with reason and owner. A truncated population is not equivalence and
-  never auto-clears a guard. Spot-check at most one of the fixer's hand mutations. When the comment is absent or stale, read the
-  `mutation-report` artifact (`node scripts/mutation-report.mjs --report
-  <mutation.json>`). Absent, stale, `0 mutants evaluated`, partial, or
-  `no report` evidence goes under `Could not verify`.
+- Apply AGENTS.md's one mutation layer (#4005): required new-guard proof and
+  demonstrated correctness gaps gate the review. Spot-check at most one of the
+  fixer's hand mutations. There is no per-PR Stryker comment or `MUTATION`
+  line to read; the nightly Stryker report on master is exploratory and is not
+  a review input.
 - Repeat the pattern and population sweeps. Check blast radius, bounded
   observability, changelog, commit, and PR-body requirements.
 - For LSP, dispatch, cache, runner, or tool changes, test one non-TypeScript
@@ -156,8 +151,7 @@ each claim's edge, re-run the targeted suites, and read CI on that head. Attack
 the round's changed lines as a fresh PR; fix rounds introduce defects at about
 the rate they remove them.
 
-- First spot-check one previous round's mutation on the new head and read its
-  `Mutation diff` comment (#2583).
+- First spot-check one previous round's mutation on the new head (#2583).
 - When a round retunes a threshold, tier, or predicate, drive the boundary
   input the new condition cannot separate through the real seam: a cure for
   over-triggering tends to ship silent under-triggering (#2983).

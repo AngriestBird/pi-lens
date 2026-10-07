@@ -52,6 +52,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { createCaseAliasFixture, setupTestEnvironment } from "./test-utils.js";
+import { withPlatform } from "../support/platform-stub.js";
 
 describe("isWindowsPath (#1213 review pins)", () => {
 	it("matches drive-prefixed and UNC shapes only", async () => {
@@ -165,6 +166,32 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 		expect(normalizeFilePath(nonExistent)).toBe(
 			normalizeFilePath(nonExistentBack),
 		);
+	});
+
+	it("treats rooted slash forms as the same Windows key", () => {
+		// RECURRENCE GUARDED: a rooted slash path is drive-relative on Windows,
+		// not a POSIX filesystem identity. Both separator spellings must therefore
+		// stay in the same Windows-only key arm (#4045 R3).
+		const native = vi
+			.spyOn(fs.realpathSync, "native")
+			.mockImplementation((value) => {
+				if (String(value).startsWith("/proj/"))
+					return "D:\\proj\\providers\\model-fetcher.ts";
+				throw new Error("synthetic missing path");
+			});
+		try {
+			expect(
+				withPlatform("win32", () =>
+					normalizeFilePath("\\proj\\providers\\model-fetcher.ts"),
+				),
+			).toBe(
+				withPlatform("win32", () =>
+					normalizeFilePath("/proj/providers/model-fetcher.ts"),
+				),
+			);
+		} finally {
+			native.mockRestore();
+		}
 	});
 
 	it("preserves the path structure and drive-letter shape — never collapses to a cwd-relative key", () => {
@@ -283,8 +310,42 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// Nothing on disk can say which spelling is real, and on a
 			// case-sensitive filesystem `NOPE` and `nope` are two different
 			// directories — folding one into the other is the #3098 non-goal.
-			expect(normalizeMapKey(absent)).toBe(absent.replace(/\\/g, "/"));
+			// win32 folds the part of the key that names nothing on disk to lower
+			// case (`normalizeMapKey`'s win32 arm, a spelling rule of the key rather
+			// than an on-disk guess) while the existing ancestor keeps its on-disk
+			// spelling, so only the absent tail changes there (#4019).
+			const spelled = tmpDir.replace(/\\/g, "/");
+			const tail = "NOPE/b.ts";
+			expect(normalizeMapKey(absent)).toBe(
+				`${spelled}/${process.platform === "win32" ? tail.toLowerCase() : tail}`,
+			);
 		} finally {
+			cleanup();
+		}
+	});
+
+	it("POSIX relative existing and empty keys keep their prior contract", (ctx) => {
+		// RECURRENCE GUARDED: the Windows-only relative/empty guard once ran on
+		// POSIX too, bypassing realpath casing for relative existing paths and
+		// changing the empty sentinel's owning arm (#4045 F1).
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-relative-");
+		const previousCwd = process.cwd();
+		try {
+			ctx.skip(
+				process.platform === "win32",
+				"POSIX realpath/casing fixture requires a POSIX filesystem; Windows arm is covered by rooted-shape tests",
+			);
+			process.chdir(tmpDir);
+			const alias = createCaseAliasFixture(".", { dirName: "subDir" });
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			withPlatform("linux", () => {
+				expect(normalizeFilePath(alias.rawMisCased)).toBe(
+					alias.onDisk.replace(/\\/g, "/"),
+				);
+				expect(normalizeFilePath("")).toBe("");
+			});
+		} finally {
+			process.chdir(previousCwd);
 			cleanup();
 		}
 	});
@@ -504,6 +565,11 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		expect(normalizeMapKey("../src/a.ts")).not.toContain(
 			process.cwd().replace(/\\/g, "/"),
 		);
+		// Recurrence: the native Windows arm used win32.resolve() for this
+		// path-only key, making it depend on the runner's current drive.
+		expect(
+			withPlatform("win32", () => normalizeMapKey("src/../src/a.ts")),
+		).toBe("src/a.ts");
 	});
 
 	it("an empty string is returned unchanged, not invented into the cwd", () => {
@@ -511,6 +577,7 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		// documented non-path sentinel in this codebase's path-typed fields
 		// (see `normalizeLoggedPath`'s doc), never a request for the cwd.
 		expect(normalizeMapKey("")).toBe("");
+		expect(withPlatform("win32", () => normalizeMapKey(""))).toBe("");
 	});
 
 	it("a UNC-shaped root keeps its leading double slash on POSIX", (ctx) => {
@@ -2310,7 +2377,15 @@ describe("the uv-members dialect reproduces the pre-fold minimatch answers (#259
 					relativePath,
 					UV_WORKSPACE_MEMBERS_DIALECT,
 				);
-				const preFold = minimatch(relativePath, normalized, { dot: true });
+				// `platform: "linux"`: minimatch otherwise reads `process.platform` and
+				// on win32 treats the `\` in the `x\y` cell as a separator, while the
+				// matcher under test (which only ever sees `toPosix` output) keeps it a
+				// literal character. The pre-fold answers being reproduced are the
+				// POSIX ones (#4019).
+				const preFold = minimatch(relativePath, normalized, {
+					dot: true,
+					platform: "linux",
+				});
 				if (folded !== preFold && !UV_MINIMATCH_DIVERGENCES.has(key)) {
 					unexpected.push(`${key} folded=${folded} minimatch=${preFold}`);
 				}

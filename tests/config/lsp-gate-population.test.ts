@@ -59,6 +59,12 @@ const FALLBACK_ADMISSIONS: readonly FallbackAdmission[] = [
 		reason: "no smoke fixture yet; lane C (#3311) adds it",
 		until: "#3311 lane C",
 	},
+	{
+		serverId: "docker-official",
+		reason:
+			"official docker-language-server is unmeasured and not installed on CI, so it has no smoke fixture yet (#3939)",
+		until: "#3939 follow-up",
+	},
 ];
 
 function fallbackPopulationIssues(
@@ -347,7 +353,7 @@ describe("LSP clean-gate population (#3217)", () => {
 		).toEqual([
 			"elixir is an unlabelled fallback-family row",
 			"elixir is neither pinned by a fixture nor admitted",
-			"fallback fixture count 6 !== registry members minus admissions 7",
+			"fallback fixture count 7 !== registry members minus admissions 8",
 		]);
 	});
 

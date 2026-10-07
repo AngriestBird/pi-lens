@@ -112,7 +112,8 @@ export function coveredChangedLinesInReport(
 }
 
 /**
- * Written beside `.stryker/incremental.json` (the workflow caches both): the
+ * Written beside `.stryker/incremental.json` (a local run reuses both; the
+ * nightly workflow starts cold): the
  * fingerprint of the inputs that file's results were computed under.
  */
 export const INCREMENTAL_FINGERPRINT_PATH = ".stryker/incremental.fingerprint";

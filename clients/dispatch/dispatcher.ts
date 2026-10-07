@@ -70,7 +70,11 @@ import { deferRunnerFindings } from "./pending-runner-findings.js";
 
 import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
-import { hasUsableResult, isRunnerSkipReason } from "./types.js";
+import {
+	hasUsableResult,
+	isRunnerClaimSource,
+	isRunnerSkipReason,
+} from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
 	Awaited<ReturnType<typeof probeToolAsync>>
@@ -85,12 +89,14 @@ import type {
 	RunnerGroup,
 	RunnerRegistry as RunnerRegistryContract,
 	RunnerResult,
+	RunnerClaimSource,
 	RunnerSkipReason,
 } from "./types.js";
 import {
 	DELTA_UNUSED_PROMOTION_NOTE,
 	formatDiagnostics,
 } from "./utils/format-utils.js";
+import { registerRunnerId } from "./known-runner-ids.js";
 
 // --- Runner Registry ---
 
@@ -100,6 +106,11 @@ export class RunnerRegistry implements RunnerRegistryContract {
 	register(runner: RunnerDefinition): void {
 		if (this.runners.has(runner.id)) return;
 		this.runners.set(runner.id, runner);
+		// The registry is the runner-id identity source (#3968): every id that
+		// enters any registry is the set `lsp.servers.<id>.covers` validation
+		// projects from (`clients/dispatch/known-runner-ids.ts`, an import
+		// leaf so the config loader can ask without importing this graph).
+		registerRunnerId(runner.id);
 	}
 
 	get(id: string): RunnerDefinition | undefined {
@@ -587,6 +598,8 @@ export interface RunnerLatency {
 	/** The runner's own `failureKind`, when it set one (#3781). */
 	failureKind?: string;
 	skipReason?: RunnerSkipReason;
+	/** WHO supplied the `covered-by-primary` claim (#3968 F2). */
+	claimSource?: RunnerClaimSource;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
 }
@@ -1118,6 +1131,13 @@ async function runGroup(
 			result.status === "skipped" && isRunnerSkipReason(result.skipReason)
 				? result.skipReason
 				: undefined;
+		// WHO claimed, for `covered-by-primary` (#3968 F2). Admitted only on
+		// actual skips and only through the closed-taxonomy guard, like
+		// skipReason, so free text cannot enter durable latency metadata.
+		const claimSource =
+			result.status === "skipped" && isRunnerClaimSource(result.claimSource)
+				? result.claimSource
+				: undefined;
 
 		latencies.push({
 			runnerId,
@@ -1132,6 +1152,9 @@ async function runGroup(
 			}),
 			...(skipReason !== undefined && {
 				skipReason,
+			}),
+			...(claimSource !== undefined && {
+				claimSource,
 			}),
 			...(result.unconfirmedServerIds !== undefined && {
 				unconfirmedServerIds: result.unconfirmedServerIds,
@@ -1159,7 +1182,10 @@ async function runGroup(
 						}))
 					: undefined,
 			metadata:
-				failureRowMetadata(result) ?? (skipReason ? { skipReason } : undefined),
+				failureRowMetadata(result) ??
+				(skipReason
+					? { skipReason, ...(claimSource !== undefined && { claimSource }) }
+					: undefined),
 		});
 		recordRunner(
 			ctx.filePath,

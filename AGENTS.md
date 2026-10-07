@@ -59,14 +59,15 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   observability, and class-sweep coverage. The issue reference goes in the PR
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
-- Mutation acceptance has two layers (#3973): every new guard, branch,
-  filter, cap, or fallback has bounded compile-valid hand-mutation proof under
-  the engineering principles; sampled Stryker is exploratory and advisory.
-  Triage exact-head behavioural survivors through real callers as killed,
-  equivalent (with bounded evidence), or unresolved (with reason and owner).
-  A demonstrated correctness gap or missing required guard proof blocks merge;
-  score, incidental survivors, and unevaluated population alone do not. Disclose
-  stale, absent, partial, and zero-mutant reports; never call them clean.
+- Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
+  new guard, branch, filter, cap, or fallback has bounded compile-valid
+  hand-mutation proof under the engineering principles, and a missing proof or
+  a demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
+  comment, or `MUTATION` line to read. Stryker runs nightly on master as an
+  exploratory test-adequacy report (`.github/workflows/stryker-nightly.yml`,
+  one rolling tracking issue); its survivors are candidates for a missing
+  test, read through real callers by whoever picks them up, and never a merge
+  input or a duty of a fixer or reviewer.
 - A declared behaviour-preserving refactor proves itself with an old-versus-new
   probe table through the built seam plus a shared-seam mutation that reds a
   caller-side witness; a passing pre-fix run is expected there.
@@ -276,6 +277,17 @@ the surface they bite; each block loads only when its trigger applies.
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
+61. **Stand-in for unknown text stripped per consumer:** when a lexer leaves a
+    placeholder for text it cannot know (a command substitution's output),
+    read the input under each bounding assumption rather than teaching each
+    consumer to ignore the placeholder: empty (the text the rules matched
+    before it existed) and opaque (no rule word matches it, no path resolves
+    through it), denying if either reading denies. Enforced by `findDeny` in
+    `scripts/hooks/guard-bash.mjs`, pinned by the "substitution next to a rule
+    word (#3997)" rows in `tests/scripts/guard-bash-hook.test.ts`. Recurrence:
+    #3997 round 3 stripped the mark at three call sites and left
+    `checkUngated`, `mktemp` flags, and `git $(:) stash` open.
+
 49. **Whitespace counted as structure when it is alignment:** a leading run can
     be alignment, not one nesting unit (call continuations, block-comment and
     template-literal interiors; #3038, #3039, #3052, #3059, #3116). Name which
@@ -301,6 +313,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 13. **Wrong failure classification:** derive availability and verdicts from raw
     evidence; preserve the classifier and evidence when a caller asserts a fact.
+    Runner log parsers tolerate ANSI control sequences, padding, and CRLF before
+    extracting a count; the exact Windows bytes are pinned by
+    `tests/config/windows-vitest-failure-count.test.ts` and the shared parser is
+    `scripts/lib/windows-vitest-failure-count.mjs`.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -328,6 +344,53 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/data-handler-bounds-sweep.test.ts` and socket `error`
     listeners by `tests/clients/socket-error-listener-sweep.test.ts`; screen
     `close` and timer callbacks by hand.
+
+60. **Wasm failure outside the #3605 containment:** every failure thrown out
+    of web-tree-sitter classifies through `classifyTreeSitterWasmError`, and a
+    `catch` inside a `withParsedTree` consumer calls `reportWasmAbort` before it
+    swallows the error. An unclassified or swallowed trap is never counted,
+    charged or recycled, and the runtime later fails elsewhere (#3996: the
+    bash wasm's unresolved `isalpha` import threw an unclassified `TypeError`
+    on every `[ a == b ]`, and a callback-traversal trap surfaced raw).
+    `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
+    that imports a function the runtime does not export.
+
+62. **Delete or rewrite through a dependency link:** a lane's `node_modules` is
+    a symlink to the main checkout's install, so any verb that removes or
+    rewrites under it reaches every lane (#3173: `git worktree remove` followed
+    the link twice; #4044: a worker's `npm ci --dry-run` emptied it under ~7
+    lanes, because npm 9.2.0 ignores `--dry-run` for the clean-install family).
+    Such a verb runs only where `node_modules` is a real directory, or in a
+    scratch copy. The hook's verb list (`NPM_NODE_MODULES_WRITERS` in
+    `scripts/hooks/guard-bash.mjs`) is the catalog: a new verb alias or
+    package manager (pnpm, yarn, bun) needs its own entry, and the hook binds
+    Claude lanes only, so a codex worker's half is the plegma shim
+    (apmantza/plegma#693). Sweep 2026-10-07, clean in the repo's own scripts
+    (`grep -rnE "rmSync\(.*node_modules|rm -rf .*node_modules|npm ci"
+    scripts clients tools`): no script runs a writer in a lane tree.
+    Deletes are the second member, measured with GNU coreutils on 2026-10-07:
+    `rm -rf node_modules/`, `rm -rf node_modules/*`, `find node_modules/
+    -delete`, `find -L|-H node_modules -delete`, `find node_modules/ -exec rm`
+    and `cd node_modules && rm -rf ./*` empty the link target, while `rm -rf
+    node_modules` (no slash) removes only the link. `classifyNodeModulesDelete`
+    denies the first set through the same `hasNodeModulesSymlinkOutside` seam;
+    that seam follows the complete symlink chain with a fail-closed fallback
+    when the target cannot be resolved (#4080).
+    a lane unlinks without a slash or glob. Consolidation verdict: two rules on
+    one classifier seam, kept apart because the npm rule judges a verb and the
+    delete rule a path operand (deleting the delete rule relocates nothing the
+    npm rule could absorb). Both share one path test,
+    `operandThroughNodeModulesLink` (npm's is `<prefix>/node_modules/`, or its
+    cwd plus the project its walk-up finds), and one rule for every value form
+    (#4054 round 4, after round 3 regressed `--prefix "$(pwd)"`): a directory
+    is tested where the program lands (the holder of each `node_modules`
+    component physically, as the kernel follows a link before `..`; npm's
+    `--prefix` lexically; npm's walk-up from the physical cwd), and a part
+    the resolver cannot read (an unknown cwd, `$( … )`, backticks, an unknown
+    variable) is the project the command runs in, failing closed in a linked
+    lane only. `find -L|-follow` also counts an operand that holds the link.
+    Unguarded, listed in the header's not-handled list: a glob that expands to
+    the link (`rm -rf */`), `xargs rm`, `rsync --delete`, `mv`, `npx rimraf`.
 
 </important>
 
@@ -377,6 +440,17 @@ the surface they bite; each block loads only when its trigger applies.
     Verify ownership against the OS when the identifier is admitted, not its
     range. Pids are enforced by `tests/support/kill-guard.ts`; screen the
     other identifier kinds by hand.
+
+59. **Generated edit with unlisted consumers:** a bot edit to a value that tests
+    pin must leave green every test that names the edited ids. Screen: apply
+    the generator's real output to the real tree (all-eligible case included),
+    build, and run every test that mentions the field or the registry; this
+    sweep is manual (#3994 F1, r3). Tests take "an unmeasured server" from a
+    class the generator never touches, never a hard-coded id.
+    A removed or demoted CI job is the same shape: before deleting it, list
+    every consumer of its check name, comment marker and ci-verdict line (job
+    and gate pins, advisory and deferred allowlists, contracts, PR template) and
+    give each a disposition in the PR body (#4005).
 
 </important>
 
@@ -532,7 +606,13 @@ the surface they bite; each block loads only when its trigger applies.
   server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
   registry server's eviction cost and respawn safety into
   `docs/lsp-idle-eviction.md` and changes no policy; a declaration change is a
-  follow-up that cites its row. `tests/config/lsp-idle-eviction-measurement.test.ts`
+  follow-up that cites its row, or the nightly's draft promotion PR
+  (`bot/lsp-idle-evict-promote`, #3989: two consecutive eligible nights, idle
+  RSS floor, cold-start cap, hold list in
+  `scripts/lib/lsp-idle-eviction-promote.mjs`, derived from the registry test's
+  `HOLD_INDEXER_IDS` class; the PR also moves the id into
+  the registry test's `TRANSPARENT_IDS`; night memory in the matrix doc's
+  refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
@@ -690,7 +770,8 @@ the surface they bite; each block loads only when its trigger applies.
 
 - Git command classification has one lexer and one guarded-verb matcher seam.
   Unknown wrappers and indirect guarded verbs fail closed. Text-consumer
-  allowances recurse through command substitutions and execution contexts.
+  allowances recurse through command substitutions and execution contexts. A
+  substitution's output is read both empty and opaque (shape 61).
 - The commit gate reads two states: the inline-blocker map's latch
   (`RuntimeCoordinator`), then the persisted `turn-end-findings` record. A
   collect-later runner's blocking findings join the map through
@@ -791,19 +872,29 @@ npm run fmt:check                     oxfmt gate
 npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
+
+For `tests/config/heavy-advisory-gate-workflow.test.ts`, set
+`PI_LENS_PRINT_PINS=1` to print the current parsed census pins as pasteable
+assertion lines after workflow edits; the assertions remain shrink-only pins.
 npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
 npm run check:lockfile                lockfile consistency
+npm run check:allow-scripts           allowScripts policy vs the resolved lockfile (#1185)
 npm run changelog:check               rollup check; fragments use check-changelog-fragments.mjs
 npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
+node scripts/guard-bash-probe.mjs <matrix.jsonl> [--head <ref|file>] [--base <ref|file>]
+                                  [--lane linked|real|both]
+                                        real-hook corpus probe (#4071): per-row verdicts
+                                        against tests/fixtures/guard-bash-probes; --base
+                                        prints only the rows that changed head vs base
 ```
 
-CI cost gates (#3801). The heavy advisory jobs (`mutation (advisory)`, `Unit
-tests Windows (advisory)`) start only after every required check passed on the
+CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
+`Unit tests Windows (advisory)`) start only after every required check passed on the
 head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
 or unfinished at its deadline). ci-verdict lists them with their real state
 (PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
@@ -821,7 +912,14 @@ The Unit shards are packed by the per-file seconds in
 
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
-(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043).
+(`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043). The
+same quote is enforced per file for an edit to any workflow whose post-image no
+`pull_request` run executes (no trigger, `pull_request_target` only, or a
+filter that excludes the file): `scripts/check-pr-body.mjs` reds the body
+without it. `Workflow run unaffected: <file> — <reason>` clears the rule only
+for a workflow with no `workflow_dispatch` trigger or an edit of comments and
+blank lines, verified against the merge base (#3085). The run id is quoted
+evidence, not verified provenance.
 
 The stale-build guard rejects a missing or older compiled twin. Pre-push fails
 when its bounded test-lock wait times out (#3717); `PI_LENS_PREPUSH_LOCK_SKIP=1`
@@ -1007,7 +1105,14 @@ Bare-Node scripts import only `.js`/`.mjs`; type stripping is not assumed.
 Every agent `Bash` call under Claude Code runs through
 `scripts/hooks/guard-bash.mjs` (`PreToolUse`), which denies with its reason:
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
-or any remove over a symlinked `node_modules`; an unpinned `node` probe loading
+or any remove over a symlinked `node_modules` or over a path it cannot resolve
+statically (`$(…)`, `~user`, an unset `$VAR`, a glob; #3988), where `~`, `$HOME`
+and relative paths (against a preceding `cd`/`git -C`) are resolved first; a
+mutating `npm` verb (`ci`, `install`, `update`, `prune`, …, or `npx npm@… ci`)
+where `node_modules` is a symlink out of the project, `--dry-run` or not, and a
+delete through such a link (`rm -rf node_modules/`, `node_modules/*`, `find
+node_modules/ -delete`; unlinking it with `rm node_modules` stays allowed;
+#4044); an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
 `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe

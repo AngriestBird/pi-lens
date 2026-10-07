@@ -567,6 +567,17 @@ export type DegradationKind =
 	/** An availability probe exceeded its advertised wall-clock budget (#2131). */
 	| "lsp-client-skipped-unavailable-command"
 	/**
+	 * #3968: a `lsp.servers.<id>.covers` claim was accepted WITHOUT runner-id
+	 * validation, because no runner registry had populated this process yet
+	 * (the first session's `loadLSPConfig` races the fire-and-forget dispatch
+	 * warm-up — the fail-open arm `clients/dispatch/known-runner-ids.ts`
+	 * names). Not an acceptance of unknown data without note: the claim is
+	 * recorded as unvalidated, the next session's load validates it, and the
+	 * record names exactly which claim it was. Subject `<file>\0<covers
+	 * pointer>`; once per session.
+	 */
+	| "lsp-covers-unvalidated"
+	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
 	 * memoizes a module record that threw while evaluating, so re-importing
@@ -577,6 +588,14 @@ export type DegradationKind =
 	/** A retired LSP diagnostics call was redirected to lens_diagnostics. */
 	| "lsp-diagnostics-compatibility"
 	| "lsp-diagnostics-file-too-large"
+	/**
+	 * #3965: a `paths` request's directory expansion reached the shared
+	 * `MAX_FILES` bound, so later entries were not checked. Subject is the
+	 * workspace cwd; `recordDegradationOnce` keeps one row per workspace per
+	 * session, and the rendered result carries the same `(capped at N)`
+	 * disclosure so a caller never reads a truncated scan as a full answer.
+	 */
+	| "lsp-diagnostics-paths-cap"
 	| "lsp-diagnostics-timeout"
 	| "lsp-diagnostics-unsupported"
 	/**
@@ -1214,6 +1233,9 @@ export type DegradationKind =
 	 * gap was classified `concurrent-secondary` instead of taking the primary
 	 * slot. Subject `expired`: no successor started within
 	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 * #3855: subject `not-the-successor`: a non-`startup` start in that gap
+	 * whose reason and key differ from the successor the shutdown named (a
+	 * subagent's own replacement) was classified `concurrent-secondary`.
 	 */
 	| "session-successor-pending"
 	/**

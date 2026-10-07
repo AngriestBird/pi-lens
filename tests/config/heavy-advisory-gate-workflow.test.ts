@@ -32,7 +32,7 @@ import { DEFAULT_DEADLINE_SECONDS } from "../../scripts/ci-heavy-gate.mjs";
 
 const byCodeUnit = (a = "", b = "") => (a < b ? -1 : a > b ? 1 : 0);
 
-// #3801: the heavy advisory jobs (mutation, the Windows Vitest subset) start
+// #3801: the heavy advisory jobs (CodeQL, the Windows Vitest subset) start
 // only after the required checks passed on the same head. Each case names the
 // regression it keeps out; the real YAML is loaded, never a source regex.
 
@@ -300,6 +300,131 @@ const CENSUS_SOURCES = workflowSources();
 const CENSUS_ROWS = censusRows(CENSUS_SOURCES);
 const CENSUS_SITES = sitesOf(CENSUS_ROWS);
 
+type CensusPins = {
+	checkoutSites: number;
+	nonGateRows: number;
+	stageRows: Record<Exclude<Stage, "gate">, number>;
+	explicitRefs: number;
+	githubRefSites: number;
+	gatingSites: number;
+	earlyStartMembers: string[];
+};
+
+function censusPins(
+	rows: CensusRow[],
+	sites: CheckoutSite[],
+	earlyStartMembers: readonly { file: string; jobId: string }[],
+): CensusPins {
+	const jobs = stageJobCounts(rows);
+	const summary = stageSummary(sites);
+	return {
+		checkoutSites: sites.length,
+		nonGateRows: rows.filter((row) => row.stage !== "gate").length,
+		stageRows: {
+			A: jobs.get("A") ?? 0,
+			B: jobs.get("B") ?? 0,
+			C: jobs.get("C") ?? 0,
+			D: jobs.get("D") ?? 0,
+		},
+		explicitRefs: sites.filter((site) => site.ref !== undefined).length,
+		githubRefSites: sites.filter((site) => site.ref === EPHEMERAL_PULL_REF)
+			.length,
+		gatingSites: summary.get("A")?.githubRef ?? 0,
+		earlyStartMembers: earlyStartMembers
+			.map((member) => `${member.file}::${member.jobId}`)
+			.sort(byCodeUnit),
+	};
+}
+
+const PINNED_PRINT = [
+	"expect(CENSUS_SITES.length).toBe(68);",
+	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(73);',
+	'expect(stageJobs("A")).toBe(25);',
+	'expect(stageJobs("B")).toBe(2);',
+	'expect(stageJobs("C")).toBe(14);',
+	'expect(stageJobs("D")).toBe(32);',
+	"expect(CENSUS_SITES.filter((site) => site.ref !== undefined).length).toBe(21);",
+	"expect(CENSUS_SITES.filter((site) => site.ref === EPHEMERAL_PULL_REF).length).toBe(17);",
+	'expect(stageRefs("A")).toBe(16);',
+	"expect(EARLY_START_MEMBERS.length).toBe(11);",
+].join("\n");
+
+// Snapshot identities make a pin failure actionable. Counts alone say that a
+// row moved; these keys say which job added or removed it.
+const PINNED_ROW_KEYS =
+	"action-pins.yml::check::A|ci-infra-kill-rerun.yml::clear-stale-verdict-labels::A|ci-infra-kill-rerun.yml::classify::A|ci-infra-kill-rerun.yml::finalize-rerun::A|ci.yml::changes::C|ci.yml::strict-install-cold-cache::A|ci.yml::dependency-boundaries::A|ci.yml::changelog-fragment-fastfail::A|ci.yml::tla-shards::A|ci.yml::tla-models::A|ci.yml::lint-and-typecheck::A|ci.yml::targeted-tests-advisory::C|ci.yml::test::A|ci.yml::unit-tests::A|ci.yml::heavy-gate::gate|ci.yml::unit-tests-windows::B|ci.yml::prod-install-build::A|ci.yml::install-test::A|ci.yml::codeql::B|close-keyword-verification.yml::verify::D|codeql.yml::analyze::D|codeql.yml::upload::D|compat-smoke.yml::compat-smoke::D|compat-smoke.yml::compat-smoke-alert::D|grammar-health.yml::guard::D|grammar-health.yml::swift-crash-watch::D|greetings.yml::greeting::D|install-smoke.yml::smoke::A|install-smoke.yml::npm-strict::A|install-smoke.yml::pi-load::A|install-smoke.yml::mise-repro::C|install-smoke.yml::host-range-smoke::A|install-smoke.yml::host-latest-smoke::D|install-smoke.yml::host-latest-notify::C|labels.yml::sync::D|lifecycle-smoke.yml::psscriptanalyzer-classification::D|lifecycle-smoke.yml::availability-lifecycle::D|lifecycle-smoke.yml::gitleaks-scratch-exclusion::D|lint.yml::actionlint::A|lint.yml::oxfmt::A|lint.yml::knip::A|lint.yml::markdownlint::A|lint.yml::vale::C|lint.yml::oxlint-advisory::C|lint.yml::jscpd::C|lint.yml::complexity::C|lint.yml::strictness::C|lint.yml::yamllint::C|lint.yml::typos::C|lint.yml::taplo::C|osv-scan.yml::detect-lockfile-change::A|osv-scan.yml::osv-scan::C|parser-smoke.yml::parser-smoke::D|pr-metadata.yml::pr-title-lint::A|pr-metadata.yml::pr-body-lint::C|pr-metadata.yml::close-keyword-lint::A|release.yml::prepare::D|release.yml::release::D|release.yml::publish-npm::D|stale-open-issues.yml::detect::D|stale.yml::stale::D|stryker-nightly.yml::prepare::D|stryker-nightly.yml::mutate::D|stryker-nightly.yml::publish::D|stryker-nightly.yml::publish-issue::D|tool-smoke.yml::test-history-rollup::D|tool-smoke.yml::test-history-publish::D|tool-smoke.yml::test-history-notify::D|tool-smoke.yml::tool-smoke::D|tool-smoke.yml::tool-smoke-prs::D|tool-smoke.yml::tool-smoke-notify::D|tool-smoke.yml::snapshot-persist-bench::D|tool-smoke.yml::snapshot-persist-notify::D|untriaged-issues.yml::detect::D".split(
+		"|",
+	);
+const PINNED_NO_CHECKOUT_KEYS = new Set([
+	"ci-infra-kill-rerun.yml::clear-stale-verdict-labels::A",
+	"ci-infra-kill-rerun.yml::finalize-rerun::A",
+	"ci.yml::tla-models::A",
+	"ci.yml::unit-tests::A",
+	"greetings.yml::greeting::D",
+	"stale.yml::stale::D",
+]);
+
+function censusDelta(rows: CensusRow[], sites: CheckoutSite[]): string {
+	const actualRows = new Map<string, number>();
+	for (const row of rows)
+		actualRows.set(
+			`${row.file}::${row.jobId}::${row.stage}`,
+			(actualRows.get(`${row.file}::${row.jobId}::${row.stage}`) ?? 0) + 1,
+		);
+	const actualSites = new Map<string, number>();
+	for (const site of sites)
+		actualSites.set(
+			`${site.file}::${site.jobId}::${site.stage}`,
+			(actualSites.get(`${site.file}::${site.jobId}::${site.stage}`) ?? 0) + 1,
+		);
+	const deltas = [...new Set([...PINNED_ROW_KEYS, ...actualRows.keys()])]
+		.map(
+			(key) =>
+				[
+					key,
+					(actualRows.get(key) ?? 0) - (PINNED_ROW_KEYS.includes(key) ? 1 : 0),
+				] as const,
+		)
+		.filter(([, delta]) => delta !== 0)
+		.map(([key, delta]) => `row ${key} ${delta > 0 ? "+" : ""}${delta}`);
+	for (const key of [...new Set([...PINNED_ROW_KEYS, ...actualSites.keys()])]) {
+		const expected = PINNED_NO_CHECKOUT_KEYS.has(key)
+			? 0
+			: PINNED_ROW_KEYS.includes(key)
+				? 1
+				: 0;
+		const delta = (actualSites.get(key) ?? 0) - expected;
+		if (delta !== 0) deltas.push(`site ${key} ${delta > 0 ? "+" : ""}${delta}`);
+	}
+	return deltas.length > 0 ? deltas.join(", ") : "none";
+}
+
+function pinnedNumber(
+	label: string,
+	observed: number,
+	expected: number,
+	rows: CensusRow[] = CENSUS_ROWS,
+	sites: CheckoutSite[] = CENSUS_SITES,
+): void {
+	const message = `${label}: observed ${observed}, expected ${expected}; per-job delta: ${censusDelta(rows, sites)}`;
+	expect(observed, message).toBe(expected);
+}
+
+function printPins(pins: CensusPins): string {
+	return [
+		`expect(CENSUS_SITES.length).toBe(${pins.checkoutSites});`,
+		`expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(${pins.nonGateRows});`,
+		...(["A", "B", "C", "D"] as const).map(
+			(stage) =>
+				`expect(stageJobs("${stage}")).toBe(${pins.stageRows[stage]});`,
+		),
+		`expect(CENSUS_SITES.filter((site) => site.ref !== undefined).length).toBe(${pins.explicitRefs});`,
+		`expect(CENSUS_SITES.filter((site) => site.ref === EPHEMERAL_PULL_REF).length).toBe(${pins.githubRefSites});`,
+		`expect(stageRefs("A")).toBe(${pins.gatingSites});`,
+		`expect(EARLY_START_MEMBERS.length).toBe(${pins.earlyStartMembers.length});`,
+	].join("\n");
+}
+
 // The eleven early-start advisory jobs whose checkout pinned the merge ref,
 // by the ids the task names. Each must stay pull_request-eligible, advisory,
 // and NOT behind the gate; the census proves the trigger and the stage.
@@ -328,6 +453,14 @@ const EARLY_START_MEMBERS = [
 		name: "PR body (advisory)",
 	},
 ] as const;
+
+if (
+	process.argv.includes("--print-pins") ||
+	process.env.PI_LENS_PRINT_PINS === "1"
+)
+	console.log(
+		printPins(censusPins(CENSUS_ROWS, CENSUS_SITES, EARLY_START_MEMBERS)),
+	);
 
 describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	// Recurrence: a required check renamed or dropped from the workflows makes
@@ -370,7 +503,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	});
 
 	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff
-	// would launch mutation and the Windows run for a change the maintainer wants
+	// would launch CodeQL and the Windows run for a change the maintainer wants
 	// spared them. And a status function in the gate's `if` (always(),
 	// cancelled(), failure()) would replace the implicit success() over its
 	// needs, releasing the heavy jobs on a head whose required job is red.
@@ -456,8 +589,6 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		expect(isAdvisoryCheck(gate.name ?? "")).toBe(true);
 		for (const [, job] of gated)
 			expect(isAdvisoryCheck(job.name ?? "")).toBe(true);
-		const mutation = CI.jobs.mutation;
-		expect(mutation["continue-on-error"]).toBe(true);
 	});
 
 	// Recurrence: a gate that polls a merge-ref sha finds no check-runs (they
@@ -478,26 +609,22 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 		);
 	});
 
-	// Recurrence: the lane kept also running from its own ungated workflow. A
-	// second `pull_request` mutation workflow would start the heavy run at once.
-	it("has no ungated mutation workflow left beside the gated job", () => {
+	// Recurrence (#4005): the Stryker mutation lane came back onto the pull_request
+	// path (a `mutation` job in ci.yml or its own workflow) and bought 11-18% of CI
+	// job-minutes per push for no product defect. It is the nightly report in
+	// stryker-nightly.yml; tests/config/stryker-nightly-workflow.test.ts pins that
+	// shape, and this pins the absence from the PR path and the gate.
+	it("has no mutation job behind the gate and no mutation workflow on the pull_request path", () => {
+		expect(Object.keys(CI.jobs).filter((id) => /mutation/i.test(id))).toEqual(
+			[],
+		);
+		expect(gated.map(([id]) => id).sort(byCodeUnit)).toEqual([
+			"codeql",
+			"unit-tests-windows",
+		]);
 		expect(existsSync(resolve(ROOT, ".github/workflows/mutation.yml"))).toBe(
 			false,
 		);
-		expect(CI.jobs.mutation.name).toBe("mutation (advisory)");
-		expect(CI.jobs.mutation.if).toContain(
-			"github.event_name == 'pull_request'",
-		);
-	});
-
-	// Recurrence: the sticky-comment job running (and marking a stale comment)
-	// on every red head, where the gate skipped mutation: a runner slot per red
-	// push for no report.
-	it("skips the sticky-comment job when mutation itself was skipped", () => {
-		const comment = CI.jobs["mutation-comment"];
-		expect(asList(comment.needs)).toEqual(["mutation"]);
-		expect(comment.if).toContain("needs.mutation.result != 'skipped'");
-		expect(comment.if).toContain("always()");
 	});
 
 	// Recurrence: #3756's aggregate lesson. A skipped required check counts as
@@ -513,7 +640,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 // auto-merge may already have deleted the mutable `refs/pull/<n>/merge` that
 // `github.ref` names. A gated checkout must rely on the action's default
 // captured commit (`github.sha`, the validated test-merge tree), never on the
-// ephemeral ref. The sibling gated jobs `mutation` and `codeql` already do.
+// ephemeral ref. The sibling gated job `codeql` already does.
 // The rule is derived from `needs`, so a future gated job is covered.
 describe("#3926 a gated checkout pins the captured commit, never the merge ref", () => {
 	const checkoutSteps = (id: string): Step[] =>
@@ -662,27 +789,41 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 55 checkout sites across the tree; 60 non-gate job rows (A22/B3/C14/D21
-		// after #3941 F1 moved install-smoke's schedule-only `host-latest-smoke`
-		// from C to D). Sites and jobs are counted separately so a no-checkout
+		// 69 checkout sites across the tree; 74 non-gate job rows (A25/B2/C14/D33
+		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
+		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
+		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
+		// and added the schedule-only nightly report job (D), and #3916 added
+		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D, and
+		// #4035 split the nightly report into two mutate shards and a publish job,
+		// also D, and #4077 split every write-scoped job into a read-only producer
+		// plus a guarded writer: eight new D jobs (codeql `upload`, compat-smoke
+		// `compat-smoke-alert`, stryker-nightly `publish-issue`, tool-smoke
+		// `test-history-publish`, `test-history-notify`, `tool-smoke-prs`,
+		// `tool-smoke-notify` and `snapshot-persist-notify`) and one C job,
+		// install-smoke's `host-latest-notify`: its `if:` carries a status
+		// function and `github.ref`, which the event-only projection cannot prove
+		// non-pull_request, and its name is advisory, so it is stage C). Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
 		// instead of reading clean.
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			55,
+			68,
 		);
-		expect(CENSUS_SITES.length).toBe(55);
-		expect(
-			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(60);
-		expect(stageJobs("A")).toBe(22);
-		expect(stageJobs("B")).toBe(3);
-		expect(stageJobs("C")).toBe(14);
-		expect(stageJobs("D")).toBe(21);
+		pinnedNumber("checkout sites", CENSUS_SITES.length, 68);
+		pinnedNumber(
+			"non-gate job rows",
+			CENSUS_ROWS.filter((row) => row.stage !== "gate").length,
+			73,
+		);
+		pinnedNumber("stage A rows", stageJobs("A"), 25);
+		pinnedNumber("stage B rows", stageJobs("B"), 2);
+		pinnedNumber("stage C rows", stageJobs("C"), 14);
+		pinnedNumber("stage D rows", stageJobs("D"), 32);
 		// The gate's own checkout is its own stage and is excluded from A-D.
-		expect(summary.get("gate")?.sites).toBe(1);
+		pinnedNumber("gate checkout sites", summary.get("gate")?.sites ?? 0, 1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
 		// even though its workflow also triggers on pull_request.
 		const hostLatest = CENSUS_SITES.find(
@@ -693,20 +834,53 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		expect(hostLatest?.events).toContain("pull_request");
 	});
 
+	// Recurrence (#4049): workers previously re-counted these pins by hand after
+	// workflow merges. This keeps the pasteable printer tied to the same census
+	// the assertions guard, while the literal remains the shrink-only pin.
+	it("keeps the printed pins equal to the master census", () => {
+		expect(
+			printPins(censusPins(CENSUS_ROWS, CENSUS_SITES, EARLY_START_MEMBERS)),
+		).toBe(PINNED_PRINT);
+	});
+
+	it("names added and removed census rows and sites in the drift delta", () => {
+		// Recurrence (#4068 F-4068-1): a newly added checkout job was present only
+		// in the actual census, so the old implicit expected count of one erased
+		// its +1 row and site deltas. A removed baseline job must remain -1.
+		const addedSource = `${CENSUS_SOURCES.get("ci.yml")}\n  census-review-fake:\n    name: census review fake\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${PINNED_CHECKOUT}\n`;
+		const addedSources = new Map(CENSUS_SOURCES).set("ci.yml", addedSource);
+		const addedRows = censusRows(addedSources);
+		const addedDelta = censusDelta(addedRows, sitesOf(addedRows));
+		expect(addedDelta).toContain("row ci.yml::census-review-fake::A +1");
+		expect(addedDelta).toContain("site ci.yml::census-review-fake::A +1");
+
+		const removedKey = "ci.yml::changes::C";
+		const removedRows = CENSUS_ROWS.filter(
+			(row) => `${row.file}::${row.jobId}::${row.stage}` !== removedKey,
+		);
+		const removedSites = CENSUS_SITES.filter(
+			(site) => `${site.file}::${site.jobId}::${site.stage}` !== removedKey,
+		);
+		const removedDelta = censusDelta(removedRows, removedSites);
+		expect(removedDelta).toContain(`row ${removedKey} -1`);
+		expect(removedDelta).toContain(`site ${removedKey} -1`);
+	});
+
 	it("removes every stage-C merge-ref site and only those", () => {
-		// After the fix: 27 github.ref sites became 16 (19 explicit refs).
-		expect(stageRefs("A")).toBe(15);
-		expect(stageRefs("B")).toBe(0);
-		expect(stageRefs("C")).toBe(0);
-		expect(stageRefs("D")).toBe(1);
+		// After the fix: 27 github.ref sites became 16 (19 explicit refs); #1185's
+		// stage-A `npm-strict` job adds one gating site (17 and 20).
+		pinnedNumber("stage A explicit github.ref sites", stageRefs("A"), 16);
+		pinnedNumber("stage B explicit github.ref sites", stageRefs("B"), 0);
+		pinnedNumber("stage C explicit github.ref sites", stageRefs("C"), 0);
+		pinnedNumber("stage D explicit github.ref sites", stageRefs("D"), 1);
 		const totalGithubRef = CENSUS_SITES.filter(
 			(site) => site.ref === EPHEMERAL_PULL_REF,
 		).length;
-		expect(totalGithubRef).toBe(16);
+		pinnedNumber("github.ref sites", totalGithubRef, 17);
 		const totalExplicit = CENSUS_SITES.filter(
 			(site) => site.ref !== undefined,
 		).length;
-		expect(totalExplicit).toBe(19);
+		pinnedNumber("explicit refs", totalExplicit, 21);
 	});
 
 	it("keeps every early-start advisory checkout on the captured commit", () => {
@@ -757,11 +931,12 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		// below are generated FROM `EARLY_START_MEMBERS`, so deleting a row would
 		// delete its own witness; the count and the exact key set are the floor
 		// that reds instead.
-		expect(EARLY_START_MEMBERS.length).toBe(11);
+		pinnedNumber("early-start member rows", EARLY_START_MEMBERS.length, 11);
 		expect(
 			EARLY_START_MEMBERS.map(
 				(member) => `${member.file}::${member.jobId}`,
 			).sort(byCodeUnit),
+			`early-start member delta; per-job delta: ${censusDelta(CENSUS_ROWS, CENSUS_SITES)}`,
 		).toEqual([
 			"ci.yml::targeted-tests-advisory",
 			"install-smoke.yml::mise-repro",
@@ -802,7 +977,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		const gatingSites = CENSUS_SITES.filter(
 			(site) => site.stage === "A" && site.ref === EPHEMERAL_PULL_REF,
 		);
-		expect(gatingSites.length).toBe(15);
+		pinnedNumber("gating sites", gatingSites.length, 16);
 		expect(earlyStartUnsafeSites(gatingSites)).toEqual([]);
 		const otherTriggerSites = CENSUS_SITES.filter(
 			(site) => site.stage === "D" && site.ref === EPHEMERAL_PULL_REF,
