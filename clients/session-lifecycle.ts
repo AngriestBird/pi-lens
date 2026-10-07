@@ -668,20 +668,14 @@ export function decideSessionStart(
 		classification === "secondary-root"
 	) {
 		if (successorPending) {
-			recordDegradationOnce(
-				reason === "startup"
-					? {
-							kind: "session-successor-pending",
-							subject: "declined",
-							reason:
-								"a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary",
-						}
-					: {
-							kind: "session-successor-pending",
-							subject: "not-the-successor",
-							reason: `a ${reason} session_start in a primary replacement gap is not the successor that shutdown named; declined as concurrent-secondary`,
-						},
-			);
+			const startup = reason === "startup";
+			recordDegradationOnce({
+				kind: "session-successor-pending",
+				subject: startup ? "declined" : "not-the-successor",
+				reason: startup
+					? "a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary"
+					: `a ${reason} session_start in a primary replacement gap is not the successor that shutdown named; declined as concurrent-secondary`,
+			});
 		}
 		registerSecondarySession();
 		return {
