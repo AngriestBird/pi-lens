@@ -47,6 +47,8 @@ import {
 	changesTestTreeFile,
 	selectTargetedTests,
 	resolveDiffRange,
+	readPrePushRecord,
+	writePrePushRecord,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -655,6 +657,79 @@ describe("selectTargetedTests — no-match fallback (F7)", () => {
 	});
 });
 
+describe("pre-push result records (#4034)", () => {
+	it("writes selected reasons and vitest counts under the git common dir", () => {
+		const commonDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-record-"),
+		);
+		const now = new Date("2026-10-07T12:00:00.000Z");
+		writePrePushRecord({
+			commonDir,
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			at: now,
+			selected: [
+				{ file: "tests/import.test.ts", reason: "import" },
+				{ file: "tests/history.test.ts", reason: "history" },
+				{ file: "tests/governance.test.ts", reason: "governance" },
+			],
+			passed: 2,
+			failed: 1,
+			skipped: 3,
+			vitestExitCode: 1,
+			wallTimeMs: 417,
+			outcome: "tests-failed",
+		});
+		const record = readPrePushRecord(commonDir, "a".repeat(40));
+		expect(record).toMatchObject({
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			passed: 2,
+			failed: 1,
+			skipped: 3,
+			vitestExitCode: 1,
+			wallTimeMs: 417,
+			outcome: "tests-failed",
+		});
+		expect(record?.selected).toEqual([
+			{ file: "tests/import.test.ts", reason: "import" },
+			{ file: "tests/history.test.ts", reason: "history" },
+			{ file: "tests/governance.test.ts", reason: "governance" },
+		]);
+		fs.rmSync(commonDir, { recursive: true, force: true });
+	});
+
+	it("prunes records older than fourteen days when writing", () => {
+		const commonDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-prepush-prune-"),
+		);
+		const dir = path.join(commonDir, "pi-lens-prepush");
+		fs.mkdirSync(dir);
+		const old = path.join(dir, `${"c".repeat(40)}.json`);
+		fs.writeFileSync(old, "{}\n");
+		fs.utimesSync(
+			old,
+			new Date("2026-09-01T00:00:00.000Z"),
+			new Date("2026-09-01T00:00:00.000Z"),
+		);
+		writePrePushRecord({
+			commonDir,
+			head: "d".repeat(40),
+			base: "e".repeat(40),
+			at: new Date("2026-10-07T00:00:00.000Z"),
+			selected: [],
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			vitestExitCode: null,
+			wallTimeMs: 0,
+			outcome: "build-only",
+		});
+		expect(fs.existsSync(old)).toBe(false);
+		fs.rmSync(commonDir, { recursive: true, force: true });
+	});
+});
+
 describe(".husky hooks — PI_LENS_SKIP_HOOKS accepts any non-empty value (F8)", () => {
 	it("pre-commit formats only staged files through the pinned binary (#3426)", () => {
 		const hook = fs.readFileSync(
@@ -768,7 +843,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 	 * `built.marker`. `astgrep:self-scan` refuses to run before that marker
 	 * exists, so the test observes the real build-before-scan ordering through
 	 * real npm resolution. */
-	function makeOrderingFixture() {
+	function makeOrderingFixture({ build = "write" } = {}) {
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-prepush-scan-order-"),
 		);
@@ -800,7 +875,9 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			JSON.stringify({
 				scripts: {
 					build:
-						"node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+						build === "fail"
+							? 'node -e "process.exit(7)"'
+							: "node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
 					"astgrep:self-scan": "node scan.mjs",
 				},
 			}),
@@ -827,6 +904,21 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("[scan] ran after build");
 		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(true);
+	});
+
+	it("records a build failure after the provisional tests-not-started record", () => {
+		const fx = makeOrderingFixture({ build: "fail" });
+		const result = runHook(fx.root, fx.refs);
+		const recordPath = path.join(
+			fx.root,
+			".git",
+			"pi-lens-prepush",
+			`${fx.refs.split(/\s+/)[1]}.json`,
+		);
+		expect(result.status).toBe(1);
+		expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toMatchObject({
+			outcome: "build-failed",
+		});
 	});
 
 	it("a deletion-only push exits 0 before the build or the self-scan", () => {
