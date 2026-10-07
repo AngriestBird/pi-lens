@@ -355,6 +355,41 @@ the surface they bite; each block loads only when its trigger applies.
     `tests/clients/grammar-runtime-imports.test.ts` reds on a shipped grammar
     that imports a function the runtime does not export.
 
+62. **Delete or rewrite through a dependency link:** a lane's `node_modules` is
+    a symlink to the main checkout's install, so any verb that removes or
+    rewrites under it reaches every lane (#3173: `git worktree remove` followed
+    the link twice; #4044: a worker's `npm ci --dry-run` emptied it under ~7
+    lanes, because npm 9.2.0 ignores `--dry-run` for the clean-install family).
+    Such a verb runs only where `node_modules` is a real directory, or in a
+    scratch copy. The hook's verb list (`NPM_NODE_MODULES_WRITERS` in
+    `scripts/hooks/guard-bash.mjs`) is the catalog: a new verb alias or
+    package manager (pnpm, yarn, bun) needs its own entry, and the hook binds
+    Claude lanes only, so a codex worker's half is the plegma shim
+    (apmantza/plegma#693). Sweep 2026-10-07, clean in the repo's own scripts
+    (`grep -rnE "rmSync\(.*node_modules|rm -rf .*node_modules|npm ci"
+    scripts clients tools`): no script runs a writer in a lane tree.
+    Deletes are the second member, measured with GNU coreutils on 2026-10-07:
+    `rm -rf node_modules/`, `rm -rf node_modules/*`, `find node_modules/
+    -delete`, `find -L|-H node_modules -delete`, `find node_modules/ -exec rm`
+    and `cd node_modules && rm -rf ./*` empty the link target, while `rm -rf
+    node_modules` (no slash) removes only the link. `classifyNodeModulesDelete`
+    denies the first set through the same `hasNodeModulesSymlinkOutside` seam;
+    a lane unlinks without a slash or glob. Consolidation verdict: two rules on
+    one classifier seam, kept apart because the npm rule judges a verb and the
+    delete rule a path operand (deleting the delete rule relocates nothing the
+    npm rule could absorb). Both share one path test,
+    `operandThroughNodeModulesLink` (npm's is `<prefix>/node_modules/`, or its
+    cwd plus the project its walk-up finds), and one rule for every value form
+    (#4054 round 4, after round 3 regressed `--prefix "$(pwd)"`): a directory
+    is tested where the program lands (the holder of each `node_modules`
+    component physically, as the kernel follows a link before `..`; npm's
+    `--prefix` lexically; npm's walk-up from the physical cwd), and a part
+    the resolver cannot read (an unknown cwd, `$( … )`, backticks, an unknown
+    variable) is the project the command runs in, failing closed in a linked
+    lane only. `find -L|-follow` also counts an operand that holds the link.
+    Unguarded, listed in the header's not-handled list: a glob that expands to
+    the link (`rm -rf */`), `xargs rm`, `rsync --delete`, `mv`, `npx rimraf`.
+
 </important>
 
 <important if="a test double, ratchet or sweep">
@@ -1070,7 +1105,12 @@ Every agent `Bash` call under Claude Code runs through
 `git stash`; `git reset --soft`/`--hard`; double-force `git worktree remove`,
 or any remove over a symlinked `node_modules` or over a path it cannot resolve
 statically (`$(…)`, `~user`, an unset `$VAR`, a glob; #3988), where `~`, `$HOME`
-and relative paths (against a preceding `cd`/`git -C`) are resolved first; an unpinned `node` probe loading
+and relative paths (against a preceding `cd`/`git -C`) are resolved first; a
+mutating `npm` verb (`ci`, `install`, `update`, `prune`, …, or `npx npm@… ci`)
+where `node_modules` is a symlink out of the project, `--dry-run` or not, and a
+delete through such a link (`rm -rf node_modules/`, `node_modules/*`, `find
+node_modules/ -delete`; unlinking it with `rm node_modules` stays allowed;
+#4044); an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
 `/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
