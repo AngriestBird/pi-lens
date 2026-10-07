@@ -1385,15 +1385,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-turn.ts#handleTurnEnd:118c149d~fbb822b8": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"A project-diagnostics analyzer run on turn_end with a " +
-			"spawn-level timeout only; the same leaf-bound shape as knip " +
-			"above it.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-turn.ts#handleTurnEnd:156451e5~bf99fb9e": {
 		family: "hook-await",
 		site: "turn_end",
@@ -2658,6 +2649,14 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"promise per store, so the three turn-end stores spend one budget each " +
 		"per delivery however many lanes await them, and an abandoned read " +
 		"yields null — a cold cache to every lane — never a stale envelope.",
+	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~be38c3d4":
+		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
+		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +
+		"wall budget is still live. #4117: this is the dead-code client's " +
+		"`analyze` (vulture), awaited under the budget LEFT after the phases " +
+		"before it, as knip's is above. It replaces the #2523 exemption for the " +
+		"same await; the scan is abandoned, not cancelled, and finishes off-hook " +
+		"under vulture's own 30 s spawn timeout and single-flight slot.",
 	"call:clients/runtime-turn.ts#handleTurnEnd:2b57f8b9~df074468":
 		"`deps.signal` — the live `turn_end` ctx.signal in the pi host, optional " +
 		"only in the standalone MCP adapter and unit harnesses, where the turn_end " +

@@ -1196,6 +1196,16 @@ export type DegradationKind =
 	 * while the host is already exiting, so a second row would never be read.
 	 */
 	| "safe-spawn-signal-reraise-unsupported"
+	/**
+	 * A project scanner (vulture, jscpd) was started over a root that holds a
+	 * linked worktree it could not be told to leave out (#4117): the project's
+	 * own scanner config could not be read, so passing the exclusion would have
+	 * replaced it, or the worktree's path cannot be spelled in the scanner's
+	 * argument (a comma, a glob character). The scan then counts the worktree's
+	 * files as the project's. Subject is the scanner; counted, because the same
+	 * root is rescanned every session and turn.
+	 */
+	| "scan-worktree-exclusion-skipped"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"

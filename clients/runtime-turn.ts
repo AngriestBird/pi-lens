@@ -2334,6 +2334,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		reason?: string;
 		/** True when a failed run left the previous good cache in place (#1467). */
 		cacheKept?: boolean;
+		/** #4117: `deferred` when a scan outlived the turn_end budget and was abandoned. */
+		execution?: "deferred";
+		/** #4117: the abandonment was the hook's own signal (Escape), not the clock. */
+		aborted?: boolean;
+		/** #4117: linked worktrees the scan was told to leave out. */
+		excludedWorktrees?: number;
 	} = {};
 	if (runtime.isStartupScanInFlight("dead-code")) {
 		dbg("turn_end: skipping dead-code (startup scan still in flight)");
@@ -2369,22 +2375,47 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				const cacheKey = `dead-code-${client.id}`;
 				const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
 				// Back off after a timeout/kill so an unresponsive scanner cannot cost
-				// every later turn its full analysis budget (mirrors knip).
-				if (
-					prev &&
-					!prev.data.success &&
-					isHardFailureSummary(prev.data.summary)
-				) {
-					dbg(
-						`turn_end: skipping dead-code after failure: ${prev.data.summary}`,
-					);
+				// every later turn its full analysis budget (mirrors knip). #4117: a
+				// scan abandoned at the budget that later timed out wrote no row, so
+				// the client that saw it settle is asked as well (optional: doubles).
+				const previousFailedHard =
+					prev && !prev.data.success && isHardFailureSummary(prev.data.summary);
+				const abandonedFailure = previousFailedHard
+					? null
+					: (client.recentHardFailure?.(cwd) ?? null);
+				if (previousFailedHard || abandonedFailure !== null) {
+					const failure = previousFailedHard
+						? prev.data.summary
+						: (abandonedFailure ?? "");
+					dbg(`turn_end: skipping dead-code after failure: ${failure}`);
 					deadCodeMeta.skipped = true;
-					reasons.push(`${client.id}:backoff:${prev.data.summary}`);
+					reasons.push(`${client.id}:backoff:${failure}`);
 					continue;
 				}
 				const startMs = Date.now();
 				try {
-					const result = await client.analyze(cwd);
+					// #4117: awaited under the turn_end budget that is LEFT and the
+					// hook's signal, as knip is (#3872). `bounded()` abandons the await,
+					// never the process: vulture keeps its own 30 s timeout and
+					// single-flight slot. Its late result is neither written nor
+					// delivered -- the turn it was computed for has ended -- and no
+					// further client starts once the budget is spent.
+					const result = await bounded(client.analyze(cwd), {
+						signal: deps.signal,
+						hook: "turn_end",
+						label: "dead-code",
+						ms: Math.max(
+							0,
+							HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
+						),
+					});
+					if (result === undefined) {
+						dbg(`turn_end: dead-code(${client.id}) outlived the budget`);
+						deadCodeMeta.execution = "deferred";
+						deadCodeMeta.aborted = deps.signal?.aborted === true;
+						reasons.push(`${client.id}:deferred`);
+						break;
+					}
 					const durationMs = Date.now() - startMs;
 					// Never overwrite a good scan with a failure (#925, #1467): a
 					// vulture timeout on one .py turn would otherwise evict the
@@ -2404,6 +2435,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// now the primary path, so dead-code.log must see it too.
 					logDeadCodeScan({
 						language: client.language,
+						root: cwd,
 						success: result.success,
 						cached: false,
 						unusedExports: result.unusedExports.length,
@@ -2411,9 +2443,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						unusedDeps: result.unusedDeps.length,
 						unlistedDeps: result.unlistedDeps.length,
 						durationMs: result.durationMs ?? durationMs,
+						...(result.excludedWorktrees !== undefined && {
+							excludedWorktrees: result.excludedWorktrees,
+						}),
 						...(!result.success && { reason: result.summary }),
 					});
 					deadCodeMeta.success = result.success;
+					if (result.excludedWorktrees !== undefined) {
+						deadCodeMeta.excludedWorktrees =
+							(deadCodeMeta.excludedWorktrees ?? 0) + result.excludedWorktrees;
+					}
 					if (!result.success) {
 						reasons.push(`${client.id}:scan_failed:${result.summary}`);
 						continue;

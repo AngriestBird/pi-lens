@@ -11,3 +11,10 @@
 export function isHardFailureSummary(summary: string): boolean {
 	return /(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(summary);
 }
+
+/**
+ * How long a root whose scan died to a timeout or a kill is skipped (#1467,
+ * #4117): the client stamps it where the scan settles, so a scan turn_end
+ * abandoned at its budget still leaves the failure the next turns must see.
+ */
+export const HARD_FAILURE_BACKOFF_MS = 30 * 60 * 1000;

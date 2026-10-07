@@ -696,6 +696,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,
+		// 0 -> 2 (#4117): jscpd's own config key, read (`config.ignore`) and typed
+		// (`{ ignore?: unknown }`) to merge the project's list with the worktree
+		// exclusion; the name is jscpd's, not one this tree coined.
+		"clients/jscpd-client.ts": 2,
 		"clients/lens-config.ts": 9,
 		"clients/project-lens-config.ts": 6,
 	},
