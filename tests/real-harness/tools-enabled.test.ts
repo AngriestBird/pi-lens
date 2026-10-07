@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { withRealPi } from "../support/real-pi-harness.js";
@@ -42,16 +43,24 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 				fixture: "scenario-1",
 				script: "lazy-activation-reload.json",
 				extensions: [
-					new URL(
-						"../fixtures/real-harness/reload-extension.mjs",
-						import.meta.url,
-					).pathname,
+					fileURLToPath(
+						new URL(
+							"../fixtures/real-harness/reload-extension.mjs",
+							import.meta.url,
+						),
+					),
 				],
 				env: { PI_LENS_TEST_MODE: "0" },
 			},
 			async (pi) => {
 				await pi.prompt("activate a lazy tool");
 				await pi.awaitAssistantTurn();
+				const before = pi.providerObservations().at(0)?.tools;
+				expect(
+					(Array.isArray(before) ? before : []).some(
+						(tool) => (tool as { name?: string }).name === "ast_grep_search",
+					),
+				).toBe(false);
 				await pi.awaitToolResult("pi_lens_activate_tools");
 				await pi.awaitAssistantTurn();
 				const activated = pi.providerObservations().at(-1)?.tools;
