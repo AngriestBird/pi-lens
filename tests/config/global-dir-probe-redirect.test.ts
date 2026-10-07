@@ -615,7 +615,13 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 		);
 		// #3696: a deep agent worktree/TMPDIR used to leave a dangling `(cwd:`
 		// stub after the fixed diagnostic consumed the ledger's 200-character cap.
-		const longCwd = path.join(root, `cwd-${"x".repeat(220)}`);
+		// The fixed diagnostic alone is ~190 characters, so any cwd overflows the
+		// cap; Windows cannot `chdir` into a path past MAX_PATH (ENAMETOOLONG on
+		// the 290-character cwd, #4019), so the pad stays under it there.
+		const longCwd = path.join(
+			root,
+			`cwd-${"x".repeat(process.platform === "win32" ? 100 : 220)}`,
+		);
 		fs.mkdirSync(longCwd, { recursive: true });
 		const savedHome = process.env.PI_LENS_HOME;
 		const savedProbe = process.env.PILENS_PROBE;

@@ -157,6 +157,28 @@ explicit timeout; run the governance batch through
 `npm run test:targeted -- <files>` (one of two machine-wide slots), also in
 the foreground.
 
+Before handback, run `npm run lane:check` (and `--body <file>` when
+applicable) and quote its JSON record and ORCHESTRATOR SUMMARY. Its verdict
+sets the exit code and only `clean` exits 0:
+
+- `clean` (0): every step ran and no red is the change's. A red that also fails
+  on `origin/master` is listed as `RED-ON-BASE` and stays `clean`.
+- `red-caused` (1): a failing test is `CAUSED-BY-CHANGE`, or a root handoff
+  file is tracked.
+- `unproven` (3): a step failed or a red could not be attributed (the build, a
+  run with no named failing file, an `INCONCLUSIVE` red-on-base verdict, a
+  failed lint or format check, a selection over the 25-file cap where only
+  governance suites ran). That is not evidence of unrelated: report it and
+  stop, or fix the cause. The summary prints `selection: selected S, matched
+  M, capped C`.
+- `2`: usage error (`--body <path>` or `--body=<path>` missing, unknown, or the
+  file absent); nothing ran.
+
+The change set is the committed diff plus uncommitted tracked edits and
+untracked files, so a lane without Git authority is checked too. In a lane that
+refuses `git worktree add`, `scripts/red-on-base.mjs` compares against a
+`git archive` tree of the base instead.
+
 Select governance suites mechanically, never from memory (#2107, #2438, #2470,
 #2511):
 `ls tests/clients/*{sweep,ratchet,conformance,coverage,gate,governance,silence,hermeticity,invariant,contract}*.test.ts`

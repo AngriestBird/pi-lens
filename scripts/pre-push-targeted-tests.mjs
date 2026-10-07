@@ -22,6 +22,11 @@
 //      files for a 43-file commit, ~10 minutes, because of exactly that).
 // A changed test file is always included directly.
 //
+// `--include-worktree` (#4047) also counts the working tree against HEAD
+// (uncommitted tracked edits plus untracked files) as changed: the pre-handback
+// gate `npm run lane:check` needs it, since a lane without Git authority leaves
+// its whole change uncommitted.
+//
 // A third pass adds history (#3215 lane 3, scripts/lib/test-history-selection.mjs):
 // the tests that failed on past heads which touched the changed files'
 // directories, from the nightly `data/test-history` summary. It only adds, is
@@ -50,10 +55,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
 import { loadHistorySelection } from "./lib/test-history-selection.mjs";
-import { quoteForWindowsCmd } from "./with-test-lock.mjs";
+import { isEntryPoint, quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
 const PREPUSH_RECORD_DIR = "pi-lens-prepush";
@@ -242,6 +246,29 @@ export function changedFiles(range) {
 	} catch (error) {
 		console.warn(
 			`[pre-push] could not compute diff range "${range}", falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
+		);
+		return null;
+	}
+}
+
+// The working tree against HEAD: uncommitted tracked edits (staged or not) plus
+// untracked files that are not ignored. A lane that holds no Git authority
+// leaves its whole deliverable here, and the committed ranges above never see
+// it (`--include-worktree`, #4047).
+export function worktreeChangedFiles() {
+	try {
+		const run = (args) =>
+			execFileSync("git", args, { encoding: "utf8" })
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line.length > 0 && !line.startsWith("dist/"));
+		return [
+			...run(["diff", "--name-only", "HEAD"]),
+			...run(["ls-files", "--others", "--exclude-standard"]),
+		];
+	} catch (error) {
+		console.warn(
+			`[pre-push] could not read the working-tree changes, falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
 		);
 		return null;
 	}
@@ -627,6 +654,13 @@ export async function main() {
 			if (!changed.includes(file)) changed.push(file);
 		}
 	}
+	if (changed !== null && process.argv.includes("--include-worktree")) {
+		const uncommitted = worktreeChangedFiles();
+		if (uncommitted === null) changed = null;
+		else
+			for (const file of uncommitted)
+				if (!changed.includes(file)) changed.push(file);
+	}
 	const skipBuild = process.argv.includes("--skip-build");
 
 	let selected = [];
@@ -835,20 +869,9 @@ export async function main() {
 }
 
 // Only run the CLI when this file is the entry point — not when a test
-// imports it to exercise selectTargetedTests/etc. directly. Mirrors
-// with-test-lock.mjs's own isEntryPoint (win32 case-insensitive fallback
-// included for the same reason: a differently-cased invocation path still
-// resolves to this file on Windows's default case-insensitive filesystem).
-function isEntryPoint() {
-	if (!process.argv[1]) return false;
-	const invoked = path.resolve(process.argv[1]);
-	const self = fileURLToPath(import.meta.url);
-	if (invoked === self) return true;
-	if (process.platform !== "win32") return false;
-	return invoked.toLowerCase() === self.toLowerCase();
-}
-
-if (isEntryPoint()) {
+// imports it to exercise selectTargetedTests/etc. directly. The symlink-safe,
+// fail-closed check is with-test-lock.mjs's `isEntryPoint` (#4086).
+if (isEntryPoint(import.meta.url)) {
 	main()
 		.then((code) => {
 			process.exitCode = code;

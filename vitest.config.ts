@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import { defineConfig } from "vitest/config";
 import { BalancedShardSequencer } from "./scripts/lib/balanced-shard-sequencer.mjs";
@@ -9,6 +10,25 @@ import {
 // Applies to globalSetup as well as workers: ordinary tests never install tools.
 process.env.PI_LENS_DISABLE_TOOL_INSTALL ??= "1";
 process.env.PI_LENS_TMP_HYGIENE_RUN_ID ??= `${Date.now()}-${process.pid}`;
+
+// #4019: GitHub's Windows runner exposes TEMP as an 8.3 short path
+// (`C:\Users\RUNNER~1\...`), but production canonicalizes through
+// `realpath.native`, which answers the long spelling (`...\runneradmin\...`).
+// A fixture made under `os.tmpdir()` and the path the product reports for it
+// then differ by spelling alone: ~25 Windows-lane tests asserted the short
+// form and read the long one. Pin the tmp env to the long spelling of the SAME
+// directory before any worker forks (they inherit `process.env`), so the 454
+// raw `mkdtemp(os.tmpdir())` callers and the product agree. Same directory,
+// never a relocation (AGENTS.md: do not move the harness home via TEMP).
+if (process.platform === "win32") {
+	try {
+		const longTmp = fs.realpathSync.native(os.tmpdir());
+		process.env.TEMP = longTmp;
+		process.env.TMP = longTmp;
+	} catch {
+		// Unresolvable tmpdir: keep the runner's own spelling.
+	}
+}
 
 // Background coding agents get worktrees under .claude/worktrees/ — vitest's
 // default exclude covers node_modules/.git/dist but NOT those, so a "full
@@ -530,6 +550,10 @@ export const wallClockBudgetInclude = [
 	// gate, which requires it for any newly admitted real spawn regardless
 	// of this list's own "carries a budget assertion" charter above.
 	"tests/scripts/knip-sibling-purge.test.ts",
+	// #4047: `npm run lane:check` against real Git fixtures, the real pre-push
+	// selector, red-on-base and vitest (real child processes, flake-shape
+	// admission).
+	"tests/scripts/lane-check.test.ts",
 	// #2700: the gating/advisory subset test resolves oxlint's real
 	// --print-config for both npm scripts (real child process, flake-shape
 	// admission).
