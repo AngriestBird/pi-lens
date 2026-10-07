@@ -503,15 +503,11 @@ export function createLspDiagnosticsTool(
 					// or fully excluded) is a real "nothing to check" answer, not a
 					// per-file failure — the same sentence the scalar directory route
 					// renders for it.
-					const listed = expanded.directoriesWithoutFiles.slice(0, 5);
-					const more = expanded.directoriesWithoutFiles.length - listed.length;
+					const { listed, text } = describeDirectoriesWithoutFiles(
+						expanded.directoriesWithoutFiles,
+					);
 					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `No supported source files found in: ${listed.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`,
-							},
-						],
+						content: [{ type: "text" as const, text }],
 						details: {
 							mode: "batch",
 							severity,
@@ -534,7 +530,7 @@ export function createLspDiagnosticsTool(
 						cwd,
 						onConfirmedNoBlockers,
 					},
-					expanded.capped,
+					expanded,
 				);
 			}
 
@@ -2175,21 +2171,21 @@ async function expandPathsToFiles(
 	for (const directory of directories) {
 		// The budget is shared across the whole request: a directory expands only
 		// into what is left of MAX_FILES, so a list of directories cannot exceed
-		// the single-directory route's own bound. `collectDirectoryScanFiles`
-		// reports a zero budget honestly: an empty result, `capped` only when the
-		// directory actually held a file the budget could not take.
+		// the single-directory route's own bound. Files an earlier entry already
+		// covers are dropped BEFORE the budget is spent, so overlapping or
+		// duplicate entries neither truncate early nor read as capped.
 		const collected = await collectDirectoryScanFiles(
 			directory,
 			MAX_FILES - files.length,
+			seenFileKeys,
 		);
 		capped ||= collected.capped;
-		if (collected.files.length === 0) {
-			directoriesWithoutFiles.push(directory);
-			continue;
-		}
+		// Only a directory that held NO eligible file is "without files"; one
+		// fully covered by an earlier entry, or starved by the shared budget,
+		// held files and is not an empty answer.
+		if (collected.eligible === 0) directoriesWithoutFiles.push(directory);
 		for (const file of collected.files) {
 			const key = normalizeMapKey(file);
-			if (seenFileKeys.has(key)) continue;
 			seenFileKeys.add(key);
 			files.push(key);
 		}
@@ -2211,12 +2207,17 @@ async function runBatchFileDiagnostics(
 	severity: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
 	options: BatchOptions,
-	// #3965: true when directory expansion hit the MAX_FILES population bound.
-	// A bounded scan whose truncation is invisible reads as a full answer
-	// (AGENTS.md shape 10), so the render names the cap the same way the
-	// scalar directory route does.
-	capped: boolean = false,
+	// #3965: what directory expansion left out of the scan. `capped` is true
+	// when it hit the MAX_FILES population bound; `directoriesWithoutFiles`
+	// are requested directories that held no eligible file. A bounded scan
+	// whose truncation or omission is invisible reads as a full answer
+	// (AGENTS.md shape 10), so the render names both.
+	scan: {
+		capped: boolean;
+		directoriesWithoutFiles: string[];
+	} = { capped: false, directoriesWithoutFiles: [] },
 ) {
+	const { capped, directoriesWithoutFiles } = scan;
 	if (absPaths.length === 0) {
 		return {
 			content: [{ type: "text" as const, text: "No file paths provided." }],
@@ -2263,6 +2264,10 @@ async function runBatchFileDiagnostics(
 			.map(([outcome, count]) => `${outcome}=${count}`)
 			.join(", ")}`,
 	);
+	// One bounded line, however many requested directories held no file.
+	const { listed: emptyListed, text: emptyText } =
+		describeDirectoriesWithoutFiles(directoriesWithoutFiles);
+	if (directoriesWithoutFiles.length > 0) lines.push("", emptyText);
 	const notConfirmed =
 		outcomeCounts.inconclusive +
 		outcomeCounts.unavailable +
@@ -2343,6 +2348,9 @@ async function runBatchFileDiagnostics(
 			serverScope: options.serverScope ?? "all",
 			filesChecked: results.length,
 			...(capped ? { capped: true } : {}),
+			...(directoriesWithoutFiles.length > 0
+				? { directoriesWithoutFiles: emptyListed }
+				: {}),
 			concurrency: options.concurrency,
 			waitMs: options.waitMs,
 			diagnostics: display,
@@ -2426,21 +2434,49 @@ export async function resolveDirectoryScanExtensions(
 async function collectDirectoryScanFiles(
 	absPath: string,
 	maxFiles: number,
-): Promise<{ files: string[]; capped: boolean }> {
+	// Files the caller already covers (the `paths` batch's earlier entries),
+	// keyed by `normalizeMapKey`. They are dropped before `maxFiles` is applied.
+	seen: ReadonlySet<string> = new Set(),
+): Promise<{ files: string[]; capped: boolean; eligible: number }> {
 	const isIgnored = projectIgnorePredicate(absPath);
 	let collectedFiles: string[] = [];
 	await resolveDirectoryScanExtensions(async (exts) => {
 		collectedFiles = await collectFiles(
 			absPath,
 			[...exts],
-			maxFiles + 1,
+			// At most `seen.size` collected files can be dropped below, so this
+			// walk still sees `maxFiles + 1` new files when the directory has them.
+			maxFiles + seen.size + 1,
 			isIgnored,
 		);
 		return collectedFiles.length > 0;
 	});
+	const fresh = collectedFiles.filter(
+		(file) => !seen.has(normalizeMapKey(file)),
+	);
 	return {
-		files: collectedFiles.slice(0, maxFiles),
-		capped: collectedFiles.length > maxFiles,
+		files: fresh.slice(0, maxFiles),
+		capped: fresh.length > maxFiles,
+		// Raw count: a directory whose files are all `seen` is not empty.
+		eligible: collectedFiles.length,
+	};
+}
+
+/**
+ * The "no supported source files" sentence for requested directories that held
+ * no eligible file — one site for the scalar route, the all-empty `paths`
+ * request, and the mixed `paths` request. At most five are named and the rest
+ * counted, so the line stays bounded.
+ */
+function describeDirectoriesWithoutFiles(directories: string[]): {
+	listed: string[];
+	text: string;
+} {
+	const listed = directories.slice(0, 5);
+	const more = directories.length - listed.length;
+	return {
+		listed,
+		text: `No supported source files found in: ${listed.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`,
 	};
 }
 
@@ -2458,7 +2494,7 @@ async function runDirectoryDiagnostics(
 			content: [
 				{
 					type: "text" as const,
-					text: `No supported source files found in: ${absPath}`,
+					text: describeDirectoriesWithoutFiles([absPath]).text,
 				},
 			],
 			details: {

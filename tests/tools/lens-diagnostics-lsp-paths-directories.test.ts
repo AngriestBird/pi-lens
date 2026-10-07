@@ -428,4 +428,214 @@ describe("lens_diagnostics source=lsp paths directories (#3965)", () => {
 			env.cleanup();
 		}
 	});
+
+	// #3965 round 2, F1: a directory that yielded no eligible file was named only
+	// when EVERY entry was empty; in a mixed request it vanished ("Files
+	// checked: 1" with no mention of it), the clean-by-omission shape the issue
+	// forbids. Recurrence this guards: `paths:[src, empty]` reading as "checked
+	// what I asked".
+	it("names a directory with no eligible file in a mixed request, bounded", async () => {
+		const env = setupTestEnvironment("pi-lens-3965-mixed-empty-");
+		const ws = env.tmpDir;
+		try {
+			const [bad] = writeFindingFiles(ws, ["src/bad.ts"]);
+			const empty = path.join(ws, "empty");
+			fs.mkdirSync(empty);
+			const service = makeService([bad]);
+
+			const result = await runTool(service, ws, {
+				source: "lsp",
+				paths: [path.join(ws, "src"), empty],
+				severity: "all",
+			});
+
+			expect(result.details.filesChecked).toBe(1);
+			expect(result.details.directoriesWithoutFiles).toEqual([empty]);
+			expect(text(result)).toContain(
+				`No supported source files found in: ${empty}`,
+			);
+			expect(findingFiles(result)).toEqual([bad]);
+
+			// Bounded: five named, the rest counted, one line.
+			const manyEmpty = Array.from({ length: 6 }, (_, index) => {
+				const directory = path.join(ws, `empty-${index}`);
+				fs.mkdirSync(directory);
+				return directory;
+			});
+			const bounded = await runTool(service, ws, {
+				source: "lsp",
+				paths: [bad, ...manyEmpty],
+				severity: "all",
+			});
+			expect(bounded.details.directoriesWithoutFiles).toHaveLength(5);
+			expect(text(bounded)).toContain("(+1 more)");
+			expect(
+				text(bounded)
+					.split("\n")
+					.filter((line) => line.includes("No supported source files")),
+			).toHaveLength(1);
+
+			// A fully clean mixed request does not hide the empty entry behind
+			// "No diagnostics found.".
+			const cleanFile = path.join(ws, "clean.ts");
+			fs.writeFileSync(cleanFile, "export {};\n");
+			const cleanMixed = await runTool(makeService([]), ws, {
+				source: "lsp",
+				paths: [cleanFile, empty],
+				severity: "all",
+			});
+			expect(text(cleanMixed)).toContain(
+				`No supported source files found in: ${empty}`,
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// F1 corollary: only a directory with NO eligible file is "without files".
+	// One that was fully covered by an earlier entry, or that the shared budget
+	// could not take, held files — naming it "no supported source files" would
+	// be a false statement. Recurrence: a zero-budget or already-seen directory
+	// rendered as empty once F1 started surfacing the list.
+	it("does not call a covered or budget-starved directory empty", async () => {
+		const env = setupTestEnvironment("pi-lens-3965-notempty-");
+		const ws = env.tmpDir;
+		try {
+			writeFindingFiles(ws, ["a/one.ts", "a/sub/two.ts"]);
+			const service = makeService([]);
+
+			const nested = await runTool(service, ws, {
+				source: "lsp",
+				paths: [path.join(ws, "a"), path.join(ws, "a", "sub")],
+				severity: "all",
+			});
+			expect(nested.details.filesChecked).toBe(2);
+			expect(nested.details.directoriesWithoutFiles).toBeUndefined();
+			expect(text(nested)).not.toContain("No supported source files");
+
+			const full = path.join(ws, "full");
+			fs.mkdirSync(full);
+			for (let i = 0; i < 100; i += 1) {
+				fs.writeFileSync(path.join(full, `f${i}.ts`), "export {};\n");
+			}
+			writeFindingFiles(ws, ["starved/s.ts"]);
+			const starved = await runTool(service, ws, {
+				source: "lsp",
+				paths: [full, path.join(ws, "starved")],
+				severity: "all",
+			});
+			expect(starved.details.filesChecked).toBe(100);
+			expect(starved.details.capped).toBe(true);
+			expect(starved.details.directoriesWithoutFiles).toBeUndefined();
+			expect(text(starved)).not.toContain("No supported source files");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// F2: the file budget was spent before overlap dedupe, so a directory whose
+	// files were already covered truncated early and printed "capped at 100"
+	// beside a count below 100 (and wrote a ledger row for a scan that left
+	// nothing unchecked). Recurrence: `[P/a, P]` under-checking P and
+	// `[A80, A80]` reported capped.
+	it("dedupes overlapping and duplicate directory entries before spending the file budget", async () => {
+		const env = setupTestEnvironment("pi-lens-3965-dedupe-");
+		const ws = env.tmpDir;
+		try {
+			const p = path.join(ws, "p");
+			for (const sub of ["a", "z"]) {
+				fs.mkdirSync(path.join(p, sub), { recursive: true });
+				for (let i = 0; i < 60; i += 1) {
+					fs.writeFileSync(
+						path.join(p, sub, `f${String(i).padStart(2, "0")}.ts`),
+						"export {};\n",
+					);
+				}
+			}
+			const service = makeService([]);
+
+			const alone = await runTool(service, ws, {
+				source: "lsp",
+				paths: [p],
+				severity: "all",
+			});
+			const overlapping = await runTool(service, ws, {
+				source: "lsp",
+				paths: [path.join(p, "a"), p],
+				severity: "all",
+			});
+			expect(alone.details.filesChecked).toBe(100);
+			expect(overlapping.details.filesChecked).toBe(100);
+			expect(overlapping.details.capped).toBe(true);
+			expect(new Set(checkedFiles(overlapping)).size).toBe(100);
+
+			resetDegradationLedger();
+			const a80 = path.join(ws, "a80");
+			fs.mkdirSync(a80);
+			for (let i = 0; i < 80; i += 1) {
+				fs.writeFileSync(path.join(a80, `f${i}.ts`), "export {};\n");
+			}
+			const duplicate = await runTool(service, ws, {
+				source: "lsp",
+				paths: [a80, a80],
+				severity: "all",
+			});
+			expect(duplicate.details.filesChecked).toBe(80);
+			expect(duplicate.details.capped).toBeUndefined();
+			expect(text(duplicate)).not.toContain("capped at");
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "lsp-diagnostics-paths-cap",
+				),
+			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// F3: `capped` is a strict ">" boundary. Recurrence: the mutant `>` -> `>=`
+	// survived every test, so a directory holding exactly MAX_FILES eligible files
+	// would have been reported as truncated with a spurious ledger row.
+	it("treats a directory of exactly the file bound as complete, not capped", async () => {
+		const env = setupTestEnvironment("pi-lens-3965-boundary-");
+		const ws = env.tmpDir;
+		try {
+			const exact = path.join(ws, "exact");
+			fs.mkdirSync(exact);
+			for (let i = 0; i < 100; i += 1) {
+				fs.writeFileSync(
+					path.join(exact, `f${String(i).padStart(3, "0")}.ts`),
+					"export {};\n",
+				);
+			}
+			const service = makeService([]);
+
+			const result = await runTool(service, ws, {
+				source: "lsp",
+				paths: [exact],
+				severity: "all",
+			});
+
+			expect(result.details.filesChecked).toBe(100);
+			expect(result.details.capped).toBeUndefined();
+			expect(text(result)).not.toContain("capped at");
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "lsp-diagnostics-paths-cap",
+				),
+			).toBeUndefined();
+
+			// One more eligible file flips it to capped.
+			fs.writeFileSync(path.join(exact, "f100.ts"), "export {};\n");
+			const over = await runTool(service, ws, {
+				source: "lsp",
+				paths: [exact],
+				severity: "all",
+			});
+			expect(over.details.filesChecked).toBe(100);
+			expect(over.details.capped).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
