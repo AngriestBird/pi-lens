@@ -160,6 +160,18 @@ change adds or removes a pinned use, run it on the head and on the merge of
 `origin/master` and the head before pushing, and re-pin in the same PR from its
 `UNPINNED`/`STALE` output (#3284, #3288).
 
+Each pre-push head has a durable result record at
+`$(git rev-parse --git-common-dir)/pi-lens-prepush/<sha>.json`. It contains the
+head/base, timestamp, selected test files and their `import`, `history`, or
+`governance` reason, plus passed/failed/skipped counts, the Vitest exit code,
+and wall time. Re-pushes overwrite that head's record; writes prune records
+older than fourteen days. The provisional record is written before build and
+self-scan work with outcome `tests-not-started`; preparation failures update it
+to `build-failed` or `self-scan-failed`. The write uses a same-directory
+temporary file and rename, and record I/O is best-effort: a warning is emitted
+once and the hook keeps its real build/test result. Quote this path when
+reporting targeted-test evidence instead of relying on prose.
+
 Never park a turn behind a background command. When a run cannot finish in the
 foreground, push with the targeted and governance suites green and say that
 the full suite was delegated to CI.
