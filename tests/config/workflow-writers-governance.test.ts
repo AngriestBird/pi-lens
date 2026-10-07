@@ -94,17 +94,12 @@ const PACKAGE_SCRIPTS = (
 ).scripts;
 
 // `npm run <name>` hides a script behind package.json: append the script body
-// (to a fixed depth) so the writer scan sees the command it runs.
+// so the writer scan sees the command it runs (one level; no workflow nests).
 function expandNpmRuns(run: string): string {
-	let text = run;
-	for (let depth = 0; depth < 3; depth += 1) {
-		const added = [...text.matchAll(/\b(?:npm|pnpm|yarn)\s+run\s+([\w:.-]+)/g)]
-			.map((m) => PACKAGE_SCRIPTS[m[1]])
-			.filter((body): body is string => typeof body === "string");
-		if (added.length === 0) break;
-		text = `${text}\n${added.join("\n")}`;
-	}
-	return text;
+	const bodies = [...run.matchAll(/\b(?:npm|pnpm|yarn)\s+run\s+([\w:.-]+)/g)]
+		.map((m) => PACKAGE_SCRIPTS[m[1]])
+		.filter((body): body is string => typeof body === "string");
+	return [run, ...bodies].join("\n");
 }
 
 function runText(run: string): string {
@@ -702,7 +697,7 @@ const WRITER_RUNS: Array<[string, string]> = [
 		"curl --data-binary @a https://x.test/a",
 	],
 	["writer after $#", "echo $# ; gh issue create --title x"],
-	["writer after a quoted #", 'echo "#" ; gh issue create --title x'],
+	["writer after a quoted #", 'echo "a # b" ; gh issue create --title x'],
 	["writer after a mid-word #", "echo a#b ; gh pr merge 1"],
 	["script via node scripts/", "node scripts/notify-install-smoke-drift.mjs"],
 	[
@@ -938,6 +933,7 @@ describe("workflow writer governance (#4053)", () => {
 				"          path: |\n            a\n            $HOME/b",
 			],
 			["a list value", "          path: ['a', '$HOME']"],
+			["a nested map", "          path:\n            dir: $HOME/x"],
 		])("flags %s", (_name, block) => {
 			expect(hits(block)).toHaveLength(1);
 		});
@@ -1058,8 +1054,8 @@ describe("workflow writer governance (#4053)", () => {
 			);
 		}
 
-		// A script a workflow runs that imports a registered writer writes through
-		// it, whether or not its own text carries a marker (the thin
+		// A script a workflow runs that directly imports a registered writer writes
+		// through it, whether or not its own text carries a marker (the thin
 		// `scripts/merge-train-warden.mjs` over its lib is the case this catches).
 		function detectedWriters(): string[] {
 			const sources = new Map(
@@ -1078,7 +1074,7 @@ describe("workflow writer governance (#4053)", () => {
 					MARKERS.some((marker) => marker.test(source)),
 				)
 				.map(([path]) => path);
-			const runText = workflowFiles()
+			const invokedText = workflowFiles()
 				.map((file) => {
 					const workflow = load(readWorkflow(file).source);
 					return Object.values(workflow.jobs ?? {})
@@ -1089,27 +1085,19 @@ describe("workflow writer governance (#4053)", () => {
 				.join("\n");
 			const invoked = [...sources.keys()].filter((path) =>
 				new RegExp(`(?<![\\w.-])${basename(path).replaceAll(".", "\\.")}`).test(
-					runText,
+					invokedText,
 				),
 			);
-			const reachesWriter = (start: string): boolean => {
-				const seen = new Set([start]);
-				for (const path of seen) {
-					const entry = sources.get(path);
-					if (!entry) continue;
-					for (const dep of importsOf(entry.file, entry.source)) {
-						if (dep in SCRIPT_WRITERS) return true;
-						seen.add(dep);
-					}
-				}
-				return false;
+			const importsWriter = (path: string): boolean => {
+				const entry = sources.get(path);
+				return (
+					entry !== undefined &&
+					importsOf(entry.file, entry.source).some(
+						(dep) => dep in SCRIPT_WRITERS,
+					)
+				);
 			};
-			return [
-				...new Set([
-					...direct,
-					...invoked.filter((path) => reachesWriter(path)),
-				]),
-			];
+			return [...new Set([...direct, ...invoked.filter(importsWriter)])];
 		}
 
 		it("registers every script that writes GitHub state", () => {
