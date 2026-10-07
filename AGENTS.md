@@ -313,6 +313,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 13. **Wrong failure classification:** derive availability and verdicts from raw
     evidence; preserve the classifier and evidence when a caller asserts a fact.
+    Runner log parsers tolerate ANSI control sequences, padding, and CRLF before
+    extracting a count; the exact Windows bytes are pinned by
+    `tests/config/windows-vitest-failure-count.test.ts` and the shared parser is
+    `scripts/lib/windows-vitest-failure-count.mjs`.
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -831,6 +835,10 @@ npm run fmt:check                     oxfmt gate
 npm run knip                          unused-code gate (CI job `knip`, gating)
 npm test                              serialized full suite
 npm run test:targeted -- <paths>      shared-slot targeted suite
+
+For `tests/config/heavy-advisory-gate-workflow.test.ts`, set
+`PI_LENS_PRINT_PINS=1` to print the current parsed census pins as pasteable
+assertion lines after workflow edits; the assertions remain shrink-only pins.
 npm run test:unit                     serialized unit suite
 npm run test:integration              serialized integration suite
 npm run preflight                     local merge/preflight gates
