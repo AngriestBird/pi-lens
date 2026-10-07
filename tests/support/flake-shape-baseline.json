@@ -66,6 +66,7 @@
 		"scripts/astgrep-self-scan.test.ts": 5,
 		"scripts/changelog-entries.test.ts": 13,
 		"scripts/changelog.test.ts": 3,
+		"scripts/check-allow-scripts.test.ts": 3,
 		"scripts/check-lockfile-sync.test.ts": 2,
 		"scripts/check-pr-body.test.ts": 9,
 		"scripts/ci-verdict.test.ts": 4,

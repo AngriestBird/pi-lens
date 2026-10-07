@@ -236,11 +236,23 @@ jobs:
       - name: Lockfile complete under the CI npm pin
         run: npm run check:lockfile -- --complete
 
+      # #1185: the whole dependency tree installs through the pinned npm with
+      # --strict-allow-scripts, so a lifecycle script package.json's allowScripts
+      # does not decide fails the install (ESTRICTALLOWSCRIPTS) instead of being
+      # skipped with a warning. The runner's bundled npm does not know the flag.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts --no-audit --no-fund
 
       - name: Lockfile in sync with package.json
         run: npm run check:lockfile
+
+      # #1185: names the package, resolved version, phase and fix for a missing,
+      # mismatched, stale or name-only approval, or a floating direct range --
+      # the cases npm's own strict flag does not report (#1176).
+      - name: allowScripts policy matches the resolved lockfile
+        run: npm run check:allow-scripts
 
       # `npm install` above ran `prepare` → downloaded the core grammars into
       # grammars/ with provenance sidecars. Verify their bytes/versions match the
@@ -816,7 +828,7 @@ jobs:
       - name: Install without devDeps (--omit=dev)
         run: |
           npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@${npm_pin}" install --omit=dev --no-audit --no-fund
+          npx -y "npm@${npm_pin}" install --omit=dev --strict-allow-scripts --no-audit --no-fund
 
       - name: Build dist from source under --omit=dev (the prepare path)
         run: npm run build:dist
@@ -875,7 +887,7 @@ jobs:
           git clone --quiet . "$RUNNER_TEMP/gh-install"
           cd "$RUNNER_TEMP/gh-install"
           npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@${npm_pin}" install --omit=dev --no-audit --no-fund
+          npx -y "npm@${npm_pin}" install --omit=dev --strict-allow-scripts --no-audit --no-fund
           if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
             echo "ERROR: npm install --omit=dev changed tracked source files"
             git status --short --untracked-files=no

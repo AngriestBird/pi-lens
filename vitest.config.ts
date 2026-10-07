@@ -494,6 +494,9 @@ export const wallClockBudgetInclude = [
 	"tests/scripts/changelog-entries.test.ts",
 	// #2807 review F1/F4: the checker must be exercised through its real local
 	// CLI and a real shallow clone, not an in-process substitute.
+	// #1185: the committed checker CLI (exit code, report, cwd contract) is the
+	// subject; an in-process call of the pure policy cannot prove that boundary.
+	"tests/scripts/check-allow-scripts.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
 	// #3883 F3: the final `ci-verdict: exit` line is emitted by the real
 	// `main()` process; the spawn is the only faithful proof of that boundary.
