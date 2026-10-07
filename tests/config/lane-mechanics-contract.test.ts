@@ -83,6 +83,23 @@ describe("orchestrator lane mechanics contract (#4007)", () => {
 		expect(body).toContain("ORCHESTRATOR SUMMARY` of at most 30 lines");
 	});
 
+	// Recurrence: #4044 (2026-10-07: a verify worker's `npm ci --ignore-scripts
+	// --dry-run` through a linked node_modules emptied the main install under
+	// every lane; the contract only said "preserve linked dependencies" and the
+	// brief itself invited the local run).
+	it("forbids mutating npm verbs through a linked node_modules and names the scratch-copy answer", () => {
+		const body = flat(sectionBody(doc("pi-lens-subagent.md")));
+		expect(body).toMatch(
+			/Never run a mutating npm verb \([^)]*`ci`[^)]*\), even `--dry-run`, where `node_modules` is a link/,
+		);
+		expect(body).toContain("#4044");
+		expect(body).toContain("Answer install-flag questions in a scratch copy");
+		// #4044 sibling: the slash/glob delete forms empty the link target.
+		expect(body).toContain(
+			"Unlink with `rm node_modules` (no trailing slash or glob)",
+		);
+	});
+
 	// Recurrence: the section is only useful when the role contracts point to
 	// it instead of carrying their own copy.
 	it.each(["pi-lens-fixer.md", "pi-lens-reviewer.md"])(
