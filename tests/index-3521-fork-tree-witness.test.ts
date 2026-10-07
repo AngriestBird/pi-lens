@@ -3531,6 +3531,32 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}).toEqual({ subagentArms: true, primaryArmsAgain: false });
 	});
 
+	it("keeps a live subagent's spent budget spent through another subagent's nine turns", async () => {
+		// #3613 G2 (verify r3 H1, probe LIVEA): a live concurrent session's
+		// current turn is live too. The recurrence: liveness that counted only
+		// the coordinator's own turn, so a second subagent's run evicted the
+		// first subagent's spent turn and handed it a fresh budget.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagentA = await startSubagent();
+		const subagentB = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await startTurn(subagentA);
+		await opaqueCall(subagentA, target);
+		exhaustBudget();
+		const bArms: boolean[] = [];
+		for (let turn = 1; turn <= 9; turn += 1) {
+			await startTurn(subagentB);
+			bArms.push(await opaqueCall(subagentB, target));
+		}
+
+		expect({
+			bArms: bArms.every(Boolean),
+			aArmsAgain: await opaqueCall(subagentA, target),
+		}).toEqual({ bArms: true, aArmsAgain: false });
+	});
+
 	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
 		// #3613 F2. The recurrence it guards: per-session budget keys over the
 		// net's one budget slot, so every switch between the two sessions'
