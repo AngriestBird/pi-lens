@@ -44,6 +44,7 @@ permissions:
 jobs:
   compat-smoke:
     name: Subagent compat smoke
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 91s; timeout = floor of

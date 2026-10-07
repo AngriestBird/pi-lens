@@ -15,6 +15,10 @@ import { basename, dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
+	dispatchableJobs,
+	hasWriteToken,
+} from "../../scripts/dispatch-safety.mjs";
+import {
 	assertNonEmptyScan,
 	auditRegistry,
 	listSourceFiles,
@@ -36,10 +40,12 @@ type Job = {
 	if?: unknown;
 	uses?: unknown;
 	with?: unknown;
+	permissions?: unknown;
 	steps?: Step[];
 };
 type Workflow = {
 	on?: unknown;
+	permissions?: unknown;
 	jobs?: Record<string, Job>;
 };
 
@@ -490,6 +496,16 @@ function writerFindings(source: string, workflowPath: string): string[] {
 	);
 }
 
+function writeScopedJobFindings(
+	source: string,
+	workflowPath: string,
+): string[] {
+	return dispatchableJobs(source, workflowPath)
+		.filter((job) => hasWriteToken(job))
+		.filter((job) => !guardOf(job.job.if).guarded)
+		.map((job) => `${job.id}: write scopes ${job.writeScopes.join(", ")}`);
+}
+
 /** Actions a dispatchable workflow uses that no list classifies. */
 function unclassifiedActions(source: string, workflowPath: string): string[] {
 	const workflow = load(source);
@@ -515,7 +531,7 @@ function unclassifiedActions(source: string, workflowPath: string): string[] {
 // first so `format('$X')` is not a hit, `\$` is an escaped literal, and a
 // braced variable may carry an expansion operator (`${VAR:-d}`).
 const SHELL_VARIABLE =
-	/(?<!\\)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*[}:#%/^,@+=?-])/;
+	/(?<!\\)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[!#]?[A-Za-z_][A-Za-z0-9_]*[}:#%/^,@+=?-]|\([^)]*\))/;
 
 function* inputStrings(
 	value: unknown,
@@ -614,6 +630,8 @@ function workflowWith(options: {
 	run?: string;
 	uses?: string;
 	jobUses?: string;
+	permissions?: string;
+	jobPermissions?: string;
 }): string {
 	const indent = (text: string, n: number) =>
 		text
@@ -629,11 +647,17 @@ function workflowWith(options: {
 		.join("\n");
 	return [
 		options.on ?? "on: workflow_dispatch",
+		options.permissions === undefined
+			? ""
+			: `permissions: ${options.permissions}`,
 		"jobs:",
 		"  fixture:",
 		options.jobIf === undefined
 			? ""
 			: `    if: ${JSON.stringify(options.jobIf)}`,
+		options.jobPermissions === undefined
+			? ""
+			: `    permissions: ${options.jobPermissions}`,
 		options.jobUses === undefined ? "" : `    uses: ${options.jobUses}`,
 		options.jobUses === undefined
 			? `    steps:\n      - name: Writer\n${indent(step, 8)}`
@@ -751,6 +775,81 @@ const WRITER_ACTION_FIXTURES = [
 ];
 
 describe("workflow writer governance (#4053)", () => {
+	describe("effective permission resolution (#4065)", () => {
+		it.each([
+			["variable git push", "$GIT push origin HEAD"],
+			["variable gh method", 'gh api -X "$M" repos/o/r/issues'],
+			["wget post", "wget --post-data=x https://example.test"],
+			["python requests", "python -c 'requests.post(url)'"],
+			["node fetch", "node -e 'fetch(url, { method: \"POST\" })'"],
+			["npm dist-tag", "npm dist-tag add pkg latest"],
+			["shell writer", "scripts/publish.sh"],
+			["two-hop re-export", "node scripts/zz-a.mjs"],
+		])("catches silent spelling: %s", (_name, run) => {
+			const source = workflowWith({
+				run,
+				jobPermissions: "{ contents: write }",
+			});
+			expect(writeScopedJobFindings(source, "fixture.yml")).toEqual([
+				"fixture.yml:fixture: write scopes contents",
+			]);
+		});
+
+		it.each([
+			[
+				"job overrides workflow",
+				"{ issues: read }",
+				"{ issues: write }",
+				["issues"],
+			],
+			[
+				"workflow overrides repository default",
+				"{ issues: read }",
+				undefined,
+				[],
+			],
+			[
+				"repository default is write-capable",
+				undefined,
+				undefined,
+				[
+					"actions",
+					"checks",
+					"contents",
+					"deployments",
+					"discussions",
+					"id-token",
+					"issues",
+					"packages",
+					"pages",
+					"pull-requests",
+					"repository-projects",
+					"security-events",
+					"statuses",
+				],
+			],
+			["empty job permissions deny inherited writes", "write-all", "{}", []],
+		])("resolves %s", (_name, permissions, jobPermissions, expected) => {
+			const jobs = dispatchableJobs(
+				workflowWith({ run: "echo ok", permissions, jobPermissions }),
+				"fixture.yml",
+			);
+			expect(jobs[0]?.writeScopes).toEqual(expected);
+		});
+
+		it("requires the job guard even when the writer spelling is unknown", () => {
+			const source = workflowWith({
+				run: "python -c 'requests.post(url)'",
+				jobPermissions: "{ issues: write }",
+			});
+			const jobs = dispatchableJobs(source, "fixture.yml");
+			expect(hasWriteToken(jobs[0])).toBe(true);
+			expect(writeScopedJobFindings(source, "fixture.yml")).toEqual([
+				"fixture.yml:fixture: write scopes issues",
+			]);
+		});
+	});
+
 	describe("`on:` forms", () => {
 		// Recurrence: round 1 read `on` with hasOwnProperty, so the string and
 		// array forms made a dispatchable workflow look non-dispatchable and
@@ -951,9 +1050,16 @@ describe("workflow writer governance (#4053)", () => {
 			],
 			["a regex anchor", '          path: "^foo$"'],
 			["a price", '          path: "cost $5"'],
-			["a command substitution", '          path: "$(pwd)/x"'],
 		])("accepts %s", (_name, block) => {
 			expect(hits(block)).toEqual([]);
+		});
+
+		it.each([
+			["length expansion", '          path: "${#PATH}"'],
+			["indirect expansion", '          path: "${!PATH}"'],
+			["command substitution", '          path: "$(pwd)/x"'],
+		])("flags shell expansion: %s", (_name, block) => {
+			expect(hits(block)).toHaveLength(1);
 		});
 
 		it("does not read github-script's JavaScript template literals as shell", () => {
@@ -992,6 +1098,24 @@ describe("workflow writer governance (#4053)", () => {
 				flagged: unguarded,
 				registered: [],
 				exemptions: REGISTERED_EXCEPTIONS,
+				minReasonLength: 30,
+			});
+			expect(audit.problems).toEqual([]);
+		});
+
+		it("guards every dispatchable job with an effective write token", () => {
+			const unguarded = real().flatMap(({ source, path }) =>
+				writeScopedJobFindings(source, path),
+			);
+			const permissionExceptions = {
+				".github/workflows/merge-train-warden.yml:warden: write scopes actions, contents, pull-requests":
+					REGISTERED_EXCEPTIONS[Object.keys(REGISTERED_EXCEPTIONS)[0]],
+			};
+			const audit = auditRegistry({
+				sweepName: "unguarded write-scoped dispatchable jobs",
+				flagged: unguarded,
+				registered: [],
+				exemptions: permissionExceptions,
 				minReasonLength: 30,
 			});
 			expect(audit.problems).toEqual([]);

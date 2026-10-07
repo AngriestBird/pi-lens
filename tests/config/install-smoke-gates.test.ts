@@ -1,6 +1,6 @@
 // Pins install-smoke.yml's job-level `if:` event gates (#2613 review T1).
 // Exactly ONE job still carries one: `host-latest-smoke`'s
-// `schedule`/`workflow_dispatch` gate, the nightly advisory drift lane.
+// `schedule`/master gate, the nightly advisory drift lane.
 // `host-range-smoke` deliberately carries NO gate (it is the PR-gating lane)
 // and is intentionally absent from this table.
 //
@@ -80,7 +80,13 @@ function readStepRun(
 function evaluateIf(expr: string, eventName: string): boolean {
 	const substituted = expr
 		.split("github.event_name")
-		.join(JSON.stringify(eventName));
+		.join(JSON.stringify(eventName))
+		.split("github.ref")
+		.join(
+			JSON.stringify(
+				eventName === "schedule" ? "refs/heads/master" : "refs/heads/feature",
+			),
+		);
 	if (substituted.includes("github.")) {
 		throw new Error(
 			`unsubstituted github.* reference survived evaluation: ${substituted} (this table only understands github.event_name)`,
@@ -101,7 +107,7 @@ const EVENTS = [
 
 // [jobName, expected-eligible-events]
 const GATES: Array<[string, readonly string[]]> = [
-	["host-latest-smoke", ["schedule", "workflow_dispatch"]],
+	["host-latest-smoke", ["schedule"]],
 ];
 
 describe("install-smoke.yml job event gates (#2613 review T1)", () => {

@@ -24,13 +24,12 @@ on:
 jobs:
   test-history-rollup:
     name: Roll up durable unit-test history
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     # History is a nightly concern. In particular, a PR must never become red
     # because its historical artifacts are unavailable or a data-branch push
-    # loses a race with another bot. A dispatch on any ref may download and
-    # roll up (the branch check of this job); only the publish and notify
-    # steps are scoped to schedule or master (#4030 F1: a branch dispatch
-    # reached the push with unreviewed rollup code).
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # loses a race with another bot. The whole write-capable job is scoped to
+    # schedule or master so a branch dispatch cannot reach the push with
+    # unreviewed rollup code (#4030 F1).
     runs-on: ubuntu-latest
     # #4030: bounds a hang against GitHub's 360-min default. Measured from a
     # dev host: listing plus 194 ZIPs took 361 s (about 1.7 s a ZIP), and the
@@ -159,6 +158,7 @@ jobs:
 
   tool-smoke:
     name: Live tool + LSP smoke
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 855s (14m15s); sized at
@@ -623,6 +623,7 @@ jobs:
   # the 20-minute job, so a hang costs one bounded step.
   snapshot-persist-bench:
     name: Snapshot persist RSS ratio
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

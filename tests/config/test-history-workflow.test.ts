@@ -151,7 +151,7 @@ describe("#3215 durable test-history workflow contract", () => {
 		const jobs = workflow.jobs as Record<string, unknown>;
 		const rollup = jobs["test-history-rollup"] as Record<string, unknown>;
 		expect(rollup.if).toBe(
-			"github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+			"github.event_name == 'schedule' || github.ref == 'refs/heads/master'",
 		);
 		const permissions = rollup.permissions as Record<string, unknown>;
 		expect(permissions.contents).toBe("write");

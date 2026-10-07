@@ -24,6 +24,7 @@ type Step = {
 	with?: Record<string, unknown>;
 };
 type Job = {
+	if?: unknown;
 	permissions?: Record<string, string>;
 	steps?: Step[];
 	"timeout-minutes"?: number;
@@ -197,7 +198,11 @@ function nightlyFindings(text: string): string[] {
 		)
 	)
 		findings.push("no title-keyed upsert step on the nightly-drift label");
-	if (upsert && !String(upsert.if ?? "").includes(WRITE_GUARD))
+	if (
+		upsert &&
+		!String(upsert.if ?? "").includes(WRITE_GUARD) &&
+		!String(workflow.jobs?.publish?.if ?? "").includes(WRITE_GUARD)
+	)
 		findings.push("the issue writer is not scoped to schedule or master");
 	if (/gh issue (create|edit|comment|close)/.test(steps.map(run).join("\n")))
 		findings.push("a raw gh issue write bypasses the shared upsert CLI");
@@ -360,12 +365,17 @@ describe("stryker-nightly.yml (#4005)", () => {
 			/workflow-level permissions/,
 		],
 		[
-			"dropping the upsert step's schedule/master scope",
+			"dropping the publish job and writer step schedule/master scopes",
 			(text) =>
-				text.replace(
-					"github.event_name == 'schedule' || github.ref == 'refs/heads/master'",
-					"true",
-				),
+				text
+					.replace(
+						"if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.prepare.outputs.run == 'true'",
+						"if: always() && needs.prepare.outputs.run == 'true'",
+					)
+					.replace(
+						"        if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'\n",
+						"        if: always()\n",
+					),
 			/not scoped to schedule or master/,
 		],
 		[

@@ -28,6 +28,7 @@ concurrency:
 jobs:
   prepare:
     name: Prepare nightly window
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       base: ${{ steps.window.outputs.base }}
@@ -174,7 +175,7 @@ jobs:
   publish:
     name: Publish combined nightly report
     needs: [prepare, mutate]
-    if: always() && needs.prepare.outputs.run == 'true'
+    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.prepare.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:

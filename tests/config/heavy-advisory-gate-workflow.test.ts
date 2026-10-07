@@ -678,8 +678,8 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		).toBe(63);
 		expect(stageJobs("A")).toBe(23);
 		expect(stageJobs("B")).toBe(2);
-		expect(stageJobs("C")).toBe(13);
-		expect(stageJobs("D")).toBe(25);
+		expect(stageJobs("C")).toBe(14);
+		expect(stageJobs("D")).toBe(24);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		expect(summary.get("gate")?.sites).toBe(1);
 		// #3941 F1: the schedule/dispatch-only advisory job is NOT early-start,
@@ -688,8 +688,8 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 			(site) =>
 				site.file === "install-smoke.yml" && site.jobId === "host-latest-smoke",
 		);
-		expect(hostLatest?.stage, "host-latest-smoke").toBe("D");
-		expect(hostLatest?.events).toContain("pull_request");
+		expect(hostLatest?.stage, "host-latest-smoke").toBe("C");
+		expect(hostLatest?.events).toContain("workflow_dispatch");
 	});
 
 	it("removes every stage-C merge-ref site and only those", () => {

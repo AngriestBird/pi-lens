@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   analyze:
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     # The `(advisory)` suffix is what scripts/lib/ci-checks.mjs reads; the
     # `baseline` word keeps this name distinct from ci.yml's PR-time job.
     name: CodeQL baseline (${{ matrix.language }}) (advisory)

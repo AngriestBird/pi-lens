@@ -853,7 +853,7 @@ jobs:
   # acceptance criterion this lane's first round missed.
   host-latest-smoke:
     name: host latest nightly (advisory)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Only 1 successful master run in the window; measured 40s; timeout = floor
