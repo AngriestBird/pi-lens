@@ -77,6 +77,24 @@ describe("real pi harness: child lifecycle", () => {
 		]);
 	}, 15_000);
 
+	// Recurrence: a killed process nobody has reaped yet still answers
+	// `kill(pid, 0)`. Waiting on that would stall teardown for the whole bound
+	// whenever a reparented grandchild's new parent reaps slowly. The child's
+	// zombie persists until this worker's event loop turns, which the
+	// synchronous pause below never lets it do.
+	it.skipIf(process.platform !== "linux")(
+		"does not count a killed, unreaped process as alive",
+		() => {
+			const child = spawnNode("setInterval(() => {}, 1000)");
+			stray.push(child);
+			const pid = child.pid as number;
+			child.kill("SIGKILL");
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+			expect(() => process.kill(pid, 0)).not.toThrow();
+			expect(isProcessAlive(pid)).toBe(false);
+		},
+	);
+
 	// Recurrence (#4081): pi exits but its reparented grandchild keeps writing
 	// under the scratch home; the wait must cover pids beyond the direct child.
 	it("also waits for the listed descendants, and gives up on one that stays", async () => {

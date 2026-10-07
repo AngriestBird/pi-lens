@@ -16,9 +16,7 @@ import { readFileSync } from "node:fs";
  * until they are gone. An already-reaped child returns [] and signals nothing:
  * its pid may have been recycled, and its children are no longer discoverable.
  *
- * POSIX: SIGSTOP the child and every descendant found (a stopped process
- * cannot fork a replacement), then SIGKILL each pid and, since a descendant is
- * usually its own group leader, its group.
+ * POSIX: SIGKILL every descendant found, then the child.
  * Windows: `taskkill /T /F`, the same tree kill the production seam uses.
  */
 export function killProcessTree(child: {
@@ -42,20 +40,12 @@ export function killProcessTree(child: {
 		});
 		return [root];
 	}
-	// The root first, so it cannot fork while its descendants are listed; then
-	// every descendant, stopped before any is killed. Known limit, stated: a
-	// descendant that forks between the `ps` snapshot and its own SIGSTOP leaves
-	// one unsignalled grandchild, which the callers' bounded removal retry
-	// absorbs.
-	signal(root, "SIGSTOP");
+	// Deepest first, the root last: once a parent dies its children are
+	// reparented and the kill-guard no longer sees them as this worker's
+	// descendants. Known limit, stated: a process forked after the `ps` snapshot
+	// is not signalled; the callers' bounded removal retry absorbs its writes.
 	const tree = [root, ...descendantsOf(root)];
-	for (const pid of tree.slice(1)) signal(pid, "SIGSTOP");
-	for (const pid of tree) {
-		// Only a descendant that leads its own group answers to -pid; for every
-		// other pid this is ESRCH, which `signal` swallows.
-		if (pid !== root) signal(-pid, "SIGKILL");
-		signal(pid, "SIGKILL");
-	}
+	for (const pid of [...tree].reverse()) signal(pid, "SIGKILL");
 	return tree;
 }
 
