@@ -114,8 +114,8 @@ jobs:
     # Gating (#2837 step 3): `npm run preflight` runs the same
     # scripts/run-knip.mjs locally before a PR is pushed, and master is clean.
     # The job name carries no `(advisory)` suffix and is not in
-    # ADVISORY_CHECKS (scripts/lib/ci-checks.mjs), so ci-verdict and the
-    # merge-train warden block on it. A rerun after the PR merged fails in
+    # ADVISORY_CHECKS (scripts/lib/ci-checks.mjs), so ci-verdict blocks
+    # on it. A rerun after the PR merged fails in
     # the checkout step (`refs/pull/N/merge` is gone); ci-verdict excuses that
     # by reading the job log (#3700), so this job needs no `if:` guard.
     steps:

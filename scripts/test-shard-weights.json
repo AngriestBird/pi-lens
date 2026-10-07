@@ -1176,7 +1176,6 @@
 		"tests/scripts/lsp-idle-eviction-doc.test.ts": 0.02,
 		"tests/scripts/lsp-idle-eviction-probe.test.ts": 0.03,
 		"tests/scripts/memory-watch.test.ts": 0.03,
-		"tests/scripts/merge-train-warden.test.ts": 0.16,
 		"tests/scripts/mutation-report-render.test.ts": 0.07,
 		"tests/scripts/mutation-source-map.test.ts": 0.01,
 		"tests/scripts/no-hardcoded-machine-paths.test.ts": 0.03,
