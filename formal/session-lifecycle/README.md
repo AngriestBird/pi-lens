@@ -18,17 +18,19 @@ Four kinds of config:
   and so must #3819's fix (`H3FileLess`, `H3FileLessStores`,
   `H3FileLessCarry`, `H3StaleSlot`, `H3StaleSlotFileLess`, with `ticketKey`
   and `demotedDiscard`), and so must #3881's (`H3Interrupted`,
-  `H3InterruptedFileLess`, with `forwardUnadopted` and `forwardPolicy`). The rest register a known violation of merged
-  master until its fix flips the config to `pass`: `Current` violates
-  `SecondaryIsolation` through N2 (#3613); the `H3Demote*` configs record the
-  cost of #3668's row-17 residual (`NoLostCarry`, `NoLostAdvisory`,
-  `NoLostActivation`).
+  `H3InterruptedFileLess`, with `forwardUnadopted` and `forwardPolicy`), and
+  so must #3855's (`H3DemoteCarry`, `H3DemoteAdvisory`, `H3DemoteActivation`,
+  `H3DemoteFileLess`, with `inheritRole`). The rest register a known
+  violation of merged master until its fix flips the config to `pass`:
+  `Current` violates `SecondaryIsolation` through N2 (#3613), and
+  `AcceptedSecondaryForkActivation` pins the answer #3855 gives for a
+  subagent's own `/fork` (finding F6).
 - **Design** (`Fix`, `FixProcess`, `FixOrder`, `NewestReadTreeFork`) is the
   adopted #3609 design, S4 included (a subagent gets its own read guard and
   turn counter). It is not #3819's fix: with `FileLess = {}` and no subagent
   replacement, `Fix` cannot reach either #3819 path. The `AcceptedLateRead*`
   configs pin the false block the design accepts (F1).
-- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`, `Pre3819*`, `Pre3881*`) restores the shape a
+- **Pre-fix** (`PreS1*`, `PreS2*`, `PreS3*`, `Pre3757*`, `Pre3819*`, `Pre3881*`, `Pre3855*`) restores the shape a
   merged fix removed, and must violate the invariant that fix established.
 - **Mut** configs remove one mechanism or restore one table row: older
   pre-fix shapes, today's open residuals, and design alternatives the design
@@ -75,7 +77,7 @@ scope the most recent primary `session_start` served.
 | `/tree` | The same activation. The branch loses its last entry and the scope's branch epoch bumps (`moveBranch`, from `retainBranch`). |
 | LSP idle reset | pi-lens' own timer. It resets the LSP service only. |
 | subagent start/stop | An in-process subagent binds with reason `startup` while the primary is live, or in its replacement gap, where #3668 declines it. It skips `handleSessionStart` (#473), begins its own scope (`beginScope` in the `session_start` handler, `index.ts`) and never adopts. |
-| subagent `/reload`, `/fork` | Its own replacement. Its shutdown takes the secondary path (no stash). With no primary registered (the primary's replacement gap), its start is the successor by #3668's rule (a reason other than `startup`), so it classifies primary and adopts; the primary's real successor is then demoted to a secondary (`BeginDemoted`). This is #3668's stated residual, row 17. |
+| subagent `/reload`, `/fork` | Its own replacement. Its shutdown takes the secondary path (no stash). Under `inheritRole` (#3855) the shutdown leaves its successor's hand-off key (`noteSecondaryReplacement`, `clients/session-scope.ts`) and the start that matches it stays secondary (`continuesSecondary`), so it never adopts. Without it, with no primary registered (the primary's replacement gap), its start was the successor by #3668's rule (a reason other than `startup`), so it classified primary and adopted, and the primary's real successor was demoted to a secondary (`BeginDemoted`): #3668's row 17. |
 | duplicate start | A second `session_start` for the same replacement (I5, #2890). |
 | interrupted start | `Interrupt` (#3881): the replacement's primary start begins (its scope's ticket is drawn, the module-level runtime serves it), and before `adoptHandoff` the activation's own `/reload` shutdown lands, because a handler ordered before pi-lens scheduled `AgentSession.reload()` and pi does not stop it while it awaits the start's emit. One step, once per behaviour. The start never adopts or registers, and the shutdown saves no sidecar (the coordinator's session id is not pinned yet, so `persistScope` does not run). Not combined with registry or LSP writers. |
 
@@ -195,6 +197,13 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   policy applies on top of the original one. Without it, every store is
   forwarded, and the inner `/reload`'s start carries a `/fork` start's
   advisory (AD: fork none, reload carry).
+- `inheritRole` (#3855): a start takes its predecessor's role. A subagent's
+  own `/reload` or `/fork` (`SecReplace`) stays secondary in the primary's
+  replacement gap, so only `Begin` registers there. The code links the
+  start to its shutdown by the hand-off key: the successor's file, else the
+  session manager pi hands a `/reload` or in-memory `/fork` successor. The
+  model takes that link as given. Without it, a gap `SecReplace` classifies
+  primary and the real successor is demoted (#3668 row 17).
 
 ## Invariants
 
@@ -213,7 +222,8 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
 | `OneResetPerScope` | One `session_start` mutation pass per scope. |
 | `NoForeignFact` | A live scope's cell holds only facts of its own conversation lineage, on its current branch. |
 | `NoForeignActivation` | A live scope holds only activations of its own conversation lineage. |
-| `NoLostActivation` | A live scope, primary or secondary, holds every activation its conversation made (`/tree` keeps them, D7). |
+| `NoLostActivation` | A live scope of a primary's conversation, primary or secondary (a demoted real successor is a secondary), holds every activation the conversation made (`/tree` keeps them, D7). |
+| `SecondaryKeepsActivation` | The same over the subagent's own conversations (files `S`, `T`). The merged design accepts its violation (F6). |
 | `NoCrossSessionDelivery` | An advisory reaches only a context call of its own conversation lineage. |
 | `NoLostAdvisory` | An advisory still queued when its scope retired by `/reload` is queued again once the successor started. One queued after its scope retired is an accepted, recorded drop. |
 | `AdvisoryStaysInSession` | An advisory reaches only a context call on its producer's session file. Only `/reload` carries an advisory, and `/reload` keeps the file, so a delivery across files crossed a `/fork`, `/clone` or resume (#3881 r2). Checked by the `Interrupt` configs. |
@@ -257,9 +267,11 @@ counterexample.
 | `H3StaleSlotFileLess` | the same, file-less sessions | pass | 2322 |
 | `H3Interrupted` | file-backed: a `/reload`, `/fork` or resume start is interrupted by its own `/reload` before it adopts, with #3881's fix: the inner reload's start keeps the reads, activations and advisory, and an interrupted `/fork` carries no advisory | pass | 189098 |
 | `H3InterruptedFileLess` | the same, file-less sessions | pass | 189098 |
-| `H3DemoteCarry` | file-backed row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
-| `H3DemoteAdvisory` | file-backed row 17: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
-| `H3DemoteActivation` | file-backed: a subagent's own replacement starts without its activations; row 17's demoted successor loses the conversation's | violated `NoLostActivation` | 28 |
+| `H3DemoteCarry` | file-backed, #3855's fix: a subagent's own `/reload` or `/fork` in the gap stays secondary, so the real successor keeps the reads | pass | 157 |
+| `H3DemoteAdvisory` | the same: the real successor keeps the advisory | pass | 150 |
+| `H3DemoteActivation` | the same: the real successor keeps the conversation's activations | pass | 192 |
+| `H3DemoteFileLess` | the same with file-less sessions: reads, advisory, activations, and no foreign or second slot take | pass | 16474 |
+| `AcceptedSecondaryForkActivation` | F6: a subagent's own `/fork` or `/reload` starts without its activations (a secondary never adopts) | violated `SecondaryKeepsActivation` | 15 |
 | `Current` | merged master, every transition: N2, #3613 | violated `SecondaryIsolation` | 54 |
 | `Fix` | adopted design: every transition, a primary and a subagent reader, one turn | pass | 71419 |
 | `FixProcess` | adopted design: heartbeat and LSP work across `/new`, resume, `/reload`, idle reset, quit, `pi --fork` | pass | 24771 |
@@ -281,6 +293,9 @@ counterexample.
 | `Pre3819FileLess` | pre-#3819: a subagent's own replacement takes a file-less primary's slot | violated `NoCrossSessionAdoption` | 29 |
 | `Pre3819StaleSlot` | pre-#3819: a demoted session takes a stale slot | violated `HandoffOnce` | 413 |
 | `Pre3881Interrupted` | pre-#3881: the interrupted start's shutdown stashes its empty scope | violated `NoLostActivation` | 209 |
+| `Pre3855DemoteCarry` | pre-#3855, #3668 row 17: the demoted real successor loses the reads | violated `NoLostCarry` | 172 |
+| `Pre3855DemoteAdvisory` | pre-#3855: the demoted real successor loses the advisory | violated `NoLostAdvisory` | 172 |
+| `Pre3855DemoteActivation` | pre-#3855: the demoted real successor loses the conversation's activations | violated `NoLostActivation` | 113 |
 | `MutInterruptedForkPolicy` | #3881 r1: the forward keeps every store, so an interrupted `/fork` is adopted under the `/reload` policy | violated `AdvisoryStaysInSession` | 3388 |
 | `MutFileLessNoTicketKey` | #3819's fix without `ticketKey` | violated `NoCrossSessionAdoption` | 29 |
 | `MutStaleSlotNoDiscard` | #3819's fix without `demotedDiscard` | violated `HandoffOnce` | 413 |
@@ -305,9 +320,10 @@ alternative" is a shape the adopted design rejects, never shipped.
 |---|---|---|---|
 | `Pre3819FileLess` | #3819 | pre-#3819 (560f24ff5): the file-less key `(reason, undefined)` (`clients/session-scope.ts`) and #3668's row 17 (`clients/session-lifecycle.ts`: with no primary registered, only a `startup` start is declined) | The primary's `/reload` shutdown stashes `(reload, undefined)`; a subagent starts in the gap and is declined; the subagent's own `/reload` start classifies primary and takes the primary's slot. `/fork` fails the same way. |
 | `Pre3819StaleSlot` | #3819 (review S1 on #3835) | pre-#3819 (560f24ff5): `stashHandoff` returns early for `/new` and resume (their `SOURCES` hold no slot), so the slot survives them, and `takeHandoff` has no expiry | The primary's `/reload` stashes `(reload, A)`; a subagent starts and is declined; the subagent's own `/fork` classifies primary (row 17) and does not match; the real successor is demoted; the new primary's `/new` (or resume) keeps the slot; the demoted session's own `/reload` classifies primary and takes scope 1's slot. Same conversation, so `NoCrossSessionAdoption` holds. |
-| `H3DemoteCarry` | #3855 (#3668 row 17) | master: `classifySessionStart` in `clients/session-lifecycle.ts` declines only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
-| `H3DemoteAdvisory` | #3855 (#3668 row 17) | master, as `H3DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
-| `H3DemoteActivation` | #3855 (#3668 row 17) | master: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. The same invariant catches row 17's demoted real successor without the primary's activations (113 states in the #3835 r1 review), after a longer trace. |
+| `Pre3855DemoteCarry` | #3855 (#3668 row 17) | pre-#3855 (b9eda404c): `decideSessionStart` in `clients/session-lifecycle.ts` declined only `startup` starts in the gap | A read lands; the primary's `/reload`; a subagent's own `/reload` or `/fork` classifies primary; the real successor is demoted and adopts nothing. |
+| `Pre3855DemoteAdvisory` | #3855 (#3668 row 17) | pre-#3855 (b9eda404c), as `Pre3855DemoteCarry` | An advisory is queued; `/reload`; row 17 demotes the real successor; a context call prunes the advisory as its retired scope's. |
+| `Pre3855DemoteActivation` | #3855 (#3668 row 17) | pre-#3855 (b9eda404c), as `Pre3855DemoteCarry` | The primary activates a tool; `/reload`; row 17 demotes the real successor, which never adopts the primary's activations. |
+| `AcceptedSecondaryForkActivation` | #3855 (the #3835 r2 question) | master, accepted: a secondary's scope never stashes, saves a sidecar or adopts, and `adoptHandoff` runs only for a primary start | The subagent activates a tool, and its own `/fork` starts without it. |
 | `Current` | N2, #3613 | master: `onTurnStart` calls `runtime.beginTurn()` with no role gate (`index.ts`) | The subagent starts, and its `turn_start` moves the primary's turn. |
 | `PreS1OrderTurn` | N3; #3540 case A | pre-S1 (b456ff89c): `_writeOrderTurn += 1`, a coordinator field | A turn draws token 1, `/reload` re-evaluates the entry, and the next turn draws token 1 again. |
 | `MutWidgetDropAfterReEval` | N3's harm; #3540 | pre-S1 (b456ff89c), as above | Two turns and a widget write at token 2; after `/reload` with re-evaluation, a turn draws token 1, and the widget guard drops the live session's own write as older. |
@@ -387,12 +403,20 @@ classifies primary. Three consequences follow.
   classifies primary and finds nothing (the #3868 r1 review's F1). The
   model cannot reach that cell, because it has one `pend`; a runtime witness
   pins it.
-- *Loss.* The demoted real successor adopts nothing, so the conversation
-  loses its reads and its queued advisory (`H3DemoteCarry`,
-  `H3DemoteAdvisory`), and its activations (`H3DemoteActivation`, whose
-  shortest trace is a subagent's own replacement, which never adopts). This
-  is the cost of #3668's stated residual (#3855), whether sessions have
-  files or not.
+- *Loss.* The demoted real successor adopted nothing, so the conversation
+  lost its reads, its queued advisory and its activations
+  (`Pre3855DemoteCarry`, `Pre3855DemoteAdvisory`,
+  `Pre3855DemoteActivation`), whether sessions have files or not. #3855
+  closes it with `inheritRole` (`H3DemoteCarry`, `H3DemoteAdvisory`,
+  `H3DemoteActivation`, `H3DemoteFileLess`).
+
+The `H3FileBacked`, `H3FileLess*`, `H3StaleSlot*`, `Pre3819*` and
+`MutFileLessNoTicketKey`/`MutStaleSlotNoDiscard` configs keep row 17 (no
+`inheritRole`). They stand in for the gap starts that still classify primary
+after #3855: a subagent's own in-memory `/new`, which pi links to nothing
+(residual R1, not modelled as a transition), and a start whose note was
+evicted. Against those starts, #3819's `ticketKey` and `demotedDiscard`
+stay load-bearing.
 
 **F4. Today, a subagent's read authorises the primary's edit** (#3613). The
 shared read guard puts a subagent's read in the primary's cell
@@ -425,6 +449,17 @@ left for it is the conversation's state. Model mutations of
   witness `gives a file-backed /fork interrupted by a reload none of the
   parent's authorship or advisories` pins it.
 
+**F6. A subagent's own `/fork` or `/reload` does not carry its activations
+(#3855's answer to the #3835 r2 question).** A secondary never stashes,
+saves a sidecar or adopts: S2's one slot is the primary's (F2), and
+`adoptHandoff` runs only for a primary start. So a subagent's own
+replacement starts with the default tool set, whether or not it lands in a
+primary's gap (`AcceptedSecondaryForkActivation`). The merged design accepts
+it: carrying them needs a hand-off of the secondary's own, which is new
+mechanism on the S2/S4 seam and a maintainer decision. A secondary hand-off
+would flip that config to `pass`. `NoLostActivation` covers the primary's
+conversations and `SecondaryKeepsActivation` the subagent's.
+
 **Confirmations.** D3: `PreS2SnapshotAtBeforeFork` violates `NoLostCarry`.
 D5: `PreS2ReloadReset` violates `NoLostCarry`. Carrying authorship on
 `/reload` is required, not merely safe.
@@ -456,9 +491,11 @@ Not modelled:
   never starts (row 15), and a `session_start` that crashed before its scope
   was set, are not modelled; either leaves an untaken slot that only a start
   without its own stash could adopt, as in #3819. Row 17 is modelled for a
-  subagent's own `/reload` and `/fork` only: its own `/new` or resume in the
-  gap also classifies primary and demotes the real successor (the
-  `H3Demote*` loss), without taking the slot, and is not modelled.
+  subagent's own `/reload` and `/fork` only. Its own persisted `/new` or
+  resume is linked by pi's target file and stays secondary under #3855; its
+  own in-memory `/new` is linked to nothing, still classifies primary in the
+  gap and demotes the real successor without taking the slot (residual R1),
+  and is not modelled. Neither are #3855's note bound and its eviction.
 - **`MutGenPerEval` (#3755).** A follow-up needs its own discriminator:
   in the #3835 review, `NoCrossSessionState` could not see a
   per-evaluation LSP generation (the mutant passed, 291 states), while

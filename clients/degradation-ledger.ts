@@ -1233,6 +1233,10 @@ export type DegradationKind =
 	 * gap was classified `concurrent-secondary` instead of taking the primary
 	 * slot. Subject `expired`: no successor started within
 	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 * #3855: subject `secondary-successor`: a start that continues a
+	 * secondary's own replacement arrived in that gap and kept the secondary
+	 * role. Subject `note-evicted` (counted): a secondary's successor note was
+	 * dropped over `SECONDARY_SUCCESSOR_NOTE_CAP`.
 	 */
 	| "session-successor-pending"
 	/**

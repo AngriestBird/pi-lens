@@ -32,8 +32,9 @@
 (*   subagent start/stop: an in-process subagent binds its own session     *)
 (*       while the primary is live (I6).                                   *)
 (*   subagent /reload, /fork: its own replacement. A start in the          *)
-(*       primary's replacement gap with a reason other than "startup" is   *)
-(*       classified primary (#3668 row 17, a stated residual).             *)
+(*       primary's replacement gap with a reason other than "startup" was  *)
+(*       classified primary (#3668 row 17); under "inheritRole" (#3855) it *)
+(*       keeps the secondary role.                                         *)
 (*                                                                         *)
 (* Writers begin in a live scope and land at ANY later step. pi refuses    *)
 (* /tree and /reload while streaming, but agent_settled handlers run after *)
@@ -90,6 +91,12 @@
 (*                       stores its own start's reason adopts; without it, *)
 (*                       every store, so the successor's /reload policy    *)
 (*                       carries a /fork start's advisory (AD fork: none)  *)
+(*   "inheritRole"       #3855: a start takes its predecessor's role. A    *)
+(*                       secondary's replacement shutdown leaves its       *)
+(*                       successor's hand-off key, and the start that      *)
+(*                       matches it stays secondary in the primary's gap;  *)
+(*                       without it, any non-startup gap start is primary  *)
+(*                       (#3668 row 17)                                    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -749,11 +756,15 @@ SecEnd ==
 
 \* A subagent's own /reload or /fork (k): its session_shutdown takes the
 \* secondary path (its activation's role, #3668 I3: no stash), then its
-\* successor's session_start arrives with reason k. With no primary
-\* registered (the primary's replacement gap), a non-"startup" start is the
-\* successor by #3668's rule and classifies primary: it runs the full start
-\* and adoptHandoff with its own file. Otherwise it is a concurrent
-\* secondary with fresh cells.
+\* successor's session_start arrives with reason k. Without "inheritRole",
+\* with no primary registered (the primary's replacement gap), a
+\* non-"startup" start is the successor by #3668's rule and classifies
+\* primary: it runs the full start and adoptHandoff with its own file. Under
+\* "inheritRole" (#3855) the shutdown's note links the start to its secondary
+\* predecessor (pi hands a /reload or /fork successor the same file, the
+\* target file, or the same session manager), so it stays secondary. A
+\* secondary start is a concurrent secondary with fresh cells: a secondary
+\* never stashes or adopts.
 SecReplace(k) ==
     /\ \/ k = "reload" /\ "SecReload" \in Transitions /\ "secReload" \notin used
        \/ k = "fork" /\ "SecFork" \in Transitions /\ "secFork" \notin used
@@ -764,7 +775,7 @@ SecReplace(k) ==
                  f == IF k = "reload" THEN sess[s] ELSE "T"
                  nb == IF k = "reload" THEN branch[sess[s]]
                        ELSE ForkBranch(branch[sess[s]])
-                 asPrimary == primary = 0
+                 asPrimary == primary = 0 /\ ~Has("inheritRole")
                  takes == asPrimary /\
                           IF Has("consumeOnMatch") THEN SlotMatch(k, f, Via(k, s))
                           ELSE slot.has
@@ -1181,12 +1192,25 @@ NoForeignFact ==
 NoForeignActivation ==
     \A t \in Tickets : st[t] = "live" => act[t] \subseteq lin[sess[t]]
 
-\* #3604: a live scope holds every activation its conversation made
-\* (/tree keeps them, D7; /new starts a conversation of its own). A demoted
-\* real successor is a secondary, so the check covers every role.
+\* The subagent's conversations: its own file and its fork's.
+SubagentFiles == {"S", "T"}
+
+\* #3604: a live scope of a primary's conversation holds every activation
+\* the conversation made (/tree keeps them, D7; /new starts a conversation
+\* of its own). A demoted real successor is a secondary on the primary's
+\* file, so the check covers every role.
 NoLostActivation ==
     \A t \in Tickets :
-        st[t] = "live" =>
+        (st[t] = "live" /\ sess[t] \notin SubagentFiles) =>
+            \A o \in acts : o \in lin[sess[t]] => o \in act[t]
+
+\* #3855's answer to the #3835 r2 question: the same over the subagent's own
+\* conversations. A secondary never stashes or adopts, so its own /fork or
+\* /reload starts without its activations; the merged design accepts that
+\* (AcceptedSecondaryForkActivation). A secondary hand-off would flip it.
+SecondaryKeepsActivation ==
+    \A t \in Tickets :
+        (st[t] = "live" /\ sess[t] \in SubagentFiles) =>
             \A o \in acts : o \in lin[sess[t]] => o \in act[t]
 
 \* #3748: an advisory reaches only a context call of its own conversation.

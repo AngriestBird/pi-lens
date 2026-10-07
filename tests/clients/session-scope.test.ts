@@ -40,11 +40,14 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	adoptHandoff,
 	beginScope,
+	continuesSecondary,
 	discardHandoff,
 	forwardHandoff,
 	nextOrderTurn,
+	noteSecondaryReplacement,
 	type PersistedStores,
 	retireScope,
+	SECONDARY_SUCCESSOR_NOTE_CAP,
 	stashHandoff,
 	takeHandoff,
 } from "../../clients/session-scope.js";
@@ -382,6 +385,151 @@ describe("#3612 the hand-off slot (F2)", () => {
 			}),
 		).toBe(true);
 		expect(takeHandoff("reload", "/s/own.jsonl")).toBeDefined();
+	});
+});
+
+/**
+ * #3855: a secondary's replacement shutdown leaves its successor's key, and
+ * that start (only that start, once) reads it, so it keeps the secondary role
+ * in a primary's gap. The recurrences: a note no start can match (it would
+ * leave #3668's row 17 open), a note that matches the primary's successor
+ * (it would demote it), a note read without being consumed, a note for a
+ * shutdown that promises no successor, and an unbounded note store.
+ */
+describe("#3855 the secondary-successor note", () => {
+	const secondary = () => beginScope({ role: "secondary" });
+	const note = (
+		reason: string | undefined,
+		files: { sessionFile?: string; targetSessionFile?: string },
+		sessionManager: unknown = undefined,
+	) =>
+		noteSecondaryReplacement(secondary(), {
+			reason,
+			sessionFile: files.sessionFile,
+			targetSessionFile: files.targetSessionFile,
+			sessionManager,
+		});
+
+	it("is read once by the start on the reloaded session's own file", () => {
+		expect(note("reload", { sessionFile: "/s/sub-a.jsonl" })).toBe(true);
+
+		expect(
+			continuesSecondary({ sessionFile: "/s/host.jsonl", sessionManager: {} }),
+		).toBe(false);
+		expect(
+			continuesSecondary({ sessionFile: "/s/sub-a.jsonl", sessionManager: {} }),
+		).toBe(true);
+		expect(
+			continuesSecondary({ sessionFile: "/s/sub-a.jsonl", sessionManager: {} }),
+		).toBe(false);
+	});
+
+	for (const reason of ["fork", "new", "resume"]) {
+		it(`keys a persisted ${reason} on pi's target file, not the session's own`, () => {
+			note(reason, {
+				sessionFile: "/s/sub-b.jsonl",
+				targetSessionFile: `/s/sub-b-${reason}.jsonl`,
+			});
+
+			expect(
+				continuesSecondary({
+					sessionFile: "/s/sub-b.jsonl",
+					sessionManager: {},
+				}),
+			).toBe(false);
+			expect(
+				continuesSecondary({
+					sessionFile: `/s/sub-b-${reason}.jsonl`,
+					sessionManager: {},
+				}),
+			).toBe(true);
+		});
+	}
+
+	for (const reason of ["reload", "fork"]) {
+		it(`keys a file-less ${reason} on the session manager pi hands its successor`, () => {
+			const manager = {};
+			expect(note(reason, {}, manager)).toBe(true);
+
+			expect(
+				continuesSecondary({ sessionFile: undefined, sessionManager: {} }),
+			).toBe(false);
+			expect(
+				continuesSecondary({
+					sessionFile: undefined,
+					sessionManager: undefined,
+				}),
+			).toBe(false);
+			expect(
+				continuesSecondary({ sessionFile: undefined, sessionManager: manager }),
+			).toBe(true);
+		});
+	}
+
+	it("leaves no note for a shutdown with no successor, or none pi links to it", () => {
+		const manager = {};
+		for (const reason of ["quit", undefined])
+			expect(
+				note(reason, { sessionFile: "/s/sub-c.jsonl" }, manager),
+				String(reason),
+			).toBe(false);
+		// An in-memory /new or resume: pi builds a new manager and names no file.
+		for (const reason of ["new", "resume"])
+			expect(note(reason, {}, manager), reason).toBe(false);
+
+		expect(
+			continuesSecondary({
+				sessionFile: "/s/sub-c.jsonl",
+				sessionManager: manager,
+			}),
+		).toBe(false);
+	});
+
+	it("never matches the start of the primary's successor", () => {
+		// The primary's own file-less reload binds its manager to its ticket;
+		// a secondary's note on another manager must not reach that start.
+		const primaryManager = {};
+		stashHandoff(beginScope({ role: "primary" }), {
+			reason: "reload",
+			sessionFile: undefined,
+			targetSessionFile: undefined,
+			sessionManager: primaryManager,
+		});
+		note("reload", {}, {});
+
+		expect(
+			continuesSecondary({
+				sessionFile: undefined,
+				sessionManager: primaryManager,
+			}),
+		).toBe(false);
+	});
+
+	it("keeps the newest notes up to the cap and records each eviction", () => {
+		const files = Array.from(
+			{ length: SECONDARY_SUCCESSOR_NOTE_CAP + 1 },
+			(_, i) => `/s/cap-${i}.jsonl`,
+		);
+		// Fill the store with this test's notes first, so an earlier test's
+		// leftover cannot be the one evicted below.
+		for (const file of files.slice(0, -1))
+			note("reload", { sessionFile: file });
+		resetDegradationLedger();
+
+		note("reload", { sessionFile: files.at(-1) });
+
+		const evicted = getDegradationSummary().find(
+			(group) => group.kind === "session-successor-pending",
+		);
+		expect(evicted?.count).toBe(1);
+		expect(evicted?.latestReasons.map((r) => r.subject)).toEqual([
+			"note-evicted",
+		]);
+		expect(
+			files.map((file) =>
+				continuesSecondary({ sessionFile: file, sessionManager: {} }),
+			),
+		).toEqual([false, ...files.slice(1).map(() => true)]);
 	});
 });
 

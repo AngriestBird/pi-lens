@@ -73,10 +73,12 @@ import {
 import {
 	adoptHandoff,
 	beginScope,
+	continuesSecondary,
 	discardHandoff,
 	forwardHandoff,
 	type LineageHandle,
 	logScopeTransition,
+	noteSecondaryReplacement,
 	retireScope,
 	type SessionScope,
 	scopeCell,
@@ -2282,6 +2284,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3662: a `startup` start in a replacement gap is not the
 						// successor, so it must not take the primary slot.
 						sessionStartReason,
+						// #3855: nor is a start that continues a secondary's own
+						// replacement. Read (and consumed) on every start.
+						continuesSecondary({
+							sessionFile: getSessionFile(ctx),
+							sessionManager: getSessionManager(ctx),
+						}),
 					);
 					ownedSessionRole = sessionStartDecision.runFullSessionStart
 						? "primary"
@@ -3749,11 +3757,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// Best-effort observability bookkeeping — a stale ctx or an
 				// unresolvable path must never break teardown.
 			}
+			const secondaryShutdown = event as
+				| { reason?: string; targetSessionFile?: string }
+				| undefined;
+			// #3855: a secondary's own replacement leaves its successor's key, so
+			// that start keeps the secondary role even in a primary's gap.
+			if (scope) {
+				noteSecondaryReplacement(scope, {
+					reason: secondaryShutdown?.reason,
+					sessionFile: getSessionFile(ctx),
+					targetSessionFile: secondaryShutdown?.targetSessionFile,
+					sessionManager: getSessionManager(ctx),
+				});
+			}
 			// #3611: only this secondary's own scope retires.
-			retireOwnScope(
-				(event as { reason?: string } | undefined)?.reason,
-				stableSessionId,
-			);
+			retireOwnScope(secondaryShutdown?.reason, stableSessionId);
 			dbg(
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);

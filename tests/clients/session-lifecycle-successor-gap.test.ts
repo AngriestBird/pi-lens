@@ -192,3 +192,78 @@ describe("successor-pending gap (#3662)", () => {
 		]);
 	});
 });
+
+/**
+ * #3855: #3668's row 17. A subagent's own `/reload` or `/fork` in the
+ * primary's gap carries a non-`startup` reason, so #3668 took it for the
+ * successor: it registered, and the real successor probed its live ctx and
+ * was demoted. The recurrence these guard: a start that continues a
+ * secondary's replacement (`continuesSecondary`, `clients/session-scope.ts`)
+ * classified primary in a gap, or a secondary's successor declined outside
+ * one.
+ */
+describe("a secondary's own successor in the gap (#3855)", () => {
+	beforeEach(() => {
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		_resetSessionLifecycleForTests();
+		resetDegradationLedger();
+	});
+
+	for (const reason of ["reload", "fork", "new", "resume"]) {
+		it(`a subagent's own ${reason} in the gap declines and the real successor is primary`, () => {
+			primaryShutsDown("reload");
+
+			const own = decideSessionStart(liveCtx(), "subagent", REPO, reason, true);
+			expect(own.classification).toBe("concurrent-secondary");
+			expect(own.runFullSessionStart).toBe(false);
+			expect(getActiveSessionId()).toBeUndefined();
+
+			const successor = decideSessionStart(
+				liveCtx(),
+				"host-session",
+				REPO,
+				"reload",
+				false,
+			);
+			expect(successor.classification).toBe("primary");
+			expect(getActiveSessionId()).toBe("host-session");
+			expect(successorPendingReasons().map((entry) => entry.subject)).toEqual([
+				"secondary-successor",
+			]);
+		});
+	}
+
+	it("a subagent's own reload after the primary quit is primary (#2129 F3)", () => {
+		primaryShutsDown("quit");
+		const own = decideSessionStart(liveCtx(), "subagent", REPO, "reload", true);
+		expect(own.classification).toBe("primary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
+	it("a subagent's own reload beside a live primary is a secondary, with no gap record", () => {
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		const own = decideSessionStart(liveCtx(), "subagent", REPO, "reload", true);
+		expect(own.classification).toBe("concurrent-secondary");
+		expect(successorPendingReasons()).toEqual([]);
+	});
+
+	it("with the guard off a subagent's own reload in the gap is primary, as before #3662", () => {
+		process.env.PI_LENS_CONCURRENT_SESSION_GUARD = "0";
+		try {
+			primaryShutsDown("reload");
+			const own = decideSessionStart(
+				liveCtx(),
+				"subagent",
+				REPO,
+				"reload",
+				true,
+			);
+			expect(own.classification).toBe("primary");
+		} finally {
+			delete process.env.PI_LENS_CONCURRENT_SESSION_GUARD;
+		}
+	});
+});

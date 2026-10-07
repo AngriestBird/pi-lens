@@ -138,8 +138,10 @@ export interface ClassifySessionStartInput {
 	sameRoot?: boolean | undefined;
 	/**
 	 * #3662: no primary is registered because a primary replacement shut down,
-	 * its successor has not started yet, and this start's reason is `startup`
-	 * (so it cannot be that successor). Only consulted when `hasPrior` is false.
+	 * its successor has not started yet, and this start cannot be that
+	 * successor: its reason is `startup` (no predecessor), or (#3855) it
+	 * continues a secondary's own replacement. Only consulted when `hasPrior`
+	 * is false.
 	 */
 	successorPending?: boolean;
 }
@@ -152,7 +154,8 @@ export interface ClassifySessionStartInput {
  *     process has seen; zero behavior change for the single-session case),
  *     unless `successorPending` → `concurrent-secondary` (#3662: a subagent
  *     binding in a replacement gap must not take the slot the successor is
- *     about to claim, or the successor would probe its live ctx and decline).
+ *     about to claim, or the successor would probe its live ctx and decline;
+ *     #3855: nor may a subagent's own `/reload`, `/fork`, `/new` or resume).
  *  2. Prior exists, same stable session id → `sequential-replacement` (the
  *     same session re-announcing itself, e.g. resume/reload paths — must
  *     keep today's behavior, NOT be mistaken for a sibling).
@@ -584,11 +587,18 @@ export function decideSessionStart(
 	/** #3662: this start's `event.reason`. pi sends `startup` only for a
 	 *  runtime's first bind, never for a replacement's successor. */
 	reason?: string | undefined,
+	/** #3855: this start continues a secondary's own replacement
+	 *  (`continuesSecondary` in `clients/session-scope.ts`), so it keeps the
+	 *  secondary role and is not the primary's successor either. */
+	continuesSecondary?: boolean,
 ): SessionStartGuardDecision {
 	const s = state();
 	const hasPrior = s.activeCtx !== undefined || s.activeSessionId !== undefined;
+	// In a primary's replacement gap only its successor is primary: a start
+	// takes its predecessor's role, and a `startup` start has none.
+	const notTheSuccessor = reason === "startup" || continuesSecondary === true;
 	const successorPending =
-		!hasPrior && reason === "startup" && successorStillPending(s);
+		!hasPrior && notTheSuccessor && successorStillPending(s);
 	const priorCtxActive = hasPrior ? probeCtxActive(s.activeCtx) : undefined;
 	// ctx OBJECT IDENTITY: if the SDK ever hands the SAME ctx object to a
 	// repeated session_start, that is by definition the same session
@@ -627,12 +637,20 @@ export function decideSessionStart(
 		classification === "secondary-root"
 	) {
 		if (successorPending) {
-			recordDegradationOnce({
-				kind: "session-successor-pending",
-				subject: "declined",
-				reason:
-					"a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary",
-			});
+			recordDegradationOnce(
+				reason === "startup"
+					? {
+							kind: "session-successor-pending",
+							subject: "declined",
+							reason:
+								"a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary",
+						}
+					: {
+							kind: "session-successor-pending",
+							subject: "secondary-successor",
+							reason: `a ${reason ?? "reasonless"} session_start that continues a secondary's own replacement arrived in a primary replacement gap; it keeps the secondary role, so the primary's successor is not demoted`,
+						},
+			);
 		}
 		registerSecondarySession();
 		return {

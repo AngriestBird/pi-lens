@@ -459,9 +459,25 @@ const HANDOFF_VERSION = 2;
 
 interface HandoffCell {
 	handoff: Handoff | undefined;
-	/** A pi session manager to the ticket of the last slot left from it. */
+	/**
+	 * A pi session manager to the ticket of the last scope that left a key from
+	 * it: a slot, or a secondary's successor note (#3855).
+	 */
 	left: WeakMap<object, number>;
+	/**
+	 * #3855: the keys secondaries' replacement shutdowns left for their
+	 * successors, oldest first. Additive: a cell from a build without it reads
+	 * `undefined` and gains one on the first note, so the version stays.
+	 */
+	secondary?: Set<string | number>;
 }
+
+/**
+ * #3855: notes kept for successors that have not started. Each note is
+ * consumed by its start; this bounds the ones whose start never comes (pi
+ * `reload()` with no bindings).
+ */
+export const SECONDARY_SUCCESSOR_NOTE_CAP = 8;
 
 /** A session manager is a WeakMap key only when it is an object. */
 function asManager(sessionManager: unknown): object | undefined {
@@ -521,6 +537,55 @@ function leaveKey(
 	const manager = asManager(args.sessionManager);
 	if (manager !== undefined) handoffSlot().left.set(manager, scope.scopeId);
 	return args.targetSessionFile ?? args.sessionFile ?? scope.scopeId;
+}
+
+/**
+ * #3855: at a secondary's `session_shutdown` (sync), leave its successor's
+ * key, so that start is known to continue a secondary's conversation and
+ * keeps the secondary role ({@link continuesSecondary}). pi gives a `/new` or
+ * resume successor a new session manager, so without a target file (an
+ * in-memory `/new`) nothing links the two and no note is left. `quit` and a
+ * missing reason read as `startup` and pi names no target for them, so they
+ * leave none either. True when a note was left.
+ */
+export function noteSecondaryReplacement(
+	scope: SessionScope,
+	args: {
+		reason: string | undefined;
+		sessionFile: string | undefined;
+		targetSessionFile: string | undefined;
+		sessionManager: unknown;
+	},
+): boolean {
+	const reason = toStartReason(args.reason);
+	const keepsManager = reason === "reload" || reason === "fork";
+	if (!keepsManager && args.targetSessionFile === undefined) return false;
+	const cell = handoffSlot();
+	cell.secondary ??= new Set();
+	cell.secondary.add(leaveKey(scope, args));
+	if (cell.secondary.size > SECONDARY_SUCCESSOR_NOTE_CAP) {
+		const [oldest] = cell.secondary;
+		cell.secondary.delete(oldest!);
+		incrementDegradationCount({
+			kind: "session-successor-pending",
+			subject: "note-evicted",
+			reason: `more than ${SECONDARY_SUCCESSOR_NOTE_CAP} secondary replacements were waiting for their start; the oldest note was dropped, so that start, if it comes, is classified without it`,
+		});
+	}
+	return true;
+}
+
+/**
+ * #3855: whether this `session_start` continues a secondary's conversation,
+ * by the key its shutdown left ({@link noteSecondaryReplacement}). Consumes
+ * the note, so no later start reads it.
+ */
+export function continuesSecondary(args: {
+	sessionFile: string | undefined;
+	sessionManager: unknown;
+}): boolean {
+	const key = startKey(args.sessionFile, args.sessionManager);
+	return key !== undefined && handoffSlot().secondary?.delete(key) === true;
 }
 
 /**
