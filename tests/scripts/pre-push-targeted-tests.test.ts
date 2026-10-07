@@ -1556,8 +1556,14 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		const { cwd, commit } = repo();
 		for (const link of ["scripts", "node_modules"])
 			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link), "dir");
-		for (const link of ["vitest.config.ts", "package.json"])
-			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link));
+		// Not the repo's vitest.config.ts: its globalSetup file does not exist in
+		// this fixture. #4086 recurrence: the symlinked lock wrapper was a silent
+		// no-op, so the repo config was never loaded and exit 0 was an artifact.
+		fs.writeFileSync(
+			path.join(cwd, "vitest.config.ts"),
+			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
+		);
+		fs.writeFileSync(path.join(cwd, "package.json"), '{"type":"module"}\n');
 		const passing = "import { it } from 'vitest';\nit('ok', () => {});\n";
 		commit(
 			{
