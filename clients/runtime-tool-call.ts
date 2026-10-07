@@ -652,7 +652,8 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				targetPath: observedPath,
 				cwd: ctx.cwd ?? runtime.projectRoot,
 				sessionGeneration: runtime.sessionGeneration,
-				turnIndex: runtime.turnIndex,
+				// #3613 F2: the budget of this session's own turn.
+				turnIndex: runtime.turnKey(deps.sessionId),
 				signal: ctx.signal,
 				dbg,
 			});

@@ -64,6 +64,12 @@ import {
 	resetPendingRunnerFindings,
 } from "../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
+import {
+	_observedMutationStateForTests,
+	_setObservedTurnBudgetForTests,
+	hasPendingObservation,
+	OBSERVED_TURN_BUDGET_MS,
+} from "../clients/observed-mutation.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -3206,6 +3212,115 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			turns: coordinator.turnIndex - before.turnIndex,
 			orderMoved: coordinator.writeOrderTurn > before.orderTurn,
 		}).toEqual({ id: sessionIdOf(primary), turns: 2, orderMoved: true });
+	});
+
+	/**
+	 * A call of a tool pi-lens does not know as a writer, with a path: the
+	 * observed-mutation net arms a baseline for it from tool_call, inside the
+	 * per-turn observation budget.
+	 */
+	let opaqueCalls = 0;
+	const opaqueTool = (id: string, file: string) => ({
+		toolCall: {
+			type: "toolCall",
+			id,
+			name: "probe_mcp_write",
+			arguments: { path: file },
+		},
+		args: { path: file },
+	});
+	async function opaqueCallId(runtime: AgentSessionRuntime, file: string) {
+		const id = `call_opaque_${++opaqueCalls}`;
+		await runtime.session.agent.beforeToolCall?.(opaqueTool(id, file) as never);
+		return { id, armed: hasPendingObservation(id) };
+	}
+	const opaqueCall = async (runtime: AgentSessionRuntime, file: string) =>
+		(await opaqueCallId(runtime, file)).armed;
+	/** The host's tool_result for an opaque call: the net settles it. */
+	async function opaqueResult(
+		runtime: AgentSessionRuntime,
+		id: string,
+		file: string,
+	): Promise<void> {
+		await runtime.session.agent.afterToolCall?.({
+			...opaqueTool(id, file),
+			result: { content: [{ type: "text", text: "ok" }], details: undefined },
+			isError: false,
+		} as never);
+	}
+	/** Spend the whole observation budget of the turn the net last charged. */
+	const exhaustBudget = () =>
+		_setObservedTurnBudgetForTests(
+			_observedMutationStateForTests().turnIndex,
+			OBSERVED_TURN_BUDGET_MS,
+		);
+
+	it("gives each of a subagent's turns its own observation budget", async () => {
+		// #3613 F2 (review r1 P4). The recurrence: the budget keyed on the
+		// primary's turn index, which a subagent's turns no longer move, so a
+		// subagent that spent it in its first turn observed nothing for the
+		// rest of its run.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await startTurn(subagent);
+		const firstArms = await opaqueCall(subagent, target);
+		exhaustBudget();
+		const spentTurnArms = await opaqueCall(subagent, target);
+
+		await startTurn(subagent);
+
+		expect({
+			firstArms,
+			spentTurnArms,
+			nextTurnArms: await opaqueCall(subagent, target),
+		}).toEqual({ firstArms: true, spentTurnArms: false, nextTurnArms: true });
+	});
+
+	it("charges a subagent's settled observation to its own turn", async () => {
+		// #3613 F2: the settle in tool_result charges the turn the arm used.
+		// The recurrence: the settle charged the primary's turn index, so a
+		// subagent's observation time spent the primary's budget.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await startTurn(subagent);
+		const { id } = await opaqueCallId(subagent, target);
+		const subagentTurn = _observedMutationStateForTests().turnIndex;
+		await opaqueCall(primary, target);
+		const primaryTurn = _observedMutationStateForTests().turnIndex;
+
+		await opaqueResult(subagent, id, target);
+
+		expect({
+			distinct: subagentTurn !== primaryTurn,
+			charged: _observedMutationStateForTests().turnIndex,
+		}).toEqual({ distinct: true, charged: subagentTurn });
+	});
+
+	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
+		// #3613 F2. The recurrence it guards: per-session budget keys over the
+		// net's one budget slot, so every switch between the two sessions'
+		// calls reset the spend and neither turn was bounded.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await opaqueCall(primary, target);
+		exhaustBudget();
+		await startTurn(subagent);
+
+		const subagentArms = await opaqueCall(subagent, target);
+
+		expect({
+			subagentArms,
+			primaryArmsAgain: await opaqueCall(primary, target),
+		}).toEqual({ subagentArms: true, primaryArmsAgain: false });
 	});
 
 	it("delivers a subagent's own warnings at its turn end, after the primary's next turn starts", async () => {

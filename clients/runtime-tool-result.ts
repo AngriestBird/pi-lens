@@ -2083,7 +2083,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			toolCallId: resolveToolCallCorrelationId(event),
 			toolName: event.toolName,
 			sessionGeneration: runtime.sessionGeneration,
-			turnIndex: runtime.turnIndex,
+			// #3613 F2: the budget of this session's own turn.
+			turnIndex: runtime.turnKey(deps.sessionId),
 			signal: getAmbientAbortSignal(),
 			// #3596: the replay lands after the settle's own awaits.
 			record: (entry) =>

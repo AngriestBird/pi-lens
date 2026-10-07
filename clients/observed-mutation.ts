@@ -329,12 +329,20 @@ interface ObservedNetState {
 	handled: BoundedSet<string>;
 	turnIndex: number;
 	turnSpentMs: number;
+	/**
+	 * #3613 F2: the spend of recent turns other than `turnIndex`. Two sessions'
+	 * turns interleave on this one net (a subagent's beside the primary's), so
+	 * a switch parks the spend instead of resetting it. Bounded at
+	 * `OBSERVED_PARKED_TURNS_MAX`, oldest key first.
+	 */
+	parkedSpendMs: Map<number, number>;
 	/** Where the next settled sweep resumes its rotation over the tracked set. */
 	sweepCursor: number;
 }
 
 const OBSERVED_FAMILY = "observed-mutation-net";
-const OBSERVED_VERSION = 3;
+const OBSERVED_VERSION = 4;
+const OBSERVED_PARKED_TURNS_MAX = 8;
 
 function state(): ObservedNetState {
 	return getProcessSingleton<ObservedNetState>(
@@ -346,6 +354,7 @@ function state(): ObservedNetState {
 			handled: new BoundedSet(OBSERVED_HANDLED_MAX),
 			turnIndex: -1,
 			turnSpentMs: 0,
+			parkedSpendMs: new Map(),
 			sweepCursor: 0,
 		}),
 	);
@@ -364,6 +373,7 @@ export function resetObservedMutationNet(): void {
 	current.handled.clear();
 	current.turnIndex = -1;
 	current.turnSpentMs = 0;
+	current.parkedSpendMs.clear();
 	current.sweepCursor = 0;
 }
 
@@ -381,6 +391,7 @@ export function _observedMutationStateForTests(): {
 	pending: string[];
 	ledger: string[];
 	handled: string[];
+	turnIndex: number;
 	turnSpentMs: number;
 	sweepCursor: number;
 } {
@@ -389,6 +400,7 @@ export function _observedMutationStateForTests(): {
 		pending: [...current.pending.keys()],
 		ledger: [...current.ledger.keys()],
 		handled: [...current.handled],
+		turnIndex: current.turnIndex,
 		turnSpentMs: current.turnSpentMs,
 		sweepCursor: current.sweepCursor,
 	};
@@ -455,22 +467,31 @@ export function hasPendingObservation(toolCallId: string | undefined): boolean {
 	return toolCallId !== undefined && state().pending.has(toolCallId);
 }
 
-function remainingTurnBudgetMs(turnIndex: number): number {
+/** The net's state with `turnIndex`'s spend in the budget slot. */
+function budgetFor(turnIndex: number): ObservedNetState {
 	const current = state();
 	if (current.turnIndex !== turnIndex) {
+		const parked = current.parkedSpendMs;
+		if (current.turnIndex !== -1)
+			parked.set(current.turnIndex, current.turnSpentMs);
+		current.turnSpentMs = parked.get(turnIndex) ?? 0;
+		parked.delete(turnIndex);
 		current.turnIndex = turnIndex;
-		current.turnSpentMs = 0;
+		while (parked.size > OBSERVED_PARKED_TURNS_MAX)
+			parked.delete(Math.min(...parked.keys()));
 	}
-	return Math.max(0, OBSERVED_TURN_BUDGET_MS - current.turnSpentMs);
+	return current;
+}
+
+function remainingTurnBudgetMs(turnIndex: number): number {
+	return Math.max(
+		0,
+		OBSERVED_TURN_BUDGET_MS - budgetFor(turnIndex).turnSpentMs,
+	);
 }
 
 function chargeTurnBudget(turnIndex: number, spentMs: number): void {
-	const current = state();
-	if (current.turnIndex !== turnIndex) {
-		current.turnIndex = turnIndex;
-		current.turnSpentMs = 0;
-	}
-	current.turnSpentMs += Math.max(0, spentMs);
+	budgetFor(turnIndex).turnSpentMs += Math.max(0, spentMs);
 }
 
 /** Test seam: force the per-turn budget to a known state. */
@@ -478,9 +499,7 @@ export function _setObservedTurnBudgetForTests(
 	turnIndex: number,
 	spentMs: number,
 ): void {
-	const current = state();
-	current.turnIndex = turnIndex;
-	current.turnSpentMs = spentMs;
+	budgetFor(turnIndex).turnSpentMs = spentMs;
 }
 
 type BoundedOutcome<T> =

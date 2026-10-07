@@ -553,6 +553,13 @@ export class RuntimeCoordinator {
 	 */
 	private _writeOrderTurn = 0;
 	private _writeIndex = 0;
+	/**
+	 * #3613 F2: the per-turn cap key of each concurrent session's current turn
+	 * (`turnKey`), and how many such turns started inside this coordinator's
+	 * current turn. Entries go at the session's shutdown (`forgetTurnSession`).
+	 */
+	private readonly _foreignTurnKeys = new Map<string, number>();
+	private _foreignTurnsInTurn = 0;
 	private _projectSeq = 0;
 	// #3511: the highest logged seq this runtime's view is known to have missed
 	// (a sibling process logged it above our seq); 0 when none. Cleared by a
@@ -676,6 +683,7 @@ export class RuntimeCoordinator {
 		this._telemetryProvider = "";
 		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
+		this._foreignTurnsInTurn = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
 		this._viewMissingThrough = 0;
@@ -816,6 +824,14 @@ export class RuntimeCoordinator {
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession !== this._telemetrySessionId) {
 			beginTurnContext(turnSession);
+			// A fresh key strictly between this coordinator's turn and its next:
+			// distinct from every other turn's, and drawn in start order.
+			this._foreignTurnsInTurn += 1;
+			this._foreignTurnKeys.set(
+				turnSession,
+				this._turnIndex +
+					this._foreignTurnsInTurn / (this._foreignTurnsInTurn + 1),
+			);
 			this._actionableWarningsThisTurn.clear(turnSession);
 			this._codeQualityWarningsThisTurn.clear(turnSession);
 			return;
@@ -862,6 +878,7 @@ export class RuntimeCoordinator {
 		// by resetForSession().
 		this._turnStartProjectSeq = this._projectSeq;
 		this._turnIndex += 1;
+		this._foreignTurnsInTurn = 0;
 		this._writeOrderTurn = nextOrderTurn();
 		beginTurnContext(this._telemetrySessionId);
 		this._writeIndex = 0;
@@ -2093,6 +2110,19 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * #3613 F2: the key a per-turn cap (the observed-mutation budget, a
+	 * bounded-telemetry `capPerTurn`) uses for the current turn of `sessionId`.
+	 * This coordinator's own turn is its turn index, as before; a concurrent
+	 * session's turn is the key its own turn start drew, so each of its turns
+	 * re-arms and no two sessions' turns share a cap.
+	 */
+	turnKey(sessionId?: string): number {
+		const turnSession = this.turnSession(sessionId);
+		if (turnSession === this._telemetrySessionId) return this._turnIndex;
+		return this._foreignTurnKeys.get(turnSession) ?? this._turnIndex;
+	}
+
+	/**
 	 * #3613: a concurrent session's per-turn records end with its session, so
 	 * a subagent that shuts down before its turn end leaves no partition
 	 * behind. This coordinator's own records are reset by `resetForSession`.
@@ -2100,6 +2130,7 @@ export class RuntimeCoordinator {
 	forgetTurnSession(sessionId: string | undefined): void {
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession === this._telemetrySessionId) return;
+		this._foreignTurnKeys.delete(turnSession);
 		this._actionableWarningsThisTurn.clear(turnSession);
 		this._codeQualityWarningsThisTurn.clear(turnSession);
 	}
