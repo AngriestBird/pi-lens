@@ -62,6 +62,7 @@ mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
 
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
   live under `tests/fixtures/witness/<slice>/`.
+- A PR claiming it "reduces failures" runs `node scripts/ci-test-diff.mjs <jobA> <jobB>`, quotes its summary, and explains any NEW failures before claiming a reduction.
 - Red-first has one stated exception: when the only red-first path needs broad
   harness setup, brittle mocks, or a test you would delete right after it
   proves the fix (shape 7: #1114, #1759), state the exception in `Tests`, name
