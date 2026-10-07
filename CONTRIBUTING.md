@@ -71,7 +71,9 @@ every `Bash` call, `scripts/hooks/guard-bash.mjs` (wired in
 `.claude/settings.json`), which denies `git stash` in any form, a `git reset
 --soft`/`--hard`, a hand-typed `git worktree remove` with two force flags (use
 `node scripts/prune-agent-worktrees.mjs` instead), any `git worktree remove`
-on a worktree whose `node_modules` is a symlink pointing outside it, an
+on a worktree whose `node_modules` is a symlink pointing outside it (or on a
+path the hook cannot resolve statically; `~`, `$HOME` and relative paths are
+resolved first, #3988), an
 unpinned `node` probe that loads built runtime code from `clients/`/`dist/`
 without a `PI_LENS_HOME` pin, and a `TMPDIR`/`TMP`/`TEMP` aimed at the vitest
 harness's own home. It exists so these six rules (previously prose-only) are
