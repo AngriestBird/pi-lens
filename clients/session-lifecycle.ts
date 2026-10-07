@@ -613,10 +613,7 @@ export function decideSessionStart(
 	// #3855: in a replacement gap only the start the shutdown named, by reason
 	// and key, is the successor. A start with no reason fails safe to primary
 	// (#3662 F8); a marker without a name keeps #3662's rule.
-	const named =
-		s.successorNamed?.since === s.successorPendingSince
-			? s.successorNamed
-			: undefined;
+	const named = namedSuccessorOf(s);
 	const notTheSuccessor =
 		named === undefined
 			? reason === "startup"
@@ -690,6 +687,16 @@ export function decideSessionStart(
 		sameRoot,
 		primaryRoot: primaryRootAtDecision,
 	};
+}
+
+/** #3855: the successor the pending replacement named, when this build's
+ *  release wrote it with the marker it stands beside. */
+function namedSuccessorOf(
+	s: SessionLifecycleState,
+): { reason: string; key: string | number | undefined } | undefined {
+	return s.successorNamed?.since === s.successorPendingSince
+		? s.successorNamed
+		: undefined;
 }
 
 /** #3662: whether a replacement shutdown's marker is younger than the bound.
