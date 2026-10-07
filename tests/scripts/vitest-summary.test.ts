@@ -85,9 +85,9 @@ describe("parseVitestSummary (#4087)", () => {
 	// line that was not `Tests N failed`, and its Windows count took the last
 	// one; a first-`Tests`-line rule read a prose line, or a nested summary a
 	// failing assertion quoted, instead of the run's own (printed last).
-	it("skips a prose Tests line before the real summary", () => {
+	it("skips a prose Tests line around the real summary", () => {
 		const log =
-			"Tests are great\n  Tests  the harness prints this\n      Tests  1 failed | 2 passed (3)\n";
+			"Tests are great\n  Tests  the harness prints this\n      Tests  1 failed | 2 passed (3)\nTests are great again\n";
 		expect(parseVitestSummary(log)).toMatchObject({
 			testsFailed: 1,
 			testsPassed: 2,
