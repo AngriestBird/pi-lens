@@ -252,6 +252,34 @@ export function selectMutationFiles({
 }
 
 /**
+ * Split one globally selected population into disjoint deterministic shards.
+ * Selection happens before splitting so queue order and path@sha bases have
+ * one canonical decision (#4035 r2).
+ *
+ * @param {{selected: string[], skipped: string[], shardIndex?: number, shardCount?: number}} options
+ */
+export function partitionMutationFiles({
+	selected,
+	skipped,
+	shardIndex = 0,
+	shardCount = 1,
+}) {
+	if (
+		!Number.isInteger(shardIndex) ||
+		!Number.isInteger(shardCount) ||
+		shardCount < 1 ||
+		shardIndex < 0 ||
+		shardIndex >= shardCount
+	)
+		throw new RangeError("invalid mutation shard");
+	return {
+		selected: selected.filter((_, index) => index % shardCount === shardIndex),
+		// One shard owns skipped files so combined reports do not duplicate them.
+		skipped: shardIndex === 0 ? skipped : [],
+	};
+}
+
+/**
  * Changed line ranges per file, each file against its own base (#4005 r4): a
  * carried-over file against the base its queue entry carries (its earlier
  * changes are outside the current window), every other file against the
