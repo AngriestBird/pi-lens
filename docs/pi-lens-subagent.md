@@ -150,6 +150,8 @@ explicit timeout; run the governance batch through
 `npm run test:targeted -- <files>` (one of two machine-wide slots), also in
 the foreground.
 
+Before handback, run `npm run lane:check` (and `--body <file>` when applicable) and quote its JSON record and ORCHESTRATOR SUMMARY output.
+
 Select governance suites mechanically, never from memory (#2107, #2438, #2470,
 #2511):
 `ls tests/clients/*{sweep,ratchet,conformance,coverage,gate,governance,silence,hermeticity,invariant,contract}*.test.ts`
