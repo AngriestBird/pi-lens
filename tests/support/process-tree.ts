@@ -1,6 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+import { adoptProcessTree } from "./kill-guard.js";
+
+/** Walks of a still-growing tree before the kill goes ahead (each ≤ 1 s). */
+const MAX_WALKS = 4;
+const PS_TIMEOUT_MS = 1_000;
+
 /**
  * SIGKILL a spawned child AND everything below it (#4081).
  *
@@ -16,7 +22,9 @@ import { readFileSync } from "node:fs";
  * until they are gone. An already-reaped child returns [] and signals nothing:
  * its pid may have been recycled, and its children are no longer discoverable.
  *
- * POSIX: SIGKILL the child and every descendant one `ps` snapshot lists.
+ * POSIX: freeze (SIGSTOP) the child and every descendant `ps` lists, re-walk
+ * until no new descendant appears (at most {@link MAX_WALKS} walks), then
+ * SIGKILL every frozen pid.
  * Windows: `taskkill /T /F`, the same tree kill the production seam uses.
  */
 export function killProcessTree(child: {
@@ -40,11 +48,30 @@ export function killProcessTree(child: {
 		});
 		return [root];
 	}
-	// Known limit, stated: a process forked after the `ps` snapshot is not
-	// signalled; the callers' bounded removal retry absorbs its writes.
-	const tree = [root, ...descendantsOf(root)];
-	for (const pid of tree) signal(pid, "SIGKILL");
-	return tree;
+	// Freeze, re-walk, then kill (#4082 r3). Each walk SIGSTOPs every pid it
+	// newly lists; a frozen process can neither fork nor exit on its own, so
+	// its children stay its children and the next walk lists what it forked
+	// after the previous snapshot. Re-walking after a SIGKILL would find
+	// nothing: a dead parent's children are reparented at its exit. Every pid
+	// is adopted into the kill guard before its first signal, because after
+	// one its ancestry is gone (a self-exiting mid process reparents too).
+	// Known limit: a process reparented before the first walk (its parent
+	// exited earlier on its own) is not listed; the callers' bounded wait and
+	// removal absorb its writes.
+	const frozen = new Set<number>();
+	for (let walk = 0; walk < MAX_WALKS; walk++) {
+		const fresh = [root, ...descendantsOf(root)].filter(
+			(pid) => !frozen.has(pid),
+		);
+		if (fresh.length === 0) break;
+		adoptProcessTree(root, fresh);
+		for (const pid of fresh) {
+			signal(pid, "SIGSTOP");
+			frozen.add(pid);
+		}
+	}
+	for (const pid of frozen) signal(pid, "SIGKILL");
+	return [...frozen];
 }
 
 function signal(pid: number, name: NodeJS.Signals): void {
@@ -59,7 +86,7 @@ function signal(pid: number, name: NodeJS.Signals): void {
 function descendantsOf(root: number): number[] {
 	const ps = spawnSync("ps", ["-A", "-o", "pid=,ppid="], {
 		encoding: "utf8",
-		timeout: 2_000,
+		timeout: PS_TIMEOUT_MS,
 	});
 	if (ps.status !== 0 || typeof ps.stdout !== "string") return [];
 	const children = new Map<number, number[]>();

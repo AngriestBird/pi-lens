@@ -75,8 +75,6 @@ let dropped = 0;
  * detector itself.
  */
 const MAX_OWNED_SEEN = 512;
-/** Ancestors walked before a pid is declared not ours (a real tree is shallow). */
-const MAX_ANCESTRY_DEPTH = 16;
 const ownedSeen = new BoundedFifoMap<number, true>(MAX_OWNED_SEEN);
 
 /**
@@ -98,28 +96,31 @@ function ownsPid(pid: number): boolean {
 	} catch {
 		return false;
 	}
-	let parent = /^PPid:\s*(\d+)$/m.exec(status);
-	// A live DESCENDANT of this worker is as much its own as a direct child:
-	// the process tree a real child spawned (a harness tearing down the pi or
-	// MCP server it started, #4081) is signalled by walking parent pids, and
-	// the kernel's ancestry is the same independent evidence as `PPid`. A
-	// reparented orphan is no longer a descendant and still counts as unowned.
-	for (let depth = 0; parent && depth < MAX_ANCESTRY_DEPTH; depth++) {
-		const ppid = Number(parent[1]);
-		if (ppid === process.pid) {
-			ownedSeen.set(pid, true);
-			return true;
-		}
-		if (ppid <= 1) return false;
-		try {
-			parent = /^PPid:\s*(\d+)$/m.exec(
-				fs.readFileSync(`/proc/${ppid}/status`, "utf8"),
-			);
-		} catch {
-			return false;
-		}
-	}
-	return false;
+	const match = /^PPid:\s*(\d+)$/m.exec(status);
+	if (!match || Number(match[1]) !== process.pid) return false;
+	ownedSeen.set(pid, true);
+	return true;
+}
+
+/**
+ * Adopt the descendants a tree kill is about to signal (#4081, #4082 r3).
+ *
+ * `pids` is one `ps` snapshot of `root`'s tree, taken just before the caller
+ * signals it. Ownership is decided here, BEFORE any signal, because after one
+ * the kernel keeps no evidence: a killed (or self-exiting) parent's children
+ * are reparented at its exit, so a re-read of `/proc` at signal time sees an
+ * outside parent and refuses a kill of our own grandchild. The snapshot is
+ * the kernel's ancestry at that moment; it is trusted only under a `root` this
+ * worker owns by {@link ownsPid}'s own rule, so a fake child carrying a
+ * fabricated pid adopts nothing and every signal it leads to is recorded.
+ *
+ * Test support only (`tests/support/process-tree.ts#killProcessTree`): the
+ * production seams this guard polices never call it.
+ */
+export function adoptProcessTree(root: number, pids: readonly number[]): void {
+	if (!ownsPid(root)) return;
+	for (const pid of pids)
+		if (Number.isInteger(pid) && pid > 0) ownedSeen.set(pid, true);
 }
 
 function record(site: "kill" | "register", target: number, detail: string) {
@@ -198,4 +199,14 @@ export function killGuardReport(): string | undefined {
 		"teardown, which is how the Unit lane killed its own npm. Give the fake a pid this " +
 		"process really owns (`process.pid`), or keep it out of the production seam."
 	);
+}
+
+/**
+ * Take (and clear) this worker's records. Only for the guard's own tests,
+ * which provoke violations on purpose and assert on them; any other caller
+ * would hide a real #2042 report from the `afterAll` that fails the file.
+ */
+export function takeKillGuardViolationsForTest(): KillGuardViolation[] {
+	dropped = 0;
+	return violations.splice(0);
 }

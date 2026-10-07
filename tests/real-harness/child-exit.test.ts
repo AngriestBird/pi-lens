@@ -1,12 +1,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	removeTempDirSync,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
-import { isProcessAlive } from "../support/process-tree.js";
+import {
+	adoptProcessTree,
+	killGuardReport,
+	takeKillGuardViolationsForTest,
+} from "../support/kill-guard.js";
+import { isProcessAlive, killProcessTree } from "../support/process-tree.js";
 import { waitForChildExit, withRealPi } from "../support/real-pi-harness.js";
 
 // The one real spawn site of this file's helper-free children.
@@ -235,4 +240,229 @@ describe("removeTempDirSync under a live writer", () => {
 		for (const child of stray.splice(0)) child.kill("SIGKILL");
 		cleanup();
 	}, 15_000);
+});
+
+// A root with a detached leaf and a mid-tree shell that starts three sleepers
+// and exits ON ITS OWN once its stdin (a pipe from the root) closes, that is,
+// as soon as the root dies: its sleepers are then reparented mid-kill, the
+// shape of pi's own wrapper children (npx). Prints every descendant pid.
+const TREE = `
+const { spawn } = require("child_process");
+setTimeout(() => process.exit(0), 20000);
+const leaf = spawn("sleep", ["20"], { detached: true, stdio: "ignore" });
+const mid = spawn("sh", ["-c", "for i in 1 2 3; do sleep 20 & echo $!; done; read _"],
+  { detached: true, stdio: ["pipe", "pipe", "ignore"] });
+let out = "";
+mid.stdout.on("data", (chunk) => {
+  out += chunk;
+  const grand = out.split("\\n").filter(Boolean).map(Number);
+  if (grand.length === 3) console.log(JSON.stringify([leaf.pid, mid.pid, ...grand]));
+});`;
+
+// A root that keeps forking `sleep <argv[1]>` (200 in all, a few per tick)
+// while it is being killed: the late fork the first snapshot cannot list.
+const FORKER = `
+const { spawn } = require("child_process");
+setTimeout(() => process.exit(0), 20000);
+let n = 0;
+const tick = () => {
+  for (let i = 0; i < 4 && n < 200; i++, n++)
+    spawn("sleep", [process.argv[1]], { stdio: "ignore" });
+  if (n < 200) setImmediate(tick);
+};
+console.log("go");
+tick();`;
+
+const firstLine = (child: ChildProcess) =>
+	new Promise<string>((resolve) => {
+		let out = "";
+		child.stdout?.on("data", (chunk) => {
+			out += String(chunk);
+			if (out.includes("\n")) resolve(out.split("\n")[0] ?? "");
+		});
+	});
+
+/** Live, non-zombie pids whose command line is `sleep <marker>` (Linux). */
+function sleepersWith(marker: string): number[] {
+	const out: number[] = [];
+	for (const name of readdirSync("/proc")) {
+		if (!/^\d+$/.test(name)) continue;
+		try {
+			const cmdline = readFileSync(`/proc/${name}/cmdline`, "utf8");
+			if (cmdline === `sleep\0${marker}\0` && isProcessAlive(Number(name)))
+				out.push(Number(name));
+		} catch {
+			// exited between readdir and read
+		}
+	}
+	return out;
+}
+
+// Starts a detached `sleep argv[1]`, prints its pid and exits: the sleeper is
+// reparented before this worker ever sees it as a descendant.
+const ORPHAN = `
+const c = require("child_process").spawn("sleep", [process.argv[1]], { detached: true, stdio: "ignore" });
+c.unref();
+console.log(c.pid);`;
+
+async function orphan(
+	seconds: string,
+): Promise<{ parent: ChildProcess; pid: number }> {
+	const parent = spawnNode(ORPHAN, seconds);
+	const pid = Number(await firstLine(parent));
+	await exited(parent);
+	return { parent, pid };
+}
+
+// The guard's oracle (tests/support/kill-guard.ts `ownsPid`) had no test in
+// either direction (#4082 verify r2, V2): making it permissive left every
+// suite green. Signals are SIGCONT where delivery to a stranger must be
+// harmless if the guard is broken, and SIGTERM where delivery is observable.
+describe("kill-guard ownership (#2042)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// Recurrence: #2042, a fabricated or foreign pid reaching a real kill.
+	it.skipIf(process.platform !== "linux")(
+		"records and does not deliver signals to pids this worker does not own",
+		async () => {
+			vi.spyOn(console, "error").mockImplementation(() => {});
+			const dead = spawnNode("");
+			await exited(dead);
+			const stranger = await orphan("5");
+			const attempts: Array<[number, NodeJS.Signals]> = [
+				[1, "SIGCONT"], // unrelated live pid (init)
+				[process.ppid, "SIGCONT"], // this worker's own ancestor
+				[dead.pid as number, "SIGTERM"], // reaped child
+				[2468, "SIGCONT"], // fabricated pid, the #2042 literal
+				[-2468, "SIGCONT"], // fabricated group
+				[stranger.pid, "SIGTERM"], // reparented, never seen
+			];
+			const thrown = attempts.filter(([pid, signal]) => {
+				try {
+					process.kill(pid, signal);
+					return false;
+				} catch {
+					return true;
+				}
+			});
+			expect({
+				thrown,
+				strangerAlive: isProcessAlive(stranger.pid),
+				recorded: takeKillGuardViolationsForTest().map((v) => [
+					v.site,
+					v.target,
+					v.detail,
+				]),
+			}).toEqual({
+				thrown: [],
+				strangerAlive: true,
+				recorded: attempts.map(([pid, signal]) => ["kill", pid, signal]),
+			});
+		},
+		15_000,
+	);
+
+	// Recurrence (#4082 verify r2, V1): a tree kill's grandchild, reparented
+	// by its parent's death, was refused. Adopted while its parent (a child of
+	// this worker) was live, it is signalled after the reparenting; the same
+	// adoption under a root this worker does not own adopts nothing.
+	it.skipIf(process.platform !== "linux")(
+		"delivers to a reparented descendant adopted under an owned root, and only then",
+		async () => {
+			vi.spyOn(console, "error").mockImplementation(() => {});
+			const parent = spawnNode(`${ORPHAN}\nsetInterval(() => {}, 1000);`, "5");
+			const grandchild = Number(await firstLine(parent));
+			adoptProcessTree(parent.pid as number, [grandchild]);
+			parent.kill("SIGKILL");
+			await exited(parent);
+			const foreign = await orphan("5");
+			adoptProcessTree(process.ppid, [foreign.pid]);
+			process.kill(grandchild, "SIGTERM");
+			process.kill(foreign.pid, "SIGTERM");
+			await waitForChildExit(parent, [grandchild], 2_000);
+			expect({
+				grandchildAlive: isProcessAlive(grandchild),
+				foreignAlive: isProcessAlive(foreign.pid),
+				recorded: takeKillGuardViolationsForTest().map((v) => v.target),
+			}).toEqual({
+				grandchildAlive: false,
+				foreignAlive: true,
+				recorded: [foreign.pid],
+			});
+		},
+		15_000,
+	);
+});
+
+describe("killProcessTree under the kill guard (#2042, #4081)", () => {
+	const stray: ChildProcess[] = [];
+	afterEach(() => {
+		for (const child of stray.splice(0)) child.kill("SIGKILL");
+		vi.restoreAllMocks();
+	});
+
+	// Recurrence (#4082 verify r2, V1): the tree kill signalled the root first,
+	// the root's death reparented its children, and the guard, re-reading
+	// /proc at signal time, recorded every later signal as a kill of an
+	// unowned pid and did not deliver it: descendants survived and the file
+	// failed in afterAll (11 of 14 real-harness runs). A mid-tree process that
+	// exits by itself reparents its children the same way.
+	it.skipIf(process.platform !== "linux")(
+		"kills every descendant of 20 trees with a self-exiting mid process, and the guard records nothing",
+		async () => {
+			const decoy = spawnNode("setInterval(() => {}, 1000)");
+			stray.push(decoy);
+			let survivors = 0;
+			let killed = 0;
+			for (let run = 0; run < 20; run++) {
+				const root = spawnNode(TREE);
+				stray.push(root);
+				const pids = JSON.parse(await firstLine(root)) as number[];
+				killed += killProcessTree(root).length;
+				await exited(root);
+				await waitForChildExit(root, pids, 2_000);
+				survivors += pids.filter((pid) => isProcessAlive(pid)).length;
+			}
+			expect({
+				survivors,
+				killed,
+				decoy: isProcessAlive(decoy.pid as number),
+				report: killGuardReport(),
+			}).toEqual({
+				survivors: 0,
+				killed: 20 * 6,
+				decoy: true,
+				report: undefined,
+			});
+		},
+		60_000,
+	);
+
+	// Recurrence (#4081 round 2's stated limit): a process the root forks after
+	// the one `ps` snapshot was never signalled, was reparented when the root
+	// died, and kept running (and, under pi, writing under the scratch home).
+	it.skipIf(process.platform !== "linux")(
+		"also kills processes the root forks while it is being killed",
+		async () => {
+			const marker = `3.${process.pid}${Date.now() % 1000}`;
+			let survivors = 0;
+			for (let run = 0; run < 5; run++) {
+				const root = spawnNode(FORKER, marker);
+				stray.push(root);
+				await firstLine(root);
+				killProcessTree(root);
+				await exited(root);
+				// SIGKILL lands asynchronously: give the signalled ones a bounded moment.
+				await waitForChildExit(root, sleepersWith(marker), 1_000);
+				survivors += sleepersWith(marker).length;
+			}
+			expect({ survivors, report: killGuardReport() }).toEqual({
+				survivors: 0,
+				report: undefined,
+			});
+		},
+		60_000,
+	);
 });
