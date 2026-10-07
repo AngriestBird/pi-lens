@@ -80,8 +80,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    env:
-      npm_config_cache: ${{ runner.temp }}/pi-lens-empty-npm-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -92,12 +90,16 @@ jobs:
         with:
           node-version: "22"
 
+      # The `runner` context is not available in job-level `env:` (GitHub
+      # rejects the whole workflow), so the cache path is exported here.
       - name: Create empty job-local npm cache
         run: |
           set -eu
-          test ! -e "$npm_config_cache"
-          mkdir -p "$npm_config_cache"
-          test -z "$(find "$npm_config_cache" -mindepth 1 -print -quit)"
+          cache="$RUNNER_TEMP/pi-lens-empty-npm-cache"
+          test ! -e "$cache"
+          mkdir -p "$cache"
+          test -z "$(find "$cache" -mindepth 1 -print -quit)"
+          echo "npm_config_cache=$cache" >> "$GITHUB_ENV"
 
       - name: Install dependencies with the pinned npm (cold cache)
         run: |

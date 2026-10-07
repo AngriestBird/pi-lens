@@ -72,7 +72,21 @@ describe("strict lifecycle-script policy in CI installs (#1185)", () => {
 		expect(job, "strict-install-cold-cache").toBeDefined();
 		expect(job?.if).toBeUndefined();
 		expect(job?.["continue-on-error"]).toBeUndefined();
-		expect(job?.env?.npm_config_cache).toContain("runner.temp");
+		// Recurrence (2026-10-07, #4067 r2): `${{ runner.temp }}` in job-level
+		// `env:` made GitHub reject the whole ci.yml, so no pull_request run
+		// started. The runner context exists only inside steps.
+		for (const [id, j] of Object.entries(workflow.jobs ?? {}))
+			expect(
+				JSON.stringify((j as { env?: unknown }).env ?? {}),
+				`${id} job env`,
+			).not.toMatch(/\$\{\{\s*runner\./);
+		const prep = steps(workflow, "strict-install-cold-cache").find((s) =>
+			s.name?.includes("empty job-local npm cache"),
+		);
+		expect(String(prep?.run)).toMatch(/\$RUNNER_TEMP\/pi-lens-empty-npm-cache/);
+		expect(String(prep?.run)).toMatch(
+			/npm_config_cache=\$cache" >> "\$GITHUB_ENV"/,
+		);
 		const checkout = steps(workflow, "strict-install-cold-cache").find((s) =>
 			s.uses?.startsWith("actions/checkout@"),
 		);
