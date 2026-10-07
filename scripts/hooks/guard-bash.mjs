@@ -126,7 +126,12 @@
  * hygiene rules stay fail-open on it. A substitution's output is unknown, so
  * {@link findDeny} reads a command holding one twice, with the output opaque
  * and with it empty, and denies if either reading does (#3997). Not handled:
- * `cd x &` and
+ * The #4044 rules (`npmLinkedInstall`, `linkedNodeModulesDelete`) use the
+ * same resolver for a delete operand and `--prefix`, in LOGICAL mode (a
+ * physical realpath collapses `lane/node_modules/` onto its target and the
+ * link leaves the path), and read an unknown cwd as the payload cwd, failing
+ * closed, so a linked lane stays denied after `cd $(pwd) && npm ci`. Not
+ * handled: `cd x &` and
  * `cd x |` (a backgrounded or piped `cd` still moves the tracked cwd), a
  * `cd` inside a `$( … )` span (each span starts from the payload cwd), and a
  * `cd` that fails.
@@ -169,6 +174,16 @@
  *   - A word spelled with ANSI-C escapes (`$'\x67it' stash`): the escapes
  *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
+ *   - npm/node_modules rules (#4044): `npm_config_prefix=`/`NPM_CONFIG_PREFIX`
+ *     in the env, `npm --prefix "$(cmd)"`; a launcher between the shell and
+ *     npm that this file's other rules also miss -- `/usr/bin/env`, `env -i`,
+ *     `sudo -E`, `corepack npm`, `nohup`/`nice`/`timeout`, `xargs`, `npm exec
+ *     -- npm ci`, `npx -c 'npm ci'`, `node …/npm-cli.js`; pnpm, yarn and bun
+ *     writers; a package script that runs `npm ci` (`npm run clean`). For the
+ *     delete rule: a glob that expands TO the link (a star-slash operand such as `rm -rf` of every subdirectory), `find -L`
+ *     from an ancestor of the lane, `xargs rm`, `find -exec sh -c`, `shred`,
+ *     `mv`, `rsync --delete`, `git clean`, `npx rimraf`, a runtime
+ *     `rmSync`/`rmtree`, and a dash-leading operand after `--`.
  *   - A hook bypass spelled some other way (#3778):
  *     `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of `.git/config`, or
  *     `git commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
@@ -241,7 +256,7 @@ export const RULE_MESSAGES = {
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
 	npmLinkedInstall:
-		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` first and install into the lane's own real directory, or point `--prefix` at a real directory.",
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory.",
 	linkedNodeModulesDelete:
 		"a delete whose operand passes THROUGH a node_modules symlink into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
@@ -1604,26 +1619,39 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
 
 /**
- * Does `operand` (resolved against `cwd`, as {@link classifyGit} resolves a
- * worktree path) pass THROUGH a `node_modules` symlink that
- * {@link hasNodeModulesSymlinkOutside} calls outside its project? "Through"
- * means the path continues past the link: `node_modules/x`, `node_modules/*`,
- * a trailing `/` or `/.` (the kernel follows a link spelled with one), or --
- * with `followFinal` (`find -L`/`-H`) -- the link itself. The bare link
- * (`rm -rf node_modules`) only unlinks it and is not through. `resolve` drops
- * a trailing slash, so it is read off the raw operand first. A `cd` INTO the
- * link then `rm -rf ./*` reaches the same test through the tracked cwd.
+ * Does `operand` pass THROUGH a `node_modules` symlink that
+ * {@link hasNodeModulesSymlinkOutside} calls outside its project? The operand
+ * is expanded and anchored by {@link resolveShellPath} in LOGICAL mode, like
+ * bash's own `cd` (`$PWD/node_modules/`, `~/node_modules/`, an assigned
+ * `$D/`, a relative path after `cd`): a PHYSICAL realpath would collapse
+ * `lane/node_modules/` onto the link's target and the link would vanish from
+ * the path. "Through" means the path continues past the link:
+ * `node_modules/x`, `node_modules/*`, a trailing `/` or `/.` (the kernel
+ * follows a link spelled with one), or -- with `followFinal`
+ * (`find -L|-H|-follow`) -- the link itself; `followAll` (`find -L|-follow`
+ * descend every link they meet) also counts an operand that merely HOLDS the
+ * link (`find -L . -delete`). The bare link (`rm -rf node_modules`) only
+ * unlinks it. The slash is read off the raw operand (resolve drops it). A
+ * `cd` INTO the link then `rm -rf ./*` reaches the same test through the
+ * tracked cwd.
  *
  * @param {string} operand
  * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
  * @param {boolean} followFinal
+ * @param {boolean} followAll
  * @returns {boolean}
  */
-function operandThroughNodeModulesLink(operand, cwd, followFinal) {
+function operandThroughNodeModulesLink(
+	operand,
+	cwd,
+	env,
+	followFinal,
+	followAll,
+) {
 	const continues = followFinal || /(^|\/)\.$|\/$/.test(operand);
-	const absolute = isAbsolute(operand)
-		? resolve(operand)
-		: resolve(cwd ?? process.cwd(), operand);
+	const { path: absolute } = resolveShellPath(operand, cwd, env, true);
+	if (followAll && hasNodeModulesSymlinkOutside(absolute)) return true;
 	const parts = absolute.split(SEP);
 	for (let i = 1; i < parts.length; i++) {
 		if (parts[i] !== "node_modules") continue;
@@ -1639,29 +1667,38 @@ function operandThroughNodeModulesLink(operand, cwd, followFinal) {
  * `-delete` or `-exec rm|rmdir|unlink`) with an operand through a linked
  * `node_modules`. MEASURED (GNU coreutils, 2026-10-07): `rm -rf
  * node_modules/`, `rm -rf node_modules/*`, `find node_modules/ -delete`,
- * `find -L|-H node_modules -delete`, `find node_modules/ -exec rm -rf {} +`
- * and `cd node_modules && rm -rf ./*` all empty the link's target; `rm -rf
- * node_modules` and `find node_modules -delete` remove only the link. NOT
- * handled: `$VAR`/`~` operands (literal, like {@link classifyGit}), `xargs rm`,
- * `rsync --delete`, `git clean`, `mv`.
+ * `find -L|-H|-follow node_modules -delete`, `find -L|-follow . -delete`,
+ * `find node_modules/ -exec rm -rf {} +` and `cd node_modules && rm -rf ./*`
+ * all empty the link's target; `rm -rf node_modules` and `find node_modules
+ * -delete` remove only the link. Operands go through {@link resolveShellPath}
+ * (`$PWD`, `~`, assigned variables). NOT handled: a glob that expands TO the
+ * link (a star-slash operand, `rm -rf` of every subdirectory or of a `node_m` prefix glob), `find -L` from an ancestor of the lane (only
+ * an operand that is, holds, or sits under the link counts), an operand with a
+ * substitution or unset variable (judged by its best-effort text), `xargs rm`,
+ * `find -exec sh -c`, `shred`, `mv`, `rsync --delete`, `git clean`,
+ * `npx rimraf`, a runtime `rmSync`/`rmtree`.
  *
  * @param {string} cmd
  * @param {string[]} args
- * @param {string} [cwd]
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
  * @returns {DenyRule | null}
  */
-function classifyNodeModulesDelete(cmd, args, cwd) {
+function classifyNodeModulesDelete(cmd, args, cwd, env) {
 	let operands;
 	let followFinal = false;
+	let followAll = false;
 	if (cmd === "find") {
 		let i = 0;
 		while (/^-([HLP]|D\w*|O\d*)$/.test(args[i] ?? "")) {
-			if (args[i] === "-L" || args[i] === "-H") followFinal = true;
+			if (args[i] === "-H") followFinal = true;
+			if (args[i] === "-L") followFinal = followAll = true;
 			i++;
 		}
 		let end = i;
 		while (end < args.length && !/^(-|\(|!)/.test(args[end])) end++;
 		const expression = args.slice(end);
+		if (expression.includes("-follow")) followFinal = followAll = true;
 		const deletes = expression.some(
 			(a, j) =>
 				a === "-delete" ||
@@ -1674,7 +1711,7 @@ function classifyNodeModulesDelete(cmd, args, cwd) {
 		operands = args.filter((a) => !a.startsWith("-"));
 	}
 	return operands.some((o) =>
-		operandThroughNodeModulesLink(o, cwd, followFinal),
+		operandThroughNodeModulesLink(o, cwd, env, followFinal, followAll),
 	)
 		? "linkedNodeModulesDelete"
 		: null;
@@ -1692,6 +1729,21 @@ const NPM_NODE_MODULES_WRITERS = new Set(
 		"install i in ins inst insta instal add install-test it isntall isnt isnta isntal",
 		"uninstall un unlink remove rm r update up upgrade udpate prune",
 		"rebuild rb link ln dedupe ddp find-dupes",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** Every other npm verb (and alias) a worker types. Only used to tell a verb
+ *  from the VALUE of an unlisted flag (`npm --audit false ci`: `false` is
+ *  neither): the verb is the first positional that is in this set or in
+ *  {@link NPM_NODE_MODULES_WRITERS}. */
+const NPM_OTHER_VERBS = new Set(
+	[
+		"access adduser audit bugs cache completion config c get set deprecate diff dist-tag",
+		"docs home doctor edit exec x explain why explore fund help help-search hook init create",
+		"innit login logout ls list la ll org outdated owner author pack ping pkg prefix profile",
+		"publish query repo restart root run run-script rum urn sbom search find s se shrinkwrap",
+		"star stars start stop team test t tst token unpublish unstar version view show info v",
+		"whoami",
 	].flatMap((line) => line.split(" ")),
 );
 
@@ -1740,16 +1792,19 @@ const NPM_VALUE_FLAGS = new Set([
  * #3173 classifier, deliberately without {@link looksLikeGitWorktree}: a
  * delete through an outside link is the hazard wherever the link sits.
  * `-g`/`--global` writes the global tree, not the project's, and is allowed.
- * NOT handled: `npm_config_prefix=` in the env, a `$VAR`/`~` in `--prefix`
- * (resolved literally, like {@link classifyGit}'s worktree path), `npm exec
- * -- npm ci`, `timeout 30 npm ci`.
+ * The verb is the first positional that is a known npm verb, so the value of
+ * an unlisted flag (`npm --audit false ci`) does not become the verb; the
+ * `--prefix` goes through {@link resolveShellPath} (`$PWD`, `~`); one that a
+ * substitution swallowed (`"$(mktemp -d)"`) is not judged. NOT handled: see the
+ * header's list (`npm_config_prefix=`, launchers, `npm exec -- npm ci`, ...).
  *
  * @param {"npm"|"npx"} cmd
  * @param {string[]} args
- * @param {string} [cwd]
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
  * @returns {DenyRule | null}
  */
-function classifyNpm(cmd, args, cwd) {
+function classifyNpm(cmd, args, cwd, env) {
 	let npmArgs = args;
 	if (cmd === "npx") {
 		let i = 0;
@@ -1760,20 +1815,35 @@ function classifyNpm(cmd, args, cwd) {
 		if (!/^npm(@[^/]*)?$/.test(args[i] ?? "")) return null;
 		npmArgs = args.slice(i + 1);
 	}
-	const [verb, subverb] = collectPositionals(npmArgs, NPM_VALUE_FLAGS);
+	const positionals = collectPositionals(npmArgs, NPM_VALUE_FLAGS);
+	const verbAt = positionals.findIndex(
+		(a) => NPM_NODE_MODULES_WRITERS.has(a) || NPM_OTHER_VERBS.has(a),
+	);
+	const verb = positionals[verbAt];
 	if (
 		!NPM_NODE_MODULES_WRITERS.has(verb) &&
-		!(verb === "audit" && subverb === "fix")
+		!(verb === "audit" && positionals[verbAt + 1] === "fix")
 	)
 		return null;
 	if (npmArgs.some((a) => a === "-g" || a === "--global")) return null;
 	let prefix;
+	let prefixGiven = false;
 	for (let i = 0; i < npmArgs.length; i++) {
-		if (npmArgs[i] === "--prefix") prefix = npmArgs[i + 1];
-		else if (npmArgs[i].startsWith("--prefix=")) prefix = npmArgs[i].slice(9);
+		if (npmArgs[i] === "--prefix") {
+			prefix = npmArgs[i + 1];
+			prefixGiven = true;
+		} else if (npmArgs[i].startsWith("--prefix=")) {
+			prefix = npmArgs[i].slice(9);
+			prefixGiven = true;
+		}
 	}
-	const base = cwd ?? process.cwd();
-	let dir = prefix === undefined ? base : resolve(base, prefix);
+	// A `--prefix` whose value is missing or empty is a word a substitution
+	// swallowed (`--prefix "$(mktemp -d)"` read with its empty reading): an
+	// unresolvable prefix, not "no prefix".
+	if (prefixGiven && !prefix) return null;
+	let dir = cwd ?? process.cwd();
+	// Logical, like the delete operands: `--prefix $PWD`, `~`, an assigned `$P`.
+	if (prefix !== undefined) dir = resolveShellPath(prefix, cwd, env, true).path;
 	for (;;) {
 		if (hasNodeModulesSymlinkOutside(dir)) return "npmLinkedInstall";
 		const parent = dirname(dir);
@@ -2398,9 +2468,15 @@ export function classifySegment(
 			cwd,
 			repositoryIdentity(repositoryRoot(originCwd)),
 		);
-	if (cmd === "npm" || cmd === "npx") return classifyNpm(cmd, args, cwd);
+	// #4044: a `cd` this scan could not resolve leaves `cwd === null`. The
+	// node_modules rules then judge the PAYLOAD cwd, failing closed: a linked
+	// lane stays denied after `cd $(pwd) && npm ci`, and the hook's own cwd
+	// (a real node_modules) is never the answer.
+	const projectCwd = cwd ?? originCwd ?? undefined;
+	if (cmd === "npm" || cmd === "npx")
+		return classifyNpm(cmd, args, projectCwd, sharedEnv);
 	if (cmd === "find" || DELETE_COMMANDS.has(cmd))
-		return classifyNodeModulesDelete(cmd, args, cwd);
+		return classifyNodeModulesDelete(cmd, args, projectCwd, sharedEnv);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);

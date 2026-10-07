@@ -373,7 +373,13 @@ the surface they bite; each block loads only when its trigger applies.
     a lane unlinks without a slash or glob. Consolidation verdict: two rules on
     one classifier seam, kept apart because the npm rule judges a verb and the
     delete rule a path operand (deleting the delete rule relocates nothing the
-    npm rule could absorb). Unguarded: `xargs rm`, `rsync --delete`, `mv`.
+    npm rule could absorb). Both rules read a `cd` the scan could not resolve
+    (`cwd === null`) as the payload cwd, failing closed, and resolve operands
+    and `--prefix` through `resolveShellPath` in logical mode (a physical
+    realpath collapses `lane/node_modules/` onto its target and the link
+    vanishes). `find -L|-follow` also counts an operand that holds the link.
+    Unguarded, listed in the header's not-handled list: a glob that expands to
+    the link (`rm -rf */`), `xargs rm`, `rsync --delete`, `mv`, `npx rimraf`.
 
 </important>
 
