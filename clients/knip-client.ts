@@ -78,6 +78,15 @@ export interface KnipResult extends AnalysedRootSignal {
 	 * result at the supplied project sequence. */
 	execution?: "executed" | "cache";
 	/**
+	 * #3872: linked worktrees nested under the scanned root, which knip walked
+	 * because the project never ignored them, and the files with issues that
+	 * were dropped from the result for living in one. Both are set together,
+	 * only when at least one worktree is nested; a root without any carries
+	 * neither field.
+	 */
+	nestedWorktrees?: number;
+	nestedFilesDropped?: number;
+	/**
 	 * #3600: the wall-clock time this run READ the bytes its issues were
 	 * computed from, stamped at the top of `runAnalyze` before the spawn. A
 	 * caller that JOINS the in-flight promise reads the initiator's stamp, so a
@@ -272,6 +281,17 @@ function readKnipShimVersion(binary: string): string | null {
 	}
 }
 
+/** The linked worktrees nested under one scan root, and whether a file is in one. */
+interface NestedWorktreeScope {
+	count: number;
+	contains(file: string | undefined): boolean;
+}
+
+const NO_NESTED_WORKTREES: NestedWorktreeScope = {
+	count: 0,
+	contains: () => false,
+};
+
 /**
  * Whether a knip-reported file lies inside a linked worktree nested under
  * `targetDir` (#3872). knip reads the checkout's `.gitignore` and nothing
@@ -286,11 +306,9 @@ function readKnipShimVersion(binary: string): string | null {
  * once; each issue then costs one lexical key and a prefix compare, not a
  * realpath (a 16 000-issue result against 55 worktrees is ~880 000 compares).
  */
-function nestedWorktreeMatcher(
-	targetDir: string,
-): (file: string | undefined) => boolean {
+function nestedWorktreeScope(targetDir: string): NestedWorktreeScope {
 	const checkout = resolveGitCheckout(targetDir);
-	if (!checkout) return () => false;
+	if (!checkout) return NO_NESTED_WORKTREES;
 	const base = normalizeFilePath(canonicalDirectory(targetDir));
 	const baseKey = normalizeEphemeralMapKey(base);
 	const prefixes: string[] = [];
@@ -298,11 +316,14 @@ function nestedWorktreeMatcher(
 		const key = normalizeEphemeralMapKey(normalizeFilePath(root));
 		if (key.startsWith(`${baseKey}/`)) prefixes.push(`${key}/`);
 	}
-	if (prefixes.length === 0) return () => false;
-	return (file) => {
-		if (!file) return false;
-		const key = normalizeEphemeralMapKey(`${base}/${file}`);
-		return prefixes.some((prefix) => key.startsWith(prefix));
+	if (prefixes.length === 0) return NO_NESTED_WORKTREES;
+	return {
+		count: prefixes.length,
+		contains: (file) => {
+			if (!file) return false;
+			const key = normalizeEphemeralMapKey(`${base}/${file}`);
+			return prefixes.some((prefix) => key.startsWith(prefix));
+		},
 	};
 }
 
@@ -358,6 +379,18 @@ export class KnipClient {
 		{ at: number; summary: string }
 	>();
 
+	/**
+	 * Per project root, how long its last two successful scans took (#3872).
+	 * turn_end reads the shorter of the two to stop awaiting a scan that cannot
+	 * fit the hook budget: the scan still runs (it re-measures, and warms knip's
+	 * own cache), the hook just no longer waits for it. Two samples, because a
+	 * session's first scan of a root is cold and its second is not (3.3 s then
+	 * 1.3 s on pi-lens itself): one cold sample must not cost the next turn its
+	 * advisory. A scan that failed, was killed or never completed is no sample.
+	 * Cleared with the other per-session state.
+	 */
+	private readonly scanDurations = new Map<string, number[]>();
+
 	/** Last successful result per project and runtime content generation. */
 	private completedByProject = new Map<
 		string,
@@ -378,6 +411,7 @@ export class KnipClient {
 	resetSessionState(): void {
 		this.completedByProject.clear();
 		this.hardFailures.clear();
+		this.scanDurations.clear();
 	}
 
 	/**
@@ -498,6 +532,21 @@ export class KnipClient {
 	}
 
 	/**
+	 * The shorter of this root's last two successful scans, or `undefined` while
+	 * fewer than two settled this session (#3872). The root is resolved the way
+	 * `analyze` resolves it.
+	 */
+	scanFloorMs(cwd: string): number | undefined {
+		const samples = this.scanDurations.get(this.resolveProjectRoot(cwd) ?? cwd);
+		return samples?.length === 2 ? Math.min(...samples) : undefined;
+	}
+
+	/** Linked worktrees nested under this root, which knip walks as project files (#3872). */
+	nestedWorktrees(cwd: string): number {
+		return nestedWorktreeScope(this.resolveProjectRoot(cwd) ?? cwd).count;
+	}
+
+	/**
 	 * Run knip analysis on the project.
 	 *
 	 * Async (uses `safeSpawnAsync`) so it never blocks the event loop —
@@ -566,9 +615,15 @@ export class KnipClient {
 			return existing;
 		}
 
+		const startedAt = Date.now();
 		const promise = this.runAnalyze(key).then((result) => {
-			if (result.success) this.hardFailures.delete(key);
-			else if (isHardFailureSummary(result.summary)) {
+			if (result.success) {
+				this.hardFailures.delete(key);
+				this.scanDurations.set(key, [
+					...(this.scanDurations.get(key) ?? []).slice(-1),
+					Date.now() - startedAt,
+				]);
+			} else if (isHardFailureSummary(result.summary)) {
 				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
 			}
 			const executed = { ...result, execution: "executed" as const };
@@ -786,7 +841,7 @@ export class KnipClient {
 
 		return {
 			...this.dropOverridePinnedDeps(
-				this.parseOutput(output, nestedWorktreeMatcher(targetDir)),
+				this.parseOutput(output, nestedWorktreeScope(targetDir)),
 				targetDir,
 			),
 			scannedAt,
@@ -925,7 +980,7 @@ export class KnipClient {
 
 	private parseOutput(
 		output: string,
-		isInNestedWorktree: (file: string | undefined) => boolean = () => false,
+		nested: NestedWorktreeScope = NO_NESTED_WORKTREES,
 	): KnipResult {
 		try {
 			const data = JSON.parse(output);
@@ -935,8 +990,12 @@ export class KnipClient {
 			const unusedDeps: KnipIssue[] = [];
 			const unlistedDeps: KnipIssue[] = [];
 
+			const droppedFiles = new Set<string>();
 			const addIssue = (issue: KnipIssue) => {
-				if (isInNestedWorktree(issue.file)) return;
+				if (nested.contains(issue.file)) {
+					droppedFiles.add(issue.file ?? "");
+					return;
+				}
 				issues.push(issue);
 				if (issue.type === "export" || issue.type === "enumMember") {
 					unusedExports.push(issue);
@@ -1026,6 +1085,10 @@ export class KnipClient {
 				unusedDeps,
 				unlistedDeps,
 				summary: `Found ${issues.length} issues`,
+				...(nested.count > 0 && {
+					nestedWorktrees: nested.count,
+					nestedFilesDropped: droppedFiles.size,
+				}),
 			};
 		} catch (err) {
 			void err;

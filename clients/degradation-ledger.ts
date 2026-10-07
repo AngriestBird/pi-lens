@@ -1520,6 +1520,14 @@ export type DegradationKind =
 	 */
 	| "turn-end-advisory-carry-dropped"
 	/**
+	 * A turn_end knip scan did not fit the budget in a root that has linked
+	 * worktrees nested under it (#3872): knip walks them as project files
+	 * because the project never ignored them. The subject is the scan root.
+	 * Counted, because a busy session defers once per turn; the root's `knip`
+	 * latency rows carry `nestedWorktrees` for each turn.
+	 */
+	| "turn-end-knip-nested-worktrees"
+	/**
 	 * turn_end did not run knip in a checkout whose edit it was handed (#3872):
 	 * the per-turn root cap was reached, or an earlier scan had already spent
 	 * the turn_end budget. The subject is the reason (`root-cap` | `budget`);

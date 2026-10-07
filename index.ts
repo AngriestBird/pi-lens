@@ -220,6 +220,7 @@ import {
 	decideSessionStart,
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
+	namedSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
 	probeCtxActive,
@@ -3815,10 +3816,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
-			if (startInFlight) {
-				startInFlight.shutDown = true;
+			// #4113: a start interrupted before pi-lens's handler ran has no mark
+			// and no scope. Its shutdown is primary only with the gap's named key
+			// (#4106), so the gap's name is the start reason it never saw. A
+			// started activation holds its scope and stashes it, even in a gap
+			// it does not own (a same-file second primary, R2: verify X1).
+			const unstartedReason =
+				startInFlight || scope !== undefined
+					? undefined
+					: namedSuccessorReason();
+			if (startInFlight || unstartedReason !== undefined) {
+				if (startInFlight) startInFlight.shutDown = true;
 				forwardHandoff({
-					startReason: startInFlight.reason,
+					startReason: startInFlight ? startInFlight.reason : unstartedReason,
 					reason: shutdownReason,
 					sessionFile: getSessionFile(ctx),
 					targetSessionFile: shutdownEvent?.targetSessionFile,
