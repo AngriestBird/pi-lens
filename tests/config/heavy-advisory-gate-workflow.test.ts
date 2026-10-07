@@ -670,9 +670,9 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			58,
+			59,
 		);
-		expect(CENSUS_SITES.length).toBe(58);
+		expect(CENSUS_SITES.length).toBe(59);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
 		).toBe(64);
