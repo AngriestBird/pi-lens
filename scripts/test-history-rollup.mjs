@@ -10,6 +10,15 @@
  * one of the two and erased the other the next night. The bounded-read F2 incident
  * (#3326, 2026-09-23) was judged flaky by reading seven logs by hand; this
  * rollup makes that same-head evidence durable.
+ *
+ * Identity (#3367): a test's `file` is its repo-relative posix path
+ * (`normalizeTestFile`), never vitest's absolute runner path, so one logical
+ * test keeps one history across checkout roots and OS path styles. Both
+ * entrances to the working set normalize: a new artifact (`rowsFromArtifacts`)
+ * and a row already on the data branch (`parseJournal`, the compat read for
+ * the absolute-path journal written before #3367). The next write stores the
+ * normalized form, so the migration is one pass and a second pass changes
+ * nothing.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -31,6 +40,20 @@ export const HISTORY_MAX_BYTES = 95 * 1024 * 1024;
  * drift apart again.
  */
 export const METADATA_FILENAME = "test-history-metadata.json";
+
+/**
+ * The one identity of a test in the journal (#3367): everything from the last
+ * `/tests/` segment on, with posix separators. Test files never nest a
+ * `tests` directory (`tests/fixtures/**` is excluded from vitest), while a
+ * checkout root may contain one, so the last occurrence is the repo-relative
+ * start. A name with no `tests/` anchor is kept verbatim (posix), never
+ * dropped: the journal records it and a reader can see the miss.
+ */
+export function normalizeTestFile(name) {
+	const posix = String(name).replaceAll("\\", "/");
+	const at = posix.lastIndexOf("/tests/");
+	return at === -1 ? posix : posix.slice(at + 1);
+}
 
 function parseArgs(argv) {
 	const result = {
@@ -143,7 +166,9 @@ export function rowsFromArtifacts(inputs) {
 		return value.testResults.map((result) => ({
 			headSha,
 			runId,
-			file: result.name ?? result.filepath ?? result.file ?? "",
+			file: normalizeTestFile(
+				result.name ?? result.filepath ?? result.file ?? "",
+			),
 			outcome: outcomeFor(result),
 			durationMs: durationFor(result),
 			lane,
@@ -153,19 +178,30 @@ export function rowsFromArtifacts(inputs) {
 	});
 }
 
-function readRows(file) {
-	if (!fs.existsSync(file)) return [];
-	return fs
-		.readFileSync(file, "utf8")
+/**
+ * Parses journal text (newline-delimited rows) into validated rows, with
+ * `file` normalized: the compat read for rows written with an absolute runner
+ * path before #3367. A row with a non-40-hex head is a bounded failure, as
+ * before; any other invalid row is dropped.
+ */
+export function parseJournal(text) {
+	return text
 		.split(/\r?\n/)
 		.filter(Boolean)
 		.map((line) => {
 			const row = JSON.parse(line);
 			if (row && typeof row === "object" && !isValidHeadSha(row.headSha))
 				throw new Error("headSha must be a 40-hex SHA");
-			return row;
+			return row && typeof row.file === "string"
+				? { ...row, file: normalizeTestFile(row.file) }
+				: row;
 		})
 		.filter(validateRow);
+}
+
+function readRows(file) {
+	if (!fs.existsSync(file)) return [];
+	return parseJournal(fs.readFileSync(file, "utf8"));
 }
 
 function key(row) {
@@ -227,21 +263,26 @@ export function rollupTestHistory({
 				meanDurationMs,
 			};
 		});
-	const flakes = [...summaryGroups.keys()].sort().flatMap((file) => {
+	// One row per failing (file, head); `flake` is the owner's rule (#3215): the
+	// same head also passed that file. The history selector reads this view.
+	const failures = [...summaryGroups.keys()].sort().flatMap((file) => {
 		const fileRows = summaryGroups.get(file);
 		const heads = new Set(
 			fileRows
 				.filter((row) => row.outcome === "failed")
 				.map((row) => row.headSha),
 		);
-		return [...heads]
-			.filter((head) =>
-				fileRows.some(
-					(row) => row.headSha === head && row.outcome === "passed",
-				),
-			)
-			.map((headSha) => ({ file, headSha }));
+		return [...heads].map((headSha) => ({
+			file,
+			headSha,
+			flake: fileRows.some(
+				(row) => row.headSha === headSha && row.outcome === "passed",
+			),
+		}));
 	});
+	const flakes = failures
+		.filter((failure) => failure.flake)
+		.map(({ file, headSha }) => ({ file, headSha }));
 	fs.mkdirSync(path.dirname(historyPath), { recursive: true });
 	fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
 	fs.writeFileSync(
@@ -253,6 +294,14 @@ export function rollupTestHistory({
 		rowCount: boundedRows.length,
 		files: summary,
 		flakeCandidates: flakes,
+		failures,
+		// Every distinct head in the window, failing or not: the selector's
+		// population for deciding which directories are touched by too many heads
+		// to say anything about a failure (#3215 lane 3 review F1).
+		heads: [...new Set(liveObservations.map((row) => row.headSha))].sort(),
+		// When this rollup ran: the selector's staleness clock (a quiet repo with
+		// no CI rows is not lagging data, a rollup that stopped running is).
+		generatedAt: new Date(now).toISOString(),
 	};
 	fs.writeFileSync(summaryPath, `${JSON.stringify(output, null, 2)}\n`);
 	return output;

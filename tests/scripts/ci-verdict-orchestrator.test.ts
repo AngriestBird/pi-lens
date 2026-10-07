@@ -520,6 +520,17 @@ describe("run — failing-test extraction from the recorded job log (#3700)", ()
 		expect(exitCode).toBe(EXIT_SUCCESS);
 		expect(w.calls.some((call) => call.includes("/actions/jobs/"))).toBe(false);
 	});
+
+	// Recurrence (#4005): the per-PR `MUTATION` line (and its `/comments` read)
+	// outliving the mutation job it reported on, as a permanent PENDING or
+	// "unreadable" line on every verdict.
+	it("prints no MUTATION line and reads no PR comments", async () => {
+		const w = world({ prs: [{ number: 5, checkRuns: GREEN }] });
+		const { exitCode, lines } = await cli(["5"], w);
+		expect(exitCode).toBe(EXIT_SUCCESS);
+		expect(lines.join("\n")).not.toMatch(/MUTATION/i);
+		expect(w.calls.some((call) => call.includes("/comments"))).toBe(false);
+	});
 });
 
 describe("run — gating and advisory reported apart (#3700)", () => {
@@ -532,7 +543,7 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 					number: 5,
 					checkRuns: [
 						...GREEN,
-						row("mutation (advisory)", "failure", 21),
+						row("jscpd (advisory)", "failure", 21),
 						row("OSV scan (advisory)", "timed_out", 22),
 						row("PR body (advisory)", "success", 23),
 					],
@@ -543,7 +554,7 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 		expect(exitCode).toBe(EXIT_SUCCESS);
 		expect(lines).toContain("Gating: 2 checks, 0 failing");
 		expect(lines).toContain(
-			"Advisory (never gates): 3 checks, 2 red: OSV scan (advisory) (timed_out), mutation (advisory) (failure)",
+			"Advisory (never gates): 3 checks, 2 red: OSV scan (advisory) (timed_out), jscpd (advisory) (failure)",
 		);
 	});
 
@@ -555,7 +566,7 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 					checkRuns: [
 						row("Unit tests", "failure", 11),
 						GREEN[1],
-						row("mutation (advisory)", "failure", 21),
+						row("jscpd (advisory)", "failure", 21),
 					],
 				},
 			],
@@ -566,7 +577,7 @@ describe("run — gating and advisory reported apart (#3700)", () => {
 			"Gating: 2 checks, 1 failing: Unit tests (failure)",
 		);
 		expect(lines).toContain(
-			"Advisory (never gates): 1 checks, 1 red: mutation (advisory) (failure)",
+			"Advisory (never gates): 1 checks, 1 red: jscpd (advisory) (failure)",
 		);
 	});
 });
