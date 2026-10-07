@@ -107,7 +107,7 @@ jobs:
         if: steps.meta.outputs.should_release == 'true'
         run: |
           npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@${npm_pin}" install --no-audit --no-fund
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts --no-audit --no-fund
 
       # No registry auth needed here: `npm publish --dry-run` never reaches the
       # actual publish call (npm skips it when --dry-run is set), so it neither
@@ -241,7 +241,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@${npm_pin}" install --no-audit --no-fund
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts --no-audit --no-fund
 
       # The runtime half of the #2940 gate, immediately before the publish it
       # guards (the static half is tests/config/release-npm-pin-gate.test.ts).
