@@ -252,3 +252,13 @@ marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
 _None observed as of the last probe run._
+
+## Capability matrix refresh state (nightly-generated)
+
+Bookkeeping for the date-based `direct` `first-publish` expiry (#3401), the
+two-run `clean-behavior` hysteresis and the consecutive-night `idle-eviction`
+counts (#3989). Regenerated every run; never a measurement.
+
+```json
+{"idle-eviction":{"docker":{"nights":[{"day":"2026-10-07","rssMb":64,"coldMs":566}]},"json":{"nights":[{"day":"2026-10-07","rssMb":67,"coldMs":1116}]},"powershell":{"nights":[{"day":"2026-10-07","rssMb":155,"coldMs":2601}]},"python-jedi":{"nights":[{"day":"2026-10-07","rssMb":51,"coldMs":1796}]},"zizmor":{"nights":[{"day":"2026-10-07","rssMb":58,"coldMs":608}]}}}
+```

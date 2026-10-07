@@ -226,6 +226,69 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(result.stdout).toContain("tests/clients/first.test.ts");
 		expect(result.stdout).toContain("tests/clients/second.test.ts");
 	});
+
+	// Recurrence (#4047 review H3): `lane:check` was blind to a grant-none lane,
+	// whose whole deliverable is uncommitted tracked edits plus new files; the
+	// selector only diffed committed ranges, so an edit that reds 8 tests
+	// selected nothing and the gate read green.
+	it("--include-worktree adds uncommitted tracked edits and untracked files to the changed set", () => {
+		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-pre-push-test-"));
+		process.chdir(fixtureDir);
+		fs.symlinkSync(
+			path.join(repoRoot, "scripts"),
+			path.join(fixtureDir as string, "scripts"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "node_modules"),
+			path.join(fixtureDir as string, "node_modules"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "vitest.config.ts"),
+			path.join(fixtureDir as string, "vitest.config.ts"),
+		);
+		fs.symlinkSync(
+			path.join(repoRoot, "package.json"),
+			path.join(fixtureDir as string, "package.json"),
+		);
+		write("clients/first.ts", "export const first = true;\n");
+		write("tests/clients/first.test.ts", "it('first', () => {});\n");
+		const git = (args: string[]) =>
+			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
+		git(["init", "--quiet", "--initial-branch=main"]);
+		git(["config", "user.name", "pi-lens test"]);
+		git(["config", "user.email", "test@example.com"]);
+		git(["add", "."]);
+		git(["commit", "--quiet", "-m", "base"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]).trim(),
+		]);
+		// Nothing committed past origin/master: only the working tree differs.
+		write("clients/first.ts", "export const first = false;\n");
+		write("tests/clients/third.test.ts", "it('third', () => {});\n");
+
+		const run = (extra: string[]) =>
+			spawnSync(
+				process.execPath,
+				[
+					path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
+					"--skip-build",
+					...extra,
+				],
+				{ cwd: fixtureDir, encoding: "utf8", input: "" },
+			);
+		const without = run([]);
+		expect(without.status).toBe(0);
+		expect(without.stdout).not.toContain("tests/clients/first.test.ts");
+		expect(without.stdout).not.toContain("tests/clients/third.test.ts");
+		const withTree = run(["--include-worktree"]);
+		expect(withTree.status).toBe(0);
+		expect(withTree.stdout).toContain("  - tests/clients/first.test.ts");
+		expect(withTree.stdout).toContain("  - tests/clients/third.test.ts");
+	});
 });
 
 describe("selectTargetedTests — path-mirror pass", () => {
