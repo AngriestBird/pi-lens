@@ -62,6 +62,16 @@ interface SessionLifecycleState {
 	 * registration on every read.
 	 */
 	successorPendingSince?: number | undefined;
+	/**
+	 * #3855: the start that release named as its successor: pi's shutdown
+	 * reason and the `startKey` its successor will compute (`undefined` when pi
+	 * links nothing, an in-memory `/new`). Trusted only while `since` equals
+	 * `successorPendingSince`, so a marker that a build without this field
+	 * rewrote falls back to #3662's rule. Additive, like the marker.
+	 */
+	successorNamed?:
+		| { since: number; reason: string; key: string | number | undefined }
+		| undefined;
 }
 
 const SESSION_LIFECYCLE_FAMILY = "session-lifecycle.primary-registration";
@@ -138,8 +148,9 @@ export interface ClassifySessionStartInput {
 	sameRoot?: boolean | undefined;
 	/**
 	 * #3662: no primary is registered because a primary replacement shut down,
-	 * its successor has not started yet, and this start's reason is `startup`
-	 * (so it cannot be that successor). Only consulted when `hasPrior` is false.
+	 * its successor has not started yet, and this start is not that successor
+	 * (#3855: its reason and key differ from the ones the shutdown named; a
+	 * `startup` start never matches). Only consulted when `hasPrior` is false.
 	 */
 	successorPending?: boolean;
 }
@@ -152,7 +163,8 @@ export interface ClassifySessionStartInput {
  *     process has seen; zero behavior change for the single-session case),
  *     unless `successorPending` → `concurrent-secondary` (#3662: a subagent
  *     binding in a replacement gap must not take the slot the successor is
- *     about to claim, or the successor would probe its live ctx and decline).
+ *     about to claim, or the successor would probe its live ctx and decline;
+ *     #3855: only the start the shutdown named is that successor).
  *  2. Prior exists, same stable session id → `sequential-replacement` (the
  *     same session re-announcing itself, e.g. resume/reload paths — must
  *     keep today's behavior, NOT be mistaken for a sibling).
@@ -357,7 +369,12 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
  * than changed, because a count that outlived the registration it is scoped to
  * would disagree with `getActivePrimaryRoot()` in the same record.
  */
-export function releasePrimarySession(shutdownReason?: string): void {
+export function releasePrimarySession(
+	shutdownReason?: string,
+	/** #3855: the `startKey` of the successor this shutdown names
+	 *  (`successorStartKey` in `clients/session-scope.ts`). */
+	successorKey?: string | number,
+): void {
 	const s = state();
 	s.activeCtx = undefined;
 	s.activeSessionId = undefined;
@@ -367,10 +384,13 @@ export function releasePrimarySession(shutdownReason?: string): void {
 	// the same reason (pi 0.85.1 `agent-session-runtime.js`, `reload()`), so the
 	// next primary is that successor. `quit` and a missing reason promise no
 	// successor and keep the #2129 F3 re-arm above.
-	s.successorPendingSince =
-		shutdownReason !== undefined && shutdownReason !== "quit"
-			? Date.now()
-			: undefined;
+	const pending = shutdownReason !== undefined && shutdownReason !== "quit";
+	const since = Date.now();
+	s.successorPendingSince = pending ? since : undefined;
+	// #3855: name the successor, so no other start in the gap can take its slot.
+	s.successorNamed = pending
+		? { since, reason: shutdownReason, key: successorKey }
+		: undefined;
 }
 
 /** Register a concurrently-bound secondary (subagent) session. Does not
@@ -436,12 +456,29 @@ export function noteSessionShutdown(
 	/** This session's own project root (`ctx.cwd`), when readable. `undefined`
 	 *  means "root unknown" and never on its own changes a verdict. */
 	root?: string | undefined,
+	/** #4106: this session's `startKey` (`clients/session-scope.ts`). */
+	key?: string | number,
 ): SessionShutdownClassification {
 	const s = state();
 	if (ctx !== undefined && ctx === s.activeCtx) {
 		return "primary";
 	}
 	if (s.activeCtx === undefined && s.activeSessionId === undefined) {
+		// #4106: no primary is registered because a replacement named its
+		// successor. Only that successor's activation can carry the named key
+		// (its manager is the one the name was derived from); an activation
+		// whose start never ran on any other manager is a secondary's, and must
+		// not rename the gap. An unnamed or expired gap keeps the fail-safe.
+		const named = namedSuccessorOf(s);
+		if (named !== undefined && key !== named.key && successorStillPending(s)) {
+			recordDegradationOnce({
+				kind: "session-successor-pending",
+				subject: "roleless-shutdown",
+				reason:
+					"a session_shutdown whose session_start never ran arrived in a primary replacement gap with a key the gap does not name; classified secondary, so the gap keeps its name",
+			});
+			return "secondary";
+		}
 		return "primary";
 	}
 	if (sessionId !== undefined && sessionId === s.activeSessionId) {
@@ -545,6 +582,7 @@ export function _resetSessionLifecycleForTests(): void {
 	s.activeRoot = undefined;
 	s.secondarySessionCount = 0;
 	s.successorPendingSince = undefined;
+	s.successorNamed = undefined;
 }
 
 export interface SessionStartGuardDecision {
@@ -584,11 +622,21 @@ export function decideSessionStart(
 	/** #3662: this start's `event.reason`. pi sends `startup` only for a
 	 *  runtime's first bind, never for a replacement's successor. */
 	reason?: string | undefined,
+	/** #3855: this start's `startKey` (`clients/session-scope.ts`). */
+	key?: string | number,
 ): SessionStartGuardDecision {
 	const s = state();
 	const hasPrior = s.activeCtx !== undefined || s.activeSessionId !== undefined;
+	// #3855: in a replacement gap only the start the shutdown named, by reason
+	// and key, is the successor. A start with no reason fails safe to primary
+	// (#3662 F8); a marker without a name keeps #3662's rule.
+	const named = namedSuccessorOf(s);
+	const notTheSuccessor =
+		named === undefined
+			? reason === "startup"
+			: reason !== undefined && (reason !== named.reason || key !== named.key);
 	const successorPending =
-		!hasPrior && reason === "startup" && successorStillPending(s);
+		!hasPrior && notTheSuccessor && successorStillPending(s);
 	const priorCtxActive = hasPrior ? probeCtxActive(s.activeCtx) : undefined;
 	// ctx OBJECT IDENTITY: if the SDK ever hands the SAME ctx object to a
 	// repeated session_start, that is by definition the same session
@@ -627,11 +675,13 @@ export function decideSessionStart(
 		classification === "secondary-root"
 	) {
 		if (successorPending) {
+			const startup = reason === "startup";
 			recordDegradationOnce({
 				kind: "session-successor-pending",
-				subject: "declined",
-				reason:
-					"a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary",
+				subject: startup ? "declined" : "not-the-successor",
+				reason: startup
+					? "a startup session_start arrived after a primary replacement shutdown and before its successor; declined as concurrent-secondary"
+					: `a ${reason} session_start in a primary replacement gap is not the successor that shutdown named; declined as concurrent-secondary`,
 			});
 		}
 		registerSecondarySession();
@@ -654,6 +704,32 @@ export function decideSessionStart(
 		sameRoot,
 		primaryRoot: primaryRootAtDecision,
 	};
+}
+
+/**
+ * #4113: in a primary replacement gap (no primary registered, the marker
+ * pending), the start reason its shutdown named. A start interrupted before
+ * pi-lens's handler ran never saw its own reason; when #4106 classifies its
+ * shutdown primary it carries the named key, so it is that start.
+ */
+export function namedSuccessorReason(): string | undefined {
+	const s = state();
+	if (s.activeCtx !== undefined || s.activeSessionId !== undefined)
+		return undefined;
+	const named = namedSuccessorOf(s);
+	return named !== undefined && successorStillPending(s)
+		? named.reason
+		: undefined;
+}
+
+/** #3855: the successor the pending replacement named, when this build's
+ *  release wrote it with the marker it stands beside. */
+function namedSuccessorOf(
+	s: SessionLifecycleState,
+): { reason: string; key: string | number | undefined } | undefined {
+	return s.successorNamed?.since === s.successorPendingSince
+		? s.successorNamed
+		: undefined;
 }
 
 /** #3662: whether a replacement shutdown's marker is younger than the bound.

@@ -16,6 +16,29 @@ export declare function pickBase(options: {
 }): { base: string; source: (typeof SOURCES)[number] };
 export declare const MAX_PENDING: number;
 export declare const MAX_BASE_AGE_DAYS: number;
+export type ShardArtifact = {
+	record?: unknown;
+	report?: unknown;
+	reportError?: string;
+};
+export type ShardVerdict = {
+	shard: number | null;
+	outcome: "complete" | "budget-cut" | "dry-run-timeout" | "failed";
+	reason: string | null;
+};
+export declare function classifyShardArtifact(
+	artifact: ShardArtifact,
+	window: string,
+): ShardVerdict & { report?: unknown };
+export declare function combineShards(options: {
+	artifacts: ShardArtifact[];
+	expectedShards: number[];
+	window: string;
+}): {
+	status: "ok" | "failed";
+	shards: ShardVerdict[];
+	reports?: unknown[];
+};
 export type QueueEntry = { file: string; base: string | null };
 export type QueueOracle = {
 	isAncestor: (sha: string) => boolean;
@@ -37,6 +60,7 @@ export declare function gitQueueOracle(cwd: string): QueueOracle;
 export declare function coverageGaps(report: unknown): {
 	capped: string[];
 	unfinished: string[];
+	retry: string[];
 };
 export declare function nextQueue(options: {
 	oldEntries: QueueEntry[];
@@ -55,6 +79,7 @@ export declare function buildNightlyBody(options: {
 	source: string;
 	status: "ok" | "failed";
 	report?: unknown;
+	shards?: ShardVerdict[];
 	runUrl?: string;
 	previous?: QueueRead;
 	exists?: (file: string) => boolean;
@@ -68,4 +93,5 @@ export declare function main(
 			source: (typeof SOURCES)[number];
 			queue: QueueRead;
 	  }
+	| { status: "ok" | "failed"; shards: ShardVerdict[]; reports?: unknown[] }
 	| string;

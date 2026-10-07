@@ -128,6 +128,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	"never-settling-wait:scripts/mutate-fixture.test.ts": {
+		detector: "never-settling-wait",
+		reason:
+			"the interrupt witness must hold a real child open until SIGINT; replacing the wait with a settled promise would erase the lifecycle under test",
+	},
 	// 2026-09-07 (#2703 review r1): an unhandled derived-promise rejection is
 	// only observable through Node's `unhandledRejection` event, which fires
 	// on a real macrotask; the file drains one real `setImmediate` tick.
@@ -253,6 +258,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the reaper's evidence is a real pid's command line, kernel start time and inherited environment; a double would encode the very identity guess the fix removes",
 	},
+	// #4046 interim: six real Node writers rendezvous on an OS barrier and
+	// persist registrations through the production cross-process lock; an
+	// in-process double cannot reproduce the race, and serialization prevents
+	// it from overlapping the timing-sensitive occupancy sampler.
+	"real-process-spawn:clients/instance-registry-race.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"six real Node writers must rendezvous on an OS barrier and contend through the production cross-process lock; an in-process double cannot reproduce the race",
+	},
 	"real-process-spawn:clients/lsp/headless-tool-call-keepalive.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -340,10 +354,18 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"observes the real npm pack lifecycle (prepack/postpack), and unpacks that real tarball to check what ships (#3219); no in-process double is faithful",
 	},
+	// 2026-10-07 (#4081): 1 -> 3. Whether teardown waits for, tree-kills and
+	// bounds a real child and its detached grandchildren, and whether removal
+	// outlasts a live writer, are only observable against real processes: an
+	// EventEmitter double has no pid, no reparenting and no files to write.
+	// 3 -> 7 in #4082 round 3: four child scripts build the process trees the
+	// tree kill and the kill guard are tested against (a self-exiting mid
+	// process, a root forking during the kill, a reparented orphan); the
+	// guard's verdict reads the kernel's PPid, which no double has.
 	"real-process-spawn:real-harness/child-exit.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"real pi child death is the process-boundary failure that must reject a governed waiter promptly",
+			"real pi child death is the process-boundary failure that must reject a governed waiter promptly; real child/grandchild processes are the only evidence that teardown reaps a process tree, that the kill guard admits exactly that tree, and that removal outlasts a live writer (#4081)",
 	},
 	// 2026-09-15 (#2154 AC1): 1 -> 3, then 3 -> 7 in #3060 round 2 (review F1 +
 	// F2). The reported defect needs TWO LIVE pi sessions over one project root
@@ -418,10 +440,22 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
+	// contract; an in-process main() call cannot prove the entry-point boundary.
+	"real-process-spawn:scripts/ci-test-diff.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the executable CLI exit status is the contract; an in-process main call cannot prove the entry-point boundary",
+	},
 	"real-process-spawn:scripts/ci-verdict.test.ts": {
 		detector: "real-process-spawn",
 		reason:
 			"#3883 F3: the final exit line and process status live at the real main() boundary; only a spawned CLI observes them",
+	},
+	"real-process-spawn:scripts/download-test-history-artifacts.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real gh child is required to prove transient API failure recovery, persistent failure, and a ZIP over the default spawn buffer at the process boundary",
 	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
@@ -437,6 +471,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the hook's real stdin/exit-code/stderr contract is unobservable from an in-process call to the exported classify functions",
 	},
+	"real-process-spawn:scripts/guard-bash-probe.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real hook stdin/exit-code contract and head-to-head differential are unobservable through an in-process classifier call",
+	},
 	// #2698: gitignore/tracked-vs-untracked resolution (git init/add/commit/
 	// ls-files against a throwaway fixture repo) is the exact mechanism
 	// scripts/lib/knip-sibling-purge.mjs depends on and this file tests.
@@ -444,6 +483,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"gitignore/tracked-vs-untracked resolution is the mechanism under test; no mock reproduces git's own resolution faithfully",
+	},
+	// #4047: the CLI's verdict and exit code are what a delegated lane acts on;
+	// they come from parsing the real selector, red-on-base and vitest
+	// transcripts over a real Git fixture, which an in-process stub restates.
+	"real-process-spawn:scripts/lane-check.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the CLI's verdict and exit code are parsed from the real selector, red-on-base and vitest transcripts over a real Git fixture; an in-process stub restates the transcript instead of proving the parse",
 	},
 	// 2026-09-07 (#2700): the gating/advisory subset test resolves oxlint's
 	// REAL `--print-config` for both npm scripts (never a hand-copied rule
@@ -464,6 +511,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and
 	// file I/O; an in-process call would just re-exercise the exported render
 	// function the other describe block already covers.
+	"real-process-spawn:scripts/mutate.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the mutation CLI's child Vitest process and signal path are the process boundary; an in-process call cannot prove restoration after SIGINT",
+	},
 	"real-process-spawn:scripts/mutation-report-render.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -508,7 +560,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/pre-commit-hook.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the real hook pipes git through xargs into the pinned oxfmt; the exit-123 refusal is a process-boundary fact",
+			"the real hook pipes git through xargs into the pinned oxfmt; the exit-123 refusal and handoff refusal are process-boundary facts",
 	},
 	"real-process-spawn:scripts/pre-push-targeted-tests.test.ts": {
 		detector: "real-process-spawn",
@@ -585,6 +637,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the defect is a temporal-dead-zone crash in the driver's own top-level execution order; the #3853 lock wait/refusal and the #3856 F3 stage dispositions (heartbeat/refusal behind a live holder, the budget-signal abort, the absent and partial coverage reports, the skipped/corrupt compiled source) are only observable by spawning the real script, and no source-text or in-process substitute reproduces them",
+	},
+	// 2026-10-07 (#4038 r5): run 37601788256's publish step crashed in the
+	// script's process-entry block, which only a real `node` process runs;
+	// the in-process `main()` tests never reached it.
+	"real-process-spawn:scripts/stryker-nightly.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the defect lived in the CLI entry block (`import.meta.url === argv[1]`), which only a real node process executes",
 	},
 	// 2026-09-06 (#2586 review F1): proves the actual delimiter
 	// supply-host-provided-deps.mjs prints in its own stdout bytes; an

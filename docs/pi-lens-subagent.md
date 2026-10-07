@@ -83,6 +83,13 @@ the brief gives.
   and `AGENTS.md` "Commands and gates" says how `pr-worktree.mjs close` does
   it). A real `node_modules` directory is removed only after confirming the
   main checkout's install is intact.
+- **Linked installs.** Never run a mutating npm verb (`ci`, `install`,
+  `update`, `uninstall`, `prune`, `dedupe`, `rebuild`), even `--dry-run`, where
+  `node_modules` is a link: `npm ci` empties the shared install under every
+  lane (#4044, 2026-10-07; `guard-bash.mjs` denies it). Answer install-flag
+  questions in a scratch copy under `$TMPDIR`, never in the linked lane.
+  Unlink with `rm node_modules` (no trailing slash or glob): `rm -rf
+  node_modules/` and `find node_modules/ -delete` empty the target too.
 - **TMPDIR.** Export
   `TMPDIR=~/.local/share/pi-lens-orchestrator/tmp/<lane>-tmp` for every command
   in the lane, including checks that spawn npm, git hooks, or a child
@@ -150,6 +157,28 @@ explicit timeout; run the governance batch through
 `npm run test:targeted -- <files>` (one of two machine-wide slots), also in
 the foreground.
 
+Before handback, run `npm run lane:check` (and `--body <file>` when
+applicable) and quote its JSON record and ORCHESTRATOR SUMMARY. Its verdict
+sets the exit code and only `clean` exits 0:
+
+- `clean` (0): every step ran and no red is the change's. A red that also fails
+  on `origin/master` is listed as `RED-ON-BASE` and stays `clean`.
+- `red-caused` (1): a failing test is `CAUSED-BY-CHANGE`, or a root handoff
+  file is tracked.
+- `unproven` (3): a step failed or a red could not be attributed (the build, a
+  run with no named failing file, an `INCONCLUSIVE` red-on-base verdict, a
+  failed lint or format check, a selection over the 25-file cap where only
+  governance suites ran). That is not evidence of unrelated: report it and
+  stop, or fix the cause. The summary prints `selection: selected S, matched
+  M, capped C`.
+- `2`: usage error (`--body <path>` or `--body=<path>` missing, unknown, or the
+  file absent); nothing ran.
+
+The change set is the committed diff plus uncommitted tracked edits and
+untracked files, so a lane without Git authority is checked too. In a lane that
+refuses `git worktree add`, `scripts/red-on-base.mjs` compares against a
+`git archive` tree of the base instead.
+
 Select governance suites mechanically, never from memory (#2107, #2438, #2470,
 #2511):
 `ls tests/clients/*{sweep,ratchet,conformance,coverage,gate,governance,silence,hermeticity,invariant,contract}*.test.ts`
@@ -159,6 +188,18 @@ identifier population per (term, file) in both directions (#3279): when a
 change adds or removes a pinned use, run it on the head and on the merge of
 `origin/master` and the head before pushing, and re-pin in the same PR from its
 `UNPINNED`/`STALE` output (#3284, #3288).
+
+Each pre-push head has a durable result record at
+`$(git rev-parse --git-common-dir)/pi-lens-prepush/<sha>.json`. It contains the
+head/base, timestamp, selected test files and their `import`, `history`, or
+`governance` reason, plus passed/failed/skipped counts, the Vitest exit code,
+and wall time. Re-pushes overwrite that head's record; writes prune records
+older than fourteen days. The provisional record is written before build and
+self-scan work with outcome `tests-not-started`; preparation failures update it
+to `build-failed` or `self-scan-failed`. The write uses a same-directory
+temporary file and rename, and record I/O is best-effort: a warning is emitted
+once and the hook keeps its real build/test result. Quote this path when
+reporting targeted-test evidence instead of relying on prose.
 
 Never park a turn behind a background command. When a run cannot finish in the
 foreground, push with the targeted and governance suites green and say that

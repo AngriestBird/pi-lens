@@ -7,33 +7,57 @@ import {
 	registerTmpRoot,
 } from "../support/tmp-root-registry.js";
 
-// Windows keeps a file handle inside a just-used temp dir alive briefly after
-// a child process/watcher/background scan exits (AV scanning, delayed handle
-// release, or — as in #810's runtime-session.test.ts case — a fire-and-forget
-// background task the test didn't wait to settle before tearing down). An
-// immediate recursive `rm` can race that and throw EPERM/ENOTEMPTY (#793,
-// #810). `maxRetries`/`retryDelay` gives Windows a moment to release the
-// handle; if it's STILL held after retrying, a leftover temp dir under the
-// OS temp root is harmless (the OS reclaims it eventually) while failing the
-// whole test run over teardown is not — so the final failure warns instead
-// of throwing. This is the ONE shared cleanup helper for test temp dirs
-// (#810's pattern-class rule) — route every ad-hoc `fs.rmSync(dir, {
-// recursive: true, force: true })` teardown through this instead of
-// hand-rolling retries per suite.
+// A just-used temp dir can still be written to after the owning test is done:
+// a Windows file handle held briefly after a child/watcher/background scan
+// exits (AV scanning, delayed handle release, #793, #810), or — measured on
+// Linux, #4081 — a grandchild of a SIGKILLed real child still writing under
+// the scratch home. An immediate recursive `rm` then throws EPERM/ENOTEMPTY.
+// Node's in-call `maxRetries` does not recover that on Node 22 (it stalls
+// ~3 s and still throws), so this loops over FRESH `rmSync` calls, each one
+// re-walking the directory, for at most REMOVE_BUDGET_MS in total. If the dir
+// is STILL there, a leftover temp dir under the OS temp root is harmless (the
+// OS reclaims it eventually) while failing the whole test run over teardown
+// is not — so the final failure warns instead of throwing. This is the ONE
+// shared cleanup helper for test temp dirs (#810's pattern-class rule) —
+// route every ad-hoc `fs.rmSync(dir, { recursive: true, force: true })`
+// teardown through this instead of hand-rolling retries per suite.
+const REMOVE_BUDGET_MS = 2_000;
+const REMOVE_RETRY_MS = 50;
+// The errnos Node's own `maxRetries` retries; anything else is not transient.
+const RETRYABLE_REMOVE_CODES = new Set([
+	"EBUSY",
+	"EMFILE",
+	"ENFILE",
+	"ENOTEMPTY",
+	"EPERM",
+]);
 export function removeTempDirSync(dir: string): void {
-	try {
-		fs.rmSync(dir, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 200,
-		});
-	} catch (err) {
-		process.stderr.write(
-			`[test cleanup] could not remove temp dir ${dir}: ${
-				err instanceof Error ? err.message : String(err)
-			}\n`,
-		);
+	const deadline = Date.now() + REMOVE_BUDGET_MS;
+	for (;;) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (
+				code === undefined ||
+				!RETRYABLE_REMOVE_CODES.has(code) ||
+				Date.now() >= deadline
+			) {
+				process.stderr.write(
+					`[test cleanup] could not remove temp dir ${dir}: ${
+						err instanceof Error ? err.message : String(err)
+					}\n`,
+				);
+				return;
+			}
+			Atomics.wait(
+				new Int32Array(new SharedArrayBuffer(4)),
+				0,
+				0,
+				REMOVE_RETRY_MS,
+			);
+		}
 	}
 }
 
@@ -174,6 +198,12 @@ export async function cleanupTestEnvironmentsDrained(
  */
 export function useTrackedTempDirs(...prefixes: string[]): void {
 	afterEach(async () => {
+		// The drain below parks on `setImmediate`, which a fake-timer test has
+		// replaced. Vitest runs `afterEach` hooks in reverse registration order, so
+		// this hook runs BEFORE the file's own `vi.useRealTimers()` teardown and
+		// hung to the 10 s hook timeout, failing the faking test and every test
+		// after it (launch.test.ts on Windows, #4019). Restore the real clock first.
+		vi.useRealTimers();
 		for (const prefix of prefixes) await cleanupTestEnvironmentsDrained(prefix);
 	});
 }

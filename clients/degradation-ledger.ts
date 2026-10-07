@@ -1233,6 +1233,9 @@ export type DegradationKind =
 	 * gap was classified `concurrent-secondary` instead of taking the primary
 	 * slot. Subject `expired`: no successor started within
 	 * `SUCCESSOR_PENDING_TTL_MS`, so the marker stopped declining starts.
+	 * #3855: subject `not-the-successor`: a non-`startup` start in that gap
+	 * whose reason and key differ from the successor the shutdown named (a
+	 * subagent's own replacement) was classified `concurrent-secondary`.
 	 */
 	| "session-successor-pending"
 	/**
@@ -1507,6 +1510,23 @@ export type DegradationKind =
 	 */
 	/** The host context could not provide a stable session identity (#2815). */
 	| "turn-context-identity-fallback"
+	/**
+	 * #3901: the turn-end cap cut an item-bearing advisory (knip, dead-code,
+	 * call-graph impact) that showed only items already re-offered once, or the
+	 * per-session parked-lane bound evicted a lane, so those items were NOT
+	 * parked again. A part showing a new item is parked and counted under
+	 * `turn-end-sections-held`. Counted; subject is the family
+	 * (`knip` | `dead-code` | `call-graph`), a fixed set.
+	 */
+	| "turn-end-advisory-carry-dropped"
+	/**
+	 * A turn_end knip scan did not fit the budget in a root that has linked
+	 * worktrees nested under it (#3872): knip walks them as project files
+	 * because the project never ignored them. The subject is the scan root.
+	 * Counted, because a busy session defers once per turn; the root's `knip`
+	 * latency rows carry `nestedWorktrees` for each turn.
+	 */
+	| "turn-end-knip-nested-worktrees"
 	/**
 	 * turn_end did not run knip in a checkout whose edit it was handed (#3872):
 	 * the per-turn root cap was reached, or an earlier scan had already spent

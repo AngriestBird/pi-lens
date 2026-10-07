@@ -196,6 +196,9 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"host type cases, not a production population sweep",
 	"tests/packaging.test.ts":
 		"packaging behavior cases, not a production population sweep",
+	"tests/scripts/guard-bash-probe.test.ts":
+		"corpus-runner behavior cases over fixture rows and stub hooks (#4071), " +
+		"not a production source-population sweep",
 	"tests/scripts/exec-isolation.test.ts":
 		"checks a freshly created temp directory is empty, not a production " +
 		"population sweep",
@@ -203,6 +206,9 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"enumerates .github/workflows/*.yml job names for gating/advisory " +
 		"classification (#2618 F3) -- an external CI-contract governance " +
 		"walk, not a clients/ production module registry sweep",
+	"tests/scripts/lane-check.test.ts":
+		"asserts empty failedFiles/scratch results of CLI fixture runs " +
+		"(toEqual([])); behavior cases, not a production population sweep",
 	"tests/scripts/red-on-base.test.ts":
 		"lists one TMPDIR-scoped scratch directory of a CLI fixture run and " +
 		"asserts it is empty after cleanup; not a production population sweep",

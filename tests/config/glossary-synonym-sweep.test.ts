@@ -650,7 +650,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-session.ts": 4,
 		"clients/runtime-tool-call.ts": 3,
 		"clients/runtime-tool-result.ts": 5,
-		"clients/runtime-turn.ts": 31,
+		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
+		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
+		// file it already walks as fresh (one). The knip and dead-code re-offers
+		// share one helper in turn-end/delivery-holds.ts instead of two copies.
+		"clients/runtime-turn.ts": 33,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -668,6 +672,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-shared.ts": 1,
 		"clients/tree-sitter-symbol-extractor.ts": 2,
 		"clients/trivy-client.ts": 1,
+		// 0 -> 1 (#3901): `stillReportedParked`, the one re-check of a parked item
+		// against a fresh run, shared by the knip and dead-code lanes.
+		"clients/turn-end/delivery-holds.ts": 1,
 		"clients/turn-end/lanes/secrets.ts": 3,
 		"clients/turn-summary-render.ts": 3,
 		"clients/vanished-instance-marker.ts": 1,
@@ -879,7 +886,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/grammar-source.ts": 4,
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
-		"clients/install-diagnostics.ts": 12,
+		"clients/install-diagnostics.ts": 11,
 		"clients/installer/index.ts": 107,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
@@ -956,10 +963,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
 		"clients/review-graph-logger.ts": 2,
-		"clients/review-graph/builder.ts": 36,
+		"clients/review-graph/builder.ts": 33,
 		"clients/review-graph/format.ts": 4,
 		"clients/review-graph/git-identity.ts": 10,
-		"clients/review-graph/import-resolvers.ts": 62,
+		"clients/review-graph/import-resolvers.ts": 61,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,

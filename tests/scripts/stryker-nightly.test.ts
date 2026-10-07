@@ -2,10 +2,13 @@
 // `git merge-base --is-ancestor` and `git rev-list --before` against a
 // throwaway repo; ancestry and commit dates are the subject, and no in-process
 // double reproduces git's answer for a rewritten or too-young history.
+// The CLI cases spawn `node scripts/stryker-nightly.mjs`: its process-entry
+// block is what crashed in run 37601788256, and only a real process runs it.
 // #4005: the state and body halves of the nightly Stryker report. Recurrences
 // each case keeps out are named in its comment. The git cases run against a
 // throwaway repo through the real `main` seam (no mocked git); the issue list
 // is the one GitHub boundary and is a literal `gh issue list --json` shape.
+import { execFileSync } from "node:child_process";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -14,15 +17,17 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	collectChangedRanges,
+	partitionMutationFiles,
 	selectMutationFiles,
 } from "../../scripts/lib/stryker-diff.mjs";
 import {
 	buildNightlyBody,
+	combineShards,
 	coverageGaps,
 	MAX_BASE_AGE_DAYS,
 	MAX_PENDING,
@@ -122,6 +127,428 @@ describe("pickBase", () => {
 	});
 });
 
+describe("nightly shard partition and publication", () => {
+	it("partitions the selected 24 disjointly and preserves the skipped queue owner", () => {
+		const selected = Array.from(
+			{ length: 24 },
+			(_, index) => `clients/f${index}.ts`,
+		);
+		const skipped = ["clients/f24.ts"];
+		const first = partitionMutationFiles({
+			selected,
+			skipped,
+			shardIndex: 0,
+			shardCount: 2,
+		});
+		const second = partitionMutationFiles({
+			selected,
+			skipped,
+			shardIndex: 1,
+			shardCount: 2,
+		});
+		expect(new Set(first.selected).size).toBe(12);
+		expect(new Set(second.selected).size).toBe(12);
+		expect(
+			first.selected.filter((file) => second.selected.includes(file)),
+		).toEqual([]);
+		expect([...first.selected, ...second.selected].sort()).toEqual(
+			[...selected].sort(),
+		);
+		expect(first.skipped).toEqual(skipped);
+		expect(second.skipped).toEqual([]);
+	});
+
+	// The completeness rule (#4038 r4), driven the way the publish job drives
+	// it: `main(["combine", ...])` over the downloaded artifact tree, then the
+	// real body over the previous queue. Each row is a cell of the PR's
+	// state-space table; `queue` is read back from the body as the next night
+	// reads it.
+	const WINDOW = `${SHA_A}..${SHA_B}@${"d".repeat(64)}`;
+	const QUEUED: [string, string] = ["clients/queued.ts", SHA_C];
+	const shardReport = (
+		shard: number,
+		file: string,
+		extra: Record<string, unknown> = {},
+	) => ({
+		files: { [file]: { mutants: [] } },
+		piLensMutationDiff: {
+			base: SHA_A,
+			headSha: SHA_B,
+			shardIndex: shard,
+			shardCount: 2,
+			filesSelected: [file],
+			filesSkippedOverCap: [],
+			rangesTotal: 2,
+			rangesEvaluated: 2,
+			partial: null,
+			zeroMutants: null,
+			counts: { Killed: 1 },
+			score: 100,
+			...extra,
+		},
+	});
+	type Artifact = { dir?: string; record?: unknown; report?: unknown };
+	const record = (shard: number, exitCode = 0, window = WINDOW) => ({
+		shard,
+		exitCode,
+		window,
+	});
+	const complete = (shard: number, file: string): Artifact => ({
+		record: record(shard),
+		report: shardReport(shard, file),
+	});
+	const PARTIAL = { evaluated: 1, total: 4, reason: "budget" };
+	const budgetCut = (shard: number, file: string): Artifact => ({
+		record: record(shard, 1),
+		report: shardReport(shard, file, { partial: PARTIAL }),
+	});
+	const night = (
+		artifacts: Artifact[],
+		previous = queueOf([QUEUED]),
+	): {
+		status: string;
+		shards: Array<{ shard: number | null; outcome: string; reason: string }>;
+		body: string;
+		marker: string | null;
+		queue: string[];
+	} => {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-stryker-combine-"));
+		try {
+			const shardsDir = join(root, "mutation-shards");
+			artifacts.forEach(({ dir, record: rec, report }, index) => {
+				const at = join(shardsDir, dir ?? `mutation-shard-${index}`);
+				mkdirSync(at, { recursive: true });
+				const write = (name: string, value: unknown) =>
+					value !== undefined &&
+					writeFileSync(
+						join(at, name),
+						typeof value === "string" ? value : JSON.stringify(value),
+					);
+				write("shard.json", rec);
+				write("mutation.json", report);
+			});
+			const out = join(root, "report.json");
+			const outcomes = join(root, "outcomes.json");
+			main([
+				"combine",
+				"--shards-dir",
+				shardsDir,
+				"--expected-shards",
+				"0,1",
+				"--window",
+				WINDOW,
+				"--out",
+				out,
+				"--outcomes",
+				outcomes,
+			]);
+			const verdict = JSON.parse(readFileSync(outcomes, "utf8"));
+			const body = buildNightlyBody({
+				base: SHA_A,
+				head: SHA_B,
+				source: "issue",
+				status: verdict.status,
+				report: JSON.parse(readFileSync(out, "utf8")) ?? undefined,
+				shards: verdict.shards,
+				previous,
+				exists: () => true,
+			});
+			return {
+				...verdict,
+				body,
+				marker: parseLastReportSha([issue(body)], TITLE),
+				queue: parsePending([issue(body)], TITLE).entries.map(
+					({ file, base }) => `${file}@${base}`,
+				),
+			};
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	};
+	const HELD = `${QUEUED[0]}@${QUEUED[1]}`;
+
+	it("advances the marker over two complete shards and renders each shard", () => {
+		const result = night([
+			complete(0, "clients/a.ts"),
+			complete(1, "clients/b.ts"),
+		]);
+		expect(result.status).toBe("ok");
+		expect(result.marker).toBe(SHA_B);
+		expect(result.queue).toEqual([HELD]);
+		expect(result.body).toContain("- **Shards:** 0 complete; 1 complete");
+		expect(result.body).toContain("### Shard 0");
+		expect(result.body).toContain("### Shard 1");
+		expect(result.body).toContain("the whole window was evaluated");
+	});
+
+	// Recurrence (#4038 r3 F1): two present shards, one report unusable, read
+	// as `ok` and moved the marker past that shard's files.
+	const REPORT_AXIS: Array<[string, unknown, string]> = [
+		["an empty object", {}, "report is not a mutation report"],
+		["zero bytes", "", "report unreadable"],
+		["malformed JSON", "{not json", "report unreadable"],
+		["an array", [], "report is not a mutation report"],
+		[
+			"a report without files",
+			{ piLensMutationDiff: { shardIndex: 1 } },
+			"report is not a mutation report",
+		],
+		[
+			"another shard's report",
+			shardReport(0, "clients/b.ts"),
+			"report is shard 0's",
+		],
+		["absent", undefined, "driver exited 0 with no report"],
+	];
+	it.each(REPORT_AXIS)(
+		"holds the marker and the queue when shard 1's report is %s",
+		(_label, report, reason) => {
+			const result = night([
+				complete(0, "clients/a.ts"),
+				{ record: record(1), report },
+			]);
+			expect(result.status).toBe("failed");
+			expect(result.marker).toBe(SHA_A);
+			expect(result.queue).toEqual([HELD]);
+			expect(result.body).toContain("**Status:** FAILED");
+			expect(result.body).toContain(`1 failed (${reason}`);
+			expect(result.body).toContain("No mutation report was produced");
+		},
+	);
+
+	// Recurrence (#4038 r2 F1 and r4): the artifacts that happened to arrive
+	// standing in for the matrix; and, on a re-run, an earlier attempt's.
+	const ARTIFACT_AXIS: Array<[string, Artifact[], string]> = [
+		["shard 1 missing", [complete(0, "clients/a.ts")], "1 failed (missing)"],
+		["no artifact at all", [], "0 failed (missing); 1 failed (missing)"],
+		[
+			"shard 0 duplicated",
+			[
+				complete(0, "clients/a.ts"),
+				complete(1, "clients/b.ts"),
+				{ dir: "mutation-shard-0-again", ...complete(0, "clients/a.ts") },
+			],
+			"0 failed (2 artifacts)",
+		],
+		[
+			"an unexpected shard 2",
+			[
+				complete(0, "clients/a.ts"),
+				complete(1, "clients/b.ts"),
+				complete(2, "clients/c.ts"),
+			],
+			"2 failed (unexpected shard)",
+		],
+		[
+			"an unreadable shard record",
+			[
+				complete(0, "clients/a.ts"),
+				{ record: "{", report: shardReport(1, "clients/b.ts") },
+			],
+			"? failed (no readable shard record)",
+		],
+		[
+			"shard 1 from another window (a re-run's earlier attempt)",
+			[
+				complete(0, "clients/a.ts"),
+				{
+					record: record(1, 0, `${SHA_C}..${SHA_B}@${"d".repeat(64)}`),
+					report: shardReport(1, "clients/b.ts"),
+				},
+			],
+			"1 failed (artifact is from another window)",
+		],
+		[
+			"shard 1 exiting 1 with an error report, not a budget cut",
+			[
+				complete(0, "clients/a.ts"),
+				{
+					record: record(1, 1),
+					report: shardReport(1, "clients/b.ts", {
+						zeroMutants: { reason: "the source-map build failed" },
+						rangesTotal: undefined,
+						rangesEvaluated: undefined,
+					}),
+				},
+			],
+			"1 failed (driver exited 1 without a partial result)",
+		],
+	];
+	it.each(ARTIFACT_AXIS)(
+		"holds the marker and the queue when the artifact set has %s",
+		(_label, artifacts, line) => {
+			const result = night(artifacts);
+			expect(result.status).toBe("failed");
+			expect(result.marker).toBe(SHA_A);
+			expect(result.queue).toEqual([HELD]);
+			expect(result.body).toContain(line);
+		},
+	);
+
+	// Recurrence (#4038 r4): the merged meta took `partial`, `zeroMutants` and
+	// the coverage verdict from shard 0 and re-queued the complete shard too.
+	it("re-queues only a budget-cut shard's files and renders its partial run", () => {
+		const result = night([
+			complete(0, "clients/a.ts"),
+			budgetCut(1, "clients/b.ts"),
+		]);
+		expect(result.status).toBe("ok");
+		expect(result.marker).toBe(SHA_B);
+		expect(result.queue).toEqual([HELD, `clients/b.ts@${SHA_A}`]);
+		expect(result.body).toContain("shard 1: partial run: the budget ended it");
+		expect(result.body).toContain("**Partial run** -- 1 of 4 mutant(s)");
+	});
+
+	it("re-queues both shards' files when both are budget-cut", () => {
+		const result = night([
+			budgetCut(0, "clients/a.ts"),
+			budgetCut(1, "clients/b.ts"),
+		]);
+		expect(result.status).toBe("ok");
+		expect(result.queue).toEqual([
+			HELD,
+			`clients/a.ts@${SHA_A}`,
+			`clients/b.ts@${SHA_A}`,
+		]);
+	});
+
+	it("re-queues a zero-mutant budget shortfall in shard 1 behind a complete shard 0", () => {
+		const result = night([
+			complete(0, "clients/a.ts"),
+			{
+				record: record(1),
+				report: shardReport(1, "clients/b.ts", {
+					zeroMutants: { reason: "budget" },
+					rangesEvaluated: undefined,
+					measuredTotalMutants: 30,
+					counts: {},
+				}),
+			},
+		]);
+		expect(result.status).toBe("ok");
+		expect(result.queue).toEqual([HELD, `clients/b.ts@${SHA_A}`]);
+		expect(result.body).toContain(
+			"shard 1: no mutant was evaluated and the dry run measured some",
+		);
+	});
+
+	// #4092 (run 37629970371): both shards' initial test runs outlasted
+	// Stryker's bound, and the night read "0 failed (driver exited 1 without a
+	// partial result); 1 failed (...)" -- the same words as a crashed driver.
+	// The driver now records `dryRunTimeout` on that report (the shape its own
+	// spawn test pins in stryker-diff.test.ts).
+	const timedOut = (shard: number, file: string): Artifact => ({
+		record: record(shard, 1),
+		report: shardReport(shard, file, {
+			zeroMutants: { reason: "mutation diff: dry run timed out" },
+			dryRunTimeout: { minutes: 10, tests: 87, estimatedSeconds: 231 },
+			rangesEvaluated: undefined,
+			counts: undefined,
+		}),
+	});
+
+	it("names a dry-run timeout in the shard verdict and the status line, and holds the marker and the queue", () => {
+		const result = night([
+			complete(0, "clients/a.ts"),
+			timedOut(1, "clients/b.ts"),
+		]);
+		expect(result.status).toBe("failed");
+		expect(result.shards).toEqual([
+			{ shard: 0, outcome: "complete", reason: null },
+			{
+				shard: 1,
+				outcome: "dry-run-timeout",
+				reason:
+					"the initial test run exceeded dryRunTimeoutMinutes (10) with 87 test file(s), estimated 231 s",
+			},
+		]);
+		expect(result.body).toContain(
+			"- **Status:** FAILED (dry-run timeout in shard 1: no mutant was evaluated)",
+		);
+		expect(result.body).toContain(
+			"- **Shards:** 0 complete; 1 dry-run-timeout (the initial test run exceeded dryRunTimeoutMinutes (10) with 87 test file(s), estimated 231 s)",
+		);
+		expect(result.marker).toBe(SHA_A);
+		expect(result.queue).toEqual([HELD]);
+	});
+
+	it("names both shards when both initial runs time out, and a plain driver failure keeps its generic verdict", () => {
+		const both = night([
+			timedOut(0, "clients/a.ts"),
+			timedOut(1, "clients/b.ts"),
+		]);
+		expect(both.body).toContain(
+			"FAILED (dry-run timeout in shard 0, 1: no mutant was evaluated)",
+		);
+		const crashed = night([
+			complete(0, "clients/a.ts"),
+			{
+				record: record(1, 1),
+				report: shardReport(1, "clients/b.ts", {
+					zeroMutants: { reason: "mutation diff: dry run failed" },
+				}),
+			},
+		]);
+		expect(crashed.shards[1]).toEqual({
+			shard: 1,
+			outcome: "failed",
+			reason: "driver exited 1 without a partial result",
+		});
+		expect(crashed.body).not.toContain("dry-run timeout");
+	});
+
+	it("still reads run 37629970371's artifacts, written before the driver recorded the timeout, as plain failures", () => {
+		// The real artifacts of the run that timed out (`gh run download`): no
+		// `dryRunTimeout` key, so an old record must keep parsing as before.
+		const artifacts = [0, 1].map((shard) => {
+			const dir = resolve(
+				import.meta.dirname,
+				`../fixtures/stryker-nightly/run-37629970371-dry-run-timeout/mutation-shard-${shard}`,
+			);
+			return {
+				dir: `mutation-shard-${shard}`,
+				record: readFileSync(join(dir, "shard.json"), "utf8"),
+				report: readFileSync(join(dir, "mutation.json"), "utf8"),
+			};
+		});
+		const window = JSON.parse(artifacts[0].record).window;
+		const reason = "driver exited 1 without a partial result";
+		const verdict = combineShards({
+			artifacts: artifacts.map(({ record: rec, report }) => ({
+				record: JSON.parse(rec),
+				report: JSON.parse(report),
+			})),
+			expectedShards: [0, 1],
+			window,
+		});
+		expect(verdict.status).toBe("failed");
+		expect(verdict.shards).toEqual([
+			{ shard: 0, outcome: "failed", reason },
+			{ shard: 1, outcome: "failed", reason },
+		]);
+	});
+
+	// The first night: no tracking issue, so no queue; new files queue against
+	// the window base.
+	it("publishes the first night with no previous queue", () => {
+		const result = night(
+			[
+				{
+					record: record(0),
+					report: shardReport(0, "clients/a.ts", {
+						filesSkippedOverCap: ["clients/c.ts"],
+					}),
+				},
+				complete(1, "clients/b.ts"),
+			],
+			queueOf([]),
+		);
+		expect(result.status).toBe("ok");
+		expect(result.marker).toBe(SHA_B);
+		expect(result.queue).toEqual([`clients/c.ts@${SHA_A}`]);
+	});
+});
+
 describe("buildNightlyBody", () => {
 	const meta = { base: SHA_A, head: SHA_B, source: "issue" } as const;
 	const report = {
@@ -210,7 +637,11 @@ describe("buildNightlyBody", () => {
 			status: "ok",
 			report: covered({}),
 		});
-		expect(coverageGaps(covered({}))).toEqual({ capped: [], unfinished: [] });
+		expect(coverageGaps(covered({}))).toEqual({
+			capped: [],
+			unfinished: [],
+			retry: [],
+		});
 		expect(body).toContain("the whole window was evaluated");
 		expect(filesOf(body)).toEqual([]);
 	});
@@ -547,7 +978,7 @@ describe("buildNightlyBody", () => {
 	// from the previous body, the real selection under the cap, a report shaped
 	// like the driver's, and the real body.
 	describe("a busy streak", () => {
-		const CAP = 12;
+		const CAP = 24;
 		const files = (n: number) =>
 			Array.from(
 				{ length: n },
@@ -620,7 +1051,7 @@ describe("buildNightlyBody", () => {
 		// Model: night n's HEAD is sha(n), its window base sha(n - 1), one night
 		// standing for one day (the floor is sha(n - 14)). A pool of 150 runtime
 		// files, 30 changed a night in rotation (5 to 15 lines a change), so a
-		// file is re-touched every fifth night: 30 a night against a 12-file cap.
+		// file is re-touched every fifth night: 30 a night against a 24-file cap.
 		// A night samples when the taken files' lines exceed `budget`, each
 		// file's lines counted since the base the real collectChangedRanges split
 		// reads it against. The queue is read, selected and written by the real
@@ -671,7 +1102,7 @@ describe("buildNightlyBody", () => {
 				const picked = selectMutationFiles({
 					pending,
 					windowFiles: all,
-					maxFiles: 12,
+					maxFiles: 24,
 					weights: new Map(
 						all.map((file) => [
 							file,
@@ -826,6 +1257,104 @@ describe("main (real git, real files)", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
+	// The process entry point, as the workflow runs it.
+	const NIGHTLY_CLI = resolve(
+		import.meta.dirname,
+		"../../scripts/stryker-nightly.mjs",
+	);
+	const cli = (args: string[]) =>
+		execFileSync(process.execPath, [NIGHTLY_CLI, ...args], {
+			cwd: repo,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	// The two artifacts run 37601788256 uploaded when both shards' Stryker dry
+	// runs failed, verbatim from `gh run download`.
+	const FAILED_RUN = resolve(
+		import.meta.dirname,
+		"../fixtures/stryker-nightly/run-37601788256-failed-dry-run",
+	);
+
+	// Recurrence (run 37601788256): every CLI `combine` crashed after writing
+	// its files ("Cannot read properties of undefined (reading 'entries')"),
+	// so the failed night published no body.
+	it("the CLI publishes a failed night from the artifacts of run 37601788256's failed dry runs", () => {
+		const base = commit("base", new Date().toISOString());
+		mkdirSync(join(repo, "clients"));
+		writeFileSync(join(repo, "clients/queued.ts"), "export {};\n");
+		const { window } = JSON.parse(
+			readFileSync(join(FAILED_RUN, "mutation-shard-0/shard.json"), "utf8"),
+		);
+		const out = join(dir, "report.json");
+		const outcomes = join(dir, "outcomes.json");
+		const bodyFile = join(dir, "body.md");
+		cli([
+			"combine",
+			"--shards-dir",
+			FAILED_RUN,
+			"--expected-shards",
+			"0,1",
+			"--window",
+			window,
+			"--out",
+			out,
+			"--outcomes",
+			outcomes,
+		]);
+		const verdict = JSON.parse(readFileSync(outcomes, "utf8"));
+		const reason = "driver exited 1 without a partial result";
+		expect(verdict).toEqual({
+			status: "failed",
+			shards: [
+				{ shard: 0, outcome: "failed", reason },
+				{ shard: 1, outcome: "failed", reason },
+			],
+		});
+		cli([
+			"body",
+			"--issues",
+			issuesFile([
+				issue(
+					`${markerOf(base)}\n<!-- stryker-nightly:pending=clients/queued.ts@${base} -->`,
+				),
+			]),
+			"--title",
+			TITLE,
+			"--base",
+			base,
+			"--head",
+			SHA_B,
+			"--source",
+			"issue",
+			"--status",
+			verdict.status,
+			"--report",
+			out,
+			"--outcomes",
+			outcomes,
+			"--out",
+			bodyFile,
+		]);
+		const body = readFileSync(bodyFile, "utf8");
+		expect(parseLastReportSha([issue(body)], TITLE)).toBe(base);
+		expect(parsePending([issue(body)], TITLE).entries).toEqual([
+			{ file: "clients/queued.ts", base },
+		]);
+		expect(body).toContain("**Status:** FAILED");
+		expect(body).toContain(
+			`- **Shards:** 0 failed (${reason}); 1 failed (${reason})`,
+		);
+	});
+
+	// The other direction of the same guard: the window step appends exactly
+	// these lines to GITHUB_OUTPUT.
+	it("the CLI base prints the GITHUB_OUTPUT lines the window step appends", () => {
+		const root = commit("root", new Date().toISOString());
+		expect(cli(["base", "--issues", issuesFile([]), "--title", TITLE])).toBe(
+			`base=${root}\nsource=fallback-no-issue\npending=0\n`,
+		);
+	});
+
 	it("`base` returns the recorded ancestor and the bounded window otherwise", () => {
 		const old = commit("old", "2026-01-01T00:00:00Z");
 		const mid = commit("mid", "2026-01-02T00:00:00Z");
@@ -886,6 +1415,48 @@ describe("main (real git, real files)", () => {
 		// No report is not a completed run: the marker stays at BASE.
 		expect(parseLastReportSha([issue(body)], TITLE)).toBe(SHA_A);
 		expect(body).toContain("No mutation report was produced");
+	});
+
+	// Recurrence (#4038 r4): a failed night whose body says only "the driver
+	// did not finish" while a shard's report was what failed.
+	it("body --outcomes names each shard's verdict in the published body", () => {
+		const out = join(dir, "body.md");
+		const outcomes = join(dir, "outcomes.json");
+		writeFileSync(
+			outcomes,
+			JSON.stringify({
+				status: "failed",
+				shards: [
+					{ shard: 0, outcome: "complete", reason: null },
+					{ shard: 1, outcome: "failed", reason: "report unreadable: x" },
+				],
+			}),
+		);
+		main(
+			[
+				"body",
+				"--issues",
+				issuesFile([]),
+				"--title",
+				TITLE,
+				"--base",
+				SHA_A,
+				"--head",
+				SHA_B,
+				"--source",
+				"issue",
+				"--status",
+				"failed",
+				"--outcomes",
+				outcomes,
+				"--out",
+				out,
+			],
+			repo,
+		);
+		expect(readFileSync(out, "utf8")).toContain(
+			"- **Shards:** 0 complete; 1 failed (report unreadable: x)",
+		);
 	});
 
 	it("`body` refuses a status it does not know", () => {

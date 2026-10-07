@@ -20,6 +20,9 @@ export function changesProductionFile(file: string): boolean;
 
 export function changedFiles(range: string): string[] | null;
 
+/** Uncommitted tracked edits plus untracked, non-ignored files (#4047). */
+export function worktreeChangedFiles(): string[] | null;
+
 export function collectTestFiles(dir: string, out?: string[]): string[];
 
 export interface TargetedTestSelection {
@@ -32,6 +35,8 @@ export interface TargetedTestSelection {
 	excludedCiOnly: string[];
 	/** Tests only the history pass added (#3215 lane 3). */
 	fromHistory: string[];
+	/** The reason each selected test entered the final selection (#4034). */
+	selectionReasons: Map<string, "import" | "history" | "governance">;
 }
 
 export function selectTargetedTests(
@@ -39,5 +44,54 @@ export function selectTargetedTests(
 	allTests: string[],
 	options?: { includeCiOnly?: boolean; historyPicks?: string[] },
 ): TargetedTestSelection;
+
+export interface PrePushRecord {
+	head: string;
+	base: string;
+	timestamp: string;
+	selected: Array<{
+		file: string;
+		reason: "import" | "history" | "governance";
+	}>;
+	passed: number;
+	failed: number;
+	skipped: number;
+	vitestExitCode: number | null;
+	wallTimeMs: number;
+	outcome:
+		| "tests-not-started"
+		| "build-only"
+		| "build-failed"
+		| "self-scan-failed"
+		| "tests-complete"
+		| "tests-failed"
+		| "tests-lock-timeout"
+		| "tests-runner-failed";
+}
+
+export function readPrePushRecord(
+	commonDir: string,
+	head: string,
+): PrePushRecord | null;
+
+export function writePrePushRecord(input: {
+	commonDir: string;
+	head: string;
+	base: string;
+	at?: Date;
+	selected: PrePushRecord["selected"];
+	passed: number;
+	failed: number;
+	skipped: number;
+	vitestExitCode: number | null;
+	wallTimeMs: number;
+	outcome?: PrePushRecord["outcome"];
+}): PrePushRecord;
+
+export function parseVitestCounts(output: string): {
+	passed: number;
+	failed: number;
+	skipped: number;
+};
 
 export function main(): Promise<number>;

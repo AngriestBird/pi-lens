@@ -95,6 +95,7 @@ vi.mock("../../clients/sessionstart-logger.js", async (importOriginal) => ({
 	logSessionStart: vi.fn(),
 }));
 
+import { resetBoundedTelemetry } from "../../clients/bounded-telemetry.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
@@ -289,6 +290,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+	resetBoundedTelemetry();
 	resetDegradationLedger();
 	clearLatencyLog();
 	await flushLatencyLog();
@@ -317,6 +319,166 @@ afterEach(() => {
 	vi.stubEnv("PI_LENS_INSTANCE_REGISTRY", "0");
 	vi.stubEnv("PI_LENS_HOME", logHome);
 	env.cleanup();
+});
+
+/** The `turn_end_test_selection` records the turn pushed to latency.log. */
+async function selectionRecords(): Promise<
+	Array<{
+		metadata: {
+			candidates: number;
+			selected: number;
+			noTestFile: number;
+			excluded: number;
+			roots: Array<{ root: string; candidates: number; selected: number }>;
+			rootsOmitted: number;
+		};
+	}>
+> {
+	await flushLatencyLog();
+	const log = fs.existsSync(getLatencyLogPath())
+		? fs.readFileSync(getLatencyLogPath(), "utf8")
+		: "";
+	return log
+		.split("\n")
+		.filter((line) => line.includes('"phase":"turn_end_test_selection"'))
+		.map((line) => JSON.parse(line));
+}
+
+describe("#3871 cell table: session checkout x edit location", () => {
+	// Rule: an edit's tests run in the checkout that owns the edited file
+	// (same commondir => its own top level), never in a checkout that does not.
+	// Premise (2026-10-07): the live 0-tests defect does not reproduce on master
+	// (#3903 shipped the rule); these cells pin the session-in-a-worktree rows
+	// the original suite did not cover.
+	it("session = a linked worktree, edit in it: runs in that worktree (the session root)", async () => {
+		const x = addWorktree("x");
+		session = x;
+		runtime.projectRoot = x;
+		const xTest = path.join(x, "tests", "unit", "self.test.ts");
+		edit(xTest);
+
+		await turnEnd();
+		await batchSettled(1);
+
+		expect(spawned().map((spawn) => [spawn.cwd, spawn.file])).toEqual([
+			[real(x), real(xTest)],
+		]);
+	});
+
+	// Rows 2-4 are NOT a test-selection decision: the worklist is the session's
+	// PROJECT worklist (#2504, `CacheManager.addModifiedRange`), so an edit
+	// outside the session cwd never reaches turn_end. The cells pin that the
+	// session in a worktree runs only its own tests, which is the #3649
+	// isolation intent from the other direction (a worktree session must not
+	// replay the main checkout's or a sibling's failing file).
+	it("session = a linked worktree, edit in the main checkout: not this session's edit, nothing runs", async () => {
+		const x = addWorktree("x");
+		session = x;
+		runtime.projectRoot = x;
+		runner.failing.add(path.join(main, "tests", "unit", "self.test.ts"));
+		edit(path.join(main, "tests", "unit", "self.test.ts"));
+
+		await turnEnd();
+
+		expect(runner.spawns).toEqual([]);
+		expect(await selectionRecords()).toEqual([]);
+	});
+
+	it("session = a linked worktree, edit in a sibling worktree: not this session's edit, nothing runs", async () => {
+		const x = addWorktree("x");
+		const y = addWorktree("y");
+		session = x;
+		runtime.projectRoot = x;
+		edit(path.join(y, "tests", "unit", "self.test.ts"));
+
+		await turnEnd();
+
+		expect(runner.spawns).toEqual([]);
+		expect(await selectionRecords()).toEqual([]);
+	});
+
+	it("session = a linked worktree, edits in it and the main checkout: only its own tests run", async () => {
+		const x = addWorktree("x");
+		session = x;
+		runtime.projectRoot = x;
+		const xTest = path.join(x, "tests", "unit", "self.test.ts");
+		edit(xTest);
+		edit(path.join(main, "tests", "unit", "self.test.ts"));
+
+		await turnEnd();
+		await batchSettled(1);
+
+		expect(spawned().map((spawn) => [spawn.cwd, spawn.file])).toEqual([
+			[real(x), real(xTest)],
+		]);
+	});
+});
+
+describe("#3871 turn_end_test_selection: one record per turn", () => {
+	// Recurrence prevented: the live session that ran 0 turn-end tests in 44
+	// turn-ends left only per-edit dbg lines ("no test file found" x40), which
+	// the MCP / Stop-hook route drops entirely; nothing durable said which
+	// checkout owned the edits or that the count selected was 0.
+	it("names each owning checkout and the count selected, once", async () => {
+		const x = addWorktree("x");
+		edit(path.join(main, "tests", "unit", "self.test.ts"));
+		edit(path.join(x, "tests", "unit", "self.test.ts"));
+		edit(path.join(x, "tests", "widget.test.ts"));
+
+		await turnEnd();
+		await batchSettled(3);
+
+		const records = await selectionRecords();
+		expect(records).toHaveLength(1);
+		expect(records[0]?.metadata).toMatchObject({
+			candidates: 3,
+			selected: 3,
+			noTestFile: 0,
+			excluded: 0,
+			rootsOmitted: 0,
+		});
+		expect(
+			[...(records[0]?.metadata.roots ?? [])].sort((a, b) =>
+				a.root.localeCompare(b.root),
+			),
+		).toEqual([
+			{ root: ".", candidates: 1, selected: 1 },
+			{ root: ".worktrees/x", candidates: 2, selected: 2 },
+		]);
+	});
+
+	it("records selected 0 with the owning root when nothing was selected", async () => {
+		const x = addWorktree("x");
+		edit(write(x, "src/orphan.ts", "export const orphan = 1;\n"));
+
+		await turnEnd();
+
+		expect(runner.spawns).toEqual([]);
+		const records = await selectionRecords();
+		expect(records).toHaveLength(1);
+		expect(records[0]?.metadata).toMatchObject({
+			candidates: 1,
+			selected: 0,
+			noTestFile: 1,
+			roots: [{ root: ".worktrees/x", candidates: 1, selected: 0 }],
+		});
+	});
+
+	it("bounds the root rows and counts the rest", async () => {
+		for (let i = 0; i < 10; i++) {
+			const dir = addWorktree(`w${i}`);
+			edit(path.join(dir, "tests", "unit", "self.test.ts"));
+		}
+
+		await turnEnd();
+		await batchSettled(10);
+
+		const records = await selectionRecords();
+		expect(records).toHaveLength(1);
+		expect(records[0]?.metadata.roots).toHaveLength(8);
+		expect(records[0]?.metadata.rootsOmitted).toBe(2);
+		expect(records[0]?.metadata.selected).toBe(10);
+	});
 });
 
 describe("#3871 test root: the checkout that owns the edit", () => {

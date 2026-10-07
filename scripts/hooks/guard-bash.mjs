@@ -20,6 +20,15 @@
  *   - ANY `git worktree remove` (force or not) on a worktree whose
  *     `node_modules` is a symlink pointing OUTSIDE that worktree (#3173,
  *     the #2704 class) -- see {@link hasNodeModulesSymlinkOutside}
+ *   - a MUTATING `npm`/`npx npm@…` verb (`ci`, `install`, `update`,
+ *     `uninstall`, `prune`, `dedupe`, `rebuild`, …), `--dry-run` or not, in
+ *     a project whose `node_modules` is a symlink pointing OUTSIDE it (#4044,
+ *     the #3173 shape on 2026-10-07) -- see {@link classifyNpm}
+ *   - a DELETE (`rm`, `rmdir`, `unlink`, `find … -delete`/`-exec rm`) whose
+ *     operand passes THROUGH a `node_modules` symlink pointing outside its
+ *     project (`rm -rf node_modules/`, `node_modules/*`, `find node_modules/
+ *     -delete`; #4044) -- unlinking the link itself stays allowed; see
+ *     {@link classifyNodeModulesDelete}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
@@ -96,6 +105,41 @@
  * really run `git stash`. It is retained as literal word text instead, and
  * {@link splitWords} strips the quotes when fusing the word.
  *
+ * ## Path arguments: ONE resolver (#3988)
+ *
+ * Every rule that tests a PATH argument -- `git worktree remove`, `git
+ * worktree add`, `git clone`, `mktemp -d`, `node <file>`, a leading `git -C`,
+ * and the `cd`/`pushd` that moves the cwd -- resolves it through
+ * {@link expandShellWord} / {@link resolveShellPath}: `~`, `$HOME`, `${HOME}`,
+ * `$VAR` (the command's variables, then this hook's ambient env) and `$PWD`
+ * are expanded the way bash would before the program sees them, then a relative
+ * result resolves against the command's EFFECTIVE cwd (a preceding `cd`, a
+ * `git -C`, else the payload cwd; a `cd` inside `( … )` does not leak out).
+ * Bash expands git's path words before an inline `VAR=val` prefix applies,
+ * so they are expanded without it, while git's own env check (`HUSKY=0`)
+ * still sees it (#3997; `mktemp` and `node` words still see the prefix, as
+ * on master). A path git or mktemp hands the kernel is resolved
+ * physically, a `cd` target logically (#3997 H3). A path that cannot be
+ * resolved statically (`$(…)`/backticks, `~user`, a variable with no known
+ * value, a glob, a cwd made unknown by an unresolvable `cd`) makes
+ * `git worktree remove` fail CLOSED (`worktreeUnresolved`); the tmp-checkout
+ * hygiene rules stay fail-open on it. A substitution's output is unknown, so
+ * {@link findDeny} reads a command holding one twice, with the output opaque
+ * and with it empty, and denies if either reading does (#3997). Not handled:
+ * The #4044 rules (`npmLinkedInstall`, `linkedNodeModulesDelete`) test a
+ * directory where the program lands: the holder of each `node_modules` a
+ * delete operand passes through physically, as the kernel does (a symlink
+ * before a later `..` is followed), and `--prefix` lexically, as npm does.
+ * A directory they cannot read -- an unknown cwd, or a value from `$( … )`,
+ * backticks or an unknown variable -- is the project the command runs in
+ * (the payload cwd when the tracked cwd is unknown), failing closed, so a
+ * linked lane stays denied after `cd $(pwd) && npm ci` and for
+ * `npm --prefix "$(pwd)" ci`. Not
+ * handled: `cd x &` and
+ * `cd x |` (a backgrounded or piped `cd` still moves the tracked cwd), a
+ * `cd` inside a `$( … )` span (each span starts from the payload cwd), and a
+ * `cd` that fails.
+ *
  * ## Handled
  *
  * `&&`, `||`, `;`, `|`, `&`, `(`, `)`, newline as segment separators;
@@ -134,6 +178,16 @@
  *   - A word spelled with ANSI-C escapes (`$'\x67it' stash`): the escapes
  *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
+ *   - npm/node_modules rules (#4044): `npm_config_prefix=`/`NPM_CONFIG_PREFIX`
+ *     in the env; a launcher between the shell and
+ *     npm that this file's other rules also miss -- `/usr/bin/env`, `env -i`,
+ *     `sudo -E`, `corepack npm`, `nohup`/`nice`/`timeout`, `xargs`, `npm exec
+ *     -- npm ci`, `npx -c 'npm ci'`, `node …/npm-cli.js`; pnpm, yarn and bun
+ *     writers; a package script that runs `npm ci` (`npm run clean`). For the
+ *     delete rule: a glob that expands TO the link (a star-slash operand such as `rm -rf` of every subdirectory), `find -L`
+ *     from an ancestor of the lane, `xargs rm`, `find -exec sh -c`, `shred`,
+ *     `mv`, `rsync --delete`, `git clean`, `npx rimraf`, a runtime
+ *     `rmSync`/`rmtree`, and a dash-leading operand after `--`.
  *   - A hook bypass spelled some other way (#3778):
  *     `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of `.git/config`, or
  *     `git commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
@@ -175,7 +229,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"worktreeUnresolved"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"|"linkedNodeModulesDelete"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -186,7 +240,9 @@ export const RULE_MESSAGES = {
 	worktreeForce:
 		"a HAND-typed `git worktree remove` with two force flags is forbidden (fixer playbook rule) -- use `node scripts/prune-agent-worktrees.mjs` (liveness-checked; it applies the same double force internally once a tree is confirmed dead) for a stuck worktree, or `git worktree unlock` then a single-force remove.",
 	worktreeSymlink:
-		"git worktree remove on a tree whose node_modules is a symlink into another checkout is forbidden (#3173, the #2704 class -- git follows the link and empties the SHARED install, not just this worktree's copy) -- unlink it first: `rm <tree>/node_modules` (removes only the symlink, not the shared install), then retry the remove; if it is a directory, remove only that worktree copy after confirming the main checkout is intact.",
+		"git worktree remove on a tree whose node_modules symlink chain cannot be safely resolved or leads outside the tree is forbidden (#3173, the #2704 class -- git can follow the link and empty the SHARED install, not just this worktree's copy) -- unlink it first: `rm <tree>/node_modules` (removes only the symlink, not the shared install), then retry the remove; if it is a directory, remove only that worktree copy after confirming the main checkout is intact.",
+	worktreeUnresolved:
+		"git worktree remove on a path this hook cannot resolve statically is forbidden (#3988) -- the #3173 node_modules-symlink check cannot run on it. The path, or the directory it is relative to, comes from a `$(...)`/backtick substitution, a `$VAR` with no value in the command or the hook environment, a `~user` or glob spelling, or an unresolvable `cd`/`git -C`/`popd`. Spell the worktree's absolute path literally (or `cd` to a literal directory first), or use `node scripts/prune-agent-worktrees.mjs`.",
 	probe:
 		"an unpinned node probe that LOADS runtime code from clients/ or dist/ is forbidden (AGENTS.md Probe hygiene) -- prefix `PI_LENS_HOME=<worktree>/.probe-home`.",
 	tmpdirCollision:
@@ -203,6 +259,10 @@ export const RULE_MESSAGES = {
 		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
+	npmLinkedInstall:
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where the node_modules symlink chain cannot be safely resolved or leads into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
+	linkedNodeModulesDelete:
+		"a delete whose operand passes THROUGH a node_modules symlink chain that cannot be safely resolved or leads into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -410,18 +470,6 @@ function consumeHeredocBody(text, start, heredoc, out) {
 }
 
 /**
- * Whether retained text currently ends in the optional coproc label word.
- * A syntax-only substitution marker can then survive the region pass without
- * exposing the substitution body to the outer command scanner.
- *
- * @param {string} retained
- * @returns {boolean}
- */
-function retainedEndsWithCoprocLabel(retained) {
-	return /\bcoproc\s+[^\s;|&{}]*$/.test(retained);
-}
-
-/**
  * THE region pass. Walks `text` from `start` until `closer` (`")"` for a
  * `$( … )` body, `` "`" `` for a backtick body, or `null` for end-of-text),
  * returning the text left once every inert region is subtracted, and
@@ -434,7 +482,9 @@ function retainedEndsWithCoprocLabel(retained) {
  * case that was remembered.
  *
  * Subtracted: comments, heredoc bodies, and substitution bodies (the last
- * are re-scanned via `out`, not discarded). Retained: everything else,
+ * are re-scanned via `out`, not discarded; each leaves one
+ * {@link SUBSTITUTION_MARK} behind so a word that held one is still known to
+ * be incomplete, #3988). Retained: everything else,
  * including single- and double-quoted spans with their quote characters,
  * so word formation downstream is unaffected.
  *
@@ -482,14 +532,13 @@ function lexRegions(text, start, closer, out) {
 			if (ch === "$" && text[i + 1] === "(") {
 				const span = lexRegions(text, i + 2, ")", out);
 				out.push(span.retained);
-				if (retainedEndsWithCoprocLabel(retained)) retained += "``";
+				retained += SUBSTITUTION_MARK;
 				i = span.end;
 				continue;
 			}
 			if (ch === "`") {
-				const inCoprocLabel = retainedEndsWithCoprocLabel(retained);
 				i = collectBacktickSpan(text, i, out);
-				if (inCoprocLabel) retained += "``";
+				retained += SUBSTITUTION_MARK;
 				continue;
 			}
 			retained += ch;
@@ -567,15 +616,14 @@ function lexRegions(text, start, closer, out) {
 		if (ch === "$" && text[i + 1] === "(") {
 			const span = lexRegions(text, i + 2, ")", out);
 			out.push(span.retained);
-			if (retainedEndsWithCoprocLabel(retained)) retained += "``";
+			retained += SUBSTITUTION_MARK;
 			atWordStart = false;
 			i = span.end;
 			continue;
 		}
 		if (ch === "`") {
-			const inCoprocLabel = retainedEndsWithCoprocLabel(retained);
 			i = collectBacktickSpan(text, i, out);
-			if (inCoprocLabel) retained += "``";
+			retained += SUBSTITUTION_MARK;
 			atWordStart = false;
 			continue;
 		}
@@ -843,6 +891,15 @@ export function splitWords(segment) {
 		}
 		if (quote === "double") {
 			started = true;
+			if (ch === SUBSTITUTION_MARK) {
+				// Output this scan cannot know (findDeny's unknown reading). Kept
+				// in the word, so no rule word matches it and no path resolves
+				// through it; recorded as a dynamic expansion, so a coproc label
+				// holding one can still form a name (#3949, #3997).
+				addExpansion("dynamic", ch);
+				i++;
+				continue;
+			}
 			if (ch === "\\" && DOUBLE_QUOTE_ESCAPABLE.has(segment[i + 1])) {
 				buf += segment[i + 1];
 				i += 2;
@@ -862,6 +919,12 @@ export function splitWords(segment) {
 			started = true;
 			buf += segment[i + 1];
 			i += 2;
+			continue;
+		}
+		if (ch === SUBSTITUTION_MARK) {
+			// The same opaque, dynamic piece as in a double-quoted span above.
+			addExpansion("dynamic", ch);
+			i++;
 			continue;
 		}
 		if (ch === "$" && segment[i + 1] === "'") {
@@ -996,22 +1059,27 @@ function looksLikeGitWorktree(dir) {
  * measured directly, `readlinkSync` throws ENOENT for a missing entry and
  * EINVAL for a REAL directory or file, both caught below, so a pre-check
  * never changed the verdict and mutating it out left every test green. Its
- * raw link text (not `realpathSync`'s resolved target), so a dangling
- * symlink (target does not exist) is still classified correctly instead of
- * throwing ENOENT on the target.
+ * raw link text proves that the entry is a symlink, then `realpathSync`
+ * follows the complete chain before the containment check. An unreadable or
+ * dangling target fails closed: this classifier protects destructive callers,
+ * so uncertainty is the outside-link verdict rather than an allow.
  *
  * @param {string} worktreeDir
  * @returns {boolean}
  */
 function hasNodeModulesSymlinkOutside(worktreeDir) {
 	const nodeModulesPath = join(worktreeDir, "node_modules");
-	let target;
 	try {
-		target = readlinkSync(nodeModulesPath);
+		readlinkSync(nodeModulesPath);
 	} catch {
 		return false;
 	}
-	const resolvedTarget = resolve(dirname(nodeModulesPath), target);
+	let resolvedTarget;
+	try {
+		resolvedTarget = realpathSync(nodeModulesPath);
+	} catch {
+		return true;
+	}
 	const rel = relative(worktreeDir, resolvedTarget);
 	return rel === ".." || rel.startsWith(`..${SEP}`) || isAbsolute(rel);
 }
@@ -1068,128 +1136,152 @@ function isUnderTmpRoot(absoluteDir) {
 	);
 }
 
-/**
- * A leading `$NAME`/`${NAME}` reference on `pathArg` -- the text a shell
- * would expand before running the command, which this static scanner never
- * runs. Substituted with whatever THIS command's own env assignments
- * (threaded down as `env`, the same `effectiveEnv` {@link classifyNode}
- * reads, which already carries forward standalone `VAR=val` segments via
- * `sharedEnv` -- #2699 review round 2 F2) set that variable to.
- *
- * Loops (bounded by {@link VAR_PREFIX_EXPANSION_CAP}) so an indirected chain
- * resolves through every hop: found auditing the real transcript corpus
- * (#3526 review F1) -- `S=/tmp/…/scratchpad; W=$S/wt; git worktree add $W`
- * is the ACTUAL shape of all 14 historical `/tmp` worktree-adds in it (the
- * reviewer playbook said "under the scratchpad", never spelling `$TMPDIR`
- * literally). One substitution alone leaves `$W` expanded to the literal
- * text `$S/wt`, still unresolved; the loop re-tests that result, finds the
- * next `$S` reference, and resolves it too. A cap bounds a pathological or
- * self-referential chain (`A=$A`) the same way {@link lexRegions}'s
- * recursion is bounded by the crash guard rather than trusted to terminate
- * on its own.
- *
- * `TMPDIR`/`TMP`/`TEMP` get a SPECIAL default when unset -- this hook's own
- * `process.env` (the same two-tier lookup {@link classifyNode}'s
- * `PI_LENS_HOME` check already uses: the guard runs as a real child process
- * inheriting the shell's actual ambient environment, which a command-text-
- * only scan would otherwise miss -- measured directly: a bare `mktemp -d`
- * with an ambient, non-command-text `TMPDIR` pointed off /tmp must allow,
- * and it does not without this fallback), then `TMP_ROOT` -- the real
- * default `os.tmpdir()`/bash/mktemp all fall back to. Any OTHER variable
- * with no known value leaves the reference as a literal `undefined`-prefixed
- * string, and the loop then finds no further `$NAME` match and stops on its
- * own next iteration (a documented blind spot, matching this file's others:
- * an unknown `$NAME` cannot be resolved by a static scan, and this fallthrough
- * is the safe direction -- the literal text still resolves as a relative path
- * segment against `cwd` in {@link pathResolvesUnderTmp}, which allows unless
- * `cwd` itself is under `/tmp`, never a false allow of a genuine `/tmp`
- * destination this scan COULD have resolved; measured mutation-inert against
- * the alternative of an explicit early `break` -- both leave the same final
- * under-/tmp verdict, so the special case was deleted). The name boundary
- * matches {@link HARNESS_HOME_VARIABLE}'s reasoning: `$TMPDIRECTORY` names a
- * different variable.
- *
- * @param {string} pathArg
- * @param {Record<string, string>} env
- * @returns {string}
- */
-function substituteTempDirPrefix(pathArg, env) {
-	let current = expandHomePrefix(pathArg);
-	for (let hop = 0; hop < VAR_PREFIX_EXPANSION_CAP; hop++) {
-		const m =
-			/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}|^\$([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])/.exec(
-				current,
-			);
-		if (!m) break;
-		const name = m[1] ?? m[2];
-		const value = TEMP_DIR_VARS.includes(name)
-			? (env[name] ?? process.env[name] ?? TMP_ROOT)
-			: env[name];
-		// An unresolvable OTHER variable is left as literal text (documented
-		// blind spot: `value` stays `undefined`, so `current` gains the
-		// literal substring "undefined" in its place) -- measured to be
-		// behaviorally inert for this function's only observable output
-		// (whether the final resolved path sits under /tmp): neither
-		// "$UNKNOWN" nor "undefined" is absolute or means anything special to
-		// {@link resolve}, so both fall through to the SAME relative-path
-		// resolution against `cwd`. An earlier version special-cased this
-		// with its own `break`; deleted after mutating it out left every
-		// test in this file green (#3526 review round 2 self-check).
-		current = expandHomePrefix(value + current.slice(m[0].length));
-	}
-	return current;
-}
-
-/** Bounds {@link substituteTempDirPrefix}'s indirection loop -- generous for
- *  the real shapes this repo's own sessions use (`S=...; W=$S/wt` is one
- *  hop) while still terminating a pathological or self-referential chain. */
+/** Bounds {@link expandShellWord}'s indirection loop -- generous for the real
+ *  shapes this repo's own sessions use (`S=...; W=$S/wt` is one hop) while
+ *  still terminating a pathological or self-referential chain (`A=$A`). */
 const VAR_PREFIX_EXPANSION_CAP = 8;
 
 /**
- * A leading `~` or `~/…` on `pathArg`, expanded from this hook's own
- * `process.env.HOME` -- bash performs tilde expansion on the raw WORD
- * before the program ever sees argv, so by the time a real `git worktree
- * add ~/.cache/…` runs, the `~` is already gone; this static scanner reads
- * the pre-expansion text and has to redo that step itself (#3526 review
- * S1). Only the bare `~` and `~/…` forms are handled -- `~user/…` (a named
- * user's home) is a documented blind spot, the same class as an unresolved
- * `$NAME` in {@link substituteTempDirPrefix}: left as literal text, which
- * resolves relative to `cwd` and is the safe (non-false-negative) direction
- * since none of this repo's own named exemption paths use it. `HOME` unset
- * also leaves it literal, for the same reason.
- *
- * @param {string} pathArg
- * @returns {string}
+ * The placeholder {@link lexRegions} leaves where it subtracted a `$( … )` or
+ * backtick span. A private-use character, not `$()`, so it never reads as a
+ * segment separator or as shell syntax downstream. The span's body is scanned
+ * as its own region. The mark stands for output this scan cannot know:
+ * {@link findDeny} reads a command once with the mark as opaque word text
+ * (so `$(pwd)/x` is not the WRONG path `/x`, and {@link expandShellWord}
+ * refuses to resolve it, #3988) and once with the marks removed (#3997).
  */
-function expandHomePrefix(pathArg) {
-	const home = process.env.HOME;
-	if (home === undefined) return pathArg;
-	if (pathArg === "~") return home;
-	if (pathArg.startsWith("~/")) return home + pathArg.slice(1);
-	return pathArg;
+const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
+
+/**
+ * The value `$NAME` expands to, or `undefined` when this static scan cannot
+ * know it. `PWD` is the command's effective cwd. The command's variables
+ * (`env`: the `export` and standalone `VAR=val` segments carried forward in
+ * `sharedEnv`, #2699 review round 2 F2, plus the inline prefix for `mktemp`
+ * and `node`; never for git's words, #3997 F4) win; then THIS hook's `process.env`,
+ * because the guard runs as a real child process inheriting the shell's
+ * ambient environment (measured: a bare `mktemp -d` with an ambient,
+ * non-command-text `TMPDIR` pointed off /tmp must allow). `TMPDIR`/`TMP`/
+ * `TEMP` default to `TMP_ROOT` when unset everywhere -- the real default
+ * `os.tmpdir()`, bash and mktemp all fall back to.
+ *
+ * @param {string} name
+ * @param {string | null | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {string | undefined}
+ */
+function lookupShellVariable(name, cwd, env) {
+	if (name === "PWD")
+		return cwd === undefined ? process.cwd() : (cwd ?? undefined);
+	if (name === "_" || name === "OLDPWD") return undefined;
+	const value = env[name] ?? process.env[name];
+	return value ?? (TEMP_DIR_VARS.includes(name) ? TMP_ROOT : undefined);
 }
 
 /**
- * Does `pathArg` (a `git worktree add`/`git clone` destination, or an
- * `mktemp` `-p`/`--tmpdir=` value or absolute template's directory) resolve
- * under `/tmp`, after {@link substituteTempDirPrefix} expands a leading `~`
- * and every `$TMPDIR`/`$NAME`-shaped reference (recursively, so a `~`
- * picked up mid-chain -- `S=~/.local/…; W=$S/wt` -- is also expanded, not
- * just one on the original argument), and resolving a relative remainder
- * against `cwd` the same way {@link classifyGit}'s worktree-path resolution
- * already does?
+ * THE path-word expander (#3988): redo, statically, what bash does to a WORD
+ * before the program sees argv, so every rule that tests a path argument
+ * (`git worktree remove`/`add`, `git clone`, `mktemp`, `node <file>`, `git -C`,
+ * `cd`) judges the directory bash would hand it, not the spelling. Handled: a
+ * leading `~` or `~/…` (from `HOME`, the command's variables first, then this
+ * hook's ambient env); every `$NAME`/`${NAME}` reference anywhere in the
+ * word, chased through indirected assignments (bounded by
+ * {@link VAR_PREFIX_EXPANSION_CAP}: `S=/tmp/…/scratchpad; W=$S/wt; git
+ * worktree add $W` is the ACTUAL shape of all 14 historical `/tmp`
+ * worktree-adds in the transcript corpus, #3526 review F1), with a tilde
+ * picked up mid-chain (`S=~/.local/…`) expanded too, including one the last
+ * hop surfaces (#3997 F5). A variable whose value is a bare name is that
+ * literal word, as in bash (`A=B; … $A` is the relative path `B`).
  *
- * @param {string} pathArg
- * @param {string | undefined} cwd
- * @param {Record<string, string>} env
- * @returns {boolean}
+ * `text` is always the best-effort expansion, with whatever could not be
+ * resolved left in place -- a rule whose hazard is a false ALLOW of a resolvable
+ * path (tmpCheckout) reads `text` and treats the leftover as relative,
+ * exactly as before. `reason` is set when part of the word is NOT statically
+ * knowable: a `$( … )`/backtick span ({@link SUBSTITUTION_MARK}), a `~user`/
+ * `~+`/`~-` tilde, a variable with no known value (or an unset `HOME`), a
+ * `${NAME:-x}`-style or `$1`/`$$` expansion (a self-referential or
+ * over-long chain ends here too: it is still a `$` reference once the hop cap
+ * is spent), or a glob character. A rule whose hazard is a false ALLOW of a
+ * destructive command (`git worktree remove`) fails closed on it.
+ *
+ * Quote context is gone by the time a word reaches here ({@link splitWords}
+ * strips quotes), so a single-quoted literal `'$HOME'` is expanded like an
+ * unquoted one -- the conservative direction for both kinds of rule.
+ *
+ * @param {string} word
+ * @param {string | null | undefined} cwd `null`: statically unknown (after an unresolvable `cd`)
+ * @param {Record<string, string>} env see {@link lookupShellVariable}
+ * @returns {{ text: string; reason?: string }}
  */
-function pathResolvesUnderTmp(pathArg, cwd, env) {
-	const substituted = substituteTempDirPrefix(pathArg, env);
-	const absolute = isAbsolute(substituted)
-		? substituted
-		: resolve(cwd ?? process.cwd(), substituted);
-	return isUnderTmpRoot(absolute);
+function expandShellWord(word, cwd, env) {
+	/** @type {string | undefined} */
+	let reason;
+	let text = word;
+	for (let hop = 0; hop <= VAR_PREFIX_EXPANSION_CAP; hop++) {
+		if (text === "~" || text.startsWith("~/")) {
+			const home = env.HOME ?? process.env.HOME;
+			if (home === undefined) reason ??= "HOME is not set";
+			else text = home + text.slice(1);
+		} else if (/^~[^/]/.test(text)) {
+			reason ??= "a ~user tilde";
+		}
+		if (hop === VAR_PREFIX_EXPANSION_CAP) break;
+		let changed = false;
+		text = text.replace(
+			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+			(reference, braced, bare) => {
+				const name = braced ?? bare;
+				const value = lookupShellVariable(name, cwd, env);
+				if (value === undefined) return reference;
+				changed = true;
+				return value;
+			},
+		);
+		if (!changed) break;
+	}
+	if (text.includes(SUBSTITUTION_MARK)) reason ??= "a command substitution";
+	if (/[{}]/.test(text)) reason ??= "brace expansion";
+	if (text.includes("$")) reason ??= "an unresolved or unsupported $ expansion";
+	if (/[*?[]/.test(text)) reason ??= "a glob pattern";
+	return reason === undefined ? { text } : { text, reason };
+}
+
+/**
+ * {@link expandShellWord}, then anchored the way the OS would: a relative
+ * result resolves against `cwd` (the command's effective cwd -- a preceding
+ * `cd`, `git -C`, else the hook payload's own; `undefined` falls back to this
+ * process's cwd, as every caller here always has). `cwd === null` means the
+ * effective cwd is itself statically unknown, which makes a RELATIVE result
+ * unresolvable (an absolute one is still exact).
+ *
+ * A path a program hands the kernel is judged where the kernel puts it, so
+ * it is resolved PHYSICALLY (#3997 H3): the kernel follows `lnk` before the
+ * `..` in `lnk/../wt`, while `path.resolve` (and `fs.realpathSync`, which
+ * normalizes first) drops the pair lexically. Measured: `git worktree remove
+ * scratch/lnk/../linked` removed the tree `lnk` points at. A target that does
+ * not exist keeps the lexical path. `logical` is bash's own `cd`, which
+ * resolves `..` lexically (`cd lnk/.. && pwd` prints the directory holding
+ * `lnk`).
+ *
+ * @param {string} word
+ * @param {string | null | undefined} cwd
+ * @param {Record<string, string>} env
+ * @param {boolean} [logical]
+ * @returns {{ path: string; reason?: string }}
+ */
+function resolveShellPath(word, cwd, env, logical = false) {
+	const { text, reason } = expandShellWord(word, cwd, env);
+	const anchor = cwd ?? process.cwd();
+	let path = resolve(anchor, text);
+	if (reason === undefined && cwd === null && !isAbsolute(text))
+		return { path, reason: "a working directory that is not statically known" };
+	if (!logical) {
+		try {
+			path = realpathSync.native(isAbsolute(text) ? text : `${anchor}/${text}`);
+		} catch {
+			// No such path for the kernel either: the lexical path stands.
+		}
+	}
+	return reason === undefined ? { path } : { path, reason };
 }
 
 /** `git worktree add [flags] <path> [<commit-ish>]` flags that consume a
@@ -1359,20 +1451,19 @@ function classifyHookBypass(args, i, env) {
  * `cwd` (the PreToolUse payload's own `cwd`, threaded down from
  * {@link classifyPayload}) resolves a RELATIVE `git worktree remove <path>`
  * / `git worktree add <path>` / `git clone … <path>` argument the same way
- * git itself would -- an absolute argument is used as given. NOT handled
- * (documented, not fixed, matching this file's other blind spots): a
- * leading `-C <dir>` global option changes git's own working directory,
- * which would change what a relative path argument resolves against; this
- * scan does not track it, so a `-C`-relative path resolves against the
- * PAYLOAD cwd instead -- proportionate, since every fixer/orchestrator
- * convention in this repo names the worktree by its absolute path.
+ * git itself would, through {@link resolveShellPath} (#3988): `~`/`$VAR`
+ * spellings are expanded first, and a relative path resolves against the
+ * directory git runs in -- `cwd` after every leading `-C <dir>` option, each
+ * relative to the one before (`-C a -C b` is `a/b`). A `git worktree remove`
+ * path that cannot be resolved statically fails closed (`worktreeUnresolved`).
  *
  * @param {string[]} args
- * @param {string} [cwd]
- * @param {Record<string, string>} [env]
+ * @param {string | null} [cwd] `null`: the effective cwd is statically unknown
+ * @param {Record<string, string>} [env] git's own env, inline `VAR=val` prefix included (the hook-bypass check reads it)
+ * @param {Record<string, string>} [expansionEnv] the shell variables bash expanded the path words with: the inline prefix applies only after expansion (#3997 F4)
  * @returns {DenyRule | null}
  */
-function classifyGit(args, cwd, env = {}) {
+function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 	const isRebaseFalseValue = (value) =>
 		["false", "no", "0", "off"].includes(value.toLowerCase());
 	const i = gitSubcommandIndex(args);
@@ -1458,6 +1549,18 @@ function classifyGit(args, cwd, env = {}) {
 			return "reset";
 		return null;
 	}
+	// The directory git runs in: each leading `-C <dir>` moves it, relative to
+	// the one before; a `<dir>` that cannot be resolved makes it unknown
+	// (`null`), which makes any relative path argument unresolvable (#3988).
+	/** @type {string | null | undefined} */
+	let gitCwd = cwd;
+	for (let k = 0; k < i; k++) {
+		if (args[k] === "-C" && args[k + 1] !== undefined) {
+			const target = resolveShellPath(args[k + 1], gitCwd, expansionEnv);
+			gitCwd = target.reason === undefined ? target.path : null;
+		}
+		if (GIT_TWO_TOKEN_FLAGS.has(args[k])) k++;
+	}
 	if (subcommand === "worktree" && args[i + 1] === "remove") {
 		const rest = args.slice(i + 2);
 		let forceCount = 0;
@@ -1468,11 +1571,15 @@ function classifyGit(args, cwd, env = {}) {
 			else if (!a.startsWith("-")) positionals.push(a);
 		}
 		if (forceCount >= 2) return "worktreeForce";
-		const worktreeArg = positionals[0];
-		if (worktreeArg) {
-			const worktreeDir = isAbsolute(worktreeArg)
-				? worktreeArg
-				: resolve(cwd ?? process.cwd(), worktreeArg);
+		if (positionals[0]) {
+			// #3988: the path bash would hand git, or a named fail-closed deny --
+			// the #3173 check cannot run on a path this scan cannot resolve.
+			const { path: worktreeDir, reason } = resolveShellPath(
+				positionals[0],
+				gitCwd,
+				expansionEnv,
+			);
+			if (reason !== undefined) return "worktreeUnresolved";
 			if (
 				looksLikeGitWorktree(worktreeDir) &&
 				hasNodeModulesSymlinkOutside(worktreeDir)
@@ -1481,13 +1588,19 @@ function classifyGit(args, cwd, env = {}) {
 		}
 		return null;
 	}
-	// #3526: a `git worktree add`/`git clone` destination under /tmp -- see
-	// pathResolvesUnderTmp's own doc for the $TMPDIR-substitution and cwd
-	// resolution this shares with the mktemp rule below.
+	// #3526: a `git worktree add`/`git clone` destination under /tmp, resolved
+	// through the same resolveShellPath as the remove rule above and the mktemp
+	// rule below (#3988). An UNRESOLVABLE destination stays a documented
+	// fail-open here: this is a hygiene rule, and denying every
+	// `git worktree add "$WT"` would block ordinary fixer work for a path that
+	// cannot be shown to be under /tmp.
 	if (subcommand === "worktree" && args[i + 1] === "add") {
 		const rest = args.slice(i + 2);
 		const [pathArg] = collectPositionals(rest, WORKTREE_ADD_VALUE_FLAGS);
-		if (pathArg !== undefined && pathResolvesUnderTmp(pathArg, cwd, env))
+		if (
+			pathArg !== undefined &&
+			isUnderTmpRoot(resolveShellPath(pathArg, gitCwd, expansionEnv).path)
+		)
 			return "tmpCheckout";
 		return null;
 	}
@@ -1500,12 +1613,307 @@ function classifyGit(args, cwd, env = {}) {
 		// documented-blind-spot shape as a command word built by expansion).
 		if (
 			positionals.length >= 2 &&
-			pathResolvesUnderTmp(positionals[1], cwd, env)
+			isUnderTmpRoot(
+				resolveShellPath(positionals[1], gitCwd, expansionEnv).path,
+			)
 		)
 			return "tmpCheckout";
 		return null;
 	}
 	return null;
+}
+
+/** Commands whose operands are the paths they delete (`find` is judged
+ *  separately: its operands are the leading words, its delete an expression). */
+const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
+
+/**
+ * Is the project `cwd` runs in linked (PR #4054 round 4)? True when the cwd
+ * itself sits inside a linked `node_modules` (npm run there lands in the
+ * shared install's own checkout; measured on npm 9.2.0: `cd
+ * lane/node_modules && npm prefix` prints `main`), or when npm's own walk-up
+ * from the PHYSICAL cwd to the nearest directory with a `package.json` or
+ * `node_modules` (from `lnk` -> `lane/scripts`, `npm prefix` prints the lane)
+ * reaches a `node_modules` that {@link hasNodeModulesSymlinkOutside} calls
+ * outside it. Also the answer for a directory the resolver cannot read (a
+ * `$( … )` or backtick output, an unknown variable, a `~user`/`~+`, a glob):
+ * such a part is judged as the project the command runs in, so `--prefix
+ * "$(pwd)"` and `D=$(pwd); --prefix $D` get one verdict, and a real lane's
+ * project is real.
+ *
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function projectNodeModulesLinked(cwd, env) {
+	if (operandThroughNodeModulesLink(".", cwd, env, false, false)) return true;
+	let dir = resolveShellPath(".", cwd, env).path;
+	for (;;) {
+		if (hasNodeModulesSymlinkOutside(dir)) return true;
+		const parent = dirname(dir);
+		if (
+			parent === dir ||
+			existsSync(join(dir, "package.json")) ||
+			existsSync(join(dir, "node_modules"))
+		)
+			return false;
+		dir = parent;
+	}
+}
+
+/**
+ * Does `operand` pass THROUGH a `node_modules` symlink that
+ * {@link hasNodeModulesSymlinkOutside} calls outside its project? The operand
+ * is expanded by {@link expandShellWord} (`$PWD/node_modules/`,
+ * `~/node_modules/`, an assigned `$D/`) and walked component by component, the
+ * cwd's own components first (a `cd` INTO the link, then `rm -rf ./*`). At each
+ * `node_modules` component that something follows -- a component, `.`, `..`,
+ * a trailing `/` (the kernel follows a link spelled with one), or, with
+ * `followFinal` (`find -L|-H|-follow`), nothing -- the directory HOLDING it is
+ * tested where the kernel lands: {@link resolveShellPath} in physical mode,
+ * which follows a symlink before a later `..` (`../lnk/../node_modules/`
+ * reaches the lane `lnk` points into, R3-2). Only the holder is resolved: a
+ * physical realpath of the whole operand collapses `lane/node_modules/` onto
+ * the link's target and the link leaves the path. A holder the resolver cannot
+ * read is the project the command runs in ({@link projectNodeModulesLinked}).
+ * `followAll` (`find -L|-follow` descend every link they meet) also tests the
+ * operand itself as a holder (`find -L . -delete`). The bare link
+ * (`rm -rf node_modules`) only unlinks it.
+ *
+ * @param {string} operand
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @param {boolean} followFinal
+ * @param {boolean} followAll
+ * @returns {boolean}
+ */
+function operandThroughNodeModulesLink(
+	operand,
+	cwd,
+	env,
+	followFinal,
+	followAll,
+) {
+	/** @param {string} holder */
+	const holderLinked = (holder) => {
+		const { path, reason } = resolveShellPath(holder, cwd, env);
+		return reason === undefined
+			? hasNodeModulesSymlinkOutside(path)
+			: projectNodeModulesLinked(cwd, env);
+	};
+	if (followAll && holderLinked(operand)) return true;
+	const { text } = expandShellWord(operand, cwd, env);
+	const words = text.split(SEP);
+	const anchor = isAbsolute(text) ? [] : (cwd ?? process.cwd()).split(SEP);
+	const parts = [...anchor, ...words];
+	for (let i = 1; i < parts.length; i++) {
+		if (parts[i] !== "node_modules") continue;
+		if (i === parts.length - 1 && !followFinal) continue;
+		// The cwd's own components are known: a tracked cwd is always resolved.
+		const linked =
+			i < anchor.length
+				? hasNodeModulesSymlinkOutside(
+						resolveShellPath(parts.slice(0, i).join(SEP) || SEP, cwd, env).path,
+					)
+				: holderLinked(
+						words.slice(0, i - anchor.length).join(SEP) ||
+							(isAbsolute(text) ? SEP : "."),
+					);
+		if (linked) return true;
+	}
+	return false;
+}
+
+/**
+ * The #4044 sibling rule: a delete (`rm`/`rmdir`/`unlink`, or `find` with
+ * `-delete` or `-exec rm|rmdir|unlink`) with an operand through a linked
+ * `node_modules`. MEASURED (GNU coreutils, 2026-10-07): `rm -rf
+ * node_modules/`, `rm -rf node_modules/*`, `find node_modules/ -delete`,
+ * `find -L|-H|-follow node_modules -delete`, `find -L|-follow . -delete`,
+ * `find node_modules/ -exec rm -rf {} +` and `cd node_modules && rm -rf ./*`
+ * all empty the link's target; `rm -rf node_modules` and `find node_modules
+ * -delete` remove only the link. Operands go through {@link resolveShellPath}
+ * (`$PWD`, `~`, assigned variables); a holder it cannot read
+ * (`"$(pwd)/node_modules/"`, an unknown variable) is the project the command
+ * runs in. NOT handled: a glob that expands TO the
+ * link (a star-slash operand, `rm -rf` of every subdirectory or of a `node_m` prefix glob), `find -L` from an ancestor of the lane (only
+ * an operand that is, holds, or sits under the link counts), an operand made
+ * only of a substitution (`rm -rf $(ls)`: no `node_modules` component), `xargs rm`,
+ * `find -exec sh -c`, `shred`, `mv`, `rsync --delete`, `git clean`,
+ * `npx rimraf`, a runtime `rmSync`/`rmtree`.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {DenyRule | null}
+ */
+function classifyNodeModulesDelete(cmd, args, cwd, env) {
+	let operands;
+	let followFinal = false;
+	let followAll = false;
+	if (cmd === "find") {
+		let i = 0;
+		while (/^-([HLP]|D\w*|O\d*)$/.test(args[i] ?? "")) {
+			if (args[i] === "-H") followFinal = true;
+			if (args[i] === "-L") followFinal = followAll = true;
+			i++;
+		}
+		let end = i;
+		while (end < args.length && !/^(-|\(|!)/.test(args[end])) end++;
+		const expression = args.slice(end);
+		if (expression.includes("-follow")) followFinal = followAll = true;
+		const deletes = expression.some(
+			(a, j) =>
+				a === "-delete" ||
+				(/^-(exec|execdir|ok|okdir)$/.test(a) &&
+					DELETE_COMMANDS.has(commandBasename(expression[j + 1] ?? ""))),
+		);
+		if (!deletes) return null;
+		operands = end > i ? args.slice(i, end) : ["."];
+	} else {
+		operands = args.filter((a) => !a.startsWith("-"));
+	}
+	return operands.some((o) =>
+		operandThroughNodeModulesLink(o, cwd, env, followFinal, followAll),
+	)
+		? "linkedNodeModulesDelete"
+		: null;
+}
+
+/** The `npm` verbs (and their aliases) that write `node_modules` (#4044):
+ *  the clean-install family (`ci`, which ignores `--dry-run` on npm 9.2.0 and
+ *  removes `node_modules/*` first), and every verb that runs the reify step.
+ *  Read-only verbs (`ls`, `run`, `test`, `view`, `audit`, `outdated`, `exec`,
+ *  `pack`, `config`) are absent on purpose. */
+const NPM_NODE_MODULES_WRITERS = new Set(
+	[
+		"ci clean-install ic install-clean isntall-clean",
+		"install-ci-test cit clean-install-test sit",
+		"install i in ins inst insta instal add install-test it isntall isnt isnta isntal",
+		"uninstall un unlink remove rm r update up upgrade udpate prune",
+		"rebuild rb link ln dedupe ddp find-dupes",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** Every other npm verb (and alias) a worker types. Only used to tell a verb
+ *  from the VALUE of an unlisted flag (`npm --audit false ci`: `false` is
+ *  neither): the verb is the first positional that is in this set or in
+ *  {@link NPM_NODE_MODULES_WRITERS}. */
+const NPM_OTHER_VERBS = new Set(
+	[
+		"access adduser audit bugs cache completion config c get set deprecate diff dist-tag",
+		"docs home doctor edit exec x explain why explore fund help help-search hook init create",
+		"innit login logout ls list la ll org outdated owner author pack ping pkg prefix profile",
+		"publish query repo restart root run run-script rum urn sbom search find s se shrinkwrap",
+		"star stars start stop team test t tst token unpublish unstar version view show info v",
+		"whoami",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** `npm`/`npx` flags that consume a separate following token, so the verb
+ *  (or the npx command) is found past them. The `--flag=value` form is one
+ *  token and needs no entry. */
+const NPM_VALUE_FLAGS = new Set([
+	"--prefix",
+	"-w",
+	"--workspace",
+	"-p",
+	"--package",
+	"-c",
+	"--call",
+	"--registry",
+	"--cache",
+	"--userconfig",
+	"--globalconfig",
+	"--loglevel",
+	"--omit",
+	"--include",
+	"--install-strategy",
+	"--tag",
+	"--scope",
+	"--otp",
+	"--before",
+]);
+
+/**
+ * The #4044 rule: is this `npm`/`npx npm@…` invocation a node_modules WRITER
+ * aimed at a project whose `node_modules` is a symlink resolving outside it?
+ * That is the #3173 hazard with a different verb -- on 2026-10-07 a worker's
+ * `npm ci --ignore-scripts --dry-run` in a lane whose `node_modules` linked
+ * the main checkout's install emptied that install for every lane (npm 9.2.0
+ * removes `node_modules/*` before reify, ignores the dry-run, and follows the
+ * link). The clean-install family is denied with or without `--dry-run`; so
+ * is every other writer, which keeps the rule one line: MEASURED on npm 9.2.0
+ * and 11.18.0, `install`/`add`/`uninstall`/`update`/`prune`/`dedupe --dry-run`
+ * leave a linked install intact, but nothing measured covers the next npm,
+ * and the scratch-copy answer costs a worker nothing.
+ *
+ * The project dir is `--prefix` when given, else the cwd -- walked up to the
+ * nearest directory with a `package.json` or `node_modules`, as npm's own
+ * local-prefix lookup does (a lane's `scripts/` subdirectory reaches the
+ * lane's link; {@link projectNodeModulesLinked}). A `--prefix` the resolver
+ * cannot read (`"$(pwd)"`, backticks, an unknown variable) is that project
+ * too, failing closed in a linked lane (R3-1); `--prefix $TMPDIR/<name>` is
+ * readable. The link test is {@link hasNodeModulesSymlinkOutside}, the
+ * #3173 classifier, deliberately without {@link looksLikeGitWorktree}: a
+ * delete through an outside link is the hazard wherever the link sits.
+ * `-g`/`--global` writes the global tree, not the project's, and is allowed.
+ * The verb is the first positional that is a known npm verb, so the value of
+ * an unlisted flag (`npm --audit false ci`) does not become the verb; the
+ * `--prefix` goes through {@link resolveShellPath} (`$PWD`, `~`). NOT handled: see the
+ * header's list (`npm_config_prefix=`, launchers, `npm exec -- npm ci`, ...).
+ *
+ * @param {"npm"|"npx"} cmd
+ * @param {string[]} args
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {DenyRule | null}
+ */
+function classifyNpm(cmd, args, cwd, env) {
+	let npmArgs = args;
+	if (cmd === "npx") {
+		let i = 0;
+		while (i < args.length && args[i].startsWith("-")) {
+			i += NPM_VALUE_FLAGS.has(args[i]) ? 2 : 1;
+		}
+		// `npx -y npm@11.18.0 ci`: the command npx runs is npm itself.
+		if (!/^npm(@[^/]*)?$/.test(args[i] ?? "")) return null;
+		npmArgs = args.slice(i + 1);
+	}
+	const positionals = collectPositionals(npmArgs, NPM_VALUE_FLAGS);
+	const verbAt = positionals.findIndex(
+		(a) => NPM_NODE_MODULES_WRITERS.has(a) || NPM_OTHER_VERBS.has(a),
+	);
+	const verb = positionals[verbAt];
+	if (
+		!NPM_NODE_MODULES_WRITERS.has(verb) &&
+		!(verb === "audit" && positionals[verbAt + 1] === "fix")
+	)
+		return null;
+	if (npmArgs.some((a) => a === "-g" || a === "--global")) return null;
+	let prefix;
+	for (let i = 0; i < npmArgs.length; i++) {
+		if (npmArgs[i] === "--prefix") prefix = npmArgs[i + 1] ?? "";
+		else if (npmArgs[i].startsWith("--prefix=")) prefix = npmArgs[i].slice(9);
+	}
+	// npm resolves `--prefix` lexically, and an empty one is the cwd (measured
+	// on npm 9.2.0: `--prefix lnk/..` is the directory holding `lnk`). The
+	// path npm writes through is `<prefix>/node_modules/`; without a readable
+	// prefix it is the project the command runs in.
+	const resolved =
+		prefix === undefined ? undefined : resolveShellPath(prefix, cwd, env, true);
+	const linked =
+		resolved === undefined || resolved.reason !== undefined
+			? projectNodeModulesLinked(cwd, env)
+			: operandThroughNodeModulesLink(
+					`${resolved.path}${SEP}node_modules${SEP}`,
+					cwd,
+					env,
+					false,
+					false,
+				);
+	return linked ? "npmLinkedInstall" : null;
 }
 
 // `-d`/`--directory` (bare or bundled, e.g. `-qd`) are the flags that make
@@ -1524,7 +1932,7 @@ function classifyGit(args, cwd, env = {}) {
  * man page's prose (AGENTS.md shape 16):
  *   - `-p <dir>` / `--tmpdir=<dir>` (bare `--tmpdir` with no `=`, GNU's own
  *     "use $TMPDIR" spelling, is folded into the same path via {@link
- *     pathResolvesUnderTmp}'s `$TMPDIR` sentinel below) -- lands in that dir,
+ *     resolveShellPath}'s `$TMPDIR` expansion below) -- lands in that dir,
  *     joined with the template if one was given.
  *   - An ABSOLUTE template with no `-p`/`--tmpdir=` -- lands in the
  *     template's own directory (`-p`/`--tmpdir=` wins if both are given;
@@ -1645,6 +2053,11 @@ function classifyMktemp(args, cwd, env) {
 		i++;
 	}
 	if (!isDir) return null;
+	// #3988: bash expands `~`/`$TMPDIR`/`$HOME` in the template BEFORE mktemp
+	// sees it, so `$TMPDIR/x.XXXXXX` is an ABSOLUTE template, not a relative
+	// one that lands in cwd.
+	if (template !== undefined)
+		template = expandShellWord(template, cwd, env).text;
 	/** @type {string} */
 	let targetDir;
 	if (tmpdirOverride !== undefined) targetDir = tmpdirOverride;
@@ -1652,7 +2065,9 @@ function classifyMktemp(args, cwd, env) {
 		targetDir = dirname(template);
 	else if (template === undefined || forceTmpdirRelative) targetDir = "$TMPDIR";
 	else targetDir = cwd ?? process.cwd();
-	return pathResolvesUnderTmp(targetDir, cwd, env) ? "tmpCheckout" : null;
+	return isUnderTmpRoot(resolveShellPath(targetDir, cwd, env).path)
+		? "tmpCheckout"
+		: null;
 }
 
 /** `pkill`/`killall` (#3556): neither has a way to scope by PID the way
@@ -1859,6 +2274,8 @@ const RUNTIME_LOAD_PATTERN =
  * @param {string[]} args
  * @param {Record<string, string>} env
  * @param {string} rawSegment
+ * @param {string | null | undefined} cwd
+ * @param {string | undefined} initialIdentity
  * @returns {DenyRule | null}
  */
 function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
@@ -1870,9 +2287,16 @@ function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
 			a === "--input-type" ||
 			a.startsWith("--input-type="),
 	);
-	const fileArg = args.find(
+	const fileArgWord = args.find(
 		(a) => !a.startsWith("-") && /\.(?:mjs|js)$/.test(a),
 	);
+	// #3988: the FILE argument is a shell word (`~/r/dist/x.mjs`, `$HOME/…`),
+	// so it is expanded like every other path argument; an `-e` payload's
+	// specifiers are JavaScript, which no shell expansion reaches.
+	const fileArg =
+		fileArgWord === undefined
+			? undefined
+			: expandShellWord(fileArgWord, cwd, env).text;
 	const fileArgLoadsRuntimeCode =
 		fileArg !== undefined &&
 		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist")) &&
@@ -2055,7 +2479,7 @@ function commandBasename(cmd) {
  *
  * @param {string} rawSegment
  * @param {Record<string, string>} sharedEnv
- * @param {string} [cwd] the PreToolUse payload's own cwd, for {@link classifyGit}'s worktree-path resolution
+ * @param {string | null} [cwd] the command's effective cwd (the PreToolUse payload's own, moved by any earlier `cd`; `null` once a `cd` could not be resolved), for the path-argument rules' {@link resolveShellPath}
  * @returns {DenyRule | null}
  */
 export function classifySegment(
@@ -2091,7 +2515,9 @@ export function classifySegment(
 	const effectiveEnv = { ...sharedEnv, ...segmentEnv };
 	const cmd = commandBasename(rest[0]);
 	const args = rest.slice(1);
-	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv);
+	// git reads its env with the inline prefix (`HUSKY=0 git commit`), but bash
+	// expanded git's path words before that prefix applied (#3997 H1, F4).
+	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv, sharedEnv);
 	if (cmd === "node" || cmd === "nodejs")
 		return classifyNode(
 			args,
@@ -2100,6 +2526,15 @@ export function classifySegment(
 			cwd,
 			repositoryIdentity(repositoryRoot(originCwd)),
 		);
+	// #4044: a `cd` this scan could not resolve leaves `cwd === null`. The
+	// node_modules rules then judge the PAYLOAD cwd, failing closed: a linked
+	// lane stays denied after `cd $(pwd) && npm ci`, and the hook's own cwd
+	// (a real node_modules) is never the answer.
+	const projectCwd = cwd ?? originCwd ?? undefined;
+	if (cmd === "npm" || cmd === "npx")
+		return classifyNpm(cmd, args, projectCwd, sharedEnv);
+	if (cmd === "find" || DELETE_COMMANDS.has(cmd))
+		return classifyNodeModulesDelete(cmd, args, projectCwd, sharedEnv);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
@@ -2496,35 +2931,89 @@ function findPipedCiVerdictStatusRead(segments) {
  * per region too, ahead of the per-segment classification, since it needs
  * every segment of the region at once rather than one at a time.
  *
+ * A substitution's output is not statically known (#3997), so a command
+ * holding one is scanned in two readings, and the first deny wins: the
+ * UNKNOWN reading keeps each {@link SUBSTITUTION_MARK} as one opaque piece of
+ * word text (no rule word matches it, and a path holding it cannot be
+ * resolved), then the EMPTY reading removes the marks -- the text master
+ * scanned, where an unquoted word made only of substitutions vanishes, as
+ * bash drops an empty unquoted expansion. Either reading alone misses a
+ * hazard: `git $(:) stash` is only `git stash` when the output is empty, and
+ * `git worktree remove $(echo wt)` only names a path when it is not.
+ *
  * @param {string} commandText
  * @param {string} [cwd] the PreToolUse payload's own cwd, threaded to every segment
  * @returns {DenyRule | null}
  */
 export function findDeny(commandText, cwd) {
-	const regions = scannableRegions(commandText);
-	/** @type {Record<string, string>} */
-	const sharedEnv = {};
-	for (let index = 0; index < regions.length; index++) {
-		const env = index === 0 ? sharedEnv : { ...sharedEnv };
-		let effectiveCwd = cwd;
-		const segments = splitSegmentsWithSeparators(regions[index]);
-		const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
-		if (ciVerdictRule) return ciVerdictRule;
-		const chainRule = findUngatedWriteInChain(segments);
-		if (chainRule) return chainRule;
-		for (const { text: segment } of segments) {
-			const rule = classifySegment(segment, env, effectiveCwd, cwd);
-			if (rule) return rule;
-			const words = stripCommandGroupAndRunnerPrefixes(splitWords(segment));
-			if (words[0] === "cd" && words[1] && effectiveCwd) {
-				const target = words[1].startsWith("~")
-					? join(process.env.HOME ?? "", words[1].slice(1))
-					: words[1];
-				effectiveCwd = resolve(effectiveCwd, target);
+	const unknownReading = scannableRegions(commandText);
+	const readings = unknownReading.some((region) =>
+		region.includes(SUBSTITUTION_MARK),
+	)
+		? [
+				unknownReading,
+				unknownReading.map((region) =>
+					region.replaceAll(SUBSTITUTION_MARK, ""),
+				),
+			]
+		: [unknownReading];
+	for (const regions of readings) {
+		/** @type {Record<string, string>} */
+		const sharedEnv = {};
+		for (let index = 0; index < regions.length; index++) {
+			const env = index === 0 ? sharedEnv : { ...sharedEnv };
+			/** @type {string | null | undefined} */
+			let effectiveCwd = cwd;
+			/** @type {Array<string | null | undefined>} the cwd to restore at each `)`: a `( cd x && … )` subshell's `cd` never leaks out */
+			const subshellCwds = [];
+			const segments = splitSegmentsWithSeparators(regions[index]);
+			const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
+			if (ciVerdictRule) return ciVerdictRule;
+			const chainRule = findUngatedWriteInChain(segments);
+			if (chainRule) return chainRule;
+			for (const { text: segment, sep } of segments) {
+				for (const ch of sep ?? "") {
+					if (ch === "(") subshellCwds.push(effectiveCwd);
+					else if (ch === ")" && subshellCwds.length > 0)
+						effectiveCwd = subshellCwds.pop();
+				}
+				const rule = classifySegment(segment, env, effectiveCwd, cwd);
+				if (rule) return rule;
+				effectiveCwd = cwdAfterSegment(segment, effectiveCwd, env);
 			}
 		}
 	}
 	return null;
+}
+
+/**
+ * The effective cwd after one segment runs: moved by `cd <dir>`/`pushd <dir>`
+ * (flags `-L`/`-P`/`-e`/`-@` and `--` skipped; a bare `cd` is `~`), through
+ * {@link resolveShellPath} like every other path argument (#3988). `null`
+ * (statically unknown) after a target that cannot be resolved, `cd -`, a bare
+ * `pushd` (swaps with the stack) or `popd`; a later absolute `cd` recovers a
+ * known cwd. Assumes the `cd` succeeded and is not backgrounded or piped
+ * (documented blind spot: `cd x & …`, `cd x | …`), and resolves the target
+ * logically even after `-P` (documented blind spot: `cd -P lnk/..`).
+ *
+ * @param {string} segment
+ * @param {string | null | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {string | null | undefined}
+ */
+function cwdAfterSegment(segment, cwd, env) {
+	const words = stripCommandGroupAndRunnerPrefixes(splitWords(segment));
+	const command = words[0];
+	if (command === "popd") return null;
+	if (command !== "cd" && command !== "pushd") return cwd;
+	let k = 1;
+	while (k < words.length && /^-[LPe@]+$/.test(words[k])) k++;
+	if (words[k] === "--") k++;
+	const target = words[k] ?? (command === "cd" ? "~" : undefined);
+	if (target === undefined || target === "-") return null;
+	// Logical, like bash's default `cd -L`: `cd lnk/..` lands beside `lnk`.
+	const resolved = resolveShellPath(target, cwd, env, true);
+	return resolved.reason === undefined ? resolved.path : null;
 }
 
 /**
