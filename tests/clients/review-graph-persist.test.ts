@@ -24,6 +24,7 @@ import {
 	waitForReviewGraphPersistsForTests,
 } from "../../clients/review-graph/builder.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import { collectMemorySampleSubsystems } from "../../clients/memory-sampler.js";
 import {
 	flushReviewGraphLogSync,
 	logReviewGraph,
@@ -142,6 +143,31 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 	});
 	it("defaults to the measured 500,000-element ceiling (#936)", () => {
 		expect(GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT).toBe(500_000);
+	});
+	it("memory samples observe and clear the real persist-worker heap slot (#4129)", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+		try {
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.reviewGraph,
+			).toBeNull();
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			await waitForReviewGraphPersistsForTests();
+			let sampled =
+				collectMemorySampleSubsystems(null).persistWorkers.reviewGraph;
+			for (let attempt = 0; attempt < 20 && !sampled; attempt += 1) {
+				await new Promise((resolve) => setImmediate(resolve));
+				sampled =
+					collectMemorySampleSubsystems(null).persistWorkers.reviewGraph;
+			}
+			expect(sampled?.heapUsedBytes).toBeGreaterThan(0);
+			await terminateReviewGraphPersistWorkerForTests();
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.reviewGraph,
+			).toBeNull();
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("entry-budget truncation remains visibly partial through persistence", async () => {

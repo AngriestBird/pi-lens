@@ -22,6 +22,7 @@ import {
 	isRapidHeapGrowth,
 	MEMORY_SAMPLE_TURN_INTERVAL,
 	recordMemorySampleOutcome,
+	recordMajorGcForTests,
 	resetMemorySamplerCadence,
 	shouldEmitMemorySample,
 	shouldEmitMemorySampleAdaptive,
@@ -39,7 +40,10 @@ import {
 	WordIndexFileTable,
 	WordPostingList,
 } from "../../clients/word-index-store.js";
-import { serializeWordIndex } from "../../clients/word-index.js";
+import {
+	recordPersistedWordIndexWireBytes,
+	serializeWordIndex,
+} from "../../clients/word-index.js";
 import { PathKeyedMap } from "../../clients/path-keyed-map.js";
 import { normalizeEphemeralMapKey } from "../../clients/path-utils.js";
 import { createLSPClient } from "../../clients/lsp/client.js";
@@ -160,7 +164,8 @@ describe("toMemoryProcessUsage (pure reshape)", () => {
 			heapUsedBytes: 60,
 			externalBytes: 20,
 			arrayBuffersBytes: 10,
-			heapSettledBytes: expect.any(Number),
+			heapSettledBytes: null,
+			heapSettledMajorGcCount: 0,
 			externalNonBufferBytes: 10,
 			peakWorkingSetBytes: null,
 		});
@@ -253,7 +258,7 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			// bytes), each carrying the fixed per-list header charge.
 			residentBytes: 2 * (8 + WORD_POSTING_LIST_OVERHEAD_BYTES),
 			forwardEntries: 1,
-			wireBytes: 0,
+			wireBytes: null,
 		});
 	});
 
@@ -268,7 +273,12 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 			fileMtimes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
 			fileSizes: new PathKeyedMap<number>(normalizeEphemeralMapKey),
 		};
-		serializeWordIndex(wordIndex);
+		const serialized = serializeWordIndex(wordIndex);
+		recordPersistedWordIndexWireBytes(
+			serialized,
+			Buffer.byteLength(JSON.stringify(serialized), "utf8"),
+		);
+		recordMajorGcForTests();
 		const sample = buildMemorySample(null, fakeMem());
 		expect(sample.process.heapSettledBytes).toBeGreaterThan(0);
 		expect(Number.isFinite(sample.process.heapSettledBytes)).toBe(true);
@@ -279,11 +289,6 @@ describe("collectMemorySampleSubsystems (O(1)/O(bounded-cache-size) live reads)"
 		expect(sample.subsystems.wordIndex).toBeNull();
 		const indexed = collectMemorySampleSubsystems(wordIndex).wordIndex;
 		expect(indexed?.wireBytes).toBeGreaterThan(0);
-		if (sample.subsystems.treeSitter) {
-			expect(
-				sample.subsystems.treeSitter.treeCacheWasmEstimateBytes,
-			).toBeGreaterThanOrEqual(0);
-		}
 		expect(sample.subsystems.persistWorkers).toHaveProperty("reviewGraph");
 		expect(sample.subsystems.persistWorkers).toHaveProperty("projectSnapshot");
 	});

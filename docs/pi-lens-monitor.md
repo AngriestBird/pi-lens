@@ -6,18 +6,18 @@ memory_sample records include bounded attribution fields for diagnosing host
 memory growth:
 
 - process.heapUsedBytes is the reading at sample time;
-  process.heapSettledBytes is updated after the latest major-GC performance
-  entry (and remains the last known value when no GC entry is available).
+  process.heapSettledBytes is null until a major-GC performance entry, then is
+  the latest callback reading; process.heapSettledMajorGcCount makes its age
+  visible.
 - process.externalNonBufferBytes is externalBytes - arrayBuffersBytes.
 - subsystems.persistWorkers.reviewGraph and
   subsystems.persistWorkers.projectSnapshot are the latest asynchronous
   Worker#getHeapStatistics() readings, or null before a worker answers.
 - subsystems.treeSitter.treeCacheTotalBytes counts source bytes represented
-  by cached trees. treeCacheWasmEstimateBytes is a separate estimate of
-  linear memory at approximately 330 KiB per resident tree; do not conflate
-  the two.
-- subsystems.wordIndex.wireBytes is the byte length of the existing cached
-  serialized word-index wire form.
+  by cached trees. Native/WASM growth is attributed by
+  process.externalNonBufferBytes; no tree-count estimate is emitted.
+- subsystems.wordIndex.wireBytes is the byte length measured from the existing
+  snapshot persist's JSON string, and is null until that index is persisted.
 - samplerDurationMs measures the sampler's own record-assembly wall time,
   excluding the surrounding turn.
 

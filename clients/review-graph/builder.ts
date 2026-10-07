@@ -96,6 +96,10 @@ import type {
 	ReviewGraphPersistWorkerResult,
 } from "./persist-worker.js";
 import {
+	readWorkerHeapStatistics,
+	type PersistWorkerHeapStatistics,
+} from "../persist-worker-stats.js";
+import {
 	clearReviewGraphFileIr,
 	getFreshReviewGraphFileIr,
 	type ReviewGraphExtractionStatus,
@@ -2092,25 +2096,15 @@ let _workerDisabled = false;
 let _persistWorkerUnavailableReason: string | undefined;
 let _lastWorkerFallbackReasonForTests: string | undefined;
 
-export interface PersistWorkerHeapStatistics {
-	heapUsedBytes: number;
-	heapTotalBytes: number;
-	heapSizeLimitBytes: number;
-}
 let _persistWorkerHeapStatistics: PersistWorkerHeapStatistics | null = null;
 
 /** Refreshes a bounded, last-known view; Worker#getHeapStatistics is async. */
 export function refreshReviewGraphPersistWorkerHeapStatistics(): void {
 	const worker = _persistWorker;
 	if (!worker || typeof worker.getHeapStatistics !== "function") return;
-	void worker
-		.getHeapStatistics()
+	void readWorkerHeapStatistics(worker)
 		.then((stats) => {
-			_persistWorkerHeapStatistics = {
-				heapUsedBytes: stats.used_heap_size,
-				heapTotalBytes: stats.total_heap_size,
-				heapSizeLimitBytes: stats.heap_size_limit,
-			};
+			_persistWorkerHeapStatistics = stats;
 		})
 		.catch(() => {});
 }

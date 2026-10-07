@@ -26,7 +26,12 @@ import type { RuleScanResult } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { StartupScanContext } from "./startup-scan.js";
 import {
+	readWorkerHeapStatistics,
+	type PersistWorkerHeapStatistics,
+} from "./persist-worker-stats.js";
+import {
 	deserializeWordIndex,
+	recordPersistedWordIndexWireBytes,
 	serializeWordIndex,
 	type SerializedWordIndex,
 } from "./word-index.js";
@@ -1008,6 +1013,8 @@ interface PendingSnapshotBody {
 	dedupeFingerprints: string[];
 	/** Main-thread serialize time of the worker dispatch (#3789); the worker's own is 0. */
 	serializeMs?: number;
+	/** Word-index value length measured in the same snapshot JSON string. */
+	wordIndexWireBytes?: number | undefined;
 }
 
 interface SnapshotPersistRecord {
@@ -1050,11 +1057,6 @@ let _lastSnapshotPersistErrorForTests: string | undefined;
 let _snapshotExiting = false;
 let _snapshotWorkerBodyWritesForTests = 0;
 
-export interface PersistWorkerHeapStatistics {
-	heapUsedBytes: number;
-	heapTotalBytes: number;
-	heapSizeLimitBytes: number;
-}
 let _snapshotPersistWorkerHeapStatistics: PersistWorkerHeapStatistics | null =
 	null;
 
@@ -1062,14 +1064,9 @@ let _snapshotPersistWorkerHeapStatistics: PersistWorkerHeapStatistics | null =
 export function refreshProjectSnapshotPersistWorkerHeapStatistics(): void {
 	const worker = _snapshotPersistWorker;
 	if (!worker || typeof worker.getHeapStatistics !== "function") return;
-	void worker
-		.getHeapStatistics()
+	void readWorkerHeapStatistics(worker)
 		.then((stats) => {
-			_snapshotPersistWorkerHeapStatistics = {
-				heapUsedBytes: stats.used_heap_size,
-				heapTotalBytes: stats.total_heap_size,
-				heapSizeLimitBytes: stats.heap_size_limit,
-			};
+			_snapshotPersistWorkerHeapStatistics = stats;
 		})
 		.catch(() => {});
 }
@@ -1580,12 +1577,46 @@ function promoteSnapshotBody(
 function serializeSnapshotBody(snapshot: ProjectSnapshot): {
 	bytes: Uint8Array<ArrayBuffer>;
 	serializeMs: number;
+	wordIndexWireBytes?: number | undefined;
 } {
 	const started = performance.now();
-	const bytes = new TextEncoder().encode(
-		JSON.stringify(storedSnapshot(snapshot)),
-	);
-	return { bytes, serializeMs: performance.now() - started };
+	const json = JSON.stringify(storedSnapshot(snapshot));
+	const wordIndexWireBytes = measureTopLevelJsonValueBytes(json, "wordIndex");
+	const bytes = new TextEncoder().encode(json);
+	return {
+		bytes,
+		serializeMs: performance.now() - started,
+		wordIndexWireBytes,
+	};
+}
+
+/** Measure an already-stringified top-level JSON value without stringifying it again. */
+function measureTopLevelJsonValueBytes(
+	json: string,
+	key: string,
+): number | undefined {
+	let cursor = 1;
+	while (cursor < json.length && json[cursor] !== "}") {
+		if (json[cursor] === ",") cursor += 1;
+		while (/\s/.test(json[cursor] ?? "")) cursor += 1;
+		const keyEnd = skipJsonValue(json, cursor);
+		let parsedKey: unknown;
+		try {
+			parsedKey = JSON.parse(json.slice(cursor, keyEnd));
+		} catch {
+			return undefined;
+		}
+		cursor = keyEnd;
+		while (/\s/.test(json[cursor] ?? "")) cursor += 1;
+		if (json[cursor] !== ":") return undefined;
+		const valueStart = cursor + 1;
+		const valueEnd = skipJsonValue(json, valueStart);
+		if (parsedKey === key) {
+			return Buffer.byteLength(json.slice(valueStart, valueEnd), "utf8");
+		}
+		cursor = valueEnd;
+	}
+	return undefined;
 }
 
 function writeSnapshotBodyOnMainThread(
@@ -1616,7 +1647,10 @@ function writeSnapshotBodyOnMainThread(
 		});
 	}
 	try {
-		const { bytes, serializeMs } = serializeSnapshotBody(pending.snapshot);
+		const { bytes, serializeMs, wordIndexWireBytes } = serializeSnapshotBody(
+			pending.snapshot,
+		);
+		pending.wordIndexWireBytes = wordIndexWireBytes;
 		const rawBytes = bytes.byteLength;
 		const fingerprint = fingerprintProjectSnapshotJson(
 			bytes,
@@ -1668,6 +1702,10 @@ function writeSnapshotBodyOnMainThread(
 			},
 		);
 		if (!promoted) return;
+		recordPersistedWordIndexWireBytes(
+			pending.snapshot.wordIndex,
+			pending.wordIndexWireBytes,
+		);
 		reconcileAuthoritativeAfterWrite(pending, rawBytes);
 		logSnapshotPersistSuccess(pending, fingerprint, {
 			rawBytes,
@@ -1800,6 +1838,10 @@ function handleSnapshotWorkerResult(
 			completeSnapshotPersist(pending);
 			return;
 		}
+		recordPersistedWordIndexWireBytes(
+			pending.snapshot.wordIndex,
+			pending.wordIndexWireBytes,
+		);
 		reconcileAuthoritativeAfterWrite(pending, result.rawBytes);
 		logSnapshotPersistSuccess(pending, result.semanticFingerprint, {
 			rawBytes: result.rawBytes,
@@ -1854,6 +1896,7 @@ function dispatchSnapshotPersist(pending: PendingSnapshotBody): void {
 		return;
 	}
 	pending.serializeMs = serialized.serializeMs;
+	pending.wordIndexWireBytes = serialized.wordIndexWireBytes;
 	const id = ++_snapshotWorkerRequestId;
 	_snapshotWorkerRequests.set(id, pending);
 	const request: ProjectSnapshotPersistWorkerRequest = {

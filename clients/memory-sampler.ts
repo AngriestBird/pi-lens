@@ -26,8 +26,8 @@
  * `wasmMemory` module option with a hand-built `WebAssembly.Memory` (a
  * stability risk for an observability-only feature, given a memory-import
  * mismatch would break structural analysis entirely). `process.memoryUsage()`
- * `arrayBuffers` is used as the process-wide proxy instead — WASM linear
- * memory backs an ArrayBuffer, so it is already included there.
+ * `external - arrayBuffers` is used as the process-wide WASM proxy; observed
+ * runtime growth is not reliably reflected in `arrayBuffers`.
  */
 
 import { PerformanceObserver, constants, performance } from "node:perf_hooks";
@@ -48,12 +48,22 @@ import {
 } from "./project-snapshot.js";
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
 import { getLspDocumentTextRetentionSnapshot } from "./lsp/client.js";
+import type { PersistWorkerHeapStatistics } from "./persist-worker-stats.js";
 
 /** Every N turns, emit one `memory_sample` latency.log line (#1123 item 2). */
 export const MEMORY_SAMPLE_TURN_INTERVAL = 10;
 
 const MAJOR_GC_KIND = constants.NODE_PERFORMANCE_GC_MAJOR;
-let settledHeapUsedBytes = process.memoryUsage().heapUsed;
+let settledHeapUsedBytes: number | null = null;
+let majorGcCount = 0;
+function recordMajorGc(): void {
+	settledHeapUsedBytes = process.memoryUsage().heapUsed;
+	majorGcCount += 1;
+}
+/** Test seam for the major-GC state transition. */
+export function recordMajorGcForTests(): void {
+	recordMajorGc();
+}
 try {
 	const gcObserver = new PerformanceObserver((list) => {
 		for (const entry of list.getEntries()) {
@@ -63,7 +73,7 @@ try {
 				}
 			).detail;
 			if (detail?.kind === MAJOR_GC_KIND) {
-				settledHeapUsedBytes = process.memoryUsage().heapUsed;
+				recordMajorGc();
 			}
 		}
 	});
@@ -143,8 +153,10 @@ export interface MemoryProcessUsage {
 	heapTotalBytes: number;
 	externalBytes: number;
 	arrayBuffersBytes: number;
-	/** Heap used after the most recent major GC performance entry. */
-	heapSettledBytes: number;
+	/** Heap used after the most recent major GC performance entry, or null before one. */
+	heapSettledBytes: number | null;
+	/** Number of major GC entries represented by heapSettledBytes. */
+	heapSettledMajorGcCount: number;
 	/** External memory excluding ArrayBuffer-backed memory (WASM proxy). */
 	externalNonBufferBytes: number;
 	/** OS high-water mark (#1999): `process.resourceUsage().maxRSS` × 1024.
@@ -177,6 +189,7 @@ export function toMemoryProcessUsage(
 		externalBytes: mem.external,
 		arrayBuffersBytes: mem.arrayBuffers,
 		heapSettledBytes: settledHeapUsedBytes,
+		heapSettledMajorGcCount: majorGcCount,
 		externalNonBufferBytes: Math.max(0, mem.external - mem.arrayBuffers),
 		peakWorkingSetBytes:
 			typeof maxKb === "number" && Number.isFinite(maxKb) && maxKb > 0
@@ -217,7 +230,7 @@ export interface MemorySampleSubsystems {
 		residentBytes: number;
 		forwardEntries: number;
 		/** JSON wire form retained by the existing serializer cache. */
-		wireBytes: number;
+		wireBytes: number | null;
 	} | null;
 	/** `null` when the shared tree-sitter client hasn't been created yet
 	 *  (WASM runtime never touched this session) or has aborted. */
@@ -229,8 +242,6 @@ export interface MemorySampleSubsystems {
 		treeCacheSize: number;
 		treeCacheMaxSize: number;
 		treeCacheTotalBytes: number;
-		/** Estimate: resident tree count × measured ~330 KiB/tree WASM high-water. */
-		treeCacheWasmEstimateBytes: number;
 	} | null;
 	persistWorkers: {
 		reviewGraph: PersistWorkerHeapStatistics | null;
@@ -244,12 +255,6 @@ export interface MemorySampleSubsystems {
 		/** Measured retained size of one `{ turnSeq, checkedAt }` cache entry. */
 		estimatedBytes: number;
 	};
-}
-
-interface PersistWorkerHeapStatistics {
-	heapUsedBytes: number;
-	heapTotalBytes: number;
-	heapSizeLimitBytes: number;
 }
 
 /** Session-age ridealong (#1999): lets growth-vs-age curves be plotted from
@@ -318,7 +323,6 @@ export function collectMemorySampleSubsystems(
 					treeCacheSize: cacheStats.size,
 					treeCacheMaxSize: cacheStats.maxSize,
 					treeCacheTotalBytes: cacheStats.totalBytes,
-					treeCacheWasmEstimateBytes: cacheStats.size * 330 * 1024,
 				};
 			})()
 		: null;
