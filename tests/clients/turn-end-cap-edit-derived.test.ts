@@ -73,6 +73,8 @@ interface Scan {
 	knip: Array<Record<string, unknown>>;
 	/** The next knip scan fails (a timeout), leaving the last good cache. */
 	knipFails?: boolean;
+	/** Host flags turned on for the turn. */
+	flags?: Set<string>;
 	deadCode: Array<Record<string, unknown>>;
 }
 
@@ -110,7 +112,7 @@ function makeRig(prefix: string): Rig {
 function makeDeps(rig: Rig) {
 	return {
 		ctxCwd: rig.cwd,
-		getFlag: () => false,
+		getFlag: (name: string) => rig.scan.flags?.has(name) ?? false,
 		dbg: () => {},
 		runtime: rig.runtime,
 		cacheManager: rig.cacheManager,
@@ -593,6 +595,102 @@ describe("call-graph impact advisory vs the cap (#3813)", () => {
 
 				nextTurn(rig, 3);
 				expect(await endTurn(rig)).not.toContain("liveCaller");
+			} finally {
+				rig.cleanup();
+			}
+		},
+	);
+});
+
+// Decision pin, not a feature: these two advisories are COUNT-AND-POINTER
+// nudges ("N warnings; use lens_diagnostics mode=delta"), built from a
+// per-turn collector that `beginTurn` itself clears, and their full content is
+// persisted in a report the pull surface reads. A cut one costs the pointer,
+// never the findings. Recurrence it prevents: treating them like the
+// item-bearing advisories above and re-offering a "this turn" count on a turn
+// whose edits it does not describe (#3813 class sweep, PR #3900 r1 F4).
+describe("pointer-only advisories keep their pull record when the cap cuts them (#3813)", () => {
+	const POINTER_CELLS = [
+		{ cell: "fits (control)", filler: 300, shown: true },
+		{ cell: "fully cut", filler: 1000, shown: false },
+	] as const;
+
+	it.each(POINTER_CELLS)(
+		"code-quality, $cell: the persisted report holds the warnings",
+		async ({ filler, shown }) => {
+			const rig = makeRig("pi-lens-3813-code-quality-");
+			try {
+				fillerBlocker(rig, filler);
+				const edited = touch(rig, "edited.ts");
+				rig.runtime.recordCodeQualityWarnings([
+					{
+						id: "cq:1",
+						filePath: edited,
+						displayPath: "edited.ts",
+						line: 1,
+						severity: "warning",
+						tool: "ast-grep",
+						rule: "too-long",
+						message: "function too long",
+						category: "maintainability",
+						origin: "dispatch",
+					},
+				]);
+
+				const first = await endTurn(rig);
+				expect(first.includes("Code-quality warnings introduced")).toBe(shown);
+				const report = rig.cacheManager.readCache<{
+					summary: { warnings: number };
+				}>("code-quality-warnings", rig.cwd)?.data;
+				expect(report?.summary.warnings).toBe(1);
+
+				nextTurn(rig, 2);
+				expect(await endTurn(rig)).not.toContain(
+					"Code-quality warnings introduced",
+				);
+			} finally {
+				rig.cleanup();
+			}
+		},
+	);
+
+	it.each(POINTER_CELLS)(
+		"actionable warnings, $cell: the persisted report holds the warnings",
+		async ({ filler, shown }) => {
+			const rig = makeRig("pi-lens-3813-actionable-");
+			try {
+				rig.scan.flags = new Set(["lens-actionable-warnings"]);
+				fillerBlocker(rig, filler);
+				const edited = touch(rig, "edited.ts");
+				rig.runtime.recordActionableWarnings([
+					{
+						id: "aw:1",
+						filePath: edited,
+						displayPath: "edited.ts",
+						line: 1,
+						severity: "warning",
+						tool: "ast-grep",
+						rule: "no-console",
+						message: "console call",
+						actions: [],
+						suppressed: false,
+						origin: "dispatch",
+					},
+				]);
+
+				const first = await endTurn(rig);
+				expect(first.includes("Fixable warnings introduced this turn")).toBe(
+					shown,
+				);
+				const report = rig.cacheManager.readCache<{
+					summary: { unsuppressed: number };
+				}>("actionable-warnings", rig.cwd)?.data;
+				expect(report?.summary.unsuppressed).toBe(1);
+
+				nextTurn(rig, 2);
+				expect(await endTurn(rig)).not.toContain(
+					"Fixable warnings introduced this turn",
+				);
 			} finally {
 				rig.cleanup();
 			}
