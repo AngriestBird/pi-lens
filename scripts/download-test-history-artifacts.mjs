@@ -32,7 +32,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 export const MAX_ATTEMPTS = 4;
-export const MAX_RUNS_PER_NIGHT = 150;
+export const MAX_RUNS_PER_NIGHT = 100;
 export const SELECT_OVERLAP_MS = 60 * 60 * 1000;
 export const LIST_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 export const METADATA_ONLY_MAX_BYTES = 1024;

@@ -32,9 +32,11 @@ jobs:
     # reached the push with unreviewed rollup code).
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # #4030: bounds a hang against GitHub's 360-min default. At the nightly cap
-    # (150 runs, about 600 ZIPs of about 0.85 MB) the job measured PENDING the
-    # branch dispatch quoted in the PR body.
+    # #4030: bounds a hang against GitHub's 360-min default. Measured from a
+    # dev host: listing plus 194 ZIPs took 361 s (about 1.7 s a ZIP), and the
+    # rollup of 191 new parts 3.4 s. At the nightly cap (100 shard-era runs,
+    # about 400 ZIPs) that is about 11 min; the PR body quotes the runner's
+    # own time from a branch dispatch.
     timeout-minutes: 30
     permissions:
       actions: read
@@ -71,7 +73,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-history-artifacts"
           # #4030: incremental ingest. Whole CI runs newer than the watermark,
-          # at most 150 a night, oldest first; 5xx responses retry.
+          # at most 100 a night, oldest first; 5xx responses retry.
           node "$RUNNER_TEMP/history-scripts/download-test-history-artifacts.mjs" \
             --repository "$GITHUB_REPOSITORY" \
             --since "$SINCE" \

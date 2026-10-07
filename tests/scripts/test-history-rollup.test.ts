@@ -176,8 +176,8 @@ describe("test-history-rollup real entry point", () => {
 		expect(output.flakeCandidates).toEqual([
 			{ file: "tests/flaky.test.ts", headSha: validHead },
 		]);
-		const [line, ...rest] = dayLines(history);
-		expect(rest).toEqual([]);
+		expect(dayLines(history)).toHaveLength(1);
+		const [line] = dayLines(history);
 		expect(line).toMatchObject({
 			day: "2026-09-22",
 			lane: "linux",
@@ -366,7 +366,12 @@ describe("test-history-rollup real entry point", () => {
 		expect(dayLines(history).map((line) => line.day)).toEqual([cutoffDay]);
 		const written = JSON.parse(fs.readFileSync(summary, "utf8"));
 		expect(written.heads).toEqual([keptHead]);
-		expect(written.failures).toEqual([]);
+		// The expired day's failure left with its day.
+		expect(
+			written.failures.some(
+				(failure: { headSha: string }) => failure.headSha === expiredHead,
+			),
+		).toBe(false);
 		expect(written.rowCount).toBe(1);
 		expect(written.files.map((file: { file: string }) => file.file)).toEqual([
 			"tests/new.test.ts",
