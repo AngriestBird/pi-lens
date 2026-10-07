@@ -605,6 +605,47 @@ describe("pr-worktree CLI open nested-destination rail", () => {
 	});
 });
 
+// #4044 (2026-10-07): a lane's `npm ci` emptied the main checkout's shared
+// install and the first signal was a worker's complaint a minute later.
+// Recurrence these cases catch: an emptied or missing install that `open` (the
+// step every lane and review starts with) reports nothing about. The count goes
+// to stderr so the path `open` prints on stdout stays machine-readable.
+describe("pr-worktree CLI open reports the main install (#4044)", () => {
+	const openArgv = ["open", "9001", "--head", "--name", "count-1"];
+	const ghExec = () => PR_HEAD_JSON;
+
+	it("prints the entry count on stderr and keeps stdout a bare path", () => {
+		const fixture = makeFixture();
+		const result = fixtureRun(fixture, openArgv, { ghExec });
+		expect(result.status).toBe(0);
+		expect(result.stdout).toEqual([
+			path.join(fixture.worktreesRoot, "count-1"),
+		]);
+		expect(result.stderr).toEqual(["main node_modules: 1 entries"]);
+	});
+
+	it("warns EMPTY when the install holds nothing but npm's hidden lockfile", () => {
+		const fixture = makeFixture();
+		const nm = path.join(fixture.repo, "node_modules");
+		fs.rmSync(path.join(nm, "shared-sentinel.txt"));
+		fs.writeFileSync(path.join(nm, ".package-lock.json"), "{}\n");
+		const result = fixtureRun(fixture, openArgv, { ghExec });
+		expect(result.status).toBe(0);
+		expect(result.stderr.join("\n")).toContain(
+			"WARNING: main node_modules is EMPTY",
+		);
+		expect(result.stderr.join("\n")).toContain("#4044");
+	});
+
+	it("says absent when the main checkout has no node_modules at all", () => {
+		const fixture = makeFixture();
+		fs.rmSync(path.join(fixture.repo, "node_modules"), { recursive: true });
+		const result = fixtureRun(fixture, openArgv, { ghExec });
+		expect(result.status).toBe(0);
+		expect(result.stderr.join("\n")).toContain("main node_modules: absent");
+	});
+});
+
 describe("pr-worktree CLI close", () => {
 	it("unlinks a symlinked node_modules and leaves the link target untouched", () => {
 		const fixture = makeFixture();

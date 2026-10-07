@@ -12,7 +12,7 @@ import base from "../stryker.config.mjs";
 import {
 	augmentAndSummarize,
 	buildRunConfig,
-	capMutationFiles,
+	selectMutationFiles,
 	changedLineWeights,
 	compiledJsPath,
 	decideMutationOutcome,
@@ -23,17 +23,20 @@ import {
 	describeStrykerFailure,
 	estimateAffordableMutants,
 	formatCapNotice,
+	collectChangedRanges,
 	isCompiledMutationSource,
 	isMutationSourceFile,
 	isScriptMutationFile,
 	mapRelatedTests,
 	mutationLaneExclusion,
+	parseQueueEntry,
 	DEFAULT_MAX_TESTS,
 	DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 	MUTATION_BUDGET_MINUTES,
 	mutationRangePatterns,
 	parseChangedLineRanges,
 	parseDryRunCost,
+	partitionMutationFiles,
 	planResample,
 	sampleRangesDeterministically,
 } from "./lib/stryker-diff.mjs";
@@ -103,6 +106,9 @@ function argumentValue(name, fallback) {
 
 const baseRef = argumentValue("--base", "origin/master");
 const maxFiles = Number(argumentValue("--max-files", DEFAULT_MAX_FILES));
+const totalMaxFiles = Number(argumentValue("--total-max-files", maxFiles));
+const shardIndex = Number(argumentValue("--shard-index", 0));
+const shardCount = Number(argumentValue("--shard-count", 1));
 const maxRanges = Number(argumentValue("--max-ranges", DEFAULT_MAX_RANGES));
 const budgetMinutes = Number(
 	argumentValue("--budget-minutes", MUTATION_BUDGET_MINUTES),
@@ -116,6 +122,17 @@ const budgetMs = Math.round(budgetMinutes * 60_000);
 // `github.event.pull_request.head.sha` from the workflow; local runs (no
 // PR event) fall back to `git rev-parse HEAD`.
 const headShaArg = argumentValue("--head-sha", null);
+// #4005: the nightly report mutates the runtime tree only (clients/, tools/,
+// mcp/, index.ts). Without this flag the driver also mutates changed
+// scripts/**/*.mjs, which compete for the --max-files slots by changed-line
+// weight and push runtime files over the cap on a busy day.
+const runtimeOnly = process.argv.includes("--runtime-only");
+// #4005: the nightly's carry-over queue. `--pending-file` lists (one per line,
+// `path@sha` or `path`) the runtime files earlier nights skipped over the cap or
+// could not finish; they are mutated first, each against its own base (r4), so
+// its earlier changed lines are in range. The list comes from an issue body a
+// maintainer can edit: every entry is re-validated here (`parseQueueEntry`).
+const pendingFileArg = argumentValue("--pending-file", null);
 
 // #3853: the driver forks vitest pools for the coverage probes and again inside
 // Stryker, so its whole run takes ONE shared test-suite slot, acquired once
@@ -148,7 +165,7 @@ function changedMutationFiles() {
 			.split("\n")
 			.map((file) => file.trim())
 			.filter(Boolean)
-			.filter(isMutationSourceFile);
+			.filter(runtimeOnly ? isCompiledMutationSource : isMutationSourceFile);
 	} catch (error) {
 		console.error(
 			`mutation diff: could not read ${baseRef}...HEAD: ${error.message}`,
@@ -172,30 +189,60 @@ function changedPaths() {
 	}
 }
 
-function changedLineRanges(files, { ignoreWhitespace = false } = {}) {
-	if (files.length === 0) return new Map();
+function readPending() {
+	if (!pendingFileArg) return new Map();
 	try {
-		return parseChangedLineRanges(
-			execFileSync(
-				"git",
-				[
-					"diff",
-					...(ignoreWhitespace ? ["-w"] : []),
-					"--unified=0",
-					"--diff-filter=AM",
-					`${baseRef}...HEAD`,
-					"--",
-					...files,
-				],
-				{ encoding: "utf8" },
-			),
-		);
+		const entries = new Map();
+		for (const line of readFileSync(pendingFileArg, "utf8").split("\n")) {
+			const entry = parseQueueEntry(line);
+			if (entry && !entries.has(entry.file) && existsSync(entry.file))
+				entries.set(entry.file, entry.base);
+		}
+		return entries;
 	} catch (error) {
 		console.error(
-			`mutation diff: could not read changed lines of ${baseRef}...HEAD: ${error.message}`,
+			`mutation diff: could not read ${pendingFileArg}: ${error.message}`,
 		);
 		process.exit(1);
 	}
+}
+const pendingBases = readPending();
+const pendingFiles = [...pendingBases.keys()];
+const pendingBaseOf = new Map(
+	[...pendingBases].filter(([, queueBase]) => queueBase !== null),
+);
+
+function changedLineRanges(files, { ignoreWhitespace = false } = {}) {
+	if (files.length === 0) return new Map();
+	return collectChangedRanges({
+		files,
+		baseRef,
+		baseOf: pendingBaseOf,
+		diff: (base, subset) => {
+			try {
+				return parseChangedLineRanges(
+					execFileSync(
+						"git",
+						[
+							"diff",
+							...(ignoreWhitespace ? ["-w"] : []),
+							"--unified=0",
+							"--diff-filter=AM",
+							`${base}...HEAD`,
+							"--",
+							...subset,
+						],
+						{ encoding: "utf8" },
+					),
+				);
+			} catch (error) {
+				console.error(
+					`mutation diff: could not read changed lines of ${base}...HEAD: ${error.message}`,
+				);
+				process.exit(1);
+			}
+		},
+	});
 }
 
 function gitHeadSha() {
@@ -241,8 +288,8 @@ function writeRunConfig(testFiles, { reuse = false } = {}) {
  * Writes the one canonical `reports/mutation/mutation.json` this run
  * produces, whether or not Stryker itself ran. `piLensMutationDiff` is a
  * non-standard top-level key alongside Stryker's own (schemaVersion, files,
- * …); it carries everything `scripts/mutation-report.mjs` and the sticky PR
- * comment need, most importantly `zeroMutants`, which is set on every path
+ * …); it carries everything `scripts/mutation-report.mjs` and the nightly
+ * tracking-issue body (scripts/stryker-nightly.mjs) need, most importantly `zeroMutants`, which is set on every path
  * that evaluates no mutants so a 0-mutant run can never be rendered as a
  * clean pass, and `partial`, set when a budget kill produced SOME results
  * (round 2 S2) but not all of them.
@@ -279,6 +326,9 @@ function baseMeta(extra) {
 		headSha: sha,
 		budgetMinutes,
 		maxFiles,
+		totalMaxFiles,
+		shardIndex,
+		shardCount,
 		maxRanges,
 		partial: null,
 		// #3592 item 2: the dry-run measurement's total (set once the
@@ -292,6 +342,9 @@ function baseMeta(extra) {
 		measuredTotalMutants: costEstimate?.totalMutants ?? null,
 		testSelection: testSelectionMeta,
 		incremental: incrementalMeta,
+		// #4005: the files this run took, so the nightly can tell which of them
+		// still need another night (sampled, budget-cut) and which are done.
+		filesSelected: files,
 		...extra,
 	};
 }
@@ -306,20 +359,33 @@ function logSurvivors(mutants) {
 }
 
 const allChangedPaths = changedPaths();
-const allFiles = changedMutationFiles();
+const allFiles = [...new Set([...pendingFiles, ...changedMutationFiles()])];
 // #3810 (from the #3797 review): which files the cap keeps is a matter of how
 // much each changed, ignoring whitespace-only lines, not of how it sorts.
-const { selected: files, skipped } = capMutationFiles(
-	allFiles,
-	maxFiles,
-	changedLineWeights(changedLineRanges(allFiles, { ignoreWhitespace: true })),
-);
+// #4005: carried-over files come first, in queue order, under the same cap.
+const { selected: files, skipped } = selectMutationFiles({
+	pending: pendingFiles,
+	windowFiles: allFiles,
+	maxFiles: totalMaxFiles,
+	weights: changedLineWeights(
+		changedLineRanges(allFiles, { ignoreWhitespace: true }),
+	),
+});
+const partitioned = partitionMutationFiles({
+	selected: files,
+	skipped,
+	shardIndex,
+	shardCount,
+});
+files.splice(0, files.length, ...partitioned.selected);
+skipped.splice(0, skipped.length, ...partitioned.skipped);
 if (skipped.length > 0) {
 	console.log(formatCapNotice(files.length, allFiles.length, skipped));
 }
 if (files.length === 0) {
-	const reason =
-		"no PR-changed lines fall under scripts/**/*.mjs, clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts";
+	const reason = runtimeOnly
+		? "no PR-changed lines fall under clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts (--runtime-only)"
+		: "no PR-changed lines fall under scripts/**/*.mjs, clients/**/*.ts, tools/**/*.ts, mcp/**/*.ts, or index.ts";
 	console.log(`mutation diff: no mutants evaluated; ${reason}`);
 	writeReport(
 		null,

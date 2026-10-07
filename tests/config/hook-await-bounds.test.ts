@@ -2234,7 +2234,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// 37 → 35 (#2660): evidence now reuses the resolver's rung instead of
 	// awaiting a second managed-binary lookup, removing the resolver's two
 	// unbounded awaits (the lookup and its caller-side reconstruction).
-	"clients/dispatch/runners/utils/runner-helpers.ts": 35,
+	// #3968: +1 — `coveringLaneAvailable` awaits each covering gate command
+	// (`ctx.hasTool`), whose probe carries the dispatcher's own 5s budget; the
+	// loop is bounded by the fact's fixed gate list, but like every sibling
+	// here it stays unbounded from the hook's signal until #2523 AC4.
+	"clients/dispatch/runners/utils/runner-helpers.ts": 36,
 	// #3541: `withHostFileMutationQueues` awaits the realpath of each path an
 	// LSP workspace edit names, which keys it the way pi keys its queue. It
 	// runs inside `applyWorkspaceEdit`, which the agent_settled actionable fix

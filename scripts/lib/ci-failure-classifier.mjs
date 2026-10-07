@@ -2,9 +2,8 @@
 //
 // Kept separate from the CLI so the log-reading heuristics and the
 // once-per-sequential-invocation rerun guard are unit-testable without a
-// GitHub event or a network call (the check-pr-title.mjs /
-// merge-train-warden.mjs pattern). The guard does not serialize CONCURRENT
-// invocations -- see the REAL SCOPE note on shouldTriggerRerun (review
+// GitHub event or a network call (the check-pr-title.mjs pattern). The guard does not serialize
+// CONCURRENT invocations -- see the REAL SCOPE note on shouldTriggerRerun (review
 // round 2, V2/V3) for exactly what is and isn't guaranteed under
 // concurrency.
 //
@@ -84,6 +83,32 @@ const MAX_LOG_BYTES = 2 * 1024 * 1024;
 // snapshot without rebuilding". The project label ("default") sits between
 // FAIL and the file path.
 const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
+
+const VITEST_TEST_FILE = /\S+\.(?:test|spec)\.[cm]?[jt]sx?/;
+
+/** Extract Vitest failure-banner identities from an already-normalized log. */
+export function extractVitestFailureIds(log) {
+	const ids = new Set();
+	for (const rawLine of log.split("\n")) {
+		const line = rawLine.match(/^\s*FAIL\b\s+(.*)$/)?.[1];
+		if (!line) continue;
+		const fileMatch = line.match(VITEST_TEST_FILE);
+		if (!fileMatch) continue;
+		const file = fileMatch[0];
+		const prefix = line.slice(0, fileMatch.index).trim();
+		const project = prefix
+			? prefix
+					.split(/\s+/)
+					.at(-1)
+					.replace(/^\|+|\|+$/g, "")
+			: "";
+		const suffix = line.slice(fileMatch.index + file.length);
+		const testName = suffix.match(/^\s*>\s*(.+?)\s*$/)?.[1];
+		const id = `${project ? `${project}::` : ""}${file}${testName ? ` › ${testName.replace(/\s+/g, " ")}` : ""}`;
+		ids.add(id);
+	}
+	return [...ids].sort();
+}
 // A file-level FAIL with no "> testname" -- a collection/import error never
 // reaches a single test, so vitest has no test name to print (review round
 // 1, F2/P2). Deliberately looser than FAIL_LINE: only used when FAIL_LINE
@@ -135,7 +160,7 @@ const TYPESCRIPT_ERROR =
 // The run's own final tally line (real log, same run): " Tests  1 failed |
 // 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
 // failed count here is unambiguous.
-const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
+export const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
 // #2839: vitest's timeout failure text (real log, run 34389495533 attempt 1,
 // job 102594125043, PR #2834): "Error: Test timed out in 5000ms." Vitest's
 // runner uses the same template for hooks: "Error: Hook timed out in 300ms."
@@ -686,8 +711,7 @@ export function buildCommentBody({
 }
 
 // ---------------------------------------------------------------------------
-// I/O layer. Every function below takes an injected `fetcher` (the
-// merge-train-warden.mjs pattern, scripts/lib/merge-train-warden.mjs:138) so
+// I/O layer. Every function below takes an injected `fetcher` so
 // the orchestration in runClassifier is testable against a mocked GitHub API
 // with no network call and no gh CLI dependency.
 // ---------------------------------------------------------------------------

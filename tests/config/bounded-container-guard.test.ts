@@ -27,6 +27,14 @@ const BOUNDED_HELPERS = new Set([
 ]);
 // Content-keyed, so an exemption must be re-confirmed after an edit.
 const FINITE_REASONS: Readonly<Record<string, string>> = {
+	// #3968: the runner-id identity leaf — written once per runner definition
+	// that enters a `RunnerRegistry` through `register` (the dispatch
+	// registry's own population, finite and ~50 today), never per file, per
+	// session or per user value. A named cap here would drop a legitimate
+	// runner id from the `lsp.servers.<id>.covers` validation — worse wrong
+	// than unbounded over a closed population.
+	"clients/dispatch/known-runner-ids.ts#177da0f7":
+		"runner-id identity written once per RunnerRegistry.register'd runner definition; finite vocabulary, bounded by the dispatch registry's own population",
 	"clients/session-scope.ts#toStartReason:e2e4ae2a":
 		"#3612 `sessionStores`: keyed by store name, one entry per `defineSessionStore` call at module load (a second declaration of a name throws); four stores today, and the session-scope sweep pins every name",
 };
@@ -626,6 +634,32 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 				minFlagged: 1,
 			});
 			expect(audit.problems, audit.problems.join("\n\n")).toEqual([]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	it("does not read runtime scratch below the walked root (#4097)", () => {
+		// Named recurrence (#4097): a root-level `index.ts` makes the scan walk
+		// the whole repo root, `.probe-home/` included, and a sibling worker
+		// removing its `worker-home-*` mid-walk killed the file with ENOENT. A
+		// class declared only below `.probe-home/` must not enter the class
+		// index either: the walk never reads scratch.
+		const root = fs.mkdtempSync(
+			path.join(process.cwd(), ".probe-bounded-root-"),
+		);
+		try {
+			const scratch = path.join(root, ".probe-home", "worker-home-a");
+			fs.mkdirSync(scratch, { recursive: true });
+			fs.writeFileSync(
+				path.join(scratch, "planted.ts"),
+				"export class PlantedHomeClass {}\n",
+			);
+			const entry = path.join(root, "index.ts");
+			fs.writeFileSync(
+				entry,
+				"const planted = new PlantedHomeClass();\nexport const touch = () => planted;\n",
+			);
+			expect(scan([entry]).scanned).toBe(0);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

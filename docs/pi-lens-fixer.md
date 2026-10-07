@@ -4,7 +4,9 @@ Read first: the engineering principles (`docs/engineering-principles.md`), then
 `AGENTS.md`, then `docs/pi-lens-subagent.md`, then this contract. Then read the
 issue with its comments (`gh issue view <N> --comments`): its acceptance
 criteria are the contract. Rules the principles or `AGENTS.md` already state
-are not repeated here.
+are not repeated here. Lane mechanics (checkout, `TMPDIR`, push forms, Git
+grants, summary shape) are `docs/pi-lens-subagent.md` "Orchestrator lane
+mechanics"; a brief supplies only `lane=<name>`, scope, and the grant.
 
 ## Before code
 
@@ -58,8 +60,11 @@ are not repeated here.
 
 ## Evidence
 
+- Use `scripts/mutate.mjs` for bounded hand mutations; it restores the target automatically, but only while the file still holds the mutated bytes. A leftover journal (`<file>.mutate-backup`) blocks the next run on that file; recover with `--restore`, which refuses and prints the three hashes when the file was edited since. If a crash left the file already at its original bytes, `--restore` also refuses; check the printed hashes and delete the journal by hand. `--restore` is crash recovery only: run against a live `mutate.mjs` run on the same file, it pulls that run's mutation, and that run then reports ERROR (exit 4).
+
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
   live under `tests/fixtures/witness/<slice>/`.
+- A PR claiming it "reduces failures" runs `node scripts/ci-test-diff.mjs <jobA> <jobB>`, quotes its summary, and explains any NEW failures before claiming a reduction.
 - Red-first has one stated exception: when the only red-first path needs broad
   harness setup, brittle mocks, or a test you would delete right after it
   proves the fix (shape 7: #1114, #1759), state the exception in `Tests`, name
@@ -73,21 +78,11 @@ are not repeated here.
   restore. Without Git authority, use a saved patch.
 - Hand-mutate only the NEW guard, branch, filter, or cap the PR is about, both
   directions, one row per direction, and quote the compile-valid red. The new
-  test is the only red under at least one mutation. Stryker samples at most 6
-  files and cannot give the red-first proof, so it does not replace this.
-- After the push, read the `Mutation diff` comment for your exact head (its
-  `Head:` line must match; `node scripts/ci-verdict.mjs <pr>` prints a
-  `MUTATION` line). Apply AGENTS.md's two-layer mutation acceptance: required
-  guard proof stays mandatory; exploratory behavioural survivors get bounded
-  caller probes and killed/equivalent/unresolved dispositions with reason and
-  owner. Fix demonstrated correctness gaps; do not turn score or unevaluated
-  population into a second merge gate. Name a 0-mutant, partial, stale, or
-  absent report in the body, never read it as clean. Use bounded hand probes
-  locally; a full Stryker campaign belongs to the CI advisory job. Render its
-  artifact with `node scripts/mutation-report.mjs --report <mutation.json>`.
-  The `mutation` job starts only after every required check passed on the head
-  (#3801): until then the `MUTATION` line reads `PENDING`, and after a red
-  required check or a red gate it reads `NOT RUN` with the reason.
+  test is the only red under at least one mutation. This is the whole PR
+  mutation layer (AGENTS.md, #4005): there is no per-PR Stryker job, comment, or
+  `MUTATION` line, and no survivor triage. The nightly Stryker report on master
+  is exploratory and is not read here. Use bounded hand probes locally; never
+  run a full Stryker campaign in a worktree.
 - Every record the `Observability` section names is asserted by a test in the
   diff and quoted in the body (#2642, #2647, #2649, #2654).
 - Every behavioural sentence (a docstring invariant, a memo, a registry

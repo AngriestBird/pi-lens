@@ -24,14 +24,12 @@ import { join, resolve } from "node:path";
 import yaml from "../../clients/deps/js-yaml.js";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { acquireTestLock, getLockPath } from "../../scripts/lib/suite-lock.mjs";
-import {
-	INCREMENTAL_FINGERPRINT_PATH,
-	probeReportsDirectory,
-} from "../../scripts/lib/mutation-test-selection.mjs";
+import { probeReportsDirectory } from "../../scripts/lib/mutation-test-selection.mjs";
 import {
 	augmentAndSummarize,
 	buildRunConfig,
 	capMutationFiles,
+	collectChangedRanges,
 	changedLineWeights,
 	compiledJsPath,
 	decideMutationOutcome,
@@ -45,8 +43,10 @@ import {
 	estimateAffordableMutants,
 	extractSnippet,
 	formatCapNotice,
+	formatQueueEntry,
 	isCompiledMutationSource,
 	isMutationSourceFile,
+	isQueueablePath,
 	isScriptMutationFile,
 	mapRelatedTests,
 	mutationLaneExclusion,
@@ -55,8 +55,10 @@ import {
 	mutationRangePatterns,
 	parseChangedLineRanges,
 	parseDryRunCost,
+	parseQueueEntry,
 	planResample,
 	sampleRangesDeterministically,
+	selectMutationFiles,
 } from "../../scripts/lib/stryker-diff.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 import {
@@ -73,19 +75,21 @@ const driver = readFileSync(
 	resolve(import.meta.dirname, "../../scripts/stryker-diff.mjs"),
 	"utf8",
 );
-// #3801: the `mutation (advisory)` job moved from mutation.yml into ci.yml (so
-// `needs:` can hold it behind the required checks); the cap is read from that
-// job, never from the first `timeout-minutes:` in the file.
+// #4005: the driver's only scheduled caller is the nightly job; the cap is read
+// from that job, never from the first `timeout-minutes:` in the file.
 const mutationJob = (
 	yaml.load(
 		readFileSync(
-			resolve(import.meta.dirname, "../../.github/workflows/ci.yml"),
+			resolve(
+				import.meta.dirname,
+				"../../.github/workflows/stryker-nightly.yml",
+			),
 			"utf8",
 		),
 	) as { jobs: Record<string, { "timeout-minutes"?: number }> }
-).jobs.mutation;
+).jobs.mutate;
 
-// lane: mutation (advisory) -- dry run and mutant runs. That lane mutates the
+// lane: the nightly Stryker report -- dry run and mutant runs. That lane mutates the
 // driver in place (stryker.config.mjs `inPlace: true`) and every expression of
 // an instrumented file is rewritten to
 // `stryMutAct_<ns>("<id>") ? <mutant> : (stryCov_<ns>("<id>"), <original>)`
@@ -605,6 +609,322 @@ describe("driver early-exit paths, spawned for real (#3592 round 2 F1)", () => {
 		} finally {
 			rmSync(fixtureRepo, { recursive: true, force: true });
 		}
+	});
+});
+
+// #4005: the nightly passes --runtime-only so changed scripts/**/*.mjs stop
+// competing for the --max-files slots with the runtime files the report is
+// about. Recurrence: a busy window (real data, 2026-10-01: 81 eligible runtime
+// files and 42 scripts, top-12 = 5 runtime + 7 scripts) leaving runtime files
+// over the cap behind a marker that advanced. Real spawn against a throwaway
+// repo: the flag is read in the driver's own top-level flow.
+describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
+	const reasonFor = (extraArgs: string[]) => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			writeFileSync(join(fixtureRepo, "README.md"), "fixture\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "README.md"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			mkdirSync(join(fixtureRepo, "scripts"));
+			writeFileSync(
+				join(fixtureRepo, "scripts", "only.mjs"),
+				"export const a = 1;\n",
+			);
+			fixtureGit(fixtureRepo, ["add", "scripts/only.mjs"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "scripts only"]);
+			runDriver(fixtureRepo, ["--base", "HEAD~1", ...extraArgs], 30_000);
+			return JSON.parse(
+				readFileSync(
+					join(fixtureRepo, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			).piLensMutationDiff.zeroMutants.reason as string;
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	};
+
+	it("drops a changed script from the mutation population", () => {
+		expect(reasonFor(["--runtime-only"])).toContain(
+			"no PR-changed lines fall under clients/**/*.ts",
+		);
+	});
+
+	// Recurrence (#4005): the queue is read from an issue body a maintainer can
+	// edit; the driver must take the valid existing runtime entries, in order,
+	// and nothing else, before the cap.
+	it("mutates queued files first and drops every invalid or vanished queue entry", () => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			mkdirSync(join(fixtureRepo, "clients"));
+			mkdirSync(join(fixtureRepo, "scripts"));
+			for (const file of ["clients/q1.ts", "clients/q2.ts", "scripts/s.mjs"])
+				writeFileSync(join(fixtureRepo, file), "export const a = 1;\n");
+			writeFileSync(join(fixtureRepo, "README.md"), "fixture\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "."]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			writeFileSync(join(fixtureRepo, "README.md"), "changed\n");
+			fixtureGit(fixtureRepo, ["commit", "-qam", "readme only"]);
+			const pending = join(fixtureRepo, "pending.txt");
+			writeFileSync(
+				pending,
+				[
+					"clients/q2.ts",
+					"../outside.ts",
+					"clients/gone.ts",
+					"scripts/s.mjs",
+					"clients/q1.ts",
+					"clients/q2.ts",
+				].join("\n"),
+			);
+			runDriver(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			const meta = JSON.parse(
+				readFileSync(
+					join(fixtureRepo, "reports", "mutation", "mutation.json"),
+					"utf8",
+				),
+			).piLensMutationDiff;
+			expect(meta.filesSelected).toEqual(["clients/q2.ts", "clients/q1.ts"]);
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	});
+
+	// Recurrence (#4005 r4): one shared queue base pinned to the first
+	// overloaded night. The driver must read a queued file against the base
+	// its own entry carries (the sha reaches git), take a well-formed entry
+	// whose base git knows, and refuse a malformed base suffix outright.
+	it("reads each queued file against its own entry's base", () => {
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
+		);
+		try {
+			mkdirSync(join(fixtureRepo, "clients"));
+			for (const file of ["clients/q1.ts", "clients/q2.ts"])
+				writeFileSync(join(fixtureRepo, file), "export const a = 1;\n");
+			fixtureGit(fixtureRepo, ["init", "-q"]);
+			fixtureGit(fixtureRepo, ["add", "."]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "base"]);
+			const first = String(
+				fixtureGit(fixtureRepo, ["rev-parse", "HEAD"]),
+			).trim();
+			writeFileSync(join(fixtureRepo, "README.md"), "readme\n");
+			fixtureGit(fixtureRepo, ["add", "README.md"]);
+			fixtureGit(fixtureRepo, ["commit", "-qm", "readme only"]);
+			const pending = join(fixtureRepo, "pending.txt");
+			const unknown = "e".repeat(40);
+			writeFileSync(
+				pending,
+				[`clients/q1.ts@${first}`, "clients/q2.ts@--output"].join("\n"),
+			);
+			runDriver(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			expect(
+				JSON.parse(
+					readFileSync(
+						join(fixtureRepo, "reports", "mutation", "mutation.json"),
+						"utf8",
+					),
+				).piLensMutationDiff.filesSelected,
+			).toEqual(["clients/q1.ts"]);
+			writeFileSync(pending, `clients/q1.ts@${unknown}\n`);
+			const result = runDriverResult(
+				fixtureRepo,
+				["--base", "HEAD~1", "--runtime-only", "--pending-file", pending],
+				30_000,
+			);
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain(
+				`could not read changed lines of ${unknown}...HEAD`,
+			);
+		} finally {
+			rmSync(fixtureRepo, { recursive: true, force: true });
+		}
+	});
+
+	it("still takes the script without the flag (the PR-time behaviour)", () => {
+		expect(reasonFor([])).toContain(
+			"no changed mutation source has a covering test",
+		);
+	});
+});
+
+// #4005: the nightly's carry-over queue. Recurrence: on a busy streak the
+// same top-weight files won every night and the rest were never mutated.
+describe("selectMutationFiles (#4005)", () => {
+	const weights = new Map([
+		["clients/heavy.ts", 90],
+		["clients/mid.ts", 20],
+		["clients/light.ts", 1],
+	]);
+
+	it("takes queued files first, in queue order, then the window by weight, under one cap", () => {
+		expect(
+			selectMutationFiles({
+				pending: ["clients/light.ts", "clients/queued.ts"],
+				windowFiles: ["clients/mid.ts", "clients/heavy.ts", "clients/light.ts"],
+				maxFiles: 3,
+				weights,
+			}),
+		).toEqual({
+			selected: ["clients/light.ts", "clients/queued.ts", "clients/heavy.ts"],
+			skipped: ["clients/mid.ts"],
+		});
+	});
+
+	it("skips queued files beyond the cap, oldest-first order kept, before any window file", () => {
+		expect(
+			selectMutationFiles({
+				pending: ["clients/q1.ts", "clients/q2.ts", "clients/q3.ts"],
+				windowFiles: ["clients/heavy.ts"],
+				maxFiles: 2,
+				weights,
+			}),
+		).toEqual({
+			selected: ["clients/q1.ts", "clients/q2.ts"],
+			skipped: ["clients/q3.ts", "clients/heavy.ts"],
+		});
+	});
+
+	it("is the plain by-weight cap when nothing is queued", () => {
+		const windowFiles = [
+			"clients/light.ts",
+			"clients/heavy.ts",
+			"clients/mid.ts",
+		];
+		expect(selectMutationFiles({ windowFiles, maxFiles: 2, weights })).toEqual(
+			capMutationFiles(windowFiles, 2, weights),
+		);
+	});
+});
+
+describe("collectChangedRanges (#4005)", () => {
+	// Recurrence: a queued file's earlier changes are outside the current
+	// window, so reading it against the window base left it with no lines; and
+	// (r4) one shared queue base re-read every carried file from the oldest
+	// contributing night.
+	it("reads each queued file against its own base, every other file against the window base, one diff per base", () => {
+		const calls: Array<[string, string[]]> = [];
+		const diff = (base: string, files: string[]) => {
+			calls.push([base, files]);
+			return new Map(
+				files.map((file) => [file, [[1, 1]] as Array<[number, number]>]),
+			);
+		};
+		const ranges = collectChangedRanges({
+			files: [
+				"clients/q1.ts",
+				"clients/q2.ts",
+				"clients/w.ts",
+				"clients/q3.ts",
+			],
+			baseRef: "window-base",
+			baseOf: new Map([
+				["clients/q1.ts", "night-1"],
+				["clients/q2.ts", "night-2"],
+				["clients/q3.ts", "night-1"],
+			]),
+			diff,
+		});
+		expect(calls).toEqual([
+			["window-base", ["clients/w.ts"]],
+			["night-1", ["clients/q1.ts", "clients/q3.ts"]],
+			["night-2", ["clients/q2.ts"]],
+		]);
+		expect([...ranges.keys()].sort()).toEqual([
+			"clients/q1.ts",
+			"clients/q2.ts",
+			"clients/q3.ts",
+			"clients/w.ts",
+		]);
+	});
+
+	it("uses the window base for a queued file whose entry has no base", () => {
+		const calls: string[] = [];
+		collectChangedRanges({
+			files: ["clients/q.ts"],
+			baseRef: "window-base",
+			diff: (base) => {
+				calls.push(base);
+				return new Map();
+			},
+		});
+		expect(calls).toEqual(["window-base"]);
+	});
+});
+
+describe("parseQueueEntry (#4005 r4)", () => {
+	const SHA = "a".repeat(40);
+	it.each([
+		[`clients/a.ts@${SHA}`, { file: "clients/a.ts", base: SHA }],
+		["clients/a.ts", { file: "clients/a.ts", base: null }],
+		[" index.ts ", { file: "index.ts", base: null }],
+		["clients/@scope/x.ts", { file: "clients/@scope/x.ts", base: null }],
+		[`clients/@scope/x.ts@${SHA}`, { file: "clients/@scope/x.ts", base: SHA }],
+	])("reads %s", (spelling, entry) => {
+		expect(parseQueueEntry(spelling)).toEqual(entry);
+		expect(parseQueueEntry(formatQueueEntry(entry))).toEqual(entry);
+	});
+
+	// Recurrence: the base suffix reaches `git diff <base>...HEAD` as an
+	// argument; only a full lowercase sha may be split off, and a spelling whose
+	// suffix is anything else is not a runtime path at all.
+	it.each([
+		"clients/a.ts@--output",
+		"clients/a.ts@abc123",
+		`clients/a.ts@${"A".repeat(40)}`,
+		`clients/a.ts@${SHA}@${SHA}`,
+		`../index.ts@${SHA}`,
+		`scripts/a.mjs@${SHA}`,
+		`@${SHA}`,
+		"",
+		undefined,
+	])("refuses %s", (spelling) => {
+		expect(parseQueueEntry(spelling)).toBeNull();
+	});
+});
+
+describe("isQueueablePath (#4005)", () => {
+	it("admits runtime sources spelled as plain relative paths", () => {
+		for (const file of [
+			"index.ts",
+			"clients/a.ts",
+			"clients/lsp/x.ts",
+			"tools/t.ts",
+			"mcp/m.ts",
+		])
+			expect(isQueueablePath(file), file).toBe(true);
+	});
+
+	// Recurrence: the queue is an editable issue body whose entries reach git
+	// and Stryker's --mutate.
+	it.each([
+		"clients/../index.ts",
+		"/clients/a.ts",
+		"clients//a.ts",
+		"clients/a.ts,tools/b.ts",
+		"clients/a.ts -->",
+		"clients\\a.ts",
+		"scripts/a.mjs",
+		"clients/a.test.ts",
+		"clients/a.d.ts",
+		"",
+		undefined,
+	])("refuses %s", (file) => {
+		expect(isQueueablePath(file)).toBe(false);
 	});
 });
 
@@ -1736,7 +2056,7 @@ describe("stryker diff mutation ranges", () => {
 });
 
 describe("stryker diff wall-clock budget", () => {
-	it("bounds the driver strictly below the advisory job cap", () => {
+	it("bounds the driver strictly below the nightly job cap", () => {
 		// Recurrence: run 36098718085 was cancelled by the runner at
 		// timeout-minutes, so the driver never regained control and its
 		// "no mutants evaluated" message never printed. The driver's own bound
@@ -1911,8 +2231,8 @@ describe.skipIf(underStryker)(
 		});
 
 		it("caps the changed files by changed-line weight with whitespace-only lines ignored (#3797 review)", () => {
-			expect(code).toContain(
-				"changedLineWeights(changedLineRanges(allFiles, { ignoreWhitespace: true }))",
+			expect(code).toMatch(
+				/weights: changedLineWeights\(\s*changedLineRanges\(allFiles, \{ ignoreWhitespace: true \}\),?\s*\)/,
 			);
 			expect(code).toMatch(/\.\.\.\(ignoreWhitespace \? \["\s*"\] : \[\]\)/);
 		});
@@ -1959,78 +2279,6 @@ describe.skipIf(underStryker)(
 		});
 	},
 );
-
-describe("mutation workflow incremental cache (#3810 item 2)", () => {
-	type Step = {
-		name?: string;
-		uses?: string;
-		run?: string;
-		if?: string;
-		with?: { path?: string; key?: string; "restore-keys"?: string };
-	};
-	const steps = (
-		yaml.load(
-			readFileSync(
-				resolve(import.meta.dirname, "../../.github/workflows/ci.yml"),
-				"utf8",
-			),
-		) as { jobs: { mutation: { steps: Step[] } } }
-	).jobs.mutation.steps;
-	const restoreIndex = steps.findIndex((step) =>
-		step.uses?.startsWith("actions/cache/restore@"),
-	);
-	const saveIndex = steps.findIndex((step) =>
-		step.uses?.startsWith("actions/cache/save@"),
-	);
-	const driverIndex = steps.findIndex((step) =>
-		step.run?.includes("scripts/stryker-diff.mjs"),
-	);
-
-	it("restores before the driver and saves after it, even when the driver fails", () => {
-		expect(restoreIndex).toBeGreaterThan(-1);
-		expect(restoreIndex).toBeLessThan(driverIndex);
-		expect(saveIndex).toBeGreaterThan(driverIndex);
-		expect(steps[saveIndex]?.if).toBe("always()");
-	});
-
-	it("keys on the PR number and the base sha, restoring by that prefix (C3, C7)", () => {
-		const restore = steps[restoreIndex]?.with;
-		const save = steps[saveIndex]?.with;
-		const prefix =
-			"mutation-incremental-${{ github.event.pull_request.number }}-${{ github.event.pull_request.base.sha }}-";
-		expect(restore?.["restore-keys"]?.trim()).toBe(prefix);
-		expect(restore?.key).toBe(
-			`${prefix}\${{ github.event.pull_request.head.sha }}`,
-		);
-		expect(save?.key).toBe(restore?.key);
-	});
-
-	it("caches exactly the incremental file and the fingerprint the driver writes beside it", () => {
-		for (const index of [restoreIndex, saveIndex]) {
-			expect(steps[index]?.with?.path?.trim().split("\n")).toEqual([
-				".stryker/incremental.json",
-				INCREMENTAL_FINGERPRINT_PATH,
-			]);
-		}
-	});
-
-	it.skipIf(underStryker)(
-		"has the driver read and write the same incremental file the workflow caches",
-		() => {
-			expect(/INCREMENTAL_PATH = "([^"]+)"/.exec(driver)?.[1]).toBe(
-				".stryker/incremental.json",
-			);
-		},
-	);
-
-	it("pins both cache actions by commit sha", () => {
-		for (const index of [restoreIndex, saveIndex]) {
-			expect(steps[index]?.uses).toMatch(
-				/^actions\/cache\/(?:restore|save)@[0-9a-f]{40}$/,
-			);
-		}
-	});
-});
 
 describe("compiled-source mutation targets (#3531 rescope)", () => {
 	it("classifies clients/tools/mcp .ts sources and the root index.ts, excluding tests and .d.ts", () => {
