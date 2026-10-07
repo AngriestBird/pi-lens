@@ -1623,21 +1623,25 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
 
 /**
- * The #4044 rules' ONE test of a directory (PR #4054 round 4): does the
- * project `cwd` runs in -- npm's own walk-up from the PHYSICAL cwd to the
- * nearest directory with a `package.json` or `node_modules` (measured on npm
- * 9.2.0: from `lnk` -> `lane/scripts`, `npm prefix` prints the lane) -- hold a
- * `node_modules` that {@link hasNodeModulesSymlinkOutside} calls outside it?
- * Also the answer for a directory the resolver cannot read (a `$( … )` or
- * backtick output, an unknown variable, a glob): such a part is judged as the
- * project the command runs in, so `--prefix "$(pwd)"` and `D=$(pwd);
- * --prefix $D` get one verdict, and a real lane's project is real.
+ * Is the project `cwd` runs in linked (PR #4054 round 4)? True when the cwd
+ * itself sits inside a linked `node_modules` (npm run there lands in the
+ * shared install's own checkout; measured on npm 9.2.0: `cd
+ * lane/node_modules && npm prefix` prints `main`), or when npm's own walk-up
+ * from the PHYSICAL cwd to the nearest directory with a `package.json` or
+ * `node_modules` (from `lnk` -> `lane/scripts`, `npm prefix` prints the lane)
+ * reaches a `node_modules` that {@link hasNodeModulesSymlinkOutside} calls
+ * outside it. Also the answer for a directory the resolver cannot read (a
+ * `$( … )` or backtick output, an unknown variable, a `~user`/`~+`, a glob):
+ * such a part is judged as the project the command runs in, so `--prefix
+ * "$(pwd)"` and `D=$(pwd); --prefix $D` get one verdict, and a real lane's
+ * project is real.
  *
  * @param {string | undefined} cwd
  * @param {Record<string, string>} env
  * @returns {boolean}
  */
 function projectNodeModulesLinked(cwd, env) {
+	if (operandThroughNodeModulesLink(".", cwd, env, false, false)) return true;
 	let dir = resolveShellPath(".", cwd, env).path;
 	for (;;) {
 		if (hasNodeModulesSymlinkOutside(dir)) return true;
@@ -1700,12 +1704,17 @@ function operandThroughNodeModulesLink(
 	for (let i = 1; i < parts.length; i++) {
 		if (parts[i] !== "node_modules") continue;
 		if (i === parts.length - 1 && !followFinal) continue;
-		const holder =
+		// The cwd's own components are known: a tracked cwd is always resolved.
+		const linked =
 			i < anchor.length
-				? parts.slice(0, i).join(SEP) || SEP
-				: words.slice(0, i - anchor.length).join(SEP) ||
-					(isAbsolute(text) ? SEP : ".");
-		if (holderLinked(holder)) return true;
+				? hasNodeModulesSymlinkOutside(
+						resolveShellPath(parts.slice(0, i).join(SEP) || SEP, cwd, env).path,
+					)
+				: holderLinked(
+						words.slice(0, i - anchor.length).join(SEP) ||
+							(isAbsolute(text) ? SEP : "."),
+					);
+		if (linked) return true;
 	}
 	return false;
 }
@@ -1886,15 +1895,12 @@ function classifyNpm(cmd, args, cwd, env) {
 	// npm resolves `--prefix` lexically, and an empty one is the cwd (measured
 	// on npm 9.2.0: `--prefix lnk/..` is the directory holding `lnk`). The
 	// path npm writes through is `<prefix>/node_modules/`; without a readable
-	// prefix it is its cwd (a cwd INSIDE the link lands npm in the shared
-	// install's own checkout, measured: `cd lane/node_modules && npm prefix`
-	// prints `main`) and the project the walk-up finds.
+	// prefix it is the project the command runs in.
 	const resolved =
 		prefix === undefined ? undefined : resolveShellPath(prefix, cwd, env, true);
 	const linked =
 		resolved === undefined || resolved.reason !== undefined
-			? operandThroughNodeModulesLink(".", cwd, env, false, false) ||
-				projectNodeModulesLinked(cwd, env)
+			? projectNodeModulesLinked(cwd, env)
 			: operandThroughNodeModulesLink(
 					`${resolved.path}${SEP}node_modules${SEP}`,
 					cwd,

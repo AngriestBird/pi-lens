@@ -1443,6 +1443,14 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 		["N6 ~", "npm --prefix ~ ci", "sib", true, "deny", "allow"],
 		["N6b $HOME", "npm --prefix $HOME ci", "sib", true, "deny", "allow"],
 		[
+			"N6c ~+ (bash: $PWD)",
+			"npm --prefix ~+ ci",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
+		[
 			"N7 $TMPDIR",
 			"npm --prefix $TMPDIR/s ci",
 			"lane",
@@ -1566,6 +1574,14 @@ describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a link
 		],
 		["D6 ~", "rm -rf ~/node_modules/", "sib", true, "deny", "allow"],
 		["D6b $HOME", "rm -rf $HOME/node_modules/*", "sib", true, "deny", "allow"],
+		[
+			"D6c ~+ (bash: $PWD)",
+			"rm -rf ~+/node_modules/",
+			"lane",
+			false,
+			"deny",
+			"allow",
+		],
 		[
 			"D7 $TMPDIR",
 			"rm -rf $TMPDIR/s/node_modules/",
