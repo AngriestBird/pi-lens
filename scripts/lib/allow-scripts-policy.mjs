@@ -106,7 +106,6 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 	}
 	const entries = Object.entries(policy ?? {});
 	const resolved = collectLifecyclePackages(lock);
-	const resolvedNames = new Set(resolved.map((p) => p.name));
 
 	const covers = (key, value, p) => {
 		const { name, version } = splitPolicyKey(key);
@@ -150,15 +149,30 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 			);
 			continue;
 		}
-		// An entry for a name that resolved at another version is reported once,
-		// against the resolved package (version-mismatch below); only a name that
-		// no longer resolves with a script is stale.
-		if (!resolvedNames.has(name)) {
+		// A name that resolved only at other, still-undecided versions is reported
+		// once, against the resolved package (version-mismatch below). The entry
+		// is stale when the name no longer resolves with a script, or when the
+		// OTHER entries already decide every resolved version of it (#1185 review
+		// F1: an old-version approval kept beside the new one).
+		const sameName = resolved.filter((p) => p.name === name);
+		const othersCoverAll =
+			sameName.length > 0 &&
+			sameName.every((p) =>
+				entries.some(
+					([other, otherValue]) =>
+						other !== key &&
+						typeof otherValue === "boolean" &&
+						covers(other, otherValue, p),
+				),
+			);
+		if (sameName.length === 0 || othersCoverAll) {
 			add(
 				"stale-approval",
 				key,
-				`"${key}" no longer resolves to a package with an install script in package-lock.json`,
-				`Delete allowScripts["${key}"] (the dependency was removed or no longer has an install script).`,
+				sameName.length === 0
+					? `"${key}" no longer resolves to a package with an install script in package-lock.json`
+					: `"${key}" matches no resolved version of ${name}; the other entries already decide every resolved version`,
+				`Delete allowScripts["${key}"] (the dependency was removed, bumped, or no longer has an install script).`,
 			);
 		}
 	}
@@ -181,7 +195,7 @@ export function checkAllowScriptsPolicy(pkg, lock, { readPhases } = {}) {
 				"version-mismatch",
 				id,
 				`${id} (${where}, ${describePhase(readPhases, p)}) resolves to ${p.version} but the policy decides ${stale.join(", ")}`,
-				`Move the entry to "${id}" in the same PR as the lockfile bump, after re-reviewing the script.`,
+				`Add or move the entry to "${id}" in the same PR as the lockfile bump, after re-reviewing the script.`,
 			);
 		} else {
 			add(

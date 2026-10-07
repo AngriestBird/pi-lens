@@ -128,7 +128,7 @@ export function resolveWebTreeSitterPackageDir(deps) {
  * runtime reads that dir first (`bundledGrammarsDir` in
  * clients/tree-sitter-client.ts); `<web-tree-sitter>/grammars` is only the
  * lazy-fetch write target and nothing at install time fills it. The selftest
- * used to probe only the latter, so it WARNed in every layout.
+ * used to probe only the latter, so it warned in every layout.
  */
 export function findCoreGrammarDir({ packageRoot, webTreeSitterDir }) {
 	return [

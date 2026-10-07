@@ -109,7 +109,65 @@ describe("allowScripts policy failure list (#1185)", () => {
 		expect(out.status).toBe(1);
 		expect(out.out).toContain("[version-mismatch] dep-a@1.2.3");
 		expect(out.out).toContain("dep-a@1.2.2");
-		expect(out.out).not.toContain("stale-approval");
+		expect(out.out).toContain("Add or move the entry");
+	});
+
+	// A plain bump is ONE finding, against the resolved package: the old entry
+	// is not also reported stale, because nothing else covers the new version.
+	it("reports a plain version bump once, as version-mismatch", () => {
+		expect(
+			kinds(
+				{ allowScripts: { "dep-a@1.2.2": true, "@scope/dep-b@2.0.0": true } },
+				lock,
+			),
+		).toEqual(["version-mismatch:dep-a@1.2.3"]);
+	});
+
+	// Recurrence (#1185 review F1): an old-version approval kept beside the
+	// resolved one survived because staleness was judged by name. With
+	// `esbuild@0.27.0` next to the resolved 0.28.2 the checker and
+	// `npm ci --strict-allow-scripts` both exited 0.
+	it("fails an old-version approval kept beside the resolved version of the same name", () => {
+		const out = runChecker(
+			{
+				allowScripts: {
+					"dep-a@1.2.3": true,
+					"dep-a@1.2.2": true,
+					"@scope/dep-b@2.0.0": false,
+				},
+			},
+			lock,
+		);
+		expect(out.status).toBe(1);
+		expect(out.out).toContain('[stale-approval] "dep-a@1.2.2"');
+		expect(out.out).not.toContain("version-mismatch");
+	});
+
+	// The same name at two resolved versions: an entry for a third version is
+	// stale only once the other keys cover BOTH resolved copies.
+	it("keeps a mismatch, not a stale report, while another resolved version is still undecided", () => {
+		const dupes = lockWith({
+			"node_modules/dep-a": script("1.2.3"),
+			"node_modules/x/node_modules/dep-a": script("1.0.0"),
+		});
+		expect(
+			kinds(
+				{ allowScripts: { "dep-a@1.2.3": true, "dep-a@0.9.0": true } },
+				dupes,
+			),
+		).toEqual(["version-mismatch:dep-a@1.0.0"]);
+		expect(
+			kinds(
+				{
+					allowScripts: {
+						"dep-a@1.2.3": true,
+						"dep-a@1.0.0": true,
+						"dep-a@0.9.0": true,
+					},
+				},
+				dupes,
+			),
+		).toEqual(["stale-approval:dep-a@0.9.0"]);
 	});
 
 	// Recurrence: a new transitive script dependency lands unreviewed.

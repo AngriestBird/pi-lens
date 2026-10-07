@@ -54,6 +54,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/install-selftest.mjs"
+      - "scripts/lib/web-tree-sitter-dir.mjs" # #1185: the selftest's grammar probe
       - "scripts/rpc-load-check.mjs"
       - "scripts/resolve-newest-in-range-host.mjs"
       - "scripts/lib/resolve-newest-in-range-host.mjs"

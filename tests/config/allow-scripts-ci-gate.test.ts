@@ -154,6 +154,23 @@ describe("npm-strict packed-tarball job (#1185)", () => {
 		}
 	});
 
+	// Recurrence (#1185 review): scripts/lib/web-tree-sitter-dir.mjs became
+	// load-bearing for the selftest this job runs; a PR touching only it ran no
+	// npm-strict. Every path the job's selftest imports must be in the filter.
+	it("runs on a change to the selftest's own helper modules", () => {
+		const on = (
+			workflow as unknown as { on: Record<string, { paths?: string[] }> }
+		).on;
+		for (const event of ["push", "pull_request"]) {
+			expect(on[event]?.paths, event).toEqual(
+				expect.arrayContaining([
+					"scripts/install-selftest.mjs",
+					"scripts/lib/web-tree-sitter-dir.mjs",
+				]),
+			);
+		}
+	});
+
 	it("pins that pi's installer still shapes the root and args this way", () => {
 		const pi = readFileSync(
 			resolve(
@@ -177,6 +194,11 @@ describe("npm-strict packed-tarball job (#1185)", () => {
 		expect(failing).toContain('grep -q "ESTRICTALLOWSCRIPTS" <<<"$OUT"');
 		expect(failing).toContain('grep -q "@ast-grep/cli@" <<<"$OUT"');
 		expect(failing).toMatch(/test "\$STATUS" -ne 0/);
+		// Recurrence (#1185 review F3): `shell: bash` runs with -e, so a bare
+		// `OUT="$(npm ...)"` dies on the expected failure before the greps run.
+		// The capture must be `|| STATUS=$?` after an explicit `STATUS=0`.
+		expect(failing).toMatch(/^STATUS=0$/m);
+		expect(failing).toMatch(/OUT="\$\(.*\)" \|\| STATUS=\$\?$/m);
 	});
 
 	it("materializes the shipped approvals in the consumer root for the passing install", () => {

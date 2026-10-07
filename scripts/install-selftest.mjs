@@ -223,7 +223,7 @@ try {
 // `<pkgRoot>/grammars`, and the runtime reads that dir first
 // (`bundledGrammarsDir` in clients/tree-sitter-client.ts). `web-tree-sitter/
 // grammars` is only the lazy-fetch write target, nothing at install time fills
-// it, so probing it alone WARNed in every layout and the strict npm gate (#1185)
+// it, so probing it alone warned in every layout and the strict npm gate (#1185)
 // could never drop `--allow-soft`. Check the bundled dir, then fall back to the
 // web-tree-sitter dir, which the extension runtime locates through the SAME
 // shared ladder (#3409 round 1, R3418-2): a bare `web-tree-sitter` resolve
