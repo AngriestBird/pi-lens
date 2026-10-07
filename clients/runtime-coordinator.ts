@@ -560,6 +560,12 @@ export class RuntimeCoordinator {
 	 */
 	private readonly _foreignTurnKeys = new Map<string, number>();
 	private _foreignTurns = 0;
+	/**
+	 * #3613 G1: every turn start on this coordinator, of any session, since the
+	 * session reset: what `_turnIndex` counted before #3613, kept for the
+	 * process-level turn cadences (`turnStartCount`).
+	 */
+	private _turnStarts = 0;
 	private _projectSeq = 0;
 	// #3511: the highest logged seq this runtime's view is known to have missed
 	// (a sibling process logged it above our seq); 0 when none. Cleared by a
@@ -683,6 +689,7 @@ export class RuntimeCoordinator {
 		this._telemetryProvider = "";
 		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
+		this._turnStarts = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
 		this._viewMissingThrough = 0;
@@ -820,6 +827,7 @@ export class RuntimeCoordinator {
 	 * window and the carried cascade runs are the primary's.
 	 */
 	beginTurn(sessionId?: string): void {
+		this._turnStarts += 1;
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession !== this._telemetrySessionId) {
 			beginTurnContext(turnSession);
@@ -1102,6 +1110,16 @@ export class RuntimeCoordinator {
 
 	get turnIndex(): number {
 		return this._turnIndex;
+	}
+
+	/**
+	 * #3613 G1: the turn starts of every session on this coordinator since the
+	 * session reset. A process-level turn cadence (the memory sample, the
+	 * smells re-check) paces on it: an integer, so its `% N` gate is met, and
+	 * moved by a subagent's turns, which run inside one primary turn.
+	 */
+	get turnStartCount(): number {
+		return this._turnStarts;
 	}
 
 	/** #3540 r2: the order turn a write token is drawn in; never restarts. */

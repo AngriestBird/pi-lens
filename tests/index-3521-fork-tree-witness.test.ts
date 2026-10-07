@@ -3447,10 +3447,11 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}).toEqual({ distinct: true, charged: subagentTurn });
 	});
 
-	it("paces the memory sample by each session's own turns", async () => {
-		// #3613 F2. The recurrence: the cadence keyed on the primary's turn
-		// index, which a subagent's turns no longer move, so while the primary
-		// sat on a sampling turn every subagent turn end wrote a sample.
+	it("does not fire the memory sample at every subagent turn end while the primary sits on a sampling turn", async () => {
+		// #3613 F2 (round 2). The recurrence: the cadence keyed on the
+		// primary's turn index, which a subagent's turns no longer move, so
+		// while the primary sat on a sampling turn every subagent turn end
+		// wrote a sample.
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
 		const subagent = await startSubagent();
 		for (let turn = 1; turn <= 10; turn += 1) await startTurn(primary);
@@ -3462,6 +3463,50 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}
 
 		expect((await latencyRows("memory_sample")).length - before).toBe(0);
+	});
+
+	it("keeps the memory sample's cadence through a long subagent run inside one primary turn", async () => {
+		// #3613 G1 (verify r2, probe MEM). The recurrence: round 2 paced the
+		// cadence on a subagent's fractional turn key, which never meets the
+		// `% 10` gate, so a long subagent run wrote no memory sample at all
+		// (the process-level OOM signal, #1999).
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		const before = (await latencyRows("memory_sample")).length;
+
+		for (let turn = 1; turn <= 20; turn += 1) {
+			await startTurn(subagent);
+			await endTurn(subagent);
+		}
+
+		expect(
+			(await latencyRows("memory_sample")).length - before,
+		).toBeGreaterThan(0);
+	});
+
+	it("keeps the primary's spent budget spent through nine subagent turns inside its turn", async () => {
+		// #3613 G2 (verify r2, probe E9). The recurrence: parking evicted the
+		// smallest key, which is the primary's live turn (a subagent's keys sit
+		// above it), so the ninth subagent turn handed the primary a fresh
+		// budget.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const target = path.join(cwd, "opaque.txt");
+		fs.writeFileSync(target, "x\n");
+		await startTurn(primary);
+		await opaqueCall(primary, target);
+		exhaustBudget();
+		const subagentArms: boolean[] = [];
+		for (let turn = 1; turn <= 9; turn += 1) {
+			await startTurn(subagent);
+			subagentArms.push(await opaqueCall(subagent, target));
+		}
+
+		expect({
+			subagentArms: subagentArms.every(Boolean),
+			primaryArmsAgain: await opaqueCall(primary, target),
+		}).toEqual({ subagentArms: true, primaryArmsAgain: false });
 	});
 
 	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
