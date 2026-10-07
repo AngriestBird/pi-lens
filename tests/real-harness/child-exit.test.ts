@@ -296,7 +296,9 @@ mid.stdout.on("data", (chunk) => {
 });`;
 
 // A root that keeps forking `sleep <argv[1]>` (200 in all, a few per tick)
-// while it is being killed: the late fork the first snapshot cannot list.
+// while it is being killed: the late fork the first snapshot cannot list. It
+// says "go" once 20 exist, so every kill lands mid-stream, with sleepers both
+// before and after its first snapshot.
 const FORKER = `
 const { spawn } = require("child_process");
 setTimeout(() => process.exit(0), 20000);
@@ -304,9 +306,9 @@ let n = 0;
 const tick = () => {
   for (let i = 0; i < 4 && n < 200; i++, n++)
     spawn("sleep", [process.argv[1]], { stdio: "ignore" });
+  if (n === 20) console.log("go");
   if (n < 200) setImmediate(tick);
 };
-console.log("go");
 tick();`;
 
 // A mid shell that starts three sleepers and then exits ON ITS OWN after
