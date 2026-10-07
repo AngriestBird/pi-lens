@@ -20,6 +20,15 @@
  *   - ANY `git worktree remove` (force or not) on a worktree whose
  *     `node_modules` is a symlink pointing OUTSIDE that worktree (#3173,
  *     the #2704 class) -- see {@link hasNodeModulesSymlinkOutside}
+ *   - a MUTATING `npm`/`npx npm@…` verb (`ci`, `install`, `update`,
+ *     `uninstall`, `prune`, `dedupe`, `rebuild`, …), `--dry-run` or not, in
+ *     a project whose `node_modules` is a symlink pointing OUTSIDE it (#4044,
+ *     the #3173 shape on 2026-10-07) -- see {@link classifyNpm}
+ *   - a DELETE (`rm`, `rmdir`, `unlink`, `find … -delete`/`-exec rm`) whose
+ *     operand passes THROUGH a `node_modules` symlink pointing outside its
+ *     project (`rm -rf node_modules/`, `node_modules/*`, `find node_modules/
+ *     -delete`; #4044) -- unlinking the link itself stays allowed; see
+ *     {@link classifyNodeModulesDelete}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
@@ -117,7 +126,16 @@
  * hygiene rules stay fail-open on it. A substitution's output is unknown, so
  * {@link findDeny} reads a command holding one twice, with the output opaque
  * and with it empty, and denies if either reading does (#3997). Not handled:
- * `cd x &` and
+ * The #4044 rules (`npmLinkedInstall`, `linkedNodeModulesDelete`) test a
+ * directory where the program lands: the holder of each `node_modules` a
+ * delete operand passes through physically, as the kernel does (a symlink
+ * before a later `..` is followed), and `--prefix` lexically, as npm does.
+ * A directory they cannot read -- an unknown cwd, or a value from `$( … )`,
+ * backticks or an unknown variable -- is the project the command runs in
+ * (the payload cwd when the tracked cwd is unknown), failing closed, so a
+ * linked lane stays denied after `cd $(pwd) && npm ci` and for
+ * `npm --prefix "$(pwd)" ci`. Not
+ * handled: `cd x &` and
  * `cd x |` (a backgrounded or piped `cd` still moves the tracked cwd), a
  * `cd` inside a `$( … )` span (each span starts from the payload cwd), and a
  * `cd` that fails.
@@ -160,6 +178,16 @@
  *   - A word spelled with ANSI-C escapes (`$'\x67it' stash`): the escapes
  *     are not decoded. A coproc label holding one counts as an expansion.
  *   - `require(mod)` with a variable specifier, for the probe rule.
+ *   - npm/node_modules rules (#4044): `npm_config_prefix=`/`NPM_CONFIG_PREFIX`
+ *     in the env; a launcher between the shell and
+ *     npm that this file's other rules also miss -- `/usr/bin/env`, `env -i`,
+ *     `sudo -E`, `corepack npm`, `nohup`/`nice`/`timeout`, `xargs`, `npm exec
+ *     -- npm ci`, `npx -c 'npm ci'`, `node …/npm-cli.js`; pnpm, yarn and bun
+ *     writers; a package script that runs `npm ci` (`npm run clean`). For the
+ *     delete rule: a glob that expands TO the link (a star-slash operand such as `rm -rf` of every subdirectory), `find -L`
+ *     from an ancestor of the lane, `xargs rm`, `find -exec sh -c`, `shred`,
+ *     `mv`, `rsync --delete`, `git clean`, `npx rimraf`, a runtime
+ *     `rmSync`/`rmtree`, and a dash-leading operand after `--`.
  *   - A hook bypass spelled some other way (#3778):
  *     `GIT_CONFIG_KEY_0=core.hooksPath`, a hand edit of `.git/config`, or
  *     `git commit` through an alias. (`--no-veri`/`--no-verif` ARE matched; `--no-ver`
@@ -201,7 +229,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"worktreeUnresolved"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"worktreeUnresolved"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"|"linkedNodeModulesDelete"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -231,6 +259,10 @@ export const RULE_MESSAGES = {
 		"force-pushing is forbidden -- merge `origin/master` instead; force-push needs explicit orchestrator authorization with `--force-with-lease=<branch>:<expected-sha>`.",
 	rebase:
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
+	npmLinkedInstall:
+		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
+	linkedNodeModulesDelete:
+		"a delete whose operand passes THROUGH a node_modules symlink into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -1586,6 +1618,299 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 	return null;
 }
 
+/** Commands whose operands are the paths they delete (`find` is judged
+ *  separately: its operands are the leading words, its delete an expression). */
+const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
+
+/**
+ * Is the project `cwd` runs in linked (PR #4054 round 4)? True when the cwd
+ * itself sits inside a linked `node_modules` (npm run there lands in the
+ * shared install's own checkout; measured on npm 9.2.0: `cd
+ * lane/node_modules && npm prefix` prints `main`), or when npm's own walk-up
+ * from the PHYSICAL cwd to the nearest directory with a `package.json` or
+ * `node_modules` (from `lnk` -> `lane/scripts`, `npm prefix` prints the lane)
+ * reaches a `node_modules` that {@link hasNodeModulesSymlinkOutside} calls
+ * outside it. Also the answer for a directory the resolver cannot read (a
+ * `$( … )` or backtick output, an unknown variable, a `~user`/`~+`, a glob):
+ * such a part is judged as the project the command runs in, so `--prefix
+ * "$(pwd)"` and `D=$(pwd); --prefix $D` get one verdict, and a real lane's
+ * project is real.
+ *
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {boolean}
+ */
+function projectNodeModulesLinked(cwd, env) {
+	if (operandThroughNodeModulesLink(".", cwd, env, false, false)) return true;
+	let dir = resolveShellPath(".", cwd, env).path;
+	for (;;) {
+		if (hasNodeModulesSymlinkOutside(dir)) return true;
+		const parent = dirname(dir);
+		if (
+			parent === dir ||
+			existsSync(join(dir, "package.json")) ||
+			existsSync(join(dir, "node_modules"))
+		)
+			return false;
+		dir = parent;
+	}
+}
+
+/**
+ * Does `operand` pass THROUGH a `node_modules` symlink that
+ * {@link hasNodeModulesSymlinkOutside} calls outside its project? The operand
+ * is expanded by {@link expandShellWord} (`$PWD/node_modules/`,
+ * `~/node_modules/`, an assigned `$D/`) and walked component by component, the
+ * cwd's own components first (a `cd` INTO the link, then `rm -rf ./*`). At each
+ * `node_modules` component that something follows -- a component, `.`, `..`,
+ * a trailing `/` (the kernel follows a link spelled with one), or, with
+ * `followFinal` (`find -L|-H|-follow`), nothing -- the directory HOLDING it is
+ * tested where the kernel lands: {@link resolveShellPath} in physical mode,
+ * which follows a symlink before a later `..` (`../lnk/../node_modules/`
+ * reaches the lane `lnk` points into, R3-2). Only the holder is resolved: a
+ * physical realpath of the whole operand collapses `lane/node_modules/` onto
+ * the link's target and the link leaves the path. A holder the resolver cannot
+ * read is the project the command runs in ({@link projectNodeModulesLinked}).
+ * `followAll` (`find -L|-follow` descend every link they meet) also tests the
+ * operand itself as a holder (`find -L . -delete`). The bare link
+ * (`rm -rf node_modules`) only unlinks it.
+ *
+ * @param {string} operand
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @param {boolean} followFinal
+ * @param {boolean} followAll
+ * @returns {boolean}
+ */
+function operandThroughNodeModulesLink(
+	operand,
+	cwd,
+	env,
+	followFinal,
+	followAll,
+) {
+	/** @param {string} holder */
+	const holderLinked = (holder) => {
+		const { path, reason } = resolveShellPath(holder, cwd, env);
+		return reason === undefined
+			? hasNodeModulesSymlinkOutside(path)
+			: projectNodeModulesLinked(cwd, env);
+	};
+	if (followAll && holderLinked(operand)) return true;
+	const { text } = expandShellWord(operand, cwd, env);
+	const words = text.split(SEP);
+	const anchor = isAbsolute(text) ? [] : (cwd ?? process.cwd()).split(SEP);
+	const parts = [...anchor, ...words];
+	for (let i = 1; i < parts.length; i++) {
+		if (parts[i] !== "node_modules") continue;
+		if (i === parts.length - 1 && !followFinal) continue;
+		// The cwd's own components are known: a tracked cwd is always resolved.
+		const linked =
+			i < anchor.length
+				? hasNodeModulesSymlinkOutside(
+						resolveShellPath(parts.slice(0, i).join(SEP) || SEP, cwd, env).path,
+					)
+				: holderLinked(
+						words.slice(0, i - anchor.length).join(SEP) ||
+							(isAbsolute(text) ? SEP : "."),
+					);
+		if (linked) return true;
+	}
+	return false;
+}
+
+/**
+ * The #4044 sibling rule: a delete (`rm`/`rmdir`/`unlink`, or `find` with
+ * `-delete` or `-exec rm|rmdir|unlink`) with an operand through a linked
+ * `node_modules`. MEASURED (GNU coreutils, 2026-10-07): `rm -rf
+ * node_modules/`, `rm -rf node_modules/*`, `find node_modules/ -delete`,
+ * `find -L|-H|-follow node_modules -delete`, `find -L|-follow . -delete`,
+ * `find node_modules/ -exec rm -rf {} +` and `cd node_modules && rm -rf ./*`
+ * all empty the link's target; `rm -rf node_modules` and `find node_modules
+ * -delete` remove only the link. Operands go through {@link resolveShellPath}
+ * (`$PWD`, `~`, assigned variables); a holder it cannot read
+ * (`"$(pwd)/node_modules/"`, an unknown variable) is the project the command
+ * runs in. NOT handled: a glob that expands TO the
+ * link (a star-slash operand, `rm -rf` of every subdirectory or of a `node_m` prefix glob), `find -L` from an ancestor of the lane (only
+ * an operand that is, holds, or sits under the link counts), an operand made
+ * only of a substitution (`rm -rf $(ls)`: no `node_modules` component), `xargs rm`,
+ * `find -exec sh -c`, `shred`, `mv`, `rsync --delete`, `git clean`,
+ * `npx rimraf`, a runtime `rmSync`/`rmtree`.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {DenyRule | null}
+ */
+function classifyNodeModulesDelete(cmd, args, cwd, env) {
+	let operands;
+	let followFinal = false;
+	let followAll = false;
+	if (cmd === "find") {
+		let i = 0;
+		while (/^-([HLP]|D\w*|O\d*)$/.test(args[i] ?? "")) {
+			if (args[i] === "-H") followFinal = true;
+			if (args[i] === "-L") followFinal = followAll = true;
+			i++;
+		}
+		let end = i;
+		while (end < args.length && !/^(-|\(|!)/.test(args[end])) end++;
+		const expression = args.slice(end);
+		if (expression.includes("-follow")) followFinal = followAll = true;
+		const deletes = expression.some(
+			(a, j) =>
+				a === "-delete" ||
+				(/^-(exec|execdir|ok|okdir)$/.test(a) &&
+					DELETE_COMMANDS.has(commandBasename(expression[j + 1] ?? ""))),
+		);
+		if (!deletes) return null;
+		operands = end > i ? args.slice(i, end) : ["."];
+	} else {
+		operands = args.filter((a) => !a.startsWith("-"));
+	}
+	return operands.some((o) =>
+		operandThroughNodeModulesLink(o, cwd, env, followFinal, followAll),
+	)
+		? "linkedNodeModulesDelete"
+		: null;
+}
+
+/** The `npm` verbs (and their aliases) that write `node_modules` (#4044):
+ *  the clean-install family (`ci`, which ignores `--dry-run` on npm 9.2.0 and
+ *  removes `node_modules/*` first), and every verb that runs the reify step.
+ *  Read-only verbs (`ls`, `run`, `test`, `view`, `audit`, `outdated`, `exec`,
+ *  `pack`, `config`) are absent on purpose. */
+const NPM_NODE_MODULES_WRITERS = new Set(
+	[
+		"ci clean-install ic install-clean isntall-clean",
+		"install-ci-test cit clean-install-test sit",
+		"install i in ins inst insta instal add install-test it isntall isnt isnta isntal",
+		"uninstall un unlink remove rm r update up upgrade udpate prune",
+		"rebuild rb link ln dedupe ddp find-dupes",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** Every other npm verb (and alias) a worker types. Only used to tell a verb
+ *  from the VALUE of an unlisted flag (`npm --audit false ci`: `false` is
+ *  neither): the verb is the first positional that is in this set or in
+ *  {@link NPM_NODE_MODULES_WRITERS}. */
+const NPM_OTHER_VERBS = new Set(
+	[
+		"access adduser audit bugs cache completion config c get set deprecate diff dist-tag",
+		"docs home doctor edit exec x explain why explore fund help help-search hook init create",
+		"innit login logout ls list la ll org outdated owner author pack ping pkg prefix profile",
+		"publish query repo restart root run run-script rum urn sbom search find s se shrinkwrap",
+		"star stars start stop team test t tst token unpublish unstar version view show info v",
+		"whoami",
+	].flatMap((line) => line.split(" ")),
+);
+
+/** `npm`/`npx` flags that consume a separate following token, so the verb
+ *  (or the npx command) is found past them. The `--flag=value` form is one
+ *  token and needs no entry. */
+const NPM_VALUE_FLAGS = new Set([
+	"--prefix",
+	"-w",
+	"--workspace",
+	"-p",
+	"--package",
+	"-c",
+	"--call",
+	"--registry",
+	"--cache",
+	"--userconfig",
+	"--globalconfig",
+	"--loglevel",
+	"--omit",
+	"--include",
+	"--install-strategy",
+	"--tag",
+	"--scope",
+	"--otp",
+	"--before",
+]);
+
+/**
+ * The #4044 rule: is this `npm`/`npx npm@…` invocation a node_modules WRITER
+ * aimed at a project whose `node_modules` is a symlink resolving outside it?
+ * That is the #3173 hazard with a different verb -- on 2026-10-07 a worker's
+ * `npm ci --ignore-scripts --dry-run` in a lane whose `node_modules` linked
+ * the main checkout's install emptied that install for every lane (npm 9.2.0
+ * removes `node_modules/*` before reify, ignores the dry-run, and follows the
+ * link). The clean-install family is denied with or without `--dry-run`; so
+ * is every other writer, which keeps the rule one line: MEASURED on npm 9.2.0
+ * and 11.18.0, `install`/`add`/`uninstall`/`update`/`prune`/`dedupe --dry-run`
+ * leave a linked install intact, but nothing measured covers the next npm,
+ * and the scratch-copy answer costs a worker nothing.
+ *
+ * The project dir is `--prefix` when given, else the cwd -- walked up to the
+ * nearest directory with a `package.json` or `node_modules`, as npm's own
+ * local-prefix lookup does (a lane's `scripts/` subdirectory reaches the
+ * lane's link; {@link projectNodeModulesLinked}). A `--prefix` the resolver
+ * cannot read (`"$(pwd)"`, backticks, an unknown variable) is that project
+ * too, failing closed in a linked lane (R3-1); `--prefix $TMPDIR/<name>` is
+ * readable. The link test is {@link hasNodeModulesSymlinkOutside}, the
+ * #3173 classifier, deliberately without {@link looksLikeGitWorktree}: a
+ * delete through an outside link is the hazard wherever the link sits.
+ * `-g`/`--global` writes the global tree, not the project's, and is allowed.
+ * The verb is the first positional that is a known npm verb, so the value of
+ * an unlisted flag (`npm --audit false ci`) does not become the verb; the
+ * `--prefix` goes through {@link resolveShellPath} (`$PWD`, `~`). NOT handled: see the
+ * header's list (`npm_config_prefix=`, launchers, `npm exec -- npm ci`, ...).
+ *
+ * @param {"npm"|"npx"} cmd
+ * @param {string[]} args
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env
+ * @returns {DenyRule | null}
+ */
+function classifyNpm(cmd, args, cwd, env) {
+	let npmArgs = args;
+	if (cmd === "npx") {
+		let i = 0;
+		while (i < args.length && args[i].startsWith("-")) {
+			i += NPM_VALUE_FLAGS.has(args[i]) ? 2 : 1;
+		}
+		// `npx -y npm@11.18.0 ci`: the command npx runs is npm itself.
+		if (!/^npm(@[^/]*)?$/.test(args[i] ?? "")) return null;
+		npmArgs = args.slice(i + 1);
+	}
+	const positionals = collectPositionals(npmArgs, NPM_VALUE_FLAGS);
+	const verbAt = positionals.findIndex(
+		(a) => NPM_NODE_MODULES_WRITERS.has(a) || NPM_OTHER_VERBS.has(a),
+	);
+	const verb = positionals[verbAt];
+	if (
+		!NPM_NODE_MODULES_WRITERS.has(verb) &&
+		!(verb === "audit" && positionals[verbAt + 1] === "fix")
+	)
+		return null;
+	if (npmArgs.some((a) => a === "-g" || a === "--global")) return null;
+	let prefix;
+	for (let i = 0; i < npmArgs.length; i++) {
+		if (npmArgs[i] === "--prefix") prefix = npmArgs[i + 1] ?? "";
+		else if (npmArgs[i].startsWith("--prefix=")) prefix = npmArgs[i].slice(9);
+	}
+	// npm resolves `--prefix` lexically, and an empty one is the cwd (measured
+	// on npm 9.2.0: `--prefix lnk/..` is the directory holding `lnk`). The
+	// path npm writes through is `<prefix>/node_modules/`; without a readable
+	// prefix it is the project the command runs in.
+	const resolved =
+		prefix === undefined ? undefined : resolveShellPath(prefix, cwd, env, true);
+	const linked =
+		resolved === undefined || resolved.reason !== undefined
+			? projectNodeModulesLinked(cwd, env)
+			: operandThroughNodeModulesLink(
+					`${resolved.path}${SEP}node_modules${SEP}`,
+					cwd,
+					env,
+					false,
+					false,
+				);
+	return linked ? "npmLinkedInstall" : null;
+}
+
 // `-d`/`--directory` (bare or bundled, e.g. `-qd`) are the flags that make
 // `mktemp` create a DIRECTORY -- parsed in {@link forEachBundledMktempFlag}
 // and {@link classifyMktemp}'s own `--directory` check. A bare `mktemp` (no
@@ -2196,6 +2521,15 @@ export function classifySegment(
 			cwd,
 			repositoryIdentity(repositoryRoot(originCwd)),
 		);
+	// #4044: a `cd` this scan could not resolve leaves `cwd === null`. The
+	// node_modules rules then judge the PAYLOAD cwd, failing closed: a linked
+	// lane stays denied after `cd $(pwd) && npm ci`, and the hook's own cwd
+	// (a real node_modules) is never the answer.
+	const projectCwd = cwd ?? originCwd ?? undefined;
+	if (cmd === "npm" || cmd === "npx")
+		return classifyNpm(cmd, args, projectCwd, sharedEnv);
+	if (cmd === "find" || DELETE_COMMANDS.has(cmd))
+		return classifyNodeModulesDelete(cmd, args, projectCwd, sharedEnv);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
