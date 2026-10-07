@@ -8,6 +8,7 @@ import {
 	matchGlob,
 	parseChangedFiles,
 } from "./lib/tla-coverage.mjs";
+import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
 import {
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	closeKeywordPlacementMessage,
@@ -1918,6 +1919,9 @@ export async function lintPullRequestEvent(
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories)
 		console.warn(`::notice::${advisory}`);
+	const workflowEvidence = lintWorkflowRunEvidence(body, { diff });
+	result.errors.push(...workflowEvidence);
+	if (workflowEvidence.length) result.valid = false;
 	if (result.valid) {
 		console.log(`PR body OK: ${pullRequest.number}`);
 		return { valid: true, repaired: normalized };
@@ -1958,6 +1962,60 @@ export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
 		changedFiles: parseChangedFiles(diff),
 		body,
 	});
+}
+
+/**
+ * #3085 gap 1: a PR that edits a workflow no pull request executes must quote
+ * the branch run (`gh workflow run <file> --ref <branch>`) with its run id.
+ * The post-image is read from the checkout the lint runs in, which is the PR's
+ * own head tree in CI and the working tree locally; `cwd` defaults to the
+ * directory `localDiff` diffs, so the diff and the post-image agree. The
+ * merge-base image lets the rule verify a comment-only edit.
+ */
+export function lintWorkflowRunEvidence(
+	body,
+	{ diff, cwd = process.cwd() } = {},
+) {
+	if (!diff) return [];
+	const unreadable = [];
+	// The merge base is what `localDiff` diffs from; no base image (an added
+	// file, a shallow checkout) reads as "not a comment-only edit".
+	let mergeBase = null;
+	try {
+		mergeBase = gitExecFileSync(["merge-base", "origin/master", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+		}).trim();
+	} catch {
+		mergeBase = null;
+	}
+	const errors = evaluateWorkflowRunEvidence({
+		changedFiles: parseChangedFiles(diff),
+		body,
+		readBaseWorkflow: (file) => {
+			if (!mergeBase) return null;
+			try {
+				return gitExecFileSync(["show", `${mergeBase}:${file}`], {
+					cwd,
+					encoding: "utf8",
+				});
+			} catch {
+				return null;
+			}
+		},
+		readWorkflow: (file) => {
+			try {
+				return readFileSync(resolve(cwd, file), "utf8");
+			} catch (error) {
+				if (error?.code === "ENOENT") return null;
+				unreadable.push(
+					`Changed workflow ${file} could not be read to judge whether a pull request runs it: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return null;
+			}
+		},
+	});
+	return [...errors, ...unreadable];
 }
 
 export function localTouchesTests(cwd = process.cwd(), git = gitExecFileSync) {
@@ -2009,6 +2067,9 @@ export function lintLocalPrBody(
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories) console.warn(advisory);
+	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd });
+	result.errors.push(...workflowEvidence);
+	if (workflowEvidence.length) result.valid = false;
 	const closeSyntax = lintCloseKeywords(body);
 	if (!closeSyntax.valid) {
 		result.valid = false;
