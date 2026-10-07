@@ -1,206 +1,298 @@
 #!/usr/bin/env node
 // One pre-handback gate for delegated lanes (#4047).
+//
+// The result is one tri-state verdict and the exit code derives from it:
+//   clean       exit 0  every step ran and no red is caused by the change
+//   red-caused  exit 1  a failing test (or a tracked handoff file) is the change's
+//   unproven    exit 3  a step failed or a red could not be attributed; it says
+//                       nothing about the change and is never "unrelated"
+// Only `clean` exits 0. A red that fails on the base too (RED-ON-BASE) is not
+// caused by the change and stays `clean`; it is listed in the record.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import {
+	changedFiles as committedChangedFiles,
+	worktreeChangedFiles,
+} from "./pre-push-targeted-tests.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASE = "origin/master";
+// Room for a 137-file governance batch: spawnSync's 1 MiB default kills the
+// child and turns a long transcript into a lost verdict.
+const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
+const HANDOFF_FILES = ["PR_BODY.md", "COMMIT_MSG.txt"];
 
-export function classifyFailureFiles(files, verdicts) {
+export const LANE_EXIT = { clean: 0, "red-caused": 1, unproven: 3 };
+
+// A red-on-base per-test line: `<VERDICT>  <file> > <test name>`.
+const PER_TEST_LINE =
+	/^(CAUSED-BY-CHANGE|RED-ON-BASE|INCONCLUSIVE)  (\S+?) > /gm;
+const SEVERITY = { "RED-ON-BASE": 0, INCONCLUSIVE: 1, "CAUSED-BY-CHANGE": 2 };
+
+/** The verdict of the whole lane: `red-caused` outranks `unproven`. */
+export function decideLane(findings) {
+	if (findings.some((finding) => finding.kind === "red-caused"))
+		return "red-caused";
+	if (findings.some((finding) => finding.kind === "unproven"))
+		return "unproven";
+	return "clean";
+}
+
+export function laneExitCode(verdict) {
+	return LANE_EXIT[verdict] ?? LANE_EXIT.unproven;
+}
+
+/**
+ * Per-file verdict from one `red-on-base` transcript: the worst per-test line
+ * of that file. A failing file with no line (the red did not reproduce, a build
+ * failure, a usage error) is INCONCLUSIVE, never RED-ON-BASE.
+ */
+export function classifyFailureFiles(files, redOnBaseOutput) {
+	const worst = {};
+	for (const [, verdict, file] of stripVTControlCharacters(
+		redOnBaseOutput,
+	).matchAll(PER_TEST_LINE))
+		if (!(file in worst) || SEVERITY[verdict] > SEVERITY[worst[file]])
+			worst[file] = verdict;
 	return files.map((file) => ({
 		file,
-		verdict: verdicts[file] ?? "INCONCLUSIVE",
+		verdict: worst[file] ?? "INCONCLUSIVE",
 	}));
 }
 
-export function laneExitCode(classifications) {
-	return classifications.some((entry) => entry.verdict === "CAUSED-BY-CHANGE")
-		? 1
-		: 0;
-}
-
-function command(commandName, args, { inherit = false } = {}) {
-	const result = spawnSync(commandName, args, {
-		cwd: ROOT,
-		encoding: "utf8",
-		stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
-	});
-	if (!inherit) {
-		if (result.stdout) process.stdout.write(result.stdout);
-		if (result.stderr) process.stderr.write(result.stderr);
-	}
-	return result.status ?? 1;
-}
-
-function changedFiles() {
-	const tracked = gitExecFileSync(["diff", "--name-only", `${BASE}...HEAD`], {
-		cwd: ROOT,
-		encoding: "utf8",
-	});
-	const untracked = gitExecFileSync(
-		["ls-files", "--others", "--exclude-standard"],
-		{ cwd: ROOT, encoding: "utf8" },
-	);
-	return [
-		...new Set(`${tracked}\n${untracked}`.split(/\r?\n/).filter(Boolean)),
-	].sort();
-}
-
-function governanceFiles() {
-	const words =
-		/(sweep|ratchet|conformance|coverage|gate|governance|silence|hermeticity|invariant|contract)/;
-	const clients = readdirSync(path.join(ROOT, "tests/clients"), {
-		withFileTypes: true,
-	})
-		.filter(
-			(entry) =>
-				entry.isFile() &&
-				entry.name.endsWith(".test.ts") &&
-				words.test(entry.name),
-		)
-		.map((entry) => `tests/clients/${entry.name}`);
-	const config = readdirSync(path.join(ROOT, "tests/config"), {
-		withFileTypes: true,
-	})
-		.filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
-		.map((entry) => `tests/config/${entry.name}`);
-	return [...new Set([...clients, ...config])].sort();
-}
-
-function redOnBase(files) {
-	const verdicts = {};
-	const redTmp = path.resolve(ROOT, "../probes-4047");
-	for (const file of files) {
-		const result = spawnSync(
-			process.execPath,
-			["scripts/red-on-base.mjs", file, "--base", BASE],
-			{
-				cwd: ROOT,
-				encoding: "utf8",
-				env: { ...process.env, TMPDIR: redTmp },
-			},
-		);
-		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-		process.stdout.write(output);
-		verdicts[file] =
-			output.match(/VERDICT: (CAUSED-BY-CHANGE|RED-ON-BASE)/)?.[1] ??
-			"INCONCLUSIVE";
-		console.log(`${verdicts[file]}: ${file}`);
-	}
-	return verdicts;
-}
-
-function reportedFailureFiles(output, candidates) {
+/** Test files a vitest transcript names as failing, limited to `candidates`. */
+export function reportedFailureFiles(output, candidates) {
 	const found = [
-		...output.matchAll(
-			/^\s*(?:❯|FAIL)\s+(?:\|[^|]+\|\s+)?(tests\/\S+?\.test\.ts)(?:\s|\()/gm,
+		...stripVTControlCharacters(output).matchAll(
+			/^\s*(?:❯|FAIL)\s+(?:\S+\s+)?(tests\/\S+?\.test\.ts)(?:\s|\()/gm,
 		),
 	].map((match) => match[1]);
 	return [...new Set(found)].filter((file) => candidates.includes(file));
 }
 
-function capturedCommand(commandName, args) {
+/**
+ * Why a failed test run cannot be pinned on named files, or null. A run that
+ * exits non-zero with no failing file named (a build or self-scan failure, a
+ * lock timeout, a crash), or that names fewer failing files than vitest
+ * counted, is `unproven`; it is never "no reds".
+ */
+export function unattributedFailure(status, output, files) {
+	if (status === 0) return null;
+	if (!files.length)
+		return `exit ${status} and no failing test file named in the output`;
+	const counted = stripVTControlCharacters(output).match(
+		/^\s*Test Files\s+(\d+) failed/m,
+	);
+	if (counted && files.length < Number(counted[1]))
+		return `exit ${status}: vitest counted ${counted[1]} failing file(s), ${files.length} named`;
+	return null;
+}
+
+function run(root, commandName, args) {
 	const result = spawnSync(commandName, args, {
-		cwd: ROOT,
+		cwd: root,
 		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
+		input: "",
+		maxBuffer: MAX_OUTPUT_BYTES,
 	});
-	const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	const output = `${result.stdout ?? ""}${result.stderr ?? ""}${result.error ? `\n${result.error.message}\n` : ""}`;
 	process.stdout.write(output);
 	return { status: result.status ?? 1, output };
 }
 
+function governanceFiles(root) {
+	const words =
+		/(sweep|ratchet|conformance|coverage|gate|governance|silence|hermeticity|invariant|contract)/;
+	const listing = (dir, keep) =>
+		readdirSync(path.join(root, dir), { withFileTypes: true })
+			.filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
+			.filter((entry) => keep(entry.name))
+			.map((entry) => `${dir}/${entry.name}`);
+	return [
+		...new Set([
+			...listing("tests/clients", (name) => words.test(name)),
+			...listing("tests/config", () => true),
+		]),
+	].sort();
+}
+
+const git = (root, args) =>
+	gitExecFileSync(args, { cwd: root, encoding: "utf8" }).trim();
+
 export function main(argv = process.argv.slice(2)) {
+	const root = process.cwd();
 	const bodyIndex = argv.indexOf("--body");
 	const body = bodyIndex === -1 ? null : argv[bodyIndex + 1];
-	const changed = changedFiles();
-	const targeted = spawnSync(
-		process.execPath,
-		["scripts/pre-push-targeted-tests.mjs"],
-		{ cwd: ROOT, input: "", encoding: "utf8" },
-	);
-	const targetedOutput = `${targeted.stdout ?? ""}${targeted.stderr ?? ""}`;
-	process.stdout.write(targeted.stdout ?? "");
-	process.stderr.write(targeted.stderr ?? "");
+	const findings = [];
+	const unproven = (reason) => findings.push({ kind: "unproven", reason });
+	const record = { base: BASE, checks: {}, failedFiles: [], redOnBase: null };
+
+	const build = run(root, "npm", ["run", "build"]);
+	record.checks.build = build.status;
+	if (build.status !== 0) {
+		// Nothing below is meaningful on a stale or missing build.
+		unproven(`build failed (exit ${build.status}); no test step ran`);
+		return report(root, record, findings, { governance: 0, changed: 0 });
+	}
+
+	const committed = committedChangedFiles(`${BASE}...HEAD`);
+	const uncommitted = worktreeChangedFiles();
+	if (committed === null || uncommitted === null)
+		unproven(`could not compute the changed set against ${BASE}`);
+	const changed = [
+		...new Set([...(committed ?? []), ...(uncommitted ?? [])]),
+	].sort();
+
+	const targeted = run(root, process.execPath, [
+		"scripts/pre-push-targeted-tests.mjs",
+		"--skip-build",
+		"--include-worktree",
+	]);
 	const selected = [
-		...targetedOutput.matchAll(/^\s+- (tests\/[^\s]+\.test\.ts)$/gm),
+		...targeted.output.matchAll(/^\s+- (tests\/[^\s]+\.test\.ts)$/gm),
 	].map((match) => match[1]);
-	const failing =
-		targeted.status === 0 ? [] : reportedFailureFiles(targetedOutput, selected);
-	const verdicts = redOnBase(failing);
-	const governance = governanceFiles();
+	const targetedFailing = reportedFailureFiles(targeted.output, selected);
+	record.checks.targeted = { status: targeted.status, failed: targetedFailing };
+	const targetedGap = unattributedFailure(
+		targeted.status,
+		targeted.output,
+		targetedFailing,
+	);
+	if (targetedGap) unproven(`targeted run: ${targetedGap}`);
+
+	const governance = governanceFiles(root);
 	console.log(`\n[lane-check] governance batch (${governance.length} files)`);
-	const governanceRun = capturedCommand("npm", [
+	const governanceRun = run(root, "npm", [
 		"run",
 		"test:targeted",
 		"--",
 		...governance,
 	]);
-	const governanceFailures =
-		governanceRun.status === 0
-			? []
-			: reportedFailureFiles(governanceRun.output, governance);
-	const governanceVerdicts = redOnBase(governanceFailures);
-	const bodyStatus = body
-		? command(process.execPath, [
-				"scripts/check-pr-body.mjs",
-				"--lint-local",
-				body,
-			])
-		: 0;
-	const changelog = command(process.execPath, [
-		"scripts/check-changelog-fragments.mjs",
-		"--base",
-		BASE,
-	]);
-	const touched = changed.filter((file) => existsSync(path.join(ROOT, file)));
-	const format = touched.length
-		? command("npx", ["oxfmt", "--check", ...touched])
-		: 0;
-	const astgrep = command("npm", ["run", "astgrep:self-scan"]);
-	const status = gitExecFileSync(["status", "--porcelain"], {
-		cwd: ROOT,
-		encoding: "utf8",
-	}).trim();
-	const trackedHandoff = gitExecFileSync(
-		["ls-files", "--", "PR_BODY.md", "COMMIT_MSG.txt", "HANDBACK_4047.md"],
-		{ cwd: ROOT, encoding: "utf8" },
-	).trim();
-	const classifications = classifyFailureFiles(
-		[...new Set([...failing, ...governanceFailures])],
-		{ ...governanceVerdicts, ...verdicts },
+	const governanceFailing = reportedFailureFiles(
+		governanceRun.output,
+		governance,
 	);
-	const record = {
-		base: BASE,
-		changed: changed.length,
-		governance: governance.length,
-		failedFiles: classifications,
-		checks: {
-			governanceStatus: governanceRun.status,
-			bodyStatus,
-			changelog,
-			format,
-			astgrep,
-		},
-		clean: !status && !trackedHandoff,
+	record.checks.governance = {
+		status: governanceRun.status,
+		failed: governanceFailing,
 	};
+	const governanceGap = unattributedFailure(
+		governanceRun.status,
+		governanceRun.output,
+		governanceFailing,
+	);
+	if (governanceGap) unproven(`governance run: ${governanceGap}`);
+
+	// One red-on-base run for every failing file: a file red in both sets is
+	// built and compared once, not twice.
+	const failing = [...new Set([...targetedFailing, ...governanceFailing])];
+	if (failing.length) {
+		const compared = run(root, process.execPath, [
+			"scripts/red-on-base.mjs",
+			...failing,
+			"--base",
+			BASE,
+		]);
+		record.redOnBase = {
+			status: compared.status,
+			baseTree: compared.output.includes("BASE-TREE git-archive")
+				? "git-archive"
+				: "worktree",
+		};
+		record.failedFiles = classifyFailureFiles(failing, compared.output);
+		for (const { file, verdict } of record.failedFiles) {
+			console.log(`${verdict}: ${file}`);
+			if (verdict === "CAUSED-BY-CHANGE")
+				findings.push({
+					kind: "red-caused",
+					reason: `${file} reds on the change`,
+				});
+			else if (verdict === "INCONCLUSIVE")
+				unproven(`${file}: red-on-base could not attribute the red`);
+		}
+	}
+
+	const touched = changed.filter((file) => existsSync(path.join(root, file)));
+	const checks = {
+		body: body
+			? run(root, process.execPath, [
+					"scripts/check-pr-body.mjs",
+					"--lint-local",
+					body,
+				])
+			: null,
+		changelog: run(root, process.execPath, [
+			"scripts/check-changelog-fragments.mjs",
+			"--base",
+			BASE,
+		]),
+		format: touched.length
+			? run(root, "npx", [
+					"oxfmt",
+					"--check",
+					// a change of only formatter-ignored files (docs, JSON) leaves no
+					// target and oxfmt exits 2 (the pre-commit hook passes the same, #3451)
+					"--no-error-on-unmatched-pattern",
+					...touched,
+				])
+			: null,
+		astgrep: run(root, "npm", ["run", "astgrep:self-scan"]),
+	};
+	for (const [name, result] of Object.entries(checks)) {
+		record.checks[name] = result ? result.status : null;
+		// Never compared against the base, so a failed check is not `red-caused`.
+		if (result && result.status !== 0)
+			unproven(`check ${name} failed (exit ${result.status})`);
+	}
+
+	const tracked = git(root, ["ls-files", "--", ...HANDOFF_FILES]);
+	if (tracked)
+		findings.push({
+			kind: "red-caused",
+			reason: `root handoff file is tracked: ${tracked.split("\n").join(", ")}`,
+		});
+	return report(root, record, findings, {
+		governance: governance.length,
+		changed: changed.length,
+	});
+}
+
+function report(root, record, findings, { governance, changed }) {
+	const verdict = decideLane(findings);
+	const branch = git(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	const head = git(root, ["rev-parse", "HEAD"]);
+	const uncommitted = git(root, ["status", "--porcelain"])
+		.split("\n")
+		.filter(Boolean).length;
+	const count = (kind) =>
+		record.failedFiles.filter((entry) => entry.verdict === kind).length;
+	const ran = Object.values(record.checks).filter((value) => value !== null);
+	const exit = laneExitCode(verdict);
+	Object.assign(record, {
+		changed,
+		governance,
+		head,
+		uncommitted,
+		findings,
+		verdict,
+		exit,
+	});
 	console.log(JSON.stringify(record));
 	console.log("ORCHESTRATOR SUMMARY");
-	console.log(`branch: tools/4047-lane-check`);
+	console.log(`branch: ${branch === "HEAD" ? "(detached)" : branch}`);
+	console.log(`head: ${head}`);
+	console.log(`verdict: ${verdict} (exit ${exit})`);
 	console.log(
-		`head: ${gitExecFileSync(["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim()}`,
+		`red files: ${record.failedFiles.length}; CAUSED-BY-CHANGE: ${count("CAUSED-BY-CHANGE")}; RED-ON-BASE: ${count("RED-ON-BASE")}; INCONCLUSIVE: ${count("INCONCLUSIVE")} (not evidence of unrelated)`,
 	);
-	console.log(
-		`red files: ${classifications.length}; CAUSED-BY-CHANGE: ${classifications.filter((x) => x.verdict === "CAUSED-BY-CHANGE").length}`,
-	);
-	console.log(
-		`green checks: ${Object.values(record.checks).filter((x) => x === 0).length}; governance files: ${governance.length}`,
-	);
-	console.log(`clean status: ${record.clean}`);
-	return laneExitCode(classifications);
+	console.log(`governance files: ${governance}; steps run: ${ran.length}`);
+	for (const finding of findings)
+		console.log(`${finding.kind}: ${finding.reason}`);
+	console.log(`uncommitted: ${uncommitted} file(s)`);
+	return exit;
 }
 
 if (

@@ -524,6 +524,10 @@ export const wallClockBudgetInclude = [
 	// gate, which requires it for any newly admitted real spawn regardless
 	// of this list's own "carries a budget assertion" charter above.
 	"tests/scripts/knip-sibling-purge.test.ts",
+	// #4047: `npm run lane:check` against real Git fixtures, the real pre-push
+	// selector, red-on-base and vitest (real child processes, flake-shape
+	// admission).
+	"tests/scripts/lane-check.test.ts",
 	// #2700: the gating/advisory subset test resolves oxlint's real
 	// --print-config for both npm scripts (real child process, flake-shape
 	// admission).
