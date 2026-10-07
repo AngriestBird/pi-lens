@@ -207,9 +207,12 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
   `clients/session-scope.ts`). The key is the successor's file, else, for a
   `/reload` or in-memory `/fork`, the primary's ticket bound to the manager pi
   hands that successor, else none (an in-memory `/new`). In the gap a `SecUp`
-  is primary only when its own (reason, key) equals that pair; a subagent's
-  start carries its own file or, file-less, no key. `Begin` is the named
-  start by construction (the code's equality is pinned by runtime tests).
+  is primary only when its own (reason, key) equals that pair. A subagent's
+  start carries its own file or, file-less, its own ticket, which its
+  shutdown binds to its manager (`leaveTicket`); an in-memory `/new` carries
+  none. A key-less start with the named reason fails safe to a ticket name
+  (a host that did not hand over the manager). `Begin` is the named start by
+  construction (the code's equality is pinned by runtime tests).
 - `inheritRole` (#3855 round 1, superseded): a secondary's `SecDown` leaves
   a note keyed by its successor's key (file-less: its ticket, bound to its
   manager), and a gap start whose note is still there stays secondary. An
