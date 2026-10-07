@@ -2164,8 +2164,9 @@ export function resolveReexecPlan({
 // prints -- never a second CI reader that could disagree with it.
 // ---------------------------------------------------------------------------
 
-/** Seconds between `--watch-open` polls: each poll costs about five `gh`
- * reads per watched PR, so this stays well above `POLL_INTERVAL_SECONDS`. */
+/** Seconds between `--watch-open` polls: a red advisory Actions row costs
+ * about seven `gh` reads per watched PR, including its two detail reads, so
+ * this stays well above `POLL_INTERVAL_SECONDS`. */
 export const WATCH_POLL_INTERVAL_SECONDS = 90;
 
 // The verdict kinds `--watch-open` reports; every other kind is progress.
@@ -2235,7 +2236,7 @@ function readViewerLogin(ghExec, timeoutMs) {
  * (`run()` already said why on `stderr`). */
 async function readPrVerdict(
 	pr,
-	{ ghExec, stderr, sleepImpl, now, absentSinceMs },
+	{ ghExec, stderr, sleepImpl, now, absentSinceMs, failureDetailsCache },
 ) {
 	let captured = null;
 	const result = await run({
@@ -2246,6 +2247,7 @@ async function readPrVerdict(
 		...(sleepImpl ? { sleepImpl } : {}),
 		...(now ? { now } : {}),
 		absentSinceMs,
+		failureDetailsCache,
 		onVerdict: (info) => {
 			captured = info;
 		},
@@ -2515,6 +2517,7 @@ export async function watchOpenPrs({
 	).split("/")[0];
 	const viewer = readViewerLogin(ghExec, DEFAULT_GH_TIMEOUT_MS);
 	const seen = loadWatchState(stateFile);
+	const failureDetailsCache = new Map();
 	let printed = 0;
 	for (;;) {
 		const events = [];
@@ -2541,6 +2544,7 @@ export async function watchOpenPrs({
 				sleepImpl,
 				now,
 				absentSinceMs: entry.since.ms,
+				failureDetailsCache,
 			});
 			if (!info) continue;
 			const { kind, mergeState } = info.verdict;
@@ -2724,6 +2728,9 @@ export async function run({
 	// #3700: receives `{ repository, sha, verdict }` just before the report
 	// prints; `--all` and `--watch-open` read every PR through it.
 	onVerdict = () => {},
+	// A watch poll shares this map across one head's reads; one-shot callers
+	// leave it absent so their detail read remains unchanged.
+	failureDetailsCache = null,
 	// #3700: when `--watch-open` first saw this head; the absence clock of a
 	// head with no check suite.
 	absentSinceMs = null,
@@ -3009,13 +3016,18 @@ export async function run({
 			(verdict.failingRows.length > 0 || advisoryRedRows.length > 0) &&
 			transport === TRANSPORT_GH
 		) {
-			const found = readFailureDetails({
-				rows: [...verdict.failingRows, ...advisoryRedRows],
-				target,
-				repository,
-				ghExec,
-				timeoutMs: initialTimeoutMs,
-			});
+			const detailRows = [...verdict.failingRows, ...advisoryRedRows];
+			const cached = failureDetailsCache?.get(sha);
+			const found =
+				cached ??
+				readFailureDetails({
+					rows: detailRows,
+					target,
+					repository,
+					ghExec,
+					timeoutMs: initialTimeoutMs,
+				});
+			if (failureDetailsCache && !cached) failureDetailsCache.set(sha, found);
 			if (found.noiseRowIds) {
 				verdict = computeVerdict(
 					lastPayload,

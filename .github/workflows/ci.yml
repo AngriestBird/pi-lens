@@ -762,7 +762,7 @@ jobs:
             fi
             if [[ -f "$RUNNER_TEMP/windows-vitest.log" ]]; then
               failures="$(sed -nE 's/^Tests[[:space:]]+([0-9]+)[[:space:]]+failed.*/\1/p' "$RUNNER_TEMP/windows-vitest.log" | tail -n 1)"
-              echo "Windows Vitest failures: ${failures:-0}"
+              echo "Windows Vitest failures: ${failures:-unknown}"
             else
               echo "Windows Vitest failures: unavailable"
             fi

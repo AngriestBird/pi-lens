@@ -120,6 +120,24 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		expect(raw).toContain("continue-on-error: true");
 	});
 
+	// Recurrence: #4042 review F1 — a Vitest crash creates an empty log, so an
+	// absent summary must stay visibly unavailable rather than becoming zero.
+	it("reports an unknown count when Vitest emits no summary", () => {
+		const raw = readFileSync(WORKFLOW_PATH, "utf8");
+		const job = readWorkflow().jobs["unit-tests-windows"];
+		const record = (job?.steps ?? []).find(
+			(step) => step.name === "Record Windows Vitest outcome",
+		);
+		const failure = (job?.steps ?? []).find(
+			(step) => step.name === "Fail Windows advisory when Vitest fails",
+		);
+		expect(record?.run).toContain(
+			"Windows Vitest failures: ${failures:-unknown}",
+		);
+		expect(failure?.run).toContain("${failures:-unknown} Vitest tests failed");
+		expect(raw).not.toContain("Windows Vitest failures: ${failures:-0}");
+	});
+
 	it("pins the sibling action revisions and the isolated home", () => {
 		const job = readWorkflow().jobs["unit-tests-windows"];
 		const steps = job?.steps ?? [];
