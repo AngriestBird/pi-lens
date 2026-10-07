@@ -98,7 +98,9 @@ const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
 // bounded by nothing. That is how the Unit-tests job got SIGKILLed (exit 137)
 // with no failing assertion. Local runs keep the measured 2026-07-29 posture
 // (8 forks ≈ 40s / 9-11 GB peak RSS; 6 forks ≈ 44s / 8 GB); memory-constrained
-// local runs still use PI_LENS_TEST_MAX_WORKERS=6.
+// local runs still use PI_LENS_TEST_MAX_WORKERS=6. A host with more than 16
+// logical CPUs is capped at those 8 forks (LOCAL_WORKER_CAP) rather than half
+// its cores.
 const testHost = {
 	totalMemMb: Math.round(os.totalmem() / (1024 * 1024)),
 	cpus: os.availableParallelism?.() ?? os.cpus().length,
