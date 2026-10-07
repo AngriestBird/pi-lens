@@ -103,7 +103,7 @@ jobs:
         run: |
           set -euxo pipefail
           npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@${npm_pin}" install --strict-allow-scripts
+          npx -y "npm@${npm_pin}" install --strict-allow-scripts --no-audit --no-fund
 
   dependency-boundaries:
     name: Dependency boundaries

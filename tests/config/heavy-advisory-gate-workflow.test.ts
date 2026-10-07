@@ -656,12 +656,13 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		sitesOf(censusRows(new Map([["fixture.yml", text]])));
 
 	it("records every stage's job and site counts from the parsed YAML", () => {
-		// 56 checkout sites across the tree; 61 non-gate job rows (A23/B2/C13/D23
+		// 57 checkout sites across the tree; 62 non-gate job rows (A24/B2/C13/D23
 		// after #1185 added install-smoke's gating `npm-strict` to A, #3941 F1 moved
 		// install-smoke's schedule-only `host-latest-smoke` from C to D, #4005
 		// removed the pull_request `mutation` (B) and `mutation comment` (C) jobs
-		// and added the schedule-only nightly report job (D), and #3916 added
-		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D).
+		// and added the schedule-only nightly report job (D), #3916 added
+		// tool-smoke's schedule/dispatch-only `snapshot-persist-bench`, also D,
+		// and #4064 added the cold-cache fast-fail job).
 		// Sites and jobs are counted separately so a no-checkout
 		// job cannot launder a stage's population. The floor call keeps this
 		// census registered under the sweep-floor meta-sweep: an empty walk fails
@@ -669,13 +670,13 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			56,
+			57,
 		);
-		expect(CENSUS_SITES.length).toBe(56);
+		expect(CENSUS_SITES.length).toBe(57);
 		expect(
 			stageJobs("A") + stageJobs("B") + stageJobs("C") + stageJobs("D"),
-		).toBe(61);
-		expect(stageJobs("A")).toBe(23);
+		).toBe(62);
+		expect(stageJobs("A")).toBe(24);
 		expect(stageJobs("B")).toBe(2);
 		expect(stageJobs("C")).toBe(13);
 		expect(stageJobs("D")).toBe(23);
@@ -693,7 +694,8 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 
 	it("removes every stage-C merge-ref site and only those", () => {
 		// After the fix: 27 github.ref sites became 16 (19 explicit refs); #1185's
-		// stage-A `npm-strict` job adds one gating site (17 and 20).
+		// stage-A `npm-strict` job and #4064's cold-cache job add two gating sites
+		// (17 and 21).
 		expect(stageRefs("A")).toBe(16);
 		expect(stageRefs("B")).toBe(0);
 		expect(stageRefs("C")).toBe(0);
@@ -705,7 +707,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		const totalExplicit = CENSUS_SITES.filter(
 			(site) => site.ref !== undefined,
 		).length;
-		expect(totalExplicit).toBe(20);
+		expect(totalExplicit).toBe(21);
 	});
 
 	it("keeps every early-start advisory checkout on the captured commit", () => {
