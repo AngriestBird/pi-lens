@@ -133,6 +133,12 @@ the brief gives.
   route the lane and opens the file only when routing a fix round, so a claim
   made only in the file does not route. (Full reports pasted into the reply
   were the largest orchestrator token cost on 2026-10-07.)
+- **Handbacks between rounds.** Every lane's returned summary for PR #N is
+  kept at `~/.local/share/pi-lens-orchestrator/tmp/handbacks/pr-<N>.md` (the
+  orchestrator's hooks write it; a fixer may also write it). A reviewer or
+  verifier of PR #N reads that file FIRST and attacks its claims, so the brief
+  carries only the attack angles, never a restatement of what the fixer
+  claims.
 
 ## Tests and probes
 
