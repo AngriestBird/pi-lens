@@ -23,7 +23,7 @@ export type ShardArtifact = {
 };
 export type ShardVerdict = {
 	shard: number | null;
-	outcome: "complete" | "budget-cut" | "failed";
+	outcome: "complete" | "budget-cut" | "dry-run-timeout" | "failed";
 	reason: string | null;
 };
 export declare function classifyShardArtifact(

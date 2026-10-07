@@ -50,7 +50,7 @@ function metaTable(meta) {
  * metadata table shows (#3810). `covering` is null when no coverage probe was
  * usable and the kept set came from the import graph alone.
  *
- * @param {{pool: number, covering: number | null, kept: number, own?: number, unknown?: number}} selection
+ * @param {{pool: number, covering: number | null, kept: number, own?: number, unknown?: number, overBudget?: number, estimatedSeconds?: number | null}} selection
  */
 export function formatTestSelection(selection) {
 	const covering =
@@ -60,6 +60,9 @@ export function formatTestSelection(selection) {
 	const extras = [
 		selection.own > 0 ? `${selection.own} own` : null,
 		selection.unknown > 0 ? `${selection.unknown} probe failed` : null,
+		selection.overBudget > 0
+			? `${selection.overBudget} over the runtime cap${typeof selection.estimatedSeconds === "number" ? `, ~${Math.round(selection.estimatedSeconds)} s kept` : ""}`
+			: null,
 	].filter(Boolean);
 	return `related ${selection.pool} → covering ${covering} → kept ${selection.kept}${extras.length > 0 ? ` (${extras.join(", ")})` : ""}`;
 }
@@ -113,10 +116,21 @@ function incrementalRowOf(meta) {
 
 // Only a DROPPED test makes the population truncated: kept < covering is not
 // the test, since a PR's own tests are kept whether or not they cover a line.
+// Two caps drop tests: the count cap (`dropped`) and the runtime cap
+// (`overBudget`, #4092); each is named, because the second also drops own tests.
 function testCapNotice(meta) {
 	const selection = validTestSelection(meta);
-	if (!selection || selection.dropped <= 0) return null;
-	return `**Bounded evidence:** ${selection.dropped} ${selection.covering === null ? "related" : "covering"} test(s) dropped by the test cap (${selection.kept} kept). The score is from a truncated test population.`;
+	const overBudget = selection?.overBudget > 0 ? selection.overBudget : 0;
+	if (!selection || (selection.dropped <= 0 && overBudget === 0)) return null;
+	const drops = [
+		selection.dropped > 0
+			? `${selection.dropped} ${selection.covering === null ? "related" : "covering"} test(s) dropped by the test cap`
+			: null,
+		overBudget > 0
+			? `${overBudget} test(s) dropped by the runtime cap${typeof selection.estimatedSeconds === "number" ? ` (~${Math.round(selection.estimatedSeconds)} s of estimated test time kept)` : ""}`
+			: null,
+	].filter(Boolean);
+	return `**Bounded evidence:** ${drops.join("; ")} (${selection.kept} kept). The score is from a truncated test population.`;
 }
 
 const BOUNDED_CELL_CHARS = 160;
