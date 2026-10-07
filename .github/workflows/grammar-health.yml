@@ -44,7 +44,9 @@ jobs:
         run: npm run build
       - name: Load + exercise every grammar in an isolated child process
         run: node scripts/check-grammar-load.mjs
+      # Runs after a red load step too, so one night records both failures.
       - name: Parse committed real-file corpus through pi-lens
+        if: ${{ !cancelled() }}
         run: node scripts/check-grammar-corpus.mjs
 
   # 2. Watch whether the blocked Swift grammar still crashes on the current Node.

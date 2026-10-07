@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 /**
- * Parse one committed real-file corpus entry through TreeSitterClient per
- * grammar. Each parent-process result is one bounded JSON record per grammar;
- * a child keeps an uncatchable WASM abort from hiding the remaining results.
+ * Parse one committed multi-construct corpus file through TreeSitterClient per
+ * grammar (#4012). Each parent-process result is one bounded JSON record per
+ * grammar; a child keeps an uncatchable WASM abort from hiding the remaining
+ * results. Record `reason`s: `missing-corpus`, `grammar-did-not-load` (status
+ * unavailable: a missing download), `null-parse` (the grammar loaded but the
+ * parse threw), `error-node` (the tree holds an ERROR or MISSING node), and a
+ * signal or exit code for a child that died.
+ *
+ * Nightly only (`.github/workflows/grammar-health.yml`). The per-PR lane checks
+ * the corpus is complete and tracked, hermetically
+ * (`tests/clients/grammar-corpus-health.test.ts`).
  */
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
@@ -33,8 +41,13 @@ async function parseOne(id) {
 		return { status: "unavailable", reason: "runtime" };
 	const file = corpusFiles().get(id);
 	if (!file) return { status: "failed", reason: "missing-corpus" };
+	if (!(await client.isLanguageSupported(id)))
+		return { status: "unavailable", reason: "grammar-did-not-load" };
+	// The grammar loaded, so a null tree is a parse that threw: the client
+	// swallows it (#3996: the bash wasm's unresolved `isalpha` import threw
+	// `resolved is not a function` on `[ a == b ]`).
 	const tree = await client.parseFile(file, id);
-	if (!tree) return { status: "unavailable", reason: "grammar-did-not-load" };
+	if (!tree) return { status: "failed", reason: "null-parse" };
 	if (tree.rootNode.hasError) return { status: "failed", reason: "error-node" };
 	return { status: "ok" };
 }

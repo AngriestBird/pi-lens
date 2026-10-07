@@ -14,86 +14,35 @@
  * population from passing, and the visible count is asserted.
  */
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+	ADMITTED_UNRESOLVED_IMPORTS,
+	grammarWasmFiles,
+	runtimeExports,
+	unresolvedImports,
+} from "../../clients/grammar-wasm-imports.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "../..");
-const requireFromRepo = createRequire(import.meta.url);
-
-/**
- * Imports a grammar may name without the runtime exporting them. Each entry is
- * an admission with its reason: the call sits on an assertion or abort path
- * that already ends the parse, so an unresolved stub there changes nothing the
- * runtime was going to do. Reviewed per grammar when a grammar is bumped.
- */
-const ADMITTED_UNRESOLVED_IMPORTS: Readonly<Record<string, string>> = {
-	__assert_fail: "C assert(): only reached after an invariant already broke",
-	abort: "C abort(): the grammar ends the process deliberately",
-};
-
-// `WebAssembly` is a runtime global the build's `lib` does not declare.
-// SAFETY: every supported Node runtime defines `WebAssembly.Module` with the
-// static `imports` / `exports` introspection calls; the cast names only those.
-interface WasmModuleHandle {
-	readonly compiled?: never;
-}
-type WasmModuleApi = {
-	new (bytes: Uint8Array): WasmModuleHandle;
-	imports(
-		module: WasmModuleHandle,
-	): Array<{ module: string; name: string; kind: string }>;
-	exports(module: WasmModuleHandle): Array<{ name: string; kind: string }>;
-};
-const wasm = (
-	globalThis as unknown as { WebAssembly: { Module: WasmModuleApi } }
-).WebAssembly;
-
-function runtimeExports(): Set<string> {
-	const runtimeDir = path.dirname(requireFromRepo.resolve("web-tree-sitter"));
-	const module = new wasm.Module(
-		fs.readFileSync(path.join(runtimeDir, "tree-sitter.wasm")),
-	);
-	return new Set(wasm.Module.exports(module).map((entry) => entry.name));
-}
-
-/** One file per grammar name, first directory wins: the order the client
- * resolves them in (`grammarSourceDirs`), so a stale shadowed copy is not
- * scanned in place of the one a parse would load. */
-function grammarFiles(): string[] {
-	const runtimeDir = path.dirname(requireFromRepo.resolve("web-tree-sitter"));
-	const dirs = [
-		path.join(repoRoot, "vendor", "grammars"),
-		path.join(repoRoot, "grammars"),
-		path.join(runtimeDir, "grammars"),
-	];
-	const byName = new Map<string, string>();
-	for (const dir of dirs) {
-		if (!fs.existsSync(dir)) continue;
-		for (const name of fs.readdirSync(dir)) {
-			if (name.endsWith(".wasm") && !byName.has(name)) {
-				byName.set(name, path.join(dir, name));
-			}
-		}
-	}
-	return [...byName.values()];
-}
-
-/** Function imports from `env` that the runtime does not export. */
-function unresolvedImports(file: string, exported: Set<string>): string[] {
-	const module = new wasm.Module(fs.readFileSync(file));
-	return wasm.Module.imports(module)
-		.filter((entry) => entry.kind === "function" && entry.module === "env")
-		.map((entry) => entry.name)
-		.filter((name) => !exported.has(name) && !exported.has(`_${name}`));
+/** A module with no body whose import section names `env.<name>` functions. */
+function wasmImporting(names: string[]): Uint8Array {
+	const text = (value: string) => [value.length, ...Buffer.from(value)];
+	const imports = names.flatMap((name) => [
+		...text("env"),
+		...text(name),
+		0,
+		0,
+	]);
+	return Uint8Array.from([
+		...[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+		...[1, 4, 1, 0x60, 0, 0], // type section: one `() -> ()`
+		...[2, imports.length + 1, names.length, ...imports], // import section
+	]);
 }
 
 describe("shipped grammars import only symbols the runtime exports (#3996)", () => {
 	const exported = runtimeExports();
-	const files = grammarFiles();
+	const files = [...grammarWasmFiles().values()];
 
 	it("scans a non-empty grammar population including bash", () => {
 		// Recurrence: a sweep over an empty directory passes vacuously.
@@ -107,11 +56,37 @@ describe("shipped grammars import only symbols the runtime exports (#3996)", () 
 		// Recurrence: #3996, tree-sitter-wasms@0.1.13 bash wasm importing
 		// `isalpha`, which web-tree-sitter 0.25 does not export.
 		const offenders = files.flatMap((file) =>
-			unresolvedImports(file, exported)
-				.filter((name) => !(name in ADMITTED_UNRESOLVED_IMPORTS))
-				.map((name) => `${path.basename(file)} imports ${name}`),
+			unresolvedImports(fs.readFileSync(file), exported).map(
+				(name) => `${path.basename(file)} imports ${name}`,
+			),
 		);
 
 		expect(offenders).toEqual([]);
+	});
+
+	it("flags an unexported import and passes exported and admitted ones", () => {
+		// Recurrence: #3996. The shared helper is what both this sweep and the
+		// nightly guard call; a filter that stopped flagging `isalpha`, or one
+		// that stopped admitting `abort`, must red here, not only on a real
+		// grammar that happens to be fetched.
+		// A bare export and an underscore-prefixed one (emscripten's C ABI spelling).
+		expect(exported.has("malloc")).toBe(true);
+		expect(exported.has("_emscripten_stack_restore")).toBe(true);
+		expect(
+			unresolvedImports(
+				wasmImporting([
+					"isalpha",
+					"abort",
+					"__assert_fail",
+					"malloc",
+					"emscripten_stack_restore",
+				]),
+				exported,
+			),
+		).toEqual(["isalpha"]);
+		expect(Object.keys(ADMITTED_UNRESOLVED_IMPORTS).sort()).toEqual([
+			"__assert_fail",
+			"abort",
+		]);
 	});
 });
