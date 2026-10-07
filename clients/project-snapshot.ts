@@ -1611,9 +1611,11 @@ const WORD_INDEX_PLACEHOLDER_JSON = `${WORD_INDEX_KEY_JSON}${JSON.stringify(
  * index is stringified once, the rest of the body once with a placeholder in
  * its slot; native `indexOf` finds the placeholder and `encodeInto` writes the
  * three pieces into one buffer, byte-identical to encoding
- * `JSON.stringify(stored)`. Returns undefined when the placeholder is not
- * found exactly once (a `toJSON` that rewrites the body), and the caller
- * encodes the plain stringify.
+ * `JSON.stringify(stored)`. Returns undefined when the placeholder is absent
+ * (a `toJSON` that rewrites the body), and the caller encodes the plain
+ * stringify. The placeholder carries a NUL, the pid and the module load time,
+ * and its quoted `"wordIndex":` form cannot occur inside a JSON string (quotes
+ * are escaped there), so the first match is the top-level slot.
  */
 function spliceWordIndexBody(stored: {
 	wordIndex?: unknown;
@@ -1621,7 +1623,7 @@ function spliceWordIndexBody(stored: {
 	const marker = WORD_INDEX_PLACEHOLDER_JSON;
 	const head = JSON.stringify({ ...stored, wordIndex: WORD_INDEX_PLACEHOLDER });
 	const at = head.indexOf(marker);
-	if (at < 0 || head.indexOf(marker, at + 1) >= 0) return undefined;
+	if (at < 0) return undefined;
 	const prefix = head.slice(0, at + WORD_INDEX_KEY_JSON.length);
 	const suffix = head.slice(at + marker.length);
 	const wordIndex = JSON.stringify(stored.wordIndex);
