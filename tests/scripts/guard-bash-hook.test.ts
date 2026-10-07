@@ -836,7 +836,7 @@ describe("scripts/hooks/guard-bash.mjs -- git worktree remove node_modules symli
 // the first guard missed (`cd <lane> && …`, `--prefix`, `npx npm@…`, a
 // subdirectory of the lane). Real filesystem fixtures, driven through the
 // real hook entry.
-describe("scripts/hooks/guard-bash.mjs -- mutating npm verbs through a linked node_modules (#4044)", () => {
+describe("scripts/hooks/guard-bash.mjs -- npm writers and deletes through a linked node_modules (#4044)", () => {
 	function makeLane(linked: boolean): {
 		tree: string;
 		shared: string;
@@ -1078,6 +1078,132 @@ describe("scripts/hooks/guard-bash.mjs -- mutating npm verbs through a linked no
 		} finally {
 			cleanup();
 		}
+	});
+
+	// Recurrence: the #4044 sibling measured with GNU coreutils on 2026-10-07:
+	// `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/
+	// -delete` follow a link and empty its target, while the no-slash forms
+	// only unlink the link. The npm rule alone left these open, and each is
+	// one keystroke from the form that is safe.
+	const DELETES_THROUGH = [
+		"rm -rf node_modules/",
+		"rm -rf node_modules/*",
+		"rm -rf ./node_modules/",
+		"rm -rf -- node_modules/",
+		"rm -r node_modules/.cache",
+		"rmdir node_modules/x",
+		"unlink node_modules/x",
+		"env rm -rf node_modules/",
+		"find node_modules/ -delete",
+		"find node_modules/ -type f -delete",
+		"find -L node_modules -delete",
+		"find -H node_modules -delete",
+		"find node_modules/ -exec rm -rf {} +",
+		"find node_modules/ -execdir unlink {} ;",
+	];
+
+	it.each(DELETES_THROUGH)(
+		"denies `%s` when node_modules links outside the lane, and names the unlink form",
+		(command) => {
+			const { tree, cleanup } = makeLane(true);
+			try {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status).toBe(2);
+				expect(result.stderr).toContain("#4044");
+				expect(result.stderr).toContain("rm node_modules");
+			} finally {
+				cleanup();
+			}
+		},
+	);
+
+	it("resolves the operand through the cwd the command really runs in: cd, absolute, relative and subdirectory spellings", () => {
+		const { tree, cleanup } = makeLane(true);
+		const sub = join(tree, "scripts");
+		mkdirSync(sub);
+		const laneName = tree.split("/").pop();
+		try {
+			const cases: Array<[string, string]> = [
+				[`cd ${tree} && rm -rf node_modules/`, PAYLOAD_CWD],
+				[`rm -rf ${tree}/node_modules/`, PAYLOAD_CWD],
+				[`rm -rf ${tree}/node_modules/*`, PAYLOAD_CWD],
+				[`find ${tree}/node_modules/ -delete`, PAYLOAD_CWD],
+				[`rm -rf ./${laneName}/node_modules/`, dirname(tree)],
+				["rm -rf ../node_modules/", sub],
+				["rm -rf ../node_modules/*", sub],
+				// cd INTO the link, then delete by glob or by `.`.
+				[`cd ${tree}/node_modules && rm -rf ./*`, PAYLOAD_CWD],
+				[`cd ${tree}/node_modules && find . -delete`, PAYLOAD_CWD],
+				[`cd ${tree}/node_modules && find -delete`, PAYLOAD_CWD],
+			];
+			for (const [command, cwd] of cases) {
+				const result = runHook(command, BASE_ENV, cwd);
+				expect(result.status, command).toBe(2);
+				expect(result.stderr, command).toContain("#4044");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows unlinking the link itself and every delete that does not pass through it", () => {
+		const { tree, cleanup } = makeLane(true);
+		try {
+			for (const command of [
+				"rm node_modules",
+				"rm -rf node_modules",
+				"rm -f ./node_modules",
+				"unlink node_modules",
+				`rm -rf ${tree}/node_modules`,
+				"find node_modules -delete",
+				"find node_modules -name x -print",
+				"find node_modules/ -name x -print",
+				"find . -delete",
+				"find node_modules/ -exec ls {} +",
+				"rm -rf dist src/*",
+				"ls node_modules/",
+			]) {
+				const result = runHook(command, BASE_ENV, tree);
+				expect(result.status, command).toBe(0);
+				expect(result.stderr, command).toBe("");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("allows `rm -rf node_modules/` where node_modules is a real directory, absent, or links INSIDE the lane", () => {
+		const real = makeLane(false);
+		const bare = makeLane(false);
+		rmSync(join(bare.tree, "node_modules"), { recursive: true });
+		const inside = makeLane(false);
+		rmSync(join(inside.tree, "node_modules"), { recursive: true });
+		const vendor = join(inside.tree, "vendor", "node_modules");
+		mkdirSync(vendor, { recursive: true });
+		symlinkSync(vendor, join(inside.tree, "node_modules"));
+		try {
+			for (const tree of [real.tree, bare.tree, inside.tree]) {
+				for (const command of [
+					"rm -rf node_modules/",
+					"rm -rf node_modules/*",
+					"find node_modules/ -delete",
+				]) {
+					const result = runHook(command, BASE_ENV, tree);
+					expect(result.status, `${tree} ${command}`).toBe(0);
+					expect(result.stderr, `${tree} ${command}`).toBe("");
+				}
+			}
+		} finally {
+			real.cleanup();
+			bare.cleanup();
+			inside.cleanup();
+		}
+	});
+
+	it("declares linkedNodeModulesDelete in the DenyRule union the .d.mts exports", () => {
+		// Same typed-binding guard as npmLinkedInstall below.
+		const rule: DenyRule = "linkedNodeModulesDelete";
+		expect(RULE_MESSAGES[rule]).toContain("unlink");
 	});
 
 	it("declares npmLinkedInstall in the DenyRule union the .d.mts exports", () => {

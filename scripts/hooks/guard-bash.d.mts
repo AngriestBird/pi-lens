@@ -17,7 +17,8 @@ export type DenyRule =
 	| "forcePush"
 	| "ciVerdictStatus"
 	| "rebase"
-	| "npmLinkedInstall";
+	| "npmLinkedInstall"
+	| "linkedNodeModulesDelete";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 

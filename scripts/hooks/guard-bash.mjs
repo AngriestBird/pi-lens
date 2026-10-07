@@ -24,6 +24,11 @@
  *     `uninstall`, `prune`, `dedupe`, `rebuild`, …), `--dry-run` or not, in
  *     a project whose `node_modules` is a symlink pointing OUTSIDE it (#4044,
  *     the #3173 shape on 2026-10-07) -- see {@link classifyNpm}
+ *   - a DELETE (`rm`, `rmdir`, `unlink`, `find … -delete`/`-exec rm`) whose
+ *     operand passes THROUGH a `node_modules` symlink pointing outside its
+ *     project (`rm -rf node_modules/`, `node_modules/*`, `find node_modules/
+ *     -delete`; #4044) -- unlinking the link itself stays allowed; see
+ *     {@link classifyNodeModulesDelete}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
  *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Probe
@@ -179,7 +184,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"|"linkedNodeModulesDelete"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -209,6 +214,8 @@ export const RULE_MESSAGES = {
 		"`git rebase` is forbidden -- merge `origin/master` instead; recovery may use `git rebase --abort` or `--quit`.",
 	npmLinkedInstall:
 		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where node_modules is a symlink into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` first and install into the lane's own real directory, or point `--prefix` at a real directory.",
+	linkedNodeModulesDelete:
+		"a delete whose operand passes THROUGH a node_modules symlink into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -1514,6 +1521,90 @@ function classifyGit(args, cwd, env = {}) {
 	return null;
 }
 
+/** Commands whose operands are the paths they delete (`find` is judged
+ *  separately: its operands are the leading words, its delete an expression). */
+const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink"]);
+
+/**
+ * Does `operand` (resolved against `cwd`, as {@link classifyGit} resolves a
+ * worktree path) pass THROUGH a `node_modules` symlink that
+ * {@link hasNodeModulesSymlinkOutside} calls outside its project? "Through"
+ * means the path continues past the link: `node_modules/x`, `node_modules/*`,
+ * a trailing `/` or `/.` (the kernel follows a link spelled with one), or --
+ * with `followFinal` (`find -L`/`-H`) -- the link itself. The bare link
+ * (`rm -rf node_modules`) only unlinks it and is not through. `resolve` drops
+ * a trailing slash, so it is read off the raw operand first. A `cd` INTO the
+ * link then `rm -rf ./*` reaches the same test through the tracked cwd.
+ *
+ * @param {string} operand
+ * @param {string | undefined} cwd
+ * @param {boolean} followFinal
+ * @returns {boolean}
+ */
+function operandThroughNodeModulesLink(operand, cwd, followFinal) {
+	const continues = followFinal || /(^|\/)\.$|\/$/.test(operand);
+	const absolute = isAbsolute(operand)
+		? resolve(operand)
+		: resolve(cwd ?? process.cwd(), operand);
+	const parts = absolute.split(SEP);
+	for (let i = 1; i < parts.length; i++) {
+		if (parts[i] !== "node_modules") continue;
+		if (i === parts.length - 1 && !continues) continue;
+		if (hasNodeModulesSymlinkOutside(parts.slice(0, i).join(SEP) || SEP))
+			return true;
+	}
+	return false;
+}
+
+/**
+ * The #4044 sibling rule: a delete (`rm`/`rmdir`/`unlink`, or `find` with
+ * `-delete` or `-exec rm|rmdir|unlink`) with an operand through a linked
+ * `node_modules`. MEASURED (GNU coreutils, 2026-10-07): `rm -rf
+ * node_modules/`, `rm -rf node_modules/*`, `find node_modules/ -delete`,
+ * `find -L|-H node_modules -delete`, `find node_modules/ -exec rm -rf {} +`
+ * and `cd node_modules && rm -rf ./*` all empty the link's target; `rm -rf
+ * node_modules` and `find node_modules -delete` remove only the link. NOT
+ * handled: `$VAR`/`~` operands (literal, like {@link classifyGit}), `xargs rm`,
+ * `rsync --delete`, `git clean`, `mv`.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} [cwd]
+ * @returns {DenyRule | null}
+ */
+function classifyNodeModulesDelete(cmd, args, cwd) {
+	let operands;
+	let followFinal = false;
+	if (cmd === "find") {
+		let i = 0;
+		while (/^-([HLP]|D\w*|O\d*)$/.test(args[i] ?? "")) {
+			if (args[i] === "-L" || args[i] === "-H") followFinal = true;
+			i++;
+		}
+		let end = i;
+		while (end < args.length && !/^(-|\(|!)/.test(args[end])) end++;
+		const expression = args.slice(end);
+		const deletes = expression.some(
+			(a, j) =>
+				a === "-delete" ||
+				(/^-(exec|execdir|ok|okdir)$/.test(a) &&
+					DELETE_COMMANDS.has(commandBasename(expression[j + 1] ?? ""))),
+		);
+		if (!deletes) return null;
+		operands = end > i ? args.slice(i, end) : ["."];
+	} else {
+		const dashDash = args.indexOf("--");
+		operands = args.filter((a, j) =>
+			dashDash >= 0 ? j > dashDash : !a.startsWith("-"),
+		);
+	}
+	return operands.some((o) =>
+		operandThroughNodeModulesLink(o, cwd, followFinal),
+	)
+		? "linkedNodeModulesDelete"
+		: null;
+}
+
 /** The `npm` verbs (and their aliases) that write `node_modules` (#4044):
  *  the clean-install family (`ci`, which ignores `--dry-run` on npm 9.2.0 and
  *  removes `node_modules/*` first), and every verb that runs the reify step.
@@ -2215,6 +2306,8 @@ export function classifySegment(
 			repositoryIdentity(repositoryRoot(originCwd)),
 		);
 	if (cmd === "npm" || cmd === "npx") return classifyNpm(cmd, args, cwd);
+	if (cmd === "find" || DELETE_COMMANDS.has(cmd))
+		return classifyNodeModulesDelete(cmd, args, cwd);
 	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
