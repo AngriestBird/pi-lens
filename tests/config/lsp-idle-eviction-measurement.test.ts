@@ -45,6 +45,8 @@ const DOC = "docs/lsp-idle-eviction.md";
 const NO_FIXTURE_ADMISSIONS: Record<string, string> = {
 	omnisharp:
 		"csharp fallback with no smoke fixture yet; lane C (#3311) adds it and removes this row",
+	"docker-official":
+		"official docker-language-server alternate: unmeasured and not installed on CI, so no fixture routes to it yet (#3939)",
 };
 
 const stubProbe = async ({
