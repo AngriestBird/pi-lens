@@ -22,6 +22,11 @@
 //      files for a 43-file commit, ~10 minutes, because of exactly that).
 // A changed test file is always included directly.
 //
+// `--include-worktree` (#4047) also counts the working tree against HEAD
+// (uncommitted tracked edits plus untracked files) as changed: the pre-handback
+// gate `npm run lane:check` needs it, since a lane without Git authority leaves
+// its whole change uncommitted.
+//
 // A third pass adds history (#3215 lane 3, scripts/lib/test-history-selection.mjs):
 // the tests that failed on past heads which touched the changed files'
 // directories, from the nightly `data/test-history` summary. It only adds, is
@@ -242,6 +247,29 @@ export function changedFiles(range) {
 	} catch (error) {
 		console.warn(
 			`[pre-push] could not compute diff range "${range}", falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
+		);
+		return null;
+	}
+}
+
+// The working tree against HEAD: uncommitted tracked edits (staged or not) plus
+// untracked files that are not ignored. A lane that holds no Git authority
+// leaves its whole deliverable here, and the committed ranges above never see
+// it (`--include-worktree`, #4047).
+export function worktreeChangedFiles() {
+	try {
+		const run = (args) =>
+			execFileSync("git", args, { encoding: "utf8" })
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line.length > 0 && !line.startsWith("dist/"));
+		return [
+			...run(["diff", "--name-only", "HEAD"]),
+			...run(["ls-files", "--others", "--exclude-standard"]),
+		];
+	} catch (error) {
+		console.warn(
+			`[pre-push] could not read the working-tree changes, falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
 		);
 		return null;
 	}
@@ -626,6 +654,13 @@ export async function main() {
 		for (const file of files) {
 			if (!changed.includes(file)) changed.push(file);
 		}
+	}
+	if (changed !== null && process.argv.includes("--include-worktree")) {
+		const uncommitted = worktreeChangedFiles();
+		if (uncommitted === null) changed = null;
+		else
+			for (const file of uncommitted)
+				if (!changed.includes(file)) changed.push(file);
 	}
 	const skipBuild = process.argv.includes("--skip-build");
 
