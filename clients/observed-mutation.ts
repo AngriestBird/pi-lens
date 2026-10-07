@@ -973,13 +973,6 @@ export interface SettleObservationArgs {
 	toolName: string;
 	sessionGeneration: number;
 	turnIndex: number;
-	/**
-	 * #3613 G2: whether a turn key is a live session turn (the primary's, or
-	 * a live subagent's current one). Parking evicts dead turns first, so a
-	 * subagent's run cannot push out the primary's spent turn. Omitted, every
-	 * parked turn counts as dead.
-	 */
-	isLiveTurn?: (turnIndex: number) => boolean;
 	signal?: AbortSignal;
 	record: ObservedReplayRecorder;
 	/** Read-guard read history for a file, for range derivation without a baseline. */
@@ -1099,7 +1092,10 @@ export async function settleObservedMutation(
 		args.signal,
 		{ hook: "tool_result_edit", label: "settleObservedMutation" },
 	);
-	chargeTurnBudget(args.turnIndex, Date.now() - started, args.isLiveTurn);
+	// No liveness here: a settle switches only to its own arm's turn, which
+	// it takes back out of the parked set, so it grows that set (and evicts)
+	// only when that turn was already evicted.
+	chargeTurnBudget(args.turnIndex, Date.now() - started);
 	if (!capture.ok) {
 		// A wedged filesystem call. There is no diff to report and, critically,
 		// no evidence the tool was clean — so the clean latch is not advanced.

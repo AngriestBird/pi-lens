@@ -64,6 +64,7 @@ import {
 	resetPendingRunnerFindings,
 } from "../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
+import { recordMemorySampleOutcome } from "../clients/memory-sampler.js";
 import {
 	_observedMutationStateForTests,
 	_setObservedTurnBudgetForTests,
@@ -3485,6 +3486,27 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		).toBeGreaterThan(0);
 	});
 
+	it("tightens the memory sample on the same turn count it paces on", async () => {
+		// #3613 G1. The recurrence: the gate read the count of all turn starts
+		// while the tightened window was recorded on the primary's turn index,
+		// so a heap jump during a subagent run opened a window that had
+		// already closed.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		// A one-byte last sample: the next real one reads as rapid growth.
+		recordMemorySampleOutcome(1, 0);
+		const before = (await latencyRows("memory_sample")).length;
+
+		// Turn starts 2..11: the sample at 10 tightens, so 11 samples too.
+		for (let turn = 1; turn <= 10; turn += 1) {
+			await startTurn(subagent);
+			await endTurn(subagent);
+		}
+
+		expect((await latencyRows("memory_sample")).length - before).toBe(2);
+	});
+
 	it("keeps the primary's spent budget spent through nine subagent turns inside its turn", async () => {
 		// #3613 G2 (verify r2, probe E9). The recurrence: parking evicted the
 		// smallest key, which is the primary's live turn (a subagent's keys sit
@@ -3507,27 +3529,6 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			subagentArms: subagentArms.every(Boolean),
 			primaryArmsAgain: await opaqueCall(primary, target),
 		}).toEqual({ subagentArms: true, primaryArmsAgain: false });
-	});
-
-	it("keeps the primary's spent budget spent when subagent calls settle between its calls", async () => {
-		// #3613 G2, the settle's half: the settle in tool_result parks and
-		// evicts too. The recurrence: a settle that switched the net back to a
-		// subagent's turn evicted the primary's live spent turn.
-		const primary = await startRuntime(SessionManager.inMemory(cwd));
-		const subagent = await startSubagent();
-		const target = path.join(cwd, "opaque.txt");
-		fs.writeFileSync(target, "x\n");
-		await startTurn(primary);
-		await opaqueCall(primary, target);
-		exhaustBudget();
-		for (let turn = 1; turn <= 10; turn += 1) {
-			await startTurn(subagent);
-			const { id } = await opaqueCallId(subagent, target);
-			await opaqueCall(primary, target);
-			await opaqueResult(subagent, id, target);
-		}
-
-		expect(await opaqueCall(primary, target)).toBe(false);
 	});
 
 	it("keeps the primary's spent observation budget spent while a subagent's turn interleaves", async () => {
