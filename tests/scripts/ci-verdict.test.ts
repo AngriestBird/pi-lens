@@ -2959,7 +2959,11 @@ describe("run — a registered ci.yml run suppresses the re-arm advice (#3861)",
 	// N1: pin the exact rendered lines, never the formatter under test, so a
 	// formatter regression reds here.
 	const REARM_LINE = `required checks absent for 45 min on ${FORK_APPROVAL.sha} (auto-merge on) — push or merge master to re-arm`;
-	const REGISTERED_TAIL = "the run is registered, so no re-arm is needed";
+	// Recurrence: a queued or in-progress run was described only by the
+	// negative fact that re-arm was unnecessary, leaving the operator without
+	// the action that matches the live state: wait for CI.
+	const REGISTERED_TAIL =
+		"wait for the registered run to finish; no re-arm is needed";
 	const TERMINAL_TAIL =
 		"the run is terminal and cannot produce the missing check-runs -- inspect it or re-run it manually (gh run rerun 4242); the verdict never re-arms automatically";
 	const UNKNOWN_LINE = `required checks absent for 45 min on ${FORK_APPROVAL.sha} and the ci.yml run lookup was unreadable: no re-arm advice without a run answer`;
@@ -3895,7 +3899,7 @@ describe("formatAbsentRunReason — unnamed run, omitted age, terminal rerun tex
 			sha: "abc123",
 		});
 		expect(text).toBe(
-			"ci.yml an unnamed run is queued for abc123: the run is registered, so no re-arm is needed",
+			"ci.yml an unnamed run is queued for abc123: wait for the registered run to finish; no re-arm is needed",
 		);
 		expect(text).not.toContain("Stryker");
 	});
