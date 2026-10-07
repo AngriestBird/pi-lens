@@ -884,6 +884,11 @@ npm run docs:rule-catalogs            regenerate rule catalogs
 npm run hygiene -- --dry-run          inspect worktree/process hygiene
 node scripts/ci-verdict.mjs <pr|sha>  exact-head CI verdict
 node scripts/gen-test-shard-weights.mjs --run <dir>...  regenerate the Unit tests shard weights
+node scripts/guard-bash-probe.mjs <matrix.jsonl> [--head <ref|file>] [--base <ref|file>]
+                                  [--lane linked|real|both]
+                                        real-hook corpus probe (#4071): per-row verdicts
+                                        against tests/fixtures/guard-bash-probes; --base
+                                        prints only the rows that changed head vs base
 ```
 
 CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
