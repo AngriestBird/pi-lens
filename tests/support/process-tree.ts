@@ -107,7 +107,7 @@ function descendantsOf(root: number): number[] {
 }
 
 /**
- * Whether `pid` still exists and is not a zombie. A zombie holds no file
+ * Whether `pid` still exists and is not a zombie (or being reaped). A zombie holds no file
  * handles and is only waiting for its (reparented) parent to reap it, so it
  * cannot write under a directory being removed.
  */
@@ -118,8 +118,15 @@ export function isProcessAlive(pid: number): boolean {
 		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 	try {
-		return !/^\d+ \(.*\) Z /s.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+		// Z: a zombie; X: being reaped right now (#4082 r3: a poll that saw Z,
+		// then X, read the process as alive again).
+		return !/^\d+ \(.*\) [ZX] /s.test(
+			readFileSync(`/proc/${pid}/stat`, "utf8"),
+		);
 	} catch {
-		return true;
+		// Linux: the zombie that answered `kill(pid, 0)` was reaped before its
+		// `/proc` entry was read (#4082 r3: a poll then saw it "alive" again).
+		// Elsewhere there is no `/proc`, and `kill(pid, 0)` is the evidence.
+		return process.platform !== "linux";
 	}
 }

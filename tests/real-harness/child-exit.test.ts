@@ -101,6 +101,42 @@ describe("real pi harness: child lifecycle", () => {
 		},
 	);
 
+	// Recurrence (#4082 r3, a false survivor in a real-harness lane run): a
+	// reparented process being reaped answers `kill(pid, 0)`, then shows state
+	// X, then has no `/proc` entry; both later reads said "alive" after an
+	// earlier poll had seen it dead (176 of 200 runs on round 2's code).
+	it.skipIf(process.platform !== "linux")(
+		"never reads a killed process as alive again once a poll saw it dead",
+		async () => {
+			let flips = 0;
+			for (let run = 0; run < 50; run++) {
+				const root = spawnNode(`${ORPHAN}\nsetInterval(() => {}, 1000);`, "5");
+				stray.push(root);
+				const pid = Number(await firstLine(root));
+				killProcessTree(root);
+				let seenDead = false;
+				// Synchronous on purpose: `pid` is reaped by its new parent, not
+				// by this worker's event loop, so nothing here needs to turn.
+				const end = Date.now() + 1_000;
+				while (Date.now() < end) {
+					if (!isProcessAlive(pid)) seenDead = true;
+					else if (seenDead) {
+						flips++;
+						break;
+					}
+					try {
+						process.kill(pid, 0);
+					} catch {
+						break;
+					}
+				}
+				await exited(root);
+			}
+			expect(flips).toBe(0);
+		},
+		60_000,
+	);
+
 	// Recurrence (#4081): pi exits but its reparented grandchild keeps writing
 	// under the scratch home; the wait must cover pids beyond the direct child.
 	it("also waits for the listed descendants, and gives up on one that stays", async () => {
