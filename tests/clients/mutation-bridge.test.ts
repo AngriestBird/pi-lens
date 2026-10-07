@@ -449,9 +449,7 @@ describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record"
 			expect(accepted).toBe(true);
 
 			// Fail closed: the pre-reset capture is NOT credited to the new session.
-			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
-				false,
-			);
+			expect(runtime.readGuard.exportAuthorship().written).toEqual([]);
 			// ... and the refusal is observable through the lineage's own record.
 			expect(
 				getDegradationSummary()

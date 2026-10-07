@@ -229,7 +229,7 @@ Reloc(lo, hi) ==
 \* Returns [act |-> "allow"|"block"|"reloc", to |-> start, inject |-> BOOLEAN].
 Verdict(lo, hi) ==
     IF Len(reads) = 0
-    THEN IF written \/ (MtimeAuthored /\ rev > born)            \* wasWrittenThisSession
+    THEN IF written \/ (MtimeAuthored /\ rev > born)            \* the zero-read authorship check (writtenThisSession)
            THEN [act |-> "allow", to |-> lo, inject |-> TRUE, why |-> "session_authored"]
            ELSE [act |-> "block", to |-> lo, inject |-> FALSE, why |-> "zero_read"]
     ELSE IF FileTimeCheck /\ ft # rev

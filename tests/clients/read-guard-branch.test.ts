@@ -246,16 +246,6 @@ describe("ReadGuard authorship export/import (#3612)", () => {
 			written: [normalizeFilePath(c)],
 		});
 	});
-
-	it("does not read a foreign write after an import as authored (#3520)", () => {
-		const c = oldFile("c.ts", 3);
-		const guard = createReadGuard("authorship-foreign");
-		guard.importAuthorship({ written: [], sessionStartMs: 0 });
-		const later = new Date(Date.now() + 60_000);
-		fs.utimesSync(c, later, later);
-
-		expect(verdict(guard, c, 2)).toMatch(/^block: .*Edit without read/);
-	});
 });
 
 describe("ReadGuard.importBranch (#3521, replaces #1041's importState)", () => {

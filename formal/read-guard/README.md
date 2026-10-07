@@ -117,7 +117,7 @@ or is a mutant of a fix (`*NoRecord`, `EvidenceAtResultHandler`,
 
 The model follows `checkEdit` step by step:
 
-- **Zero-read.** `wasWrittenThisSession`: `writtenThisSession` only, since
+- **Zero-read.** The authorship check: `writtenThisSession` only, since
   #3520. Before it, also `mtime >= sessionStartMs` (`MtimeAuthored = TRUE`).
 - **FileTime.** Whole-file mtime/ctime/size. The rescue is
   `canIgnoreStalenessByHashes` (`canTreatStalenessAsOwnPriorEdit` is gone

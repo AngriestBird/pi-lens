@@ -1058,9 +1058,10 @@ export class ReadGuard {
 		// 1. Zero-read check
 		const fileReads = this.reads.get(filePath);
 		if (!fileReads || fileReads.length === 0) {
-			// A write pi-lens observed this session (recordWritten, from any
-			// producer) is the agent's own; a synthetic read is injected for it.
-			if (this.wasWrittenThisSession(filePath)) {
+			// Only a write pi-lens observed (recordWritten, from any producer) is
+			// the agent's own; a newer mtime is any writer's (#3520). A synthetic
+			// read is injected for it.
+			if (this.writtenThisSession.has(filePath)) {
 				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
@@ -1543,8 +1544,8 @@ export class ReadGuard {
 	}
 
 	/**
-	 * The files this session authored (#3612, D5): what `wasWrittenThisSession`
-	 * reads. A `/reload` keeps the conversation and its branch, so the
+	 * The files this session authored (#3612, D5): `writtenThisSession`, which
+	 * the zero-read check reads. A `/reload` keeps the conversation and its branch, so the
 	 * reloaded guard keeps them; every other start resets them.
 	 */
 	exportAuthorship(): PersistedReadGuardAuthorship {
@@ -1714,12 +1715,6 @@ export class ReadGuard {
 			timestamp: Date.now(),
 			...(toolCallId !== undefined && { toolCallId }),
 		});
-	}
-
-	// Only a write pi-lens observed (recordWritten) is authorship; a newer mtime
-	// is any writer's (#3520).
-	private wasWrittenThisSession(filePath: string): boolean {
-		return this.writtenThisSession.has(filePath);
 	}
 
 	private canIgnoreStalenessByHashes(

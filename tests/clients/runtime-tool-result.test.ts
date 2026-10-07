@@ -608,9 +608,6 @@ describe("bash grep searchReads registration", () => {
 				agentBehaviorRecord: () => [],
 				formatBehaviorWarnings: () => "",
 			} as any);
-			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
-				false,
-			);
 			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
 				"block",
 			);
@@ -678,9 +675,6 @@ describe("bash grep searchReads registration", () => {
 				agentBehaviorRecord: () => [],
 				formatBehaviorWarnings: () => "",
 			} as any);
-			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
-				false,
-			);
 			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
 				"block",
 			);
