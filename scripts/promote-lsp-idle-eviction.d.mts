@@ -6,6 +6,8 @@ export function promoteFromSummary(opts: {
 	matrixPath: string;
 	serverPath: string;
 	reasonsPath: string;
+	registryPath: string;
+	rejectedPath?: string;
 	today: string;
 	runUrl?: string | null;
 	log?: (line: string) => void;

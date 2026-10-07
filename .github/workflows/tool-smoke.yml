@@ -353,7 +353,8 @@ jobs:
       # restores it each night) and, for a server that meets the promotion rule
       # (scripts/lib/lsp-idle-eviction-promote.mjs: two consecutive eligible
       # nights, idle RSS floor, cold-start cap, hold list), flips its
-      # `idleEviction: "unmeasured"` line in the working tree. Only the
+      # `idleEviction: "unmeasured"` line and moves its id in the registry
+      # test's class pin (#3952) in the working tree. Only the
       # promotion PR step below commits that edit; the docs-refresh PR's
       # add-paths never include it. A missing summary (measurement crashed or
       # timed out) clears the memory and promotes nothing. Scoped like the PR
@@ -363,7 +364,15 @@ jobs:
         if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
         continue-on-error: true
         timeout-minutes: 2
-        run: node scripts/promote-lsp-idle-eviction.mjs --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json" --body "$RUNNER_TEMP/lsp-idle-eviction-promote.md"
+        run: |
+          set -uo pipefail
+          # F4 (#3989): the server sets of promotion PRs closed unmerged, read from
+          # the `idle-evict-set` marker in their bodies, so a PR a maintainer closed
+          # is not re-created nightly. The job's GITHUB_TOKEN already holds
+          # `pull-requests: write`; this only reads. A failed listing leaves no
+          # file, which the script reads as "unknown" and promotes nothing.
+          gh pr list --head bot/lsp-idle-evict-promote --state closed --limit 30 --json body --jq '.[].body' > "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt" || rm -f "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
+          node scripts/promote-lsp-idle-eviction.mjs --summary "$RUNNER_TEMP/lsp-idle-eviction-summary.json" --body "$RUNNER_TEMP/lsp-idle-eviction-promote.md" --rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"
 
       - name: Check LSP docs refresh diff
         id: docs_diff
@@ -424,6 +433,7 @@ jobs:
           add-paths: |
             clients/lsp/server.ts
             tests/config/lsp-idle-eviction-reasons.json
+            tests/config/lsp-idle-eviction-registry.test.ts
           commit-message: 'perf(lsp): promote measured idle-eviction servers (refs #3989)'
           title: 'perf(lsp): promote measured idle-eviction servers (refs #3989)'
           body-path: ${{ runner.temp }}/lsp-idle-eviction-promote.md

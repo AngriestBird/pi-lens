@@ -8,7 +8,16 @@ export type NightState = Record<string, { nights: IdleEvictionNight[] }>;
 export const PROMOTE_NIGHTS: number;
 export const IDLE_EVICTION_MIN_RSS_BYTES: number;
 export const COLD_START_MAX_MS: number;
-export const IDLE_EVICTION_HOLD: ReadonlyMap<string, string>;
+export const HELD_UNTIL_3966: ReadonlyMap<string, string>;
+
+export function holdList(registrySource: string): Map<string, string> | null;
+
+export function moveClassId(
+	registrySource: string,
+	serverId: string,
+): { ok: true; text: string } | { ok: false; reason: string };
+
+export function parseRejectedSets(text: string | null | undefined): Set<string>;
 
 export function advanceNights(
 	prior: NightState | undefined,
@@ -28,7 +37,10 @@ export interface Skipped {
 	reason: string;
 }
 
-export function selectPromotions(state: NightState): {
+export function selectPromotions(
+	state: NightState,
+	hold: ReadonlyMap<string, string>,
+): {
 	promote: Promotion[];
 	skipped: Skipped[];
 };
@@ -49,6 +61,9 @@ export function planPromotions(input: {
 	today: string;
 	serverSource: string;
 	reasonsText: string;
+	registrySource: string;
+	/** null = the closed-PR list could not be read. */
+	rejected?: ReadonlySet<string> | null;
 	runUrl?: string | null;
 }): {
 	state: NightState;
@@ -56,6 +71,7 @@ export function planPromotions(input: {
 	skipped: Skipped[];
 	serverSource: string;
 	reasonsText: string;
+	registrySource: string;
 	body: string | null;
 };
 

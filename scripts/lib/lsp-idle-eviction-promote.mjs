@@ -30,18 +30,18 @@ export const IDLE_EVICTION_MIN_RSS_BYTES = 50 * MB;
 export const COLD_START_MAX_MS = 3000;
 
 /**
- * Servers the promotion never touches, with the reason. Each is held until PR
- * #3966 (the shared server-selection seam) merges: it changes which of these
- * servers a language resolves to, so promoting one now would declare the policy
- * on a server whose selection is about to move. Remove an entry in the PR that
- * lifts its hold, never here by hand.
+ * Servers held until PR #3966 (the shared server-selection seam) merges: it
+ * changes which server a language resolves to, so promoting one now would
+ * declare the policy on a server whose selection is about to move. Remove an
+ * entry in the PR that lifts its hold, never here by hand.
  */
-export const IDLE_EVICTION_HOLD = new Map([
+export const HELD_UNTIL_3966 = new Map([
 	["docker", "held until #3966 (shared server-selection seam) merges"],
-	["docker-official", "held until #3966 (shared server-selection seam) merges"],
-	["expert", "held until #3966 (shared server-selection seam) merges"],
 	["python-jedi", "held until #3966 (shared server-selection seam) merges"],
 ]);
+
+const INDEXER_HOLD =
+	"held: #3952 HOLD_INDEXER class (re-index cost after eviction is unmeasured; user decision 2026-10-06)";
 
 /**
  * @typedef {{ day: string, rssMb: number | null, coldMs: number }} Night
@@ -68,13 +68,21 @@ function qualifies(row) {
 	);
 }
 
+/** The UTC day before `day` (`YYYY-MM-DD`). */
+function previousDay(day) {
+	return new Date(Date.parse(`${day}T00:00:00Z`) - 86_400_000)
+		.toISOString()
+		.slice(0, 10);
+}
+
 /**
  * Advance the per-server night memory by one run. A server keeps (or gains) a
  * night only when this run's row qualifies; every other outcome (vetoed,
  * inconclusive, unavailable, budget-exhausted, no row, over the cold-start cap,
  * under the RSS floor, no longer `unmeasured`) drops its entry, so the nights held are consecutive.
- * Two runs on one UTC day count once (a manual dispatch must not satisfy the
- * rule), and an entry that already holds `PROMOTE_NIGHTS` nights is left
+ * A held night counts only when it is the previous UTC day; any other (a skipped
+ * night, or today's own earlier run) restarts the count at one, so two runs on
+ * one UTC day count once and a manual dispatch cannot satisfy the rule. An entry that already holds `PROMOTE_NIGHTS` nights is left
  * untouched, so a settled server writes a byte-identical block and the refresh
  * PR does not open on timing noise.
  *
@@ -100,7 +108,7 @@ export function advanceNights(prior, rows, today) {
 				typeof row.rssBytes === "number" ? Math.round(row.rssBytes / MB) : null,
 			coldMs: Math.round(row.coldStartMs),
 		};
-		const kept = held.at(-1)?.day === today ? held.slice(0, -1) : held;
+		const kept = held.at(-1)?.day === previousDay(today) ? held : [];
 		next[row.serverId] = { nights: [...kept, night] };
 	}
 	return next;
@@ -110,9 +118,10 @@ export function advanceNights(prior, rows, today) {
  * Decide which servers to promote from the night memory.
  *
  * @param {NightState} state  after `advanceNights`
+ * @param {ReadonlyMap<string, string>} hold  server id -> why it is held
  * @returns {{ promote: { serverId: string, nights: Night[], minRssMb: number, worstColdMs: number }[], skipped: { serverId: string, reason: string }[] }}
  */
-export function selectPromotions(state) {
+export function selectPromotions(state, hold) {
 	const promote = [];
 	const skipped = [];
 	for (const serverId of Object.keys(state).sort()) {
@@ -124,9 +133,9 @@ export function selectPromotions(state) {
 			});
 			continue;
 		}
-		const hold = IDLE_EVICTION_HOLD.get(serverId);
-		if (hold) {
-			skipped.push({ serverId, reason: hold });
+		const held = hold.get(serverId);
+		if (held) {
+			skipped.push({ serverId, reason: held });
 			continue;
 		}
 		if (nights.some((n) => n.rssMb === null)) {
@@ -152,6 +161,98 @@ export function selectPromotions(state) {
 		promote.push({ serverId, nights, minRssMb, worstColdMs });
 	}
 	return { promote, skipped };
+}
+
+/**
+ * Read one `const NAME = [ "id", ... ] as const;` class array out of
+ * tests/config/lsp-idle-eviction-registry.test.ts (#3952). Fail closed: any
+ * line inside the array that is not exactly `\t"<id>",` returns null, so a
+ * reshaped file turns into "unknown", never a partial list.
+ *
+ * @returns {{ start: number, end: number, ids: string[] } | null}  `start` is the
+ *   `const` line, `end` the closing `] as const;` line
+ */
+function classArray(lines, name) {
+	const start = lines.indexOf(`const ${name} = [`);
+	if (start < 0 || lines.indexOf(`const ${name} = [`, start + 1) >= 0)
+		return null;
+	const end = lines.indexOf("] as const;", start);
+	if (end < 0) return null;
+	const ids = [];
+	for (const line of lines.slice(start + 1, end)) {
+		const m = /^\t"([^"]+)",$/.exec(line);
+		if (!m) return null;
+		ids.push(m[1]);
+	}
+	return { start, end, ids };
+}
+
+/**
+ * The hold list: #3952's HOLD_INDEXER class (read from the registry test, so
+ * there is one source of truth) plus the servers held until #3966. Null when
+ * the class cannot be read or is empty, in which case nothing is promoted.
+ *
+ * @returns {Map<string, string> | null}
+ */
+export function holdList(registrySource) {
+	const indexers = classArray(registrySource.split("\n"), "HOLD_INDEXER_IDS");
+	if (!indexers || indexers.ids.length === 0) return null;
+	const hold = new Map(HELD_UNTIL_3966);
+	for (const id of indexers.ids) hold.set(id, INDEXER_HOLD);
+	return hold;
+}
+
+/**
+ * Move `serverId` from NEXT_PHASE_ELIGIBLE_IDS to TRANSPARENT_IDS in the
+ * registry test (#3952 pins every id to one class and requires the
+ * non-transparent classes to stay `unmeasured`, so a declaration flip without
+ * this move reds CI). Fail closed unless the id is in NEXT_PHASE_ELIGIBLE_IDS
+ * exactly once and in no other class.
+ *
+ * @returns {{ ok: true, text: string } | { ok: false, reason: string }}
+ */
+export function moveClassId(registrySource, serverId) {
+	const lines = registrySource.split("\n");
+	const from = classArray(lines, "NEXT_PHASE_ELIGIBLE_IDS");
+	const to = classArray(lines, "TRANSPARENT_IDS");
+	if (!from || !to)
+		return { ok: false, reason: "registry test class arrays not found" };
+	if (!from.ids.includes(serverId))
+		return {
+			ok: false,
+			reason: "not in the registry test's NEXT_PHASE_ELIGIBLE_IDS class",
+		};
+	if (from.ids.filter((id) => id === serverId).length !== 1)
+		return { ok: false, reason: "listed twice in NEXT_PHASE_ELIGIBLE_IDS" };
+	for (const name of ["TRANSPARENT_IDS", "HOLD_INDEXER_IDS", "UNPROVEN_IDS"]) {
+		const other = classArray(lines, name);
+		if (!other)
+			return { ok: false, reason: `registry test ${name} array not found` };
+		if (other.ids.includes(serverId))
+			return { ok: false, reason: `also listed in ${name}` };
+	}
+	const line = `\t"${serverId}",`;
+	const removeAt = lines.findIndex(
+		(l, i) => i > from.start && i < from.end && l === line,
+	);
+	const out = lines.filter((_, i) => i !== removeAt);
+	out.splice(to.end > removeAt ? to.end - 1 : to.end, 0, line);
+	return { ok: true, text: out.join("\n") };
+}
+
+/**
+ * The server sets of closed-unmerged promotion PRs, read from their bodies'
+ * `<!-- idle-evict-set: a,b -->` marker. Each is the sorted comma list.
+ *
+ * @returns {Set<string>}
+ */
+export function parseRejectedSets(text) {
+	const sets = new Set();
+	for (const m of String(text ?? "").matchAll(
+		/<!-- idle-evict-set: ([^>\s]+) -->/g,
+	))
+		sets.add(m[1]);
+	return sets;
 }
 
 /**
@@ -217,7 +318,10 @@ export function addReasons(text, reasons) {
  * Apply one run: advance the night memory, select, and edit. Everything a
  * caller must write comes back; nothing is written here.
  *
- * @param {{ rows: readonly object[], prior: NightState | undefined, today: string, serverSource: string, reasonsText: string, runUrl?: string | null }} input
+ * `rejected` holds the server sets of promotion PRs closed unmerged; promoting
+ * the same set again is skipped, so a maintainer's close is not undone nightly.
+ *
+ * @param {{ rows: readonly object[], prior: NightState | undefined, today: string, serverSource: string, reasonsText: string, registrySource: string, rejected?: ReadonlySet<string> | null, runUrl?: string | null }} input
  */
 export function planPromotions({
 	rows,
@@ -225,51 +329,95 @@ export function planPromotions({
 	today,
 	serverSource,
 	reasonsText,
+	registrySource,
+	rejected,
 	runUrl,
 }) {
 	const state = advanceNights(prior, rows, today);
-	const { promote, skipped } = selectPromotions(state);
+	const none = (skipped) => ({
+		state,
+		promoted: [],
+		skipped,
+		serverSource,
+		reasonsText,
+		registrySource,
+		body: null,
+	});
+	const hold = holdList(registrySource);
+	if (!hold) {
+		return none(
+			Object.keys(state)
+				.sort()
+				.map((serverId) => ({
+					serverId,
+					reason:
+						"hold list unreadable (registry test HOLD_INDEXER_IDS not found); promoting nothing",
+				})),
+		);
+	}
+	const { promote, skipped } = selectPromotions(state, hold);
 	let source = serverSource;
+	let registry = registrySource;
 	const promoted = [];
 	const reasons = {};
 	for (const p of promote) {
-		const edit = promoteDeclaration(source, p.serverId);
-		if (!edit.ok) {
-			skipped.push({ serverId: p.serverId, reason: edit.reason });
+		const decl = promoteDeclaration(source, p.serverId);
+		if (!decl.ok) {
+			skipped.push({ serverId: p.serverId, reason: decl.reason });
 			continue;
 		}
-		source = edit.text;
+		const moved = moveClassId(registry, p.serverId);
+		if (!moved.ok) {
+			skipped.push({ serverId: p.serverId, reason: moved.reason });
+			continue;
+		}
+		source = decl.text;
+		registry = moved.text;
 		promoted.push(p);
 		reasons[p.serverId] =
 			`Nightly measurement (#3989): eligible, respawn ok and findings preserved on ${PROMOTE_NIGHTS} consecutive runs, idle RSS ${p.minRssMb} MB, cold start ${p.worstColdMs} ms.`;
 	}
-	let reasonsOut = reasonsText;
-	if (promoted.length > 0) {
-		const added = addReasons(reasonsText, reasons);
-		if (!added.ok) {
-			// Without the reason rows the registry test would red: promote nothing.
-			for (const p of promoted)
-				skipped.push({ serverId: p.serverId, reason: added.reason });
-			return {
-				state,
-				promoted: [],
-				skipped,
-				serverSource,
-				reasonsText,
-				body: null,
-			};
-		}
-		reasonsOut = added.text;
+	if (promoted.length === 0) return none(skipped);
+	const set = promoted
+		.map((p) => p.serverId)
+		.sort()
+		.join(",");
+	if (rejected === null) {
+		// The rejected-set list could not be read: reopening a closed PR is the
+		// failure to avoid, so promote nothing tonight.
+		return none([
+			...skipped,
+			...promoted.map((p) => ({
+				serverId: p.serverId,
+				reason: "closed-PR list unreadable; promoting nothing tonight",
+			})),
+		]);
+	}
+	if (rejected?.has(set)) {
+		return none([
+			...skipped,
+			...promoted.map((p) => ({
+				serverId: p.serverId,
+				reason: `the promotion PR for this exact set (${set}) was closed unmerged`,
+			})),
+		]);
+	}
+	const added = addReasons(reasonsText, reasons);
+	if (!added.ok) {
+		// Without the reason rows the registry test would red: promote nothing.
+		return none([
+			...skipped,
+			...promoted.map((p) => ({ serverId: p.serverId, reason: added.reason })),
+		]);
 	}
 	return {
 		state,
 		promoted,
 		skipped,
 		serverSource: source,
-		reasonsText: reasonsOut,
-		body: promoted.length
-			? renderPromotionBody(promoted, skipped, runUrl)
-			: null,
+		reasonsText: added.text,
+		registrySource: registry,
+		body: renderPromotionBody(promoted, skipped, runUrl),
 	};
 }
 
@@ -278,7 +426,7 @@ export function renderPromotionBody(promoted, skipped, runUrl) {
 	const lines = [
 		"Automated promotion from the nightly `tool-smoke` idle-eviction measurement (#3989). This PR is a draft and is never auto-merged.",
 		"",
-		`Each server below was measured \`eligible\` (eviction and respawn preserved every finding) on ${PROMOTE_NIGHTS} consecutive nightly runs, held idle RSS of at least ${IDLE_EVICTION_MIN_RSS_BYTES / MB} MB, and cold-started in at most ${COLD_START_MAX_MS} ms on both nights (the worse night is judged). It flips that server's \`idleEviction: "unmeasured"\` to \`"transparent"\` in \`clients/lsp/server.ts\` and adds its reason row to \`tests/config/lsp-idle-eviction-reasons.json\`. Nothing is ever demoted here: a declared-transparent server the measurement vetoes is the drift issue's job (#3645).`,
+		`Each server below was measured \`eligible\` (eviction and respawn preserved every finding) on ${PROMOTE_NIGHTS} consecutive nightly runs, held idle RSS of at least ${IDLE_EVICTION_MIN_RSS_BYTES / MB} MB, and cold-started in at most ${COLD_START_MAX_MS} ms on both nights (the worse night is judged). It flips that server's \`idleEviction: "unmeasured"\` to \`"transparent"\` in \`clients/lsp/server.ts\`, adds its reason row to \`tests/config/lsp-idle-eviction-reasons.json\`, and moves its id from NEXT_PHASE_ELIGIBLE_IDS to TRANSPARENT_IDS in \`tests/config/lsp-idle-eviction-registry.test.ts\` (#3952's class pin). Nothing is ever demoted here: a declared-transparent server the measurement vetoes is the drift issue's job (#3645).`,
 		"",
 		"| server | night 1 (day, rss MB, cold start ms) | night 2 (day, rss MB, cold start ms) | nights eligible |",
 		"|---|---|---|---|",
@@ -292,6 +440,13 @@ export function renderPromotionBody(promoted, skipped, runUrl) {
 		for (const s of skipped) lines.push(`- ${s.serverId}: ${s.reason}`);
 	}
 	if (runUrl) lines.push("", `Measured by workflow run: ${runUrl}`);
+	lines.push(
+		"",
+		`<!-- idle-evict-set: ${promoted
+			.map((p) => p.serverId)
+			.sort()
+			.join(",")} -->`,
+	);
 	lines.push(
 		"",
 		"To trigger it: the nightly `tool-smoke` run on master, or `workflow_dispatch` of `tool-smoke` on master. Two runs on one UTC day count as one night.",

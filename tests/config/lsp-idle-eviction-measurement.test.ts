@@ -317,9 +317,17 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		for (const path of [
 			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
 			"$RUNNER_TEMP/lsp-idle-eviction-promote.md",
+			"$RUNNER_TEMP/lsp-idle-eviction-rejected.txt",
 		]) {
 			expect(promote.run, `promotion reads/writes ${path}`).toContain(path);
 		}
+		// F4: the closed-PR listing is read-only and scoped to the promotion branch.
+		expect(promote.run).toContain(
+			"gh pr list --head bot/lsp-idle-evict-promote --state closed",
+		);
+		expect(promote.run).toContain(
+			'--rejected "$RUNNER_TEMP/lsp-idle-eviction-rejected.txt"',
+		);
 		expect(steps[measureAt].run).toContain(
 			"$RUNNER_TEMP/lsp-idle-eviction-summary.json",
 		);
@@ -350,6 +358,7 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		).toEqual([
 			"clients/lsp/server.ts",
 			"tests/config/lsp-idle-eviction-reasons.json",
+			"tests/config/lsp-idle-eviction-registry.test.ts",
 		]);
 		expect(promotionPr?.with?.["body-path"]).toContain(
 			"lsp-idle-eviction-promote.md",

@@ -24,11 +24,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	COLD_START_MAX_MS,
-	IDLE_EVICTION_HOLD,
+	HELD_UNTIL_3966,
 	IDLE_EVICTION_MIN_RSS_BYTES,
 	PROMOTE_NIGHTS,
 	addReasons,
 	advanceNights,
+	holdList,
+	moveClassId,
+	parseRejectedSets,
 	planPromotions,
 	promoteDeclaration,
 	selectPromotions,
@@ -47,6 +50,10 @@ import { promoteFromSummary } from "../../scripts/promote-lsp-idle-eviction.mjs"
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../..",
+);
+const REAL_REGISTRY_TS = fs.readFileSync(
+	path.join(repoRoot, "tests/config/lsp-idle-eviction-registry.test.ts"),
+	"utf8",
 );
 const MB = 1024 * 1024;
 const D1 = "2026-10-06";
@@ -79,32 +86,53 @@ function nights(
 	return state as NightState;
 }
 
+/** The registry test's class arrays in their real shape (#3952), minimal. */
+const FIXTURE_REGISTRY_TS = `const TRANSPARENT_IDS = [
+\t"marksman",
+] as const;
+const NEXT_PHASE_ELIGIBLE_IDS = [
+\t"java",
+\t"json",
+\t"zizmor",
+] as const;
+const HOLD_INDEXER_IDS = [
+\t"indexer",
+] as const;
+const UNPROVEN_IDS = [
+\t"dup",
+\t"reordered",
+] as const;
+`;
+const FIXTURE_HOLD = holdList(FIXTURE_REGISTRY_TS) as Map<string, string>;
+
 describe("consecutive-night hysteresis (#3989)", () => {
 	it("counts one qualifying night as pending, two as promotable", () => {
-		const one = nights([D1], () => [row("rust")]);
-		expect(one.rust.nights).toHaveLength(1);
-		expect(selectPromotions(one).promote).toEqual([]);
-		expect(selectPromotions(one).skipped[0].reason).toContain("1/2");
-		const two = nights([D1, D2], () => [row("rust")]);
-		expect(selectPromotions(two).promote.map((p) => p.serverId)).toEqual([
-			"rust",
-		]);
+		const one = nights([D1], () => [row("json")]);
+		expect(one.json.nights).toHaveLength(1);
+		expect(selectPromotions(one, FIXTURE_HOLD).promote).toEqual([]);
+		expect(selectPromotions(one, FIXTURE_HOLD).skipped[0].reason).toContain(
+			"1/2",
+		);
+		const two = nights([D1, D2], () => [row("json")]);
+		expect(
+			selectPromotions(two, FIXTURE_HOLD).promote.map((p) => p.serverId),
+		).toEqual(["json"]);
 	});
 
 	it("counts a night at exactly the RSS floor and at exactly the cold-start cap", () => {
 		const state = nights([D1], () => [
-			row("rust", {
+			row("json", {
 				rssBytes: IDLE_EVICTION_MIN_RSS_BYTES,
 				coldStartMs: COLD_START_MAX_MS,
 			}),
 		]);
-		expect(state.rust.nights).toHaveLength(1);
+		expect(state.json.nights).toHaveLength(1);
 	});
 
 	it("counts two runs on one UTC day once (a manual dispatch is not a second night)", () => {
-		const state = nights([D1, D1], () => [row("rust")]);
-		expect(state.rust.nights).toHaveLength(1);
-		expect(selectPromotions(state).promote).toEqual([]);
+		const state = nights([D1, D1], () => [row("json")]);
+		expect(state.json.nights).toHaveLength(1);
+		expect(selectPromotions(state, FIXTURE_HOLD).promote).toEqual([]);
 	});
 
 	// An unavailable, inconclusive, vetoed, narrowed, or absent night is not a
@@ -123,18 +151,37 @@ describe("consecutive-night hysteresis (#3989)", () => {
 		["no row at all", null],
 	])("resets the count on a %s night", (_name, bad) => {
 		const state = nights([D1, D2, D3], (day) =>
-			day === D2 ? (bad ? [row("rust", bad)] : []) : [row("rust")],
+			day === D2 ? (bad ? [row("json", bad)] : []) : [row("json")],
 		);
-		expect(state.rust.nights).toHaveLength(1);
-		expect(state.rust.nights[0].day).toBe(D3);
-		expect(selectPromotions(state).promote).toEqual([]);
+		expect(state.json.nights).toHaveLength(1);
+		expect(state.json.nights[0].day).toBe(D3);
+		expect(selectPromotions(state, FIXTURE_HOLD).promote).toEqual([]);
+	});
+
+	// A settled (two-night) entry is the one a bad night must still drop: a
+	// vetoed night after two good ones means the server is no longer proven.
+	it("drops a settled entry on a later bad night, and restarts from one", () => {
+		const D4 = "2026-10-09";
+		const state = nights([D1, D2, D3, D4], (day) =>
+			day === D3
+				? [row("json", { result: "vetoed", respawn: "failed" })]
+				: [row("json")],
+		);
+		expect(state.json.nights.map((n) => n.day)).toEqual([D4]);
+		expect(
+			nights([D1, D2, D3], (day) =>
+				day === D3
+					? [row("json", { result: "vetoed", respawn: "failed" })]
+					: [row("json")],
+			).json,
+		).toBeUndefined();
 	});
 
 	it("leaves a settled entry byte-identical on later nights, so the refresh PR does not churn", () => {
-		const settled = nights([D1, D2], () => [row("rust")]);
+		const settled = nights([D1, D2], () => [row("json")]);
 		const later = advanceNights(
 			settled,
-			[row("rust", { rssBytes: 300 * MB, coldStartMs: 900 })],
+			[row("json", { rssBytes: 300 * MB, coldStartMs: 900 })],
 			D3,
 		);
 		expect(later).toEqual(settled);
@@ -154,7 +201,7 @@ describe("RSS floor, cold-start cap and hold list (#3989)", () => {
 		a: Partial<IdleEvictionNight>,
 		b: Partial<IdleEvictionNight>,
 	): NightState => ({
-		rust: {
+		json: {
 			nights: [
 				{ day: D1, rssMb: 120, coldMs: 1500, ...a },
 				{ day: D2, rssMb: 120, coldMs: 1500, ...b },
@@ -164,55 +211,84 @@ describe("RSS floor, cold-start cap and hold list (#3989)", () => {
 
 	it("promotes at the floor and skips below it, judging the lower of the two nights", () => {
 		const floorMb = IDLE_EVICTION_MIN_RSS_BYTES / MB;
-		expect(selectPromotions(pair({ rssMb: floorMb }, {})).promote).toHaveLength(
-			1,
+		expect(
+			selectPromotions(pair({ rssMb: floorMb }, {}), FIXTURE_HOLD).promote,
+		).toHaveLength(1);
+		const below = selectPromotions(
+			pair({}, { rssMb: floorMb - 1 }),
+			FIXTURE_HOLD,
 		);
-		const below = selectPromotions(pair({}, { rssMb: floorMb - 1 }));
 		expect(below.promote).toEqual([]);
 		expect(below.skipped[0].reason).toContain("below the 50 MB floor");
 	});
 
 	it("skips a server whose idle RSS was not measured on a night", () => {
-		const out = selectPromotions(pair({ rssMb: null }, {}));
+		const out = selectPromotions(pair({ rssMb: null }, {}), FIXTURE_HOLD);
 		expect(out.promote).toEqual([]);
 		expect(out.skipped[0].reason).toContain("not measured");
 	});
 
 	it("promotes at the cold-start cap and skips above it, judging the worse of the two nights", () => {
 		expect(
-			selectPromotions(pair({ coldMs: COLD_START_MAX_MS }, {})).promote,
+			selectPromotions(pair({ coldMs: COLD_START_MAX_MS }, {}), FIXTURE_HOLD)
+				.promote,
 		).toHaveLength(1);
 		const over = selectPromotions(
 			pair({ coldMs: 1000 }, { coldMs: COLD_START_MAX_MS + 1 }),
+			FIXTURE_HOLD,
 		);
 		expect(over.promote).toEqual([]);
 		expect(over.skipped[0].reason).toContain("exceeds the 3000 ms cap");
 		const first = selectPromotions(
 			pair({ coldMs: COLD_START_MAX_MS + 1 }, { coldMs: 1000 }),
+			FIXTURE_HOLD,
 		);
 		expect(first.promote).toEqual([]);
 	});
 
-	it("never promotes a held server, and names #3966", () => {
-		expect([...IDLE_EVICTION_HOLD.keys()].sort()).toEqual([
+	it("never promotes a held server, and names why", () => {
+		expect([...HELD_UNTIL_3966.keys()].sort()).toEqual([
 			"docker",
-			"docker-official",
-			"expert",
 			"python-jedi",
 		]);
-		for (const id of IDLE_EVICTION_HOLD.keys()) {
+		for (const id of [...HELD_UNTIL_3966.keys(), "indexer"]) {
 			const state = nights([D1, D2], () => [row(id)]);
-			const out = selectPromotions(state);
+			const out = selectPromotions(state, FIXTURE_HOLD);
 			expect(out.promote, id).toEqual([]);
-			expect(out.skipped[0].reason, id).toContain("#3966");
+			expect(out.skipped[0].reason, id).toMatch(/#3966|HOLD_INDEXER/);
 		}
+	});
+
+	// #3989 F3: the indexer hold is read from #3952's own class array, so the
+	// two cannot drift: the real file's five indexers are all held, and the
+	// non-registry id `docker-official` is not.
+	it("reads the hold list from the real registry test's HOLD_INDEXER class", () => {
+		const hold = holdList(REAL_REGISTRY_TS) as Map<string, string>;
+		expect([...hold.keys()].sort()).toEqual([
+			"docker",
+			"expert",
+			"kotlin",
+			"powershell",
+			"python-jedi",
+			"rust",
+			"svelte",
+		]);
+		expect(hold.has("docker-official")).toBe(false);
+	});
+
+	it("reads no hold list from a file whose class array is missing, empty or reshaped", () => {
+		expect(holdList("")).toBeNull();
+		expect(holdList("const HOLD_INDEXER_IDS = [\n] as const;\n")).toBeNull();
+		expect(
+			holdList('const HOLD_INDEXER_IDS = [\n\t"a", // why\n] as const;\n'),
+		).toBeNull();
 	});
 });
 
 const FIXTURE_SERVER_TS = `export const RustServer: LSPServerInfo = {
-\tid: "rust",
+\tid: "json",
 \tidleEviction: "unmeasured",
-\tname: "rust-analyzer",
+\tname: "vscode-json-ls",
 };
 
 export const MarksmanServer: LSPServerInfo = {
@@ -242,6 +318,11 @@ export const Reordered: LSPServerInfo = {
 \tidleEviction: "unmeasured",
 };
 
+export const Zizmor: LSPServerInfo = {
+\tid: "zizmor",
+\tidleEviction: "unmeasured",
+};
+
 function createInteractiveServer(spec: { id: string }): LSPServerInfo {
 \treturn {
 \t\tid: spec.id,
@@ -252,7 +333,7 @@ function createInteractiveServer(spec: { id: string }): LSPServerInfo {
 
 describe("the structured declaration edit (#3989)", () => {
 	it("flips exactly the server's own idleEviction line and nothing else", () => {
-		const out = promoteDeclaration(FIXTURE_SERVER_TS, "rust");
+		const out = promoteDeclaration(FIXTURE_SERVER_TS, "json");
 		expect(out.ok).toBe(true);
 		const before = FIXTURE_SERVER_TS.split("\n");
 		const after = (out as { text: string }).text.split("\n");
@@ -298,12 +379,12 @@ describe("the structured declaration edit (#3989)", () => {
 			path.join(repoRoot, "clients/lsp/server.ts"),
 			"utf8",
 		);
-		const rust = promoteDeclaration(real, "rust");
-		expect(rust.ok).toBe(true);
+		const json = promoteDeclaration(real, "json");
+		expect(json.ok).toBe(true);
 		const diff = real
 			.split("\n")
 			.flatMap((l, i) =>
-				l !== (rust as { text: string }).text.split("\n")[i] ? [l] : [],
+				l !== (json as { text: string }).text.split("\n")[i] ? [l] : [],
 			);
 		expect(diff).toEqual(['\tidleEviction: "unmeasured",']);
 		expect(promoteDeclaration(real, "java")).toMatchObject({ ok: false });
@@ -321,10 +402,10 @@ describe("the reasons-file edit (#3989)", () => {
 	);
 
 	it("appends a reason in the file's own canonical format", () => {
-		const out = addReasons(real, { rust: "because" });
+		const out = addReasons(real, { json: "because" });
 		expect(out.ok).toBe(true);
 		const text = (out as { text: string }).text;
-		expect(JSON.parse(text)).toEqual({ ...JSON.parse(real), rust: "because" });
+		expect(JSON.parse(text)).toEqual({ ...JSON.parse(real), json: "because" });
 		expect(text.endsWith('"because"\n}\n')).toBe(true);
 	});
 
@@ -349,12 +430,13 @@ describe("planPromotions (#3989)", () => {
 			today: D2,
 			serverSource: FIXTURE_SERVER_TS,
 			reasonsText,
+			registrySource: FIXTURE_REGISTRY_TS,
 			runUrl: "https://example.test/run/1",
 		});
 
 	it("edits the source, adds the reason and renders both nights for a promoted server", () => {
-		const plan = two([row("rust"), row("java")]);
-		expect(plan.promoted.map((p) => p.serverId)).toEqual(["rust"]);
+		const plan = two([row("json"), row("java")]);
+		expect(plan.promoted.map((p) => p.serverId)).toEqual(["json"]);
 		expect(plan.skipped).toEqual([
 			{
 				serverId: "java",
@@ -362,11 +444,11 @@ describe("planPromotions (#3989)", () => {
 			},
 		]);
 		expect(plan.serverSource).toContain(
-			'\tid: "rust",\n\tidleEviction: "transparent",',
+			'\tid: "json",\n\tidleEviction: "transparent",',
 		);
-		expect(JSON.parse(plan.reasonsText).rust).toContain("#3989");
+		expect(JSON.parse(plan.reasonsText).json).toContain("#3989");
 		expect(plan.body).toContain(
-			"| rust | 2026-10-06, 120, 1500 | 2026-10-07, 120, 1500 | 2 |",
+			"| json | 2026-10-06, 120, 1500 | 2026-10-07, 120, 1500 | 2 |",
 		);
 		expect(plan.body).toContain("https://example.test/run/1");
 		expect(plan.body).toContain("workflow_dispatch");
@@ -374,11 +456,12 @@ describe("planPromotions (#3989)", () => {
 
 	it("promotes nothing when the reasons file cannot be edited (the registry test would red)", () => {
 		const plan = planPromotions({
-			rows: [row("rust")],
-			prior: nights([D1], () => [row("rust")]),
+			rows: [row("json")],
+			prior: nights([D1], () => [row("json")]),
 			today: D2,
 			serverSource: FIXTURE_SERVER_TS,
 			reasonsText: "{}",
+			registrySource: FIXTURE_REGISTRY_TS,
 		});
 		expect(plan.promoted).toEqual([]);
 		expect(plan.serverSource).toBe(FIXTURE_SERVER_TS);
@@ -399,6 +482,7 @@ describe("planPromotions (#3989)", () => {
 			today: D2,
 			serverSource: FIXTURE_SERVER_TS,
 			reasonsText,
+			registrySource: FIXTURE_REGISTRY_TS,
 		});
 		expect(plan.promoted).toEqual([]);
 		expect(plan.serverSource).toBe(FIXTURE_SERVER_TS);
@@ -420,7 +504,7 @@ describe("the refresh-state seam (#3989)", () => {
 		"",
 	].join("\n");
 	const state: NightState = {
-		rust: { nights: [{ day: D1, rssMb: 120, coldMs: 1500 }] },
+		json: { nights: [{ day: D1, rssMb: 120, coldMs: 1500 }] },
 	};
 
 	it("round-trips through the shared block", () => {
@@ -478,6 +562,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 			),
 			serverPath: file("server.ts", FIXTURE_SERVER_TS),
 			reasonsPath: file("reasons.json", `{\n\t"typescript": "x"\n}\n`),
+			registryPath: file("registry.test.ts", FIXTURE_REGISTRY_TS),
 			bodyPath: path.join(dir, "body.md"),
 			summary: (rows: object[]) =>
 				file("summary.json", JSON.stringify({ rows })),
@@ -486,7 +571,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 
 	it("holds night one, promotes on night two, and leaves a vetoed night alone", () => {
 		const ws = workspace();
-		const rows = [row("rust"), row("marksman", { declared: "transparent" })];
+		const rows = [row("json"), row("marksman", { declared: "transparent" })];
 		const run = (summaryPath: string | undefined, today: string) =>
 			promoteFromSummary({
 				summaryPath,
@@ -494,6 +579,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 				matrixPath: ws.matrixPath,
 				serverPath: ws.serverPath,
 				reasonsPath: ws.reasonsPath,
+				registryPath: ws.registryPath,
 				today,
 				log: () => {},
 			});
@@ -502,17 +588,17 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 		expect(
 			parseRefreshState(fs.readFileSync(ws.matrixPath, "utf8"))[
 				IDLE_EVICTION_KEY
-			]?.rust.nights,
+			]?.json.nights,
 		).toHaveLength(1);
 
-		expect(run(ws.summary(rows), D2)).toEqual(["rust"]);
+		expect(run(ws.summary(rows), D2)).toEqual(["json"]);
 		expect(fs.readFileSync(ws.serverPath, "utf8")).toContain(
-			'\tid: "rust",\n\tidleEviction: "transparent",',
+			'\tid: "json",\n\tidleEviction: "transparent",',
 		);
 		expect(
-			JSON.parse(fs.readFileSync(ws.reasonsPath, "utf8")).rust,
+			JSON.parse(fs.readFileSync(ws.reasonsPath, "utf8")).json,
 		).toBeTruthy();
-		expect(fs.readFileSync(ws.bodyPath, "utf8")).toContain("| rust |");
+		expect(fs.readFileSync(ws.bodyPath, "utf8")).toContain("| json |");
 	});
 
 	it("clears the night memory when the measurement left no summary", () => {
@@ -522,11 +608,12 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 			matrixPath: ws.matrixPath,
 			serverPath: ws.serverPath,
 			reasonsPath: ws.reasonsPath,
+			registryPath: ws.registryPath,
 			log: () => {},
 		};
 		promoteFromSummary({
 			...base,
-			summaryPath: ws.summary([row("rust")]),
+			summaryPath: ws.summary([row("json")]),
 			today: D1,
 		});
 		promoteFromSummary({
@@ -543,7 +630,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 		expect(
 			promoteFromSummary({
 				...base,
-				summaryPath: ws.summary([row("rust")]),
+				summaryPath: ws.summary([row("json")]),
 				today: D3,
 			}),
 		).toEqual([]);
@@ -557,10 +644,239 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 				matrixPath: "/nonexistent/m.md",
 				serverPath: "/nonexistent/s.ts",
 				reasonsPath: "/nonexistent/r.json",
+				registryPath: "/nonexistent/t.ts",
 				today: D1,
 				log: (l) => logged.push(l),
 			}),
 		).toEqual([]);
 		expect(logged[0]).toContain("idle-eviction promotion:");
+	});
+});
+
+describe("calendar adjacency of nights (#3989 F2)", () => {
+	// Recurrence: a single night held from 2026-09-01 plus a run on 2026-10-06
+	// promoted json, because only "not today" was checked. A skipped night is
+	// not a consecutive one.
+	it("restarts the count when the held night is not yesterday", () => {
+		const prior = {
+			json: { nights: [{ day: "2026-09-01", rssMb: 120, coldMs: 1500 }] },
+		};
+		const next = advanceNights(prior, [row("json")], D1);
+		expect(next.json.nights).toEqual([{ day: D1, rssMb: 120, coldMs: 1500 }]);
+		expect(selectPromotions(next, FIXTURE_HOLD).promote).toEqual([]);
+	});
+
+	it("keeps a night held from the previous UTC day, across a month boundary", () => {
+		const prior = {
+			json: { nights: [{ day: "2026-09-30", rssMb: 120, coldMs: 1500 }] },
+		};
+		const next = advanceNights(prior, [row("json")], "2026-10-01");
+		expect(next.json.nights.map((n) => n.day)).toEqual([
+			"2026-09-30",
+			"2026-10-01",
+		]);
+	});
+
+	it("restarts on a future-dated held night", () => {
+		const prior = {
+			json: { nights: [{ day: "2026-10-09", rssMb: 120, coldMs: 1500 }] },
+		};
+		expect(advanceNights(prior, [row("json")], D1).json.nights).toHaveLength(1);
+	});
+});
+
+describe("the registry test's class pin (#3989 F1)", () => {
+	// Recurrence (review of #3994): every promotion reds CI because
+	// lsp-idle-eviction-registry.test.ts pins each id to one class and requires
+	// the non-transparent classes to stay unmeasured.
+	const ids = (src: string, name: string) =>
+		[
+			...(
+				new RegExp(`const ${name} = \\[\\n([^\\]]*)\\] as const;`).exec(
+					src,
+				)?.[1] ?? ""
+			).matchAll(/"([^"]+)"/g),
+		].map((m) => m[1]);
+
+	it("moves the id from NEXT_PHASE_ELIGIBLE_IDS to TRANSPARENT_IDS and touches nothing else", () => {
+		const out = moveClassId(FIXTURE_REGISTRY_TS, "json");
+		expect(out.ok).toBe(true);
+		const text = (out as { text: string }).text;
+		expect(ids(text, "TRANSPARENT_IDS")).toEqual(["marksman", "json"]);
+		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual(["java", "zizmor"]);
+		expect(ids(text, "HOLD_INDEXER_IDS")).toEqual(["indexer"]);
+		expect(ids(text, "UNPROVEN_IDS")).toEqual(["dup", "reordered"]);
+	});
+
+	it("also moves correctly when the target array follows the source array", () => {
+		const swapped = FIXTURE_REGISTRY_TS.split("const ").filter(Boolean);
+		const reordered = `const ${[swapped[1], swapped[0], swapped[2], swapped[3]].join("const ")}`;
+		const out = moveClassId(reordered, "zizmor");
+		expect(out.ok).toBe(true);
+		const text = (out as { text: string }).text;
+		expect(ids(text, "TRANSPARENT_IDS")).toEqual(["marksman", "zizmor"]);
+		expect(ids(text, "NEXT_PHASE_ELIGIBLE_IDS")).toEqual(["java", "json"]);
+	});
+
+	it.each([
+		[
+			"an id in the HOLD_INDEXER class",
+			"indexer",
+			"NEXT_PHASE_ELIGIBLE_IDS class",
+		],
+		["an id in the UNPROVEN class", "dup", "NEXT_PHASE_ELIGIBLE_IDS class"],
+		[
+			"an id already in TRANSPARENT_IDS",
+			"marksman",
+			"NEXT_PHASE_ELIGIBLE_IDS class",
+		],
+		["an unclassified id", "ghost", "NEXT_PHASE_ELIGIBLE_IDS class"],
+	])("fails closed on %s", (_n, id, why) => {
+		expect(moveClassId(FIXTURE_REGISTRY_TS, id)).toEqual({
+			ok: false,
+			reason: expect.stringContaining(why),
+		});
+	});
+
+	it("fails closed on an id listed in two classes, and on a missing array", () => {
+		const dupe = FIXTURE_REGISTRY_TS.replace(
+			"const UNPROVEN_IDS = [\n",
+			'const UNPROVEN_IDS = [\n\t"json",\n',
+		);
+		expect(moveClassId(dupe, "json")).toEqual({
+			ok: false,
+			reason: "also listed in UNPROVEN_IDS",
+		});
+		expect(moveClassId("", "json")).toEqual({
+			ok: false,
+			reason: "registry test class arrays not found",
+		});
+	});
+
+	// Real-source witness: apply a plan over the REAL server.ts, reasons file and
+	// registry test, and check what #3952's pin checks, on the edited text.
+	it("keeps the real registry consistent after a real plan (json, zizmor)", () => {
+		const read = (rel: string) =>
+			fs.readFileSync(path.join(repoRoot, rel), "utf8");
+		const realServer = read("clients/lsp/server.ts");
+		const plan = planPromotions({
+			rows: [row("json"), row("zizmor"), row("rust"), row("docker")],
+			prior: nights([D1], () => [
+				row("json"),
+				row("zizmor"),
+				row("rust"),
+				row("docker"),
+			]),
+			today: D2,
+			serverSource: realServer,
+			reasonsText: read("tests/config/lsp-idle-eviction-reasons.json"),
+			registrySource: REAL_REGISTRY_TS,
+		});
+		expect(plan.promoted.map((p) => p.serverId)).toEqual(["json", "zizmor"]);
+		expect(plan.skipped.map((x) => x.serverId).sort()).toEqual([
+			"docker",
+			"rust",
+		]);
+		const declared = (id: string) =>
+			new RegExp(`\\tid: "${id}",\\n\\tidleEviction: "(\\w+)"`).exec(
+				plan.serverSource,
+			)?.[1];
+		for (const id of ids(plan.registrySource, "TRANSPARENT_IDS"))
+			expect(declared(id) ?? "transparent", `${id} is transparent`).toBe(
+				"transparent",
+			);
+		for (const name of [
+			"NEXT_PHASE_ELIGIBLE_IDS",
+			"HOLD_INDEXER_IDS",
+			"UNPROVEN_IDS",
+		])
+			for (const id of ids(plan.registrySource, name))
+				expect(declared(id) ?? "unmeasured", `${id} stays unmeasured`).toBe(
+					"unmeasured",
+				);
+		const all = [
+			"TRANSPARENT_IDS",
+			"NEXT_PHASE_ELIGIBLE_IDS",
+			"HOLD_INDEXER_IDS",
+			"UNPROVEN_IDS",
+		].flatMap((n) => ids(plan.registrySource, n));
+		expect(new Set(all).size).toBe(all.length);
+		expect(all.length).toBe(
+			[
+				"TRANSPARENT_IDS",
+				"NEXT_PHASE_ELIGIBLE_IDS",
+				"HOLD_INDEXER_IDS",
+				"UNPROVEN_IDS",
+			].flatMap((n) => ids(REAL_REGISTRY_TS, n)).length,
+		);
+		expect(declared("json")).toBe("transparent");
+		expect(JSON.parse(plan.reasonsText).zizmor).toContain("#3989");
+	});
+
+	it("promotes nothing when the registry test cannot take the move", () => {
+		const plan = planPromotions({
+			rows: [row("json")],
+			prior: nights([D1], () => [row("json")]),
+			today: D2,
+			serverSource: FIXTURE_SERVER_TS,
+			reasonsText: `{\n\t"typescript": "x"\n}\n`,
+			registrySource: FIXTURE_REGISTRY_TS.replace('\t"json",\n', ""),
+		});
+		expect(plan.promoted).toEqual([]);
+		expect(plan.serverSource).toBe(FIXTURE_SERVER_TS);
+		expect(plan.skipped[0].reason).toContain("NEXT_PHASE_ELIGIBLE_IDS");
+	});
+
+	it("promotes nothing at all when the hold list is unreadable", () => {
+		const plan = planPromotions({
+			rows: [row("json")],
+			prior: nights([D1], () => [row("json")]),
+			today: D2,
+			serverSource: FIXTURE_SERVER_TS,
+			reasonsText: `{\n\t"typescript": "x"\n}\n`,
+			registrySource: "",
+		});
+		expect(plan.promoted).toEqual([]);
+		expect(plan.skipped[0].reason).toContain("hold list unreadable");
+	});
+});
+
+describe("a promotion PR closed unmerged is not re-created (#3989 F4)", () => {
+	// Recurrence: create-pull-request force-rebuilds its branch nightly, so a PR a
+	// maintainer closed would reopen the next night for the same servers.
+	const base = {
+		prior: nights([D1], () => [row("json"), row("zizmor")]),
+		rows: [row("json"), row("zizmor")],
+		today: D2,
+		serverSource: FIXTURE_SERVER_TS,
+		reasonsText: `{\n\t"typescript": "x"\n}\n`,
+		registrySource: FIXTURE_REGISTRY_TS,
+	};
+
+	it("writes the server set into the body as a marker the next night can read", () => {
+		const plan = planPromotions(base);
+		expect(plan.body).toContain("<!-- idle-evict-set: json,zizmor -->");
+		expect(
+			parseRejectedSets(`noise\n${plan.body}\n<!-- idle-evict-set: a,b -->`),
+		).toEqual(new Set(["json,zizmor", "a,b"]));
+	});
+
+	it("skips exactly the rejected set, and allows a different one", () => {
+		const same = planPromotions({
+			...base,
+			rejected: new Set(["json,zizmor"]),
+		});
+		expect(same.promoted).toEqual([]);
+		expect(same.serverSource).toBe(FIXTURE_SERVER_TS);
+		expect(same.skipped[0].reason).toContain("closed unmerged");
+		expect(
+			planPromotions({ ...base, rejected: new Set(["json"]) }).promoted,
+		).toHaveLength(2);
+	});
+
+	it("promotes nothing when the closed-PR list could not be read", () => {
+		const plan = planPromotions({ ...base, rejected: null });
+		expect(plan.promoted).toEqual([]);
+		expect(plan.skipped[0].reason).toContain("closed-PR list unreadable");
 	});
 });

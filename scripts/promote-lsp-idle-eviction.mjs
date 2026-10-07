@@ -24,7 +24,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { planPromotions } from "./lib/lsp-idle-eviction-promote.mjs";
+import {
+	parseRejectedSets,
+	planPromotions,
+} from "./lib/lsp-idle-eviction-promote.mjs";
 import {
 	IDLE_EVICTION_KEY,
 	parseRefreshState,
@@ -32,9 +35,23 @@ import {
 } from "./lib/md-matrix.mjs";
 
 /**
+ * The server sets of closed-unmerged promotion PRs, from the file the workflow
+ * wrote (`gh pr list --state closed`). No path given: nothing was rejected. A
+ * path that cannot be read is `null` ("unknown"), and the plan promotes nothing.
+ */
+function readRejected(file) {
+	if (!file) return new Set();
+	try {
+		return parseRejectedSets(fs.readFileSync(file, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+/**
  * One nightly run. Returns the promoted server ids; never throws.
  *
- * @param {{ summaryPath?: string, bodyPath?: string, matrixPath: string, serverPath: string, reasonsPath: string, today: string, runUrl?: string | null, log?: (line: string) => void }} opts
+ * @param {{ summaryPath?: string, bodyPath?: string, matrixPath: string, serverPath: string, reasonsPath: string, registryPath: string, rejectedPath?: string, today: string, runUrl?: string | null, log?: (line: string) => void }} opts
  * @returns {string[]}
  */
 export function promoteFromSummary(opts) {
@@ -63,6 +80,8 @@ export function promoteFromSummary(opts) {
 			today: opts.today,
 			serverSource: fs.readFileSync(opts.serverPath, "utf8"),
 			reasonsText: fs.readFileSync(opts.reasonsPath, "utf8"),
+			registrySource: fs.readFileSync(opts.registryPath, "utf8"),
+			rejected: readRejected(opts.rejectedPath),
 			runUrl: opts.runUrl,
 		});
 		fs.writeFileSync(
@@ -78,6 +97,7 @@ export function promoteFromSummary(opts) {
 		if (plan.promoted.length === 0) return [];
 		fs.writeFileSync(opts.serverPath, plan.serverSource);
 		fs.writeFileSync(opts.reasonsPath, plan.reasonsText);
+		fs.writeFileSync(opts.registryPath, plan.registrySource);
 		if (opts.bodyPath && plan.body) fs.writeFileSync(opts.bodyPath, plan.body);
 		return plan.promoted.map((p) => p.serverId);
 	} catch (error) {
@@ -115,6 +135,16 @@ if (
 			"--reasons",
 			path.join(repoRoot, "tests", "config", "lsp-idle-eviction-reasons.json"),
 		),
+		registryPath: flag(
+			"--registry-test",
+			path.join(
+				repoRoot,
+				"tests",
+				"config",
+				"lsp-idle-eviction-registry.test.ts",
+			),
+		),
+		rejectedPath: flag("--rejected", undefined),
 		today: flag("--today", new Date().toISOString().slice(0, 10)),
 		runUrl:
 			GITHUB_SERVER_URL && GITHUB_REPOSITORY && GITHUB_RUN_ID
