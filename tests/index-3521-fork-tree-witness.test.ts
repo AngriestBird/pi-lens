@@ -2914,6 +2914,64 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 	}
 
 	/**
+	 * #4113 verify X1 (R2, the reviewer's PR20): a gap subagent resumes the
+	 * user's file inside the user's resume gap, so two started primaries run
+	 * on one file. In the user's later reload gap the second runtime reloads
+	 * itself: it is primary with no in-flight mark, and the gap names
+	 * `(reload, its file)`. The recurrence: without the "no scope" half of
+	 * the unstarted rule, that started shutdown forwarded the user's slot
+	 * instead of stashing its own scope, and its reload successor ran with the
+	 * user's activations, not its own.
+	 */
+	it("keeps a same-file second primary's own activations when it reloads in the user's reload gap (R2)", async () => {
+		let second: AgentSessionRuntime | undefined;
+		let target = "";
+		let phase: "resume" | "reload" | "done" = "resume";
+		const gapActor = (pi: ExtensionAPI) => {
+			pi.on("session_shutdown", async (event) => {
+				const reason = (event as { reason?: string }).reason;
+				if (phase === "resume" && reason === "resume" && !second) {
+					second = await startRuntime(SessionManager.inMemory(cwd));
+					await second.switchSession(target);
+				} else if (phase === "reload" && reason === "reload" && second) {
+					phase = "done";
+					await activateTools(second, "act-second", ["lsp_navigation"]);
+					await reload(second);
+				}
+			});
+		};
+		const other = SessionManager.create(cwd, sessionsDir);
+		other.appendMessage({
+			role: "user",
+			content: "other",
+			timestamp: Date.now(),
+		} as never);
+		target = other.getSessionFile()!;
+		const primary = await startRuntime(
+			SessionManager.create(cwd, sessionsDir),
+			[gapActor],
+		);
+		const c = conversation(primary);
+		c.user("prompt 1");
+		c.done();
+		await primary.switchSession(target);
+		expect(second).toBeDefined();
+		await activateTools(primary, "act-user", ["ast_grep_search"]);
+		resetDegradationLedger();
+
+		phase = "reload";
+		await reload(primary);
+
+		expect(phase).toBe("done");
+		expect(activeSituational(second!)).toEqual(["lsp_navigation"]);
+		expect(
+			(await latencyRows("degradation_ledger")).filter(
+				(row) => row.kind === "session-scope-handoff-interrupted",
+			),
+		).toEqual([]);
+	});
+
+	/**
 	 * #3881 r2 F2: a reload scheduled one microtask hop after the fork's
 	 * `session_start` emit lands in t0, after pi-lens's handler was entered
 	 * and before it set its scope. The recurrence: a mark set after the
