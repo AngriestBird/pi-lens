@@ -15,7 +15,7 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
-import { isHardFailureSummary } from "./hard-failure-summary.js";
+import { HardFailureStamps } from "./hard-failure-summary.js";
 import {
 	findNearestMarkerRoot,
 	normalizeEphemeralMapKey,
@@ -23,8 +23,7 @@ import {
 } from "./path-utils.js";
 import {
 	canonicalDirectory,
-	listLinkedWorktreeRoots,
-	resolveGitCheckout,
+	listNestedLinkedWorktreeRoots,
 } from "./review-graph/git-identity.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
@@ -124,13 +123,6 @@ const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
 };
 
 const ANALYSIS_TIMEOUT_MS = 30_000;
-
-/**
- * How long a recorded hard failure keeps a root off the turn_end path: the
- * cache row that carried this back-off before #3872 lived exactly as long as
- * the cache's default max age (`DEFAULT_MAX_AGE_MS`, `clients/cache-manager.ts`).
- */
-const HARD_FAILURE_BACKOFF_MS = 30 * 60 * 1000;
 
 /**
  * Every package name referenced as a KEY (at any nesting depth — npm's
@@ -307,16 +299,12 @@ const NO_NESTED_WORKTREES: NestedWorktreeScope = {
  * realpath (a 16 000-issue result against 55 worktrees is ~880 000 compares).
  */
 function nestedWorktreeScope(targetDir: string): NestedWorktreeScope {
-	const checkout = resolveGitCheckout(targetDir);
-	if (!checkout) return NO_NESTED_WORKTREES;
-	const base = normalizeFilePath(canonicalDirectory(targetDir));
-	const baseKey = normalizeEphemeralMapKey(base);
 	const prefixes: string[] = [];
-	for (const root of listLinkedWorktreeRoots(checkout.commonDir)) {
-		const key = normalizeEphemeralMapKey(normalizeFilePath(root));
-		if (key.startsWith(`${baseKey}/`)) prefixes.push(`${key}/`);
+	for (const root of listNestedLinkedWorktreeRoots(targetDir)) {
+		prefixes.push(`${normalizeEphemeralMapKey(normalizeFilePath(root))}/`);
 	}
 	if (prefixes.length === 0) return NO_NESTED_WORKTREES;
+	const base = normalizeFilePath(canonicalDirectory(targetDir));
 	return {
 		count: prefixes.length,
 		contains: (file) => {
@@ -374,10 +362,7 @@ export class KnipClient {
 	 * that later timed out still leaves the failure the next turn must see:
 	 * the turn's own cache row only exists for a scan that settled inside it.
 	 */
-	private readonly hardFailures = new Map<
-		string,
-		{ at: number; summary: string }
-	>();
+	private readonly hardFailures = new HardFailureStamps();
 
 	/**
 	 * Per project root, how long its last two successful scans took (#3872).
@@ -522,13 +507,7 @@ export class KnipClient {
 		// key `analyze` stamps under.
 		const key = this.resolveProjectRoot(cwd);
 		if (!key) return null;
-		const failure = this.hardFailures.get(key);
-		if (!failure) return null;
-		if (Date.now() - failure.at > HARD_FAILURE_BACKOFF_MS) {
-			this.hardFailures.delete(key);
-			return null;
-		}
-		return failure.summary;
+		return this.hardFailures.recent(key);
 	}
 
 	/**
@@ -617,14 +596,12 @@ export class KnipClient {
 
 		const startedAt = Date.now();
 		const promise = this.runAnalyze(key).then((result) => {
+			this.hardFailures.settle(key, result);
 			if (result.success) {
-				this.hardFailures.delete(key);
 				this.scanDurations.set(key, [
 					...(this.scanDurations.get(key) ?? []).slice(-1),
 					Date.now() - startedAt,
 				]);
-			} else if (isHardFailureSummary(result.summary)) {
-				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
 			}
 			const executed = { ...result, execution: "executed" as const };
 			if (result.success && options.projectSeq !== undefined) {

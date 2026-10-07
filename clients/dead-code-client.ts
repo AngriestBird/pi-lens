@@ -22,10 +22,7 @@ import {
 	extractTomlTableSection,
 	parseTomlStringArray,
 } from "./cargo-manifest.js";
-import {
-	HARD_FAILURE_BACKOFF_MS,
-	isHardFailureSummary,
-} from "./hard-failure-summary.js";
+import { HardFailureStamps } from "./hard-failure-summary.js";
 import { findLocalBinsAt, VENV_BIN_DIRS } from "./package-manager.js";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { listNestedLinkedWorktreeRoots } from "./review-graph/git-identity.js";
@@ -231,10 +228,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	 * turn's own cache row only exists for a scan that settled inside it, and a
 	 * failure never replaces a good baseline row.
 	 */
-	private readonly hardFailures = new Map<
-		string,
-		{ at: number; summary: string }
-	>();
+	private readonly hardFailures = new HardFailureStamps();
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
@@ -244,14 +238,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	recentHardFailure(cwd: string): string | null {
 		const root = this.resolveProjectRoot(cwd || process.cwd());
 		if (!root) return null;
-		const key = resolve(root);
-		const failure = this.hardFailures.get(key);
-		if (!failure) return null;
-		if (Date.now() - failure.at > HARD_FAILURE_BACKOFF_MS) {
-			this.hardFailures.delete(key);
-			return null;
-		}
-		return failure.summary;
+		return this.hardFailures.recent(resolve(root));
 	}
 
 	private get minConfidence(): number {
@@ -471,10 +458,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		const existing = this.inFlight.get(key);
 		if (existing) return existing;
 		const promise = this.runAnalyze(key).then((result) => {
-			if (result.success) this.hardFailures.delete(key);
-			else if (isHardFailureSummary(result.summary)) {
-				this.hardFailures.set(key, { at: Date.now(), summary: result.summary });
-			}
+			this.hardFailures.settle(key, result);
 			return result;
 		});
 		const wrapped = promise.finally(() => {
