@@ -310,7 +310,13 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// Nothing on disk can say which spelling is real, and on a
 			// case-sensitive filesystem `NOPE` and `nope` are two different
 			// directories — folding one into the other is the #3098 non-goal.
-			expect(normalizeMapKey(absent)).toBe(absent.replace(/\\/g, "/"));
+			// win32 map keys are lowercased by design (`normalizeMapKey`'s win32
+			// arm); that is a spelling rule of the key, not an on-disk guess, so the
+			// directory casing is still not adopted from anything (#4019).
+			const spelled = absent.replace(/\\/g, "/");
+			expect(normalizeMapKey(absent)).toBe(
+				process.platform === "win32" ? spelled.toLowerCase() : spelled,
+			);
 		} finally {
 			cleanup();
 		}

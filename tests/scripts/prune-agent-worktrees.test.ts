@@ -1888,18 +1888,23 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		"reaps under the registered argv when the listing itself fails (#2486's own reason)",
 		{ timeout: 90_000 },
 		() => {
-			// The exact reason string from the reported hygiene.log, driven by
-			// a ceiling the REAL listing cannot meet: measured on this box the
-			// Windows listing costs ~524ms at its floor (~208ms powershell
-			// startup + ~316ms projected WQL query) and 584-707ms in practice,
-			// so a 400ms ceiling times the spawn out and `ok` comes back
-			// false. Windows-only because POSIX `ps` answers in ~15ms — the
-			// portable case above drives the same degraded state through the
-			// `skipped` branch instead (both yield listingOk=false and an
-			// empty table; only the reason string differs).
+			// The exact reason string from the reported hygiene.log. The listing
+			// is made to fail by pointing the child's `SystemRoot` at a directory
+			// with no `System32`, so `windowsExe("...powershell.exe")` (the
+			// listing's absolute interpreter path) does not exist and the spawn
+			// errors. The first version drove it with a 400ms ceiling ("the real
+			// listing costs ~524ms at its floor", measured on one dev box), but
+			// the GitHub runner's listing sometimes finishes inside 400ms, so the
+			// `listing-failed` record was absent on a fast run: a wall-clock race
+			// on an unmeasured host claim (#4019). `--scan-timeout-ms 400` stays
+			// because it is the ceiling the record reports. Windows-only because
+			// POSIX `ps` answers in ~15ms — the portable case above drives the
+			// same degraded state through the `skipped` branch instead (both yield
+			// listingOk=false and an empty table; only the reason string differs).
 			runCli(
 				[...registeredArgv(), "--scan-timeout-ms", "400"],
 				subagentStopPayload(AGENT_ID),
+				{ SystemRoot: path.join(root, "no-system-root") },
 			);
 
 			expect(fs.existsSync(worktree)).toBe(false);
