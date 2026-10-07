@@ -13,23 +13,23 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import path from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 
 const root = process.cwd();
-const probe = join(root, "scripts", "guard-bash-probe.mjs");
-const probesDir = join(root, "tests", "fixtures", "guard-bash-probes");
-const corpus = join(probesDir, "reviewer-corpus.jsonl");
+const probe = path.join(root, "scripts", "guard-bash-probe.mjs");
+const probesDir = path.join(root, "tests", "fixtures", "guard-bash-probes");
+const corpus = path.join(probesDir, "reviewer-corpus.jsonl");
 // Frozen #4054 hook bytes (an open PR, not on master): the r2 head and the r3
 // head whose swallowed `--prefix` allowance is R3-1. The blob ids are the git
 // object ids of `scripts/hooks/guard-bash.mjs` at those commits.
 const R2 = {
-	file: join(probesDir, "hooks", "guard-bash-4054-r2-2a486ce70.txt"),
+	file: path.join(probesDir, "hooks", "guard-bash-4054-r2-2a486ce70.txt"),
 	blob: "8e41c75e1ea88a318af5e2a7457cd0727be8099d",
 };
 const R3 = {
-	file: join(probesDir, "hooks", "guard-bash-4054-r3-784a6c2d8.txt"),
+	file: path.join(probesDir, "hooks", "guard-bash-4054-r3-784a6c2d8.txt"),
 	blob: "d7d4e708ce2d672b5e3817c8c08800f71e0b4791",
 };
 
@@ -49,17 +49,16 @@ type Outcome = {
 	summary: { head: { blob: string }; base: { blob: string } | null };
 };
 
-let scratch = "";
-beforeAll(() => {
-	scratch = mkdtempSync(join(tmpdir(), "guard-bash-probe-test-"));
-});
+const scratch = mkdtempSync(
+	path.join(tmpdir(), "pi-lens-guard-bash-probe-test-"),
+);
 afterAll(() => {
 	rmSync(scratch, { recursive: true, force: true });
 });
 
 /** One private TMPDIR per run, so a leaked fixture directory is observable. */
 function run(args: string[], env: Record<string, string> = {}) {
-	const home = mkdtempSync(join(scratch, "run-"));
+	const home = mkdtempSync(path.join(scratch, "run-"));
 	const child = spawnSync(process.execPath, [probe, ...args], {
 		cwd: root,
 		encoding: "utf8",
@@ -75,9 +74,9 @@ function json(args: string[], env?: Record<string, string>) {
 }
 
 function writeFile(name: string, text: string) {
-	const path = join(scratch, name);
-	writeFileSync(path, text);
-	return path;
+	const file = path.join(scratch, name);
+	writeFileSync(file, text);
+	return file;
 }
 
 function writeMatrix(name: string, rows: object[]) {
@@ -87,8 +86,8 @@ function writeMatrix(name: string, rows: object[]) {
 	);
 }
 
-function gitBlob(path: string) {
-	const bytes = readFileSync(path);
+function gitBlob(file: string) {
+	const bytes = readFileSync(file);
 	return createHash("sha1")
 		.update(`blob ${bytes.length}\0`)
 		.update(bytes)
@@ -282,8 +281,8 @@ process.exit(ok ? 2 : 0);
 				{ command: "echo env", lane: "both", expect: "deny" },
 			]);
 			const { child, outcome } = json([matrix, "--head", stub], {
-				PI_LENS_HOME: join(scratch, "ambient-pin"),
-				PILENS_DATA_DIR: join(scratch, "ambient-data"),
+				PI_LENS_HOME: path.join(scratch, "ambient-pin"),
+				PILENS_DATA_DIR: path.join(scratch, "ambient-data"),
 			});
 			expect(
 				outcome.results.map((r) => `${r.lane}:${r.status}`).sort(),
@@ -299,11 +298,14 @@ process.exit(ok ? 2 : 0);
 			// GitHub: the object is genuinely missing from the clone.
 			const git = (cwd: string, ...args: string[]) =>
 				String(gitExecFileSync(args, { cwd, encoding: "utf8" })).trim();
-			const origin = join(scratch, "origin");
-			mkdirSync(join(origin, "scripts", "hooks"), { recursive: true });
+			const origin = path.join(scratch, "origin");
+			mkdirSync(path.join(origin, "scripts", "hooks"), { recursive: true });
 			git(origin, "init", "-q");
 			const commit = (hook: string, subject: string) => {
-				writeFileSync(join(origin, "scripts", "hooks", "guard-bash.mjs"), hook);
+				writeFileSync(
+					path.join(origin, "scripts", "hooks", "guard-bash.mjs"),
+					hook,
+				);
 				git(origin, "add", "-A");
 				git(
 					origin,
@@ -320,23 +322,23 @@ process.exit(ok ? 2 : 0);
 			};
 			const denying = commit("process.exit(2);\n", "deny");
 			const allowing = commit("process.exit(0);\n", "allow");
-			const clone = join(scratch, "clone");
+			const clone = path.join(scratch, "clone");
 			git(scratch, "clone", "-q", "--depth", "1", `file://${origin}`, clone);
 			expect(() => git(clone, "cat-file", "-e", denying)).toThrow();
-			mkdirSync(join(clone, "scripts", "lib"), { recursive: true });
-			copyFileSync(probe, join(clone, "scripts", "guard-bash-probe.mjs"));
+			mkdirSync(path.join(clone, "scripts", "lib"), { recursive: true });
+			copyFileSync(probe, path.join(clone, "scripts", "guard-bash-probe.mjs"));
 			copyFileSync(
-				join(root, "scripts", "lib", "git-fixture-env.mjs"),
-				join(clone, "scripts", "lib", "git-fixture-env.mjs"),
+				path.join(root, "scripts", "lib", "git-fixture-env.mjs"),
+				path.join(clone, "scripts", "lib", "git-fixture-env.mjs"),
 			);
 			const matrix = writeMatrix("ref.jsonl", [
 				{ command: "echo a", lane: "real", expect: "deny" },
 			]);
-			const home = mkdtempSync(join(scratch, "run-"));
+			const home = mkdtempSync(path.join(scratch, "run-"));
 			const child = spawnSync(
 				process.execPath,
 				[
-					join(clone, "scripts", "guard-bash-probe.mjs"),
+					path.join(clone, "scripts", "guard-bash-probe.mjs"),
 					matrix,
 					"--base",
 					denying,
