@@ -573,6 +573,38 @@ describe("project-snapshot persist-worker heap slot (#4129)", () => {
 			}
 		}));
 
+	it("drops a heap reading that lands after the worker exited", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			// Recurrence: 7 of 20 loaded runs (24 busy loops) of the exit case
+			// read a non-null slot after terminate(). The sampler's refresh is
+			// fire-and-forget, so its answer could land after the exit clear and
+			// leave a dead isolate's reading in place with nothing to refresh it.
+			// The answer is held here so it lands after the clear every time.
+			let captured: Worker | undefined;
+			const realPost = Worker.prototype.postMessage;
+			vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (
+				this: Worker,
+				...args: Parameters<Worker["postMessage"]>
+			) {
+				captured = this;
+				return realPost.apply(this, args);
+			});
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			await settle(cwd);
+			const worker = captured!;
+			const reading = await worker.getHeapStatistics();
+			let release!: () => void;
+			const held = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			worker.getHeapStatistics = () => held.then(() => reading);
+			const refresh = refreshProjectSnapshotPersistWorkerHeapStatistics();
+			await terminateProjectSnapshotPersistWorkerForTests();
+			release();
+			await refresh;
+			expect(getProjectSnapshotPersistWorkerHeapStatistics()).toBeNull();
+		}));
+
 	it("clears the reading on the test reset", async () =>
 		withProjectDataDirAsync(async (cwd) => {
 			saveProjectSnapshot(cwd, releasedSnapshot());

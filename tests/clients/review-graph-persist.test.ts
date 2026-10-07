@@ -170,6 +170,47 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		}
 	});
 
+	it("drops a persist-worker heap reading that lands after the worker exited (#4129)", async () => {
+		// Recurrence: under 24 busy loops this file's slot case read a non-null
+		// reading after terminate() in 5 of 20 runs: the sampler's
+		// fire-and-forget refresh landed after the exit clear. The answer is
+		// held here so it lands after the clear every time.
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+		let captured: Worker | undefined;
+		const realPost = Worker.prototype.postMessage;
+		const postSpy = vi
+			.spyOn(Worker.prototype, "postMessage")
+			.mockImplementation(function (
+				this: Worker,
+				...args: Parameters<Worker["postMessage"]>
+			) {
+				captured = this;
+				return realPost.apply(this, args);
+			});
+		try {
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			await waitForReviewGraphPersistsForTests();
+			const worker = captured!;
+			const reading = await worker.getHeapStatistics();
+			let release!: () => void;
+			const held = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			worker.getHeapStatistics = () => held.then(() => reading);
+			const refresh = refreshReviewGraphPersistWorkerHeapStatistics();
+			await terminateReviewGraphPersistWorkerForTests();
+			release();
+			await refresh;
+			expect(
+				collectMemorySampleSubsystems(null).persistWorkers.reviewGraph,
+			).toBeNull();
+		} finally {
+			postSpy.mockRestore();
+			env.cleanup();
+		}
+	});
+
 	it("entry-budget truncation remains visibly partial through persistence", async () => {
 		const env = makeEnv();
 		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");

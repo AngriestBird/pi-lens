@@ -2110,7 +2110,9 @@ export function refreshReviewGraphPersistWorkerHeapStatistics(): Promise<void> {
 	}
 	return readWorkerHeapStatistics(worker)
 		.then((stats) => {
-			_persistWorkerHeapStatistics = stats;
+			// An answer that lands after the worker's exit or death clear belongs
+			// to a dead isolate; every clear also drops the worker reference.
+			if (_persistWorker === worker) _persistWorkerHeapStatistics = stats;
 		})
 		.catch(() => {});
 }
