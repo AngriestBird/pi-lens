@@ -398,10 +398,11 @@ the surface they bite; each block loads only when its trigger applies.
     `FAIL` from its file, so a parser reads "no tests", "no red" or the wrong
     class (#4074, #4075, #4079, #4087: the pre-push hook recorded `failed: 0`
     for a red run). Read a Vitest transcript only through `parseVitestSummary`
-    in `scripts/lib/ci-failure-classifier.mjs`; its consumers are guarded over
-    a real coloured run by `tests/scripts/vitest-summary-consumers.test.ts`.
-    Consolidation verdict: folded onto that seam (deleting it would send six
-    scripts back to six private regexes). Sweep 2026-10-07 over `scripts/`,
+    in `scripts/lib/vitest-summary.mjs` (pure, so importing it does not make a
+    script a workflow writer); its consumers are guarded over a real coloured
+    run by `tests/scripts/vitest-summary-consumers.test.ts`.
+    Consolidation verdict: folded onto that seam (deleting it would send seven
+    scripts back to private regexes). Sweep 2026-10-07 over `scripts/`,
     `scripts/lib/`, `tests/support/` and `.github/`
     (`grep -rnE "Tests\s|Test Files|stripVTControl|u001b|x1b"`): the other
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s

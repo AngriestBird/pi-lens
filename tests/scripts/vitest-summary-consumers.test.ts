@@ -118,4 +118,13 @@ describe("every Vitest-output consumer reads coloured output like plain output (
 			);
 		},
 	);
+
+	// Recurrence: PR #4109 review F1 (a nested summary before the real one).
+	it("ci-test-diff and the Windows count read the run's own summary, not a nested one", () => {
+		const log =
+			"Tests  5 passed (5)\nTests are great\nTests  1 failed | 4 passed (5)\nFailed Tests  1\n" +
+			" FAIL  default tests/a.test.ts > x\n";
+		expect(validateLog(log)).toMatchObject({ testsFailed: 1 });
+		expect(parseWindowsVitestFailureCount(log)).toBe(1);
+	});
 });

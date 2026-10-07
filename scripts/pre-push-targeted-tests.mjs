@@ -55,7 +55,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { parseVitestSummary } from "./lib/ci-failure-classifier.mjs";
+import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import { getLockPath, getSlotPath } from "./lib/suite-lock.mjs";
 import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { isEntryPoint, quoteForWindowsCmd } from "./with-test-lock.mjs";

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseVitestSummary } from "./ci-failure-classifier.mjs";
+import { parseVitestSummary } from "./vitest-summary.mjs";
 
 /** Return the failed-test count from a Vitest Windows runner log, if present. */
 export function parseWindowsVitestFailureCount(log) {

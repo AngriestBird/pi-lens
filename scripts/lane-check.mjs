@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseVitestSummary } from "./lib/ci-failure-classifier.mjs";
+import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	changedFiles as committedChangedFiles,

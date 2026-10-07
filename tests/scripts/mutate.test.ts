@@ -72,6 +72,19 @@ it("accepts several test files after --tests", async () => {
 	expect(digest()).toBe(before);
 });
 
+// The usage line puts [--table] after `--tests <files…>`; the list used to run
+// to the end of argv, so the flag reached vitest (CACError) and a surviving
+// mutation read RED (PR #4109 review F2).
+it("ends the --tests list at the next flag", async () => {
+	const before = digest();
+	const { stdout } = await invoke(target, "--table");
+	expect(stdout).toContain("SURVIVED");
+	expect(stdout).toContain(
+		"mutation-table: | tests/scripts/mutate-fixture.test.ts | 0 | SURVIVED",
+	);
+	expect(digest()).toBe(before);
+});
+
 it("restores the source after a failing test run and reports RED with a title", async () => {
 	// Round 2 searched a string-only needle, which the matcher refuses with the
 	// same exit code 1, so this test never reached RED. A code needle does.

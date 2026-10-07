@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import {
 	normalizeVitestOutput,
 	parseVitestSummary,
-} from "./lib/ci-failure-classifier.mjs";
+} from "./lib/vitest-summary.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -46,8 +46,12 @@ function argsFrom(argv) {
 		)
 			values[arg.slice(2)] = true;
 		else if (arg === "--tests") {
-			values.tests = argv.slice(++index);
-			index = argv.length;
+			// The list ends at the next flag: `--tests a b --table` is a table run.
+			const end = argv.findIndex(
+				(value, at) => at > index && value.startsWith("--"),
+			);
+			values.tests = argv.slice(index + 1, end === -1 ? argv.length : end);
+			index = (end === -1 ? argv.length : end) - 1;
 		} else if (["--file", "--find", "--replace"].includes(arg)) {
 			if (arg === "--file" && fileSeen)
 				throw new Error(

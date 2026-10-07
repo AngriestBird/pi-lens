@@ -207,10 +207,10 @@ import { fileURLToPath } from "node:url";
 import {
 	ASSERTION_LINE,
 	BARE_FAIL_LINE,
-	parseVitestSummary,
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
+import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import {
 	CHANGES_CHECK,
 	DEFERRED_ADVISORY_CHECKS,

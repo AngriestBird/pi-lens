@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import {
 	normalizeVitestOutput,
 	parseVitestSummary,
-} from "./lib/ci-failure-classifier.mjs";
+} from "./lib/vitest-summary.mjs";
 
 const DEFAULT_REPOSITORY = "apmantza/pi-lens";
 export function stripLogDecorations(log) {
