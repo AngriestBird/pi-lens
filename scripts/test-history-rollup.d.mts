@@ -1,4 +1,5 @@
 export const HISTORY_MAX_AGE_MS: number;
+export const HISTORY_MAX_BYTES: number;
 export const METADATA_FILENAME: string;
 export function rowsFromArtifacts(inputs: string[]): Array<{
 	headSha: string;
@@ -16,6 +17,7 @@ export function rollupTestHistory(options: {
 	historyPath: string;
 	summaryPath: string;
 	now?: number;
+	maxBytes?: number;
 }): {
 	rowCount: number;
 	files: unknown[];

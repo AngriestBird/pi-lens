@@ -17,6 +17,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 export const HISTORY_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+export const HISTORY_MAX_BYTES = 95 * 1024 * 1024;
 
 /**
  * The single source of truth for the producer/consumer artifact contract.
@@ -176,6 +177,7 @@ export function rollupTestHistory({
 	historyPath,
 	summaryPath,
 	now = Date.now(),
+	maxBytes = HISTORY_MAX_BYTES,
 }) {
 	const incoming = rowsFromArtifacts(artifactPaths);
 	const priorRows = readRows(historyPath);
@@ -190,11 +192,17 @@ export function rollupTestHistory({
 				a.recordedAt.localeCompare(b.recordedAt) ||
 				key(a).localeCompare(key(b)),
 		);
-	const grouped = new Map();
-	for (const row of rows) {
-		if (!grouped.has(row.file)) grouped.set(row.file, []);
-		grouped.get(row.file).push(row);
+	const serializedRows = rows.map((row) => JSON.stringify(row));
+	let firstRetained = 0;
+	let retainedBytes = serializedRows.reduce(
+		(total, row) => total + Buffer.byteLength(row) + 1,
+		0,
+	);
+	while (firstRetained < serializedRows.length && retainedBytes > maxBytes) {
+		retainedBytes -= Buffer.byteLength(serializedRows[firstRetained]) + 1;
+		firstRetained += 1;
 	}
+	const boundedRows = rows.slice(firstRetained);
 	const liveObservations = observations.filter(
 		(row) => Date.parse(row.recordedAt) >= cutoff,
 	);
@@ -238,11 +246,11 @@ export function rollupTestHistory({
 	fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
 	fs.writeFileSync(
 		historyPath,
-		rows.map((row) => JSON.stringify(row)).join("\n") +
-			(rows.length ? "\n" : ""),
+		boundedRows.map((row) => JSON.stringify(row)).join("\n") +
+			(boundedRows.length ? "\n" : ""),
 	);
 	const output = {
-		rowCount: rows.length,
+		rowCount: boundedRows.length,
 		files: summary,
 		flakeCandidates: flakes,
 	};

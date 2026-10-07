@@ -206,6 +206,35 @@ describe("test-history-rollup real entry point", () => {
 		);
 	});
 
+	it("bounds the durable journal by bytes and keeps newest rows", () => {
+		const { root, artifact } = fixture();
+		const history = path.join(root, "history.ndjson");
+		const rows = ["old-a", "old-b", "newest"].map((file, index) => ({
+			headSha: "b".repeat(40),
+			runId: String(index),
+			file: `${file}-${"x".repeat(100)}`,
+			outcome: "passed",
+			durationMs: 1,
+			lane: "linux",
+			recordedAt: `2026-09-2${index + 3}T00:00:00.000Z`,
+		}));
+		fs.writeFileSync(
+			history,
+			`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+		);
+		const summary = path.join(root, "summary.json");
+		rollupTestHistory({
+			artifactPaths: [artifact],
+			historyPath: history,
+			summaryPath: summary,
+			now: Date.parse("2026-09-30T00:00:00.000Z"),
+			maxBytes: 400,
+		});
+		const output = fs.readFileSync(history, "utf8");
+		expect(Buffer.byteLength(output)).toBeLessThanOrEqual(400);
+		expect(output).toContain("newest-");
+	});
+
 	// Round 3 F8: the producer uploaded `test-history-metadata.json` while the
 	// consumer looked for a sibling `metadata.json`, so the rollup exited 2 on
 	// every real artifact and lane 1 never wrote a row. This runs the real CLI
