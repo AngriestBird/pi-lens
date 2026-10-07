@@ -383,7 +383,7 @@ process.exit(ok ? 2 : 0);
 				[{ ...rows[0], expect: "maybe" }, /expect must be allow or deny/],
 				[{ ...rows[0], gap: "#7" }, /gap is only valid with expect deny/],
 				[{ ...rows[0], lane: "both", cwd: "{{OTHER}}" }, /must name one lane/],
-				[{ ...rows[0], expcet: "allow" }, /unknown field expcet/],
+				[{ ...rows[0], bogus: "allow" }, /unknown field bogus/],
 				[{ ...rows[0], source: "" }, /missing source/],
 				[{ ...rows[0], command: "echo {{NOPE}}" }, /unresolved placeholder/],
 			];
