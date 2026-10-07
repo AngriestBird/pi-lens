@@ -729,6 +729,47 @@ describe("LSPService race hardening", () => {
 				).toEqual(["marksman"]);
 			});
 
+		// G1 (round 3). Recurrence: in `clientScope: "all"` the touch acquires
+		// auxiliary servers and resolves their roots (`serverCountAttempted` 2),
+		// so dropping every auxiliary made the row narrower than the attempt.
+		it("an all-scope no-client touch lists an auxiliary server it resolved a root for", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+				{
+					id: "opengrep",
+					name: "opengrep",
+					role: "auxiliary",
+					extensions: [".md"],
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await new LSPService().touchFile("C:/repo-b/README.md", "# b\n", {
+				diagnostics: "none",
+				clientScope: "all",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			});
+
+			expect(
+				(
+					candidatesOfTouch() as Array<{ serverId: string; rooted: boolean }>
+				).map((entry) => [entry.serverId, entry.rooted]),
+			).toEqual([
+				["marksman", true],
+				["opengrep", true],
+			]);
+		});
+
 		// The row's bound: a file with more primary candidates than the cap
 		// names the first MAX_TOUCH_CANDIDATES (8). Recurrence: unbounded row
 		// growth on a repeat decision.

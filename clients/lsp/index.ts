@@ -3454,6 +3454,13 @@ export class LSPService {
 		filePath: string,
 		excludeServerIds?: ReadonlySet<string>,
 		resolvedRoots?: Map<string, string>,
+		/**
+		 * The roots of the auxiliary servers this call attempted (#3873 G1). Kept
+		 * apart from `resolvedRoots`, which `isSpawnInFlight` reads as the
+		 * PRIMARY servers' roots: an auxiliary spawn in flight must not read as
+		 * the primary's.
+		 */
+		auxiliaryRoots?: Map<string, string>,
 	): Promise<{ clients: SpawnedServer[]; serverCountAttempted: number }> {
 		const allServers = getServersForFileWithConfig(filePath);
 		const servers =
@@ -3474,6 +3481,10 @@ export class LSPService {
 			(entry): entry is { server: LSPServerInfo; root: string } =>
 				entry.root !== undefined,
 		);
+
+		for (const { server, root } of rootedServers)
+			if (server.role === "auxiliary")
+				auxiliaryRoots?.set(server.id, normalizeMapKey(root));
 
 		let serverCountAttempted = 0;
 		const acquisitions = new Map<string, Promise<SpawnedServer | undefined>>();
@@ -4842,6 +4853,7 @@ export class LSPService {
 			options.clientScope ?? (diagnosticsMode === "full" ? "all" : "primary");
 		const useAllClients = clientScope === "all";
 		const resolvedPrimaryRoots = new Map<string, string>();
+		const attemptedAuxiliaryRoots = new Map<string, string>();
 		const waitSkipReasons = new Set<string>();
 		const coldAuxiliaryServerIds = new Set<string>();
 		const noteColdAuxiliary = (
@@ -4859,6 +4871,7 @@ export class LSPService {
 				filePath,
 				options.excludeServerIds,
 				resolvedPrimaryRoots,
+				attemptedAuxiliaryRoots,
 			);
 			spawned = result.clients;
 			serverCountAttempted = result.serverCountAttempted;
@@ -4946,6 +4959,7 @@ export class LSPService {
 					candidates: this.describeTouchCandidates(
 						filePath,
 						resolvedPrimaryRoots,
+						attemptedAuxiliaryRoots,
 					),
 				},
 			});
@@ -10361,14 +10375,18 @@ export class LSPService {
 	 * or it was an alternate never tried), and an `alive` client next to a
 	 * no-client verdict is the contradiction worth reading.
 	 *
-	 * Auxiliary servers (opengrep, ast-grep, typos, ...) are NOT listed: the
-	 * touch resolves roots for primary servers only, so an auxiliary entry
-	 * would read `rooted: false` beside a live client. Their outcome is the
-	 * `auxiliary_readiness` row's. Bounded at {@link MAX_TOUCH_CANDIDATES}.
+	 * An auxiliary server (opengrep, ast-grep, typos, ...) is listed only when
+	 * this touch attempted it and so has a root in `auxiliaryRoots`, which only
+	 * `clientScope: "all"` fills (`getClientsForFile`). In the primary and
+	 * with-auxiliary scopes it is skipped: no root is resolved for it here, so
+	 * its entry would read `rooted: false` beside a live client. The
+	 * with-auxiliary outcome is the `auxiliary_readiness` row's (written only in
+	 * that branch). Bounded at {@link MAX_TOUCH_CANDIDATES}.
 	 */
 	describeTouchCandidates(
 		filePath: string,
 		resolvedRoots: ReadonlyMap<string, string>,
+		auxiliaryRoots: ReadonlyMap<string, string> = new Map(),
 	): Array<{
 		serverId: string;
 		rooted: boolean;
@@ -10382,9 +10400,12 @@ export class LSPService {
 			generation: number | undefined;
 		}> = [];
 		for (const server of getServersForFileWithConfig(filePath)) {
-			if (server.role === "auxiliary") continue;
+			// Only `clientScope: "all"` attempts auxiliary servers in this touch; an
+			// auxiliary it did not attempt was never considered.
+			const auxiliary = server.role === "auxiliary";
+			if (auxiliary && !auxiliaryRoots.has(server.id)) continue;
 			if (candidates.length >= MAX_TOUCH_CANDIDATES) break;
-			const root = resolvedRoots.get(server.id);
+			const root = (auxiliary ? auxiliaryRoots : resolvedRoots).get(server.id);
 			const key = root === undefined ? undefined : `${server.id}:${root}`;
 			const client =
 				key === undefined ? undefined : this.state.clients.get(key);

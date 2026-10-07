@@ -91,7 +91,7 @@ readout.
    `queueEpoch`, so one touch delivered in three drains is three epochs;
    a no-client `lsp_touch_file` carries `candidates[]` (`serverId`, `rooted`,
    `clientFound`, `generation`) for the file's primary servers only, 8 at most;
-   auxiliary servers are in `auxiliary_readiness`.
+   an auxiliary server is listed only in `clientScope: "all"` touches, the one scope that resolves its root (the with-auxiliary scope reports it in `auxiliary_readiness`).
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,
