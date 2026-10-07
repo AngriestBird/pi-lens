@@ -51,9 +51,10 @@ describe("review graph with a project root spelled differently from the canonica
 		_resetReviewGraphSourcePathMemoForTests();
 	});
 
-	// lane: Unit tests Windows (advisory). A directory junction is the Windows
-	// spelling of an OneDrive/profile redirect; `realpathSync.native` expands it
-	// in the file keys while the root stays the junction path.
+	// A directory junction is the Windows spelling of an OneDrive/profile
+	// redirect; `realpathSync.native` expands it in the file keys while the root
+	// stays the junction path. Runs on the "Unit tests Windows (advisory)" job.
+	// lane: windows-vitest
 	it.skipIf(process.platform !== "win32")(
 		"keeps the import edge when cwd is a junction to the real root",
 		async () => {
