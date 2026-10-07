@@ -256,12 +256,15 @@ export function _resetProjectDataDirMemoForTests(): void {
  *     {@link homeRelativePath} so the default `~/.pi-lens/projects/...` store
  *     does not leak the account name into agent context (#2440 F5).
  *
- * Pure string work on top of `getProjectDataDir`'s own resolution: it never
- * stats the target, so it is safe to call for a file that has not been written
- * yet and cannot throw on a surface whose whole job is to render a hint.
+ * String work on top of `getProjectDataDir`'s own resolution. Since #4101,
+ * `toProjectRelativePath` retries canonically (a stat) only when the lexical
+ * test says the target is outside the root; that retry tolerates a missing
+ * path, so this stays safe for a file that has not been written yet and does
+ * not throw on a surface whose whole job is to render a hint.
  *
  * The relative-or-absolute decision reuses `toProjectRelativePath`
- * (`clients/path-utils.ts`) — the same shape-aware, non-stat'ing primitive
+ * (`clients/path-utils.ts`) — the same shape-aware primitive (lexical first,
+ * a canonical retry only on a lexical miss, #4101)
  * `toRunnerDisplayPath` (`clients/dispatch/runner-context.ts`) composes for
  * the analogous "relative path if under this root, else something else"
  * decision — rather than a second hand-rolled `path.relative` fold. It is NOT
