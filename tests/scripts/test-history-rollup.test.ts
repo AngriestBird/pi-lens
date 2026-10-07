@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonReporter } from "vitest/node";
 import {
 	METADATA_FILENAME,
+	normalizeTestFile,
 	rollupTestHistory,
 	rowsFromArtifacts,
 	runCli,
@@ -22,6 +23,19 @@ const repoRoot = path.resolve(import.meta.dirname, "../..");
 const realArtifact = path.join(
 	repoRoot,
 	"tests/fixtures/test-history/run-35918869980",
+);
+
+/**
+ * Journal rows exactly as the nightly rollup wrote them before #3367: `file`
+ * is vitest's absolute runner path. Five real lines of `data/test-history`
+ * (`git show origin/data/test-history:history/test-results.ndjson`): three
+ * from run 35918869980 (no `runAttempt`, the pre-#3447 shape), one failure
+ * from run 36132594277 (no `runAttempt`) and one from run 36168594090
+ * (`runAttempt: "1"`). The parser must keep reading every generation.
+ */
+const oldShapeJournal = path.join(
+	repoRoot,
+	"tests/fixtures/test-history/journal-schema-absolute-path/test-results.ndjson",
 );
 
 afterEach(() => {
@@ -252,15 +266,15 @@ describe("test-history-rollup real entry point", () => {
 		expect(new Set(rows.map((row) => row.runId))).toEqual(
 			new Set(["35918869980"]),
 		);
-		// Real vitest names a file by its absolute runner path, and every entry
-		// in that run passed. `durationMs` comes from endTime - startTime,
+		// Real vitest names a file by its absolute runner path; the journal keys
+		// it repo-relative (#3367). Every entry in that run passed. `durationMs` comes from endTime - startTime,
 		// because real per-file entries carry no `duration` field.
 		expect(
 			rows.find((row) =>
 				String(row.file).endsWith("tests/real-harness/child-exit.test.ts"),
 			),
 		).toMatchObject({
-			file: "/home/runner/work/pi-lens/pi-lens/tests/real-harness/child-exit.test.ts",
+			file: "tests/real-harness/child-exit.test.ts",
 			outcome: "passed",
 			lane: "linux",
 			recordedAt: "2026-09-23T21:10:42.273Z",
@@ -419,12 +433,183 @@ describe("vitest JsonReporter contract the CI producer relies on", () => {
 			{
 				headSha: validHead,
 				runId: "7",
-				file: "/home/runner/work/pi-lens/pi-lens/tests/probe.test.ts",
+				file: "tests/probe.test.ts",
 				outcome: "passed",
 				durationMs: 7,
 				lane: "linux",
 				recordedAt: "2026-09-23T00:00:00.000Z",
 			},
+		]);
+	});
+});
+
+/**
+ * #3367. The journal key's `file` was vitest's absolute runner path, so the
+ * same logical test under another root (a local worktree, a Windows lane, a
+ * moved runner workspace) keyed as a second test and split its history. The
+ * identity is one repo-relative posix path, derived at both entrances of the
+ * rollup (a new artifact, and a row already on the data branch).
+ *
+ * Writers by axis: the only writer of journal rows is the nightly rollup
+ * (`tool-smoke.yml`), fed by `ci.yml`'s per-shard artifacts (linux today); a
+ * future second OS lane is a second producer under another root. Readers: the
+ * rollup itself, `gen-test-shard-weights`, and the lane-3 selector.
+ */
+describe("journal identity is the repo-relative path (#3367)", () => {
+	it("derives one posix repo-relative id from every runner path spelling", () => {
+		expect(
+			normalizeTestFile("/home/runner/work/pi-lens/pi-lens/tests/a/b.test.ts"),
+		).toBe("tests/a/b.test.ts");
+		expect(normalizeTestFile("C:\\work\\pi-lens\\tests\\a\\b.test.ts")).toBe(
+			"tests/a/b.test.ts",
+		);
+		// A checkout whose own root holds a `tests` directory: the repo-relative
+		// path starts at the LAST `/tests/`, because test files never nest one.
+		expect(normalizeTestFile("/srv/tests/pi-lens/tests/a/b.test.ts")).toBe(
+			"tests/a/b.test.ts",
+		);
+		// Already relative (a local run, the unit fixtures): untouched.
+		expect(normalizeTestFile("tests/a/b.test.ts")).toBe("tests/a/b.test.ts");
+		expect(normalizeTestFile("./tests/a/b.test.ts")).toBe("tests/a/b.test.ts");
+		// No `tests/` anchor: kept verbatim (posix), never dropped from the journal.
+		expect(normalizeTestFile("/elsewhere/not-a-test.ts")).toBe(
+			"/elsewhere/not-a-test.ts",
+		);
+	});
+
+	it("collapses one test observed under two roots into one journal row", () => {
+		// Recurrence: lane 3 ranks flakes per file; a second lane with another
+		// root would have split every history into two files.
+		const root = tempRoot();
+		const observe = (name: string, testPath: string) => {
+			const dir = path.join(root, name);
+			fs.mkdirSync(dir);
+			writeMetadata(dir, {
+				headSha: validHead,
+				runId: 55,
+				runAttempt: 1,
+				lane: "linux",
+				recordedAt: "2026-09-26T00:00:00.000Z",
+			});
+			fs.writeFileSync(
+				path.join(dir, "vitest.json"),
+				JSON.stringify({
+					testResults: [{ name: testPath, status: "passed", duration: 4 }],
+				}),
+			);
+			return dir;
+		};
+		const runner = observe(
+			"runner",
+			"/home/runner/work/pi-lens/pi-lens/tests/x.test.ts",
+		);
+		const other = observe("other", "C:\\actions\\pi-lens\\tests\\x.test.ts");
+		const history = path.join(root, "history.ndjson");
+		const output = rollupTestHistory({
+			artifactPaths: [runner, other],
+			historyPath: history,
+			summaryPath: path.join(root, "summary.json"),
+			now: Date.parse("2026-09-27T00:00:00.000Z"),
+		});
+		expect(output.rowCount).toBe(1);
+		expect(
+			fs
+				.readFileSync(history, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line).file),
+		).toEqual(["tests/x.test.ts"]);
+	});
+
+	it("migrates the old absolute-path journal on read without duplicate rows, and is idempotent on the real artifact", () => {
+		const root = tempRoot();
+		const history = path.join(root, "history.ndjson");
+		fs.copyFileSync(oldShapeJournal, history);
+		const artifacts = path.join(root, "artifacts", "3801234567");
+		fs.mkdirSync(artifacts, { recursive: true });
+		for (const name of fs.readdirSync(realArtifact))
+			fs.copyFileSync(
+				path.join(realArtifact, name),
+				path.join(artifacts, name),
+			);
+		const summary = path.join(root, "summary.json");
+		const args = [
+			"--artifact-dir",
+			path.join(root, "artifacts"),
+			"--history",
+			history,
+			"--summary",
+			summary,
+			"--now",
+			"2026-09-24T00:00:00.000Z",
+		];
+		expect(cli(args).exitCode).toBe(0);
+		const first = fs.readFileSync(history, "utf8");
+		const rows = first
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		// The artifact re-observes the three run-35918869980 rows the old journal
+		// already holds under their absolute paths, so they must merge: 5 old
+		// rows + 3 re-observed = 5 rows, not 8.
+		expect(rows).toHaveLength(5);
+		expect(rows.map((row) => row.file).sort()).toEqual([
+			"tests/clients/instance-registry-race.test.ts",
+			"tests/config/test-history-workflow.test.ts",
+			"tests/real-harness/child-exit.test.ts",
+			"tests/scripts/ci-verdict.test.ts",
+			"tests/scripts/test-history-rollup.test.ts",
+		]);
+		// The rest of each old row survives the migration unchanged.
+		expect(
+			rows.find((row) => row.file === "tests/scripts/ci-verdict.test.ts"),
+		).toMatchObject({
+			headSha: "ddb07b23e74e8522dd155604538d1dc32da6d3d8",
+			runId: "36168594090",
+			runAttempt: "1",
+			outcome: "failed",
+		});
+		// A second night over the same artifact and the migrated journal: no
+		// byte of the journal moves.
+		expect(cli(args).exitCode).toBe(0);
+		expect(fs.readFileSync(history, "utf8")).toBe(first);
+	});
+
+	it("derives flake candidates across an old absolute row and a new relative row", () => {
+		// Recurrence: a failure stored under the absolute path and its passing
+		// re-run stored under the relative one are one test; the flake list must
+		// see both observations on the head.
+		const root = tempRoot();
+		const history = path.join(root, "history.ndjson");
+		fs.writeFileSync(
+			history,
+			`${JSON.stringify({ headSha: validHead, runId: "9", file: "/home/runner/work/pi-lens/pi-lens/tests/race.test.ts", outcome: "failed", durationMs: 3, lane: "linux", runAttempt: "1", recordedAt: "2026-09-25T00:00:00.000Z" })}\n`,
+		);
+		const dir = path.join(root, "retry");
+		fs.mkdirSync(dir);
+		writeMetadata(dir, {
+			headSha: validHead,
+			runId: 9,
+			runAttempt: 2,
+			lane: "linux",
+			recordedAt: "2026-09-25T01:00:00.000Z",
+		});
+		fs.writeFileSync(
+			path.join(dir, "vitest.json"),
+			JSON.stringify({
+				testResults: [
+					{ name: "tests/race.test.ts", status: "passed", duration: 3 },
+				],
+			}),
+		);
+		const output = rollupTestHistory({
+			artifactPaths: [dir],
+			historyPath: history,
+			summaryPath: path.join(root, "summary.json"),
+			now: Date.parse("2026-09-26T00:00:00.000Z"),
+		});
+		expect(output.flakeCandidates).toEqual([
+			{ file: "tests/race.test.ts", headSha: validHead },
 		]);
 	});
 });
