@@ -38,6 +38,55 @@ describe("RuntimeCoordinator", () => {
 		).toBeUndefined();
 	});
 
+	/** #3613: one code-quality record, named by the session that recorded it. */
+	const quality = (rule: string) => ({
+		id: `cq:${rule}`,
+		filePath: path.resolve("src/quality.ts"),
+		displayPath: "src/quality.ts",
+		line: 1,
+		severity: "warning" as const,
+		tool: "ast-grep",
+		rule,
+		message: rule,
+		category: "maintainability" as const,
+		origin: "dispatch" as const,
+	});
+	const rules = (records: { rule?: string }[]) => records.map((r) => r.rule);
+
+	it("resetForSession drops the outgoing session's turn warnings and keeps a concurrent session's (#3613)", () => {
+		// The recurrences: a reset that clears every partition drops a live
+		// subagent's warnings at the primary's /new, and one that clears none
+		// carries the ended session's warnings into the new session's turn.
+		const runtime = new RuntimeCoordinator();
+		runtime.recordCodeQualityWarnings([quality("own")]);
+		runtime.recordCodeQualityWarnings([quality("sub")], "subagent-session");
+
+		runtime.resetForSession();
+
+		expect({
+			own: rules(runtime.peekCodeQualityWarnings()),
+			sub: rules(runtime.peekCodeQualityWarnings("subagent-session")),
+		}).toEqual({ own: [], sub: ["sub"] });
+	});
+
+	it("forgetTurnSession never drops this coordinator's own turn warnings (#3613)", () => {
+		// The recurrence: a secondary shutdown with no session id of its own,
+		// or the coordinator's id, cleared the primary's partition.
+		const runtime = new RuntimeCoordinator();
+		runtime.recordCodeQualityWarnings([quality("own")]);
+		runtime.recordCodeQualityWarnings([quality("sub")], "subagent-session");
+
+		runtime.forgetTurnSession(undefined);
+		runtime.forgetTurnSession(runtime.telemetrySessionId);
+		const kept = rules(runtime.peekCodeQualityWarnings());
+		runtime.forgetTurnSession("subagent-session");
+
+		expect({
+			kept,
+			sub: rules(runtime.peekCodeQualityWarnings("subagent-session")),
+		}).toEqual({ kept: ["own"], sub: [] });
+	});
+
 	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/sticky.ts");

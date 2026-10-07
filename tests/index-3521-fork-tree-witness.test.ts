@@ -101,6 +101,8 @@ vi.mock("../clients/lsp/index.js", async (importOriginal) => {
  */
 const pipelineDouble = vi.hoisted(() => ({
 	result: undefined as undefined | ((filePath: string) => unknown),
+	/** The files the doubled pipeline analysed, in order. */
+	analysed: [] as string[],
 }));
 vi.mock("../clients/pipeline.js", async (importOriginal) => {
 	const original =
@@ -109,7 +111,8 @@ vi.mock("../clients/pipeline.js", async (importOriginal) => {
 		...original,
 		runPipeline: (async (ctx, deps) =>
 			pipelineDouble.result
-				? pipelineDouble.result(ctx.filePath)
+				? (pipelineDouble.analysed.push(ctx.filePath),
+					pipelineDouble.result(ctx.filePath))
 				: original.runPipeline(ctx, deps)) as typeof original.runPipeline,
 	};
 });
@@ -3012,6 +3015,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 
 	afterEach(() => {
 		pipelineDouble.result = undefined;
+		pipelineDouble.analysed = [];
 		vi.restoreAllMocks();
 	});
 
@@ -3050,10 +3054,11 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 	}
 
 	/** One edit through the session's real tool_call and tool_result hooks. */
+	let edits = 0;
 	async function edit(runtime: AgentSessionRuntime, file: string) {
 		const c = conversation(runtime);
 		c.user(`edit ${path.basename(file)}`);
-		await c.write(`call_${path.basename(file)}`, file, "const a = 1;\n");
+		await c.write(`call_edit_${++edits}`, file, "const a = 1;\n");
 	}
 
 	const sessionIdOf = (runtime: AgentSessionRuntime) =>
@@ -3110,8 +3115,8 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		const coordinator = seen[0]!;
 		const subagent = await startSubagent();
 		await startTurn(primary);
-		await edit(primary, path.join(cwd, "a.ts"));
 		await startTurn(subagent);
+		await edit(primary, path.join(cwd, "a.ts"));
 
 		await endTurn(subagent);
 
@@ -3119,6 +3124,51 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 			subagentSees: (await contextText(subagent)).includes(PRIMARY_RULE),
 			primaryKeeps: coordinator.peekCodeQualityWarnings().map((w) => w.rule),
 		}).toEqual({ subagentSees: false, primaryKeeps: [PRIMARY_RULE] });
+	});
+
+	it("starts a subagent's turn without the warnings its previous turn left undelivered", async () => {
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		await startTurn(subagent);
+		await edit(subagent, path.join(cwd, "sub.ts"));
+
+		// The turn ended with no turn_end (an aborted turn); the next one starts.
+		await startTurn(subagent);
+		await endTurn(subagent);
+
+		expect((await contextText(subagent)).includes(SUBAGENT_RULE)).toBe(false);
+	});
+
+	it("keeps a subagent's warnings across the primary's /new", async () => {
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		await startTurn(primary);
+		await startTurn(subagent);
+		await edit(subagent, path.join(cwd, "sub.ts"));
+
+		await primary.newSession();
+		await endTurn(subagent);
+
+		expect((await contextText(subagent)).includes(SUBAGENT_RULE)).toBe(true);
+	});
+
+	it("re-analyses a subagent's unchanged file on its next turn", async () => {
+		// The recurrence it guards: gating the turn_start's dedupe clear to
+		// the primary with the rest of the turn state. The dedupe keys on the
+		// primary's turn index, which a subagent's turn no longer moves.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const sub = path.join(cwd, "sub.ts");
+		await startTurn(primary);
+		await startTurn(subagent);
+		await edit(subagent, sub);
+		await endTurn(subagent);
+
+		await startTurn(subagent);
+		await edit(subagent, sub);
+
+		expect(pipelineDouble.analysed).toEqual([sub, sub]);
 	});
 
 	it("advances a subagent's own turn id and leaves the primary's", async () => {
