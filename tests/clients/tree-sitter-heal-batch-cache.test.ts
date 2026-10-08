@@ -50,6 +50,7 @@ const defs = (client: TreeSitterClient) =>
 		compileQueryBatch: (
 			queryDefs: TreeSitterQuery[],
 			languageId: string,
+			retain?: boolean,
 		) => Promise<{
 			entries: Array<{ queryDef: TreeSitterQuery }>;
 			key: string;
@@ -58,6 +59,8 @@ const defs = (client: TreeSitterClient) =>
 		loadLanguage: (languageId: string) => Promise<unknown>;
 		queryBatchCache: Map<string, unknown>;
 		queryBatchInputs: { size: number };
+		queryBatchBuilds: Map<string, Promise<unknown>>;
+		getQueryCacheKey: (key: string, languageId: string) => string;
 		cacheQueryBatch: (
 			key: string,
 			value: unknown,
@@ -308,15 +311,111 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 		expect(deleteQuery).toHaveBeenCalledTimes(1);
 	});
 
-	it("retires the replaced batch", async () => {
+	it("retains a cache hit before a heal can retire it (#4207 F6)", async () => {
 		const client = new TreeSitterClient();
 		expect(await client.init()).toBe(true);
 		const state = defs(client);
-		const first = await state.compileQueryBatch([healthyRule], "python");
-		expect(first).not.toBeNull();
-		const deleteQuery = vi.spyOn(first!.query, "delete");
-		state.cacheQueryBatch(first!.key, first, [first!.key]);
+		const filePath = "tree-sitter-heal-cache-hit.py";
+		const content = "def f():\n    return 1\n";
+		const first = await client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			content,
+		);
+		const batch = [...state.queryBatchCache.values()][0] as {
+			key: string;
+			query: { delete: () => void };
+		};
+		const deleteQuery = vi.spyOn(batch.query, "delete");
+		const batchInput = wasmQueryInput(batch.key);
+		state.trappedInputs.set(state.wasmInputKey(batchInput), {
+			traps: 1,
+			by: undefined,
+			source: batchInput.source,
+		});
+		// The heal is queued after the cache-hit lookup but before its caller's
+		// continuation. This prevents #4207 F6: disposing the native query under
+		// the scan because retainQueryBatch ran too late.
+		queueMicrotask(() => state.clearWasmInput(batchInput));
+		const second = await client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			content,
+		);
+		expect(first.map(({ queryDef }) => queryDef.id)).toEqual(["healthy"]);
+		expect(second.map(({ queryDef }) => queryDef.id)).toEqual(["healthy"]);
 		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not cache a batch after its build heals an input (#4207 F7)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const probeKey = state.getQueryCacheKey(
+			`raw:${rule.id}:${rule.query}`,
+			"python",
+		);
+		const probeInput = wasmQueryInput(probeKey);
+		state.trappedInputs.set(state.wasmInputKey(probeInput), {
+			traps: 1,
+			by: undefined,
+			source: probeInput.source,
+		});
+		const { Query } = await loadWebTreeSitter();
+		const realPatternCount = Query.prototype.patternCount;
+		let queuedHeal = false;
+		vi.spyOn(Query.prototype, "patternCount").mockImplementation(function (
+			this: InstanceType<typeof Query>,
+		) {
+			if (!queuedHeal) {
+				queuedHeal = true;
+				// This continuation lands after the synchronous build and before
+				// its cache-publication continuation (#4207 F7).
+				queueMicrotask(() => {
+					state.trappedInputs.set(state.wasmInputKey(probeInput), {
+						traps: 1,
+						by: undefined,
+						source: probeInput.source,
+					});
+					state.clearWasmInput(probeInput);
+				});
+			}
+			return realPatternCount.call(this);
+		});
+		const built = await state.compileQueryBatch([rule, healthyRule], "python");
+		expect(built?.entries.map(({ queryDef }) => queryDef.id)).toEqual([
+			"r1",
+			"healthy",
+		]);
+		// clearWasmInput ran during the synchronous build, before its final await;
+		// the healed build must not become the process-wide cached answer.
+		expect(state.queryBatchCache.size).toBe(0);
+	});
+
+	it("coalesces concurrent cold builds at the batch seam (#4207 F8)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const realLoad = state.loadLanguage.bind(client);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.spyOn(state, "loadLanguage").mockImplementation(async (languageId) => {
+			await held;
+			return realLoad(languageId);
+		});
+		const first = state.compileQueryBatch([healthyRule], "python");
+		const second = state.compileQueryBatch([healthyRule], "python");
+		await Promise.resolve();
+		expect(state.queryBatchBuilds.size).toBe(1);
+		release();
+		const [firstBatch, secondBatch] = await Promise.all([first, second]);
+		expect(firstBatch).toBe(secondBatch);
 	});
 
 	it("retires the evicted batch", async () => {

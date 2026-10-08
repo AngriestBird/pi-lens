@@ -134,15 +134,16 @@ TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers 1`, on `cf1b548e5`.
 | `RaceBatchHeal` | #3834 fixed: a healed batch key replaces stale cached output | pass | |
 
 `MergedBatch` passes only under an assumption the code does not make.
-`compileQueryBatch` has no in-flight dedupe: its cache check and its
-`cacheQueryBatch` are two awaits apart, and in review three concurrent cold
-`runQueriesOnFile` calls on one rule set ran three combined compiles. **Master
-does not satisfy `NoCachedTransient` unrestricted.** `RaceBatchHeal` is the
-same spec with two builds in flight, and `RaceRawHeal` adds a concurrent raw
-compile; both violated it (finding 1) before #3834. The fix invalidates cached
-batches when the compile that healed a trapped input succeeds, so both race
-configs now pass. Likewise, `MergedBatchRaw` passes only because it allows one
-one-off, below the two the race needs.
+`compileQueryBatch` coalesces same-key in-flight builds: its cache check and
+`cacheQueryBatch` are two awaits apart, but `queryBatchBuilds` admits only one
+build for a key. **Master does not satisfy `NoCachedTransient` unrestricted.**
+`RaceBatchHeal` keeps `MaxPend = 2` to prove that the explicit coalescing guard,
+not the capacity constant, prevents the two-build race; deleting that guard or
+running the config on the master model violates the invariant. `RaceRawHeal`
+adds a concurrent raw compile. The fix also rejects a batch publication when a
+heal epoch moved during its build, so both race configs pass. Likewise,
+`MergedBatchRaw` passes only because it allows one one-off, below the two the
+race needs.
 
 The number in brackets is the trace length in states. Each pre-fix config sets
 its switches to that code's behaviour, and each mutant flips one switch from

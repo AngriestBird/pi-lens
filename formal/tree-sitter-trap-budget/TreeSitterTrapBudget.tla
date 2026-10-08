@@ -329,13 +329,16 @@ RawEvict(r) ==
     /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, attempted,
                    lost, poison, extDone, pendRaw, cache, pendB>>
 
-(* compileQueryBatch: cache miss and the batch-key check (a charged batch   *)
-(* key builds a null without trapping, and that null is cached).            *)
+(* compileQueryBatch: cache miss and the batch-key check. The production     *)
+(* coalescer admits one same-key build at a time; MaxPend remains 2 in      *)
+(* RaceBatchHeal so deleting this explicit admission guard restores the     *)
+(* pre-coalescing race.                                                      *)
 BatchCheck(n) ==
     /\ EnableBatch
     /\ ~Aborted
     /\ cache[n].st = "none"
     /\ pendB[n] < MaxPend
+    /\ pendB[n] = 0
     /\ IF KeyBatch /\ ChargedKey(BKey(n))
        THEN /\ cache' = [cache EXCEPT ![n] = NullCache]
             /\ UNCHANGED <<pendB, attempted>>

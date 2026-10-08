@@ -567,6 +567,8 @@ export class TreeSitterClient {
 	);
 	/** Concurrent callers share one native batch build per cache key. */
 	private queryBatchBuilds = new Map<string, Promise<QueryBatch | null>>();
+	/** Advances whenever a successful query input heal can invalidate a build. */
+	private queryBatchHealEpoch = 0;
 	/** Raw and batch cache keys represented by each bounded entry (#3834). */
 	private queryBatchInputs = new Map<string, Set<string>>();
 	private queryCacheCap(): number {
@@ -806,13 +808,17 @@ export class TreeSitterClient {
 	 * Only a success by the entry's first trapper decays it (#3678 F2, F4): a
 	 * healthy consumer says nothing about another consumer's trap.
 	 */
-	clearWasmInput(input: WasmInput | undefined): void {
+	clearWasmInput(
+		input: WasmInput | undefined,
+		internalBatchHeal = false,
+	): void {
 		if (!input || this.trappedInputs.size === 0) return;
 		const key = this.wasmInputKey(input);
 		const entry = this.trappedInputs.get(key);
 		const source = entry?.source;
 		if (entry?.by === input.caller) {
 			this.trappedInputs.delete(key);
+			if (!internalBatchHeal) this.queryBatchHealEpoch++;
 			// A batch that skipped this input (or cached null after it was charged)
 			// is no longer equivalent to a clean rebuild. Invalidate it before the
 			// healed entry becomes observable (#3834).
@@ -2194,7 +2200,7 @@ export class TreeSitterClient {
 		}
 		const maxResults = options.maxResults ?? 50;
 
-		const batch = await this.compileQueryBatch(queryDefs, languageId);
+		const batch = await this.compileQueryBatch(queryDefs, languageId, true);
 		if (!batch) {
 			// Fallback: one walk per rule, preserving rule order.
 			const results: Array<{
@@ -2213,8 +2219,6 @@ export class TreeSitterClient {
 			}
 			return results;
 		}
-		this.retainQueryBatch(batch);
-
 		const perQuery = new Map<number, StructuralMatch[]>();
 		await this.parseFileAndUse(
 			filePath,
@@ -2292,6 +2296,7 @@ export class TreeSitterClient {
 	private async compileQueryBatch(
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
+		retain = false,
 	): Promise<QueryBatch | null> {
 		const identity = crypto
 			.createHash("sha256")
@@ -2302,15 +2307,22 @@ export class TreeSitterClient {
 		if (cached !== undefined) {
 			this.queryBatchCache.delete(cacheKey);
 			this.queryBatchCache.set(cacheKey, cached);
+			if (retain && cached) this.retainQueryBatch(cached);
 			return cached;
 		}
 		const inFlight = this.queryBatchBuilds.get(cacheKey);
-		if (inFlight) return inFlight;
+		if (inFlight) {
+			const batch = await inFlight;
+			if (retain && batch) this.retainQueryBatch(batch);
+			return batch;
+		}
 
 		const build = this.compileQueryBatchOnce(queryDefs, languageId);
 		this.queryBatchBuilds.set(cacheKey, build);
 		try {
-			return await build;
+			const batch = await build;
+			if (retain && batch) this.retainQueryBatch(batch);
+			return batch;
 		} finally {
 			if (this.queryBatchBuilds.get(cacheKey) === build) {
 				this.queryBatchBuilds.delete(cacheKey);
@@ -2348,6 +2360,7 @@ export class TreeSitterClient {
 			this.queryBatchCache.set(cacheKey, cached);
 			return cached;
 		}
+		const healEpoch = this.queryBatchHealEpoch;
 
 		// A loadLanguage() failure is transient (offline lazy grammar fetch,
 		// transient mid-scan load error) — do NOT cache null for it, or every
@@ -2404,7 +2417,7 @@ export class TreeSitterClient {
 					const probe = new Query(language as any, queryDef.query);
 					patternCount = probe.patternCount();
 					probe.delete?.();
-					this.clearWasmInput(probeInput);
+					this.clearWasmInput(probeInput, true);
 				} catch (err) {
 					if (this.reportWasmAbort(err, probeInput)) return null;
 					if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
@@ -2435,7 +2448,7 @@ export class TreeSitterClient {
 					);
 					return null;
 				}
-				this.clearWasmInput(batchInput);
+				this.clearWasmInput(batchInput, true);
 				return {
 					query,
 					entries,
@@ -2454,7 +2467,9 @@ export class TreeSitterClient {
 		};
 
 		const batch = await build();
-		if (!trapped) this.cacheQueryBatch(cacheKey, batch, inputKeys);
+		if (!trapped && this.queryBatchHealEpoch === healEpoch) {
+			this.cacheQueryBatch(cacheKey, batch, inputKeys);
+		}
 		return batch;
 	}
 
