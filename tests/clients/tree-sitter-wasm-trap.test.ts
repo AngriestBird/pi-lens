@@ -264,6 +264,7 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 
 		client.reportWasmAbort(trap(), input);
 		client.reportWasmAbort(trap(), input);
+		client.reportWasmAbort(trap(), input);
 
 		expect(kindCount("grammar-blocked")).toBeUndefined();
 		expect(onAbort).not.toHaveBeenCalled();
