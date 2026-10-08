@@ -326,7 +326,7 @@ export class AstGrepClient {
 		ruleYaml: string,
 		paths: string[],
 		apply: boolean,
-		options?: { lineage?: LineageHandle },
+		options?: { lineage?: LineageHandle | undefined },
 	): Promise<{
 		matches: AstGrepMatch[];
 		totalMatches: number;

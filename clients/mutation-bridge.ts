@@ -598,10 +598,11 @@ export function recordMutationThroughSeam(
 ): boolean {
 	const outcome = recordMutationOutcome(entry, deps);
 	if (outcome.reason === "out-of-scope") {
-		const consumer = (entry as { consumer?: unknown } | null)?.consumer;
+		// The entry's producer name, read the way the validator above reads it.
+		const producer = (entry as Record<string, unknown> | null)?.["consumer"];
 		recordDegradationOnce({
 			kind: "mutation-bridge-out-of-scope",
-			subject: `${typeof consumer === "string" ? consumer : "unknown"}:out-of-scope`,
+			subject: `${typeof producer === "string" ? producer : "unknown"}:out-of-scope`,
 			reason: `${outcome.detail ?? "<unknown path>"}: the producer's path is outside the project or unresolvable; bridge bookkeeping was not admitted`,
 		});
 	}
