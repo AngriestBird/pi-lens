@@ -33,6 +33,7 @@ import {
 	isPathIgnoredByProject,
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
+import { judgeConfirmedDelete } from "./confirmed-delete.js";
 import { deliveredLineEvidence, type ReadGuard } from "./read-guard.js";
 import {
 	expectationFromToolInput,
@@ -1779,25 +1780,26 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// as a signal. Each match is routed to already-active LSP clients as a
 		// type-3 watched-files event through the same #271 coalescing queue a
 		// burst of deletes still flushes as one notification per server.
+		const readGuard = deps.readGuard;
 		if (
 			event.isError !== true &&
+			readGuard !== undefined &&
 			!getFlag("no-lsp") &&
 			!getFlag("no-read-guard")
 		) {
 			for (const dp of extractDeletedPathsFromCommand(command, workspaceRoot)) {
-				if (isExternalOrVendorFile(dp, workspaceRoot)) continue;
-				if (isPathIgnoredByProject(dp, workspaceRoot, false)) continue;
-				if (!deps.readGuard || !deps.readGuard.hasKnownPath(dp)) continue;
-				// #1668 review F4: this is the ONLY gate standing between a merely
-				// NAMED path and an actual confirmed delete — extractDeletedPathsFromCommand
-				// only proposes candidates from parsing the command text, so it can't
-				// tell `git rm --cached f` (index-only, file still on disk) from a
-				// real delete, can't see a short-circuited `rm f && false` that never
-				// ran, and can't resolve a relative path run from a `cd`-ed subdirectory
-				// against the wrong cwd. Every one of those is caught here, and only
-				// here — do not remove or reorder this check relative to the loop body.
-				if (nodeFs.existsSync(dp)) continue; // still there — not a real delete
-				deps.readGuard.forgetPath(dp);
+				// The four gates (and the #1668 F4 confirm) are shared with the v2
+				// bridge's delete facet; every verdict but `confirmed` is skipped.
+				const verdict = judgeConfirmedDelete(dp, {
+					isExternalOrVendorFile: (p) =>
+						isExternalOrVendorFile(p, workspaceRoot),
+					isPathIgnoredByProject: (p) =>
+						isPathIgnoredByProject(p, workspaceRoot, false),
+					hasKnownPath: (p) => readGuard.hasKnownPath(p),
+					existsSync: (p) => nodeFs.existsSync(p),
+				});
+				if (verdict !== "confirmed") continue;
+				readGuard.forgetPath(dp);
 				void notifyExternalFileChange(dp, 3).catch((err) => {
 					dbg(`tool_result: external-delete notify failed for ${dp}: ${err}`);
 				});
