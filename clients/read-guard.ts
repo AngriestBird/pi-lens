@@ -835,6 +835,14 @@ export class ReadGuard {
 			 * to whatever last observed the disk (#3519, #3523, #3524).
 			 */
 			stampFileTime?: boolean;
+			/**
+			 * False when the caller deliberately supplies or omits line evidence,
+			 * so the guard must not fall back to a disk hash capture. #3654 D5: a
+			 * coverage-only bridge read credits its range with no hashes and
+			 * performs zero disk reads. Default true preserves every existing
+			 * caller (native reads, search reads, the v1 read shim).
+			 */
+			captureLineHashes?: boolean;
 		},
 	): void {
 		const filePath = this.key(record.filePath);
@@ -860,11 +868,13 @@ export class ReadGuard {
 			filePath,
 			lineHashes:
 				record.lineHashes ??
-				captureLineHashes(
-					filePath,
-					record.effectiveOffset,
-					record.effectiveLimit,
-				),
+				(opts?.captureLineHashes === false
+					? undefined
+					: captureLineHashes(
+							filePath,
+							record.effectiveOffset,
+							record.effectiveLimit,
+						)),
 		};
 		const arr = this.reads.get(storedRecord.filePath) ?? [];
 		this.consumedReadFiles.delete(storedRecord.filePath);

@@ -42,6 +42,8 @@ export interface DeadCodeScanEvent {
 	unlistedDeps: number;
 	durationMs?: number;
 	reason?: string;
+	/** #4154: a failed scan left the good row on disk in place instead of replacing it. */
+	cacheKept?: boolean;
 }
 
 /**

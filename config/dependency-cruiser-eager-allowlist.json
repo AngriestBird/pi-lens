@@ -35,6 +35,7 @@
   "./clients/installer/index.js",
   "./clients/instance-reaper.js",
   "./clients/instance-registry.js",
+  "./clients/io-bridge.js",
   "./clients/language-profile.js",
   "./clients/latency-logger.js",
   "./clients/lens-config.js",
