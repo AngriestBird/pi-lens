@@ -34,8 +34,10 @@ const runGit = (args, options) => gitExecFileSync(args, options);
 const ISSUE_REFERENCE =
 	/\s*(?:\((?:refs?|closes?|fixes?|fixed)?\s*#\d+\)|(?:refs?|closes?|fixes?|fixed)\s+#\d+|#\d+)/gi;
 
-function userLeadError(file, leadLength) {
-	return `Invalid changelog entry .changelog/${file}: user-facing fragments must open with a bold lead of at most 100 characters (refs excluded from the count); lead length ${leadLength}`;
+function userLeadError(file, { lead, length }) {
+	if (!lead)
+		return `Invalid changelog entry .changelog/${file}: user-facing fragments must open with a bold lead; plain lead length ${length}`;
+	return `Invalid changelog entry .changelog/${file}: bold lead must be at most 100 characters (refs excluded from the count); bold lead length ${length}`;
 }
 
 function validateAddedUserLeads({ fragments, cwd }) {
@@ -44,13 +46,16 @@ function validateAddedUserLeads({ fragments, cwd }) {
 		const text = fs.readFileSync(join(cwd, fragment), "utf8");
 		const entry = parseEntry(text, file);
 		if (entry.audience !== "user") continue;
-		const firstLine = entry.entry.split(/\r?\n/, 1)[0];
-		const lead = firstLine.match(/^[-*]\s+\*\*(.*?)\*\*/)?.[1];
+		const firstLine = entry.entry
+			.split(/\r?\n/)
+			.find((line) => /^[-*]\s+\S/.test(line));
+		const lead = firstLine?.match(/^[-*]\s+\*\*(.*?)\*\*/)?.[1];
 		const leadLength = lead
 			? lead.replace(ISSUE_REFERENCE, "").length
-			: firstLine.replace(/^[-*]\s+/, "").replace(ISSUE_REFERENCE, "").length;
+			: (firstLine ?? "").replace(/^[-*]\s+/, "").replace(ISSUE_REFERENCE, "")
+					.length;
 		if (!lead || leadLength > 100)
-			throw new Error(userLeadError(file, leadLength));
+			throw new Error(userLeadError(file, { lead, length: leadLength }));
 	}
 }
 
