@@ -74,6 +74,40 @@ afterAll(() => {
 });
 
 describe("tree-sitter query loader metadata parsing", () => {
+	it("loads user rules between project and bundled rules and fingerprints the user root", async () => {
+		const project = makeTempRulesRoot();
+		const machine = makeTempRulesRoot();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		try {
+			writeRule(
+				machine,
+				"rules/tree-sitter-queries/typescript/user-rule.yml",
+				`id: user-rule\nname: user\nquery: |\n  (identifier) @X\n`,
+			);
+			writeRule(
+				project,
+				"rules/tree-sitter-queries/typescript/project-rule.yml",
+				`id: user-rule\nname: project\nquery: |\n  (string) @X\n`,
+			);
+			const loader = new TreeSitterQueryLoader();
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("user-rule")?.name).toBe("project");
+			expect(
+				loader.getAllQueries().filter((query) => query.id === "user-rule"),
+			).toHaveLength(1);
+			expect(ruleFilesForLanguage("typescript", project)).toContain(
+				path.join(
+					machine,
+					"rules/tree-sitter-queries/typescript/user-rule.yml",
+				),
+			);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
 	it("parses cwe/owasp/confidence in inline arrays", async () => {
 		const root = makeTempRulesRoot();
 		writeRule(

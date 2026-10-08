@@ -68,7 +68,7 @@ export class AstGrepRuleManager {
 	private ruleDescriptions: Map<string, RuleDescription> | null = null;
 
 	constructor(
-		private ruleDir: string,
+		private ruleDir: string | string[],
 		private log: (msg: string) => void,
 	) {}
 
@@ -76,9 +76,22 @@ export class AstGrepRuleManager {
 		if (this.ruleDescriptions !== null) return this.ruleDescriptions;
 
 		const descriptions = new Map<string, RuleDescription>();
-		const possiblePaths = candidateAstGrepRulesPaths(this.ruleDir);
+		const roots = Array.isArray(this.ruleDir) ? this.ruleDir : [this.ruleDir];
+		const possiblePaths = roots.flatMap(candidateAstGrepRulesPaths);
+		const rulesPaths: string[] = [];
+		if (Array.isArray(this.ruleDir)) {
+			for (const candidate of possiblePaths) {
+				if (fs.existsSync(candidate)) rulesPaths.push(candidate);
+			}
+		} else {
+			for (const candidate of possiblePaths) {
+				if (!fs.existsSync(candidate)) continue;
+				rulesPaths.push(candidate);
+				break;
+			}
+		}
 
-		const rulesPath = possiblePaths.find((p) => fs.existsSync(p));
+		const rulesPath = rulesPaths[0];
 
 		if (!rulesPath) {
 			this.log(
@@ -89,14 +102,19 @@ export class AstGrepRuleManager {
 		}
 
 		try {
-			const files = fs.readdirSync(rulesPath).filter((f) => f.endsWith(".yml"));
-			this.log(`Loaded ${files.length} rule descriptions from ${rulesPath}`);
-			for (const file of files) {
-				const filePath = path.join(rulesPath, file);
-				const content = fs.readFileSync(filePath, "utf-8");
-				const rule = this.parseRuleYaml(content);
-				if (rule) {
-					descriptions.set(rule.id, rule);
+			for (const resolvedPath of rulesPaths) {
+				const files = fs
+					.readdirSync(resolvedPath)
+					.filter((f) => f.endsWith(".yml"));
+				this.log(
+					`Loaded ${files.length} rule descriptions from ${resolvedPath}`,
+				);
+				for (const file of files) {
+					const filePath = path.join(resolvedPath, file);
+					const content = fs.readFileSync(filePath, "utf-8");
+					const rule = this.parseRuleYaml(content);
+					if (rule && !descriptions.has(rule.id))
+						descriptions.set(rule.id, rule);
 				}
 			}
 		} catch (err: any) {

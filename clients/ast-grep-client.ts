@@ -16,6 +16,7 @@ import {
 	AstGrepRuleManager,
 	checkAstGrepRulesHealth,
 } from "./ast-grep-rule-manager.js";
+import { getUserRuleRoot } from "./custom-rule-locations.js";
 import type {
 	AstGrepDiagnostic,
 	AstGrepMatch,
@@ -281,7 +282,12 @@ export class AstGrepClient {
 				: resolvePackagePath(import.meta.url, "rules"));
 		this.log = verbose ? createSubsystemLogger("ast-grep") : () => {};
 		this.ensureRulesHealthReported();
-		this.ruleManager = new AstGrepRuleManager(this.ruleDir, this.log);
+		this.ruleManager = new AstGrepRuleManager(
+			ruleDir
+				? this.ruleDir
+				: [projectRuleDir, getUserRuleRoot(), this.ruleDir],
+			this.log,
+		);
 		this.runner = new SgRunner(verbose);
 	}
 

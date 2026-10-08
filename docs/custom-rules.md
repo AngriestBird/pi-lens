@@ -1,6 +1,6 @@
 # Custom Rules
 
-pi-lens picks up project-local rules automatically alongside its built-ins.
+pi-lens picks up project-local and user-level rules automatically alongside its built-ins.
 Drop YAML files in the right directory and they are active on the next file dispatch — no config required.
 
 > For the full list of bundled rules per language, see the generated catalogs:
@@ -21,6 +21,16 @@ your-project/
 ```
 
 Project ast-grep rules are fingerprinted by relative path and contents, so in-place edits, renames, additions, and removals take effect within one tool call even when mtimes are preserved. Tree-sitter rules retain their directory-mtime cache.
+
+### User-level rules
+
+Rules shared across projects live under the relocatable machine-data directory:
+`<PI_LENS_HOME>/rules/` (or the platform default pi-lens directory when
+`PI_LENS_HOME` is unset). Use the same `tree-sitter-queries/` and
+`ast-grep-rules/` layout shown above. Precedence is project > user > bundled;
+when rule IDs collide, the higher tier wins and the lower definition is
+shadowed from execution. User-rule changes are included in the relevant
+fingerprints, so edits, additions, and removals take effect without restart.
 
 ---
 

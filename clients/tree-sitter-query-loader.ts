@@ -19,6 +19,7 @@ import {
 } from "./degradation-ledger.js";
 import yaml from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
+import { getUserRuleRoot } from "./custom-rule-locations.js";
 
 /**
  * The bundled `rules/tree-sitter-queries` root — the ONE spelling of this
@@ -131,6 +132,7 @@ export function ruleFilesForLanguage(
 	for (const lang of ruleSourceLanguages(languageId)) {
 		for (const dir of [
 			path.join(resolvedRoot, "rules", "tree-sitter-queries", lang),
+			path.join(getUserRuleRoot(), "tree-sitter-queries", lang),
 			path.join(BUNDLED_QUERIES_ROOT, lang),
 		]) {
 			if (!fs.existsSync(dir)) continue;
@@ -393,6 +395,7 @@ export class TreeSitterQueryLoader {
 		const queryDirs = [
 			...new Set([
 				path.join(resolvedRoot, "rules", "tree-sitter-queries"),
+				path.join(getUserRuleRoot(), "tree-sitter-queries"),
 				resolvePackagePath(import.meta.url, "rules", "tree-sitter-queries"),
 			]),
 		];
@@ -421,7 +424,9 @@ export class TreeSitterQueryLoader {
 					const filePath = path.join(langDir, file);
 					const query = this.parseQueryFile(filePath, languageKey);
 					if (query) {
-						langQueries.push(query);
+						if (!langQueries.some((existing) => existing.id === query.id)) {
+							langQueries.push(query);
+						}
 					}
 				}
 

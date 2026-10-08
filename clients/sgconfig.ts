@@ -6,6 +6,7 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { load as loadYaml } from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
 import { findLocalToolConfig } from "./path-utils.js";
+import { getGlobalPiLensDir } from "./file-utils.js";
 
 // ast-grep's root config marker. The `ast-grep lsp` server is workspace-gated:
 // it only operates in a project that has an `sgconfig.y[a]ml` at (or above) the
@@ -14,7 +15,7 @@ const SGCONFIG_NAMES = ["sgconfig.yml", "sgconfig.yaml"] as const;
 
 export interface AstGrepRuleSource {
 	dir: string;
-	origin: "project" | "bundled";
+	origin: "project" | "user" | "bundled";
 	tier: "primary" | "secondary";
 }
 
@@ -60,7 +61,8 @@ function canonicalDir(dir: string): string {
 
 /**
  * Rule sources in the precedence order shared by raw ast-grep/LSP and NAPI:
- * project primary, project secondary, bundled primary, bundled secondary.
+ * project primary, project secondary, user primary, user secondary, bundled
+ * primary, bundled secondary.
  */
 export function getAstGrepRuleSources(
 	projectRoot = process.cwd(),
@@ -79,6 +81,21 @@ export function getAstGrepRuleSources(
 			{
 				dir: path.join(root, "rules", "ast-grep-rules", "coderabbit", "rules"),
 				origin: "project",
+				tier: "secondary",
+			},
+		);
+	}
+	const userRoot = path.join(getGlobalPiLensDir(), "rules");
+	if (canonicalDir(userRoot) !== canonicalDir(root)) {
+		candidates.push(
+			{
+				dir: path.join(userRoot, "ast-grep-rules", "rules"),
+				origin: "user",
+				tier: "primary",
+			},
+			{
+				dir: path.join(userRoot, "ast-grep-rules", "coderabbit", "rules"),
+				origin: "user",
 				tier: "secondary",
 			},
 		);
@@ -195,7 +212,18 @@ function snapshotRuleSource(source: AstGrepRuleSource): RuleSourceSnapshot {
 		}
 		hash.update(content);
 		hash.update("\0");
-		files.push({ file, relativePath, documents: parseRuleDocuments(content) });
+		const documents = parseRuleDocuments(content);
+		if (
+			source.origin === "user" &&
+			documents.some((document) => !document.id)
+		) {
+			recordDegradationOnce({
+				kind: "ast-grep-rule-invalid",
+				subject: file,
+				reason: "user ast-grep rule has no valid rule id",
+			});
+		}
+		files.push({ file, relativePath, documents });
 	}
 	const snapshot = { ...source, files, digest: hash.digest("hex") };
 	if (source.origin === "bundled") bundledSnapshots.set(cacheKey, snapshot);
