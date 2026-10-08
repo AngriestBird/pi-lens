@@ -11,6 +11,7 @@ import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 // handleToolCall calls getLSPService() directly (not via DI, matching the
 // pattern already used by runtime-session.ts). Stub it so tests never spin up
@@ -100,12 +101,14 @@ describe("handleToolCall", () => {
 			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					getFlag: (name) => name === "no-complexity",
-					event: { toolName: "read", input: { filePath } },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						getFlag: (name) => name === "no-complexity",
+						event: { toolName: "read", input: { filePath } },
+					}),
+				),
 			);
 			expect(runtime.complexityBaselines.has(filePath)).toBe(false);
 			expect(
@@ -125,18 +128,20 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-2726" });
 			runtime.updateGitGuardStatus(true, "existing blocker");
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					getFlag: (name) => name === "lens-guard",
-					event: {
-						toolName: "bash",
-						input: {
-							command: "cat <<EOF\nbody text: git push\nEOF\n",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						getFlag: (name) => name === "lens-guard",
+						event: {
+							toolName: "bash",
+							input: {
+								command: "cat <<EOF\nbody text: git push\nEOF\n",
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 			expect(result).toBeUndefined();
 		} finally {
@@ -151,16 +156,18 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-2726-operator" });
 			runtime.updateGitGuardStatus(true, "existing blocker");
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					getFlag: (name) => name === "lens-guard",
-					event: {
-						toolName: "bash",
-						input: { command: "cat <<EOF; echo git push\nbody\nEOF" },
-					},
-				}),
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						getFlag: (name) => name === "lens-guard",
+						event: {
+							toolName: "bash",
+							input: { command: "cat <<EOF; echo git push\nbody\nEOF" },
+						},
+					}),
+				),
 			);
 			expect(result).toBeUndefined();
 		} finally {
@@ -175,16 +182,18 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-2726-git" });
 			runtime.updateGitGuardStatus(true, "existing blocker");
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					getFlag: (name) => name === "lens-guard",
-					event: {
-						toolName: "bash",
-						input: { command: "cat <<EOF; git push\nbody\nEOF" },
-					},
-				}),
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						getFlag: (name) => name === "lens-guard",
+						event: {
+							toolName: "bash",
+							input: { command: "cat <<EOF; git push\nbody\nEOF" },
+						},
+					}),
+				),
 			);
 			expect(result).toMatchObject({ block: expect.anything() });
 		} finally {
@@ -194,12 +203,14 @@ describe("handleToolCall", () => {
 	it("is a no-op when lensEnabled is false", async () => {
 		const runtime = new RuntimeCoordinator();
 		const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
-		const result = await handleToolCall(
-			baseDeps({
-				lensEnabled: false,
-				runtime,
-				event: { toolName: "read", input: { path: "/does/not/matter" } },
-			}),
+		const result = await runHandlerExpectingNoThrow(() =>
+			handleToolCall(
+				baseDeps({
+					lensEnabled: false,
+					runtime,
+					event: { toolName: "read", input: { path: "/does/not/matter" } },
+				}),
+			),
 		);
 		expect(result).toBeUndefined();
 		expect(recordRead).not.toHaveBeenCalled();
@@ -218,12 +229,14 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "read", input: { path: filePath } },
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: filePath } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 
 			expect(recordRead).toHaveBeenCalledWith(
@@ -257,16 +270,18 @@ describe("handleToolCall", () => {
 			const client = { init } as unknown as TreeSitterClient;
 			const getTreeSitterClient = vi.fn(() => client);
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: {
-						toolName: "read",
-						input: { path: filePath, offset: 2, limit: 1 },
-					},
-					ctx: { cwd: env.tmpDir },
-					getTreeSitterClient,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: {
+							toolName: "read",
+							input: { path: filePath, offset: 2, limit: 1 },
+						},
+						ctx: { cwd: env.tmpDir },
+						getTreeSitterClient,
+					}),
+				),
 			);
 
 			expect(getTreeSitterClient).toHaveBeenCalledTimes(1);
@@ -288,16 +303,18 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			const getTreeSitterClient = vi.fn(() => null);
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: {
-						toolName: "read",
-						input: { path: filePath, offset: 2, limit: 1 },
-					},
-					ctx: { cwd: env.tmpDir },
-					getTreeSitterClient,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: {
+							toolName: "read",
+							input: { path: filePath, offset: 2, limit: 1 },
+						},
+						ctx: { cwd: env.tmpDir },
+						getTreeSitterClient,
+					}),
+				),
 			);
 
 			expect(getTreeSitterClient).toHaveBeenCalledTimes(1);
@@ -319,19 +336,21 @@ describe("handleToolCall", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "edit",
-						input: {
-							path: filePath,
-							oldText: "function foo() {\n\treturn 1;\n}",
-							newText: "function foo() {\n\treturn 2;\n}",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "edit",
+							input: {
+								path: filePath,
+								oldText: "function foo() {\n\treturn 1;\n}",
+								newText: "function foo() {\n\treturn 2;\n}",
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -357,19 +376,21 @@ describe("handleToolCall", () => {
 			const later = new Date(Date.now() + 60_000);
 			fs.utimesSync(filePath, later, later);
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "edit",
-						input: {
-							path: filePath,
-							oldText: "return 7;",
-							newText: "return 8;",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "edit",
+							input: {
+								path: filePath,
+								oldText: "return 7;",
+								newText: "return 8;",
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -395,15 +416,17 @@ describe("handleToolCall", () => {
 			// before invoking tool_call, matching how the pipeline actually runs).
 			createTempFile(env.tmpDir, "src/c.ts", "export const x = 1;\n");
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "write",
-						input: { path: filePath, content: "export const x = 1;\n" },
-					},
-				}),
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "write",
+							input: { path: filePath, content: "export const x = 1;\n" },
+						},
+					}),
+				),
 			);
 
 			expect(result).toBeUndefined();
@@ -429,18 +452,20 @@ describe("handleToolCall", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.cachedExports.set("shared", otherFile);
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "write",
-						input: {
-							path: targetFile,
-							content: "export function shared() {}\n",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "write",
+							input: {
+								path: targetFile,
+								content: "export function shared() {}\n",
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -485,12 +510,14 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: mixedBatchEvent(filePath),
-				}),
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: mixedBatchEvent(filePath),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -517,24 +544,26 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "edit",
-						input: {
-							path: filePath,
-							edits: [
-								{
-									oldText: "const total = a-b;",
-									newText: "const total = a+b;",
-								},
-								{ oldText: "const missing = true;", newText: "noop" },
-							],
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "edit",
+							input: {
+								path: filePath,
+								edits: [
+									{
+										oldText: "const total = a-b;",
+										newText: "const total = a+b;",
+									},
+									{ oldText: "const missing = true;", newText: "noop" },
+								],
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 			expect(result).toMatchObject({ block: true });
 			expect(fs.readFileSync(filePath, "utf8")).toBe(
@@ -557,12 +586,14 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: mixedBatchEvent(filePath),
-				}),
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: mixedBatchEvent(filePath),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -593,8 +624,8 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			runtime.projectRoot = env.tmpDir;
 			const event = mixedBatchEvent(filePath);
 
-			await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event })),
 			);
 			const afterFirst = fs.readFileSync(filePath, "utf-8");
 			expect(afterFirst).toBe(
@@ -604,8 +635,8 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			// Identical retry: edits[0]'s oldText still occurs exactly once
 			// (inside its own applied newText). The retry must recognize the
 			// applied record, not re-execute the write.
-			const retry = await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			const retry = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event })),
 			);
 
 			expect(retry).toMatchObject({ block: true });
@@ -663,8 +694,10 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			} as never);
 
 			// Identical retry through the real tool_call path.
-			const retry = await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event: editEvent }),
+			const retry = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event: editEvent }),
+				),
 			);
 
 			expect(retry).toMatchObject({ block: true });
@@ -694,21 +727,23 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			const recordWritten = vi.spyOn(runtime.readGuard, "recordWritten");
 			const seqBefore = runtime.projectSeq;
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "edit",
-						input: {
-							path: filePath,
-							edits: [
-								{ oldText: "const b = 2;", newText: "const b = 20;" },
-								{ oldText: "function gone() {}", newText: "noop" },
-							],
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "edit",
+							input: {
+								path: filePath,
+								edits: [
+									{ oldText: "const b = 2;", newText: "const b = 20;" },
+									{ oldText: "function gone() {}", newText: "noop" },
+								],
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });
@@ -789,18 +824,20 @@ describe("#2423 review round 4 (F5) — the hashline anchor memo drops at the to
 			// Call 1: warms `clients/hashline-anchor.ts`'s per-file memo against
 			// `before`'s content (this is what makes the second call a proof of
 			// the DROP, not just "the file happened to be read fresh once").
-			await handleToolCall({
-				...deps,
-				event: {
-					toolName: "replace",
-					input: {
-						path: filePath,
-						remove_from: anchorForAlpha,
-						remove_to: anchorForAlpha,
-						replacement_lines: ["placeholder"],
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					...deps,
+					event: {
+						toolName: "replace",
+						input: {
+							path: filePath,
+							remove_from: anchorForAlpha,
+							remove_to: anchorForAlpha,
+							replacement_lines: ["placeholder"],
+						},
 					},
-				},
-			});
+				}),
+			);
 			expect(checkEdit).toHaveBeenCalledTimes(1);
 			expect(checkEdit.mock.calls[0]![0]).toBe(filePath);
 			expect(checkEdit.mock.calls[0]![1]).toEqual([1, 1]);
@@ -816,18 +853,20 @@ describe("#2423 review round 4 (F5) — the hashline anchor memo drops at the to
 			// the file, so a genuine re-read must fail to resolve it — a memo
 			// that survived from call 1 would instead answer `line: 1`
 			// confidently, because that is exactly what it answered before.
-			await handleToolCall({
-				...deps,
-				event: {
-					toolName: "replace",
-					input: {
-						path: filePath,
-						remove_from: anchorForAlpha,
-						remove_to: anchorForAlpha,
-						replacement_lines: ["placeholder"],
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					...deps,
+					event: {
+						toolName: "replace",
+						input: {
+							path: filePath,
+							remove_from: anchorForAlpha,
+							remove_to: anchorForAlpha,
+							replacement_lines: ["placeholder"],
+						},
 					},
-				},
-			});
+				}),
+			);
 			expect(checkEdit).toHaveBeenCalledTimes(2);
 			expect(checkEdit.mock.calls[1]![0]).toBe(filePath);
 			expect(checkEdit.mock.calls[1]![1]).toBeUndefined();
@@ -864,8 +903,8 @@ describe("#3052 indent autopatch does not retarget from a comment's alignment", 
 				input: { path: filePath, oldText, newText },
 			};
 
-			await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event })),
 			);
 
 			// applyNewText patches event.input.newText in place (the host then
@@ -908,8 +947,8 @@ describe("#3116 indent autopatch does not retarget from a template literal's ali
 				input: { path: filePath, oldText, newText },
 			};
 
-			await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event })),
 			);
 
 			// Pre-fix, this exact input patched `b();` to 16 literal spaces (the
@@ -955,8 +994,8 @@ describe("#3116 review round 2 — indent autopatch resolves a boundary-crossing
 				input: { path: filePath, oldText, newText },
 			};
 
-			await handleToolCall(
-				baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(baseDeps({ runtime, ctx: { cwd: env.tmpDir }, event })),
 			);
 
 			// A fragment-only lexer reads A's closer backtick as an opener and
@@ -998,12 +1037,14 @@ describe("LSP auto-touch skip path folding (#1193)", () => {
 			const filePath = createTempFile(env.tmpDir, relativePath, "export {};\n");
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "read", input: { path: filePath } },
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: filePath } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 			return touchFileMock.mock.calls.length > 0;
 		} finally {

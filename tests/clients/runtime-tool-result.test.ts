@@ -41,6 +41,7 @@ import {
 	createBashToolDefinition,
 	createReadToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -157,22 +158,24 @@ describe("bash grep searchReads registration", () => {
 				const runtime = new RuntimeCoordinator();
 				runtime.projectRoot = env.tmpDir;
 				const cacheManager = new CacheManager(false);
-				await handleToolCall({
-					event: {
-						toolName: "bash",
-						toolCallId: "3832-bash",
-						input: { command },
-					},
-					ctx: { cwd: env.tmpDir },
-					lensEnabled: true,
-					getFlag: () => false,
-					dbg: () => {},
-					runtime,
-					cacheManager,
-					ensureLSPConfigInitialized: async () => {},
-					updateLspStatus: () => {},
-					resetLSPService: () => {},
-				} as any);
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolName: "bash",
+							toolCallId: "3832-bash",
+							input: { command },
+						},
+						ctx: { cwd: env.tmpDir },
+						lensEnabled: true,
+						getFlag: () => false,
+						dbg: () => {},
+						runtime,
+						cacheManager,
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as any),
+				);
 				// The host ran the command between tool_call and tool_result.
 				fs.writeFileSync(filePath, "export const after = true;\n");
 				const structuredContent = {
@@ -357,22 +360,24 @@ describe("bash grep searchReads registration", () => {
 			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			await handleToolCall({
-				event: {
-					toolName: "read",
-					toolCallId: "2802-supersede",
-					input: { path: filePath, offset: 1, limit: 3000 },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "read",
+						toolCallId: "2802-supersede",
+						input: { path: filePath, offset: 1, limit: 3000 },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 			const readTool = createReadToolDefinition(env.tmpDir);
 			const result = await readTool.execute(
 				"2802-supersede",
@@ -573,22 +578,24 @@ describe("bash grep searchReads registration", () => {
 			// Run for real by the bash host below: a forward-slash path survives
 			// bash on Windows, a backslash one does not (#4019).
 			const command = `sed -i 's/ABSENT_VALUE/x/' ${toPosix(filePath)}`;
-			await handleToolCall({
-				event: {
-					toolName: "bash",
-					toolCallId: "2802-noop",
-					input: { command },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "bash",
+						toolCallId: "2802-noop",
+						input: { command },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 			const bashTool = createBashToolDefinition(env.tmpDir, {
 				exposeSessionEnvironment: false,
 			});
@@ -639,22 +646,24 @@ describe("bash grep searchReads registration", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const command = `sed -i 's/const a = 1;/const a = 9;/' ${filePath}`;
-			await handleToolCall({
-				event: {
-					toolName: "bash",
-					toolCallId: "2802-unknown-authorship",
-					input: { command },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "bash",
+						toolCallId: "2802-unknown-authorship",
+						input: { command },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 			const bashTool = createBashToolDefinition(env.tmpDir, {
 				exposeSessionEnvironment: false,
 			});
@@ -1927,22 +1936,24 @@ describe("monorepo turn-state cwd alignment", () => {
 			runtime.projectRoot = env.tmpDir;
 			const entered = runtime.sessionGeneration;
 			const cacheManager = new CacheManager(false);
-			await handleToolCall({
-				event: {
-					toolName: "bash",
-					toolCallId: "3568-bash",
-					input: { command },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager,
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "bash",
+						toolCallId: "3568-bash",
+						input: { command },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 			fs.writeFileSync(existingPath, "(function(){ return 2; })();\n");
 			fs.writeFileSync(directPath, "const direct = 2;\n");
 			const handler = handleToolResult({
@@ -2647,22 +2658,24 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const recordWritten = vi.spyOn(runtime.readGuard, "recordWritten");
-			await handleToolCall({
-				event: {
-					toolName: "bash",
-					toolCallId: "3226-opaque",
-					input: { command },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "bash",
+						toolCallId: "3226-opaque",
+						input: { command },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 
 			// Stand in for the true extraction/download child boundary: the
 			// tool_result path sees only the resulting filesystem state.
@@ -4217,22 +4230,24 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			const dbg = vi.fn();
 			const toolCallId = "call-1642";
 
-			await handleToolCall({
-				event: {
-					toolCallId,
-					toolName: "edit",
-					input: { path: "src/app.ts" },
-				},
-				ctx: { cwd: worktreeDir },
-				lensEnabled: true,
-				getFlag: (name: string) => name === "no-lsp",
-				dbg,
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolCallId,
+						toolName: "edit",
+						input: { path: "src/app.ts" },
+					},
+					ctx: { cwd: worktreeDir },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg,
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 
 			await handleToolResult({
 				event: {
@@ -4303,22 +4318,27 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			runtime.projectRoot = parentRoot;
 			const toolCallId = "call-new-file";
 
-			await handleToolCall({
-				event: {
-					toolCallId,
-					toolName: "write",
-					input: { path: "src/brand-new.ts", content: "export const x = 1;\n" },
-				},
-				ctx: { cwd: parentRoot },
-				lensEnabled: true,
-				getFlag: (name: string) => name === "no-lsp",
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolCallId,
+						toolName: "write",
+						input: {
+							path: "src/brand-new.ts",
+							content: "export const x = 1;\n",
+						},
+					},
+					ctx: { cwd: parentRoot },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 
 			// The write itself executes on the host side between tool_call and
 			// tool_result — the file exists by the time tool_result fires.
@@ -4374,25 +4394,27 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			);
 			const toolCallId = "call-blocked";
 
-			const result = await handleToolCall({
-				event: {
-					toolCallId,
-					toolName: "write",
-					input: {
-						path: "src/dupe.ts",
-						content: "export const existing = 2;\n",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolCallId,
+						toolName: "write",
+						input: {
+							path: "src/dupe.ts",
+							content: "export const existing = 2;\n",
+						},
 					},
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: (name: string) => name === "no-lsp",
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 
 			expect((result as { block?: boolean } | undefined)?.block).toBe(true);
 			// The attribution recorded before the block fired must be gone —
@@ -4518,22 +4540,24 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			runtime.projectRoot = env.tmpDir;
 			const callId = "callid-not-toolcallid";
 
-			await handleToolCall({
-				event: {
-					callId,
-					toolName: "write",
-					input: { path: "src/app.ts", content: "x\n" },
-				},
-				ctx: { cwd: worktreeDir },
-				lensEnabled: true,
-				getFlag: (name: string) => name === "no-lsp",
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						callId,
+						toolName: "write",
+						input: { path: "src/app.ts", content: "x\n" },
+					},
+					ctx: { cwd: worktreeDir },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
 
 			const dbg = vi.fn();
 			await handleToolResult({
@@ -4614,8 +4638,12 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			});
 
 			// Call A, then call B (in order) — both fire before either result.
-			await handleToolCall(callDeps("call-A", worktreeA) as any);
-			await handleToolCall(callDeps("call-B", worktreeB) as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps("call-A", worktreeA) as any),
+			);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps("call-B", worktreeB) as any),
+			);
 
 			const resultDeps = (toolCallId: string) => ({
 				event: {
@@ -4711,8 +4739,12 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 				formatBehaviorWarnings: () => "",
 			});
 
-			await handleToolCall(callDeps(`${parent}/1`, "b.ts") as any);
-			await handleToolCall(callDeps(`${parent}/2`, "c.ts") as any);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps(`${parent}/1`, "b.ts") as any),
+			);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps(`${parent}/2`, "c.ts") as any),
+			);
 			await handleToolResult(resultDeps(`${parent}/1`, "b.ts") as any);
 			await handleToolResult(resultDeps(`${parent}/2`, "c.ts") as any);
 

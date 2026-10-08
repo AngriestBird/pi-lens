@@ -119,6 +119,7 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 	getLSPService: vi.fn(),
 }));
 import { getLSPService } from "../../clients/lsp/index.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 function gate() {
 	let open!: () => void;
@@ -294,22 +295,24 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			write: () => fs.writeFileSync(file, opts.bytes ?? `${newText}\n`),
 			/** pi's tool_call for this edit: the host tool is about to run. */
 			start: async () => {
-				return handleToolCall({
-					event: {
-						toolCallId: opts.toolCallId,
-						toolName: kind,
-						input,
-					},
-					ctx: { cwd: tmpDir },
-					lensEnabled: true,
-					getFlag: (flag: string) => flag === "no-lsp",
-					dbg: () => {},
-					runtime,
-					cacheManager: new CacheManager(false),
-					ensureLSPConfigInitialized: async () => {},
-					updateLspStatus: () => {},
-					resetLSPService: () => {},
-				} as never);
+				return runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolCallId: opts.toolCallId,
+							toolName: kind,
+							input,
+						},
+						ctx: { cwd: tmpDir },
+						lensEnabled: true,
+						getFlag: (flag: string) => flag === "no-lsp",
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as never),
+				);
 			},
 			deliver: async () => {
 				await handleToolResult({
