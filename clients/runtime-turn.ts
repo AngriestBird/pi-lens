@@ -1241,18 +1241,24 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 */
 	const deliveryHolds: DeliveryHold[] = [];
 	/**
-	 * #4161/#4168: the turn's one session identity, taken here, at entry: the
-	 * scope of the activation whose turn this is (the coordinator's for the
-	 * primary and on the MCP route, its own for a concurrent secondary). A
-	 * session replaced mid-turn owns none of the held state any more, and
-	 * that is judged at every access, not here: the hold stores are drained
-	 * after awaits that a replacement can land in, so a drain or a write-back
-	 * runs through `holdScope.guardedWrite` and nothing is drained once the
-	 * scope has ended (one counted `generation-guard-stale-write` row per store
-	 * or lane). The late dead-code scan cell is this scope's too.
+	 * #4161/#4168: identity follows the store's owner, each taken here, at
+	 * entry. `turnScope` is the activation's scope (the coordinator's for the
+	 * primary and on the MCP route, its own for a concurrent secondary): it
+	 * owns the late dead-code scan cell (#4154). `holdScope` is the
+	 * coordinator's scope: it owns the hold stores (the cascade runs and
+	 * parked computes, the park map, and the module-level late-auxiliary and
+	 * runner stores), which a concurrent secondary shares with the primary
+	 * (#3613). A session replaced mid-turn owns none of the held state any
+	 * more, and that is judged at every access, not here: the hold stores are
+	 * drained after awaits that a replacement can land in, so a drain or a
+	 * write-back runs through `holdScope.guardedWrite` and nothing is drained
+	 * once the coordinator's scope has ended (one counted
+	 * `generation-guard-stale-write` row per store or lane). A secondary's own
+	 * end therefore fences only its cell: what it drained from the shared
+	 * stores is restored at settle for the primary, as on master (#4168 R2-F1).
 	 */
 	const turnScope = deps.sessionScope ?? runtime.sessionScope;
-	const holdScope = turnScope.capture();
+	const holdScope = runtime.captureSessionGeneration();
 	/**
 	 * #3813/#3901: a parked lane belongs to the session that cut it. The park
 	 * map is the coordinator's, shared by a concurrent secondary (subagent)

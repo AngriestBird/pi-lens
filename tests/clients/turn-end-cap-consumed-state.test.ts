@@ -1128,6 +1128,13 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 			.flatMap((entry) => entry.latestReasons.map((r) => r.subject));
 	}
 
+	/** The drain's one `late_auxiliary_findings` row for the turn. */
+	function lateAuxRow(): any {
+		return logLatency.mock.calls
+			.map((call) => call[0])
+			.find((entry: any) => entry?.phase === "late_auxiliary_findings");
+	}
+
 	// Recurrence: REVIEW_4155 F1. The replacement lands at the turn's first
 	// await; the successor records a blocker that cuts every later part, a
 	// built cascade run, and a compute still parked for the settle.
@@ -1250,10 +1257,10 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 			);
 			// Recurrence (#4168 review F2): the dropped re-arm was still counted,
 			// so the row read `rearmed: 1` beside `pendingAfter: 0`.
-			const row = logLatency.mock.calls
-				.map((call) => call[0])
-				.find((entry: any) => entry?.phase === "late_auxiliary_findings");
-			expect(row?.metadata).toMatchObject({ rearmed: 0, pendingAfter: 0 });
+			expect(lateAuxRow()?.metadata).toMatchObject({
+				rearmed: 0,
+				pendingAfter: 0,
+			});
 			expect(file).toContain("old-aux.ts");
 		} finally {
 			rig.cleanup();
@@ -1284,19 +1291,24 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 		}
 	});
 
-	// Recurrence (#4168 named output): the hold drains were judged by the
-	// coordinator's scope and the late-scan cell by the activation's. A
-	// concurrent secondary whose own scope ended mid-turn still drained the
-	// primary's run and showed it in its own message. One identity, the
-	// activation's scope taken at entry, now judges both.
-	it("a secondary whose scope ended mid-turn leaves the primary's run for the primary", async () => {
-		const rig = makeRig("pi-lens-4161-secondary-retired-");
+	// Recurrence (#4168 verify R2-F1, probe S1): round 2 judged a concurrent
+	// secondary's drains AND settle by the secondary's own scope. A secondary
+	// that drained the primary's run and then ended before settle skipped the
+	// restore, so the primary's cut run was lost (head `[]`, master
+	// `["primary-built.ts"]`). The store is the coordinator's, so its fence is
+	// the coordinator's scope, which is live: settle restores it for the primary.
+	it("a secondary that drained the primary's cut run and then ended before settle restores it for the primary", async () => {
+		const rig = makeRig("pi-lens-4161-secondary-s1-");
 		try {
+			fillerBlocker(rig, 1000);
 			rig.runtime.appendCascadeRun(cascadeRun(rig, "primary-built"));
 			const secondary = beginScope({ role: "secondary" });
-			queueMicrotask(() => retireScope(secondary, "shutdown"));
 			await handleTurnEnd({
-				...makeDeps(rig.runtime, rig.cacheManager, rig.cwd),
+				// The knip await sits after `consumeCascadeRuns`, so the retirement
+				// lands between the drain and settle.
+				...makeDeps(rig.runtime, rig.cacheManager, rig.cwd, () =>
+					retireScope(secondary, "shutdown"),
+				),
 				sessionId: "secondary-4161",
 				sessionScope: secondary,
 			});
@@ -1305,10 +1317,114 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 					.consumeCascadeRuns()
 					.map((run) => path.basename(run.filePath)),
 			).toEqual(["primary-built.ts"]);
+			expect(staleWriteSubjects()).toEqual([]);
 		} finally {
 			rig.cleanup();
 		}
 	});
+
+	// Recurrence (#4168 verify R2-F1, probe S4): the same window on the
+	// late-auxiliary store. The secondary drained the primary's pair, its scope
+	// ended inside the probe's await, and the still-scanning re-arm was fenced
+	// off (head 0, master 1). The store is the module's, shared through the
+	// coordinator, so the coordinator's live scope lets the re-arm land.
+	it("a secondary that drained the primary's aux pair and then ended before settle re-arms it for the primary", async () => {
+		const rig = makeRig("pi-lens-4161-secondary-s4-");
+		try {
+			markAux(rig, "primary-aux.ts");
+			const secondary = beginScope({ role: "secondary" });
+			// Alive but not yet published: the drain's own still-scanning branch
+			// re-arms the pair after this await.
+			readCachedDiagnosticsForServers.mockImplementation(async () => {
+				retireScope(secondary, "shutdown");
+				return new Map([["opengrep", { diags: [] }]]);
+			});
+			await handleTurnEnd({
+				...makeDeps(rig.runtime, rig.cacheManager, rig.cwd),
+				sessionId: "secondary-4161",
+				sessionScope: secondary,
+			});
+			expect(pendingAuxiliaryCoverageSize()).toBe(1);
+			expect(lateAuxRow()?.metadata).toMatchObject({
+				rearmed: 1,
+				pendingAfter: 1,
+			});
+			expect(staleWriteSubjects()).toEqual([]);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence (#4168 verify R2-F2): the "re-arm counted only when it landed"
+	// guard was pinned at the probe-failure site alone; making the count
+	// unconditional at the other three sites stayed green. One row per site:
+	// the replacement lands inside the probe's await, the probe's answer steers
+	// the drain into that site's branch, and the row must not claim a re-arm
+	// (or a stuck pair) the fence dropped.
+	const REARM_SITES = [
+		{
+			site: "notify-stall",
+			markedAgoMs: 2000,
+			// The LSP service's teardown status for a pair marked before it.
+			probe: () =>
+				new Map([
+					[
+						"opengrep",
+						{ diags: [], notifyStallDemoted: true, demotedAt: Date.now() },
+					],
+				]),
+		},
+		{
+			site: "still-scanning",
+			markedAgoMs: 2000,
+			// Alive, nothing published yet.
+			probe: () => new Map([["opengrep", { diags: [] }]]),
+		},
+		{
+			site: "stale-gate",
+			// The file's mtime (now) is past a mark this old, so every finding
+			// the probe answers is stale and the drain re-arms with the baseline.
+			markedAgoMs: 60_000,
+			probe: () =>
+				new Map([
+					[
+						"opengrep",
+						{ diags: [auxDiag(0, "stale body")], publishedAt: Date.now() },
+					],
+				]),
+		},
+	] as const;
+
+	it.each(REARM_SITES)(
+		"does not count a re-arm the fence dropped at the $site site",
+		async ({ site, markedAgoMs, probe }) => {
+			const rig = makeRig(`pi-lens-4161-aux-rearm-${site}-`);
+			try {
+				const file = touch(rig, "old-aux.ts");
+				markPendingAuxiliaryCoverage(
+					file,
+					["opengrep"],
+					Date.now() - markedAgoMs,
+				);
+				readCachedDiagnosticsForServers.mockImplementation(async () => {
+					replace(rig);
+					return probe();
+				});
+				await endTurn(rig);
+				expect(pendingAuxiliaryCoverageSize()).toBe(0);
+				expect(staleWriteSubjects()).toContain(
+					"runtime-session:turn-end:late-aux-rearm",
+				);
+				expect(lateAuxRow()?.metadata).toMatchObject({
+					rearmed: 0,
+					pendingAfter: 0,
+					stuckPairs: [],
+				});
+			} finally {
+				rig.cleanup();
+			}
+		},
+	);
 
 	// No-drop direction (shape 54): without a replacement the same turn still
 	// drains, settles and restores (the reviewer's control, `[Y, X]`).

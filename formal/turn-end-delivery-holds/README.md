@@ -155,6 +155,20 @@ while the old turn was in flight.
   (`Owner`), a modelling choice that makes the first clause of
   `HoldFencedToSession` true by construction for items 1 to 3 and 6. Lane M4
   (`session-lifecycle`) owns these stores.
+- **A secondary's own scope.** Both sessions read one coordinator generation
+  (`gen`): `MayDrain` and `Settle`'s `trueLive` compare `hgen[s]` with it.
+  That is the shipped identity for these stores (#4168 round 3: the hold
+  drains and write-backs are fenced by the coordinator's scope, which owns
+  them). A concurrent secondary's own retirement changes no modelled
+  variable, so the cell "the secondary drains, then its own scope retires
+  before `Settle`" (#4168 verify R2-F1) is a stutter here: `Settle` restores
+  under `gen` exactly as the code restores under `holdScope`. It is pinned by
+  the two secondary rows in `turn-end-cap-consumed-state.test.ts` (S1 and
+  S4). The round-2 identity, which judged the secondary's settle by its own
+  scope, cannot be expressed without a per-activation scope and an owner map
+  for items 2 and 3 (`Owner` gives them to session 1 by construction); both
+  are lane M4's. The one store the activation's scope owns, the late-scan
+  cell, is lane M2's (`turn-end-late-scan`, whose settle reads `ended`).
 - **The late scan family.** `runtime-turn.ts` `LateDeadCodeScan` is lane M2.
 
 ## Replay on the real code
