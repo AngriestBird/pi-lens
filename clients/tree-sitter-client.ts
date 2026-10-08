@@ -561,6 +561,8 @@ export class TreeSitterClient {
 	private queryBatchCache = new BoundedFifoMap<string, QueryBatch | null>(
 		TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES,
 	);
+	/** Raw and batch cache keys represented by each bounded entry (#3834). */
+	private queryBatchInputs = new Map<string, Set<string>>();
 	private queryCacheCap(): number {
 		const value = Number.parseInt(
 			process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "",
@@ -594,12 +596,19 @@ export class TreeSitterClient {
 		for (const [, dropped] of evicted) dropped?.query?.delete?.();
 	}
 
-	private cacheQueryBatch(key: string, value: QueryBatch | null): void {
+	private cacheQueryBatch(
+		key: string,
+		value: QueryBatch | null,
+		inputKeys: Iterable<string> = [],
+	): void {
 		this.queryBatchCache.delete(key);
 		const evicted = this.queryBatchCache.setMaxEntries(
 			this.queryBatchCacheCap(),
 		);
 		evicted.push(...this.queryBatchCache.set(key, value));
+		for (const [evictedKey] of evicted)
+			this.queryBatchInputs.delete(evictedKey);
+		this.queryBatchInputs.set(key, new Set(inputKeys));
 		for (const [, dropped] of evicted) dropped?.query?.delete?.();
 	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
@@ -761,6 +770,23 @@ export class TreeSitterClient {
 		const key = this.wasmInputKey(input);
 		if (this.trappedInputs.get(key)?.by === input.caller) {
 			this.trappedInputs.delete(key);
+			// A batch that skipped this input (or cached null after it was charged)
+			// is no longer equivalent to a clean rebuild. Invalidate it before the
+			// healed entry becomes observable (#3834).
+			for (const [batchKey, batch] of this.queryBatchCache) {
+				const inputs = this.queryBatchInputs.get(batchKey);
+				if (
+					!inputs ||
+					![...inputs].some(
+						(cacheInput) =>
+							this.wasmInputKey(wasmQueryInput(cacheInput)) === key,
+					)
+				)
+					continue;
+				this.queryBatchCache.delete(batchKey);
+				this.queryBatchInputs.delete(batchKey);
+				batch?.query?.delete?.();
+			}
 		}
 	}
 
@@ -2241,6 +2267,15 @@ export class TreeSitterClient {
 			.update(JSON.stringify(queryDefs))
 			.digest("hex");
 		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const inputKeys = [
+			cacheKey,
+			...queryDefs.map((queryDef) =>
+				this.getQueryCacheKey(
+					`raw:${queryDef.id}:${queryDef.query}`,
+					languageId,
+				),
+			),
+		];
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) {
 			this.queryBatchCache.delete(cacheKey);
@@ -2261,7 +2296,7 @@ export class TreeSitterClient {
 					`Batch: grammar for ${languageId} failed to load ${failures} times — caching miss`,
 				);
 				this.queryBatchLoadFailures.delete(cacheKey);
-				this.cacheQueryBatch(cacheKey, null);
+				this.cacheQueryBatch(cacheKey, null, inputKeys);
 			} else {
 				this.queryBatchLoadFailures.set(cacheKey, failures);
 			}
@@ -2345,7 +2380,7 @@ export class TreeSitterClient {
 		};
 
 		const batch = await build();
-		if (!trapped) this.cacheQueryBatch(cacheKey, batch);
+		if (!trapped) this.cacheQueryBatch(cacheKey, batch, inputKeys);
 		return batch;
 	}
 

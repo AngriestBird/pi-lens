@@ -124,8 +124,8 @@ TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers 1`, on `cf1b548e5`.
 | `Pre3731Budget` | before #3731: unkeyed probe | `BudgetOnEvidence` violated (5) | |
 | `MutNoCacheGuard` | #3731 FL3/FL4: keyed, but a trapped build is cached | `NoCachedTransient` violated (3) | |
 | `MutConstBatchKey` | #3731 FL10: one batch key for every rule set | `NoKeyLeak` violated (5) | |
-| `RaceRawHeal` | **master**, a concurrent `compileRawQuery` | `NoCachedTransient` violated (9): finding 1 | |
-| `RaceBatchHeal` | **master**, two builds of one rule set in flight | `NoCachedTransient` violated (8): finding 1 | |
+| `RaceRawHeal` | #3834 fixed: a concurrent `compileRawQuery` invalidates stale batches | pass | |
+| `RaceBatchHeal` | #3834 fixed: a healed batch key replaces stale cached output | pass | |
 
 `MergedBatch` passes only under an assumption the code does not make.
 `compileQueryBatch` has no in-flight dedupe: its cache check and its
@@ -133,8 +133,10 @@ TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers 1`, on `cf1b548e5`.
 `runQueriesOnFile` calls on one rule set ran three combined compiles. **Master
 does not satisfy `NoCachedTransient` unrestricted.** `RaceBatchHeal` is the
 same spec with two builds in flight, and `RaceRawHeal` adds a concurrent raw
-compile; both violate it (finding 1). Likewise, `MergedBatchRaw` passes only
-because it allows one one-off, below the two the race needs.
+compile; both violated it (finding 1) before #3834. The fix invalidates cached
+batches when the compile that healed a trapped input succeeds, so both race
+configs now pass. Likewise, `MergedBatchRaw` passes only because it allows one
+one-off, below the two the race needs.
 
 The number in brackets is the trace length in states. Each pre-fix config sets
 its switches to that code's behaviour, and each mutant flips one switch from
@@ -164,9 +166,11 @@ between `compileQueryBatch`'s batch-key check and its combined compile.
 5. The call from step 2 resumes, compiles r1 cleanly, and `clearWasmInput`
    deletes r1's entry.
 
-Now r1 is healthy and `runQueryOnFile(r1)` matches, but the cached batch still
-omits r1. `queryBatchCache` is a 256-entry `BoundedFifoMap`, so the omission
-lasts until that entry is evicted, possibly for the life of the process.
+Now r1 is healthy and `runQueryOnFile(r1)` matches. Before #3834, the cached
+batch still omitted r1; `queryBatchCache` is a 256-entry `BoundedFifoMap`, so
+the omission could last until that entry was evicted, possibly for the life of
+the process. The fix disposes and clears cached batches when r1 heals, forcing
+the next batch call to rebuild from the healthy rule set.
 `RaceBatchHeal` shows the same shape on the combined compile with three
 one-offs: a null is cached against a batch key that a late build has already
 healed, and every scan then pays the per-rule fallback.
@@ -200,8 +204,9 @@ simplest being three calls launched in one tick.
 
 Severity is low. The effect is one rule missing from batched scans (or the
 batch falling back to per-rule walks), never a wrong finding or an abort.
-Tracked as #3834. No code is changed here. The fix belongs
-on the seam, not in this model.
+Tracked as #3834. The committed regression drives the same compiler seam with a
+held `loadLanguage` and a one-off probe trap, then asserts that the healed batch
+contains r1 again.
 
 ## Provenance (master `cf1b548e5`)
 

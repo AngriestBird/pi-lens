@@ -312,15 +312,16 @@ RawDo(r) ==
     /\ pendRaw[r] > 0
     /\ pendRaw' = [pendRaw EXCEPT ![r] = @ - 1]
     /\ IF Aborted
-       THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted, rawCached>>
+       THEN UNCHANGED <<entry, spent, heap, hits, poisonHit, stale, attempted, rawCached, cache>>
        ELSE \E oc \in Outs :
               /\ Allowed(ProbeSite(r), oc, heap)
               /\ IF oc = "ok"
                  THEN /\ SetSt(Mark(Clr(Cur, PKey(r), NoId, TRUE), PKey(r), NoId))
                       /\ rawCached' = [rawCached EXCEPT ![r] = TRUE]
+                      /\ cache' = [n \in SetNames |-> NoCache]
                  ELSE /\ SetSt(Rep(Cur, <<"probe", r>>, PKey(r), NoId, oc, KeyInputs))
-                      /\ UNCHANGED rawCached
-    /\ UNCHANGED <<content, lost, poison, extDone, cache, pendB>>
+                      /\ UNCHANGED <<rawCached, cache>>
+    /\ UNCHANGED <<content, lost, poison, extDone, pendB>>
 
 RawEvict(r) ==
     /\ rawCached[r]
@@ -396,7 +397,10 @@ BatchBuild(n) ==
                  /\ SetSt(res.s)
                  /\ cache' = IF CacheGuard /\ res.trapped
                              THEN cache
-                             ELSE [cache EXCEPT ![n] = res.val]
+                             ELSE IF res.val.st = "ok"
+                                  THEN [m \in SetNames |->
+                                      IF m = n THEN res.val ELSE NoCache]
+                                  ELSE [cache EXCEPT ![n] = res.val]
     /\ UNCHANGED <<content, lost, poison, extDone, rawCached, pendRaw>>
 
 (* LRU eviction, or a rule edit that reloads the rule set. *)
