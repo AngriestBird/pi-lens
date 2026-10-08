@@ -24,6 +24,7 @@ import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
 	drainProjectDataDirMigrations,
+	sweepDeadEphemeralDataDirs,
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
 	getProjectDataDir,
@@ -35,7 +36,7 @@ import {
 	GovulncheckClient,
 	type GovulncheckResult,
 } from "./govulncheck-client.js";
-import { sweepAtomicWriteStages } from "./instance-reaper.js";
+import { realIsPidAlive, sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { JscpdClient } from "./jscpd-client.js";
 import type { KnipResult } from "./knip-client.js";
 import { canRunStartupHeavyScans } from "./language-policy.js";
@@ -2538,6 +2539,16 @@ export async function handleSessionStart(
 	for (const migration of drainProjectDataDirMigrations()) {
 		const targetName = path.basename(migration.to);
 		const hash = targetName.match(/([0-9a-f]{8})$/)?.[1] ?? "unknown";
+		if (migration.outcome === "ephemeral") {
+			// #1129 decision B: say once that this root's state dies with the process.
+			recordDegradationOnce({
+				kind: "data-dir-ephemeral",
+				subject: hash,
+				reason:
+					"temporary checkout: project data lives in a process-owned directory and is not kept after exit",
+			});
+			continue;
+		}
 		recordDegradationOnce({
 			kind: "data_dir_migrated",
 			subject: hash,
@@ -2567,6 +2578,11 @@ export async function handleSessionStart(
 		path.join(globalDir, "bin"),
 		path.join(globalDir, "tools"),
 	]).catch(() => {
+		// best-effort lifecycle cleanup — never fail session_start
+	});
+	// #1129: reap the ephemeral data dirs of processes that died before their
+	// exit hook ran. Fire-and-forget and bounded like the stage sweep above.
+	void sweepDeadEphemeralDataDirs({ isPidAlive: realIsPidAlive }).catch(() => {
 		// best-effort lifecycle cleanup — never fail session_start
 	});
 	if (quickMode) {

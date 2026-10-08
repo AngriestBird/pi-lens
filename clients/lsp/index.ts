@@ -94,6 +94,7 @@ import {
 	isOutsideAllSessionRoots,
 } from "./session-roots.js";
 import { getProcessSingleton } from "../process-singletons.js";
+import { isEphemeralCheckoutRoot } from "../ephemeral-root.js";
 import { getLanguageId } from "./language.js";
 import {
 	getReverseDepsFromIndex,
@@ -412,6 +413,7 @@ async function runRenameNotify(
 }
 const DEFAULT_LSP_CLIENT_CEILING = 24;
 const DEFAULT_IDLE_EVICT_MS = 20 * 60_000;
+const DEFAULT_EPHEMERAL_IDLE_EVICT_MS = 60_000;
 
 /**
  * #3645: the idle window shared by every server whose registry policy is
@@ -428,6 +430,22 @@ export function getLspIdleEvictMs(): number {
 		if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
 	}
 	return DEFAULT_IDLE_EVICT_MS;
+}
+
+function getEphemeralLspIdleEvictMs(): number {
+	const parsed = Number.parseInt(
+		process.env.PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS ?? "",
+		10,
+	);
+	return Number.isSafeInteger(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_EPHEMERAL_IDLE_EVICT_MS;
+}
+
+export function getLspIdleEvictMsForRoot(root: string): number {
+	return isEphemeralCheckoutRoot(root)
+		? getEphemeralLspIdleEvictMs()
+		: getLspIdleEvictMs();
 }
 
 export function getLspClientCeiling(): number {
@@ -1942,6 +1960,8 @@ export class LSPService {
 		// warm-LSP-friendly 20-minute default instead.
 		this.clearIdleEvictionTimer(key);
 		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
+		const root = key.slice(key.indexOf(":") + 1);
+		const idleMs = getLspIdleEvictMsForRoot(root);
 		const timer = setTimeout(() => {
 			this.idleEvictionTimers.delete(key);
 			void this.withClientSpawnGate(async () => {
@@ -1974,7 +1994,7 @@ export class LSPService {
 					reason: "idle LSP client released to bound memory",
 				});
 			}).catch(() => {});
-		}, getLspIdleEvictMs());
+		}, idleMs);
 		timer.unref?.();
 		this.idleEvictionTimers.set(key, timer);
 	}
