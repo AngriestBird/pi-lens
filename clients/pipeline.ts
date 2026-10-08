@@ -1336,7 +1336,7 @@ export function chainLateFormatResync(
 	which: "deferred" | "inband",
 	row: { toolName: string; filePath: string; startedAt: number },
 	dbg: PipelineContext["dbg"],
-): void {
+): Promise<void> {
 	const inband = which === "inband";
 	const logLate = (outcome: string) => {
 		const common = {
@@ -1363,7 +1363,7 @@ export function chainLateFormatResync(
 		durationMs: Date.now() - row.startedAt,
 		metadata: { which },
 	});
-	void settled
+	return settled
 		.then(async () => {
 			logLate(await resyncHeldLspDocument(row.filePath));
 		})

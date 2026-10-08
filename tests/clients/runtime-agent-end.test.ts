@@ -1233,6 +1233,73 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	it("keeps the format lifecycle matchable and waits for an abandoned formatter write (#4213)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-bus-format-identity-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "session-4213" });
+			runtime.deferFormat(
+				filePath,
+				env.tmpDir,
+				"edit",
+				env.tmpDir,
+				"session-4213",
+			);
+			let releaseLate!: () => void;
+			const abandoned = new Promise<void>((resolve) => {
+				releaseLate = resolve;
+			});
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			const drain = handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				currentSessionId: "session-4213",
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [{ name: "biome", success: true, changed: true }],
+							anyChanged: true,
+							allSucceeded: true,
+							abandoned,
+						})) as any,
+					}) as any,
+			});
+			await drain;
+			expect(emit).not.toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.anything(),
+			);
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			releaseLate();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const done = emit.mock.calls.find(
+				([name]) => name === "pilens:format:done",
+			);
+			expect(done?.[1]).toMatchObject({
+				ownerSessionId: "session-4213",
+				turnIndex: expect.any(Number),
+				batchId: expect.any(String),
+			});
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("does not publish pilens:format:start when there is nothing queued (#673)", async () => {
 		const env = setupTestEnvironment(
 			"pi-lens-agent-end-bus-format-start-empty-",

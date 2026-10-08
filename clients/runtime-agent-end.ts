@@ -419,6 +419,10 @@ export async function handleAgentEnd({
 		kind: "autofix";
 	}> = [];
 	const deferredAutofixChanged = new Set<string>();
+	// A formatter that outlives the hook budget owns a later disk write. The
+	// terminal format event waits for these contained continuations, so a
+	// listener never treats pre-late-write bytes as settled (#4213).
+	const lateFormatCompletions: Promise<void>[] = [];
 	// #3576: runAutofix marks a file fixed after its fixer awaits; a replaced
 	// session's mark would skip the next session's own autofix of that file.
 	const fixedThisTurn = sessionFencedFixedThisTurn(
@@ -637,11 +641,15 @@ export async function handleAgentEnd({
 	// (e.g. a review/snapshot controller) can use this to know the deferred-
 	// format phase is starting and these specific paths may still be mutated.
 	if (records.length > 0) {
+		const batch = records[0];
 		publishFormatStart({
 			cwd: ctxCwd ?? runtime.projectRoot,
 			paths: records.map((r) => r.filePath),
 			dbg,
 			kinds: [...new Set(records.flatMap((record) => [...record.kinds]))],
+			ownerSessionId: batch.ownerSessionId,
+			turnIndex: batch.queuedTurnIndex,
+			batchId: batch.queuedTurnId,
 		});
 	}
 
@@ -727,6 +735,17 @@ export async function handleAgentEnd({
 							label: "deferred-format",
 						}),
 					};
+					const abandoned = work[index]?.result?.abandoned;
+					if (abandoned) {
+						lateFormatCompletions.push(
+							chainLateFormatResync(
+								abandoned,
+								"deferred",
+								{ toolName: "agent_end", filePath, startedAt: fileStart },
+								dbg,
+							),
+						);
+					}
 					// #3529: the bound gave up on the phase, not on its formatter
 					// child, which writes F later. Once the phase and every formatter
 					// it gave up on have settled, sync a fresh stamped read of F, or
@@ -761,11 +780,13 @@ export async function handleAgentEnd({
 									// Held-only in every case (#3828): the install can outlive
 									// the client (idle eviction), and this must never open a
 									// file or spawn for it.
-									chainLateFormatResync(
-										formatterSettling,
-										"deferred",
-										{ toolName: "agent_end", filePath, startedAt: fileStart },
-										dbg,
+									lateFormatCompletions.push(
+										chainLateFormatResync(
+											formatterSettling,
+											"deferred",
+											{ toolName: "agent_end", filePath, startedAt: fileStart },
+											dbg,
+										),
 									);
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
@@ -1004,12 +1025,18 @@ export async function handleAgentEnd({
 				fixes: deferredFormatFixes,
 			});
 		}
-		publishFormatDone({
-			cwd: ctxCwd ?? runtime.projectRoot,
-			paths: summary.changed,
-			kinds: ["format"],
-			dbg,
-		});
+		const publishDone = () =>
+			publishFormatDone({
+				cwd: ctxCwd ?? runtime.projectRoot,
+				paths: summary.changed,
+				kinds: ["format"],
+				ownerSessionId: records[0]?.ownerSessionId,
+				turnIndex: records[0]?.queuedTurnIndex,
+				batchId: records[0]?.queuedTurnId,
+				dbg,
+			});
+		if (lateFormatCompletions.length === 0) publishDone();
+		else void Promise.all(lateFormatCompletions).then(publishDone);
 	}
 
 	// LSP sees only authoritative content after both mutation phases. In

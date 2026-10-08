@@ -34,10 +34,10 @@
  * choose to wait, re-derive, or flag its own snapshot as provisional. It is
  * NOT a synchronous flush/barrier API (a caller cannot block deferred
  * formatting via these events) — that remains a separate, explicitly
- * out-of-scope future feature. Completion is already covered by the existing
- * `pilens:files:touched` (`reason: "format"`) event; `pilens:format:done`
- * closes the pre/post pair and carries an empty `paths` array when formatting
- * ran but changed no bytes.
+ * out-of-scope future feature. `pilens:format:done` closes the pre/post pair
+ * and carries an empty `paths` array when formatting ran but changed no bytes.
+ * It is emitted only after formatter-owned late writes and their resync have
+ * settled; a formatter that never settles has no false terminal event.
  *
  * ## `pilens:autofix:start` (#684)
  *
@@ -106,6 +106,9 @@ interface FormatQueuedPayload {
 	cwd: string;
 	tool: "write" | "edit";
 	kinds: Array<"autofix" | "format">;
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 }
 
 interface FormatStartPayload {
@@ -115,6 +118,9 @@ interface FormatStartPayload {
 	paths: string[];
 	fileCount: number;
 	kinds: Array<"autofix" | "format">;
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 }
 
 interface FormatDonePayload {
@@ -124,6 +130,9 @@ interface FormatDonePayload {
 	paths: string[];
 	fileCount: number;
 	kinds: Array<"autofix" | "format">;
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 }
 
 interface AutofixStartPayload {
@@ -193,6 +202,10 @@ export interface PublishFormatQueuedArgs {
 	// pass the real kind(s) being queued, so a silent "format" default would
 	// only ever mask a caller that forgot to pass it.
 	kinds: Array<"autofix" | "format">;
+	/** The queued record identity, when published from the runtime seam. */
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 	dbg?: (msg: string) => void;
 }
 
@@ -241,6 +254,11 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			cwd: normalizeFilePath(args.cwd),
 			tool: args.tool,
 			kinds: args.kinds,
+			...(args.ownerSessionId === undefined
+				? {}
+				: { ownerSessionId: args.ownerSessionId }),
+			...(args.turnIndex === undefined ? {} : { turnIndex: args.turnIndex }),
+			...(args.batchId === undefined ? {} : { batchId: args.batchId }),
 		};
 		busEmit(BUS_FORMAT_QUEUED_EVENT, payload);
 		hasLoggedQueuedFailure = false;
@@ -273,6 +291,9 @@ export interface PublishFormatStartArgs {
 	paths: string[];
 	kinds?: Array<"autofix" | "format">;
 	dbg?: (msg: string) => void;
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 }
 
 /**
@@ -323,6 +344,11 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			paths,
 			fileCount: paths.length,
 			kinds: args.kinds ?? ["format"],
+			...(args.ownerSessionId === undefined
+				? {}
+				: { ownerSessionId: args.ownerSessionId }),
+			...(args.turnIndex === undefined ? {} : { turnIndex: args.turnIndex }),
+			...(args.batchId === undefined ? {} : { batchId: args.batchId }),
 		};
 		busEmit(BUS_FORMAT_START_EVENT, payload);
 		hasLoggedStartFailure = false;
@@ -355,13 +381,16 @@ export interface PublishFormatDoneArgs {
 	paths: string[];
 	kinds?: Array<"autofix" | "format">;
 	dbg?: (msg: string) => void;
+	ownerSessionId?: string;
+	turnIndex?: number;
+	batchId?: string;
 }
 
 /**
- * Publish after the deferred-format batch has finished. This is emitted for
- * every non-empty batch, including a batch whose formatter changed no bytes;
- * that case is represented by `paths: []`. Fire-and-forget, like the other
- * format events.
+ * Publish after the deferred-format batch has finished, including any
+ * formatter-owned late-write resync. This is emitted for every non-empty
+ * batch, including a batch whose formatter changed no bytes; that case is
+ * represented by `paths: []`. Fire-and-forget, like the other format events.
  */
 export function publishFormatDone(args: PublishFormatDoneArgs): void {
 	if (!isBusPublishEnabled()) {
@@ -400,6 +429,11 @@ export function publishFormatDone(args: PublishFormatDoneArgs): void {
 			paths,
 			fileCount: paths.length,
 			kinds: args.kinds ?? ["format"],
+			...(args.ownerSessionId === undefined
+				? {}
+				: { ownerSessionId: args.ownerSessionId }),
+			...(args.turnIndex === undefined ? {} : { turnIndex: args.turnIndex }),
+			...(args.batchId === undefined ? {} : { batchId: args.batchId }),
 		};
 		resolution.emit(BUS_FORMAT_DONE_EVENT, payload);
 		hasLoggedDoneFailure = false;

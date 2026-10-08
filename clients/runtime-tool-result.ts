@@ -2931,6 +2931,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// Publish a file's first queue entry and each newly added kind. A same-kind
 		// re-touch before agent_end carries no new information and stays silent.
 		if (isNewlyQueued || autofixNewlyQueued) {
+			const identity = runtime.deferredFormatIdentity?.(filePath);
 			publishFormatQueued({
 				filePath,
 				cwd: dispatchCwd,
@@ -2942,16 +2943,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				tool: mutation.kind,
 				dbg,
 				kinds: autofixMode === "deferred" ? ["autofix", "format"] : ["format"],
+				...identity,
 			});
 		}
 	}
 	if (autofixNewlyQueued && !formatQueued) {
+		const identity = runtime.deferredFormatIdentity?.(filePath);
 		publishFormatQueued({
 			filePath,
 			cwd: dispatchCwd,
 			// Same #2421 projection as the queued-with-format publish above.
 			tool: mutation.kind,
 			kinds: ["autofix"],
+			...identity,
 			dbg,
 		});
 	}

@@ -131,6 +131,25 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 			expect(payload.cwd).not.toContain("\\");
 		});
 
+		it("carries the queued record identity for lifecycle matching (#4213)", () => {
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			publishFormatQueued({
+				filePath: "/repo/a.ts",
+				cwd: "/repo",
+				tool: "write",
+				kinds: ["format"],
+				ownerSessionId: "session-a",
+				turnIndex: 7,
+				batchId: "session-a:7",
+			});
+			expect(emit.mock.calls[0]?.[1]).toMatchObject({
+				ownerSessionId: "session-a",
+				turnIndex: 7,
+				batchId: "session-a:7",
+			});
+		});
+
 		it("kill switch: PI_LENS_BUS_PUBLISH=0 disables publishing", () => {
 			process.env.PI_LENS_BUS_PUBLISH = "0";
 			_resetBusPublishForTests();

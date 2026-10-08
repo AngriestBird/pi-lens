@@ -2383,6 +2383,23 @@ export class RuntimeCoordinator {
 		);
 	}
 
+	/** Return the ownership identity of a queued format record for bus events. */
+	deferredFormatIdentity(filePath: string):
+		| {
+				ownerSessionId: string | undefined;
+				turnIndex: number;
+				batchId: string;
+		  }
+		| undefined {
+		const record = this._pendingDeferredMutations.get(path.resolve(filePath));
+		if (!record || !record.kinds.has("format")) return undefined;
+		return {
+			ownerSessionId: record.ownerSessionId,
+			turnIndex: record.queuedTurnIndex,
+			batchId: record.queuedTurnId,
+		};
+	}
+
 	get pendingDeferredFormatCount(): number {
 		return this._pendingDeferredMutations.size;
 	}
