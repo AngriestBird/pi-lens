@@ -478,6 +478,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/sgconfig-scratch-bound.test.ts",
 	"tests/clients/shared-checkout-guard.test.ts",
 	"tests/clients/startup-overhead.test.ts",
+	// #3871: runner-location regex budget (depth-30 paths, 100K blank runs
+	// and tokens); a real event-loop occupancy witness, so it runs serialized.
+	"tests/clients/test-runner-location-regex-budget.test.ts",
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",

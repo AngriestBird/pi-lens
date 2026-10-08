@@ -85,6 +85,7 @@ import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-a
 import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
+import { hasAmbientPythonEnvironment } from "./python-environment.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -3681,10 +3682,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							targets.find(
 								(candidate) => candidate.testFile === result.value.file,
 							)?.testRoot ?? cwd;
+						// #3871: name the refused borrow only when the shell actually
+						// set an ambient Python environment.
+						const ambientNote =
+							result.value.runner === "pytest" && hasAmbientPythonEnvironment()
+								? "; ambient Python environments outside this checkout were not borrowed"
+								: "";
 						incrementDegradationCount({
 							kind: "turn-end-test-root-skipped",
 							subject: result.value.notRun,
-							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own; its tests were skipped rather than fetched through npx or run in another environment`,
+							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own${ambientNote}; its tests were skipped rather than fetched through npx or run in another environment`,
 						});
 						dbg(
 							`turn_end: skipped ${toRunnerDisplayPath(cwd, result.value.file)}: ${result.value.notRun} in ${toRunnerDisplayPath(cwd, skippedRoot)}`,

@@ -118,6 +118,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"#3403 measures real scratch-tree filesystem latency; fake timers cannot observe cold CI disk work",
 	},
+	// 2026-10-08 (#3871 r2, moved to its own file in r3): depth-30 runner
+	// paths, 100K blank runs and 100K tokens are real event-loop occupancy
+	// witnesses for super-linear location-regex backtracking.
+	"elapsed-time-assertion:clients/test-runner-location-regex-budget.test.ts": {
+		detector: "elapsed-time-assertion",
+		reason:
+			"the defect is wall-clock only (super-linear runner-location regex backtracking); a fake clock measures nothing",
+	},
 	// 2026-09-06 (#2603, was #2591 review round 2, F1): the defect is 2^N regex
 	// backtracking through detectPythonEnvironment — the ANSWER was always
 	// right, only the time was wrong, so no non-clock assertion separates
