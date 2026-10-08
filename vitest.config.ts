@@ -20,6 +20,8 @@ process.env.PI_LENS_TMP_HYGIENE_RUN_ID ??= `${Date.now()}-${process.pid}`;
 // directory before any worker forks (they inherit `process.env`), so the 454
 // raw `mkdtemp(os.tmpdir())` callers and the product agree. Same directory,
 // never a relocation (AGENTS.md: do not move the harness home via TEMP).
+// SonarCloud typescript:S5443 flags the two assignments below; this file is
+// classified as a test file in .sonarcloud.properties for that reason.
 if (process.platform === "win32") {
 	try {
 		const longTmp = fs.realpathSync.native(os.tmpdir());

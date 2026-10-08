@@ -88,7 +88,6 @@ CONSTANTS
                  \*             (delivery-holds.ts `stillReportedParked`)
                  \* "unchecked" every parked item returns
     Fence,       \* "checked"   Settle skips a replaced session (planDeliveryHolds `live`)
-                 \* "unchecked" Settle runs against the new session's stores
                  \* "reachedOnly" the skip guards the held branch only, so
                  \*             onDelivered still runs after a replacement
                  \* "heldOnly"  the skip guards the delivered branch only, so
@@ -356,9 +355,8 @@ Settle(s) ==
     /\ phase[s] = "capped"
     /\ LET trueLive == hgen[s] = gen
            \* The hold's callback runs: the session is current, or the fence is
-           \* absent ("unchecked") or absent for the delivered branch only.
+           \* absent for one branch only ("reachedOnly", "heldOnly").
            runK(k) == \/ trueLive
-                     \/ Fence = "unchecked"
                      \/ (Fence = "reachedOnly" /\ Reach(s, k))
                      \/ (Fence = "heldOnly" /\ ~Reach(s, k))
            inPlan(i) == \E k \in Parts(s) : ItemAt(s, k) = i
