@@ -565,6 +565,8 @@ export class TreeSitterClient {
 	private queryBatchCache = new BoundedFifoMap<string, QueryBatch | null>(
 		TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES,
 	);
+	/** Concurrent callers share one native batch build per cache key. */
+	private queryBatchBuilds = new Map<string, Promise<QueryBatch | null>>();
 	/** Raw and batch cache keys represented by each bounded entry (#3834). */
 	private queryBatchInputs = new Map<string, Set<string>>();
 	private queryCacheCap(): number {
@@ -2288,6 +2290,35 @@ export class TreeSitterClient {
 	 * pattern-index → rule map. Cached per language + rule-set identity.
 	 */
 	private async compileQueryBatch(
+		queryDefs: TreeSitterQuery[],
+		languageId: string,
+	): Promise<QueryBatch | null> {
+		const identity = crypto
+			.createHash("sha256")
+			.update(JSON.stringify(queryDefs))
+			.digest("hex");
+		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const cached = this.queryBatchCache.get(cacheKey);
+		if (cached !== undefined) {
+			this.queryBatchCache.delete(cacheKey);
+			this.queryBatchCache.set(cacheKey, cached);
+			return cached;
+		}
+		const inFlight = this.queryBatchBuilds.get(cacheKey);
+		if (inFlight) return inFlight;
+
+		const build = this.compileQueryBatchOnce(queryDefs, languageId);
+		this.queryBatchBuilds.set(cacheKey, build);
+		try {
+			return await build;
+		} finally {
+			if (this.queryBatchBuilds.get(cacheKey) === build) {
+				this.queryBatchBuilds.delete(cacheKey);
+			}
+		}
+	}
+
+	private async compileQueryBatchOnce(
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
 	): Promise<QueryBatch | null> {
