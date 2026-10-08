@@ -1414,7 +1414,7 @@ describe("#3926 the Windows summary stays honest when the tree is unavailable", 
 // policy is established by the same-run, same-second sibling successes in
 // INVESTIGATION.md. #4167: this is intentionally a real-spawn wall-clock
 // budget; Windows Git process startup makes the measured p95 much slower than
-// Linux, so the per-test budget is 4x the Windows p95 rather than a fake Git
+// Linux, so the per-test budget is 4x the worst of 10 measured Windows runs (15.2 s) rather than a fake Git
 // seam or a weakened assertion.
 describe("#3926 the merge ref disappears but the captured commit resolves", () => {
 	const fixture = setupTestEnvironment("pi-lens-3926-git-");
