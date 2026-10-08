@@ -459,6 +459,10 @@ export const wallClockBudgetInclude = [
 	// #3510: a real sibling node process with its own pid shares the project
 	// snapshot cache dir (flake-shape admission).
 	"tests/clients/project-snapshot-cross-process.test.ts",
+	// #4148: pytest traceback and go.mod regex budgets (100K blank lines, a
+	// 100K-character rule); a real event-loop occupancy witness, so it runs
+	// serialized.
+	"tests/clients/pytest-gomod-regex-budget.test.ts",
 	"tests/clients/read-expansion-enrichment.test.ts",
 	// #2622: adjacent read-guard stars previously produced exponential regex
 	// backtracking against a long non-matching path; the test measures the real
