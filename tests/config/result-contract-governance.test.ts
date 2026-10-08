@@ -51,7 +51,17 @@ describe("result contract across registered tool surfaces", () => {
 	let pi: ReturnType<typeof createPiMock>;
 
 	beforeAll(async () => {
-		cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-result-contract-"));
+		// #4019: canonicalize the fixture cwd. `os.tmpdir()` is a symlink on macOS
+		// (`/tmp` -> `/private/tmp`), and the two surfaces resolve the same directory
+		// through different spellings: the pi surface joins the `ctx.cwd` STRING, while
+		// the MCP child's OS cwd (and the pi extension's own `getProjectRoot()`) is the
+		// realpath. `toProjectRelativePath` cannot relativize across that mismatch on
+		// POSIX today (its canonical rescue is win32-only), so pi rendered the file
+		// absolute while MCP rendered it relative. Realpath makes both surfaces observe
+		// one spelling; this is a fixture artifact, and the parity assertion is kept.
+		cwd = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-result-contract-")),
+		);
 		const fixtureRoot = path.resolve("tests/fixtures");
 		fs.copyFileSync(
 			path.join(fixtureRoot, "tool-smoke/ast-grep-baseline/bad.ts"),
