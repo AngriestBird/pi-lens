@@ -418,7 +418,12 @@ the surface they bite; each block loads only when its trigger applies.
 ### a test double, ratchet or sweep
 
 7. **Vacuous test:** prove the real entry point and real fixture arm. A skip is
-   visible, a mock has the required fields, and the test fails pre-fix.
+   visible, a mock has the required fields, and the test fails pre-fix. A hook
+   handler that swallows its own throw (`handleToolCall` returns `undefined`
+   and records `tool-call-handler-throw`) reads a crash as the verdict under
+   test: call it through `runHandlerExpectingNoThrow`
+   (`tests/support/handler-verdict.ts`; the pi mock does it for `tool_call`
+   hooks), enforced by `tests/config/handler-verdict-sweep.test.ts` (#4182).
 
 8. **Name heuristic:** a filename skip has an observable count and a content
    escape hatch; never silently drop a real file.
@@ -763,6 +768,12 @@ the surface they bite; each block loads only when its trigger applies.
 
 ### Session, telemetry, and delivery
 
+- Registry root ownership (#3849): each holder's record in a pid entry's
+  `projectRootHolders` lists exactly the roots THAT holder registered (`host`
+  for `registerInstance`, a per-activation id for a declined secondary). Only
+  its own `deregisterInstanceRoot`, whole-entry removal, or cap eviction ends
+  a record; a root stays while any record lists it. No anonymous counts; one
+  settle (`settleRootHolders`) for every writer; `getInstanceRoots` reads.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.

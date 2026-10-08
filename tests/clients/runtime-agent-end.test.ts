@@ -77,6 +77,7 @@ import {
 	formatFile as runFormatter,
 	getFormattersForFile,
 } from "../../clients/formatters.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 describe("runtime-agent-end deferred formatting", () => {
 	const cleanupAgentEndTemps = async () => {
@@ -98,23 +99,25 @@ describe("runtime-agent-end deferred formatting", () => {
 			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
-			await handleToolCall({
-				event: {
-					toolName: "read",
-					toolCallId: "blocked-read",
-					input: { path: filePath },
-				},
-				ctx: { cwd: env.tmpDir },
-				lensEnabled: true,
-				getFlag: (name: string) =>
-					name === "no-lsp" || name === "no-complexity",
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-			} as never);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "read",
+						toolCallId: "blocked-read",
+						input: { path: filePath },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: (name: string) =>
+						name === "no-lsp" || name === "no-complexity",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as never),
+			);
 			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
 				expect.objectContaining({ provisional: true }),
 			]);
@@ -1908,22 +1911,24 @@ describe("runtime-agent-end deferred formatting", () => {
 				runtime.projectRoot = env.tmpDir;
 				const toolCallId = "call-origin-mismatch";
 
-				await handleToolCall({
-					event: {
-						toolCallId,
-						toolName: "write",
-						input: { path: "src/app.ts", content: "const x=1" },
-					},
-					ctx: { cwd: worktreeRoot },
-					lensEnabled: true,
-					getFlag: (name: string) => name === "no-lsp",
-					dbg: () => {},
-					runtime,
-					cacheManager: new CacheManager(false),
-					ensureLSPConfigInitialized: async () => {},
-					updateLspStatus: () => {},
-					resetLSPService: () => {},
-				} as any);
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolCallId,
+							toolName: "write",
+							input: { path: "src/app.ts", content: "const x=1" },
+						},
+						ctx: { cwd: worktreeRoot },
+						lensEnabled: true,
+						getFlag: (name: string) => name === "no-lsp",
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as any),
+				);
 
 				await handleToolResult({
 					event: {
