@@ -900,7 +900,9 @@ export type DegradationKind =
 	 * their blockers. Subject `overwrite`: a baseline with the same key was
 	 * replaced (a host with no distinct tool-call ids, or a reused id). Subject
 	 * `cap`: more baselines were pending than the store keeps, so the oldest
-	 * went. Counted.
+	 * went. Subject `unsettled`: a baseline outlived its turn with no
+	 * `tool_result` (the call was blocked or aborted before it ran) and was
+	 * retired; a result that still arrives loses its authorship. Counted.
 	 */
 	| "opaque-baseline-lost"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */

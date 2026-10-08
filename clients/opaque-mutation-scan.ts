@@ -101,18 +101,16 @@ export interface PendingOpaqueBaseline {
 	strategy: "git" | "stat-diff";
 	stats?: FileStatsSnapshot;
 	statsUnknownReason?: OpaqueUnknownReason;
-	/**
-	 * Paths the command's own text names as written (`normalizeMapKey` keys,
-	 * from `extractWrittenPathsFromCommand`). A parallel sibling's recovery
-	 * window contains these writes, so it subtracts them instead of claiming
-	 * them as opaque (#4137).
-	 */
-	recognized?: readonly string[];
 }
 
-/** A taken baseline plus the paths overlapping sibling calls recognized. */
-export interface TakenOpaqueBaseline extends PendingOpaqueBaseline {
-	siblingRecognized: ReadonlySet<string>;
+/**
+ * The turn a baseline was recorded in: the session's turn key and the
+ * coordinator's liveness test for it (`RuntimeCoordinator.turnKey` and
+ * `isLiveTurnKey`, #3613), so a concurrent session's turn stays live.
+ */
+export interface OpaqueBaselineTurn {
+	key: number;
+	isLive: (key: number) => boolean;
 }
 
 export interface CaptureOptions {
@@ -306,19 +304,11 @@ export function opaqueBaselineSlot(
 }
 
 /**
- * Upper bound on baselines awaiting their `tool_result`, and on the settled
- * claims kept for them. A call whose result never arrives (an aborted turn)
- * leaves its entry behind until the session reset, so per-call keying needs the
- * bound a one-entry slot had by construction. Real batches are a handful of
- * calls; a codemode fan-out of dozens still fits.
+ * Upper bound on baselines awaiting their `tool_result`, so per-call keying
+ * keeps the bound a one-entry slot had by construction. Real batches are a
+ * handful of calls; a codemode fan-out of dozens still fits.
  */
 export const OPAQUE_BASELINE_PENDING_CAP = 64;
-
-interface SettledClaim {
-	slot: string;
-	takenAt: number;
-	recognized: readonly string[];
-}
 
 /**
  * Baselines awaiting their `tool_result`, one entry per bash call (#4137).
@@ -330,39 +320,45 @@ interface SettledClaim {
  * gives each call its own entry; a host that supplies no id keeps the shared
  * slot, the only identity it offers.
  *
- * A call's recovery window also contains its siblings' writes, so a call could
- * claim a sibling's recognized write as opaque (non-autonomous) and the
- * sibling's own authored dispatch would then be skipped as already analysed.
- * The store therefore hands each taken baseline the recognized paths of every
- * call whose lifetime overlapped it: still-pending siblings, and settled ones
- * taken at or after this call's start.
+ * A call's recovery window also holds its siblings' writes, which it dispatches
+ * as opaque; the pipeline dedupe ranks authority, so the sibling's own authored
+ * dispatch of the same bytes still runs (`claimPipelineDispatch`).
  */
 export class OpaqueBaselineStore {
 	private readonly pending = new BoundedFifoMap<
 		string,
-		{ slot: string; state: PendingOpaqueBaseline }
+		{ state: PendingOpaqueBaseline; turn?: OpaqueBaselineTurn }
 	>(OPAQUE_BASELINE_PENDING_CAP);
-	private readonly settled: SettledClaim[] = [];
 
 	private static keyOf(slot: string, callId: string | undefined): string {
 		return callId === undefined ? slot : `${slot}#${callId}`;
 	}
 
 	/**
-	 * Store `baseline` for a call. A baseline this displaces is lost: its
+	 * Store `state` for a call. A baseline this displaces is lost: its
 	 * `tool_result` will find nothing and report `partial-recognition-no-baseline`,
 	 * withholding the blocker section of a write the agent authored. That loss is
 	 * counted in the degradation ledger, one entry per cause with a running count,
 	 * never one row per occurrence (#4137).
+	 *
+	 * First, an entry whose turn is over is retired: pi sends no `tool_result`
+	 * for a call a `tool_call` handler blocked or Escape aborted before it ran,
+	 * and on a non-git project the entry holds a whole-tree stat snapshot.
 	 */
 	record(
 		slot: string,
 		callId: string | undefined,
 		state: PendingOpaqueBaseline,
+		turn?: OpaqueBaselineTurn,
 	): void {
+		for (const [staleKey, entry] of this.pending.entriesArray())
+			if (entry.turn && !entry.turn.isLive(entry.turn.key)) {
+				this.pending.delete(staleKey);
+				recordBaselineLoss("unsettled");
+			}
 		const key = OpaqueBaselineStore.keyOf(slot, callId);
 		const overwrote = this.pending.delete(key);
-		const evicted = this.pending.set(key, { slot, state });
+		const evicted = this.pending.set(key, { state, turn });
 		if (overwrote) recordBaselineLoss("overwrite");
 		if (evicted.length > 0) recordBaselineLoss("cap");
 	}
@@ -370,45 +366,32 @@ export class OpaqueBaselineStore {
 	take(
 		slot: string,
 		callId: string | undefined,
-	): TakenOpaqueBaseline | undefined {
+	): PendingOpaqueBaseline | undefined {
 		const key = OpaqueBaselineStore.keyOf(slot, callId);
 		const entry = this.pending.get(key);
-		if (!entry) return undefined;
 		this.pending.delete(key);
-		const siblingRecognized = new Set<string>();
-		for (const other of this.pending.values())
-			if (other.slot === slot)
-				for (const p of other.state.recognized ?? []) siblingRecognized.add(p);
-		for (const claim of this.settled)
-			if (claim.slot === slot && claim.takenAt >= entry.state.startedAt)
-				for (const p of claim.recognized) siblingRecognized.add(p);
-		if (entry.state.recognized?.length) {
-			this.settled.push({
-				slot,
-				takenAt: Date.now(),
-				recognized: entry.state.recognized,
-			});
-			if (this.settled.length > OPAQUE_BASELINE_PENDING_CAP)
-				this.settled.shift();
-		}
-		return { ...entry.state, siblingRecognized };
+		return entry?.state;
 	}
 
 	/** Session-boundary clear - unconsumed baselines are unreachable after reset. */
 	takeAllForTest(): void {
 		this.pending.clear();
-		this.settled.length = 0;
 	}
 }
 
-function recordBaselineLoss(cause: "overwrite" | "cap"): void {
+const BASELINE_LOSS_REASONS = {
+	overwrite:
+		"a pending bash baseline was replaced before its tool_result took it; that call reports partial-recognition-no-baseline and withholds blockers (host without distinct tool-call ids, or a reused id)",
+	cap: `more than ${OPAQUE_BASELINE_PENDING_CAP} bash baselines awaited a tool_result; the oldest was dropped`,
+	unsettled:
+		"a bash baseline outlived its turn with no tool_result (the call was blocked or aborted before it ran) and was retired; a result that still arrives reports partial-recognition-no-baseline",
+} as const;
+
+function recordBaselineLoss(cause: keyof typeof BASELINE_LOSS_REASONS): void {
 	incrementDegradationCount({
 		kind: "opaque-baseline-lost",
 		subject: cause,
-		reason:
-			cause === "overwrite"
-				? "a pending bash baseline was replaced before its tool_result took it; that call reports partial-recognition-no-baseline and withholds blockers (host without distinct tool-call ids, or a reused id)"
-				: `more than ${OPAQUE_BASELINE_PENDING_CAP} bash baselines awaited a tool_result; the oldest was dropped`,
+		reason: BASELINE_LOSS_REASONS[cause],
 	});
 }
 

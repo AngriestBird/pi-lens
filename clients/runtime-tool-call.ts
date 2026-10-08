@@ -8,9 +8,8 @@ import { isPathIgnoredByProject } from "./file-utils.js";
 import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
-import { extractWrittenPathsFromCommand } from "./bash-file-access.js";
 import { logLatency } from "./latency-logger.js";
-import { normalizeMapKey, toPosix } from "./path-utils.js";
+import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
@@ -611,18 +610,15 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// replacing it must yield a no-pending-snapshot UNKNOWN for us -
 				// never a diff against another session's baseline. One entry per
 				// call (#4137): parallel bash calls all record before the first
-				// result, and each carries the paths its text names so a sibling's
-				// recovery does not claim them as opaque. The root is the one
-				// tool_result parses against (`workspaceRoot`).
+				// result. The turn lets the store retire the entry of a call that
+				// never gets a result (#3613 F2: this session's own turn).
 				getOpaqueBaselineStore().record(
 					baselineSlot,
 					resolveToolCallCorrelationId(event),
+					baseline,
 					{
-						...baseline,
-						recognized: extractWrittenPathsFromCommand(
-							commandInput.command,
-							runtime.projectRoot || process.cwd(),
-						).map((p) => normalizeMapKey(path.resolve(p))),
+						key: runtime.turnKey(deps.sessionId),
+						isLive: (key) => runtime.isLiveTurnKey(key),
 					},
 				);
 				logLatency({

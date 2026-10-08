@@ -963,8 +963,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
-		state:
-			"OpaqueBaselineStore pending map and settled claims, gitRepoMemo, gitToplevelMemo",
+		state: "OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:

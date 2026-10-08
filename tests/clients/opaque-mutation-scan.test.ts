@@ -57,6 +57,7 @@ import {
 	OpaqueBaselineStore,
 	OPAQUE_SCAN_MAX_FILES,
 	recoverOpaqueChangesViaGit,
+	resetOpaqueMutationState,
 } from "../../clients/opaque-mutation-scan.js";
 import { extractWrittenPathsFromCommand } from "../../clients/bash-file-access.js";
 import {
@@ -255,65 +256,6 @@ describe("OpaqueBaselineStore", () => {
 		expect(lostBaselines()).toEqual([
 			{ subject: "cap", reason: expect.stringContaining("(count: 1)") },
 		]);
-	});
-
-	it("hands a call the recognized paths of overlapping siblings only", () => {
-		vi.useFakeTimers({ toFake: ["Date"] });
-		try {
-			const store = new OpaqueBaselineStore();
-			const at = (startedAt: number, recognized: string[]) => ({
-				startedAt,
-				strategy: "git" as const,
-				recognized,
-			});
-			vi.setSystemTime(1000);
-			store.record("/p:1", "early", at(1000, ["/p/early.ts"]));
-			vi.setSystemTime(2000);
-			expect(store.take("/p:1", "early")?.siblingRecognized.size).toBe(0);
-			// `early` settled before `late` started: no overlap, not subtracted.
-			vi.setSystemTime(3000);
-			store.record("/p:1", "late", at(3000, ["/p/late.ts"]));
-			store.record("/p:1", "other", at(3000, ["/p/other.ts"]));
-			store.record("/q:1", "elsewhere", at(3000, ["/q/else.ts"]));
-			vi.setSystemTime(4000);
-			// `other` is still pending and `elsewhere` is another slot.
-			expect([
-				...(store.take("/p:1", "late")?.siblingRecognized ?? []),
-			]).toEqual(["/p/other.ts"]);
-			vi.setSystemTime(5000);
-			// `late` settled while `other` was in flight: `other` still sees its writes.
-			expect([
-				...(store.take("/p:1", "other")?.siblingRecognized ?? []),
-			]).toEqual(["/p/late.ts"]);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	// A session of sequential bash writes settles a claim per call; the cap is the
-	// only thing that keeps the list from growing for the life of the session.
-	it("keeps at most the cap of settled claims", () => {
-		vi.useFakeTimers({ toFake: ["Date"] });
-		try {
-			const store = new OpaqueBaselineStore();
-			const at = (recognized: string[]) => ({
-				startedAt: 1000,
-				strategy: "git" as const,
-				recognized,
-			});
-			vi.setSystemTime(1000);
-			store.record("/p:1", "long-running", at([]));
-			for (let i = 0; i <= OPAQUE_BASELINE_PENDING_CAP; i++) {
-				store.record("/p:1", `call-${i}`, at([`/p/${i}.ts`]));
-				store.take("/p:1", `call-${i}`);
-			}
-			const seen = store.take("/p:1", "long-running")?.siblingRecognized;
-			expect(seen?.size).toBe(OPAQUE_BASELINE_PENDING_CAP);
-			expect(seen?.has("/p/0.ts")).toBe(false);
-			expect(seen?.has(`/p/${OPAQUE_BASELINE_PENDING_CAP}.ts`)).toBe(true);
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 });
 
@@ -1167,13 +1109,72 @@ describe("parallel bash calls (#4137)", () => {
 		);
 		process.env.PILENS_DATA_DIR = dataDir;
 		resetDegradationLedger();
+		// The store is process-global: a case that leaves a call pending must
+		// not reach the next case's cap or loss counts.
+		resetOpaqueMutationState();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		delete process.env.PILENS_DATA_DIR;
 		removeTempDirSync(repoDir);
 		removeTempDirSync(dataDir);
+		(await pipelineMock()).mockResolvedValue(NO_BLOCKERS);
 	});
+
+	const NO_BLOCKERS = {
+		output: "✓ no blockers",
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+	};
+
+	async function pipelineMock() {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		return vi.mocked(runPipeline);
+	}
+
+	/**
+	 * The pipeline's own authority rule, at its process boundary: a run with
+	 * authorship returns the blocker and its inline record; a run without it
+	 * withholds both (#3226), which makes the handler clear the file's record.
+	 */
+	async function mockBlockingPipeline() {
+		const stop = "🔴 STOP — 1 issue(s) must be fixed:\n  L2: debugger";
+		(await pipelineMock()).mockImplementation(async (ctx) =>
+			ctx.allowAutonomousWriters === false
+				? NO_BLOCKERS
+				: {
+						output: stop,
+						hasBlockers: true,
+						isError: false,
+						fileModified: false,
+						inlineBlockerSummary: stop,
+						inlineBlockerSources: ["biome"],
+						inlineBlockerLines: [2],
+					},
+		);
+	}
+
+	function newRuntime(sessionId: string): RuntimeCoordinator {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = repoDir;
+		runtime.setTelemetryIdentity({ sessionId });
+		return runtime;
+	}
+
+	/** Each dispatch as [file, authored], in order. */
+	async function dispatchLog() {
+		return (await pipelineMock()).mock.calls.map(([ctx]) => [
+			path.basename(String(ctx?.filePath)),
+			ctx?.allowAutonomousWriters === true,
+		]);
+	}
+
+	// A command the extractor cannot read. The case writes its bytes itself,
+	// standing in for the child process as the opaque cases above do.
+	const opaqueCommand = () => `node "${path.join(repoDir, "gen.cjs")}"`;
+	const append = (file: string, text: string) =>
+		fs.appendFileSync(path.join(repoDir, file), text);
 
 	function callDeps(
 		runtime: RuntimeCoordinator,
@@ -1202,12 +1203,14 @@ describe("parallel bash calls (#4137)", () => {
 		runtime: RuntimeCoordinator,
 		command: string,
 		toolCallId: string | undefined,
+		isError = false,
 	) {
 		return {
 			event: {
 				toolName: "bash",
 				input: { command },
 				content: [{ type: "text", text: "(no output)" }],
+				isError,
 				...(toolCallId === undefined ? {} : { toolCallId }),
 			},
 			getFlag: () => false,
@@ -1295,39 +1298,10 @@ describe("parallel bash calls (#4137)", () => {
 		expect(lostBaselines()).toEqual([]);
 	});
 
-	// #2060's rule for a filter that is invisible in production otherwise: the
-	// siblings' recognized writes a call leaves out of its recovery are counted.
-	it("records how many sibling writes each call left out of its recovery", async () => {
-		const previousTestMode = process.env.PI_LENS_TEST_MODE;
-		process.env.PI_LENS_TEST_MODE = "0";
-		try {
-			const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
-			const beforeLines = new Set(
-				fs.existsSync(latencyPath)
-					? fs.readFileSync(latencyPath, "utf8").split("\n")
-					: [],
-			);
-			await runBatch(["par-1", "par-2", "par-3"], "sequential");
-			await flushLatencyLog();
-			const records = fs
-				.readFileSync(latencyPath, "utf8")
-				.split("\n")
-				.filter(
-					(l) =>
-						l.trim() &&
-						!beforeLines.has(l) &&
-						l.includes("opaque_mutation_sibling_excluded"),
-				);
-			expect(records).toHaveLength(3);
-			for (const record of records) expect(record).toContain("excluded:2");
-		} finally {
-			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
-			else process.env.PI_LENS_TEST_MODE = previousTestMode;
-		}
-	});
-
 	// A call with no recognized write keeps its own opaque recovery under
-	// parallelism: the siblings' writes come out of it, its own stays.
+	// parallelism. Its window also holds the recognized sibling's write, which it
+	// dispatches without authorship; the sibling's own dispatch of the same bytes
+	// still runs with authorship (the dedupe ranks authority).
 	it("an opaque sibling still recovers its own writes", async () => {
 		const runtime = new RuntimeCoordinator();
 		runtime.projectRoot = repoDir;
@@ -1354,9 +1328,164 @@ describe("parallel bash calls (#4137)", () => {
 				path.basename(String(ctx?.filePath)),
 				ctx?.allowAutonomousWriters === true,
 			]);
-		expect(dispatches).toEqual([
+		// The opaque call's two paths come in git's listing order.
+		expect(dispatches.slice(0, 2).sort()).toEqual([
 			["opaque-out.ts", false],
+			["par-a.ts", false],
+		]);
+		expect(dispatches.slice(2)).toEqual([["par-a.ts", true]]);
+	});
+
+	// REVIEW_4159 F1: pi fires no tool_result for a call a tool_call handler
+	// blocked (pi-lens's own git guard, a later extension's policy gate) or one
+	// Escape aborted before it started. Round 1 kept such a call's named paths
+	// out of every later opaque recovery until the session reset: real pi
+	// dispatched 0 of 2 later writes, master 2 of 2.
+	it("dispatches every later opaque write to a path a blocked call named", async () => {
+		const runtime = newRuntime("blocked-namer");
+		(await pipelineMock()).mockClear();
+		await handleToolCall(
+			callDeps(runtime, "echo 'x' >> par-a.ts", "blocked-call"),
+		);
+		for (const id of ["opaque-1", "opaque-2", "opaque-3"]) {
+			await handleToolCall(callDeps(runtime, opaqueCommand(), id));
+			append("par-a.ts", `debugger; // ${id}\n`);
+			await handleToolResult(resultDeps(runtime, opaqueCommand(), id));
+		}
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", false],
+			["par-a.ts", false],
+			["par-a.ts", false],
+		]);
+	});
+
+	// REVIEW_4159 F2: round 1 left a path a sibling only NAMED out of a call's
+	// opaque recovery, whatever the sibling did with the path, so the opaque
+	// write's bytes were never analysed.
+	it.each([
+		{
+			cell: "the write landed after the sibling's dispatch (P1)",
+			sibling: "echo 'x' >> par-a.ts",
+			siblingWrites: true,
+			siblingFails: false,
+			expected: [
+				["par-a.ts", true],
+				["par-a.ts", false],
+			],
+		},
+		{
+			cell: "the sibling named the path and wrote nothing (P2)",
+			sibling: "[ -f nope ] && echo 'x' >> par-a.ts; true",
+			siblingWrites: false,
+			siblingFails: false,
+			expected: [["par-a.ts", false]],
+		},
+		{
+			cell: "the sibling failed (P2e)",
+			sibling: "false && echo 'x' >> par-a.ts",
+			siblingWrites: false,
+			siblingFails: true,
+			expected: [["par-a.ts", false]],
+		},
+	])(
+		"dispatches an opaque write to a path a sibling named: $cell",
+		async ({ sibling, siblingWrites, siblingFails, expected }) => {
+			const runtime = newRuntime("named-sibling");
+			(await pipelineMock()).mockClear();
+			await handleToolCall(callDeps(runtime, sibling, "sibling"));
+			await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+			if (siblingWrites) append("par-a.ts", "x\n");
+			await handleToolResult(
+				resultDeps(runtime, sibling, "sibling", siblingFails),
+			);
+			append("par-a.ts", "debugger;\n");
+			await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+			expect(await dispatchLog()).toEqual(expected);
+		},
+	);
+
+	// The dedupe ranks authority: an authored claim proceeds past an opaque
+	// analysis of the same bytes. Sequential calls reach it too, when a
+	// recognized write leaves the bytes an opaque run already analysed this turn.
+	it("dispatches with authorship a recognized write of bytes an opaque run analysed", async () => {
+		await mockBlockingPipeline();
+		const runtime = newRuntime("opaque-first");
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+		await handleToolCall(callDeps(runtime, "touch par-a.ts", "touch"));
+		const now = new Date();
+		fs.utimesSync(path.join(repoDir, "par-a.ts"), now, now);
+		const result = await handleToolResult(
+			resultDeps(runtime, "touch par-a.ts", "touch"),
+		);
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", false],
 			["par-a.ts", true],
 		]);
+		expect(JSON.stringify(result)).toContain("STOP");
+	});
+
+	// The other direction: an authored analysis satisfies a later opaque claim on
+	// the same bytes. Were the opaque run to proceed, its result (no inline
+	// summary, #3226) would clear the authored blocker record before turn end.
+	it("skips an opaque claim on bytes an authored dispatch analysed, keeping its blocker", async () => {
+		await mockBlockingPipeline();
+		const runtime = newRuntime("authored-first");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+		expect(await dispatchLog()).toEqual([["par-a.ts", true]]);
+		expect(
+			runtime
+				.getInlineBlockersSnapshot()
+				.map((record) => path.basename(record.filePath)),
+		).toEqual(["par-a.ts"]);
+	});
+
+	// A blocked call's entry has no reader. It holds a whole-tree stat snapshot
+	// on a non-git project, so it must not sit until the session reset.
+	it("retires a pending baseline once its turn is over, counted", async () => {
+		const runtime = newRuntime("retire");
+		(await pipelineMock()).mockClear();
+		runtime.beginTurn();
+		const blocked = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, blocked, "blocked-call"));
+		runtime.beginTurn();
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "next-turn"));
+		expect(lostBaselines()).toEqual([
+			{ subject: "unsettled", reason: expect.stringContaining("(count: 1)") },
+		]);
+		// Gone from the store: a result that did arrive now finds no baseline.
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, blocked, "blocked-call"));
+		expect(await dispatchLog()).toEqual([["par-a.ts", false]]);
+	});
+
+	// #3613: a concurrent secondary (a subagent in this process) shares the
+	// coordinator, so its bash calls land in the primary's slot. The primary's
+	// next turn must not retire a subagent call that is still running.
+	it("keeps a concurrent session's pending baseline across the primary's turn", async () => {
+		const runtime = newRuntime("primary");
+		(await pipelineMock()).mockClear();
+		runtime.beginTurn();
+		runtime.beginTurn("subagent");
+		const subagentWrite = "echo 'debugger;' >> par-b.ts";
+		await handleToolCall({
+			...callDeps(runtime, subagentWrite, "subagent-call"),
+			sessionId: "subagent",
+		});
+		runtime.beginTurn();
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "primary-call"));
+		append("par-b.ts", "debugger;\n");
+		await handleToolResult({
+			...resultDeps(runtime, subagentWrite, "subagent-call"),
+			sessionId: "subagent",
+		});
+		expect(await dispatchLog()).toEqual([["par-b.ts", true]]);
+		expect(lostBaselines()).toEqual([]);
 	});
 });

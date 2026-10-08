@@ -988,7 +988,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.resolve(filePath)`, the expression every sibling method uses.
 		"clients/runtime-coordinator.ts": 29,
 		"clients/runtime-session.ts": 15,
-		"clients/runtime-tool-call.ts": 22,
+		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
+		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
+		"clients/runtime-tool-call.ts": 21,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		"clients/runtime-tool-result.ts": 19,
