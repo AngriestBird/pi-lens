@@ -10,6 +10,7 @@ import {
 	type CaptureOptions,
 	diffFileContent,
 	getOpaqueBaselineStore,
+	opaqueBaselineSlot,
 	recoverOpaqueChangesViaGit,
 } from "./opaque-mutation-scan.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -1508,7 +1509,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const scanRoot = workspaceRoot;
 			const started = Date.now();
 			const pending = getOpaqueBaselineStore().take(
-				`${normalizeMapKey(path.resolve(scanRoot))}:${runtime.sessionGeneration}`,
+				opaqueBaselineSlot(scanRoot, runtime.sessionGeneration),
+				toolCallId,
 			);
 			let unknownReason: string | undefined;
 			if (!pending && recognized.length > 0) {
@@ -1591,6 +1593,24 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					recognizedWritten.map((p) => normalizeMapKey(path.resolve(p))),
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
+			}
+			// #4137: a parallel sibling's recognized write falls inside this call's
+			// recovery window. Claiming it as opaque would dispatch it without
+			// autonomous rights first, and the sibling's own authored dispatch would
+			// then be skipped as already analysed.
+			if (opaquePaths.length > 0 && pending?.siblingRecognized.size) {
+				const before = opaquePaths.length;
+				opaquePaths = opaquePaths.filter(
+					(p) => !pending.siblingRecognized.has(p),
+				);
+				if (opaquePaths.length < before)
+					logLatency({
+						type: "phase",
+						phase: "opaque_mutation_sibling_excluded",
+						filePath: command.slice(0, 80),
+						durationMs: Date.now() - started,
+						result: `excluded:${before - opaquePaths.length}`,
+					});
 			}
 			if (observedChangedKeys) {
 				recognizedAuthored = recognizedWritten.filter((file) =>

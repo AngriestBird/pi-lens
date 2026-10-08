@@ -40,6 +40,7 @@ import * as path from "node:path";
 import { collectSourceFilesWithBudgetAsync } from "./source-filter.js";
 import { createHash } from "node:crypto";
 
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -99,6 +100,18 @@ export interface PendingOpaqueBaseline {
 	strategy: "git" | "stat-diff";
 	stats?: FileStatsSnapshot;
 	statsUnknownReason?: OpaqueUnknownReason;
+	/**
+	 * Paths the command's own text names as written (`normalizeMapKey` keys,
+	 * from `extractWrittenPathsFromCommand`). A parallel sibling's recovery
+	 * window contains these writes, so it subtracts them instead of claiming
+	 * them as opaque (#4137).
+	 */
+	recognized?: readonly string[];
+}
+
+/** A taken baseline plus the paths overlapping sibling calls recognized. */
+export interface TakenOpaqueBaseline extends PendingOpaqueBaseline {
+	siblingRecognized: ReadonlySet<string>;
 }
 
 export interface CaptureOptions {
@@ -278,29 +291,139 @@ export function diffFileContent(
 	return changed;
 }
 
+/**
+ * The session-stamped slot (`<cwd>:<generation>`) a baseline lives in, derived
+ * once for the `tool_call` record and the `tool_result` take (shape 19). The
+ * generation keeps a concurrent-secondary session (#473) from consuming another
+ * session's baseline.
+ */
+export function opaqueBaselineSlot(
+	scanRoot: string,
+	sessionGeneration: number,
+): string {
+	return `${normalizeMapKey(path.resolve(scanRoot))}:${sessionGeneration}`;
+}
+
+/**
+ * Upper bound on baselines awaiting their `tool_result`, and on the settled
+ * claims kept for them. A call whose result never arrives (an aborted turn)
+ * leaves its entry behind until the session reset, so per-call keying needs the
+ * bound a one-entry slot had by construction. Real batches are a handful of
+ * calls; a codemode fan-out of dozens still fits.
+ */
+export const OPAQUE_BASELINE_PENDING_CAP = 64;
+
+interface SettledClaim {
+	slot: string;
+	takenAt: number;
+	recognized: readonly string[];
+}
+
+/**
+ * Baselines awaiting their `tool_result`, one entry per bash call (#4137).
+ *
+ * pi runs the bash calls of one assistant message in parallel (top level and
+ * codemode's nested `Promise.all` alike), so all N `tool_call`s precede the
+ * first `tool_result`. A slot per cwd kept the last baseline and N-1 calls lost
+ * the evidence that proves they authored their own writes. The tool-call id
+ * gives each call its own entry; a host that supplies no id keeps the shared
+ * slot, the only identity it offers.
+ *
+ * A call's recovery window also contains its siblings' writes, so a call could
+ * claim a sibling's recognized write as opaque (non-autonomous) and the
+ * sibling's own authored dispatch would then be skipped as already analysed.
+ * The store therefore hands each taken baseline the recognized paths of every
+ * call whose lifetime overlapped it: still-pending siblings, and settled ones
+ * taken at or after this call's start.
+ */
 export class OpaqueBaselineStore {
-	private readonly byCwd = new Map<string, PendingOpaqueBaseline>();
-	private evictions = 0;
+	private readonly pending = new Map<
+		string,
+		{ slot: string; baseline: PendingOpaqueBaseline }
+	>();
+	private settled: SettledClaim[] = [];
 
-	record(cwdKey: string, baseline: PendingOpaqueBaseline): void {
-		if (this.byCwd.has(cwdKey)) this.evictions += 1;
-		this.byCwd.set(cwdKey, baseline);
+	private static keyOf(slot: string, callId: string | undefined): string {
+		return callId === undefined ? slot : `${slot}#${callId}`;
 	}
 
-	take(cwdKey: string): PendingOpaqueBaseline | undefined {
-		const baseline = this.byCwd.get(cwdKey);
-		this.byCwd.delete(cwdKey);
-		return baseline;
+	/**
+	 * Store `baseline` for a call. A baseline this displaces is lost: its
+	 * `tool_result` will find nothing and report `partial-recognition-no-baseline`,
+	 * withholding the blocker section of a write the agent authored. That loss is
+	 * counted in the degradation ledger, one entry per cause with a running count,
+	 * never one row per occurrence (#4137).
+	 */
+	record(
+		slot: string,
+		callId: string | undefined,
+		baseline: PendingOpaqueBaseline,
+	): void {
+		const key = OpaqueBaselineStore.keyOf(slot, callId);
+		const overwrote = this.pending.delete(key);
+		this.pending.set(key, { slot, baseline });
+		if (overwrote) {
+			recordBaselineLoss("overwrite");
+		} else if (this.pending.size > OPAQUE_BASELINE_PENDING_CAP) {
+			const oldest = this.pending.keys().next();
+			if (!oldest.done) this.pending.delete(oldest.value);
+			recordBaselineLoss("cap");
+		}
 	}
 
-	get evictionCount(): number {
-		return this.evictions;
+	take(
+		slot: string,
+		callId: string | undefined,
+	): TakenOpaqueBaseline | undefined {
+		const key = OpaqueBaselineStore.keyOf(slot, callId);
+		const entry = this.pending.get(key);
+		if (!entry) return undefined;
+		this.pending.delete(key);
+		const siblingRecognized = new Set<string>();
+		for (const other of this.pending.values())
+			if (other.slot === slot)
+				for (const p of other.baseline.recognized ?? [])
+					siblingRecognized.add(p);
+		for (const claim of this.settled)
+			if (claim.slot === slot && claim.takenAt >= entry.baseline.startedAt)
+				for (const p of claim.recognized) siblingRecognized.add(p);
+		this.settleClaim(slot, entry.baseline.recognized);
+		return { ...entry.baseline, siblingRecognized };
+	}
+
+	/**
+	 * Keep a taken call's recognized paths only while an older call is still
+	 * pending: a call that started before this one ended can still see its
+	 * writes, and nothing else can.
+	 */
+	private settleClaim(slot: string, recognized: readonly string[] | undefined) {
+		const now = Date.now();
+		if (recognized?.length)
+			this.settled.push({ slot, takenAt: now, recognized });
+		let oldestPending = Number.POSITIVE_INFINITY;
+		for (const { baseline } of this.pending.values())
+			oldestPending = Math.min(oldestPending, baseline.startedAt);
+		this.settled = this.settled
+			.filter((claim) => claim.takenAt >= oldestPending)
+			.slice(-OPAQUE_BASELINE_PENDING_CAP);
 	}
 
 	/** Session-boundary clear - unconsumed baselines are unreachable after reset. */
 	takeAllForTest(): void {
-		this.byCwd.clear();
+		this.pending.clear();
+		this.settled = [];
 	}
+}
+
+function recordBaselineLoss(cause: "overwrite" | "cap"): void {
+	incrementDegradationCount({
+		kind: "opaque-baseline-lost",
+		subject: cause,
+		reason:
+			cause === "overwrite"
+				? "a pending bash baseline was replaced before its tool_result took it; that call reports partial-recognition-no-baseline and withholds blockers (host without distinct tool-call ids, or a reused id)"
+				: `more than ${OPAQUE_BASELINE_PENDING_CAP} bash baselines awaited a tool_result; the oldest was dropped`,
+	});
 }
 
 const globalStoreSymbol = Symbol.for("pi-lens:opaque-snapshot-store");

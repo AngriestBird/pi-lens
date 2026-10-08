@@ -53,15 +53,30 @@ import type { ProjectChangeEntry } from "../../clients/project-changes.js";
 import {
 	captureFileStats,
 	diffFileStats,
+	OPAQUE_BASELINE_PENDING_CAP,
 	OpaqueBaselineStore,
 	OPAQUE_SCAN_MAX_FILES,
 	recoverOpaqueChangesViaGit,
 } from "../../clients/opaque-mutation-scan.js";
 import { extractWrittenPathsFromCommand } from "../../clients/bash-file-access.js";
-import { normalizeMapKey } from "../../clients/path-utils.js";
+import {
+	normalizeFilePath,
+	normalizeMapKey,
+} from "../../clients/path-utils.js";
 import { removeTempDirSync } from "./test-utils.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 let tmpDir = "";
+
+function lostBaselines() {
+	return (
+		getDegradationSummary().find((g) => g.kind === "opaque-baseline-lost")
+			?.latestReasons ?? []
+	);
+}
 
 beforeEach(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opaque-scan-"));
@@ -192,14 +207,64 @@ describe("content-hash confirm on the stat-diff path (#2000)", () => {
 });
 
 describe("OpaqueBaselineStore", () => {
-	it("one slot per cwd: take consumes, replacement evicts with a count", () => {
+	// #4137: the pre-fix store kept one entry per cwd slot, so a second record
+	// replaced the first and `take` returned the sibling's baseline to the wrong
+	// call. Entries are per call now; only a host without ids shares the slot.
+	it("keeps one entry per tool-call id in a slot; take consumes", () => {
 		const store = new OpaqueBaselineStore();
-		store.record("/p", { startedAt: 1, strategy: "git" });
-		store.record("/p", { startedAt: 2, strategy: "git" });
-		expect(store.evictionCount).toBe(1);
-		const taken = store.take("/p");
-		expect(taken?.startedAt).toBe(2);
-		expect(store.take("/p")).toBeUndefined();
+		store.record("/p:1", "a", { startedAt: 1, strategy: "git" });
+		store.record("/p:1", "b", { startedAt: 2, strategy: "git" });
+		expect(store.take("/p:1", "a")?.startedAt).toBe(1);
+		expect(store.take("/p:1", "a")).toBeUndefined();
+		expect(store.take("/p:1", "b")?.startedAt).toBe(2);
+		expect(store.take("/p:1", "b")).toBeUndefined();
+	});
+
+	it("falls back to the shared slot for a host with no tool-call ids, counting the overwrite", () => {
+		resetDegradationLedger();
+		const store = new OpaqueBaselineStore();
+		store.record("/p:1", undefined, { startedAt: 1, strategy: "git" });
+		store.record("/p:1", undefined, { startedAt: 2, strategy: "git" });
+		store.record("/p:1", undefined, { startedAt: 3, strategy: "git" });
+		expect(store.take("/p:1", undefined)?.startedAt).toBe(3);
+		expect(store.take("/p:1", undefined)).toBeUndefined();
+		expect(lostBaselines()).toEqual([
+			{ subject: "overwrite", reason: expect.stringContaining("(count: 2)") },
+		]);
+	});
+
+	it("evicts the oldest pending baseline past the cap, counted", () => {
+		resetDegradationLedger();
+		const store = new OpaqueBaselineStore();
+		for (let i = 0; i <= OPAQUE_BASELINE_PENDING_CAP; i++)
+			store.record("/p:1", `call-${i}`, { startedAt: i, strategy: "git" });
+		expect(store.take("/p:1", "call-0")).toBeUndefined();
+		expect(store.take("/p:1", "call-1")?.startedAt).toBe(1);
+		expect(lostBaselines()).toEqual([
+			{ subject: "cap", reason: expect.stringContaining("(count: 1)") },
+		]);
+	});
+
+	it("hands a call the recognized paths of overlapping siblings only", () => {
+		const store = new OpaqueBaselineStore();
+		const at = (startedAt: number, recognized: string[]) => ({
+			startedAt,
+			strategy: "git" as const,
+			recognized,
+		});
+		store.record("/p:1", "early", at(Date.now() - 10_000, ["/p/early.ts"]));
+		expect(store.take("/p:1", "early")?.siblingRecognized.size).toBe(0);
+		// `early` settled before `late` started: no overlap, not subtracted.
+		store.record("/p:1", "late", at(Date.now(), ["/p/late.ts"]));
+		store.record("/p:1", "other", at(Date.now(), ["/p/other.ts"]));
+		store.record("/q:1", "elsewhere", at(Date.now(), ["/q/else.ts"]));
+		const late = store.take("/p:1", "late");
+		// `other` is still pending and `elsewhere` is another slot.
+		expect([...(late?.siblingRecognized ?? [])]).toEqual(["/p/other.ts"]);
+		// `late` settled while `other` was pending: `other` still sees its writes.
+		expect([...(store.take("/p:1", "other")?.siblingRecognized ?? [])]).toEqual(
+			["/p/late.ts"],
+		);
 	});
 });
 
@@ -1031,4 +1096,227 @@ describe("failed Git integration recovery dispatch", () => {
 			}
 		},
 	);
+});
+
+// #4137: pi runs the bash calls of one assistant message in parallel (top level
+// and codemode's nested Promise.all alike), so every tool_call precedes the
+// first tool_result. The pending baseline used to sit in one slot per
+// cwd:generation, so N-1 of N calls found no baseline, reported
+// `partial-recognition-no-baseline`, and withheld the blocker section of a write
+// the agent had in fact authored (the real-pi S8 witness: 4 of 6 files lost).
+describe("parallel bash calls (#4137)", () => {
+	let repoDir = "";
+	let dataDir = "";
+	const FILES = ["par-a.ts", "par-b.ts", "par-c.ts"];
+
+	beforeEach(() => {
+		repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opaque-par-"));
+		execSync("git init -q", { cwd: repoDir });
+		execSync("git config user.email t@t.local", { cwd: repoDir });
+		execSync("git config user.name t", { cwd: repoDir });
+		for (const file of FILES)
+			fs.writeFileSync(path.join(repoDir, file), "export const x = 1;\n");
+		execSync("git add -A && git commit -qm base", { cwd: repoDir });
+		// Outside the repo: project data under it would read as changed files.
+		dataDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-opaque-par-data-"),
+		);
+		process.env.PILENS_DATA_DIR = dataDir;
+		resetDegradationLedger();
+	});
+
+	afterEach(() => {
+		delete process.env.PILENS_DATA_DIR;
+		removeTempDirSync(repoDir);
+		removeTempDirSync(dataDir);
+	});
+
+	function callDeps(
+		runtime: RuntimeCoordinator,
+		command: string,
+		toolCallId: string | undefined,
+	) {
+		return {
+			event: {
+				toolName: "bash",
+				input: { command },
+				...(toolCallId === undefined ? {} : { toolCallId }),
+			},
+			ctx: { cwd: repoDir },
+			lensEnabled: true,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+		} as Parameters<typeof handleToolCall>[0];
+	}
+
+	function resultDeps(
+		runtime: RuntimeCoordinator,
+		command: string,
+		toolCallId: string | undefined,
+	) {
+		return {
+			event: {
+				toolName: "bash",
+				input: { command },
+				content: [{ type: "text", text: "(no output)" }],
+				...(toolCallId === undefined ? {} : { toolCallId }),
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			testRunnerClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+			readGuard: runtime.readGuard,
+		} as unknown as Parameters<typeof handleToolResult>[0];
+	}
+
+	async function runBatch(
+		toolCallIds: Array<string | undefined>,
+		resultOrder: "sequential" | "concurrent",
+		afterCalls: () => void = () => {},
+	) {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = repoDir;
+		runtime.setTelemetryIdentity({ sessionId: "parallel-bash" });
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockClear();
+		const calls = FILES.map((file, i) => ({
+			file,
+			id: toolCallIds[i],
+			command: `echo 'debugger;' >> ${file}`,
+		}));
+		// Every tool_call precedes the first tool_result: the S8 trace order.
+		for (const call of calls)
+			await handleToolCall(callDeps(runtime, call.command, call.id));
+		for (const call of calls)
+			fs.appendFileSync(path.join(repoDir, call.file), "debugger;\n");
+		afterCalls();
+		const run = (call: (typeof calls)[number]) =>
+			handleToolResult(resultDeps(runtime, call.command, call.id));
+		if (resultOrder === "concurrent") await Promise.all(calls.map(run));
+		else for (const call of calls) await run(call);
+		const dispatches = vi.mocked(runPipeline).mock.calls.map(([ctx]) => ({
+			filePath: String(ctx?.filePath),
+			autonomous: ctx?.allowAutonomousWriters === true,
+		}));
+		return { runtime, dispatches };
+	}
+
+	const keyOf = (file: string) => normalizeMapKey(path.join(repoDir, file));
+
+	it.each(["sequential", "concurrent"] as const)(
+		"keeps authorship for N of N parallel bash writes (%s results)",
+		{ timeout: 30_000 },
+		async (resultOrder) => {
+			const { runtime, dispatches } = await runBatch(
+				["par-1", "par-2", "par-3"],
+				resultOrder,
+			);
+			// Authorship (the blocker channel) belongs to each file's own call.
+			expect(
+				dispatches
+					.filter((d) => d.autonomous)
+					.map((d) => d.filePath)
+					.sort(),
+			).toEqual(FILES.map(keyOf).sort());
+			expect(runtime.readGuard.exportAuthorship().written.sort()).toEqual(
+				FILES.map((file) => normalizeFilePath(path.join(repoDir, file))).sort(),
+			);
+		},
+	);
+
+	// The recurrence a host without distinct tool-call ids still has: the shared
+	// slot overwrites, and the loss must be a counted ledger entry, never silent
+	// (`evictionCount` was read by no production code).
+	it("counts the baselines a host without tool-call ids loses", async () => {
+		await runBatch([undefined, undefined, undefined], "sequential");
+		expect(lostBaselines()).toEqual([
+			{ subject: "overwrite", reason: expect.stringContaining("(count: 2)") },
+		]);
+	});
+
+	it("loses nothing when every call carries an id", async () => {
+		await runBatch(["par-1", "par-2", "par-3"], "concurrent");
+		expect(lostBaselines()).toEqual([]);
+	});
+
+	// #2060's rule for a filter that is invisible in production otherwise: the
+	// siblings' recognized writes a call leaves out of its recovery are counted.
+	it("records how many sibling writes each call left out of its recovery", async () => {
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		try {
+			const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
+			const beforeLines = new Set(
+				fs.existsSync(latencyPath)
+					? fs.readFileSync(latencyPath, "utf8").split("\n")
+					: [],
+			);
+			await runBatch(["par-1", "par-2", "par-3"], "sequential");
+			await flushLatencyLog();
+			const records = fs
+				.readFileSync(latencyPath, "utf8")
+				.split("\n")
+				.filter(
+					(l) =>
+						l.trim() &&
+						!beforeLines.has(l) &&
+						l.includes("opaque_mutation_sibling_excluded"),
+				);
+			expect(records).toHaveLength(3);
+			for (const record of records) expect(record).toContain("excluded:2");
+		} finally {
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		}
+	});
+
+	// A call with no recognized write keeps its own opaque recovery under
+	// parallelism: the siblings' writes come out of it, its own stays.
+	it("an opaque sibling still recovers its own writes", async () => {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = repoDir;
+		runtime.setTelemetryIdentity({ sessionId: "parallel-opaque" });
+		const opaqueTarget = path.join(repoDir, "opaque-out.ts");
+		const script = path.join(repoDir, ".opaque-child.cjs");
+		fs.writeFileSync(
+			script,
+			`require('fs').writeFileSync(${JSON.stringify(opaqueTarget)}, 'export const o = 1;\\n');`,
+		);
+		const past = new Date(Date.now() - 5000);
+		fs.utimesSync(script, past, past);
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockClear();
+		const opaque = { id: "opq", command: `node "${script}"` };
+		const recognized = { id: "rec", command: "echo 'debugger;' >> par-a.ts" };
+		await handleToolCall(callDeps(runtime, opaque.command, opaque.id));
+		await handleToolCall(callDeps(runtime, recognized.command, recognized.id));
+		execSync(`node "${script}"`, { cwd: repoDir });
+		fs.appendFileSync(path.join(repoDir, "par-a.ts"), "debugger;\n");
+		await handleToolResult(resultDeps(runtime, opaque.command, opaque.id));
+		await handleToolResult(
+			resultDeps(runtime, recognized.command, recognized.id),
+		);
+		const dispatches = vi
+			.mocked(runPipeline)
+			.mock.calls.map(([ctx]) => [
+				path.basename(String(ctx?.filePath)),
+				ctx?.allowAutonomousWriters === true,
+			]);
+		expect(dispatches).toEqual([
+			["opaque-out.ts", false],
+			["par-a.ts", true],
+		]);
+	});
 });

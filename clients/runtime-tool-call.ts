@@ -8,12 +8,14 @@ import { isPathIgnoredByProject } from "./file-utils.js";
 import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
+import { extractWrittenPathsFromCommand } from "./bash-file-access.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey, toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
 	isGitWorktree,
+	opaqueBaselineSlot,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
@@ -576,7 +578,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			const scanRoot = ctx.cwd ?? runtime.projectRoot;
 			if (scanRoot) {
 				const started = Date.now();
-				const rootKey = `${normalizeMapKey(path.resolve(scanRoot))}:${runtime.sessionGeneration}`;
+				const baselineSlot = opaqueBaselineSlot(
+					scanRoot,
+					runtime.sessionGeneration,
+				);
 				let baseline: PendingOpaqueBaseline;
 				let resultNote: string;
 				if (await isGitWorktree(scanRoot)) {
@@ -602,10 +607,24 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					resultNote =
 						outcome.unknownReason ?? `scanned:${outcome.scannedCount}`;
 				}
-				// Session-stamped key: a concurrent-secondary session (#473)
-				// replacing this slot must yield a no-pending-snapshot UNKNOWN
-				// for us - never a diff against another session's baseline.
-				getOpaqueBaselineStore().record(rootKey, baseline);
+				// Session-stamped slot: a concurrent-secondary session (#473)
+				// replacing it must yield a no-pending-snapshot UNKNOWN for us -
+				// never a diff against another session's baseline. One entry per
+				// call (#4137): parallel bash calls all record before the first
+				// result, and each carries the paths its text names so a sibling's
+				// recovery does not claim them as opaque. The root is the one
+				// tool_result parses against (`workspaceRoot`).
+				getOpaqueBaselineStore().record(
+					baselineSlot,
+					resolveToolCallCorrelationId(event),
+					{
+						...baseline,
+						recognized: extractWrittenPathsFromCommand(
+							commandInput.command,
+							runtime.projectRoot || process.cwd(),
+						).map((p) => normalizeMapKey(path.resolve(p))),
+					},
+				);
 				logLatency({
 					type: "phase",
 					phase: "opaque_mutation_prescan",
