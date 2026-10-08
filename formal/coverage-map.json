@@ -91,6 +91,9 @@
       "session-lifecycle",
       "read-guard"
     ],
+    "clients/confirmed-delete.ts": [
+      "read-guard"
+    ],
     "clients/observed-mutation.ts": [
       "session-lifecycle"
     ],
