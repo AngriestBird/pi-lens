@@ -110,6 +110,7 @@ import {
 	resolveStartupScanContext,
 	type StartupScanContext,
 } from "./startup-scan.js";
+import { getStartupScanMaxSourceFilesDerived } from "./project-scale.js";
 import {
 	getSubagentIdentity,
 	isSubagentSession,
@@ -3133,7 +3134,16 @@ export async function handleSessionStart(
 			const overrideHint =
 				startupScan.reason === "too-many-entries"
 					? ` (set PI_LENS_STARTUP_SCAN_MAX_ENTRIES=<n> to override the ${getStartupScanMaxEntries()}-entry cap)`
-					: "";
+					: ` (set maxProjectFiles in .pi-lens.json to override the ${getStartupScanMaxSourceFilesDerived(analysisRoot)}-source-file cap)`;
+			recordDegradationOnce({
+				kind: "startup-warm-skipped",
+				subject: analysisRoot,
+				reason: `${startupScan.reason}; maxProjectFiles=${getStartupScanMaxSourceFilesDerived(analysisRoot)}`,
+				metadata: {
+					reason: startupScan.reason,
+					maxProjectFiles: getStartupScanMaxSourceFilesDerived(analysisRoot),
+				},
+			});
 			notify(
 				`📦 Project-size limits disabled background warm scans (heavy scans, TODO scan, LSP pre-warm)${overrideHint}.`,
 				"warning",

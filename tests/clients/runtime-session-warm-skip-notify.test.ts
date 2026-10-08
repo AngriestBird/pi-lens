@@ -30,6 +30,7 @@ import {
 	waitForProjectSnapshotPersistsForTests,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { getDegradationSummary } from "../../clients/degradation-ledger.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	createTempFile,
@@ -208,6 +209,44 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 				n.msg.includes("Project-size limits disabled background warm scans"),
 			);
 			expect(warmSkipNotices).toHaveLength(1);
+			expect(warmSkipNotices[0].msg).toContain("maxProjectFiles");
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ kind: "startup-warm-skipped", count: 1 }),
+				]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("shows the real session-start skip for a project above the safe 2,000-file bound (#4126)", async () => {
+		const env = setupTestEnvironment("pi-lens-warm-skip-notify-large-");
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const cwd = path.join(env.tmpDir, "project");
+			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+			for (let i = 0; i < 2_001; i++) {
+				fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+				fs.writeFileSync(
+					path.join(cwd, "src", `file-${i}.ts`),
+					"export const value = 1;\n",
+				);
+			}
+			const notifications: Array<{ msg: string; level: string }> = [];
+			await handleSessionStart(
+				makeDeps(cwd, (msg, level) => notifications.push({ msg, level })),
+			);
+			const warmSkip = notifications.filter((n) =>
+				n.msg.includes("Project-size limits disabled background warm scans"),
+			);
+			expect(warmSkip).toHaveLength(1);
+			expect(warmSkip[0].msg).toContain("maxProjectFiles");
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "startup-warm-skipped",
+				),
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}
