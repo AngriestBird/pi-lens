@@ -291,6 +291,8 @@ export type DegradationKind =
 	 * Subject is the tool.
 	 */
 	| "fix-run-agent-edit-overwritten"
+	/** A bounded pre-run call was not carried into a fixer run (#3830). */
+	| "fix-run-pending-call-cap"
 	/**
 	 * #3830: a whole-package fixer's restore left a file alone, and named it
 	 * possibly lost, because a newer agent edit may have won (a call in flight,

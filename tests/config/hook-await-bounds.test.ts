@@ -2253,8 +2253,9 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// statting twice (the stat's identity was blind to a same-size edit inside
 	// one mtime tick), and the wrapper awaits the caller's scan (`afterRun`) but
 	// no longer `finish()`. One await is the per-file queue entry, which a hook
-	// signal cannot reach until #2523 AC4.
-	"clients/fix-run-restore.ts": 10,
+	// signal cannot reach until #2523 AC4. 10 -> 11 (round 2): native call
+	// expectations are carried through the restore decision and add one await.
+	"clients/fix-run-restore.ts": 11,
 	"clients/format-service.ts": 4,
 	// #2767: managed formatter resolution uses the installer's bounded probes;
 	// keep the measured count pinned until the formatter seam carries signals.

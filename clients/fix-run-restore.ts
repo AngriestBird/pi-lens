@@ -357,13 +357,12 @@ async function restoreRun(
 					let matchesAgentWrite = false;
 					try {
 						const current = await fs.promises.readFile(file.filePath);
-						matchesAgentWrite = [...run.calls.values()]
-							.filter((call) => call.key === key)
-							.some(
-								(call) =>
-									call.expected !== undefined &&
-									verdictFor(current, call.expected) === "verified",
-							);
+						matchesAgentWrite = [...run.calls.values()].some(
+							(call) =>
+								call.key === key &&
+								call.expected !== undefined &&
+								verdictFor(current, call.expected) === "verified",
+						);
 					} catch {
 						// An unreadable file cannot prove that the agent write survived.
 					}
