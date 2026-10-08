@@ -1106,7 +1106,7 @@ describe("mutation bridge registration", () => {
  * the only staleness check a line without a hash has, so an edit of a line
  * another writer changed passed on a record past READ_HASH_MAX_LINES.
  */
-describe("mutation bridge FileTime credit (#3525)", () => {
+describe("mutation bridge authorship without FileTime credit (#3865)", () => {
 	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
 	for (const provenance of ["settled-sweep", "observed"] as const) {
 		it(`${provenance === "settled-sweep" ? "does not stamp" : "stamps"} FileTime for a ${provenance} replay`, () => {
@@ -1146,7 +1146,7 @@ describe("mutation bridge FileTime credit (#3525)", () => {
 					),
 				).toBe(true);
 				expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
-					provenance === "settled-sweep" ? "block" : "allow",
+					"block",
 				);
 			} finally {
 				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;

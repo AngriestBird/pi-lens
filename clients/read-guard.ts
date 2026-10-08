@@ -593,6 +593,12 @@ export class ReadGuard {
 	/** Reads remain behavior-gating until the corresponding edit is published. */
 	private readonly consumedReadFiles = new Set<string>();
 	private readonly fileTime: FileTime;
+	/**
+	 * The last bytes observed when authorship was credited. This is separate
+	 * from `fileTime`: an opaque/partial producer may credit authorship without
+	 * vouching for the bytes as conversation evidence (#4131, #3865).
+	 */
+	private readonly authorshipFileTime: FileTime;
 	private readonly exemptions = new Set<string>(); // One-time exemptions via /lens-allow-edit
 	private readonly pendingCreations = new Map<
 		string,
@@ -661,6 +667,7 @@ export class ReadGuard {
 		this.sessionId = sessionId;
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.fileTime = createFileTime(sessionId);
+		this.authorshipFileTime = createFileTime(`${sessionId}:authorship`);
 	}
 
 	/**
@@ -728,6 +735,9 @@ export class ReadGuard {
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
 		const droppedAuthorship = this.writtenThisSession.delete(filePath);
+		// Test doubles and released host adapters may expose only the original
+		// FileTime surface; the authorship observation is best-effort on eviction.
+		this.authorshipFileTime.clearFile?.(filePath);
 		// #1668 review F1: prune the reverse-pointing knownPathIndex entries
 		// too, so it never outlives the record it points at.
 		for (const [syntacticKey, stored] of this.knownPathIndex) {
@@ -1097,10 +1107,25 @@ export class ReadGuard {
 		// 1. Zero-read check
 		const fileReads = this.reads.get(filePath);
 		if (!fileReads || fileReads.length === 0) {
-			// Only a write pi-lens observed (recordWritten, from any producer) is
-			// the agent's own; a newer mtime is any writer's (#3520). A synthetic
-			// read is injected for it.
+			// A write pi-lens observed (recordWritten, from any producer) is the
+			// agent's own only until the bytes change. Do this before the
+			// session-authored fast path: otherwise a foreign write after an
+			// authorship-only record is turned into a synthetic read of bytes the
+			// conversation never saw (#4131).
 			if (this.writtenThisSession.has(filePath)) {
+				if (this.authorshipFileTime.hasChanged(filePath)) {
+					this.writtenThisSession.delete(filePath);
+					const verdict = this.blockOrWarn(
+						"file-modified",
+						`🔄 RETRYABLE — File modified since read\n\nThe file changed after the conversation's authored bytes were recorded. Re-read it before editing: \`read path="${filePath}"\``,
+						undefined,
+						effectiveMode,
+					);
+					this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+						reasonKind: "file_modified",
+					});
+					return verdict;
+				}
 				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
@@ -1466,6 +1491,7 @@ export class ReadGuard {
 		// (see `knownPathIndex`) so a later hasKnownPath/forgetPath lookup
 		// after an external delete can still find this entry's real key.
 		this.knownPathIndex.set(normalizeEphemeralMapKey(rawFilePath), filePath);
+		this.authorshipFileTime.read(filePath);
 		if (opts?.stampFileTime !== false) this.fileTime.read(filePath);
 		this.writtenThisSession.add(filePath);
 		if (this.reads.has(filePath)) this.consumedReadFiles.add(filePath);
@@ -1613,7 +1639,12 @@ export class ReadGuard {
 		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
 		if (Array.isArray(authorship?.written))
 			for (const filePath of authorship.written)
-				if (typeof filePath === "string") this.writtenThisSession.add(filePath);
+				if (typeof filePath === "string") {
+					this.writtenThisSession.add(filePath);
+					// Released records contain paths only. Establish the observation
+					// baseline they can support without changing their shape.
+					this.authorshipFileTime.read(filePath);
+				}
 	}
 
 	/**
@@ -1648,6 +1679,7 @@ export class ReadGuard {
 		}
 		this.edits.clear();
 		this.writtenThisSession.clear();
+		this.authorshipFileTime.clear();
 		this.expiredWrites.clear();
 		this.pendingCreations.clear();
 		this.fileTime.clear();

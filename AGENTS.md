@@ -912,7 +912,10 @@ bridge and opaque-write recovery feed this seam for non-native producers.
 The read guard keys all path state through its normalizer. It accepts Read,
 search, LSP, bridge, bash-view, and authored-write evidence, but name-only
 `ls`/`find` output is not file content. Partial edits consume preflight-approved
-spans and never re-search stale bytes.
+spans and never re-search stale bytes. Authorship-only writes retain a separate
+observation of the credited bytes; a later foreign change retires authorship
+before zero-read admission. Process bridges credit authorship without moving
+conversation-backed FileTime unless they carry the delivered bytes.
 
 </important>
 ## Commands and gates

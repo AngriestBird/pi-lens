@@ -1993,6 +1993,40 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		v[n - 1] = text;
 		writeNow(file, v.join("\n"));
 	};
+
+	// #4131: recordWritten without a read must not turn a later foreign write
+	// into a synthetic creation read. The bash tool_result path is the real
+	// producer: it credits authorship but does not show the bytes it wrote.
+	it("does not let a foreign write inherit bash authorship after recordWritten", async () => {
+		const env = setupTestEnvironment("rg-4131-bash-authorship-");
+		try {
+			const file = fixture(env.tmpDir, "big.ts", BIG);
+			const runtime = newRuntime(env.tmpDir);
+			const toolCallId = `bash-${++seq}`;
+			const input = { command: `sed -i 's/^line3$/agent3/' ${file}` };
+			await handleToolCall(
+				callDeps(runtime, { toolName: "bash", toolCallId, input }),
+			);
+			writeNow(
+				file,
+				fs.readFileSync(file, "utf8").replace("line3\n", "agent3\n"),
+			);
+			await handleToolResult(
+				resultDeps(runtime, {
+					toolName: "bash",
+					toolCallId,
+					input,
+					content: [{ type: "text", text: "" }],
+				}),
+			);
+			foreignWrite(file, 11, "EXTERNAL11");
+			const edit = await positionalEdit(runtime, file, [[11, 11, "agent11"]]);
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain("File modified since read");
+		} finally {
+			env.cleanup();
+		}
+	});
 	/**
 	 * The deferred agent_end format through the real `FormatService`, built
 	 * the way `index.ts` builds it for the drain (the guard's session id).
@@ -2452,7 +2486,7 @@ describe("#3962: a native re-read supersedes a stale bridge binding", () => {
 			const file = fixture(
 				env.tmpDir,
 				"b.ts",
-				"const a = 1;\nconst b = 2;\nconst c = 3;\n",
+				`${lines(8, "const line ").join("\n")}\n`,
 			);
 			const runtime = newRuntime(env.tmpDir);
 			_bridgeRuntime = runtime;
@@ -2499,14 +2533,14 @@ describe("#3962: a native re-read supersedes a stale bridge binding", () => {
 				requestedLimit: 1,
 			});
 			writeNow(file, "const a = 99;\nconst b = 2;\nconst c = 3;\n");
-			// A newer native read of line 1 only; the edit targets line 3, which
+			// A newer native read of line 1 only; the edit targets line 5, which
 			// the read never delivered. The strong anchor is not dropped for it.
 			await piRead(runtime, file, { offset: 1, limit: 1 });
 			const edit = await positionalEdit(runtime, file, [
-				[3, 3, "const c = 30;"],
+				[5, 5, "const d = 30;"],
 			]);
 			expect(edit.blocked).toBe(true);
-			expect(edit.reason).toContain("content no longer matches");
+			expect(edit.reason).toContain("outside read range");
 		} finally {
 			env.cleanup();
 		}

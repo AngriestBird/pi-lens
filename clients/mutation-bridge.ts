@@ -399,9 +399,10 @@ function stampLiveMutation(
 	if (sessionLive && stampReadGuard) {
 		runtime.readGuard.recordWritten?.(filePath, {
 			...(stamp !== undefined && { branchEpoch: stamp }),
-			// #3525: settled-sweep drift is unattributed, and the agent never
-			// saw it: authorship, not FileTime.
-			...(entry.provenance === "settled-sweep" && { stampFileTime: false }),
+			// A process bridge reports a mutation, not the bytes delivered to the
+			// conversation. Credit authorship, but leave FileTime at its last
+			// conversation-backed observation (#3865).
+			stampFileTime: false,
 		});
 	}
 	return { sessionLive, stamp };
