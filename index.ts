@@ -32,6 +32,7 @@ import {
 	suppressesUserNotify,
 	supportsTuiWidget,
 } from "./clients/extension-mode.js";
+import { randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -109,10 +110,7 @@ import {
 	recordIOEntry,
 	registerIOBridge,
 } from "./clients/io-bridge.js";
-import {
-	isExternalOrVendorFile,
-	normalizeFilePath,
-} from "./clients/path-utils.js";
+import { isExternalOrVendorFile } from "./clients/path-utils.js";
 import {
 	isPathIgnoredByProject,
 	isRecordableProjectPath,
@@ -786,10 +784,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// misclassify its context/message_end/shutdown as primary. Closure ownership
 	// avoids a shared mutable "last session" race between sibling activations.
 	let ownedSessionRole: "primary" | "concurrent-secondary" | undefined;
-	// A declined session may only remove a root whose own add landed. Keeping
-	// this promise per activation prevents a reload-gap subagent, whose add has
-	// no entry to update, from decrementing another session's holder count.
-	let ownedSecondaryRootRegistration: Promise<string | undefined> | undefined;
+	// #3849: this activation's own holder id in the registry entry, and the
+	// root it asked to hold as a declined secondary. Its shutdown ends only
+	// this holder's record, so a hold already ended by a primary reload, a cap
+	// eviction or an add that found no entry cannot free another holder's root.
+	const secondaryRootHolder = `secondary:${randomUUID()}`;
+	let ownedSecondaryRoot: string | undefined;
 	// #3611: the session scope THIS activation serves, set once at its
 	// session_start and retired at its session_shutdown. Activation equals
 	// session (pi re-runs this factory on every transition except /tree).
@@ -2389,12 +2389,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionStartDecision.sameRoot === false &&
 							typeof sessionStartCwd === "string"
 						) {
-							ownedSecondaryRootRegistration = registerInstanceRoot(
+							ownedSecondaryRoot = sessionStartCwd;
+							void registerInstanceRoot(
 								sessionStartCwd,
-							).then((registered) =>
-								registered ? normalizeFilePath(sessionStartCwd) : undefined,
-							);
-							void ownedSecondaryRootRegistration.catch(() => {
+								secondaryRootHolder,
+							).catch(() => {
 								// best-effort observability — never fail session_start
 							});
 						}
@@ -3840,11 +3839,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			decrementSecondarySessionCount();
 			// #2130: scoped deregistration. A secondary's shutdown must never run
 			// `deregisterInstance()` — the process lives on and the primary still
-			// owns the entry. Drop only THIS session's own root, and only when it
-			// is positively a different root than the primary's, so a secondary
-			// that shares the primary's directory cannot deregister the root the
-			// host is still working in. A root this session never registered is a
-			// documented no-op inside `deregisterInstanceRoot`.
+			// owns the entry. End only THIS activation's own hold (#3849): the
+			// root leaves the entry only when no other holder, the host's
+			// primary record included, still lists it. A secondary in the
+			// primary's own directory added nothing and removes nothing, and a
+			// hold the registry already ended is a documented no-op inside
+			// `deregisterInstanceRoot`.
 			//
 			// #2130 round 2: the call is now QUEUED, so it lands behind this
 			// session's own `void registerInstanceRoot(cwd)` from the declined
@@ -3852,19 +3852,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// root behind. Fire and forget is still correct — the tail owns the
 			// ordering, and teardown must not block on a registry write.
 			try {
-				const registration = ownedSecondaryRootRegistration;
-				if (registration) {
-					void registration
-						.then((secondaryRoot) => {
-							if (secondaryRoot === undefined) return;
-							const primaryRoot = getActivePrimaryRoot();
-							if (primaryRoot !== undefined && secondaryRoot !== primaryRoot) {
-								return deregisterInstanceRoot(secondaryRoot);
-							}
-						})
-						.catch(() => {
-							// best-effort bookkeeping — never fail teardown
-						});
+				if (ownedSecondaryRoot !== undefined) {
+					void deregisterInstanceRoot(
+						ownedSecondaryRoot,
+						secondaryRootHolder,
+					).catch(() => {
+						// best-effort bookkeeping — never fail teardown
+					});
 				}
 			} catch {
 				// Best-effort observability bookkeeping — a stale ctx or an
