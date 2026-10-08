@@ -637,6 +637,31 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 		expect(changelog).toContain("refs #3989");
 	});
 
+	it("retains earlier promoted servers until the release consumes the fragment", () => {
+		const ws = workspace();
+		const next = workspace();
+		const run = (target: typeof ws, serverId: string, today: string) =>
+			promoteFromSummary({
+				summaryPath: target.summary([row(serverId)]),
+				bodyPath: target.bodyPath,
+				matrixPath: target.matrixPath,
+				serverPath: target.serverPath,
+				reasonsPath: target.reasonsPath,
+				registryPath: target.registryPath,
+				changelogPath: ws.changelogPath,
+				today,
+				log: () => {},
+			});
+
+		expect(run(ws, "json", D1)).toEqual([]);
+		expect(run(ws, "json", D2)).toEqual(["json"]);
+		expect(run(next, "zizmor", D1)).toEqual([]);
+		expect(run(next, "zizmor", D2)).toEqual(["zizmor"]);
+		const changelog = fs.readFileSync(ws.changelogPath, "utf8");
+		expect(changelog).toContain("`json`");
+		expect(changelog).toContain("`zizmor`");
+	});
+
 	it("clears the night memory when the measurement left no summary", () => {
 		const ws = workspace();
 		const base = {

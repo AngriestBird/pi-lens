@@ -101,11 +101,21 @@ export function promoteFromSummary(opts) {
 		fs.writeFileSync(opts.reasonsPath, plan.reasonsText);
 		fs.writeFileSync(opts.registryPath, plan.registrySource);
 		if (opts.bodyPath && plan.body) fs.writeFileSync(opts.bodyPath, plan.body);
-		if (opts.changelogPath)
+		if (opts.changelogPath) {
+			const previous = fs.existsSync(opts.changelogPath)
+				? fs.readFileSync(opts.changelogPath, "utf8")
+				: "";
+			const previousIds = [...previous.matchAll(/`([^`]+)`/g)].map(
+				([, serverId]) => serverId,
+			);
+			const serverIds = [
+				...new Set([...previousIds, ...plan.promoted.map((p) => p.serverId)]),
+			];
 			fs.writeFileSync(
 				opts.changelogPath,
-				`---\nsection: Changed\naudience: user\n---\n\n- Idle eviction is now enabled for ${plan.promoted.map((p) => `\`${p.serverId}\``).join(", ")} after consecutive safe measurements (refs #3989).\n`,
+				`---\nsection: Changed\naudience: user\n---\n\n- Idle eviction is now enabled for ${serverIds.map((serverId) => `\`${serverId}\``).join(", ")} after consecutive safe measurements (refs #3989).\n`,
 			);
+		}
 		return plan.promoted.map((p) => p.serverId);
 	} catch (error) {
 		log(`idle-eviction promotion: ${error?.message ?? error}`);
