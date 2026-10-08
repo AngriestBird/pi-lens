@@ -116,7 +116,7 @@ const GH_WRITE = new RegExp(
 	"g",
 );
 export const GIT_PUSH =
-	/\bgit(?:\s+(?:-[cC]\s+(?:'[^']*'|"[^"]*"|[^\s'"])+|--[\w-]+(?:=(?:'[^']*'|"[^"]*"|[^\s'"])+)?))*\s+push\b/;
+	/\bgit(?:\s+(?:-[cC]\s+(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])+|--[\w-]+(?:=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])+)?))*\s+push\b/;
 const PKG_PUBLISH = new RegExp(
 	String.raw`\b(?:npm|pnpm|yarn|bun|npx)\b(${CMD})\bpublish(?![\w:-])([^\n;|&]*)`,
 	"g",
@@ -857,11 +857,23 @@ describe("workflow writer governance (#4053)", () => {
 	});
 
 	describe("writer commands in run:", () => {
-		// flake-shape: elapsed-time-assertion — CodeQL #60/#61 found exponential
+		// flake-shape: elapsed-time-assertion — CodeQL alerts 60 and 61 found exponential
 		// backtracking when the quoted -c alternatives overlap with `\S`; only a
 		// real clock can distinguish the fixed regex from the vulnerable one.
-		it("rejects the #60/#61 adversarial git-push input without backtracking", () => {
+		it("rejects the adversarial git-push input without backtracking", () => {
 			const adversarial = `git -c ${'""'.repeat(24)}x`;
+			const startedAt = performance.now();
+			expect(GIT_PUSH.test(adversarial)).toBe(false);
+			expect(performance.now() - startedAt).toBeLessThan(50);
+		});
+
+		it("detects escaped quotes in git option values", () => {
+			expect(GIT_PUSH.test('git -c a=\\"b push')).toBe(true);
+			expect(GIT_PUSH.test('git -c "a\\" b" push')).toBe(true);
+		});
+
+		it("rejects escaped-quote repeats without backtracking", () => {
+			const adversarial = `git -c ${'\\"'.repeat(24)}x`;
 			const startedAt = performance.now();
 			expect(GIT_PUSH.test(adversarial)).toBe(false);
 			expect(performance.now() - startedAt).toBeLessThan(50);
