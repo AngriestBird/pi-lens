@@ -1133,7 +1133,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/scanner.ts": 10,
 		"clients/project-report.ts": 3,
 		// #4129 adds the word-index splice and worker heap slot's snapshot uses.
-		"clients/project-snapshot.ts": 130,
+		"clients/project-snapshot.ts": 131,
 		"clients/read-guard-branch.ts": 2,
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,

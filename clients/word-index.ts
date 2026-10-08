@@ -1942,6 +1942,23 @@ export function recordPersistedWordIndexWireBytes(
 	if (cache?.serialized === serialized) cache.wireBytes = wireBytes;
 }
 
+/**
+ * Release the serialized side of a completed snapshot write. The decoded
+ * index remains the live merge-read value; the wire form is only needed until
+ * the persistence worker has published it (#4124, the second #1370 copy).
+ */
+export function releaseSerializedWordIndex(
+	serialized: SerializedWordIndex | undefined,
+): void {
+	if (!serialized) return;
+	const index = serializedWordIndexSources.get(serialized);
+	if (!index) return;
+	const memo = serializedWordIndexCaches.get(index);
+	if (memo?.serialized !== serialized) return;
+	serializedWordIndexCaches.delete(index);
+	serializedWordIndexSources.delete(serialized);
+}
+
 let _lastSerializeWork: WordIndexSerializeWork | undefined;
 
 /** Test-only: work stats for the most recent {@link serializeWordIndex} call. */
