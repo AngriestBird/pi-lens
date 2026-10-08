@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 
 describe("RuntimeCoordinator", () => {
 	it("resetForSession clears recorded tool-call path attributions (#1642 F5)", () => {
@@ -362,6 +367,7 @@ describe("RuntimeCoordinator", () => {
 			dir = mkdtempSync(path.join(tmpdir(), "pi-lens-same-bytes-"));
 			file = path.join(dir, "same-bytes.ts");
 			writeFileSync(file, "debugger;\n");
+			resetDegradationLedger();
 		});
 		afterEach(() => {
 			rmSync(dir, { recursive: true, force: true });
@@ -394,6 +400,47 @@ describe("RuntimeCoordinator", () => {
 			).toBe(true);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+		});
+
+		// The refusal's observability: one ledger entry per file key, counted, so
+		// a script that keeps touching a blocked file does not write a row per run.
+		it("counts repeated refusals on one ledger entry per file, not one per occurrence", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP L2",
+				1,
+				["biome"],
+				[2],
+				recorded,
+			);
+			for (const writeIndex of [2, 3, 4]) {
+				expect(
+					runtime.clearInlineBlockers(file, writeIndex, undefined, {
+						authored: false,
+						sha256: recorded.sha256,
+					}),
+				).toBe(false);
+			}
+			const group = getDegradationSummary().find(
+				(candidate) => candidate.kind === "blocker-clear-refused",
+			);
+			expect(group?.count).toBe(3);
+			expect(group?.latestReasons).toEqual([
+				{
+					subject: normalizeMapKey(file),
+					reason: expect.stringContaining("(count: 3)"),
+				},
+			]);
+			// Nothing is counted when the clear is not refused.
+			runtime.clearInlineBlockers(file, 5, undefined, {
+				authored: false,
+				sha256: "b".repeat(64),
+			});
+			expect(
+				getDegradationSummary().find((c) => c.kind === "blocker-clear-refused")
+					?.count,
+			).toBe(3);
 		});
 
 		it("clears a record that carries no content baseline, as before", () => {

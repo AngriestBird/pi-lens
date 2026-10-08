@@ -1607,6 +1607,16 @@ describe("parallel bash calls (#4137)", () => {
 		]);
 		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
 		expect(resolvedFiles(runtime)).toEqual([]);
+		// The refusal is counted once per file key.
+		expect(
+			getDegradationSummary().find((g) => g.kind === "blocker-clear-refused")
+				?.latestReasons,
+		).toEqual([
+			{
+				subject: keyOf("par-a.ts"),
+				reason: expect.stringContaining("(count: 1)"),
+			},
+		]);
 	});
 
 	// The same cell for the session's own turn. The latch never outlives a turn

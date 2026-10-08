@@ -30,7 +30,10 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
 import { deriveProviderFromModelId } from "./model-provider.js";
 import { beginTurnContext, setTurnContextSession } from "./turn-context.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { WriteOrderingGuard, writeOrderToken } from "./write-ordering-guard.js";
 import type { GenerationHandle } from "./generation-guard.js";
 import {
@@ -1680,9 +1683,10 @@ export class RuntimeCoordinator {
 	 * before this, an opaque recovery of bytes the agent authored cleared the
 	 * record whenever the already-analysed latch was gone (a concurrent
 	 * session's turn start, the session's own next turn), and turn end then
-	 * reported a false "Resolved". The refusal consumes no write order. A record
-	 * with no `recordedHash` (#2982: the file was unreadable or over the baseline
-	 * cap at record time) cannot be matched and is cleared as before.
+	 * reported a false "Resolved". The refusal consumes no write order and is
+	 * counted as `blocker-clear-refused` per file key. A record with no
+	 * `recordedHash` (#2982: the file was unreadable or over the baseline cap at
+	 * record time) cannot be matched and is cleared as before.
 	 */
 	clearInlineBlockers(
 		filePath: string,
@@ -1697,8 +1701,18 @@ export class RuntimeCoordinator {
 			!analysis.authored &&
 			analysis.sha256 !== undefined &&
 			existing.recordedHash === analysis.sha256
-		)
+		) {
+			// Counted per file key: one ledger entry per file, a durable row at the
+			// first refusal and the ledger's power-of-two milestones, never one per
+			// occurrence.
+			incrementDegradationCount({
+				kind: "blocker-clear-refused",
+				subject: normalizeMapKey(filePath),
+				reason:
+					"an analysis without authorship read the bytes an authored verdict is about; its clean result does not retire the record (#4137)",
+			});
 			return false;
+		}
 		if (
 			!this._inlineBlockerWriteOrder.shouldWrite(
 				normalizeMapKey(filePath),

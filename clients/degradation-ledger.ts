@@ -142,6 +142,13 @@ export type DegradationKind =
 	| "bash-view-clipped"
 	| "biome-explain-unavailable"
 	/**
+	 * #4137 round 3: `clearInlineBlockers` refused a clean result from a run
+	 * without authorship (an opaque recovery, #3226) over the very bytes an
+	 * authored verdict recorded; the inline blocker record stays. One subject per
+	 * file key, counted across the session.
+	 */
+	| "blocker-clear-refused"
+	/**
 	 * #3594: `acquireBoundedPidFileLock`'s wait (the durable-store sync
 	 * waiter) was skipped because the same top-generation holder an earlier
 	 * wait ran out on is still there. The call falls back at once, same as
