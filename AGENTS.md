@@ -85,8 +85,10 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   model in step with the code. `formal/coverage-map.json` maps source globs to
   model families; the PR-body lint requires a `.tla`/`.cfg` change under any one
   of a mapped row's families, or a `TLA+ unaffected: <family> — <reason>` line
-  for one of them. `unmodelled` rows and rows of 4+ families stay advisory. A
-  TLA lane that adds a family adds its map row (#3802).
+  for one of them. `unmodelled` rows and rows of 4+ families stay advisory,
+  except the `index.ts` row, which gates per lifecycle hook handler a changed
+  hunk lands in (an edit outside every handler prints a note). A TLA lane that
+  adds a family adds its map row (#3802, #3878).
 
 <important if="delegating work or coordinating a lane">
 
