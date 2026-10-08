@@ -3,5 +3,6 @@ section: Changed
 audience: user
 ---
 
-- Certify pi hosts from `0.80.10` through the supported `1.1.x` minor line;
-  pi-lens now accepts the range `>=0.80.10 <1.2.0`.
+- pi 1.0.x and 1.1.x are now verified release-QA hosts, and the published
+  pi-tui peer no longer excludes pi 1.x; the certified host window is
+  `>=0.80.10 <1.2.0`.

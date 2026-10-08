@@ -421,9 +421,9 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	const floor = workflow.env?.PI_HOST_FLOOR_VERSION ?? "";
 
 	// Hosts release-qa has actually passed. NOT derived from the lockfile: the
-	// lockfile's pi version is only a test host, not a promise. Each minor line
-	// in this list needs its own release-qa witness before the contiguous window
-	// can widen.
+	// lockfile's pi version is only a test host, not a promise. P1 requires one
+	// release-qa witness per minor line from 0.86 onward; represented 0.80,
+	// 0.84, and 0.85 lines are also kept in this ratchet.
 	const RELEASE_QA_VERIFIED_HOSTS = [
 		"0.80.10",
 		"0.84.1",
@@ -434,7 +434,16 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"1.0.4",
 		"1.1.0",
 	];
-	const VERIFIED_MINOR_LINES = ["0.86", "0.87", "0.99", "1.0", "1.1"];
+	const VERIFIED_MINOR_LINES = [
+		"0.80",
+		"0.84",
+		"0.85",
+		"0.86",
+		"0.87",
+		"0.99",
+		"1.0",
+		"1.1",
+	];
 
 	it("declares a window at all", () => {
 		expect(
