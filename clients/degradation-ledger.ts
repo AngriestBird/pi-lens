@@ -893,6 +893,8 @@ export type DegradationKind =
 	 * epoch sends it on every call, and one row is the signal.
 	 */
 	| "mutation-bridge-invalid-branch-epoch"
+	/** A mutation bridge producer supplied a path outside the project or one that could not be resolved. */
+	| "mutation-bridge-out-of-scope"
 	| "native-read-clipped"
 	/**
 	 * #3524: the file moved between a native read's tool_call and its

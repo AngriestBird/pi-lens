@@ -11,6 +11,7 @@
  * than on a missing module.
  */
 import { describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
 import { AstGrepClient } from "../../clients/ast-grep-client.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import type { LineageHandle } from "../../clients/session-scope.js";
@@ -93,7 +94,7 @@ describe("#2423 ast_grep_replace records its applied rewrites", () => {
 		expect(result.applied).toBe(true);
 		expect(recorded).toHaveLength(2);
 		expect(recorded[0]).toMatchObject({
-			filePath: "src/a.ts",
+			filePath: path.resolve(process.cwd(), "src/a.ts"),
 			kind: "edit",
 			consumer: "ast_grep_replace",
 			editRanges: [
@@ -102,7 +103,7 @@ describe("#2423 ast_grep_replace records its applied rewrites", () => {
 			],
 		});
 		expect(recorded[1]).toMatchObject({
-			filePath: "src/b.ts",
+			filePath: path.resolve(process.cwd(), "src/b.ts"),
 			kind: "edit",
 			editRanges: [[1, 1]],
 		});

@@ -67,7 +67,10 @@ import {
 	storedLineHashesFor,
 } from "./observed-mutation-sources.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
-import { resolveToolCallCorrelationId } from "./tool-event.js";
+import {
+	resolveReadEvidenceCorrelationId,
+	resolveToolCallCorrelationId,
+} from "./tool-event.js";
 import {
 	boundedIndexesForCount,
 	createReadGuardEditBatchSummary,
@@ -210,6 +213,8 @@ export function isFailedGitIntegrationCommand(
 interface ToolResultEvent {
 	toolName: string;
 	toolCallId?: string | number;
+	/** Parent codemode call whose transcript result contains nested calls. */
+	parentToolCallId?: string | number;
 	/** Host tool_result status; distinct from pi-lens PipelineResult.isError. */
 	isError?: boolean;
 	input: unknown;
@@ -1892,7 +1897,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				? attribution.resolvedPath
 				: filePath;
 		if (nodeFs.existsSync(deliveredFilePath)) {
-			const nativeReadToolCallId = resolveToolCallCorrelationId(event);
+			const nativeReadToolCallId = resolveReadEvidenceCorrelationId(event);
 			const input = event.input as { offset?: number; limit?: number };
 			const requestedOffset = Math.max(1, input.offset ?? 1);
 			const requestedLimit = input.limit;
@@ -2038,7 +2043,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						turnIndex: runtime.turnIndex,
 						writeIndex: runtime.peekWriteIndex(),
 						timestamp: Date.now(),
-						...(toolCallId !== undefined && { toolCallId }),
+						...(nativeReadToolCallId !== undefined && {
+							toolCallId: nativeReadToolCallId,
+						}),
 					};
 					deps.readGuard.recordRead(deliveredRecord, {
 						...(nativeReadToolCallId && {

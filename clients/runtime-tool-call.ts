@@ -68,7 +68,10 @@ import {
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
-import { resolveToolCallCorrelationId } from "./tool-event.js";
+import {
+	resolveReadEvidenceCorrelationId,
+	resolveToolCallCorrelationId,
+} from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
@@ -322,6 +325,8 @@ interface ToolCallEvent {
 	 * (#1642).
 	 */
 	toolCallId?: string;
+	/** Parent codemode call carrying nested tool results on the transcript. */
+	parentToolCallId?: string;
 	input?: unknown;
 	details?: unknown;
 	provider?: string;
@@ -743,8 +748,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
 	const toolCallId = resolveToolCallCorrelationId(event);
+	const readEvidenceToolCallId = resolveReadEvidenceCorrelationId(event);
 	const attributesMutationTarget =
-		toolCallId !== undefined && mutation !== undefined;
+		toolCallId !== undefined && (mutation !== undefined || toolName === "read");
 	const targetMissing = !nodeFs.existsSync(filePath);
 	// #1642 F1: a brand-new file's WRITE is never a "skip" — `tool_call`
 	// fires PRE-execution, so `existsSync` is false for every path a write
@@ -1081,8 +1087,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			writeIndex: runtime.peekWriteIndex(),
 			timestamp: Date.now(),
 			provisional: true,
-			...(resolveToolCallCorrelationId(event) !== undefined && {
-				source: `native-read:${resolveToolCallCorrelationId(event)}:provisional`,
+			...(readEvidenceToolCallId !== undefined && {
+				source: `native-read:${readEvidenceToolCallId}:provisional`,
+				toolCallId: readEvidenceToolCallId,
 			}),
 		});
 	}

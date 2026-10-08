@@ -221,7 +221,12 @@ describe("handleToolCall", () => {
 			await handleToolCall(
 				baseDeps({
 					runtime,
-					event: { toolName: "read", input: { path: filePath } },
+					event: {
+						toolName: "read",
+						toolCallId: "read-call",
+						parentToolCallId: "codemode-call",
+						input: { path: filePath },
+					},
 					ctx: { cwd: env.tmpDir },
 				}),
 			);
@@ -230,6 +235,7 @@ describe("handleToolCall", () => {
 				expect.objectContaining({
 					filePath,
 					effectiveOffset: 1,
+					toolCallId: "codemode-call",
 				}),
 			);
 			expect(touchFileMock).toHaveBeenCalled();

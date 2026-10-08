@@ -512,6 +512,13 @@ export function recordMutationOutcome(
 	const valid = entry as MutationBridgeEntry;
 	if (!deps.isRecordable(valid.filePath)) {
 		deps.dbg?.(`mutation_bridge: out of scope ${valid.filePath}`);
+		recordDegradationOnce({
+			kind: "mutation-bridge-out-of-scope",
+			subject: "recordMutation",
+			reason:
+				"a mutation producer supplied an out-of-scope or unresolvable path; " +
+				"bridge bookkeeping was not admitted",
+		});
 		return rejectedOutcome("out-of-scope", valid.filePath);
 	}
 	const outcome = runAdmittedMutation(valid, deps, opts);

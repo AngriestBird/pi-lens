@@ -777,7 +777,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/actionable-warnings.ts": 13,
 		"clients/advisory-provenance.ts": 12,
 		"clients/agent-nudge.ts": 3,
-		"clients/ast-grep-client.ts": 9,
+		"clients/ast-grep-client.ts": 10,
 		"clients/ast-grep-rule-manager.ts": 4,
 		"clients/ast-grep-tool-logger.ts": 3,
 		"clients/atomic-write-staging.ts": 2,

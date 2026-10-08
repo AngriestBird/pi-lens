@@ -27,6 +27,7 @@ import { getDegradationLedgerGeneration } from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import { getMutationBridge } from "./mutation-bridge.js";
 import type { LineageHandle } from "./session-scope.js";
+import { normalizeFilePath } from "./path-utils.js";
 import { resolvePackagePath } from "./package-root.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
 import {
@@ -99,7 +100,10 @@ function recordAstGrepApply(
 	}
 	for (const [filePath, editRanges] of rangesByFile) {
 		bridge.recordMutation({
-			filePath,
+			// ast-grep echoes the spelling passed to its CLI. Resolve that
+			// tool-relative spelling at the producer boundary, then use the
+			// existing canonical path seam before recordability is checked (#4140).
+			filePath: normalizeFilePath(path.resolve(process.cwd(), filePath)),
 			kind: "edit",
 			editRanges,
 			consumer: "ast_grep_replace",

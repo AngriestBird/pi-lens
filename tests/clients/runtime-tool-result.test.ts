@@ -418,6 +418,7 @@ describe("bash grep searchReads registration", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+			const agentBehaviorRecord = vi.fn(() => []);
 			const readTool = createReadToolDefinition(env.tmpDir);
 			const result = await readTool.execute(
 				"2802",
@@ -440,7 +441,7 @@ describe("bash grep searchReads registration", () => {
 				cacheManager: new CacheManager(false),
 				resetLSPService: () => {},
 				readGuard: runtime.readGuard,
-				agentBehaviorRecord: () => [],
+				agentBehaviorRecord,
 				formatBehaviorWarnings: () => "",
 			} as never);
 
@@ -454,6 +455,64 @@ describe("bash grep searchReads registration", () => {
 				// #3524: no writer raced this read, so it re-stamps FileTime.
 				{ stampFileTime: true },
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("records a relative nested read under its parent transcript identity (#4138 #3831)", async () => {
+		const env = setupTestEnvironment("pi-lens-relative-nested-read-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"nested.ts",
+				"export const value = 1;\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.recordToolCallAttribution("nested-1", {
+				resolvedPath: filePath,
+				skipped: false,
+				originCwd: env.tmpDir,
+			});
+			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+			const agentBehaviorRecord = vi.fn(() => []);
+			const readTool = createReadToolDefinition(env.tmpDir);
+			const result = await readTool.execute(
+				"nested-1",
+				{ path: "nested.ts", offset: 1, limit: 20 },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+
+			await handleToolResult({
+				event: {
+					toolName: "read",
+					toolCallId: "nested-1",
+					parentToolCallId: "codemode-1",
+					input: { path: "nested.ts", offset: 1, limit: 20 },
+					content: result.content,
+					details: result.details,
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord,
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+			expect(recordRead).toHaveBeenCalledWith(
+				expect.objectContaining({
+					filePath,
+					toolCallId: "codemode-1",
+				}),
+				expect.anything(),
+			);
+			expect(agentBehaviorRecord).toHaveBeenCalledWith("read", filePath);
 		} finally {
 			env.cleanup();
 		}

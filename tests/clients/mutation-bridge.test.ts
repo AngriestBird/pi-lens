@@ -251,6 +251,7 @@ describe("mutation bridge bookkeeping", () => {
 	});
 
 	it("drops an out-of-scope path without touching any store", () => {
+		resetDegradationLedger();
 		const env = setupTestEnvironment("pi-lens-2423-bridge-scope-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
@@ -280,6 +281,16 @@ describe("mutation bridge bookkeeping", () => {
 			).toHaveLength(0);
 			expect(readChangesSince(env.tmpDir, 0)).toEqual([]);
 			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "mutation-bridge-out-of-scope",
+						latestReasons: [
+							expect.objectContaining({ subject: "recordMutation" }),
+						],
+					}),
+				]),
+			);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
