@@ -524,11 +524,13 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 		expect(await c.editLine("post_c", file, 2, "Y", false)).toBe("ALLOW");
 	});
 
-	it("needs a re-read of a brand-new file created on the kept branch (writtenThisSession is cleared)", async () => {
-		// A write that CREATES a file returns from tool_call before
-		// noteCreatedFile (`targetMissing`), so no creation read carries its
-		// tool call; only `writtenThisSession` vouched for it, and a move clears
-		// that. The safe direction: one re-read, never an allow.
+	// #3603: a write that CREATES a file returns from tool_call before
+	// noteCreatedFile (`targetMissing`), so no creation read carries its tool
+	// call; only its authorship vouches for it. Recurrence: a move cleared
+	// every authorship, so the agent re-read its own file although the branch
+	// still showed the write. Authorship now follows the read-set's rule: it
+	// stays iff the write's tool result is on the branch.
+	it("keeps the authorship of a brand-new file whose write is on the kept branch (#3603)", async () => {
 		const c = conversation(await startRuntime(SessionManager.inMemory(cwd)));
 		const file = path.join(cwd, "new.conf");
 		c.user("prompt 1");
@@ -538,6 +540,18 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 		c.done();
 
 		await c.S().navigateTree(u2);
+
+		expect(await c.editLine("post_new", file, 2, "Y", false)).toBe("ALLOW");
+	});
+
+	it("drops the authorship of a brand-new file whose write the kept branch does not show (#3603)", async () => {
+		const c = conversation(await startRuntime(SessionManager.inMemory(cwd)));
+		const file = path.join(cwd, "new.conf");
+		const u1 = c.user("prompt 1");
+		await c.write("call_write_new", file, "n1\nn2\nn3");
+		c.done();
+
+		await c.S().navigateTree(u1);
 
 		expect(await c.editLine("post_new", file, 2, "Y", false)).toEqual(
 			ZERO_READ,
@@ -1454,7 +1468,10 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 		);
 	});
 
-	it("does not carry the parent's authorship into a /fork", async () => {
+	// #3603: the same rule as /tree. Recurrence: the authorship store reset
+	// on /fork, so a file the agent created needed a re-read in the fork
+	// although the fork's branch shows the write.
+	it("carries the authorship of a write the fork's branch shows into a /fork (#3603)", async () => {
 		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
 		const c = conversation(runtime);
 		const file = path.join(cwd, "new.conf");
@@ -1465,8 +1482,21 @@ describe("#3612 /reload hands the read guard to the reloaded activation", () => 
 
 		await runtime.fork(u2);
 
-		// The same rule as /tree (G10): the write's creation read carried no
-		// tool call, so only the parent's authorship vouched for it.
+		expect(await c.editLine("post_new", file, 2, "Y", false)).toBe("ALLOW");
+	});
+
+	it("does not carry the authorship of a write the fork's branch does not show (#3603)", async () => {
+		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
+		const c = conversation(runtime);
+		const file = path.join(cwd, "new.conf");
+		const u1 = c.user("prompt 1");
+		expect(await c.write("call_write_new", file, "n1\nn2\nn3")).toBe("ALLOW");
+		c.done();
+		c.user("prompt 2");
+		c.done();
+
+		await runtime.fork(u1);
+
 		expect(await c.editLine("post_new", file, 2, "Y", false)).toEqual(
 			ZERO_READ,
 		);
@@ -1842,12 +1872,13 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 				expect(inner).toBeDefined();
 				await inner;
 
-				// As on a clean /fork: the activation crosses; the parent's
-				// authorship and its queued advisory do not.
+				// As on a clean /fork: the activation crosses, and so does the
+				// authorship of a write the fork's branch shows (#3603); the
+				// parent's queued advisory does not.
 				expect.soft(activeSituational(runtime)).toEqual(["ast_grep_search"]);
 				expect
 					.soft(await c.editLine("post_written", written, 2, "Y", false))
-					.toEqual(ZERO_READ);
+					.toBe("ALLOW");
 				expect
 					.soft(await contextText(runtime))
 					.not.toContain("lost edit in a.rs");
@@ -1951,13 +1982,14 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 				// pinned so S4 flips it: a secondary's edits are judged by the
 				// primary's read guard, so the primary's read of a.conf allows the
 				// subagent's edit, and the primary's own authorship policy decides
-				// its written file (carried on /reload, reset on /fork, D5). These
-				// read ZERO_READ before #3855 only because the subagent's own start
-				// wrongly took the primary slot and reset the guard.
+				// its written file (carried on /reload and, since #3603, on a
+				// /fork whose branch shows the write). These read ZERO_READ before
+				// #3855 only because the subagent's own start wrongly took the
+				// primary slot and reset the guard.
 				const s = conversation(subagent);
 				expect
 					.soft(await s.editLine("sub_written", written, 2, "Y", false))
-					.toEqual(kind === "reload" ? "ALLOW" : ZERO_READ);
+					.toBe("ALLOW");
 				expect.soft(await s.editLine("sub_a", a, 2, "Y", false)).toBe("ALLOW");
 			});
 		}

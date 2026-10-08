@@ -279,7 +279,14 @@ interface ToolResultDeps {
 }
 
 /** How the agent's own write/edit moves the read guard (#3524, #3525). */
-type OwnWriteStamp = { stampFileTime: boolean; writtenContent?: string };
+type OwnWriteStamp = {
+	stampFileTime: boolean;
+	writtenContent?: string;
+	/** The write's transcript entry: its authorship survives a move to a branch that shows it (#3603). */
+	toolCallId?: string;
+	/** sha256 of the bytes this handler already read after the write (#2499). */
+	contentHash?: string;
+};
 
 function ensureToolResultClients(
 	deps: ToolResultDeps,
@@ -1196,6 +1203,12 @@ async function dispatchPipelineAnalysis(args: {
 			if (nodeFs.existsSync(changedFile)) {
 				deps.readGuard?.recordWritten(changedFile, {
 					stampFileTime: ownFileTimeStamp || changedFile !== ownPath,
+					// The identity of the bytes this pipeline analysed or wrote
+					// (#2499), when it knows them: no re-read.
+					...(changedFile === ownPath &&
+						(!result.fileModified || pipelineOwnedWriteHash !== undefined) && {
+							contentHash: finalStateHash,
+						}),
 				});
 			}
 		}
@@ -1671,7 +1684,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// #3525: the command is in the conversation, the bytes it wrote
 			// are not: authorship, not FileTime.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
-				deps.readGuard?.recordWritten(wp, { stampFileTime: false });
+				deps.readGuard?.recordWritten(wp, {
+					stampFileTime: false,
+					...(toolCallId !== undefined && { toolCallId }),
+				});
 			const receipt = (runtime as Partial<RuntimeCoordinator>)
 				.recordMutationToolReceipt;
 			// #3763: after the recovery and earlier synthetic awaits, a replaced
@@ -1708,7 +1724,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_attachmentBudget: syntheticAttachmentBudget,
 				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
 				_readGuardAuthorship: recognizedAuthoredSet.has(wp),
-				_ownWriteStamp: { stampFileTime: false },
+				_ownWriteStamp: {
+					stampFileTime: false,
+					...(toolCallId !== undefined && { toolCallId }),
+				},
 				// Opaque recovery is mutation evidence only. The synthetic call still
 				// records freshness and runs diagnostics, but it cannot format/autofix
 				// or issue an edit-directed blocker/actionable instruction.
@@ -2355,6 +2374,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							// only guards the cascade's tier-3 touch. #3568: the
 							// handler's, not one taken after path 1's await.
 							sessionGeneration: writeSession,
+							// #3865: pi-lens does not know the bytes an
+							// unclassified tool wrote, so its refresh credits
+							// authorship and leaves FileTime where it was.
+							ownFileTimeStamp: false,
 						}),
 						{
 							ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
@@ -2528,6 +2551,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		...(typeof executedContent === "string" && {
 			writtenContent: executedContent,
 		}),
+		...(toolCallId !== undefined && { toolCallId }),
 	};
 
 	// Must happen before debounce admission: latestDeps intentionally retains only
@@ -2566,7 +2590,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// Refresh the read-guard's FileTime stamp so that the model's own write
 	// doesn't trigger a spurious "file_modified" block on the next edit.
 	if (bashAuthorshipConfirmed)
-		deps.readGuard?.recordWritten(filePath, ownWriteStamp);
+		deps.readGuard?.recordWritten(filePath, {
+			...ownWriteStamp,
+			contentHash: postWriteStateHash,
+		});
 
 	// Keep cachedExports in sync after each write/edit so the pre-write STOP
 	// check doesn't fire on names that were removed from this file this session.
@@ -2625,7 +2652,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				};
 			}
 		).readGuard;
-		if (entryLive) readGuard?.recordWritten?.(filePath, ownWriteStamp);
+		if (entryLive)
+			readGuard?.recordWritten?.(filePath, {
+				...ownWriteStamp,
+				contentHash: postWriteStateHash,
+			});
 		else
 			recordDroppedRead(writeSession, "tool-result", writeSession.branchEpoch);
 	}

@@ -8,7 +8,8 @@ session boundaries. The `TLA+ models` CI job
 `\* expect:` line.
 
 Issues: #3519, #3520, #3521, #3522, #3523, #3524 and #3525 are fixed in the
-code and modelled as such. The one config that still turns the #3520 mtime
+code and modelled as such; so are #4131 and #3603 (#4187: authorship follows
+content identity and the branch). The one config that still turns the #3520 mtime
 fallback on (`TreeDrainFencedMtime`) is a mutant of the fix (`violated`).
 
 ## Scope
@@ -108,7 +109,8 @@ before it), `OwnEditRescue = FALSE`,
 `BranchFilter = TRUE`, `FormatStamp = FALSE`, `SpanSnapshot = TRUE`,
 `RelocFromLatest = TRUE`, `WholeVouchesPastEnd = FALSE`, `ForkAtBoundary = FALSE`,
 `DrainMode = "fenced"` (every config before #3521 round 2 keeps `"atomic"`,
-its old shape). `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
+its old shape), `AuthorIdentity = TRUE`, `RetireAtWrite = TRUE` and
+`AuthorBranch = TRUE` (all three since #4187; `FALSE` is the code before it). `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
 was `ForkImport = FALSE` (the fork imported nothing), not `TRUE` as this file
 used to say. `SuppressByNewerContext` (`TRUE` before #3522) is read only when
 `SpanSnapshot = FALSE`, so every config sets `SpanSnapshot = TRUE` and its value
@@ -128,6 +130,16 @@ The model follows `checkEdit` step by step:
 
 - **Zero-read.** The authorship check: `writtenThisSession` only, since
   #3520. Before it, also `mtime >= sessionStartMs` (`MtimeAuthored = TRUE`).
+  Since #4187 the record (`written`) holds the bytes it was credited over
+  (`written.c`), and the check also asks that the disk still holds them
+  (`AuthorIdentity`; the code's `stat` pre-filter is not modelled, since a
+  token is content). A write that carries no bytes of its own (the bash
+  write's tool_call, the drain's start) first retires a record whose bytes
+  changed, and no later write resumes it (`RetireAtWrite`,
+  `retireChangedAuthorship`). `/tree` and `/fork` keep a record iff the write
+  that named it is on the kept branch (`AuthorBranch`, `KeptAuth`); a
+  pi-lens writer (the drain, `WriteRW2`) names none and keeps the record's
+  (`Carry`). `pbash` is a recognized bash write of one line, the F6 shape.
 - **FileTime.** Whole-file mtime/ctime/size. The rescue is
   `canIgnoreStalenessByHashes` (`canTreatStalenessAsOwnPriorEdit` is gone
   since #3525).
@@ -217,6 +229,16 @@ head that added this model. It is not checked in CI.
 | `SpanSnapshotFixNoOwnRecord` | the same without the own-edit read record (the code before #3523, rescue on) | violated `NoStaleAllow` | 6,945 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 fixed: no own-edit rescue; the drain credits authorship only | pass | 1,338 / 245 |
 | `UnhashedOwnEditRescueOn`, `UnhashedFormatStampOn` | the same with the rescue / the drain's FileTime stamp back (the code before #3525) | violated `NoStaleAllow` | 437 / 101 |
+| `AuthorForeign` | #4131 fixed: bash authors a never-read file, another writer changes it, three agent ops | pass | 292 |
+| `AuthorForeignNoIdentity` | the same, authorship by `recordWritten` alone (the code before #4187): BashWrite, External, Edit | violated `NoStaleAllow` | 37 |
+| `AuthorRewriteForeign` | #4187 F6 P2 fixed: bash, another writer, a one-line bash write, an edit | pass | 397 |
+| `AuthorRewriteForeignNoRetire` | the same, the second write re-baselining over the other writer's bytes (round 1 of #4187) | violated `NoStaleAllow` | 204 |
+| `AuthorDrainForeign` | #4187 F6 P3 fixed: bash, another writer, the agent_end drain (a whitespace-only format), an edit | pass | 209 |
+| `AuthorDrainForeignNoRetire` | the same, the drain re-baselining (round 1 of #4187) | violated `NoStaleAllow` | 121 |
+| `AuthorTouch` | #4187 F5 no-drop: another writer's whitespace-only rewrite (a new mtime, the same tokens) keeps bash authorship | pass (all three invariants) | 39 |
+| `AuthorBranch` | #3603 fixed: bash, `/tree` or `/fork`, an edit; the kept branch shows the write | pass (all three invariants) | 303 |
+| `AuthorBranchCleared` | the same, every move clearing authorship (the code before #4187) | violated `NoFalseBlock` | 149 |
+| `AuthorBranchExt` | #3603 with another writer before or after the move | pass | 1,833 |
 
 `OwnEditReloc` sets `CreationHandlerEvidence =
 FALSE`, so the creation-read race `CreationAtResult` documents cannot mask the
@@ -272,9 +294,11 @@ the `#3522` block of the same file.
   applies on the direct branch (the no-context bridge fallback still stamps
   until #3865) and the format service credit authorship and leave FileTime:
   for FileTime and hashes that is the model's "another writer", and the
-  `written` they add is not modelled for them. The mutation bridge's other
-  producers (`observed`, `ast_grep_replace`, co-process extensions) and the
-  read bridge still stamp FileTime; they are not modelled either.
+  `written` they add is not modelled for them. Since #4187 the mutation
+  bridge's producers (`observed`, `ast_grep_replace`, co-process
+  extensions), the observed dispatch's refresh and a read-bridge range read
+  credit authorship or coverage and leave FileTime too (#3865); they are not
+  modelled either.
 - The immediate autofix's `recordWritten` still stamps FileTime (`WriteRW2`),
   including when the attachment was withheld (the agent never saw the
   post-fix bytes). Its unhashed stale allow is a named residual of #3525.
@@ -287,6 +311,15 @@ the `#3522` block of the same file.
 - The host rejects edits past EOF, so the model does not count them.
 - The TOCTOU between `checkEdit` at tool_call and the host's positional apply
   is not modelled.
+- Authorship is whole-file content identity, so another writer's change of
+  any line refuses a zero-read edit of every line: the `Author*` configs with
+  another writer do not check `NoFalseBlock` (the accepted cost, one re-read).
+  A non-whitespace drain format of a zero-read authored file is a stale allow
+  on the formatted line (`FormatDrain = "replace"` with `bash`): the drain
+  credits authorship by design (#3525), so the `Author*` configs use the
+  whitespace-only `"ws"` formatter. Recorded as a residual on #4187.
+  `BashAuthored` stays at three ops: its four-op false block is in the
+  FileTime arm after the edit's creation read, not in the authorship arm.
 - `/fork` and `/tree` only reach "before the current prompt"
   (`BeforePrompt`, `r.g < turnNo`), and the model's records are matched to
   the branch exactly. The code matches a record to the branch by its tool

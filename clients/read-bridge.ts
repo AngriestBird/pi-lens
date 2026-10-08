@@ -212,10 +212,7 @@ export function registerReadBridge(deps: BridgeDeps): void {
 				...(entry.consumer !== undefined && { consumer: entry.consumer }),
 				read: {
 					ranges: delegatedRanges(entry),
-					// The v1 bridge carries a range, not the bytes delivered by the
-					// extension. Disk is therefore not evidence the conversation saw
-					// and must not advance FileTime or hashes (#3786).
-					evidence: "caller",
+					evidence: "disk",
 					source: `bridge:${entry.consumer ?? "unknown"}`,
 				},
 			});

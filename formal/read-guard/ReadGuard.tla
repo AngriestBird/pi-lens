@@ -97,7 +97,16 @@ CONSTANTS
                          \* "fenced": the refusal is against the epoch the work was queued with, which a
                          \*   Requeue keeps (code since #3521 round 3)
     \* ---- existing guards (FALSE = mutant with the guard removed) ----
-    FileTimeCheck, CoverageCheck, SnapshotCheck
+    FileTimeCheck, CoverageCheck, SnapshotCheck,
+    \* ---- authorship (#4131, #4187) ----
+    AuthorIdentity, \* TRUE (code since #4187): authorship holds the bytes the conversation last wrote and
+                    \*   ends when the disk differs (content identity; stat is only the code's pre-filter);
+                    \*   FALSE (code before): any recordWritten authors the file until a branch move
+    RetireAtWrite,  \* TRUE (code since #4187): a write that carries no bytes of its own (a bash write's
+                    \*   tool_call, the agent_end drain) first ends an authorship whose bytes changed, and
+                    \*   no later write resumes it; FALSE: it re-baselines over the other writer's bytes
+    AuthorBranch    \* TRUE (code since #4187, #3603): /tree and /fork keep the authorship whose write is
+                    \*   on the kept branch; FALSE (code before): they clear every authorship
 
 Lines == 1..MaxLen
 NoH == [l \in Lines |-> 0]
@@ -111,19 +120,23 @@ MkH(c, lo, hi) ==
 Replace(s, l, t) == [s EXCEPT ![l] = t]
 Delete(s, l) == SubSeq(s, 1, l - 1) \o SubSeq(s, l + 1, Len(s))
 Insert(s, l, t) == SubSeq(s, 1, l - 1) \o <<t>> \o SubSeq(s, l, Len(s))
+\* "ws" (a formatter's whitespace-only rewrite, #4187): new mtime, same tokens.
 Mod(kind, s, l, t) ==
     CASE kind = "replace" -> Replace(s, l, t)
       [] kind = "delete"  -> Delete(s, l)
       [] kind = "insert"  -> Insert(s, l, t)
+      [] kind = "ws"      -> s
 ModOk(kind, s, l) ==
     CASE kind = "replace" -> l <= Len(s)
       [] kind = "delete"  -> l <= Len(s) /\ Len(s) >= 2
       [] kind = "insert"  -> l <= Len(s) + 1 /\ Len(s) < MaxLen
+      [] kind = "ws"      -> l <= Len(s)
 
 VARIABLES
     disk, rev, tok,             \* file content, write counter (= mtime clock), fresh-token source
     know, kTurn,                \* agent knowledge; knowledge before the current prompt
     reads, ft, written, pendCreate, lastEditOk, born, turnNo,  \* guard state
+                                \* (written: the authorship record, see NoAuth/Auth)
     pc, pend, ops, ext, nb, fixedTurn, mutatedTurn,
     dr,                         \* settle drain: queued (q), branch epoch it carries (ep), current epoch (cur),
                                 \* work put back by an aborted or failed drain (rq)
@@ -138,10 +151,35 @@ guardVars == <<reads, ft, written, pendCreate, lastEditOk, born, turnNo, dr>>
 \* g = turn the record was made in (ReadRecord.turnIndex); whole = whole-file view.
 Rec(lo, hi, h, prov) == [lo |-> lo, hi |-> hi, h |-> h, prov |-> prov, g |-> turnNo, whole |-> FALSE]
 
+\* The authorship record (writtenThisSession, AuthoredBytes): on = an
+\* entry exists; c = the bytes it was credited over (its content identity);
+\* g = the turn of the write that named it, id = whether one did (a pi-lens
+\* writer names none and keeps the id of the bytes it rewrote); ret = it was
+\* retired because another writer changed the bytes (#4131). A retired record
+\* stays (no write resumes it) and moves with its write like a live one.
+NoAuth == [on |-> FALSE, c |-> <<>>, g |-> 0, id |-> FALSE, ret |-> FALSE]
+\* recordWritten by a write that names its transcript entry.
+Auth(c) == IF written.ret THEN written
+           ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> TRUE, ret |-> FALSE]
+\* recordWritten by a pi-lens writer: carries the id of the write it rewrote.
+Carry(c) == IF written.ret THEN written
+            ELSE IF written.on THEN [written EXCEPT !.c = c]
+            ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> FALSE, ret |-> FALSE]
+\* The zero-read arm's authorship question (ReadGuard.checkEdit).
+Authored == written.on /\ ~written.ret /\ (AuthorIdentity => written.c = disk)
+\* retireChangedAuthorship at the start of a write that carries no bytes of its own.
+Broken == RetireAtWrite /\ written.on /\ (written.ret \/ written.c # disk)
+Retired == [written EXCEPT !.ret = TRUE]
+\* retainBranch / importAuthorship (#3603): the authorship, retired or not,
+\* stays iff the write that named it is on the kept branch (made before the
+\* prompt the move returns to, as BeforePrompt asks of a read).
+KeptAuth == IF AuthorBranch /\ written.on /\ written.id /\ written.g < turnNo
+              THEN written ELSE NoAuth
+
 Init ==
     /\ disk = [l \in 1..N0 |-> l] /\ rev = 0 /\ tok = N0 + 1
     /\ know = [l \in Lines |-> 0] /\ kTurn = know
-    /\ reads = <<>> /\ ft = -1 /\ written = FALSE /\ pendCreate = FALSE
+    /\ reads = <<>> /\ ft = -1 /\ written = NoAuth /\ pendCreate = FALSE
     /\ lastEditOk = FALSE /\ born = 0 /\ turnNo = 0
     /\ pc = "idle" /\ pend = [k |-> "none"] /\ ops = 0 /\ ext = 0 /\ nb = 0
     /\ fixedTurn = FALSE /\ mutatedTurn = FALSE
@@ -232,9 +270,10 @@ Reloc(lo, hi) ==
 \* Returns [act |-> "allow"|"block"|"reloc", to |-> start, inject |-> BOOLEAN].
 Verdict(lo, hi) ==
     IF Len(reads) = 0
-    THEN IF written \/ (MtimeAuthored /\ rev > born)            \* the zero-read authorship check (writtenThisSession)
+    THEN IF Authored \/ (MtimeAuthored /\ rev > born)           \* the zero-read authorship check (writtenThisSession)
            THEN [act |-> "allow", to |-> lo, inject |-> TRUE, why |-> "session_authored"]
-           ELSE [act |-> "block", to |-> lo, inject |-> FALSE, why |-> "zero_read"]
+           ELSE [act |-> "block", to |-> lo, inject |-> FALSE,
+                 why |-> IF written.on THEN "authorship_retired" ELSE "zero_read"]
     ELSE IF FileTimeCheck /\ ft # rev
              /\ ~(OwnEditRescue /\ lastEditOk)
              /\ ~HashRescue(lo, hi)
@@ -348,7 +387,7 @@ Edit(lo, span) ==
 \* tool_result of the edit: recordWritten (FileTime from disk now).
 EditRW ==
     /\ pc = "editRW"
-    /\ ft' = rev /\ written' = TRUE /\ pendCreate' = FALSE
+    /\ ft' = rev /\ written' = Auth(disk) /\ pendCreate' = FALSE
     /\ reads' = LET r0 == IF pendCreate
                             THEN AddRec(reads, Rec(1, Len(disk), MkH(disk, 1, Len(disk)), FALSE), TRUE)
                             ELSE reads
@@ -375,7 +414,7 @@ Write ==
 \* recordWritten before the pipeline: stamps FileTime, injects the creation read.
 WriteRW1 ==
     /\ pc = "writeRW1"
-    /\ ft' = rev /\ written' = TRUE /\ pendCreate' = FALSE
+    /\ ft' = rev /\ written' = Auth(disk) /\ pendCreate' = FALSE
     /\ reads' = IF pendCreate
                   THEN AddRec(reads, Rec(1, IF CreationHandlerEvidence THEN Len(disk) ELSE pend.n,
                                          IF CreationHandlerEvidence THEN MkH(disk, 1, Len(disk))
@@ -401,7 +440,7 @@ Fix ==
 \* recordWritten after the pipeline; the tool result attaches the post-fix bytes.
 WriteRW2 ==
     /\ pc = "writeRW2"
-    /\ ft' = rev /\ written' = TRUE
+    /\ ft' = rev /\ written' = Carry(disk)
     /\ know' = pend.c
     /\ reads' = IF RecordAuthoritative
                   THEN AddRec(reads, Rec(1, pend.n, MkH(pend.c, 1, pend.n), FALSE), TRUE)
@@ -420,8 +459,22 @@ BashWrite ==
     /\ CanOp("bash")
     /\ LET c == [l \in 1..N0 |-> tok + l - 1]
        IN /\ disk' = c /\ know' = KnowAll(c)
+          /\ written' = IF Broken THEN Retired ELSE Auth(c)
     /\ rev' = rev + 1 /\ tok' = tok + N0
-    /\ written' = TRUE
+    /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
+                   fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
+\* ---- a recognized bash write of one line ("pbash": sed -i on line 1) ----
+\* The agent knows the line it wrote, not the rest. Scoped to a file this
+\* conversation already authored (the #4187 F6 shape: an own write after
+\* another writer's); a first partial write of a never-read file is the
+\* whole-file BashWrite abstraction above (#3520), not modelled here.
+PartialBashWrite ==
+    /\ CanOp("pbash") /\ written.on
+    /\ disk' = Replace(disk, 1, tok) /\ know' = [know EXCEPT ![1] = tok]
+    /\ written' = IF Broken THEN Retired ELSE Auth(Replace(disk, 1, tok))
+    /\ rev' = rev + 1 /\ tok' = tok + 1
     /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
                    fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
@@ -448,7 +501,8 @@ Turn ==
     /\ Idle /\ "turn" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ IF DrainMode = "atomic" /\ FormatDrain # "none" /\ mutatedTurn /\ ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
-              /\ written' = TRUE                              \* recordWritten after the format
+              /\ written' = IF Broken THEN Retired              \* recordWritten after the format
+                             ELSE Carry(Mod(FormatDrain, disk, 1, tok))
               /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
     /\ kTurn' = know /\ turnNo' = turnNo + 1
@@ -483,7 +537,8 @@ Drain ==
     /\ IF ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
               /\ IF DrainMode = "unfenced" \/ dr.ep = dr.cur
-                   THEN /\ written' = TRUE
+                   THEN /\ written' = IF Broken THEN Retired
+                                      ELSE Carry(Mod(FormatDrain, disk, 1, tok))
                         /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
                    ELSE UNCHANGED <<ft, written>>
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
@@ -502,7 +557,7 @@ Requeue ==
                    staleAllow, blindAllow, falseBlock>>
 
 FreshGuard ==
-    /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE
+    /\ ft' = -1 /\ written' = NoAuth /\ pendCreate' = FALSE /\ lastEditOk' = FALSE
     /\ born' = rev
 
 \* /new: fresh guard, empty conversation.
@@ -531,7 +586,7 @@ Fork ==
               IN /\ reads' = imp
                  /\ ft' = IF Len(imp) > 0 THEN rev ELSE -1      \* recordRead stamps FileTime
     /\ UNCHANGED turnNo
-    /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE /\ born' = rev
+    /\ written' = KeptAuth /\ pendCreate' = FALSE /\ lastEditOk' = FALSE /\ born' = rev
     /\ know' = kTurn
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
     /\ dr' = [dr EXCEPT !.q = FALSE, !.rq = FALSE]   \* the session generation drops the old drain (#3528)
@@ -548,11 +603,11 @@ Tree ==
     /\ know' = kTurn
     /\ IF BranchFilter
          THEN /\ reads' = SelectSeq(reads, BeforePrompt)
-              /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE
+              /\ ft' = -1 /\ written' = KeptAuth /\ pendCreate' = FALSE
               /\ lastEditOk' = FALSE /\ born' = rev
               /\ dr' = [dr EXCEPT !.cur = dr.cur + 1]      \* the branch epoch
          ELSE /\ reads' = IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
-              /\ written' = IF ForkAtBoundary THEN FALSE ELSE written   \* writtenThisSession
+              /\ written' = IF ForkAtBoundary THEN NoAuth ELSE written   \* writtenThisSession
               /\ UNCHANGED <<ft, pendCreate, lastEditOk, born, dr>>
     /\ UNCHANGED turnNo
     /\ nb' = nb + 1
@@ -566,7 +621,7 @@ Next ==
     \/ ReadExec \/ ReadResult
     \/ \E lo \in 1..MaxLen, s \in Spans : Edit(lo, s)
     \/ EditRW
-    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite
+    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite
     \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars

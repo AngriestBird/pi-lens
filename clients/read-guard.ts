@@ -10,6 +10,7 @@
  * Falls back safely when LSP is unavailable.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { BoundedSet } from "./bounded-cache.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
@@ -176,9 +177,42 @@ export interface PersistedReadGuardState {
 	reads: Array<[string, ReadRecord[]]>;
 }
 
-/** A session's authorship ({@link ReadGuard.exportAuthorship}), keys in `normalizeFilePath` form. */
+/**
+ * A session's authorship ({@link ReadGuard.exportAuthorship}), keys in
+ * `normalizeFilePath` form. `written` is the released (#3612) shape and is
+ * still written, so an older reader keeps parsing it. `entries` (#4131,
+ * #3603) carries each file's content identity and the transcript id of the
+ * write it came from; a `written` path with no entry has neither, so no
+ * branch can be shown to hold it and it is not imported.
+ */
 export interface PersistedReadGuardAuthorship {
 	written: string[];
+	entries?: Array<{ filePath: string } & AuthoredBytes>;
+}
+
+/**
+ * The content identity of the bytes the conversation last wrote to a file
+ * (#4131; maintainer decision F5 on #4187). `stat` is the cheap pre-filter:
+ * unchanged, the bytes are taken as unchanged; changed, the hash decides, so
+ * `touch`, `chmod` or a checkout of identical bytes keeps authorship.
+ */
+interface AuthoredBytes {
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	/** sha256 of the bytes; absent past READ_BINDING_MAX_BYTES, where any stat change ends authorship. */
+	hash?: string;
+	/** The write's transcript entry (#3603): a branch move keeps the authorship iff it is on the branch. */
+	toolCallId?: string;
+	/**
+	 * Another writer changed the bytes (#4131): the authorship has ended and
+	 * no later write resumes it. A bash write, the agent_end drain or a
+	 * process bridge would vouch for the other writer's bytes it rewrote
+	 * around; the agent's own edit or write of an existing file needs a read
+	 * here first, after which the reads judge its edits. It goes with the
+	 * entry: idle eviction, an external delete, or a move off its branch.
+	 */
+	retired?: true;
 }
 
 /**
@@ -214,6 +248,72 @@ const READ_HASH_MAX_LINES = Math.max(
  * synchronous disk read so bridge registration never hashes an unbounded file.
  */
 const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
+
+function hashFileBytes(filePath: string): string {
+	return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+/** `size` of an authorship credited while the file could not be read. */
+const ABSENT_SIZE = -1;
+
+/**
+ * The disk's identity now. `knownHash` is the sha256 of the bytes the caller
+ * already read for this write (`getFileStateHash`), so the hot path reads
+ * them once (#2499). A file that cannot be read is the identity "absent".
+ */
+function observeAuthoredBytes(
+	filePath: string,
+	knownHash: string | undefined,
+): AuthoredBytes {
+	try {
+		const stat = fs.statSync(filePath);
+		const hash =
+			knownHash !== undefined
+				? knownHash
+				: stat.size <= READ_BINDING_MAX_BYTES
+					? hashFileBytes(filePath)
+					: undefined;
+		return {
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
+			...(hash !== undefined && { hash }),
+		};
+	} catch {
+		return { size: ABSENT_SIZE, mtimeMs: 0, ctimeMs: 0 };
+	}
+}
+
+/**
+ * Whether the disk still holds the authored bytes. An unchanged stat skips the
+ * hash; a hash match refreshes the stat so the next check is cheap again.
+ */
+function authoredBytesIntact(
+	filePath: string,
+	authored: AuthoredBytes,
+): boolean {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return authored.size === ABSENT_SIZE;
+	}
+	if (
+		stat.size === authored.size &&
+		stat.mtimeMs === authored.mtimeMs &&
+		stat.ctimeMs === authored.ctimeMs
+	)
+		return true;
+	if (authored.hash === undefined || stat.size !== authored.size) return false;
+	try {
+		if (hashFileBytes(filePath) !== authored.hash) return false;
+	} catch {
+		return false;
+	}
+	authored.mtimeMs = stat.mtimeMs;
+	authored.ctimeMs = stat.ctimeMs;
+	return true;
+}
 const READ_GUARD_MAX_FILES = 256;
 /**
  * #1904 item 3: `enforceFileCap` bounds how many FILES the store holds, not how
@@ -593,12 +693,6 @@ export class ReadGuard {
 	/** Reads remain behavior-gating until the corresponding edit is published. */
 	private readonly consumedReadFiles = new Set<string>();
 	private readonly fileTime: FileTime;
-	/**
-	 * The last bytes observed when authorship was credited. This is separate
-	 * from `fileTime`: an opaque/partial producer may credit authorship without
-	 * vouching for the bytes as conversation evidence (#4131, #3865).
-	 */
-	private readonly authorshipFileTime: FileTime;
 	private readonly exemptions = new Set<string>(); // One-time exemptions via /lens-allow-edit
 	private readonly pendingCreations = new Map<
 		string,
@@ -607,7 +701,9 @@ export class ReadGuard {
 	// Files that recordWritten() has fired on this session: the only evidence
 	// of session authorship, independent of filesystem mtime granularity or
 	// clock skew (NFS, FAT32, etc.) and of other writers' mtimes (#3520).
-	private readonly writtenThisSession = new Set<string>();
+	// Each holds the content identity of the bytes the conversation last
+	// wrote; authorship ends (`retired`) when the disk's bytes differ (#4131).
+	private readonly writtenThisSession = new Map<string, AuthoredBytes>();
 	// Files whose write record idle-expired (#3520): `evictFile` drops the
 	// authorship with the rest of the file's state, and a later zero-read edit
 	// must say so instead of "you have not read" (false for a file the agent
@@ -667,7 +763,6 @@ export class ReadGuard {
 		this.sessionId = sessionId;
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.fileTime = createFileTime(sessionId);
-		this.authorshipFileTime = createFileTime(`${sessionId}:authorship`);
 	}
 
 	/**
@@ -735,9 +830,6 @@ export class ReadGuard {
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
 		const droppedAuthorship = this.writtenThisSession.delete(filePath);
-		// Test doubles and released host adapters may expose only the original
-		// FileTime surface; the authorship observation is best-effort on eviction.
-		this.authorshipFileTime.clearFile?.(filePath);
 		// #1668 review F1: prune the reverse-pointing knownPathIndex entries
 		// too, so it never outlives the record it points at.
 		for (const [syntacticKey, stored] of this.knownPathIndex) {
@@ -1000,6 +1092,47 @@ export class ReadGuard {
 	}
 
 	/**
+	 * #4131: end the file's authorship when its bytes are no longer the ones the
+	 * conversation last wrote. Called by every guard decision that relies on
+	 * authorship: the zero-read edit check, and the start of a write that
+	 * carries no bytes of its own (a recognized bash write's tool_call, the
+	 * agent_end drain), which would otherwise re-baseline over the other
+	 * writer's bytes. Returns true when it ended the authorship here.
+	 */
+	retireChangedAuthorship(rawFilePath: string): boolean {
+		const filePath = this.key(rawFilePath);
+		const authored = this.writtenThisSession.get(filePath);
+		if (
+			!authored ||
+			authored.retired ||
+			authoredBytesIntact(filePath, authored)
+		)
+			return false;
+		authored.retired = true;
+		// Once per authorship episode: a retired entry is never retired again.
+		const isRisingEdge = incrementDegradationCount({
+			kind: "read-guard-authorship-retired",
+			subject: filePath,
+			reason:
+				"another writer changed the bytes the conversation wrote; the next edit needs a read",
+		});
+		if (isRisingEdge)
+			logReadGuardEvent({
+				event: "authorship_retired",
+				sessionId: this.sessionId,
+				filePath,
+				metadata: {
+					authoredSize: authored.size,
+					hashed: authored.hash !== undefined,
+					...(authored.toolCallId !== undefined && {
+						toolCallId: authored.toolCallId,
+					}),
+				},
+			});
+		return true;
+	}
+
+	/**
 	 * #3525: whether the disk may hold bytes no read or own write accounts
 	 * for: FileTime moved since its stamp, or there is none. An edit that
 	 * passes `checkEdit` then did so on other evidence (line hashes, a
@@ -1107,25 +1240,24 @@ export class ReadGuard {
 		// 1. Zero-read check
 		const fileReads = this.reads.get(filePath);
 		if (!fileReads || fileReads.length === 0) {
-			// A write pi-lens observed (recordWritten, from any producer) is the
-			// agent's own only until the bytes change. Do this before the
-			// session-authored fast path: otherwise a foreign write after an
-			// authorship-only record is turned into a synthetic read of bytes the
-			// conversation never saw (#4131).
+			// Only a write pi-lens observed (recordWritten, from any producer) is
+			// the agent's own; a newer mtime is any writer's (#3520). It stays the
+			// agent's own while the disk holds the bytes it wrote (#4131). A
+			// synthetic read is injected for it.
+			this.retireChangedAuthorship(filePath);
+			if (this.writtenThisSession.get(filePath)?.retired) {
+				const verdict = this.blockOrWarn(
+					"authorship-retired",
+					`🔄 RETRYABLE — File modified since your write: \`${filePath}\` no longer holds the bytes this conversation wrote. Read it first, then retry: \`read path="${filePath}"\`.`,
+					undefined,
+					effectiveMode,
+				);
+				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+					reasonKind: "authorship_retired",
+				});
+				return verdict;
+			}
 			if (this.writtenThisSession.has(filePath)) {
-				if (this.authorshipFileTime.hasChanged(filePath)) {
-					this.writtenThisSession.delete(filePath);
-					const verdict = this.blockOrWarn(
-						"file-modified",
-						`🔄 RETRYABLE — File modified since read\n\nThe file changed after the conversation's authored bytes were recorded. Re-read it before editing: \`read path="${filePath}"\``,
-						undefined,
-						effectiveMode,
-					);
-					this.recordVerdict(filePath, "edit", touchedLines, verdict, {
-						reasonKind: "file_modified",
-					});
-					return verdict;
-				}
 				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
@@ -1398,7 +1530,7 @@ export class ReadGuard {
 	 */
 	getTrackedPaths(): string[] {
 		const tracked = new Set<string>(this.reads.keys());
-		for (const written of this.writtenThisSession) tracked.add(written);
+		for (const written of this.writtenThisSession.keys()) tracked.add(written);
 		return [...tracked];
 	}
 
@@ -1473,6 +1605,13 @@ export class ReadGuard {
 			stampFileTime?: boolean;
 			/** The bytes a `write` wrote: its creation read's evidence (#3524). */
 			writtenContent?: string;
+			/**
+			 * The write's transcript entry (#3603). A writer that names none (a
+			 * pi-lens writer) keeps the id of the write its bytes descend from.
+			 */
+			toolCallId?: string;
+			/** sha256 (hex) of the bytes on disk the caller already read for this write. */
+			contentHash?: string;
 		},
 	): void {
 		if (
@@ -1491,9 +1630,8 @@ export class ReadGuard {
 		// (see `knownPathIndex`) so a later hasKnownPath/forgetPath lookup
 		// after an external delete can still find this entry's real key.
 		this.knownPathIndex.set(normalizeEphemeralMapKey(rawFilePath), filePath);
-		this.authorshipFileTime.read(filePath);
 		if (opts?.stampFileTime !== false) this.fileTime.read(filePath);
-		this.writtenThisSession.add(filePath);
+		this.creditAuthorship(filePath, opts);
 		if (this.reads.has(filePath)) this.consumedReadFiles.add(filePath);
 		this.touchFile(filePath);
 		this.enforceFileCap();
@@ -1623,28 +1761,78 @@ export class ReadGuard {
 
 	/**
 	 * The files this session authored (#3612, D5): `writtenThisSession`, which
-	 * the zero-read check reads. A `/reload` keeps the conversation and its branch, so the
-	 * reloaded guard keeps them; every other start resets them.
+	 * the zero-read check reads, each with the content identity and transcript
+	 * id of its write (#4131, #3603).
 	 */
 	exportAuthorship(): PersistedReadGuardAuthorship {
-		return { written: [...this.writtenThisSession] };
+		return {
+			// A released reader treats every `written` path as authored, so a
+			// retired one is carried in `entries` only.
+			written: [...this.writtenThisSession].flatMap(([filePath, authored]) =>
+				authored.retired ? [] : [filePath],
+			),
+			entries: [...this.writtenThisSession].map(([filePath, authored]) => ({
+				filePath,
+				...authored,
+			})),
+		};
 	}
 
 	/**
-	 * Restore {@link exportAuthorship}'s output. Null-safe on a malformed
-	 * payload; a row from a released writer may carry a `sessionStartMs`, which
-	 * is ignored.
+	 * Restore {@link exportAuthorship}'s output for the branch this session
+	 * starts on (#3603): the {@link importBranch} rule, an entry is imported
+	 * iff its write's `toolCallId` is in `onBranch`. Its content identity
+	 * comes with it, so bytes another writer changed meanwhile end it at the
+	 * next check. A released writer's row (#3612: `written` paths only, maybe a
+	 * `sessionStartMs`) names no write, so it imports nothing. Null-safe on a
+	 * malformed payload; never throws.
 	 */
-	importAuthorship(state: unknown): void {
+	importAuthorship(
+		state: unknown,
+		onBranch: ReadonlySet<string>,
+	): { imported: number; dropped: number } {
+		const result = { imported: 0, dropped: 0 };
 		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
+		const entries = Array.isArray(authorship?.entries)
+			? authorship.entries
+			: [];
+		const withEntry = new Set<string>();
+		for (const entry of entries) {
+			const candidate = entry as Partial<{ filePath: string } & AuthoredBytes>;
+			if (typeof candidate?.filePath !== "string") continue;
+			withEntry.add(candidate.filePath);
+			if (
+				typeof candidate.toolCallId !== "string" ||
+				!onBranch.has(candidate.toolCallId) ||
+				typeof candidate.size !== "number" ||
+				typeof candidate.mtimeMs !== "number" ||
+				typeof candidate.ctimeMs !== "number" ||
+				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
+				(candidate.retired !== undefined && candidate.retired !== true)
+			) {
+				result.dropped += 1;
+				continue;
+			}
+			const filePath = this.key(candidate.filePath);
+			this.knownPathIndex.set(
+				normalizeEphemeralMapKey(candidate.filePath),
+				filePath,
+			);
+			this.writtenThisSession.set(filePath, {
+				size: candidate.size,
+				mtimeMs: candidate.mtimeMs,
+				ctimeMs: candidate.ctimeMs,
+				...(candidate.hash !== undefined && { hash: candidate.hash }),
+				toolCallId: candidate.toolCallId,
+				...(candidate.retired === true && { retired: true as const }),
+			});
+			result.imported += 1;
+		}
 		if (Array.isArray(authorship?.written))
 			for (const filePath of authorship.written)
-				if (typeof filePath === "string") {
-					this.writtenThisSession.add(filePath);
-					// Released records contain paths only. Establish the observation
-					// baseline they can support without changing their shape.
-					this.authorshipFileTime.read(filePath);
-				}
+				if (typeof filePath === "string" && !withEntry.has(filePath))
+					result.dropped += 1;
+		return result;
 	}
 
 	/**
@@ -1656,8 +1844,10 @@ export class ReadGuard {
 	 * is re-verified or re-stamped here: the FileTime stamps are cleared, so
 	 * each kept record must pass the per-line hash check against disk at the
 	 * next edit. A stamp taken on the abandoned branch would otherwise vouch
-	 * for bytes this branch never showed. Edits, authored-write and
-	 * pending-creation state came from the old branch too, so they go.
+	 * for bytes this branch never showed. Authorship follows the same rule
+	 * (#3603): it stays, retired or not, iff the write it came from is on the
+	 * branch, and its content identity still decides. Edits, idle-expiry
+	 * marks and pending creations came from the old branch, so they go.
 	 */
 	retainBranch(onBranch: ReadonlySet<string>): {
 		kept: number;
@@ -1677,9 +1867,13 @@ export class ReadGuard {
 			}
 			this.reads.delete(filePath);
 		}
+		for (const [filePath, authored] of this.writtenThisSession)
+			if (
+				authored.toolCallId === undefined ||
+				!onBranch.has(authored.toolCallId)
+			)
+				this.writtenThisSession.delete(filePath);
 		this.edits.clear();
-		this.writtenThisSession.clear();
-		this.authorshipFileTime.clear();
 		this.expiredWrites.clear();
 		this.pendingCreations.clear();
 		this.fileTime.clear();
@@ -1759,6 +1953,25 @@ export class ReadGuard {
 	}
 
 	// --- Private helpers ---
+
+	/**
+	 * #4131: record the content identity of the bytes `recordWritten` just
+	 * credited. A retired authorship is never resumed (see
+	 * `AuthoredBytes.retired`).
+	 */
+	private creditAuthorship(
+		filePath: string,
+		opts: { toolCallId?: string; contentHash?: string } | undefined,
+	): void {
+		if (this.writtenThisSession.get(filePath)?.retired) return;
+		const observed = observeAuthoredBytes(filePath, opts?.contentHash);
+		const toolCallId =
+			opts?.toolCallId ?? this.writtenThisSession.get(filePath)?.toolCallId;
+		this.writtenThisSession.set(filePath, {
+			...observed,
+			...(toolCallId !== undefined && { toolCallId }),
+		});
+	}
 
 	/**
 	 * `writtenContent`, when the write's bytes are known, is the agent's view

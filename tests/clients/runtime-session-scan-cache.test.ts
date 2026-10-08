@@ -26,7 +26,10 @@ import {
 	saveProjectSnapshot,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { _resetStartupScanVerdictTtlForTests } from "../../clients/startup-scan.js";
+import {
+	_resetStartupScanVerdictTtlForTests,
+	getStartupScanMaxEntries,
+} from "../../clients/startup-scan.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -238,6 +241,8 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
+					maxProjectFiles: 2000,
+					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now(),
 				},
 			});
@@ -272,6 +277,9 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
+					// Current bounds, so the TTL is the only thing that expires here.
+					maxProjectFiles: 2000,
+					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now() - 10_000, // well past the 1s TTL
 				},
 			});

@@ -797,6 +797,8 @@ export type DegradationKind =
 	 * server and file for the same reason every other pull kind does.
 	 */
 	| "lsp-session-root-evicted"
+	/** A sibling LSP notification failed while touching a file. */
+	| "lsp-sibling-announcement"
 	/**
 	 * A language-server child process CLOSED without pi-lens having asked it to
 	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
@@ -1086,6 +1088,13 @@ export type DegradationKind =
 	 * credited to the new branch, which never showed it. One subject, counted.
 	 */
 	| "read-guard-write-after-branch-move"
+	/**
+	 * #4131: another writer changed a file the agent authored without a read
+	 * (a bash write, a created file), so its authorship ended
+	 * (`ReadGuard.retireChangedAuthorship`) and its next edit needs a read.
+	 * Subject is the file; counted, the read-guard.log row on the rising edge.
+	 */
+	| "read-guard-authorship-retired"
 	/**
 	 * The tier-3 cascade's outstanding-touch registry
 	 * (`clients/lsp/cascade-tier.ts`) reached its cap before a quiet-window
@@ -1420,6 +1429,8 @@ export type DegradationKind =
 	 * kind. Once per file per session; subject is the file path.
 	 */
 	| "startup-analyzer-disabled"
+	/** A project-size bound skipped the session-start warm pipeline (#4126). */
+	| "startup-warm-skipped"
 	/**
 	 * Automatic test ownership is indeterminate: filesystem identity or marker
 	 * I/O failed, a target walk hit its depth bound, or the dispatch walk missed.

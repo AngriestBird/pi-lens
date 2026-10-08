@@ -26,16 +26,23 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolveLanguageRootForFile } from "../../clients/language-profile.js";
 import {
 	MUTATION_ATTRIBUTION_FILE,
+	lookupLearnedMutatingTool,
 	primePersistedMutationAttribution,
 	resetMutationAttribution,
 	shouldArmObservationForTool,
 } from "../../clients/mutation-attribution.js";
+import { PI_LENS_TOOL_NAMES } from "../../clients/tool-config.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import {
 	armObservedMutation,
 	_setObservedTimeBoundsForTests,
 	resetObservedMutationNet,
 } from "../../clients/observed-mutation.js";
 import { readChangesSince } from "../../clients/project-changes.js";
+import {
+	_resetFormatEventsPublishForTests,
+	wireFormatEventsBusEmitter,
+} from "../../clients/format-events-publish.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
@@ -69,6 +76,7 @@ vi.mock("../../clients/bootstrap.js", () => ({
 		metricsClient: {},
 		agentBehaviorClient: { recordToolCall: () => [], formatWarnings: () => "" },
 	}),
+	requestBootstrapClients: async () => ({ complexityClient: undefined }),
 }));
 
 const SOURCE = ["const a = 1;", "const b = 2;", "const c = 3;", ""].join("\n");
@@ -294,6 +302,247 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 			// Deferred, never immediate — an unknown edit-shaped tool takes the
 			// safe timing, so the agent_settled drain formats it.
 			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+describe("#4139 pi-lens tool attribution boundary", () => {
+	it("does not block LSP reads after two observed pi-tool renames", async () => {
+		// #4139 F5: this must reach the read guard. The bootstrap mock includes
+		// requestBootstrapClients because a thrown complexity lookup is caught as
+		// "no opinion" before the guard, making the old witness vacuous.
+		const env = setupTestEnvironment("pi-lens-4139-read-guard-");
+		try {
+			const filePath = path.join(env.tmpDir, "renamed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+
+			for (const suffix of ["first", "second"]) {
+				const event = {
+					toolName: "lsp_navigation",
+					toolCallId: `call-4139-rename-${suffix}`,
+					input: { path: filePath, operation: "rename", apply: true },
+					content: [{ type: "text", text: "renamed" }],
+				};
+				await handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				);
+				fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+				await handleToolResult(
+					toolResultDeps({ event, runtime, cacheManager }),
+				);
+			}
+
+			const unreadPath = path.join(env.tmpDir, "unread.ts");
+			fs.writeFileSync(unreadPath, SOURCE);
+			for (const operation of [
+				"hover",
+				"references",
+				"definition",
+				"documentSymbol",
+				"implementation",
+			] as const) {
+				const result = await handleToolCall(
+					toolCallDeps({
+						event: {
+							toolName: "lsp_navigation",
+							toolCallId: `call-4139-${operation}`,
+							input: { path: unreadPath, operation },
+						},
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				);
+				expect(result).toBeUndefined();
+			}
+			expect(
+				getDegradationSummary().some(
+					(entry) =>
+						entry.kind === "tool-call-handler-throw" &&
+						entry.latestReasons.some(
+							(reason) => reason.subject === "lsp_navigation",
+						),
+				),
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not learn any pi-registered tool through the real call/result path", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-pi-tools-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			for (const [index, toolName] of PI_LENS_TOOL_NAMES.entries()) {
+				const filePath = path.join(env.tmpDir, `${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				const { runtime, cacheManager } = newSession(env.tmpDir);
+				for (const suffix of ["first", "second"]) {
+					const event = {
+						toolName,
+						toolCallId: `call-4139-${index}-${suffix}`,
+						input: { path: filePath, operation: "rename", apply: true },
+						content: [{ type: "text", text: "renamed" }],
+					};
+					await handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					);
+					fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+					await handleToolResult(
+						toolResultDeps({ event, runtime, cacheManager }),
+					);
+				}
+				expect(lookupLearnedMutatingTool(toolName)).toBeUndefined();
+				const hover = {
+					toolName,
+					input: {
+						path: path.join(env.tmpDir, "unread.ts"),
+						operation: "hover",
+					},
+				};
+				expect(classifyMutatingTool(hover)).toBeUndefined();
+			}
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records lens_diagnostic_mark suppress writes through the mutation bridge", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "marked.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const emitted: Array<{ event: string; payload: unknown }> = [];
+			wireFormatEventsBusEmitter((event, payload) => {
+				emitted.push({ event, payload });
+			});
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			const turnState = cacheManager.readTurnState(env.tmpDir);
+			expect(Object.keys(turnState.files ?? {})).toContain("marked.ts");
+			expect(turnState.files["marked.ts"]?.modifiedRanges).toEqual([
+				{ start: 1, end: 1 },
+			]);
+			expect(readChangesSince(env.tmpDir, 0)).toContainEqual(
+				expect.objectContaining({ source: "agent-tool:lens_diagnostic_mark" }),
+			);
+			expect(emitted).toContainEqual(
+				expect.objectContaining({
+					event: "pilens:format:queued",
+					payload: expect.objectContaining({ tool: "edit" }),
+				}),
+			);
+			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			_resetFormatEventsPublishForTests();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("drops a suppress write whose session is retired while it awaits", async () => {
+		// #4139 F4 / #3763: a write that crosses session replacement must not
+		// publish turn-state or deferred-format evidence into the new session.
+		const env = setupTestEnvironment("pi-lens-4139-retired-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "retired.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			const run = tool.execute(
+				"call-4139-retired-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+			runtime.resetForSession();
+			await run;
+
+			expect(cacheManager.readTurnState(env.tmpDir).files).toEqual({});
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records the merged suppress comment and its adjacent source range", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-merged-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "merged.ts");
+			fs.writeFileSync(
+				filePath,
+				"const a = 0;\n// pi-lens-ignore: other\nconst value = 1;\n",
+			);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-merged-mark",
+				{
+					filePath,
+					line: 3,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			expect(
+				cacheManager.readTurnState(env.tmpDir).files["merged.ts"]
+					?.modifiedRanges,
+			).toEqual([{ start: 2, end: 3 }]);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
@@ -896,8 +1145,12 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			).toEqual(["agent-tool:patch_retry", "agent-tool:patch_retry"]);
 			// 1. The staleness stamp is re-taken over the file the pipeline itself
 			//    rewrote, so the agent's next edit is judged by read coverage.
+			//    #3865: authorship only. pi-lens does not know the bytes an
+			//    unclassified tool wrote, so FileTime stays at its last
+			//    conversation-backed stamp and line hashes judge the next edit.
 			expect(recordWritten).toHaveBeenCalledWith(path.resolve(filePath), {
-				stampFileTime: true,
+				stampFileTime: false,
+				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
 			});
 			// 2. The #2402 record is re-stamped with the POST-pipeline hash, so an
 			//    identical retry against the formatted bytes is still recognized as
@@ -928,6 +1181,108 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				_bypassDebounce: true,
 			});
 			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(dispatchesSoFar);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #3865 member 1 (#4187 F3, P8): an unclassified tool's write is credited
+	// as authorship, never as FileTime. Recurrence: the mutation bridge's
+	// observed replay and the observed dispatch's post-pipeline refresh both
+	// re-stamped FileTime, so an edit of a line another writer changed, whose
+	// newest view carries no hash (past READ_HASH_MAX_LINES), passed.
+	it("credits an observed tool's write as authorship without re-stamping FileTime (#3865)", async () => {
+		const env = setupTestEnvironment("pi-lens-3865-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "big.ts");
+			const big = Array.from({ length: 3100 }, (_, i) => `line${i + 1}`);
+			fs.writeFileSync(filePath, big.join("\n"));
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's whole-file read, past READ_HASH_MAX_LINES: no hashes.
+			runtime.readGuard.recordRead({
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: big.length,
+				effectiveOffset: 1,
+				effectiveLimit: big.length,
+				expandedByLsp: false,
+				turnIndex: 0,
+				writeIndex: 0,
+				timestamp: Date.now(),
+			});
+			big[10] = "EXTERNAL11";
+			fs.writeFileSync(filePath, big.join("\n"));
+			const event = patchEvent(filePath, "call-3865-observed");
+			await handleToolCall(
+				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			);
+			big[1] = "patched2";
+			fs.writeFileSync(filePath, big.join("\n"));
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.exportAuthorship().written).toHaveLength(1);
+			const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since read");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4131 (#4187 F6): an observed tool's replay credits authorship without
+	// the bytes, so it must not re-author bytes another writer changed after
+	// the agent's own write. Recurrence: the replay's recordWritten
+	// re-baselined the authorship over the other writer's change.
+	it("does not let an observed tool's write re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = patchEvent(filePath, "call-4131-observed");
+			await handleToolCall(
+				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;

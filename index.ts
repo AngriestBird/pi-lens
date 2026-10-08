@@ -1878,6 +1878,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				model: runtime.telemetryModelId,
 				provider: runtime.telemetryProviderId,
 			}),
+			() => runtime.captureSessionGeneration(),
 		),
 	];
 	const LAZY_TOOL_CATALOG: ActivatableToolInfo[] = TOOL_REGISTRY.filter(

@@ -124,12 +124,11 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 		});
 		// #3521: every primary session_start imports the branch's reads.
 		importBranch = () => ({ imported: 0, dropped: 0 });
-		// #3612: a /reload hands the guard's authorship to the reloaded one.
-		exportAuthorship = () => ({
-			written: [],
-			sessionStartMs: 0,
-		});
-		importAuthorship = () => {};
+		// #3612: a /reload hands the guard's authorship to the reloaded one;
+		// since #3603 every start that keeps a conversation adopts it through
+		// the branch filter, so the double answers with the import tally.
+		exportAuthorship = () => ({ written: [], entries: [] });
+		importAuthorship = () => ({ imported: 0, dropped: 0 });
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,

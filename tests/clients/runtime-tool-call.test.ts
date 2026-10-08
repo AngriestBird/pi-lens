@@ -730,9 +730,11 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 
 			// The synthetic post-edit dispatch credits the commit to the read
 			// guard. The file was never read, so there is no FileTime to keep
-			// fresh (#3525).
+			// fresh (#3525). The handler hands over the bytes it already hashed
+			// for the authorship's content identity (#4131).
 			expect(recordWritten).toHaveBeenCalledWith(filePath, {
 				stampFileTime: false,
+				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
 			});
 		} finally {
 			env.cleanup();
