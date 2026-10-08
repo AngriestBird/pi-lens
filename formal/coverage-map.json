@@ -357,6 +357,7 @@
         "agent_settled": ["late-aux-drain", "session-straddle"],
         "tool_call": ["dispatch-pipeline", "read-guard", "opaque-baseline-slot"],
         "tool_result": ["dispatch-pipeline", "read-guard", "session-straddle"],
+        "tool_execution_end": ["read-guard"],
         "context": ["read-guard", "session-lifecycle"]
       }
     },
