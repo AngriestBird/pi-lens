@@ -32,7 +32,6 @@ import {
 import {
 	deserializeWordIndex,
 	recordPersistedWordIndexWireBytes,
-	releaseSerializedWordIndex,
 	serializeWordIndex,
 	type SerializedWordIndex,
 } from "./word-index.js";
@@ -1416,7 +1415,6 @@ function reconcileAuthoritativeAfterWrite(
 	// WordIndex owns mutable Map/PathKeyedMap state. Drop the authoritative copy
 	// after publication; later merge-writers rehydrate the canonical disk body.
 	if (pending.snapshot.wordIndex) {
-		releaseSerializedWordIndex(pending.snapshot.wordIndex);
 		try {
 			const stat = fs.statSync(pending.gzPath);
 			cacheParsedSnapshot(pending.gzPath, {

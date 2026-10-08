@@ -8,7 +8,6 @@ import {
 	deserializeWordIndex,
 	getWordIndexBuildStatus,
 	getWordIndexWireBytes,
-	releaseSerializedWordIndex,
 	parseWordIndexQuery,
 	flushWordIndexRecompactionsForTests,
 	searchWordIndex,
@@ -594,21 +593,6 @@ describe("serializeWordIndex / deserializeWordIndex", () => {
 		// Recurrence: measuring JSON in serializeWordIndex puts whole-index work
 		// back on every incremental persist and defeats the occupancy guard (#2068).
 		expect(getWordIndexWireBytes(index)).toBeNull();
-	});
-
-	it("releases the published wire form while retaining the decoded index (#4124)", () => {
-		const index = buildWordIndex(files);
-		const serialized = serializeWordIndex(index);
-
-		// Recurrence: the #1370 live index fix left its serialized snapshot copy
-		// reachable through the memo after publication, duplicating the warm heap.
-		releaseSerializedWordIndex(serialized);
-
-		expect(getWordIndexWireBytes(index)).toBeNull();
-		expect(searchWordIndex(index, "alpha handler").map((r) => r.file)).toEqual([
-			"src/a.ts",
-			"src/b.ts",
-		]);
 	});
 
 	it("round-trips to identical search behavior", () => {

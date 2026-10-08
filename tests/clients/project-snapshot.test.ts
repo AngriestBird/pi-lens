@@ -70,8 +70,10 @@ import {
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	buildWordIndex,
-	getWordIndexWireBytes,
+	getLastWordIndexSerializeWork,
+	releaseWordIndexMemoAtSettle,
 	searchWordIndex,
+	updateWordIndexDocument,
 } from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
@@ -182,30 +184,82 @@ describe("project snapshot", () => {
 			expect(isProjectSnapshotFresh(loaded, 7)).toBe(true);
 		}));
 
-	it("releases the published word-index wire memo but keeps merge reads live (#4124)", async () =>
-		withProjectDataDirAsync(async (cwd) => {
-			const runtime = new RuntimeCoordinator();
-			runtime.seedProjectSequence(7);
-			runtime.wordIndex = buildWordIndex([
-				{ path: path.join(cwd, "src", "alpha.ts"), content: "alphaHandler()" },
-				{ path: path.join(cwd, "src", "beta.ts"), content: "betaHandler()" },
-			]);
-
+	/**
+	 * A runtime whose word index is saved through the real snapshot seam
+	 * (`buildProjectSnapshotFromRuntime` -> `saveProjectSnapshot`, which hands the
+	 * body to the persist writer), as a run's per-edit persists do.
+	 */
+	function wordIndexedRuntime(cwd: string) {
+		const runtime = new RuntimeCoordinator();
+		runtime.seedProjectSequence(7);
+		const alpha = path.join(cwd, "src", "alpha.ts");
+		runtime.wordIndex = buildWordIndex([
+			{ path: alpha, content: "alphaHandler()" },
+			{ path: path.join(cwd, "src", "beta.ts"), content: "betaHandler()" },
+			{ path: path.join(cwd, "src", "gamma.ts"), content: "gammaHandler()" },
+		]);
+		const save = async () => {
 			saveProjectSnapshot(
 				cwd,
 				buildProjectSnapshotFromRuntime({ cwd, runtime }),
 			);
 			await waitForProjectSnapshotPersistsForTests();
+		};
+		return { runtime, alpha, save };
+	}
 
-			// Recurrence: #1370's live decoded index remained useful, but the
-			// serialized copy stayed reachable after publication and doubled warm
-			// memory. The real writer must release only that copy.
-			expect(getWordIndexWireBytes(runtime.wordIndex)).toBeNull();
-			expect(searchWordIndex(runtime.wordIndex, "alpha handler")).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ file: path.join(cwd, "src", "alpha.ts") }),
-				]),
+	it("serializes an edit after a published save incrementally (#4124)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			const { runtime, alpha, save } = wordIndexedRuntime(cwd);
+			await save();
+			updateWordIndexDocument(runtime.wordIndex!, {
+				path: alpha,
+				content: "alphaHandler changedHandler()",
+			});
+			await save();
+
+			// Recurrence: #4124 round 1 released the memo at every publication, so
+			// each later edit's persist re-serialized the whole index
+			// (tookFullPath true, affectedTokenCount 59,182 on this repo).
+			expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(false);
+			expect(getLastWordIndexSerializeWork()?.affectedTokenCount).toBeLessThan(
+				10,
 			);
+			// The decoded index stayed live and queryable.
+			expect(searchWordIndex(runtime.wordIndex!, "changed handler")).toEqual(
+				expect.arrayContaining([expect.objectContaining({ file: alpha })]),
+			);
+		}));
+
+	it("serves a no-op same-seq re-save from the memo, without a body write (#4124)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			const { save } = wordIndexedRuntime(cwd);
+			await save();
+
+			writeFileAtomicSpy.mockClear();
+			await save();
+
+			// Recurrence: the no-op save (decision skipped_unchanged) re-serialized
+			// the index in full and left a memo nothing released.
+			expect(
+				writeFileAtomicSpy.mock.calls.filter(
+					([filePath]) => filePath === getProjectSnapshotPath(cwd),
+				),
+			).toHaveLength(0);
+			expect(getLastWordIndexSerializeWork()).toEqual({
+				affectedTokenCount: 0,
+				tookFullPath: false,
+			});
+		}));
+
+	it("serializes in full again once the settle released the memo (#4124)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			const { runtime, save } = wordIndexedRuntime(cwd);
+			await save();
+			releaseWordIndexMemoAtSettle(runtime.wordIndex!);
+			await save();
+
+			expect(getLastWordIndexSerializeWork()?.tookFullPath).toBe(true);
 		}));
 
 	it("skips a same-seq body when only generatedAt changed", () =>
