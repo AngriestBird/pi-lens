@@ -98,7 +98,9 @@ const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
 // bounded by nothing. That is how the Unit-tests job got SIGKILLed (exit 137)
 // with no failing assertion. Local runs keep the measured 2026-07-29 posture
 // (8 forks ≈ 40s / 9-11 GB peak RSS; 6 forks ≈ 44s / 8 GB); memory-constrained
-// local runs still use PI_LENS_TEST_MAX_WORKERS=6.
+// local runs still use PI_LENS_TEST_MAX_WORKERS=6. A host with more than 16
+// logical CPUs is capped at those 8 forks (LOCAL_WORKER_CAP) rather than half
+// its cores.
 const testHost = {
 	totalMemMb: Math.round(os.totalmem() / (1024 * 1024)),
 	cpus: os.availableParallelism?.() ?? os.cpus().length,
@@ -478,6 +480,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/sgconfig-scratch-bound.test.ts",
 	"tests/clients/shared-checkout-guard.test.ts",
 	"tests/clients/startup-overhead.test.ts",
+	// #3871: runner-location regex budget (depth-30 paths, 100K blank runs
+	// and tokens); a real event-loop occupancy witness, so it runs serialized.
+	"tests/clients/test-runner-location-regex-budget.test.ts",
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",

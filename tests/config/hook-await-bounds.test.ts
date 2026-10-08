@@ -2438,6 +2438,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
 	"clients/project-snapshot.ts": 2,
+	// #3871 r3: runtime-turn imports only the synchronous
+	// `hasAmbientPythonEnvironment`, which this one-hop walk cannot tell apart.
+	// The four awaits are `detectPythonEnvironment`'s filesystem probes, which
+	// turn_end already reached two hops away through test-runner-client.ts.
+	"clients/python-environment.ts": 4,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
 	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved

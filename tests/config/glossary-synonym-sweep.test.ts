@@ -903,7 +903,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/installer/index.ts": 107,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
-		"clients/instance-registry-lock.ts": 8,
+		// 8 -> 9 (#3498): the own-hold skip's degradation `subject`,
+		// `path.resolve(target)`, as its sibling records in this file spell it.
+		"clients/instance-registry-lock.ts": 9,
 		"clients/instance-registry.ts": 2,
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
@@ -971,7 +973,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 21,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
-		"clients/python-environment.ts": 18,
+		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
+		// path operations at the shared Python resolver seam; r3 restored the
+		// `path.isAbsolute` leg that rejects another Windows drive (V1).
+		"clients/python-environment.ts": 22,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
@@ -1017,7 +1022,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
 		// exception's physical policy-relative path (R4). These remain filesystem
 		// operations, not delivery lanes; the census measures every use.
-		"clients/test-runner-client.ts": 66,
+		// 66 -> 74 (#3871 r2): text-runner display rebasing uses path operations
+		// for pytest, PHPUnit, Mix, and generic runner locations.
+		"clients/test-runner-client.ts": 74,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,

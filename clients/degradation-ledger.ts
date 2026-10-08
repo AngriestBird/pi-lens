@@ -485,6 +485,14 @@ export type DegradationKind =
 	 */
 	| "instance-registry-lock-legacy-held"
 	/**
+	 * A sync registry-lock acquisition returned without waiting because an
+	 * async registry op of this process holds the lock: that holder cannot
+	 * release while a sync wait blocks the event loop. The caller queues behind
+	 * it (`instance-registry-deregister-queued`). Subject is the resolved lock
+	 * target.
+	 */
+	| "instance-registry-lock-own-hold"
+	/**
 	 * #3476: a registry-lock acquisition took over a generation whose holder
 	 * was dead or past the 5 s lease. Subject is the resolved lock target.
 	 */
