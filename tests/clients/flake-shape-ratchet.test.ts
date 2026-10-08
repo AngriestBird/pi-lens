@@ -410,6 +410,20 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the installed pi host must load the built extension and expose its provider roster across the process boundary",
 	},
+	// 2026-10-08 (#4138, #3831, #4185 round 2): the branch a read record is
+	// admitted to is pi's own session branch after a real RPC clone rebinds the
+	// extension, and the nested ids (`c1/1`, parent `c1`) and the toolResult pi
+	// persists for a codemode call exist only in the real host. Round 4 adds
+	// four: pi's own agent loop decides that a call a later extension blocked
+	// gets tool_execution_end and no tool_result, in what order, top-level,
+	// parallel and nested. Round 5 adds one: a later extension's tool_result
+	// hook rewrites a failed read's isError after pi-lens saw it, which only
+	// pi's own hook chain produces.
+	"real-process-spawn:real-harness/read-guard-moves.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the read guard's branch admission after a real RPC clone, the nested-call ids pi mints, and the tool_execution_end pi's agent loop emits for a call a later extension blocked cannot be produced by an in-process double",
+	},
 	"real-process-spawn:real-harness/scenario-1.test.ts": {
 		detector: "real-process-spawn",
 		reason:

@@ -361,9 +361,10 @@ describe("ReadGuard.importBranch (#3521, replaces #1041's importState)", () => {
 		});
 	});
 
-	it("loads undefined, a version-1 or an unknown version as no reads", () => {
+	it("loads an old record without an id but does not credit it to a branch", () => {
 		const guard = createReadGuard("import-compat");
 		const any = new Set(["call_a"]);
+		const legacy = oldFile("legacy.ts", 6);
 		expect(guard.importBranch(undefined, any)).toEqual({
 			imported: 0,
 			dropped: 0,
@@ -372,6 +373,15 @@ describe("ReadGuard.importBranch (#3521, replaces #1041's importState)", () => {
 			imported: 0,
 			dropped: 0,
 		});
+		expect(
+			guard.importBranch(
+				{
+					version: READ_GUARD_STATE_VERSION,
+					reads: [[normalizeFilePath(legacy), [fullRead(legacy, 6)]]],
+				},
+				any,
+			),
+		).toEqual({ imported: 0, dropped: 1 });
 		expect(guard.importBranch({ version: 999, reads: [] }, any)).toEqual({
 			imported: 0,
 			dropped: 0,

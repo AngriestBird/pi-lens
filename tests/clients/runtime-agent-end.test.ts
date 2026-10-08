@@ -84,6 +84,59 @@ describe("runtime-agent-end deferred formatting", () => {
 		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-");
 	};
 
+	// Recurrence: a run that dies between a read's tool_call and its
+	// tool_execution_end (a throw in pi's agent loop takes handleRunFailure,
+	// which emits agent_end and no tool_execution_end) left the capture to
+	// license an edit in the next run (#4185 R2-3; the per-call release is
+	// handleToolExecutionEnd since round 4, this is its backstop).
+	it("releases a capture its run left open at the real agent-settled handler (#4185 R2-3)", async () => {
+		const env = setupTestEnvironment("pi-lens-blocked-read-turn-end-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"blocked.ts",
+				"export const value = 1;\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "read",
+						toolCallId: "blocked-read",
+						input: { path: filePath },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: (name: string) =>
+						name === "no-lsp" || name === "no-complexity",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as never),
+			);
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+				expect.objectContaining({ provisional: true }),
+			]);
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: () => {},
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				getFormatService: () => ({ recordRead: () => {} }) as never,
+			});
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	afterEach(cleanupAgentEndTemps);
 	afterAll(cleanupAgentEndTemps);
 
