@@ -427,7 +427,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/error-class.ts": 3,
 		"clients/extension-log.ts": 3,
 		"clients/file-utils.ts": 3,
-		"clients/format-events-publish.ts": 3,
+		"clients/format-events-publish.ts": 4,
 		"clients/format-service.ts": 11,
 		"clients/formatters.ts": 26,
 		"clients/generation-lock.ts": 7,

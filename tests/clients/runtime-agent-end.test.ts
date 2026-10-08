@@ -1213,6 +1213,15 @@ describe("runtime-agent-end deferred formatting", () => {
 					paths: [filePath.replace(/\\/g, "/")],
 				}),
 			);
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({
+					v: 1,
+					source: "pi-lens",
+					fileCount: 1,
+					paths: [filePath.replace(/\\/g, "/")],
+				}),
+			);
 		} finally {
 			resetFormatEventsPublish();
 			if (previousDataDir === undefined) {
@@ -1259,6 +1268,49 @@ describe("runtime-agent-end deferred formatting", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+
+	it("publishes pilens:format:done with no paths when formatting changes no bytes (#673)", async () => {
+		const env = setupTestEnvironment(
+			"pi-lens-agent-end-bus-format-done-empty-",
+		);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [],
+							anyChanged: false,
+							allSucceeded: true,
+						})),
+					}) as any,
+			});
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({ fileCount: 0, paths: [] }),
+			);
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});

@@ -626,6 +626,9 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 		["recordDegradation", ["kind"]],
 		["logExtension", ["subsystem", "message"]],
 		["logLatency", ["phase", "event", "eventName", "name"]],
+		// The pi event bus NDJSON sink is the bounded record for bus
+		// publications, including format lifecycle observations.
+		["logBusEvent", ["event", "outcome"]],
 		// #3168 F12: `logCascade` (clients/cascade-logger.ts) is a
 		// `createNdjsonLogger` sink with the same `phase` discriminator as
 		// `logLatency`, so a PR whose only new bounded record goes to

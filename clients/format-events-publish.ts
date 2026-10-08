@@ -1,5 +1,5 @@
 /**
- * Publishes `pilens:format:queued`, `pilens:format:start`, and
+ * Publishes `pilens:format:queued`, `pilens:format:start`, `pilens:format:done`, and
  * `pilens:autofix:start` on pi's shared `pi.events` bus (#673, #684).
  *
  * Sibling to `clients/bus-publish.ts` (#482 `pilens:files:touched`) and
@@ -35,8 +35,9 @@
  * NOT a synchronous flush/barrier API (a caller cannot block deferred
  * formatting via these events) — that remains a separate, explicitly
  * out-of-scope future feature. Completion is already covered by the existing
- * `pilens:files:touched` (`reason: "format"`) event; these two do not
- * duplicate it.
+ * `pilens:files:touched` (`reason: "format"`) event; `pilens:format:done`
+ * closes the pre/post pair and carries an empty `paths` array when formatting
+ * ran but changed no bytes.
  *
  * ## `pilens:autofix:start` (#684)
  *
@@ -92,6 +93,9 @@ export const BUS_FORMAT_QUEUED_VERSION = 1;
 export const BUS_FORMAT_START_EVENT = "pilens:format:start";
 export const BUS_FORMAT_START_VERSION = 1;
 
+export const BUS_FORMAT_DONE_EVENT = "pilens:format:done";
+export const BUS_FORMAT_DONE_VERSION = 1;
+
 export const BUS_AUTOFIX_START_EVENT = "pilens:autofix:start";
 export const BUS_AUTOFIX_START_VERSION = 1;
 
@@ -106,6 +110,15 @@ interface FormatQueuedPayload {
 
 interface FormatStartPayload {
 	v: typeof BUS_FORMAT_START_VERSION;
+	source: "pi-lens";
+	cwd: string;
+	paths: string[];
+	fileCount: number;
+	kinds: Array<"autofix" | "format">;
+}
+
+interface FormatDonePayload {
+	v: typeof BUS_FORMAT_DONE_VERSION;
 	source: "pi-lens";
 	cwd: string;
 	paths: string[];
@@ -129,6 +142,9 @@ let hasLoggedQueuedDisabled = false;
 let hasLoggedStartFailure = false;
 let hasLoggedStartUnwired = false;
 let hasLoggedStartDisabled = false;
+let hasLoggedDoneFailure = false;
+let hasLoggedDoneUnwired = false;
+let hasLoggedDoneDisabled = false;
 let hasLoggedAutofixStartFailure = false;
 let hasLoggedAutofixStartUnwired = false;
 let hasLoggedAutofixStartDisabled = false;
@@ -160,6 +176,9 @@ export function _resetFormatEventsPublishForTests(): void {
 	hasLoggedStartFailure = false;
 	hasLoggedStartUnwired = false;
 	hasLoggedStartDisabled = false;
+	hasLoggedDoneFailure = false;
+	hasLoggedDoneUnwired = false;
+	hasLoggedDoneDisabled = false;
 	hasLoggedAutofixStartFailure = false;
 	hasLoggedAutofixStartUnwired = false;
 	hasLoggedAutofixStartDisabled = false;
@@ -326,6 +345,83 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			recordStaleBusFailure(BUS_FORMAT_START_EVENT, err);
 			args.dbg?.(
 				`format-events-publish: pilens:format:start emit failed (further failures suppressed): ${err}`,
+			);
+		}
+	}
+}
+
+export interface PublishFormatDoneArgs {
+	cwd: string;
+	paths: string[];
+	kinds?: Array<"autofix" | "format">;
+	dbg?: (msg: string) => void;
+}
+
+/**
+ * Publish after the deferred-format batch has finished. This is emitted for
+ * every non-empty batch, including a batch whose formatter changed no bytes;
+ * that case is represented by `paths: []`. Fire-and-forget, like the other
+ * format events.
+ */
+export function publishFormatDone(args: PublishFormatDoneArgs): void {
+	if (!isBusPublishEnabled()) {
+		if (!hasLoggedDoneDisabled) {
+			hasLoggedDoneDisabled = true;
+			logBusEvent({
+				event: BUS_FORMAT_DONE_EVENT,
+				outcome: "skipped_disabled",
+				cwd: normalizeFilePath(args.cwd),
+			});
+		}
+		return;
+	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
+		event: BUS_FORMAT_DONE_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+	}));
+	if (resolution.outcome === "stale-session") return;
+	if (resolution.outcome === "unwired") {
+		if (!hasLoggedDoneUnwired) {
+			hasLoggedDoneUnwired = true;
+			logBusEvent({
+				event: BUS_FORMAT_DONE_EVENT,
+				outcome: "skipped_unwired",
+				cwd: normalizeFilePath(args.cwd),
+			});
+		}
+		return;
+	}
+	try {
+		const paths = args.paths.map((p) => normalizeFilePath(p));
+		const payload: FormatDonePayload = {
+			v: BUS_FORMAT_DONE_VERSION,
+			source: "pi-lens",
+			cwd: normalizeFilePath(args.cwd),
+			paths,
+			fileCount: paths.length,
+			kinds: args.kinds ?? ["format"],
+		};
+		resolution.emit(BUS_FORMAT_DONE_EVENT, payload);
+		hasLoggedDoneFailure = false;
+		logBusEvent({
+			event: BUS_FORMAT_DONE_EVENT,
+			outcome: "emitted",
+			cwd: payload.cwd,
+			fileCount: payload.fileCount,
+		});
+	} catch (err) {
+		logBusEvent({
+			event: BUS_FORMAT_DONE_EVENT,
+			outcome: "emit_failed",
+			cwd: normalizeFilePath(args.cwd),
+			error: String(err),
+			ctxSource: resolution.ctxSource,
+		});
+		if (!hasLoggedDoneFailure) {
+			hasLoggedDoneFailure = true;
+			recordStaleBusFailure(BUS_FORMAT_DONE_EVENT, err);
+			args.dbg?.(
+				`format-events-publish: pilens:format:done emit failed (further failures suppressed): ${err}`,
 			);
 		}
 	}

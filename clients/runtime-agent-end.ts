@@ -12,6 +12,7 @@ import type { BiomeClient } from "./biome-client.js";
 import type { RuffClient } from "./ruff-client.js";
 import {
 	publishAutofixStart,
+	publishFormatDone,
 	publishFormatStart,
 } from "./format-events-publish.js";
 import type { FormatService } from "./format-service.js";
@@ -1003,6 +1004,12 @@ export async function handleAgentEnd({
 				fixes: deferredFormatFixes,
 			});
 		}
+		publishFormatDone({
+			cwd: ctxCwd ?? runtime.projectRoot,
+			paths: summary.changed,
+			kinds: ["format"],
+			dbg,
+		});
 	}
 
 	// LSP sees only authoritative content after both mutation phases. In

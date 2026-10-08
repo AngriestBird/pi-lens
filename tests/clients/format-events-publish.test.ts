@@ -13,7 +13,10 @@ import {
 	BUS_FORMAT_QUEUED_VERSION,
 	BUS_FORMAT_START_EVENT,
 	BUS_FORMAT_START_VERSION,
+	BUS_FORMAT_DONE_EVENT,
+	BUS_FORMAT_DONE_VERSION,
 	publishAutofixStart,
+	publishFormatDone,
 	publishFormatQueued,
 	publishFormatStart,
 	wireFormatEventsBusEmitter,
@@ -322,6 +325,32 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 					outcome: "emitted",
 					fileCount: 3,
 				}),
+			);
+		});
+	});
+
+	describe("pilens:format:done", () => {
+		it("emits changed paths after the batch, including an empty no-change batch", () => {
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+
+			publishFormatDone({ cwd: "/repo", paths: ["/repo/a.ts"] });
+			publishFormatDone({ cwd: "/repo", paths: [] });
+
+			expect(emit).toHaveBeenNthCalledWith(
+				1,
+				BUS_FORMAT_DONE_EVENT,
+				expect.objectContaining({
+					v: BUS_FORMAT_DONE_VERSION,
+					source: "pi-lens",
+					paths: ["/repo/a.ts"],
+					fileCount: 1,
+				}),
+			);
+			expect(emit).toHaveBeenNthCalledWith(
+				2,
+				BUS_FORMAT_DONE_EVENT,
+				expect.objectContaining({ paths: [], fileCount: 0 }),
 			);
 		});
 	});
