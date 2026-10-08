@@ -268,6 +268,14 @@ nightly measurement behind each declaration, is in
 When unset or invalid, `PI_LENS_TS_IDLE_EVICT_MS` (below) is read.
 **Default:** 20 minutes (`1200000`).
 
+### `PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS`
+
+Idle window (ms) for language-service clients whose workspace is inside a
+temporary or ephemeral Git checkout. This overrides the shared window above
+for those roots; when unset or invalid, the default is 60 seconds (`60000`).
+The nightly idle-eviction measurement temporarily sets this variable alongside
+`PI_LENS_LSP_IDLE_EVICT_MS` so both root policies are measured.
+
 ### `PI_LENS_TS_IDLE_EVICT_MS`
 
 The original, TypeScript-named spelling of the same window, retained for
