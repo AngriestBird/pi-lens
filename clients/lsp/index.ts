@@ -1357,8 +1357,14 @@ async function collectWorkspaceDiagnosticFiles(
 // --- Service ---
 
 export class LSPService {
+	private static readonly MAX_SIBLING_ANNOUNCEMENTS = 1024;
 	private readonly sessionCwd: string | undefined;
 	private state: LSPState;
+	/** Content hashes already announced to a sibling root in this service. */
+	private readonly siblingAnnouncementHashes = new BoundedFifoMap<
+		string,
+		string
+	>(LSPService.MAX_SIBLING_ANNOUNCEMENTS);
 	private readonly workspaceProbeLogged = new Set<string>();
 	/** Per-service immutable root-boundary verdicts; root detectors cache hits too. */
 	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
@@ -1764,6 +1770,65 @@ export class LSPService {
 	 *  caller holding this generation can tell a reset from "no client" (#3483). */
 	checkDestroyed(): boolean {
 		return this.isDestroyed;
+	}
+
+	/**
+	 * Keep live same-server clients in sibling package roots current. A
+	 * didOpen/didChange only updates the client that owns the touched root, but
+	 * TypeScript importers in another package can retain the old module graph.
+	 * The notification uses each client's existing #271 watch queue.
+	 */
+	private announceToSiblings(
+		filePath: string,
+		content: string,
+		contentHash = this.hashContent(content),
+	): Promise<void> {
+		const normalizedPath = normalizeMapKey(filePath);
+		if (this.siblingAnnouncementHashes.get(normalizedPath) === contentHash) {
+			return Promise.resolve();
+		}
+		return Promise.all(
+			getServersForFileWithConfig(filePath).map((server) =>
+				this.resolveServerRoot(server, filePath).then((root) => {
+					if (!root) return false;
+					const ownKey = `${server.id}:${normalizeMapKey(root)}`;
+					return this.notifyLiveClientsForServer(
+						server.id,
+						filePath,
+						2,
+						ownKey,
+						false,
+					);
+				}),
+			),
+		).then(() => {
+			// Record attempted content even when every sibling is absent. A respawned
+			// client must receive a later A→B→A edit (#4156 M1).
+			this.siblingAnnouncementHashes.set(normalizedPath, contentHash);
+		});
+	}
+
+	private notifyLiveClientsForServer(
+		serverId: string,
+		filePath: string,
+		type: number,
+		ownKey: string,
+		includeOwn: boolean,
+	): boolean {
+		let notified = false;
+		const prefix = `${serverId}:`;
+		for (const [key, client] of this.state.clients) {
+			if (
+				!key.startsWith(prefix) ||
+				(!includeOwn && key === ownKey) ||
+				!client.isAlive()
+			) {
+				continue;
+			}
+			client.notify.watchedFileChange(filePath, type);
+			notified = true;
+		}
+		return notified;
 	}
 
 	private async withClientSpawnGate<T>(
@@ -3770,11 +3835,13 @@ export class LSPService {
 		for (const server of getServersForFileWithConfig(filePath)) {
 			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
-			const key = `${server.id}:${normalizeMapKey(root)}`;
-			const existing = this.state.clients.get(key);
-			if (existing?.isAlive()) {
-				existing.notify.watchedFileChange(filePath, type);
-			}
+			this.notifyLiveClientsForServer(
+				server.id,
+				filePath,
+				type,
+				`${server.id}:${normalizeMapKey(root)}`,
+				true,
+			);
 		}
 	}
 
@@ -4836,6 +4903,18 @@ export class LSPService {
 			});
 			return;
 		}
+		const contentHash = this.hashContent(content);
+		if (typeof content === "string") {
+			void this.announceToSiblings(filePath, content, contentHash).catch(
+				(cause: unknown) => {
+					incrementDegradationCount({
+						kind: "lsp-sibling-announcement",
+						subject: normalizeMapKey(filePath),
+						reason: `sibling notification failed: ${String(cause)}`,
+					});
+				},
+			);
+		}
 		const startedAt = Date.now();
 		// #3480: the whole-content fingerprint (a sha256 past 96 chars), computed
 		// at most once per touch however many servers it checks and marks.
@@ -5092,13 +5171,13 @@ export class LSPService {
 			// version-less publication, or malformed binding fails closed and is not
 			// replayed. The fresh notify still runs below, so scanners continue toward
 			// a publication for this touch while the prior late result reaches the read.
-			const touchContentHash = this.hashContent(content);
 			// #1586: THE content-match atom. Every content-bound question in this touch
 			// — the carry-over below, #1493's pre-notify snapshot, and the merge-time
 			// coverage predicate — asks it here and nowhere else, so a door cannot
 			// acquire a rule of its own by writing the comparison inline. A binding with
 			// no `contentHash` (version-less publish) fails closed: `undefined` never
 			// equals a hash.
+			const touchContentHash = contentHash;
 			const bindingMatchesTouchContent = (
 				binding: StoredDiagnosticBinding | undefined,
 			): boolean => binding?.contentHash === touchContentHash;

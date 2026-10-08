@@ -13,6 +13,7 @@
  * tree. The workflow's second create-pull-request step commits those edits and
  * the generated user-facing changelog fragment to `bot/lsp-idle-evict-promote`
  * as a DRAFT PR; it is never merged here.
+ * It also emits one user-facing changelog fragment naming the promoted servers.
  *
  *   node scripts/promote-lsp-idle-eviction.mjs --summary <path> [--body <path>]
  *       [--matrix <path>] [--server-src <path>] [--reasons <path>] [--today <YYYY-MM-DD>]

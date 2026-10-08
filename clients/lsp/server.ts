@@ -2766,7 +2766,7 @@ export const PythonServer: LSPServerInfo = {
 
 export const PythonJediServer: LSPServerInfo = {
 	id: "python-jedi",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Jedi Language Server",
 	fallbackFor: "python",
 	extensions: KIND_EXTENSIONS["python"],
@@ -3799,7 +3799,7 @@ export const CMakeServer: LSPServerInfo = {
 
 export const DockerServer: LSPServerInfo = {
 	id: "docker",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Dockerfile Language Server",
 	extensions: [".dockerfile", "Dockerfile"],
 	root: RootWithFallback(
@@ -3899,7 +3899,7 @@ export const YamlServer: LSPServerInfo = {
 
 export const JsonServer: LSPServerInfo = {
 	id: "json",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "VSCode JSON Language Server",
 	extensions: KIND_EXTENSIONS["json"],
 	root: RootWithFallback(

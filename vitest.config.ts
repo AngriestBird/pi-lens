@@ -508,6 +508,7 @@ export const wallClockBudgetInclude = [
 	// their wall-clock completion; keep its 120s budget in the quiet phase.
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
+	"tests/config/workflow-writers-governance.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
