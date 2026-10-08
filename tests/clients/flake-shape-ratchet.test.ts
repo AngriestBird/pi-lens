@@ -97,6 +97,8 @@ const FLAKE_SHAPE_BASELINE: Baseline = JSON.parse(
 const ADMITTED_AFTER_BASELINE: Readonly<
 	Record<string, { detector: DetectorName; reason: string }>
 > = {
+	// 2026-10-08 (#4148): blank-heavy YAML language extraction is a synchronous
+	// event-loop path, so only a real-clock assertion sees its quadratic stall.
 	"elapsed-time-assertion:clients/ast-grep-rule-regex-budget.test.ts": {
 		detector: "elapsed-time-assertion",
 		reason:
@@ -111,6 +113,8 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"event-loop occupancy has no deterministic proxy; the sampler row guards per-chunk block size the yield count cannot see",
 	},
+	// 2026-10-08 (#4148): 100K blank lines expose the real event-loop stall in
+	// pytest traceback and go.mod regex parsing; a fake clock cannot measure it.
 	"elapsed-time-assertion:clients/pytest-gomod-regex-budget.test.ts": {
 		detector: "elapsed-time-assertion",
 		reason:

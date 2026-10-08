@@ -37,15 +37,18 @@ function randomizedYamlInputs(): string[] {
 		state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
 		return state;
 	};
-	const alphabet = " language:#\n\r\t_0123XYZ";
+	const alphabet = " language:#\n\r\t\u00a0_0123XYZ";
 	const inputs: string[] = [];
 	for (let sample = 0; sample < 3000; sample++) {
 		let value = "";
 		for (let index = 0; index < next() % 180; index++) {
 			value += alphabet[next() % alphabet.length];
 		}
-		if (sample % 3 === 0)
-			value += `\nlanguage: ${sample % 2 ? "python" : "TypeScript"}`;
+		if (sample % 3 === 0) {
+			const indent = ["", " ", "\t", "\u00a0"][sample % 4];
+			const key = sample % 2 ? "language" : "Language";
+			value += `${sample % 5 === 0 ? "\r" : "\n"}${indent}${key}: ${sample % 2 ? "python" : "TypeScript"}`;
+		}
 		inputs.push(value);
 	}
 	return inputs;
@@ -81,6 +84,29 @@ describe("ast-grep rule language regex (#4148)", () => {
 		expect(differences).toEqual([]);
 	});
 
+	it("keeps language verdicts for YAML line and value spellings", () => {
+		const cases = [
+			"Language: python\n",
+			"LANGUAGE: TypeScript\n",
+			"\tlanguage: python\n",
+			"\u00a0language: python\n",
+			"language: python\r\n",
+			"language: python\r",
+			`language: python${String.fromCharCode(0x2028)}`,
+			`language: python${String.fromCharCode(0x2029)}`,
+			"\ufefflanguage: python\n",
+			"language: python # comment\n",
+			'language: "python"\n',
+			"name: first\nlanguage: python\nlanguage: ruby\n",
+		];
+		const differences = cases.flatMap((source) => {
+			const oldValue = oldRuleLanguage(source);
+			const newValue = extractRuleLanguage(source);
+			return oldValue === newValue ? [] : [{ source, oldValue, newValue }];
+		});
+		expect(differences).toEqual([]);
+	});
+
 	it("keeps a 199K-blank-line rule language scan linear", async () => {
 		const client = clientWithSuccessfulScan();
 		const rule = `${"\n".repeat(ADVERSARIAL_BLANK_LINES)}id: blank-heavy\n`;
@@ -92,11 +118,16 @@ describe("ast-grep rule language regex (#4148)", () => {
 		expect(elapsed).toBeLessThan(BUDGET_MS);
 	});
 
-	it("scales linearly across a 10x adversarial input growth", () => {
+	it.each([
+		["LF", "\n"],
+		["CR", "\r"],
+		["U+2028", String.fromCharCode(0x2028)],
+		["U+2029", String.fromCharCode(0x2029)],
+	])("scales linearly across a 10x %s blank-run growth", (_name, lineEnd) => {
 		const measure = (blankLines: number): number => {
 			const started = performance.now();
 			expect(
-				extractRuleLanguage(`${"\n".repeat(blankLines)}id: no-language`),
+				extractRuleLanguage(`${lineEnd.repeat(blankLines)}id: no-language`),
 			).toBe(undefined);
 			return performance.now() - started;
 		};
