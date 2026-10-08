@@ -327,6 +327,14 @@ BlockerKept ==
                 (\A o \in Writers \ {w} : p \notin Writes[o])
                     => rec[p] = "authored"
 
+(* The clear rule's other half: an authored record about older bytes does  *)
+(* not outlive an unauthored analysis of the path's current bytes. The     *)
+(* refusal is for the very bytes the verdict is about, nothing wider.      *)
+StaleRecordCleared ==
+    \A p \in Paths :
+        (rec[p] = "authored" /\ recVer[p] # ver[p]) =>
+            ~\E t \in Turns : <<p, ver[p], FALSE, t>> \in analysed
+
 (* Shape 54, the no-drop side: once no call is in flight, the latest bytes  *)
 (* of every written path were analysed, unless a counted loss took the      *)
 (* writer's baseline.                                                       *)

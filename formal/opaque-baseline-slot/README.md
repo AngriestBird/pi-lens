@@ -87,6 +87,9 @@ Issue: #4137. Lane M5 of #3803.
   stat snapshot of the whole tree.
 - `RetiresOnlyAbandoned`: retirement never takes a call that can still get its
   result.
+- `StaleRecordCleared`: the clear rule's other half. An authored record about
+  older bytes does not outlive an unauthored analysis of the path's current
+  bytes; the refusal covers the very bytes the verdict is about, nothing wider.
 
 ## Configs
 
@@ -140,6 +143,9 @@ The spec mutants run for round 3:
 
 - Neutering the clear rule (`Keeps(p) == FALSE`) reds `BlockerKept` on
   `PerCallSecondaryTurn`.
+- Dropping the version comparison from the rule (keep whenever the record is
+  authored) reds `StaleRecordCleared` on `PerCallNamedSibling`, where call 3
+  rewrites the path call 1 recorded.
 - Making the dedupe read the `analysed` history instead of the latch turns
   `Round2SecondaryTurn` to pass: a model whose dedupe cannot lose its latch
   cannot see N1.
