@@ -136,6 +136,8 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
 		"the /lens-widget-toggle choice; D6 was not approved, so it resets per activation (N6 accepted)",
 	mountedLensWidgetUi: "the UI this activation mounted its widget on",
 	ownEventCtx: "the live ctx of this activation's own events",
+	ownedSecondaryRoot:
+		"the root this declined activation asked to hold under its own holder id, released by its own shutdown (#3849)",
 	ownedSessionRole: "this activation's primary or secondary role (#1996)",
 	renderInvalidator: "this activation's widget repaint callback",
 	scope: "this activation's session scope (#3611)",

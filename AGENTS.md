@@ -763,6 +763,12 @@ the surface they bite; each block loads only when its trigger applies.
 
 ### Session, telemetry, and delivery
 
+- Registry root ownership (#3849): each holder's record in a pid entry's
+  `projectRootHolders` lists exactly the roots THAT holder registered (`host`
+  for `registerInstance`, a per-activation id for a declined secondary). Only
+  its own `deregisterInstanceRoot`, whole-entry removal, or cap eviction ends
+  a record; a root stays while any record lists it. No anonymous counts; one
+  settle (`settleRootHolders`) for every writer; `getInstanceRoots` reads.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
