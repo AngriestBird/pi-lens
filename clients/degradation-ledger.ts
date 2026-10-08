@@ -708,6 +708,8 @@ export type DegradationKind =
 	| "lsp-nav-request-timeout"
 	/** A workspace diagnostics cache was rejected during the v3 provenance migration (#2776). */
 	| "lsp-notify-inflight-stall"
+	/** A sibling LSP watch notification failed; the owner touch continues. */
+	| "lsp-sibling-announcement"
 	/**
 	 * A tool-event path did not resolve to an existing file, and pi's own
 	 * unicode/spacing variant ladder did not find it either (#1655 item 5).

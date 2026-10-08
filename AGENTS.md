@@ -647,9 +647,10 @@ the surface they bite; each block loads only when its trigger applies.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
-- A landed `touchFile` content change announces type-2 watched-file events to
-  every other live client of the same server across package roots through the
-  client watch queue; content hashes are session-scoped and bounded (#4156).
+- `touchFile` fires a type-2 watched-file announcement at entry for the first
+  seen content hash of a path, before the owner's didChange; it reaches every
+  other live client of the same server across package roots through the client
+  watch queue. Content hashes are session-scoped and bounded (#4156).
 - A capability the client advertises has a sender, or the advertisement states
   why it has none. `textDocument/didSave` follows a landed didOpen/didChange
   only when the server declared `textDocumentSync.save` and the caller declared

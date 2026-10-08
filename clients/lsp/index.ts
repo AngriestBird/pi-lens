@@ -1778,9 +1778,12 @@ export class LSPService {
 	 * TypeScript importers in another package can retain the old module graph.
 	 * The notification uses each client's existing #271 watch queue.
 	 */
-	private announceToSiblings(filePath: string, content: string): Promise<void> {
+	private announceToSiblings(
+		filePath: string,
+		content: string,
+		contentHash = this.hashContent(content),
+	): Promise<void> {
 		const normalizedPath = normalizeMapKey(filePath);
-		const contentHash = this.hashContent(content);
 		if (this.siblingAnnouncementHashes.get(normalizedPath) === contentHash) {
 			return Promise.resolve();
 		}
@@ -1798,10 +1801,10 @@ export class LSPService {
 					);
 				}),
 			),
-		).then((announcements) => {
-			if (announcements.some(Boolean)) {
-				this.siblingAnnouncementHashes.set(normalizedPath, contentHash);
-			}
+		).then(() => {
+			// Record attempted content even when every sibling is absent. A respawned
+			// client must receive a later A→B→A edit (#4156 M1).
+			this.siblingAnnouncementHashes.set(normalizedPath, contentHash);
 		});
 	}
 
@@ -4900,8 +4903,17 @@ export class LSPService {
 			});
 			return;
 		}
+		const touchContentHash = this.hashContent(content);
 		if (typeof content === "string") {
-			void this.announceToSiblings(filePath, content).catch(() => {});
+			void this.announceToSiblings(filePath, content, touchContentHash).catch(
+				(cause: unknown) => {
+					incrementDegradationCount({
+						kind: "lsp-sibling-announcement",
+						subject: normalizeMapKey(filePath),
+						reason: `sibling notification failed: ${String(cause)}`,
+					});
+				},
+			);
 		}
 		const startedAt = Date.now();
 		// #3480: the whole-content fingerprint (a sha256 past 96 chars), computed
@@ -5159,7 +5171,6 @@ export class LSPService {
 			// version-less publication, or malformed binding fails closed and is not
 			// replayed. The fresh notify still runs below, so scanners continue toward
 			// a publication for this touch while the prior late result reaches the read.
-			const touchContentHash = this.hashContent(content);
 			// #1586: THE content-match atom. Every content-bound question in this touch
 			// — the carry-over below, #1493's pre-notify snapshot, and the merge-time
 			// coverage predicate — asks it here and nowhere else, so a door cannot

@@ -148,6 +148,7 @@ describe("LSPService.notifyExternalFileChange (#1668)", () => {
 		).state;
 		state.clients.set("typescript:c:/repo", owningClient);
 		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+		state.clients.set("typescript-jedi:c:/repo/packages/jedi", makeClient());
 
 		await service.touchFile(FILE, "export type T = 'new';\n");
 		await new Promise<void>((resolve) => setImmediate(resolve));
@@ -157,6 +158,72 @@ describe("LSPService.notifyExternalFileChange (#1668)", () => {
 			FILE,
 			2,
 		);
+		expect(
+			(
+				state.clients.get(
+					"typescript-jedi:c:/repo/packages/jedi",
+				) as ReturnType<typeof makeClient>
+			).notify.watchedFileChange,
+		).not.toHaveBeenCalled();
+	});
+
+	it("records content when no sibling is live, then announces after respawn", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const owningClient = makeClient();
+		const siblingClient = makeClient();
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", owningClient);
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+
+		const announce = (
+			service as unknown as {
+				announceToSiblings(path: string, content: string): Promise<void>;
+			}
+		).announceToSiblings.bind(service);
+		await announce(FILE, "old");
+		state.clients.delete("typescript:c:/repo/packages/a");
+		await announce(FILE, "new");
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+		await announce(FILE, "old");
+
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenCalledTimes(2);
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenLastCalledWith(
+			FILE,
+			2,
+		);
+	});
+
+	it("records a bounded degradation when sibling notification fails", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const owningClient = makeClient();
+		const siblingClient = makeClient();
+		siblingClient.notify.watchedFileChange.mockImplementation(() => {
+			throw new Error("watch queue unavailable");
+		});
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", owningClient);
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+
+		await service.touchFile(FILE, "broken");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "lsp-sibling-announcement",
+		);
+		expect(group?.count).toBe(1);
 	});
 
 	it("notifies same-server sibling roots for external changes", async () => {
