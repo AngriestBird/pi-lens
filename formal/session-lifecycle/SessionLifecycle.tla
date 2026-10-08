@@ -121,6 +121,34 @@
 (*   "keylessFailSafe"   #3855 r2's J6, a rejected alternative: a key-less *)
 (*                       gap start with the named reason passes for a      *)
 (*                       ticket name                                       *)
+(*                                                                         *)
+(* Lane M4 (#3803) adds the coordinator's other session-scoped stores and  *)
+(* their writers (section "M4"), each part a merged fix or a rejected      *)
+(* alternative:                                                            *)
+(*   "bridgeStamp", "bridgeRanges", "bridgeDefer"  the bridge producer's   *)
+(*                       three hops: the read-guard stamp, the turn-state  *)
+(*                       range, the deferral                               *)
+(*   "bridgeEpoch"       a bridge producer sends the read-guard branch     *)
+(*                       epoch it captured (#3521's settled sweep)         *)
+(*   "bridgeLineage"     S3 (#3759): it also sends the lineage handle it   *)
+(*                       captured, and the bridge drops a retired scope's  *)
+(*                       stamp, turn state and deferral; without it the    *)
+(*                       entry fails open (I4, #3763)                      *)
+(*   "deferAboveIgnore"  #3763 item 5: a captured epoch above the live one *)
+(*                       is ignored (the deferral takes the current one)   *)
+(*   "deferAboveSkip"    #3705 round 3: it queues nothing instead          *)
+(*   "deferResetClear"   resetForSession clears the deferral queue         *)
+(*   "debounceEntryCapture" S3 row 16: the debounce re-entry keeps the     *)
+(*                       session its handler entered in                    *)
+(*   "stateWBranchFence" a rejected alternative: the S3 non-read-guard     *)
+(*                       writers fenced at branch level                    *)
+(*   "parkSessionKey"    #4112 r2: a parked lane is keyed by the turn's    *)
+(*                       session id                                        *)
+(*   "parkResetClear"    resetForSession clears the park map               *)
+(*   "parkFence"         the park settles only while the coordinator's     *)
+(*                       scope is the one the turn captured at entry       *)
+(*   "turnEndScoped"     a proposed shape that is NOT on master: a turn_end*)
+(*                       composer drains only its own scope's work         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -129,10 +157,13 @@ CONSTANTS
                     \*   {"New","Resume","Fork","Clone","CancelFork","Reload",
                     \*    "Quit","PiFork","Tree","IdleReset","SecStart",
                     \*    "SecEnd","SecTurn","SecReload","SecFork","Dup",
-                    \*    "Interrupt","InterruptPreScope","InterruptUnstarted"}
+                    \*    "Interrupt","InterruptPreScope","InterruptUnstarted",
+                    \*    "DeferOwn","DrainDefer","TurnWork","TurnEnd",
+                    \*    "SecTurnEnd","ParkTake"}
     Writers,        \* the writers in play, a subset of
                     \*   {"read","secRead","heartbeat","lsp","widget",
-                    \*    "advisory","activate"}
+                    \*    "advisory","activate","stateW","debounce",
+                    \*    "bridge","park"}
     FixParts,       \* see the header
     FileLess,       \* the conversations whose sessions have no session file
                     \*   (pi --no-session, an in-memory subagent): their slot
@@ -234,7 +265,10 @@ Files   == {"A", "N", "F", "C", "P", "S", "T", "U"}
                                 \* the subagent's, its fork, its /new
 Entries == 1..4
 Facts   == [e : Entries, o : Tickets]
-FlightIds == Writers \ {"widget", "activate"}
+\* The M4 writers keep their own slots (`mw`), so the generic flight writers
+\* below stay as they were.
+M4Writers == {"stateW", "debounce", "bridge", "park"}
+FlightIds == Writers \ ({"widget", "activate"} \cup M4Writers)
 
 InitBranch(f) ==
     CASE f = "A" -> {1, 2} [] f = "N" -> {3} [] f = "S" -> {4} [] OTHER -> {}
@@ -270,6 +304,7 @@ NamedKey(k, p, succ) ==
     IF succ \notin FileLess THEN [f |-> succ, t |-> 0]
     ELSE IF SR(k) \in SlotReasons THEN [f |-> "-", t |-> p] ELSE NoKey
 IdleW  == [pc |-> "idle", s |-> 0, ep |-> 0, e |-> 0, svc |-> 0]
+IdleM  == [pc |-> "idle", s |-> 0, hs |-> 0, ep |-> 0, k |-> "-"]
 
 RegOn   == "heartbeat" \in Writers
 LspOn   == "lsp" \in Writers
@@ -318,20 +353,40 @@ VARIABLES
                              \* declined while no scope held the primary slot
     fwd,                     \* scopes whose start a /reload interrupted (#3881):
                              \* their shutdown forwarded, it stashed nothing
-    preScope                 \* of those, the ones interrupted before the start
+    preScope,                \* of those, the ones interrupted before the start
                              \* held its scope (verify r4 V6: W0-W2)
+    mw,                      \* M4: in-flight stateW/debounce/bridge/park writers
+    co,                      \* M4: generation -> the coordinator's work records
+                             \*   [k: store, o: producing scope]
+    dq,                      \* M4: generation -> the deferral queue's pairs
+                             \*   [o: producing scope, e: branch epoch]
+    pk,                      \* M4: generation -> the park map's entries
+                             \*   [o: parking scope, k: session key]
+    consumed,                \* M4: ghost, work a turn_end drained [k, o, by]
+    pkOut                    \* M4: ghost, parked items taken [o, to]
 
 vars == <<st, role, sess, ep, why, primary, last, nxt, pend, forking, branch,
           cell, imp, lin, slot, taken, side, sideAct, wr, entry, intent, reg,
           svc, fleet, turn, begun, turns, procTurn, evalTurn, wgTok, wgDone,
           lastTok, prevMax, ownDrop, recorded, resets, dupDone, landed, reads,
           predOf, act, acts, adv, advOut, advDrop, steps, used, notes, spend,
-          subBorn, userDeclined, fwd, preScope>>
+          subBorn, userDeclined, fwd, preScope, mw, co, dq, pk, consumed, pkOut>>
 
 \* Groups for UNCHANGED.
 lzV  == <<act, acts>>
 adV  == <<adv, advOut, advDrop>>
 r2V  == <<notes, spend, subBorn, userDeclined, fwd, preScope>>
+m4V  == <<mw, co, dq, pk, consumed, pkOut>>
+\* Every pre-M4 variable but the five a read-guard-shaped write moves, for the
+\* M4 actions below.
+uScope == <<st, role, sess, ep, why, primary, last, nxt, pend, forking, predOf,
+            resets, dupDone>>
+uFiles == <<branch, imp, lin, slot, taken, side, sideAct>>
+uMisc  == <<wr, entry, intent, reg, svc, fleet>>
+uTurn  == <<turn, begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
+            prevMax>>
+uLz    == <<act, acts, adv, advOut, advDrop>>
+uOld   == <<uScope, uFiles, uMisc, uTurn, uLz, steps, used, r2V>>
 
 \* The successor born from scope p is of the subagent's chain when p is.
 Born(t, p) == IF p \in subBorn THEN subBorn \cup {t} ELSE subBorn
@@ -369,6 +424,10 @@ Init ==
     /\ steps = 0 /\ used = {}
     /\ notes = {} /\ spend = NoSpend /\ subBorn = {} /\ userDeclined = FALSE
     /\ fwd = {} /\ preScope = {}
+    /\ mw = [x \in M4Writers |-> IdleM]
+    /\ co = [t \in Tickets |-> {}] /\ dq = [t \in Tickets |-> {}]
+    /\ pk = [t \in Tickets |-> {}]
+    /\ consumed = {} /\ pkOut = {}
 
 -----------------------------------------------------------------------------
 (* Helpers.                                                                *)
@@ -1395,39 +1454,282 @@ RegLand(t) ==
                    resets, dupDone, landed, reads, predOf, lzV, adV, steps,
                    used>>
 
+-----------------------------------------------------------------------------
+(* M4 (#3803): the coordinator's other session-scoped stores, their late    *)
+(* writers, and the turn_end composer.                                      *)
+(*                                                                          *)
+(* `resetForSession` (`clients/runtime-coordinator.ts`) clears about forty  *)
+(* stores. Each store below is a cell per coordinator GENERATION, indexed   *)
+(* by `last`, the scope the module-level runtime serves: the reset is a new *)
+(* ticket, so the new generation's cell starts empty and a write that       *)
+(* resolves the module-level runtime when it lands reaches `co[last]` of    *)
+(* whichever generation is current THEN. A handle captured at entry         *)
+(* (`captureSessionGeneration`) answers `st[handle]` instead. A record      *)
+(* carries the scope that produced it (`o`, a ghost: production records     *)
+(* keep no such field), which is what the invariants read.                  *)
+(*                                                                          *)
+(*   co  the work records a tool_result settle leaves: the turn-state       *)
+(*       worklist (`ranges`, `addModifiedRange`), the turn summary          *)
+(*       (`summary`, `runtime.turnSummary`), the git-guard latch            *)
+(*       (`gitguard`, `updateGitGuardStatus`, `markGitGuardCacheUnknown`),  *)
+(*       and the stores a turn_end composer drains (`cascade`, `runner`).   *)
+(*   dq  the deferral queue (`deferMutation`): one file, so one merged      *)
+(*       record; its epoch is the `Math.max` of its pairs'.                 *)
+(*   pk  the cut-advisory park map (`parkCutAdvisoryItems`).                *)
+(***************************************************************************)
+
+StateKinds == {"ranges", "summary", "gitguard"}
+WorkKinds  == {"ranges", "cascade", "runner"}
+
+M4Kinds(x) == IF x \in {"stateW", "debounce"} THEN StateKinds ELSE {"-"}
+
+\* A writer begins once in a live scope, after the hook's entry captured the
+\* handle, and lands at any later step. `hs` is the coordinator's scope when
+\* it began (what `holdScope` captures at handleTurnEnd's entry).
+M4Begin(x) ==
+    /\ mw[x].pc = "idle"
+    /\ \E s \in Tickets :
+          /\ st[s] = "live"
+          /\ (x = "park" \/ s = primary)
+          /\ \E k \in M4Kinds(x) :
+                mw' = [mw EXCEPT ![x] = [pc |-> "flight", s |-> s, hs |-> last,
+                                         ep |-> ep[s], k |-> k]]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, co, dq, pk,
+                   consumed, pkOut>>
+
+\* Rows 7, 12, 14, 15 and 16 of S3's writer table (#3759): a tool_result
+\* settle writes the turn-state worklist (`addTurnRange` behind `entryLive`,
+\* the changed-files loop behind `resultLive`), the turn summary
+\* (`runtime.turnSummary.record*`) and the git-guard latch
+\* (`runtime.updateGitGuardStatus`, `syncGitGuardRecord`,
+\* `markGitGuardCacheUnknown`) after the pipeline's awaits, each behind
+\* `writeSession.guardedWrite`, the handle `handleToolResult` captured at
+\* entry. A debounced call re-enters `handleToolResult` from the timer
+\* (`scheduleDebounced`); the re-entry keeps the entry's handle through
+\* `_sessionGeneration` ("debounceEntryCapture", #3596 G), and without it
+\* captures at timer time. The fence is the scope's session: a `/tree` moves no
+\* worklist, so "stateWBranchFence" drops a live scope's own record (I3).
+LandState(x) ==
+    /\ x \in {"stateW", "debounce"} /\ x \in Writers /\ mw[x].pc = "flight"
+    /\ LET w == mw[x]
+           captured == IF x = "debounce" THEN Has("debounceEntryCapture")
+                       ELSE Has("entryCapture")
+           hs == IF captured THEN w.s ELSE last
+           ok == st[hs] = "live" /\ (Has("stateWBranchFence") => ep[hs] = w.ep)
+       IN
+       /\ co' = IF ok THEN [co EXCEPT ![last] = @ \cup {[k |-> w.k, o |-> w.s]}]
+                ELSE co
+       /\ ownDrop' = (ownDrop \/ (~ok /\ st[w.s] = "live"))
+       /\ mw' = [mw EXCEPT ![x].pc = IF ok THEN "landed" ELSE "dropped"]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, dq, pk, consumed, pkOut>>
+
+\* The mutation bridge's producer (`recordMutationThroughSeam`,
+\* `clients/mutation-bridge.ts`; the v2 route is `recordMutateFacet`,
+\* `clients/io-bridge.ts`). Three hops in one body, each only when the
+\* producer's scope is live, each a part so a config can isolate one
+\* ("bridgeStamp", "bridgeRanges", "bridgeDefer"):
+\*   1. `stampLiveMutation`: the read-guard stamp, `recordWritten` with the
+\*      captured epoch (refused when a /tree moved the branch);
+\*   2. `applyTurnAndChangeLog`: the turn-state range;
+\*   3. `queueDeferredMutation`: the deferral, with the epoch
+\*      `resolveReadGuardBranchEpoch` resolves.
+\* "bridgeLineage": the entry carries the handle the producer captured (the
+\* settled sweep, `ast_grep_replace`, the LSP fallback), so `lineage.guardedWrite`
+\* answers currency. Without it the entry fails open (I4): no handle, no epoch,
+\* so the live module-level runtime takes the write whenever it lands. The
+\* bridge exposes neither, so a third-party producer cannot send them
+\* (BridgeExtNoLineage).
+BridgeAlive(w) == ~Has("bridgeLineage") \/ st[w.s] = "live"
+\* Whether the deferral gets a record, and the epoch it carries.
+BridgeQueues(w) ==
+    ~(Has("bridgeEpoch") /\ w.ep > ep[last] /\ Has("deferAboveSkip"))
+BridgeEpoch(w) ==
+    IF ~Has("bridgeEpoch") THEN ep[last]
+    ELSE IF w.ep <= ep[last] THEN w.ep
+    ELSE IF Has("deferAboveIgnore") THEN ep[last]
+    ELSE w.ep
+
+LandBridge ==
+    /\ "bridge" \in Writers /\ mw["bridge"].pc = "flight"
+    /\ LET w == mw["bridge"]
+           alive == BridgeAlive(w)
+           f == [e |-> 1, o |-> w.s]
+           \* The stamp always reaches the live module-level runtime's guard,
+           \* which refuses a capture from another branch epoch.
+           credit == alive /\ (~Has("bridgeEpoch") \/ ep[last] = w.ep)
+       IN
+       /\ cell' = IF credit /\ Has("bridgeStamp")
+                  THEN [cell EXCEPT ![last] = @ \cup {f}] ELSE cell
+       /\ co' = IF alive /\ Has("bridgeRanges")
+                THEN [co EXCEPT ![last] = @ \cup {[k |-> "ranges", o |-> w.s]}]
+                ELSE co
+       /\ dq' = IF alive /\ Has("bridgeDefer") /\ BridgeQueues(w)
+                THEN [dq EXCEPT ![last] = @ \cup {[o |-> w.s, e |-> BridgeEpoch(w)]}]
+                ELSE dq
+       /\ mw' = [mw EXCEPT !["bridge"].pc = IF alive THEN "landed" ELSE "dropped"]
+    /\ UNCHANGED <<uOld, landed, reads, recorded, ownDrop, pk, consumed, pkOut>>
+
+\* A TLC state constraint, for the configs that isolate #3705's rows 5 to 7:
+\* the producer captured its epoch after a /tree, so it is above the epoch a
+\* new session restarts at (row 8's equal epoch is the alias that needs no
+\* /tree, and is the shortest counterexample whenever the lineage is absent).
+AboveLiveOnly == mw["bridge"].pc = "idle" \/ mw["bridge"].ep >= 1
+
+\* The deferral queue as the drain sees it: the live generation's, or, when
+\* `resetForSession` does not clear it, every generation's.
+DQView == IF Has("deferResetClear") THEN dq[last] ELSE UNION {dq[g] : g \in Tickets}
+
+\* The live primary's own edit queues its file synchronously, at the live
+\* epoch (`deferFormat`, the default of `deferMutation`'s epoch parameter).
+DeferOwn ==
+    /\ "DeferOwn" \in Transitions /\ "deferOwn" \notin used
+    /\ primary # 0 /\ pend.k = "none"
+    /\ dq' = [dq EXCEPT ![last] = @ \cup {[o |-> primary, e |-> ep[primary]]}]
+    /\ used' = used \cup {"deferOwn"}
+    /\ UNCHANGED <<uScope, uFiles, uMisc, uTurn, uLz, steps, r2V, cell, landed,
+                   reads, recorded, ownDrop, mw, co, pk, consumed, pkOut>>
+
+\* The agent_end drain (`handleAgentEnd`): the second hop of the credit. The
+\* merged record's epoch is the `Math.max` of what was queued
+\* (`deferMutation`); `ReadGuard.recordWritten` credits the rewrite only at
+\* the live branch epoch and refuses it otherwise. A refusal of a record that
+\* holds a live scope's own current-epoch write is a false block (#3677's
+\* poison); a credit of a record that holds another scope's write is state
+\* from another session (#3705 rows 5 and 7).
+DrainDefer ==
+    /\ "DrainDefer" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ DQView # {}
+    /\ LET p == primary
+           Q == DQView
+           credit == Max({r.e : r \in Q}) = ep[p]
+       IN
+       /\ cell' = IF credit
+                  THEN [cell EXCEPT ![p] = @ \cup {[e |-> 1, o |-> r.o] : r \in Q}]
+                  ELSE cell
+       /\ ownDrop' = (ownDrop \/ (~credit /\ \E r \in Q :
+                                      st[r.o] = "live" /\ r.e = ep[r.o]))
+       /\ dq' = IF Has("deferResetClear") THEN [dq EXCEPT ![last] = {}]
+                ELSE [g \in Tickets |-> {}]
+    /\ UNCHANGED <<uOld, landed, reads, recorded, mw, co, pk, consumed, pkOut>>
+
+\* The park (`cutAdvisoryHold`'s `onHeld`, run by `settleHolds` after the cap)
+\* writes the lane's entry under the turn's session id (`carryScope`), only
+\* while the coordinator's scope is the one the turn captured at entry
+\* (`planDeliveryHolds`' `isCurrentSession`, `holdScope.isCurrent()`).
+\* "parkSessionKey" is #4112 round 2; without it a lane is keyed by its name
+\* alone.
+LandPark ==
+    /\ "park" \in Writers /\ mw["park"].pc = "flight"
+    /\ LET w == mw["park"]
+           ok == ~Has("parkFence") \/ st[w.hs] = "live"
+       IN
+       /\ pk' = IF ok
+                THEN [pk EXCEPT ![last] = @ \cup
+                        {[o |-> w.s,
+                          k |-> IF Has("parkSessionKey") THEN sess[w.s] ELSE "-"]}]
+                ELSE pk
+       /\ mw' = [mw EXCEPT !["park"].pc = IF ok THEN "landed" ELSE "dropped"]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, co, dq,
+                   consumed, pkOut>>
+
+\* The park map as the next run sees it: the live generation's, or, when
+\* `resetForSession` does not clear it, every generation's.
+PkView == IF Has("parkResetClear") THEN pk[last] ELSE UNION {pk[g] : g \in Tickets}
+
+\* The lane's next successful run (`takeCutAdvisoryItems` through `takeParked`)
+\* takes the entries under its key and shows them.
+ParkTake ==
+    /\ "ParkTake" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ \E t \in Tickets :
+          /\ st[t] = "live"
+          /\ LET mine == {r \in PkView : r.k = "-" \/ r.k = sess[t]} IN
+             /\ mine # {}
+             /\ pkOut' = pkOut \cup {[o |-> r.o, to |-> t] : r \in mine}
+             /\ pk' = IF Has("parkResetClear") THEN [pk EXCEPT ![last] = @ \ mine]
+                      ELSE [g \in Tickets |-> pk[g] \ mine]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, co, dq,
+                   consumed>>
+
+\* A live scope's tool_result leaves a work record in the coordinator's stores
+\* (the turn-state worklist owned by the coordinator's session id, cascade runs,
+\* pending runner findings), in the hook, with no await. A concurrent
+\* subagent's tool results reach the same coordinator.
+TurnWork ==
+    /\ "TurnWork" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ \E s \in Tickets, k \in WorkKinds :
+          /\ st[s] = "live"
+          /\ ~\E c \in consumed : c.k = k /\ c.o = s
+          /\ [k |-> k, o |-> s] \notin co[last]
+          /\ co' = [co EXCEPT ![last] = @ \cup {[k |-> k, o |-> s]}]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   consumed, pkOut>>
+
+\* A turn_end (`handleTurnEnd`, from `onTurnEnd` in `index.ts`, every
+\* activation, primary or concurrent subagent) runs the whole composer on the
+\* process's runtime: it reads and clears the turn-state worklist the
+\* coordinator's session id owns, consumes the cascade runs and drains the
+\* pending runner findings. On master it takes every scope's work (the open
+\* half of #3613, #3758's pinned residual). "turnEndScoped" is the proposed
+\* shape, not shipped: each record carries its producing activation and a
+\* turn_end drains its own.
+TurnEnd ==
+    /\ primary # 0 /\ pend.k = "none"
+    /\ \E s \in Tickets :
+          /\ st[s] = "live"
+          /\ \/ (s = primary /\ "TurnEnd" \in Transitions)
+             \/ (role[s] = "secondary" /\ "SecTurnEnd" \in Transitions)
+          /\ LET take == {r \in co[last] : r.k \in WorkKinds
+                                           /\ (Has("turnEndScoped") => r.o = s)}
+             IN
+             /\ take # {}
+             /\ consumed' = consumed \cup
+                              {[k |-> r.k, o |-> r.o, by |-> s] : r \in take}
+             /\ co' = [co EXCEPT ![last] = @ \ take]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   pkOut>>
+
 \* Actions that move no #3855 r2 variable keep them in Next.
 Next ==
-    \/ \E k \in {"fork", "clone"} : BeforeFork(k) /\ UNCHANGED r2V
-    \/ CancelFork /\ UNCHANGED r2V
-    \/ \E k \in {"new", "resume", "fork", "clone", "reload", "quit"} :
-          Retire(k) /\ UNCHANGED r2V
-    \/ RetireSub /\ UNCHANGED r2V
-    \/ Begin
-    \/ BeginDemoted
-    \/ BeginDeclined
-    \/ \E w \in {"post", "pre", "unstarted"} : InterruptAt(w)
-    \/ PiFork
-    \/ Tree /\ UNCHANGED r2V
-    \/ IdleReset /\ UNCHANGED r2V
-    \/ SecStart
-    \/ \E k \in {"reload", "fork"} : SecBind(k)
-    \/ SecEnd /\ UNCHANGED r2V
-    \/ \E k \in {"reload", "fork", "new"} : SecDown(k)
-    \/ SecUp
-    \/ SecRoleless
-    \/ Evict
-    \/ Dup /\ UNCHANGED r2V
-    \/ TurnStart /\ UNCHANGED r2V
-    \/ SecTurn /\ UNCHANGED r2V
-    \/ WidgetWrite /\ UNCHANGED r2V
-    \/ Activate /\ UNCHANGED r2V
-    \/ Context /\ UNCHANGED r2V
-    \/ \E x \in FlightIds : WriterBegin(x) /\ UNCHANGED r2V
-    \/ \E x \in FlightIds : LandRead(x) /\ UNCHANGED r2V
-    \/ LandHeartbeat /\ UNCHANGED r2V
-    \/ LandLsp /\ UNCHANGED r2V
-    \/ LandAdvisory /\ UNCHANGED r2V
-    \/ \E t \in Tickets : RegLand(t) /\ UNCHANGED r2V
+    \/ (\E k \in {"fork", "clone"} : BeforeFork(k) /\ UNCHANGED r2V) /\ UNCHANGED m4V
+    \/ CancelFork /\ UNCHANGED <<r2V, m4V>>
+    \/ (\E k \in {"new", "resume", "fork", "clone", "reload", "quit"} :
+          Retire(k) /\ UNCHANGED r2V) /\ UNCHANGED m4V
+    \/ RetireSub /\ UNCHANGED <<r2V, m4V>>
+    \/ Begin /\ UNCHANGED m4V
+    \/ BeginDemoted /\ UNCHANGED m4V
+    \/ BeginDeclined /\ UNCHANGED m4V
+    \/ (\E w \in {"post", "pre", "unstarted"} : InterruptAt(w)) /\ UNCHANGED m4V
+    \/ PiFork /\ UNCHANGED m4V
+    \/ Tree /\ UNCHANGED <<r2V, m4V>>
+    \/ IdleReset /\ UNCHANGED <<r2V, m4V>>
+    \/ SecStart /\ UNCHANGED m4V
+    \/ (\E k \in {"reload", "fork"} : SecBind(k)) /\ UNCHANGED m4V
+    \/ SecEnd /\ UNCHANGED <<r2V, m4V>>
+    \/ (\E k \in {"reload", "fork", "new"} : SecDown(k)) /\ UNCHANGED m4V
+    \/ SecUp /\ UNCHANGED m4V
+    \/ SecRoleless /\ UNCHANGED m4V
+    \/ Evict /\ UNCHANGED m4V
+    \/ Dup /\ UNCHANGED <<r2V, m4V>>
+    \/ TurnStart /\ UNCHANGED <<r2V, m4V>>
+    \/ SecTurn /\ UNCHANGED <<r2V, m4V>>
+    \/ WidgetWrite /\ UNCHANGED <<r2V, m4V>>
+    \/ Activate /\ UNCHANGED <<r2V, m4V>>
+    \/ Context /\ UNCHANGED <<r2V, m4V>>
+    \/ (\E x \in FlightIds : WriterBegin(x) /\ UNCHANGED r2V) /\ UNCHANGED m4V
+    \/ (\E x \in FlightIds : LandRead(x) /\ UNCHANGED r2V) /\ UNCHANGED m4V
+    \/ LandHeartbeat /\ UNCHANGED <<r2V, m4V>>
+    \/ LandLsp /\ UNCHANGED <<r2V, m4V>>
+    \/ LandAdvisory /\ UNCHANGED <<r2V, m4V>>
+    \/ (\E t \in Tickets : RegLand(t) /\ UNCHANGED r2V) /\ UNCHANGED m4V
+    \/ \E x \in M4Writers : x \in Writers /\ M4Begin(x)
+    \/ \E x \in {"stateW", "debounce"} : LandState(x)
+    \/ LandBridge
+    \/ LandPark
+    \/ DeferOwn
+    \/ DrainDefer
+    \/ ParkTake
+    \/ TurnWork
+    \/ TurnEnd
 
 Spec == Init /\ [][Next]_vars
 
@@ -1442,6 +1744,10 @@ TypeOK ==
     /\ primary \in 0..(MaxSteps + 2)
     /\ slot.reason \in {"-"} \cup SlotReasons
     /\ \A s \in Stores : \A r \in Reasons : Policy(s, r) \in Actions
+    /\ \A t \in Tickets : co[t] \subseteq [k : StateKinds \cup WorkKinds, o : Tickets]
+    /\ \A t \in Tickets : dq[t] \subseteq [o : Tickets, e : Nat]
+    /\ \A t \in Tickets : pk[t] \subseteq [o : Tickets, k : Files \cup {"-"}]
+    /\ \A x \in M4Writers : mw[x].pc \in {"idle", "flight", "landed", "dropped"}
 
 \* The design's NoCrossScopeWrite (#3528, #3568, #3596, #3576): a live
 \* scope's read-guard cell holds only its own facts and the facts it
@@ -1452,6 +1758,13 @@ NoCrossSessionState ==
           st[t] = "live" => \A x \in cell[t] : x.o = t \/ x \in imp[t]
     /\ \A r \in entry : st[r] = "live"
     /\ \A srv \in fleet : srv.g = svc
+    \* M4: the live coordinator generation's work records come from its own
+    \* scope or a concurrent subagent's (a shared coordinator, by design); a
+    \* record from another primary scope is a retired session's write that
+    \* landed in the live one (#3759's rows 7, 12, 14, 15, 16).
+    /\ \A t \in Tickets :
+          st[t] = "live" =>
+              \A r \in co[t] : r.o = t \/ role[r.o] = "secondary"
 
 \* The design's NoOffBranchFact (#3521): a live scope's own-lineage facts
 \* name entries on its current branch.
@@ -1503,6 +1816,11 @@ SecondaryIsolation ==
               => {x \in landed : x.o = s} \subseteq cell[CellOf(s)]
     /\ \A t \in Tickets :
           (st[t] = "live" /\ role[t] # "-") => turn[TurnCellOf(t)] = begun[t]
+    \* M4, the turn_end half (#3613's R2, #3758): a turn_end drains only its
+    \* own scope's work, so a subagent's never clears the primary's worklist,
+    \* cascade runs or pending runner findings, and the primary's never takes
+    \* a subagent's.
+    /\ \A c \in consumed : c.o = c.by
 
 \* F2: the slot is taken only by a primary start that replaced the scope
 \* that wrote it.
@@ -1579,6 +1897,12 @@ NoLostAdvisory ==
                 => \/ \E a \in adv : a.o = d.o
                    \/ \E x \in advOut : x.o = d.o
                    \/ \E d2 \in advDrop : d2.o = d.o /\ (d2.why # "reload" \/ d2.late)
+
+\* M4, #4112: a parked cut-advisory item is shown only by the scope that parked
+\* it. A parked entry is never carried across a replacement (`resetForSession`
+\* clears the map), and the lane's key is the turn's session, so a concurrent
+\* subagent neither takes nor shows the primary's.
+ParkedStaysInScope == \A d \in pkOut : d.o = d.to
 
 \* #3855 r2 (review F3): the process has a primary whenever no primary
 \* replacement is pending. A declined real successor leaves it with none.

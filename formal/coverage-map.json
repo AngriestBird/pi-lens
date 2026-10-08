@@ -96,6 +96,12 @@
       "session-lifecycle",
       "read-guard"
     ],
+    "tools/ast-grep-replace.ts": [
+      "session-lifecycle"
+    ],
+    "clients/turn-summary.ts": [
+      "session-lifecycle"
+    ],
     "clients/confirmed-delete.ts": [
       "read-guard"
     ],
@@ -159,7 +165,9 @@
     "clients/lsp/edits.ts": [
       "lsp-rename-edit"
     ],
-    "clients/lsp-mutation.ts": "unmodelled",
+    "clients/lsp-mutation.ts": [
+      "session-lifecycle"
+    ],
     "tools/lsp-navigation.ts": [
       "lsp-rename-edit"
     ],
@@ -379,7 +387,7 @@
     "clients/fix-run-restore.ts": "Whole-package fixer vs concurrent agent sibling edits: capture, the restore under pi's queue for the sibling after the target's hold is released, and the lock order against multi-path LSP edits (#3741, #3830). Modelled by dispatch-pipeline `SiblingRestore.tla`.",
     "clients/lsp/edits.ts": "applyWorkspaceEdit under every path's queue (#3610) and the rename staleness capture (#3736, #3747, #3734). Modelled by lsp-rename-edit (#3826).",
     "tools/lsp-navigation.ts": "See clients/lsp/edits.ts.",
-    "clients/lsp-mutation.ts": "LSP fallback bridge producer; carries no lineage and stays fail-open (#3763 residual).",
+    "clients/lsp-mutation.ts": "LSP fallback bridge producer (`bookkeepLspMutation`): it captures the session at `lsp_navigation`'s execute entry and sends it as the entry's lineage, so the bridge fences it like the settled sweep (#3824). Modelled as session-lifecycle's `bridge` writer (`BridgeLineage` fenced, `BridgeExtNoLineage` the entry without a handle, the accepted I4 residual of #3763); the LSP request and the workspace edit itself are lsp-rename-edit's.",
     "clients/mcp/session.ts": "MCP session refresh calls handleSessionStart (scope 'superseded'); session-lifecycle states the MCP host is out of scope.",
     "clients/dispatch/dispatcher.ts": "`buildCoverageNotice` decides per dispatch whether the synthetic model-facing coverage notice is emitted; the decision is the session-scoped `coverageNoticeSeen` latch (kind + file + sorted server sets) with the `dedupe` push/pull axis. No formal family models a model-facing coverage-notice dedupe: `dispatch-pipeline`'s `latch` is the `(file, hash)` analysed/in-flight dedupe in `clients/pipeline.ts`, and `session-lifecycle`'s `dedupe` is the #2890 duplicate-start gate. Unmodelled at the TLA axis (advisory), so the row only gates the seam record rule for the file's decision branches.",
     "clients/dispatch/pending-runner-findings.ts": "The deferred collect-later runner store (#3758/#3813): both readers (drain, commit gate's non-draining peek) apply the owned-admission fence (ownedByLiveSession), and requeueRunnerFindings carries entry.session, so a requeued answer stays fenced to its producer scope. Modelled by pending-runner-store (#3814, #3824).",
@@ -393,11 +401,14 @@
     "clients/opaque-mutation-scan.ts": "The pending opaque baseline of bash calls (OpaqueBaselineStore: one entry per tool-call id, retirement of an entry whose turn is over, the pending cap and its counted loss; #4137). Modelled by opaque-baseline-slot, together with the authority-ranked dispatch dedupe its recoveries feed (claimPipelineDispatch). The record site is clients/runtime-tool-call.ts and the take site and the dedupe are in clients/runtime-tool-result.ts, so those rows list the family too; the recovery itself (recoverOpaqueChangesViaGit, captureFileStats) is a stat or git read, not lifecycle.",
     "clients/deferred-runner-blockers.ts": "The commit gate's judgement of settled collect-later runner answers (`judgeDeferredRunnerFindings`). The file only reads the store through the non-draining `peekSettledRunnerFindings`, which is pending-runner-store's `PeekRead`; admission and drain live in clients/dispatch/pending-runner-findings.ts. Freshness-then-policy is not modelled.",
     "clients/finding-delivery-gate.ts": "Delivery freshness, disposition, and policy admission are not represented by a formal family; keep this delivery seam visible as unmodelled.",
-    "clients/git-guard.ts": "The git guard has session and turn latches, but no formal family currently models their writers or reset rules; keep it visible as unmodelled.",
+    "clients/git-guard.ts": "The git guard's command classification. Its session latch lives in `RuntimeCoordinator` (`updateGitGuardStatus`, `markGitGuardCacheUnknown`, cleared by `resetForSession`); the latch's late writers are modelled as the `gitguard` kind of session-lifecycle's `stateW` and `debounce` writers (`StateWLate`, `Pre3759StateWUncaptured`, `DebounceCaptureAtTimer`), so the latch's reset rules stay as they are in clients/runtime-coordinator.ts. This file's classification is unmodelled.",
     "clients/advisory-provenance.ts": "The advisory scanners' `scannedAt` stamp (taken at runScan entry, before the spawn) is store-freshness' Stamp = \"start\" rule, listed as 'not committed' in its store map; the finding-path freshness classification (live, stale, missing, unreadable) is not modelled. The rest is pure evidence shaping.",
     "clients/read-bridge.ts": "Out-of-band reads forwarded to io-bridge's `recordRead` as `evidence: \"disk\"`, the read guard's `recordRead`. read-guard models disk-evidence reads at the tool_result seam (`EvidenceAtResultHandler`); the bridge's own producer timing is not modelled, so a change here moves read-guard or declares it unaffected.",
     "clients/project-snapshot-persist-worker.ts": "The worker entry only serves one gzip-stage request and skips a body whose semantic fingerprint is unchanged. The Stage action and the generation-gated promotion live in clients/gzip-stage-write.ts and clients/project-snapshot.ts; the fingerprint skip itself is not modelled.",
     "clients/memory-sampler.ts": "Sampling cadence and heap-growth tightening are observability state, but no formal family models their session reset and timer-free turn state; keep it visible as unmodelled.",
+    "tools/ast-grep-replace.ts": "`ast_grep_replace` captures the coordinator's session at `execute` entry and hands it to the apply, which sends it as the bridge entry's lineage (#3763 item 4, #3824). Modelled as session-lifecycle's `bridge` writer (`BridgeLineage`).",
+    "clients/turn-summary.ts": "The run's turn summary collector: a session-scoped store `resetForSession` clears, written by `handleToolResult` and the deferred-format drain behind the handle each captured at entry (#3759 row 14). Modelled as the `summary` kind of session-lifecycle's `stateW` and `debounce` writers (`StateWLate`, `Pre3759StateWUncaptured`); the collector's content is not.",
+    "clients/runtime-turn.ts": "`handleTurnEnd`'s drains and the park of a cut advisory: modelled by session-lifecycle's `TurnEnd` (a turn_end drains only its own scope's work: `SecondaryTurnEnd` is master's open half of #3613 and #3758, `SecondaryTurnEndScoped` the proposed shape) and `park`/`ParkTake` (`ParkMerged`, `Pre4112ParkNoSessionKey`, `Mut4112ParkNoResetClear`, `MutParkNoFence`; the key and fence are also turn-end-delivery-holds'). The row is deliberately not given session-lifecycle: a fourth family would make it a hub and silence its gate (#3878).",
     "index.ts": "The hook handlers in index.ts: an edit inside one (session_start, session_shutdown, session_tree, turn_start, turn_end, agent_end, agent_settled, tool_call, tool_result, context) gates on that hook's families only, found by `findHookRanges` in scripts/lib/tla-coverage.mjs from the post-image the diff names (#3878). An edit outside every handler (activation setup, helpers) prints a note and never gates."
   }
 }
