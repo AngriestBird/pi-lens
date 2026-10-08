@@ -238,6 +238,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
+					maxProjectFiles: 2000,
 					computedAt: Date.now(),
 				},
 			});

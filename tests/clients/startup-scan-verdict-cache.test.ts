@@ -20,6 +20,7 @@ import {
 	resolveStartupScanContextAsync,
 	__testing,
 } from "../../clients/startup-scan.js";
+import { _resetProjectScaleBaseForTests } from "../../clients/project-scale.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -39,6 +40,7 @@ function makeVerdict(
 		canWarmCaches: false,
 		reason: "too-many-source-files",
 		sourceFileCount: 5000,
+		maxProjectFiles: 2000,
 		computedAt: Date.now(),
 		...overrides,
 	};
@@ -103,6 +105,32 @@ describe("isStartupScanVerdictFresh", () => {
 		const verdict = makeVerdict();
 		delete verdict.computedAt;
 		expect(isStartupScanVerdictFresh(verdict)).toBe(false);
+	});
+
+	it("fails closed for a persisted verdict written before maxProjectFiles was stored (#4126 F2)", () => {
+		const verdict = makeVerdict();
+		delete verdict.maxProjectFiles;
+		expect(isStartupScanVerdictFresh(verdict)).toBe(false);
+	});
+
+	it("treats a changed maxProjectFiles as stale before the TTL expires (#4126 F2)", () => {
+		const env = setupTestEnvironment("pi-lens-scan-bound-change-");
+		try {
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({ maxProjectFiles: 5000 }),
+			);
+			const verdict = makeVerdict({
+				cwd: env.tmpDir,
+				scanRoot: env.tmpDir,
+				projectRoot: env.tmpDir,
+				sourceFileCount: 6000,
+			});
+			expect(isStartupScanVerdictFresh(verdict)).toBe(false);
+		} finally {
+			env.cleanup();
+			_resetProjectScaleBaseForTests();
+		}
 	});
 
 	it("never TTLs a home-dir verdict, however old", () => {

@@ -1,3 +1,4 @@
+// flake-shape: ungoverned-wait-for — the same real deferred warmup must settle before the assertion; the wait observes notification ordering, not duration.
 /**
  * #775 — a `too-many-source-files` / `too-many-entries` startup-scan verdict
  * silently skipped the warm pipeline (heavy scans, TODO scan, dominant-
@@ -6,9 +7,8 @@
  * `slowFsVerdict.slow` check). These tests drive the real `handleSessionStart`
  * full-mode path with a pre-seeded startup-scan verdict (same technique as
  * `runtime-session-scan-cache.test.ts`) and assert:
- *   - an over-budget verdict fires the warm-skip notify exactly once per
- *     session, naming the entry-budget override when the reason is
- *     `too-many-entries`;
+ *   - every size-bounded verdict fires the warm-skip notify exactly once per
+ *     session, naming only the override that governs its reason;
  *   - a normal (small, `canWarmCaches: true`) project never fires it.
  */
 
@@ -171,12 +171,17 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 			expect(warmSkipNotices[0].msg).toContain(
 				"PI_LENS_STARTUP_SCAN_MAX_ENTRIES",
 			);
+			expect(
+				getDegradationSummary().find(
+					(entry) => entry.kind === "startup-warm-skipped",
+				)?.latestReasons[0]?.reason,
+			).toBe("too-many-entries");
 		} finally {
 			env.cleanup();
 		}
 	});
 
-	it("fires the warm-skip notify once for a too-many-source-files verdict (no override to name)", async () => {
+	it("fires the warm-skip notify once for a too-many-source-files verdict and records its bound", async () => {
 		const env = setupTestEnvironment("pi-lens-warm-skip-notify-files-");
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
 		try {
@@ -195,6 +200,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
+					maxProjectFiles: 2000,
 					computedAt: Date.now(),
 				},
 			});
@@ -212,10 +218,76 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 			expect(warmSkipNotices[0].msg).toContain("maxProjectFiles");
 			expect(getDegradationSummary()).toEqual(
 				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "startup-warm-skipped",
+						count: 1,
+						latestReasons: [
+							expect.objectContaining({
+								reason: "too-many-source-files; maxProjectFiles=2000",
+							}),
+						],
+					}),
+				]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("shows a size skip on the default first quick session (#4126 F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-warm-skip-notify-quick-");
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const previousDelay = process.env.PI_LENS_WARMUP_DELAY_MS;
+		const processGlobals = globalThis as typeof globalThis & {
+			__piLensFirstSessionDone?: boolean;
+			__piLensWarmupScheduled?: boolean;
+		};
+		try {
+			delete process.env.PI_LENS_STARTUP_MODE;
+			process.env.PI_LENS_WARMUP_DELAY_MS = "0";
+			delete processGlobals.__piLensFirstSessionDone;
+			delete processGlobals.__piLensWarmupScheduled;
+			const cwd = path.join(env.tmpDir, "project");
+			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+			for (let i = 0; i < 2_001; i++) {
+				fs.writeFileSync(
+					path.join(cwd, `file-${i}.ts`),
+					"export const value = 1;\n",
+				);
+			}
+			const notifications: Array<{ msg: string; level: string }> = [];
+			await handleSessionStart(
+				makeDeps(cwd, (msg, level) => notifications.push({ msg, level })),
+			);
+			await new Promise<void>((resolve) => {
+				const waitForWarmSkip = (): void => {
+					if (
+						notifications.some((n) =>
+							n.msg.includes(
+								"Project-size limits disabled background warm scans",
+							),
+						)
+					) {
+						resolve();
+						return;
+					}
+					setImmediate(waitForWarmSkip);
+				};
+				waitForWarmSkip();
+			});
+			const warmSkip = notifications.filter((n) =>
+				n.msg.includes("Project-size limits disabled background warm scans"),
+			);
+			expect(warmSkip).toHaveLength(1);
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
 					expect.objectContaining({ kind: "startup-warm-skipped", count: 1 }),
 				]),
 			);
 		} finally {
+			if (previousDelay === undefined)
+				delete process.env.PI_LENS_WARMUP_DELAY_MS;
+			else process.env.PI_LENS_WARMUP_DELAY_MS = previousDelay;
 			env.cleanup();
 		}
 	});

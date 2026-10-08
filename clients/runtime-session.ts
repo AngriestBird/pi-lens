@@ -213,6 +213,47 @@ interface SessionStartDeps {
 	resetLSPService: (options?: LSPShutdownOptions) => void;
 }
 
+/** Surface every project-size warm skip through the same bounded seam (#4126). */
+function notifyStartupWarmSkip(args: {
+	scan: StartupScanContext;
+	analysisRoot: string;
+	notify: SessionStartDeps["notify"];
+	runtime: RuntimeCoordinator;
+	sessionGeneration: number;
+}): void {
+	// The quick-mode callback runs after an await; only suppress it when the
+	// coordinator has moved to a different session generation. The lightweight
+	// test/runtime coordinator may not mark its scope live, so `isCurrentSession`
+	// would reject a valid first-session callback here.
+	if (args.runtime.sessionGeneration !== args.sessionGeneration) return;
+	const reason = args.scan.reason;
+	if (reason !== "too-many-source-files" && reason !== "too-many-entries") {
+		return;
+	}
+	const maxProjectFiles =
+		reason === "too-many-source-files"
+			? getStartupScanMaxSourceFilesDerived(args.analysisRoot)
+			: undefined;
+	const overrideHint =
+		reason === "too-many-entries"
+			? ` (set PI_LENS_STARTUP_SCAN_MAX_ENTRIES=<n> to override the ${getStartupScanMaxEntries()}-entry cap)`
+			: ` (set maxProjectFiles in .pi-lens.json to override the ${maxProjectFiles}-source-file cap)`;
+	recordDegradationOnce({
+		kind: "startup-warm-skipped",
+		subject: args.analysisRoot,
+		reason:
+			maxProjectFiles === undefined
+				? reason
+				: `${reason}; maxProjectFiles=${maxProjectFiles}`,
+		metadata:
+			maxProjectFiles === undefined ? { reason } : { reason, maxProjectFiles },
+	});
+	args.notify(
+		`📦 Project-size limits disabled background warm scans (heavy scans, TODO scan, LSP pre-warm)${overrideHint}.`,
+		"warning",
+	);
+}
+
 /** `SessionStartDeps` with the analyzer clients merged in. */
 type BootstrapResolvedDeps = SessionStartDeps & BootstrapClients;
 
@@ -1958,6 +1999,7 @@ export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
 	resetDegradationLedger();
+	let sessionGenerationAtStart = deps.runtime.sessionGeneration;
 	// #2467: re-arm the analyzer bootstrap's shutdown gate. The gate is a
 	// per-SESSION claim ("this session is over") held in process-lived storage,
 	// so without this a replacement session in the same process would find
@@ -2186,6 +2228,13 @@ export async function handleSessionStart(
 						warmupDbg(
 							`warmup: skipping language-profile (canWarm=false, reason=${scan.reason ?? "unknown"})`,
 						);
+						notifyStartupWarmSkip({
+							scan,
+							analysisRoot: scan.projectRoot ?? warmupCwd,
+							notify: deps.notify,
+							runtime: deps.runtime,
+							sessionGeneration: sessionGenerationAtStart,
+						});
 						return;
 					}
 					const languageRoot = scan.projectRoot ?? warmupCwd;
@@ -2472,6 +2521,7 @@ export async function handleSessionStart(
 	// next session's first reconcile gauge.
 	resetCascadeTierSessionState();
 	runtime.resetForSession(sessionStartMs);
+	sessionGenerationAtStart = runtime.sessionGeneration;
 	logLatency({
 		type: "phase",
 		phase: "session_start_runtime_reset",
@@ -3127,28 +3177,13 @@ export async function handleSessionStart(
 		// `else` branch runs once per handleSessionStart call — the
 		// dominant-language LSP pre-warm skip further down reuses this same
 		// verdict rather than notifying a second time).
-		if (
-			startupScan.reason === "too-many-source-files" ||
-			startupScan.reason === "too-many-entries"
-		) {
-			const overrideHint =
-				startupScan.reason === "too-many-entries"
-					? ` (set PI_LENS_STARTUP_SCAN_MAX_ENTRIES=<n> to override the ${getStartupScanMaxEntries()}-entry cap)`
-					: ` (set maxProjectFiles in .pi-lens.json to override the ${getStartupScanMaxSourceFilesDerived(analysisRoot)}-source-file cap)`;
-			recordDegradationOnce({
-				kind: "startup-warm-skipped",
-				subject: analysisRoot,
-				reason: `${startupScan.reason}; maxProjectFiles=${getStartupScanMaxSourceFilesDerived(analysisRoot)}`,
-				metadata: {
-					reason: startupScan.reason,
-					maxProjectFiles: getStartupScanMaxSourceFilesDerived(analysisRoot),
-				},
-			});
-			notify(
-				`📦 Project-size limits disabled background warm scans (heavy scans, TODO scan, LSP pre-warm)${overrideHint}.`,
-				"warning",
-			);
-		}
+		notifyStartupWarmSkip({
+			scan: startupScan,
+			analysisRoot,
+			notify,
+			runtime,
+			sessionGeneration,
+		});
 	} else {
 		scheduleStartupScans(
 			deps,

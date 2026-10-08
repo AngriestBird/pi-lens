@@ -465,6 +465,9 @@ export const wallClockBudgetInclude = [
 	// synchronous matcher cost and belongs in the quiet serialized phase.
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
+	// #4126: the first-session warmup has no awaitable completion signal; keep
+	// its real deferred-notification ordering in the serialized phase.
+	"tests/clients/runtime-session-warm-skip-notify.test.ts",
 	// #3872: real `git worktree add` children are the fixture (flake-shape admission).
 	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).

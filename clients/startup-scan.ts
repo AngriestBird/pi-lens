@@ -61,6 +61,8 @@ export interface StartupScanContext {
 		| "too-many-source-files"
 		| "too-many-entries";
 	sourceFileCount?: number;
+	/** Effective project-size bound used to compute this verdict (#4126). */
+	maxProjectFiles?: number;
 	/**
 	 * Wall-clock time (`Date.now()`) this verdict was computed. Stamped by
 	 * `resolveStartupScanContext`/`Async` right before it's cached, and carried
@@ -146,8 +148,8 @@ export const _resetStartupScanMaxEntriesForTests = _maxEntries._resetForTests;
  * function either; a fresh snapshot's `seq` match already implies the
  * project state hasn't moved since it warmed successfully.
  *
- * Fails closed on a verdict with no `computedAt` (e.g. hand-written test
- * fixture, or a pre-#699 snapshot) — treated as stale so it gets refreshed
+ * Fails closed on a verdict with no `computedAt` or effective bound (e.g. a
+ * hand-written test fixture, or a pre-#4126 snapshot) — treated as stale so it gets refreshed
  * rather than trusted indefinitely.
  */
 export function isStartupScanVerdictFresh(
@@ -160,6 +162,18 @@ export function isStartupScanVerdictFresh(
 	)
 		return true;
 	if (typeof verdict.computedAt !== "number") return false;
+	if (verdict.reason === "too-many-source-files") {
+		if (typeof verdict.maxProjectFiles !== "number") return false;
+		const currentMaxProjectFiles = getStartupScanMaxSourceFilesDerived(
+			verdict.cwd,
+		);
+		if (verdict.maxProjectFiles !== currentMaxProjectFiles) return false;
+		if (
+			typeof verdict.sourceFileCount === "number" &&
+			verdict.sourceFileCount <= currentMaxProjectFiles
+		)
+			return false;
+	}
 	return now - verdict.computedAt < getStartupScanVerdictTtlMs();
 }
 
@@ -401,6 +415,7 @@ function computeStartupScanContext(
 				? "too-many-entries"
 				: "too-many-source-files",
 			sourceFileCount,
+			maxProjectFiles: maxSourceFiles,
 		};
 	}
 
@@ -528,6 +543,7 @@ export async function resolveStartupScanContextAsync(
 					? "too-many-entries"
 					: "too-many-source-files",
 				sourceFileCount,
+				maxProjectFiles: maxSourceFiles,
 			};
 		} else {
 			result = {

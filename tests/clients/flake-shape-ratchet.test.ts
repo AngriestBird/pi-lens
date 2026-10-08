@@ -704,6 +704,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"#3617: the subject is Vitest's own fork teardown (the pool SIGTERMs the worker after the shared afterAll); no in-process double reproduces that kill or a hook timeout",
 	},
+	"ungoverned-wait-for:clients/runtime-session-warm-skip-notify.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the deferred warmup exposes no awaitable; real-time polling is the join that proves the notification arrives after the scan decision",
+	},
 	// 2026-09-26 (#3511 review round 3): the quick-mode warmup witness must
 	// run the real warmup timer and background word-index save, which no
 	// test hook awaits.
