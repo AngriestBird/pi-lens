@@ -56,8 +56,17 @@ const defs = (client: TreeSitterClient) =>
 			query: { delete: () => void };
 		} | null>;
 		loadLanguage: (languageId: string) => Promise<unknown>;
-		queryBatchCache: { size: number };
+		queryBatchCache: Map<string, unknown>;
 		queryBatchInputs: { size: number };
+		cacheQueryBatch: (
+			key: string,
+			value: unknown,
+			inputKeys?: string[],
+		) => void;
+		reportWasmAbort: (
+			thrown: unknown,
+			input?: { languageId: string; source: string },
+		) => boolean;
 		parseFileAndUse: (...args: unknown[]) => Promise<unknown>;
 		wasmInputKey: (input: { languageId: string; source: string }) => string;
 		trappedInputs: Map<string, { traps: number; by?: string; source?: string }>;
@@ -238,14 +247,97 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 		state.clearWasmInput(batchInput);
 		expect(deleteQuery).not.toHaveBeenCalled();
 		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "wasm-query-batch-disposal-deferred",
+			)?.count,
+		).toBe(1);
+		expect(
 			getDegradationSummary().find((group) => group.kind === "wasm-trap")
 				?.count,
-		).toBeGreaterThan(trapsBefore);
+		).toBe(trapsBefore);
 
 		release();
 		expect((await pending).map(({ queryDef }) => queryDef.id)).toEqual([
 			"healthy",
 		]);
 		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("releases a retired batch in finally when the consumer throws", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const filePath = "tree-sitter-heal-batch-error.py";
+		await client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			"def f():\n    return 1\n",
+		);
+		const batch = [...state.queryBatchCache.values()][0] as {
+			key: string;
+			query: { delete: () => void };
+		};
+		const deleteQuery = vi.spyOn(batch.query, "delete");
+		const batchInput = wasmQueryInput(batch.key);
+		state.trappedInputs.set(state.wasmInputKey(batchInput), {
+			traps: 1,
+			by: undefined,
+			source: batchInput.source,
+		});
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.spyOn(state, "parseFileAndUse").mockImplementation(async () => {
+			await held;
+			throw new Error("consumer failed");
+		});
+		const pending = client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			"def f():\n    return 1\n",
+		);
+		await Promise.resolve();
+		state.clearWasmInput(batchInput);
+		release();
+		await expect(pending).rejects.toThrow("consumer failed");
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("retires the replaced batch", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const first = await state.compileQueryBatch([healthyRule], "python");
+		expect(first).not.toBeNull();
+		const deleteQuery = vi.spyOn(first!.query, "delete");
+		state.cacheQueryBatch(first!.key, first, [first!.key]);
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("retires the evicted batch", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP = "1";
+		const first = await state.compileQueryBatch([healthyRule], "python");
+		const alternateRule = { ...healthyRule, id: "evicted", name: "evicted" };
+		const deleteQuery = vi.spyOn(first!.query, "delete");
+		await state.compileQueryBatch([alternateRule], "python");
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not retain full file text in a trap record", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const fileInput = { languageId: "python", source: "secret file text" };
+		client.reportWasmAbort(trap(), fileInput);
+		const entry = [...state.trappedInputs.values()][0];
+		expect(entry.source).toBeUndefined();
 	});
 });

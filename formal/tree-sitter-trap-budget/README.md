@@ -58,6 +58,12 @@ The environment picks trap outcomes:
 The ghosts `hits`, `poisonHit` and `heap` record each trap's true culprit. They
 are the evidence that the budget is allowed to spend.
 
+The model's `ok-build`/`raw-ok` transitions invalidate every cached batch after
+a healed query input. The implementation invalidates only batches whose stored
+input-key mirror contains that healed input. This is a deliberate
+over-approximation in the model: it proves the safety property for a larger
+invalidation set while the code preserves unrelated cached batches.
+
 ## Invariants
 
 - `Contained` (#3605, #3673). A call loses a file's extraction only through

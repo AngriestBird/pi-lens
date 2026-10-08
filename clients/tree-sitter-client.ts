@@ -627,11 +627,11 @@ export class TreeSitterClient {
 	private retireQueryBatch(batch: QueryBatch | null): void {
 		if (!batch) return;
 		batch.retired = true;
-		if (batch.users === undefined || batch.users === 0) {
+		if (batch.users === 0) {
 			this.disposeQueryBatch(batch);
 		} else {
 			incrementDegradationCount({
-				kind: "wasm-trap",
+				kind: "wasm-query-batch-disposal-deferred",
 				subject: "web-tree-sitter",
 				reason: "deferred batch disposal while a scan is active",
 			});
@@ -668,7 +668,7 @@ export class TreeSitterClient {
 	 * holds more than `WASM_TRAP_BUDGET + 1`. */
 	private trappedInputs = new Map<
 		string,
-		{ traps: number; by: string | undefined; source?: string }
+		{ traps: number; by: string | undefined; source?: string | undefined }
 	>();
 	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
 	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
@@ -747,7 +747,7 @@ export class TreeSitterClient {
 				this.trappedInputs.set(key, {
 					traps: 1,
 					by: input.caller,
-					source: input.source,
+					source: input.languageId === "query" ? input.source : undefined,
 				});
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {

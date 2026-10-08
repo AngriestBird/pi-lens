@@ -1671,6 +1671,8 @@ export type DegradationKind =
 	 * re-observes the file.
 	 */
 	| "wasm-abort"
+	/** #3834: a retired compiled query stayed alive for an active scan. Counted. */
+	| "wasm-query-batch-disposal-deferred"
 	/**
 	 * #3605: web-tree-sitter trapped (`memory access out of bounds`, `table
 	 * index is out of bounds`, ...) while parsing or querying one file. That
