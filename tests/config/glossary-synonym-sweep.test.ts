@@ -365,6 +365,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp-mutation.ts": 1,
 		"clients/mutating-tool.ts": 2,
 		"clients/observed-mutation.ts": 3,
+		"tools/lens-diagnostic-mark.ts": 1,
 		"clients/read-bridge.ts": 5,
 		"clients/zizmor-config.ts": 13,
 	},

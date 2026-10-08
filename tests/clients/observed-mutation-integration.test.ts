@@ -26,16 +26,23 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolveLanguageRootForFile } from "../../clients/language-profile.js";
 import {
 	MUTATION_ATTRIBUTION_FILE,
+	lookupLearnedMutatingTool,
 	primePersistedMutationAttribution,
 	resetMutationAttribution,
 	shouldArmObservationForTool,
 } from "../../clients/mutation-attribution.js";
+import { PI_LENS_TOOL_NAMES } from "../../clients/tool-config.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import {
 	armObservedMutation,
 	_setObservedTimeBoundsForTests,
 	resetObservedMutationNet,
 } from "../../clients/observed-mutation.js";
 import { readChangesSince } from "../../clients/project-changes.js";
+import {
+	_resetFormatEventsPublishForTests,
+	wireFormatEventsBusEmitter,
+} from "../../clients/format-events-publish.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
@@ -69,6 +76,7 @@ vi.mock("../../clients/bootstrap.js", () => ({
 		metricsClient: {},
 		agentBehaviorClient: { recordToolCall: () => [], formatWarnings: () => "" },
 	}),
+	requestBootstrapClients: async () => ({ complexityClient: undefined }),
 }));
 
 const SOURCE = ["const a = 1;", "const b = 2;", "const c = 3;", ""].join("\n");
@@ -294,6 +302,247 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 			// Deferred, never immediate — an unknown edit-shaped tool takes the
 			// safe timing, so the agent_settled drain formats it.
 			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+describe("#4139 pi-lens tool attribution boundary", () => {
+	it("does not block LSP reads after two observed pi-tool renames", async () => {
+		// #4139 F5: this must reach the read guard. The bootstrap mock includes
+		// requestBootstrapClients because a thrown complexity lookup is caught as
+		// "no opinion" before the guard, making the old witness vacuous.
+		const env = setupTestEnvironment("pi-lens-4139-read-guard-");
+		try {
+			const filePath = path.join(env.tmpDir, "renamed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+
+			for (const suffix of ["first", "second"]) {
+				const event = {
+					toolName: "lsp_navigation",
+					toolCallId: `call-4139-rename-${suffix}`,
+					input: { path: filePath, operation: "rename", apply: true },
+					content: [{ type: "text", text: "renamed" }],
+				};
+				await handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				);
+				fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+				await handleToolResult(
+					toolResultDeps({ event, runtime, cacheManager }),
+				);
+			}
+
+			const unreadPath = path.join(env.tmpDir, "unread.ts");
+			fs.writeFileSync(unreadPath, SOURCE);
+			for (const operation of [
+				"hover",
+				"references",
+				"definition",
+				"documentSymbol",
+				"implementation",
+			] as const) {
+				const result = await handleToolCall(
+					toolCallDeps({
+						event: {
+							toolName: "lsp_navigation",
+							toolCallId: `call-4139-${operation}`,
+							input: { path: unreadPath, operation },
+						},
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				);
+				expect(result).toBeUndefined();
+			}
+			expect(
+				getDegradationSummary().some(
+					(entry) =>
+						entry.kind === "tool-call-handler-throw" &&
+						entry.latestReasons.some(
+							(reason) => reason.subject === "lsp_navigation",
+						),
+				),
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not learn any pi-registered tool through the real call/result path", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-pi-tools-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			for (const [index, toolName] of PI_LENS_TOOL_NAMES.entries()) {
+				const filePath = path.join(env.tmpDir, `${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				const { runtime, cacheManager } = newSession(env.tmpDir);
+				for (const suffix of ["first", "second"]) {
+					const event = {
+						toolName,
+						toolCallId: `call-4139-${index}-${suffix}`,
+						input: { path: filePath, operation: "rename", apply: true },
+						content: [{ type: "text", text: "renamed" }],
+					};
+					await handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					);
+					fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+					await handleToolResult(
+						toolResultDeps({ event, runtime, cacheManager }),
+					);
+				}
+				expect(lookupLearnedMutatingTool(toolName)).toBeUndefined();
+				const hover = {
+					toolName,
+					input: {
+						path: path.join(env.tmpDir, "unread.ts"),
+						operation: "hover",
+					},
+				};
+				expect(classifyMutatingTool(hover)).toBeUndefined();
+			}
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records lens_diagnostic_mark suppress writes through the mutation bridge", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "marked.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const emitted: Array<{ event: string; payload: unknown }> = [];
+			wireFormatEventsBusEmitter((event, payload) => {
+				emitted.push({ event, payload });
+			});
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			const turnState = cacheManager.readTurnState(env.tmpDir);
+			expect(Object.keys(turnState.files ?? {})).toContain("marked.ts");
+			expect(turnState.files["marked.ts"]?.modifiedRanges).toEqual([
+				{ start: 1, end: 1 },
+			]);
+			expect(readChangesSince(env.tmpDir, 0)).toContainEqual(
+				expect.objectContaining({ source: "agent-tool:lens_diagnostic_mark" }),
+			);
+			expect(emitted).toContainEqual(
+				expect.objectContaining({
+					event: "pilens:format:queued",
+					payload: expect.objectContaining({ tool: "edit" }),
+				}),
+			);
+			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			_resetFormatEventsPublishForTests();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("drops a suppress write whose session is retired while it awaits", async () => {
+		// #4139 F4 / #3763: a write that crosses session replacement must not
+		// publish turn-state or deferred-format evidence into the new session.
+		const env = setupTestEnvironment("pi-lens-4139-retired-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "retired.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			const run = tool.execute(
+				"call-4139-retired-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+			runtime.resetForSession();
+			await run;
+
+			expect(cacheManager.readTurnState(env.tmpDir).files).toEqual({});
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records the merged suppress comment and its adjacent source range", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-merged-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "merged.ts");
+			fs.writeFileSync(
+				filePath,
+				"const a = 0;\n// pi-lens-ignore: other\nconst value = 1;\n",
+			);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-merged-mark",
+				{
+					filePath,
+					line: 3,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			expect(
+				cacheManager.readTurnState(env.tmpDir).files["merged.ts"]
+					?.modifiedRanges,
+			).toEqual([{ start: 2, end: 3 }]);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
