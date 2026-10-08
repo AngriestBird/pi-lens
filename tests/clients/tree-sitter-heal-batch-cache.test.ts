@@ -67,6 +67,7 @@ const defs = (client: TreeSitterClient) =>
 			inputKeys?: string[],
 		) => void;
 		releaseQueryBatch: (batch: { query: { delete: () => void } }) => void;
+		retireQueryBatch: (batch: { query: { delete: () => void } } | null) => void;
 		reportWasmAbort: (
 			thrown: unknown,
 			input?: { languageId: string; source: string },
@@ -557,6 +558,68 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 		state.releaseQueryBatch(ownerBatch!);
 		expect(deleteQuery).not.toHaveBeenCalled();
 		state.releaseQueryBatch(waiterBatch!);
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("leases a caller that joins after the build decided (#4207 F9)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const probeKey = state.getQueryCacheKey(
+			`raw:${rule.id}:${rule.query}`,
+			"python",
+		);
+		const probeInput = wasmQueryInput(probeKey);
+		state.trappedInputs.set(state.wasmInputKey(probeInput), {
+			traps: 1,
+			by: undefined,
+			source: probeInput.source,
+		});
+		const realLoad = state.loadLanguage.bind(client);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let heldOnce = false;
+		vi.spyOn(state, "loadLanguage").mockImplementation(
+			async (languageId: string) => {
+				if (!heldOnce) {
+					heldOnce = true;
+					await held;
+				}
+				return realLoad(languageId);
+			},
+		);
+		// The build record stays registered until the owner's own continuation
+		// runs, one microtask after the decision section. A caller that enters
+		// in between joins a build that has already decided: its lease goes onto
+		// the decided batch, because the join counter is drained. Counting it
+		// there instead would release against another consumer's lease and
+		// dispose the native Query early (state-table row 9).
+		let lateJoin!: Promise<{ query: { delete: () => void } } | null>;
+		const realRetire = state.retireQueryBatch.bind(client);
+		state.retireQueryBatch = (batch) => {
+			realRetire(batch);
+			queueMicrotask(() => {
+				lateJoin = state.compileQueryBatch([rule, healthyRule], "python", true);
+			});
+		};
+		const owner = state.compileQueryBatch([rule, healthyRule], "python", true);
+		const waiter = state.compileQueryBatch([rule, healthyRule], "python", true);
+		client.clearWasmInput(probeInput);
+		release();
+		const [ownerBatch, waiterBatch] = await Promise.all([owner, waiter]);
+		const lateBatch = await lateJoin;
+		expect(ownerBatch).not.toBeNull();
+		expect(waiterBatch).toBe(ownerBatch);
+		// The late caller joined the registered build instead of starting one.
+		expect(lateBatch).toBe(ownerBatch);
+		const deleteQuery = vi.spyOn(ownerBatch!.query, "delete");
+		state.releaseQueryBatch(ownerBatch!);
+		expect(deleteQuery).not.toHaveBeenCalled();
+		state.releaseQueryBatch(waiterBatch!);
+		expect(deleteQuery).not.toHaveBeenCalled();
+		state.releaseQueryBatch(lateBatch!);
 		expect(deleteQuery).toHaveBeenCalledTimes(1);
 	});
 
