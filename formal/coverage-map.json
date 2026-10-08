@@ -26,7 +26,8 @@
     "store-freshness",
     "tree-sitter-trap-budget",
     "turn-end-delivery-holds",
-    "turn-end-late-scan"
+    "turn-end-late-scan",
+    "lsp-ephemeral-data-dir"
   ],
   "map": {
     "clients/read-guard.ts": [
@@ -84,7 +85,8 @@
     "clients/runtime-session.ts": [
       "session-lifecycle",
       "session-straddle",
-      "snapshot-freshness"
+      "snapshot-freshness",
+      "lsp-ephemeral-data-dir"
     ],
     "clients/mutation-bridge.ts": [
       "session-lifecycle",
@@ -189,8 +191,12 @@
     "clients/installer/index.ts": [
       "file-locks"
     ],
+    "clients/ephemeral-root.ts": [
+      "lsp-ephemeral-data-dir"
+    ],
     "clients/instance-reaper.ts": [
       "instance-reaper",
+      "lsp-ephemeral-data-dir",
       "review-graph-promotion",
       "snapshot-promotion"
     ],
@@ -326,6 +332,9 @@
     ],
     "clients/opaque-mutation-scan.ts": [
       "opaque-baseline-slot"
+    ],
+    "clients/file-utils.ts": [
+      "lsp-ephemeral-data-dir"
     ]
   },
   "notes": {
