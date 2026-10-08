@@ -135,4 +135,79 @@ describe("LSPService.notifyExternalFileChange (#1668)", () => {
 		expect(auxClient.notify.watchedFileChange).toHaveBeenCalledTimes(1);
 		expect(auxClient.notify.watchedFileChange).toHaveBeenCalledWith(FILE, 3);
 	});
+
+	it("announces a changed file to a live sibling root", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const owningClient = makeClient();
+		const siblingClient = makeClient();
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", owningClient);
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+
+		await service.touchFile(FILE, "export type T = 'new';\n");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(owningClient.notify.watchedFileChange).not.toHaveBeenCalled();
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenCalledWith(
+			FILE,
+			2,
+		);
+	});
+
+	it("notifies same-server sibling roots for external changes", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const owningClient = makeClient();
+		const siblingClient = makeClient();
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", owningClient);
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+
+		await service.notifyExternalFileChange(FILE, 3);
+
+		expect(owningClient.notify.watchedFileChange).toHaveBeenCalledWith(FILE, 3);
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenCalledWith(
+			FILE,
+			3,
+		);
+	});
+
+	it("does not re-announce unchanged content and bounds the hash table", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const siblingClient = makeClient();
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", makeClient());
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+		const announce = (
+			service as unknown as {
+				announceToSiblings(path: string, content: string): Promise<void>;
+			}
+		).announceToSiblings.bind(service);
+
+		await announce("C:/repo/packages/a.ts", "same");
+		await announce("C:/repo/packages/a.ts", "same");
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenCalledTimes(1);
+
+		for (let index = 0; index < 1025; index += 1) {
+			await announce(`C:/repo/packages/${index}.ts`, String(index));
+		}
+		const hashes = (
+			service as unknown as { siblingAnnouncementHashes: { size: number } }
+		).siblingAnnouncementHashes;
+		expect(hashes.size).toBe(1024);
+	});
 });
