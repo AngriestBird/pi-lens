@@ -106,6 +106,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"event-loop occupancy has no deterministic proxy; the sampler row guards per-chunk block size the yield count cannot see",
 	},
+	// 2026-10-08 (#4148): 100K blank lines and a 100K-character rule are real
+	// event-loop occupancy witnesses for the pytest traceback and go.mod regexes.
+	"elapsed-time-assertion:clients/pytest-gomod-regex-budget.test.ts": {
+		detector: "elapsed-time-assertion",
+		reason:
+			"the defect is wall-clock only (quadratic pytest traceback and go.mod regex backtracking); a fake clock measures nothing",
+	},
 	// 2026-09-08 (#2622): the defect is wall-clock only — 2^N regex
 	// backtracking in both glob compilers; a fake clock measures nothing.
 	"elapsed-time-assertion:clients/read-guard-glob-nonbacktracking.test.ts": {
@@ -402,6 +409,20 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the installed pi host must load the built extension and expose its provider roster across the process boundary",
+	},
+	// 2026-10-08 (#4138, #3831, #4185 round 2): the branch a read record is
+	// admitted to is pi's own session branch after a real RPC clone rebinds the
+	// extension, and the nested ids (`c1/1`, parent `c1`) and the toolResult pi
+	// persists for a codemode call exist only in the real host. Round 4 adds
+	// four: pi's own agent loop decides that a call a later extension blocked
+	// gets tool_execution_end and no tool_result, in what order, top-level,
+	// parallel and nested. Round 5 adds one: a later extension's tool_result
+	// hook rewrites a failed read's isError after pi-lens saw it, which only
+	// pi's own hook chain produces.
+	"real-process-spawn:real-harness/read-guard-moves.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the read guard's branch admission after a real RPC clone, the nested-call ids pi mints, and the tool_execution_end pi's agent loop emits for a call a later extension blocked cannot be produced by an in-process double",
 	},
 	"real-process-spawn:real-harness/scenario-1.test.ts": {
 		detector: "real-process-spawn",

@@ -254,6 +254,7 @@ describe("mutation bridge bookkeeping", () => {
 	});
 
 	it("drops an out-of-scope path without touching any store", () => {
+		resetDegradationLedger();
 		const env = setupTestEnvironment("pi-lens-2423-bridge-scope-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
@@ -268,7 +269,12 @@ describe("mutation bridge bookkeeping", () => {
 			const cacheManager = new CacheManager(false);
 
 			const accepted = recordMutationThroughSeam(
-				{ filePath, kind: "edit", touchedLines: [1, 2] },
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "ast_grep_replace",
+				},
 				makeDeps({
 					tmpDir: env.tmpDir,
 					runtime,
@@ -283,6 +289,21 @@ describe("mutation bridge bookkeeping", () => {
 			).toHaveLength(0);
 			expect(readChangesSince(env.tmpDir, 0)).toEqual([]);
 			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			// #4140: the v1 drop is recorded once per producer, with the path, so a
+			// second producer's drop stays visible (#4185 round 1 F5).
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "mutation-bridge-out-of-scope",
+						latestReasons: [
+							expect.objectContaining({
+								subject: "ast_grep_replace:out-of-scope",
+								reason: expect.stringContaining(filePath),
+							}),
+						],
+					}),
+				]),
+			);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;

@@ -129,6 +129,10 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 		// the branch filter, so the double answers with the import tally.
 		exportAuthorship = () => ({ written: [], entries: [] });
 		importAuthorship = () => ({ imported: 0, dropped: 0 });
+		// #4185: agent_settled's backstop and tool_execution_end release read
+		// captures; this double holds none.
+		dropProvisionalReads = () => 0;
+		dropProvisionalReadByCall = () => false;
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,

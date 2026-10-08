@@ -919,6 +919,46 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(noticeText()).not.toContain("cannot confirm");
 	});
 
+	// Recurrence: #4185 round 1 F2. #4138 attributes reads at tool_call, and the
+	// same branch noted the call in flight, so a read of the sibling during the
+	// run stopped the restore: the tool's bytes stayed on disk and the agent's
+	// edit was reported possibly lost. A read changes no bytes.
+	it("does not treat an in-flight read as an in-flight mutation", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			return 0;
+		};
+
+		const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		const first = agentEdit(aRs, "let ONE = 1;");
+		first.write();
+		await first.deliver();
+		// pi's tool_call for a read of the sibling; its tool_result has not come.
+		await handleToolCall({
+			event: { toolCallId: "read-2", toolName: "read", input: { path: aRs } },
+			ctx: { cwd: tmpDir },
+			lensEnabled: true,
+			getFlag: (flag: string) => flag === "no-lsp" || flag === "no-complexity",
+			dbg: () => {},
+			runtime: first.runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+		} as never);
+		proceed.open();
+		await run;
+
+		expect(fs.readFileSync(aRs, "utf-8")).toBe("let ONE = 1;\n");
+		expect(noticeText()).not.toContain("cannot confirm");
+	});
+
 	it("does not write over a newer edit that lands while the restore is reading", async () => {
 		const aRs = path.join(srcDir, "a.rs");
 		const started = gate();

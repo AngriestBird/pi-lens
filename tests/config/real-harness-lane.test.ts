@@ -23,6 +23,7 @@ describe("real harness lane admission", () => {
 			"tests/real-harness/bridge-reload.test.ts",
 			"tests/real-harness/diagnostic-provenance.test.ts",
 			"tests/real-harness/provider-compatibility.test.ts",
+			"tests/real-harness/read-guard-moves.test.ts",
 		];
 		expect(realHarnessInclude).toEqual(expect.arrayContaining(expected));
 		expect(realHarnessInclude).toHaveLength(expected.length);

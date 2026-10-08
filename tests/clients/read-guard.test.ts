@@ -53,6 +53,41 @@ describe("ReadGuard", () => {
 		fileTimeState.hasChanged = false;
 		vi.mocked(logReadGuardEvent).mockClear();
 	});
+	it("revokes an unseen blocked read without dropping delivered evidence", () => {
+		const filePath = "/tmp/blocked-read-release.ts";
+		const guard = createReadGuard("blocked-read-release-session");
+		// Recurrence: a later extension can block after the read tool_call, so no
+		// tool_result arrives; that unseen capture must not license an edit.
+		guard.recordRead(
+			createReadRecord(filePath, {
+				provisional: true,
+				source: "native-read:blocked-call:provisional",
+			}),
+		);
+		guard.recordRead(
+			createReadRecord(filePath, { toolCallId: "delivered-result" }),
+		);
+
+		expect(guard.dropProvisionalReadByCall("blocked-call")).toBe(true);
+		expect(guard.getReadHistory(filePath)).toEqual([
+			expect.objectContaining({ toolCallId: "delivered-result" }),
+		]);
+	});
+
+	it("releases every provisional capture at the turn boundary", () => {
+		const guard = createReadGuard("blocked-read-turn-end-session");
+		for (const [filePath, source] of [
+			["/tmp/a.ts", "native-read:a:provisional"],
+			["/tmp/b.ts", "native-read:b:provisional"],
+		] as const)
+			guard.recordRead(
+				createReadRecord(filePath, { provisional: true, source }),
+			);
+
+		expect(guard.dropProvisionalReads()).toBe(2);
+		expect(guard.getReadHistory("/tmp/a.ts")).toEqual([]);
+		expect(guard.getReadHistory("/tmp/b.ts")).toEqual([]);
+	});
 	it("supersedes only the correlated provisional native read", () => {
 		const filePath = "/tmp/native-read-identity.ts";
 		const guard = createReadGuard("native-read-identity-session");

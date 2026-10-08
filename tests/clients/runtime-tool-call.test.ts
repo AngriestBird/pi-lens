@@ -221,17 +221,30 @@ describe("handleToolCall", () => {
 			await handleToolCall(
 				baseDeps({
 					runtime,
-					event: { toolName: "read", input: { path: filePath } },
+					event: {
+						toolName: "read",
+						toolCallId: "read-call",
+						parentToolCallId: "codemode-call",
+						input: { path: filePath },
+					},
 					ctx: { cwd: env.tmpDir },
 				}),
 			);
 
+			// The provisional record is keyed by the call's own identity for the
+			// tool_result that supersedes it, and carries no transcript identity:
+			// it showed the agent nothing yet, so no branch move may keep it
+			// (#4185 round 1 F1: with `toolCallId` here, a read that errored
+			// licensed an edit after /clone).
 			expect(recordRead).toHaveBeenCalledWith(
 				expect.objectContaining({
 					filePath,
 					effectiveOffset: 1,
+					provisional: true,
+					source: "native-read:read-call:provisional",
 				}),
 			);
+			expect(recordRead.mock.calls[0]?.[0]).not.toHaveProperty("toolCallId");
 			expect(touchFileMock).toHaveBeenCalled();
 			// #3481 round 1: the auto-touch says when it read the file, so the
 			// notify queue can order it against the other reads of that file.

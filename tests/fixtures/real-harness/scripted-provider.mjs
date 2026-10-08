@@ -71,9 +71,21 @@ function recordContextShapeDiagnostic() {
 	);
 }
 
+// The turn counter lives on the process, keyed by the script file: pi re-runs
+// the extension factory on an RPC `clone`/`fork`, `new_session` and `/reload`,
+// and a counter in the factory's closure restarted the script at turn 0 after
+// every such rebind, so no scenario could move the conversation and go on
+// (#4185 round 1, F3). One process runs one script file.
+const TURN_COUNTERS = Symbol.for("pi-lens.real-harness.scripted-turns");
+const turnCounters = (globalThis[TURN_COUNTERS] ??= new Map());
+
 export default function scriptedProvider(pi) {
 	const script = loadScript();
-	let turn = 0;
+	const nextTurn = () => {
+		const turn = turnCounters.get(scriptPath) ?? 0;
+		turnCounters.set(scriptPath, turn + 1);
+		return turn;
+	};
 	pi.registerProvider("scripted", {
 		name: "Scripted harness provider",
 		baseUrl: "https://scripted.invalid",
@@ -92,7 +104,9 @@ export default function scriptedProvider(pi) {
 		],
 		streamSimple(model, context, options) {
 			const stream = createAssistantMessageEventStream();
-			const action = script[turn++];
+			const turnIndex = nextTurn();
+			const turn = turnIndex + 1;
+			const action = script[turnIndex];
 			if (observationPath) {
 				const providerContextTools = providerTools(context);
 				if (providerContextTools === undefined) recordContextShapeDiagnostic();
