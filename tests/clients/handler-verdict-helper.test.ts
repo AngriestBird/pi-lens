@@ -215,6 +215,73 @@ describe("#3518 — a swallowed handler throw fails the handler-verdict test", (
 		}
 	});
 
+	it("an entry failure resets the ledger: the next checked call is judged fresh (#4201 F2)", async () => {
+		// Recurrence: without the reset in the entry branch, one earlier swallow
+		// fails EVERY later checked call in the file, not the one that met it.
+		recordDegradationOnce({
+			kind: "tool-call-handler-throw",
+			subject: "earlier",
+			reason: "swallowed before this call",
+		});
+		const first = await expectHelperFailure(() =>
+			runHandlerExpectingNoThrow(async () => "never reached"),
+		);
+		expect(first).toContain("swallowed before this call");
+		await expect(
+			runHandlerExpectingNoThrow(async () => "verdict"),
+		).resolves.toBe("verdict");
+	});
+
+	it("reads the ledger of the module graph the handler ran in, after vi.resetModules() (#4201 F1)", async () => {
+		// Recurrence: tests/index-integration.test.ts calls vi.resetModules() and
+		// imports index.js, so the production handler records into a FRESH
+		// degradation-ledger instance while the helper (imported once) held the
+		// original. With handleToolCallImpl always throwing, two tool_call tests
+		// there passed with no helper message (AGENTS.md shape 14).
+		const env = setupTestEnvironment("pi-lens-3518-reset-");
+		try {
+			const filePath = path.join(env.tmpDir, "target.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			vi.resetModules();
+			const fresh = await import("../../clients/runtime-tool-call.js");
+			const freshLedger = await import("../../clients/degradation-ledger.js");
+			expect(freshLedger.getDegradationSummary).not.toBe(getDegradationSummary);
+			const pi = createPiMock();
+			pi.on("tool_call", (event) =>
+				fresh.handleToolCall({
+					...readDeps(env.tmpDir, filePath),
+					event: event as never,
+				}),
+			);
+
+			const message = await expectHelperFailure(() =>
+				pi.emit(
+					"tool_call",
+					{
+						toolName: "read",
+						toolCallId: "call-3518-reset",
+						input: { path: filePath },
+					},
+					makeCtx({ cwd: env.tmpDir }),
+				),
+			);
+
+			expect(message).toContain("tool-call-handler-throw (read)");
+			// The split the fix closes: the statically imported ledger saw nothing.
+			expect(
+				getDegradationSummary().some(
+					(group) => group.kind === "tool-call-handler-throw",
+				),
+			).toBe(false);
+			// The failure reset the fresh ledger too: the next checked call is clean.
+			await expect(
+				runHandlerExpectingNoThrow(async () => "verdict"),
+			).resolves.toBe("verdict");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("a handler that completes returns its real verdict, blocking or not", async () => {
 		const env = setupTestEnvironment("pi-lens-3518-verdict-");
 		try {

@@ -29,7 +29,8 @@
  *   handler `tests/support/pi-mock.ts` registered, and that mock wraps every
  *   `tool_call` registration in the helper. The sweep pins that wrapping at the
  *   source and `tests/clients/handler-verdict-helper.test.ts` pins it at
- *   runtime.
+ *   runtime, including for a test that calls `vi.resetModules()` and imports
+ *   `index.js` (the helper reads the ledger of both module graphs, #4201 F1).
  * - Every other hook handler either has no whole-handler catch
  *   (`handleToolResult`, `handleAgentEnd`, `handleTurnEnd`,
  *   `handleSessionStart`: a throw rejects the awaited call) or rethrows under
