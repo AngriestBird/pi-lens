@@ -40,6 +40,7 @@ import * as path from "node:path";
 import { collectSourceFilesWithBudgetAsync } from "./source-filter.js";
 import { createHash } from "node:crypto";
 
+import { BoundedFifoMap } from "./bounded-cache.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
@@ -337,10 +338,10 @@ interface SettledClaim {
  * taken at or after this call's start.
  */
 export class OpaqueBaselineStore {
-	private readonly pending = new Map<
+	private readonly pending = new BoundedFifoMap<
 		string,
 		{ slot: string; state: PendingOpaqueBaseline }
-	>();
+	>(OPAQUE_BASELINE_PENDING_CAP);
 	private readonly settled: SettledClaim[] = [];
 
 	private static keyOf(slot: string, callId: string | undefined): string {
@@ -361,14 +362,9 @@ export class OpaqueBaselineStore {
 	): void {
 		const key = OpaqueBaselineStore.keyOf(slot, callId);
 		const overwrote = this.pending.delete(key);
-		this.pending.set(key, { slot, state });
-		if (overwrote) {
-			recordBaselineLoss("overwrite");
-		} else if (this.pending.size > OPAQUE_BASELINE_PENDING_CAP) {
-			const oldest = this.pending.keys().next();
-			if (!oldest.done) this.pending.delete(oldest.value);
-			recordBaselineLoss("cap");
-		}
+		const evicted = this.pending.set(key, { slot, state });
+		if (overwrote) recordBaselineLoss("overwrite");
+		if (evicted.length > 0) recordBaselineLoss("cap");
 	}
 
 	take(
