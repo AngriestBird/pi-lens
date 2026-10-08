@@ -570,6 +570,20 @@ describe("#4154 a late scan is fenced to its session, its edits and the row on d
 				: `${root}/mod.py:4: unused function 'late' (60% confidence)\n`;
 	}
 
+	/**
+	 * Resolves when a parked scan's settle has logged a failed scan. That event
+	 * is written after the row decision (#4154 V1 reads the row on disk first,
+	 * asynchronously), so awaiting it orders the row assertions after the write
+	 * without polling a clock.
+	 */
+	function failureLogged(): Promise<void> {
+		return new Promise((resolve) => {
+			logDeadCodeScan.mockImplementation((event: { success: boolean }) => {
+				if (!event.success) resolve();
+			});
+		});
+	}
+
 	function dropped(): string {
 		return JSON.stringify(
 			getDegradationSummary().find(
@@ -595,12 +609,9 @@ describe("#4154 a late scan is fenced to its session, its edits and the row on d
 		expect(names()).toEqual(["foreign_good"]);
 
 		vultureProcess.failure = new Error("boom");
+		const logged = failureLogged();
 		await settle(slow);
-		await vi.waitFor(() =>
-			expect(logDeadCodeScan).toHaveBeenCalledWith(
-				expect.objectContaining({ success: false }),
-			),
-		);
+		await logged;
 
 		expect(row()?.success).toBe(true);
 		expect(names()).toEqual(["foreign_good"]);
@@ -618,12 +629,9 @@ describe("#4154 a late scan is fenced to its session, its edits and the row on d
 		vultureProcess.failure = new Error("boom");
 		const slow = await slowTurn();
 		await slow.turn;
+		const logged = failureLogged();
 		await settle(slow);
-		await vi.waitFor(() =>
-			expect(logDeadCodeScan).toHaveBeenCalledWith(
-				expect.objectContaining({ success: false }),
-			),
-		);
+		await logged;
 
 		expect(row()?.success).toBe(false);
 		expect(logDeadCodeScan).not.toHaveBeenCalledWith(
