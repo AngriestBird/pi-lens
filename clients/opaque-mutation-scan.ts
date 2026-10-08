@@ -339,9 +339,9 @@ interface SettledClaim {
 export class OpaqueBaselineStore {
 	private readonly pending = new Map<
 		string,
-		{ slot: string; baseline: PendingOpaqueBaseline }
+		{ slot: string; state: PendingOpaqueBaseline }
 	>();
-	private settled: SettledClaim[] = [];
+	private readonly settled: SettledClaim[] = [];
 
 	private static keyOf(slot: string, callId: string | undefined): string {
 		return callId === undefined ? slot : `${slot}#${callId}`;
@@ -357,11 +357,11 @@ export class OpaqueBaselineStore {
 	record(
 		slot: string,
 		callId: string | undefined,
-		baseline: PendingOpaqueBaseline,
+		state: PendingOpaqueBaseline,
 	): void {
 		const key = OpaqueBaselineStore.keyOf(slot, callId);
 		const overwrote = this.pending.delete(key);
-		this.pending.set(key, { slot, baseline });
+		this.pending.set(key, { slot, state });
 		if (overwrote) {
 			recordBaselineLoss("overwrite");
 		} else if (this.pending.size > OPAQUE_BASELINE_PENDING_CAP) {
@@ -382,36 +382,26 @@ export class OpaqueBaselineStore {
 		const siblingRecognized = new Set<string>();
 		for (const other of this.pending.values())
 			if (other.slot === slot)
-				for (const p of other.baseline.recognized ?? [])
-					siblingRecognized.add(p);
+				for (const p of other.state.recognized ?? []) siblingRecognized.add(p);
 		for (const claim of this.settled)
-			if (claim.slot === slot && claim.takenAt >= entry.baseline.startedAt)
+			if (claim.slot === slot && claim.takenAt >= entry.state.startedAt)
 				for (const p of claim.recognized) siblingRecognized.add(p);
-		this.settleClaim(slot, entry.baseline.recognized);
-		return { ...entry.baseline, siblingRecognized };
-	}
-
-	/**
-	 * Keep a taken call's recognized paths only while an older call is still
-	 * pending: a call that started before this one ended can still see its
-	 * writes, and nothing else can.
-	 */
-	private settleClaim(slot: string, recognized: readonly string[] | undefined) {
-		const now = Date.now();
-		if (recognized?.length)
-			this.settled.push({ slot, takenAt: now, recognized });
-		let oldestPending = Number.POSITIVE_INFINITY;
-		for (const { baseline } of this.pending.values())
-			oldestPending = Math.min(oldestPending, baseline.startedAt);
-		this.settled = this.settled
-			.filter((claim) => claim.takenAt >= oldestPending)
-			.slice(-OPAQUE_BASELINE_PENDING_CAP);
+		if (entry.state.recognized?.length) {
+			this.settled.push({
+				slot,
+				takenAt: Date.now(),
+				recognized: entry.state.recognized,
+			});
+			if (this.settled.length > OPAQUE_BASELINE_PENDING_CAP)
+				this.settled.shift();
+		}
+		return { ...entry.state, siblingRecognized };
 	}
 
 	/** Session-boundary clear - unconsumed baselines are unreachable after reset. */
 	takeAllForTest(): void {
 		this.pending.clear();
-		this.settled = [];
+		this.settled.length = 0;
 	}
 }
 

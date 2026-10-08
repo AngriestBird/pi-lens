@@ -28,7 +28,7 @@
 		"clients/lsp/typescript-classic-repair.integration.test.ts": 2,
 		"clients/lsp/typescript-native-vitest.integration.test.ts": 1,
 		"clients/metrics-history-stderr.test.ts": 14,
-		"clients/opaque-mutation-scan.test.ts": 53,
+		"clients/opaque-mutation-scan.test.ts": 50,
 		"clients/persistence-worker-exit.test.ts": 1,
 		"clients/project-data-dir-slug.test.ts": 1,
 		"clients/project-snapshot-cross-process.test.ts": 2,

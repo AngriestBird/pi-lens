@@ -1599,18 +1599,18 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// autonomous rights first, and the sibling's own authored dispatch would
 			// then be skipped as already analysed.
 			if (opaquePaths.length > 0 && pending?.siblingRecognized.size) {
-				const before = opaquePaths.length;
-				opaquePaths = opaquePaths.filter(
-					(p) => !pending.siblingRecognized.has(p),
-				);
-				if (opaquePaths.length < before)
+				const kept: string[] = [];
+				for (const p of opaquePaths)
+					if (!pending.siblingRecognized.has(p)) kept.push(p);
+				if (kept.length < opaquePaths.length)
 					logLatency({
 						type: "phase",
 						phase: "opaque_mutation_sibling_excluded",
 						filePath: command.slice(0, 80),
 						durationMs: Date.now() - started,
-						result: `excluded:${before - opaquePaths.length}`,
+						result: `excluded:${opaquePaths.length - kept.length}`,
 					});
+				opaquePaths = kept;
 			}
 			if (observedChangedKeys) {
 				recognizedAuthored = recognizedWritten.filter((file) =>

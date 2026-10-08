@@ -71,6 +71,18 @@ import {
 
 let tmpDir = "";
 
+/** A git repo whose first commit holds `files` (relative path to content). */
+function initCommittedRepo(dir: string, files: Record<string, string>): void {
+	for (const [file, content] of Object.entries(files)) {
+		fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+		fs.writeFileSync(path.join(dir, file), content);
+	}
+	execSync(
+		"git init -q && git config user.email t@t.local && git config user.name t && git add -A && git commit -qm base",
+		{ cwd: dir },
+	);
+}
+
 function lostBaselines() {
 	return (
 		getDegradationSummary().find((g) => g.kind === "opaque-baseline-lost")
@@ -246,25 +258,62 @@ describe("OpaqueBaselineStore", () => {
 	});
 
 	it("hands a call the recognized paths of overlapping siblings only", () => {
-		const store = new OpaqueBaselineStore();
-		const at = (startedAt: number, recognized: string[]) => ({
-			startedAt,
-			strategy: "git" as const,
-			recognized,
-		});
-		store.record("/p:1", "early", at(Date.now() - 10_000, ["/p/early.ts"]));
-		expect(store.take("/p:1", "early")?.siblingRecognized.size).toBe(0);
-		// `early` settled before `late` started: no overlap, not subtracted.
-		store.record("/p:1", "late", at(Date.now(), ["/p/late.ts"]));
-		store.record("/p:1", "other", at(Date.now(), ["/p/other.ts"]));
-		store.record("/q:1", "elsewhere", at(Date.now(), ["/q/else.ts"]));
-		const late = store.take("/p:1", "late");
-		// `other` is still pending and `elsewhere` is another slot.
-		expect([...(late?.siblingRecognized ?? [])]).toEqual(["/p/other.ts"]);
-		// `late` settled while `other` was pending: `other` still sees its writes.
-		expect([...(store.take("/p:1", "other")?.siblingRecognized ?? [])]).toEqual(
-			["/p/late.ts"],
-		);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const store = new OpaqueBaselineStore();
+			const at = (startedAt: number, recognized: string[]) => ({
+				startedAt,
+				strategy: "git" as const,
+				recognized,
+			});
+			vi.setSystemTime(1000);
+			store.record("/p:1", "early", at(1000, ["/p/early.ts"]));
+			vi.setSystemTime(2000);
+			expect(store.take("/p:1", "early")?.siblingRecognized.size).toBe(0);
+			// `early` settled before `late` started: no overlap, not subtracted.
+			vi.setSystemTime(3000);
+			store.record("/p:1", "late", at(3000, ["/p/late.ts"]));
+			store.record("/p:1", "other", at(3000, ["/p/other.ts"]));
+			store.record("/q:1", "elsewhere", at(3000, ["/q/else.ts"]));
+			vi.setSystemTime(4000);
+			// `other` is still pending and `elsewhere` is another slot.
+			expect([
+				...(store.take("/p:1", "late")?.siblingRecognized ?? []),
+			]).toEqual(["/p/other.ts"]);
+			vi.setSystemTime(5000);
+			// `late` settled while `other` was in flight: `other` still sees its writes.
+			expect([
+				...(store.take("/p:1", "other")?.siblingRecognized ?? []),
+			]).toEqual(["/p/late.ts"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// A session of sequential bash writes settles a claim per call; the cap is the
+	// only thing that keeps the list from growing for the life of the session.
+	it("keeps at most the cap of settled claims", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const store = new OpaqueBaselineStore();
+			const at = (recognized: string[]) => ({
+				startedAt: 1000,
+				strategy: "git" as const,
+				recognized,
+			});
+			vi.setSystemTime(1000);
+			store.record("/p:1", "long-running", at([]));
+			for (let i = 0; i <= OPAQUE_BASELINE_PENDING_CAP; i++) {
+				store.record("/p:1", `call-${i}`, at([`/p/${i}.ts`]));
+				store.take("/p:1", `call-${i}`);
+			}
+			const seen = store.take("/p:1", "long-running")?.siblingRecognized;
+			expect(seen?.size).toBe(OPAQUE_BASELINE_PENDING_CAP);
+			expect(seen?.has("/p/0.ts")).toBe(false);
+			expect(seen?.has(`/p/${OPAQUE_BASELINE_PENDING_CAP}.ts`)).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -840,13 +889,10 @@ describe("failed Git integration recovery dispatch", () => {
 		repoDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-opaque-integration-"),
 		);
-		execSync("git init -q", { cwd: repoDir });
-		execSync("git config user.email t@t.local", { cwd: repoDir });
-		execSync("git config user.name t", { cwd: repoDir });
-		fs.mkdirSync(path.join(repoDir, "src"), { recursive: true });
-		fs.writeFileSync(path.join(repoDir, "src", "conflict.ts"), "base\n");
-		fs.writeFileSync(path.join(repoDir, "src", "imported.ts"), "base\n");
-		execSync("git add -A && git commit -qm base", { cwd: repoDir });
+		initCommittedRepo(repoDir, {
+			"src/conflict.ts": "base\n",
+			"src/imported.ts": "base\n",
+		});
 	});
 
 	afterEach(() => removeTempDirSync(repoDir));
@@ -1111,12 +1157,10 @@ describe("parallel bash calls (#4137)", () => {
 
 	beforeEach(() => {
 		repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opaque-par-"));
-		execSync("git init -q", { cwd: repoDir });
-		execSync("git config user.email t@t.local", { cwd: repoDir });
-		execSync("git config user.name t", { cwd: repoDir });
-		for (const file of FILES)
-			fs.writeFileSync(path.join(repoDir, file), "export const x = 1;\n");
-		execSync("git add -A && git commit -qm base", { cwd: repoDir });
+		initCommittedRepo(
+			repoDir,
+			Object.fromEntries(FILES.map((file) => [file, "export const x = 1;\n"])),
+		);
 		// Outside the repo: project data under it would read as changed files.
 		dataDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-opaque-par-data-"),
@@ -1289,20 +1333,16 @@ describe("parallel bash calls (#4137)", () => {
 		runtime.projectRoot = repoDir;
 		runtime.setTelemetryIdentity({ sessionId: "parallel-opaque" });
 		const opaqueTarget = path.join(repoDir, "opaque-out.ts");
-		const script = path.join(repoDir, ".opaque-child.cjs");
-		fs.writeFileSync(
-			script,
-			`require('fs').writeFileSync(${JSON.stringify(opaqueTarget)}, 'export const o = 1;\\n');`,
-		);
-		const past = new Date(Date.now() - 5000);
-		fs.utimesSync(script, past, past);
+		// Stands in for the true child boundary: tool_result sees only the
+		// resulting filesystem state, as the #3226 case above does.
+		const script = path.join(repoDir, "opaque-child.cjs");
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockClear();
 		const opaque = { id: "opq", command: `node "${script}"` };
 		const recognized = { id: "rec", command: "echo 'debugger;' >> par-a.ts" };
 		await handleToolCall(callDeps(runtime, opaque.command, opaque.id));
 		await handleToolCall(callDeps(runtime, recognized.command, recognized.id));
-		execSync(`node "${script}"`, { cwd: repoDir });
+		fs.writeFileSync(opaqueTarget, "export const o = 1;\n");
 		fs.appendFileSync(path.join(repoDir, "par-a.ts"), "debugger;\n");
 		await handleToolResult(resultDeps(runtime, opaque.command, opaque.id));
 		await handleToolResult(

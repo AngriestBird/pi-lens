@@ -326,7 +326,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/opaque-mutation-scan.ts": 4,
 		"clients/runtime-tool-call.ts": 13,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
@@ -934,7 +933,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mutation-attribution.ts": 3,
 		"clients/ndjson-logger.ts": 5,
 		"clients/observed-mutation.ts": 6,
-		"clients/opaque-mutation-scan.ts": 5,
+		"clients/opaque-mutation-scan.ts": 6,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		"clients/package-manager.ts": 20,
@@ -990,7 +989,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-tool-call.ts": 22,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
-		"clients/runtime-tool-result.ts": 20,
+		"clients/runtime-tool-result.ts": 19,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
 		"clients/runtime-turn.ts": 27,
