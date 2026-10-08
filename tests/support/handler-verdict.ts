@@ -16,6 +16,12 @@
  * undefined / not blocked" assertion in the file passed whatever the read
  * guard would have said.
  *
+ * Known limit (#4201 verify R2-1). The helper reads the statically imported
+ * ledger and the one the current module graph resolves. A hook registered in
+ * an earlier graph and fired after a SECOND `vi.resetModules()` in the same
+ * test records into a third instance the helper does not read. No test does
+ * that today; a test that needs it must re-import the helper after the reset.
+ *
  * What it does. `runHandlerExpectingNoThrow(call)` awaits the handler call
  * and returns its verdict, after checking the production record of a swallowed
  * throw on both sides of the call:
