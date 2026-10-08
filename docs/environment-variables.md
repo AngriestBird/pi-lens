@@ -231,7 +231,7 @@ NODE_OPTIONS=--max-old-space-size=700 pi
 `700` MB is a diagnosis-based starting point, not a universal project limit. In
 the #1999 investigation, the capped and uncapped runs had the same settled live
 heap (about 240 MB), while the cap reduced peak RSS from about 1,870 MB to
-961 MB at the same point and did not add wall time in that run. The measured
+961 MB at the same point and did not add wall time in that run. GC CPU cost was not measured separately, so treat the value as a starting point to tune on your own workload. The measured
 long-session parent heaps were otherwise about 1.3–1.8 GiB, so increase the
 ceiling for a workload that needs more headroom. A ceiling that is too low can
 make Node abort with an out-of-memory crash; it does not reduce the live state
