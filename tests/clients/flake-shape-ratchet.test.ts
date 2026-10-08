@@ -409,7 +409,9 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// persists for a codemode call exist only in the real host. Round 4 adds
 	// four: pi's own agent loop decides that a call a later extension blocked
 	// gets tool_execution_end and no tool_result, in what order, top-level,
-	// parallel and nested.
+	// parallel and nested. Round 5 adds one: a later extension's tool_result
+	// hook rewrites a failed read's isError after pi-lens saw it, which only
+	// pi's own hook chain produces.
 	"real-process-spawn:real-harness/read-guard-moves.test.ts": {
 		detector: "real-process-spawn",
 		reason:

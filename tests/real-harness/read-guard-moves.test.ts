@@ -157,6 +157,38 @@ describe("real pi RPC: read evidence across a conversation move", () => {
 	}, 60_000);
 });
 
+// #4185 round 4 R4-1: a later extension rewrites a failed read into a
+// success. The release at tool_execution_end reads pi's FINAL isError, which
+// the rewrite flipped, so the capture of the read the agent got no bytes from
+// survived and licensed the next oldText edit. pi-lens's own tool_result
+// handler saw the real failure and now drops the capture there.
+describe("real pi RPC: a failed read another extension rewrites to a success licenses nothing", () => {
+	it("refuses an edit after a failed read a later extension rewrote to isError false", async () => {
+		await withRealPi(
+			{
+				...scenario("failed-read-next-turn.json"),
+				extensions: [
+					path.join(realHarnessFixtureRoot, "read-error-rewrite-extension.mjs"),
+				],
+			},
+			async (pi) => {
+				// One run: the failed read and the edit are consecutive turns, so
+				// only the release at the read's own result can drop the capture
+				// (the agent_settled backstop fires after the edit).
+				await pi.prompt("read then edit");
+				await pi.events("agent_end");
+				// The rewrite took effect: the persisted read result is a success.
+				expect(
+					pi.toolResults().find((row) => row.toolName === "read"),
+				).toMatchObject({ isError: false });
+				expect(
+					pi.toolResults().find((row) => row.toolName === "edit"),
+				).toMatchObject(refused);
+			},
+		);
+	}, 60_000);
+});
+
 // #4185 round 3 R3-2: a later extension blocks a read that pi-lens already
 // captured at tool_call. pi emits `tool_execution_end` for the blocked call
 // and no `tool_result`, so the agent never saw the bytes; an edit later in the

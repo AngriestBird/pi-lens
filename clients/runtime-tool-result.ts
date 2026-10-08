@@ -1391,6 +1391,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #3598: the host tool for this call has finished, whatever it did. Before
 	// any return below, so a call that exits early is still no longer in flight.
 	noteAgentCallEnd(toolCallId);
+	// #4185 R4-1: this event's own isError is what pi-lens saw fail; the
+	// `tool_execution_end` release reads pi's final value, which a later
+	// extension's `tool_result` hook can rewrite to success. Before any return.
+	if (event.isError === true && toolCallId !== undefined)
+		deps.readGuard?.dropProvisionalReadByCall(toolCallId);
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)

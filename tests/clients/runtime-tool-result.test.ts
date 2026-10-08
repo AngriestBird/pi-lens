@@ -630,14 +630,68 @@ describe("bash grep searchReads registration", () => {
 						content: failed.content,
 					}),
 				);
-				// pi emits tool_execution_end after every tool_result handler
-				// returned; the call is over and showed nothing.
+				// pi-lens's own tool_result already released the capture (R4-1);
+				// the tool_execution_end pi emits after every handler finds nothing
+				// left to release. The end-only release (a blocked read, which has
+				// no tool_result) is the "read blocked after its capture" suite.
 				expect(
 					handleToolExecutionEnd(
 						{ toolName: "read", toolCallId: "r1", isError: true },
 						runtime.readGuard,
 					),
-				).toBe(true);
+				).toBe(false);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+				expect(
+					runtime.readGuard.checkEdit(filePath, [1, 1], undefined, {
+						skipSnapshotCheck: true,
+						oldTextResolved: true,
+					}),
+				).toMatchObject({ action: "block" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// Recurrence: #4185 round 4 R4-1. The tool_execution_end release reads
+		// pi's FINAL isError, after every extension's tool_result hook. A later
+		// extension that rewrote a failed read into {isError:false} left the
+		// capture alive. pi-lens's own handler saw the failure, so it drops the
+		// capture there, by call id; the end event below carries the rewritten
+		// isError:false exactly as pi emits it.
+		it("drops a failed read's capture at its own tool_result, before a later extension rewrites the result to success", async () => {
+			const env = setupTestEnvironment("pi-lens-rewritten-read-capture-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"short.ts",
+					"export const value = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const input = { path: "short.ts", offset: 999 };
+				await handleToolCall(
+					callDeps(runtime, { toolName: "read", toolCallId: "r1", input }),
+				);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+					expect.objectContaining({ provisional: true }),
+				]);
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "read",
+						toolCallId: "r1",
+						isError: true,
+						input,
+						content: [{ type: "text", text: "offset beyond end of file" }],
+					}),
+				);
+				// A later extension now returns {isError:false}; pi's end event
+				// reports the rewritten value, so this release is a no-op.
+				expect(
+					handleToolExecutionEnd(
+						{ toolName: "read", toolCallId: "r1", isError: false },
+						runtime.readGuard,
+					),
+				).toBe(false);
 				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
 				expect(
 					runtime.readGuard.checkEdit(filePath, [1, 1], undefined, {
