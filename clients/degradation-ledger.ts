@@ -508,20 +508,20 @@ export type DegradationKind =
 	 */
 	| "instance-registry-registration-superseded"
 	/**
-	 * #3654: the File I/O Lifecycle Bridge dropped a `read` facet. The entry was
-	 * malformed, out of scope, ignored, refused under `no-read-guard`, stale on
-	 * its lineage, or failed its bookkeeping. Subject is `"${consumer}:${reason}"`
-	 * — the exact pair the synchronous `RecordResult` also returned, so a monitor
-	 * can join this row to the caller's own drop count.
-	 */
-	| "io-bridge-read-dropped"
-	/**
-	 * #3654: the File I/O Lifecycle Bridge dropped a `mutate` facet, for the same
-	 * reasons and with the same `"${consumer}:${reason}"` subject as
-	 * `io-bridge-read-dropped`. A `delete` facet that fails its confirm gate
-	 * (still present on disk) reports here too.
+	 * #3654: the File I/O Lifecycle Bridge dropped a `mutate` facet. The entry
+	 * was malformed, out of scope, ignored, refused under `no-read-guard`, or
+	 * failed its bookkeeping; a `delete` facet that fails its confirm gate (still
+	 * present on disk) reports here too. Subject is `"${caller}:${reason}"` — the
+	 * exact pair the synchronous `RecordResult` also returned, so a monitor can
+	 * join this row to the caller's own drop count.
 	 */
 	| "io-bridge-mutate-dropped"
+	/**
+	 * #3654: the File I/O Lifecycle Bridge dropped a `read` facet, for the same
+	 * reasons and with the same `"${caller}:${reason}"` subject as
+	 * `io-bridge-mutate-dropped`.
+	 */
+	| "io-bridge-read-dropped"
 	/**
 	 * #3383: a newline-framed reader (`createWarmIpcLineReader`) discarded an
 	 * unterminated line that had grown past `MAX_FRAMED_LINE_BYTES`. The peer is

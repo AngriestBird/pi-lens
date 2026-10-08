@@ -20,7 +20,7 @@
  *
  * Drops are returned synchronously as `RecordOutcome` AND recorded in the
  * degradation ledger as `io-bridge-read-dropped` / `io-bridge-mutate-dropped`
- * with subject `"${consumer}:${reason}"`, so a monitor can join the log row to
+ * with subject `"${caller}:${reason}"`, so a monitor can join the log row to
  * the caller's own count (F5).
  */
 import { recordDegradationOnce } from "./degradation-ledger.js";
@@ -135,8 +135,8 @@ function hasFacet(
 }
 
 function readConsumer(raw: Record<string, unknown>): string {
-	const consumer = raw["consumer"];
-	return typeof consumer === "string" && consumer !== "" ? consumer : "unknown";
+	const caller = raw["consumer"];
+	return typeof caller === "string" && caller !== "" ? caller : "unknown";
 }
 
 /**
@@ -248,16 +248,23 @@ function mutationFacetProblem(mutate: unknown): string | undefined {
 
 function drop(
 	facet: "read" | "mutate",
-	consumer: string,
+	caller: string,
 	reason: RecordReason,
 	detail: string,
 ): RecordOutcome {
-	recordDegradationOnce({
-		kind:
-			facet === "read" ? "io-bridge-read-dropped" : "io-bridge-mutate-dropped",
-		subject: `${consumer}:${reason}`,
-		reason: detail,
-	});
+	if (facet === "read") {
+		recordDegradationOnce({
+			kind: "io-bridge-read-dropped",
+			subject: `${caller}:${reason}`,
+			reason: detail,
+		});
+	} else {
+		recordDegradationOnce({
+			kind: "io-bridge-mutate-dropped",
+			subject: `${caller}:${reason}`,
+			reason: detail,
+		});
+	}
 	return { accepted: false, reason };
 }
 
@@ -324,31 +331,30 @@ function recordOneRange(
 
 function recordReadFacet(
 	raw: Record<string, unknown>,
-	consumer: string,
+	caller: string,
 	deps: IOBridgeDeps,
 ): RecordOutcome {
 	const problem = readFacetProblem(raw["read"]);
-	if (problem !== undefined)
-		return drop("read", consumer, "malformed", problem);
+	if (problem !== undefined) return drop("read", caller, "malformed", problem);
 	const read = raw["read"] as ReadFacet;
 	const filePath = raw["filePath"];
 	if (typeof filePath !== "string" || filePath === "") {
 		return drop(
 			"read",
-			consumer,
+			caller,
 			"malformed",
 			"filePath must be a non-empty string",
 		);
 	}
 	if (deps.getFlag("no-read-guard")) {
-		return drop("read", consumer, "no-read-guard", filePath);
+		return drop("read", caller, "no-read-guard", filePath);
 	}
 	if (!deps.isRecordable(filePath)) {
-		return drop("read", consumer, "out-of-scope", filePath);
+		return drop("read", caller, "out-of-scope", filePath);
 	}
 
 	const evidence = read.evidence ?? "caller";
-	const source = read.source ?? `io-bridge:${consumer}`;
+	const source = read.source ?? `io-bridge:${caller}`;
 	const guard = deps.getReadGuard();
 	const turnIndex = deps.getTurnIndex();
 	const writeIndex = deps.peekWriteIndex();
@@ -361,12 +367,12 @@ function recordReadFacet(
 		try {
 			size = deps.nodeFs.statSync(filePath).size;
 		} catch (err) {
-			return drop("read", consumer, "bookkeeping-error", `${err}`);
+			return drop("read", caller, "bookkeeping-error", `${err}`);
 		}
 		if (size !== 0) {
 			return drop(
 				"read",
-				consumer,
+				caller,
 				"bookkeeping-error",
 				`zero-line read of a non-empty file (${size} bytes)`,
 			);
@@ -397,7 +403,7 @@ function recordReadFacet(
 				if (!deps.nodeFs.existsSync(filePath)) {
 					return drop(
 						"read",
-						consumer,
+						caller,
 						"bookkeeping-error",
 						`disk read of an absent file: ${filePath}`,
 					);
@@ -431,7 +437,7 @@ function recordReadFacet(
 				});
 			}
 		} catch (err) {
-			return drop("read", consumer, "bookkeeping-error", `${err}`);
+			return drop("read", caller, "bookkeeping-error", `${err}`);
 		}
 	}
 	return { accepted: true };
@@ -461,20 +467,20 @@ function publishQueued(
 
 function recordDeleteFacet(
 	filePath: string,
-	consumer: string,
+	caller: string,
 	deps: IOBridgeDeps,
 ): RecordOutcome {
 	// Enclosing gate (RFC D3). `no-lsp` is read again below, where it suppresses
 	// only the LSP notification — the eviction still runs (RFC §6).
 	if (deps.getFlag("no-read-guard")) {
-		return drop("mutate", consumer, "no-read-guard", filePath);
+		return drop("mutate", caller, "no-read-guard", filePath);
 	}
 	// Inner confirmed-delete gates, in `runtime-tool-result.ts` production order.
 	if (deps.isExternalOrVendorFile(filePath)) {
-		return drop("mutate", consumer, "out-of-scope", filePath);
+		return drop("mutate", caller, "out-of-scope", filePath);
 	}
 	if (deps.isPathIgnoredByProject(filePath)) {
-		return drop("mutate", consumer, "ignored", filePath);
+		return drop("mutate", caller, "ignored", filePath);
 	}
 	const guard = deps.getReadGuard();
 	const tracked = guard.hasKnownPath(filePath);
@@ -485,7 +491,7 @@ function recordDeleteFacet(
 	if (exists) {
 		return drop(
 			"mutate",
-			consumer,
+			caller,
 			"bookkeeping-error",
 			`delete confirmed for a file still on disk: ${filePath}`,
 		);
@@ -511,25 +517,25 @@ function recordDeleteFacet(
 
 function recordMutateFacet(
 	raw: Record<string, unknown>,
-	consumer: string,
+	caller: string,
 	deps: IOBridgeDeps,
 ): RecordOutcome {
 	const problem = mutationFacetProblem(raw["mutate"]);
 	if (problem !== undefined) {
-		return drop("mutate", consumer, "malformed", problem);
+		return drop("mutate", caller, "malformed", problem);
 	}
 	const mutate = raw["mutate"] as MutationFacet;
 	const filePath = raw["filePath"];
 	if (typeof filePath !== "string" || filePath === "") {
 		return drop(
 			"mutate",
-			consumer,
+			caller,
 			"malformed",
 			"filePath must be a non-empty string",
 		);
 	}
 	if (mutate.kind === "delete") {
-		return recordDeleteFacet(filePath, consumer, deps);
+		return recordDeleteFacet(filePath, caller, deps);
 	}
 	// edit/write: the mutation bookkeeping owner runs the seam (scope gate,
 	// lineage fence, stamp, turn state, receipt, deferral). This module only
@@ -561,7 +567,7 @@ function recordMutateFacet(
 	}
 	if (!outcome.accepted) {
 		const reason: RecordReason = outcome.reason ?? "bookkeeping-error";
-		return drop("mutate", consumer, reason, filePath);
+		return drop("mutate", caller, reason, filePath);
 	}
 	return { accepted: true };
 }
@@ -571,14 +577,14 @@ function recordMutateFacet(
  * outcome (D9: `record()` never throws) without silencing the other facet.
  */
 function safeFacet(
-	consumer: string,
+	caller: string,
 	facet: "read" | "mutate",
 	run: () => RecordOutcome,
 ): RecordOutcome {
 	try {
 		return run();
 	} catch (err) {
-		return drop(facet, consumer, "bookkeeping-error", `${err}`);
+		return drop(facet, caller, "bookkeeping-error", `${err}`);
 	}
 }
 
@@ -590,15 +596,15 @@ function recordIOEntry(raw: BridgeEntry, deps: IOBridgeDeps): RecordResult {
 			mutate: drop("mutate", "unknown", "malformed", detail),
 		};
 	}
-	const consumer = readConsumer(raw);
+	const caller = readConsumer(raw);
 	const hasRead = hasFacet(raw, "read");
 	const hasMutate = hasFacet(raw, "mutate");
 
 	if (!hasRead && !hasMutate) {
 		const detail = "entry carries no read or mutate facet";
 		return {
-			read: drop("read", consumer, "malformed", detail),
-			mutate: drop("mutate", consumer, "malformed", detail),
+			read: drop("read", caller, "malformed", detail),
+			mutate: drop("mutate", caller, "malformed", detail),
 		};
 	}
 
@@ -612,21 +618,21 @@ function recordIOEntry(raw: BridgeEntry, deps: IOBridgeDeps): RecordResult {
 	) {
 		const detail = "delete cannot be combined with read";
 		return {
-			read: drop("read", consumer, "malformed", detail),
-			mutate: drop("mutate", consumer, "malformed", detail),
+			read: drop("read", caller, "malformed", detail),
+			mutate: drop("mutate", caller, "malformed", detail),
 		};
 	}
 
 	// Atomic ordering: mutate strictly before read.
 	const result: RecordResult = {};
 	if (hasMutate) {
-		result.mutate = safeFacet(consumer, "mutate", () =>
-			recordMutateFacet(raw, consumer, deps),
+		result.mutate = safeFacet(caller, "mutate", () =>
+			recordMutateFacet(raw, caller, deps),
 		);
 	}
 	if (hasRead) {
-		result.read = safeFacet(consumer, "read", () =>
-			recordReadFacet(raw, consumer, deps),
+		result.read = safeFacet(caller, "read", () =>
+			recordReadFacet(raw, caller, deps),
 		);
 	}
 	return result;

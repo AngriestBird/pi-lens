@@ -356,11 +356,18 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"index.ts": 2,
 	},
 	consumer: {
+		// #3654: the unified bridge's frozen `BridgeEntry.consumer` field (RFC §3)
+		// and the v1 shim reads that forward it (D14). Caller-identity sense; the
+		// lexical census cannot tell it apart from the retired delivery-surface
+		// sense. New internal code in `clients/io-bridge.ts` says `caller`; only
+		// the frozen public/RFC field reads remain.
 		"clients/ast-grep-client.ts": 1,
+		"clients/io-bridge-contract.ts": 1,
 		"clients/lsp-mutation.ts": 1,
 		"clients/mutating-tool.ts": 2,
+		"clients/mutation-bridge.ts": 3,
 		"clients/observed-mutation.ts": 3,
-		"clients/read-bridge.ts": 2,
+		"clients/read-bridge.ts": 6,
 		"clients/zizmor-config.ts": 13,
 	},
 	epoch: {
@@ -1061,10 +1068,16 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/git-guard.ts": 44,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
+		// #3654: the unified bridge's own `record()` API (RFC §3) — a method
+		// name, not the retired finding-record noun; the lexical census cannot
+		// tell the two senses apart.
+		"clients/io-bridge-contract.ts": 2,
+		"clients/io-bridge.ts": 2,
 		"clients/lsp/document-drift.ts": 19,
 		"clients/lsp/index.ts": 36,
 		"clients/lsp/workspace-diagnostics-cache.ts": 2,
 		"clients/mcp/analyze.ts": 2,
+		"clients/mutation-bridge.ts": 1,
 		"clients/observed-mutation.ts": 4,
 		"clients/opaque-mutation-scan.ts": 1,
 		"clients/partial-edit-apply.ts": 5,
@@ -1072,7 +1085,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/fresh-fetch.ts": 12,
 		"clients/project-lens-config.ts": 6,
 		"clients/project-snapshot.ts": 10,
-		"clients/read-bridge.ts": 1,
+		"clients/read-bridge.ts": 2,
 		"clients/read-guard-tool-lines.ts": 4,
 		"clients/read-guard.ts": 20,
 		"clients/runtime-agent-end.ts": 56,
@@ -1286,6 +1299,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/install-diagnostics.ts": 3,
 		"clients/installer/index.ts": 60,
 		"clients/installer/managed-tool-refresh.ts": 24,
+		// #3654: the unified bridge protocol's own `version` field (RFC §3) — a
+		// protocol name that cannot be renamed.
+		"clients/io-bridge-contract.ts": 1,
+		"clients/io-bridge.ts": 1,
 		"clients/knip-client.ts": 8,
 		"clients/lens-events.ts": 4,
 		// #3505 (b): the workspace pull binds an item by the LSP report's own
