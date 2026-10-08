@@ -343,6 +343,9 @@ export function classifyTreeSitterWasmError(
  */
 export const WASM_TRAP_BUDGET = 3;
 
+/** Distinct scanner traps before retiring one grammar (#4010). */
+export const GRAMMAR_TRAP_LATCH_THRESHOLD = WASM_TRAP_BUDGET - 1;
+
 /**
  * Positively-identified RESOLUTION-failure codes for a dynamic `import()`:
  * the specifier couldn't be found/resolved, or a transient fs error hit
@@ -626,6 +629,13 @@ export class TreeSitterClient {
 		string,
 		{ traps: number; by: string | undefined }
 	>();
+	/** Distinct input keys that trapped (first trap) and have not healed, by
+	 * language. Process-lifetime. A key enters only on a trap, a first trap
+	 * spends budget, and the budget aborts the process after `WASM_TRAP_BUDGET + 1`
+	 * of them, so at most that many keys exist across all languages. */
+	private grammarTrapInputs = new Map<string, Set<string>>();
+	/** Grammars retired for the process after repeated scanner traps. */
+	private retiredGrammars = new Map<string, string>();
 	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
 	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
 	private activeWasmInput: WasmInput | undefined;
@@ -688,6 +698,7 @@ export class TreeSitterClient {
 			}
 			if (input) {
 				const key = this.wasmInputKey(input);
+				this.countGrammarTrapInput(input.languageId, key);
 				const entry = this.trappedInputs.get(key);
 				if (entry) {
 					entry.traps++;
@@ -731,6 +742,26 @@ export class TreeSitterClient {
 		return true;
 	}
 
+	/**
+	 * Count `key` as a distinct trapping input of `languageId`'s grammar and
+	 * retire the grammar at {@link GRAMMAR_TRAP_LATCH_THRESHOLD} of them (#4010).
+	 * The first trap of an input is what counts: most surfaces parse fresh bytes
+	 * per edit, so waiting for a retry would let distinct bad files spend the
+	 * whole budget first. A repeat trap of one input adds nothing (set), and
+	 * `clearWasmInput` removes the key when the trapper's own parse succeeds.
+	 */
+	private countGrammarTrapInput(languageId: string, key: string): void {
+		const grammarFile = LANGUAGE_TO_GRAMMAR[languageId];
+		if (!grammarFile) return;
+		let inputs = this.grammarTrapInputs.get(languageId);
+		if (!inputs) this.grammarTrapInputs.set(languageId, (inputs = new Set()));
+		inputs.add(key);
+		if (inputs.size >= GRAMMAR_TRAP_LATCH_THRESHOLD) {
+			this.retiredGrammars.set(languageId, grammarFile);
+			this.recordGrammarBlocked(grammarFile);
+		}
+	}
+
 	private wasmInputKey(input: WasmInput): string {
 		input.key ??= crypto
 			.createHash("sha256")
@@ -761,6 +792,7 @@ export class TreeSitterClient {
 		const key = this.wasmInputKey(input);
 		if (this.trappedInputs.get(key)?.by === input.caller) {
 			this.trappedInputs.delete(key);
+			this.grammarTrapInputs.get(input.languageId)?.delete(key);
 		}
 	}
 
@@ -1038,6 +1070,19 @@ export class TreeSitterClient {
 		this.grammarLastNotifiedDelayMs.clear();
 		this.poisonedGrammarPaths.clear();
 		this.staleReportedGrammarPaths.clear();
+		for (const grammarFile of this.retiredGrammars.values()) {
+			this.recordGrammarBlocked(grammarFile);
+		}
+	}
+
+	private recordGrammarBlocked(grammarFile: string): void {
+		recordDegradationOnce({
+			kind: "grammar-blocked",
+			subject: grammarFile,
+			reason:
+				`grammar retired after ${GRAMMAR_TRAP_LATCH_THRESHOLD} distinct WASM traps; ` +
+				"structural analysis is unavailable for this language until restart",
+		});
 	}
 
 	/**
@@ -1674,6 +1719,7 @@ export class TreeSitterClient {
 	 */
 	resetLoadStateForSession(): void {
 		this.webTreeSitterLoadFailed = false;
+		this.refreshGrammarSessionLatches();
 	}
 
 	/** Load language grammar */
@@ -1682,6 +1728,7 @@ export class TreeSitterClient {
 	): Promise<TreeSitterLanguage | null> {
 		if (this.wasmAborted) return null;
 		this.dbg(`Loading language: ${languageId}`);
+		if (this.retiredGrammars.has(languageId)) return null;
 
 		if (this.languages.has(languageId)) {
 			this.dbg(`Language ${languageId} already loaded`);
@@ -1989,7 +2036,7 @@ export class TreeSitterClient {
 
 	/** Get loaded language for symbol extraction */
 	getLanguage(languageId: string): TreeSitterLanguage | null {
-		if (this.wasmAborted) return null;
+		if (this.wasmAborted || this.retiredGrammars.has(languageId)) return null;
 		return this.languages.get(languageId) || null;
 	}
 
