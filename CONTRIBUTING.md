@@ -87,6 +87,7 @@ mechanically enforced rather than relied on.
 - **Test workers.** `PI_LENS_TEST_MAX_WORKERS` caps the vitest worker-fork
   count (`vitest.config.ts`); set it (`=6` is what CI and agent worktrees use)
   on a memory-constrained host to avoid an OOM under a full or targeted run.
+  Without it a local run uses half the logical CPUs, up to 8 forks.
 - **Mutation testing.** The PR proof is hand mutation of each new guard (see
   "Mutation output is quoted, not ticked" in `AGENTS.md`). Stryker is not a PR
   check: `.github/workflows/stryker-nightly.yml` runs it nightly on master over

@@ -896,7 +896,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/installer/index.ts": 107,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
-		"clients/instance-registry-lock.ts": 8,
+		// 8 -> 9 (#3498): the own-hold skip's degradation `subject`,
+		// `path.resolve(target)`, as its sibling records in this file spell it.
+		"clients/instance-registry-lock.ts": 9,
 		"clients/instance-registry.ts": 2,
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
