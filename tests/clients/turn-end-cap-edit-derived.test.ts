@@ -73,6 +73,8 @@ interface Scan {
 	knipFails?: boolean;
 	/** Host flags turned on for the turn. */
 	flags?: Set<string>;
+	/** Runs inside the knip scan's await, where a test can change the world. */
+	duringKnipScan?: () => void;
 	deadCode: Array<Record<string, unknown>>;
 }
 
@@ -117,14 +119,16 @@ function makeDeps(rig: Rig, sessionId?: string) {
 		cacheManager: rig.cacheManager,
 		knipClient: {
 			ensureAvailable: async () => false,
-			analyze: async () =>
-				rig.scan.knipFails
+			analyze: async () => {
+				rig.scan.duringKnipScan?.();
+				return rig.scan.knipFails
 					? { ...EMPTY_KNIP, success: false, summary: "knip failed" }
 					: {
 							...EMPTY_KNIP,
 							issues: rig.scan.knip,
 							unusedExports: rig.scan.knip,
-						},
+						};
+			},
 		},
 		deadCodeClients: [
 			{
@@ -527,6 +531,46 @@ describe("knip carry bounds and neighbours (#3901)", () => {
 
 			nextTurn(rig, 3);
 			expect(await endTurn(rig)).toContain("left-pad");
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence (#4161): a sequential replacement with the same stable id
+	// (resume, `session-lifecycle.ts` branch 2) parks under the same lane key.
+	// The old turn took the successor's parked item after its scan await, the
+	// cap cut it, and settle skipped the re-park for the stale session.
+	it("a turn whose session was replaced does not take its successor's parked item", async () => {
+		const rig = makeRig("pi-lens-4161-knip-park-");
+		try {
+			const parks = vi.spyOn(rig.runtime, "parkCutAdvisoryItems");
+			const fillerFile = fillerBlocker(rig, 1000);
+			touch(rig, "edited.ts");
+			rig.scan.knip = [issue("left-pad")];
+			await endTurn(rig);
+			// What the cut turn parked, as its own call wrote it.
+			const parked = parks.mock.calls.filter(([, items]) => items.length > 0);
+			expect(parked).toHaveLength(1);
+
+			nextTurn(rig, 2);
+			rig.scan.duringKnipScan = () => {
+				rig.scan.duringKnipScan = undefined;
+				rig.runtime.resetForSession();
+				rig.runtime.setTelemetryIdentity({ sessionId: SESSION });
+				// The successor's own cut turn parked the same item under its key.
+				for (const [lane, items] of parked)
+					rig.runtime.parkCutAdvisoryItems(lane, items);
+			};
+			await endTurn(rig);
+
+			clearFiller(rig, fillerFile);
+			nextTurn(rig, 3);
+			expect(await endTurn(rig)).toContain("left-pad");
+			expect(
+				getDegradationSummary()
+					.filter((entry) => entry.kind === "generation-guard-stale-write")
+					.flatMap((entry) => entry.latestReasons.map((r) => r.subject)),
+			).toContain(`runtime-session:turn-end:${parked[0]?.[0]}`);
 		} finally {
 			rig.cleanup();
 		}

@@ -1092,6 +1092,193 @@ describe("M3d: late auxiliary coverage vs the cap (#3813)", () => {
 	});
 });
 
+/**
+ * #4161: `handleTurnEnd` captured its session at entry and drained the hold
+ * stores after several awaits. A session replaced inside that window (`/new`,
+ * a resume) left the old turn draining the NEW session's state; settle then
+ * skipped the restore for the stale session, so a cut item was gone. Every
+ * case replaces the session between the turn's entry and a drain, then asks
+ * the successor's own stores and its next turn.
+ */
+describe("#4161: a turn whose session was replaced drains nothing of its successor's", () => {
+	const SUCCESSOR = "session-4161-successor";
+	const runEnd = (name: string) => `${PAD}END-${name}`;
+
+	function cascadeRun(rig: Rig, name: string) {
+		const primary = touch(rig, `${name}.ts`);
+		const neighbor = touch(rig, `${name}-dep.ts`);
+		return {
+			filePath: primary,
+			result: cascadeResult(primary, neighbor, runEnd(name)),
+			neighborCount: 1,
+			diagnosticCount: 1,
+		};
+	}
+
+	/** The successor's `session_start` reset plus its own identity. */
+	function replace(rig: Rig): void {
+		rig.runtime.resetForSession();
+		rig.runtime.setTelemetryIdentity({ sessionId: SUCCESSOR });
+	}
+
+	function staleWriteSubjects(): string[] {
+		return getDegradationSummary()
+			.filter((entry) => entry.kind === "generation-guard-stale-write")
+			.flatMap((entry) => entry.latestReasons.map((r) => r.subject));
+	}
+
+	// Recurrence: REVIEW_4155 F1. The replacement lands at the turn's first
+	// await; the successor records a blocker that cuts every later part, a
+	// built cascade run, and a compute still parked for the settle.
+	it("leaves the successor's cascade run and parked compute for the successor's own turn", async () => {
+		const rig = makeRig("pi-lens-4161-cascade-");
+		try {
+			touch(rig, "old-edit.ts");
+			let successorFiller = "";
+			queueMicrotask(() => {
+				replace(rig);
+				successorFiller = fillerBlocker(rig, 1000);
+				rig.runtime.appendCascadeRun(cascadeRun(rig, "succ-built"));
+				rig.runtime.appendCascadePromise(
+					Promise.resolve(cascadeRun(rig, "succ-pending")),
+					rig.runtime.captureSessionGeneration(),
+					path.join(rig.cwd, "succ-pending.ts"),
+				);
+			});
+			await endTurn(rig);
+
+			clearFiller(rig, successorFiller);
+			nextTurn(rig, 2);
+			const successorTurn = await endTurn(rig);
+			expect(successorTurn).toContain("END-succ-built");
+			expect(successorTurn).toContain("END-succ-pending");
+			expect(staleWriteSubjects()).toEqual(
+				expect.arrayContaining([
+					"runtime-session:cascade-settle",
+					"runtime-session:turn-end:cascade-runs",
+				]),
+			);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence: REVIEW_4155 F1, the reviewer's window. The replacement lands
+	// inside the cascade settle's await: the old session's compute settles
+	// there, and the successor appends its own run.
+	it("keeps the successor's run and drops the replaced session's compute that settles inside the settle wait", async () => {
+		const rig = makeRig("pi-lens-4161-settle-");
+		try {
+			fillerBlocker(rig, 1000);
+			const oldRun = cascadeRun(rig, "old-pending");
+			const settled = Promise.resolve(oldRun);
+			// `settleCascadeRuns` attaches the first `.then` when it takes the
+			// compute; the hook replaces the session in the next microtask, while
+			// the settle awaits.
+			const then = settled.then.bind(settled);
+			let taken = false;
+			(settled as any).then = (onFulfilled: any, onRejected: any) => {
+				if (!taken) {
+					taken = true;
+					queueMicrotask(() => {
+						replace(rig);
+						rig.runtime.appendCascadeRun(cascadeRun(rig, "succ-built"));
+					});
+				}
+				return then(onFulfilled, onRejected);
+			};
+			rig.runtime.appendCascadePromise(
+				settled,
+				rig.runtime.captureSessionGeneration(),
+				oldRun.filePath,
+			);
+			await endTurn(rig);
+			expect(taken).toBe(true);
+
+			const pendingAfter = rig.runtime
+				.consumeCascadeRuns()
+				.map((run) => path.basename(run.filePath));
+			expect(pendingAfter).toEqual(["succ-built.ts"]);
+			expect(staleWriteSubjects()).toEqual(
+				expect.arrayContaining([
+					"runtime-session:turn-end:cascade-runs",
+					`runtime-session:${oldRun.filePath}`,
+				]),
+			);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence: the late-auxiliary drain sits after every scan await. The
+	// replacement lands in the knip scan, after the old turn read its blocker
+	// (which cuts the part), and the successor marks its own pair.
+	it("leaves the successor's late-auxiliary pair pending", async () => {
+		const rig = makeRig("pi-lens-4161-aux-drain-");
+		try {
+			fillerBlocker(rig, 1000);
+			touch(rig, "old-edit.ts");
+			await endTurn(rig, () => {
+				replace(rig);
+				markAux(rig, "succ-aux.ts");
+			});
+			expect(pendingAuxiliaryCoverageSize()).toBe(1);
+			expect(staleWriteSubjects()).toContain(
+				"runtime-session:turn-end:late-aux",
+			);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence: the probe-failure re-arm runs after the probe's await. A
+	// replacement inside it must not hand the old session's pair to the
+	// successor, whose session_start emptied this store.
+	it("does not re-arm the replaced session's pair into its successor", async () => {
+		const rig = makeRig("pi-lens-4161-aux-rearm-");
+		try {
+			const file = markAux(rig, "old-aux.ts");
+			readCachedDiagnosticsForServers.mockImplementation(async () => {
+				replace(rig);
+				throw new Error("probe failed");
+			});
+			await endTurn(rig);
+			expect(pendingAuxiliaryCoverageSize()).toBe(0);
+			expect(staleWriteSubjects()).toContain(
+				`runtime-session:turn-end:late-aux-rearm:opengrep:${file}`,
+			);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// No-drop direction (shape 54): without a replacement the same turn still
+	// drains, settles and restores (the reviewer's control, `[Y, X]`).
+	it("restores both cut runs when no replacement lands", async () => {
+		const rig = makeRig("pi-lens-4161-control-");
+		try {
+			fillerBlocker(rig, 1000);
+			const oldRun = cascadeRun(rig, "old-pending");
+			rig.runtime.appendCascadePromise(
+				Promise.resolve(oldRun),
+				rig.runtime.captureSessionGeneration(),
+				oldRun.filePath,
+			);
+			rig.runtime.appendCascadeRun(cascadeRun(rig, "old-built"));
+			await endTurn(rig);
+			expect(
+				rig.runtime
+					.consumeCascadeRuns()
+					.map((run) => path.basename(run.filePath))
+					.sort(),
+			).toEqual(["old-built.ts", "old-pending.ts"]);
+			expect(staleWriteSubjects()).toEqual([]);
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
 describe("F6: a resolved retirement the signature dedupe would suppress (#3813)", () => {
 	// Recurrence (#3776 verify r3 F6): an identical second retirement on
 	// consecutive turns (same file, count and ordinal) was consumed by the
