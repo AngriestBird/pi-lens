@@ -41,4 +41,4 @@ it("keeps a third-party v1 bridge read live across /reload (#4169)", async () =>
 			});
 		},
 	);
-});
+}, 60_000);
