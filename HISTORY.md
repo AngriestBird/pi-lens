@@ -118,6 +118,30 @@ worktree, `--dryRunOnly` for reproductions (fixer and reviewer Probe hygiene
 sections, #3180); and the release-bump PR title format (release-qa skill's
 pre-bump dry-roll step, the 4.2.0 retitle).
 
+## 2026-10-08 — merge train to v4.4.0
+
+312 changelog fragments (Added 23 / Changed 56 / Fixed 230 / Removed 2 /
+Security 1; 171 user-facing / 141 internal) shipped as v4.4.0 from bump PR
+#4175, tagged at 12:48Z. Release-QA shipped on pi 0.80.10, 0.86.1, 0.87.1,
+0.99.2, 1.0.4 and 1.1.0; the certified host range is `>=0.80.10 <1.2.0`,
+and git-install-loads passed on every host.
+
+The train's main product arc was making session and turn state explicit and
+bounded: per-session scope and hand-off records now explain what survives a
+reload, fork, resume or replacement, while turn-end delivery holds late
+findings instead of losing them. Late dead-code scans stay with the session
+that started them, drain fences preserve work across the turn boundary, and
+the parallel bash and codemode paths keep each writer's blockers and
+correlation separate. The read guard now follows authorship rather than mtime
+accidents (#4000, external contributor AngriestBird), and extensions have a
+single unified file-I/O lifecycle bridge (#4145, external contributor Rianico).
+
+The release also certified pi 1.x hosts, added codemode coverage and a
+parallel-bash baseline, and advanced the formal coverage with the TLA+ M1/M2
+models for session and late-scan behavior. CI flake fixes, the SonarCloud A
+cleanup, and the remaining release-QA and governance work made the train's
+internal quality theme explicit rather than leaving it in the test logs.
+
 ## 2026-09-25 — merge train to v4.3.0
 
 115 PRs merged 2026-09-22 through 2026-09-25, closing 107 issues; the release
