@@ -158,7 +158,10 @@ rigor (#2599).
   must pass, and the hand-back quotes them. A red `PR body (advisory)` check is
   a fix-before-review item. A changelog fragment is `---` /
   `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
-  `audience: <user|internal>` / `---` / blank / one `- ` bullet. `audience` is
+  `audience: <user|internal>` / `---` / blank / one `- ` bullet. New
+  `audience: user` fragments must begin with a bold lead of at most 100
+  characters, excluding issue references; internal fragments are exempt.
+  `audience` is
   required: `user` is anything a pi-lens user or agent can observe (tools,
   diagnostics, messages, config, install, performance, a fixed bug they could
   hit); `internal` is CI, tests, `formal/`, contributor docs, orchestration, and
