@@ -37,7 +37,7 @@ One lane is one (client, root). The model keeps:
 | `Edit` | `modifiedFiles`, `runtime-turn.ts:2554` | The agent edits a file. |
 | `TurnEndStart` (InlineScan) | `:2693-2727` | No entry: start the scan and await it. |
 | `TurnEndCarry` | `:2688-2692` | An entry is in flight: this turn's files join its carry; no scan starts. |
-| `TurnEndTake` | `:2677-2686`, `:2693` | A settled entry is delivered once and removed; its carry joins this turn's scan files. |
+| `TurnEndTake` | `:2677-2686`, `:2693`, `:2703-2718` | A settled entry is delivered once and removed; its carry joins this turn's scan files; the back-off then applies to that scan like any other. |
 | `TurnEndSkip` | `:2703-2718` | The back-off: the root is skipped. |
 | `InlineFinish` | `:2755-2786` | The scan ended inside the budget: the inline writer compares with the row read before the await. |
 | `Abandon` (Park) | `:2737-2753`, `:608-629` | `bounded()` gave up. The entry records the scan's files and the row it started against. |
@@ -45,7 +45,9 @@ One lane is one (client, root). The model keeps:
 | `EntrySettle` (Settle, Drop) | `:630-663`, `:587-600` | The `.then` handler: an ended session writes nothing; otherwise the row is written unless it would poison; a failure drops the entry; a success is parked. |
 | `SessionReplace` | `runtime-coordinator.ts:652-654` | `/new`, fork, reload or quit retires the scope; the new scope has its own cell. |
 | `ForeignWrite` | `project-diagnostics/fresh-fetch.ts:858-870` | `lens_diagnostics` stores a good row from outside the lane. |
-| `Expire`, `ExpireBadRow` | `hard-failure-summary.ts:20`, `cache-manager.ts:218` | The 30 minute mark expires; a failed row ages out. |
+| `ForeignStamp` | `project-diagnostics/fresh-fetch.ts:858`, `runtime-session.ts:1522` | A scan outside the lane (the fresh fetch, `session_start`) dies to a timeout or kill and stamps the shared client; a failure there writes no row. It can land while a settled entry waits. |
+| `Expire`, `ExpireBadRow` | `hard-failure-summary.ts:20`, `cache-manager.ts:255` | The 30 minute mark expires; a failed row ages out (`readCache`). |
+| `Idle` | none (model device) | Stutter when no lane work is pending or a bound is spent, so a state with work and no enabled action is a deadlock TLC reports. |
 
 ## Invariants
 
@@ -60,13 +62,20 @@ One lane is one (client, root). The model keeps:
 | `NoOrphanScan` | A running scan always has a consumer: the awaiting handler or a live entry. | Review F1 of #4120 round 1: `bounded()` abandoned the await and nothing kept the scan, so a slow root got no row and no delta. |
 | `NoLostRow` | After a live handler saw a successful scan, the row is a good row at least that fresh. | A handler that sees the result and drops it. |
 | `NoRespawnWhileStamped` | A scan that died to a timeout or kill is not respawned until the mark expires or a scan succeeds. | #4117: a scan abandoned at its budget that later timed out left no mark, so every later turn spawned another 30 s vulture. |
+| `NoDeliverFailed` | A failed scan result is never delivered as a delta. | #4120 mutation L9: the drop at `:650-657` gone, so the entry keeps a failed result. |
 | `NoLostEditStrict` | A counted drop loses no carried edit. | VERIFY_4120 V2. Registered as violated. |
 | `NoStaleCover` | A delta for files is never computed from a result that predates them. | The cross-session join below. Registered as violated. |
 
-The liveness-shaped half of the lane ("the late result lands") is two bounded
-safety checks, `NoOrphanScan` (a scan is kept) and `NoLostRow` (a kept result
-reaches the row). The model has no fairness assumption, so it cannot say the
-delta arrives; it says nothing drops it.
+The liveness-shaped half of the lane ("the late result lands") is bounded
+checks, not a fairness argument. `NoOrphanScan` says a running scan has a
+consumer, `NoLostRow` says a result a live handler saw reaches the row,
+`NoDeliverFailed` says what is delivered is a success, and `Merged` runs with
+`CHECK_DEADLOCK TRUE` and an `Idle` stutter that is enabled only when nothing
+is pending: a settled result that nothing takes leaves work with no enabled
+action, and TLC reports `Deadlock` (`SettledNeverTaken`, #4120 mutation L1).
+That is progress under the model's bounds (3 edits, 3 scans, 3 entries), not a
+proof that the delta arrives for every schedule. Without the deadlock check,
+`Merged` would stay green with the take disabled.
 
 ## Configs
 
@@ -76,20 +85,23 @@ is up to the first violation (BFS, so the trace is a shortest one).
 
 | Config | Expect | States | What it proves |
 |---|---|---|---|
-| `Merged` | pass | 39 789 / 19 182 | The shipped design with the lane's own writers: every invariant above except the three registered findings (`NoLostEditStrict`, `NoStaleCover`, and `NoPoison` against a foreign writer). |
-| `SettleAfterEnd` | violated `NoCrossSession` | 874 / 694 | Without the generation check a scan that ends after `/new` writes the row. |
-| `SettleWritesPoison` | violated `NoPoison` | 569 / 457 | Without `wouldPoisonCache` at `:639` a failed late scan replaces a good row. |
-| `InlineWhileParked` | violated `SingleWriter` | 4 214 / 2 678 | Without the in-flight branch a turn_end starts its own scan beside the parked one and both write. |
-| `PreRound2Dropped` | violated `NoOrphanScan` | 47 / 40 | Round 1: nothing keeps an abandoned scan. |
-| `SettleDropsResult` | violated `NoLostRow` | 335 / 273 | A handler that drops a successful result leaves the row behind. |
-| `CarryNotRecorded` | violated `NoLostEdit` | 324 / 263 | Without the carry add an edit made while the scan runs is covered by no scan. |
-| `EntryOnModule` | violated `NoCrossSession` | 2 090 / 1 479 | A module-level entry map delivers one session's result in the next. |
-| `BackoffUnread` | violated `NoRespawnWhileStamped` | 1 465 / 1 089 | A reader that ignores the client's mark respawns after a hard failure the good row hid. |
-| `StampAtTurn` | violated `NoRespawnWhileStamped` | 3 090 / 2 190 | A client that stamps only a failure settled inside the turn leaves a parked failure unmarked. |
-| `FailedScanDropsCarry` | violated `NoLostEditStrict` | 2 031 / 1 443 | VERIFY_4120 V2, a documented degradation: a failed in-flight scan drops the files carried for it. |
-| `JoinedScanStale` | violated `NoStaleCover` | 4 295 / 2 769 | After a session replacement the new session joins the old session's running vulture and covers its own edits with a result that predates them. |
-| `ForeignRowPoison` | violated `NoPoison` | 1 486 / 1 164 | VERIFY_4120 V1, a registered defect: the poison guard compares with the row the scan started from, not the row now. |
-| `ForeignRowCurrentGuard` | pass | 147 132 / 67 476 | The V1 remedy: comparing with the current row holds against the same foreign writer. |
+| `Merged` | pass | 119 260 / 42 600 | The shipped design with the lane's own writers and the foreign scans: every invariant above except the three registered findings (`NoLostEditStrict`, `NoStaleCover`, and `NoPoison` against a foreign row writer). `CHECK_DEADLOCK TRUE`. |
+| `SettleAfterEnd` | violated `NoCrossSession` | 1 598 / 952 | Without the generation check a scan that ends after `/new` writes the row. |
+| `SettleWritesPoison` | violated `NoPoison` | 1 090 / 649 | Without `wouldPoisonCache` at `:639` a failed late scan replaces a good row. |
+| `InlineWhileParked` | violated `SingleWriter` | 6 755 / 3 759 | Without the in-flight branch a turn_end starts its own scan beside the parked one and both write. |
+| `PreRound2Dropped` | violated `NoOrphanScan` | 77 / 54 | Round 1: nothing keeps an abandoned scan. |
+| `SettleDropsResult` | violated `NoLostRow` | 675 / 404 | A handler that drops a successful result leaves the row behind. |
+| `SettledNeverTaken` | violated `Deadlock` | 28 047 / 13 298 | #4120 mutation L1, bounded progress: with the take disabled a settled result waits and the lane has work with no enabled action. |
+| `FailedResultKept` | violated `NoDeliverFailed` | 1 575 / 938 | #4120 mutation L9: a failed late result is kept as a deliverable entry and the next turn_end delivers it. |
+| `CarryNotRecorded` | violated `NoLostEdit` | 664 / 394 | Without the carry add an edit made while the scan runs is covered by no scan. |
+| `EntryOnModule` | violated `NoCrossSession` | 3 414 / 1 973 | A module-level entry map delivers one session's result in the next. |
+| `BackoffUnread` | violated `NoRespawnWhileStamped` | 87 / 61 | A reader that ignores the client's mark respawns after a hard failure the good row hid. |
+| `StampAtTurn` | violated `NoRespawnWhileStamped` | 5 082 / 2 996 | A client that stamps only a failure settled inside the turn leaves a parked failure unmarked. |
+| `TakeUnblocked` | violated `NoRespawnWhileStamped` | 6 699 / 3 768 | REVIEW_4153 F1: without the back-off after a take, a foreign scan that stamped the root while a settled entry waited lets the take start a vulture on it. Needs `ForeignStamp`. |
+| `FailedScanDropsCarry` | violated `NoLostEditStrict` | 3 347 / 1 932 | VERIFY_4120 V2, a documented degradation: a failed in-flight scan drops the files carried for it. |
+| `JoinedScanStale` | violated `NoStaleCover` | 6 948 / 3 881 | After a session replacement the new session joins the old session's running vulture and covers its own edits with a result that predates them. |
+| `ForeignRowPoison` | violated `NoPoison` | 2 733 / 1 607 | VERIFY_4120 V1, a registered defect: the poison guard compares with the row the scan started from, not the row now. |
+| `ForeignRowCurrentGuard` | pass | 417 310 / 146 830 | The V1 remedy: comparing with the current row. It passes by construction: the guard and `NoPoison` read the same row, so the config documents the remedy and cannot detect an incomplete one. |
 
 The three `violated` configs for the registered findings (`FailedScanDropsCarry`,
 `JoinedScanStale`, `ForeignRowPoison`) follow the `SecRootSharedTwo` precedent
@@ -97,6 +109,8 @@ in `formal/session-registry`: the config documents behaviour on master, and
 the fix PR flips it to `pass`.
 
 ## Registered findings
+
+V1 and J1 are filed as #4154.
 
 - **V1 (`ForeignRowPoison`).** `parkLateDeadCodeScan` guards the write with
   `entry.previousScan`, the row read when the scan started, and the inline path
@@ -156,10 +170,21 @@ the fix PR flips it to `pass`.
 - **Ownership and the delta text.** Every edited file is owned; no-previous-scan,
   `no_owned_files`, disposition filtering and the delivery cap are not modelled
   (the delivery cap and its holds are a separate family, #3813 and #3901).
-- **Scans started outside the lane.** `session_start` (`runtime-session.ts:1512`)
-  and the fresh fetch (`fresh-fetch.ts:858`) start `analyze` too; a turn_end
-  that joins one of them has the same stale-snapshot caveat as `J1`. Only the
-  fresh fetch's row write is modelled (`ForeignWrite`).
+- **Scans started outside the lane.** `session_start` (`runtime-session.ts:1522`)
+  and the fresh fetch (`fresh-fetch.ts:858`) start `analyze` too, on the same
+  shared client. Modelled: the stamp their timeout leaves (`ForeignStamp`, which
+  `TakeUnblocked` needs) and the fresh fetch's good row (`ForeignWrite`). Not
+  modelled: a turn_end that joins one of their running scans has the same
+  stale-snapshot caveat as `J1`.
+- **A concurrent secondary session (owned by #4154 and lane M4).** The model has
+  one turn_end actor. In production a secondary (subagent) activation runs
+  `handleTurnEnd` on the same process-singleton runtime (`index.ts:585`,
+  `runtime-turn.ts:1190-1198`), and the late-scan cell is keyed by client and
+  root, not by session id: a secondary's turn_end can take the primary's settled
+  entry, or add its files to the primary's carry (REVIEW_4153 F2, reproduced
+  with two `sessionId`s on one runtime). `NoCrossSession` here covers sequential
+  replacement only. The fix is #4154's (fence entries by session), and M4's
+  `SecondaryIsolation` is where the invariant belongs; it is not modelled here.
 - **The back-off across sessions.** The dead-code client never clears its
   `HardFailureStamps` (knip's `resetSessionState` does), so the mark survives
   `SessionReplace`; the model follows the code, and no invariant calls it a

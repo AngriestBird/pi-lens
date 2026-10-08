@@ -38,7 +38,13 @@
 (*                scope (runtime-coordinator.ts:652-654);                  *)
 (*  ForeignWrite  a writer outside the lane stores a good row (the         *)
 (*                lens_diagnostics fresh fetch, fresh-fetch.ts:858-870);   *)
-(*  Expire, ExpireBadRow  the 30 minute mark and the cache age run out.    *)
+(*  ForeignStamp  a scan outside the lane (the fresh fetch, session_start) *)
+(*                dies to a timeout and stamps the shared client           *)
+(*                (fresh-fetch.ts:858, runtime-session.ts:1522);           *)
+(*  Expire, ExpireBadRow  the 30 minute mark and the cache age run out;    *)
+(*  Idle          stutter when nothing is pending: with CHECK_DEADLOCK on, *)
+(*                work with no enabled action is a lane that cannot        *)
+(*                progress (bounded form of "a settled result is taken"). *)
 (*                                                                         *)
 (* Invariants:                                                             *)
 (*  SingleWriter    one scan result is written to the row once: the inline *)
@@ -50,6 +56,7 @@
 (*                  live entry until a started scan covers it;             *)
 (*  NoSecondStart   no scan starts while an entry is in flight;            *)
 (*  NoDoubleDelivery  a scan's result is delivered at most once;           *)
+(*  NoDeliverFailed  a failed scan result is never delivered (#4120 L9);   *)
 (*  NoOrphanScan    a running scan always has a consumer (round 1 had none);*)
 (*  NoLostRow       a successful scan a live handler saw is in the row;    *)
 (*  NoRespawnWhileStamped  a scan that died to a timeout or kill is not    *)
@@ -60,8 +67,9 @@
 (* Abstractions (README "What the model cannot see"): the file set is one  *)
 (* id per edit; Edit, SessionReplace and ForeignWrite do not occur while a *)
 (* handler awaits (the agent is stopped for the budget) or between a      *)
-(* scan's end and its handlers (Quiet); ownership, the delta text and the  *)
-(* knip lane are not modelled.                                             *)
+(* scan's end and its handlers (Quiet); ownership, the delta text, the     *)
+(* knip lane and a concurrent secondary session (#4154, lane M4) are not   *)
+(* modelled.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -80,12 +88,18 @@ CONSTANTS
     Late,          \* "keep"          round 2: the late result is written and parked
                    \* "dropAtPark"   round 1: bounded() gave up and nothing keeps the scan
                    \* "dropAtSettle" mutant: the handler sees the result and throws it away
+                   \* "keepFailed"   mutant (#4120 L9): a failed result is kept as a
+                   \*                deliverable entry (the drop at :650-657 gone)
+                   \* "neverTake"    mutant (#4120 L1): a settled entry is never taken
+                   \*                (the take at :2677 gone)
     InFlight,      \* "carry" shipped: an in-flight entry takes the turn's files
                    \* "scan"  mutant: a turn_end starts its own scan beside it
     CarryRec,      \* "on" shipped (:2689); "off" mutant: carry not recorded
     EntryScope,    \* "session" shipped: the entry lives on the scope's cell
                    \* "module"  mutant: round 1's module-level map
     Foreign,       \* "on": a writer outside the lane may store a good row once
+    TakeBackoff,   \* "on" shipped: the back-off at :2703-2718 also follows a take
+                   \* "off" mutant: a take starts its scan on a stamped root
     Backoff,       \* "both" shipped: a root with a recent hard failure is skipped by
                    \*          the failed row (:2703) and by the client's mark (:2707)
                    \* "row"  pre-#4117: only the failed row is read
@@ -111,6 +125,7 @@ VARIABLES
     lostCounted,  \* carried edits lost with a counted drop
     wrote,        \* process ids already written to the row
     fgn,          \* the foreign write happened
+    fst,          \* the foreign stamp happened
     poisoned,     \* a failure replaced a good row
     crossWrite,   \* a settle wrote for an ended session
     crossDeliver, \* an entry was delivered in another session
@@ -121,12 +136,13 @@ VARIABLES
     hf,           \* the last scan died to a timeout or kill, inside the window
     respawn,      \* a new vulture process started while the root was stamped
     delivered,    \* process ids whose result was delivered as a delta
-    dupDeliver    \* one process result was delivered twice
+    dupDeliver,   \* one process result was delivered twice
+    deliverFail   \* a failed scan result was delivered as a delta
 
 vars == <<cur, made, turnEdits, row, scRun, scId, scSnap, w, en, slot, nextE,
-          owed, rowOwed, lostCounted, wrote, fgn, poisoned, crossWrite,
+          owed, rowOwed, lostCounted, wrote, fgn, fst, poisoned, crossWrite,
           crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
-          delivered, dupDeliver>>
+          delivered, dupDeliver, deliverFail>>
 
 EIds == 1..MaxEnt
 Res == {"ok", "fail", "threw"}
@@ -134,7 +150,8 @@ Res == {"ok", "fail", "threw"}
 NoW == [on |-> FALSE, sid |-> 0, files |-> {}, prev |-> "none",
         snap |-> {}, fin |-> "run"]
 NoEnt == [on |-> FALSE, sess |-> 0, files |-> {}, prev |-> "none",
-          carry |-> {}, st |-> "run", sid |-> 0, snap |-> {}]
+          carry |-> {}, st |-> "run", sid |-> 0, snap |-> {},
+          res |-> "ok"]
 
 TypeOK ==
     /\ cur \in 1..MaxSess
@@ -155,8 +172,8 @@ TypeOK ==
     /\ lostCounted \subseteq Edits
     /\ wrote \subseteq 1..MaxScan
     /\ delivered \subseteq 1..MaxScan
-    /\ {fgn, poisoned, crossWrite, crossDeliver, dupWrite, secondStart,
-        staleCover, stamp, hf, respawn, dupDeliver} \subseteq BOOLEAN
+    /\ {fgn, fst, poisoned, crossWrite, crossDeliver, dupWrite, secondStart,
+        staleCover, stamp, hf, respawn, dupDeliver, deliverFail} \subseteq BOOLEAN
 
 \* The cell a session's entry lives in (:540-548). "module" is round 1's map.
 SlotOf(s) == IF EntryScope = "session" THEN s ELSE 1
@@ -183,6 +200,7 @@ Quiet == /\ ~w.on
 \* :2703) and the stamp the client set where that scan settled
 \* (recentHardFailure, dead-code-client.ts:238).
 Blocked == row.kind = "bad" \/ (Backoff = "both" /\ stamp)
+TakeBlocked == TakeBackoff = "on" /\ Blocked
 
 Init ==
     /\ cur = 1
@@ -201,6 +219,7 @@ Init ==
     /\ lostCounted = {}
     /\ wrote = {}
     /\ fgn = FALSE
+    /\ fst = FALSE
     /\ poisoned = FALSE
     /\ crossWrite = FALSE
     /\ crossDeliver = FALSE
@@ -212,6 +231,7 @@ Init ==
     /\ respawn = FALSE
     /\ delivered = {}
     /\ dupDeliver = FALSE
+    /\ deliverFail = FALSE
 
 \* modifiedFiles() (:2554): the agent edits a file.
 Edit(e) ==
@@ -220,9 +240,9 @@ Edit(e) ==
     /\ made' = made \cup {e}
     /\ turnEdits' = turnEdits \cup {e}
     /\ UNCHANGED <<cur, row, scRun, scId, scSnap, w, en, slot, nextE, owed,
-                   rowOwed, lostCounted, wrote, fgn, poisoned, crossWrite,
+                   rowOwed, lostCounted, wrote, fgn, fst, poisoned, crossWrite,
                    crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* client.analyze(cwd) (:2727): start the process, or JOIN the one running
 \* (dead-code-client.ts:458). `prev` is the row read first (:2698).
@@ -249,14 +269,15 @@ TurnEndCarry ==
     /\ owed' = owed \cup turnEdits
     /\ turnEdits' = {}
     /\ UNCHANGED <<cur, made, row, scRun, scId, scSnap, w, slot, nextE,
-                   rowOwed, lostCounted, wrote, fgn, poisoned, crossWrite,
+                   rowOwed, lostCounted, wrote, fgn, fst, poisoned, crossWrite,
                    crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* :2677-2686 -- a settled entry is taken: delivered once, then removed; its
 \* carry joins this turn's scan files (:2693), which may start a scan.
 TurnEndTake ==
     /\ Quiet
+    /\ Late # "neverTake"
     /\ VisEnt.on /\ VisEnt.st = "settled"
     /\ LET e == VisEnt
            F == turnEdits \cup e.carry
@@ -264,16 +285,20 @@ TurnEndTake ==
           /\ staleCover' = (staleCover \/ ~(e.files \subseteq e.snap))
           /\ dupDeliver' = (dupDeliver \/ e.sid \in delivered)
           /\ delivered' = delivered \cup {e.sid}
+          /\ deliverFail' = (deliverFail \/ e.res # "ok")
           /\ en' = [en EXCEPT ![Vis] = NoEnt]
           /\ slot' = [slot EXCEPT ![SlotOf(cur)] = 0]
           /\ turnEdits' = {}
           /\ owed' = owed \ F
-          /\ \/ /\ F = {}
+          \* :2703-2718 follows the take (a stamped root skips the scan; the
+          \* mark can come from a scan outside the lane: ForeignStamp).
+          /\ \/ /\ (F = {} \/ TakeBlocked)
                 /\ UNCHANGED <<w, scRun, scId, scSnap, secondStart, respawn>>
              \/ /\ F # {}
+                /\ ~TakeBlocked
                 /\ CanStart
                 /\ StartScan(F)
-    /\ UNCHANGED <<cur, made, row, nextE, rowOwed, lostCounted, wrote, fgn,
+    /\ UNCHANGED <<cur, made, row, nextE, rowOwed, lostCounted, wrote, fgn, fst,
                    poisoned, crossWrite, dupWrite, stamp, hf>>
 
 \* :2693-2727 -- InlineScan: no entry, so this turn starts and awaits a scan.
@@ -287,8 +312,8 @@ TurnEndStart ==
     /\ owed' = owed \ turnEdits
     /\ turnEdits' = {}
     /\ UNCHANGED <<cur, made, row, en, slot, nextE, rowOwed, lostCounted,
-                   wrote, fgn, poisoned, crossWrite, crossDeliver, dupWrite,
-                   staleCover, stamp, hf, delivered, dupDeliver>>
+                   wrote, fgn, fst, poisoned, crossWrite, crossDeliver, dupWrite,
+                   staleCover, stamp, hf, delivered, dupDeliver, deliverFail>>
 
 \* :2710-2718 -- the back-off: no scan, the turn's files are skipped and the
 \* row says so (`python:backoff:`).
@@ -299,10 +324,10 @@ TurnEndSkip ==
     /\ Blocked
     /\ turnEdits' = {}
     /\ UNCHANGED <<cur, made, row, scRun, scId, scSnap, w, en, slot, nextE,
-                   owed, rowOwed, lostCounted, wrote, fgn, poisoned,
+                   owed, rowOwed, lostCounted, wrote, fgn, fst, poisoned,
                    crossWrite, crossDeliver, dupWrite, secondStart,
                    staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* Mutant InlineWhileParked: the :2688 branch is gone, so a turn_end starts
 \* (joins) its own scan with an entry in flight.
@@ -317,8 +342,8 @@ TurnEndStartBesideEntry ==
     /\ owed' = owed \ turnEdits
     /\ turnEdits' = {}
     /\ UNCHANGED <<cur, made, row, en, slot, nextE, rowOwed, lostCounted,
-                   wrote, fgn, poisoned, crossWrite, crossDeliver, dupWrite,
-                   staleCover, stamp, hf, delivered, dupDeliver>>
+                   wrote, fgn, fst, poisoned, crossWrite, crossDeliver, dupWrite,
+                   staleCover, stamp, hf, delivered, dupDeliver, deliverFail>>
 
 \* :2737-2753 and :608-629 -- Park: bounded() gave up (budget or Escape). The
 \* scan keeps running; the entry records what the scan was started for and
@@ -330,14 +355,15 @@ Abandon ==
           THEN UNCHANGED <<en, slot, nextE>>
           ELSE /\ en' = [en EXCEPT ![nextE] = [on |-> TRUE, sess |-> cur,
                         files |-> w.files, prev |-> w.prev, carry |-> {},
-                        st |-> w.fin, sid |-> w.sid, snap |-> w.snap]]
+                        st |-> w.fin, sid |-> w.sid, snap |-> w.snap,
+                        res |-> "ok"]]
                /\ slot' = [slot EXCEPT ![SlotOf(cur)] = nextE]
                /\ nextE' = nextE + 1
     /\ w' = NoW
     /\ UNCHANGED <<cur, made, turnEdits, row, scRun, scId, scSnap, owed,
-                   rowOwed, lostCounted, wrote, fgn, poisoned, crossWrite,
+                   rowOwed, lostCounted, wrote, fgn, fst, poisoned, crossWrite,
                    crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* :2755-2786 -- Await finished inside the budget: the inline writer.
 InlineFinish ==
@@ -367,8 +393,8 @@ InlineFinish ==
                           [] OTHER -> stamp)
                   ELSE stamp
     /\ UNCHANGED <<cur, made, turnEdits, scRun, scId, scSnap, en, slot, nextE,
-                   owed, lostCounted, fgn, crossWrite, crossDeliver,
-                   secondStart, hf, respawn>>
+                   owed, lostCounted, fgn, fst, crossWrite, crossDeliver,
+                   secondStart, hf, respawn, deliverFail>>
 
 \* The vulture process ends (dead-code-client.ts:461). Everything attached to
 \* it sees the same result.
@@ -379,7 +405,7 @@ ScanComplete(r) ==
     /\ en' = [i \in EIds |->
                  IF en[i].on /\ en[i].sid = scId /\ en[i].st = "run"
                     THEN [en[i] EXCEPT !.st = r] ELSE en[i]]
-    \* HardFailureStamps.settle (hard-failure-summary.ts:26): a success lifts the
+    \* HardFailureStamps.settle (hard-failure-summary.ts:31): a success lifts the
     \* mark, a timeout or kill sets it, a rejection never reaches it.
     /\ hf' = (CASE r = "fail" -> TRUE
                  [] r = "ok" -> FALSE
@@ -390,9 +416,9 @@ ScanComplete(r) ==
                           [] OTHER -> stamp)
                   ELSE stamp
     /\ UNCHANGED <<cur, made, turnEdits, row, scId, scSnap, slot, nextE,
-                   owed, rowOwed, lostCounted, wrote, fgn, poisoned,
+                   owed, rowOwed, lostCounted, wrote, fgn, fst, poisoned,
                    crossWrite, crossDeliver, dupWrite, secondStart,
-                   staleCover, respawn, delivered, dupDeliver>>
+                   staleCover, respawn, delivered, dupDeliver, deliverFail>>
 
 \* :630-663 -- the .then handler of a parked scan. An ended session writes
 \* nothing and is dropped (:632-635); otherwise the row is written unless it
@@ -412,7 +438,8 @@ EntrySettle(i) ==
                      /\ e.st # "threw"
                      /\ ~(Late = "dropAtSettle" /\ e.st = "ok")
                      /\ (SettlePoison = "unguarded" \/ ~Poisons(kind, guard))
-           gone == ended \/ e.st \in {"fail", "threw"}
+           gone == ended \/ e.st = "threw"
+                   \/ (e.st = "fail" /\ Late # "keepFailed")
                    \/ (Late = "dropAtSettle" /\ e.st = "ok")
        IN /\ row' = IF writes
                        THEN [kind |-> kind,
@@ -430,11 +457,11 @@ EntrySettle(i) ==
                      /\ owed' = owed \ e.carry
                      /\ lostCounted' = IF ended THEN lostCounted
                                        ELSE lostCounted \cup (e.carry \cap owed)
-                ELSE /\ en' = [en EXCEPT ![i].st = "settled"]
+                ELSE /\ en' = [en EXCEPT ![i].st = "settled", ![i].res = e.st]
                      /\ UNCHANGED <<slot, owed, lostCounted>>
-    /\ UNCHANGED <<cur, made, turnEdits, scRun, scId, scSnap, w, nextE, fgn,
+    /\ UNCHANGED <<cur, made, turnEdits, scRun, scId, scSnap, w, nextE, fgn, fst,
                    crossDeliver, secondStart, staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* runtime-coordinator.ts:652-654 -- /new, fork, reload or quit retires the
 \* scope. The new scope has its own cell; the old entries are unreachable.
@@ -444,9 +471,9 @@ SessionReplace ==
     /\ cur' = cur + 1
     /\ turnEdits' = {}
     /\ UNCHANGED <<made, row, scRun, scId, scSnap, w, en, slot, nextE, owed,
-                   rowOwed, lostCounted, wrote, fgn, poisoned, crossWrite,
+                   rowOwed, lostCounted, wrote, fgn, fst, poisoned, crossWrite,
                    crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* project-diagnostics/fresh-fetch.ts:858-870 -- a fresh fetch stores a good
 \* row from outside the lane, once, while no turn_end handler is awaiting
@@ -459,10 +486,10 @@ ForeignWrite ==
     /\ row' = [kind |-> "good", snap |-> made]
     /\ fgn' = TRUE
     /\ UNCHANGED <<cur, made, turnEdits, scRun, scId, scSnap, w, en, slot,
-                   nextE, owed, rowOwed, lostCounted, wrote, poisoned,
+                   nextE, owed, rowOwed, lostCounted, wrote, fst, poisoned,
                    crossWrite, crossDeliver, dupWrite, secondStart,
                    staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
 
 \* HARD_FAILURE_BACKOFF_MS (hard-failure-summary.ts:20): the mark expires.
 Expire ==
@@ -470,20 +497,49 @@ Expire ==
     /\ stamp' = FALSE
     /\ hf' = FALSE
     /\ UNCHANGED <<cur, made, turnEdits, row, scRun, scId, scSnap, w, en, slot,
-                   nextE, owed, rowOwed, lostCounted, wrote, fgn, poisoned,
+                   nextE, owed, rowOwed, lostCounted, wrote, fgn, fst, poisoned,
                    crossWrite, crossDeliver, dupWrite, secondStart,
-                   staleCover, respawn, delivered, dupDeliver>>
+                   staleCover, respawn, delivered, dupDeliver, deliverFail>>
 
-\* CacheManager.readCache (cache-manager.ts:218): a cache row older than its
+\* CacheManager.readCache (cache-manager.ts:255): a cache row older than its
 \* maximum age reads as absent, so a failed row stops blocking.
 ExpireBadRow ==
     /\ row.kind = "bad"
     /\ row' = [kind |-> "none", snap |-> {}]
     /\ UNCHANGED <<cur, made, turnEdits, scRun, scId, scSnap, w, en, slot,
-                   nextE, owed, rowOwed, lostCounted, wrote, fgn, poisoned,
+                   nextE, owed, rowOwed, lostCounted, wrote, fgn, fst, poisoned,
                    crossWrite, crossDeliver, dupWrite, secondStart,
                    staleCover, stamp, hf, respawn,
-                   delivered, dupDeliver>>
+                   delivered, dupDeliver, deliverFail>>
+
+\* A scan outside the lane that dies to a timeout or a kill stamps the shared
+\* client: lens_diagnostics' fresh fetch (fresh-fetch.ts:858, a failure writes no
+\* row, recordFailed) or the session_start scan (runtime-session.ts:1522). The
+\* mark can land while a settled entry waits for its take.
+ForeignStamp ==
+    /\ Quiet
+    /\ ~scRun
+    /\ ~stamp
+    /\ ~fst
+    /\ fst' = TRUE
+    /\ stamp' = TRUE
+    /\ hf' = TRUE
+    /\ UNCHANGED <<cur, made, turnEdits, row, scRun, scId, scSnap, w, en, slot,
+                   nextE, owed, rowOwed, lostCounted, wrote, fgn, poisoned,
+                   crossWrite, crossDeliver, dupWrite, secondStart,
+                   staleCover, respawn, delivered, dupDeliver, deliverFail>>
+
+\* Stutter when no lane work is pending (or a model bound is spent). With
+\* CHECK_DEADLOCK on, a state that has work and no enabled action is then a
+\* lane that cannot make progress: the bounded form of "a settled result is
+\* delivered" (#4120 L1: the take gone).
+Idle ==
+    /\ \/ /\ Quiet
+          /\ turnEdits = {}
+          /\ ~(VisEnt.on /\ VisEnt.st = "settled")
+       \/ ~CanStart
+       \/ nextE > MaxEnt
+    /\ UNCHANGED vars
 
 Next ==
     \/ \E e \in Edits : Edit(e)
@@ -500,6 +556,8 @@ Next ==
     \/ ForeignWrite
     \/ Expire
     \/ ExpireBadRow
+    \/ ForeignStamp
+    \/ Idle
 
 Spec == Init /\ [][Next]_vars
 
@@ -544,6 +602,9 @@ NoRespawnWhileStamped == ~respawn
 (* A scan's result is delivered as a delta at most once (:2678 removes the  *)
 (* entry it takes).                                                          *)
 NoDoubleDelivery == ~dupDeliver
+
+(* A failed scan result is never delivered as a delta (#4120 L9).           *)
+NoDeliverFailed == ~deliverFail
 
 (* A delta for files is never computed from a result that predates them.     *)
 NoStaleCover == ~staleCover
