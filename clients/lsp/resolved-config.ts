@@ -85,7 +85,7 @@ function isLegacyLspFile(file: string | undefined): boolean {
 	const normalized = file.replaceAll("\\", "/");
 	return (
 		/(?:^|\/)(?:pi-lens|pi-lsp)\.json$/.test(normalized) ||
-		normalized.endsWith("/.pi-lens/lsp.json")
+		normalized.endsWith(["", ".pi-lens", "lsp.json"].join("/"))
 	);
 }
 
