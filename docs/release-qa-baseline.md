@@ -156,6 +156,20 @@ matrix on it, add it to that test's verified list, and move the workflow's
 ceiling together. The window is contiguous, so a ceiling past an unrun minor
 claims that minor too.
 
+### Verified hosts
+
+The certified policy is `>=0.80.10 <1.2.0`. Each listed minor line has a
+release-QA witness; the workflow ceiling and `tests/packaging.test.ts` list are
+updated together.
+
+| host | date | pi-lens commit | coverage line | report |
+| --- | --- | --- | --- | --- |
+| 0.86.1 | 2026-10-08 | f58d769a66ae89ce85d6ed129c28ec90734a321f | 0.86 | `/home/akis/.local/share/pi-lens-orchestrator/tmp/inv-gates/qa-out-0.86.1/release-qa-report.md` |
+| 0.87.1 | 2026-10-08 | f58d769a66ae89ce85d6ed129c28ec90734a321f | 0.87 | `/home/akis/.local/share/pi-lens-orchestrator/tmp/inv-gates/qa-out-0.87.1/release-qa-report.md` |
+| 0.99.2 | 2026-10-08 | 08abd60e193e5a17ea28dd4fbf3603cc9a0cdbe0 | 0.99 | `/home/akis/.local/share/pi-lens-orchestrator/tmp/inv-gates/qa-out-0.99.2/release-qa-report.md` |
+| 1.0.4 | 2026-10-08 | 08abd60e193e5a17ea28dd4fbf3603cc9a0cdbe0 | 1.0 | `/home/akis/.local/share/pi-lens-orchestrator/tmp/inv-gates/qa-out-1.0.4/release-qa-report.md` |
+| 1.1.0 | 2026-10-08 | 2fda17a53d62267cd9035fa04380bbf0e2de4318 | 1.1 | `/home/akis/.local/share/pi-lens-orchestrator/tmp/inv-gates/qa-out-110/release-qa-report.md` |
+
 ## Why `skills-registered` pins the registrar
 
 pi-lens's skills are declared by the `pi.skills` manifest (`./skills`) and were
