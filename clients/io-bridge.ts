@@ -28,7 +28,6 @@ import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	IO_BRIDGE_SYMBOL,
 	IO_BRIDGE_VERSION,
-	getIOBridge,
 	type BridgeEntry,
 	type LineHashMap,
 	type LineRange,
@@ -54,11 +53,12 @@ import { registerProcessBridge } from "./process-bridge.js";
 export {
 	IO_BRIDGE_SYMBOL,
 	IO_BRIDGE_VERSION,
-	getIOBridge,
 	type BridgeEntry,
 	type RecordOutcome,
 	type RecordReason,
 };
+
+export { getIOBridge } from "./io-bridge-contract.js";
 
 /** The read-guard surface the bridge drives. */
 export interface ReadGuardBridgeSurface {
@@ -96,7 +96,7 @@ export interface IOBridgeDeps extends MutationBridgeDeps {
 	notifyExternalFileChange(
 		filePath: string,
 		type: number,
-	): Promise<unknown> | unknown;
+	): void | Promise<void>;
 	/** The filesystem probes the bridge performs itself. */
 	nodeFs: {
 		existsSync(filePath: string): boolean;
@@ -155,50 +155,128 @@ function readConsumer(raw: Record<string, unknown>): string {
  * `[]` is the explicit zero-line read. `content` is valid only with a single
  * range. Every `lineHashes` key must fall inside a declared range.
  */
-function readFacetProblem(read: unknown): string | undefined {
-	if (!isRecordObject(read)) return "read facet must be an object";
-	const ranges = read["ranges"];
+/** `ranges` must be an array of 1-indexed `[start, end]` pairs. */
+function readRangesProblem(ranges: unknown): string | undefined {
 	if (!Array.isArray(ranges)) return "ranges must be an array";
 	if (!ranges.every(isValidRange)) {
 		return "ranges must be 1-indexed [start, end] with start <= end";
 	}
-	const declared = ranges as LineRange[];
-	const evidence = read["evidence"];
-	if (evidence !== undefined && evidence !== "caller" && evidence !== "disk") {
-		return 'evidence must be "caller" or "disk"';
+	return undefined;
+}
+
+function readEvidenceProblem(evidence: unknown): string | undefined {
+	if (evidence === undefined || evidence === "caller" || evidence === "disk") {
+		return undefined;
 	}
-	const content = read["content"];
-	if (content !== undefined && typeof content !== "string") {
-		return "content must be a string";
-	}
-	if (
-		content !== undefined &&
-		!(
-			declared.length === 1 ||
-			(declared.length === 0 && (content as string) === "")
-		)
-	) {
+	return 'evidence must be "caller" or "disk"';
+}
+
+/** `content` is a string, and only a single range (or the explicit empty one) may carry it. */
+function readContentProblem(
+	content: unknown,
+	declared: LineRange[],
+): string | undefined {
+	if (content === undefined) return undefined;
+	if (typeof content !== "string") return "content must be a string";
+	const singleRange = declared.length === 1;
+	const explicitEmpty = declared.length === 0 && content === "";
+	if (!singleRange && !explicitEmpty) {
 		return "content is valid only with a single range";
 	}
-	if (read["source"] !== undefined && typeof read["source"] !== "string") {
-		return "source must be a string";
+	return undefined;
+}
+
+function readSourceProblem(source: unknown): string | undefined {
+	if (source === undefined || typeof source === "string") return undefined;
+	return "source must be a string";
+}
+
+/** Every `lineHashes` key must be an integer line inside a declared range. */
+function readLineHashesProblem(
+	lineHashes: unknown,
+	declared: LineRange[],
+): string | undefined {
+	if (lineHashes === undefined) return undefined;
+	if (!isRecordObject(lineHashes) || Array.isArray(lineHashes)) {
+		return "lineHashes must be an object keyed by line number";
 	}
-	const lineHashes = read["lineHashes"];
-	if (lineHashes !== undefined) {
-		if (!isRecordObject(lineHashes) || Array.isArray(lineHashes)) {
-			return "lineHashes must be an object keyed by line number";
+	for (const [key, value] of Object.entries(lineHashes)) {
+		const line = Number(key);
+		if (!Number.isInteger(line) || line < 1 || typeof value !== "string") {
+			return `lineHashes[${key}] must map an integer line to a string hash`;
 		}
-		for (const [key, value] of Object.entries(lineHashes)) {
-			const line = Number(key);
-			if (!Number.isInteger(line) || line < 1 || typeof value !== "string") {
-				return `lineHashes[${key}] must map an integer line to a string hash`;
-			}
-			if (!declared.some(([start, end]) => line >= start && line <= end)) {
-				return `lineHashes key ${key} falls outside every declared range`;
-			}
+		if (!declared.some(([start, end]) => line >= start && line <= end)) {
+			return `lineHashes key ${key} falls outside every declared range`;
 		}
 	}
 	return undefined;
+}
+
+function readFacetProblem(read: unknown): string | undefined {
+	if (!isRecordObject(read)) return "read facet must be an object";
+	const ranges = read["ranges"];
+	const rangesProblem = readRangesProblem(ranges);
+	if (rangesProblem !== undefined) return rangesProblem;
+	const declared = ranges as LineRange[];
+	return (
+		readEvidenceProblem(read["evidence"]) ??
+		readContentProblem(read["content"], declared) ??
+		readSourceProblem(read["source"]) ??
+		readLineHashesProblem(read["lineHashes"], declared)
+	);
+}
+
+/** `kind` must be one of the three mutation verbs. */
+function mutationKindProblem(kind: unknown): string | undefined {
+	if (kind === "edit" || kind === "write" || kind === "delete") {
+		return undefined;
+	}
+	return 'kind must be "edit", "write", or "delete"';
+}
+
+/** `edit` ranges are optional, but a present `ranges` must be a non-empty array. */
+function editRangesProblem(
+	mutate: Record<string, unknown>,
+): string | undefined {
+	if (mutate["kind"] !== "edit") return undefined;
+	const ranges = mutate["ranges"];
+	if (ranges === undefined) return undefined;
+	if (!Array.isArray(ranges) || ranges.length === 0) {
+		return "edit ranges must be a non-empty array";
+	}
+	return undefined;
+}
+
+function writeContentProblem(
+	mutate: Record<string, unknown>,
+): string | undefined {
+	if (mutate["kind"] !== "write") return undefined;
+	const writtenContent = mutate["writtenContent"];
+	if (writtenContent === undefined || typeof writtenContent === "string") {
+		return undefined;
+	}
+	return "writtenContent must be a string";
+}
+
+function booleanFieldProblem(value: unknown, name: string): string | undefined {
+	if (value === undefined || typeof value === "boolean") return undefined;
+	return `${name} must be a boolean`;
+}
+
+function touchedLinesProblem(value: unknown): string | undefined {
+	if (value === undefined || isValidRange(value)) return undefined;
+	return "touchedLines must be 1-indexed [start, end]";
+}
+
+function provenanceProblem(value: unknown): string | undefined {
+	if (
+		value === undefined ||
+		value === "observed" ||
+		value === "settled-sweep"
+	) {
+		return undefined;
+	}
+	return 'provenance must be "observed" or "settled-sweep"';
 }
 
 /**
@@ -210,51 +288,16 @@ function readFacetProblem(read: unknown): string | undefined {
  */
 function mutationFacetProblem(mutate: unknown): string | undefined {
 	if (!isRecordObject(mutate)) return "mutate facet must be an object";
-	const kind = mutate["kind"];
-	if (kind !== "edit" && kind !== "write" && kind !== "delete") {
-		return 'kind must be "edit", "write", or "delete"';
-	}
-	if (kind === "edit") {
-		const ranges = mutate["ranges"];
-		if (ranges !== undefined) {
-			if (!Array.isArray(ranges) || ranges.length === 0) {
-				return "edit ranges must be a non-empty array";
-			}
-		}
-	}
-	if (kind === "write") {
-		const writtenContent = mutate["writtenContent"];
-		if (writtenContent !== undefined && typeof writtenContent !== "string") {
-			return "writtenContent must be a string";
-		}
-	}
-	if (
-		mutate["deferAutofix"] !== undefined &&
-		typeof mutate["deferAutofix"] !== "boolean"
-	) {
-		return "deferAutofix must be a boolean";
-	}
-	if (
-		mutate["importsChanged"] !== undefined &&
-		typeof mutate["importsChanged"] !== "boolean"
-	) {
-		return "importsChanged must be a boolean";
-	}
-	if (
-		mutate["touchedLines"] !== undefined &&
-		!isValidRange(mutate["touchedLines"])
-	) {
-		return "touchedLines must be 1-indexed [start, end]";
-	}
-	const provenance = mutate["provenance"];
-	if (
-		provenance !== undefined &&
-		provenance !== "observed" &&
-		provenance !== "settled-sweep"
-	) {
-		return 'provenance must be "observed" or "settled-sweep"';
-	}
-	return undefined;
+	const kindProblem = mutationKindProblem(mutate["kind"]);
+	if (kindProblem !== undefined) return kindProblem;
+	return (
+		editRangesProblem(mutate) ??
+		writeContentProblem(mutate) ??
+		booleanFieldProblem(mutate["deferAutofix"], "deferAutofix") ??
+		booleanFieldProblem(mutate["importsChanged"], "importsChanged") ??
+		touchedLinesProblem(mutate["touchedLines"]) ??
+		provenanceProblem(mutate["provenance"])
+	);
 }
 
 function drop(
@@ -340,6 +383,89 @@ function recordOneRange(
 	);
 }
 
+/** Shared, resolved inputs for the read facet's two recording branches. */
+interface ReadRecordContext {
+	read: ReadFacet;
+	deps: IOBridgeDeps;
+	filePath: string;
+	source: string;
+	guard: ReadGuardBridgeSurface;
+	turnIndex: number;
+	writeIndex: number;
+}
+
+/**
+ * The explicit zero-line read: it credits whole-file coverage only for a genuinely
+ * empty file; anything else would credit lines the agent never saw (#3652).
+ * Returns a drop detail, or `undefined` when recorded.
+ */
+function recordZeroLineRead(ctx: ReadRecordContext): string | undefined {
+	let size: number;
+	try {
+		size = ctx.deps.nodeFs.statSync(ctx.filePath).size;
+	} catch (err) {
+		return `${err}`;
+	}
+	if (size !== 0) {
+		return `zero-line read of a non-empty file (${size} bytes)`;
+	}
+	recordOneRange(ctx.guard, {
+		filePath: ctx.filePath,
+		requestedOffset: 1,
+		requestedLimit: 0,
+		effectiveOffset: 1,
+		effectiveLimit: Number.MAX_SAFE_INTEGER,
+		source: ctx.source,
+		turnIndex: ctx.turnIndex,
+		writeIndex: ctx.writeIndex,
+		captureLineHashes: false,
+	});
+	return undefined;
+}
+
+/**
+ * One declared range in caller- or disk-evidence mode. Returns a drop detail, or
+ * `undefined` when recorded; a disk read of an absent file is refused.
+ */
+function recordRange(
+	ctx: ReadRecordContext,
+	start: number,
+	end: number,
+): string | undefined {
+	// A `MAX_SAFE_INTEGER` end is the v1 "whole file" spelling; keep the
+	// requested limit identical to v1 rather than `end - start + 1`.
+	const limit =
+		end === Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : end - start + 1;
+	const base: OneRangeRecord = {
+		filePath: ctx.filePath,
+		requestedOffset: start,
+		requestedLimit: limit,
+		effectiveOffset: start,
+		effectiveLimit: limit,
+		source: ctx.source,
+		turnIndex: ctx.turnIndex,
+		writeIndex: ctx.writeIndex,
+		captureLineHashes: ctx.read.evidence === "disk",
+	};
+	if (ctx.read.evidence === "disk") {
+		if (!ctx.deps.nodeFs.existsSync(ctx.filePath)) {
+			return `disk read of an absent file: ${ctx.filePath}`;
+		}
+		const binding = captureReadContentBinding(ctx.filePath, start, limit);
+		recordOneRange(ctx.guard, {
+			...base,
+			...(binding !== undefined && { contentBinding: binding }),
+		});
+		return undefined;
+	}
+	const hashes = selectLineHashes(ctx.read, start, end);
+	recordOneRange(ctx.guard, {
+		...base,
+		...(hashes !== undefined && { lineHashes: hashes }),
+	});
+	return undefined;
+}
+
 function recordReadFacet(
 	raw: Record<string, unknown>,
 	caller: string,
@@ -364,88 +490,28 @@ function recordReadFacet(
 		return drop("read", caller, "out-of-scope", filePath);
 	}
 
-	const evidence = read.evidence ?? "caller";
-	const source = read.source ?? `io-bridge:${caller}`;
-	const guard = deps.getReadGuard();
-	const turnIndex = deps.getTurnIndex();
-	const writeIndex = deps.peekWriteIndex();
+	const ctx: ReadRecordContext = {
+		read,
+		deps,
+		filePath,
+		source: read.source ?? `io-bridge:${caller}`,
+		guard: deps.getReadGuard(),
+		turnIndex: deps.getTurnIndex(),
+		writeIndex: deps.peekWriteIndex(),
+	};
 
 	if (read.ranges.length === 0) {
-		// #3652: `[]` is an explicit zero-line read. It credits whole-file
-		// coverage only for a genuinely empty file; anything else would credit
-		// lines the agent never saw.
-		let size: number;
-		try {
-			size = deps.nodeFs.statSync(filePath).size;
-		} catch (err) {
-			return drop("read", caller, "bookkeeping-error", `${err}`);
-		}
-		if (size !== 0) {
-			return drop(
-				"read",
-				caller,
-				"bookkeeping-error",
-				`zero-line read of a non-empty file (${size} bytes)`,
-			);
-		}
-		recordOneRange(guard, {
-			filePath,
-			requestedOffset: 1,
-			requestedLimit: 0,
-			effectiveOffset: 1,
-			effectiveLimit: Number.MAX_SAFE_INTEGER,
-			source,
-			turnIndex,
-			writeIndex,
-			captureLineHashes: false,
-		});
-		return { accepted: true };
+		const detail = recordZeroLineRead(ctx);
+		return detail === undefined
+			? { accepted: true }
+			: drop("read", caller, "bookkeeping-error", detail);
 	}
 
 	for (const [start, end] of read.ranges) {
-		// A `MAX_SAFE_INTEGER` end is the v1 "whole file" spelling; keep the
-		// requested limit identical to v1 rather than `end - start + 1`.
-		const limit =
-			end === Number.MAX_SAFE_INTEGER
-				? Number.MAX_SAFE_INTEGER
-				: end - start + 1;
 		try {
-			if (evidence === "disk") {
-				if (!deps.nodeFs.existsSync(filePath)) {
-					return drop(
-						"read",
-						caller,
-						"bookkeeping-error",
-						`disk read of an absent file: ${filePath}`,
-					);
-				}
-				const binding = captureReadContentBinding(filePath, start, limit);
-				recordOneRange(guard, {
-					filePath,
-					requestedOffset: start,
-					requestedLimit: limit,
-					effectiveOffset: start,
-					effectiveLimit: limit,
-					source,
-					turnIndex,
-					writeIndex,
-					...(binding !== undefined && { contentBinding: binding }),
-					captureLineHashes: true,
-				});
-			} else {
-				const hashes = selectLineHashes(read, start, end);
-				recordOneRange(guard, {
-					filePath,
-					requestedOffset: start,
-					requestedLimit: limit,
-					effectiveOffset: start,
-					effectiveLimit: limit,
-					source,
-					turnIndex,
-					writeIndex,
-					...(hashes !== undefined && { lineHashes: hashes }),
-					captureLineHashes: false,
-				});
+			const detail = recordRange(ctx, start, end);
+			if (detail !== undefined) {
+				return drop("read", caller, "bookkeeping-error", detail);
 			}
 		} catch (err) {
 			return drop("read", caller, "bookkeeping-error", `${err}`);

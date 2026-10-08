@@ -65,7 +65,7 @@ import {
 	captureReadContentBinding,
 	type ReadContentBinding,
 } from "./read-guard.js";
-import { getIOBridge } from "./io-bridge-contract.js";
+import { getIOBridge, type PiLensIOBridge } from "./io-bridge-contract.js";
 
 export const READ_BRIDGE_KEY: unique symbol = Symbol.for("pi-lens:read-bridge");
 
@@ -174,6 +174,64 @@ function isValidEntry(entry: unknown): entry is ReadBridgeEntry {
 }
 
 /**
+ * The `[start, end]` a v1 entry's offset/limit denotes. `undefined` means
+ * whole-file; `MAX_SAFE_INTEGER` avoids an unsafe `offset + …` and lets the
+ * guard's own file-length probe clip the effective limit.
+ */
+function delegatedRange(entry: ReadBridgeEntry): [number, number] {
+	const offset = entry.requestedOffset;
+	const limit = entry.requestedLimit ?? Number.MAX_SAFE_INTEGER;
+	const end =
+		limit === Number.MAX_SAFE_INTEGER
+			? Number.MAX_SAFE_INTEGER
+			: offset + limit - 1;
+	return [offset, end];
+}
+
+/** Forward a v1 entry to the unified bridge, preserving its `bridge:<consumer>` source. */
+function delegateReadToUnifiedBridge(
+	entry: ReadBridgeEntry,
+	ioBridge: PiLensIOBridge,
+): void {
+	const [offset, end] = delegatedRange(entry);
+	ioBridge.record({
+		filePath: entry.filePath,
+		...(entry.consumer !== undefined && { consumer: entry.consumer }),
+		read: {
+			ranges: [[offset, end]],
+			evidence: "disk",
+			source: `bridge:${entry.consumer ?? "unknown"}`,
+		},
+	});
+}
+
+/**
+ * A zero-line read vouches for nothing unless the file is really empty: probe
+ * emptiness here (and only here — no new stat on the common path). Returns
+ * `true` when the read was dropped (a non-empty, missing, or unreadable
+ * target), recording one bounded degradation.
+ */
+function zeroLineReadDropped(entry: ReadBridgeEntry): boolean {
+	if (entry.requestedLimit !== 0) return false;
+	let size: number | undefined;
+	try {
+		size = fs.statSync(entry.filePath).size;
+	} catch {
+		size = undefined;
+	}
+	if (size === 0) return false;
+	incrementDegradationCount({
+		kind: "read-bridge-zero-line-dropped",
+		subject: entry.filePath,
+		reason:
+			size === undefined
+				? "a zero-line read was dropped: the target file's size could not be read"
+				: "a zero-line read was dropped: the target file is not empty",
+	});
+	return true;
+}
+
+/**
  * Mount the bridge singleton. Call once from inside the extension factory
  * (protected by the `_readBridgeRegistered` module-level flag). Subsequent
  * calls are no-ops (first-wins, `clients/process-bridge.ts` owns the mount
@@ -187,83 +245,43 @@ export function registerReadBridge(deps: BridgeDeps): void {
 			// integration bugs in callers (malformed fields, bad numbers).
 			if (!isValidEntry(entry)) return;
 
-			// #3654: in a pi-lens process the unified bridge is mounted in the same
-			// first-wins pass, so delegate to it. This body stays as the fallback for
-			// an isolated unit-test mount or a dirty process that mounted only v1.
 			// #3654 D14: the v1 recordability gate runs FIRST, on the v1 path. Its
 			// flag read is this bridge's own ("read-bridge" subject, and a
 			// near-match stale error rethrows as v1 did); delegating first would
 			// report "io-bridge" and swallow the rethrow inside the v2
 			// never-throw wrapper.
 			if (!deps.isRecordable(entry.filePath)) return;
+
+			// #3654: in a pi-lens process the unified bridge is mounted in the same
+			// first-wins pass, so delegate to it. This body stays as the fallback for
+			// an isolated unit-test mount or a dirty process that mounted only v1.
 			const ioBridge = getIOBridge();
 			if (ioBridge !== undefined) {
-				const offset = entry.requestedOffset;
-				const requested = entry.requestedLimit;
-				// `undefined` means whole-file; the guard's own file-length probe clips
-				// the effective limit. MAX_SAFE_INTEGER avoids an unsafe `offset + …`.
-				const limit = requested ?? Number.MAX_SAFE_INTEGER;
-				const end =
-					limit === Number.MAX_SAFE_INTEGER
-						? Number.MAX_SAFE_INTEGER
-						: offset + limit - 1;
-				ioBridge.record({
-					filePath: entry.filePath,
-					...(entry.consumer !== undefined && { consumer: entry.consumer }),
-					read: {
-						ranges: [[offset, end]],
-						evidence: "disk",
-						source: `bridge:${entry.consumer ?? "unknown"}`,
-					},
-				});
+				delegateReadToUnifiedBridge(entry, ioBridge);
 				return;
 			}
 
-			// A zero-line read vouches for nothing unless the file is really
-			// empty: probe emptiness here (and only here - no new stat on the
-			// common path). A non-empty, missing, or unreadable target is
-			// dropped (one bounded degradation record) instead of granting coverage
-			// for content never seen.
-			if (entry.requestedLimit === 0) {
-				let size: number | undefined;
-				try {
-					size = fs.statSync(entry.filePath).size;
-				} catch {
-					size = undefined;
-				}
-				if (size !== 0) {
-					incrementDegradationCount({
-						kind: "read-bridge-zero-line-dropped",
-						subject: entry.filePath,
-						reason:
-							size === undefined
-								? "a zero-line read was dropped: the target file's size could not be read"
-								: "a zero-line read was dropped: the target file is not empty",
-					});
-					return;
-				}
-			}
+			if (zeroLineReadDropped(entry)) return;
 
 			const offset = entry.requestedOffset;
 			// When no limit is given treat the whole file as covered — the
 			// guard clips to the actual line count via its own file-length
 			// probe.
 			const limit = entry.requestedLimit ?? Number.MAX_SAFE_INTEGER;
+			const zeroLine = entry.requestedLimit === 0;
 			// A zero-line read admitted by the empty-file gate above grants
 			// whole-file coverage, so a later multi-line insert into the empty
 			// file falls inside the recorded range. `requestedLimit` below keeps
 			// the caller's asked-for 0 for provenance (log-only in read-guard.log).
 			// No content is bound: a zero-line read delivered nothing, and a
 			// stale empty-file binding would block every later edit (#3652).
-			const effectiveLimit =
-				entry.requestedLimit === 0 ? Number.MAX_SAFE_INTEGER : limit;
+			const effectiveLimit = zeroLine ? Number.MAX_SAFE_INTEGER : limit;
 			// An empty file has only line 1 addressable: normalize coverage to
 			// start there regardless of the caller's offset.
-			const effectiveOffset = entry.requestedLimit === 0 ? 1 : offset;
-			const contentBinding =
-				entry.requestedLimit === 0
-					? undefined
-					: captureReadContentBinding(entry.filePath, offset, effectiveLimit);
+			const effectiveOffset = zeroLine ? 1 : offset;
+			const contentBinding = zeroLine
+				? undefined
+				: captureReadContentBinding(entry.filePath, offset, effectiveLimit);
 
 			deps.getReadGuard().recordRead({
 				filePath: entry.filePath,
