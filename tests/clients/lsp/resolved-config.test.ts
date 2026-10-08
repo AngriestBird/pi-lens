@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+	registerRunnerId,
+	resetRunnerIdentityForTests,
+} from "../../../clients/dispatch/known-runner-ids.js";
 import {
 	resolveLspConfig,
 	type ResolvedLspConfig,
@@ -9,6 +13,8 @@ const project = (value: unknown) => ({
 	file: "/workspace/.pi-lens.json",
 	value,
 });
+
+afterEach(() => resetRunnerIdentityForTests());
 
 describe("ResolvedLspConfig compatibility normalizer (#2416)", () => {
 	it("defaults an omitted canonical name from the server id", () => {
@@ -100,12 +106,16 @@ describe("ResolvedLspConfig compatibility normalizer (#2416)", () => {
 	});
 
 	it("drops only unknown covers claims and retains the server", () => {
+		registerRunnerId("shellcheck");
 		const result = resolveLspConfig({
 			sources: [
 				project({
 					lsp: {
 						servers: {
-							rust: { command: ["rust-analyzer"], covers: ["unknown-runner"] },
+							rust: {
+								command: ["rust-analyzer"],
+								covers: ["shellcheck", "unknown-runner"],
+							},
 						},
 					},
 				}),
@@ -114,7 +124,62 @@ describe("ResolvedLspConfig compatibility normalizer (#2416)", () => {
 		expect(result.value.servers.rust).toMatchObject({
 			command: ["rust-analyzer"],
 		});
-		expect(result.value.servers.rust.covers).toBeUndefined();
+		expect(result.value.servers.rust.covers).toEqual(["shellcheck"]);
+	});
+
+	it("uses the legacy-file migration code and canonical destination", () => {
+		const result = resolveLspConfig({
+			sources: [
+				{
+					tier: "project",
+					file: "/workspace/.pi-lens/lsp.json",
+					value: { servers: { rust: { command: ["rust-analyzer"] } } },
+				},
+			],
+		});
+		expect(result.records).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					code: "PILENS_CFG_0003",
+					key: "servers",
+					canonicalKey: "lsp.servers",
+				}),
+			]),
+		);
+		expect(result.records).not.toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ code: "PILENS_CFG_0002", key: "servers" }),
+			]),
+		);
+	});
+
+	it("bounds normalizer records with the requested cap", () => {
+		const servers = Object.fromEntries(
+			Array.from({ length: 30 }, (_, index) => [
+				`bad${index}`,
+				{ command: [] },
+			]),
+		);
+		const result = resolveLspConfig({
+			sources: [project({ lsp: { servers } })],
+			maxRecords: 1,
+		});
+		expect(result.records).toHaveLength(1);
+	});
+
+	it("sanitizes a control-bearing server id in diagnostic records", () => {
+		const id = "bad\nghp_abcdefghijklmnopqrst";
+		const result = resolveLspConfig({
+			sources: [project({ lsp: { servers: { [id]: { command: [] } } } })],
+		});
+		const record = result.records.find(
+			(entry) => entry.code === "PILENS_CFG_0005",
+		);
+		expect(record?.key).toBe(
+			"/lsp/servers/bad [REDACTED:github-token]/command",
+		);
+		expect(record?.subject).not.toContain("\n");
+		expect(record?.subject).not.toContain("ghp_abcdefghijklmnopqrst");
 	});
 
 	it("publishes a tiered schema artifact matching the runtime schema", async () => {

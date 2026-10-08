@@ -8,6 +8,9 @@ import { LEGACY_ROOT_LSP_KEYS } from "../config-locations.js";
 import { PI_LENS_CONFIG_SCHEMA } from "../config-schema.js";
 import { resolveConfig, type RawConfigSource } from "../config-core/resolve.js";
 import {
+	MAX_MIGRATION_RECORDS,
+	MigrationRecordCollector,
+	boundedKeyLabel,
 	migrationSubject,
 	type MigrationRecord,
 } from "../config-core/records.js";
@@ -66,14 +69,24 @@ function makeMigrationRecord(
 	key: string,
 	reason: string,
 ): MigrationRecord {
+	const safeKey = boundedKeyLabel(key);
 	return {
 		code: "PILENS_CFG_0005",
 		file: source.file ?? "",
-		key,
-		subject: migrationSubject(source.file ?? "", key),
+		key: safeKey,
+		subject: migrationSubject(source.file ?? "", safeKey),
 		reason,
 		tier: source.tier,
 	};
+}
+
+function isLegacyLspFile(file: string | undefined): boolean {
+	if (!file) return false;
+	const normalized = file.replaceAll("\\", "/");
+	return (
+		/(?:^|\/)(?:pi-lens|pi-lsp)\.json$/.test(normalized) ||
+		normalized.endsWith("/.pi-lens/lsp.json")
+	);
 }
 
 function canonicalizeSource(source: RawConfigSource): {
@@ -236,6 +249,9 @@ function normalizeServer(
 					>,
 				}
 			: {}),
+		...(Array.isArray(entry.covers)
+			? { covers: entry.covers as string[] }
+			: {}),
 	};
 }
 
@@ -248,33 +264,47 @@ export function resolveLspConfig(
 		schema: PI_LENS_CONFIG_SCHEMA,
 		maxRecords: options.maxRecords,
 	});
-	const records = [...resolution.records];
-	for (const [index, item] of prepared.entries()) {
+	const collector = new MigrationRecordCollector(
+		options.maxRecords ?? MAX_MIGRATION_RECORDS,
+		resolution.droppedRecordCount,
+	);
+	for (const record of resolution.records) collector.add(record);
+	const seenMigrationRecords = new Set<string>();
+	for (const item of prepared) {
 		for (const key of item.migrationKeys) {
-			records.push({
-				code: "PILENS_CFG_0002",
+			const code = isLegacyLspFile(item.source.file)
+				? "PILENS_CFG_0003"
+				: "PILENS_CFG_0002";
+			const safeKey = boundedKeyLabel(key);
+			const identity = `${code}\0${item.source.file ?? ""}\0${safeKey}`;
+			if (seenMigrationRecords.has(identity)) continue;
+			seenMigrationRecords.add(identity);
+			collector.add({
+				code,
 				file: item.source.file ?? "",
-				key,
-				subject: migrationSubject(item.source.file ?? "", key),
+				key: safeKey,
+				subject: migrationSubject(item.source.file ?? "", safeKey),
 				canonicalKey: `lsp.${key}`,
-				reason: `deprecated LSP key; use lsp.${key}`,
+				reason: `deprecated LSP ${code === "PILENS_CFG_0003" ? "file location" : "key"}; use lsp.${safeKey}`,
 				tier: item.source.tier,
 			});
 		}
-		void index;
 	}
 	const lsp = object(resolution.resolved.value?.lsp) ?? {};
 	const servers = object(lsp.servers) ?? {};
 	const normalizedServers: Record<string, ResolvedLspServer> = {};
+	const serverRecords: MigrationRecord[] = [];
 	for (const [id, entry] of Object.entries(servers)) {
 		const normalized = normalizeServer(
 			id,
 			entry,
 			options.sources[0] ?? { tier: "project", value: {} },
-			records,
+			serverRecords,
 		);
 		if (normalized) normalizedServers[id] = normalized;
 	}
+	for (const record of serverRecords) collector.add(record);
+	const records = collector.records;
 	// The existing covers projection is the one validator for runner identities.
 	const covered = customServerSpecsOf({ lsp: { servers: normalizedServers } });
 	for (const [id, server] of Object.entries(covered)) {
