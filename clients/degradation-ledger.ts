@@ -1422,6 +1422,8 @@ export type DegradationKind =
 	 * kind. Once per file per session; subject is the file path.
 	 */
 	| "startup-analyzer-disabled"
+	/** A project-size bound skipped the session-start warm pipeline (#4126). */
+	| "startup-warm-skipped"
 	/**
 	 * Automatic test ownership is indeterminate: filesystem identity or marker
 	 * I/O failed, a target walk hit its depth bound, or the dispatch walk missed.

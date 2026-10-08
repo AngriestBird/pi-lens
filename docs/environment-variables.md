@@ -104,12 +104,14 @@ without changing the steady-state behaviour of an interactive session.
 
 ### `PI_LENS_STARTUP_SCAN_VERDICT_TTL_MS`
 
-How long (ms) a persisted `too-many-source-files` startup-scan verdict is
-trusted before the source-file count is re-walked (default 24h). The verdict
-is cached in the project snapshot so repeated `pi -p` runs in a very large
-repo skip the counting walk entirely; a repo that shrinks below the threshold
-recovers when the TTL expires. Other verdicts use content-based freshness and
-ignore this setting.
+How long (ms) a persisted size-skip startup-scan verdict (`too-many-source-files`
+or `too-many-entries`) is trusted before the project is re-walked (default
+24h). The verdict is cached in the project snapshot so repeated `pi -p` runs in
+a very large repo skip the counting walk entirely; a repo that shrinks below
+the threshold recovers when the TTL expires. The verdict also records the
+bounds that produced it (`maxProjectFiles`, `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`),
+so raising either one invalidates it at once and the next session re-walks.
+Other verdicts use content-based freshness and ignore this setting.
 
 ## Scale and limits
 
