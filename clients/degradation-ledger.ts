@@ -527,7 +527,9 @@ export type DegradationKind =
 	/**
 	 * #3654: the File I/O Lifecycle Bridge dropped a `read` facet, for the same
 	 * reasons and with the same `"${caller}:${reason}"` subject as
-	 * `io-bridge-mutate-dropped`.
+	 * `io-bridge-mutate-dropped`. A v1 `read-bridge` zero-line read of a
+	 * non-empty or unreadable file (#3652) reports here as
+	 * `<consumer>:bookkeeping-error`; it was `read-bridge-zero-line-dropped`.
 	 */
 	| "io-bridge-read-dropped"
 	/**
@@ -1014,13 +1016,6 @@ export type DegradationKind =
 	 * leaking an orphan — is visible rather than silent.
 	 */
 	| "query-predicates-invalid"
-	/**
-	 * #3652: a co-process extension reported a zero-line read
-	 * (`requestedLimit: 0`) of a target that is not empty, or whose size could
-	 * not be read, so the bridge dropped the observation. Subject is the file
-	 * path. Counted. The accepted empty-file case emits nothing.
-	 */
-	| "read-bridge-zero-line-dropped"
 	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and

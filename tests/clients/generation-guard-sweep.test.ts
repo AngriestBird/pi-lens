@@ -106,8 +106,6 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 	"lsp/index.ts":
 		"the generation handoff compares PROMISE IDENTITY to decide whether the slot it is clearing is still its own. That is the eviction direction, but keyed on object identity rather than a counter, which is what the primitive models; a counter would add state where an identity compare already answers exactly",
 
-	"mutation-bridge.ts":
-		"#3654: the flagged line is `entry.readGuardBranchEpoch !== undefined` in the v1->v2 entry translation — an optional-field PRESENCE check (`undefined` guard), not a generation compare. The value itself is resolved and fenced by read-guard.ts's own #3521 branch-epoch guard (exempted above); this file only copies an optional field onto the seam entry. No counter is compared, and no post-await write hangs on the answer.",
 	// --- Permanent: migrating would be circular. ---
 	"single-flight.ts":
 		"the #1753 singleFlight primitive OWNS its generation compare. It is GenerationGuard's sibling, not its caller: routing singleFlight's own share-branch check through GenerationGuard would make two primitives depend on each other for the property each exists to provide. Permanent, not backlog. Listed at FILE level so it survives #1762's restructuring of that comparison",

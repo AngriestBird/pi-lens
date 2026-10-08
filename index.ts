@@ -104,7 +104,11 @@ import { isEditClassToolResult } from "./clients/bash-file-access.js";
 import { resolveLanguageRootForFile } from "./clients/language-profile.js";
 import { countFileLines } from "./clients/read-guard-tool-lines.js";
 import { registerReadBridge } from "./clients/read-bridge.js";
-import { registerIOBridge } from "./clients/io-bridge.js";
+import {
+	type IOBridgeDeps,
+	recordIOEntry,
+	registerIOBridge,
+} from "./clients/io-bridge.js";
 import {
 	isExternalOrVendorFile,
 	normalizeFilePath,
@@ -1057,25 +1061,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	let lensEnabled = !getLensFlag("no-lens");
 
-	// Read-bridge: refresh the flag getter on every factory activation so the
+	// Bridges: refresh the flag getter on every factory activation so the
 	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
-	// Register the singleton once — subsequent activations only refresh the getter.
+	// Each singleton is registered once; later activations only refresh the getter.
 	_bridgeGetFlag = getLensFlag;
-	if (!_readBridgeRegistered) {
-		_readBridgeRegistered = true;
-		registerReadBridge({
-			getReadGuard: () => runtime.readGuard,
-			getTurnIndex: () => runtime.turnIndex,
-			peekWriteIndex: () => runtime.peekWriteIndex(),
-			isRecordable(filePath: string): boolean {
-				// Unknown during a replacement/reload records the read. The guard is
-				// the obstruction here, so failure must fall toward not blocking the
-				// user's later edit; recording while disabled is harmless.
-				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
-				return isRecordableProjectPath(filePath, runtime.projectRoot);
-			},
-		});
-	}
 
 	// Mutation bridge (#2423): same live-getter discipline as the read bridge.
 	// An in-process producer that writes a file outside pi-lens's tool-event
@@ -1090,7 +1079,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				runtime.projectRoot || process.cwd(),
 			),
 		countFileLines,
-		// #2465: unlike the read bridge above (whose whole purpose IS the
+		// #2465: unlike the read bridge below (whose whole purpose IS the
 		// read-guard stamp, so `no-read-guard` correctly disables it
 		// entirely), this bridge also drives turn-state and the change-log
 		// receipt. `no-read-guard` gates ONLY the read-guard stamp — the same
@@ -1107,40 +1096,54 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 		dbg,
 	};
+	// Unified File I/O bridge (#3654): the v2 surface. It composes the mutation
+	// seam with the read guard and the confirmed-delete lifecycle. The v1 read
+	// shim below runs this same body with these same deps, and the v1 mutation
+	// shim calls the bookkeeping owner the v2 mutate facet also calls, so a v1
+	// producer gets the unified behavior (disk-evidence reads, the
+	// `pilens:format:queued` publish) without changing its own call.
+	const ioBridgeDeps: IOBridgeDeps = {
+		...mutationBridgeDeps,
+		getReadGuard: () => runtime.readGuard,
+		getTurnIndex: () => runtime.turnIndex,
+		peekWriteIndex: () => runtime.peekWriteIndex(),
+		getFlag: (name: string, bridge?: "read" | "mutation" | "io") =>
+			getBridgeFlag(_bridgeGetFlag, bridge ?? "io", name),
+		isExternalOrVendorFile: (filePath: string) =>
+			isExternalOrVendorFile(filePath, runtime.projectRoot),
+		isPathIgnoredByProject: (filePath: string) =>
+			isPathIgnoredByProject(filePath, runtime.projectRoot, false),
+		// #3654: resolved lazily through the live LSP client seam, so a test mock
+		// of `clients/lsp/index.js` that predates this bridge (and so omits the
+		// named export) cannot break the delete path. This is exactly what the
+		// module-level `notifyExternalFileChange` does
+		// (`getLSPService().notifyExternalFileChange(...)`), so the real path is
+		// unchanged.
+		notifyExternalFileChange: (filePath: string, type: number) =>
+			getLSPService().notifyExternalFileChange(filePath, type),
+		nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
+	};
+
+	if (!_readBridgeRegistered) {
+		_readBridgeRegistered = true;
+		registerReadBridge({
+			isRecordable(filePath: string): boolean {
+				// Unknown during a replacement/reload records the read. The guard is
+				// the obstruction here, so failure must fall toward not blocking the
+				// user's later edit; recording while disabled is harmless.
+				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
+				return isRecordableProjectPath(filePath, runtime.projectRoot);
+			},
+			forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
+		});
+	}
 	if (!_mutationBridgeRegistered) {
 		_mutationBridgeRegistered = true;
 		registerMutationBridge(mutationBridgeDeps);
 	}
-
-	// Unified File I/O bridge (#3654): the v2 surface, in the same first-wins
-	// pass as the two v1 shims above. Composing the mutation seam with the read
-	// guard and the confirmed-delete lifecycle here is what lets a v1 producer
-	// that still calls `read-bridge` / `mutation-bridge` gain the unified
-	// behavior (atomic edit+preview, coverage-only reads, the
-	// `pilens:format:queued` publish) without changing its own call.
 	if (!_ioBridgeRegistered) {
 		_ioBridgeRegistered = true;
-		registerIOBridge({
-			...mutationBridgeDeps,
-			getReadGuard: () => runtime.readGuard,
-			getTurnIndex: () => runtime.turnIndex,
-			peekWriteIndex: () => runtime.peekWriteIndex(),
-			getFlag: (name: string, bridge?: "read" | "mutation" | "io") =>
-				getBridgeFlag(_bridgeGetFlag, bridge ?? "io", name),
-			isExternalOrVendorFile: (filePath: string) =>
-				isExternalOrVendorFile(filePath, runtime.projectRoot),
-			isPathIgnoredByProject: (filePath: string) =>
-				isPathIgnoredByProject(filePath, runtime.projectRoot, false),
-			// #3654: resolved lazily through the live LSP client seam, so a test mock
-			// of `clients/lsp/index.js` that predates this bridge (and so omits the
-			// named export) cannot break the delete path. This is exactly what the
-			// module-level `notifyExternalFileChange` does
-			// (`getLSPService().notifyExternalFileChange(...)`), so the real path is
-			// unchanged.
-			notifyExternalFileChange: (filePath: string, type: number) =>
-				getLSPService().notifyExternalFileChange(filePath, type),
-			nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
-		});
+		registerIOBridge(ioBridgeDeps);
 	}
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:

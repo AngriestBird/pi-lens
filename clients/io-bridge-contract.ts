@@ -4,12 +4,12 @@
  * This module is a deliberate dependency leaf. It owns the mount key, the
  * version, the frozen public type surface, and the lookup helper — nothing
  * that could reach back into another `clients/` module. `clients/io-bridge.ts`
- * implements the bridge, the frozen v1 shims (`clients/read-bridge.ts`,
- * `clients/mutation-bridge.ts`) resolve it through `getIOBridge()` here, and
- * `clients/process-bridge.ts` owns the first-wins mount body. Keeping the
- * contract here is what lets the shims gain v2 behavior underneath without
- * the `io-bridge.ts` -> `mutation-bridge.ts` -> `io-bridge.ts` cycle the
- * `no-client-cycles` rule forbids.
+ * implements the bridge and `clients/process-bridge.ts` owns the first-wins
+ * mount body. The frozen v1 shims never look the mount up: the read shim
+ * calls the bridge body with the deps `index.ts` hands it, and the mutation
+ * shim calls the bookkeeping owner (`clients/mutation-bridge.ts`) that the
+ * bridge itself calls. Keeping the types here lets `clients/read-bridge.ts`
+ * name them without importing the implementation.
  *
  * The type surface is RFC 3654 §3 verbatim plus one documented addition: the
  * `v1-compat` fields on `ReadFacet` / `MutationFacet`. D14 freezes the v1
@@ -108,8 +108,12 @@ export type MutationFacet =
 			/** 1-indexed line ranges modified. Must be non-empty. */ ranges: LineRange[];
 	  } & MutationFacetBase)
 	| ({
+			/**
+			 * Whole-file authorship. The authored bytes are not part of the
+			 * contract yet: creation read evidence from them is #3524's design
+			 * (G9), and a field nothing consumes would freeze an unwired promise.
+			 */
 			kind: "write";
-			/** Bytes authored by the agent, if known (#3524). */ writtenContent?: string;
 	  } & MutationFacetBase)
 	| { kind: "delete" };
 

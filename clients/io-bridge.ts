@@ -8,30 +8,31 @@
  * already wrote the bytes and then previews them never desynchronizes the
  * read guard's staleness stamp.
  *
- * The frozen v1 shims (`clients/read-bridge.ts`, `clients/mutation-bridge.ts`)
- * resolve this bridge through `clients/io-bridge-contract.ts` and delegate to
- * `record()` when it is mounted, keeping their v1 return types and keys (D14).
+ * The frozen v1 shims keep their v1 return types and keys (D14) over the same
+ * bodies: the read shim (`clients/read-bridge.ts`) translates its entry and
+ * calls {@link recordIOEntry} (index.ts hands it the same deps this mount
+ * gets), and the mutation shim calls the bookkeeping owner directly.
  *
- * Ownership: the mutation bookkeeping rule stays in `clients/mutation-bridge.ts`
- * (`recordMutationOutcome`); this module composes it with the read-guard and
- * delete lifecycle and never re-derives it. The read path uses the read
- * guard's own content-binding and in-memory-hash seams, and the delete path
- * mirrors `clients/runtime-tool-result.ts`'s confirmed-delete gates.
+ * Ownership: the mutation bookkeeping rule, its validator and the
+ * `pilens:format:queued` publish stay in `clients/mutation-bridge.ts`
+ * (`recordMutationOutcome`); this module translates the facet into that
+ * entry and never re-derives it. The read path uses the read guard's own
+ * content-binding and in-memory-hash seams, and the delete path asks
+ * `clients/confirmed-delete.ts`, the verdict the native bash path also uses.
  *
  * Drops are returned synchronously as `RecordOutcome` AND recorded in the
  * degradation ledger as `io-bridge-read-dropped` / `io-bridge-mutate-dropped`
  * with subject `"${caller}:${reason}"`, so a monitor can join the log row to
  * the caller's own count (F5).
  */
+import { judgeConfirmedDelete } from "./confirmed-delete.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
-import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	IO_BRIDGE_SYMBOL,
 	IO_BRIDGE_VERSION,
 	type BridgeEntry,
 	type LineHashMap,
 	type LineRange,
-	type MutationFacet,
 	type PiLensIOBridge,
 	type ReadFacet,
 	type RecordOutcome,
@@ -39,6 +40,7 @@ import {
 	type RecordResult,
 } from "./io-bridge-contract.js";
 import {
+	isValidRange,
 	recordMutationOutcome,
 	type MutationBridgeDeps,
 } from "./mutation-bridge.js";
@@ -88,11 +90,11 @@ export interface IOBridgeDeps extends MutationBridgeDeps {
 		name: string,
 		bridge?: "read" | "mutation" | "io",
 	): boolean | string | undefined;
-	/** Delete gate 1 — vendor / outside every workspace root. */
+	/** Delete gate 1 (`clients/confirmed-delete.ts`). */
 	isExternalOrVendorFile(filePath: string): boolean;
-	/** Delete gate 2 — ignored by a project ignore file. */
+	/** Delete gate 2 (`clients/confirmed-delete.ts`). */
 	isPathIgnoredByProject(filePath: string): boolean;
-	/** Delete gate 4 — tell LSP clients the watched file is gone (type 3). */
+	/** After a confirmed delete: tell LSP clients the watched file is gone (type 3). */
 	notifyExternalFileChange(
 		filePath: string,
 		type: number,
@@ -102,8 +104,6 @@ export interface IOBridgeDeps extends MutationBridgeDeps {
 		existsSync(filePath: string): boolean;
 		statSync(filePath: string): { size: number };
 	};
-	/** Test seam for the deferred-format event; defaults to the real publisher. */
-	publishFormatQueued?: typeof publishFormatQueued;
 }
 
 /** Mount the bridge singleton. First-wins, `clients/process-bridge.ts` owns the body. */
@@ -118,19 +118,6 @@ export function registerIOBridge(deps: IOBridgeDeps): void {
 
 function isRecordObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
-}
-
-function isValidRange(value: unknown): value is LineRange {
-	if (!Array.isArray(value) || value.length !== 2) return false;
-	const [start, end] = value;
-	return (
-		typeof start === "number" &&
-		typeof end === "number" &&
-		Number.isInteger(start) &&
-		Number.isInteger(end) &&
-		start >= 1 &&
-		end >= start
-	);
 }
 
 /**
@@ -150,11 +137,6 @@ function readConsumer(raw: Record<string, unknown>): string {
 	return typeof caller === "string" && caller !== "" ? caller : "unknown";
 }
 
-/**
- * A read-facet problem string, or `undefined` when valid. `ranges` is required;
- * `[]` is the explicit zero-line read. `content` is valid only with a single
- * range. Every `lineHashes` key must fall inside a declared range.
- */
 /** `ranges` must be an array of 1-indexed `[start, end]` pairs. */
 function readRangesProblem(ranges: unknown): string | undefined {
 	if (!Array.isArray(ranges)) return "ranges must be an array";
@@ -212,6 +194,11 @@ function readLineHashesProblem(
 	return undefined;
 }
 
+/**
+ * A read-facet problem string, or `undefined` when valid. `ranges` is required;
+ * `[]` is the explicit zero-line read. `content` is valid only with a single
+ * range. Every `lineHashes` key must fall inside a declared range.
+ */
 function readFacetProblem(read: unknown): string | undefined {
 	if (!isRecordObject(read)) return "read facet must be an object";
 	const ranges = read["ranges"];
@@ -232,72 +219,6 @@ function mutationKindProblem(kind: unknown): string | undefined {
 		return undefined;
 	}
 	return 'kind must be "edit", "write", or "delete"';
-}
-
-/** `edit` ranges are optional, but a present `ranges` must be a non-empty array. */
-function editRangesProblem(
-	mutate: Record<string, unknown>,
-): string | undefined {
-	if (mutate["kind"] !== "edit") return undefined;
-	const ranges = mutate["ranges"];
-	if (ranges === undefined) return undefined;
-	if (!Array.isArray(ranges) || ranges.length === 0) {
-		return "edit ranges must be a non-empty array";
-	}
-	return undefined;
-}
-
-function writeContentProblem(
-	mutate: Record<string, unknown>,
-): string | undefined {
-	if (mutate["kind"] !== "write") return undefined;
-	const writtenContent = mutate["writtenContent"];
-	if (writtenContent === undefined || typeof writtenContent === "string") {
-		return undefined;
-	}
-	return "writtenContent must be a string";
-}
-
-function booleanFieldProblem(value: unknown, name: string): string | undefined {
-	if (value === undefined || typeof value === "boolean") return undefined;
-	return `${name} must be a boolean`;
-}
-
-function touchedLinesProblem(value: unknown): string | undefined {
-	if (value === undefined || isValidRange(value)) return undefined;
-	return "touchedLines must be 1-indexed [start, end]";
-}
-
-function provenanceProblem(value: unknown): string | undefined {
-	if (
-		value === undefined ||
-		value === "observed" ||
-		value === "settled-sweep"
-	) {
-		return undefined;
-	}
-	return 'provenance must be "observed" or "settled-sweep"';
-}
-
-/**
- * A mutation-facet problem string, or `undefined` when valid. `edit` ranges
- * are optional (omitted means the v1 seam's whole-file over-approximation), but
- * a present `ranges` must be non-empty and well-formed. `readGuardBranchEpoch`
- * is deliberately NOT type-checked here: a malformed epoch is the mutation
- * seam's to record (`mutation-bridge-invalid-branch-epoch`) and fail open.
- */
-function mutationFacetProblem(mutate: unknown): string | undefined {
-	if (!isRecordObject(mutate)) return "mutate facet must be an object";
-	const kindProblem = mutationKindProblem(mutate["kind"]);
-	if (kindProblem !== undefined) return kindProblem;
-	return (
-		editRangesProblem(mutate) ??
-		writeContentProblem(mutate) ??
-		booleanFieldProblem(mutate["deferAutofix"], "deferAutofix") ??
-		booleanFieldProblem(mutate["importsChanged"], "importsChanged") ??
-		touchedLinesProblem(mutate["touchedLines"]) ??
-		provenanceProblem(mutate["provenance"])
-	);
 }
 
 function drop(
@@ -520,52 +441,33 @@ function recordReadFacet(
 	return { accepted: true };
 }
 
-function publishQueued(
-	filePath: string,
-	mutate: MutationFacet,
-	deps: IOBridgeDeps,
-	queued: ReadonlyArray<"autofix" | "format">,
-): void {
-	const publish = deps.publishFormatQueued ?? publishFormatQueued;
-	try {
-		publish({
-			filePath,
-			cwd: deps.getDispatchCwd(filePath),
-			tool: mutate.kind === "write" ? "write" : "edit",
-			kinds: [...queued],
-			...(deps.dbg !== undefined && { dbg: deps.dbg }),
-		});
-	} catch (err) {
-		deps.dbg?.(
-			`io_bridge: format-queued publish failed for ${filePath}: ${err}`,
-		);
-	}
-}
-
 function recordDeleteFacet(
 	filePath: string,
 	caller: string,
 	deps: IOBridgeDeps,
 ): RecordOutcome {
 	// Enclosing gate (RFC D3). `no-lsp` is read again below, where it suppresses
-	// only the LSP notification — the eviction still runs (RFC §6).
+	// only the LSP notification; the eviction still runs (RFC §6). The native
+	// bash path skips the whole delete under `no-lsp` instead.
 	if (deps.getFlag("no-read-guard", "mutation")) {
 		return drop("mutate", caller, "no-read-guard", filePath);
 	}
-	// Inner confirmed-delete gates, in `runtime-tool-result.ts` production order.
-	if (deps.isExternalOrVendorFile(filePath)) {
-		return drop("mutate", caller, "out-of-scope", filePath);
-	}
-	if (deps.isPathIgnoredByProject(filePath)) {
-		return drop("mutate", caller, "ignored", filePath);
-	}
 	const guard = deps.getReadGuard();
-	const tracked = guard.hasKnownPath(filePath);
-	const exists = deps.nodeFs.existsSync(filePath);
-	// Untracked and already absent: nothing to evict, nothing to notify.
-	if (!tracked && !exists) return { accepted: true };
-	// Still on disk: the on-disk delete must precede the bridge call.
-	if (exists) {
+	const verdict = judgeConfirmedDelete(filePath, {
+		isExternalOrVendorFile: (p) => deps.isExternalOrVendorFile(p),
+		isPathIgnoredByProject: (p) => deps.isPathIgnoredByProject(p),
+		hasKnownPath: (p) => guard.hasKnownPath(p),
+		existsSync: (p) => deps.nodeFs.existsSync(p),
+	});
+	if (verdict === "out-of-scope" || verdict === "ignored") {
+		return drop("mutate", caller, verdict, filePath);
+	}
+	// Untracked and already absent: nothing to evict, nothing to notify. Any
+	// other path still on disk means the caller recorded before deleting.
+	if (verdict === "untracked" && !deps.nodeFs.existsSync(filePath)) {
+		return { accepted: true };
+	}
+	if (verdict !== "confirmed") {
 		return drop(
 			"mutate",
 			caller,
@@ -592,16 +494,35 @@ function recordDeleteFacet(
 	return { accepted: true };
 }
 
+/** The facet fields the bookkeeping owner reads under the same names. */
+const MUTATE_PASSTHROUGH_KEYS = [
+	"touchedLines",
+	"deferAutofix",
+	"importsChanged",
+	"provenance",
+	"readGuardBranchEpoch",
+	"lineage",
+] as const;
+
 function recordMutateFacet(
 	raw: Record<string, unknown>,
 	caller: string,
 	deps: IOBridgeDeps,
 ): RecordOutcome {
-	const problem = mutationFacetProblem(raw["mutate"]);
-	if (problem !== undefined) {
-		return drop("mutate", caller, "malformed", problem);
+	const mutate = raw["mutate"];
+	if (!isRecordObject(mutate)) {
+		return drop(
+			"mutate",
+			caller,
+			"malformed",
+			"mutate facet must be an object",
+		);
 	}
-	const mutate = raw["mutate"] as MutationFacet;
+	const kindProblem = mutationKindProblem(mutate["kind"]);
+	if (kindProblem !== undefined) {
+		return drop("mutate", caller, "malformed", kindProblem);
+	}
+	const kind = mutate["kind"] as "edit" | "write" | "delete";
 	const filePath = raw["filePath"];
 	if (typeof filePath !== "string" || filePath === "") {
 		return drop(
@@ -611,48 +532,30 @@ function recordMutateFacet(
 			"filePath must be a non-empty string",
 		);
 	}
-	if (mutate.kind === "delete") {
-		return recordDeleteFacet(filePath, caller, deps);
+	if (kind === "delete") return recordDeleteFacet(filePath, caller, deps);
+	// edit/write: translate the facet into the owner's entry once. The owner
+	// validates every field (one validator, #3654 F3) and runs the seam: scope
+	// gate, lineage fence, stamp, turn state, receipt, deferral, publish.
+	// `consumer` rides along so the change log names the producer
+	// (`agent-tool:<name>`), never `agent-tool:unknown`.
+	const entry: Record<string, unknown> = { filePath, kind };
+	if (caller !== "unknown") entry["consumer"] = caller;
+	if (kind === "edit" && mutate["ranges"] !== undefined) {
+		entry["editRanges"] = mutate["ranges"];
 	}
-	// edit/write: the mutation bookkeeping owner runs the seam (scope gate,
-	// lineage fence, stamp, turn state, receipt, deferral). This module only
-	// translates the facet and turns the outcome into v2 vocabulary.
-	const v1Entry: Record<string, unknown> = {
-		filePath,
-		kind: mutate.kind,
-	};
-	// #3654/#2465: the mutation owner derives the change-log source
-	// (`agent-tool:<name>`) from the entry's `consumer`, so a v1 caller's
-	// producer identity must ride along. Without this the v2 translation
-	// reported every v1 producer as `agent-tool:unknown`.
-	const rawProducer = raw["consumer"];
-	if (typeof rawProducer === "string" && rawProducer !== "") {
-		v1Entry["consumer"] = rawProducer;
+	for (const key of MUTATE_PASSTHROUGH_KEYS) {
+		if (mutate[key] !== undefined) entry[key] = mutate[key];
 	}
-	const passthrough = raw["mutate"] as Record<string, unknown>;
-	const editRanges = passthrough["ranges"];
-	if (mutate.kind === "edit" && editRanges !== undefined) {
-		v1Entry["editRanges"] = editRanges;
-	}
-	for (const key of [
-		"touchedLines",
-		"deferAutofix",
-		"importsChanged",
-		"provenance",
-		"readGuardBranchEpoch",
-		"lineage",
-	] as const) {
-		if (passthrough[key] !== undefined) v1Entry[key] = passthrough[key];
-	}
-	const outcome = recordMutationOutcome(v1Entry, deps, {
+	const outcome = recordMutationOutcome(entry, deps, {
 		rejectStaleLineage: true,
 	});
-	if (outcome.queued.length > 0) {
-		publishQueued(filePath, mutate, deps, outcome.queued);
-	}
 	if (!outcome.accepted) {
-		const reason: RecordReason = outcome.reason ?? "bookkeeping-error";
-		return drop("mutate", caller, reason, filePath);
+		return drop(
+			"mutate",
+			caller,
+			outcome.reason ?? "bookkeeping-error",
+			outcome.detail ?? filePath,
+		);
 	}
 	return { accepted: true };
 }
@@ -673,7 +576,14 @@ function safeFacet(
 	}
 }
 
-function recordIOEntry(raw: BridgeEntry, deps: IOBridgeDeps): RecordResult {
+/**
+ * The bridge body: the mounted `record()` and the v1 read shim both call it
+ * with the same deps, so the shim exercises exactly what v2 runs.
+ */
+export function recordIOEntry(
+	raw: BridgeEntry,
+	deps: IOBridgeDeps,
+): RecordResult {
 	if (!isRecordObject(raw)) {
 		const detail = "entry must be an object";
 		return {

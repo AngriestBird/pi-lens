@@ -9,8 +9,9 @@
  * record a later phase reads, not a spy's call log.
  *
  * Frozen v1 shims (`read-bridge`, `mutation-bridge`) are mounted in the same
- * file so their delegation to v2 and their unchanged return types are proven
- * together (D14).
+ * file, wired as `index.ts` wires them (the read shim over `recordIOEntry` and
+ * these deps, the mutation shim over the same bookkeeping owner), so their
+ * delegation and their unchanged return types are proven together (D14).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -33,6 +34,7 @@ import {
 	type RecordOutcome,
 	type RecordReason,
 	getIOBridge,
+	recordIOEntry,
 	registerIOBridge,
 } from "../../clients/io-bridge.js";
 import {
@@ -86,7 +88,6 @@ let currentStatSize: (filePath: string) => number;
 let previousTestMode: string | undefined;
 let capturedReads: CapturedRead[];
 let forgetCalls: string[];
-let readOrder: string[];
 let isRecordableSpy: Mock<(filePath: string) => void>;
 let notifySpy: Mock<(filePath: string, type: number) => void>;
 let publishSpy: Mock<(args: unknown) => void>;
@@ -128,6 +129,9 @@ const mutationDeps: MutationBridgeDeps = {
 	isRecordable: (filePath) => currentIsRecordable(filePath),
 	shouldStampReadGuard: () => !currentFlags.get("no-read-guard"),
 	dbg: () => {},
+	publishFormatQueued: (args) => {
+		publishSpy(args);
+	},
 };
 
 // ── Bridge absent — must run before the describe's beforeAll fires ───────────
@@ -140,10 +144,8 @@ describe("io-bridge v2", () => {
 	beforeAll(() => {
 		registerIOBridge(ioDeps);
 		registerReadBridge({
-			getReadGuard: () => currentReadGuard as never,
-			getTurnIndex: () => runtime.turnIndex,
-			peekWriteIndex: () => runtime.peekWriteIndex(),
 			isRecordable: (filePath) => currentIsRecordable(filePath),
+			forward: (entry) => recordIOEntry(entry, ioDeps),
 		});
 		registerMutationBridge(mutationDeps);
 	});
@@ -164,7 +166,6 @@ describe("io-bridge v2", () => {
 		const realGuard = runtime.readGuard;
 		capturedReads = [];
 		forgetCalls = [];
-		readOrder = [];
 		isRecordableSpy = vi.fn<(filePath: string) => void>();
 		notifySpy = vi.fn<(filePath: string, type: number) => void>();
 		publishSpy = vi.fn<(args: unknown) => void>();
@@ -178,7 +179,6 @@ describe("io-bridge v2", () => {
 		currentReadGuard = {
 			recordRead: (record, opts) => {
 				capturedReads.push({ record, opts });
-				readOrder.push("recordRead");
 				realGuard.recordRead(record, opts);
 			},
 			forgetPath: (filePath) => {
@@ -562,26 +562,43 @@ describe("io-bridge v2", () => {
 
 	// ── 6. Write-before-read ordering ───────────────────────────────────────
 
-	it("executes the mutate facet strictly before the read facet", () => {
+	// D10's observable effect (#3654 F5). `recordWritten` marks a file's
+	// existing reads consumed, and only a consumed read may idle out;
+	// `recordRead` makes the file's reads outstanding again. Mutate-then-read
+	// leaves the preview read outstanding; read-then-mutate would consume it,
+	// so the read the producer just reported would be evicted on idle and the
+	// next edit would block as never read.
+	it("keeps the compound call's preview read outstanding through idle eviction", () => {
 		const filePath = writeFile();
-		const originalRecordWritten = runtime.readGuard.recordWritten.bind(
-			runtime.readGuard,
-		);
-		vi.spyOn(runtime.readGuard, "recordWritten").mockImplementation(
-			(
-				fp: string,
-				opts?: { branchEpoch?: number; stampFileTime?: boolean },
-			) => {
-				readOrder.push("recordWritten");
-				originalRecordWritten(fp, opts);
-			},
-		);
-		record({
-			filePath,
-			mutate: { kind: "edit", ranges: [[10, 15]] },
-			read: { ranges: [[5, 25]], content: FILE_LINES.slice(4, 25).join("\n") },
-		});
-		expect(readOrder).toEqual(["recordWritten", "recordRead"]);
+		const previousIdle = process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS;
+		process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS = "1000";
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const result = record({
+				filePath,
+				mutate: { kind: "edit", ranges: [[10, 15]] },
+				read: {
+					ranges: [[5, 25]],
+					content: FILE_LINES.slice(4, 25).join("\n"),
+				},
+			});
+			expect(result).toEqual({
+				mutate: { accepted: true },
+				read: { accepted: true },
+			});
+			vi.advanceTimersByTime(5_000);
+			expect(runtime.readGuard.getReadHistory(filePath)).toHaveLength(1);
+			expect(runtime.readGuard.checkEdit(filePath, [12, 12]).action).toBe(
+				"allow",
+			);
+		} finally {
+			vi.useRealTimers();
+			if (previousIdle === undefined) {
+				delete process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS;
+			} else {
+				process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS = previousIdle;
+			}
+		}
 	});
 
 	it("lets a later checkEdit on an edited line pass after a compound edit+read", () => {
@@ -627,6 +644,41 @@ describe("io-bridge v2", () => {
 		const stored = runtime.readGuard.getReadHistory(filePath).at(-1);
 		expect(stored?.lineHashes).toBeUndefined();
 		expect(stored?.source).toBe("io-bridge:coverage");
+	});
+
+	// #3654 F2: the size gate is the only thing between `ranges: []` on a
+	// non-empty file and whole-file coverage of lines the agent never saw (a
+	// NoBlindAllow allow, #3652).
+	it("refuses a zero-line read of a non-empty file and records nothing", () => {
+		const filePath = writeFile();
+		const result = record({
+			filePath,
+			consumer: "zero",
+			read: { ranges: [] },
+		});
+		expect(result.read).toEqual({
+			accepted: false,
+			reason: "bookkeeping-error",
+		});
+		expect(capturedReads).toHaveLength(0);
+		expect(runtime.readGuard.getReadHistory(filePath)).toHaveLength(0);
+		expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe("block");
+	});
+
+	it("credits whole-file coverage for a zero-line read of an empty file", () => {
+		const filePath = writeFile("src/empty.ts", []);
+		fs.writeFileSync(filePath, "");
+		const result = record({
+			filePath,
+			consumer: "zero",
+			read: { ranges: [] },
+		});
+		expect(result.read).toEqual({ accepted: true });
+		const stored = runtime.readGuard.getReadHistory(filePath);
+		expect(
+			stored.map((r) => [r.effectiveOffset, r.effectiveLimit, r.source]),
+		).toEqual([[1, Number.MAX_SAFE_INTEGER, "io-bridge:zero"]]);
+		expect(stored[0]?.lineHashes).toBeUndefined();
 	});
 
 	it("hashes in memory when content is supplied, without a contentBinding", () => {
