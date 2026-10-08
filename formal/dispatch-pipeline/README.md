@@ -266,9 +266,12 @@ sibling.
 | `SiblingRestoreInFlightHeld` | the in-flight check, with the other windows closed and every call reaching pi-lens during the run | pass | 612 |
 | `MutSiblingNoInFlight` | the same without the in-flight check (the restore before #3741 round 2) | violated `NoRestoreOverNewer` | 493 (at the violation) |
 | `SiblingRestoreDeregistered` | finding A | violated `NoRestoreOverReadEdit` | 252 (at the violation) |
-| `SiblingRestoreInFlight` | finding B | violated `NoSilentLoss` | 129 (at the violation) |
+| `SiblingRestoreInFlight` | finding B: an uncaptured in-flight edit is reported, but its bytes are not retained | pass | 146 |
 | `SiblingRestoreQueuedSilent` | finding C, left after defect 2's fix | violated `NoSilentLoss` | 245 (at the violation) |
-| `SiblingRestoreCallBeforeRun` | finding D: `SiblingRestoreInFlightHeld` with `SCallInRun = FALSE` | violated `NoRestoreOverNewer` | 1,261 (at the violation) |
+| `SiblingRestoreCallBeforeRun` | finding D: a pre-registration call is carried into the run, preventing restore over newer bytes | pass | 1,261 |
+| `SiblingRestoreInFlightUnfixed` | pre-fix B witness: no report for an uncaptured in-flight edit | violated `NoSilentLoss` | 129 (at the violation) |
+| `SiblingRestoreQueuedSilentUnfixed` | pre-fix C witness: a later capture hides an earlier loss | violated `NoSilentLoss` | 245 (at the violation) |
+| `SiblingRestoreCallBeforeRunUnfixed` | pre-fix D witness: a pre-registration call is not carried into the run | violated `NoRestoreOverNewer` | 1,261 (at the violation) |
 
 Non-vacuity: the restore is load-bearing (`MutSiblingNoRestore` against
 `SiblingRestoreOneEdit`); the re-check is load-bearing (`MutSiblingNoRecheck`
@@ -326,23 +329,23 @@ each reproduced against the real `beginFixRun` / `noteAgentMutation` /
   header's "one syscall gap" understated it. The run now stays registered until
   `restore` ends (`SettleCapture`; `MutSiblingNoSettleCapture` is red without
   it).
-- **B, `SiblingRestoreInFlight`.** `settle` skips a file with no capture
-  (`if (!capture) continue`) before it looks at the in-flight set. An agent
-  edit whose `tool_result` has not arrived when the tool exits has no capture.
-  If the tool's write erased it, the file is neither restored nor reported
-  (`agentEdited` lists only captured files).
+- **B, `SiblingRestoreInFlight`.** `settle` reports a file with no capture
+  while its native call is in flight. The agent's bytes cannot be retained
+  because the fixer wrote outside pi's queue before pi-lens observed the
+  result; the remaining safety property is reportability, not preservation.
 - **C, `SiblingRestoreQueuedSilent`.** A later capture replaces an earlier
   one. If the tool's stale write erased edit 1 after it was captured, and
-  edit 2 then landed on the tool's bytes, edit 2's capture passes its own
-  check and edit 1 is in neither the capture nor the report.
-- **D, `SiblingRestoreCallBeforeRun`.** `noteAgentCallStart` reaches only an
-  active run, so a `tool_call` that passed pi-lens before `beginFixRun` is not
-  in flight. Its edit lands during the run with its `tool_result` still to
-  come, and the restore writes the older capture over it. Reach: pi's parallel
-  batch runs `tool_call` for every call first, so a same-batch sibling is
-  always called before `beginFixRun`; but it usually finishes in milliseconds,
-  long before the write's pipeline starts the tool, so landing inside the run
-  takes a long holder of S's queue. Reachable in the model, narrow in practice.
+  edit 2 then landed on the tool's bytes, the earlier loss remains reported
+  when its capture was not verified; verified sequential edits are not a
+  loss signal.
+- **D, `SiblingRestoreCallBeforeRun`.** `noteAgentCallStart` retains a bounded
+  pre-registration identity and carries it into the run, so the restore does
+  not write an older capture over the newer in-flight edit. Reach: pi's
+  parallel batch runs `tool_call` for every call first, so a same-batch sibling
+  is always called before `beginFixRun`; but it usually finishes in
+  milliseconds, long before the write's pipeline starts the tool, so landing
+  inside the run takes a long holder of S's queue. Reachable in the model,
+  narrow in practice.
   The realistic overlap is the abandoned handler, whose next-turn `tool_call`
   arrives during the run and is noted in flight; that path meets defect 2 and
   findings A to C, not D.

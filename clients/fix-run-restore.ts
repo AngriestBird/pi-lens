@@ -150,10 +150,15 @@ interface CoveredFile {
 	superseded?: CaptureVerdict;
 }
 
+interface PendingCall {
+	key: string;
+	expected?: AgentWriteExpectation;
+}
+
 interface ActiveRun {
 	files: Map<string, CoveredFile>;
 	/** Agent mutating tool calls started and not yet delivered: id -> file key. */
-	calls: Map<string, string>;
+	calls: Map<string, PendingCall>;
 }
 
 export interface FixRunReport {
@@ -212,7 +217,7 @@ export async function runWithFixRestore<T, R>(
 interface Registry {
 	active: Set<ActiveRun>;
 	/** Calls that started before a run registered, retained until their result. */
-	pendingCalls: Map<string, string>;
+	pendingCalls: Map<string, PendingCall>;
 }
 
 const REGISTRY_FAMILY = "fix-run-restore";
@@ -309,8 +314,8 @@ export async function beginFixRun(args: {
 	active.add(run);
 	// A parallel tool call can pass the tool_call seam while the fixer is still
 	// hashing its scope. Carry that identity into the run (#3830, window D).
-	for (const [toolCallId, key] of registry().pendingCalls) {
-		if (run.files.has(key)) run.calls.set(toolCallId, key);
+	for (const [toolCallId, call] of registry().pendingCalls) {
+		if (run.files.has(call.key)) run.calls.set(toolCallId, call);
 	}
 	return {
 		finish() {
@@ -345,11 +350,24 @@ async function restoreRun(
 	let queueWaitMs = 0;
 	try {
 		for (const [key, file] of run.files) {
-			const inFlight = [...run.calls.values()].includes(key);
+			const inFlight = [...run.calls.values()].some((call) => call.key === key);
 			if (!file.capture) {
 				if (inFlight) {
 					report.agentEdited.push(file.filePath);
-					report.possiblyLost.push(file.filePath);
+					let matchesAgentWrite = false;
+					try {
+						const current = await fs.promises.readFile(file.filePath);
+						matchesAgentWrite = [...run.calls.values()]
+							.filter((call) => call.key === key)
+							.some(
+								(call) =>
+									call.expected !== undefined &&
+									verdictFor(current, call.expected) === "verified",
+							);
+					} catch {
+						// An unreadable file cannot prove that the agent write survived.
+					}
+					if (!matchesAgentWrite) report.possiblyLost.push(file.filePath);
 				}
 				continue;
 			}
@@ -367,6 +385,10 @@ async function restoreRun(
 	} finally {
 		active.delete(run);
 	}
+	report.restored = [...new Set(report.restored)];
+	report.lost = [...new Set(report.lost)];
+	report.possiblyLost = [...new Set(report.possiblyLost)];
+	report.agentEdited = [...new Set(report.agentEdited)];
 	if (report.agentEdited.length > 0) {
 		// One row per run that had a capture: `queueWaitMs` is the time spent
 		// behind other holders of the siblings' queue entries, the number to watch
@@ -421,7 +443,8 @@ async function restoreFile(
 	const capture = file.capture;
 	if (!capture) return;
 	if (file.superseded === "overwritten") report.lost.push(file.filePath);
-	else if (file.superseded) report.possiblyLost.push(file.filePath);
+	else if (file.superseded === "unverifiable")
+		report.possiblyLost.push(file.filePath);
 	let current: Buffer;
 	try {
 		current = await fs.promises.readFile(file.filePath);
@@ -435,7 +458,7 @@ async function restoreFile(
 		return;
 	}
 	const unchanged = current.equals(capture.bytes);
-	if ([...run.calls.values()].includes(key)) {
+	if ([...run.calls.values()].some((call) => call.key === key)) {
 		// A newer agent write may already be on disk with its tool_result still
 		// to come: the capture is older than the file, so it must not be written.
 		if (!unchanged || capture.verdict === "unverifiable")
@@ -493,7 +516,8 @@ export function noteAgentMutation(
 				continue;
 			}
 			if (file.capture && !file.capture.bytes.equals(bytes)) {
-				file.superseded ??= file.capture.verdict;
+				if (file.capture.verdict !== "verified")
+					file.superseded ??= file.capture.verdict;
 				if (file.capture.verdict === "overwritten")
 					file.superseded = "overwritten";
 			}
@@ -514,6 +538,7 @@ export function noteAgentMutation(
 export function noteAgentCallStart(
 	toolCallId: string | undefined,
 	filePath: string,
+	expected?: AgentWriteExpectation,
 ): void {
 	if (toolCallId === undefined) return;
 	const { active } = registry();
@@ -521,9 +546,16 @@ export function noteAgentCallStart(
 	// The bounded pending set closes the registration race between the agent's
 	// tool_call and beginFixRun (#3830, window D).
 	if (registry().pendingCalls.size < 256)
-		registry().pendingCalls.set(toolCallId, key);
+		registry().pendingCalls.set(toolCallId, { key, expected });
+	else
+		recordDegradationOnce({
+			kind: "fix-run-pending-call-cap",
+			subject: "fix-run-restore",
+			reason:
+				"more than 256 agent mutation calls were in flight before a fixer run; later calls were not carried into the run",
+		});
 	for (const run of active) {
-		if (run.files.has(key)) run.calls.set(toolCallId, key);
+		if (run.files.has(key)) run.calls.set(toolCallId, { key, expected });
 	}
 }
 

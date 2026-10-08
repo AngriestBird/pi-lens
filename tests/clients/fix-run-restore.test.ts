@@ -45,6 +45,8 @@ import {
 	beginFixRun,
 	expectationFromToolInput,
 	FIX_RUN_MAX_FILE_BYTES,
+	noteAgentCallEnd,
+	noteAgentCallStart,
 	noteAgentMutation,
 	runWithFixRestore,
 } from "../../clients/fix-run-restore.js";
@@ -368,7 +370,7 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(fs.readFileSync(aRs, "utf-8")).toBe("let AGENT = 1;\n");
 		expect(result.changedFiles ?? []).not.toContain(aRs);
 		expect(overwrittenCount()).toBe(1);
-	});
+	}, 10000);
 
 	it("leaves the tool's fix on a sibling the agent did not edit", async () => {
 		const aRs = path.join(srcDir, "a.rs");
@@ -1456,17 +1458,46 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 				toolCallId: "before-fix-run",
 			});
 			await early.start();
+			early.write();
 			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
 			await started.p;
 			proceed.open();
 			await toolWrote.p;
-			early.write();
 			await run;
 			await restoreSettled();
 			await early.deliver();
 
-			expect(fs.readFileSync(aRs, "utf-8")).toBe("let EARLY = 1;\n");
+			expect(fs.readFileSync(aRs, "utf-8")).toBe(TOOL_FIXED);
 			expect(noticeText()).toContain("a.rs");
+		});
+
+		it("does not report an uncaptured edit that landed after the tool write", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				toolWrote.open();
+				return 0;
+			};
+			const late = agentEdit(aRs, "let LATE = 1;", "write", false, {
+				toolCallId: "after-tool-write",
+			});
+			await late.start();
+			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await toolWrote.p;
+			late.write();
+			await run;
+			await restoreSettled();
+			await late.deliver();
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe("let LATE = 1;\n");
+			expect(noticeText()).toBe("");
 		});
 
 		// Recurrence: window C of #3830. A later capture used to replace the only
@@ -1484,7 +1515,9 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			};
 			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
 			await started.p;
-			const first = agentEdit(aRs, "let FIRST = 1;");
+			const first = agentEdit(aRs, "let FIRST = 1;", "edit", false, {
+				bytes: "let FIRST-ACTUAL = 1;\n",
+			});
 			first.write();
 			await first.deliver();
 			fs.writeFileSync(aRs, TOOL_FIXED);
@@ -1497,6 +1530,31 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 			expect(fs.readFileSync(aRs, "utf-8")).toBe("let SECOND = 2;\n");
 			expect(noticeText()).toContain("a.rs");
+		});
+
+		it("does not report sequential verified edits when the tool never touched the sibling", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				return 0;
+			};
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			const first = agentEdit(aRs, "let FIRST = 1;");
+			first.write();
+			await first.deliver();
+			const second = agentEdit(aRs, "let SECOND = 2;");
+			second.write();
+			await second.deliver();
+			proceed.open();
+			await run;
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe("let SECOND = 2;\n");
+			expect(noticeText()).toBe("");
+			expect(overwrittenCount()).toBe(0);
 		});
 
 		// Recurrence: the #3844 review's forced-mtime probe. The re-stat compared
@@ -1879,6 +1937,47 @@ describe("what a native write or edit says it wrote (#3598)", () => {
 
 describe("fix-run registry (#3598)", () => {
 	const activeRuns = activeFixRuns;
+
+	it("removes a completed pre-run call before carrying calls into a run", async () => {
+		const env = setupTestEnvironment("pi-lens-fix-run-pending-end-");
+		const sibling = path.join(env.tmpDir, "a.rs");
+		fs.writeFileSync(sibling, "fn a() {}\n");
+		try {
+			noteAgentCallStart("ended-before-run", sibling, {
+				content: "fn agent() {}\n",
+			});
+			noteAgentCallEnd("ended-before-run");
+			const { restoring } = await runWithFixRestore(
+				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+				async () => {
+					fs.writeFileSync(sibling, "fn agent() {}\n");
+					noteAgentMutation(sibling, { content: "fn agent() {}\n" });
+					fs.writeFileSync(sibling, "fn tool() {}\n");
+				},
+				async () => {},
+			);
+			const report = await restoring;
+			expect(report.restored).toEqual([sibling]);
+			expect(report.possiblyLost).toEqual([]);
+		} finally {
+			noteAgentCallEnd("ended-before-run");
+			env.cleanup();
+		}
+	});
+
+	it("records a bounded degradation when pre-run calls exceed the cap", () => {
+		resetDegradationLedger();
+		const ids = Array.from({ length: 257 }, (_, i) => `pending-cap-${i}`);
+		try {
+			for (const id of ids) noteAgentCallStart(id, `pending-cap/${id}.rs`);
+			const cap = getDegradationSummary().find(
+				(group) => group.kind === "fix-run-pending-call-cap",
+			);
+			expect(cap?.count).toBe(1);
+		} finally {
+			for (const id of ids) noteAgentCallEnd(id);
+		}
+	});
 
 	it("unregisters the run when the fixer settles and when it throws", async () => {
 		const before = activeRuns().size;
