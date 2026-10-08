@@ -327,7 +327,7 @@ export const OPAQUE_BASELINE_PENDING_CAP = 64;
 export class OpaqueBaselineStore {
 	private readonly pending = new BoundedFifoMap<
 		string,
-		{ state: PendingOpaqueBaseline; turn?: OpaqueBaselineTurn }
+		{ state: PendingOpaqueBaseline; turn: OpaqueBaselineTurn | undefined }
 	>(OPAQUE_BASELINE_PENDING_CAP);
 
 	private static keyOf(slot: string, callId: string | undefined): string {
