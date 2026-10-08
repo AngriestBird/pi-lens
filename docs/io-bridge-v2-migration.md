@@ -25,7 +25,10 @@ Under **Decision D14** (Backward-Compatible Refinement):
 - **Semantics & Keying**:
   - Path arguments are accepted as strings without clobbering caller display paths.
   - Map keys in `ReadGuard` and `CacheManager` are derived identically.
-  - No v1-valid call will be rejected or re-keyed by upgrading `pi-lens`.
+  - No v1-valid call is re-keyed by upgrading `pi-lens`, and every v1 call keeps its return value.
+- **Two recorded differences** (the v1 read shim now runs v2's `disk`-evidence read):
+  - A read of a file that is absent when the call lands records nothing; v1 recorded coverage for it. The drop is an `io-bridge-read-dropped` ledger row.
+  - A zero-line read (`requestedLimit: 0`) of a non-empty or unreadable file is still dropped, but its ledger row is `io-bridge-read-dropped` (subject `<consumer>:bookkeeping-error`) instead of `read-bridge-zero-line-dropped`.
 
 ---
 
@@ -35,8 +38,8 @@ Under **Decision D14** (Backward-Compatible Refinement):
 |---|---|---|
 | **Read File Window** | `readBridge.recordRead({ filePath, requestedOffset: 10, requestedLimit: 20, consumer: "my-tool" })` | `ioBridge.record({ filePath, consumer: "my-tool", read: { ranges: [[10, 29]], evidence: "disk" } })` |
 | **Read Entire File** | `readBridge.recordRead({ filePath, requestedOffset: 1, consumer: "my-tool" })` | `ioBridge.record({ filePath, consumer: "my-tool", read: { ranges: [[1, lineCount]], content: inMemoryText } })` |
-| **Partial Edit** | `mutationBridge.recordMutation({ filePath, ranges: [[12, 15]], kind: "edit", importsChanged: false })` | `ioBridge.record({ filePath, mutate: { kind: "edit", ranges: [[12, 15]], importsChanged: false } })` |
-| **Whole-File Write** | `mutationBridge.recordMutation({ filePath, kind: "write" })` | `ioBridge.record({ filePath, mutate: { kind: "write", writtenContent: newText } })` |
+| **Partial Edit** | `mutationBridge.recordMutation({ filePath, editRanges: [[12, 15]], kind: "edit", importsChanged: false })` | `ioBridge.record({ filePath, mutate: { kind: "edit", ranges: [[12, 15]], importsChanged: false } })` |
+| **Whole-File Write** | `mutationBridge.recordMutation({ filePath, kind: "write" })` | `ioBridge.record({ filePath, mutate: { kind: "write" } })` |
 | **Atomic Edit + Read** | *Requires 2 separate calls to two different global symbols* | `ioBridge.record({ filePath, mutate: { kind: "edit", ranges: [[10, 15]] }, read: { ranges: [[5, 25]], content: previewText } })` |
 | **File Deletion** | *Not supported in v1* | `ioBridge.record({ filePath, mutate: { kind: "delete" } })` |
 
@@ -46,7 +49,7 @@ Under **Decision D14** (Backward-Compatible Refinement):
 
 | Feature | Category | Description |
 |---|---|---|
-| **Atomic Mutate-Before-Read** | `COMPATIBLE` | Compound `{ mutate, read }` calls guarantee `mutate` runs before `read`, avoiding false `file_time_stale` blocks on preview diffs. |
+| **Atomic Mutate-Before-Read** | `COMPATIBLE` | Compound `{ mutate, read }` calls guarantee `mutate` runs before `read`, so the preview read stays outstanding: a write marks the file's earlier reads consumed (evictable on idle), and the read that follows it is not. |
 | **In-Memory Hash Evidence** | `OPT-IN` | Passing `content` (or `lineHashes`) hashes in memory, eliminating two synchronous `fs.readFileSync` calls per read (#3651). |
 | **Coverage-Only Reads** | `OPT-IN` | Default `evidence: "caller"` records line range coverage in `ReadGuard` without reading or hashing disk. |
 | **Explicit Zero-Line Reads** | `COMPATIBLE` | `ranges: []` records an empty/0-byte read without tripping staleness checks (#3652). |
@@ -71,7 +74,7 @@ Under **Decision D14** (Backward-Compatible Refinement):
    } else {
      // Graceful fallback to legacy v1 symbols
      const mutBridge = (globalThis as any)[Symbol.for("pi-lens:mutation-bridge")];
-     mutBridge?.recordMutation({ filePath, ranges: [[10, 20]], kind: "edit" });
+     mutBridge?.recordMutation({ filePath, editRanges: [[10, 20]], kind: "edit" });
      const readBridge = (globalThis as any)[Symbol.for("pi-lens:read-bridge")];
      readBridge?.recordRead({ filePath, requestedOffset: 1, requestedLimit: 50 });
    }

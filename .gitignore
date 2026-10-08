@@ -201,9 +201,6 @@ PR_issues_Audit.md
 .plegma-envelope.json
 .plegma/
 
-# lane coordination artifacts (never commit)
-.lane/
-
 # C# build output from dotnet-build test fixtures (never commit)
 tests/fixtures/**/obj/
 tests/fixtures/**/bin/

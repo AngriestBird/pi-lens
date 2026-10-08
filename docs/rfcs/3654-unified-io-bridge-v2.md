@@ -1,6 +1,6 @@
 # RFC 3654: Unified File I/O Lifecycle Bridge (v2 Specification)
 
-**Status:** Proposed Architecture Specification  
+**Status:** Accepted by the maintainer on #4145 (2026-10-08)  
 **Tracking Issue:** [apmantza/pi-lens#3654](https://github.com/apmantza/pi-lens/issues/3654)  
 **Related Issues/PRs:** #3651 (multi-span batching), #3652 (0-line reads), #3650 (mutating-tool path), #3785 (read-guard evidence & FileTime), #2465 (no-read-guard split), #3620 (lineage fence)  
 **Authors:** Architecture Council (`lens-orchestrator`, `council-peer`)  
@@ -27,7 +27,7 @@ A unified, cohesive File I/O Lifecycle Bridge mounted at `Symbol.for("pi-lens:io
 |---|---|---|
 | **D1** | **Symbol Key & Version** | `Symbol.for("pi-lens:io-bridge")` + `readonly version: 2`. Policy: `version` covers minors; breaking majors require a new symbol key (first-wins frozen per-process slot). In the same first-wins pass, mount v1 shims for `pi-lens:read-bridge` and `pi-lens:mutation-bridge` preserving v1 return types (`void` and `boolean`). |
 | **D2** | **Mutation Umbrella Name** | The mutation facet is named **`mutate`** (not `write`), because `delete` is an absence event, not a write. |
-| **D3** | **`delete` Primitive** | `delete` is a `kind` under `mutate` (`mutate: { kind: "delete" }`), wrapped by enclosing flag gates `!getFlag("no-read-guard")` and `!getFlag("no-lsp")` (`clients/runtime-tool-result.ts:1769-1770`; `event.isError !== true` at :1768 is a host tool_result gate with no bridge analog), followed by the 4 confirmed-delete gates in production order (`clients/runtime-tool-result.ts:1773-1784`): (1) `isExternalOrVendorFile`, (2) `isPathIgnoredByProject`, (3) `deps.readGuard.hasKnownPath`, (4) `!nodeFs.existsSync(dp)` confirm. Action: `deps.readGuard.forgetPath(dp)` (:1785) and, when `!getFlag("no-lsp")`, `notifyExternalFileChange(dp, 3)` (:1786). Bypasses `recordWritten` and `addModifiedRange`; emits no change-log receipt. |
+| **D3** | **`delete` Primitive** | `delete` is a `kind` under `mutate` (`mutate: { kind: "delete" }`), wrapped by the enclosing `!getFlag("no-read-guard")` gate, followed by the 4 confirmed-delete gates in production order, shared with the native bash path through `judgeConfirmedDelete` (`clients/confirmed-delete.ts`): (1) `isExternalOrVendorFile`, (2) `isPathIgnoredByProject`, (3) `readGuard.hasKnownPath`, (4) `!existsSync` confirm. Action: `readGuard.forgetPath(filePath)` and, when `!getFlag("no-lsp")`, `notifyExternalFileChange(filePath, 3)`. `no-lsp` suppresses only the notification; the native bash path skips the whole delete under `no-lsp`. Bypasses `recordWritten` and `addModifiedRange`; emits no change-log receipt. |
 | **D4** | **`rename` Deferred** | Compose as `delete(old)` + `write(new)`. Dead fields like `renamedFrom` are omitted from v2 until an active consumer exists. |
 | **D5** | **Read Evidence Policy** | Default is **coverage-only** (`evidence: "caller"` with no content/hashes binds range without line hashes). `"disk"` is an explicit opt-in for bridge-initiated disk hashing. The bridge never synthesizes hash evidence unless `"disk"` is passed. |
 | **D6** | **`content` Semantics** | Delivered raw text starting at `ranges[0][0]` (span-relative). No caller-fabricated `contentBinding`; whole-file staleness checks stay disk-derived only. |
@@ -106,11 +106,9 @@ export type MutationFacet =
   | {
       /** Whole-file authorship (creation or complete replacement). */
       kind: "write";
-      /**
-       * Bytes authored by the agent. If provided, eagerly binds creation read
-       * evidence at record time (#3524) rather than lazily on next edit (#3520).
-       */
-      writtenContent?: string;
+      // The authored bytes are not part of v2 yet: binding creation read
+      // evidence from them is #3524's design (G9), and the field had no
+      // consumer (#4145 review F4).
       /**
        * Whether to queue deferred autofix and formatting for agent_settled.
        * Defaults to true. When true, publishes `pilens:format:queued` on `pi.events`
@@ -191,7 +189,7 @@ export function getIOBridge(): PiLensIOBridge | undefined;
 | **Negative Path** | Invariant Conflict (§5) | `mutate: { kind: "delete" }` combined with `read`. | Contradictory state: deleting a file while binding a read on it creates a zombie read record on an absent file. | Validation strictly rejects `mutate.kind === "delete" && read !== undefined` with `{ accepted: false, reason: "malformed" }` for both facets. | Preserves invariant closure: an absent file has no read coverage. |
 | **Negative Path** | Contiguous Span Bounds (§5) | `content` passed with `ranges.length !== 1`. | Unclear line mapping if multiple disjoint ranges are passed with one text buffer. | If `content !== undefined`, require `ranges.length === 1`. If `ranges.length === 0`, `content` must be omitted or `""`. Else reject with `"malformed"`. | Enforces D7 deterministically; eliminates semantic ambiguity. |
 | **Negative Path** | Disk Failure in "disk" mode (§5) | `evidence: "disk"` on unreadable or deleted file. | Synchronous `fs.readFileSync` could throw an uncaught exception, crashing the host. | Disk reads in `"disk"` mode wrapped in try/catch. On failure, return `read: { accepted: false, reason: "bookkeeping-error" }`. | Preserves D9 (never throws). |
-| **Negative Path** | Delete Confirmation & Seam (F3) | Fabricating a change-log receipt, omitting enclosing flag gates (!no-read-guard, !no-lsp), or misordering confirmation gates. | Emitting LSP notifications when no-lsp is active (regression against v1 tool-result), or leaving zombie records in readGuard.reads when files are deleted on disk. | Wrapped by outer enclosing flag gates `!getFlag("no-read-guard")` and `!getFlag("no-lsp")` (`clients/runtime-tool-result.ts:1769-1770`; `event.isError !== true` at :1768 is a host tool_result gate with no bridge analog), followed by 4 inner confirmed-delete gates in production order (`clients/runtime-tool-result.ts:1773-1784`): (1) `isExternalOrVendorFile(dp)` (:1773) -> `"out-of-scope"`; (2) `isPathIgnoredByProject(dp)` (:1774) -> `"ignored"`; (3) `deps.readGuard.hasKnownPath(dp)` (:1775) check: if false and !existsSync, returns `{ accepted: true }` without notifying LSP; (4) `nodeFs.existsSync(dp)` (:1784) confirm: if file still exists on disk, confirm fails -> return `{ accepted: false, reason: "bookkeeping-error" }` (v2 refinement; v1 tool-result loops `continue`). Action: `deps.readGuard.forgetPath(dp)` (:1785) and, when `!getFlag("no-lsp")` (:1769), `notifyExternalFileChange(dp, 3)` (:1786). Bypasses `recordWritten` and emits NO change-log receipt. | Aligns with tool-result delete lifecycle and flags; refines disk-still-exists into explicit bookkeeping-error; closes zombie-record leaks without fabricated receipts. |
+| **Negative Path** | Delete Confirmation & Seam (F3) | Fabricating a change-log receipt, omitting enclosing flag gates (!no-read-guard, !no-lsp), or misordering confirmation gates. | Emitting LSP notifications when no-lsp is active (regression against v1 tool-result), or leaving zombie records in readGuard.reads when files are deleted on disk. | Wrapped by the enclosing `!getFlag("no-read-guard")` gate, followed by the 4 confirmed-delete gates in production order, shared with the native bash path (`judgeConfirmedDelete`, `clients/confirmed-delete.ts`): (1) `isExternalOrVendorFile` -> `"out-of-scope"`; (2) `isPathIgnoredByProject` -> `"ignored"`; (3) `hasKnownPath`: an untracked path that is absent returns `{ accepted: true }` without notifying LSP, and one still on disk returns `bookkeeping-error`; (4) `existsSync` confirm: a tracked file still on disk returns `{ accepted: false, reason: "bookkeeping-error" }` (v2 refinement; the bash path skips it). Action: `forgetPath(filePath)` and, unless `no-lsp`, `notifyExternalFileChange(filePath, 3)`; `no-lsp` suppresses only the notification. Bypasses `recordWritten` and emits NO change-log receipt. | Aligns with tool-result delete lifecycle and flags; refines disk-still-exists into explicit bookkeeping-error; closes zombie-record leaks without fabricated receipts. |
 | **State & Timing** | Lineage / Branch Fence (§3, §5) | Delayed write arriving after session `/tree` or shutdown. | Stale write accepted across epoch boundary, corrupting branch turn state (#3620). | `mutate` validates `runtime.readGuard.currentBranchEpoch`. If branch changed or lineage retired, call `recordDroppedRead` (`clients/session-scope.ts:281-301`, emitting `session-scope-read-dropped` at `clients/session-scope.ts:297`) and return `mutate: { accepted: false, reason: "stale-lineage" }`. If epoch is malformed, call `recordDegradationOnce` (`clients/mutation-bridge.ts:264`, emitting `mutation-bridge-invalid-branch-epoch`). | Preserves TLA+ `session-lifecycle` model and degradation accounting. |
 | **Boundaries** | Flag & Scope Gating (§4) | Collapsing `isRecordable` into a single combined check. | If `no-read-guard` is set, a single gate drops mutation turn-state and change logs (#2465). | Gating is strictly per-facet: `read` gates on `!noReadGuard && isRecordable`; `mutate` gates on `isRecordable`; read-guard write stamp gates on `!noReadGuard`. | Preserves independent accountability of turn-state vs read-guard. |
 | **Retirement** | Legacy Shims & First-Wins (§8) | Old extensions calling `read-bridge` or `mutation-bridge`. | In fresh processes, mounts v1 shims delegating to `ioBridge.record()`. If a dirty process already mounted legacy v1, first-wins retains incumbent. | Mount shims for `Symbol.for("pi-lens:read-bridge")` and `Symbol.for("pi-lens:mutation-bridge")` delegating to `ioBridge.record()`. Document first-wins behavior. | Zero-friction backward compatibility. |
@@ -265,15 +263,15 @@ For a whole-file read `ranges: [[1, lineCount]]`, passing `content` derives in-m
   - Out-of-project paths return `{ accepted: false, reason: "out-of-scope" }`.
   - `no-read-guard` flag active: `read` returns `{ accepted: false, reason: "no-read-guard" }`; `mutate` returns `{ accepted: true }` but skips `ReadGuard.recordWritten`.
 - **Delete Seam & Flag Gates Matrix (F3)**:
-  - Enclosing flag gates (`clients/runtime-tool-result.ts:1769-1770`):
+  - Enclosing flag gates:
     - `no-read-guard` active: skips read-guard eviction, returns `{ accepted: false, reason: "no-read-guard" }`.
     - `no-lsp` active: eviction `readGuard.forgetPath` runs, but `notifyExternalFileChange(filePath, 3)` is suppressed.
-  - 4 inner gates in production order (`clients/runtime-tool-result.ts:1773-1784`):
-    1. External / vendor path (`isExternalOrVendorFile` :1773): returns `{ accepted: false, reason: "out-of-scope" }`.
-    2. Ignored path (`isPathIgnoredByProject` :1774): returns `{ accepted: false, reason: "ignored" }`.
-    3. Untracked path (`!hasKnownPath` :1775): if file absent, returns `{ accepted: true }`; zero LSP notifications sent.
-    4. Disk confirm (`nodeFs.existsSync` :1784): if file still exists on disk, returns `{ accepted: false, reason: "bookkeeping-error" }`.
-  - Confirmed delete on tracked path: calls `forgetPath(filePath)` (:1785) and `notifyExternalFileChange(filePath, 3)` (:1786). Asserts NO `recordProjectMutation` or `addModifiedRange` invoked.
+  - 4 inner gates in production order (`judgeConfirmedDelete`, `clients/confirmed-delete.ts`, shared with the native bash path):
+    1. External / vendor path (`isExternalOrVendorFile`): returns `{ accepted: false, reason: "out-of-scope" }`.
+    2. Ignored path (`isPathIgnoredByProject`): returns `{ accepted: false, reason: "ignored" }`.
+    3. Untracked path (`!hasKnownPath`): if file absent, returns `{ accepted: true }`; zero LSP notifications sent. If it is still on disk, returns `{ accepted: false, reason: "bookkeeping-error" }`.
+    4. Disk confirm (`nodeFs.existsSync`): if file still exists on disk, returns `{ accepted: false, reason: "bookkeeping-error" }`.
+  - Confirmed delete on tracked path: calls `forgetPath(filePath)` and `notifyExternalFileChange(filePath, 3)`. Asserts NO `recordProjectMutation` or `addModifiedRange` invoked.
 - **Observability & Degradation Ledger Matrix (F5)**:
   - Telemetry witness: trigger bridge drop on read and mutate; flush `latency.log` (via `getGlobalPiLensLogDir()` sink) and read back records, asserting:
     - `kind: "io-bridge-read-dropped"`, `subject: "${consumer}:${reason}"`.
@@ -293,8 +291,8 @@ For a whole-file read `ranges: [[1, lineCount]]`, passing `content` derives in-m
     read: { ranges: [[5, 25]], content: postMutationContext }
   });
   ```
-- **Red Witness (Order Inversion)**: If `read` executed before `mutate`, `readGuard.recordRead` would stamp a read timestamp $T_1$, and then `recordWritten` would stamp `FileTime.read(filePath)` at $T_2 > T_1$. A subsequent `checkEdit` on line 12 would observe `fileTimeMoved === true` and block with `reasonKind: "file_time_stale"`.
-- **Green Witness**: With `mutate` running before `read`, `recordWritten` stamps `FileTime` at $T_1$, and `recordRead` stamps the post-mutation preview read at $T_2 \ge T_1$. The subsequent `checkEdit` succeeds cleanly.
+- **Red Witness (Order Inversion)**: The order does not change an immediate `checkEdit`: the #4145 probe found the same verdict for every order, and there is no `file_time_stale` reason. What it changes is `consumedReadFiles`. `recordWritten` marks a file's existing reads consumed, and `recordRead` makes them outstanding again. Read-then-mutate therefore leaves the preview read consumed, and a consumed read is evictable on idle and under the file cap: after the idle window the read is gone and the next edit blocks as never read.
+- **Green Witness**: With `mutate` running before `read`, the preview read is the last word and stays outstanding, so idle eviction cannot drop it. `tests/clients/io-bridge.test.ts` "keeps the compound call's preview read outstanding through idle eviction" pins this; swapping the facets reds it (`expected [] to have a length of 1`).
 
 #### 2. Witness for D5 Coverage-Only Default
 - **Production Seam**: `ioBridge.record` -> `readGuard.reads.get(filePath)`.
@@ -313,6 +311,6 @@ For a whole-file read `ranges: [[1, lineCount]]`, passing `content` derives in-m
 
 - **Open Defects / Ambiguities**: **None**.
   - **F1 (Path Resolution & Display Parity)**: Fully resolved. `filePath` non-empty string preserved verbatim without re-resolving or clobbering at bridge layer; unit test matrix verifies v1 parity.
-  - **F3 (Delete Seam & Flag Gates)**: Fully resolved. Mirrored enclosing flag gates (`!getFlag("no-read-guard")`, `!getFlag("no-lsp")` from `clients/runtime-tool-result.ts:1769-1770`) and 4 inner confirmed-delete gates in production order (`isExternalOrVendorFile` :1773, `isPathIgnoredByProject` :1774, `hasKnownPath` :1775, `!existsSync` :1784), followed by `forgetPath` (:1785) and `notifyExternalFileChange` (:1786). Dropped fabricated change-log receipt.
+  - **F3 (Delete Seam & Flag Gates)**: Fully resolved. The enclosing `!getFlag("no-read-guard")` gate, then the 4 confirmed-delete gates shared with the native bash path (`clients/confirmed-delete.ts`), followed by `forgetPath` and, unless `no-lsp`, `notifyExternalFileChange`. Dropped fabricated change-log receipt.
   - **F5 (Observability & Exact Citations)**: Fully resolved. Read log provenance uses `bridge:<consumer>` for v1 shim (`clients/read-bridge.ts:207`) and `io-bridge:<consumer>` as `[NEW]` for v2 native (`ReadRecord.source` type at `clients/read-guard.ts:55`). Re-uses existing `session-scope-read-dropped` (`clients/session-scope.ts:297`) and `mutation-bridge-invalid-branch-epoch` (`clients/mutation-bridge.ts:264`); explicitly declares `[NEW]` `DegradationKind` union members `"io-bridge-read-dropped"` and `"io-bridge-mutate-dropped"` in `clients/degradation-ledger.ts:40+` with test reading `latency.log`.
-- **Maintainer Decisions Remaining**: **None**. All 14 core architectural decisions (D1–D14) are closed and settled. Ready for maintainer sign-off on #3654.
+- **Maintainer Decisions**: the maintainer accepted this design on #4145 (2026-10-08): the D5/D6 evidence model, the public field set, relative paths out of scope, and a tracked `docs/rfcs/`.
