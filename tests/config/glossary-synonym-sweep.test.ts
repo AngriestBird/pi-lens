@@ -1087,6 +1087,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/io-bridge.ts": 2,
 		"clients/lsp/document-drift.ts": 19,
 		"clients/lsp/index.ts": 36,
+		// #2416: migration records are the public config diagnostic rows; the
+		// glossary's retired noun is intentional in this record-owning module.
+		"clients/lsp/resolved-config.ts": 4,
 		"clients/lsp/workspace-diagnostics-cache.ts": 2,
 		"clients/mcp/analyze.ts": 2,
 		"clients/observed-mutation.ts": 4,
