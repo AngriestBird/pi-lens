@@ -97,6 +97,11 @@ const FLAKE_SHAPE_BASELINE: Baseline = JSON.parse(
 const ADMITTED_AFTER_BASELINE: Readonly<
 	Record<string, { detector: DetectorName; reason: string }>
 > = {
+	"elapsed-time-assertion:clients/ast-grep-rule-regex-budget.test.ts": {
+		detector: "elapsed-time-assertion",
+		reason:
+			"the defect is wall-clock only (super-linear ast-grep rule YAML language extraction); a fake clock measures nothing",
+	},
 	// 2026-09-11 (#2886 round 2): the /lens-perf occupancy row keeps one
 	// real-clock sampler assertion alongside its deterministic yield count —
 	// event-loop occupancy has no deterministic proxy; the yield count is
@@ -106,8 +111,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"event-loop occupancy has no deterministic proxy; the sampler row guards per-chunk block size the yield count cannot see",
 	},
-	// 2026-10-08 (#4148): 100K blank lines and a 100K-character rule are real
-	// event-loop occupancy witnesses for the pytest traceback and go.mod regexes.
 	"elapsed-time-assertion:clients/pytest-gomod-regex-budget.test.ts": {
 		detector: "elapsed-time-assertion",
 		reason:
