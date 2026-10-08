@@ -1240,19 +1240,41 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 * counter must not advance for it (`skipOnSuppressed`).
 	 */
 	const deliveryHolds: DeliveryHold[] = [];
-	/** A session replaced mid-turn owns none of the held state any more. */
-	const holdGeneration = runtime.sessionGeneration;
 	/**
-	 * #3813/#3901: a parked lane belongs to the session that cut it. The runtime
-	 * is a process singleton and a concurrent secondary (subagent) activation
-	 * runs this function on it, so `holdGeneration` (the runtime's scope id) is
-	 * the same for both; the turn's own session id, the one the deferred-test
-	 * list is keyed by, is not. A secondary neither takes nor shows the
-	 * primary's parked items.
+	 * #4161/#4168: identity follows the store's owner, each taken here, at
+	 * entry. `turnScope` is the activation's scope (the coordinator's for the
+	 * primary and on the MCP route, its own for a concurrent secondary): it
+	 * owns the late dead-code scan cell (#4154). `holdScope` is the
+	 * coordinator's scope: it owns the hold stores (the cascade runs and
+	 * parked computes, the park map, and the module-level late-auxiliary and
+	 * runner stores), which a concurrent secondary shares with the primary
+	 * (#3613). A session replaced mid-turn owns none of the held state any
+	 * more, and that is judged at every access, not here: the hold stores are
+	 * drained after awaits that a replacement can land in, so a drain or a
+	 * write-back runs through `holdScope.guardedWrite` and nothing is drained
+	 * once the coordinator's scope has ended (one counted
+	 * `generation-guard-stale-write` row per store or lane). A secondary's own
+	 * end therefore fences only its cell: what it drained from the shared
+	 * stores is restored at settle for the primary, as on master (#4168 R2-F1).
+	 */
+	const turnScope = deps.sessionScope ?? runtime.sessionScope;
+	const holdScope = runtime.captureSessionGeneration();
+	/**
+	 * #3813/#3901: a parked lane belongs to the session that cut it. The park
+	 * map is the coordinator's, shared by a concurrent secondary (subagent)
+	 * activation that runs this function on the process-singleton runtime, so
+	 * its key carries the turn's own session id, the one the deferred-test list
+	 * is keyed by. A secondary neither takes nor shows the primary's parked
+	 * items; `holdScope` fences only the session's end.
 	 */
 	const carryScope = sessionId ?? runtime.telemetrySessionId;
 	const carryLane = (...parts: string[]): string =>
 		[carryScope, ...parts].join(":");
+	/** #3901/#4161: a lane's parked items, taken once, by its own session. */
+	const takeParked = <T>(lane: string): T[] =>
+		holdScope.guardedWrite(`turn-end:${lane}`, () =>
+			runtime.takeCutAdvisoryItems<T>(lane),
+		) ?? [];
 	/**
 	 * #3813/#3901: the hold for an item-bearing advisory whose producer has no
 	 * queue to restore (knip, dead-code, call-graph impact). `shown` are the
@@ -1693,10 +1715,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// concurrently off the write hot path; wait a bounded time for them here so
 	// their runs are available to the merge below. A compute still in flight at
 	// the cap is carried over to the next turn_end (never dropped).
+	// #4161: the settle takes the parked computes at the call and writes them
+	// back after its own await; `generation` fences both ends to this turn's
+	// session.
 	const cascadeSettleStart = Date.now();
 	const { settled, timedOut } = await runtime.settleCascadeRuns(
 		cascadeSettleWaitMs(),
-		{ trackTurnEndClock: true },
+		{ trackTurnEndClock: true, generation: holdScope },
 	);
 	logLatency({
 		type: "phase",
@@ -1713,7 +1738,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	//   2. Neighbor-level: each neighbor is claimed by the latest cascade result
 	//      that covers it — suppresses stale neighbor state from earlier writes.
 	const t0 = Date.now();
-	const cascadeRuns = runtime.consumeCascadeRuns().filter((run) => {
+	const cascadeRuns = (
+		holdScope.guardedWrite("turn-end:cascade-runs", () =>
+			runtime.consumeCascadeRuns(),
+		) ?? []
+	).filter((run) => {
 		const originSeq = run.origin?.projectSeq;
 		const originTurn = run.origin?.turnSeq;
 		// A deferred result from AFTER a later write is not current state. Old test
@@ -2310,8 +2339,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const knipAdvisoryLane = carryLane("knip", scanRoot, "advisory");
 		const parkedKnip = knipResult.success
 			? [
-					...runtime.takeCutAdvisoryItems<KnipIssue>(knipBlockerLane),
-					...runtime.takeCutAdvisoryItems<KnipIssue>(knipAdvisoryLane),
+					...takeParked<KnipIssue>(knipBlockerLane),
+					...takeParked<KnipIssue>(knipAdvisoryLane),
 				]
 			: [];
 		if (knipResult.success && knipResult.issues.length > 0) {
@@ -2642,8 +2671,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// #3901: items the cap cut on the previous turn. A failed scan
 			// leaves them parked; a successful one takes them (offered once).
 			const deadCodeLane = carryLane("dead-code", client.id);
-			const parkedDeadCode =
-				runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
+			const parkedDeadCode = takeParked<DeadCodeIssue>(deadCodeLane);
 			deadCodeMeta.totalIssues =
 				(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
 			// No baseline means every finding looks new. Report nothing rather
@@ -2726,8 +2754,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// per-turn delta this block only read a cache; now it iterates and awaits,
 		// so the whole thing needs the guard, not just `client.analyze`.
 		try {
-			const lateScope = deps.sessionScope ?? runtime.sessionScope;
-			const lateScans = lateDeadCodeScansOf(lateScope);
+			// #4168 F1: the entry scope, never one read after the knip await.
+			const lateScans = lateDeadCodeScansOf(turnScope);
 			for (const client of deadCodeClients) {
 				if (!client.detect(cwd)) {
 					reasons.push(`${client.id}:not_detected`);
@@ -2828,7 +2856,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							reasons.push(`${client.id}:deferred`);
 						}
 						parkLateDeadCodeScan({
-							scope: lateScope,
+							scope: turnScope,
 							cacheManager,
 							client,
 							cwd,
@@ -4308,14 +4336,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						normalizeMapKey(resolveRunnerPath(cwd, file)),
 					),
 				);
-				const reOfferedImpactFiles = runtime
-					.takeCutAdvisoryItems<string>(carryLane("call-graph"))
-					.filter(
-						(file) =>
-							!impactFileKeys.has(
-								normalizeMapKey(resolveRunnerPath(cwd, file)),
-							),
-					);
+				const reOfferedImpactFiles = takeParked<string>(
+					carryLane("call-graph"),
+				).filter(
+					(file) =>
+						!impactFileKeys.has(normalizeMapKey(resolveRunnerPath(cwd, file))),
+				);
 				/** Files that contributed a line to the part. */
 				const shownImpactFiles: string[] = [];
 				for (const filePath of [...impactFiles, ...reOfferedImpactFiles]) {
@@ -4821,11 +4847,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// (baseline preserved, TTL anchor advanced) until the re-arm TTL; a dead
 	// client drops silently.
 	const lateAuxStart = Date.now();
-	const drainedPairs = drainPendingAuxiliaryCoverage();
 	// #2168: cap evictions retire a pair before any drain can observe it — read
 	// and reset that count here so it folds into this turn's reconciliation
 	// sum instead of the pair vanishing uncounted.
-	const lateAuxCapEvicted = drainPendingAuxCapEvictedCount();
+	// #4161: both belong to the session current now; a replaced one takes none.
+	const { drainedPairs, lateAuxCapEvicted } = holdScope.guardedWrite(
+		"turn-end:late-aux",
+		() => ({
+			drainedPairs: drainPendingAuxiliaryCoverage(),
+			lateAuxCapEvicted: drainPendingAuxCapEvictedCount(),
+		}),
+	) ?? { drainedPairs: [], lateAuxCapEvicted: 0 };
+	/**
+	 * #4161: a re-arm after the probe's await lands only in this session.
+	 * True when it landed: a dropped one is the stale-write row's, never a
+	 * `rearmed` count (#4168 F2).
+	 */
+	const rearmLateAux = (pair: (typeof drainedPairs)[number]): boolean =>
+		holdScope.guardedWrite(
+			// One subject for the store (#4168 F3): the row's count carries how many.
+			"turn-end:late-aux-rearm",
+			() => {
+				rearmPendingAuxiliaryCoverage(pair);
+				return true;
+			},
+		) === true;
 	let lateAuxDelivered = 0;
 	let lateAuxStale = 0;
 	let lateAuxMissing = 0;
@@ -4896,8 +4942,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					lateAuxProbeFailed += pairs.length;
 					for (const pair of pairs) {
 						if (canRearmPendingAuxiliary(pair)) {
-							rearmPendingAuxiliaryCoverage(pair);
-							lateAuxRearmed += 1;
+							if (rearmLateAux(pair)) lateAuxRearmed += 1;
 						} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
 							lateAuxExpired += 1;
 						} else {
@@ -4956,13 +5001,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						const pastTtl = isPendingAuxiliaryPastRearmTtl(pair);
 						const atCeiling = (pair.rearmCount ?? 0) >= MAX_LATE_AUX_REARMS;
 						if (!pastTtl && !atCeiling) {
-							rearmPendingAuxiliaryCoverage(pair);
-							lateAuxRearmed += 1;
-							if (lateAuxStuckPairs.length < 20)
-								lateAuxStuckPairs.push({
-									filePath: pair.filePath,
-									serverId: pair.serverId,
-								});
+							if (rearmLateAux(pair)) {
+								lateAuxRearmed += 1;
+								if (lateAuxStuckPairs.length < 20)
+									lateAuxStuckPairs.push({
+										filePath: pair.filePath,
+										serverId: pair.serverId,
+									});
+							}
 						} else {
 							if (pastTtl) lateAuxExpired += 1;
 							else lateAuxCeilingExhausted += 1;
@@ -4993,13 +5039,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// anchored on `lastRearmedAtMs`, advanced by every successful
 						// empty probe: the scanner is demonstrably alive, just slow.
 						if (canRearmPendingAuxiliary(pair)) {
-							rearmPendingAuxiliaryCoverage(pair);
-							lateAuxRearmed += 1;
-							if (lateAuxStuckPairs.length < 20)
-								lateAuxStuckPairs.push({
-									filePath: pair.filePath,
-									serverId: pair.serverId,
-								});
+							if (rearmLateAux(pair)) {
+								lateAuxRearmed += 1;
+								if (lateAuxStuckPairs.length < 20)
+									lateAuxStuckPairs.push({
+										filePath: pair.filePath,
+										serverId: pair.serverId,
+									});
+							}
 						} else {
 							if (isPendingAuxiliaryPastRearmTtl(pair)) lateAuxExpired += 1;
 							else lateAuxCeilingExhausted += 1;
@@ -5090,8 +5137,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							// a refreshed baseline absorbed the edit, so an older queued
 							// scan that published later passed both gates).
 							if (canRearmPendingAuxiliary(pair)) {
-								rearmPendingAuxiliaryCoverage(pair);
-								lateAuxRearmed += 1;
+								if (rearmLateAux(pair)) lateAuxRearmed += 1;
 							} else if (isPendingAuxiliaryPastRearmTtl(pair)) {
 								lateAuxExpired += 1;
 							} else {
@@ -5381,7 +5427,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const settleHolds = (suppressed: boolean): void => {
 			const outcome = holdPlan.settle({
 				suppressed,
-				isCurrentSession: () => runtime.isCurrentSession(holdGeneration),
+				isCurrentSession: () => holdScope.isCurrent(),
 				onFault: (cause) => dbg(`turn_end: delivery hold failed: ${cause}`),
 			});
 			heldSections = outcome.held;

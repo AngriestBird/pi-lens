@@ -777,7 +777,11 @@ the surface they bite; each block loads only when its trigger applies.
   in a scope cell for a later turn lives on the activation's own scope
   (`TurnEndDeps.sessionScope`, passed by `index.ts`), never on
   `runtime.sessionScope`, which is the primary's during a secondary's turn
-  (#4154: the late dead-code scan).
+  (#4154: the late dead-code scan). A turn-end drain or write-back is fenced
+  by the scope that owns the store, taken at entry (#4161, #4168 round 3):
+  the coordinator's for the coordinator and module stores a secondary
+  shares, the activation's for its own scope cell. One store never answers
+  to two scopes, and a secondary's end fences only its cell.
 - Every session-scope hand-off decision leaves one `latency.log` row per
   lifecycle event, never one per occurrence in a loop (#3873):
   `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`

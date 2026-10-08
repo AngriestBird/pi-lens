@@ -26,10 +26,12 @@ One part per item; three hold shapes and six items:
    the same composer on the same process-singleton runtime (carryScope).
 
 Actions (one per step of handleTurnEnd, per session s):
+ - Start(s): handleTurnEnd's entry captures the session scope (holdScope);
  - NextTurn(s): the park lane's run takes the entries under its key and
    rechecks stillReportedParked;
  - Compose(s): the producers push their parts (drain, requeue, restore,
    park) in any order; peek leaves state alone;
+ - Skip(s): a turn with nothing to compose ends;
  - Cap(s): planDeliveryHolds + capTurnEndMessage: the reach rule, one
    canHold ask per part, and the signature-dedupe verdict;
  - Settle(s): each hold runs once, guarded by isCurrentSession;
@@ -39,12 +41,14 @@ Cap and Settle are one synchronous block in the code (planDeliveryHolds to
 settleHolds in handleTurnEnd, no await between them), so no other action
 runs while a session sits between them.
 
-NOT modelled (#4161): the code captures holdGeneration at handleTurnEnd
-entry and drains the producers after several awaits; Compose here captures
-and drains in one step, so a session replaced inside that window (the old
-turn then drains the new session's state and its Settle is skipped) is not
-reachable. The drain-shape and peek stores are also process-wide (#3758);
-only the park map carries the turn's session id.
+Start and Compose are separate steps (#4161): the code captures the scope at
+handleTurnEnd entry and drains the producers after several awaits, so a
+SessionReplace can land between them. DrainFence says what a drain does
+then: "access" (shipped) checks the captured scope at each drain and takes
+nothing once it is stale (holdScope.guardedWrite); "entry" (pre-#4161)
+drains whatever the store holds, the successor's state included. The
+drain-shape and peek stores are also process-wide (#3758); only the park
+map carries the turn's session id.
 
 Invariants:
  - NoLossByCap: a part the cap cut is still pending after Settle, unless it
@@ -55,7 +59,9 @@ Invariants:
    never held (it could not fit alone, so holding it pins it);
  - HoldFencedToSession: a session's parts hold only its own items, no store
    entry carries a replaced session's generation, and a replaced session's
-   Settle changes no store entry.
+   Settle changes no store entry;
+ - NoStrand: a replaced turn never takes a successor's item the cap then
+   cuts (its Settle is skipped, so nothing would restore it).
 ***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -86,8 +92,13 @@ CONSTANTS
                  \*             onDelivered still runs after a replacement
                  \* "heldOnly"  the skip guards the delivered branch only, so
                  \*             onHeld still restores after a replacement
-    OnReached    \* "none" onHeld runs only for a cut part (shipped)
+    OnReached,   \* "none" onHeld runs only for a cut part (shipped)
                  \* "restore" mutant: a drain hold also restores a reached part
+    DrainFence   \* "access" a drain checks the turn's scope when it runs and
+                 \*          takes nothing once the session was replaced
+                 \*          (runtime-turn.ts `holdScope.guardedWrite`, #4161)
+                 \*          "entry"  the scope is captured at entry and only
+                 \*          Settle checks it (pre-#4161)
 
 VARIABLES
     gen,        \* the runtime's session generation (runtime-coordinator.ts `isCurrentSession`)
@@ -103,14 +114,15 @@ VARIABLES
     plan,       \* [Sess -> the composed parts: <<[item, size, reoff]>>]
     verdict,    \* [Sess -> <<[reached, keeps]>>] from planDeliveryHolds
     supp,       \* [Sess -> the message is signature-suppressed]
-    hgen,       \* [Sess -> holdGeneration, captured at the turn's start]
+    hgen,       \* [Sess -> holdScope's generation, captured at Start]
     lost,       \* a cut part left Settle neither pending nor recorded dropped
     leadHeld,   \* a leading part was held
     staleShown, \* a re-offer was shown after its lane stopped reporting it
-    crossWrite  \* a replaced session's Settle changed a store entry
+    crossWrite, \* a replaced session's Settle changed a store entry
+    strand      \* a replaced turn took a successor's item the cap then cut
 
 vars == <<gen, st, igen, parks, rearm, dcnt, phase, turns, offerQ, unrep, plan,
-          verdict, supp, hgen, lost, leadHeld, staleShown, crossWrite>>
+          verdict, supp, hgen, lost, leadHeld, staleShown, crossWrite, strand>>
 
 Sess == 1..2
 Items == 1..6
@@ -142,7 +154,7 @@ TypeOK ==
     /\ parks \in [Items -> Nat]
     /\ rearm \in [Items -> Nat]
     /\ dcnt \in [Items -> Nat]
-    /\ phase \in [Sess -> {"idle", "composed", "capped"}]
+    /\ phase \in [Sess -> {"idle", "started", "composed", "capped"}]
     /\ turns \in [Sess -> 0..MaxTurns]
     /\ offerQ \in [Sess -> SUBSET Items]
     /\ unrep \subseteq Items
@@ -152,6 +164,7 @@ TypeOK ==
     /\ leadHeld \in BOOLEAN
     /\ staleShown \in BOOLEAN
     /\ crossWrite \in BOOLEAN
+    /\ strand \in BOOLEAN
 
 Init ==
     /\ gen = 1
@@ -172,6 +185,7 @@ Init ==
     /\ leadHeld = FALSE
     /\ staleShown = FALSE
     /\ crossWrite = FALSE
+    /\ strand = FALSE
 
 Range(f) == {f[k] : k \in DOMAIN f}
 
@@ -188,9 +202,29 @@ NoneCapped == \A t \in Sess : phase[t] # "capped"
 
 Taken(s) == {i \in ParkItems : st[i] = "parked" /\ KeyOf(i) = KeyOf(ParkOf(s))}
 
-NextTurn(s) ==
+\* The turn may drain: its session is still current, or only Settle checks it.
+MayDrain(s) == DrainFence = "entry" \/ hgen[s] = gen
+
+Cands(s) == {i \in Items : Owner(i) = s /\ st[i] = "src"} \cup offerQ[s]
+
+\* Start(s): handleTurnEnd's entry captures the session scope
+\* (runtime-turn.ts `holdScope`); the drains below run after awaits.
+Start(s) ==
     /\ NoneCapped
     /\ phase[s] = "idle"
+    /\ turns[s] < MaxTurns
+    /\ Cands(s) # {} \/ Taken(s) # {}
+    /\ hgen' = [hgen EXCEPT ![s] = gen]
+    /\ turns' = [turns EXCEPT ![s] = turns[s] + 1]
+    /\ phase' = [phase EXCEPT ![s] = "started"]
+    /\ UNCHANGED <<gen, st, igen, parks, rearm, dcnt, offerQ, unrep, plan,
+                   verdict, supp, lost, leadHeld, staleShown, crossWrite,
+                   strand>>
+
+NextTurn(s) ==
+    /\ NoneCapped
+    /\ phase[s] = "started"
+    /\ MayDrain(s)
     /\ offerQ[s] = {}
     /\ Taken(s) # {}
     /\ \E rep \in [Taken(s) -> BOOLEAN] :
@@ -202,20 +236,25 @@ NextTurn(s) ==
            /\ offerQ' = [offerQ EXCEPT ![s] = reoff]
            /\ unrep' = unrep \cup {i \in reoff : ~rep[i]}
     /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, phase, turns, plan, verdict,
-                   supp, hgen, lost, leadHeld, staleShown, crossWrite>>
+                   supp, hgen, lost, leadHeld, staleShown, crossWrite, strand>>
 
 \* Compose(s): each producer that has something pushes its part. The order
 \* is the producer's (any here); a peek producer leaves its state alone
 \* (runtime-turn.ts, the peek holds (`onDelivered`)), a drain or park producer consumes it
 \* (runtime-turn.ts, the runner holds (`requeueRunnerFindings`), `takeCutAdvisoryItems`). Every taken re-offer must appear.
-Cands(s) == {i \in Items : Owner(i) = s /\ st[i] = "src"} \cup offerQ[s]
+\* A turn whose session was replaced drains nothing (DrainFence "access"):
+\* only the peek producers, which consume nothing, still compose, and so do
+\* re-offers NextTurn already took (none under "access", whose NextTurn is
+\* fenced too).
+ComposeCands(s) ==
+    IF MayDrain(s) THEN Cands(s)
+    ELSE {i \in Cands(s) : Shape(i) = "peek"} \cup offerQ[s]
 
 Compose(s) ==
     /\ NoneCapped
-    /\ phase[s] = "idle"
-    /\ turns[s] < MaxTurns
-    /\ Cands(s) # {}
-    /\ \E n \in 1..3 : \E seq \in [1..n -> Cands(s)] : \E sz \in [1..n -> SizeSet] :
+    /\ phase[s] = "started"
+    /\ ComposeCands(s) # {}
+    /\ \E n \in 1..3 : \E seq \in [1..n -> ComposeCands(s)] : \E sz \in [1..n -> SizeSet] :
         /\ \A a, b \in 1..n : a # b => seq[a] # seq[b]
         /\ offerQ[s] \subseteq Range(seq)
         /\ plan' = [plan EXCEPT ![s] =
@@ -229,10 +268,19 @@ Compose(s) ==
         /\ staleShown' = (staleShown \/ (Range(seq) \cap unrep # {}))
         /\ unrep' = unrep \ Range(seq)
     /\ offerQ' = [offerQ EXCEPT ![s] = {}]
-    /\ hgen' = [hgen EXCEPT ![s] = gen]
-    /\ turns' = [turns EXCEPT ![s] = turns[s] + 1]
     /\ phase' = [phase EXCEPT ![s] = "composed"]
-    /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, verdict, supp, lost, leadHeld, crossWrite>>
+    /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, turns, verdict, supp, hgen,
+                   lost, leadHeld, crossWrite, strand>>
+
+\* Skip(s): nothing to compose (the turn's items were taken or reset).
+Skip(s) ==
+    /\ NoneCapped
+    /\ phase[s] = "started"
+    /\ ComposeCands(s) = {}
+    /\ phase' = [phase EXCEPT ![s] = "idle"]
+    /\ UNCHANGED <<gen, st, igen, parks, rearm, dcnt, turns, offerQ, unrep,
+                   plan, verdict, supp, hgen, lost, leadHeld, staleShown,
+                   crossWrite, strand>>
 
 \* Cap(s): planDeliveryHolds judges each part against the kept prefix
 \* (delivery-holds.ts `planDeliveryHolds`). A part is reached when it lies whole inside
@@ -264,7 +312,7 @@ Cap(s) ==
                                \/ CanHold(plan[s][k].item, plan[s][k].reoff)]]]
     /\ phase' = [phase EXCEPT ![s] = "capped"]
     /\ UNCHANGED <<gen, st, igen, parks, rearm, dcnt, turns, offerQ, unrep,
-                   plan, hgen, lost, leadHeld, staleShown, crossWrite>>
+                   plan, hgen, lost, leadHeld, staleShown, crossWrite, strand>>
 
 \* Settle(s): every hold runs once (delivery-holds.ts `settle`). A session
 \* replaced mid-turn owns none of this state, so the callbacks are skipped
@@ -342,6 +390,11 @@ Settle(s) ==
                       /\ newSt[ItemAt(s, k)] \notin {"src", "parked", "dropped"}
                  \/ \E j \in Items : st[j] = "parked" /\ newSt[j] = "evicted")))
           /\ crossWrite' = (crossWrite \/ (~trueLive /\ newSt # st))
+          \* SessionReplace resets every status to "src", so an item still
+          \* "msg" under a replaced turn was drained after the replacement:
+          \* the successor's, and cut, so nothing restores it.
+          /\ strand' = (strand \/ (~trueLive /\
+                \E k \in Parts(s) : ~Reach(s, k) /\ st[ItemAt(s, k)] = "msg"))
           /\ leadHeld' = (leadHeld \/ (Len(plan[s]) >= 1 /\ ~Reach(s, 1)))
     /\ plan' = [plan EXCEPT ![s] = <<>>]
     /\ verdict' = [verdict EXCEPT ![s] = <<>>]
@@ -352,23 +405,32 @@ Settle(s) ==
 \* session-scoped stores: the park map (runtime-coordinator.ts `resetForSession`), the
 \* cascade runs, the pending runner store (cleared at session_start). The
 \* new session's producers start fresh.
+\* #4161: a session index stands for the session AND its successor, which
+\* runs one turn at a time here, so the successor's own cut turn cannot run
+\* while the old turn is still in flight. `succParked` stands in for it: the
+\* successor's park lane may already hold its item, parked by the successor
+\* with the successor's generation (a same-id replacement keys it the same).
+\* Only a lane whose owner has a turn in flight needs it: an idle owner's
+\* successor parks through its own later turn.
 SessionReplace ==
     /\ gen < MaxGen
     /\ NoneCapped
     /\ gen' = gen + 1
-    /\ st' = [i \in Items |-> "src"]
+    /\ \E succParked \in SUBSET {i \in ParkItems : phase[Owner(i)] # "idle"} :
+        /\ st' = [i \in Items |-> IF i \in succParked THEN "parked" ELSE "src"]
+        /\ parks' = [i \in Items |-> IF i \in succParked THEN 1 ELSE 0]
     /\ igen' = [i \in Items |-> gen + 1]
-    /\ parks' = [i \in Items |-> 0]
     /\ rearm' = [i \in Items |-> 0]
     /\ dcnt' = [i \in Items |-> 0]
     /\ offerQ' = [s \in Sess |-> {}]
     /\ unrep' = {}
     /\ UNCHANGED <<phase, turns, plan, verdict, supp, hgen, lost, leadHeld,
-                   staleShown, crossWrite>>
+                   staleShown, crossWrite, strand>>
 
 Next ==
     \/ SessionReplace
-    \/ \E s \in Sess : NextTurn(s) \/ Compose(s) \/ Cap(s) \/ Settle(s)
+    \/ \E s \in Sess : \/ Start(s) \/ NextTurn(s) \/ Compose(s) \/ Skip(s)
+                     \/ Cap(s) \/ Settle(s)
 
 Spec == Init /\ [][Next]_vars
 
@@ -390,5 +452,10 @@ HoldFencedToSession ==
     /\ \A s \in Sess : \A k \in Parts(s) : Owner(plan[s][k].item) = s
     /\ \A i \in Items : st[i] \in {"src", "parked"} => igen[i] = gen
     /\ ~crossWrite
+
+\* NoStrand (#4161): a turn whose session was replaced between its Start and a
+\* drain never takes the successor's item, which its skipped Settle would
+\* leave neither delivered nor pending.
+NoStrand == ~strand
 
 =========================================================================

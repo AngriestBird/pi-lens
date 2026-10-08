@@ -1401,12 +1401,21 @@ export class RuntimeCoordinator {
 			 * #3499: the session this settle belongs to. The quiet window runs
 			 * fire-and-forget and can outlive its session; after a replacement,
 			 * both the append and the re-park are dropped.
+			 * #4161: a settle called after the replacement takes nothing: the
+			 * computes parked then are the successor's (turn_end calls it after
+			 * awaits a replacement can land in).
 			 */
 			generation?: GenerationHandle | undefined;
 		} = {},
 	): Promise<{ settled: number; timedOut: number }> {
 		const pending = this._pendingCascadeRuns;
 		if (pending.length === 0) return { settled: 0, timedOut: 0 };
+		const { generation } = settleOptions;
+		if (
+			generation &&
+			generation.guardedWrite("cascade-settle", () => true) === undefined
+		)
+			return { settled: 0, timedOut: 0 };
 		this._pendingCascadeRuns = [];
 		const settleToken = settleOptions.trackTurnEndClock
 			? ++this._nextCascadeSettleToken
@@ -1440,7 +1449,6 @@ export class RuntimeCoordinator {
 				timeout,
 			]);
 
-			const { generation } = settleOptions;
 			const commit = (subject: string, write: () => void): void => {
 				if (generation) generation.guardedWrite(subject, write);
 				else write();
