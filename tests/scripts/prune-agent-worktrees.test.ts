@@ -1917,8 +1917,9 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 			// seam, rather than by relying on how quickly a missing PowerShell
 			// executable reports its spawn error. The old setup raced a fast listing
 			// and never produced the record (#4019). `--scan-timeout-ms 400` stays
-			// because it is the ceiling the record reports. Windows-only because
-			// POSIX `ps` answers in ~15ms — the portable case above drives the
+			// because it is the ceiling the record reports. The forced seam makes the
+			// case platform-neutral; it stays Windows-gated only for its win32 lane
+			// membership (tests/config/win32-gate-lane.test.ts). The portable case above drives the
 			// same degraded state through the `skipped` branch instead (both yield
 			// listingOk=false and an empty table; only the reason string differs).
 			patchProcessScanFailure();
