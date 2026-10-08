@@ -174,6 +174,44 @@ function lspServerEntryNode(): ConfigSchemaNode {
 				[MERGE_STRATEGY_KEY]: "replace",
 				[STABILITY_TIER_KEY]: "experimental",
 			},
+			name: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+			enabled: { type: "boolean", [STABILITY_TIER_KEY]: "experimental" },
+			role: {
+				type: "string",
+				enum: ["language", "auxiliary"],
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			// `command` accepts string here solely for the compatibility window;
+			// ResolvedLspConfig makes argv the only canonical output.
+			command: { [STABILITY_TIER_KEY]: "experimental" },
+			args: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			extensions: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			rootMarkers: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			env: {
+				type: "object",
+				additionalProperties: {
+					type: "string",
+					[STABILITY_TIER_KEY]: "experimental",
+				},
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			initializationOptions: {
+				type: "object",
+				additionalProperties: true,
+				[STABILITY_TIER_KEY]: "experimental",
+			},
 		},
 	};
 }

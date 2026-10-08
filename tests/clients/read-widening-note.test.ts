@@ -36,6 +36,7 @@ import {
 } from "../../clients/latency-logger.js";
 import { getLSPService } from "../../clients/lsp/index.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 type Content = Array<{ type: string; text?: string }>;
 
@@ -97,19 +98,23 @@ async function readToolCall(
 		treeSitter?: ReturnType<typeof stubTreeSitter>;
 	} = {},
 ) {
-	await handleToolCall({
-		event: { toolName: "read", toolCallId, input },
-		ctx: { cwd: runtime.projectRoot },
-		lensEnabled: true,
-		getFlag: opts.getFlag ?? guardOn,
-		dbg: () => {},
-		runtime,
-		cacheManager: new CacheManager(false),
-		ensureLSPConfigInitialized: async () => {},
-		updateLspStatus: () => {},
-		resetLSPService: () => {},
-		...(opts.treeSitter ? { getTreeSitterClient: () => opts.treeSitter } : {}),
-	} as never);
+	await runHandlerExpectingNoThrow(() =>
+		handleToolCall({
+			event: { toolName: "read", toolCallId, input },
+			ctx: { cwd: runtime.projectRoot },
+			lensEnabled: true,
+			getFlag: opts.getFlag ?? guardOn,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+			...(opts.treeSitter
+				? { getTreeSitterClient: () => opts.treeSitter }
+				: {}),
+		} as never),
+	);
 }
 
 /**

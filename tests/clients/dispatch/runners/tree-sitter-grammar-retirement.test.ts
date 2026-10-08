@@ -25,15 +25,11 @@ describe("tree-sitter runner grammar retirement (#4010)", () => {
 		expect(client).not.toBeNull();
 		await client!.init();
 		expect(await client!.isLanguageSupported("typescript")).toBe(true);
+		// Two distinct inputs, each trapping once: the first-trap count retires.
 		for (const source of ["runner-trap-a", "runner-trap-b"]) {
-			const input = { languageId: "typescript", source };
 			client!.reportWasmAbort(
 				new WebAssembly.RuntimeError("table index is out of bounds"),
-				input,
-			);
-			client!.reportWasmAbort(
-				new WebAssembly.RuntimeError("table index is out of bounds"),
-				input,
+				{ languageId: "typescript", source },
 			);
 		}
 

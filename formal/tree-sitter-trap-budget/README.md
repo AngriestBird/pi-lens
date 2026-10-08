@@ -103,18 +103,39 @@ compared the healer with `by` would restate the code's comparison.
 
 ### Grammar retirement projection (#4010)
 
-`GrammarRetirement.tla` is a small per-language projection of the scanner
-retirement state. `Retire` admits only inputs confirmed to trap repeatedly;
-`HealA` and `HealB` implement `DecayOnOwnSuccess` by removing the successful
-input before the next distinct input is considered. `GrammarRetirement.cfg`
-passes `NoRetireAfterTwoHealed`; `GrammarRetirementNoDecay.cfg` is the
-compile-time counterexample and must violate that invariant. TLC is run by the
-cloud verification lane; this fix lane has no Java runtime.
+`GrammarRetirement.tla` is a per-language projection of the retirement state
+(`grammarTrapInputs`, `retiredGrammars`, the budget). Each input is one distinct
+set of bytes; the environment decides whether it traps every time (persistent:
+trap, trap again on a retry, then charged) or once (a one-off that parses
+cleanly on its retry). `Trap` adds the input to the grammar's set on every trap
+and retires at `LatchThreshold` inputs; only a first trap spends budget, and
+past `Budget` the process aborts. `Heal` is the trapper's own success and
+removes the input from the set (`Decay`).
+
+Invariants: `SetIsLive` (the set is exactly the inputs that trapped and have not
+healed: decay), `RetiredIffTwoLive` (retired exactly when two inputs were live
+at once: never on healed one-offs, never missed), `NoAbort` (retirement comes
+before the abort: #4010's outcome). `GrammarRetirement.cfg` passes all three;
+`GrammarRetirementNoDecay` (no `delete` on success) violates `SetIsLive`;
+`GrammarRetirementLateLatch` (threshold 3) violates `NoAbort`; the
+`GrammarRetirementReach*` configs violate `NeverRetired`, `NeverHealed` and
+`NeverCharged`, so retirement, decay and the charged path are all reachable in
+the good config's population (it is not vacuous). `NoAbort` holds only while
+the one-offs that spend budget first number at most `Budget - LatchThreshold`;
+the good config has one.
+
+The retirement model is independent of `TreeSitterTrapBudget`: it does not
+model `trappedInputs` identity (caller, keys), only the first-trap/charged
+split the retirement reads.
 
 TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers 1`, on `cf1b548e5`.
 
 | Config | Behaviour | Verdict | Distinct states |
 |---|---|---|---|
+| `GrammarRetirement` | #4010: one one-off and three persistent inputs, T = 2, budget 3, decay on | pass | 39 |
+| `GrammarRetirementNoDecay` | #4010 mutant: no removal on the trapper's success | `SetIsLive` violated (3) | |
+| `GrammarRetirementLateLatch` | #4010 mutant: threshold 3 | `NoAbort` violated (6) | |
+| `GrammarRetirementReach` / `ReachHeal` / `ReachCharged` | non-vacuity for `GrammarRetirement` | `NeverRetired` (3) / `NeverHealed` (3) / `NeverCharged` (3) violated | |
 | `MergedFiles` | master: parse/consume, 2 files, 3 consumers, 4 poison candidates, 2 one-offs | pass | 39,364 |
 | `MergedExtractor` | master: extractor compile at 3 owners | pass | 27 |
 | `MergedBatch` | master **restricted** to one build per rule set in flight (see below) | pass | 1,879 |
@@ -237,8 +258,10 @@ F4, F5, F6), `tests/clients/review-graph/wasm-trap-decay.test.ts` and
 
 ## Scope
 
-The code has no per-language trap count. A language is part of each input's
-key, since the key hashes the `languageId`. Per-language failures that are not
+`TreeSitterTrapBudget` has no per-language trap count; `GrammarRetirement`
+(above) models the per-language set of distinct trapping inputs that retires a
+grammar. A language is part of each input's key, since the key hashes the
+`languageId`. Per-language failures that are not
 traps (`Language.load` failing, which charges the grammar file and allows a
 re-fetch; a batch whose grammar failed to load) sit outside the budget and
 are not modelled. The same goes for the trap classifier, the parser and

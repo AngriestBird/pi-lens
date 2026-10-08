@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach } from "vitest";
 import { withTimeout } from "../../clients/deadline-utils.js";
+import { runHandlerExpectingNoThrow } from "./handler-verdict.js";
 
 /**
  * #3855: the session manager is pi's, not the ctx's. pi 1.0.4 hands a /reload
@@ -300,11 +301,19 @@ export function createPiMock(
 			activeTools.add(tool.name);
 		},
 		on(event, handler) {
+			// `tool_call` is the one hook whose handler swallows a throw into a
+			// verdict (`handleToolCall`'s total guard), so every route to it
+			// (`emit`, `getHandlers`, `getHandlerOrThrow`, `handlers`) runs
+			// through the checker: a swallowed throw fails the awaiting test
+			// instead of reading as "no opinion" (#3518, recurrence #4182).
 			const boundedHandler: Hook =
 				event === "session_start"
 					? (payload, ctx) =>
 							runSessionStartWithBudget(() => handler(payload, ctx))
-					: handler;
+					: event === "tool_call"
+						? (payload, ctx) =>
+								runHandlerExpectingNoThrow(() => handler(payload, ctx))
+						: handler;
 			const list = handlers.get(event) ?? [];
 			list.push(boundedHandler);
 			handlers.set(event, list);

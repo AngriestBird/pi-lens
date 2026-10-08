@@ -3,4 +3,4 @@ section: Fixed
 audience: user
 ---
 
-- **Repeated grammar failures no longer exhaust the shared parser heap.** A grammar that keeps trapping on distinct inputs is retired until restart, so the runner reports it unavailable instead of clean and other languages retain the remaining budget (refs #4010, #3996).
+- **A grammar that traps on two distinct files is retired, not retried until the heap aborts.** The runner reports the language unavailable instead of clean and other languages keep the remaining trap budget; a file that traps once and then parses cleanly does not count (refs #4010, #3996).

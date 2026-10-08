@@ -65,13 +65,13 @@ import { getProcessSingleton } from "./process-singletons.js";
 export function getProjectDataDir(cwd: string): string {
 	const legacyProjectDir = path.join(cwd, ".pi-lens");
 	const configuredBase = process.env.PILENS_DATA_DIR?.trim();
-	if (!configuredBase && fs.existsSync(legacyProjectDir)) {
-		return legacyProjectDir;
-	}
 	const resolvedBase = projectDataBase();
 	const memoKey = `${resolvedBase}\0${path.resolve(cwd)}`;
 	const cached = settledDataDirs.get(memoKey);
 	if (cached !== undefined) return cached;
+	if (!configuredBase && fs.existsSync(legacyProjectDir)) {
+		return legacyProjectDir;
+	}
 	const canonical = canonicalProjectRoot(cwd);
 	const readable = projectDataDirReadableSlug(canonical.root);
 	const hash = projectDataDirRootHash(canonical.root);
