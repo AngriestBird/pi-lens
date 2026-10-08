@@ -476,6 +476,42 @@ describe("ReadGuard authorship export/import (#3612)", () => {
 		expect(verdict(guard, c, 2)).toMatch(/^block: .*Edit without read/);
 		expect(guard.exportAuthorship()).toEqual({ written: [], entries: [] });
 	});
+
+	// #4187 R2-6: every adopting start (resume, fork, reload) imports the last
+	// guard's authorship and exports it again with the new writes, so an
+	// uncapped store grows with every start (probe: 100, 200 ... 600 entries
+	// over six starts) into the sidecar. Bounded at 4096 files, the read
+	// guard's unconsumed-read cap: retired entries go first, then the oldest.
+	it("bounds the authorship it carries across starts, dropping retired entries first (#4187 R2-6)", () => {
+		const live = (i: number) => ({
+			filePath: normalizeFilePath(path.join(env.tmpDir, `gone-${i}.ts`)),
+			size: -1,
+			mtimeMs: 0,
+			ctimeMs: 0,
+			toolCallId: "call_write",
+		});
+		const entries = [
+			...Array.from({ length: 4100 }, (_, i) => live(i)),
+			...Array.from({ length: 5 }, (_, i) => ({
+				...live(10_000 + i),
+				retired: true as const,
+			})),
+		];
+		const guard = createReadGuard("authorship-cap");
+		guard.importAuthorship({ written: [], entries }, new Set(["call_write"]));
+		const c = path.join(env.tmpDir, "c.ts");
+		fs.writeFileSync(c, "c1\nc2\nc3\n");
+		guard.recordWritten(c, { toolCallId: "call_new" });
+
+		const exported = guard.exportAuthorship().entries ?? [];
+		expect(exported).toHaveLength(4096);
+		expect(exported.some((entry) => entry.retired)).toBe(false);
+		const kept = new Set(exported.map((entry) => entry.filePath));
+		// 4106 credited, 10 over: the 5 retired, then the 5 oldest live.
+		for (let i = 0; i < 5; i++) expect(kept.has(live(i).filePath)).toBe(false);
+		expect(kept.has(live(5).filePath)).toBe(true);
+		expect(verdict(guard, c, 2)).toBe("allow");
+	});
 });
 
 describe("ReadGuard.importBranch (#3521, replaces #1041's importState)", () => {

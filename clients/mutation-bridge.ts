@@ -98,7 +98,11 @@ export interface MutationBridgeDeps {
 			currentBranchEpoch: number;
 			recordWritten?: (
 				filePath: string,
-				opts?: { branchEpoch?: number; stampFileTime?: boolean },
+				opts?: {
+					branchEpoch?: number;
+					stampFileTime?: boolean;
+					advanceAuthorship?: boolean;
+				},
 			) => void;
 		};
 		recordProjectMutation?: (args: {
@@ -403,6 +407,12 @@ function stampLiveMutation(
 			// conversation. Credit authorship, but leave FileTime at its last
 			// conversation-backed observation (#3865).
 			stampFileTime: false,
+			// Nor may it re-baseline an existing authorship over bytes it wrote
+			// around (#4131, #4187 R2-4): only the observed replay had a
+			// pre-write check, its tool_call's retire. The rest (a co-process
+			// producer, ast_grep_replace, an LSP edit, the settled sweep's
+			// drift) may create a first authorship and otherwise end it.
+			advanceAuthorship: entry.provenance === "observed",
 		});
 	}
 	return { sessionLive, stamp };

@@ -674,8 +674,11 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		if (observedPath) {
 			// #4131: as for a bash write (above), the replay of what this tool
 			// wrote credits authorship without the bytes, so a broken one ends
-			// before the tool rewrites around another writer's bytes.
-			runtime.readGuard?.retireChangedAuthorship?.(observedPath);
+			// before the tool rewrites around another writer's bytes: for the
+			// path it named and, for a directory, every file it may replay.
+			const retire = (target: string) =>
+				runtime.readGuard?.retireChangedAuthorship?.(target);
+			retire(observedPath);
 			await armObservedMutation({
 				toolCallId: resolveToolCallCorrelationId(event),
 				toolName,
@@ -685,6 +688,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// #3613 F2: the budget of this session's own turn.
 				turnIndex: runtime.turnKey(deps.sessionId),
 				isLiveTurn: (key) => runtime.isLiveTurnKey(key),
+				onUniverse: (paths) => paths.forEach(retire),
 				signal: ctx.signal,
 				dbg,
 			});

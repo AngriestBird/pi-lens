@@ -420,6 +420,14 @@ const READ_GUARD_MAX_EDITS_PER_FILE = 256;
 // Unconsumed reads remain valid until edit or session end, but this high
 // sanity cap prevents a read-only session from growing without bound.
 const READ_GUARD_MAX_UNCONSUMED_FILES = 4096;
+/**
+ * #4187 R2-6: the authorship store's bound, the unconsumed-read cap above (an
+ * authorship is a zero-read edit's only evidence, as an unconsumed read is a
+ * read edit's). Every adopting start re-exports what it imported, so the
+ * store grows with each start otherwise. Retired entries go first, then the
+ * least recently credited.
+ */
+const READ_GUARD_MAX_AUTHORED_FILES = READ_GUARD_MAX_UNCONSUMED_FILES;
 const READ_GUARD_IDLE_EVICT_MS_DEFAULT = 30 * 60_000;
 
 export function captureReadContentBinding(
@@ -859,15 +867,40 @@ export class ReadGuard {
 	 * and log it once per file (the set is the once-only gate). The set holds
 	 * at most `READ_GUARD_MAX_FILES` files, oldest dropped first.
 	 */
-	private noteExpiredWrite(filePath: string): void {
+	private noteExpiredWrite(
+		filePath: string,
+		reason: "idle-timeout" | "authorship-cap" = "idle-timeout",
+	): void {
 		if (this.expiredWrites.has(filePath)) return;
 		this.expiredWrites.add(filePath);
 		logReadGuardEvent({
 			event: "read_file_evicted",
 			sessionId: this.sessionId,
 			filePath,
-			metadata: { reason: "idle-timeout", authorshipDropped: true },
+			metadata: { reason, authorshipDropped: true },
 		});
+	}
+
+	/**
+	 * #4187 R2-6: hold `writtenThisSession` at READ_GUARD_MAX_AUTHORED_FILES.
+	 * A retired entry blocks like no entry, so it goes first; a live one is
+	 * dropped least recently credited first, as an expired write (#3520).
+	 */
+	private enforceAuthorshipCap(): void {
+		let excess = this.writtenThisSession.size - READ_GUARD_MAX_AUTHORED_FILES;
+		if (excess <= 0) return;
+		for (const [filePath, authored] of this.writtenThisSession) {
+			if (excess <= 0) return;
+			if (!authored.retired) continue;
+			this.writtenThisSession.delete(filePath);
+			excess -= 1;
+		}
+		for (const filePath of this.writtenThisSession.keys()) {
+			if (excess <= 0) return;
+			this.writtenThisSession.delete(filePath);
+			this.noteExpiredWrite(filePath, "authorship-cap");
+			excess -= 1;
+		}
 	}
 
 	private touchFile(filePath: string): void {
@@ -1100,7 +1133,15 @@ export class ReadGuard {
 	 * writer's bytes. Returns true when it ended the authorship here.
 	 */
 	retireChangedAuthorship(rawFilePath: string): boolean {
-		const filePath = this.key(rawFilePath);
+		return this.retireIfChanged(this.key(rawFilePath));
+	}
+
+	/**
+	 * {@link retireChangedAuthorship} on a key. `writer` names a write that
+	 * ended it after the fact (a bridge write, which no pre-write check
+	 * guarded), so the record tells the two triggers apart.
+	 */
+	private retireIfChanged(filePath: string, writer?: "bridge"): boolean {
 		const authored = this.writtenThisSession.get(filePath);
 		if (
 			!authored ||
@@ -1124,6 +1165,7 @@ export class ReadGuard {
 				metadata: {
 					authoredSize: authored.size,
 					hashed: authored.hash !== undefined,
+					...(writer !== undefined && { writer }),
 					...(authored.toolCallId !== undefined && {
 						toolCallId: authored.toolCallId,
 					}),
@@ -1612,6 +1654,13 @@ export class ReadGuard {
 			toolCallId?: string;
 			/** sha256 (hex) of the bytes on disk the caller already read for this write. */
 			contentHash?: string;
+			/**
+			 * False for a write no pre-write check guarded (a mutation bridge
+			 * write, #4187 R2-4): it may create a first authorship, but over an
+			 * existing one it can only end it, since the bytes it wrote around
+			 * may be another writer's.
+			 */
+			advanceAuthorship?: boolean;
 		},
 	): void {
 		if (
@@ -1828,6 +1877,7 @@ export class ReadGuard {
 			});
 			result.imported += 1;
 		}
+		this.enforceAuthorshipCap();
 		if (Array.isArray(authorship?.written))
 			for (const filePath of authorship.written)
 				if (typeof filePath === "string" && !withEntry.has(filePath))
@@ -1961,16 +2011,29 @@ export class ReadGuard {
 	 */
 	private creditAuthorship(
 		filePath: string,
-		opts: { toolCallId?: string; contentHash?: string } | undefined,
+		opts:
+			| {
+					toolCallId?: string;
+					contentHash?: string;
+					advanceAuthorship?: boolean;
+			  }
+			| undefined,
 	): void {
-		if (this.writtenThisSession.get(filePath)?.retired) return;
+		const existing = this.writtenThisSession.get(filePath);
+		if (existing?.retired) return;
+		if (existing && opts?.advanceAuthorship === false) {
+			this.retireIfChanged(filePath, "bridge");
+			return;
+		}
 		const observed = observeAuthoredBytes(filePath, opts?.contentHash);
-		const toolCallId =
-			opts?.toolCallId ?? this.writtenThisSession.get(filePath)?.toolCallId;
+		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
+		// Re-inserted, so the map's order is credit order for the cap.
+		this.writtenThisSession.delete(filePath);
 		this.writtenThisSession.set(filePath, {
 			...observed,
 			...(toolCallId !== undefined && { toolCallId }),
 		});
+		this.enforceAuthorshipCap();
 	}
 
 	/**

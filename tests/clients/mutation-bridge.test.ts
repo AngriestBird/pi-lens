@@ -1169,3 +1169,72 @@ describe("mutation bridge authorship without FileTime credit (#3865)", () => {
 		});
 	}
 });
+
+/**
+ * #4131 (#4187 R2-4, probe A1; orchestrator decision 2): a bridge write that
+ * no pre-write check guarded (a co-process producer, `ast_grep_replace`, the
+ * settled sweep's drift) reports a mutation without the bytes, so it may
+ * create a first authorship but never advance one. Recurrence: its
+ * `recordWritten` re-baselined the agent's authorship over another writer's
+ * line 11, and a zero-read edit of that line passed (stale allow).
+ */
+describe("mutation bridge never advances an existing authorship (#4131)", () => {
+	for (const provenance of ["settled-sweep", undefined] as const) {
+		it(`ends the authorship a ${provenance ?? "co-process"} write lands on`, () => {
+			const env = setupTestEnvironment("pi-lens-4131-bridge-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				const lines = Array.from({ length: 12 }, (_, i) => `line${i + 1}`);
+				fs.writeFileSync(filePath, lines.join("\n"));
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				// The agent's bash write authored the file, without a read.
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4131-bash",
+				});
+				// Another writer changes line 11.
+				lines[10] = "EXTERNAL11";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				// The producer writes line 3 and reports it.
+				lines[2] = "bridge3";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [3, 3],
+							...(provenance !== undefined && { provenance }),
+						},
+						makeDeps({
+							tmpDir: env.tmpDir,
+							runtime,
+							cacheManager: new CacheManager(false),
+						}),
+					),
+				).toBe(true);
+				const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("File modified since your write");
+				expect(runtime.readGuard.exportAuthorship()).toMatchObject({
+					written: [],
+					entries: [{ retired: true }],
+				});
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+});

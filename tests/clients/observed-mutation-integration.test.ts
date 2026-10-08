@@ -1290,6 +1290,64 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 		}
 	});
 
+	// #4131 (#4187 R2-3, probe A2): a tool that names a DIRECTORY replays every
+	// file of that directory it changed, so each of them must end a broken
+	// authorship at the tool_call, not only the path the input named.
+	// Recurrence: the retire covered `input.path` alone, and the replay of a
+	// file inside the named directory re-baselined authorship over another
+	// writer's line 3 (allow).
+	it("does not let a directory-target observed tool re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-dir-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const dir = path.join(env.tmpDir, "src");
+			fs.mkdirSync(dir);
+			const filePath = path.join(dir, "touched.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-dir",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = {
+				toolName: "dir_codemod",
+				toolCallId: "call-4131-observed-dir",
+				input: { path: dir, transform: "rename" },
+				content: [{ type: "text", text: "rewrote" }],
+			};
+			await handleToolCall(
+				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:dir_codemod" },
+			]);
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("surfaces a pipeline crash on the observed path the way the classified path does", async () => {
 		// #2464 review round 2, S6. A crash used to be swallowed into a `dbg`
 		// line the model never sees, so an observed tool's edit came back looking

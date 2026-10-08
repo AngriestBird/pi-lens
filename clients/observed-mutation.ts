@@ -775,6 +775,12 @@ export interface ArmObservationArgs {
 	 * parked turn counts as dead.
 	 */
 	isLiveTurn?: (turnIndex: number) => boolean;
+	/**
+	 * #4131 (#4187 R2-3): handed every file the observation will replay, before
+	 * the tool runs. A directory target replays its entries, not the path the
+	 * input named, so the caller's pre-write check must see them.
+	 */
+	onUniverse?: (paths: readonly string[]) => void;
 	signal?: AbortSignal;
 	dbg?: (msg: string) => void;
 }
@@ -833,6 +839,7 @@ export async function armObservedMutation(
 	const outcome = await withBounds(
 		async () => {
 			const universe = await collectObservationUniverse(args.targetPath);
+			args.onUniverse?.(universe.paths);
 			const captured = await captureFileStatsForPaths(universe.paths, {
 				withHashes: true,
 				hashBudgetBytes: OBSERVED_HASH_BUDGET_BYTES,

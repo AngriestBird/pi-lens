@@ -108,7 +108,10 @@ export interface LspMutationContext {
 	source: "lsp-edit" | "lsp-rename" | "lsp-execute-command" | "autofix";
 	runtime?: LspMutationRuntime;
 	readGuard?: {
-		recordWritten: (filePath: string, opts: { stampFileTime: false }) => void;
+		recordWritten: (
+			filePath: string,
+			opts: { stampFileTime: false; advanceAuthorship: false },
+		) => void;
 	};
 	cacheManager?: LspMutationCacheManager;
 	/** Existing autonomous-write publishers. Agent-owned navigation edits do not set these. */
@@ -339,8 +342,12 @@ function bookkeepLspMutation(
 		if (sessionLive && context.readGuard) {
 			try {
 				// #3525: the server computed these bytes; the agent never saw
-				// them: authorship, not FileTime.
-				context.readGuard.recordWritten(filePath, { stampFileTime: false });
+				// them: authorship, not FileTime. Nor an advance of an existing
+				// authorship: the bridge branch below ends it instead (#4187 R2-4).
+				context.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					advanceAuthorship: false,
+				});
 			} catch (err) {
 				context.dbg?.(
 					`lsp mutation read-guard stamp failed for ${filePath}: ${err}`,
