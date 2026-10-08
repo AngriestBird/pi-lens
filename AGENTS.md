@@ -760,10 +760,6 @@ the surface they bite; each block loads only when its trigger applies.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
-- Session shutdown persistence returns its save promise and the shutdown hook
-  exposes it before handing control to a reload or factory rebuild; a successor
-  must await that signal rather than race the session sidecar's atomic rename
-  (#4134).
 - Session degradation uses the ledger's bounded once/count APIs and resets at
   the correct primary session boundary. `SessionStartClassification`
   (`clients/session-lifecycle.ts`): `primary` and `sequential-replacement`

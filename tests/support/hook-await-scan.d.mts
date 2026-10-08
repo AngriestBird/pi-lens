@@ -1,5 +1,6 @@
 export const DEFINITION_FILE: string;
 export function findUnboundedAwaitLines(stripped: string): number[];
+export function findReturnedPromiseLines(stripped: string): number[];
 export function findHandRolledRaceLines(stripped: string): number[];
 export function findBoundedCallLines(stripped: string): number[];
 export function awaitOccurrenceKey(

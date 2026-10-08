@@ -3819,16 +3819,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			| { reason?: string; targetSessionFile?: string }
 			| undefined;
 		const shutdownReason = shutdownEvent?.reason;
-		let sidecarSave: Promise<void> | undefined;
 		// #3611 r2: the retire runs in `finally`. After a /reload that
 		// re-evaluated the entry nothing else ever ends this scope, so a throw
 		// from a teardown step below must not skip it.
 		try {
 			// #3612 (D3): hand this scope's stores to the successor that
 			// continues its conversation (`/reload`, `/fork`, `/clone`), before
-			// any teardown below. The hook returns the sidecar save promise before
-			// teardown, so a successor can await it instead of racing the atomic
-			// rename (#4134). The
+			// any teardown below. Sync: this hook may not await (#2523). The
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
@@ -3862,7 +3859,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}) &&
 				runtime.hasStableSessionId
 			) {
-				sidecarSave = persistScope(
+				persistScope(
 					shutdownCwd ?? process.cwd(),
 					runtime.telemetrySessionId,
 					scope,
@@ -3958,7 +3955,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// handle this session issued stops being current (design §3.4).
 			retireOwnScope(shutdownReason, stableSessionId);
 		}
-		return sidecarSave;
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

@@ -30,6 +30,11 @@ import {
 export const DEFINITION_FILE = "clients/deadline-utils.ts";
 /** An `await` token that is a KEYWORD, not a property name or an identifier tail. */
 const AWAIT_TOKEN = /(?<![.\w$])await(?![\w$])/g;
+/** Promise-typed local bindings whose returned value can block a hook host. */
+const PROMISE_BINDING =
+	/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*(?:Promise|PromiseLike)\b/g;
+/** A returned local binding; its type is resolved by findReturnedPromiseLines. */
+const RETURN_BINDING = /\breturn\s+([A-Za-z_$][\w$]*)\s*;/g;
 /**
  * A `Promise.race(` or `Promise.any(` call head. `Promise.any([work, delay])`
  * is the same shape as a `Promise.race` with a timer arm — first settlement
@@ -114,6 +119,24 @@ export function findUnboundedAwaitLines(stripped) {
 		const at = match.index + match[0].length;
 		if (isBoundedAwait(stripped, at)) continue;
 		hits.add(lineOf(stripped, match.index));
+	}
+	return [...hits].sort((a, b) => a - b);
+}
+/**
+ * Every return of a Promise-typed local binding, 1-based.
+ *
+ * A hook may block its host without an `await` token by returning a promise;
+ * #4143's `return sidecarSave` bypassed the await-only ratchet. Keep this
+ * detector deliberately lexical and narrow: typed local bindings are the
+ * source shape that can be proved without pretending a regex is a typechecker.
+ */
+export function findReturnedPromiseLines(stripped) {
+	const promiseBindings = new Set(
+		[...stripped.matchAll(PROMISE_BINDING)].map((match) => match[1]),
+	);
+	const hits = new Set();
+	for (const match of stripped.matchAll(RETURN_BINDING)) {
+		if (promiseBindings.has(match[1])) hits.add(lineOf(stripped, match.index));
 	}
 	return [...hits].sort((a, b) => a - b);
 }

@@ -123,6 +123,7 @@ import {
 	DEFINITION_FILE,
 	findBoundedCallLines,
 	findHandRolledRaceLines,
+	findReturnedPromiseLines,
 	findUnboundedAwaitLines,
 	hookHelperModules,
 	hookPathFiles,
@@ -2853,6 +2854,13 @@ const awaits = scanFiles(
 	findUnboundedAwaitLines,
 	"",
 );
+const returnedPromises = scanFiles(
+	REPO_ROOT,
+	hookPathFiles(REPO_ROOT),
+	findReturnedPromiseLines,
+	"return:",
+	(rel) => rel !== "index.ts",
+);
 const races = scanFiles(
 	REPO_ROOT,
 	shippedSourceFiles(REPO_ROOT),
@@ -2881,7 +2889,7 @@ function measureHelperModules(): Record<string, number> {
 	return out;
 }
 
-describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled race", () => {
+describe("#2523 AC1 every hook-path wait is bounded, and no new hand-rolled race", () => {
 	it("keeps hook admission registries sorted", () => {
 		// #2671 recurrence: an unsorted admission is a merge-conflict magnet.
 		expect(() => assertSortedRegistry("fixture", ["b", "a"])).toThrow(
@@ -2897,6 +2905,7 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		expect(awaits.scanned).toBeGreaterThanOrEqual(8);
 		expect(races.scanned).toBeGreaterThanOrEqual(200);
 		expect(awaits.occurrences.length).toBeGreaterThanOrEqual(1);
+		expect(returnedPromises.scanned).toBe(1);
 		expect(races.occurrences.length).toBeGreaterThanOrEqual(1);
 	});
 
@@ -2974,6 +2983,14 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		// Not a keyword: a property named `await`, an identifier tail.
 		expect(findUnboundedAwaitLines("queue.await(job);")).toEqual([]);
 		expect(findUnboundedAwaitLines("const awaited = value;")).toEqual([]);
+		expect(
+			findReturnedPromiseLines(
+				"let save: Promise<void> | undefined;\nreturn save;",
+			),
+		).toEqual([2]);
+		expect(
+			findReturnedPromiseLines("let value: string;\nreturn value;"),
+		).toEqual([]);
 		// Comments and strings are blanked before the scan reaches them.
 		expect(
 			findUnboundedAwaitLines(stripSource("// await loadBootstrapClients();")),
@@ -3350,10 +3367,14 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		}
 	});
 
-	it("every hook-path await and every hand-rolled race is bounded or exempted", () => {
+	it("every hook-path wait and every hand-rolled race is bounded or exempted", () => {
 		const audit = auditRegistry({
-			sweepName: "hook-await-bounds sweep (#2523 AC1)",
-			flagged: [...awaits.occurrences, ...races.occurrences],
+			sweepName: "hook-wait-bounds sweep (#2523 AC1)",
+			flagged: [
+				...awaits.occurrences,
+				...returnedPromises.occurrences,
+				...races.occurrences,
+			],
 			registered: [],
 			exemptions: exemptionReasons(),
 			scannedCount: awaits.scanned + races.scanned,
