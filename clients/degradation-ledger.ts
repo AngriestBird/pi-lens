@@ -516,6 +516,23 @@ export type DegradationKind =
 	 */
 	| "instance-registry-registration-superseded"
 	/**
+	 * #3654: the File I/O Lifecycle Bridge dropped a `mutate` facet. The entry
+	 * was malformed, out of scope, ignored, refused under `no-read-guard`, or
+	 * failed its bookkeeping; a `delete` facet that fails its confirm gate (still
+	 * present on disk) reports here too. Subject is `"${caller}:${reason}"` — the
+	 * exact pair the synchronous `RecordResult` also returned, so a monitor can
+	 * join this row to the caller's own drop count.
+	 */
+	| "io-bridge-mutate-dropped"
+	/**
+	 * #3654: the File I/O Lifecycle Bridge dropped a `read` facet, for the same
+	 * reasons and with the same `"${caller}:${reason}"` subject as
+	 * `io-bridge-mutate-dropped`. A v1 `read-bridge` zero-line read of a
+	 * non-empty or unreadable file (#3652) reports here as
+	 * `<consumer>:bookkeeping-error`; it was `read-bridge-zero-line-dropped`.
+	 */
+	| "io-bridge-read-dropped"
+	/**
 	 * #3383: a newline-framed reader (`createWarmIpcLineReader`) discarded an
 	 * unterminated line that had grown past `MAX_FRAMED_LINE_BYTES`. The peer is
 	 * either broken or hostile: before this bound, one `buffer += chunk` per
@@ -999,13 +1016,6 @@ export type DegradationKind =
 	 * leaking an orphan — is visible rather than silent.
 	 */
 	| "query-predicates-invalid"
-	/**
-	 * #3652: a co-process extension reported a zero-line read
-	 * (`requestedLimit: 0`) of a target that is not empty, or whose size could
-	 * not be read, so the bridge dropped the observation. Subject is the file
-	 * path. Counted. The accepted empty-file case emits nothing.
-	 */
-	| "read-bridge-zero-line-dropped"
 	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and

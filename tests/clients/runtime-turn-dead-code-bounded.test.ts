@@ -85,6 +85,11 @@ import {
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
+import {
+	beginScope,
+	retireScope,
+	type SessionScope,
+} from "../../clients/session-scope.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const CACHE_KEY = "dead-code-python";
@@ -96,15 +101,29 @@ let cacheManager: CacheManager;
 let client: PythonDeadCodeClient;
 let root: string;
 
-function edit(name = "mod.py"): void {
+function edit(name = "mod.py", via: CacheManager = cacheManager): void {
 	const file = path.join(root, name);
 	fs.writeFileSync(file, "x = 1\n");
-	cacheManager.addModifiedRange(file, { start: 1, end: 1 }, false, root);
+	via.addModifiedRange(file, { start: 1, end: 1 }, false, root);
+}
+
+/**
+ * #4154: who runs the turn, when it is not this test's primary session.
+ * Another pi-lens process on the same project has its own runtime, client and
+ * cache manager; a concurrent in-process subagent shares the runtime and has
+ * its own session id and scope, as `index.ts` passes them.
+ */
+interface TurnActor {
+	runtime?: RuntimeCoordinator;
+	cacheManager?: CacheManager;
+	sessionId?: string;
+	sessionScope?: SessionScope;
 }
 
 function startTurn(
 	signal?: AbortSignal,
 	clients: DeadCodeClient[] = [client],
+	actor: TurnActor = {},
 ): {
 	turn: Promise<void>;
 	settled: () => boolean;
@@ -114,9 +133,13 @@ function startTurn(
 		ctxCwd: root,
 		getFlag: () => false,
 		dbg: () => {},
-		runtime,
-		cacheManager,
+		runtime: actor.runtime ?? runtime,
+		cacheManager: actor.cacheManager ?? cacheManager,
 		...(signal === undefined ? {} : { signal }),
+		...(actor.sessionId === undefined ? {} : { sessionId: actor.sessionId }),
+		...(actor.sessionScope === undefined
+			? {}
+			: { sessionScope: actor.sessionScope }),
 		knipClient: {
 			ensureAvailable: async () => false,
 			analyze: async () => ({
@@ -156,7 +179,7 @@ function deadCodeRows(): Array<Record<string, unknown>> {
 }
 
 /** Park the scan, begin a turn, and spend the whole turn_end budget on the fake clock. */
-async function slowTurn(signal?: AbortSignal) {
+async function slowTurn(signal?: AbortSignal, actor: TurnActor = {}) {
 	let release!: () => void;
 	vultureProcess.gate = new Promise<void>((resolve) => {
 		release = resolve;
@@ -168,7 +191,7 @@ async function slowTurn(signal?: AbortSignal) {
 	vultureProcess.onScan = scan;
 	vi.useFakeTimers();
 	edit();
-	const started = startTurn(signal);
+	const started = startTurn(signal, [client], actor);
 	await scanning;
 	await vi.advanceTimersByTimeAsync(3_100);
 	return { ...started, release };
@@ -511,5 +534,255 @@ describe("#4117 the back-off after an abandoned scan's timeout", () => {
 		expect(client.recentHardFailure(root)).toContain("timed out");
 		vi.setSystemTime(Date.now() + 2);
 		expect(client.recentHardFailure(root)).toBeNull();
+	});
+});
+
+describe("#4154 a late scan is fenced to its session, its edits and the row on disk", () => {
+	/** Let the parked scan finish, flush its settle handler, and return to the real clock. */
+	async function settle(slow: { release: () => void }): Promise<void> {
+		slow.release();
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+	}
+
+	function row(): DeadCodeResult | undefined {
+		return cacheManager.readCache<DeadCodeResult>(CACHE_KEY, root)?.data;
+	}
+
+	function names(): string[] {
+		return row()?.unusedExports.map((issue) => issue.name) ?? [];
+	}
+
+	/** Another pi-lens process on the same project: its own runtime, client and cache manager. */
+	function otherProcess(): TurnActor & { clients: DeadCodeClient[] } {
+		return {
+			runtime: new RuntimeCoordinator(),
+			cacheManager: new CacheManager(false),
+			clients: [new PythonDeadCodeClient(false)],
+		};
+	}
+
+	/** Scan 2 is the other process's own scan; every other scan prints the default finding. */
+	function foreignScanPrintsGood(): void {
+		vultureProcess.stdout = (scan) =>
+			scan === 2
+				? `${root}/other.py:7: unused function 'foreign_good' (60% confidence)\n`
+				: `${root}/mod.py:4: unused function 'late' (60% confidence)\n`;
+	}
+
+	/**
+	 * Resolves when a parked scan's settle has logged a failed scan. That event
+	 * is written after the row decision (#4154 V1 reads the row on disk first,
+	 * asynchronously), so awaiting it orders the row assertions after the write
+	 * without polling a clock.
+	 */
+	function failureLogged(): Promise<void> {
+		return new Promise((resolve) => {
+			logDeadCodeScan.mockImplementation((event: { success: boolean }) => {
+				if (!event.success) resolve();
+			});
+		});
+	}
+
+	function dropped(): string {
+		return JSON.stringify(
+			getDegradationSummary().find(
+				(group) => group.kind === "dead-code-late-scan-dropped",
+			) ?? null,
+		);
+	}
+
+	it("keeps a good row another process stored while a parked scan ran, when that scan then fails", async () => {
+		// Recurrence prevented (#4154 V1, model ForeignRowPoison): the settle
+		// handler judged the failure against the row the scan STARTED from (none),
+		// so it replaced the good row another process had stored meanwhile and the
+		// next turn rescanned with no baseline.
+		cacheManager.clearCache(CACHE_KEY, root);
+		foreignScanPrintsGood();
+		const slow = await slowTurn();
+		await slow.turn;
+
+		const other = otherProcess();
+		vultureProcess.gate = undefined;
+		edit("other.py", other.cacheManager);
+		await startTurn(undefined, other.clients, other).turn;
+		expect(names()).toEqual(["foreign_good"]);
+
+		vultureProcess.failure = new Error("boom");
+		const logged = failureLogged();
+		await settle(slow);
+		await logged;
+
+		expect(row()?.success).toBe(true);
+		expect(names()).toEqual(["foreign_good"]);
+		expect(logDeadCodeScan).toHaveBeenCalledWith(
+			expect.objectContaining({ success: false, cacheKept: true }),
+		);
+		expect(dropped()).toContain("scan-failed");
+	});
+
+	it("still writes a parked scan's failure when no good row is on disk, so the back-off outlives the process", async () => {
+		// The other direction of the V1 guard: a failure with nothing good to
+		// protect is still recorded (the failed row is what session_start and the
+		// next process back off on).
+		cacheManager.clearCache(CACHE_KEY, root);
+		vultureProcess.failure = new Error("boom");
+		const slow = await slowTurn();
+		await slow.turn;
+		const logged = failureLogged();
+		await settle(slow);
+		await logged;
+
+		expect(row()?.success).toBe(false);
+		expect(logDeadCodeScan).not.toHaveBeenCalledWith(
+			expect.objectContaining({ cacheKept: true }),
+		);
+	});
+
+	it("keeps a good row another process stored during an inline scan that then fails inside the budget", async () => {
+		// #4154 V1, inline member: the same stale comparison, over a window of at
+		// most the budget.
+		cacheManager.clearCache(CACHE_KEY, root);
+		foreignScanPrintsGood();
+		let release!: () => void;
+		vultureProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let scan!: () => void;
+		const scanning = new Promise<void>((resolve) => {
+			scan = resolve;
+		});
+		vultureProcess.onScan = scan;
+		vi.useFakeTimers();
+		edit();
+		const turn = startTurn();
+		await scanning;
+		vultureProcess.onScan = undefined;
+
+		const other = otherProcess();
+		vultureProcess.gate = undefined;
+		edit("other.py", other.cacheManager);
+		await startTurn(undefined, other.clients, other).turn;
+		expect(names()).toEqual(["foreign_good"]);
+
+		vultureProcess.failure = new Error("boom");
+		release();
+		await turn.turn;
+
+		expect(names()).toEqual(["foreign_good"]);
+		const failedRow = deadCodeRows().find((meta) => meta.success === false);
+		expect(failedRow).toMatchObject({ cacheKept: true });
+	});
+
+	it("delivers an edit a replaced session made while the old session's scan was still running", async () => {
+		// Recurrence prevented (#4154 J1, model JoinedScanStale): after /new the
+		// new session's turn joined the old session's running vulture (the
+		// client's single flight is process-wide) and took its result, which
+		// predates the edit, as the answer for that edit: `carried` was never
+		// delivered. Scan 1 started before other.py was edited; scan 2 sees it.
+		vultureProcess.stdout = (scan) =>
+			scan === 1
+				? `${root}/mod.py:4: unused function 'late' (60% confidence)\n`
+				: `${root}/mod.py:4: unused function 'late' (60% confidence)\n${root}/other.py:7: unused function 'carried' (60% confidence)\n`;
+		const first = await slowTurn();
+		await first.turn;
+		runtime.resetForSession();
+
+		edit("other.py");
+		const second = startTurn();
+		await vi.advanceTimersByTimeAsync(3_100);
+		await second.turn;
+		expect(vultureProcess.scans).toBe(1);
+		await settle(first);
+		vultureProcess.gate = undefined;
+
+		edit("third.py");
+		await startTurn().turn;
+
+		expect(advisory()).toContain("carried");
+		expect(String(deadCodeRows().at(-1)?.reason)).toContain("python:joined");
+		expect(vultureProcess.scans).toBe(2);
+	});
+
+	it("parks a joined result that predates this turn's edit even when it finishes inside the budget", async () => {
+		// #4154 J1, the inline member: a fresh fetch (lens_diagnostics) started
+		// the scan, the agent then edited other.py, and turn_end joined that scan
+		// and got its answer inside the budget. It is not this edit's answer.
+		vultureProcess.stdout = (scan) =>
+			scan === 1
+				? `${root}/mod.py:4: unused function 'late' (60% confidence)\n`
+				: `${root}/mod.py:4: unused function 'late' (60% confidence)\n${root}/other.py:7: unused function 'carried' (60% confidence)\n`;
+		let release!: () => void;
+		vultureProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let scan!: () => void;
+		const scanning = new Promise<void>((resolve) => {
+			scan = resolve;
+		});
+		vultureProcess.onScan = scan;
+		vi.useFakeTimers();
+		const freshFetch = client.analyze(root);
+		await scanning;
+		vultureProcess.onScan = undefined;
+		await vi.advanceTimersByTimeAsync(50);
+
+		edit("other.py");
+		const turn = startTurn();
+		await vi.advanceTimersByTimeAsync(100);
+		release();
+		await turn.turn;
+		await freshFetch;
+		expect(advisory()).toBe("");
+		expect(String(deadCodeRows().at(-1)?.reason)).toContain("python:joined");
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+		vultureProcess.gate = undefined;
+
+		edit("third.py");
+		await startTurn().turn;
+		expect(advisory()).toContain("carried");
+		expect(vultureProcess.scans).toBe(2);
+	});
+
+	it("never hands a concurrent subagent's turn the primary's settled late scan", async () => {
+		// Recurrence prevented (review of #4153, F2): the entry was keyed by
+		// client and root on the primary's scope, so a subagent's turn on the
+		// singleton runtime took the primary's settled entry and rendered its
+		// delta as its own; the primary never saw it.
+		const slow = await slowTurn();
+		await slow.turn;
+		await settle(slow);
+		vultureProcess.gate = undefined;
+
+		const secondary: TurnActor = {
+			sessionId: "secondary-B",
+			sessionScope: beginScope({ role: "secondary" }),
+		};
+		edit("other.py");
+		await startTurn(undefined, [client], secondary).turn;
+		expect(advisory()).not.toContain("late");
+
+		edit("third.py");
+		await startTurn().turn;
+		expect(advisory()).toContain("late");
+	});
+
+	it("drops a subagent's late scan when the subagent ends before it settles, and leaves the primary's cell alone", async () => {
+		const scope = beginScope({ role: "secondary" });
+		const slow = await slowTurn(undefined, {
+			sessionId: "secondary-B",
+			sessionScope: scope,
+		});
+		await slow.turn;
+		retireScope(scope, "quit");
+		await settle(slow);
+
+		expect(dropped()).toContain("session-ended");
+		vultureProcess.gate = undefined;
+		edit("third.py");
+		await startTurn().turn;
+		expect(String(deadCodeRows().at(-1)?.reason)).not.toContain("late_scan");
+		expect(advisory()).not.toContain("late");
 	});
 });

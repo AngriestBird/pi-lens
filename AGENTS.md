@@ -773,7 +773,11 @@ the surface they bite; each block loads only when its trigger applies.
   warnings are partitioned by the session that recorded them. Every
   producer and reader passes that id (`tool_result`, a partial apply's
   pipeline, `turn_end`). A concurrent secondary still shares the read guard
-  and the turn-end worklist (the open half of #3613).
+  and the turn-end worklist (the open half of #3613). State `turn_end` parks
+  in a scope cell for a later turn lives on the activation's own scope
+  (`TurnEndDeps.sessionScope`, passed by `index.ts`), never on
+  `runtime.sessionScope`, which is the primary's during a secondary's turn
+  (#4154: the late dead-code scan).
 - Every session-scope hand-off decision leaves one `latency.log` row per
   lifecycle event, never one per occurrence in a loop (#3873):
   `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`
