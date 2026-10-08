@@ -29,6 +29,24 @@ describe("ResolvedLspConfig compatibility normalizer (#2416)", () => {
 		expect(result.value.servers.rust.command).toEqual(["rust-analyzer"]);
 	});
 
+	it("keeps reserved server fields inert in the normalized model", () => {
+		const result = resolveLspConfig({
+			sources: [
+				project({
+					lsp: {
+						servers: {
+							rust: {
+								command: ["rust-analyzer"],
+								reservedFutureField: "must-not-become-runtime-state",
+							},
+						},
+					},
+				}),
+			],
+		});
+		expect(result.value.servers.rust).not.toHaveProperty("reservedFutureField");
+	});
+
 	it("normalizes legacy string command plus args to identical argv", () => {
 		const result = resolveLspConfig({
 			sources: [
