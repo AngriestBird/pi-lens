@@ -58,6 +58,8 @@ CONSTANTS
     SRestore,       \* FALSE: the code before #3598 (no capture, no restore)
     SettleCapture,  \* candidate fix: the run stays registered (captures and in-flight calls tracked) until its restore has settled
     RestoreNoCapInFlight, \* candidate fix for finding B: a file with no capture and a call in flight is named possibly lost
+    KeepCaptureHistory, \* retain evidence when a later capture replaces an earlier one (window C)
+    CarryPreRunCalls, \* calls started before registration remain in flight for the run (window D)
     RestoreInFlight,\* TRUE: settle leaves a file with a call in flight alone (#3741 round 2)
     RestoreRecheck, \* TRUE: the re-stat before the write (#3741 round 2)
     RestoreQueue,   \* the restore's read, decision, re-check and write run inside pi's queue entry for S (a per-sibling entry taken only for the restore, #3830)
@@ -112,7 +114,7 @@ SACall(i) ==
     /\ SConcurrent \/ rpc \in {"idle", "done"}
     /\ SCallInRun => rpc \in {"run", "rread", "rlock", "rrecheck", "rwrite"}
     /\ sa' = [sa EXCEPT ![i] = "called"]
-    /\ infl' = IF Registered THEN infl \cup {i} ELSE infl
+    /\ infl' = IF Registered \/ CarryPreRunCalls THEN infl \cup {i} ELSE infl
     /\ UNCHANGED <<sdisk, sver, sq, sapplied, sabuf, cap, tpc, tbuf,
                    rpc, rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
@@ -146,9 +148,12 @@ SANote(i) ==
                 THEN [has |-> TRUE, b |-> sdisk,
                       v |-> IF i \in sdisk.e THEN "verified" ELSE "overwritten"]
                 ELSE cap
+    /\ rep' = IF Registered /\ KeepCaptureHistory /\ cap.has /\ cap.b # sdisk
+                THEN rep \cup {"possibly"}
+                ELSE rep
     /\ sa' = [sa EXCEPT ![i] = "done"]
     /\ UNCHANGED <<sdisk, sver, sq, sapplied, sabuf, tpc, tbuf,
-                   rpc, rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
+                   rpc, rbuf, rv, rcap, rc, wk, fq, lpc>>
 
 ----------------------------------------------------------------------------
 \* beginFixRun: hash the files, register the run. Under pi's sequential tool

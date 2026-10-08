@@ -16,7 +16,8 @@
  *    an agent mutate ({@link noteAgentMutation}, called from the tool_result
  *    seam and from the mutation bridge that observed-mutation replays through),
  *    and note the agent's mutating tool calls that are still in flight
- *    ({@link noteAgentCallStart} / {@link noteAgentCallEnd}).
+ *    ({@link noteAgentCallStart} / {@link noteAgentCallEnd}); calls that start
+ *    while the run is registering are carried into it.
  * 3. After the run, write the captured bytes back over the tool's write and
  *    record ONE degradation for the run ({@link FixRun.finish}).
  * 4. A file the tool created is not in the pre-run set and is left alone.
@@ -94,14 +95,14 @@
  *   the queue (bash, a bridged producer) that lands between the re-read and
  *   the rename is still overwritten.
  * - "In flight" is known only for calls that pass pi-lens's tool_call seam with
- *   a correlation id while a run is registered; a call made before
- *   `beginFixRun` is not seen (#3830, window D). A bash or bridged producer
+ *   a correlation id while a run is registered; calls started before
+ *   `beginFixRun` are carried into the run (#3830, window D). A bash or bridged producer
  *   whose write lands during the run and whose bytes were never captured, on a
  *   file the tool did not touch, is neither seen nor restored over when no
  *   capture exists for the file; on a file the tool DID touch it is the
  *   unverifiable case above. A later capture replaces an earlier one (#3830,
- *   window C), and a file with no capture is skipped before the in-flight
- *   check (window B).
+ *   window C), and a file with no capture is named before the in-flight check
+ *   (window B).
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -145,6 +146,8 @@ interface CoveredFile {
 	filePath: string;
 	hash: string;
 	capture?: Capture;
+	/** A prior capture was replaced before restore could account for it. */
+	superseded?: CaptureVerdict;
 }
 
 interface ActiveRun {
@@ -208,10 +211,12 @@ export async function runWithFixRestore<T, R>(
 
 interface Registry {
 	active: Set<ActiveRun>;
+	/** Calls that started before a run registered, retained until their result. */
+	pendingCalls: Map<string, string>;
 }
 
 const REGISTRY_FAMILY = "fix-run-restore";
-const REGISTRY_VERSION = 1;
+const REGISTRY_VERSION = 2;
 
 function registry(): Registry {
 	return getProcessSingleton<Registry>(
@@ -219,6 +224,7 @@ function registry(): Registry {
 		REGISTRY_VERSION,
 		() => ({
 			active: new Set(),
+			pendingCalls: new Map(),
 		}),
 	);
 }
@@ -301,6 +307,11 @@ export async function beginFixRun(args: {
 	}
 	const { active } = registry();
 	active.add(run);
+	// A parallel tool call can pass the tool_call seam while the fixer is still
+	// hashing its scope. Carry that identity into the run (#3830, window D).
+	for (const [toolCallId, key] of registry().pendingCalls) {
+		if (run.files.has(key)) run.calls.set(toolCallId, key);
+	}
 	return {
 		finish() {
 			return {
@@ -334,7 +345,14 @@ async function restoreRun(
 	let queueWaitMs = 0;
 	try {
 		for (const [key, file] of run.files) {
-			if (!file.capture) continue;
+			const inFlight = [...run.calls.values()].includes(key);
+			if (!file.capture) {
+				if (inFlight) {
+					report.agentEdited.push(file.filePath);
+					report.possiblyLost.push(file.filePath);
+				}
+				continue;
+			}
 			report.agentEdited.push(file.filePath);
 			const requestedAt = Date.now();
 			try {
@@ -402,6 +420,8 @@ async function restoreFile(
 ): Promise<void> {
 	const capture = file.capture;
 	if (!capture) return;
+	if (file.superseded === "overwritten") report.lost.push(file.filePath);
+	else if (file.superseded) report.possiblyLost.push(file.filePath);
 	let current: Buffer;
 	try {
 		current = await fs.promises.readFile(file.filePath);
@@ -472,6 +492,11 @@ export function noteAgentMutation(
 				delete file.capture;
 				continue;
 			}
+			if (file.capture && !file.capture.bytes.equals(bytes)) {
+				file.superseded ??= file.capture.verdict;
+				if (file.capture.verdict === "overwritten")
+					file.superseded = "overwritten";
+			}
 			file.capture = { bytes, verdict: verdictFor(bytes, expected) };
 		} catch {
 			// Unreadable or gone: the agent deleted or renamed it, so an older
@@ -492,10 +517,12 @@ export function noteAgentCallStart(
 ): void {
 	if (toolCallId === undefined) return;
 	const { active } = registry();
-	if (active.size === 0) return;
-	let key: string | undefined;
+	const key = normalizeMapKey(filePath);
+	// The bounded pending set closes the registration race between the agent's
+	// tool_call and beginFixRun (#3830, window D).
+	if (registry().pendingCalls.size < 256)
+		registry().pendingCalls.set(toolCallId, key);
 	for (const run of active) {
-		key ??= normalizeMapKey(filePath);
 		if (run.files.has(key)) run.calls.set(toolCallId, key);
 	}
 }
@@ -504,6 +531,7 @@ export function noteAgentCallStart(
 export function noteAgentCallEnd(toolCallId: string | undefined): void {
 	if (toolCallId === undefined) return;
 	const { active } = registry();
+	registry().pendingCalls.delete(toolCallId);
 	for (const run of active) run.calls.delete(toolCallId);
 }
 

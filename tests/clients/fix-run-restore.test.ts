@@ -132,7 +132,7 @@ function gate() {
 function activeFixRuns(): Set<unknown> {
 	return getProcessSingleton<{ active: Set<unknown> }>(
 		"fix-run-restore",
-		1,
+		2,
 		() => ({ active: new Set() }),
 	).active;
 }
@@ -1435,6 +1435,68 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 
 			expect(fs.readFileSync(bRs, "utf-8")).toBe("let TWO = 1;\n");
 			expect(fs.readFileSync(aRs, "utf-8")).toBe("let ONE = 1;\n");
+		});
+
+		// Recurrence: window B of #3830. A call that is already in flight when
+		// the fixer registers has no capture yet; restore must name it rather than
+		// silently skipping the file before checking the in-flight set.
+		it("reports an uncaptured edit whose tool_call began before the fixer run", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				toolWrote.open();
+				return 0;
+			};
+			const early = agentEdit(aRs, "let EARLY = 1;", "write", false, {
+				toolCallId: "before-fix-run",
+			});
+			await early.start();
+			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await toolWrote.p;
+			early.write();
+			await run;
+			await restoreSettled();
+			await early.deliver();
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe("let EARLY = 1;\n");
+			expect(noticeText()).toContain("a.rs");
+		});
+
+		// Recurrence: window C of #3830. A later capture used to replace the only
+		// evidence of an earlier edit that the fixer had already erased.
+		it("reports an earlier capture when a later agent capture replaces it", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const second = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await toolWrote.p;
+				await second.p;
+				return 0;
+			};
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			const first = agentEdit(aRs, "let FIRST = 1;");
+			first.write();
+			await first.deliver();
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			toolWrote.open();
+			const later = agentEdit(aRs, "let SECOND = 2;");
+			later.write();
+			await later.deliver();
+			second.open();
+			await run;
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe("let SECOND = 2;\n");
+			expect(noticeText()).toContain("a.rs");
 		});
 
 		// Recurrence: the #3844 review's forced-mtime probe. The re-stat compared
