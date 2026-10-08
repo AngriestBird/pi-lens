@@ -963,9 +963,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 21,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
-		// 18 -> 21 (#3871 r2): ambient-environment containment uses three
-		// additional path operations at the shared Python resolver seam.
-		"clients/python-environment.ts": 21,
+		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
+		// path operations at the shared Python resolver seam; r3 restored the
+		// `path.isAbsolute` leg that rejects another Windows drive (V1).
+		"clients/python-environment.ts": 22,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,

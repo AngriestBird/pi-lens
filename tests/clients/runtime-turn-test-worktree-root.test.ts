@@ -847,7 +847,7 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 			).not.toEqual(expect.objectContaining({ results: expect.anything() }));
 		});
 
-		it("explains when a linked-worktree pytest run ignores ambient Python", async () => {
+		const skipBarePytest = async (): Promise<string> => {
 			const bare = addWorktree("bare-pytest", { install: false });
 			write(bare, "pyproject.toml", "[tool.pytest.ini_options]\n");
 			const testFile = write(
@@ -861,9 +861,29 @@ describe("#3871 test root: the checkout that owns the edit", () => {
 			await dbgSeen(/no-runner-install/);
 
 			expect(runner.spawns).toEqual([]);
-			expect(JSON.stringify(skipRows())).toContain(
+			return JSON.stringify(skipRows());
+		};
+
+		it("explains when a linked-worktree pytest run ignores ambient Python", async () => {
+			// The session checkout's activated venv: a real interpreter outside
+			// the worktree, which the containment gate refuses to borrow.
+			const python = write(main, ".venv/bin/python", "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(python, 0o755);
+			vi.stubEnv("VIRTUAL_ENV", path.join(main, ".venv"));
+
+			expect(await skipBarePytest()).toContain(
 				"ambient Python environments outside this checkout were not borrowed",
 			);
+		});
+
+		it("names no ambient Python in a pytest skip when none is set (#3871 r3)", async () => {
+			// Recurrence (#3871 r2 verify LOW-3): the ambient clause was appended
+			// to every pytest skip, so a worktree with no environment anywhere
+			// read as if an activated one had been refused.
+			const reason = await skipBarePytest();
+
+			expect(reason).toContain("has no pytest install of its own");
+			expect(reason).not.toContain("ambient Python");
 		});
 
 		it("still runs the installed worktree beside the bare one", async () => {

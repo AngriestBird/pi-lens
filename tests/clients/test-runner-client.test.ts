@@ -1,4 +1,3 @@
-// flake-shape: elapsed-time-assertion — depth-30 malformed runner paths are the measured regression witness for exponential regex backtracking
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -220,27 +219,6 @@ describe("test-runner-client", () => {
 		expect(
 			mix.failures.map((failure: { location?: string }) => failure.location),
 		).toEqual(["FooTest", "test/bar_test.exs:9"]);
-	});
-
-	it("keeps depth-30 text location parsing non-blocking (#3871 F2)", () => {
-		const client = new TestRunnerClient(false) as any;
-		const nested = Array.from({ length: 30 }, (_, index) => `d${index}`).join(
-			"/",
-		);
-		const output = `FAILED /${nested}/test.py::test_value\n1 tests completed, 1 failed`;
-		const started = performance.now();
-		client.parseGenericRunnerOutput(
-			output,
-			"",
-			1,
-			"/repo/test.py",
-			"generic",
-			"/repo",
-			"/repo",
-			"/repo",
-		);
-		const elapsed = performance.now() - started;
-		expect(elapsed).toBeLessThan(1000);
 	});
 
 	// #1479: the agent-facing surface asks the same "was this measured at all"

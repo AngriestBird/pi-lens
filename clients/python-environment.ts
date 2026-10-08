@@ -175,6 +175,26 @@ function isUvWorkspaceMember(
 }
 
 /**
+ * #3871: the process-wide channels a shell can point at any environment on the
+ * machine. A linked-worktree run (`allowAmbient: false`) takes one only when
+ * its root lies inside the requested project root.
+ */
+const AMBIENT_ENVIRONMENT_VARIABLES = {
+	"uv-project-environment": "UV_PROJECT_ENVIRONMENT",
+	"virtual-env": "VIRTUAL_ENV",
+	conda: "CONDA_PREFIX",
+} as const;
+
+/** True when any ambient Python environment channel is set in `env`. */
+export function hasAmbientPythonEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	return Object.values(AMBIENT_ENVIRONMENT_VARIABLES).some((name) =>
+		Boolean(env[name]),
+	);
+}
+
+/**
  * Resolve the interpreter and executable directory for the project's Python
  * environment without activating it or invoking a package manager.
  */
@@ -217,7 +237,13 @@ export async function detectPythonEnvironment(
 	const allowAmbient = options.allowAmbient ?? true;
 	const isWithinProjectRoot = (candidateRoot: string): boolean => {
 		const relative = path.relative(root, path.resolve(candidateRoot));
-		return relative !== ".." && !relative.startsWith(`..${path.sep}`);
+		return (
+			relative !== ".." &&
+			!relative.startsWith(`..${path.sep}`) &&
+			// #3871 V1: another Windows drive has no relative path, so
+			// `path.relative` returns the absolute target: no `..`, not inside.
+			!path.isAbsolute(relative)
+		);
 	};
 	const candidates: Array<{
 		root: string | undefined;
@@ -251,9 +277,7 @@ export async function detectPythonEnvironment(
 		if (!candidate.root) continue;
 		if (
 			!allowAmbient &&
-			(candidate.source === "uv-project-environment" ||
-				candidate.source === "virtual-env" ||
-				candidate.source === "conda") &&
+			candidate.source in AMBIENT_ENVIRONMENT_VARIABLES &&
 			!isWithinProjectRoot(candidate.root)
 		)
 			continue;

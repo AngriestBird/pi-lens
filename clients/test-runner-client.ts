@@ -2334,12 +2334,19 @@ export class TestRunnerClient {
 
 	// --- Pytest Parser (text-based, no JSON dependency) ---
 
+	/**
+	 * #3871: a text runner prints a path relative to the directory it ran in
+	 * (`spawnCwd`, first in `bases`) or to the dispatch root. The first base
+	 * that holds the file wins; a path that resolves nowhere stays as printed,
+	 * and an absent capture is no location.
+	 */
 	private renderTextLocation(
 		displayRoot: string,
 		bases: readonly string[],
-		file: string,
-		line: string,
-	): string {
+		file: string | undefined,
+		line: string | undefined,
+	): string | undefined {
+		if (file === undefined || line === undefined) return undefined;
 		for (const base of bases) {
 			const resolved = path.resolve(base, file);
 			if (fs.existsSync(resolved)) {
@@ -2370,18 +2377,17 @@ export class TestRunnerClient {
 		const failureRegex = /FAILED\s+(\S+::\S+)\s*-\s*(.+?)(?:\n|$)/g;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
+			const [file, ...testParts] = match[1].split("::");
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				file,
+				testParts.join("::"),
+			);
 			failures.push({
 				name: match[1],
 				message: match[2].trim().slice(0, 500),
-				location: (() => {
-					const [file, ...testParts] = match[1].split("::");
-					return this.renderTextLocation(
-						displayRoot,
-						[spawnCwd, cwd],
-						file,
-						testParts.join("::"),
-					);
-				})(),
+				...(location === undefined ? {} : { location }),
 			});
 		}
 
@@ -2457,24 +2463,25 @@ export class TestRunnerClient {
 		const failureRegex = /^\d+\)\s+(\S+)/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
+			// #3871 r3: `[^\S\n]*`, not `\s*`, after a line anchor. `\s*` crossed
+			// newlines, so every line of a blank run rescanned the whole run.
 			const afterFailure = output.slice(match.index + match[0].length);
-			const nextFailure = afterFailure.search(/(?:^|\n)\s*\d+\)\s+/);
+			const nextFailure = afterFailure.search(/(?:^|\n)[^\S\n]*\d+\)\s/);
 			const failureBlock =
 				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
-			const locationMatch = failureBlock.match(
-				/(?:^|\n)\s*([^\s:]+\.php):(\d+)/,
+			const locationMatch = /(?:^|\n)[^\S\n]*([^\s:]+\.php):(\d+)/.exec(
+				failureBlock,
+			);
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				locationMatch?.[1],
+				locationMatch?.[2],
 			);
 			failures.push({
 				name: match[1],
 				message: match[1],
-				location: locationMatch
-					? this.renderTextLocation(
-							displayRoot,
-							[spawnCwd, cwd],
-							locationMatch[1],
-							locationMatch[2],
-						)
-					: undefined,
+				...(location === undefined ? {} : { location }),
 			});
 		}
 
@@ -2585,27 +2592,28 @@ export class TestRunnerClient {
 
 		// Individual failures: "  1) test some behavior (MyModuleTest)"
 		const failures: TestFailure[] = [];
-		const failureRegex = /^\s*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
+		// #3871 r3: `^[^\S\n]*`, not `^\s*`: the multiline anchor restarted at
+		// every line of a blank run and `\s*` rescanned the rest of it.
+		const failureRegex = /^[^\S\n]*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
 			const afterFailure = output.slice(match.index + match[0].length);
-			const nextFailure = afterFailure.search(/(?:^|\n)\s*\d+\)\s+/);
+			const nextFailure = afterFailure.search(/(?:^|\n)[^\S\n]*\d+\)\s/);
 			const failureBlock =
 				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
-			const locationMatch = failureBlock.match(
-				/(?:^|\n)\s*([^\s:]+\.exs):(\d+)/,
+			const locationMatch = /(?:^|\n)[^\S\n]*([^\s:]+\.exs):(\d+)/.exec(
+				failureBlock,
 			);
 			failures.push({
 				name: match[1].trim(),
 				message: match[1].trim(),
-				location: locationMatch
-					? this.renderTextLocation(
-							displayRoot,
-							[spawnCwd, cwd],
-							locationMatch[1],
-							locationMatch[2],
-						)
-					: match[2].trim(),
+				location:
+					this.renderTextLocation(
+						displayRoot,
+						[spawnCwd, cwd],
+						locationMatch?.[1],
+						locationMatch?.[2],
+					) ?? match[2].trim(),
 			});
 		}
 
@@ -3095,20 +3103,24 @@ export class TestRunnerClient {
 		];
 		for (const m of otherNames) {
 			if (failures.length >= 5) break;
-			const locationMatch = m[1].match(
-				/([^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/,
+			const name = m[1].trim();
+			// #3871 r3: `(?<!\S)` starts a location only at a token start. The
+			// unanchored match restarted at every offset of a long token, and
+			// took `//host/a.py:80` out of a prose URL.
+			const locationMatch =
+				/(?<!\S)([^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/.exec(
+					name,
+				);
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				locationMatch?.[1],
+				locationMatch?.[2],
 			);
 			failures.push({
-				name: m[1].trim(),
-				message: m[1].trim(),
-				location: locationMatch
-					? this.renderTextLocation(
-							displayRoot,
-							[spawnCwd, cwd],
-							locationMatch[1],
-							locationMatch[2],
-						)
-					: undefined,
+				name,
+				message: name,
+				...(location === undefined ? {} : { location }),
 			});
 		}
 
