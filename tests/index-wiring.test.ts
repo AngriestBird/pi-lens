@@ -952,7 +952,14 @@ describe("index.ts extension wiring", () => {
 				);
 
 				// pi shuts the old activation down before it re-runs the factory.
-				await first.emit("session_shutdown", { reason: "reload" }, ctx);
+				// Invoke the real registered handler so this assertion observes its
+				// returned persistence promise, not the mock emitter's wrapper promise.
+				const shutdown = first.getHandlerOrThrow("session_shutdown")(
+					{ reason: "reload" },
+					ctx,
+				);
+				expect(shutdown).toBeInstanceOf(Promise);
+				await shutdown;
 				const rebuilt = createPiMock();
 				extension(rebuilt.asExtensionAPI());
 				for (const name of rebuilt.tools.keys()) rebuilt.activeTools.add(name);
@@ -960,7 +967,15 @@ describe("index.ts extension wiring", () => {
 
 				expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
 				expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
-				await sidecarWritten(tmp, "factory-rebuild");
+				// #4134: session_shutdown now settles its own sidecar save before
+				// returning, so this assertion observes the producer's completion
+				// signal instead of racing the atomic rename with a poll.
+				const sidecar = path.join(
+					getProjectDataDir(tmp),
+					"sessions",
+					"factory-rebuild.json",
+				);
+				expect(fs.existsSync(sidecar), sidecar).toBe(true);
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;

@@ -107,14 +107,14 @@ export async function saveSessionState(
 
 /**
  * The one sidecar writer (#3612): every declared store's snapshot of
- * `scope`, saved fire-and-forget under `sessionId`.
+ * `scope`, saved under `sessionId`; callers choose whether to await it.
  */
 export function persistScope(
 	cwd: string,
 	sessionId: string | undefined,
 	scope: SessionScope,
-): void {
-	void saveSessionState(cwd, sessionId, snapshotSessionStores(scope));
+): Promise<void> {
+	return saveSessionState(cwd, sessionId, snapshotSessionStores(scope));
 }
 
 /**
