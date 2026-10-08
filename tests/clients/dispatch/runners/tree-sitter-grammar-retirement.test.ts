@@ -24,6 +24,7 @@ describe("tree-sitter runner grammar retirement (#4010)", () => {
 		const client = getSharedTreeSitterClient();
 		expect(client).not.toBeNull();
 		await client!.init();
+		expect(await client!.isLanguageSupported("typescript")).toBe(true);
 		for (const source of ["runner-trap-a", "runner-trap-b"])
 			client!.reportWasmAbort(
 				new WebAssembly.RuntimeError("table index is out of bounds"),
