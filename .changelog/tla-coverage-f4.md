@@ -3,4 +3,4 @@ section: Changed
 audience: internal
 ---
 
-- Tighten TLA+ coverage declarations and map previously untracked lifecycle seams.
+- Map the unmapped lifecycle files in `formal/coverage-map.json` and gate `index.ts` per lifecycle hook handler instead of per file (refs #3803).

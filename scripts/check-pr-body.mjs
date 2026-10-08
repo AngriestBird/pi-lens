@@ -3,10 +3,10 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
+	changedHookAnchors,
 	evaluateTlaCoverage,
 	loadCoverageMap,
 	matchGlob,
-	parseChangedAnchors,
 	parseChangedFiles,
 } from "./lib/tla-coverage.mjs";
 import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
@@ -418,7 +418,7 @@ function gitHeaderPaths(rest) {
 // itself starts with `++` is emitted as `+++…` and must be harvested, not
 // skipped (#3906 R3-B), and a removed `--…` line likewise must not advance the
 // POST cursor.
-function parseRuntimeHunks(diff) {
+export function parseRuntimeHunks(diff) {
 	const files = [];
 	let current = null;
 	let inHunk = false;
@@ -431,6 +431,8 @@ function parseRuntimeHunks(diff) {
 				postBlob: null,
 				postLine: 1,
 				added: new Map(),
+				deletedAfter: new Set(),
+				removed: [],
 			};
 			files.push(current);
 			inHunk = false;
@@ -461,6 +463,11 @@ function parseRuntimeHunks(diff) {
 			current.added.set(current.postLine, line.slice(1));
 			current.postLine += 1;
 		} else if (line.startsWith(" ")) current.postLine += 1;
+		else if (inHunk && line.startsWith("-")) {
+			// A deletion sits between post-image lines `postLine - 1` and `postLine`.
+			current.deletedAfter.add(current.postLine - 1);
+			current.removed.push(line.slice(1));
+		}
 	}
 	return files;
 }
@@ -1954,7 +1961,10 @@ export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
  * rows stay advisory. The map logic is dependency-free because this script
  * runs with no `npm install` in the PR-body lane.
  */
-export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
+export function lintTlaCoverage(
+	body,
+	{ diff, cwd = REPO_ROOT, sourceCwd, headFiles, git } = {},
+) {
 	if (!diff) return { errors: [], advisories: [] };
 	let map;
 	try {
@@ -1967,13 +1977,61 @@ export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
 			advisories: [],
 		};
 	}
-	return evaluateTlaCoverage({
+	const anchors = hookAnchorsFromDiff(diff, map, {
+		cwd: sourceCwd,
+		headFiles,
+		git,
+	});
+	const result = evaluateTlaCoverage({
 		map,
 		changedFiles: parseChangedFiles(diff),
-		changedAnchors: parseChangedAnchors(diff),
+		changedAnchors: anchors.fired,
 		body,
-		cwd,
 	});
+	return {
+		errors: result.errors,
+		advisories: [...result.advisories, ...anchors.notes].sort(),
+	};
+}
+
+/**
+ * The `<file>#<hook>` anchors an anchored map row (index.ts, #3878) sees
+ * changed. `git diff --unified=0` carries no hook name for a hunk inside a
+ * handler, so the hunk's post-image lines are placed against the handler ranges
+ * of the post-image the diff names. A post-image that is unreadable or does not
+ * carry the diff's added lines cannot place a hunk: every hook of that file
+ * counts as changed (the any-of declaration still satisfies it) and one note
+ * says so, never a silent pass.
+ */
+function hookAnchorsFromDiff(diff, map, options) {
+	const fired = [];
+	const notes = [];
+	const rows = Object.entries(map?.map ?? {}).filter(
+		([, row]) => row && typeof row === "object" && !Array.isArray(row),
+	);
+	if (!rows.length) return { fired, notes };
+	for (const file of parseRuntimeHunks(diff)) {
+		const row = rows.find(([glob]) => matchGlob(glob, file.post))?.[1];
+		if (!row?.anchors) continue;
+		const names = Object.keys(row.anchors);
+		const source = headFileSource(file.post, {
+			headFiles: options.headFiles,
+			workingTree: true,
+			cwd: options.cwd,
+			git: options.git,
+			postBlob: file.postBlob,
+		});
+		const hooks =
+			typeof source === "string"
+				? changedHookAnchors(source, file, names)
+				: null;
+		if (hooks === null)
+			notes.push(
+				`TLA+ note: the post-image of ${file.post} could not be read against the diff, so every lifecycle hook counts as changed.`,
+			);
+		for (const hook of hooks ?? names) fired.push(`${file.post}#${hook}`);
+	}
+	return { fired, notes };
 }
 
 /**
@@ -2075,7 +2133,12 @@ export function lintLocalPrBody(
 		ref: options.ref,
 		headFiles: options.headFiles,
 	});
-	const coverage = lintTlaCoverage(body, { diff });
+	const coverage = lintTlaCoverage(body, {
+		diff,
+		sourceCwd: cwd,
+		headFiles: options.headFiles,
+		git,
+	});
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories) console.warn(advisory);

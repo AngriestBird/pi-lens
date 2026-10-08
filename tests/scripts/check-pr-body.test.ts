@@ -4621,7 +4621,7 @@ describe("TLA+ coverage through the CI entry point (#3802 F3)", () => {
 
 	it("passes the same diff once the body declares one listed family", async () => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-		const declared = `${runtimeBody}\n\nTLA+ unaffected: read-guard — NoStaleAllow remains unchanged.`;
+		const declared = `${runtimeBody}\n\nTLA+ unaffected: read-guard — only a local helper moved.`;
 		const result = await lintPullRequestEvent(fetchForEvent(declared, []), {
 			pull_request: { number: 7, body: declared },
 		});

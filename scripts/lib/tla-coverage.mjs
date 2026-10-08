@@ -8,9 +8,12 @@
 // A PR that changes a file the checked-in `formal/coverage-map.json` maps to
 // model families must also change a `.tla`/`.cfg` under ANY ONE of the row's
 // families' `formal/<family>/`, or carry a `TLA+ unaffected: <family> —
-// <reason>` line in the PR body for any one of them. Hub files use anchor rows
-// so only a changed modelled hook is checked (#3878). `unmodelled` entries are
-// advisory and never fail. #3802.
+// <reason>` line in the PR body for any one of them. A row listing
+// `HUB_FAMILY_THRESHOLD` or more families is too coarse for a file-level rule
+// to call, so it only prints a note, unless the row carries `anchors`: then a
+// hunk that lands inside a lifecycle hook handler gates on that hook's
+// families alone (#3878). `unmodelled` entries are advisory and never fail.
+// #3802.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -22,6 +25,13 @@ const UNMODELLED = "unmodelled";
 
 /** A coverage file whose change proves the family's model moved with the code. */
 const MODEL_FILE = /\.(?:tla|cfg)$/;
+
+/**
+ * A row listing this many families or more is a hub file (`index.ts`, the LSP
+ * client): file-level matching cannot tell which family a change moves, so an
+ * unmet hub row is a note, not an error, until hunk-level matching exists.
+ */
+const HUB_FAMILY_THRESHOLD = 4;
 
 function compareStrings(a, b) {
 	return a < b ? -1 : a > b ? 1 : 0;
@@ -107,27 +117,156 @@ export function parseChangedFiles(diff = "") {
 	return [...paths];
 }
 
+const CLOSER_START = /^[)}\]]/;
+
+/** Indentation of `line` (leading tabs and spaces). */
+function indentOf(line) {
+	return /^[ \t]*/.exec(line)[0];
+}
+
 /**
- * Return the hook names visible in changed hunks.  Hub rows can opt into this
- * anchor-level check without making every edit to index.ts pay for every
- * lifecycle family listed there (#3878).
+ * 1-based inclusive `[start, end]` of the statement that begins at index
+ * `from`: the same-indent closing line (`);`, `};`, `}`) that does not itself
+ * open a block, or `from` when its first line is a complete `...;` statement.
+ * The checked-in tree is oxfmt-formatted (`fmt:check` gates it), so a handler's
+ * statement boundary is its indentation, and no lexer is needed (this module
+ * imports `node:` only).
  */
-export function parseChangedAnchors(diff = "") {
-	const anchors = new Set();
-	let currentFile = null;
-	for (const line of String(diff).split(/\r?\n/)) {
-		const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-		if (header) {
-			currentFile = toPosix(header[2]);
-			continue;
-		}
-		if (!currentFile || line.startsWith("diff --git ")) continue;
-		for (const anchor of line.matchAll(
-			/\b(session_start|session_shutdown|session_tree|turn_start|turn_end|agent_settled|tool_call|tool_result|context)\b/g,
-		))
-			anchors.add(`${currentFile}#${anchor[1]}`);
+function statementEnd(lines, from) {
+	const first = lines[from];
+	if (/;\s*$/.test(first) && !/[({[]\s*$/.test(first)) return from;
+	const indent = indentOf(first);
+	for (let index = from + 1; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (indentOf(line) !== indent || !CLOSER_START.test(line.trim())) continue;
+		if (/[({[]\s*$/.test(line)) continue;
+		return index;
 	}
-	return [...anchors];
+	return from;
+}
+
+/**
+ * Bare identifiers a registration statement passes as call arguments outside
+ * any `{ }` (`on("hook", NAME)` and `wrapSessionEventHandler("hook", NAME,
+ * { ... })`). An inline handler's body and options sit inside braces, and its
+ * parameters (`event`, `ctx`) name no function declaration, so none is read as
+ * a handler. Strings and `//` comments are blanked first.
+ */
+function handlerArguments(text) {
+	const code = text
+		.replace(/\/\/[^\n]*/g, " ")
+		.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`/g, '""');
+	const names = [];
+	let braces = 0;
+	for (let at = 0; at < code.length; at += 1) {
+		const char = code[at];
+		if (char === "{") braces += 1;
+		else if (char === "}") braces -= 1;
+		else if (
+			braces === 0 &&
+			/[\w$]/.test(char) &&
+			!/[\w$]/.test(code[at - 1] ?? " ")
+		) {
+			const name = /^[A-Za-z_$][\w$]*(?=\s*[,)])/.exec(code.slice(at))?.[0];
+			const before = code.slice(0, at).trimEnd().slice(-1);
+			if (name && (before === "(" || before === ",")) names.push(name);
+		}
+	}
+	return names;
+}
+
+const FUNCTION_DECLARATION = (name) =>
+	new RegExp(
+		`^\\s*(?:const\\s+${name}\\s*=\\s*(?:async\\s*)?(?:\\(|function\\b)|(?:async\\s+)?function\\s+${name}\\b)`,
+	);
+
+/**
+ * Where each lifecycle hook handler lives in `source` (index.ts): hook name to
+ * 1-based inclusive `[start, end]` line ranges. A handler is the registration
+ * statement (`pi.on("hook", ...)` or `(pi as any).on("hook", ...)`, with the
+ * name on the same or the next line) plus, for each bare identifier it passes
+ * as an argument that the file declares as a function (`wrapSessionEventHandler(
+ * "turn_end", onTurnEnd, ...)`), that function's declaration. Registrations in
+ * comment lines never start a statement because the line must open with the
+ * call. The key set is the hook list: callers filter it, nothing else names
+ * hooks.
+ */
+export function findHookRanges(source) {
+	const lines = String(source).split(/\r?\n/);
+	const ranges = new Map();
+	const add = (hook, from, to) => {
+		const list = ranges.get(hook) ?? [];
+		list.push([from + 1, to + 1]);
+		ranges.set(hook, list);
+	};
+	for (let index = 0; index < lines.length; index += 1) {
+		const open =
+			/^\s*(?:\(\s*pi\s+as\s+any\s*\)|pi)\.on\(\s*(?:"([a-z_]+)")?/.exec(
+				lines[index],
+			);
+		if (!open) continue;
+		let hook = open[1];
+		if (!hook) {
+			const next = /^\s*"([a-z_]+)",?\s*$/.exec(lines[index + 1] ?? "");
+			if (!next) continue;
+			hook = next[1];
+		}
+		const end = statementEnd(lines, index);
+		add(hook, index, end);
+		for (const name of handlerArguments(
+			lines.slice(index, end + 1).join("\n"),
+		)) {
+			const declaration = FUNCTION_DECLARATION(name.replace(/\$/g, "\\$"));
+			const at = lines.findIndex((line) => declaration.test(line));
+			if (at >= 0) add(hook, at, statementEnd(lines, at));
+		}
+	}
+	return ranges;
+}
+
+/**
+ * The hook names, from `anchorNames`, that a changed file's hunks edit, given
+ * the handler `ranges` of its post-image (`findHookRanges`). `hunk` carries
+ * what `git diff --unified=0` gives per file: the post-image line numbers of
+ * added lines (`added`, line to text), the post-image line each deletion
+ * follows (`deletedAfter`), and the removed lines' text (`removed`). An added
+ * line inside a handler's range fires it; a deletion fires it when it sits
+ * strictly inside the range (after line `start` .. before `end`); a removed or
+ * added registration line fires its hook, so deleting a whole handler is seen
+ * too.
+ */
+export function hookAnchorsFromRanges(ranges, hunk, anchorNames) {
+	const fired = [];
+	for (const hook of anchorNames) {
+		const registration = new RegExp(
+			`\\.on\\(\\s*"${hook}"|^\\s*"${hook}",?\\s*$`,
+		);
+		const inside = (ranges.get(hook) ?? []).some(
+			([start, end]) =>
+				[...hunk.added.keys()].some((line) => line >= start && line <= end) ||
+				[...hunk.deletedAfter].some((line) => line >= start && line < end),
+		);
+		if (
+			inside ||
+			[...hunk.removed, ...hunk.added.values()].some((text) =>
+				registration.test(text),
+			)
+		)
+			fired.push(hook);
+	}
+	return fired;
+}
+
+/**
+ * `hookAnchorsFromRanges` over `source`, the post-image the diff names, or
+ * `null` when that image does not carry the diff's own added text (a drifted
+ * or renamed image): the caller decides what an unreadable file means.
+ */
+export function changedHookAnchors(source, hunk, anchorNames) {
+	const lines = String(source).split(/\r?\n/);
+	for (const [line, text] of hunk.added)
+		if (lines[line - 1] !== text) return null;
+	return hookAnchorsFromRanges(findHookRanges(source), hunk, anchorNames);
 }
 
 /** Directory a glob is rooted at, or `null` when it is a literal path. */
@@ -167,6 +306,51 @@ function globMatchesAnyFile(glob, rootDir = process.cwd()) {
 	const found = [];
 	walkFiles(rootDir, staticDir, found);
 	return found.some((file) => matchGlob(glob, file));
+}
+
+/** The `{ families, anchors }` form of a map row, or `null` for a plain value. */
+function anchoredRow(value) {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? value
+		: null;
+}
+
+/**
+ * An anchored row names a literal file whose hook list (`findHookRanges`)
+ * contains every anchor key; each anchor's families are a non-empty subset of
+ * the row's. A key the file never registers would never fire, so the gate it
+ * stands for would be silent (#3878 F11).
+ */
+function validateAnchors(glob, row, rootDir) {
+	const errors = [];
+	const anchors = row.anchors;
+	if (!anchors || typeof anchors !== "object" || Array.isArray(anchors))
+		return [`map.${glob} has no anchors object`];
+	let hooks = new Set();
+	try {
+		hooks = new Set(
+			findHookRanges(
+				fs.readFileSync(path.join(rootDir, toPosix(glob)), "utf8"),
+			).keys(),
+		);
+	} catch {
+		errors.push(`map.${glob} anchors need a readable literal file`);
+	}
+	for (const [hook, list] of Object.entries(anchors)) {
+		if (!/^[a-z_]+$/.test(hook))
+			errors.push(`map.${glob} anchor ${hook} is not a hook name`);
+		else if (hooks.size && !hooks.has(hook))
+			errors.push(`map.${glob} anchor ${hook} is not registered in ${glob}`);
+		if (!Array.isArray(list) || !list.length)
+			errors.push(`map.${glob} anchor ${hook} needs a non-empty family array`);
+		else
+			for (const family of list)
+				if (!row.families.includes(family))
+					errors.push(
+						`map.${glob} anchor ${hook} names ${family}, which is not in the row's families`,
+					);
+	}
+	return errors;
 }
 
 /**
@@ -211,19 +395,18 @@ export function validateCoverageMap(map, rootDir = process.cwd()) {
 		if (!globMatchesAnyFile(glob, rootDir))
 			errors.push(`glob ${glob} matches no file`);
 		if (value === UNMODELLED) continue;
-		const familiesValue =
-			value && typeof value === "object" && !Array.isArray(value)
-				? value.families
-				: value;
-		if (!Array.isArray(familiesValue) || !familiesValue.length) {
+		const row = anchoredRow(value);
+		const list = row ? row.families : value;
+		if (!Array.isArray(list) || !list.length) {
 			errors.push(
 				`map.${glob} must be "${UNMODELLED}" or a non-empty family array`,
 			);
 			continue;
 		}
-		for (const family of familiesValue)
+		for (const family of list)
 			if (!known.has(family))
 				errors.push(`map.${glob} names unknown family ${family}`);
+		if (row) errors.push(...validateAnchors(glob, row, rootDir));
 	}
 	return errors;
 }
@@ -262,76 +445,21 @@ function bodyNamesFamily(lines, family) {
 	return lines.some((line) => pattern.test(line));
 }
 
-function blankModelComments(source) {
-	return String(source)
-		.replace(/\/\*[\s\S]*?\*\//g, " ")
-		.replace(/^\s*\\\*.*$/gm, " ");
-}
-
-function modelSymbols(rootDir, family) {
-	const directory = path.join(rootDir, "formal", family);
-	let entries;
-	try {
-		entries = fs.readdirSync(directory, { withFileTypes: true });
-	} catch {
-		return null;
-	}
-	const symbols = new Set();
-	for (const entry of entries) {
-		if (!entry.isFile() || !MODEL_FILE.test(entry.name)) continue;
-		let source;
-		try {
-			source = fs.readFileSync(path.join(directory, entry.name), "utf8");
-		} catch {
-			continue;
-		}
-		for (const symbol of blankModelComments(source).matchAll(
-			/\b[A-Za-z][A-Za-z0-9_]*\b/g,
-		))
-			symbols.add(symbol[0]);
-	}
-	return symbols;
-}
-
-function bodyDeclaresModelSymbol(lines, family, rootDir) {
-	const escaped = family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const pattern = new RegExp(
-		`^\\s*(?:[-*+]\\s+)?\\**TLA\\+ unaffected:\\s*${escaped}(?![\\w-])\\s*[—–-]\\s*(\\S.*)$`,
-	);
-	const symbols = modelSymbols(rootDir, family);
-	// Synthetic maps used by callers that exercise only row semantics do not
-	// carry a formal tree. Preserve their legacy declaration check; the checked-
-	// in map always has model files and therefore takes the strict path below.
-	if (!symbols) return bodyNamesFamily(lines, family);
-	for (const line of lines) {
-		const match = pattern.exec(line);
-		if (!match) continue;
-		const reason = match[1].trim();
-		if (
-			/^(?:unrelated|n\/a|none|comment(?:-only)?\s+moved|only\s+a\s+local\s+helper\s+moved)[.!\s]*$/i.test(
-				reason,
-			)
-		)
-			continue;
-		const named = reason.match(/`([^`]+)`|\b[A-Z][A-Za-z0-9_]*\b/g) ?? [];
-		if (named.some((token) => symbols.has(token.replaceAll("`", ""))))
-			return true;
-	}
-	return false;
-}
-
 /**
  * The rule itself. Given the parsed map, the diff's changed paths, and the PR
  * body, return `{ errors, advisories }`. A changed mapped file is satisfied
  * when ANY family on its row moved (a `.tla`/`.cfg` under `formal/<family>/`)
- * or is declared unaffected in the body. `unmodelled` seams stay advisories.
+ * or is declared unaffected in the body; an unmet row with fewer than
+ * `HUB_FAMILY_THRESHOLD` families is an error, an unmet hub row a note. An
+ * anchored row (`{ families, anchors }`) is judged on the families of the hooks
+ * in `changedAnchors` (`<file>#<hook>`) and is a note when none fired.
+ * `unmodelled` seams stay advisories.
  */
 export function evaluateTlaCoverage({
 	map,
 	changedFiles = [],
 	changedAnchors = [],
 	body = "",
-	cwd = process.cwd(),
 }) {
 	const changed = changedFiles.map(toPosix).sort(compareStrings);
 	const formalChanged = changed.filter((file) => file.startsWith("formal/"));
@@ -340,18 +468,7 @@ export function evaluateTlaCoverage({
 	const advisories = new Set();
 	const families = new Set(Array.isArray(map?.families) ? map.families : []);
 	for (const [glob, value] of Object.entries(map?.map ?? {})) {
-		const row =
-			value && typeof value === "object" && !Array.isArray(value)
-				? value
-				: null;
-		const rowFamilies = row ? row.families : value;
-		const matched = changed.filter((file) => {
-			if (!matchGlob(glob, file)) return false;
-			if (!row?.anchors) return true;
-			return Object.keys(row.anchors).some((anchor) =>
-				changedAnchors.includes(`${file}#${anchor}`),
-			);
-		});
+		const matched = changed.filter((file) => matchGlob(glob, file));
 		if (!matched.length) continue;
 		if (value === UNMODELLED) {
 			for (const file of matched)
@@ -360,21 +477,17 @@ export function evaluateTlaCoverage({
 				);
 			continue;
 		}
-		const activeAnchors = row?.anchors
-			? Object.keys(row.anchors).filter((anchor) =>
-					changedAnchors.includes(`${matched[0]}#${anchor}`),
-				)
-			: [];
-		const list =
-			row?.anchors && activeAnchors.length
-				? [
-						...new Set(
-							activeAnchors.flatMap((anchor) => row.anchors[anchor] ?? []),
-						),
-					]
-				: Array.isArray(rowFamilies)
-					? rowFamilies
-					: [];
+		const row = anchoredRow(value);
+		const rowList = row ? row.families : value;
+		let list = Array.isArray(rowList) ? rowList : [];
+		// An anchored row is judged by the hooks a hunk landed in: the families
+		// of the fired hooks gate; a file change that fired none is a note.
+		const anchors = row?.anchors ?? {};
+		const fired = Object.keys(anchors).filter((hook) =>
+			matched.some((file) => changedAnchors.includes(`${file}#${hook}`)),
+		);
+		if (fired.length)
+			list = [...new Set(fired.flatMap((hook) => anchors[hook] ?? []))];
 		if (!list.length) {
 			errors.add(
 				`coverage map row ${glob} is neither "${UNMODELLED}" nor a family list`,
@@ -390,9 +503,21 @@ export function evaluateTlaCoverage({
 				formalChanged.some(
 					(file) =>
 						file.startsWith(`formal/${family}/`) && MODEL_FILE.test(file),
-				) || bodyDeclaresModelSymbol(lines, family, cwd),
+				) || bodyNamesFamily(lines, family),
 		);
 		if (satisfied) continue;
+		if (row && !fired.length) {
+			advisories.add(
+				`TLA+ note: ${matched[0]} changed outside its lifecycle hook handlers (${Object.keys(anchors).join(", ")}), so no hook gate applied; if the change moves lifecycle, timing or identity behaviour, change a .tla/.cfg under one of ${list.join(", ")} or add "TLA+ unaffected: <family> \u2014 <reason>" to the PR body (#3878).`,
+			);
+			continue;
+		}
+		if (!row && list.length >= HUB_FAMILY_THRESHOLD) {
+			advisories.add(
+				`TLA+ note: ${matched[0]} maps to ${list.length} families (${list.join(", ")}) and file-level matching cannot tell which your change moves; if it changes lifecycle, timing or identity behaviour, change a .tla/.cfg under one of them or add "TLA+ unaffected: <family> \u2014 <reason>" to the PR body (hunk-level matching is #3878).`,
+			);
+			continue;
+		}
 		const target = list.map((family) => `formal/${family}/`).join(", ");
 		errors.add(
 			`Changed file ${matched[0]} is modelled by ${target}: change a .tla/.cfg under any listed family, or add "TLA+ unaffected: ${list[0]} \u2014 <reason>" (naming any listed family) to the PR body.`,
