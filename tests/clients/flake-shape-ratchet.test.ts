@@ -362,6 +362,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"observes the real npm pack lifecycle (prepack/postpack), and unpacks that real tarball to check what ships (#3219); no in-process double is faithful",
 	},
+	"real-process-spawn:real-harness/bridge-reload.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the shipped real pi host must reload the built extension and keep a third-party v1 bridge read connected to the live runtime across that lifecycle boundary (#4169)",
+	},
 	// 2026-10-07 (#4081): 1 -> 3. Whether teardown waits for, tree-kills and
 	// bounds a real child and its detached grandchildren, and whether removal
 	// outlasts a live writer, are only observable against real processes: an
