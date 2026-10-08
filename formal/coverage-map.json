@@ -1,5 +1,5 @@
 {
-  "$comment": "Checked-in coverage map for #3802 rule 2, produced by the #3803 phase-1 audit (2026-09-30, master 1f41157ca), landed by #3802. Key = source glob relative to the repo root. Value = the formal/ families whose spec models behaviour in that file, or the string \"unmodelled\" for a lifecycle/timing/identity/concurrency file that no family models yet. A row is ANY-OF: a PR touching a mapped file must also touch a formal/<family>/*.tla or *.cfg file for ANY ONE of the row's families, or carry a `TLA+ unaffected: <family> — <reason>` line in the PR body for any one of them. A row listing 4 or more families (a hub file such as index.ts) is too coarse for file-level matching, so an unmet hub row prints a note and never fails. `unmodelled` entries print an advisory and never gate; they keep the gap visible. Every formal/<dir> must be listed in `families` and named by at least one row; a TLA lane that adds a family adds its row in the same PR. `notes` explains the non-obvious rows and the hot files deliberately left out. Paths were checked to exist on master at audit time.",
+  "$comment": "Checked-in coverage map for #3802 rule 2, produced by the #3803 phase-1 audit (2026-09-30, master 1f41157ca), landed by #3802. Key = source glob relative to the repo root. Value = the formal/ families whose spec models behaviour in that file, or the string \"unmodelled\" for a lifecycle/timing/identity/concurrency file that no family models yet. A row is ANY-OF: a PR touching a mapped file must also touch a formal/<family>/*.tla or *.cfg file for ANY ONE of the row's families, or carry a `TLA+ unaffected: <family> — <reason>` line in the PR body for any one of them. Hub files use anchor rows so only a changed modelled hook is checked (#3878). `unmodelled` entries print an advisory and never gate; they keep the gap visible. Every formal/<dir> must be listed in `families` and named by at least one row; a TLA lane that adds a family adds its row in the same PR. `notes` explains the non-obvious rows and the hot files deliberately left out. Paths were checked to exist on master at audit time.",
   "version": 0,
   "families": [
     "dispatch-pipeline",
@@ -315,21 +315,48 @@
     ],
     "clients/workspace-topology.ts": "unmodelled",
     "clients/test-runner-client.ts": "unmodelled",
-    "index.ts": [
-      "session-lifecycle",
-      "session-straddle",
-      "session-registry",
-      "format-drain",
-      "read-guard",
-      "late-aux-drain",
-      "dispatch-pipeline"
+    "clients/deferred-runner-blockers.ts": [
+      "pending-runner-store"
     ],
+    "clients/finding-delivery-gate.ts": "unmodelled",
+    "clients/git-guard.ts": "unmodelled",
+    "clients/advisory-provenance.ts": [
+      "store-freshness"
+    ],
+    "clients/read-bridge.ts": "unmodelled",
+    "clients/project-snapshot-persist-worker.ts": [
+      "snapshot-promotion"
+    ],
+    "clients/memory-sampler.ts": "unmodelled",
+    "index.ts": {
+      "families": [
+        "session-lifecycle",
+        "session-straddle",
+        "session-registry",
+        "format-drain",
+        "read-guard",
+        "late-aux-drain",
+        "dispatch-pipeline",
+        "opaque-baseline-slot"
+      ],
+      "anchors": {
+        "session_start": ["session-lifecycle", "session-straddle", "session-registry"],
+        "session_shutdown": ["session-lifecycle", "session-straddle", "session-registry"],
+        "session_tree": ["session-lifecycle", "session-straddle"],
+        "turn_start": ["session-lifecycle", "late-aux-drain", "dispatch-pipeline"],
+        "turn_end": ["session-lifecycle", "late-aux-drain", "dispatch-pipeline"],
+        "agent_settled": ["late-aux-drain", "session-straddle"],
+        "tool_call": ["dispatch-pipeline", "read-guard", "opaque-baseline-slot"],
+        "tool_result": ["dispatch-pipeline", "read-guard", "session-straddle"],
+        "context": ["read-guard", "session-lifecycle"]
+      }
+    },
     "clients/opaque-mutation-scan.ts": [
       "opaque-baseline-slot"
     ]
   },
   "notes": {
-    "index.ts": "Every hook handler lives here, so a file-level glob makes most PRs carry a `TLA+ unaffected` line. Phase 2 should narrow this row to hook anchors (session_start, session_shutdown, session_tree, turn_start, turn_end, agent_settled, tool_call, tool_result, context) once #3802's checker can match hunks, not files (#3878).",
+    "index.ts": "Hook anchors (session_start, session_shutdown, session_tree, turn_start, turn_end, agent_settled, tool_call, tool_result, context) select only the families whose modelled seam a changed hunk names (#3878).",
     "clients/installer/index.ts": "Only the install lock (tryAcquireInstallLock, acquireInstallLock, assertOwnsLock, the generation heartbeat) is modelled, and only partly: file-locks has no heartbeat or ownership recheck (#3553). The rest of the installer is not lifecycle.",
     "clients/lsp/server.ts": "The LSP service generation (captureLspServiceGeneration, lspServiceGenerationCell, #3755) is session-lifecycle's `svc`, format-drain's ServiceGen and lsp-idle-reset's reset. The server registry table (idleEviction policy data, #3622) is not lifecycle.",
     "clients/lsp/index.ts": "Per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) map to lsp-crash `Evict`; per-generation derived state (EWMA, aux inflight, write-timeout streak) is not modelled yet (#3672, #3584). applyWorkspaceEdit callers are unmodelled (clients/lsp/edits.ts).",
@@ -349,8 +376,16 @@
     "clients/dead-code-client.ts": "The turn_end dead-code lane's late scan (#4117 round 2, #4120): the client's single flight `inFlight` is process-wide, so a scan parked by one session is joined by the next session's analyze (J1, `JoinedScanStale`); `HardFailureStamps` is set where a scan settles and never cleared at a session boundary. The lane itself is in clients/runtime-turn.ts, which stays at its three families: a fourth would make the row a hub (4 or more) and silence the gate for the whole file. Modelled by turn-end-late-scan; store-freshness keeps the Stamp rule.",
     "clients/hard-failure-summary.ts": "`HardFailureStamps` (stamp where a scan settles, 30 minute expiry, success lifts), shared by the knip and dead-code clients. Modelled by turn-end-late-scan (`NoRespawnWhileStamped`, `StampAtTurn`, `BackoffUnread`).",
     "unlisted": "Runtime files touched by the 151 audited PRs and deliberately not mapped (no lifecycle, timing, identity or concurrency behaviour): bounded-telemetry, cache-observability, complexity-client, dispatch/types, dispatch/utils/format-utils, install-diagnostics, lens-config, lsp/config, lsp/session-roots, lsp/wait-policy/capability-snapshot, module-report, path-utils, persistent-reverify, probe-home-state, project-diagnostics/types, project-lens-config, python-environment, read-expansion, review-graph-logger, tool-agreement, tools/module-report. Also deliberately unmapped because nearly every PR touches them for non-lifecycle reasons: clients/degradation-ledger.ts (the DegradationKind registry; touched by most runtime PRs for a record kind, never lifecycle behaviour); clients/latency-logger.ts (telemetry sink); clients/hook-budgets.ts (budget table (data); #2523 governs it); clients/dispatch/runners/** (runner outcome parsing; the fix-run restore seam is mapped at clients/fix-run-restore.ts); clients/dispatch/facts/** (pure extractors; their tree-sitter trap accounting lives in clients/tree-sitter-client.ts).",
-    "clients/turn-end/delivery-holds.ts": "The turn-end delivery holds (#3813): peek-then-commit, drain-then-restore and park-then-recheck, settled once after the cap against the kept prefix (the reach rule), fenced by isCurrentSession, with the cut-advisory park keyed by session (#4112). Modelled by turn-end-delivery-holds. The producers register their holds in clients/runtime-turn.ts (handleTurnEnd), which is deliberately not given this family: that row would reach four families and its gate would turn advisory (#3878).",
+    "clients/turn-end/delivery-holds.ts": "The turn-end delivery holds (#3813): peek-then-commit, drain-then-restore and park-then-recheck, settled once after the cap against the kept prefix (the reach rule), fenced by isCurrentSession, with the cut-advisory park keyed by session (#4112). Modelled by turn-end-delivery-holds. The producers register their holds in clients/runtime-turn.ts (handleTurnEnd), which is deliberately not given this family because its row covers separate turn-end seams.",
     "clients/test-runner-client.ts": "Per-checkout isolation of automatic test selection (#3649). Identity keying without interleaving; unit tests suffice, listed only so the gap is visible.",
     "clients/opaque-mutation-scan.ts": "The pending opaque baseline of bash calls (OpaqueBaselineStore: one entry per tool-call id, retirement of an entry whose turn is over, the pending cap and its counted loss; #4137). Modelled by opaque-baseline-slot, together with the authority-ranked dispatch dedupe its recoveries feed (claimPipelineDispatch). The record site is clients/runtime-tool-call.ts and the take site and the dedupe are in clients/runtime-tool-result.ts, so those rows list the family too; the recovery itself (recoverOpaqueChangesViaGit, captureFileStats) is a stat or git read, not lifecycle."
+    ,"clients/deferred-runner-blockers.ts": "The deferred runner verdict and blocker recording are covered by pending-runner-store's owned admission and drain/peek actions."
+    ,"clients/finding-delivery-gate.ts": "Delivery freshness, disposition, and policy admission are not represented by a formal family; keep this delivery seam visible as unmodelled."
+    ,"clients/git-guard.ts": "The git guard has session and turn latches, but no formal family currently models their writers or reset rules; keep it visible as unmodelled."
+    ,"clients/advisory-provenance.ts": "Path freshness and missing-file admission use store-freshness's freshness axes; the remaining provenance snapshot is pure evidence shaping."
+    ,"clients/read-bridge.ts": "The bridge is a process-boundary producer without a formal lineage model; keep it visible as unmodelled."
+    ,"clients/project-snapshot-persist-worker.ts": "The worker participates in snapshot-promotion's generation-gated stage-to-canonical promotion."
+    ,"clients/memory-sampler.ts": "Sampling cadence and heap-growth tightening are observability state, but no formal family models their session reset and timer-free turn state; keep it visible as unmodelled."
+    ,"index.ts": "Hook rows are narrowed to changed hunk anchors; an edit only matches the families attached to session_start, session_shutdown, session_tree, turn_start, turn_end, agent_settled, tool_call, tool_result, or context (#3878)."
   }
 }

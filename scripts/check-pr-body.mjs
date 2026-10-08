@@ -6,6 +6,7 @@ import {
 	evaluateTlaCoverage,
 	loadCoverageMap,
 	matchGlob,
+	parseChangedAnchors,
 	parseChangedFiles,
 } from "./lib/tla-coverage.mjs";
 import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
@@ -1969,7 +1970,9 @@ export function lintTlaCoverage(body, { diff, cwd = REPO_ROOT } = {}) {
 	return evaluateTlaCoverage({
 		map,
 		changedFiles: parseChangedFiles(diff),
+		changedAnchors: parseChangedAnchors(diff),
 		body,
+		cwd,
 	});
 }
 

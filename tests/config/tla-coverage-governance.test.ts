@@ -6,6 +6,7 @@ import {
 	evaluateTlaCoverage,
 	loadCoverageMap,
 	matchGlob,
+	parseChangedAnchors,
 	parseChangedFiles,
 	validateCoverageMap,
 } from "../../scripts/lib/tla-coverage.mjs";
@@ -173,9 +174,50 @@ describe("TLA+ coverage map (#3802)", () => {
 			"clients/read-guard.ts",
 		]);
 	});
+
+	it("extracts hook anchors from the changed hunk", () => {
+		const diff = [
+			"diff --git a/index.ts b/index.ts",
+			"@@ -1,2 +1,3 @@",
+			' pi.on("session_start", handler);',
+			"+// changed",
+		].join("\n");
+		expect(parseChangedAnchors(diff)).toEqual(["index.ts#session_start"]);
+	});
 });
 
 describe("TLA+ coverage rule", () => {
+	it("only applies an index.ts row to a changed hook anchor", () => {
+		const indexMap = {
+			families: ["read-guard", "session-lifecycle"],
+			map: {
+				"index.ts": {
+					families: ["read-guard", "session-lifecycle"],
+					anchors: { session_start: ["session-lifecycle"] },
+				},
+			},
+		};
+		expect(
+			evaluateTlaCoverage({
+				map: indexMap,
+				changedFiles: ["index.ts"],
+				changedAnchors: [],
+				body: "",
+			}),
+		).toEqual({ errors: [], advisories: [] });
+		expect(
+			evaluateTlaCoverage({
+				map: indexMap,
+				changedFiles: ["index.ts"],
+				changedAnchors: ["index.ts#session_start"],
+				body: "",
+			}),
+		).toEqual({
+			errors: [expect.stringContaining("formal/session-lifecycle/")],
+			advisories: [],
+		});
+	});
+
 	it("errors on a mapped change with no model change and no body line", () => {
 		const result = evaluateTlaCoverage({
 			map: READ_GUARD_MAP,
@@ -200,7 +242,7 @@ describe("TLA+ coverage rule", () => {
 		const result = evaluateTlaCoverage({
 			map: READ_GUARD_MAP,
 			changedFiles: ["clients/read-guard.ts"],
-			body: "TLA+ unaffected: read-guard — only a local helper moved.",
+			body: "TLA+ unaffected: read-guard — NoStaleAllow remains unchanged.",
 		});
 		expect(result).toEqual({ errors: [], advisories: [] });
 	});
@@ -227,7 +269,7 @@ describe("TLA+ coverage rule", () => {
 		const result = evaluateTlaCoverage({
 			map: TWO_FAMILY_MAP,
 			changedFiles: ["clients/read-guard.ts"],
-			body: "TLA+ unaffected: session-lifecycle — only a local helper moved.",
+			body: "TLA+ unaffected: session-lifecycle — NoCrossSessionState remains unchanged.",
 		});
 		expect(result).toEqual({ errors: [], advisories: [] });
 	});
@@ -252,18 +294,17 @@ describe("TLA+ coverage rule", () => {
 		expect(result.errors).toHaveLength(1);
 	});
 
-	it("turns an unmet hub row (4+ families) into a note, not an error", () => {
+	it("requires an unmet multi-family row after anchor matching", () => {
 		const result = evaluateTlaCoverage({
 			map: hubMap(4),
 			changedFiles: ["clients/hub.ts"],
 			body: "",
 		});
-		expect(result.errors).toEqual([]);
-		expect(result.advisories).toHaveLength(1);
-		expect(result.advisories[0]).toContain("TLA+ note: clients/hub.ts");
+		expect(result.errors).toHaveLength(1);
+		expect(result.advisories).toEqual([]);
 	});
 
-	it("keeps an unmet 3-family row an error (hub threshold boundary)", () => {
+	it("keeps an unmet 3-family row an error", () => {
 		const result = evaluateTlaCoverage({
 			map: hubMap(3),
 			changedFiles: ["clients/hub.ts"],
@@ -331,6 +372,54 @@ describe("TLA+ coverage rule", () => {
 		expect(result.errors).toHaveLength(1);
 	});
 
+	it("rejects an unaffected declaration that names no model symbol", () => {
+		const body = fs.readFileSync(
+			path.join(
+				REPO_ROOT,
+				"tests/fixtures/ci-pr-bodies/tla-unaffected-boilerplate.md",
+			),
+			"utf8",
+		);
+		const result = evaluateTlaCoverage({
+			map: {
+				families: ["read-guard"],
+				map: { "clients/read-guard.ts": ["read-guard"] },
+			},
+			changedFiles: ["clients/read-guard.ts"],
+			body,
+		});
+		expect(result.errors).toHaveLength(1);
+	});
+
+	it("keeps a fixture declaration that names a real model invariant", () => {
+		const body = fs.readFileSync(
+			path.join(
+				REPO_ROOT,
+				"tests/fixtures/ci-pr-bodies/tla-unaffected-symbol.md",
+			),
+			"utf8",
+		);
+		expect(
+			evaluateTlaCoverage({
+				map: READ_GUARD_MAP,
+				changedFiles: ["clients/read-guard.ts"],
+				body,
+			}),
+		).toEqual({ errors: [], advisories: [] });
+	});
+
+	it("rejects an unaffected declaration that cites another family's symbol", () => {
+		const result = evaluateTlaCoverage({
+			map: {
+				families: ["read-guard", "session-lifecycle"],
+				map: { "clients/read-guard.ts": ["read-guard"] },
+			},
+			changedFiles: ["clients/read-guard.ts"],
+			body: "TLA+ unaffected: read-guard — NoCrossSessionState is unchanged.",
+		});
+		expect(result.errors).toHaveLength(1);
+	});
+
 	it.each([
 		["a backtick fence", "```\nTLA+ unaffected: read-guard — hidden.\n```"],
 		["a tilde fence", "~~~\nTLA+ unaffected: read-guard — hidden.\n~~~"],
@@ -357,7 +446,7 @@ describe("TLA+ coverage rule", () => {
 		const result = evaluateTlaCoverage({
 			map: READ_GUARD_MAP,
 			changedFiles: ["clients/read-guard.ts"],
-			body: "```\ncode\n```\n<!-- note -->\n- TLA+ unaffected: read-guard — real reason.",
+			body: "```\ncode\n```\n<!-- note -->\n- TLA+ unaffected: read-guard — NoStaleAllow remains unchanged.",
 		});
 		expect(result).toEqual({ errors: [], advisories: [] });
 	});
@@ -401,7 +490,7 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 			args.includes("--name-only")
 				? "clients/read-guard.ts\n"
 				: READ_GUARD_DIFF;
-		const body = `${BASE_BODY}\n\nTLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.`;
+		const body = `${BASE_BODY}\n\nTLA+ unaffected: read-guard — NoStaleAllow remains unchanged.\nTLA+ unaffected: session-lifecycle — NoCrossSessionState remains unchanged.`;
 		const result = lintLocalPrBody(body, REPO_ROOT, git as never, {
 			headFiles: READ_GUARD_HEAD_FILES,
 		});
@@ -436,7 +525,7 @@ describe("lintTlaCoverage seam (#3802)", () => {
 		});
 	});
 
-	it("prints a hub-row note through the local lint without failing it", () => {
+	it("does not print the old hub note for an anchored hook", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const git = (args: string[]) =>
@@ -445,10 +534,10 @@ describe("lintTlaCoverage seam (#3802)", () => {
 					: [
 							"diff --git a/index.ts b/index.ts",
 							"@@ -1,0 +1,1 @@",
-							"+// touched",
+							'+pi.on("session_start", handler);',
 						].join("\n");
 			lintLocalPrBody(BASE_BODY, REPO_ROOT, git as never);
-			expect(warn.mock.calls.flat().join("\n")).toContain(
+			expect(warn.mock.calls.flat().join("\n")).not.toContain(
 				"TLA+ note: index.ts",
 			);
 		} finally {
