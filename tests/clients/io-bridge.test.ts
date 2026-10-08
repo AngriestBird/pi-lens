@@ -50,6 +50,7 @@ import {
 	READ_BRIDGE_KEY,
 	registerReadBridge,
 } from "../../clients/read-bridge.js";
+import { readChangesSince } from "../../clients/project-changes.js";
 import type { ReadRecord } from "../../clients/read-guard.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -339,6 +340,72 @@ describe("io-bridge v2", () => {
 		).toBe("malformed");
 	});
 
+	// #3654 mutation table: each row below is the only red for one read-facet
+	// validator (every one of them survived its mutation before this table).
+	// Without the check, the facet either throws into the never-throw wrapper
+	// (`bookkeeping-error`, so a caller cannot tell a typo from a pi-lens fault)
+	// or is accepted with evidence the caller never shaped.
+	it.each([
+		["missing ranges", {}],
+		["an unknown evidence mode", { ranges: [[1, 2]], evidence: "network" }],
+		["non-string content", { ranges: [[1, 2]], content: 5 }],
+		["a non-string source", { ranges: [[1, 2]], source: 5 }],
+		["a non-object lineHashes", { ranges: [[1, 2]], lineHashes: 5 }],
+		[
+			"a fractional lineHashes key",
+			{ ranges: [[1, 10]], lineHashes: { "1.5": "aa" } },
+		],
+		[
+			"a non-string lineHashes value",
+			{ ranges: [[1, 10]], lineHashes: { 1: 5 } },
+		],
+	])("rejects a read facet with %s as malformed", (_label, read) => {
+		const filePath = writeFile();
+		expect(reasonOf(record({ filePath, read: read as never }).read)).toBe(
+			"malformed",
+		);
+		expect(capturedReads).toHaveLength(0);
+	});
+
+	it("rejects an entry with neither facet, and a null mutate facet, as malformed", () => {
+		const filePath = writeFile();
+		expect(record({ filePath } as BridgeEntry)).toEqual({
+			read: { accepted: false, reason: "malformed" },
+			mutate: { accepted: false, reason: "malformed" },
+		});
+		expect(reasonOf(record({ filePath, mutate: null as never }).mutate)).toBe(
+			"malformed",
+		);
+	});
+
+	it("rejects a delete with an empty filePath as malformed", () => {
+		expect(record({ filePath: "", mutate: { kind: "delete" } }).mutate).toEqual(
+			{ accepted: false, reason: "malformed" },
+		);
+		expect(forgetCalls).toHaveLength(0);
+	});
+
+	// D9: `record()` never throws. A dep that throws becomes that facet's
+	// `bookkeeping-error`, on both facets, instead of escaping into the caller.
+	it("turns a throwing dependency into bookkeeping-error on each facet", () => {
+		const filePath = writeFile();
+		currentIsRecordable = () => {
+			throw new Error("scope probe failed");
+		};
+		let result: ReturnType<typeof record> | undefined;
+		expect(() => {
+			result = record({
+				filePath,
+				mutate: { kind: "edit", ranges: [[1, 1]] },
+				read: { ranges: [[1, 2]] },
+			});
+		}).not.toThrow();
+		expect(result).toEqual({
+			mutate: { accepted: false, reason: "bookkeeping-error" },
+			read: { accepted: false, reason: "bookkeeping-error" },
+		});
+	});
+
 	it("rejects delete combined with read as malformed for both facets", () => {
 		const filePath = writeFile();
 		const result = record({
@@ -477,6 +544,18 @@ describe("io-bridge v2", () => {
 		currentExists = () => false;
 		expect(record({ filePath, mutate: { kind: "delete" } }).mutate).toEqual({
 			accepted: true,
+		});
+		expect(forgetCalls).toHaveLength(0);
+		expect(notifySpy).not.toHaveBeenCalled();
+	});
+
+	it("reports bookkeeping-error for an untracked delete target still on disk", () => {
+		// The caller recorded before deleting: say so, even for a path pi-lens
+		// never saw, rather than accept a delete that did not happen.
+		const filePath = writeFile("src/never-read.ts");
+		expect(record({ filePath, mutate: { kind: "delete" } }).mutate).toEqual({
+			accepted: false,
+			reason: "bookkeeping-error",
 		});
 		expect(forgetCalls).toHaveLength(0);
 		expect(notifySpy).not.toHaveBeenCalled();
@@ -681,6 +760,48 @@ describe("io-bridge v2", () => {
 		expect(stored[0]?.lineHashes).toBeUndefined();
 	});
 
+	it("refuses a disk-evidence read of an absent file and records nothing", () => {
+		const filePath = path.join(tmpDir, "src/absent.ts");
+		expect(
+			record({
+				filePath,
+				consumer: "disk",
+				read: { ranges: [[1, 5]], evidence: "disk" },
+			}).read,
+		).toEqual({ accepted: false, reason: "bookkeeping-error" });
+		expect(capturedReads).toHaveLength(0);
+	});
+
+	it('admits content "" with ranges [] as the explicit zero-line read', () => {
+		const filePath = writeFile("src/empty-content.ts", []);
+		fs.writeFileSync(filePath, "");
+		expect(
+			record({ filePath, consumer: "zero", read: { ranges: [], content: "" } })
+				.read,
+		).toEqual({ accepted: true });
+		expect(runtime.readGuard.getReadHistory(filePath)).toHaveLength(1);
+	});
+
+	it("stores each range's caller lineHashes on that range's record only", () => {
+		const filePath = writeFile();
+		const result = record({
+			filePath,
+			consumer: "multi",
+			read: {
+				ranges: [
+					[1, 2],
+					[5, 6],
+				],
+				lineHashes: { 1: "h1", 2: "h2", 5: "h5", 6: "h6" },
+			},
+		});
+		expect(result.read).toEqual({ accepted: true });
+		expect(capturedReads.map((c) => c.record.lineHashes)).toEqual([
+			{ 1: "h1", 2: "h2" },
+			{ 5: "h5", 6: "h6" },
+		]);
+	});
+
 	it("hashes in memory when content is supplied, without a contentBinding", () => {
 		const filePath = writeFile();
 		const result = record({
@@ -710,6 +831,27 @@ describe("io-bridge v2", () => {
 			tool: "edit",
 			kinds: ["autofix", "format"],
 		});
+	});
+
+	it("publishes once per file: a re-touch that queues nothing new is silent", () => {
+		const filePath = writeFile();
+		record({ filePath, mutate: { kind: "edit", ranges: [[2, 4]] } });
+		record({ filePath, mutate: { kind: "edit", ranges: [[6, 8]] } });
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("names the v2 consumer in the change-log receipt", () => {
+		const filePath = writeFile();
+		record({
+			filePath,
+			consumer: "my-tool",
+			mutate: { kind: "edit", ranges: [[2, 4]] },
+		});
+		expect(
+			readChangesSince(tmpDir, 0)
+				.filter((change) => change.filePath === filePath)
+				.map((change) => change.source),
+		).toEqual(["agent-tool:my-tool"]);
 	});
 
 	it("suppresses queueing and emission when deferAutofix is false", () => {

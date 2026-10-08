@@ -679,6 +679,39 @@ describe("read-bridge", () => {
 			expect(read.source).toBe("bridge:test-ext");
 		});
 
+		it("a ranged read stores disk line hashes for exactly the lines it covered", () => {
+			const guard = new ReadGuard("bridge-disk-hashes", { mode: "block" });
+			_guardFn = (record, opts) => guard.recordRead(record, opts);
+			const filePath = fx("hashed.ts");
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ filePath, requestedOffset: 10, requestedLimit: 5 }),
+			);
+			const stored = guard.getReadHistory(filePath);
+			expect(stored).toHaveLength(1);
+			expect(Object.keys(stored[0]?.lineHashes ?? {})).toEqual([
+				"10",
+				"11",
+				"12",
+				"13",
+				"14",
+			]);
+		});
+
+		// #3654: v2's disk-evidence read refuses a file that is gone, where the
+		// v1 body recorded coverage for it. The drop is visible in the ledger.
+		it("a read of an absent file records nothing and leaves one drop row", () => {
+			fx("main.go");
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ filePath: join(_fixtureDir!, "gone.ts"), consumer: "x" }),
+			);
+			expect(_guardFn).not.toHaveBeenCalled();
+			const groups = getDegradationSummary().filter(
+				(group) => group.kind === "io-bridge-read-dropped",
+			);
+			expect(groups).toHaveLength(1);
+			expect(groups[0].latestReasons[0].subject).toBe("x:bookkeeping-error");
+		});
+
 		it("a read for file A does not authorize edits on file B", () => {
 			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
 				validEntry({ filePath: fx("a.ts") }),

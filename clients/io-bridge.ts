@@ -213,14 +213,6 @@ function readFacetProblem(read: unknown): string | undefined {
 	);
 }
 
-/** `kind` must be one of the three mutation verbs. */
-function mutationKindProblem(kind: unknown): string | undefined {
-	if (kind === "edit" || kind === "write" || kind === "delete") {
-		return undefined;
-	}
-	return 'kind must be "edit", "write", or "delete"';
-}
-
 function drop(
 	facet: "read" | "mutate",
 	caller: string,
@@ -518,11 +510,7 @@ function recordMutateFacet(
 			"mutate facet must be an object",
 		);
 	}
-	const kindProblem = mutationKindProblem(mutate["kind"]);
-	if (kindProblem !== undefined) {
-		return drop("mutate", caller, "malformed", kindProblem);
-	}
-	const kind = mutate["kind"] as "edit" | "write" | "delete";
+	const kind = mutate["kind"];
 	const filePath = raw["filePath"];
 	if (typeof filePath !== "string" || filePath === "") {
 		return drop(
@@ -533,8 +521,9 @@ function recordMutateFacet(
 		);
 	}
 	if (kind === "delete") return recordDeleteFacet(filePath, caller, deps);
-	// edit/write: translate the facet into the owner's entry once. The owner
-	// validates every field (one validator, #3654 F3) and runs the seam: scope
+	// Anything else is an edit/write for the owner: translate the facet into
+	// its entry once. The owner validates every field, `kind` included (one
+	// validator, #3654 F3), and runs the seam: scope
 	// gate, lineage fence, stamp, turn state, receipt, deferral, publish.
 	// `consumer` rides along so the change log names the producer
 	// (`agent-tool:<name>`), never `agent-tool:unknown`.
