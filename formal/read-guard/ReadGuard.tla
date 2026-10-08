@@ -126,8 +126,11 @@ CONSTANTS
     RetireAtWrite,  \* TRUE (code since #4187): a write that carries no bytes of its own (a bash write's
                     \*   tool_call, the agent_end drain) first ends an authorship whose bytes changed, and
                     \*   no later write resumes it; FALSE: it re-baselines over the other writer's bytes
-    AuthorBranch    \* TRUE (code since #4187, #3603): /tree and /fork keep the authorship whose write is
+    AuthorBranch,   \* TRUE (code since #4187, #3603): /tree and /fork keep the authorship whose write is
                     \*   on the kept branch; FALSE (code before): they clear every authorship
+    BridgeNoAdvance \* TRUE (code since #4187 round 3, R2-4): a mutation-bridge write, which no pre-write
+                    \*   check guarded, ends an existing authorship whose bytes it changed instead of
+                    \*   advancing it; FALSE (round 2): it re-baselines like an own write
 
 Lines == 1..MaxLen
 NoH == [l \in Lines |-> 0]
@@ -571,6 +574,25 @@ PartialBashWrite ==
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
                    fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
+\* ---- a mutation-bridge write of one line ("bridge") ----
+\* A co-process producer (or ast_grep_replace, an LSP edit, the settled
+\* sweep's replay) writes line 1 and calls recordMutation after the fact:
+\* stampLiveMutation's recordWritten(stampFileTime: false). Nothing ran
+\* before the write, so the authorship it lands on cannot be checked against
+\* the bytes it wrote around. The agent is told what was written (know), so
+\* the only hazard left is the other writer's bytes. Scoped to an authored
+\* file like PartialBashWrite: a first record is the #3865 credit.
+BridgeWrite ==
+    /\ CanOp("bridge") /\ written.on
+    /\ LET c == Replace(disk, 1, tok)
+       IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
+          /\ written' = IF ~BridgeNoAdvance THEN Auth(c)
+                        ELSE IF written.c = c THEN written ELSE Retired
+    /\ rev' = rev + 1 /\ tok' = tok + 1
+    /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
+                   fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
 ----------------------------------------------------------------------------
 \* Another writer (external editor, second pi-lens instance, git checkout).
 External ==
@@ -722,7 +744,7 @@ Next ==
     \/ ReadExec \/ ReadResult \/ FailedRead \/ BlockedReadCall \/ BlockedReadEnd
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
-    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite
+    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite \/ BridgeWrite
     \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars

@@ -1045,6 +1045,15 @@ export type DegradationKind =
 	 */
 	| "query-predicates-invalid"
 	/**
+	 * #4131: another writer changed a file the agent authored without a read
+	 * (a bash write, a created file), or a mutation-bridge write landed on it
+	 * with no pre-write check (#4187 R2-4, the row's `writer: "bridge"`), so
+	 * its authorship ended (`ReadGuard.retireChangedAuthorship`) and its next
+	 * edit needs a read. Subject is the file; counted, the read-guard.log row
+	 * on the rising edge.
+	 */
+	| "read-guard-authorship-retired"
+	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and
 	 * far more frequent budget than the orphan backstop's one-per-cooldown
@@ -1096,13 +1105,6 @@ export type DegradationKind =
 	 * credited to the new branch, which never showed it. One subject, counted.
 	 */
 	| "read-guard-write-after-branch-move"
-	/**
-	 * #4131: another writer changed a file the agent authored without a read
-	 * (a bash write, a created file), so its authorship ended
-	 * (`ReadGuard.retireChangedAuthorship`) and its next edit needs a read.
-	 * Subject is the file; counted, the read-guard.log row on the rising edge.
-	 */
-	| "read-guard-authorship-retired"
 	/**
 	 * The tier-3 cascade's outstanding-touch registry
 	 * (`clients/lsp/cascade-tier.ts`) reached its cap before a quiet-window

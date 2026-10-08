@@ -928,7 +928,10 @@ spans and never re-search stale bytes. Authorship (`writtenThisSession`)
 follows content identity (#4131): it holds the bytes the conversation last
 wrote, `stat` only pre-filters the hash, and another writer's byte change ends
 it at the next zero-read edit, bash write or drain on the file
-(`retireChangedAuthorship`); no later write resumes it. A branch move keeps it
+(`retireChangedAuthorship`); no later write resumes it. A mutation-bridge
+write (no pre-write check) may create a first authorship but ends an
+existing one; the observed replay alone advances it, its tool_call having
+retired every file it may replay. The store holds at most 4096 files. A branch move keeps it
 iff its write's tool result is on the branch (#3603). FileTime moves only over
 bytes the conversation holds whole: process bridges, observed replays and
 range bridge reads leave it (#3865).

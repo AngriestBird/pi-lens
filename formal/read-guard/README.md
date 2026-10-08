@@ -134,6 +134,7 @@ before it), `OwnEditRescue = FALSE`,
 `DrainMode = "fenced"` (every config before #3521 round 2 keeps `"atomic"`,
 its old shape), `AuthorIdentity = TRUE`, `RetireAtWrite = TRUE` and
 `AuthorBranch = TRUE` (all three since #4187; `FALSE` is the code before it),
+`BridgeNoAdvance = TRUE` (since #4187 round 3; `FALSE` on its round-2 head),
 `ProvisionalCredit = FALSE` (`TRUE` only on #4185's round-1
 head, which stamped the transcript identity on the provisional record) and
 `RevokeFailedRead = TRUE` (since #4185 round 2; `FALSE` before) and
@@ -170,6 +171,11 @@ The model follows `checkEdit` step by step:
   that named it is on the kept branch (`AuthorBranch`, `KeptAuth`); a
   pi-lens writer (the drain, `WriteRW2`) names none and keeps the record's
   (`Carry`). `pbash` is a recognized bash write of one line, the F6 shape.
+  `bridge` is a mutation-bridge write of one line (a co-process producer's
+  `recordMutation` after the fact): nothing ran before it, so it ends an
+  existing record whose bytes it changed instead of advancing it
+  (`BridgeNoAdvance`, `advanceAuthorship: false`). The observed replay is the
+  bridge's one advancing producer: its tool_call retires first, as bash does.
 - **FileTime.** Whole-file mtime/ctime/size. The rescue is
   `canIgnoreStalenessByHashes` (`canTreatStalenessAsOwnPriorEdit` is gone
   since #3525).
@@ -264,6 +270,8 @@ head that added this model. It is not checked in CI.
 | `AuthorForeignNoIdentity` | the same, authorship by `recordWritten` alone (the code before #4187): BashWrite, External, Edit | violated `NoStaleAllow` | 37 |
 | `AuthorRewriteForeign` | #4187 F6 P2 fixed: bash, another writer, a one-line bash write, an edit | pass | 397 |
 | `AuthorRewriteForeignNoRetire` | the same, the second write re-baselining over the other writer's bytes (round 1 of #4187) | violated `NoStaleAllow` | 204 |
+| `AuthorBridgeForeign` | #4187 R2-4 fixed: bash, another writer, a one-line mutation-bridge write, an edit | pass | 374 |
+| `AuthorBridgeForeignAdvance` | the same, the bridge write re-baselining over the other writer's bytes (round 2 of #4187, probe A1): BashWrite, External, BridgeWrite, Edit | violated `NoStaleAllow` | 204 |
 | `AuthorDrainForeign` | #4187 F6 P3 fixed: bash, another writer, the agent_end drain (a whitespace-only format), an edit | pass | 209 |
 | `AuthorDrainForeignNoRetire` | the same, the drain re-baselining (round 1 of #4187) | violated `NoStaleAllow` | 121 |
 | `AuthorTouch` | #4187 F5 no-drop: another writer's whitespace-only rewrite (a new mtime, the same tokens) keeps bash authorship | pass (all three invariants) | 39 |
