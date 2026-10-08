@@ -175,14 +175,11 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 
 	it("retires one repeatedly trapping grammar before the shared heap aborts (#4010)", async () => {
 		const { client, onAbort } = await liveClient();
-		for (let i = 0; i < GRAMMAR_TRAP_LATCH_THRESHOLD; i++) {
-			expect(
-				client.reportWasmAbort(trap(), {
-					languageId: "bash",
-					source: `scanner-input-${i}`,
-				}),
-			).toBe(false);
-		}
+		for (let i = 0; i < GRAMMAR_TRAP_LATCH_THRESHOLD; i++)
+			client.reportWasmAbort(trap(), {
+				languageId: "bash",
+				source: `scanner-input-${i}`,
+			});
 
 		expect(onAbort).not.toHaveBeenCalled();
 		expect(kindCount("wasm-abort")).toBeUndefined();
@@ -191,6 +188,38 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 			(
 				await client.withParsedTree(
 					pythonFile(`[ "$1" == "--quiet" ]\n`),
+					"bash",
+					undefined,
+					() => 1,
+				)
+			).parsed,
+		).toBe(false);
+		expect(client.getLanguage("bash")).toBeNull();
+	});
+
+	it("latches consume traps across clean parses and keeps the latch after session reset (#4010)", async () => {
+		const { client, onAbort } = await liveClient();
+		for (const source of ["first", "second"]) {
+			const outcome = await client.withParsedTree(
+				pythonFile(`print(${JSON.stringify(source)})\n`),
+				"bash",
+				undefined,
+				() => {
+					throw trap();
+				},
+			);
+			expect(outcome).toEqual({ parsed: false, wasmTrap: "retry" });
+		}
+
+		expect(kindCount("grammar-blocked")).toBe(1);
+		expect(onAbort).not.toHaveBeenCalled();
+		resetDegradationLedger();
+		client.resetLoadStateForSession();
+		expect(kindCount("grammar-blocked")).toBe(1);
+		expect(
+			(
+				await client.withParsedTree(
+					pythonFile("print('after')\n"),
 					"bash",
 					undefined,
 					() => 1,
