@@ -88,6 +88,7 @@ import {
 	safeSpawnAsync,
 } from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
+import { ephemeralStagingRoot } from "../ephemeral-root.js";
 import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -154,6 +155,15 @@ export async function resolveLspServerCwd(
 	onRootFailure?: (reason: string) => void,
 	onRootFallback?: (fallback: LspRootFallback) => void,
 ): Promise<string | undefined> {
+	const stagingRoot = ephemeralStagingRoot(filePath);
+	if (stagingRoot) {
+		recordDegradationOnce({
+			kind: "lsp-root-declined",
+			subject: stagingRoot,
+			reason: "LSP root declined for host pi-agent staging directory",
+		});
+		return undefined;
+	}
 	const rootMarkers = server.rootMarkers ?? server.root.rootMarkers;
 	let serverRoot: string | undefined;
 	let rootFailed = false;

@@ -215,6 +215,13 @@ export type DegradationKind =
 	 * cannot carry, since the warm-only callers never reach selection.
 	 */
 	/**
+	 * #1129 decision B: a root inside a real git checkout below the host tmpdir
+	 * got a process-owned data dir, so nothing it records outlives the process
+	 * (and a durable dir it may have had before is not read). Subject is the
+	 * slug hash; recorded once per root via the session-start data-dir drain.
+	 */
+	| "data-dir-ephemeral"
+	/**
 	 * #2874: a pre-hash project data-dir slug directory was renamed once to
 	 * its hashed slug (or an old/new pair was found coexisting and the new
 	 * one preferred), so two roots that differ only in separator-vs-hyphen
@@ -222,6 +229,14 @@ export type DegradationKind =
 	 * Recorded ONCE per migrated directory via the session-start drain.
 	 */
 	| "data_dir_migrated"
+	/**
+	 * A dead-code scan that missed the turn_end budget finished in the
+	 * background and was NOT used (#4117): its session ended before it settled
+	 * (`session-ended`), or it failed (`scan-failed`; a timeout or kill also
+	 * backs the root off). Subject is the client id; counted, because a slow root
+	 * repeats it every turn.
+	 */
+	| "dead-code-late-scan-dropped"
 	/**
 	 * #3814: the commit gate's pre-check of settled collect-later runner answers
 	 * (`absorbSettledRunnerBlockers`) threw. The gate falls back to the blocker
@@ -713,6 +728,8 @@ export type DegradationKind =
 	 * "hung" server is truly hung or just answering late.
 	 */
 	| "lsp-pull-unconfirmed"
+	/** A host-created pi-agent staging root was declined as an LSP root. */
+	| "lsp-root-declined"
 	/**
 	 * The abandoned request behind an `lsp-pull-late-answer` timeout REJECTED
 	 * instead of answering (#1774) — e.g. a permanent server error such as
@@ -1196,6 +1213,16 @@ export type DegradationKind =
 	 * while the host is already exiting, so a second row would never be read.
 	 */
 	| "safe-spawn-signal-reraise-unsupported"
+	/**
+	 * A project scanner (vulture, jscpd) was started over a root that holds a
+	 * linked worktree it could not be told to leave out (#4117): the project's
+	 * own scanner config could not be read, so passing the exclusion would have
+	 * replaced it, or the worktree's path cannot be spelled in the scanner's
+	 * argument (a comma, a glob character). The scan then counts the worktree's
+	 * files as the project's. Subject is the scanner; counted, because the same
+	 * root is rescanned every session and turn.
+	 */
+	| "scan-worktree-exclusion-skipped"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
@@ -2081,6 +2108,8 @@ const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	// doc comment above) and is frequent/self-healing by design — a `⚠` would
 	// cry wolf on the sampler's ordinary best-effort data loss.
 	"resource-sampler-scanner-escalated",
+	// #1129: an ephemeral data dir for a tmp checkout is decision B working.
+	"data-dir-ephemeral",
 	// #2874: a successful legacy-directory migration is an upgrade tally, not
 	// a call to action. The hash-only subject avoids exposing the project path.
 	"data_dir_migrated",

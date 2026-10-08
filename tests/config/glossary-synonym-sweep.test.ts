@@ -655,7 +655,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
 		// share one helper in turn-end/delivery-holds.ts instead of two copies.
-		"clients/runtime-turn.ts": 33,
+		"clients/runtime-turn.ts": 32,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -697,6 +697,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,
+		// 0 -> 2 (#4117): jscpd's own config key, read (`config.ignore`) and typed
+		// (`{ ignore?: unknown }`) to merge the project's list with the worktree
+		// exclusion; the name is jscpd's, not one this tree coined.
+		"clients/jscpd-client.ts": 2,
 		"clients/lens-config.ts": 9,
 		"clients/project-lens-config.ts": 6,
 	},
@@ -871,7 +875,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/extension-log.ts": 2,
 		"clients/file-kinds.ts": 2,
 		"clients/file-time.ts": 7,
-		"clients/file-utils.ts": 53,
+		"clients/ephemeral-root.ts": 15,
+		"clients/file-utils.ts": 57,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		"clients/format-service.ts": 3,
@@ -959,7 +964,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 21,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
-		"clients/python-environment.ts": 18,
+		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
+		// path operations at the shared Python resolver seam; r3 restored the
+		// `path.isAbsolute` leg that rejects another Windows drive (V1).
+		"clients/python-environment.ts": 22,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
@@ -1005,7 +1013,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
 		// exception's physical policy-relative path (R4). These remain filesystem
 		// operations, not delivery lanes; the census measures every use.
-		"clients/test-runner-client.ts": 66,
+		// 66 -> 74 (#3871 r2): text-runner display rebasing uses path operations
+		// for pytest, PHPUnit, Mix, and generic runner locations.
+		"clients/test-runner-client.ts": 74,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,

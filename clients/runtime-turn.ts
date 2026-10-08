@@ -76,6 +76,7 @@ import {
 	stableFindingKey,
 } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
+import { scopeCell } from "./session-scope.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	writeProjectDiagnosticsDeltaReport,
@@ -84,6 +85,7 @@ import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-a
 import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
+import { hasAmbientPythonEnvironment } from "./python-environment.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -508,6 +510,157 @@ function wouldPoisonCache(
 	next: { success: boolean },
 ): boolean {
 	return !next.success && prev?.data.success === true;
+}
+
+/**
+ * A dead-code scan that missed the turn_end budget and is still running, or
+ * has finished since (#4117). `bounded()` abandons the await, not the process,
+ * and vulture keeps no disk cache, so what the abandoned scan computes is
+ * written and delivered by the entry below instead of being thrown away: the
+ * scan lands its baseline row where it settles, and the next turn_end that
+ * reaches the lane delivers its delta. One entry per (client, root) on the
+ * session scope's cell, so it lives and dies with the session: a new session
+ * never sees it, and a scan that settles after its session ended is dropped.
+ * While an entry exists no second scan starts, so the settle handler is the
+ * only writer of the baseline row.
+ */
+interface LateDeadCodeScan {
+	/** Resolved paths of the files edited in the turn the scan was started for. */
+	files: ReadonlySet<string>;
+	/** The baseline row the scan was started against; absent when there was none. */
+	previousScan: DeadCodeResult | undefined;
+	/** Resolved paths edited while the scan ran: the next scan covers them. */
+	carry: Set<string>;
+	/** The scan's result once it succeeded; null while it runs. */
+	settled: DeadCodeResult | null;
+}
+
+const LATE_DEAD_CODE_SCANS = "dead-code-late-scans";
+
+function lateDeadCodeScansOf(
+	runtime: RuntimeCoordinator,
+): Map<string, LateDeadCodeScan> {
+	return scopeCell(
+		runtime.sessionScope,
+		LATE_DEAD_CODE_SCANS,
+		() => new Map<string, LateDeadCodeScan>(),
+	) as Map<string, LateDeadCodeScan>;
+}
+
+/** One finished scan and what it is compared with, for the dead-code delta. */
+interface DeadCodeDeltaSource {
+	result: DeadCodeResult;
+	previousScan: DeadCodeResult | undefined;
+	/** Resolved paths of the files whose new findings are attributable to the agent. */
+	modified: ReadonlySet<string>;
+}
+
+function lateDeadCodeScanKey(client: DeadCodeClient, cwd: string): string {
+	return `${client.id}\0${cwd}`;
+}
+
+/** The one `dead-code.log` event a cross-file scan produces, inline or late. */
+function deadCodeScanEvent(
+	client: DeadCodeClient,
+	cwd: string,
+	result: DeadCodeResult,
+	durationMs: number,
+): Parameters<typeof logDeadCodeScan>[0] {
+	return {
+		language: client.language,
+		root: cwd,
+		success: result.success,
+		cached: false,
+		unusedExports: result.unusedExports.length,
+		unusedFiles: result.unusedFiles.length,
+		unusedDeps: result.unusedDeps.length,
+		unlistedDeps: result.unlistedDeps.length,
+		durationMs: result.durationMs ?? durationMs,
+		...(result.excludedWorktrees !== undefined && {
+			excludedWorktrees: result.excludedWorktrees,
+		}),
+		...(!result.success && { reason: result.summary }),
+	};
+}
+
+/** Remove a late scan that will not be used, and count why. */
+function dropLateDeadCodeScan(
+	scans: Map<string, LateDeadCodeScan>,
+	key: string,
+	client: DeadCodeClient,
+	reason: string,
+): void {
+	scans.delete(key);
+	incrementDegradationCount({
+		kind: "dead-code-late-scan-dropped",
+		subject: client.id,
+		reason,
+	});
+}
+
+/**
+ * Keep a dead-code scan that missed the turn_end budget (#4117 F1). Where it
+ * settles it writes the baseline row (a failure never replaces a good row,
+ * #925) and its `dead-code.log` event, and a successful result waits in the
+ * entry for the next turn_end that reaches the lane. A result for a session
+ * that has ended is dropped and counted.
+ */
+function parkLateDeadCodeScan(args: {
+	runtime: RuntimeCoordinator;
+	cacheManager: CacheManager;
+	client: DeadCodeClient;
+	cwd: string;
+	cacheKey: string;
+	scan: Promise<DeadCodeResult>;
+	startedAt: number;
+	files: ReadonlySet<string>;
+	previousScan: DeadCodeResult | undefined;
+}): void {
+	const { runtime, cacheManager, client, cwd, cacheKey, startedAt } = args;
+	const scans = lateDeadCodeScansOf(runtime);
+	const key = lateDeadCodeScanKey(client, cwd);
+	const generation = runtime.sessionGeneration;
+	const entry: LateDeadCodeScan = {
+		files: args.files,
+		previousScan: args.previousScan,
+		carry: new Set(),
+		settled: null,
+	};
+	scans.set(key, entry);
+	void args.scan.then(
+		(result) => {
+			if (!runtime.isCurrentSession(generation)) {
+				dropLateDeadCodeScan(scans, key, client, "session-ended");
+				return;
+			}
+			const durationMs = Date.now() - startedAt;
+			// The same comparison the inline path makes, against the row the scan
+			// was started against (read before the await there too).
+			if (
+				!wouldPoisonCache(
+					entry.previousScan ? { data: entry.previousScan } : null,
+					result,
+				)
+			) {
+				cacheManager.writeCache(cacheKey, result, cwd, {
+					scanDurationMs: durationMs,
+				});
+			}
+			logDeadCodeScan(deadCodeScanEvent(client, cwd, result, durationMs));
+			if (!result.success) {
+				dropLateDeadCodeScan(
+					scans,
+					key,
+					client,
+					`scan-failed: ${result.summary}`,
+				);
+				return;
+			}
+			entry.settled = result;
+		},
+		(err: unknown) =>
+			dropLateDeadCodeScan(scans, key, client, `scan-threw: ${err}`),
+	);
 }
 
 // LSP idle reset scheduling — prevents thrashing by delaying shutdown
@@ -2379,6 +2532,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		reason?: string;
 		/** True when a failed run left the previous good cache in place (#1467). */
 		cacheKept?: boolean;
+		/** #4117: `deferred` when a scan outlived the turn_end budget and was abandoned. */
+		execution?: "deferred";
+		/** #4117: the abandonment was the hook's own signal (Escape), not the clock. */
+		aborted?: boolean;
+		/** #4117: linked worktrees the scan was told to leave out. */
+		excludedWorktrees?: number;
 	} = {};
 	if (runtime.isStartupScanInFlight("dead-code")) {
 		dbg("turn_end: skipping dead-code (startup scan still in flight)");
@@ -2398,38 +2557,201 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		/** #3248: bounded per-turn on this lane's own row, never per finding. */
 		let deadCodeDispositionSuppressed = 0;
 		const reasons: string[] = [];
+		/**
+		 * The attributable delta of finished scans: what became unused in the files
+		 * each source's `modified` names, against that source's `baseline` (the row
+		 * its scan was compared with). A source is a scan that finished inside this
+		 * turn, or one that missed an earlier turn's budget and settled since
+		 * (#4117 F1); the last source is the newest and gives the totals and the
+		 * re-offered cut items.
+		 */
+		const deliverDeadCodeDelta = (
+			client: DeadCodeClient,
+			sources: readonly DeadCodeDeltaSource[],
+		): void => {
+			const latest = sources.at(-1);
+			if (latest === undefined) return;
+			const result = latest.result;
+			// #3901: items the cap cut on the previous turn. A failed scan
+			// leaves them parked; a successful one takes them (offered once).
+			const deadCodeLane = carryLane("dead-code", client.id);
+			const parkedDeadCode =
+				runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
+			deadCodeMeta.totalIssues =
+				(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
+			// No baseline means every finding looks new. Report nothing rather
+			// than blame the edit for the whole project's pre-existing debt.
+			if (!sources.some((source) => source.previousScan?.success)) {
+				reasons.push(`${client.id}:no_previous_scan`);
+				return;
+			}
+			const newIssues: DeadCodeIssue[] = [];
+			for (const source of sources) {
+				if (!source.previousScan?.success) continue;
+				const prevKeys = new Set(
+					deadCodeIssues(source.previousScan).map(deadCodeIssueKey),
+				);
+				for (const issue of deadCodeIssues(source.result)) {
+					if (prevKeys.has(deadCodeIssueKey(issue)) || !issue.file) continue;
+					if (source.modified.has(resolveRunnerPath(cwd, issue.file))) {
+						newIssues.push(issue);
+					}
+				}
+			}
+			// #3901: a parked item is offered again only while this scan still
+			// reports it, as this scan's own record of it; it bypasses the
+			// baseline and the edited-file gate the cut turn overwrote.
+			const reOffered = stillReportedParked(
+				parkedDeadCode,
+				deadCodeIssues(result),
+				deadCodeIssueKey,
+				new Set(newIssues.map(deadCodeIssueKey)),
+			);
+			if (newIssues.length === 0 && reOffered.length === 0) {
+				reasons.push(`${client.id}:clean`);
+				return;
+			}
+			newIssueTotal += newIssues.length;
+			if (newIssues.length > 0) {
+				projectDiagnosticsDelta.push(
+					...newIssues.map((issue) =>
+						deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+					),
+				);
+				projectDiagnosticsSources.add("dead-code");
+			}
+			// #3248: the rendered advisory takes the stored-disposition
+			// filter, keyed off this lane's OWN adapter. The delta record
+			// above keeps the unfiltered set — its reader applies the policy
+			// on read, so filtering both would double-apply on one lane.
+			const deadCodeDeliverable = filterFindingsByDisposition(
+				[...newIssues, ...reOffered],
+				cwd,
+				(issue) =>
+					deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+			);
+			deadCodeDispositionSuppressed += deadCodeDeliverable.suppressed;
+			// Every finding on this scan was marked: a PUSH surface stays
+			// silent rather than re-announcing that the mark is working; the
+			// count rides this lane's bounded per-turn row.
+			if (deadCodeDeliverable.kept.length === 0) {
+				reasons.push(`${client.id}:all_disposed`);
+				return;
+			}
+			const deadCodePart = formatDeadCodeDelta(
+				deadCodeDeliverable.kept,
+				result.language,
+			);
+			// @delivery-surface: runtime-turn:dead-code-advisory
+			advisoryParts.push(deadCodePart);
+			const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
+			deliveryHolds.push(
+				cutAdvisoryHold(
+					"dead-code",
+					deadCodeLane,
+					deadCodePart,
+					deadCodeDeliverable.kept.slice(0, DEAD_CODE_DELTA_MAX_SHOWN),
+					(issue) => reOfferedKeys.has(deadCodeIssueKey(issue)),
+				),
+			);
+		};
 		// A malformed client or deps object must never abort turn_end. Before the
 		// per-turn delta this block only read a cache; now it iterates and awaits,
 		// so the whole thing needs the guard, not just `client.analyze`.
 		try {
+			const lateScans = lateDeadCodeScansOf(runtime);
 			for (const client of deadCodeClients) {
 				if (!client.detect(cwd)) {
 					reasons.push(`${client.id}:not_detected`);
 					continue;
 				}
-				if (![...modifiedFiles()].some((f) => client.owns(f))) {
-					reasons.push(`${client.id}:no_owned_files`);
-					continue;
-				}
 				const cacheKey = `dead-code-${client.id}`;
-				const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
-				// Back off after a timeout/kill so an unresponsive scanner cannot cost
-				// every later turn its full analysis budget (mirrors knip).
-				if (
-					prev &&
-					!prev.data.success &&
-					isHardFailureSummary(prev.data.summary)
-				) {
-					dbg(
-						`turn_end: skipping dead-code after failure: ${prev.data.summary}`,
-					);
-					deadCodeMeta.skipped = true;
-					reasons.push(`${client.id}:backoff:${prev.data.summary}`);
-					continue;
+				const lateKey = lateDeadCodeScanKey(client, cwd);
+				const sources: DeadCodeDeltaSource[] = [];
+				// A scan an earlier turn abandoned at its budget (#4117 F1): its
+				// session may be over; if it finished, its delta is delivered now
+				// and the files edited meanwhile join this turn's scan; if it still
+				// runs, nothing else starts and this turn's files wait for it.
+				const late = lateScans.get(lateKey);
+				let carried: ReadonlySet<string> = new Set();
+				if (late?.settled) {
+					lateScans.delete(lateKey);
+					sources.push({
+						result: late.settled,
+						previousScan: late.previousScan,
+						modified: late.files,
+					});
+					carried = late.carry;
+					reasons.push(`${client.id}:late_scan`);
 				}
-				const startMs = Date.now();
 				try {
-					const result = await client.analyze(cwd);
+					if (late && !late.settled) {
+						for (const file of modifiedFiles()) late.carry.add(file);
+						reasons.push(`${client.id}:in_flight`);
+						continue;
+					}
+					const scanFiles = new Set([...modifiedFiles(), ...carried]);
+					if (![...scanFiles].some((f) => client.owns(f))) {
+						reasons.push(`${client.id}:no_owned_files`);
+						continue;
+					}
+					const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
+					// Back off after a timeout/kill so an unresponsive scanner cannot cost
+					// every later turn its full analysis budget (mirrors knip). #4117: a
+					// scan abandoned at the budget that later timed out wrote no row, so
+					// the client that saw it settle is asked as well (optional: doubles).
+					const previousFailedHard =
+						prev &&
+						!prev.data.success &&
+						isHardFailureSummary(prev.data.summary);
+					const abandonedFailure = previousFailedHard
+						? null
+						: (client.recentHardFailure?.(cwd) ?? null);
+					if (previousFailedHard || abandonedFailure !== null) {
+						const failure = previousFailedHard
+							? prev.data.summary
+							: (abandonedFailure ?? "");
+						dbg(`turn_end: skipping dead-code after failure: ${failure}`);
+						deadCodeMeta.skipped = true;
+						reasons.push(`${client.id}:backoff:${failure}`);
+						continue;
+					}
+					const startMs = Date.now();
+					// #4117: awaited under the turn_end budget that is LEFT and the
+					// hook's signal, as knip is (#3872). `bounded()` abandons the await,
+					// never the process: vulture keeps its own 30 s timeout and
+					// single-flight slot, and a scan that misses the budget is parked
+					// (`parkLateDeadCodeScan`) so its row is written where it settles and
+					// its delta delivered by a later turn. No further client starts once
+					// the budget is spent.
+					const scan = client.analyze(cwd);
+					const result = await bounded(scan, {
+						signal: deps.signal,
+						hook: "turn_end",
+						label: "dead-code",
+						ms: Math.max(
+							0,
+							HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
+						),
+					});
+					if (result === undefined) {
+						dbg(`turn_end: dead-code(${client.id}) outlived the budget`);
+						deadCodeMeta.execution = "deferred";
+						deadCodeMeta.aborted = deps.signal?.aborted === true;
+						reasons.push(`${client.id}:deferred`);
+						parkLateDeadCodeScan({
+							runtime,
+							cacheManager,
+							client,
+							cwd,
+							cacheKey,
+							scan,
+							startedAt: startMs,
+							files: scanFiles,
+							previousScan: prev?.data,
+						});
+						break;
+					}
 					const durationMs = Date.now() - startMs;
 					// Never overwrite a good scan with a failure (#925, #1467): a
 					// vulture timeout on one .py turn would otherwise evict the
@@ -2447,103 +2769,31 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					}
 					// One event per cross-file scan (AGENTS.md) — the per-turn scan is
 					// now the primary path, so dead-code.log must see it too.
-					logDeadCodeScan({
-						language: client.language,
-						success: result.success,
-						cached: false,
-						unusedExports: result.unusedExports.length,
-						unusedFiles: result.unusedFiles.length,
-						unusedDeps: result.unusedDeps.length,
-						unlistedDeps: result.unlistedDeps.length,
-						durationMs: result.durationMs ?? durationMs,
-						...(!result.success && { reason: result.summary }),
-					});
+					logDeadCodeScan(deadCodeScanEvent(client, cwd, result, durationMs));
 					deadCodeMeta.success = result.success;
+					if (result.excludedWorktrees !== undefined) {
+						deadCodeMeta.excludedWorktrees =
+							(deadCodeMeta.excludedWorktrees ?? 0) + result.excludedWorktrees;
+					}
 					if (!result.success) {
 						reasons.push(`${client.id}:scan_failed:${result.summary}`);
 						continue;
 					}
-					// #3901: items the cap cut on the previous turn. A failed scan
-					// leaves them parked; a successful one takes them (offered once).
-					const deadCodeLane = carryLane("dead-code", client.id);
-					const parkedDeadCode =
-						runtime.takeCutAdvisoryItems<DeadCodeIssue>(deadCodeLane);
-					deadCodeMeta.totalIssues =
-						(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
-					// No baseline means every finding looks new. Report nothing rather
-					// than blame the edit for the whole project's pre-existing debt.
-					if (!prev?.data.success) {
-						reasons.push(`${client.id}:no_previous_scan`);
-						continue;
-					}
-					const prevKeys = new Set(
-						deadCodeIssues(prev.data).map(deadCodeIssueKey),
-					);
-					const modified = modifiedFiles();
-					const newIssues = deadCodeIssues(result).filter((issue) => {
-						if (prevKeys.has(deadCodeIssueKey(issue))) return false;
-						if (!issue.file) return false;
-						return modified.has(resolveRunnerPath(cwd, issue.file));
+					sources.push({
+						result,
+						previousScan: prev?.data,
+						modified: scanFiles,
 					});
-					// #3901: a parked item is offered again only while this scan still
-					// reports it, as this scan's own record of it; it bypasses the
-					// baseline and the edited-file gate the cut turn overwrote.
-					const reOffered = stillReportedParked(
-						parkedDeadCode,
-						deadCodeIssues(result),
-						deadCodeIssueKey,
-						new Set(newIssues.map(deadCodeIssueKey)),
-					);
-					if (newIssues.length === 0 && reOffered.length === 0) {
-						reasons.push(`${client.id}:clean`);
-						continue;
-					}
-					newIssueTotal += newIssues.length;
-					if (newIssues.length > 0) {
-						projectDiagnosticsDelta.push(
-							...newIssues.map((issue) =>
-								deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-							),
-						);
-						projectDiagnosticsSources.add("dead-code");
-					}
-					// #3248: the rendered advisory takes the stored-disposition
-					// filter, keyed off this lane's OWN adapter. The delta record
-					// above keeps the unfiltered set — its reader applies the policy
-					// on read, so filtering both would double-apply on one lane.
-					const deadCodeDeliverable = filterFindingsByDisposition(
-						[...newIssues, ...reOffered],
-						cwd,
-						(issue) =>
-							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-					);
-					deadCodeDispositionSuppressed += deadCodeDeliverable.suppressed;
-					// Every finding on this scan was marked: a PUSH surface stays
-					// silent rather than re-announcing that the mark is working; the
-					// count rides this lane's bounded per-turn row.
-					if (deadCodeDeliverable.kept.length === 0) {
-						reasons.push(`${client.id}:all_disposed`);
-						continue;
-					}
-					const deadCodePart = formatDeadCodeDelta(
-						deadCodeDeliverable.kept,
-						result.language,
-					);
-					// @delivery-surface: runtime-turn:dead-code-advisory
-					advisoryParts.push(deadCodePart);
-					const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
-					deliveryHolds.push(
-						cutAdvisoryHold(
-							"dead-code",
-							deadCodeLane,
-							deadCodePart,
-							deadCodeDeliverable.kept.slice(0, DEAD_CODE_DELTA_MAX_SHOWN),
-							(issue) => reOfferedKeys.has(deadCodeIssueKey(issue)),
-						),
-					);
 				} catch (err) {
 					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
 					reasons.push(`${client.id}:threw`);
+				} finally {
+					try {
+						deliverDeadCodeDelta(client, sources);
+					} catch (err) {
+						dbg(`turn_end: dead-code(${client.id}) delivery failed: ${err}`);
+						reasons.push(`${client.id}:threw`);
+					}
 				}
 			}
 		} catch (err) {
@@ -3432,10 +3682,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							targets.find(
 								(candidate) => candidate.testFile === result.value.file,
 							)?.testRoot ?? cwd;
+						// #3871: name the refused borrow only when the shell actually
+						// set an ambient Python environment.
+						const ambientNote =
+							result.value.runner === "pytest" && hasAmbientPythonEnvironment()
+								? "; ambient Python environments outside this checkout were not borrowed"
+								: "";
 						incrementDegradationCount({
 							kind: "turn-end-test-root-skipped",
 							subject: result.value.notRun,
-							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own; its tests were skipped rather than fetched through npx or run in another environment`,
+							reason: `${toRunnerDisplayPath(cwd, skippedRoot)} has no ${result.value.runner} install of its own${ambientNote}; its tests were skipped rather than fetched through npx or run in another environment`,
 						});
 						dbg(
 							`turn_end: skipped ${toRunnerDisplayPath(cwd, result.value.file)}: ${result.value.notRun} in ${toRunnerDisplayPath(cwd, skippedRoot)}`,
