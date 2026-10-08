@@ -1673,13 +1673,32 @@ export class RuntimeCoordinator {
 
 	/**
 	 * Clear a file's verdict after a clean dispatch. Returns false when a newer
-	 * dispatch of the same file already recorded or cleared it (#3507).
+	 * dispatch of the same file already recorded or cleared it (#3507), or when
+	 * `analysis` ran without authorship over the very bytes the record is about
+	 * (#4137 round 3). Such a run withholds the blocker channel (#3226), so its
+	 * clean result is no evidence against an authored verdict on the same bytes;
+	 * before this, an opaque recovery of bytes the agent authored cleared the
+	 * record whenever the already-analysed latch was gone (a concurrent
+	 * session's turn start, the session's own next turn), and turn end then
+	 * reported a false "Resolved". The refusal consumes no write order. A record
+	 * with no `recordedHash` (#2982: the file was unreadable or over the baseline
+	 * cap at record time) cannot be matched and is cleared as before.
 	 */
 	clearInlineBlockers(
 		filePath: string,
 		writeIndex?: number,
 		orderTurn = this._writeOrderTurn,
+		analysis?: { authored: boolean; sha256: string | undefined },
 	): boolean {
+		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
+		if (
+			existing &&
+			analysis &&
+			!analysis.authored &&
+			analysis.sha256 !== undefined &&
+			existing.recordedHash === analysis.sha256
+		)
+			return false;
 		if (
 			!this._inlineBlockerWriteOrder.shouldWrite(
 				normalizeMapKey(filePath),
@@ -1687,7 +1706,6 @@ export class RuntimeCoordinator {
 			)
 		)
 			return false;
-		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
 		if (existing) {
 			this.noteResolvedBlockerFile(
 				existing,

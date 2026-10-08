@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 
 describe("RuntimeCoordinator", () => {
@@ -345,6 +345,88 @@ describe("RuntimeCoordinator", () => {
 			runtime.seedProjectSequence(5, new Map([["/proj/a.ts", 3]]));
 			// Seeded per-file counters carry no seq provenance ⇒ empty changed map.
 			expect(runtime.getFilesChangedSince(0)).toHaveLength(0);
+		});
+	});
+
+	// #4137 round 3: an analysis without authorship withholds the blocker
+	// channel (#3226), so its clean result says nothing about bytes an authored
+	// analysis found blocking. Before this, an opaque recovery of the very bytes
+	// an agent authored cleared the record whenever the already-analysed latch
+	// was gone (a concurrent session's turn start, the session's own next turn).
+	describe("an unauthored clean result on the recorded bytes (#4137 round 3)", () => {
+		const recorded = { size: 12, sha256: "a".repeat(64) };
+		let dir = "";
+		let file = "";
+		beforeEach(() => {
+			// A live file: the snapshot drops records of deleted files (#1245).
+			dir = mkdtempSync(path.join(tmpdir(), "pi-lens-same-bytes-"));
+			file = path.join(dir, "same-bytes.ts");
+			writeFileSync(file, "debugger;\n");
+		});
+		afterEach(() => {
+			rmSync(dir, { recursive: true, force: true });
+		});
+
+		it("keeps the record, notes nothing resolved, and consumes no write order", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP L2",
+				1,
+				["biome"],
+				[2],
+				recorded,
+			);
+			expect(
+				runtime.clearInlineBlockers(file, 2, undefined, {
+					authored: false,
+					sha256: recorded.sha256,
+				}),
+			).toBe(false);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+			// Other bytes are not the record's: a later clean write still clears.
+			expect(
+				runtime.clearInlineBlockers(file, 3, undefined, {
+					authored: false,
+					sha256: "b".repeat(64),
+				}),
+			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+		});
+
+		it("clears a record that carries no content baseline, as before", () => {
+			// #2982: a dispatch that could not fingerprint the file (unreadable, or
+			// over the baseline cap) records no hash, so nothing can match it.
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers(file, "🔴 STOP L2", 1, ["biome"], [2]);
+			expect(
+				runtime.clearInlineBlockers(file, 2, undefined, {
+					authored: false,
+					sha256: undefined,
+				}),
+			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+		});
+
+		it("lets an authored clean of the same bytes clear the record", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP L2",
+				1,
+				["biome"],
+				[2],
+				recorded,
+			);
+			expect(
+				runtime.clearInlineBlockers(file, 2, undefined, {
+					authored: true,
+					sha256: recorded.sha256,
+				}),
+			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 		});
 	});
 

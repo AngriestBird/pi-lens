@@ -480,6 +480,12 @@ export type PipelineDispatchClaim =
  * the blocker channel (#3226), so an authored claim skipped there would lose
  * the blockers of a write the agent authored. A parallel bash call's recovery
  * window holds its siblings' writes, so that opaque claim often lands first.
+ *
+ * The rank saves a duplicate run; it does not guard the inline blocker record.
+ * `lastAnalyzedStateByFile` is cleared at every session's turn start (#3613),
+ * so an unauthored run of authored bytes can still proceed, and
+ * `clearInlineBlockers` refuses its clear of a record about those bytes
+ * (#4137 round 3).
  */
 function claimPipelineDispatch(args: {
 	filePath: string;
@@ -3034,6 +3040,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					filePath,
 					result.writeIndex ?? writeIndex,
 					result.orderTurn ?? writeOrderTurn,
+					// #4137 round 3: a run without authorship does not retire a
+					// record about the very bytes it read. The already-analysed latch
+					// is a cost rule, not the record's guard.
+					{
+						authored: bashAuthorshipConfirmed,
+						sha256: result.inlineBlockerFileContent?.sha256,
+					},
 				),
 			) ?? false;
 	}

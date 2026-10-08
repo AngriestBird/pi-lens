@@ -4,6 +4,7 @@
  * only; handler wiring coverage (real node -e / python -c child writes through
  * handleToolCall/handleToolResult) is PR-B scope and NOT covered here.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -40,6 +41,7 @@ vi.mock("../../clients/opaque-mutation-scan.js", async (importOriginal) => {
 
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
+	clearLastAnalyzedStateCache,
 	handleToolResult,
 	isFailedGitIntegrationCommand,
 } from "../../clients/runtime-tool-result.js";
@@ -1149,11 +1151,34 @@ describe("parallel bash calls (#4137)", () => {
 		inlineBlockerLines: [2],
 	};
 
-	async function mockBlockingPipeline() {
-		(await pipelineMock()).mockImplementation(async (ctx) =>
-			ctx.allowAutonomousWriters === false ? NO_BLOCKERS : BLOCKED,
-		);
+	/** The content baseline the real pipeline returns of the bytes it read (#3574). */
+	function analysedBytes(filePath: string) {
+		const bytes = fs.readFileSync(filePath);
+		return {
+			size: bytes.byteLength,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		};
 	}
+
+	async function mockBlockingPipeline() {
+		(await pipelineMock()).mockImplementation(async (ctx) => {
+			const inlineBlockerFileContent = analysedBytes(String(ctx.filePath));
+			return ctx.allowAutonomousWriters === false
+				? { ...NO_BLOCKERS, inlineBlockerFileContent }
+				: { ...BLOCKED, inlineBlockerFileContent };
+		});
+	}
+
+	const blockerFiles = (runtime: RuntimeCoordinator) =>
+		runtime
+			.getInlineBlockersSnapshot()
+			.map((record) => path.basename(record.filePath));
+
+	/** The turn-end "Resolved" entries, by file; consuming them is the end state. */
+	const resolvedFiles = (runtime: RuntimeCoordinator) =>
+		runtime
+			.consumeResolvedBlockerFiles(() => false)
+			.files.map((entry) => path.basename(entry.filePath));
 
 	function newRuntime(sessionId: string): RuntimeCoordinator {
 		const runtime = new RuntimeCoordinator();
@@ -1427,8 +1452,9 @@ describe("parallel bash calls (#4137)", () => {
 	});
 
 	// The other direction: an authored analysis satisfies a later opaque claim on
-	// the same bytes. Were the opaque run to proceed, its result (no inline
-	// summary, #3226) would clear the authored blocker record before turn end.
+	// the same bytes, so the duplicate run is skipped. The record itself does not
+	// depend on this skip: round 3 refuses an unauthored clear of the recorded
+	// bytes (the cases after the in-flight one below).
 	it("skips an opaque claim on bytes an authored dispatch analysed, keeping its blocker", async () => {
 		await mockBlockingPipeline();
 		const runtime = newRuntime("authored-first");
@@ -1554,5 +1580,139 @@ describe("parallel bash calls (#4137)", () => {
 		});
 		expect(await dispatchLog()).toEqual([["par-b.ts", true]]);
 		expect(lostBaselines()).toEqual([]);
+	});
+	// VERIFY_4159 N1: index.ts's turn_start runs `beginTurn(session)` and
+	// `clearLastAnalyzedStateCache()` for every session's turn, a concurrent
+	// subagent's included (#3613). With the latch gone, the opaque sibling's
+	// recovery of the same bytes runs, and its clean result (no blocker channel,
+	// #3226) carries a newer write token than the authored verdict. Round 2
+	// cleared the record and turn end reported a false "Resolved".
+	it("keeps an authored blocker when a concurrent session's turn start drops the latch before the opaque sibling's result", async () => {
+		await mockBlockingPipeline();
+		const runtime = newRuntime("primary");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		// The two calls index.ts's turn_start makes for a concurrent secondary.
+		runtime.beginTurn("subagent");
+		clearLastAnalyzedStateCache();
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+		// The opaque run proceeds (the latch is a cost rule); the record survives it.
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", true],
+			["par-a.ts", false],
+		]);
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		expect(resolvedFiles(runtime)).toEqual([]);
+	});
+
+	// The same cell for the session's own turn. The latch never outlives a turn
+	// and the next turn's write tokens outrank the record's, so on master an
+	// opaque command of the next turn that rewrote or touched the file with the
+	// same bytes cleared the authored record, and turn end said "Resolved".
+	it("keeps an authored blocker across turns when an opaque rerun leaves the same bytes", async () => {
+		await mockBlockingPipeline();
+		const runtime = newRuntime("sequential");
+		runtime.beginTurn();
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		// index.ts's turn_start for the session's own next turn.
+		runtime.beginTurn();
+		clearLastAnalyzedStateCache();
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "rerun"));
+		const now = new Date();
+		fs.utimesSync(path.join(repoDir, "par-a.ts"), now, now);
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "rerun"));
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", true],
+			["par-a.ts", false],
+		]);
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		expect(resolvedFiles(runtime)).toEqual([]);
+	});
+
+	// The guard's other direction: bytes the record is not about are cleared as
+	// before. The record described the authored bytes; the file now holds
+	// others, which the self-drift sweep would have demoted at turn end anyway.
+	// Whether an unauthored run should retire a record at all is #3226's
+	// question, not this guard's.
+	it("clears an authored blocker when an opaque run analyses changed bytes", async () => {
+		await mockBlockingPipeline();
+		const runtime = newRuntime("changed-bytes");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		append("par-a.ts", "export const y = 2;\n");
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", true],
+			["par-a.ts", false],
+		]);
+		expect(blockerFiles(runtime)).toEqual([]);
+		expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+	});
+
+	// VERIFY_4159 N2: the other half of the in-flight rank. An opaque claim
+	// that arrives while an authored run of the same bytes is in flight joins
+	// it. Running beside it would analyse bytes the agent authored a second
+	// time without authorship, for nothing.
+	it("joins an authored run in flight instead of analysing its bytes without authorship", async () => {
+		let releaseAuthored = () => {};
+		const authoredGate = new Promise<void>((resolve) => {
+			releaseAuthored = resolve;
+		});
+		let authoredStarted = () => {};
+		const authoredRunning = new Promise<void>((resolve) => {
+			authoredStarted = resolve;
+		});
+		(await pipelineMock()).mockImplementation(async (ctx) => {
+			const inlineBlockerFileContent = analysedBytes(String(ctx.filePath));
+			if (ctx.allowAutonomousWriters === false)
+				return { ...NO_BLOCKERS, inlineBlockerFileContent };
+			authoredStarted();
+			await authoredGate;
+			return { ...BLOCKED, inlineBlockerFileContent };
+		});
+		const runtime = newRuntime("authored-in-flight");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		append("par-a.ts", "debugger;\n");
+		const recognizedResult = handleToolResult(
+			resultDeps(runtime, recognized, "recognized"),
+		);
+		// Settles even when a regression dispatches nothing for the recognized call.
+		await Promise.race([authoredRunning, recognizedResult]);
+		let joinedAuthoredRun = () => {};
+		const joined = new Promise<void>((resolve) => {
+			joinedAuthoredRun = resolve;
+		});
+		const opaqueResult = handleToolResult({
+			...resultDeps(runtime, opaqueCommand(), "opaque"),
+			// A sync point only: the claim's join is otherwise invisible here.
+			dbg: (message: string) => {
+				if (message.includes("skipping duplicate concurrent state"))
+					joinedAuthoredRun();
+			},
+		});
+		try {
+			// A claim that runs instead of joining settles on its own while the
+			// authored run is still gated.
+			await Promise.race([joined, opaqueResult]);
+		} finally {
+			releaseAuthored();
+		}
+		await Promise.all([recognizedResult, opaqueResult]);
+		expect(await dispatchLog()).toEqual([["par-a.ts", true]]);
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
 	});
 });
