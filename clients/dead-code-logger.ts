@@ -29,6 +29,10 @@ const writer = createNdjsonLogger({
 
 export interface DeadCodeScanEvent {
 	language: string;
+	/** #4117: the project root the scan ran over. */
+	root?: string;
+	/** #4117: linked worktrees under the root the scan was told to leave out. */
+	excludedWorktrees?: number;
 	sessionId?: string;
 	success: boolean;
 	cached: boolean;

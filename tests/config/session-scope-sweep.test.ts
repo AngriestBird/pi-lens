@@ -159,6 +159,10 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_fileLastProjectSeq: "reset",
 	_fileSeq: "reset",
 	_fixedThisTurn: "reset",
+	_foreignTurnKeys:
+		"kept: a live concurrent session's turn key outlives the primary's replacement; its own shutdown removes it (forgetTurnSession, #3613)",
+	_foreignTurns:
+		"kept: a count that only orders concurrent sessions' turn keys, which stay distinct across a reset (#3613)",
 	_gitGuardCacheUnknownReason: "reset",
 	_gitGuardHasBlockers: "reset",
 	_gitGuardSummary: "reset",
@@ -195,6 +199,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_turnEndCascadeSettleStarts: "reset",
 	_turnIndex: "reset",
 	_turnStartProjectSeq: "reset",
+	_turnStarts: "reset",
 	_turnSummary: "reset",
 	_viewLogEntries: "reset",
 	_viewMissingThrough: "reset",

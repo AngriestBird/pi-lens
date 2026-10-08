@@ -2075,7 +2075,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			toolCallId: resolveToolCallCorrelationId(event),
 			toolName: event.toolName,
 			sessionGeneration: runtime.sessionGeneration,
-			turnIndex: runtime.turnIndex,
+			// #3613 F2: the budget of this session's own turn.
+			turnIndex: runtime.turnKey(deps.sessionId),
 			signal: getAmbientAbortSignal(),
 			// #3596: the replay lands after the settle's own awaits.
 			record: (entry) =>
@@ -2915,13 +2916,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #3568: per-turn maps the replacement's reset cleared.
 	const { actionableWarnings, codeQualityWarnings } = result;
 	if (actionableWarnings?.length) {
+		// #3613: in the partition of the session whose turn this result is.
 		writeSession.guardedWrite(filePath, () =>
-			runtime.recordActionableWarnings(actionableWarnings),
+			runtime.recordActionableWarnings(actionableWarnings, deps.sessionId),
 		);
 	}
 	if (codeQualityWarnings?.length) {
 		writeSession.guardedWrite(filePath, () =>
-			runtime.recordCodeQualityWarnings(codeQualityWarnings),
+			runtime.recordCodeQualityWarnings(codeQualityWarnings, deps.sessionId),
 		);
 	}
 

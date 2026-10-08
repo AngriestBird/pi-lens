@@ -369,6 +369,12 @@ interface ToolCallDeps {
 	) => void;
 	resetLSPService: (options?: LSPShutdownOptions) => void;
 	getTreeSitterClient?: typeof getSharedTreeSitterClient;
+	/**
+	 * #3613: the stable session id of the session whose tool call this is, so
+	 * the post-edit pipeline a partial apply runs here records its per-turn
+	 * warnings in that session's partition.
+	 */
+	sessionId?: string;
 }
 
 export type ToolCallResult = { block: true; reason?: string } | void;
@@ -646,7 +652,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				targetPath: observedPath,
 				cwd: ctx.cwd ?? runtime.projectRoot,
 				sessionGeneration: runtime.sessionGeneration,
-				turnIndex: runtime.turnIndex,
+				// #3613 F2: the budget of this session's own turn.
+				turnIndex: runtime.turnKey(deps.sessionId),
+				isLiveTurn: (key) => runtime.isLiveTurnKey(key),
 				signal: ctx.signal,
 				dbg,
 			});
@@ -1495,6 +1503,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 									metricsClient,
 									resetLSPService,
 									readGuard: runtime.readGuard,
+									sessionId: deps.sessionId,
 									_ownWriteStamp: partialStamp,
 									agentBehaviorRecord: (toolName, analyzedPath) =>
 										agentBehaviorClient.recordToolCall(toolName, analyzedPath),

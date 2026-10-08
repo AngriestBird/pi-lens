@@ -2567,6 +2567,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					// Pin the stable identity + reason over the fresh random id that
+					// reset drew (#190). #3613 F1: before the await, for the same
+					// reason as the scope: a throw later in the handler must not leave
+					// the coordinator on the random id, or every turn of this primary
+					// would take `beginTurn`'s other-session path.
+					runtime.setSessionLifecycle({
+						sessionId: stableSessionId,
+						reason: sessionReason,
+					});
 					await bounded(sessionStartWork, {
 						ms: HOOK_WALL_BUDGET_MS.session_start,
 						signal: ctx.signal,
@@ -2574,13 +2583,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						label: "handleSessionStart",
 					});
 					if (ctx.ui) updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
-
-					// Pin the stable identity + reason AFTER handleSessionStart (which ran
-					// resetForSession → a fresh random id); the stable id now wins (#190).
-					runtime.setSessionLifecycle({
-						sessionId: stableSessionId,
-						reason: sessionReason,
-					});
 					// #3612: the coordinator's fresh guard is this scope's read-guard
 					// cell, which the read-guard stores snapshot and restore.
 					scopeCell(scope, READ_GUARD_CELL, () => runtime.readGuard);
@@ -2731,6 +2733,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			ensureLSPConfigInitialized,
 			updateLspStatus,
 			resetLSPService,
+			sessionId: getStableSessionId(ctx),
 		});
 	});
 
@@ -2883,7 +2886,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 		) {
 			mountLensWidget(ctx.ui, readExtensionMode(ctx));
 		}
-		runtime.beginTurn();
+		// #3613 (S4, N2): the turn's own session. A concurrent secondary's turn
+		// advances only its own turn identity and per-turn records; the
+		// coordinator's turn state is the primary's.
+		runtime.beginTurn(getStableSessionId(ctx));
+		// Every turn, a secondary's too: clearing only re-runs a duplicate
+		// same-state analysis, while keeping it would skip a secondary's next
+		// turn (the dedupe keys on the primary's turn index).
 		clearLastAnalyzedStateCache();
 
 		// #492: parent-at-turn_start cross-process nudge consumer — the "parent
@@ -3302,7 +3311,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// (see clients/memory-sampler.ts). Session age + turn count ride along so
 			// growth-vs-age curves are plottable from logs alone. Still cheap:
 			// O(1)/O(bounded-cache-size) reads only, no extra throttling needed.
-			if (shouldEmitMemorySampleAdaptive(runtime.turnIndex)) {
+			// #3613 G1: process-level cadences pace on every session's turn
+			// starts. The primary's index stands still through a subagent's run
+			// (it would fire at every subagent turn end while on a sampling
+			// turn), and a subagent's fractional turn key never meets `% N`.
+			const cadenceTurn = runtime.turnStartCount;
+			if (shouldEmitMemorySampleAdaptive(cadenceTurn)) {
 				try {
 					const sample = buildMemorySample(
 						runtime.wordIndex,
@@ -3324,10 +3338,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						durationMs: 0,
 						metadata: { turnIndex: runtime.turnIndex, ...sample },
 					});
-					recordMemorySampleOutcome(
-						sample.process.heapUsedBytes,
-						runtime.turnIndex,
-					);
+					recordMemorySampleOutcome(sample.process.heapUsedBytes, cadenceTurn);
 				} catch {
 					// best-effort observability — never fail turn_end over this
 				}
@@ -3337,7 +3348,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// sample above — at most once per SMELLS_TURN_CHECK_INTERVAL turns, and
 			// each smell notifies at most once per session (checkSmellsAndNoteOnce's
 			// gate). See clients/smells-rollup.ts for the tail-scan cost bound.
-			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
+			if (shouldCheckSmellsThisTurn(cadenceTurn)) {
 				try {
 					// S3c (#1432 review): use the in-process session start instead of
 					// letting countRecentSmells() fall back to its 24h rolling
@@ -3761,6 +3772,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				"concurrent-secondary",
 			);
 			clearCachePrefixSession(stableSessionId, "concurrent-secondary");
+			// #3613: its per-turn records end with it.
+			runtime.forgetTurnSession(stableSessionId);
 			decrementSecondarySessionCount();
 			// #2130: scoped deregistration. A secondary's shutdown must never run
 			// `deregisterInstance()` — the process lives on and the primary still

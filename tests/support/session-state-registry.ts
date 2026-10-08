@@ -1783,7 +1783,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"widget-state.ts": 5,
 	// #2068 added the per-index dirty-file set; it is process-local wire-cache
 	// state and is cleared by serialization, so it needs no session reset.
-	"word-index.ts": 4,
+	// #4129 added the serialized-source WeakMap used to publish persist-owned
+	// wire bytes; it follows the WordIndex object's lifetime and needs no reset.
+	"word-index.ts": 5,
 	"workspace-topology.ts": 2,
 	"zizmor-config.ts": 0,
 };
