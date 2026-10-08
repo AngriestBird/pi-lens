@@ -404,6 +404,9 @@ export const realHarnessInclude = [
 // host. Sweep coverage for other members lives in this list; new entries must
 // carry a wall-clock budget assertion, not just slowness.
 export const wallClockBudgetInclude = [
+	// #4148: a 199K-blank-line rule is a real event-loop occupancy witness for
+	// validateRule's synchronous language extraction, so it runs serialized.
+	"tests/clients/ast-grep-rule-regex-budget.test.ts",
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
 	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)
