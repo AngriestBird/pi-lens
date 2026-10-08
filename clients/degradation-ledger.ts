@@ -797,6 +797,8 @@ export type DegradationKind =
 	 * server and file for the same reason every other pull kind does.
 	 */
 	| "lsp-session-root-evicted"
+	/** A sibling LSP notification failed while touching a file. */
+	| "lsp-sibling-announcement"
 	/**
 	 * A language-server child process CLOSED without pi-lens having asked it to
 	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
@@ -815,8 +817,6 @@ export type DegradationKind =
 	 * only after the child's stdio streams have drained, so "stderr was empty"
 	 * is a fact about the server rather than a race with the pipe.
 	 */
-	| "lsp-sibling-announcement"
-	/** A warm LSP client was unavailable when a request expected it. */
 	| "lsp-warm-client-missing"
 	/**
 	 * A liveness probe (`clientPingLiveness`, `clients/lsp/client.ts`) found no

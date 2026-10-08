@@ -167,6 +167,26 @@ describe("LSPService.notifyExternalFileChange (#1668)", () => {
 		).not.toHaveBeenCalled();
 	});
 
+	it("announces each distinct touchFile content to a live sibling root", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const server = makeServer("typescript");
+		const owningClient = makeClient();
+		const siblingClient = makeClient();
+		getServersForFileWithConfig.mockReturnValue([server]);
+		const state = (
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state;
+		state.clients.set("typescript:c:/repo", owningClient);
+		state.clients.set("typescript:c:/repo/packages/a", siblingClient);
+
+		await service.touchFile(FILE, "export type T = 'old';\n");
+		await service.touchFile(FILE, "export type T = 'new';\n");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(siblingClient.notify.watchedFileChange).toHaveBeenCalledTimes(2);
+	});
+
 	it("records content when no sibling is live, then announces after respawn", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();

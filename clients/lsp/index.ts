@@ -4903,9 +4903,9 @@ export class LSPService {
 			});
 			return;
 		}
-		const touchContentHash = this.hashContent(content);
+		const contentHash = this.hashContent(content);
 		if (typeof content === "string") {
-			void this.announceToSiblings(filePath, content, touchContentHash).catch(
+			void this.announceToSiblings(filePath, content, contentHash).catch(
 				(cause: unknown) => {
 					incrementDegradationCount({
 						kind: "lsp-sibling-announcement",
@@ -5177,6 +5177,7 @@ export class LSPService {
 			// acquire a rule of its own by writing the comparison inline. A binding with
 			// no `contentHash` (version-less publish) fails closed: `undefined` never
 			// equals a hash.
+			const touchContentHash = contentHash;
 			const bindingMatchesTouchContent = (
 				binding: StoredDiagnosticBinding | undefined,
 			): boolean => binding?.contentHash === touchContentHash;
