@@ -158,7 +158,8 @@
       "session-registry"
     ],
     "clients/instance-registry-lock.ts": [
-      "file-locks"
+      "file-locks",
+      "session-registry"
     ],
     "clients/generation-lock.ts": [
       "file-locks",
