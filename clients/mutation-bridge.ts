@@ -102,6 +102,7 @@ export interface MutationBridgeDeps {
 					branchEpoch?: number;
 					stampFileTime?: boolean;
 					advanceAuthorship?: boolean;
+					toolCallId?: string;
 				},
 			) => void;
 		};
@@ -237,6 +238,12 @@ function mutationEntryProblem(entry: unknown): string | undefined {
 		provenance !== "settled-sweep"
 	)
 		return 'provenance must be "observed" or "settled-sweep"';
+
+	// #4187 R4-1: the call id licenses an authorship advance, so a producer that
+	// invents a non-string one must be told rather than silently downgraded to
+	// "no call" (which would end an authorship the call did license).
+	if (e["toolCallId"] !== undefined && typeof e["toolCallId"] !== "string")
+		return "toolCallId must be a string";
 
 	return undefined;
 }
@@ -413,6 +420,11 @@ function stampLiveMutation(
 			// producer, ast_grep_replace, an LSP edit, the settled sweep's
 			// drift) may create a first authorship and otherwise end it.
 			advanceAuthorship: entry.provenance === "observed",
+			// #4187 R4-1: and an observed replay advances only a path its OWN
+			// call licensed at tool_call (`ReadGuard.noteCheckedPaths`), since a
+			// tool writes a set wider than the one it named. An entry with no
+			// call (a co-process producer, a server-initiated edit) names none.
+			...(entry.toolCallId !== undefined && { toolCallId: entry.toolCallId }),
 		});
 	}
 	return { sessionLive, stamp };

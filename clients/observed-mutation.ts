@@ -256,6 +256,13 @@ export interface ObservedReplayEntry {
 	editRanges?: [number, number][];
 	consumer?: string;
 	provenance?: "observed" | "settled-sweep";
+	/**
+	 * #4187 R4-1: the call whose `tool_call` licensed these paths
+	 * (`ReadGuard.noteCheckedPaths`), so the replay's authorship advance is
+	 * judged against the set that call actually checked. The settled sweep
+	 * replays with no call of its own and names none.
+	 */
+	toolCallId?: string;
 	/** #3521: see `BridgeMutationEntry.readGuardBranchEpoch`. */
 	readGuardBranchEpoch?: number;
 	/** #3620: see `BridgeMutationEntry.lineage`. */
@@ -1189,6 +1196,9 @@ export async function settleObservedMutation(
 			editRanges: editRanges && editRanges.length > 1 ? editRanges : undefined,
 			consumer: args.toolName,
 			provenance: "observed",
+			// #4187 R4-1: the armed call licensed the universe it collected, so
+			// its replay may advance exactly those paths and no other.
+			...(args.toolCallId !== undefined && { toolCallId: args.toolCallId }),
 		});
 		if (accepted) {
 			replayed += 1;

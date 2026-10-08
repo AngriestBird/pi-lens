@@ -43,6 +43,16 @@
 (*               post-fix                                                  *)
 (*               bytes are attached as "authoritative" and                 *)
 (*               recorded as a whole-file read (#3519).                    *)
+(*      own    : an owned in-process write (#4187 R4-1): a pi-lens tool    *)
+(*               that writes bytes of its own (ast_grep_replace with       *)
+(*               apply: true, an lsp_navigation rename,                    *)
+(*               lens_diagnostic_mark's suppress). Its tool_call retires a *)
+(*               broken authorship for the paths it named and licenses an  *)
+(*               advance for exactly those (read-guard.ts                  *)
+(*               noteCheckedPaths); the write then re-baselines a licensed *)
+(*               path and ends every other one. Two steps (OwnCall,        *)
+(*               OwnWrite), so another writer may land inside the tool's   *)
+(*               run, after the check that licensed it (R4-6).             *)
 (*  - another writer (external editor, second pi-lens instance, git):      *)
 (*    changes F between any two steps.                                     *)
 (*  - pi-lens' deferred agent_end format drain (runtime-agent-end.ts       *)
@@ -65,10 +75,15 @@ CONSTANTS
     N0,             \* initial line count
     MaxLen,         \* longest file
     AgentOps,       \* bound on agent tool calls
-    Ops,            \* agent tool kinds: subset of {"read","rread","fread","bread","edit","oedit","write","bash"}
+    Ops,            \* agent tool kinds: subset of {"read","rread","fread","bread","edit","oedit","write","bash",
+                    \*  "pbash","bridge","own","ownwrite"}
                     \* ("fread": a read whose host call errors, offset past EOF;
                     \*  "bread": a read a later extension blocks after pi-lens's tool_call captured it;
-                    \*  "oedit": an oldText edit, gated by the zero-read check alone)
+                    \*  "oedit": an oldText edit, gated by the zero-read check alone;
+                    \*  "pbash": a recognized bash write of one line;
+                    \*  "bridge": a mutation-bridge write of one line, with no pre-write check of its own;
+                    \*  "own": an owned in-process call+write pair, the call licensing the write's advance;
+                    \*  "ownwrite": the same write with no call, the round-4 mutant)
     Spans,          \* edit spans: subset of {1,2}
     ExtWrites,      \* bound on other-writer writes
     ExtKinds,       \* subset of {"replace","delete","insert"}
@@ -575,24 +590,74 @@ PartialBashWrite ==
                    fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* ---- a mutation-bridge write of one line ("bridge") ----
-\* A co-process producer (or ast_grep_replace, an LSP edit, the settled
-\* sweep's replay) writes line 1 and calls recordMutation after the fact:
-\* stampLiveMutation's recordWritten(stampFileTime: false). Nothing ran
-\* before the write, so the authorship it lands on cannot be checked against
-\* the bytes it wrote around. The agent is told what was written (know), so
-\* the only hazard left is the other writer's bytes. Scoped to an authored
-\* file like PartialBashWrite: a first record is the #3865 credit.
+\* The write with NO pre-write check of its own: a co-process producer's
+\* recordMutation after the fact (stampLiveMutation's
+\* recordWritten(advanceAuthorship: false, stampFileTime: false)), a
+\* server-initiated workspace/applyEdit, and a drain record that reaches the
+\* guard unlicensed (an advanceAuthorship: true write whose tool_call checked
+\* no path, so wasCheckedAtCall refuses it). Nothing ran before the write, so
+\* the authorship it lands on cannot be checked against the bytes it wrote
+\* around: it may create a first authorship and otherwise ends one. The agent
+\* is told what was written (know), so the only hazard left is the other
+\* writer's bytes. Scoped to an authored file like PartialBashWrite: a first
+\* record is the #3865 credit. The owned in-process writers that used to be
+\* listed here (ast_grep_replace, an LSP edit, the observed replay) carry a
+\* tool_call since #4187 round 5 and are OwnCall/OwnWrite below; the settled
+\* sweep's replay stays here, unlicensed.
 BridgeWrite ==
     /\ CanOp("bridge") /\ written.on
     /\ LET c == Replace(disk, 1, tok)
        IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
-          /\ written' = IF ExtWrites = 0 THEN Auth(c)
-                        ELSE IF ~BridgeNoAdvance THEN Auth(c)
+          /\ written' = IF ~BridgeNoAdvance THEN Auth(c)
                         ELSE IF written.c = c THEN written ELSE Retired
     /\ rev' = rev + 1 /\ tok' = tok + 1
     /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
                    fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
+\* ---- an owned in-process write ("own"): retire at tool_call, advance at the write ----
+\* #4187 R4-1/R4-2: a pi-lens-owned in-process tool (ast_grep_replace over the
+\* file it named, an lsp_navigation rename, lens_diagnostic_mark's suppress) has
+\* a tool_call seam before its write, and the guard licenses an advance per
+\* call for the paths that call checked (ReadGuard.noteCheckedPaths). Two
+\* actions, because the license is checked at the call and spent at the write,
+\* and External may land in between (ExtPhases "inflight"): that window is the
+\* code's own (R4-6, a foreign write while the tool runs) and AuthorOwnToctou.cfg
+\* states it. Scoped to an authored file like BridgeWrite: a first credit is the
+\* #3865 credit and is not modelled here.
+OwnCall ==
+    /\ CanOp("own") /\ written.on
+    /\ written' = IF Broken THEN Retired ELSE written
+    /\ pc' = "ownpending" /\ ops' = ops + 1
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, reads, ft, pendCreate, lastEditOk,
+                   born, turnNo, pend, ext, nb, fixedTurn, mutatedTurn, dr,
+                   staleAllow, blindAllow, falseBlock>>
+
+\* The write and its licensed advance: recordWritten(advanceAuthorship: true,
+\* toolCallId) for a path the call licensed. No op is consumed: this is the
+\* second half of the one call OwnCall counted.
+OwnWrite ==
+    /\ pc = "ownpending"
+    /\ LET c == Replace(disk, 1, tok)
+       IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
+          /\ written' = Auth(c)
+    /\ rev' = rev + 1 /\ tok' = tok + 1 /\ mutatedTurn' = TRUE /\ pc' = "idle"
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pend, ops, ext,
+                   nb, fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
+\* Round 4's code, the R4-1 mutant: the record advanced EVERY path the write
+\* changed, licensed or not, so a rename's importers, an ast-grep folder and a
+\* server-initiated applyEdit all re-baselined an authorship over bytes nothing
+\* checked. In this single-file model that is an own write no call checked, so
+\* it is its own op kind: a config selects "ownwrite" instead of the "own" pair.
+OwnWriteUnchecked ==
+    /\ CanOp("ownwrite") /\ written.on
+    /\ LET c == Replace(disk, 1, tok)
+       IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
+          /\ written' = Auth(c)
+    /\ rev' = rev + 1 /\ tok' = tok + 1 /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend,
+                   ext, nb, fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 ----------------------------------------------------------------------------
 \* Another writer (external editor, second pi-lens instance, git checkout).
@@ -746,6 +811,7 @@ Next ==
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite \/ BridgeWrite
+    \/ OwnCall \/ OwnWrite \/ OwnWriteUnchecked
     \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars

@@ -290,11 +290,17 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 			const lines = [...FIXTURE_LINES];
 			lines[EDIT_LINE_1BASED - 1] = "owned lsp;";
 			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			// The license `handleToolCall` records for the call before the write
+			// (`retireInProcessToolAuthorship` → `noteCheckedPaths`); the
+			// tool_call → license chain itself is pinned by
+			// tests/clients/runtime-tool-call.test.ts (#4187 R4-1).
+			runtime.readGuard.noteCheckedPaths("call-4187-owned-lsp", [filePath]);
 			const context: LspMutationContext =
 				dir === dirDirect
 					? {
 							cwd: dir,
 							correlationId: "owned-direct",
+							toolCallId: "call-4187-owned-lsp",
 							tool: "lsp_navigation:executeCommand",
 							source: "lsp-execute-command",
 							runtime: runtime as never,
@@ -305,6 +311,7 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 					: {
 							cwd: dir,
 							correlationId: "owned-bridge",
+							toolCallId: "call-4187-owned-lsp",
 							tool: "lsp_navigation:executeCommand",
 							source: "lsp-execute-command",
 							emitSummary: false,

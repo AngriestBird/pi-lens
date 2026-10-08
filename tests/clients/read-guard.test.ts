@@ -2606,14 +2606,20 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 	// #4187 R3-3: authorship-cap pressure is counted for every eviction, but
 	// read-guard.log gets only the rising-edge witness. Recurrence: one log row
 	// per over-cap file flooded the sink during a steady-state credit stream.
+	// #4187 R4-3 (T9b): one eviction proves nothing about the gate — a single
+	// row is also what an ungated `if (true)` emits — so this credits 104 files
+	// past the cap and pins 104 counted against ONE row.
 	it("counts authorship-cap evictions and logs only its rising edge", () => {
 		resetDegradationLedger();
 		const guard = createReadGuard("4187-authorship-cap-observability");
-		for (let i = 0; i <= 4096; i += 1) {
+		const overCap = 104;
+		for (let i = 0; i < 4096 + overCap; i += 1) {
 			const filePath = `/tmp/4187-authorship-cap-${i}.ts`;
 			guard.recordWritten(filePath);
 		}
-		const evictions = evictionEvents("read_file_evicted");
+		const evictions = evictionEvents("read_file_evicted").filter(
+			([entry]) => entry.metadata?.reason === "authorship-cap",
+		);
 		expect(evictions).toHaveLength(1);
 		expect(evictions[0][0]).toMatchObject({
 			metadata: { reason: "authorship-cap", authorshipDropped: true },
@@ -2622,7 +2628,7 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 			getDegradationSummary().find(
 				(group) => group.kind === "read-guard-authorship-cap",
 			)?.count,
-		).toBe(1);
+		).toBe(overCap);
 	});
 
 	// #1918 review F3: pin session re-arm — the SAME file evicted twice within

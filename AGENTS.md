@@ -193,6 +193,17 @@ the surface they bite; each block loads only when its trigger applies.
 39. **Walk-up result used as eligibility:** return ownership and start-directory
     identity separately; enumerate root-position by ambient-input cells.
 
+64. **Named path vs written set:** a guard keyed on the path a tool NAMES must
+    hold for every path the tool WRITES; enumerate the written set (a rename's
+    importers, an `ast_grep_replace` folder or its project default, a
+    server-initiated `workspace/applyEdit` with no call at all) and key the
+    permission per call, never per path. Three rounds on the read guard's
+    authorship seam (#4187 R2-3, R4-1, R5): the pre-write retire covered the
+    named path while the post-write advance covered every recorded one, so a
+    file nothing checked was re-baselined over another writer's bytes. The
+    screen: for each writer, table named-at-call against actually-written, and
+    ask which rule answers for a path in the second column only.
+
 </important>
 
 <important if="adding or reading a cache, durable record, or project-intelligence state">

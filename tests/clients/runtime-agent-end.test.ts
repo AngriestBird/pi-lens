@@ -5,6 +5,10 @@ import type { ActionableWarningsReport } from "../../clients/actionable-warnings
 import { CacheManager } from "../../clients/cache-manager.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolvePiLensFlag } from "../../clients/lens-config.js";
+import {
+	type LspMutationContext,
+	recordLspMutation,
+} from "../../clients/lsp-mutation.js";
 import { recordMutationThroughSeam } from "../../clients/mutation-bridge.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
@@ -1413,6 +1417,157 @@ describe("runtime-agent-end deferred formatting", () => {
 			resetBusPublish();
 			applyConservativeActionableWarningFixesMock.mockReset();
 			env.cleanup();
+		}
+	});
+
+	// #4187 R4-4 (probe L4): the quickfix drain is the third writer that credits
+	// authorship over bytes the agent never saw, and it was the one drain with no
+	// pre-write retire: the format and autofix drains both call
+	// `retireChangedAuthorshipBeforeDrain` before they rewrite. Recurrence: the
+	// drain's `recordWritten` re-baselined the authorship over another writer's
+	// line, so the next positional edit of that line was allowed.
+	it("ends an authorship another writer broke before the LSP quickfix drain rewrites it (#4187 R4-4)", async () => {
+		const fixture = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+		for (const foreign of [true, false]) {
+			const env = setupTestEnvironment(
+				`pi-lens-agent-end-quickfix-retire-${foreign}-`,
+			);
+			try {
+				const filePath = createTempFile(env.tmpDir, "src/app.ts", fixture);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.seedProjectSequence(1);
+				// The agent's own bash write authored the file, without a read.
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4187-quickfix-bash",
+				});
+				if (foreign) {
+					const lines = fixture.split("\n");
+					lines[1] = "const external = 2;";
+					fs.writeFileSync(filePath, lines.join("\n"));
+				}
+				const report: ActionableWarningsReport = {
+					generatedAt: new Date().toISOString(),
+					scope: "turn_delta",
+					sessionId: "s1",
+					turnIndex: 1,
+					projectSeqEnd: 1,
+					deltaOnly: true,
+					includeLspCodeActions: true,
+					files: [
+						{
+							filePath,
+							displayPath: "src/app.ts",
+							// #3676: the entries the credit epoch is read from; without
+							// them the drain stamps no read guard at all.
+							branchEpoch: runtime.readGuard.currentBranchEpoch,
+							branchScope: runtime.readGuard.lineageKey,
+							warnings: [
+								{
+									id: "aw:4187",
+									filePath,
+									displayPath: "src/app.ts",
+									severity: "warning",
+									tool: "typescript",
+									message: "unused var",
+									suppressed: false,
+									origin: "dispatch",
+									actions: [
+										{
+											title: "Remove unused var",
+											hasEdit: true,
+											hasCommand: false,
+											autoFixEligible: true,
+										},
+									],
+								},
+							],
+						},
+					],
+					summary: {
+						warnings: 1,
+						unsuppressed: 1,
+						suppressed: 0,
+						files: 1,
+						actions: 1,
+						autoFixEligible: 1,
+					},
+				};
+				// The real fix pass applies a code action and bookkeeps it through
+				// the context the drain built, so drive that seam: rewrite line 1,
+				// then `recordLspMutation` with the drain's own `mutationContext`.
+				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+					async (args: { mutationContext: LspMutationContext }) => {
+						const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+						lines[0] = "const fixed = 1;";
+						fs.writeFileSync(filePath, lines.join("\n"));
+						recordLspMutation(args.mutationContext, {
+							results: [
+								{
+									descriptions: [],
+									files: [filePath],
+									operationTotal: 1,
+									appliedOperationTotal: 1,
+									appliedOperationIndexes: [0],
+									operationCounts: {
+										textEdits: 1,
+										create: 0,
+										rename: 0,
+										delete: 0,
+									},
+									fileDetails: [
+										{
+											filePath,
+											range: { start: 1, end: 1 },
+											importsChanged: false,
+										},
+									],
+								},
+							],
+						});
+						return {
+							considered: 1,
+							applied: 1,
+							changedFiles: [filePath],
+							skipped: [],
+						};
+					},
+				);
+
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+
+				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				if (foreign) {
+					const verdict = runtime.readGuard.checkEdit(filePath, [2, 2]);
+					expect(verdict.action).toBe("block");
+					expect(verdict.reason).toContain("File modified since your write");
+				} else {
+					// No other writer: the drain's own rewrite keeps the authorship,
+					// so the fix costs no re-read.
+					expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+						"allow",
+					);
+				}
+			} finally {
+				applyConservativeActionableWarningFixesMock.mockReset();
+				env.cleanup();
+			}
 		}
 	});
 

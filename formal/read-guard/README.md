@@ -82,6 +82,23 @@ change.
     no read and with the agent knowing the bytes, so it is the witness that the
     zero-read arm of `checkEdit` lets an own write through (`BashAuthored`,
     #3520).
+  - **owned in-process write** (`"own"`, #4187 R4-1): a pi-lens tool that
+    writes bytes of its own through an in-process producer
+    (`ast_grep_replace` with `apply: true`, an `lsp_navigation` rename,
+    `lens_diagnostic_mark`'s suppress). Two steps, `OwnCall` then `OwnWrite`,
+    because the license is checked at the call and spent at the write. At
+    `tool_call` the writer retires a broken authorship for the paths it named
+    and records exactly those as checked (`clients/read-guard.ts`
+    `noteCheckedPaths`; the sites are the observational net's arm in
+    `clients/runtime-tool-call.ts` for a call that names one path, and
+    `retireAstGrepApplyTargets` for an apply's `paths` array); its
+    `recordWritten(advanceAuthorship: true, toolCallId)` then advances only a
+    path that call licensed (`mayAdvanceAuthorship`). A tool writes a wider
+    set than it names (a rename's importers, an ast-grep folder or its project
+    default), and every path outside the licensed set ends its authorship
+    instead. `OwnWriteUnchecked` (`"ownwrite"`) is the round-4 mutant: the same
+    write with no call, advancing every path it changed. `External` may land
+    between the two steps, which is the tool-run window in Limits (R4-6).
 - **Another writer** (an external editor, a second pi-lens instance, git):
   changes the file between any two steps. With `ExtPhases` it can land inside
   a tool call.
@@ -165,17 +182,25 @@ The model follows `checkEdit` step by step:
   (`written.c`), and the check also asks that the disk still holds them
   (`AuthorIdentity`; the code's `stat` pre-filter is not modelled, since a
   token is content). A write that carries no bytes of its own (the bash
-  write's tool_call, the drain's start) first retires a record whose bytes
-  changed, and no later write resumes it (`RetireAtWrite`,
+  write's tool_call, an owned in-process writer's tool_call, the drain's
+  start) first retires a record whose bytes changed, and no later write
+  resumes it (`RetireAtWrite`,
   `retireChangedAuthorship`). `/tree` and `/fork` keep a record iff the write
   that named it is on the kept branch (`AuthorBranch`, `KeptAuth`); a
   pi-lens writer (the drain, `WriteRW2`) names none and keeps the record's
   (`Carry`). `pbash` is a recognized bash write of one line, the F6 shape.
-  `bridge` is a mutation-bridge write of one line (a co-process producer's
-  `recordMutation` after the fact): nothing ran before it, so it ends an
-  existing record whose bytes it changed instead of advancing it
-  (`BridgeNoAdvance`, `advanceAuthorship: false`). The observed replay is the
-  bridge's one advancing producer: its tool_call retires first, as bash does.
+  `bridge` is a mutation-bridge write of one line with no pre-write check of
+  its own: a co-process producer's `recordMutation` after the fact, a
+  server-initiated `workspace/applyEdit`, the settled sweep's replay, or a
+  drain record that reaches the guard unlicensed. It may create a first
+  record and otherwise ends an existing one whose bytes it changed instead of
+  advancing it (`BridgeNoAdvance`, `advanceAuthorship: false`). `own` is the
+  owned in-process write (Actors above): its call retires first, as bash does,
+  and licenses an advance for exactly the paths it checked (`noteCheckedPaths`),
+  which the write then spends (`mayAdvanceAuthorship`); `ownwrite` is the same
+  write with no call, the round-4 mutant (R4-1) that advanced every path it
+  changed. The observed replay, the one mutation-bridge producer with a
+  tool_call of its own, is the `own` shape since #4187 round 5.
 - **FileTime.** Whole-file mtime/ctime/size. The rescue is
   `canIgnoreStalenessByHashes` (`canTreatStalenessAsOwnPriorEdit` is gone
   since #3525).
@@ -272,7 +297,10 @@ head that added this model. It is not checked in CI.
 | `AuthorRewriteForeignNoRetire` | the same, the second write re-baselining over the other writer's bytes (round 1 of #4187) | violated `NoStaleAllow` | 204 |
 | `AuthorBridgeForeign` | #4187 R2-4 fixed: bash, another writer, a one-line mutation-bridge write, an edit | pass | 374 |
 | `AuthorBridgeForeignAdvance` | the same, the bridge write re-baselining over the other writer's bytes (round 2 of #4187, probe A1): BashWrite, External, BridgeWrite, Edit | violated `NoStaleAllow` | 204 |
-| `AuthorBridgeOwn` | #4187 R4: an in-process bridge write retires at tool_call and advances after its own write, with `ExtWrites = 0` | pass | — |
+| `AuthorBridgeOwn` | #4187 R4-2 no-drop: an owned in-process write licensed by its own call (`OwnCall`, then `OwnWrite`), no other writer, then an edit of the line it wrote. Round 4 keyed the advance on `ExtWrites = 0`, a bound no code observes, so the pass was vacuous (#3802) | pass | — |
+| `AuthorOwnExternal` | #4187 R4-2 safety: bash, another writer at an idle phase, the licensed own write, an edit; the call's retire ends the broken authorship and the write does not advance a retired record | pass | — |
+| `AuthorOwnUnchecked` | the same with `ownwrite`, the R4-1 mutant and round 4's code: an own write no call licensed re-baselines over the other writer's bytes (BashWrite, External, OwnWriteUnchecked, Edit) | violated `NoStaleAllow` | — |
+| `AuthorOwnToctou` | the R4-6 residual, not a fix: a foreign write lands between the call's check and the write it licenses, inside the tool's run (BashWrite, OwnCall, External inflight, OwnWrite, Edit) | violated `NoStaleAllow` | — |
 | `AuthorDrainForeign` | #4187 F6 P3 fixed: bash, another writer, the agent_end drain (a whitespace-only format), an edit | pass | 209 |
 | `AuthorDrainForeignNoRetire` | the same, the drain re-baselining (round 1 of #4187) | violated `NoStaleAllow` | 121 |
 | `AuthorTouch` | #4187 F5 no-drop: another writer's whitespace-only rewrite (a new mtime, the same tokens) keeps bash authorship | pass (all three invariants) | 39 |
@@ -362,6 +390,14 @@ the `#3522` block of the same file.
 - The host rejects edits past EOF, so the model does not count them.
 - The TOCTOU between `checkEdit` at tool_call and the host's positional apply
   is not modelled.
+- A foreign write between a `tool_call` check and the write it licenses is
+  credited, because the check runs before the write (#4187 R4-6,
+  `AuthorOwnToctou.cfg`): an owned in-process tool (`ast_grep_replace`, an
+  `lsp_navigation` rename, `lens_diagnostic_mark`'s suppress) can have another
+  writer's bytes land inside its own run, and its `recordWritten` then
+  advances the authorship over bytes no check saw. It is inherent to a
+  pre-write check, and nothing after the write re-checks it. The code has the
+  same window; the orchestrator files it rather than this change fixing it.
 - Authorship is whole-file content identity, so another writer's change of
   any line refuses a zero-read edit of every line: the `Author*` configs with
   another writer do not check `NoFalseBlock` (the accepted cost, one re-read).

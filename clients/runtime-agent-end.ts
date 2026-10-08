@@ -1189,9 +1189,27 @@ export async function handleAgentEnd({
 							"an actionable-warnings entry the quick fix acts on was built under another read guard, or carries no valid branch stamp; its fixes are applied and credited to no branch",
 					});
 				}
+				// #4131, #4187 R4-4: the quickfix's `recordWritten` below credits
+				// authorship over bytes the agent never saw, so it may only carry
+				// forward an authorship whose bytes still hold. One other writer
+				// broke since the agent's write ends here, before the fix rewrites
+				// around it — the pre-write check the format and autofix drains
+				// already run, and the third drain writer it was missing on.
+				for (const file of fixableFiles)
+					retireChangedAuthorshipBeforeDrain(
+						runtime,
+						session,
+						file.filePath,
+						getFlag,
+					);
 				const mutationContext: LspMutationContext = {
 					cwd: fixCwd,
 					correlationId: newLspMutationCorrelationId(),
+					// #4187 R4-1: no `toolCallId` — a drain has no tool call, so
+					// `bookkeepLspMutation`'s `advanceAuthorship: true` reaches the
+					// guard unlicensed and cannot re-baseline an authorship. The
+					// retire below is this drain's pre-write check instead, the one
+					// the format and autofix drains already run.
 					tool: "lsp-quickfix",
 					source: "autofix",
 					runtime,
@@ -1201,6 +1219,11 @@ export async function handleAgentEnd({
 							? undefined
 							: {
 									// #3525: bytes the agent never saw; authorship, not FileTime.
+									// #4187 R4-4: the wrapper deliberately records a DRAIN write,
+									// not the LSP bookkeeping's licensed tool write: it drops
+									// `advanceAuthorship: true`, so the credit is the drain's own
+									// (retire before, advance over its rewrite) and not an
+									// unlicensed advance over a byte nothing checked.
 									recordWritten: (filePath: string) =>
 										runtime.readGuard.recordWritten(filePath, {
 											branchEpoch: credit,
