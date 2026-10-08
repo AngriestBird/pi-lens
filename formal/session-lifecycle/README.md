@@ -474,6 +474,200 @@ open. `MergedTurns` checked under `PreS4TurnSec` violates
 the invariant before #3613 (19 states): the turn clause for live subagents
 is what sees the primary's turn and reset moving their records.
 
+## F1 (#3803): marker expiry, the per-evaluation generation, the widget token and the late stores
+
+Lane F1 closes the F1 items of #3803's delta audit. Its configs and results are
+here, not in the tables above, so the lane's rows stay together.
+
+**Where it lives.** `SessionLifecycle.tla` gets two parts, one action and
+three invariants (below). `SessionLifecycleF1.tla` is a second module,
+`EXTENDS SessionLifecycle`, with its own variables, so every transition and
+policy table is the base model's and a base step reaches the new stores
+through one `Hook` (it reads the primed `primary`, `pend` and `turns`). Its
+configs name `SpecF1`. The lane adds no variable and no constant to the base model, so no older
+config moved: all 107 configs of this directory and of
+`formal/session-straddle` that predate the lane keep their verdicts and
+distinct-state counts (a run before and after, compared row by row).
+
+**Marker expiry (#3668).** `MarkerExpire` is the 60 s TTL of the
+successor-pending marker (`SUCCESSOR_PENDING_TTL_MS`,
+`successorStillPending`, `clients/session-lifecycle.ts`) as one nondeterministic
+step, once per marker, while a primary replacement is pending and nothing is
+registered. The flag is the marker's own field (`pend.exp`), so a replacement's
+new marker starts unexpired. With `markerTtl` an expired marker declines
+nothing: `SecStart`, `SecBind`, `SecUp` and `SecRoleless` classify primary
+(`decideSessionStart` finds `successorPending` false), the real successor
+that arrives later is demoted (`BeginDemoted`), and `InterruptAt`'s W0 forward
+stops, because `namedSuccessorReason` no longer names the gap. `ExpiredGapAdmits`
+is the property the TTL buys: no start in an expired gap is declined (the ghost
+`declinedLate` in `used`). Without `markerTtl` the marker never expires, a
+design the code never shipped: `MutMarkerNoTtl`.
+
+- `H3MarkerTtl` and `H3MarkerTtlFileLess` hold `ExpiredGapAdmits`,
+  `HasPrimary`, `HandoffOnce`, `NoCrossSessionAdoption` and `NoForeignFact`
+  across a live successor, a successor that never starts and expiry, for a
+  subagent's start, SDK bind, own `/reload`, `/fork`, `/new` and role-less
+  shutdown in the gap. `NoLostCarryUntilExpiry` is `NoLostCarry` for a
+  behaviour in which the marker never expired: the live successor keeps the
+  conversation's reads.
+- `AcceptedLateSuccessor` is the cost, accepted: a successor slower than the
+  TTL, behind a later start that took the primary slot, is demoted and loses
+  the reads. pi's gap is one awaited sequence, so only a successor slower than
+  60 s reaches it; the README's earlier note ("not modelled: no time") is this
+  config. `demotedDiscard` still keeps the demoted session from taking the slot
+  later (`HandoffOnce` holds in `H3MarkerTtl` after the late successor).
+- `AcceptedExpiredUnstarted` is the same residual for #4113's W0 interrupt: the
+  forward needs the marker to name the gap, so an expired gap loses the slot.
+- Not modelled: the clock (an expiry can fire at any point of the gap), the
+  `session-successor-pending` degradation record (`subject: "expired"`, once),
+  and expiry combined with registry or LSP writers.
+
+**`MutGenPerEval` (#3755).** `perEvalSvc` makes the LSP service generation a
+counter of each entry-module evaluation: a `/reload` that re-evaluates restarts
+it at 0 (`Begin`). LSP work begun in generation 0 before the shutdown lands in
+the new evaluation's generation 0 and spawns a server for a retired scope.
+`NoCrossSessionState` compares the server's generation with the service's and
+cannot see it (`BlindMut3755GenPerEval` passes); `FleetOwnersLive`, every
+server in the fleet belongs to a live scope, does (`Mut3755GenPerEval`), and
+holds on the merged model (`H3LspGenProcess`). The three configs share their
+transitions, so the owner clause is the only difference; replacing it with the
+generation comparison turns the mutant green (the mutation table).
+
+**The widget token (`WriteOrderingGuard`, `widgetStore`).** The module models
+a pipeline run as two verbs, a diagnostics write and a runner write, behind
+two guards (`diagnosticsWriteGuard`, `runnerWriteGuard`, `clients/widget-state.ts`).
+Either verb may complete first, and the one that does advances both guards to
+the run's token, so the other arrives at a token equal to its guard's. Two runs
+(a later one outranks an earlier one of the same turn, `writeOrderToken`) land
+in any order at any later step.
+
+- `H3WidgetToken` holds `ShowsNewest` (a verb's row is the newest token the
+  guard accepted: an older run never overwrites a newer one), `NoOwnDropWidget`
+  (no guard drops a verb of the newest run), `NoLostWidget` (a verb that landed
+  is still shown after `/reload` and `/fork`, which carry the rows) and
+  `WidgetInLineage` (the rows are the live conversation's) across `/new`,
+  `/reload`, `/fork`, quit and `pi --fork`, whose new process restarts the
+  order turn.
+- `MutWidgetTieDrop`: `>` for `>=`. The second verb of every run is dropped.
+  The tie is not a corner: `admitWidgetDiagnosticsWrite` and `recordRunner` make
+  it the second verb's normal case, and the guard's doc comment pins it.
+- `Pre555WidgetNoGuard`: no guard (pre-#555-class widget-state), an older run's
+  verb overwrites a newer one's.
+- `Pre3589WidgetForkReset`: `LegacyPolicy`, the fork start resets the rows and
+  guards, so the parent's verdicts are lost. The truth the invariant reads is
+  the design's table (`TargetPolicy`), whatever policy the config runs.
+- `Pre3824WidgetNoFence`: a verb with no captured scope lands after `/new` and
+  its row is in the new conversation's widget.
+- What the model does not see: the guard's key (one file), sidecar adoption at
+  resume and launch (those rows are `reset` here, and the invariants only read
+  the carrying transitions), and how the other guard's advance couples the two
+  verbs' content (it matters here only for the tie; without it the strict
+  guard passes).
+
+**The late coordinator stores (#3824).** Four writers capture the scope at hook
+entry and write after an await, a live scope's, primary or concurrent
+subagent's: the mutation receipt (`recordMutationToolReceipt`),
+`fixedThisTurn` (`sessionFencedFixedThisTurn`), the analysed-state latch
+(`lastAnalyzedStateByFile`) and the pending runner findings
+(`deferRunnerFindings`). A fifth, `complexityBaselines`, is an open instance found by the class sweep
+(F1.3). The stores differ by what clears them: the receipts,
+`fixedThisTurn`, the baselines and the runner findings by the primary's start (the coordinator's
+reset, and `resetPendingRunnerFindings`), the latch by the next turn start of
+any session (`clearLastAnalyzedStateCache`, #3613), not by the reset. A fenced
+writer drops once its scope retired (`fenceReceipt`, `fenceFixed`,
+`fenceLatch`, `fenceRunner`); without the part it writes the live store when it
+lands. `StoreOwnersLive`: once a primary is registered, the three stores hold
+only live scopes' writes (a concurrent subagent's included), and the latch does
+once the primary's first turn started and cleared it. `NoOwnDropStores` is the
+other direction.
+
+- `H3StoreFences` holds both across `/new`, `/reload`, `/tree`, a subagent
+  that starts and ends, and the four writers.
+- `Pre3824ReceiptUnfenced`, `Pre3824FixedUnfenced`, `Pre3824LatchUnfenced` and
+  `Pre3824RunnerUnfenced` each remove one fence (#3824, 4c7c4b4db).
+- `OpenComplexityBaselineUnfenced` is a defect witness on master (F1.3), and
+  `FixComplexityBaselineFenced` the proposed fence, not shipped.
+- `MutStoreBranchFence` fences the same writes at branch level, as the read
+  guard is: a `/tree` drops a live scope's own write (shape 54).
+- The runner store's readers (the turn-end drain, the commit gate's peek, the
+  requeue) are `formal/pending-runner-store`; only its producer's fence is
+  composed here, with the real replacement, subagent and `/tree` transitions
+  (that family's raw generation bump has none of them).
+- Overlap with PR #4214 (lane M4): its `co` cells and `bridge`, `stateW` and
+  `debounce` writers are the same shape for other stores and its `bridgeEpoch`
+  part covers the bridge epoch. The two lanes edit different stores; after #4214
+  merges, the receipt, `fixedThisTurn` and latch kinds could be added to its
+  `StateKinds` and this module's store half deleted. This lane could not do it
+  on master.
+
+**F1 results.** TLC 2.19, one worker, distinct states.
+
+| Config | Models | Expect | States |
+|---|---|---|---|
+| `H3MarkerTtl` | #3668: a live successor, a successor that never starts and expiry; no start declined after the TTL; the slot taken only by its writer's replacement | pass | 10046 |
+| `H3MarkerTtlFileLess` | the same, file-less sessions | pass | 10046 |
+| `MutMarkerNoTtl` | design alternative: a marker with no TTL; a start after the time is still declined | violated `ExpiredGapAdmits` | 11 |
+| `AcceptedLateSuccessor` | a successor slower than the TTL is demoted and loses the reads | violated `NoLostCarry` | 118 |
+| `AcceptedExpiredUnstarted` | an expired marker no longer names the gap, so the W0 shutdown forwards nothing | violated `NoLostActivation` | 33 |
+| `H3LspGenProcess` | #3755: one process generation; every fleet server has a live owner | pass | 99 |
+| `Mut3755GenPerEval` | pre-#3755: a re-evaluation restarts the generation | violated `FleetOwnersLive` | 73 |
+| `BlindMut3755GenPerEval` | the same mutant under `NoCrossSessionState` only | pass | 151 |
+| `H3WidgetToken` | the widget token across the transitions, two runs, two verbs | pass | 46211 |
+| `MutWidgetTieDrop` | `>` for `>=` | violated `NoOwnDropWidget` | 11 |
+| `Pre555WidgetNoGuard` | no ordering guard | violated `ShowsNewest` | 15 |
+| `Pre3589WidgetForkReset` | the fork start resets the widget | violated `NoLostWidget` | 67 |
+| `Pre3824WidgetNoFence` | a retired scope's verb lands after `/new` | violated `WidgetInLineage` | 26 |
+| `H3StoreFences` | the four stores fenced by the captured scope | pass | 237536 |
+| `Pre3824ReceiptUnfenced` | the receipt write unfenced | violated `StoreOwnersLive` | 23 |
+| `Pre3824FixedUnfenced` | `fixedThisTurn` unfenced | violated `StoreOwnersLive` | 23 |
+| `Pre3824LatchUnfenced` | the analysed-state latch unfenced | violated `StoreOwnersLive` | 30 |
+| `Pre3824RunnerUnfenced` | the pending runner findings unfenced | violated `StoreOwnersLive` | 23 |
+| `MutStoreBranchFence` | the store writers fenced at branch level | violated `NoOwnDropStores` | 8 |
+| `OpenComplexityBaselineUnfenced` | open on master: the tool_call hook's baseline write has no captured scope | violated `StoreOwnersLive` | 23 |
+| `FixComplexityBaselineFenced` | the proposed fence, not shipped | pass | 438 |
+
+| Config | Issue | Provenance | Shortest counterexample |
+|---|---|---|---|
+| `MutMarkerNoTtl` | #3668 | design alternative: 07f415501's marker without its 60 s bound | The primary's `/reload`; the marker's time passes; a subagent's `startup` is still declined. |
+| `AcceptedLateSuccessor` | #3668 | master, accepted | `/reload`; the marker expires; a subagent's start is primary; the real successor starts and is demoted. |
+| `AcceptedExpiredUnstarted` | #3668, #4113 | master, accepted | `/fork`; the marker expires; the fork's start is interrupted before pi-lens's handler (W0); nothing is forwarded; the inner reload's start misses the slot. |
+| `Mut3755GenPerEval` | #3755 (#3733, N4 of #3609) | pre-#3755 (35bcc9d5e): a generation counter per module evaluation | LSP work begins in generation 0; `/reload` retires the scope and the re-evaluated module restarts the counter at 0; the work lands and spawns a server for the retired scope. |
+| `MutWidgetTieDrop` | `WriteOrderingGuard` | design alternative: the guard's `token < last` as `token <= last` | One run's diagnostics verb lands; its runner verb arrives at the same token and is dropped. |
+| `Pre555WidgetNoGuard` | #555 class | pre-guard widget-state (cf83a0d42, before d8c5f64eb) | Two runs begin; the newer one's verb lands; the older one's lands over it. |
+| `Pre3589WidgetForkReset` | #3589 | pre-#3589 (fcf3f1c40): the fork start cleared the widget | A verb lands; `/fork`; the start resets the rows. |
+| `Pre3824WidgetNoFence` | #3824 class | a widget verb with no captured scope | A run begins; `/new`; the verb lands in the new conversation's widget. |
+| `Pre3824*Unfenced` | #3763, #3758 | pre-#3824 (4c7c4b4db): `recordMutationToolReceipt`, `fixedThisTurn.add`, `lastAnalyzedStateByFile.set` and `deferRunnerFindings` resolved the live store | A writer begins; `/new`; the writer lands in the new session's store (the latch: after its first turn started). |
+| `MutStoreBranchFence` | design alternative | the read guard's branch fence applied to coordinator stores | A writer begins; `/tree`; the live scope's own write is dropped. |
+| `OpenComplexityBaselineUnfenced` | F1.3 | master (49843ef09): `runtime.complexityBaselines.set` after the awaits in `clients/runtime-tool-call.ts`, no handle | A tool_call hook begins its baseline; `/new`; the baseline lands in the new session's map. |
+
+**F1.1 The expiry cost is a bounded loss, and no clock is needed to see it.**
+`AcceptedLateSuccessor` is reachable only by a successor slower than the TTL.
+The model cannot say how likely that is; the code's answer is that the gap is
+one awaited sequence. The loss is the reads, advisory and activations of that
+conversation, as in `Pre3855Demote*`, not a cross-session take.
+
+**F1.3 `complexityBaselines` has an unfenced late writer on master (open).**
+The tool_call hook awaits `requestBootstrapClients` and `analyzeFile`, then
+runs `runtime.complexityBaselines.set(filePath, baseline)` and
+`captureSnapshot` with no captured handle, and the getter resolves the live
+coordinator when the write lands. `resetForSession` clears the map, so a
+baseline begun in a replaced session lands in the next one's. The only
+reader is the hook's own `has` gate, so the harm is bounded: the new session
+skips computing its own baseline (and snapshot) for that file, as #3763 r2
+described for `fixedThisTurn`. Whether a replacement can land inside the
+awaits is the host's: pi aborts the active run at `/new`, and the bootstrap
+await takes `ctx.signal`, but `analyzeFile` does not. `OpenComplexityBaselineUnfenced`
+is the witness. Same-shape member the sweep saw and did not model (no harm
+claimed, not examined further): `runtime.markLspReadWarmCompleted` and
+`clearLspReadWarmState` in the detached `.then` of the read warm-up
+(`clients/runtime-tool-call.ts`).
+
+**F1.2 The analysed-state latch has its own clear.** Unlike the receipts, it is
+a module map cleared at every session's turn start, so `StoreOwnersLive` asks
+it of the latch only once the new primary's first turn started: a retired
+session's write before that turn is cleared by it, and one after it marks the
+new session's bytes as already analysed (`Pre3824LatchUnfenced`).
+
 ## Findings
 
 **F1. A dropped late read is a false block, and the design accepts it.** A
@@ -635,26 +829,28 @@ Not modelled:
   (`tests/index-3521-fork-tree-witness.test.ts`). An interrupt between the
   slot take and the end of `adoptHandoff`'s synchronous restores (a
   microtask-driven reload) is not modelled either.
-- **#3668's successor marker and its expiry.** A replacement whose successor
-  never starts (row 15), and a `session_start` that crashed before its scope
-  was set, are not modelled; either leaves an untaken slot that only a start
+- **#3668's successor marker.** A `session_start` that crashed before its
+  scope was set is not modelled; it leaves an untaken slot that only a start
   without its own stash could adopt, as in #3819. Row 17 is modelled for a
   subagent's own `/reload`, `/fork` and `/new` (file `U`); its own resume is
   not modelled (its start carries pi's target file, as a persisted `/new`
-  does). The marker's 60 s bound is not modelled either.
-- **`MutGenPerEval` (#3755).** A follow-up needs its own discriminator:
-  in the #3835 review, `NoCrossSessionState` could not see a
-  per-evaluation LSP generation (the mutant passed, 291 states), while
-  `\A srv \in fleet : st[srv.o] = "live"` redded it (77 states) and held on
-  the unmutated model (161).
-- **`formal/session-straddle`** is not re-baselined here; its generation is
-  still an equality counter bumped at `resetForSession`.
+  does). The marker's expiry is `MarkerExpire` (F1 section): a replacement
+  whose successor never starts and the 60 s bound are modelled as a
+  nondeterministic step, with no clock.
+- **`MutGenPerEval` (#3755)** is `Mut3755GenPerEval` (F1 section): the
+  #3835 review's discriminator, `\A srv \in fleet : st[srv.o] = "live"`
+  (`FleetOwnersLive`), reds it and holds on the merged model, which
+  `NoCrossSessionState` cannot see.
+- **`formal/session-straddle`** keeps its original configs on the reset-time
+  counter; its `Retired*` configs add the retirement at shutdown (#3611).
 - **#3587** (a shutdown that meets this process's own registry lock skips
   the deregistration), and secondary registry roots.
 - **The ALS hazard of D2**, **D4** (tool-call id reuse across branches), and
   **N5** (the turn summary and test-runner delivery after `/tree`).
 - **The widget's write token.** `WidgetWrite` allows one write per turn, and
   its token is the bare order turn, so the guard's `>=` and `>` cannot be
-  told apart, and neither can the fork row's `carry` and `reset`.
+  told apart there; `SessionLifecycleF1`'s two-verb pipeline run (F1 section)
+  tells them apart, and the fork row's `carry` from `reset` through the widget's
+  rows.
 - **Time**, the cwd-changing resume's re-evaluation, the MCP host, the
   advisory cap, and more than one subagent.
