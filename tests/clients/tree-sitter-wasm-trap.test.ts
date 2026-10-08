@@ -20,6 +20,7 @@ import { loadWebTreeSitter } from "../../clients/deps/web-tree-sitter.js";
 import {
 	classifyTreeSitterWasmError,
 	TreeSitterClient,
+	GRAMMAR_TRAP_LATCH_THRESHOLD,
 	WASM_TRAP_BUDGET,
 } from "../../clients/tree-sitter-client.js";
 import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
@@ -169,6 +170,32 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		expect(
 			(await client.withParsedTree(pythonFile(), "python", undefined, () => 1))
 				.parsed,
+		).toBe(false);
+	});
+
+	it("retires one repeatedly trapping grammar before the shared heap aborts (#4010)", async () => {
+		const { client, onAbort } = await liveClient();
+		for (let i = 0; i < GRAMMAR_TRAP_LATCH_THRESHOLD; i++) {
+			expect(
+				client.reportWasmAbort(trap(), {
+					languageId: "bash",
+					source: `scanner-input-${i}`,
+				}),
+			).toBe(false);
+		}
+
+		expect(onAbort).not.toHaveBeenCalled();
+		expect(kindCount("wasm-abort")).toBeUndefined();
+		expect(kindCount("grammar-blocked")).toBe(1);
+		expect(
+			(
+				await client.withParsedTree(
+					pythonFile(`[ "$1" == "--quiet" ]\n`),
+					"bash",
+					undefined,
+					() => 1,
+				)
+			).parsed,
 		).toBe(false);
 	});
 

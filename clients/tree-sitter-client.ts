@@ -343,6 +343,9 @@ export function classifyTreeSitterWasmError(
  */
 export const WASM_TRAP_BUDGET = 3;
 
+/** Consecutive scanner traps before retiring one grammar (#4010). */
+export const GRAMMAR_TRAP_LATCH_THRESHOLD = WASM_TRAP_BUDGET;
+
 /**
  * Positively-identified RESOLUTION-failure codes for a dynamic `import()`:
  * the specifier couldn't be found/resolved, or a transient fs error hit
@@ -626,6 +629,10 @@ export class TreeSitterClient {
 		string,
 		{ traps: number; by: string | undefined }
 	>();
+	/** Consecutive distinct-input traps by language; reset by a clean parse. */
+	private grammarTrapStreak = new Map<string, number>();
+	/** Grammars retired for the current session after repeated scanner traps. */
+	private latchedGrammars = new Set<string>();
 	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
 	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
 	private activeWasmInput: WasmInput | undefined;
@@ -687,6 +694,7 @@ export class TreeSitterClient {
 				this.reportedTraps.add(thrown);
 			}
 			if (input) {
+				const grammarFile = LANGUAGE_TO_GRAMMAR[input.languageId];
 				const key = this.wasmInputKey(input);
 				const entry = this.trappedInputs.get(key);
 				if (entry) {
@@ -701,6 +709,21 @@ export class TreeSitterClient {
 					return false;
 				}
 				this.trappedInputs.set(key, { traps: 1, by: input.caller });
+				if (grammarFile) {
+					const streak =
+						(this.grammarTrapStreak.get(input.languageId) ?? 0) + 1;
+					this.grammarTrapStreak.set(input.languageId, streak);
+					if (streak >= GRAMMAR_TRAP_LATCH_THRESHOLD) {
+						this.latchedGrammars.add(input.languageId);
+						recordDegradationOnce({
+							kind: "grammar-blocked",
+							subject: grammarFile,
+							reason:
+								`grammar retired after ${streak} consecutive WASM traps; ` +
+								"structural analysis is unavailable for this language until the next session",
+						});
+					}
+				}
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
 				incrementDegradationCount({
@@ -1038,6 +1061,8 @@ export class TreeSitterClient {
 		this.grammarLastNotifiedDelayMs.clear();
 		this.poisonedGrammarPaths.clear();
 		this.staleReportedGrammarPaths.clear();
+		this.grammarTrapStreak.clear();
+		this.latchedGrammars.clear();
 	}
 
 	/**
@@ -1674,6 +1699,7 @@ export class TreeSitterClient {
 	 */
 	resetLoadStateForSession(): void {
 		this.webTreeSitterLoadFailed = false;
+		this.refreshGrammarSessionLatches();
 	}
 
 	/** Load language grammar */
@@ -1682,6 +1708,7 @@ export class TreeSitterClient {
 	): Promise<TreeSitterLanguage | null> {
 		if (this.wasmAborted) return null;
 		this.dbg(`Loading language: ${languageId}`);
+		if (this.latchedGrammars.has(languageId)) return null;
 
 		if (this.languages.has(languageId)) {
 			this.dbg(`Language ${languageId} already loaded`);
@@ -1873,6 +1900,8 @@ export class TreeSitterClient {
 			this.dbg(`Parse error: ${err}`);
 			return this.notParsed(err, input);
 		}
+		// A clean parse breaks a grammar's consecutive-trap streak (#4010).
+		this.grammarTrapStreak.delete(languageId);
 		// #3678 F-A: a clean parse heals a parse-phase entry, whoever asked.
 		this.clearWasmInput(input);
 		// The consumer shares the parse's entry and key; its identity decides
