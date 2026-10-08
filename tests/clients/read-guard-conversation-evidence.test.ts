@@ -90,6 +90,7 @@ import { pathToFileURL } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queue.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const CLEAN_DISPATCH = {
 	diagnostics: [],
@@ -208,8 +209,10 @@ async function piRead(
 	const toolCallId = `read-${++seq}`;
 	const args = { path: file, ...input };
 	if (!opts.skipToolCall) {
-		await handleToolCall(
-			callDeps(runtime, { toolName: "read", toolCallId, input: args }),
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(
+				callDeps(runtime, { toolName: "read", toolCallId, input: args }),
+			),
 		);
 		opts.afterToolCall?.();
 	}
@@ -257,8 +260,8 @@ async function positionalEdit(
 			newText,
 		})),
 	};
-	const verdict = (await handleToolCall(
-		callDeps(runtime, { toolName: "edit", toolCallId, input }),
+	const verdict = (await runHandlerExpectingNoThrow(() =>
+		handleToolCall(callDeps(runtime, { toolName: "edit", toolCallId, input })),
 	)) as { block?: boolean; reason?: string } | undefined;
 	return {
 		toolCallId,
@@ -320,8 +323,8 @@ async function piWrite(
 ): Promise<void> {
 	const toolCallId = `write-${++seq}`;
 	const input = { path: file, content };
-	await handleToolCall(
-		callDeps(runtime, { toolName: "write", toolCallId, input }),
+	await runHandlerExpectingNoThrow(() =>
+		handleToolCall(callDeps(runtime, { toolName: "write", toolCallId, input })),
 	);
 	writeNow(file, content);
 	gate?.();
@@ -339,8 +342,8 @@ async function textEdit(
 ): Promise<{ blocked: boolean; reason?: string }> {
 	const toolCallId = `text-edit-${++seq}`;
 	const input = { path: file, edits: [{ oldText, newText }] };
-	const verdict = (await handleToolCall(
-		callDeps(runtime, { toolName: "edit", toolCallId, input }),
+	const verdict = (await runHandlerExpectingNoThrow(() =>
+		handleToolCall(callDeps(runtime, { toolName: "edit", toolCallId, input })),
 	)) as { block?: boolean; reason?: string } | undefined;
 	if (verdict?.block === true) return { blocked: true, reason: verdict.reason };
 	writeNow(file, fs.readFileSync(file, "utf8").replace(oldText, newText));
@@ -382,8 +385,10 @@ async function writeWithAutofix(
 		},
 	} as unknown as BiomeClient;
 	const input = { path: file, content };
-	await handleToolCall(
-		callDeps(runtime, { toolName: "write", toolCallId: "w1", input }),
+	await runHandlerExpectingNoThrow(() =>
+		handleToolCall(
+			callDeps(runtime, { toolName: "write", toolCallId: "w1", input }),
+		),
 	);
 	writeNow(file, content);
 	const res = (await handleToolResult(
@@ -894,8 +899,10 @@ describe("#3523: the agent's own positional edit is a read", () => {
 					path: file,
 					oldRange: { start: { line: 2 }, end: { line: 2 } },
 				};
-				const verdict = (await handleToolCall(
-					callDeps(runtime, { toolName: "edit", toolCallId, input }),
+				const verdict = (await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						callDeps(runtime, { toolName: "edit", toolCallId, input }),
+					),
 				)) as { block?: boolean; reason?: string } | undefined;
 				return { input, verdict };
 			};
@@ -933,8 +940,10 @@ describe("#3523: the agent's own positional edit is a read", () => {
 					remove_to: anchors?.[1],
 					replacement_lines: ["agent2"],
 				};
-				const verdict = (await handleToolCall(
-					callDeps(runtime, { toolName: "replace", toolCallId, input }),
+				const verdict = (await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						callDeps(runtime, { toolName: "replace", toolCallId, input }),
+					),
 				)) as { block?: boolean; reason?: string } | undefined;
 				return { input, verdict };
 			};
@@ -1172,23 +1181,27 @@ describe("#3524: a native read's evidence is the delivered text", () => {
 			const runtime = newRuntime(env.tmpDir);
 			const args = { path: file, offset: 1, limit: 12 };
 			// A tool_call whose result never came (another extension blocked it).
-			await handleToolCall(
-				callDeps(runtime, {
-					toolName: "read",
-					toolCallId: "call_9",
-					input: args,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					callDeps(runtime, {
+						toolName: "read",
+						toolCallId: "call_9",
+						input: args,
+					}),
+				),
 			);
 			await piRead(runtime, file, { offset: 1, limit: 12 });
 			const own = await positionalEdit(runtime, file, [[5, 5, "own5"]]);
 			await applyEdit(runtime, file, own);
 			// The id comes back: decorated, and raced on line 11.
-			await handleToolCall(
-				callDeps(runtime, {
-					toolName: "read",
-					toolCallId: "call_9",
-					input: args,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					callDeps(runtime, {
+						toolName: "read",
+						toolCallId: "call_9",
+						input: args,
+					}),
+				),
 			);
 			const tool = createReadToolDefinition(runtime.projectRoot);
 			const result = await tool.execute("call_9", args, undefined, undefined, {
@@ -2068,8 +2081,10 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 				path: file,
 				edits: [{ oldText: "line3\n", newText: "agent3\n" }],
 			};
-			await handleToolCall(
-				callDeps(runtime, { toolName: "edit", toolCallId, input }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					callDeps(runtime, { toolName: "edit", toolCallId, input }),
+				),
 			);
 			writeNow(
 				file,
@@ -2210,8 +2225,10 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 				{ oldText: "NOPE\n", newText: "x\n" },
 			],
 		};
-		const verdict = (await handleToolCall(
-			callDeps(runtime, { toolName: "edit", toolCallId, input }),
+		const verdict = (await runHandlerExpectingNoThrow(() =>
+			handleToolCall(
+				callDeps(runtime, { toolName: "edit", toolCallId, input }),
+			),
 		)) as { block?: boolean; reason?: string } | undefined;
 		expect(verdict?.reason).toContain("PARTIAL APPLY — 1 edit committed");
 		expect(verdict?.reason).not.toContain("Post-edit analysis failed");
@@ -2262,8 +2279,10 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			foreignWrite(file, 11, "EXTERNAL11");
 			const toolCallId = `bash-${++seq}`;
 			const input = { command: `sed -i 's/^line3$/agent3/' ${file}` };
-			await handleToolCall(
-				callDeps(runtime, { toolName: "bash", toolCallId, input }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					callDeps(runtime, { toolName: "bash", toolCallId, input }),
+				),
 			);
 			writeNow(
 				file,
