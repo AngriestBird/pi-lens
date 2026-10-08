@@ -45,7 +45,7 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { getProcessSingleton } from "./process-singletons.js";
-import { LENS_TOOL_NAMES } from "./tool-config.js";
+import { PI_LENS_TOOL_NAMES } from "./tool-config.js";
 
 /** Persisted-file schema version. A file of any other version is ignored. */
 const MUTATION_ATTRIBUTION_FILE_VERSION = 1;
@@ -140,7 +140,7 @@ const ATTRIBUTION_FAMILY = "mutation-attribution";
  * never be promoted by the open-ended third-party learning mechanism (#4139).
  */
 function isPiLensToolName(toolName: string): boolean {
-	return LENS_TOOL_NAMES.includes(toolName);
+	return PI_LENS_TOOL_NAMES.includes(toolName);
 }
 
 /**

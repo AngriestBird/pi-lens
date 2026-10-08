@@ -910,9 +910,10 @@ Do not pair `bumpFileSeq` and change-log writes at a new call site. The mutation
 bridge and opaque-write recovery feed this seam for non-native producers.
 
 Tier-4 mutation attribution is only for third-party tool names. Names in
-`clients/tool-config.ts`'s `LENS_TOOL_NAMES` registry are never learned or
+`clients/tool-config.ts`'s `PI_LENS_TOOL_NAMES` projection are never learned or
 observed as generic edits, because one pi-lens tool may mix write and read-only
-operations (for example `lsp_navigation`).
+operations (for example `lsp_navigation`). MCP-only registry names remain
+third-party names on pi and retain the bounded observation path.
 
 The read guard keys all path state through its normalizer. It accepts Read,
 search, LSP, bridge, bash-view, and authored-write evidence, but name-only

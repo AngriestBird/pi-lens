@@ -26,10 +26,13 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolveLanguageRootForFile } from "../../clients/language-profile.js";
 import {
 	MUTATION_ATTRIBUTION_FILE,
+	lookupLearnedMutatingTool,
 	primePersistedMutationAttribution,
 	resetMutationAttribution,
 	shouldArmObservationForTool,
 } from "../../clients/mutation-attribution.js";
+import { PI_LENS_TOOL_NAMES } from "../../clients/tool-config.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import {
 	armObservedMutation,
 	_setObservedTimeBoundsForTests,
@@ -293,6 +296,85 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 
 			// Deferred, never immediate — an unknown edit-shaped tool takes the
 			// safe timing, so the agent_settled drain formats it.
+			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+describe("#4139 pi-lens tool attribution boundary", () => {
+	it("does not learn any pi-registered tool through the real call/result path", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-pi-tools-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			for (const [index, toolName] of PI_LENS_TOOL_NAMES.entries()) {
+				const filePath = path.join(env.tmpDir, `${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				const { runtime, cacheManager } = newSession(env.tmpDir);
+				for (const suffix of ["first", "second"]) {
+					const event = {
+						toolName,
+						toolCallId: `call-4139-${index}-${suffix}`,
+						input: { path: filePath, operation: "rename", apply: true },
+						content: [{ type: "text", text: "renamed" }],
+					};
+					await handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					);
+					fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+					await handleToolResult(
+						toolResultDeps({ event, runtime, cacheManager }),
+					);
+				}
+				expect(lookupLearnedMutatingTool(toolName)).toBeUndefined();
+				const hover = {
+					toolName,
+					input: {
+						path: path.join(env.tmpDir, "unread.ts"),
+						operation: "hover",
+					},
+				};
+				expect(classifyMutatingTool(hover)).toBeUndefined();
+			}
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records lens_diagnostic_mark suppress writes through the mutation bridge", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "marked.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(() => env.tmpDir);
+			await tool.execute(
+				"call-4139-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			const turnState = cacheManager.readTurnState(env.tmpDir);
+			expect(Object.keys(turnState.files ?? {})).toContain("marked.ts");
+			expect(readChangesSince(env.tmpDir, 0)).toContainEqual(
+				expect.objectContaining({ source: "agent-tool:lens_diagnostic_mark" }),
+			);
 			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;

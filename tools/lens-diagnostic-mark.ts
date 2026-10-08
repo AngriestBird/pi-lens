@@ -50,6 +50,7 @@ import {
 	type Disposition,
 } from "../clients/diagnostic-dispositions.js";
 import { insertSuppressComment } from "../clients/dispatch/suppress-writer.js";
+import { getMutationBridge } from "../clients/mutation-bridge.js";
 import { normalizeMapKey } from "../clients/path-utils.js";
 import { resolveLensToolName } from "../clients/tool-config.js";
 import {
@@ -416,6 +417,11 @@ export function createLensDiagnosticMarkTool(
 					};
 				}
 				await fs.writeFile(absPath, updated, "utf-8");
+				getMutationBridge()?.recordMutation({
+					filePath: absPath,
+					kind: "write",
+					consumer: "lens_diagnostic_mark",
+				});
 			}
 
 			const anchor = markDisposition(

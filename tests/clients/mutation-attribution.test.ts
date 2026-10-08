@@ -29,6 +29,7 @@ import {
 	shouldArmObservationForTool,
 	_mutationAttributionSnapshotForTests,
 } from "../../clients/mutation-attribution.js";
+import { PI_LENS_TOOL_NAMES } from "../../clients/tool-config.js";
 import { classifyMutatingTool } from "../../clients/mutating-tool.js";
 import {
 	_seedProcessSingletonCellForTests,
@@ -239,6 +240,13 @@ describe("#2430 item 2 — persistence across sessions", () => {
 			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
+	});
+
+	it("keeps MCP-only registry names available for third-party learning", () => {
+		expect(shouldArmObservationForTool("rebuild")).toBe(true);
+		noteObservedMutation("rebuild", undefined);
+		expect(lookupLearnedMutatingTool("rebuild")).toBe("session");
+		expect(PI_LENS_TOOL_NAMES).not.toContain("rebuild");
 	});
 
 	it("persists on the SECOND observation and a fresh session classifies from disk", () => {
