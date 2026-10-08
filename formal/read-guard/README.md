@@ -173,6 +173,11 @@ The model follows `checkEdit` step by step:
 a record built from the conversation's bytes must neither pass a stale edit
 nor refuse an exact one.
 
+Round 3 adds `BlockedRead`: a later extension can block after the tool-call
+capture, so no tool result arrives. The capture is revoked when a block is
+observed or at turn end; `BlockedReadLive.cfg` models the pre-fix leak and
+`BlockedRead.cfg` the fixed single release rule.
+
 ## Results
 
 TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers auto`. Times were measured on a

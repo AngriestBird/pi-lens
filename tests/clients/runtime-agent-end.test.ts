@@ -83,6 +83,52 @@ describe("runtime-agent-end deferred formatting", () => {
 		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-");
 	};
 
+	it("releases a blocked read capture at the real turn-end handler (#4185 R2-3)", async () => {
+		const env = setupTestEnvironment("pi-lens-blocked-read-turn-end-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"blocked.ts",
+				"export const value = 1;\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolCall({
+				event: {
+					toolName: "read",
+					toolCallId: "blocked-read",
+					input: { path: filePath },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: (name: string) =>
+					name === "no-lsp" || name === "no-complexity",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as never);
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+				expect.objectContaining({ provisional: true }),
+			]);
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: () => {},
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				getFormatService: () => ({ recordRead: () => {} }) as never,
+			});
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	afterEach(cleanupAgentEndTemps);
 	afterAll(cleanupAgentEndTemps);
 

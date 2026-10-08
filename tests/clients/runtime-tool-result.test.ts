@@ -641,6 +641,79 @@ describe("bash grep searchReads registration", () => {
 			}
 		});
 
+		it.each(["@a.ts", "~/proj/a.ts"])(
+			"drops a failed read using its tool-call attribution for %s (#4185 R2-1)",
+			async (resultSpelling) => {
+				const env = setupTestEnvironment("pi-lens-failed-read-spelling-");
+				try {
+					const filePath = createTempFile(
+						env.tmpDir,
+						"a.ts",
+						"export const value = 1;\n",
+					);
+					const runtime = new RuntimeCoordinator();
+					runtime.projectRoot = env.tmpDir;
+					await handleToolCall(
+						callDeps(runtime, {
+							toolName: "read",
+							toolCallId: `failed-${resultSpelling}`,
+							input: { path: filePath, offset: 999 },
+						}),
+					);
+					expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+						expect.objectContaining({ provisional: true }),
+					]);
+					await handleToolResult(
+						resultDeps(runtime, {
+							toolName: "read",
+							toolCallId: `failed-${resultSpelling}`,
+							isError: true,
+							input: { path: resultSpelling, offset: 999 },
+							content: [{ type: "text", text: "failed" }],
+						}),
+					);
+					expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+				} finally {
+					env.cleanup();
+				}
+			},
+		);
+
+		it("uses the parent transcript identity for a nested write creation read (#4185 R2-2)", async () => {
+			const env = setupTestEnvironment("pi-lens-nested-write-creation-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"created.ts",
+					"export const value = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				await handleToolCall(
+					callDeps(runtime, {
+						toolName: "write",
+						toolCallId: "codemode-write/1",
+						parentToolCallId: "codemode-write",
+						input: { path: filePath, content: "export const value = 2;\n" },
+					}),
+				);
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "write",
+						toolCallId: "codemode-write/1",
+						parentToolCallId: "codemode-write",
+						input: { path: filePath, content: "export const value = 2;\n" },
+						content: [{ type: "text", text: "written" }],
+					}),
+				);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+					expect.objectContaining({ toolCallId: "codemode-write" }),
+				]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("records a nested bash view span under the parent's transcript identity", async () => {
 			const env = setupTestEnvironment("pi-lens-nested-bash-view-");
 			try {

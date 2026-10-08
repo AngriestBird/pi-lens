@@ -822,10 +822,6 @@ export class ReadGuard {
 	// --- Public API ---
 
 	/**
-	 * Record that a file was read.
-	 * Call this from the tool_call handler after any LSP expansion.
-	 */
-	/**
 	 * Drop the tool_call capture of the read `toolCallId` made of `rawFilePath`
 	 * (the record whose `source` is `native-read:<call>:provisional`). The
 	 * delivered record supersedes it ({@link recordRead}); a result that
@@ -850,6 +846,47 @@ export class ReadGuard {
 		return true;
 	}
 
+	/**
+	 * Drop every provisional native-read capture that never reached a
+	 * tool_result. A later extension can block a read after this handler has
+	 * returned, so agent_end is the only remaining boundary that can revoke
+	 * that unseen evidence (#4185 R2-3).
+	 */
+	dropProvisionalReads(): number {
+		let dropped = 0;
+		for (const [filePath, records] of this.reads) {
+			const kept = records.filter((record) => {
+				if (!record.provisional) return true;
+				dropped += 1;
+				return false;
+			});
+			if (kept.length === 0) this.reads.delete(filePath);
+			else if (kept.length !== records.length) this.reads.set(filePath, kept);
+		}
+		return dropped;
+	}
+
+	/**
+	 * Drop the provisional capture for one blocked read without re-deriving its
+	 * path. The call identity is unique even when nested reads share a parent
+	 * transcript identity.
+	 */
+	dropProvisionalReadByCall(toolCallId: string): boolean {
+		for (const [filePath, records] of this.reads) {
+			const source = `native-read:${toolCallId}:provisional`;
+			const index = records.findIndex((record) => record.source === source);
+			if (index < 0) continue;
+			records.splice(index, 1);
+			if (records.length === 0) this.reads.delete(filePath);
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Record that a file was read.
+	 * Call this from the tool_call handler after any LSP expansion.
+	 */
 	recordRead(
 		record: ReadRecord,
 		opts?: {

@@ -640,7 +640,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/python-provenance.ts": 4,
 		"clients/read-guard-logger.ts": 3,
 		"clients/read-guard-tool-lines.ts": 6,
-		"clients/read-guard.ts": 8,
+		"clients/read-guard.ts": 9,
 		"clients/recent-touches.ts": 2,
 		"clients/resource-sampler.ts": 2,
 		"clients/reverse-deps.ts": 1,
@@ -1092,7 +1092,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 6,
 		"clients/project-snapshot.ts": 10,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 20,
+		"clients/read-guard.ts": 24,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
 		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed

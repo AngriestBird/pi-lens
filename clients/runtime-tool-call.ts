@@ -68,7 +68,10 @@ import {
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
-import { resolveToolCallCorrelationId } from "./tool-event.js";
+import {
+	resolveReadEvidenceCorrelationId,
+	resolveToolCallCorrelationId,
+} from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
@@ -435,6 +438,8 @@ export async function handleToolCall(
 			// the cleanup does.
 			try {
 				const toolCallId = resolveToolCallCorrelationId(deps.event);
+				if (deps.event.toolName === "read" && toolCallId !== undefined)
+					deps.runtime.readGuard.dropProvisionalReadByCall(toolCallId);
 				if (toolCallId !== undefined) {
 					deps.runtime.takeToolCallAttribution(toolCallId);
 				}
@@ -1191,7 +1196,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			filePath,
 			runtime.turnIndex,
 			runtime.peekWriteIndex(),
-			toolCallId,
+			resolveReadEvidenceCorrelationId(event),
 		);
 	}
 

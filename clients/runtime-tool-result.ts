@@ -1902,7 +1902,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		toolCallId !== undefined &&
 		filePath
 	) {
-		deps.readGuard.dropProvisionalRead(filePath, toolCallId);
+		deps.readGuard.dropProvisionalRead(
+			attribution?.resolvedPath ?? filePath,
+			toolCallId,
+		);
 	}
 
 	// Native read results are the authoritative read boundary. The tool_call

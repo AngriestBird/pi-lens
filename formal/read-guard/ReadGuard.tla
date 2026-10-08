@@ -346,6 +346,21 @@ FailedRead ==
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo, pc, pend,
                    ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
+\* A later extension can block a read after pi-lens has recorded its
+\* tool_call, so no tool_result arrives. The capture is released at the block
+\* boundary when the handler observes its own block, or at turn end when the
+\* later extension is the blocker. Reuse RevokeFailedRead as the one rule for
+\* every read that delivered no bytes: FALSE is the pre-fix capture leak.
+BlockedRead ==
+    /\ CanOp("fread")
+    /\ reads' = IF RevokeFailedRead THEN reads
+                ELSE Append(reads, Rec(Len(disk) + 1, Len(disk) + 1, NoH, TRUE))
+    /\ ft' = rev
+    /\ lastEditOk' = FALSE
+    /\ ops' = ops + 1
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo, pc, pend,
+                   ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
 \* ---- edit of lo..lo+span-1 (checkEdit at tool_call, host apply) ----
 \* Positional ("edit"): the guard fully enforces it. oldText ("oedit"): the
 \* host validates the text, so the guard runs the zero-read check alone
@@ -620,7 +635,7 @@ Tree ==
 Next ==
     \/ \E lo \in 1..MaxLen, hi \in 1..MaxLen : ReadCall(FALSE, lo, hi)
     \/ ReadCall(TRUE, 1, MaxLen)
-    \/ ReadExec \/ ReadResult \/ FailedRead
+    \/ ReadExec \/ ReadResult \/ FailedRead \/ BlockedRead
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite
