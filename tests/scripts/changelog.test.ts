@@ -137,12 +137,13 @@ describe("changelog lib — summarizeSection", () => {
 		"",
 	].join("\n");
 
-	it("keeps plain bullets, condensed to their first clause", () => {
+	it("keeps plain bullets through their whole first sentence", () => {
 		const s = summarizeSection(PLAIN);
 		expect(s).toContain("### Changed");
-		// First clause survives; the post-boundary tail does not.
-		expect(s).toContain("- perf: cascade diagnostics now run concurrently");
-		expect(s).not.toContain("settled at turn_end");
+		// The complete first sentence survives; clause tails are not cut away.
+		expect(s).toContain(
+			"- perf: cascade diagnostics now run concurrently after each edit instead of blocking the write pipeline (~26% median per-edit latency reduction); settled at turn_end with a bounded wait (#450)",
+		);
 		expect(s).toContain("- perf: short one (#453)");
 		expect(s).not.toContain("nested continuation");
 	});
@@ -186,6 +187,9 @@ describe("changelog lib — summarizeSection", () => {
 		const body = extractSection(CHANGELOG, "4.4.0");
 		expect(body).not.toBeNull();
 		const summary = summarizeSection(body!);
+		// A literal command ellipsis is valid; hard-truncation ellipses are not.
+		expect(summary).not.toMatch(/ …|…$/m);
+		expect(summary).toContain("re-registers on its next heartbeat");
 		for (const fragment of [
 			"pi 1.0.x and 1.1.x are now verified release-QA hosts, and the published",
 			"A file with no project marker (no `package.json`, `Cargo.toml` and the like",
@@ -205,14 +209,38 @@ describe("changelog lib — summarizeSection", () => {
 		}
 	});
 
-	it("hard-truncates an unbroken over-long plain bullet at a word boundary", () => {
+	it("keeps an unbroken over-long plain bullet instead of hard-truncating", () => {
 		const long = `### Fixed\n\n- ${"word ".repeat(60).trim()} (#99)\n`;
 		const s = summarizeSection(long);
 		const line = s.split("\n").find((l) => l.startsWith("- word"));
 		expect(line).toBeDefined();
-		expect(line!.length).toBeLessThan(260);
-		expect(line).toContain("…");
+		expect(line).toContain("word ".repeat(59));
+		expect(line).not.toContain("…");
 		expect(line).toContain("(#99)");
+	});
+
+	it("keeps a plain entry through an em-dash parenthetical", () => {
+		const body = [
+			"### Fixed",
+			"",
+			"- A session (the registry — including its lock) now re-registers on its next heartbeat, using its original root.",
+			"",
+		].join("\n");
+		expect(summarizeSection(body)).toContain(
+			"- A session (the registry — including its lock) now re-registers on its next heartbeat, using its original root.",
+		);
+	});
+
+	it("ignores periods in code spans, abbreviations, and version numbers", () => {
+		const body = [
+			"### Fixed",
+			"",
+			"- The `lookup.v1.2.3` path handles e.g. package roots and i.e. workspaces before returning a result. Later details are omitted.",
+			"",
+		].join("\n");
+		expect(summarizeSection(body)).toContain(
+			"- The `lookup.v1.2.3` path handles e.g. package roots and i.e. workspaces before returning a result.",
+		);
 	});
 });
 
