@@ -2067,8 +2067,10 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	) => {
 		const toolCallId = `bash-${++seq}`;
 		const input = { command: `sed -i 's/^${from}$/${to}/' ${file}` };
-		await handleToolCall(
-			callDeps(runtime, { toolName: "bash", toolCallId, input }),
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(
+				callDeps(runtime, { toolName: "bash", toolCallId, input }),
+			),
 		);
 		writeNow(
 			file,

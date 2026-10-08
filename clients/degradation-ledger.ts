@@ -1052,6 +1052,8 @@ export type DegradationKind =
 	 * edit needs a read. Subject is the file; counted, the read-guard.log row
 	 * on the rising edge.
 	 */
+	/** Counted authorship-cap evictions; read-guard.log is rising-edge only. */
+	| "read-guard-authorship-cap"
 	| "read-guard-authorship-retired"
 	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS

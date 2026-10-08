@@ -586,7 +586,8 @@ BridgeWrite ==
     /\ CanOp("bridge") /\ written.on
     /\ LET c == Replace(disk, 1, tok)
        IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
-          /\ written' = IF ~BridgeNoAdvance THEN Auth(c)
+          /\ written' = IF ExtWrites = 0 THEN Auth(c)
+                        ELSE IF ~BridgeNoAdvance THEN Auth(c)
                         ELSE IF written.c = c THEN written ELSE Retired
     /\ rev' = rev + 1 /\ tok' = tok + 1
     /\ ops' = ops + 1 /\ mutatedTurn' = TRUE

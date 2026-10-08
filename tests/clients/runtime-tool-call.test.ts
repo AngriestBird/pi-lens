@@ -90,6 +90,58 @@ function baseDeps(
 }
 
 describe("handleToolCall", () => {
+	it("retires owned in-process authorship at tool_call (#4187 R4)", async () => {
+		for (const [toolName, inputFor] of [
+			[
+				"ast_grep_replace",
+				(filePath: string) => ({ apply: true, paths: [filePath] }),
+			],
+			[
+				"lens_diagnostic_mark",
+				(filePath: string) => ({ filePath, disposition: "suppress" }),
+			],
+			[
+				"lsp_navigation",
+				(filePath: string) => ({ path: filePath, operation: "rename" }),
+			],
+		] as const) {
+			const env = setupTestEnvironment(`pi-lens-4187-owned-${toolName}-`);
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"authored.ts",
+					"const a = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4187-bash",
+				});
+				fs.writeFileSync(filePath, "const external = 1;\n");
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						baseDeps({
+							runtime,
+							ctx: { cwd: env.tmpDir },
+							event: { toolName, input: inputFor(filePath) },
+						}),
+					),
+				);
+				fs.writeFileSync(filePath, "const owned = 1;\n");
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					advanceAuthorship: true,
+				});
+				expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+					"block",
+				);
+			} finally {
+				env.cleanup();
+			}
+		}
+	});
+
 	it("does not collect a complexity baseline when disabled", async () => {
 		resetDegradationLedger();
 		const env = setupTestEnvironment("pi-lens-runtime-tool-call-complexity-");

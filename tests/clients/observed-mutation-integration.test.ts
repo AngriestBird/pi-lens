@@ -1253,8 +1253,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			big[10] = "EXTERNAL11";
 			fs.writeFileSync(filePath, big.join("\n"));
 			const event = patchEvent(filePath, "call-3865-observed");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			big[1] = "patched2";
 			fs.writeFileSync(filePath, big.join("\n"));
@@ -1301,8 +1303,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
 			);
 			const event = patchEvent(filePath, "call-4131-observed");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(
 				filePath,
@@ -1342,8 +1346,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				toolCallId: "call-4131-bash-keep",
 			});
 			const event = patchEvent(filePath, "call-4131-observed-keep");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(
 				filePath,
@@ -1400,8 +1406,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				input: { path: dir, transform: "rename" },
 				content: [{ type: "text", text: "rewrote" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(
 				filePath,

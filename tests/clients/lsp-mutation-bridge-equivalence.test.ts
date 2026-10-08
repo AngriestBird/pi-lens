@@ -241,6 +241,7 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 			const lines = [...FIXTURE_LINES];
 			lines[1] = "const b = 'EXTERNAL';";
 			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			runtime.readGuard.retireChangedAuthorship(filePath);
 			lines[EDIT_LINE_1BASED - 1] = "hello lsp;";
 			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
 		}
@@ -274,6 +275,47 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 			const verdict = runtime.readGuard.checkEdit(filePath, [2, 2]);
 			expect(verdict.action).toBe("block");
 			expect(verdict.reason).toContain("File modified since your write");
+		}
+	});
+
+	it("keeps authorship for an owned write on both branches (#4187 R4)", () => {
+		for (const [runtime, filePath, dir] of [
+			[runtimeDirect, fileDirect, dirDirect],
+			[runtimeBridge, fileBridge, dirBridge],
+		] as const) {
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4187-owned-lsp",
+			});
+			const lines = [...FIXTURE_LINES];
+			lines[EDIT_LINE_1BASED - 1] = "owned lsp;";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			const context: LspMutationContext =
+				dir === dirDirect
+					? {
+							cwd: dir,
+							correlationId: "owned-direct",
+							tool: "lsp_navigation:executeCommand",
+							source: "lsp-execute-command",
+							runtime: runtime as never,
+							cacheManager: cacheManagerDirect,
+							readGuard: runtime.readGuard,
+							emitSummary: false,
+						}
+					: {
+							cwd: dir,
+							correlationId: "owned-bridge",
+							tool: "lsp_navigation:executeCommand",
+							source: "lsp-execute-command",
+							emitSummary: false,
+						};
+			recordLspMutation(context, { results: resultsFor(filePath) });
+			expect(
+				runtime.readGuard.checkEdit(filePath, [
+					EDIT_LINE_1BASED,
+					EDIT_LINE_1BASED,
+				]).action,
+			).toBe("allow");
 		}
 	});
 

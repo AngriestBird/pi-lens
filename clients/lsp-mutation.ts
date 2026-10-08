@@ -110,7 +110,7 @@ export interface LspMutationContext {
 	readGuard?: {
 		recordWritten: (
 			filePath: string,
-			opts: { stampFileTime: false; advanceAuthorship: false },
+			opts: { stampFileTime: false; advanceAuthorship: true },
 		) => void;
 	};
 	cacheManager?: LspMutationCacheManager;
@@ -343,10 +343,10 @@ function bookkeepLspMutation(
 			try {
 				// #3525: the server computed these bytes; the agent never saw
 				// them: authorship, not FileTime. Nor an advance of an existing
-				// authorship: the bridge branch below ends it instead (#4187 R2-4).
+				// authorship: the tool_call retire makes this an observed write.
 				context.readGuard.recordWritten(filePath, {
 					stampFileTime: false,
-					advanceAuthorship: false,
+					advanceAuthorship: true,
 				});
 			} catch (err) {
 				context.dbg?.(
@@ -394,6 +394,7 @@ function bookkeepLspMutation(
 							? [[detail.range.start, detail.range.end]]
 							: undefined,
 						consumer: context.tool,
+						provenance: "observed",
 						// Real value threaded through, not the bridge's own
 						// historical `false` default (#2450 review round 2, F1) —
 						// the tsserver organize-imports/add-import case is exactly

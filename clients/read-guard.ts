@@ -873,6 +873,22 @@ export class ReadGuard {
 	): void {
 		if (this.expiredWrites.has(filePath)) return;
 		this.expiredWrites.add(filePath);
+		if (reason === "authorship-cap") {
+			const isRisingEdge = incrementDegradationCount({
+				kind: "read-guard-authorship-cap",
+				subject: this.sessionId,
+				reason: "authorship cap evicted a live write record",
+			});
+			if (isRisingEdge) {
+				logReadGuardEvent({
+					event: "read_file_evicted",
+					sessionId: this.sessionId,
+					filePath,
+					metadata: { reason, authorshipDropped: true },
+				});
+			}
+			return;
+		}
 		logReadGuardEvent({
 			event: "read_file_evicted",
 			sessionId: this.sessionId,

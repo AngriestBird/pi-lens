@@ -2603,6 +2603,28 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 		);
 	});
 
+	// #4187 R3-3: authorship-cap pressure is counted for every eviction, but
+	// read-guard.log gets only the rising-edge witness. Recurrence: one log row
+	// per over-cap file flooded the sink during a steady-state credit stream.
+	it("counts authorship-cap evictions and logs only its rising edge", () => {
+		resetDegradationLedger();
+		const guard = createReadGuard("4187-authorship-cap-observability");
+		for (let i = 0; i <= 4096; i += 1) {
+			const filePath = `/tmp/4187-authorship-cap-${i}.ts`;
+			guard.recordWritten(filePath);
+		}
+		const evictions = evictionEvents("read_file_evicted");
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			metadata: { reason: "authorship-cap", authorshipDropped: true },
+		});
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "read-guard-authorship-cap",
+			)?.count,
+		).toBe(1);
+	});
+
 	// #1918 review F3: pin session re-arm — the SAME file evicted twice within
 	// one session logs once (rising edge), but a fresh session (which is what
 	// resetDegradationLedger models: the ledger's own generation bump, wired

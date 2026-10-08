@@ -149,6 +149,43 @@ function getToolCallRawFilePath(
 }
 
 /**
+ * #4187 R4: pi-lens-owned in-process writers have a tool_call seam before
+ * their write. Retire a broken authorship there so their later bridge record
+ * may advance only the bytes this call observed. Third-party recordMutation
+ * has no such seam and remains retire-only in `creditAuthorship`.
+ */
+function retireInProcessToolAuthorship(
+	toolName: string,
+	event: { input?: unknown },
+	runtime: ToolCallDeps["runtime"],
+	ctx: { cwd?: string },
+): void {
+	const input = (event.input ?? {}) as Record<string, unknown>;
+	const shouldRetire =
+		(toolName === "ast_grep_replace" && input.apply === true) ||
+		(toolName === "lens_diagnostic_mark" && input.disposition === "suppress") ||
+		(toolName === "lsp_navigation" &&
+			(input.operation === "rename" || input.operation === "executeCommand"));
+	if (!shouldRetire) return;
+	const rawPaths =
+		toolName === "ast_grep_replace" && Array.isArray(input.paths)
+			? input.paths.filter(
+					(value): value is string => typeof value === "string",
+				)
+			: [input.filePath ?? input.path].filter(
+					(value): value is string => typeof value === "string",
+				);
+	for (const rawPath of rawPaths) {
+		const resolved = resolveToolCallFilePath(
+			rawPath,
+			ctx.cwd,
+			runtime.projectRoot,
+		)?.path;
+		if (resolved) runtime.readGuard?.retireChangedAuthorship?.(resolved);
+	}
+}
+
+/**
  * Resolve a tool_call's raw path to the file pi will actually touch.
  *
  * The `cwd` basis is the host `ctx.cwd`, which for the pinned host IS the same
@@ -699,6 +736,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			});
 		}
 	}
+	retireInProcessToolAuthorship(toolName, event, runtime, ctx);
 
 	if (
 		getFlag("lens-guard") &&

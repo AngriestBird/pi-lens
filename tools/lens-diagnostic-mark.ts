@@ -425,6 +425,7 @@ export function createLensDiagnosticMarkTool(
 					kind: "edit",
 					editRanges: [[Math.max(1, verifiedLine - 1), verifiedLine]],
 					consumer: "lens_diagnostic_mark",
+					provenance: "observed",
 					...(lineage && { lineage }),
 				});
 			}

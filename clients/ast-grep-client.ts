@@ -107,6 +107,7 @@ function recordAstGrepApply(
 			kind: "edit",
 			editRanges,
 			consumer: "ast_grep_replace",
+			provenance: "observed",
 			// #3763: the call's session, so an apply that lands after `/new`
 			// writes none of the next session's state.
 			...(lineage && { lineage }),
