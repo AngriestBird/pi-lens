@@ -91,6 +91,13 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
 	],
 	"index.ts": [
 		"_bridgeGetFlag",
+		// #3654: the unified IO bridge's mount latch. Process-lifetime by design —
+		// the singleton lives on `globalThis` under `Symbol.for(...)` and the mount
+		// is first-wins — exactly like `_readBridgeRegistered` and
+		// `_mutationBridgeRegistered` beside it. Boundary fixture:
+		// `tests/clients/io-bridge.test.ts` mounts twice and pins first-wins +
+		// version. Not session state, so no reset.
+		"_ioBridgeRegistered",
 		"_lspConfigInitializedCwds",
 		"_mutationBridgeRegistered",
 		"_nextTestRunnerDeliveryOwnerId",

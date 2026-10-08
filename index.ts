@@ -85,7 +85,10 @@ import {
 	successorStartKey,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
-import { registerMutationBridge } from "./clients/mutation-bridge.js";
+import {
+	type MutationBridgeDeps,
+	registerMutationBridge,
+} from "./clients/mutation-bridge.js";
 import {
 	OBSERVED_TRACKED_MAX_FILES,
 	refreshObservedMutationLedger,
@@ -101,8 +104,19 @@ import { isEditClassToolResult } from "./clients/bash-file-access.js";
 import { resolveLanguageRootForFile } from "./clients/language-profile.js";
 import { countFileLines } from "./clients/read-guard-tool-lines.js";
 import { registerReadBridge } from "./clients/read-bridge.js";
-import { normalizeFilePath } from "./clients/path-utils.js";
-import { isRecordableProjectPath } from "./clients/file-utils.js";
+import {
+	type IOBridgeDeps,
+	recordIOEntry,
+	registerIOBridge,
+} from "./clients/io-bridge.js";
+import {
+	isExternalOrVendorFile,
+	normalizeFilePath,
+} from "./clients/path-utils.js";
+import {
+	isPathIgnoredByProject,
+	isRecordableProjectPath,
+} from "./clients/file-utils.js";
 import {
 	loadSessionState,
 	persistScope,
@@ -606,6 +620,10 @@ let _bridgeGetFlag:
 // follows its registration discipline exactly — mount once per process, refresh
 // the flag getter on every activation.
 let _mutationBridgeRegistered = false;
+// #3654: the unified I/O bridge composes the read-guard and the mutation
+// seam; it follows the same once-per-process discipline and is mounted in the
+// same first-wins pass as the two v1 shims it supersedes.
+let _ioBridgeRegistered = false;
 
 /**
  * Read a bridge flag without letting a session replacement obstruct the
@@ -617,10 +635,11 @@ let _mutationBridgeRegistered = false;
  */
 function getBridgeFlag(
 	getter: ((name: string) => boolean | string | undefined) | undefined,
-	bridge: "read" | "mutation",
+	bridge: "read" | "mutation" | "io",
+	name = "no-read-guard",
 ): boolean | string | undefined {
 	try {
-		return getter?.("no-read-guard");
+		return getter?.(name);
 	} catch (err) {
 		if (!isStaleExtensionCtxError(err)) throw err;
 		recordDegradationOnce({
@@ -1042,16 +1061,72 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	let lensEnabled = !getLensFlag("no-lens");
 
-	// Read-bridge: refresh the flag getter on every factory activation so the
+	// Bridges: refresh the flag getter on every factory activation so the
 	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
-	// Register the singleton once — subsequent activations only refresh the getter.
+	// Each singleton is registered once; later activations only refresh the getter.
 	_bridgeGetFlag = getLensFlag;
+
+	// Mutation bridge (#2423): same live-getter discipline as the read bridge.
+	// An in-process producer that writes a file outside pi-lens's tool-event
+	// path records it here, and the same bookkeeping runs.
+	const mutationBridgeDeps: MutationBridgeDeps = {
+		getRuntime: () => runtime,
+		getCacheManager: () => cacheManager,
+		getProjectRoot: () => runtime.projectRoot || process.cwd(),
+		getDispatchCwd: (filePath: string) =>
+			resolveLanguageRootForFile(
+				filePath,
+				runtime.projectRoot || process.cwd(),
+			),
+		countFileLines,
+		// #2465: unlike the read bridge below (whose whole purpose IS the
+		// read-guard stamp, so `no-read-guard` correctly disables it
+		// entirely), this bridge also drives turn-state and the change-log
+		// receipt. `no-read-guard` gates ONLY the read-guard stamp — the same
+		// canonical split `clients/runtime-tool-result.ts` applies at
+		// `recordWritten` (:1859) — so it must not appear in the recordability
+		// gate `recordMutationThroughSeam` early-returns on. That gate stays
+		// path-scope only (ignored/vendor); the flag is threaded separately
+		// below via `shouldStampReadGuard`.
+		isRecordable(filePath: string): boolean {
+			return isRecordableProjectPath(filePath, runtime.projectRoot);
+		},
+		shouldStampReadGuard(): boolean {
+			return !getBridgeFlag(_bridgeGetFlag, "mutation");
+		},
+		dbg,
+	};
+	// Unified File I/O bridge (#3654): the v2 surface. It composes the mutation
+	// seam with the read guard and the confirmed-delete lifecycle. The v1 read
+	// shim below runs this same body with these same deps, and the v1 mutation
+	// shim calls the bookkeeping owner the v2 mutate facet also calls, so a v1
+	// producer gets the unified behavior (disk-evidence reads, the
+	// `pilens:format:queued` publish) without changing its own call.
+	const ioBridgeDeps: IOBridgeDeps = {
+		...mutationBridgeDeps,
+		getReadGuard: () => runtime.readGuard,
+		getTurnIndex: () => runtime.turnIndex,
+		peekWriteIndex: () => runtime.peekWriteIndex(),
+		getFlag: (name: string, bridge?: "read" | "mutation" | "io") =>
+			getBridgeFlag(_bridgeGetFlag, bridge ?? "io", name),
+		isExternalOrVendorFile: (filePath: string) =>
+			isExternalOrVendorFile(filePath, runtime.projectRoot),
+		isPathIgnoredByProject: (filePath: string) =>
+			isPathIgnoredByProject(filePath, runtime.projectRoot, false),
+		// #3654: resolved lazily through the live LSP client seam, so a test mock
+		// of `clients/lsp/index.js` that predates this bridge (and so omits the
+		// named export) cannot break the delete path. This is exactly what the
+		// module-level `notifyExternalFileChange` does
+		// (`getLSPService().notifyExternalFileChange(...)`), so the real path is
+		// unchanged.
+		notifyExternalFileChange: (filePath: string, type: number) =>
+			getLSPService().notifyExternalFileChange(filePath, type),
+		nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
+	};
+
 	if (!_readBridgeRegistered) {
 		_readBridgeRegistered = true;
 		registerReadBridge({
-			getReadGuard: () => runtime.readGuard,
-			getTurnIndex: () => runtime.turnIndex,
-			peekWriteIndex: () => runtime.peekWriteIndex(),
 			isRecordable(filePath: string): boolean {
 				// Unknown during a replacement/reload records the read. The guard is
 				// the obstruction here, so failure must fall toward not blocking the
@@ -1059,41 +1134,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
 				return isRecordableProjectPath(filePath, runtime.projectRoot);
 			},
+			forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
 		});
 	}
-
-	// Mutation bridge (#2423): same live-getter discipline as the read bridge.
-	// An in-process producer that writes a file outside pi-lens's tool-event
-	// path records it here, and the same bookkeeping runs.
 	if (!_mutationBridgeRegistered) {
 		_mutationBridgeRegistered = true;
-		registerMutationBridge({
-			getRuntime: () => runtime,
-			getCacheManager: () => cacheManager,
-			getProjectRoot: () => runtime.projectRoot || process.cwd(),
-			getDispatchCwd: (filePath: string) =>
-				resolveLanguageRootForFile(
-					filePath,
-					runtime.projectRoot || process.cwd(),
-				),
-			countFileLines,
-			// #2465: unlike the read bridge above (whose whole purpose IS the
-			// read-guard stamp, so `no-read-guard` correctly disables it
-			// entirely), this bridge also drives turn-state and the change-log
-			// receipt. `no-read-guard` gates ONLY the read-guard stamp — the same
-			// canonical split `clients/runtime-tool-result.ts` applies at
-			// `recordWritten` (:1859) — so it must not appear in the recordability
-			// gate `recordMutationThroughSeam` early-returns on. That gate stays
-			// path-scope only (ignored/vendor); the flag is threaded separately
-			// below via `shouldStampReadGuard`.
-			isRecordable(filePath: string): boolean {
-				return isRecordableProjectPath(filePath, runtime.projectRoot);
-			},
-			shouldStampReadGuard(): boolean {
-				return !getBridgeFlag(_bridgeGetFlag, "mutation");
-			},
-			dbg,
-		});
+		registerMutationBridge(mutationBridgeDeps);
+	}
+	if (!_ioBridgeRegistered) {
+		_ioBridgeRegistered = true;
+		registerIOBridge(ioBridgeDeps);
 	}
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
