@@ -565,6 +565,7 @@ describe("index.ts hook anchors (#3878)", () => {
 			agent_settled: ["on", "onAgentSettled"],
 			tool_call: ["on"],
 			tool_result: ["on", "onToolResult"],
+			tool_execution_end: ["on"],
 			context: ["on"],
 		});
 	});

@@ -130,6 +130,10 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 			sessionStartMs: 0,
 		});
 		importAuthorship = () => {};
+		// #4185: agent_settled's backstop and tool_execution_end release read
+		// captures; this double holds none.
+		dropProvisionalReads = () => 0;
+		dropProvisionalReadByCall = () => false;
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,

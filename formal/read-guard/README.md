@@ -18,7 +18,11 @@ hashline adapters. The guard fully enforces only this class. An `oldText` edit
 is content-validated by the host, so `checkEdit` gets `skipSnapshotCheck` and
 `oldTextResolved` (`clients/runtime-tool-call.ts` `handleToolCall`). For such an edit, FileTime and
 the snapshot are skipped and out-of-range is only a warning. The only checks
-left are zero-read and the bridge content binding.
+left are zero-read and the bridge content binding. Since #4185 round 2 the
+model has that edit too, as `"oedit"` (`VerdictOldText`): the zero-read gate
+alone, the host applying only a text that matches the disk, no own-edit record.
+It exists to witness what a read record that delivered nothing can license
+(`FailedRead*`); FileTime and the snapshot stay out of scope for it.
 
 A file is a sequence of line tokens. Every write mints fresh tokens, so token
 equality is `lineContentHash` equality. A whitespace-only rewrite counts as no
@@ -31,7 +35,26 @@ change.
     a FileTime stamp (`clients/runtime-tool-call.ts` `handleToolCall`), the host read, then the
     tool_result record that supersedes it (`clients/runtime-tool-result.ts` `handleToolResult`).
     Since #3524, when the file moved after the tool_call's stamp, that record
-    is hashed and sized from the delivered text and keeps the stamp;
+    is hashed and sized from the delivered text and keeps the stamp. The two
+    records carry two identities (#4138, #3831, #4185 round 2): the provisional
+    record's `source` is the call's own id, which the delivered record's
+    `supersedes` uses; the delivered record's `toolCallId` is the transcript
+    identity (the parent codemode call's id for a nested read), which the
+    branch filter reads. A provisional record has no `toolCallId`
+    (`ProvisionalCredit = FALSE`);
+  - **failed read** (`"fread"`, #4185 round 2): the tool_call capture, then a
+    host error (offset past EOF), then a tool_result that delivers nothing;
+    the call's end drops the capture (`RevokeFailedRead`; at the tool_result
+    in rounds 2 and 3, at `tool_execution_end` through
+    `ReadGuard.dropProvisionalReadByCall` since round 4). Before it the
+    capture stayed, with no `toolCallId`;
+  - **blocked read** (`"bread"`, #4185 rounds 3 and 4): the tool_call capture,
+    then an extension loaded after pi-lens blocks the call. pi emits no
+    tool_result, only `tool_execution_end`, before the run's next tool_call.
+    Two steps (`BlockedReadCall`, `BlockedReadEnd`), because the capture lives
+    from the block to the action that releases it (`BlockRelease`): the run
+    boundary (`Turn`, `"run"`, round 3) or the call's `tool_execution_end`
+    (`"end"`, round 4, which keeps the run-boundary drop as a backstop);
   - **positional edit** of 1 or 2 lines: `checkEdit` at tool_call,
     optional relocation, the host apply, then `recordWritten` at
     tool_result. Since #3523, an edit the guard allowed unrelocated
@@ -108,7 +131,13 @@ before it), `OwnEditRescue = FALSE`,
 `BranchFilter = TRUE`, `FormatStamp = FALSE`, `SpanSnapshot = TRUE`,
 `RelocFromLatest = TRUE`, `WholeVouchesPastEnd = FALSE`, `ForkAtBoundary = FALSE`,
 `DrainMode = "fenced"` (every config before #3521 round 2 keeps `"atomic"`,
-its old shape). `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
+its old shape), `ProvisionalCredit = FALSE` (`TRUE` only on #4185's round-1
+head, which stamped the transcript identity on the provisional record) and
+`RevokeFailedRead = TRUE` (since #4185 round 2; `FALSE` before) and
+`BlockRelease = "end"` (since #4185 round 4; `"run"` on its round-3 head,
+`"none"` before, which the two configs of older heads keep). The run-boundary
+drop `BlockRelease` adds to `Turn` changes no other config's count: with
+`RevokeFailedRead = TRUE` no capture is left at an idle step. `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
 was `ForkImport = FALSE` (the fork imported nothing), not `TRUE` as this file
 used to say. `SuppressByNewerContext` (`TRUE` before #3522) is read only when
 `SpanSnapshot = FALSE`, so every config sets `SpanSnapshot = TRUE` and its value
@@ -156,6 +185,7 @@ The model follows `checkEdit` step by step:
 `NoStaleAllow` and `NoFalseBlock` are the two directions of catalog shape 54:
 a record built from the conversation's bytes must neither pass a stale edit
 nor refuse an exact one.
+
 
 ## Results
 
@@ -217,6 +247,11 @@ head that added this model. It is not checked in CI.
 | `SpanSnapshotFixNoOwnRecord` | the same without the own-edit read record (the code before #3523, rescue on) | violated `NoStaleAllow` | 6,945 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 fixed: no own-edit rescue; the drain credits authorship only | pass | 1,338 / 245 |
 | `UnhashedOwnEditRescueOn`, `UnhashedFormatStampOn` | the same with the rescue / the drain's FileTime stamp back (the code before #3525) | violated `NoStaleAllow` | 437 / 101 |
+| `FailedReadFork` | #4185 round 2: reads, a read that errors and oldText edits across `/fork`; the errored read's capture is dropped at its result, and would carry no identity anyway. Positional edits are left out: an oldText edit records no own-edit read (#3760), so a positional re-edit of its line is the known refused re-edit, not this change's | pass | 1,194 |
+| `FailedReadForkCredited` | the same on #4185's round-1 head (`ProvisionalCredit = TRUE`, `RevokeFailedRead = FALSE`): the capture crosses `/fork` under the transcript identity and the zero-read check lets a blind oldText edit through | violated `NoBlindAllow` | 10 |
+| `FailedReadLive` | the same on master before #4185 (`RevokeFailedRead = FALSE`), no move: the capture alone satisfies the zero-read check | violated `NoBlindAllow` | 9 |
+| `BlockedRead` | #4185 round 4: reads, a read a later extension blocks, and oldText edits in one run; the capture is released at the blocked call's `tool_execution_end` (`BlockRelease = "end"`), and a delivered read keeps licensing its exact edit (`NoFalseBlock`) | pass | 307 |
+| `BlockedReadLive` | the same on #4185's round-3 head (`BlockRelease = "run"`): the capture outlives its call until the run boundary, and an oldText edit in between is a blind allow (`BlockedReadCall`, `BlockedReadEnd`, `Edit`) | violated `NoBlindAllow` | 17 |
 
 `OwnEditReloc` sets `CreationHandlerEvidence =
 FALSE`, so the creation-read race `CreationAtResult` documents cannot mask the
@@ -246,7 +281,13 @@ the `#3522` block of the same file.
 
 - One file, one agent tool at a time. Parallel batches are not modelled (pi
   runs every `tool_call` of a batch before any tool executes), nor is #3506's
-  autofix-versus-concurrent-edit race.
+  autofix-versus-concurrent-edit race. In a batch, a read's capture is held
+  while the read is in flight, so it satisfies the zero-read check of an
+  oldText edit in the same batch (unchanged by #4185). A blocked read's
+  `tool_execution_end` is emitted inside pi's prepare loop, before the next
+  call's `tool_call`, so its capture is released before any sibling sees it
+  (`tests/real-harness/read-guard-moves.test.ts`, "refuses an edit in the same
+  message as a blocked read").
 - FileTime detects every write. Real mtime/ctime/size can miss an equal-size
   rewrite inside one timestamp tick.
 - No clock. The own-edit rescue (its 120 s window and its same-millisecond

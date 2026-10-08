@@ -67,7 +67,10 @@ import {
 	storedLineHashesFor,
 } from "./observed-mutation-sources.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
-import { resolveToolCallCorrelationId } from "./tool-event.js";
+import {
+	resolveReadEvidenceCorrelationId,
+	resolveToolCallCorrelationId,
+} from "./tool-event.js";
 import {
 	boundedIndexesForCount,
 	createReadGuardEditBatchSummary,
@@ -210,6 +213,8 @@ export function isFailedGitIntegrationCommand(
 interface ToolResultEvent {
 	toolName: string;
 	toolCallId?: string | number;
+	/** Parent codemode call whose transcript result contains nested calls. */
+	parentToolCallId?: string | number;
 	/** Host tool_result status; distinct from pi-lens PipelineResult.isError. */
 	isError?: boolean;
 	input: unknown;
@@ -1305,6 +1310,30 @@ function readWideningNote(widening: ReadWidening): string {
 	return `[pi-lens: read widened to ${reason}: you asked for lines ${requested.offset}-${requested.offset + requested.limit - 1}, this shows lines ${shown.offset}-${shown.offset + shown.limit - 1}. Re-request with limit > ${EXPANSION_LIMIT_LINES} for the exact range.]`;
 }
 
+/**
+ * `tool_execution_end`: the call is over (#4185 round 4). pi emits it once
+ * for every call that reached `tool_call`, top-level and nested
+ * (`parentToolCallId`), and for an executed call only after every extension's
+ * `tool_result` handler returned. A call that ended in error showed the agent
+ * no bytes: a read the host failed, or one a later extension blocked after
+ * pi-lens recorded its capture (pi then emits no `tool_result` at all). Its
+ * capture is released here, by the call identity that keyed it, so it cannot
+ * license an edit later in the same run. A delivered read is left alone: its
+ * `tool_result` already superseded the capture, or is still writing the
+ * record that will. Returns whether a capture was released.
+ */
+export function handleToolExecutionEnd(
+	event: unknown,
+	readGuard: Pick<ReadGuard, "dropProvisionalReadByCall">,
+): boolean {
+	if ((event as { isError?: unknown } | undefined)?.isError !== true)
+		return false;
+	const toolCallId = resolveToolCallCorrelationId(event);
+	return toolCallId !== undefined
+		? readGuard.dropProvisionalReadByCall(toolCallId)
+		: false;
+}
+
 export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
@@ -1354,9 +1383,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// `rawFilePath` against that basis, rather than trusting a call-time path
 	// that a later handler may have superseded.
 	const toolCallId = resolveToolCallCorrelationId(event);
+	// The transcript identity every read-evidence record below carries: the
+	// `toolResult` that shows the agent the bytes, which for a nested call is
+	// its parent's (#3831, #4138). `toolCallId` stays the call's own identity
+	// for everything that pairs this result with its tool_call.
+	const readEvidenceToolCallId = resolveReadEvidenceCorrelationId(event);
 	// #3598: the host tool for this call has finished, whatever it did. Before
 	// any return below, so a call that exits early is still no longer in flight.
 	noteAgentCallEnd(toolCallId);
+	// #4185 R4-1: this event's own isError is what pi-lens saw fail; the
+	// `tool_execution_end` release reads pi's final value, which a later
+	// extension's `tool_result` hook can rewrite to success. Before any return.
+	if (event.isError === true && toolCallId !== undefined)
+		deps.readGuard?.dropProvisionalReadByCall(toolCallId);
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
@@ -1801,7 +1840,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					turnIndex: runtime.turnIndex,
 					writeIndex: runtime.peekWriteIndex(),
 					timestamp: Date.now(),
-					...(toolCallId !== undefined && { toolCallId }),
+					...(readEvidenceToolCallId !== undefined && {
+						toolCallId: readEvidenceToolCallId,
+					}),
 				});
 			}
 		}
@@ -1871,10 +1912,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				projectRoot: workspaceRoot,
 				turnIndex: runtime.turnIndex,
 				writeIndex: runtime.peekWriteIndex(),
-				...(toolCallId !== undefined && { toolCallId }),
+				...(readEvidenceToolCallId !== undefined && {
+					toolCallId: readEvidenceToolCallId,
+				}),
 			});
 		}
 	}
+
+	// A read whose host call errored delivered nothing: its tool_call capture
+	// is released by `handleToolExecutionEnd`, which pi emits right after this
+	// handler, keyed by the call (#4185 round 4).
 
 	// Native read results are the authoritative read boundary. The tool_call
 	// input can request past EOF, and the host can cap bytes or lines before the
@@ -1892,7 +1939,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				? attribution.resolvedPath
 				: filePath;
 		if (nodeFs.existsSync(deliveredFilePath)) {
-			const nativeReadToolCallId = resolveToolCallCorrelationId(event);
 			const input = event.input as { offset?: number; limit?: number };
 			const requestedOffset = Math.max(1, input.offset ?? 1);
 			const requestedLimit = input.limit;
@@ -1974,8 +2020,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							.reverse()
 							.find(
 								(candidate) =>
-									candidate.source ===
-									`native-read:${nativeReadToolCallId}:provisional`,
+									candidate.source === `native-read:${toolCallId}:provisional`,
 							)
 					: undefined;
 				const capturedLines = capture?.lineHashes
@@ -2038,12 +2083,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						turnIndex: runtime.turnIndex,
 						writeIndex: runtime.peekWriteIndex(),
 						timestamp: Date.now(),
-						...(toolCallId !== undefined && { toolCallId }),
+						...(readEvidenceToolCallId !== undefined && {
+							toolCallId: readEvidenceToolCallId,
+						}),
 					};
 					deps.readGuard.recordRead(deliveredRecord, {
-						...(nativeReadToolCallId && {
-							supersedes: { toolCallId: nativeReadToolCallId },
-						}),
+						// The capture is keyed by this call's own identity.
+						...(toolCallId && { supersedes: { toolCallId } }),
 						stampFileTime: !raced,
 					});
 				}
@@ -2510,7 +2556,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				writeIndex: runtime.peekWriteIndex(),
 				timestamp: Date.now(),
 				source: "own-edit",
-				...(toolCallId !== undefined && { toolCallId }),
+				...(readEvidenceToolCallId !== undefined && {
+					toolCallId: readEvidenceToolCallId,
+				}),
 			},
 			{ stampFileTime: false },
 		);

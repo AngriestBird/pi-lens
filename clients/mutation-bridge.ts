@@ -585,12 +585,28 @@ function runAdmittedMutation(
 		: { recorded: true, accepted: false, reason: "stale-lineage", queued };
 }
 
-/** The v1 `recordMutation()` boolean answer, over the same one body. */
+/**
+ * The v1 `recordMutation()` boolean answer, over the same one body. A v1
+ * caller sees only that boolean, so an out-of-scope drop is recorded here,
+ * once per producer, with the path (#4140); the v2 io-bridge records its own
+ * `io-bridge-mutate-dropped` for the same outcome and must not get a second
+ * row (#4185 round 1, F5).
+ */
 export function recordMutationThroughSeam(
 	entry: unknown,
 	deps: MutationBridgeDeps,
 ): boolean {
-	return recordMutationOutcome(entry, deps).recorded;
+	const outcome = recordMutationOutcome(entry, deps);
+	if (outcome.reason === "out-of-scope") {
+		// The entry's producer name, read the way the validator above reads it.
+		const producer = (entry as Record<string, unknown> | null)?.["consumer"];
+		recordDegradationOnce({
+			kind: "mutation-bridge-out-of-scope",
+			subject: `${typeof producer === "string" ? producer : "unknown"}:out-of-scope`,
+			reason: `${outcome.detail ?? "<unknown path>"}: the producer's path is outside the project or unresolvable; bridge bookkeeping was not admitted`,
+		});
+	}
+	return outcome.recorded;
 }
 
 /**

@@ -599,9 +599,10 @@ export class RuntimeCoordinator {
 		ToolCallAttribution
 	>(TOOL_CALL_ATTRIBUTION_CAPACITY);
 	/**
-	 * #3555: reads carry no {@link ToolCallAttribution} (it is recorded for
-	 * mutations, and its origin cwd would change how a read's path resolves),
-	 * so a widening rides its own correlation, with the same bound.
+	 * #3555: a widening rides its own correlation, with the same bound. Since
+	 * #4138 a read also carries a {@link ToolCallAttribution} (its origin cwd
+	 * is what a relative read path resolves against at tool_result); the
+	 * widening stays separate because it outlives a blocked call's attribution.
 	 */
 	private readonly _readWidenings = new BoundedLruCache<string, ReadWidening>(
 		TOOL_CALL_ATTRIBUTION_CAPACITY,
