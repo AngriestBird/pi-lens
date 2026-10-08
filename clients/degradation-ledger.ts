@@ -142,6 +142,13 @@ export type DegradationKind =
 	| "bash-view-clipped"
 	| "biome-explain-unavailable"
 	/**
+	 * #4137 round 3: `clearInlineBlockers` refused a clean result from a run
+	 * without authorship (an opaque recovery, #3226) over the very bytes an
+	 * authored verdict recorded; the inline blocker record stays. One subject per
+	 * file key, counted across the session.
+	 */
+	| "blocker-clear-refused"
+	/**
 	 * #3594: `acquireBoundedPidFileLock`'s wait (the durable-store sync
 	 * waiter) was skipped because the same top-generation holder an earlier
 	 * wait ran out on is still there. The call falls back at once, same as
@@ -911,6 +918,17 @@ export type DegradationKind =
 	| "observed-mutation-dir-cap"
 	/** An observed directory mutation exceeded the same-turn analysis fan-out. */
 	| "observed-mutation-dispatch-cap"
+	/**
+	 * #4137: a pending bash baseline was dropped before its `tool_result` took
+	 * it, so that call could not prove it authored its own writes and withheld
+	 * their blockers. Subject `overwrite`: a baseline with the same key was
+	 * replaced (a host with no distinct tool-call ids, or a reused id). Subject
+	 * `cap`: more baselines were pending than the store keeps, so the oldest
+	 * went. Subject `unsettled`: a baseline outlived its turn with no
+	 * `tool_result` (the call was blocked or aborted before it ran) and was
+	 * retired; a result that still arrives loses its authorship. Counted.
+	 */
+	| "opaque-baseline-lost"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */
 	| "opaque-mutation-ownership-boundary"
 	/** Opengrep completed with partial parsing warnings (#2943). */

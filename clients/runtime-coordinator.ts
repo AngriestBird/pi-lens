@@ -30,7 +30,10 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
 import { deriveProviderFromModelId } from "./model-provider.js";
 import { beginTurnContext, setTurnContextSession } from "./turn-context.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { WriteOrderingGuard, writeOrderToken } from "./write-ordering-guard.js";
 import type { GenerationHandle } from "./generation-guard.js";
 import {
@@ -1681,13 +1684,43 @@ export class RuntimeCoordinator {
 
 	/**
 	 * Clear a file's verdict after a clean dispatch. Returns false when a newer
-	 * dispatch of the same file already recorded or cleared it (#3507).
+	 * dispatch of the same file already recorded or cleared it (#3507), or when
+	 * `analysis` ran without authorship over the very bytes the record is about
+	 * (#4137 round 3). Such a run withholds the blocker channel (#3226), so its
+	 * clean result is no evidence against an authored verdict on the same bytes;
+	 * before this, an opaque recovery of bytes the agent authored cleared the
+	 * record whenever the already-analysed latch was gone (a concurrent
+	 * session's turn start, the session's own next turn), and turn end then
+	 * reported a false "Resolved". The refusal consumes no write order and is
+	 * counted as `blocker-clear-refused` per file key. A record with no
+	 * `recordedHash` (#2982: the file was unreadable or over the baseline cap at
+	 * record time) cannot be matched and is cleared as before.
 	 */
 	clearInlineBlockers(
 		filePath: string,
 		writeIndex?: number,
 		orderTurn = this._writeOrderTurn,
+		analysis?: { authored: boolean; sha256: string | undefined },
 	): boolean {
+		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
+		if (
+			existing &&
+			analysis &&
+			!analysis.authored &&
+			analysis.sha256 !== undefined &&
+			existing.recordedHash === analysis.sha256
+		) {
+			// Counted per file key: one ledger entry per file, a durable row at the
+			// first refusal and the ledger's power-of-two milestones, never one per
+			// occurrence.
+			incrementDegradationCount({
+				kind: "blocker-clear-refused",
+				subject: normalizeMapKey(filePath),
+				reason:
+					"an analysis without authorship read the bytes an authored verdict is about; its clean result does not retire the record (#4137)",
+			});
+			return false;
+		}
 		if (
 			!this._inlineBlockerWriteOrder.shouldWrite(
 				normalizeMapKey(filePath),
@@ -1695,7 +1728,6 @@ export class RuntimeCoordinator {
 			)
 		)
 			return false;
-		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
 		if (existing) {
 			this.noteResolvedBlockerFile(
 				existing,

@@ -408,7 +408,13 @@ export interface PipelineResult {
 	 * re-render of an unmarked record is byte-identical to the stored summary.
 	 */
 	inlineBlockerDiagnostics?: Diagnostic[];
-	/** Content baseline captured from the pipeline read used to render blockers. */
+	/**
+	 * Content baseline of the bytes the analysis read (#3574): the inline blocker
+	 * record's `recordedHash` when the result carries blockers, and what a clean
+	 * result without authorship is compared against before it may clear such a
+	 * record (#4137 round 3). Absent when the file was unreadable or over the
+	 * baseline cap.
+	 */
 	inlineBlockerFileContent?: { size: number; sha256: string };
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
@@ -2411,9 +2417,7 @@ async function analysePipeline(
 						source: "autofix",
 					}
 				: undefined,
-		inlineBlockerFileContent: hasBlockers
-			? inlineBlockerFileContent
-			: undefined,
+		inlineBlockerFileContent,
 		// #3246: the very array `blockerOutput` above was rendered from, so the
 		// turn-end policy filter and its re-render can never disagree with the
 		// text they guard — the same provenance argument `inlineBlockerSources`

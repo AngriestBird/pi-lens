@@ -10,6 +10,7 @@ import {
 	type CaptureOptions,
 	diffFileContent,
 	getOpaqueBaselineStore,
+	opaqueBaselineSlot,
 	recoverOpaqueChangesViaGit,
 } from "./opaque-mutation-scan.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -358,7 +359,19 @@ const inFlightPipelines = new PathKeyedMap<Map<string, InFlightPipeline>>(
 const lastAnalyzedStateByFile = new PathKeyedMap<{
 	turnIndex: number;
 	stateHash: string;
+	/** The analysis ran with authorship (autonomous writers allowed). */
+	authored: boolean;
 }>(normalizeEphemeralMapKey);
+
+/**
+ * The in-flight registry's inner key: one run per content hash and authority
+ * (#4137). An authored claim must not join a run without authorship, and two
+ * runs of one state must not share an entry (its release would evict the
+ * other's registration, #2464).
+ */
+function inFlightKey(stateHash: string, authored: boolean): string {
+	return authored ? stateHash : `${stateHash}#unauthored`;
+}
 
 // Called at turn_start — entries from the previous turn can never match the new
 // turnIndex so they're dead weight. Clearing here keeps the map bounded to the
@@ -381,7 +394,7 @@ export function clearLastAnalyzedStateCache(): void {
  */
 function registerInFlightPipeline(
 	filePath: string,
-	stateHash: string,
+	registryKey: string,
 	pipeline: InFlightPipeline,
 ): Map<string, InFlightPipeline> {
 	let filePipelines = inFlightPipelines.get(filePath);
@@ -389,7 +402,7 @@ function registerInFlightPipeline(
 		filePipelines = new Map<string, InFlightPipeline>();
 		inFlightPipelines.set(filePath, filePipelines);
 	}
-	filePipelines.set(stateHash, pipeline);
+	filePipelines.set(registryKey, pipeline);
 	return filePipelines;
 }
 
@@ -408,10 +421,10 @@ function registerInFlightPipeline(
  */
 function releaseInFlightPipeline(
 	filePath: string,
-	stateHash: string,
+	registryKey: string,
 	registered: Map<string, InFlightPipeline>,
 ): void {
-	registered.delete(stateHash);
+	registered.delete(registryKey);
 	if (registered.size === 0 && inFlightPipelines.get(filePath) === registered) {
 		inFlightPipelines.delete(filePath);
 	}
@@ -458,19 +471,38 @@ export type PipelineDispatchClaim =
  * `turn-state.json` ranges and an attributed change-log receipt for a state
  * already analysed this turn — the duplicate-recording inversion #2464 exists
  * to remove.
+ *
+ * ## Why authority ranks the dedupe (#4137)
+ *
+ * `authored` is the `allowAutonomousWriters` the caller dispatches with. An
+ * analysis with authorship satisfies every claim on its state. One without it
+ * (an opaque recovery) satisfies only another claim without it: it withholds
+ * the blocker channel (#3226), so an authored claim skipped there would lose
+ * the blockers of a write the agent authored. A parallel bash call's recovery
+ * window holds its siblings' writes, so that opaque claim often lands first.
+ *
+ * The rank saves a duplicate run; it does not guard the inline blocker record.
+ * `lastAnalyzedStateByFile` is cleared at every session's turn start (#3613),
+ * so an unauthored run of authored bytes can still proceed, and
+ * `clearInlineBlockers` refuses its clear of a record about those bytes
+ * (#4137 round 3).
  */
 function claimPipelineDispatch(args: {
 	filePath: string;
 	stateHash: string;
 	turnIndex: number;
+	authored: boolean;
 	participantId: string;
 	dbg: (message: string) => void;
 }): PipelineDispatchClaim {
-	const { filePath, stateHash, turnIndex, participantId, dbg } = args;
+	const { filePath, stateHash, turnIndex, authored, participantId, dbg } = args;
 	// Deduplicate concurrent calls for the same final file state (pi can fire one
 	// tool_result per edit hunk). Do not dedupe by file alone: a distinct later
 	// same-turn edit to this file must still be analyzed.
-	const inFlight = inFlightPipelines.get(filePath)?.get(stateHash);
+	const filePipelines = inFlightPipelines.get(filePath);
+	const inFlight =
+		filePipelines?.get(inFlightKey(stateHash, true)) ??
+		(authored ? undefined : filePipelines?.get(inFlightKey(stateHash, false)));
 	if (inFlight) {
 		dbg(`tool_result: skipping duplicate concurrent state for ${filePath}`);
 		if (inFlight.participantIds.length < 100) {
@@ -485,7 +517,8 @@ function claimPipelineDispatch(args: {
 	const lastAnalyzed = lastAnalyzedStateByFile.get(filePath);
 	if (
 		lastAnalyzed?.turnIndex === turnIndex &&
-		lastAnalyzed.stateHash === stateHash
+		lastAnalyzed.stateHash === stateHash &&
+		(lastAnalyzed.authored || !authored)
 	) {
 		dbg(
 			`tool_result: skipping already-analyzed file state this turn for ${filePath}`,
@@ -979,9 +1012,10 @@ async function dispatchPipelineAnalysis(args: {
 	// Synchronous, and the FIRST thing after `runPipeline` handed back its
 	// promise: `claimPipelineDispatch` at each call site is only atomic because
 	// nothing awaits between the claim and this registration.
+	const registryKey = inFlightKey(initialStateHash, allowAutonomousWriters);
 	const registeredPipelines = registerInFlightPipeline(
 		filePath,
-		initialStateHash,
+		registryKey,
 		pipelineTelemetry,
 	);
 	let result: PipelineResult;
@@ -1057,7 +1091,7 @@ async function dispatchPipelineAnalysis(args: {
 			},
 		};
 	} finally {
-		releaseInFlightPipeline(filePath, initialStateHash, registeredPipelines);
+		releaseInFlightPipeline(filePath, registryKey, registeredPipelines);
 	}
 
 	if (!isPartialApplyResult) {
@@ -1123,6 +1157,7 @@ async function dispatchPipelineAnalysis(args: {
 			lastAnalyzedStateByFile.set(filePath, {
 				turnIndex: runtime.turnIndex,
 				stateHash: finalStateHash,
+				authored: allowAutonomousWriters,
 			}),
 		);
 	}
@@ -1509,7 +1544,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const scanRoot = workspaceRoot;
 			const started = Date.now();
 			const pending = getOpaqueBaselineStore().take(
-				`${normalizeMapKey(path.resolve(scanRoot))}:${runtime.sessionGeneration}`,
+				opaqueBaselineSlot(scanRoot, runtime.sessionGeneration),
+				toolCallId,
 			);
 			let unknownReason: string | undefined;
 			if (!pending && recognized.length > 0) {
@@ -2265,6 +2301,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						filePath: observedPath,
 						stateHash: observedStateHashForPath,
 						turnIndex: runtime.turnIndex,
+						// #4137: the authority its dispatch below runs with.
+						authored: true,
 						participantId: observedReadGuardCorrelationId,
 						dbg,
 					});
@@ -2562,6 +2600,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		filePath,
 		stateHash: initialStateHash,
 		turnIndex: runtime.turnIndex,
+		// #4137: the authority the dispatch below runs with.
+		authored: bashAuthorshipConfirmed,
 		participantId: readGuardCorrelationId,
 		dbg,
 	});
@@ -3000,6 +3040,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					filePath,
 					result.writeIndex ?? writeIndex,
 					result.orderTurn ?? writeOrderTurn,
+					// #4137 round 3: a run without authorship does not retire a
+					// record about the very bytes it read. The already-analysed latch
+					// is a cost rule, not the record's guard.
+					{
+						authored: bashAuthorshipConfirmed,
+						sha256: result.inlineBlockerFileContent?.sha256,
+					},
 				),
 			) ?? false;
 	}
