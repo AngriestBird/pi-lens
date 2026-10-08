@@ -19,16 +19,26 @@ import {
 // `rule-cache.test.ts`). Exercising the real "bundled root gone" path here
 // therefore mocks `node:fs`'s `readdirSync` for the ONE real, known
 // `BUNDLED_QUERIES_ROOT` path, delegating every other call (this file's own
-// temp rule dirs) to the real implementation.
+// temp rule dirs) to the real implementation. #4212 round 3 extends the same
+// mock with `readFileSync`: the r2 verify measured the warm memo re-reading
+// and re-content-hashing the whole rule corpus on EVERY call (100 warm
+// `loadQueries` calls: 134.98 ms on the r2 head vs 18.03 ms on master), and
+// the regression guard below counts rule-content reads across warm calls.
 const actualFsRef = vi.hoisted(() => {
 	return {
 		readdirSync: undefined as unknown as typeof import("node:fs").readdirSync,
+		readFileSync: undefined as unknown as typeof import("node:fs").readFileSync,
 	};
 });
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	actualFsRef.readdirSync = actual.readdirSync;
-	return { ...actual, readdirSync: vi.fn(actual.readdirSync) };
+	actualFsRef.readFileSync = actual.readFileSync;
+	return {
+		...actual,
+		readdirSync: vi.fn(actual.readdirSync),
+		readFileSync: vi.fn(actual.readFileSync),
+	};
 });
 
 import * as fs from "node:fs";
@@ -307,6 +317,56 @@ has_fix: false
 				"rules/tree-sitter-queries/typescript/console-statement.yml",
 			),
 		).toBe(false);
+	});
+});
+
+// #4212 round 3 (the r2 verify's HIGH): the r2 head gated the warm memo on
+// `computeRuleFilesFingerprint(allRuleFilesForRoot(...))`, so EVERY warm
+// `loadQueries` call re-walked all three rule roots AND re-read/re-hashed the
+// content of every non-bundled rule file — measured 100 warm calls at 134.98
+// ms on the r2 head vs 18.03 ms on master. The warm path must re-stat only
+// the MUTABLE corpus (project + user roots; the bundled root is
+// immutable-per-process, and dispatch-side RuleCache v7 still content-keys
+// the bundled set on every dispatched file) and must never read rule content
+// on a memo hit. These counts are the deterministic proxy for the wall-clock
+// regression: they red on any change that re-introduces per-call hashing or
+// per-call bundled-root walking.
+describe("warm loadQueries performs no corpus re-hash (#4212 round 3)", () => {
+	function countRuleContentReads(): number {
+		return vi
+			.mocked(fs.readFileSync)
+			.mock.calls.filter(([filePath]) => String(filePath).endsWith(".yml"))
+			.length;
+	}
+
+	function countBundledRootWalks(): number {
+		return vi
+			.mocked(fs.readdirSync)
+			.mock.calls.filter(([dir]) => dir === BUNDLED_QUERIES_ROOT).length;
+	}
+
+	it("reads no rule content and does not re-walk the bundled root across memoized calls", async () => {
+		const project = makeTempRulesRoot();
+		writeRule(
+			project,
+			"rules/tree-sitter-queries/typescript/warm-a.yml",
+			`id: warm-a\nname: A\nquery: |\n  (identifier) @X\n`,
+		);
+		writeRule(
+			project,
+			"rules/tree-sitter-queries/python/warm-b.yml",
+			`id: warm-b\nname: B\nquery: |\n  (identifier) @X\n`,
+		);
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(project); // cold parse, not measured
+
+		const contentReadsBefore = countRuleContentReads();
+		const bundledWalksBefore = countBundledRootWalks();
+		for (let i = 0; i < 25; i++) {
+			await loader.loadQueries(project);
+		}
+		expect(countRuleContentReads() - contentReadsBefore).toBe(0);
+		expect(countBundledRootWalks() - bundledWalksBefore).toBe(0);
 	});
 });
 
