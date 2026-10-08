@@ -101,6 +101,16 @@ compared the healer with `by` would restate the code's comparison.
 
 ## Results
 
+### Grammar retirement projection (#4010)
+
+`GrammarRetirement.tla` is a small per-language projection of the scanner
+retirement state. `Retire` admits only inputs confirmed to trap repeatedly;
+`HealA` and `HealB` implement `DecayOnOwnSuccess` by removing the successful
+input before the next distinct input is considered. `GrammarRetirement.cfg`
+passes `NoRetireAfterTwoHealed`; `GrammarRetirementNoDecay.cfg` is the
+compile-time counterexample and must violate that invariant. TLC is run by the
+cloud verification lane; this fix lane has no Java runtime.
+
 TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers 1`, on `cf1b548e5`.
 
 | Config | Behaviour | Verdict | Distinct states |
