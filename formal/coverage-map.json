@@ -24,6 +24,7 @@
     "snapshot-promotion",
     "store-freshness",
     "tree-sitter-trap-budget",
+    "turn-end-delivery-holds",
     "turn-end-late-scan"
   ],
   "map": {
@@ -237,6 +238,9 @@
       "late-aux-drain",
       "session-straddle"
     ],
+    "clients/turn-end/delivery-holds.ts": [
+      "turn-end-delivery-holds"
+    ],
     "clients/freshness.ts": [
       "store-freshness"
     ],
@@ -336,6 +340,7 @@
     "clients/dead-code-client.ts": "The turn_end dead-code lane's late scan (#4117 round 2, #4120): the client's single flight `inFlight` is process-wide, so a scan parked by one session is joined by the next session's analyze (J1, `JoinedScanStale`); `HardFailureStamps` is set where a scan settles and never cleared at a session boundary. The lane itself is in clients/runtime-turn.ts, which stays at its three families: a fourth would make the row a hub (4 or more) and silence the gate for the whole file. Modelled by turn-end-late-scan; store-freshness keeps the Stamp rule.",
     "clients/hard-failure-summary.ts": "`HardFailureStamps` (stamp where a scan settles, 30 minute expiry, success lifts), shared by the knip and dead-code clients. Modelled by turn-end-late-scan (`NoRespawnWhileStamped`, `StampAtTurn`, `BackoffUnread`).",
     "unlisted": "Runtime files touched by the 151 audited PRs and deliberately not mapped (no lifecycle, timing, identity or concurrency behaviour): bounded-telemetry, cache-observability, complexity-client, dispatch/types, dispatch/utils/format-utils, install-diagnostics, lens-config, lsp/config, lsp/session-roots, lsp/wait-policy/capability-snapshot, module-report, path-utils, persistent-reverify, probe-home-state, project-diagnostics/types, project-lens-config, python-environment, read-expansion, review-graph-logger, tool-agreement, tools/module-report. Also deliberately unmapped because nearly every PR touches them for non-lifecycle reasons: clients/degradation-ledger.ts (the DegradationKind registry; touched by most runtime PRs for a record kind, never lifecycle behaviour); clients/latency-logger.ts (telemetry sink); clients/hook-budgets.ts (budget table (data); #2523 governs it); clients/dispatch/runners/** (runner outcome parsing; the fix-run restore seam is mapped at clients/fix-run-restore.ts); clients/dispatch/facts/** (pure extractors; their tree-sitter trap accounting lives in clients/tree-sitter-client.ts).",
+    "clients/turn-end/delivery-holds.ts": "The turn-end delivery holds (#3813): peek-then-commit, drain-then-restore and park-then-recheck, settled once after the cap against the kept prefix (the reach rule), fenced by isCurrentSession, with the cut-advisory park keyed by session (#4112). Modelled by turn-end-delivery-holds. The producers register their holds in clients/runtime-turn.ts (handleTurnEnd), which is deliberately not given this family: that row would reach four families and its gate would turn advisory (#3878).",
     "clients/test-runner-client.ts": "Per-checkout isolation of automatic test selection (#3649). Identity keying without interleaving; unit tests suffice, listed only so the gap is visible."
   }
 }
