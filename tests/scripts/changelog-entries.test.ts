@@ -30,7 +30,7 @@ describe("changelog entry guard", () => {
 // counted the PR diff's additions.
 describe("one changelog fragment per PR (#3795)", () => {
 	const fragment = (bullet: string) =>
-		`---\nsection: Fixed\naudience: user\n---\n\n- ${bullet}\n`;
+		`---\nsection: Fixed\naudience: user\n---\n\n- **${bullet}** — details.\n`;
 	let dirs: string[] = [];
 	afterEach(() => {
 		for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
@@ -55,7 +55,9 @@ describe("one changelog fragment per PR (#3795)", () => {
 			path.join(process.cwd(), ".tmp-changelog-frag-"),
 		);
 		dirs.push(dir);
-		gitExecFileSync(["init", "-q", "-b", "fixture-master"], { cwd: dir });
+		gitExecFileSync(["init", "-q", "-b", "sub-muzlphf5-77/fixture-master"], {
+			cwd: dir,
+		});
 		fs.mkdirSync(path.join(dir, ".changelog"), { recursive: true });
 		fs.writeFileSync(
 			path.join(dir, ".changelog", "old.md"),
@@ -99,6 +101,65 @@ describe("one changelog fragment per PR (#3795)", () => {
 		expect(result.valid).toBe(true);
 	});
 
+	it("rejects a new user fragment whose plain opening is over 100 characters", () => {
+		const dir = makeRepo();
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "pr-a.md"),
+			`---\nsection: Fixed\naudience: user\n---\n\n- ${"x".repeat(150)}\n`,
+		);
+		gitExecFileSync(["add", "."], { cwd: dir });
+		commit(dir, "head");
+		const result = checkChangelogFragments({
+			base: "HEAD~1",
+			cwd: dir,
+			git: gitFor(dir),
+		});
+		expect(result.valid).toBe(false);
+		expect(result.message).toContain(".changelog/pr-a.md");
+		expect(result.message).toContain("lead length 150");
+		expect(result.message).toContain("bold lead");
+	});
+
+	it("accepts a new user fragment with a short bold lead", () => {
+		const dir = makeRepo();
+		addFragment(dir, "pr-a.md", "x".repeat(100));
+		commit(dir, "head");
+		const result = checkChangelogFragments({
+			base: "HEAD~1",
+			cwd: dir,
+			git: gitFor(dir),
+		});
+		expect(result.valid).toBe(true);
+	});
+
+	it("excludes issue references from the bold lead length", () => {
+		const dir = makeRepo();
+		addFragment(dir, "pr-a.md", `${"x".repeat(100)} (#2608)`);
+		commit(dir, "head");
+		const result = checkChangelogFragments({
+			base: "HEAD~1",
+			cwd: dir,
+			git: gitFor(dir),
+		});
+		expect(result.valid).toBe(true);
+	});
+
+	it("does not require a lead for a new internal fragment", () => {
+		const dir = makeRepo();
+		fs.writeFileSync(
+			path.join(dir, ".changelog", "pr-a.md"),
+			`---\nsection: Fixed\naudience: internal\n---\n\n- ${"x".repeat(150)}\n`,
+		);
+		gitExecFileSync(["add", "."], { cwd: dir });
+		commit(dir, "head");
+		const result = checkChangelogFragments({
+			base: "HEAD~1",
+			cwd: dir,
+			git: gitFor(dir),
+		});
+		expect(result.valid).toBe(true);
+	});
+
 	it("accepts a PR diff that adds no fragment", () => {
 		const dir = makeRepo();
 		fs.writeFileSync(path.join(dir, "notes.md"), "docs\n");
@@ -123,12 +184,12 @@ describe("one changelog fragment per PR (#3795)", () => {
 		);
 		gitExecFileSync(["add", "."], { cwd: dir });
 		commit(dir, "rollup");
-		gitExecFileSync(["branch", "rollup"], { cwd: dir });
+		gitExecFileSync(["branch", "sub-muzlphf5-77/rollup"], { cwd: dir });
 		gitExecFileSync(["checkout", "-q", branchPoint], { cwd: dir });
 		addFragment(dir, "pr-a.md", "the branch change");
 		commit(dir, "head");
 		const result = checkChangelogFragments({
-			base: "rollup",
+			base: "sub-muzlphf5-77/rollup",
 			cwd: dir,
 			git: gitFor(dir),
 		});
@@ -291,24 +352,24 @@ describe("one changelog fragment per PR (#3795)", () => {
 			fs.mkdirSync(path.dirname(path.join(origin, name)), { recursive: true });
 			fs.writeFileSync(path.join(origin, name), text);
 		};
-		run(["init", "-q", "-b", "fixture-master"]);
+		run(["init", "-q", "-b", "sub-muzlphf5-77/fixture-master"]);
 		write(".changelog/old.md", fragment("released before the branch"));
 		run(["add", "."]);
 		commit(origin, "base");
 		const branchPoint = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "-b", "fixture-pr"]);
+		run(["checkout", "-q", "-b", "sub-muzlphf5-77/fixture-pr"]);
 		for (const [name, text] of Object.entries(branchFiles)) write(name, text);
 		run(["add", "."]);
 		commit(origin, "pr");
 		const headSha = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "fixture-master"]);
+		run(["checkout", "-q", "sub-muzlphf5-77/fixture-master"]);
 		fs.rmSync(path.join(origin, ".changelog", "old.md"));
 		write(".changelog/master-a.md", fragment("merged on master one"));
 		write(".changelog/master-b.md", fragment("merged on master two"));
 		run(["add", "-A"]);
 		commit(origin, "rollup");
 		const baseSha = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "-b", "fixture-merge"]);
+		run(["checkout", "-q", "-b", "sub-muzlphf5-77/fixture-merge"]);
 		run([
 			"-c",
 			"user.email=pi-lens-test@example.com",
@@ -319,7 +380,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"--no-ff",
 			"-m",
 			"merge",
-			"fixture-pr",
+			"sub-muzlphf5-77/fixture-pr",
 		]);
 		const clone = fs.mkdtempSync(
 			path.join(process.cwd(), ".tmp-changelog-clone-"),
@@ -331,7 +392,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"-q",
 			...depthArgs,
 			"--branch",
-			"fixture-merge",
+			"sub-muzlphf5-77/fixture-merge",
 			`file://${origin}`,
 			clone,
 		]);
