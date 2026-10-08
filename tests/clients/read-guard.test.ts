@@ -619,6 +619,49 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		// #4187 R2-4: a bridge write ends the authorship after the fact, so its
+		// row names the writer. Recurrence: without it, read-guard.log cannot
+		// tell a retirement a bridge write caused from one an edit check found.
+		it("records an authorship a bridge write ended as authorship_retired with its writer, once", () => {
+			const env = setupTestEnvironment("read-guard-authorship-bridge-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_bash" });
+				fs.writeFileSync(filePath, "export const x = 22;\n");
+				for (let call = 0; call < 2; call++)
+					guard.recordWritten(filePath, {
+						stampFileTime: false,
+						advanceAuthorship: false,
+					});
+
+				expect(
+					vi
+						.mocked(logReadGuardEvent)
+						.mock.calls.map(([entry]) => entry)
+						.filter((entry) => entry.event === "authorship_retired"),
+				).toEqual([
+					expect.objectContaining({
+						filePath: normalizeFilePath(filePath),
+						metadata: expect.objectContaining({
+							writer: "bridge",
+							toolCallId: "call_bash",
+						}),
+					}),
+				]);
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("blocks zero-read edit on a file the agent never wrote and was last touched before this session", () => {
 			const env = setupTestEnvironment("read-guard-old-file-");
 			try {

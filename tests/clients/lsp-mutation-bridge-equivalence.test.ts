@@ -222,6 +222,61 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 		expect(runtimeBridge.readGuard.checkEdit(fileBridge).action).toBe("allow");
 	});
 
+	// #4187 R2-4: the server computed the bytes and nothing checked the file
+	// before the edit, so on both branches the edit ends an authorship
+	// another writer broke instead of re-baselining it. Recurrence: the
+	// direct branch's own `recordWritten` advanced it, so a zero-read edit of
+	// the other writer's line passed there while the bridge branch refused it.
+	it("end an authorship another writer broke on both branches (#4131)", () => {
+		const fileA_Direct = writeFixture(dirDirect, "authored.ts");
+		const fileA_Bridge = writeFixture(dirBridge, "authored.ts");
+		for (const [runtime, filePath] of [
+			[runtimeDirect, fileA_Direct],
+			[runtimeBridge, fileA_Bridge],
+		] as const) {
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash",
+			});
+			const lines = [...FIXTURE_LINES];
+			lines[1] = "const b = 'EXTERNAL';";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			lines[EDIT_LINE_1BASED - 1] = "hello lsp;";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+		}
+		recordLspMutation(
+			{
+				cwd: dirDirect,
+				correlationId: "equiv-direct-4131",
+				tool: "lsp_navigation:executeCommand",
+				source: "lsp-execute-command",
+				runtime: runtimeDirect as never,
+				cacheManager: cacheManagerDirect,
+				readGuard: runtimeDirect.readGuard,
+				emitSummary: false,
+			},
+			{ results: resultsFor(fileA_Direct) },
+		);
+		recordLspMutation(
+			{
+				cwd: dirBridge,
+				correlationId: "equiv-bridge-4131",
+				tool: "lsp_navigation:executeCommand",
+				source: "lsp-execute-command",
+				emitSummary: false,
+			},
+			{ results: resultsFor(fileA_Bridge) },
+		);
+		for (const [runtime, filePath] of [
+			[runtimeDirect, fileA_Direct],
+			[runtimeBridge, fileA_Bridge],
+		] as const) {
+			const verdict = runtime.readGuard.checkEdit(filePath, [2, 2]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		}
+	});
+
 	// #2450 fix round 3 (minor): `beforeEach` above only ever exercises
 	// `importsChanged: true` on a SINGLE file. Both are worth pinning
 	// independently: `importsChanged: false` is the more common shape (most

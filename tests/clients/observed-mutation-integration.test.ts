@@ -1290,6 +1290,50 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 		}
 	});
 
+	// #4187 R2-4, the no-drop side: the observed replay is the one bridge
+	// producer whose tool_call checked the authorship before the write, so it
+	// still advances an intact one. Recurrence: ending every bridge write's
+	// authorship (the rule for writes nothing checked first) would make an
+	// unknown tool's edit of a file the agent wrote cost a re-read.
+	it("keeps the authorship an observed tool's write lands on when no other writer moved it (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-keep-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-keep",
+			});
+			const event = patchEvent(filePath, "call-4131-observed-keep");
+			await handleToolCall(
+				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"allow",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	// #4131 (#4187 R2-3, probe A2): a tool that names a DIRECTORY replays every
 	// file of that directory it changed, so each of them must end a broken
 	// authorship at the tool_call, not only the path the input named.
