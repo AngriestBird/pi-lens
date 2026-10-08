@@ -629,8 +629,8 @@ export class TreeSitterClient {
 		string,
 		{ traps: number; by: string | undefined }
 	>();
-	/** Distinct trapping input keys by language. Process-lifetime and bounded by
-	 * the existing trapped-input budget. */
+	/** Distinct input keys confirmed to trap repeatedly by language. Process-
+	 * lifetime and bounded by the existing trapped-input budget. */
 	private grammarTrapInputs = new Map<string, Set<string>>();
 	/** Grammars retired for the process after repeated scanner traps. */
 	private latchedGrammars = new Set<string>();
@@ -701,6 +701,21 @@ export class TreeSitterClient {
 				const entry = this.trappedInputs.get(key);
 				if (entry) {
 					entry.traps++;
+					if (grammarFile) {
+						let inputs = this.grammarTrapInputs.get(input.languageId);
+						if (!inputs) {
+							inputs = new Set();
+							this.grammarTrapInputs.set(input.languageId, inputs);
+						}
+						inputs.add(key);
+						if (
+							inputs.size >= GRAMMAR_TRAP_LATCH_THRESHOLD &&
+							this.latchedGrammars.add(input.languageId)
+						) {
+							this.latchedGrammarFiles.set(input.languageId, grammarFile);
+							this.recordGrammarBlocked(grammarFile, inputs.size);
+						}
+					}
 					// A second trap on one input is that input's fault, not the
 					// heap's: charge it, and spend no budget (#3605).
 					incrementDegradationCount({
@@ -716,14 +731,6 @@ export class TreeSitterClient {
 					if (!inputs) {
 						inputs = new Set();
 						this.grammarTrapInputs.set(input.languageId, inputs);
-					}
-					inputs.add(key);
-					if (
-						inputs.size >= GRAMMAR_TRAP_LATCH_THRESHOLD &&
-						this.latchedGrammars.add(input.languageId)
-					) {
-						this.latchedGrammarFiles.set(input.languageId, grammarFile);
-						this.recordGrammarBlocked(grammarFile, inputs.size);
 					}
 				}
 			}
@@ -786,6 +793,12 @@ export class TreeSitterClient {
 		const key = this.wasmInputKey(input);
 		if (this.trappedInputs.get(key)?.by === input.caller) {
 			this.trappedInputs.delete(key);
+			const grammarFile = LANGUAGE_TO_GRAMMAR[input.languageId];
+			if (grammarFile) {
+				const inputs = this.grammarTrapInputs.get(input.languageId);
+				inputs?.delete(key);
+				if (inputs?.size === 0) this.grammarTrapInputs.delete(input.languageId);
+			}
 		}
 	}
 
