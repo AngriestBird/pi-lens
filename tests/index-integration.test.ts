@@ -3234,6 +3234,53 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	);
 
 	it(
+		"hands each activation's turn_end its own session scope, which a secondary's shutdown retires",
+		async () => {
+			// Recurrence prevented (#4154; review of #4153, F2): turn_end parked a
+			// late dead-code scan on `runtime.sessionScope`, the primary's, for every
+			// activation on the process-singleton runtime, so a concurrent
+			// subagent's turn took the primary's settled scan. The late-scan cell
+			// lives on the scope this activation passes.
+			mockSuiteDeps();
+			const seen = new Map<string, { scope: any; coordinator: any }>();
+			handleTurnEndHook = (deps: any) => {
+				seen.set(deps.sessionId, {
+					scope: deps.sessionScope,
+					coordinator: deps.runtime.sessionScope,
+				});
+			};
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			const secondary = createMockPi();
+			registerExtension(secondary.pi as any);
+			const primaryCtx = makeCtx({ cwd: tmpDir, sessionId: "primary-scope" });
+			const secondaryCtx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "secondary-scope",
+			});
+
+			await primary.trigger("session_start", {}, primaryCtx);
+			await secondary.trigger("session_start", {}, secondaryCtx);
+			await primary.trigger("turn_end", {}, primaryCtx);
+			await secondary.trigger("turn_end", {}, secondaryCtx);
+
+			const own = seen.get("primary-scope");
+			const sub = seen.get("secondary-scope");
+			expect(own?.scope).toBeDefined();
+			expect(own?.scope).toBe(own?.coordinator);
+			expect(sub?.scope).toBeDefined();
+			expect(sub?.scope).not.toBe(sub?.coordinator);
+			expect(sub?.scope.isLive()).toBe(true);
+
+			await secondary.trigger("session_shutdown", {}, secondaryCtx);
+			expect(sub?.scope.isLive()).toBe(false);
+			expect(own?.scope.isLive()).toBe(true);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
 		"emits nothing at turn_end; exactly one entry at agent_settled, surviving an intervening turn_start",
 		async () => {
 			vi.doMock("../clients/pipeline.js", () => ({
