@@ -88,6 +88,7 @@ import {
 	safeSpawnAsync,
 } from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
+import { ephemeralStagingRoot } from "../ephemeral-root.js";
 import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -154,6 +155,15 @@ export async function resolveLspServerCwd(
 	onRootFailure?: (reason: string) => void,
 	onRootFallback?: (fallback: LspRootFallback) => void,
 ): Promise<string | undefined> {
+	const stagingRoot = ephemeralStagingRoot(filePath);
+	if (stagingRoot) {
+		recordDegradationOnce({
+			kind: "lsp-root-declined",
+			subject: stagingRoot,
+			reason: "LSP root declined for host pi-agent staging directory",
+		});
+		return undefined;
+	}
 	const rootMarkers = server.rootMarkers ?? server.root.rootMarkers;
 	let serverRoot: string | undefined;
 	let rootFailed = false;
@@ -2756,7 +2766,7 @@ export const PythonServer: LSPServerInfo = {
 
 export const PythonJediServer: LSPServerInfo = {
 	id: "python-jedi",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Jedi Language Server",
 	fallbackFor: "python",
 	extensions: KIND_EXTENSIONS["python"],
@@ -3789,7 +3799,7 @@ export const CMakeServer: LSPServerInfo = {
 
 export const DockerServer: LSPServerInfo = {
 	id: "docker",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "Dockerfile Language Server",
 	extensions: [".dockerfile", "Dockerfile"],
 	root: RootWithFallback(
@@ -3889,7 +3899,7 @@ export const YamlServer: LSPServerInfo = {
 
 export const JsonServer: LSPServerInfo = {
 	id: "json",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	name: "VSCode JSON Language Server",
 	extensions: KIND_EXTENSIONS["json"],
 	root: RootWithFallback(
