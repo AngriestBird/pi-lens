@@ -573,8 +573,6 @@ describe("the refresh-state seam (#3989)", () => {
 });
 
 describe("the nightly driver, end to end on files (#3989)", () => {
-	const fixtureRef = (name: string) =>
-		`${(process.env.PLEGMA_GUARD_OWN_REF ?? "refs/heads/fixture").replace(/^refs\/heads\//, "")}/${name}`;
 	const dirs: string[] = [];
 	afterEach(() => {
 		for (const d of dirs.splice(0))
@@ -584,7 +582,7 @@ describe("the nightly driver, end to end on files (#3989)", () => {
 	function workspace() {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-idle-promote-"));
 		dirs.push(dir);
-		gitExecFileSync(["init", "-q", "-b", fixtureRef("fixture-master")], {
+		gitExecFileSync(["init", "-q", "-b", "fixture-master"], {
 			cwd: dir,
 		});
 		const file = (name: string, text: string) => {

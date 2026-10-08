@@ -29,8 +29,6 @@ describe("changelog entry guard", () => {
 // change rule. The fast-fail job validated each fragment's shape but never
 // counted the PR diff's additions.
 describe("one changelog fragment per PR (#3795)", () => {
-	const fixtureRef = (name: string) =>
-		`${(process.env.PLEGMA_GUARD_OWN_REF ?? "refs/heads/fixture").replace(/^refs\/heads\//, "")}/${name}`;
 	const fragment = (bullet: string) =>
 		`---\nsection: Fixed\naudience: user\n---\n\n- **${bullet}** — details.\n`;
 	let dirs: string[] = [];
@@ -57,7 +55,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			path.join(process.cwd(), ".tmp-changelog-frag-"),
 		);
 		dirs.push(dir);
-		gitExecFileSync(["init", "-q", "-b", fixtureRef("fixture-master")], {
+		gitExecFileSync(["init", "-q", "-b", "fixture-master"], {
 			cwd: dir,
 		});
 		fs.mkdirSync(path.join(dir, ".changelog"), { recursive: true });
@@ -214,12 +212,12 @@ describe("one changelog fragment per PR (#3795)", () => {
 		);
 		gitExecFileSync(["add", "."], { cwd: dir });
 		commit(dir, "rollup");
-		gitExecFileSync(["branch", fixtureRef("rollup")], { cwd: dir });
+		gitExecFileSync(["branch", "rollup"], { cwd: dir });
 		gitExecFileSync(["checkout", "-q", branchPoint], { cwd: dir });
 		addFragment(dir, "pr-a.md", "the branch change");
 		commit(dir, "head");
 		const result = checkChangelogFragments({
-			base: fixtureRef("rollup"),
+			base: "rollup",
 			cwd: dir,
 			git: gitFor(dir),
 		});
@@ -382,24 +380,24 @@ describe("one changelog fragment per PR (#3795)", () => {
 			fs.mkdirSync(path.dirname(path.join(origin, name)), { recursive: true });
 			fs.writeFileSync(path.join(origin, name), text);
 		};
-		run(["init", "-q", "-b", fixtureRef("fixture-master")]);
+		run(["init", "-q", "-b", "fixture-master"]);
 		write(".changelog/old.md", fragment("released before the branch"));
 		run(["add", "."]);
 		commit(origin, "base");
 		const branchPoint = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "-b", fixtureRef("fixture-pr")]);
+		run(["checkout", "-q", "-b", "fixture-pr"]);
 		for (const [name, text] of Object.entries(branchFiles)) write(name, text);
 		run(["add", "."]);
 		commit(origin, "pr");
 		const headSha = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", fixtureRef("fixture-master")]);
+		run(["checkout", "-q", "fixture-master"]);
 		fs.rmSync(path.join(origin, ".changelog", "old.md"));
 		write(".changelog/master-a.md", fragment("merged on master one"));
 		write(".changelog/master-b.md", fragment("merged on master two"));
 		run(["add", "-A"]);
 		commit(origin, "rollup");
 		const baseSha = run(["rev-parse", "HEAD"]);
-		run(["checkout", "-q", "-b", fixtureRef("fixture-merge")]);
+		run(["checkout", "-q", "-b", "fixture-merge"]);
 		run([
 			"-c",
 			"user.email=pi-lens-test@example.com",
@@ -410,7 +408,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"--no-ff",
 			"-m",
 			"merge",
-			fixtureRef("fixture-pr"),
+			"fixture-pr",
 		]);
 		const clone = fs.mkdtempSync(
 			path.join(process.cwd(), ".tmp-changelog-clone-"),
@@ -422,7 +420,7 @@ describe("one changelog fragment per PR (#3795)", () => {
 			"-q",
 			...depthArgs,
 			"--branch",
-			fixtureRef("fixture-merge"),
+			"fixture-merge",
 			`file://${origin}`,
 			clone,
 		]);
