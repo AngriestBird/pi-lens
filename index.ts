@@ -3431,6 +3431,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 				depChecker,
 				testRunnerClient,
 				sessionId: getStableSessionId(ctx),
+				// #4154: this activation's own scope, so a concurrent secondary's
+				// late dead-code scan never lands in the primary's cell.
+				...(scope === undefined ? {} : { sessionScope: scope }),
 				signal: ctx.signal,
 				onTestRunnerComplete: (delivery) =>
 					stageTestRunnerDelivery({

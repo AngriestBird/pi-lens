@@ -1247,3 +1247,51 @@ describe("#3872 records: the knip row names the root and how many nested worktre
 		).toBeUndefined();
 	});
 });
+
+describe("#4154 a failed scan never replaces the good knip row on disk", () => {
+	it("keeps a good knip row another process stored while this turn's scan ran, when that scan fails inside the budget", async () => {
+		// Recurrence prevented (#4154 V1, the knip member): `applyKnipResult`
+		// judged a failure against `prevKnip`, read before the await, so a good
+		// row another pi-lens process stored during the await was replaced by
+		// the failure and the next turn diffed against nothing.
+		const file = path.join(main, "src", "a.ts");
+		edit(file);
+		const slow = slowTurn();
+		await slow.spawned;
+		knipProcess.onSpawn = undefined;
+
+		// Another pi-lens process on the same project: its own runtime, cache
+		// manager and knip client, so its scan is not this process's single flight.
+		const otherRuntime = new RuntimeCoordinator();
+		otherRuntime.projectRoot = main;
+		otherRuntime.setTelemetryIdentity({ sessionId: "other-process" });
+		const otherCache = new CacheManager(false);
+		knipProcess.gate = undefined;
+		otherRuntime.recordProjectMutation({
+			filePath: file,
+			source: "agent-edit",
+		});
+		otherCache.addModifiedRange(file, { start: 1, end: 1 }, false, main);
+		await handleTurnEnd({
+			...turnEndDeps(),
+			runtime: otherRuntime,
+			cacheManager: otherCache,
+			knipClient: new KnipClient(false),
+		});
+		expect(
+			cacheManager.readCache<{ success: boolean }>("knip", main)?.data.success,
+		).toBe(true);
+
+		knipProcess.failure = new Error("boom");
+		slow.release();
+		await slow.turn;
+
+		expect(
+			cacheManager.readCache<{ success: boolean }>("knip", main)?.data.success,
+		).toBe(true);
+		const failedRow = knipRows().find(
+			(row) => (row.metadata as { success?: boolean }).success === false,
+		);
+		expect(failedRow?.metadata).toMatchObject({ cacheKept: true });
+	});
+});

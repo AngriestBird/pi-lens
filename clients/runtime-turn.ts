@@ -76,7 +76,7 @@ import {
 	stableFindingKey,
 } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
-import { scopeCell } from "./session-scope.js";
+import { type SessionScope, scopeCell } from "./session-scope.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	writeProjectDiagnosticsDeltaReport,
@@ -491,6 +491,13 @@ interface TurnEndDeps {
 	}) => void;
 	/** Stable session identity from the event ctx that fired this turn_end. */
 	sessionId?: string;
+	/**
+	 * #4154: the session scope of the activation whose turn this is: the
+	 * coordinator's for the primary, its own for a concurrent secondary (which
+	 * shares the coordinator). A late dead-code scan belongs to it. Absent on
+	 * the MCP route and in harnesses: the coordinator's scope.
+	 */
+	sessionScope?: SessionScope;
 	/** Abort signal from the event ctx that fired this turn_end. */
 	signal?: AbortSignal;
 	/** Delivery adapter whose tool names appear in agent-facing advisories. */
@@ -519,10 +526,12 @@ function wouldPoisonCache(
  * written and delivered by the entry below instead of being thrown away: the
  * scan lands its baseline row where it settles, and the next turn_end that
  * reaches the lane delivers its delta. One entry per (client, root) on the
- * session scope's cell, so it lives and dies with the session: a new session
- * never sees it, and a scan that settles after its session ended is dropped.
- * While an entry exists no second scan starts, so the settle handler is the
- * only writer of the baseline row.
+ * cell of the session scope whose turn parked it (#4154): the primary's, a
+ * concurrent secondary's own, or a replaced session's new one. Park, take,
+ * carry and the settle's liveness check all ask that one scope, so a session
+ * never sees another's entry, and a scan that settles after its session ended
+ * is dropped. While an entry exists no second scan starts, so the settle
+ * handler is the session's only writer of the baseline row.
  */
 interface LateDeadCodeScan {
 	/** Resolved paths of the files edited in the turn the scan was started for. */
@@ -533,18 +542,59 @@ interface LateDeadCodeScan {
 	carry: Set<string>;
 	/** The scan's result once it succeeded; null while it runs. */
 	settled: DeadCodeResult | null;
+	/** When the lane asked for the scan (`joinedEarlierScan`). */
+	askedAt: number;
 }
 
 const LATE_DEAD_CODE_SCANS = "dead-code-late-scans";
 
 function lateDeadCodeScansOf(
-	runtime: RuntimeCoordinator,
+	scope: SessionScope,
 ): Map<string, LateDeadCodeScan> {
 	return scopeCell(
-		runtime.sessionScope,
+		scope,
 		LATE_DEAD_CODE_SCANS,
 		() => new Map<string, LateDeadCodeScan>(),
 	) as Map<string, LateDeadCodeScan>;
+}
+
+/**
+ * #4154 J1: did `analyze()` hand back a scan that was already running when the
+ * lane asked at `askedAt`? The client's single flight is process-wide, so the
+ * scan may be another session's, a subagent's, or a fresh fetch's, started
+ * before this turn's edits: it read the tree before them and cannot cover
+ * them. `scannedAt` is the initiator's read stamp, which a joiner inherits
+ * (#3600); a result without one never reached a scan.
+ */
+function joinedEarlierScan(result: DeadCodeResult, askedAt: number): boolean {
+	return (
+		result.scannedAt !== undefined && Date.parse(result.scannedAt) < askedAt
+	);
+}
+
+/**
+ * #4154 V1: a scan's result, with the row a FAILED result is judged against
+ * before it is written: the row on disk once the scan settled, not the one
+ * read before it started. Another writer (another pi-lens process on the same
+ * project) may have stored a good row meanwhile, and the failure must not
+ * replace it. A success needs no row, and a good `startRow` is kept either way,
+ * so only the cold path reads; it reads through `readCacheAsync`, so an inline
+ * caller's `bounded()` still covers the read.
+ */
+function withRowForFailureWrite<R extends { success: boolean }>(
+	scan: Promise<R>,
+	cacheManager: CacheManager,
+	cacheKey: string,
+	cwd: string,
+	startRow: { data: { success: boolean } } | null,
+): Promise<{ result: R; row: { data: { success: boolean } } | null }> {
+	return scan.then((result) =>
+		result.success || startRow?.data.success === true
+			? { result, row: startRow }
+			: cacheManager
+					.readCacheAsync<{ success: boolean }>(cacheKey, cwd)
+					.then((row) => ({ result, row })),
+	);
 }
 
 /** One finished scan and what it is compared with, for the dead-code delta. */
@@ -599,14 +649,15 @@ function dropLateDeadCodeScan(
 }
 
 /**
- * Keep a dead-code scan that missed the turn_end budget (#4117 F1). Where it
- * settles it writes the baseline row (a failure never replaces a good row,
- * #925) and its `dead-code.log` event, and a successful result waits in the
- * entry for the next turn_end that reaches the lane. A result for a session
- * that has ended is dropped and counted.
+ * Keep a dead-code scan that missed the turn_end budget (#4117 F1), or one
+ * that joined a scan older than this turn's edits (#4154 J1). Where it settles
+ * it writes the baseline row (a failure never replaces the good row on disk
+ * then, #925, #4154 V1) and its `dead-code.log` event, and a successful result
+ * waits in the entry for the next turn_end of the same session that reaches
+ * the lane. A result for a session that has ended is dropped and counted.
  */
 function parkLateDeadCodeScan(args: {
-	runtime: RuntimeCoordinator;
+	scope: SessionScope;
 	cacheManager: CacheManager;
 	client: DeadCodeClient;
 	cwd: string;
@@ -616,37 +667,40 @@ function parkLateDeadCodeScan(args: {
 	files: ReadonlySet<string>;
 	previousScan: DeadCodeResult | undefined;
 }): void {
-	const { runtime, cacheManager, client, cwd, cacheKey, startedAt } = args;
-	const scans = lateDeadCodeScansOf(runtime);
+	const { scope, cacheManager, client, cwd, cacheKey, startedAt } = args;
+	const scans = lateDeadCodeScansOf(scope);
 	const key = lateDeadCodeScanKey(client, cwd);
-	const generation = runtime.sessionGeneration;
 	const entry: LateDeadCodeScan = {
 		files: args.files,
 		previousScan: args.previousScan,
 		carry: new Set(),
 		settled: null,
+		askedAt: startedAt,
 	};
 	scans.set(key, entry);
-	void args.scan.then(
-		(result) => {
-			if (!runtime.isCurrentSession(generation)) {
+	void withRowForFailureWrite(
+		args.scan,
+		cacheManager,
+		cacheKey,
+		cwd,
+		entry.previousScan ? { data: entry.previousScan } : null,
+	).then(
+		({ result, row }) => {
+			if (!scope.isLive()) {
 				dropLateDeadCodeScan(scans, key, client, "session-ended");
 				return;
 			}
 			const durationMs = Date.now() - startedAt;
-			// The same comparison the inline path makes, against the row the scan
-			// was started against (read before the await there too).
-			if (
-				!wouldPoisonCache(
-					entry.previousScan ? { data: entry.previousScan } : null,
-					result,
-				)
-			) {
+			const cacheKept = wouldPoisonCache(row, result);
+			if (!cacheKept) {
 				cacheManager.writeCache(cacheKey, result, cwd, {
 					scanDurationMs: durationMs,
 				});
 			}
-			logDeadCodeScan(deadCodeScanEvent(client, cwd, result, durationMs));
+			logDeadCodeScan({
+				...deadCodeScanEvent(client, cwd, result, durationMs),
+				...(cacheKept && { cacheKept }),
+			});
 			if (!result.success) {
 				dropLateDeadCodeScan(
 					scans,
@@ -2215,10 +2269,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		scanRoot: string,
 		prevKnip: CacheEntry<KnipResult> | null,
 		knipResult: KnipResult,
+		rowNow: { data: { success: boolean } } | null,
 	): KnipTurnMeta => {
 		// Never overwrite a good scan with a failure (#925, #1467): the last
-		// good result stays until a new successful scan replaces it.
-		const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
+		// good result stays until a new successful scan replaces it. `rowNow` is
+		// the row on disk once the scan settled, not `prevKnip` (#4154 V1).
+		const knipWouldPoison = wouldPoisonCache(rowNow, knipResult);
 		if (knipWouldPoison) {
 			dbg(
 				`turn_end: keeping last good knip cache; this run failed: ${knipResult.summary}`,
@@ -2466,9 +2522,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				const knownSlow =
 					scanFloorMs !== undefined && scanFloorMs > remainingMs;
 				const scanned = await bounded(
-					knipClient.analyze(scanRoot, getKnipIgnorePatterns(), {
-						projectSeq: runtime.projectSeq,
-					}),
+					withRowForFailureWrite(
+						knipClient.analyze(scanRoot, getKnipIgnorePatterns(), {
+							projectSeq: runtime.projectSeq,
+						}),
+						cacheManager,
+						"knip",
+						scanRoot,
+						prevKnip,
+					),
 					{
 						ms: knownSlow ? KNOWN_SLOW_KNIP_GRACE_MS : remainingMs,
 						signal: deps.signal,
@@ -2501,7 +2563,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						});
 					}
 				} else {
-					metadata = applyKnipResult(scanRoot, prevKnip, scanned);
+					metadata = applyKnipResult(
+						scanRoot,
+						prevKnip,
+						scanned.result,
+						scanned.row,
+					);
 				}
 			}
 			// A root that was not awaited spent none of the budget: the next
@@ -2659,7 +2726,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// per-turn delta this block only read a cache; now it iterates and awaits,
 		// so the whole thing needs the guard, not just `client.analyze`.
 		try {
-			const lateScans = lateDeadCodeScansOf(runtime);
+			const lateScope = deps.sessionScope ?? runtime.sessionScope;
+			const lateScans = lateDeadCodeScansOf(lateScope);
 			for (const client of deadCodeClients) {
 				if (!client.detect(cwd)) {
 					reasons.push(`${client.id}:not_detected`);
@@ -2683,6 +2751,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					});
 					carried = late.carry;
 					reasons.push(`${client.id}:late_scan`);
+					// #4154 J1: a scan that was already running when the lane asked read
+					// the tree before the files it was parked for were edited. Its delta
+					// still shows what it saw; the next scan covers those files too.
+					if (joinedEarlierScan(late.settled, late.askedAt)) {
+						carried = new Set([...late.carry, ...late.files]);
+						reasons.push(`${client.id}:joined`);
+					}
 				}
 				try {
 					if (late && !late.settled) {
@@ -2723,24 +2798,37 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// single-flight slot, and a scan that misses the budget is parked
 					// (`parkLateDeadCodeScan`) so its row is written where it settles and
 					// its delta delivered by a later turn. No further client starts once
-					// the budget is spent.
+					// the budget is spent. A failure's row is re-read inside the same
+					// bound (#4154 V1).
 					const scan = client.analyze(cwd);
-					const result = await bounded(scan, {
-						signal: deps.signal,
-						hook: "turn_end",
-						label: "dead-code",
-						ms: Math.max(
-							0,
-							HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
-						),
-					});
-					if (result === undefined) {
-						dbg(`turn_end: dead-code(${client.id}) outlived the budget`);
-						deadCodeMeta.execution = "deferred";
-						deadCodeMeta.aborted = deps.signal?.aborted === true;
-						reasons.push(`${client.id}:deferred`);
+					const settled = await bounded(
+						withRowForFailureWrite(scan, cacheManager, cacheKey, cwd, prev),
+						{
+							signal: deps.signal,
+							hook: "turn_end",
+							label: "dead-code",
+							ms: Math.max(
+								0,
+								HOOK_WALL_BUDGET_MS.turn_end - (Date.now() - turnEndStart),
+							),
+						},
+					);
+					// #4154 J1: a joined scan that predates this turn's edits is not
+					// their answer even when it finishes in time: parked like a late
+					// one, its delta lands next turn and its files join the next scan.
+					const joined =
+						settled !== undefined && joinedEarlierScan(settled.result, startMs);
+					if (settled === undefined || joined) {
+						if (joined) {
+							reasons.push(`${client.id}:joined`);
+						} else {
+							dbg(`turn_end: dead-code(${client.id}) outlived the budget`);
+							deadCodeMeta.execution = "deferred";
+							deadCodeMeta.aborted = deps.signal?.aborted === true;
+							reasons.push(`${client.id}:deferred`);
+						}
 						parkLateDeadCodeScan({
-							runtime,
+							scope: lateScope,
 							cacheManager,
 							client,
 							cwd,
@@ -2750,14 +2838,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							files: scanFiles,
 							previousScan: prev?.data,
 						});
+						if (joined) continue;
 						break;
 					}
+					const { result } = settled;
 					const durationMs = Date.now() - startMs;
 					// Never overwrite a good scan with a failure (#925, #1467): a
 					// vulture timeout on one .py turn would otherwise evict the
 					// session_start scan, and the backoff above would then latch
-					// off the poisoned record.
-					if (wouldPoisonCache(prev, result)) {
+					// off the poisoned record. The good row is the one on disk now.
+					if (wouldPoisonCache(settled.row, result)) {
 						dbg(
 							`turn_end: keeping last good dead-code(${client.id}) cache; this run failed: ${result.summary}`,
 						);

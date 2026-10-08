@@ -25,9 +25,10 @@
 (*  TurnEndStart  InlineScan: no entry, so start the scan and await it     *)
 (*                (:2693-2727);                                            *)
 (*  InlineFinish  Await finished inside the budget: the inline writer      *)
-(*                compares with the row read BEFORE the await and writes   *)
-(*                (:2755-2786);                                            *)
-(*  Abandon       Park: bounded() gave up, the entry is created            *)
+(*                compares a failure with the row (Poison) and writes      *)
+(*                (:2755-2786); a joined await is not finished here (Join);*)
+(*  Abandon       Park: bounded() gave up, or the await joined a running   *)
+(*                scan (#4154); the entry is created                       *)
 (*                (:2737-2753, runtime-turn.ts:608-629);                   *)
 (*  TurnEndSkip   the back-off: the root is skipped (:2703-2718);           *)
 (*  ScanComplete  the vulture process ends: ok, fail or threw; the client  *)
@@ -61,15 +62,16 @@
 (*  NoLostRow       a successful scan a live handler saw is in the row;    *)
 (*  NoRespawnWhileStamped  a scan that died to a timeout or kill is not    *)
 (*                  respawned until the mark expires or a scan succeeds;   *)
-(*  NoLostEditStrict, NoStaleCover: two documented degradations, see the   *)
-(*                  README.                                                *)
+(*  NoStaleCover    a file is never left with only a result that predates  *)
+(*                  its edit (#4154 J1);                                   *)
+(*  NoLostEditStrict: a documented degradation (V2), see the README.       *)
 (*                                                                         *)
 (* Abstractions (README "What the model cannot see"): the file set is one  *)
 (* id per edit; Edit, SessionReplace and ForeignWrite do not occur while a *)
 (* handler awaits (the agent is stopped for the budget) or between a      *)
 (* scan's end and its handlers (Quiet); ownership, the delta text, the     *)
-(* knip lane and a concurrent secondary session (#4154, lane M4) are not   *)
-(* modelled.                                                               *)
+(* knip lane and a concurrent secondary session (fenced in the code by     *)
+(* #4154; lane M4) are not modelled.                                       *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -82,9 +84,10 @@ CONSTANTS
                    \* "unchecked" mutant: a settle after the session ended writes
     SettlePoison,  \* "guarded"   the settle handler asks wouldPoisonCache (:639)
                    \* "unguarded" mutant: it writes a failure over a good row
-    Poison,        \* "start"    both writers compare with the row read when the
-                   \*            scan STARTED (shipped, VERIFY_4120 V1)
-                   \* "current"  the remedy: compare with the row as it is now
+    Poison,        \* "current"  shipped (#4154 V1): a failure is compared with the
+                   \*            row as it is when the scan settled
+                   \* "start"    pre-#4154: both writers compare with the row read
+                   \*            when the scan STARTED (VERIFY_4120 V1)
     Late,          \* "keep"          round 2: the late result is written and parked
                    \* "dropAtPark"   round 1: bounded() gave up and nothing keeps the scan
                    \* "dropAtSettle" mutant: the handler sees the result and throws it away
@@ -103,10 +106,15 @@ CONSTANTS
     Backoff,       \* "both" shipped: a root with a recent hard failure is skipped by
                    \*          the failed row (:2703) and by the client's mark (:2707)
                    \* "row"  pre-#4117: only the failed row is read
-    StampAt        \* "settle" shipped: the client stamps where the scan settles
+    StampAt,       \* "settle" shipped: the client stamps where the scan settles
                    \*          (dead-code-client.ts:461)
                    \* "turn"  pre-#4117: only a scan that settled inside the turn
                    \*          left a mark
+    Join           \* "carry" shipped (#4154 J1): a scan that was already running
+                   \*         when the lane asked (joinedEarlierScan) is never finished
+                   \*         inline; it is parked, and when it is taken its files join
+                   \*         the next scan
+                   \* "trust" pre-#4154: the joined result is the answer for the files
 
 VARIABLES
     cur,          \* the current session
@@ -148,10 +156,10 @@ EIds == 1..MaxEnt
 Res == {"ok", "fail", "threw"}
 
 NoW == [on |-> FALSE, sid |-> 0, files |-> {}, prev |-> "none",
-        snap |-> {}, fin |-> "run"]
+        snap |-> {}, fin |-> "run", joined |-> FALSE]
 NoEnt == [on |-> FALSE, sess |-> 0, files |-> {}, prev |-> "none",
           carry |-> {}, st |-> "run", sid |-> 0, snap |-> {},
-          res |-> "ok"]
+          res |-> "ok", joined |-> FALSE]
 
 TypeOK ==
     /\ cur \in 1..MaxSess
@@ -164,6 +172,7 @@ TypeOK ==
     /\ scSnap \subseteq Edits
     /\ w.on \in BOOLEAN
     /\ w.fin \in {"run", "ok", "fail", "threw"}
+    /\ w.joined \in BOOLEAN
     /\ \A i \in EIds : en[i].on \in BOOLEAN /\ en[i].carry \subseteq Edits
     /\ \A s \in 1..MaxSess : slot[s] \in 0..MaxEnt
     /\ nextE \in 1..(MaxEnt + 1)
@@ -245,12 +254,14 @@ Edit(e) ==
                    delivered, dupDeliver, deliverFail>>
 
 \* client.analyze(cwd) (:2727): start the process, or JOIN the one running
-\* (dead-code-client.ts:458). `prev` is the row read first (:2698).
+\* (dead-code-client.ts:458). `prev` is the row read first (:2698). `joined`
+\* is what joinedEarlierScan reads: the result's scannedAt predates the call.
 StartScan(F) ==
     /\ w' = [on |-> TRUE,
              sid |-> IF scRun THEN scId ELSE scId + 1,
              files |-> F, prev |-> row.kind,
-             snap |-> IF scRun THEN scSnap ELSE made, fin |-> "run"]
+             snap |-> IF scRun THEN scSnap ELSE made, fin |-> "run",
+             joined |-> scRun]
     /\ scId' = IF scRun THEN scId ELSE scId + 1
     /\ scSnap' = IF scRun THEN scSnap ELSE made
     /\ scRun' = TRUE
@@ -280,9 +291,12 @@ TurnEndTake ==
     /\ Late # "neverTake"
     /\ VisEnt.on /\ VisEnt.st = "settled"
     /\ LET e == VisEnt
+           \* #4154 J1: a joined entry's files join the next scan.
            F == turnEdits \cup e.carry
+                \cup (IF Join = "carry" /\ e.joined THEN e.files ELSE {})
        IN /\ crossDeliver' = (crossDeliver \/ e.sess # cur)
-          /\ staleCover' = (staleCover \/ ~(e.files \subseteq e.snap))
+          \* A file the result predates is neither covered by it nor sent on.
+          /\ staleCover' = (staleCover \/ ~((e.files \ e.snap) \subseteq F))
           /\ dupDeliver' = (dupDeliver \/ e.sid \in delivered)
           /\ delivered' = delivered \cup {e.sid}
           /\ deliverFail' = (deliverFail \/ e.res # "ok")
@@ -356,7 +370,7 @@ Abandon ==
           ELSE /\ en' = [en EXCEPT ![nextE] = [on |-> TRUE, sess |-> cur,
                         files |-> w.files, prev |-> w.prev, carry |-> {},
                         st |-> w.fin, sid |-> w.sid, snap |-> w.snap,
-                        res |-> "ok"]]
+                        res |-> "ok", joined |-> w.joined]]
                /\ slot' = [slot EXCEPT ![SlotOf(cur)] = nextE]
                /\ nextE' = nextE + 1
     /\ w' = NoW
@@ -365,10 +379,12 @@ Abandon ==
                    crossDeliver, dupWrite, secondStart, staleCover, stamp, hf, respawn,
                    delivered, dupDeliver, deliverFail>>
 
-\* :2755-2786 -- Await finished inside the budget: the inline writer.
+\* :2755-2786 -- Await finished inside the budget: the inline writer. #4154
+\* J1: a joined await is not finished inline; Abandon parks it instead.
 InlineFinish ==
     /\ w.on
     /\ w.fin # "run"
+    /\ Join = "trust" \/ ~w.joined
     /\ LET kind == IF w.fin = "ok" THEN "good" ELSE "bad"
            doWrite == w.fin # "threw" /\ ~Poisons(kind, GuardOf(w.prev))
        IN /\ row' = IF doWrite
@@ -606,6 +622,7 @@ NoDoubleDelivery == ~dupDeliver
 (* A failed scan result is never delivered as a delta (#4120 L9).           *)
 NoDeliverFailed == ~deliverFail
 
-(* A delta for files is never computed from a result that predates them.     *)
+(* A file is never left with only a result that predates its edit: a joined *)
+(* result is not finished inline, and its files join the next scan (#4154).   *)
 NoStaleCover == ~staleCover
 =============================================================================
