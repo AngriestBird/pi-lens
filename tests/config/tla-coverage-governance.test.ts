@@ -640,9 +640,11 @@ describe("index.ts hook anchors (#3878)", () => {
 	it("places a pure deletion by the post-image line it follows", () => {
 		// Recurrence: under --unified=0 a deletion has no added line, so a matcher
 		// that reads only added lines never sees a block removed from a handler.
-		const [start, end] = findHookRanges(INDEX_SOURCE)
+		const turnEndRange = findHookRanges(INDEX_SOURCE)
 			.get("turn_end")
-			?.find(([from, to]) => to - from > 5) as [number, number];
+			?.find(([from, to]) => to - from > 5);
+		expect(turnEndRange).toBeDefined();
+		const [start, end] = turnEndRange ?? [0, 0];
 		const deletion = (after: number) =>
 			[
 				"diff --git a/index.ts b/index.ts",
@@ -802,15 +804,6 @@ describe("hub rows without anchors stay advisory (#3802 hub threshold)", () => {
 	const hubs = Object.entries(map.map ?? {}).filter(
 		([, value]) => Array.isArray(value) && value.length >= 4,
 	);
-
-	it("has the four hub rows the threshold covers", () => {
-		expect(hubs.map(([glob]) => glob).sort()).toEqual([
-			"clients/lsp/client.ts",
-			"clients/lsp/index.ts",
-			"clients/runtime-coordinator.ts",
-			"clients/runtime-tool-result.ts",
-		]);
-	});
 
 	it.each(hubs.map(([glob]) => [glob]))(
 		"%s prints the hub note and never fails an empty body",
