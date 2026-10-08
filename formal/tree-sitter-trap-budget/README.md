@@ -179,7 +179,10 @@ the process. The fix disposes and clears cached batches when r1 heals, forcing
 the next batch call to rebuild from the healthy rule set.
 `RaceBatchHeal` shows the same shape on the combined compile with three
 one-offs: a null is cached against a batch key that a late build has already
-healed, and every scan then pays the per-rule fallback.
+healed, and every scan then pays the per-rule fallback. The production client
+now coalesces same-key batch builds, so `RaceBatchHeal.cfg` bounds one native
+build past its batch-key check (`MaxPend = 1`); the model still permits a later
+retry after that build settles.
 
 The premise was checked through the real `TreeSitterClient` with a real
 python grammar. A scratch probe, not committed, injected the traps at the
