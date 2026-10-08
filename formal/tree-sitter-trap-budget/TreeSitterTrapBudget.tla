@@ -73,7 +73,10 @@ CONSTANTS
     GuardF1,          \* #3706 F1: no clear when the call itself raised the count
     KeyBatch,         \* #3731: the batch probe and combined compile are keyed
     CacheGuard,       \* #3731: a build that trapped is not cached
-    DistinctBatchKeys \* #3731 FL10: each rule set has its own batch key
+    DistinctBatchKeys,\* #3731 FL10: each rule set has its own batch key
+    Coalesce,         \* #3834: one same-key batch build in flight (queryBatchBuilds)
+    BatchHealDrop     \* #3834: a build that heals its own charged batch key drops
+                      \* the stale cached entry instead of leaving it
 
 \* The first file starts on content "c1", every other file on "c2".
 InitContent == [f \in Files |-> IF f = "fa" THEN "c1" ELSE "c2"]
@@ -329,16 +332,20 @@ RawEvict(r) ==
     /\ UNCHANGED <<content, entry, spent, heap, hits, poisonHit, stale, attempted,
                    lost, poison, extDone, pendRaw, cache, pendB>>
 
-(* compileQueryBatch: cache miss and the batch-key check. The production     *)
-(* coalescer admits one same-key build at a time; MaxPend remains 2 in      *)
-(* RaceBatchHeal so deleting this explicit admission guard restores the     *)
-(* pre-coalescing race.                                                      *)
+(* compileQueryBatch: cache miss and the batch-key check. `Coalesce` is the    *)
+(* production coalescer: `queryBatchBuilds` admits one same-key build at a     *)
+(* time. It is one of two defences against the two-build race (#3834), and     *)
+(* each alone holds `NoCachedTransient`: `RaceBatchHeal` turns `Coalesce` off  *)
+(* so `BatchHealDrop` is the only defence, `RaceBatchCoalesce` turns           *)
+(* `BatchHealDrop` off so `Coalesce` is, and `Mut3834BatchRace` turns both off *)
+(* and violates. With `MaxPend = 1`, `Coalesce` is vacuous, which is why every *)
+(* other config keeps both switches at the production value.                   *)
 BatchCheck(n) ==
     /\ EnableBatch
     /\ ~Aborted
     /\ cache[n].st = "none"
     /\ pendB[n] < MaxPend
-    /\ pendB[n] = 0
+    /\ Coalesce => pendB[n] = 0
     /\ IF KeyBatch /\ ChargedKey(BKey(n))
        THEN /\ cache' = [cache EXCEPT ![n] = NullCache]
             /\ UNCHANGED <<pendB, attempted>>
@@ -398,8 +405,15 @@ BatchBuild(n) ==
                   res == Combine(n, occ, Probe(OrderOf(n), oc, acc0))
               IN /\ res.ok
                  /\ SetSt(res.s)
+                 \* `BatchHealDrop` is the trapped branch's half of #3834: a
+                 \* build that heals its own charged batch key (`Combine`'s
+                 \* `Clr` dropped the entry, so its post-state traps are back
+                 \* to <= 1) must not leave the null a concurrent BatchCheck
+                 \* cached against that key. Without it the cached null
+                 \* outlives the heal and every scan pays the fallback.
                  /\ cache' = IF CacheGuard /\ res.trapped
-                             THEN IF ChargedKey(BKey(n)) /\ res.s.e[BKey(n)].traps <= 1
+                             THEN IF BatchHealDrop /\ ChargedKey(BKey(n))
+                                       /\ res.s.e[BKey(n)].traps <= 1
                                   THEN [cache EXCEPT ![n] = NoCache]
                                   ELSE cache
                              ELSE IF res.val.st = "ok"

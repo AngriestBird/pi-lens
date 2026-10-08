@@ -59,13 +59,14 @@ const defs = (client: TreeSitterClient) =>
 		loadLanguage: (languageId: string) => Promise<unknown>;
 		queryBatchCache: Map<string, unknown>;
 		queryBatchInputs: { size: number };
-		queryBatchBuilds: Map<string, Promise<unknown>>;
+		queryBatchBuilds: Map<string, unknown>;
 		getQueryCacheKey: (key: string, languageId: string) => string;
 		cacheQueryBatch: (
 			key: string,
 			value: unknown,
 			inputKeys?: string[],
 		) => void;
+		releaseQueryBatch: (batch: { query: { delete: () => void } }) => void;
 		reportWasmAbort: (
 			thrown: unknown,
 			input?: { languageId: string; source: string },
@@ -438,5 +439,159 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 		client.reportWasmAbort(trap(), fileInput);
 		const entry = [...state.trappedInputs.values()][0];
 		expect(entry.source).toBeUndefined();
+	});
+
+	it("leases every coalesced consumer at publication, before a heal can dispose (#4207 F9)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const filePath = "tree-sitter-heal-coalesced.py";
+		const content = "def f():\n    return 1\n";
+		const probeKey = state.getQueryCacheKey(
+			`raw:${rule.id}:${rule.query}`,
+			"python",
+		);
+		const probeInput = wasmQueryInput(probeKey);
+		// r1 is charged, so the build skips it and caches a batch holding only
+		// `healthy`; healing r1's entry invalidates exactly that batch.
+		state.trappedInputs.set(state.wasmInputKey(probeInput), {
+			traps: 2,
+			by: undefined,
+			source: probeInput.source,
+		});
+		const { Query } = await loadWebTreeSitter();
+		const realPatternCount = Query.prototype.patternCount;
+		let queued = false;
+		let cachedAtHeal = -1;
+		let deletedAtHeal = -1;
+		let deleteQuery: ReturnType<typeof vi.spyOn> | undefined;
+		vi.spyOn(Query.prototype, "patternCount").mockImplementation(function (
+			this: InstanceType<typeof Query>,
+		) {
+			if (!queued) {
+				queued = true;
+				// Another actor's two-hop continuation. The first hop runs before
+				// the build's publication section, so the second lands after the
+				// batch is cached and before the coalesced consumers resume: the
+				// window where #4207 F9 disposed the native Query under three
+				// scans that then silently reported zero findings.
+				queueMicrotask(() =>
+					queueMicrotask(() => {
+						const cached = [...state.queryBatchCache.values()];
+						cachedAtHeal = cached.length;
+						const batch = cached[0] as
+							| { query: { delete: () => void } }
+							| undefined;
+						if (batch) deleteQuery = vi.spyOn(batch.query, "delete");
+						client.clearWasmInput(probeInput);
+						deletedAtHeal = deleteQuery?.mock.calls.length ?? -1;
+					}),
+				);
+			}
+			return realPatternCount.call(this);
+		});
+		const results = await Promise.all(
+			[0, 1, 2].map(() =>
+				client.runQueriesOnFile(
+					[rule, healthyRule],
+					filePath,
+					"python",
+					{},
+					content,
+				),
+			),
+		);
+		// The interleaving this test needs, pinned so a scheduler change reds
+		// instead of passing vacuously: the heal lands after publication.
+		expect(cachedAtHeal).toBe(1);
+		// Publication already carries all three leases, so the heal retires the
+		// batch and defers disposal instead of deleting it under the scans.
+		expect(deletedAtHeal).toBe(0);
+		expect(results.map((matches) => matches.length)).toEqual([1, 1, 1]);
+		expect(deleteQuery).toBeDefined();
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("disposes an epoch-skipped build once its coalesced consumers release it (#4207 F10)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const probeKey = state.getQueryCacheKey(
+			`raw:${rule.id}:${rule.query}`,
+			"python",
+		);
+		const probeInput = wasmQueryInput(probeKey);
+		state.trappedInputs.set(state.wasmInputKey(probeInput), {
+			traps: 1,
+			by: undefined,
+			source: probeInput.source,
+		});
+		const realLoad = state.loadLanguage.bind(client);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let heldOnce = false;
+		vi.spyOn(state, "loadLanguage").mockImplementation(
+			async (languageId: string) => {
+				if (!heldOnce) {
+					heldOnce = true;
+					await held;
+				}
+				return realLoad(languageId);
+			},
+		);
+		const owner = state.compileQueryBatch([rule, healthyRule], "python", true);
+		const waiter = state.compileQueryBatch([rule, healthyRule], "python", true);
+		// An external heal while the build is in flight moves the epoch, so the
+		// build refuses publication and no cache entry ever owns this batch.
+		client.clearWasmInput(probeInput);
+		release();
+		const [ownerBatch, waiterBatch] = await Promise.all([owner, waiter]);
+		expect(ownerBatch).not.toBeNull();
+		expect(ownerBatch).toBe(waiterBatch);
+		expect(state.queryBatchCache.size).toBe(0);
+		const deleteQuery = vi.spyOn(ownerBatch!.query, "delete");
+		// The waiter counted its lease when it joined, so one release is not the
+		// last one: the native Query survives it (#4207 F11).
+		state.releaseQueryBatch(ownerBatch!);
+		expect(deleteQuery).not.toHaveBeenCalled();
+		state.releaseQueryBatch(waiterBatch!);
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("records the deferred disposal of a trapped build it refuses to publish (#4207 F10)", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const deferred = () =>
+			getDegradationSummary().find(
+				(group) => group.kind === "wasm-query-batch-disposal-deferred",
+			)?.count ?? 0;
+		const { Query } = await loadWebTreeSitter();
+		const realPatternCount = Query.prototype.patternCount;
+		let trappedOnce = false;
+		vi.spyOn(Query.prototype, "patternCount").mockImplementation(function (
+			this: InstanceType<typeof Query>,
+		) {
+			if (!trappedOnce) {
+				trappedOnce = true;
+				throw trap();
+			}
+			return realPatternCount.call(this);
+		});
+		const before = deferred();
+		const results = await client.runQueriesOnFile(
+			[rule, healthyRule],
+			"tree-sitter-heal-trapped.py",
+			"python",
+			{},
+			"def f():\n    return 1\n",
+		);
+		// A trapped build is degraded, so it is not published; its consumer's
+		// release must still free the native Query it was handed.
+		expect(results.map(({ queryDef }) => queryDef.id)).toEqual(["healthy"]);
+		expect(state.queryBatchCache.size).toBe(0);
+		expect(deferred() - before).toBe(1);
 	});
 });

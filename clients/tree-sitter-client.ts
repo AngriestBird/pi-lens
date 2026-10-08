@@ -225,6 +225,25 @@ interface QueryBatch {
 	disposed: boolean;
 }
 
+/**
+ * Consumer leases counted for one in-flight combined build (#4207 F9). A
+ * consumer counts here when it joins, because the batch it will scan does not
+ * exist yet; the build's publication section moves the count onto `users` in
+ * the same synchronous step that makes the batch visible.
+ */
+interface QueryBatchLease {
+	/** Consumers counted at join and not yet moved onto a batch. */
+	count: number;
+	/** The decided batch, `undefined` until the publication section runs. */
+	batch: QueryBatch | null | undefined;
+}
+
+/** One registered in-flight combined build per batch cache key. */
+interface QueryBatchBuild {
+	promise: Promise<QueryBatch | null>;
+	lease: QueryBatchLease;
+}
+
 interface GrammarDirResolutionDeps {
 	resolveAsset: (asset: string) => string | undefined;
 	resolvePackage: (specifier: string) => string;
@@ -566,7 +585,7 @@ export class TreeSitterClient {
 		TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES,
 	);
 	/** Concurrent callers share one native batch build per cache key. */
-	private queryBatchBuilds = new Map<string, Promise<QueryBatch | null>>();
+	private queryBatchBuilds = new Map<string, QueryBatchBuild>();
 	/** Advances whenever a successful query input heal can invalidate a build. */
 	private queryBatchHealEpoch = 0;
 	/** Raw and batch cache keys represented by each bounded entry (#3834). */
@@ -649,6 +668,26 @@ export class TreeSitterClient {
 	private releaseQueryBatch(batch: QueryBatch): void {
 		batch.users--;
 		if (batch.retired && batch.users === 0) this.disposeQueryBatch(batch);
+	}
+
+	/**
+	 * Move the leases counted at join onto the batch they were built for, and
+	 * mark the build decided (#4207 F9). Runs in the same synchronous section
+	 * that publishes the batch, so a batch is never visible to a heal without
+	 * its consumers' leases: the heal then defers disposal to the last release
+	 * instead of deleting the native Query under scans that are about to run it
+	 * and silently report zero findings. A later joiner reads `lease.batch` and
+	 * retains directly, because the counter is drained.
+	 */
+	private takeQueryBatchLeases(
+		lease: QueryBatchLease,
+		batch: QueryBatch | null,
+	): QueryBatch | null {
+		lease.batch = batch;
+		if (!batch) return null;
+		batch.users += lease.count;
+		lease.count = 0;
+		return batch;
 	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
 	private queryBatchLoadFailures = new Map<string, number>();
@@ -2312,17 +2351,27 @@ export class TreeSitterClient {
 		}
 		const inFlight = this.queryBatchBuilds.get(cacheKey);
 		if (inFlight) {
-			const batch = await inFlight;
-			if (retain && batch) this.retainQueryBatch(batch);
-			return batch;
+			// Lease rule (#4207 F9): a waiter counts its lease when it joins, not
+			// when the shared build resolves — a heal that lands between the
+			// publication and a late retain would otherwise dispose the native
+			// Query under every coalesced scan. A build that has already decided
+			// drained its counter, so the lease goes onto the batch directly.
+			if (retain) {
+				const decided = inFlight.lease.batch;
+				if (decided === undefined) inFlight.lease.count++;
+				else if (decided) this.retainQueryBatch(decided);
+			}
+			return inFlight.promise;
 		}
 
-		const build = this.compileQueryBatchOnce(queryDefs, languageId);
+		const lease: QueryBatchLease = { count: retain ? 1 : 0, batch: undefined };
+		const promise = this.compileQueryBatchOnce(queryDefs, languageId, lease);
+		const build: QueryBatchBuild = { promise, lease };
 		this.queryBatchBuilds.set(cacheKey, build);
 		try {
-			const batch = await build;
-			if (retain && batch) this.retainQueryBatch(batch);
-			return batch;
+			// The owner's lease is already counted in `lease`; the publication
+			// section moves it onto the batch, so no retain happens here.
+			return await promise;
 		} finally {
 			if (this.queryBatchBuilds.get(cacheKey) === build) {
 				this.queryBatchBuilds.delete(cacheKey);
@@ -2333,6 +2382,7 @@ export class TreeSitterClient {
 	private async compileQueryBatchOnce(
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
+		lease: QueryBatchLease,
 	): Promise<QueryBatch | null> {
 		// Key on rule CONTENT, not just ids: the batch stores each queryDef (its
 		// message reaches diagnostics) and the compiled patterns. Rule ids are
@@ -2358,7 +2408,11 @@ export class TreeSitterClient {
 		if (cached !== undefined) {
 			this.queryBatchCache.delete(cacheKey);
 			this.queryBatchCache.set(cacheKey, cached);
-			return cached;
+			// Defensive: the caller checked this key in the same synchronous
+			// section, so nothing can have published in between. Settled anyway,
+			// because a counted lease that no batch receives would be released
+			// against another consumer's count (#4207 F9).
+			return this.takeQueryBatchLeases(lease, cached);
 		}
 		const healEpoch = this.queryBatchHealEpoch;
 
@@ -2379,7 +2433,7 @@ export class TreeSitterClient {
 			} else {
 				this.queryBatchLoadFailures.set(cacheKey, failures);
 			}
-			return null;
+			return this.takeQueryBatchLeases(lease, null);
 		}
 		this.queryBatchLoadFailures.delete(cacheKey);
 
@@ -2467,8 +2521,20 @@ export class TreeSitterClient {
 		};
 
 		const batch = await build();
-		if (!trapped && this.queryBatchHealEpoch === healEpoch) {
+		const published = !trapped && this.queryBatchHealEpoch === healEpoch;
+		// Lease rule (#4207 F9): the consumers counted at join take their leases
+		// before the batch becomes visible, in the same synchronous section that
+		// publishes it.
+		this.takeQueryBatchLeases(lease, batch);
+		if (published) {
 			this.cacheQueryBatch(cacheKey, batch, inputKeys);
+		} else {
+			// Disposal rule (#4207 F10): a batch this build does not publish is
+			// unreachable through the cache, so retire it here and let the last
+			// consumer's release free the native Query. Without this, every
+			// epoch-skipped or trapped build leaks one Query for the process
+			// lifetime, and nothing the process reclaims bounds the count.
+			this.retireQueryBatch(batch);
 		}
 		return batch;
 	}
