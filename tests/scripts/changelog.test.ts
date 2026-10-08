@@ -131,7 +131,7 @@ describe("changelog lib — summarizeSection", () => {
 	const PLAIN = [
 		"### Changed",
 		"",
-		"- perf: cascade diagnostics now run concurrently after each edit instead of blocking the write pipeline (~26% median per-edit latency reduction); settled at turn_end with a bounded wait (#450)",
+		"- perf: cascade diagnostics now run concurrently after each edit instead of blocking the write pipeline (~26% median per-edit latency reduction); settled at turn_end with a bounded wait. (#450)",
 		"- perf: short one (#453)",
 		"  - nested continuation stays dropped",
 		"",
@@ -142,7 +142,7 @@ describe("changelog lib — summarizeSection", () => {
 		expect(s).toContain("### Changed");
 		// The complete first sentence survives; clause tails are not cut away.
 		expect(s).toContain(
-			"- perf: cascade diagnostics now run concurrently after each edit instead of blocking the write pipeline (~26% median per-edit latency reduction); settled at turn_end with a bounded wait (#450)",
+			"- perf: cascade diagnostics now run concurrently after each edit instead of blocking the write pipeline (~26% median per-edit latency reduction); settled at turn_end with a bounded wait. (#450)",
 		);
 		expect(s).toContain("- perf: short one (#453)");
 		expect(s).not.toContain("nested continuation");
@@ -181,6 +181,22 @@ describe("changelog lib — summarizeSection", () => {
 		expect(summarizeSection(body, { gist: true })).toContain(
 			"- **Wrapped fix (#77)** — The first sentence continues onto the next line and remains a complete gist (refs #88)",
 		);
+	});
+
+	it("stops joining at adjacent top-level bullets and headings", () => {
+		const body = [
+			"### Fixed",
+			"",
+			"- First entry remains separate.",
+			"- Second entry remains separate.",
+			"### Added",
+			"- A following heading remains reachable.",
+		].join("\n");
+		const summary = summarizeSection(body);
+		expect(summary).toContain("- First entry remains separate.");
+		expect(summary).toContain("- Second entry remains separate.");
+		expect(summary).toContain("### Added");
+		expect(summary).toContain("- A following heading remains reachable.");
 	});
 
 	it("summarizes the released 4.4.0 section without physical-line fragments", () => {
@@ -223,11 +239,11 @@ describe("changelog lib — summarizeSection", () => {
 		const body = [
 			"### Fixed",
 			"",
-			"- A session (the registry — including its lock) now re-registers on its next heartbeat, using its original root.",
+			"- The session registry keeps its identity stable while restarting — including its lock — and now re-registers on its next heartbeat, using its original root.",
 			"",
 		].join("\n");
 		expect(summarizeSection(body)).toContain(
-			"- A session (the registry — including its lock) now re-registers on its next heartbeat, using its original root.",
+			"- The session registry keeps its identity stable while restarting — including its lock — and now re-registers on its next heartbeat, using its original root.",
 		);
 	});
 
@@ -235,12 +251,29 @@ describe("changelog lib — summarizeSection", () => {
 		const body = [
 			"### Fixed",
 			"",
-			"- The `lookup.v1.2.3` path handles e.g. package roots and i.e. workspaces before returning a result. Later details are omitted.",
+			"- The parser keeps the code token `a. b` intact before returning a result. Later details are omitted.",
+			"- The parser keeps parenthetical notes (the old path. still works) before returning a result. Later details are omitted.",
+			"- The release bumps to 1.2. before continuing with the migration. Later details are omitted.",
 			"",
 		].join("\n");
-		expect(summarizeSection(body)).toContain(
-			"- The `lookup.v1.2.3` path handles e.g. package roots and i.e. workspaces before returning a result.",
+		const summary = summarizeSection(body);
+		expect(summary).toContain(
+			"- The parser keeps the code token `a. b` intact before returning a result.",
 		);
+		expect(summary).toContain(
+			"- The parser keeps parenthetical notes (the old path. still works) before returning a result.",
+		);
+		expect(summary).toContain(
+			"- The release bumps to 1.2. before continuing with the migration.",
+		);
+	});
+
+	it("keeps the bold gist default below its documented cap", () => {
+		const gist = "word ".repeat(35).trim();
+		const body = `### Fixed\n\n- **Long title** — ${gist}. More detail.`;
+		const summary = summarizeSection(body, { gist: true });
+		expect(summary).toContain(`- **Long title** — ${gist}`);
+		expect(summary).not.toContain("…");
 	});
 });
 

@@ -244,7 +244,9 @@ export function hasSection(text, version) {
  *      on the same physical line as the opening. `summarizeSection` reads only
  *      the entry's first line and emits only the text inside `**…**`, so a
  *      wrapped title renders truncated AND drops any `(refs #NNN)` that trails
- *      onto the continuation line.
+ *      onto the continuation line. The summarizer now joins continuation lines;
+ *      this lint remains because wrapped titles are still poor release-note
+ *      input.
  *
  * Line numbers are 1-based within the passed body.
  *
