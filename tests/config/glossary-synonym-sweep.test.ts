@@ -655,7 +655,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
 		// share one helper in turn-end/delivery-holds.ts instead of two copies.
-		"clients/runtime-turn.ts": 33,
+		"clients/runtime-turn.ts": 32,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -697,6 +697,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,
+		// 0 -> 2 (#4117): jscpd's own config key, read (`config.ignore`) and typed
+		// (`{ ignore?: unknown }`) to merge the project's list with the worktree
+		// exclusion; the name is jscpd's, not one this tree coined.
+		"clients/jscpd-client.ts": 2,
 		"clients/lens-config.ts": 9,
 		"clients/project-lens-config.ts": 6,
 	},
