@@ -16,6 +16,9 @@ import { McpHarness, testTimeoutScale } from "../mcp/harness.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { createPiMock } from "../support/pi-mock.js";
 
+// #4151: parity must not race two independent cold ast-grep starts against
+// the product's 1800 ms strategy budget; this test is about rendered results.
+
 type ToolResult = {
 	content?: { type: string; text?: string }[];
 	isError?: boolean;
@@ -85,11 +88,18 @@ describe("result contract across registered tool surfaces", () => {
 		bigLines.push("\treturn acc;", "}");
 		fs.writeFileSync(path.join(cwd, "big.ts"), `${bigLines.join("\n")}\n`);
 		process.chdir(cwd);
+		const parityWaitMs = String(10_000 * testTimeoutScale);
+		const env = {
+			PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS: parityWaitMs,
+			PI_LENS_AUX_GRACE_MS: parityWaitMs,
+		};
+		vi.stubEnv("PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS", parityWaitMs);
+		vi.stubEnv("PI_LENS_AUX_GRACE_MS", parityWaitMs);
 		pi = createPiMock();
 		vi.resetModules();
 		const { default: extension } = await import("../../index.js");
 		extension(pi.asExtensionAPI());
-		mcp = new McpHarness({ cwd });
+		mcp = new McpHarness({ cwd, env });
 		await mcp.request(1, "initialize", {
 			protocolVersion: "2025-06-18",
 			capabilities: {},
@@ -104,6 +114,7 @@ describe("result contract across registered tool surfaces", () => {
 		// Windows its cwd handle on this directory outlives the call and a bare
 		// `rmSync` threw EBUSY (#4019). The shared helper retries while it drains.
 		removeTempDirSync(cwd);
+		vi.unstubAllEnvs();
 	});
 
 	// Whole-roster sweep: drives every paired registry tool through a real pi
