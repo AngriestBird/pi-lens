@@ -390,14 +390,30 @@ describe("a scoped root removal's decision (#3587)", () => {
 		);
 	}
 
-	it("says it updated this process's entry when a served root was removed", async () => {
+	it("says the last holder freed a served root", async () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 
 		await registry.deregisterInstanceRoot(ROOT_SECONDARY);
 
 		expect(landedReasons()).toEqual([
-			expect.stringContaining("updated this process's entry"),
+			expect.stringContaining("last holder left; root freed"),
+		]);
+	});
+
+	it("records decrement and final free as distinct root decisions (#3849 F6)", async () => {
+		await registry.registerInstance(ROOT_A);
+		await registry.registerInstanceRoot(ROOT_SECONDARY);
+		await registry.registerInstanceRoot(ROOT_SECONDARY);
+
+		await registry.deregisterInstanceRoot(ROOT_SECONDARY);
+		expect(landedReasons()).toEqual([
+			expect.stringContaining("holder count decremented; root kept"),
+		]);
+
+		await registry.deregisterInstanceRoot(ROOT_SECONDARY);
+		expect(landedReasons()).toEqual([
+			expect.stringContaining("last holder left; root freed"),
 		]);
 	});
 

@@ -248,6 +248,64 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 		expect(roots[0]).toContain(path.basename(hostRoot));
 	}, 30_000);
 
+	it("a reload-gap session cannot free two live secondary holders (#3849 F2)", async () => {
+		const first = createPiMock();
+		extension(first.asExtensionAPI());
+		const hostCtx = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
+		await first.emit("session_start", makeSessionStartEvent(), hostCtx);
+		await first.emit("session_shutdown", { reason: "reload" }, hostCtx);
+		invalidate(hostCtx);
+
+		const gap = createPiMock();
+		extension(gap.asExtensionAPI());
+		const gapCtx = makeCtx({ cwd: tempWorktree, sessionId: "gap-session" });
+		await gap.emit("session_start", makeSessionStartEvent(), gapCtx);
+
+		const reloaded = createPiMock();
+		extension(reloaded.asExtensionAPI());
+		await reloaded.emit(
+			"session_start",
+			makeSessionStartEvent({ reason: "reload" }),
+			makeCtx({ cwd: hostRoot, sessionId: "host-session" }),
+		);
+
+		const holder1 = createPiMock();
+		extension(holder1.asExtensionAPI());
+		await holder1.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tempWorktree, sessionId: "holder-1" }),
+		);
+		const holder2 = createPiMock();
+		extension(holder2.asExtensionAPI());
+		await holder2.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tempWorktree, sessionId: "holder-2" }),
+		);
+		await settleRegistryWrites();
+
+		await gap.emit("session_shutdown", {}, gapCtx);
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(path.resolve(tempWorktree));
+
+		await holder1.emit(
+			"session_shutdown",
+			{},
+			makeCtx({ cwd: tempWorktree, sessionId: "holder-1" }),
+		);
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(path.resolve(tempWorktree));
+
+		await holder2.emit(
+			"session_shutdown",
+			{},
+			makeCtx({ cwd: tempWorktree, sessionId: "holder-2" }),
+		);
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).not.toContain(path.resolve(tempWorktree));
+	}, 30_000);
+
 	it("a declined SAME-root start adds nothing to the set (#2130)", async () => {
 		// The root add runs for any readable cwd; `mergeInstanceRoots`'s dedupe
 		// is what makes a same-root bind a no-op, not a second gate at the call

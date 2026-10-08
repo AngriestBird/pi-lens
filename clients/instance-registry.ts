@@ -559,14 +559,15 @@ async function registerInstanceNow(
  * mutation, so it cannot interleave its read-modify-write with a concurrent
  * `registerInstance` and silently revert it (#1724).
  */
-export function registerInstanceRoot(projectRoot: string): Promise<void> {
+export function registerInstanceRoot(projectRoot: string): Promise<boolean> {
 	return queueRegistryMutation(() => registerInstanceRootNow(projectRoot));
 }
 
-async function registerInstanceRootNow(projectRoot: string): Promise<void> {
-	if (!isInstanceRegistryEnabled()) return;
+async function registerInstanceRootNow(projectRoot: string): Promise<boolean> {
+	if (!isInstanceRegistryEnabled()) return false;
 	const normalizedRoot = normalizeFilePath(projectRoot);
 	const selfStart = await ownProcessStart(startReadOptions());
+	let registered = false;
 	await withInstanceRegistryLock(registryPath(), async () => {
 		const file = await readRegistryAsync();
 		const idx = file.instances.findIndex((entry) =>
@@ -583,6 +584,9 @@ async function registerInstanceRootNow(projectRoot: string): Promise<void> {
 				(previousCounts[normalizedRoot] ??
 					(priorRoots.includes(normalizedRoot) ? 1 : 0)) + 1;
 		}
+		for (const root of Object.keys(holderCounts)) {
+			if (!roots.includes(root)) delete holderCounts[root];
+		}
 		if (
 			roots.length === priorRoots.length &&
 			roots.every((root, index) => root === priorRoots[index]) &&
@@ -598,7 +602,9 @@ async function registerInstanceRootNow(projectRoot: string): Promise<void> {
 				: {}),
 		};
 		await writeRegistryAsync(file);
+		registered = roots[0] !== normalizedRoot && roots.includes(normalizedRoot);
 	});
+	return registered;
 }
 
 export interface HeartbeatPatch {
@@ -1061,12 +1067,17 @@ export function deregisterInstanceRoot(projectRoot: string): Promise<void> {
  * `isOwnEntry`, and the whole-entry removal through `withoutOwnEntry`, exactly
  * as `deregisterInstance` does (#3498).
  */
+type RootRemovalPlan = {
+	file: RegistryFile;
+	outcome: "decremented" | "freed";
+};
+
 function planRootRemoval(
 	file: RegistryFile,
 	normalizedRoot: string,
 	selfStart: string | undefined,
 	generation: GenerationHandle,
-): RegistryFile | undefined {
+): RootRemovalPlan | undefined {
 	const idx = file.instances.findIndex((entry) => isOwnEntry(entry, selfStart));
 	if (idx === -1) {
 		// Entry already gone (e.g. a dropped registration): still stop a
@@ -1087,17 +1098,20 @@ function planRootRemoval(
 		(priorRoots.includes(normalizedRoot) ? 1 : 0);
 	if (holderCount > 1) {
 		return {
-			instances: file.instances.map((entry, i) =>
-				i === idx
-					? {
-							...entry,
-							projectRootHolderCounts: {
-								...previousCounts,
-								[normalizedRoot]: holderCount - 1,
-							},
-						}
-					: entry,
-			),
+			file: {
+				instances: file.instances.map((entry, i) =>
+					i === idx
+						? {
+								...entry,
+								projectRootHolderCounts: {
+									...previousCounts,
+									[normalizedRoot]: holderCount - 1,
+								},
+							}
+						: entry,
+				),
+			},
+			outcome: "decremented",
 		};
 	}
 	const remainingRoots = priorRoots.filter((root) => root !== normalizedRoot);
@@ -1105,32 +1119,42 @@ function planRootRemoval(
 	if (remainingRoots.length === 0) {
 		// The host serves no root: a heartbeat must not bring it back.
 		rememberRegistrationRoot(undefined);
-		return withoutOwnEntry(file, selfStart);
+		const next = withoutOwnEntry(file, selfStart);
+		if (!next) return undefined;
+		return {
+			file: next,
+			outcome: "freed",
+		};
 	}
 	// Keep a heartbeat re-registration on a root the host still serves,
 	// unless the host session ended since this removal was queued (#3498):
 	// its roots are no longer served, and the intent must stay clear.
 	if (generation.isCurrent()) rememberRegistrationRoot(remainingRoots[0]);
+	const remainingCounts = Object.entries(previousCounts).reduce<
+		Record<string, number>
+	>((result, [root, count]) => {
+		if (root !== normalizedRoot && remainingRoots.includes(root)) {
+			result[root] = count;
+		}
+		return result;
+	}, {});
 	return {
-		instances: file.instances.map((entry, i) =>
-			i === idx
-				? {
-						...current,
-						projectRoot: remainingRoots[0],
-						projectRoots: remainingRoots,
-						...(Object.keys(previousCounts).length > 0
-							? {
-									projectRootHolderCounts: Object.entries(
-										previousCounts,
-									).reduce<Record<string, number>>((result, [root, count]) => {
-										if (root !== normalizedRoot) result[root] = count;
-										return result;
-									}, {}),
-								}
-							: {}),
-					}
-				: entry,
-		),
+		file: {
+			instances: file.instances.map((entry, i) =>
+				i === idx
+					? {
+							...current,
+							projectRoot: remainingRoots[0],
+							projectRoots: remainingRoots,
+							projectRootHolderCounts:
+								Object.keys(remainingCounts).length > 0
+									? remainingCounts
+									: undefined,
+						}
+					: entry,
+			),
+		},
+		outcome: "freed",
 	};
 }
 
@@ -1150,13 +1174,16 @@ async function deregisterInstanceRootNow(
 				selfStart,
 				generation,
 			);
-			if (next) await writeRegistryAsync(next);
+			if (next) await writeRegistryAsync(next.file);
 			incrementDegradationCount({
 				kind: "instance-registry-deregister-landed",
 				subject: String(process.pid),
-				reason: next
-					? "the queued removal took the lock and updated this process's entry"
-					: "the queued removal took the lock; there was nothing left to remove",
+				reason:
+					next?.outcome === "decremented"
+						? "holder count decremented; root kept"
+						: next?.outcome === "freed"
+							? "last holder left; root freed"
+							: "the queued removal took the lock; there was nothing left to remove",
 			});
 		},
 		LOCK_WAIT_THROUGH_LEASE_MS,

@@ -786,6 +786,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// misclassify its context/message_end/shutdown as primary. Closure ownership
 	// avoids a shared mutable "last session" race between sibling activations.
 	let ownedSessionRole: "primary" | "concurrent-secondary" | undefined;
+	// A declined session may only remove a root whose own add landed. Keeping
+	// this promise per activation prevents a reload-gap subagent, whose add has
+	// no entry to update, from decrementing another session's holder count.
+	let ownedSecondaryRootRegistration: Promise<string | undefined> | undefined;
 	// #3611: the session scope THIS activation serves, set once at its
 	// session_start and retired at its session_shutdown. Activation equals
 	// session (pi re-runs this factory on every transition except /tree).
@@ -2385,7 +2389,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionStartDecision.sameRoot === false &&
 							typeof sessionStartCwd === "string"
 						) {
-							void registerInstanceRoot(sessionStartCwd).catch(() => {
+							ownedSecondaryRootRegistration = registerInstanceRoot(
+								sessionStartCwd,
+							).then((registered) =>
+								registered ? normalizeFilePath(sessionStartCwd) : undefined,
+							);
+							void ownedSecondaryRootRegistration.catch(() => {
 								// best-effort observability — never fail session_start
 							});
 						}
@@ -3843,17 +3852,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// root behind. Fire and forget is still correct — the tail owns the
 			// ordering, and teardown must not block on a registry write.
 			try {
-				const secondaryRoot = shutdownCwd;
-				const primaryRoot = getActivePrimaryRoot();
-				if (
-					typeof secondaryRoot === "string" &&
-					secondaryRoot.length > 0 &&
-					primaryRoot !== undefined &&
-					normalizeFilePath(secondaryRoot) !== primaryRoot
-				) {
-					void deregisterInstanceRoot(secondaryRoot).catch(() => {
-						// best-effort bookkeeping — never fail teardown
-					});
+				const registration = ownedSecondaryRootRegistration;
+				if (registration) {
+					void registration
+						.then((secondaryRoot) => {
+							if (secondaryRoot === undefined) return;
+							const primaryRoot = getActivePrimaryRoot();
+							if (primaryRoot !== undefined && secondaryRoot !== primaryRoot) {
+								return deregisterInstanceRoot(secondaryRoot);
+							}
+						})
+						.catch(() => {
+							// best-effort bookkeeping — never fail teardown
+						});
 				}
 			} catch {
 				// Best-effort observability bookkeeping — a stale ctx or an

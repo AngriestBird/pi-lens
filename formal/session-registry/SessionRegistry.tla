@@ -116,14 +116,17 @@ VARIABLES
     stuck,      \* the other process holds the lock and never releases
     td,         \* teardown pc: "run" | "join" | "done"
     rpPc,       \* the reaper's own prune: "idle" | "acq" | "held" | "done"
-    xs          \* per session: second holder of Sec[s]: none | queued | held
+    xs,         \* per session: second holder of Sec[s]: none | queued | held
+    secCount,   \* durable holder count for Sec[s]
+    secDone2    \* second holder's shutdown was queued
 
 \* The variables the original model had no part in: every pre-existing
 \* action leaves them alone.
-aux == <<secReg, rmLanded, stuck, td, rpPc, xs>>
+aux == <<secReg, rmLanded, stuck, td, rpPc, xs, secCount, secDone2>>
 
 vars == <<sess, live, entry, intent, tail, tpc, lock, hbPc, hbMissing,
-          spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc, xs>>
+          spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc, xs,
+          secCount, secDone2>>
 
 GenGuard == "generation" \in FixParts
 ChildGate == "child" \in FixParts
@@ -142,7 +145,7 @@ RegOp(r, g) == Op("reg", r, g)
 DeregOp     == Op("dereg", None, 0)
 \* deregisterInstanceRoot: `root` is the primary it re-arms the intent to,
 \* `sec` the secondary's own root it removes, `s` the session it belongs to.
-RootOp(s, g) == [kind |-> "root", root |-> Root[s], gen |-> g, sec |-> Sec[s], s |-> s]
+RootOp(s, g, h) == [kind |-> "root", root |-> Root[s], gen |-> g, sec |-> Sec[s], s |-> s, holder |-> h]
 
 TypeOK ==
     /\ sess \in 0..2
@@ -162,6 +165,8 @@ TypeOK ==
     /\ td \in {"run", "join", "done"}
     /\ rpPc \in {"idle", "acq", "held", "done"}
     /\ xs \in [1..2 -> {"none", "queued", "held"}]
+    /\ secCount \in [1..2 -> 0..2]
+    /\ secDone2 \in [1..2 -> BOOLEAN]
 
 Init ==
     /\ sess = 0
@@ -182,6 +187,8 @@ Init ==
     /\ td = "run"
     /\ rpPc = "idle"
     /\ xs = [s \in 1..2 |-> "none"]
+    /\ secCount = [s \in 1..2 |-> 0]
+    /\ secDone2 = [s \in 1..2 |-> FALSE]
 
 (* ---------------- host ---------------- *)
 
@@ -223,7 +230,8 @@ SecondaryStart(s) ==
     /\ secReg' = [secReg EXCEPT ![s] = TRUE]
     /\ tail' = Append(tail, Op("radd", Sec[s], gen))
     /\ UNCHANGED <<sess, live, entry, intent, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, rmLanded, stuck, td, rpPc, xs>>
+                   spawned, secDone, gen, rmLanded, stuck, td, rpPc, xs,
+                   secCount, secDone2>>
 
 \* A SECOND declined secondary of session s on the same root Sec[s] (#3849):
 \* it queues its own registerInstanceRoot and lives until the session ends.
@@ -234,7 +242,19 @@ SecondaryStart2(s) ==
     /\ xs' = [xs EXCEPT ![s] = "queued"]
     /\ tail' = Append(tail, Op("radx", Sec[s], gen))
     /\ UNCHANGED <<sess, live, entry, intent, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc,
+                   secCount, secDone2>>
+
+\* A 32-root cap can evict a non-primary root. The real writer removes its
+\* durable holder record in the same locked write; later shutdowns are no-ops
+\* until a fresh registration creates a new count.
+CapEviction(s) ==
+    /\ SharedSec /\ live /\ sess = s /\ Sec[s] \in entry
+    /\ entry' = entry \ {Sec[s]}
+    /\ secCount' = [secCount EXCEPT ![s] = 0]
+    /\ UNCHANGED <<sess, live, intent, tail, tpc, lock, hbPc, hbMissing,
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc,
+                   xs, secDone2>>
 
 \* A declined secondary's `deregisterInstanceRoot(tempRoot)`. Its own start
 \* was queued first (the shutdown follows the start), so the removal lands
@@ -243,8 +263,16 @@ SecondaryShutdown(s) ==
     /\ live /\ sess = s /\ ~secDone[s]
     /\ ~SecOn \/ secReg[s]
     /\ secDone' = [secDone EXCEPT ![s] = TRUE]
-    /\ tail' = Append(tail, RootOp(s, gen))
+    /\ tail' = Append(tail, RootOp(s, gen, 1))
     /\ UNCHANGED <<sess, live, entry, intent, tpc, lock, hbPc, hbMissing, spawned, gen, aux>>
+
+SecondaryShutdown2(s) ==
+    /\ SharedSec /\ live /\ sess = s /\ ~secDone2[s] /\ xs[s] = "held"
+    /\ secDone2' = [secDone2 EXCEPT ![s] = TRUE]
+    /\ tail' = Append(tail, RootOp(s, gen, 2))
+    /\ UNCHANGED <<sess, live, entry, intent, tpc, lock, hbPc, hbMissing,
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, rpPc, xs,
+                   secCount>>
 
 (* ---------------- another process ---------------- *)
 
@@ -253,7 +281,7 @@ OtherAcquire ==
     /\ lock' = "other"
     /\ stuck' \in (IF PeerStuck THEN BOOLEAN ELSE {FALSE})
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, hbPc, hbMissing, spawned, secDone, gen,
-                   secReg, rmLanded, td, rpPc, xs>>
+                   secReg, rmLanded, td, rpPc, xs, secCount, secDone2>>
 
 OtherRelease ==
     /\ lock = "other" /\ ~stuck
@@ -287,7 +315,9 @@ RootApplies ==
 RootLanded ==
     IF SecOn THEN [rmLanded EXCEPT ![Op1.s] = @ + 1] ELSE rmLanded
 
-RootRemoves == ~(HolderCounts /\ xs[Op1.s] = "held")
+RootOwned ==
+    IF Op1.holder = 1 THEN secReg[Op1.s] ELSE xs[Op1.s] = "held"
+RootRemoves == RootOwned /\ secCount[Op1.s] > 0
 
 \* The sync attempt `deregisterInstanceRootNow` made before #3657 (and
 \* `withInstanceRegistryLockSync`'s 500 ms spin, which now returns at once
@@ -309,12 +339,12 @@ RootSyncAttempt ==
                THEN /\ tpc' = "acq" /\ UNCHANGED tail
                ELSE /\ tail' = Tail(tail) /\ UNCHANGED tpc
        \/ /\ lock # "none" /\ ~(lock = "other" /\ ~stuck)
-          /\ UNCHANGED <<entry, intent, rmLanded, xs>>
+          /\ UNCHANGED <<entry, intent, rmLanded, xs, secCount, secDone2>>
           /\ IF RootRemoval = "sync"
                THEN /\ tail' = Tail(tail) /\ UNCHANGED tpc
                ELSE /\ tpc' = "acq" /\ UNCHANGED tail
     /\ UNCHANGED <<sess, live, lock, hbPc, hbMissing, spawned, secDone, gen,
-                   secReg, stuck, td, rpPc, xs>>
+                   secReg, stuck, td, rpPc, xs, secCount, secDone2>>
 
 TailAcquire ==
     /\ tpc = "acq" /\ lock = "none"
@@ -353,15 +383,21 @@ TailWrite ==
                   [] Op1.kind \in {"radd", "radx"} ->
                         IF entry # {} THEN entry \cup {Op1.root} ELSE entry
                   [] Op1.kind = "root" /\ SecOn ->
-                        IF RootRemoves THEN entry \ {Op1.sec} ELSE entry
+                        IF RootRemoves /\ secCount[Op1.s] = 1
+                           THEN entry \ {Op1.sec} ELSE entry
                   [] OTHER -> entry
     /\ intent' = IF RootApplies THEN Op1.root ELSE intent
     /\ rmLanded' = IF Op1.kind = "root" THEN RootLanded ELSE rmLanded
+    /\ secCount' = IF Op1.kind \in {"radd", "radx"} /\ entry # {}
+                       THEN [secCount EXCEPT ![Op1.s] = @ + 1]
+                       ELSE IF Op1.kind = "root" /\ SecOn /\ RootRemoves
+                               THEN [secCount EXCEPT ![Op1.s] = @ - 1]
+                               ELSE secCount
     /\ xs' = IF Op1.kind = "radx" /\ entry # {}
                THEN [s \in 1..2 |-> IF Sec[s] = Op1.root THEN "held" ELSE xs[s]]
                ELSE xs
     /\ lock' = "none" /\ tpc' = "idle" /\ tail' = Tail(tail)
-    /\ UNCHANGED <<sess, live, hbPc, hbMissing, spawned, secDone, gen, secReg, stuck, td, rpPc>>
+    /\ UNCHANGED <<sess, live, hbPc, hbMissing, spawned, secDone, gen, secReg, stuck, td, rpPc, secDone2>>
 
 (* ---------------- heartbeat ---------------- *)
 
@@ -409,19 +445,22 @@ ReaperStart ==
     /\ Reaper /\ rpPc = "idle"
     /\ rpPc' = "acq"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs,
+                   secCount, secDone2>>
 
 ReaperAcquire ==
     /\ rpPc = "acq" /\ lock = "none"
     /\ lock' = "reaper" /\ rpPc' = "held"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs,
+                   secCount, secDone2>>
 
 ReaperWrite ==
     /\ rpPc = "held"
     /\ lock' = "none" /\ rpPc' = "done"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, td, xs,
+                   secCount, secDone2>>
 
 (* ---------------- the test worker's teardown (#3703) ---------------- *)
 
@@ -440,14 +479,16 @@ TdBegin ==
     /\ Teardown # "off" /\ td = "run" /\ ~live /\ sess = 2
     /\ td' = IF Teardown = "kill" THEN "done" ELSE "join"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs,
+                   secCount, secDone2>>
 
 \* `_settleRegistryMutationsForTests` resolved: the join is over.
 TdJoined ==
     /\ td = "join" /\ Drained
     /\ td' = "done"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs,
+                   secCount, secDone2>>
 
 \* The real-time bound on the join ran out (the `[registry-settle]` line).
 TdGiveUp ==
@@ -455,7 +496,8 @@ TdGiveUp ==
     /\ lock \notin {"tail", "hb", "reaper"}
     /\ td' = "done"
     /\ UNCHANGED <<sess, live, entry, intent, tail, tpc, lock, hbPc, hbMissing,
-                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs>>
+                   spawned, secDone, gen, secReg, rmLanded, stuck, rpPc, xs,
+                   secCount, secDone2>>
 
 Step ==
     \/ Start \/ Shutdown
@@ -466,7 +508,8 @@ Step ==
     \/ \E s \in 1..2 : \/ HbStart(s) \/ HbAcquire(s) \/ HbTimeout(s)
                        \/ HbWrite(s) \/ HbPost(s)
                        \/ LspSpawn(s) \/ SecondaryStart(s) \/ SecondaryStart2(s)
-                       \/ SecondaryShutdown(s)
+                       \/ CapEviction(s)
+                       \/ SecondaryShutdown(s) \/ SecondaryShutdown2(s)
 
 \* The process has exited: nothing runs after it.
 Next == (td # "done" /\ Step) \/ (td = "done" /\ UNCHANGED vars)
@@ -482,7 +525,8 @@ DeregQueued == \E i \in 1..Len(tail) : tail[i].kind = "dereg"
 \* A second secondary on the same root (SharedSec) holds it until the session
 \* ends.
 SecHeld(r) ==
-    \E s \in 1..2 : r = Sec[s] /\ live /\ sess = s /\ (~secDone[s] \/ xs[s] # "none")
+    \E s \in 1..2 : r = Sec[s] /\ live /\ sess = s /\
+        ((secReg[s] /\ ~secDone[s]) \/ xs[s] # "none")
 RootOpPending(r) == \E i \in 1..Len(tail) : tail[i].kind = "root" /\ tail[i].sec = r
 
 \* A root the process no longer serves is never in its entry: an ended
@@ -526,4 +570,8 @@ TeardownProgress == (Teardown # "off" /\ td # "done") => ENABLED Step
 \* the model, so its root must be in the entry until the session ends (#3849).
 SharedRootHeld ==
     \A s \in 1..2 : (live /\ sess = s /\ xs[s] = "held") => Sec[s] \in entry
+
+RootCountMatches ==
+    \A s \in 1..2 : (Sec[s] \in entry /\ ~RootOpPending(Sec[s])) =>
+        secCount[s] > 0
 =============================================================================

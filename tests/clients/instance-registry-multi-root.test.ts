@@ -51,6 +51,7 @@ describe("instance-registry multi-root (#2130)", () => {
 	function readEntry(): {
 		projectRoot: string;
 		projectRoots?: string[];
+		projectRootHolderCounts?: Record<string, number>;
 	} {
 		const raw = fs.readFileSync(path.join(dir, "instances.json"), "utf-8");
 		return JSON.parse(raw).instances[0];
@@ -219,6 +220,71 @@ describe("instance-registry multi-root (#2130)", () => {
 
 			await deregisterInstanceRoot(tempRoot);
 			expect(readEntry().projectRoots).toEqual([readEntry().projectRoot]);
+			expect(readEntry().projectRootHolderCounts).toBeUndefined();
+		});
+
+		it("prunes holder counts when cap eviction removes a root (#3849 F1)", async () => {
+			const { registerInstance, registerInstanceRoot, deregisterInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+			for (let i = 0; i < 32; i++) {
+				await registerInstanceRoot(path.join(dir, `filler-${i}`));
+			}
+			const evicted = readEntry();
+			expect(evicted.projectRoots).not.toContain(path.resolve(tempRoot));
+			expect(evicted.projectRootHolderCounts).not.toHaveProperty(
+				path.resolve(tempRoot),
+			);
+
+			await deregisterInstanceRoot(tempRoot);
+			await registerInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).not.toContain(path.resolve(tempRoot));
+		});
+
+		it("strips a removed root's count before it can be re-added (#3849 F4)", async () => {
+			const { registerInstance, registerInstanceRoot, deregisterInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
+			await registerInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toEqual([readEntry().projectRoot]);
+			expect(readEntry().projectRootHolderCounts).toBeUndefined();
+		});
+
+		it("treats a legacy secondary root as one holder when adding another (#3849 F5)", async () => {
+			const { registerInstance, registerInstanceRoot, deregisterInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+			const registryFile = path.join(dir, "instances.json");
+			const legacy = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+			delete legacy.instances[0].projectRootHolderCounts;
+			fs.writeFileSync(registryFile, JSON.stringify(legacy));
+
+			await registerInstanceRoot(tempRoot);
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toContain(path.resolve(tempRoot));
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toEqual([readEntry().projectRoot]);
+		});
+
+		it("drops a stale primary count during full registration (#3849 F5)", async () => {
+			const { registerInstance } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			const registryFile = path.join(dir, "instances.json");
+			const file = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+			file.instances[0].projectRootHolderCounts = {
+				[path.resolve(realRoot)]: 7,
+			};
+			fs.writeFileSync(registryFile, JSON.stringify(file));
+
+			await registerInstance(realRoot);
+			expect(readEntry().projectRootHolderCounts).toBeUndefined();
 		});
 
 		it("loads a pre-#3849 entry without holder counts", async () => {

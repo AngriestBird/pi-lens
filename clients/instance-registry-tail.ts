@@ -52,10 +52,13 @@ function registryTailState(): { tail: Promise<void> } {
 	);
 }
 
-export function queueRegistryMutation(op: () => Promise<void>): Promise<void> {
+export function queueRegistryMutation<T>(op: () => Promise<T>): Promise<T> {
 	const state = registryTailState();
 	const run = state.tail.then(op);
-	state.tail = run.catch(() => {});
+	state.tail = run.then(
+		() => undefined,
+		() => undefined,
+	);
 	return run;
 }
 
