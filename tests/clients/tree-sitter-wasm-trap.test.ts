@@ -258,6 +258,17 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		expect(onAbort).not.toHaveBeenCalled();
 	});
 
+	it("does not count repeated traps from one input as distinct grammar inputs (#4010 N3)", async () => {
+		const { client, onAbort } = await liveClient();
+		const input = { languageId: "python", source: "persistent-input" };
+
+		client.reportWasmAbort(trap(), input);
+		client.reportWasmAbort(trap(), input);
+
+		expect(kindCount("grammar-blocked")).toBeUndefined();
+		expect(onAbort).not.toHaveBeenCalled();
+	});
+
 	it("records a grammar retirement once per ledger generation (#4010 N3)", async () => {
 		const { client } = await liveClient();
 		const recordGrammarBlocked = (
