@@ -800,7 +800,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// synchronous sibling does (`cachePath`, `metaPath`). Same sense, one more
 		// reader of the same two files.
 		"clients/cache-manager.ts": 19,
-		"clients/cache/rule-cache.ts": 7,
+		// 7 -> 5 (#3930 r2): the shared fingerprint replaces the cache's
+		// duplicated path operations with one owner.
+		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
 		"clients/cargo-manifest.ts": 7,
 		"clients/cascade-logger.ts": 2,
@@ -1017,7 +1019,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/session-state-store.ts": 3,
 		"clients/sessionstart-logger.ts": 2,
 		"clients/sg-runner.ts": 12,
-		"clients/sgconfig.ts": 26,
+		// 26 -> 25 (#3930 r2): the shared user rule-root seam removes one
+		// duplicated path construction.
+		"clients/sgconfig.ts": 25,
 		"clients/skills-resolver.ts": 3,
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
@@ -1041,7 +1045,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
 		"clients/tree-sitter-logger.ts": 2,
-		"clients/tree-sitter-query-loader.ts": 11,
+		// 11 -> 18 (#3930 r2): the loader's complete rule fingerprint walks
+		// language rule directories and normalizes their paths.
+		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
 		"clients/trivy-client.ts": 5,
