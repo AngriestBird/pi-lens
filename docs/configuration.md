@@ -10,6 +10,14 @@ There are **two** pi-lens config files:
 Both files have the same shape, with one exception noted below the example:
 everything LSP-related lives under an `lsp` namespace inside them.
 
+The editor-facing JSON Schema is published at
+[`docs/schema/pi-lens-config-v1.json`](schema/pi-lens-config-v1.json). LSP
+server entries also accept canonical argv arrays, optional `name` (defaulting
+to the map id), `enabled`, `role` (`language` or `auxiliary`), `args`, and
+`rootMarkers`. These new fields are experimental; reserved role, root-policy,
+and timing semantics are inert until their planned catalog slices land, so this
+schema slice does not change server launch behavior.
+
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/apmantza/pi-lens/master/docs/schema/pi-lens-config-v1.json",
@@ -23,8 +31,7 @@ everything LSP-related lives under an `lsp` namespace inside them.
       "my-server": {
         "name": "My Custom LSP",
         "extensions": [".myext"],
-        "command": "my-lsp-server",
-        "args": ["--stdio"],
+        "command": ["my-lsp-server", "--stdio"],
         "covers": ["shellcheck"]
       }
     },
