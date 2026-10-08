@@ -1,87 +1,97 @@
 ---------------------- MODULE TurnEndDeliveryHolds ----------------------
-(***************************************************************************)
-(* The turn-end composer's delivery holds (#3813): a producer that has   *)
-(* consumed one-shot state for a part registers a hold on the part, and  *)
-(* the composer settles every hold ONCE, after the cap, against what the *)
-(* message actually kept (clients/turn-end/delivery-holds.ts,            *)
-(* clients/runtime-turn.ts `handleTurnEnd`).                             *)
-(*                                                                       *)
-(* One part per item. The model has three hold shapes and six items:     *)
-(*  - peek-then-commit (items 1 and 6): the producer leaves its state    *)
-(*    alone at compose; `onDelivered` commits it. Item 1 is the          *)
-(*    dependency-drift count (skipOnSuppressed, runtime-turn.ts:1574-1575);*)
-(*    item 6 is the past-EOF retirement, which settles as delivered even *)
-(*    on a suppressed turn (runtime-turn.ts:1567-1570);                  *)
-(*  - drain-then-restore (items 2 and 3): the producer's state is drained*)
-(*    at compose; `onHeld` puts it back. Item 2 is the late auxiliary    *)
-(*    pair, bounded by `canHold` (runtime-turn.ts:5073). Item 3 stands for *)
-(*    the unbounded restores: a settled runner result requeued           *)
-(*    (runtime-turn.ts:1302, 1376) and a cascade run re-appended         *)
-(*    (runtime-turn.ts:1877, 2040);                                      *)
-(*  - park-then-recheck (items 4 and 5): the producer has no queue, so   *)
-(*    `onHeld` parks the shown items on the coordinator under a lane key *)
-(*    (runtime-turn.ts:1229-1240); the lane's next run takes them and    *)
-(*    offers each once more, only while that run still reports it        *)
-(*    (runtime-turn.ts:2257-2258, 2280). Item 4 belongs to the primary   *)
-(*    session, item 5 to a concurrent secondary (subagent) activation that *)
-(*    runs the same composer on the same process-singleton runtime       *)
-(*    (runtime-turn.ts:1190-1202).                                       *)
-(*                                                                       *)
-(* Actions (one per step of handleTurnEnd, per session s):               *)
-(*  - NextTurn(s): the park lane's run takes the entries under its key and *)
-(*    rechecks stillReportedParked;                                      *)
-(*  - Compose(s): the producers push parts (drain, requeue, restore, park) *)
-(*    in any order; peek leaves state alone;                             *)
-(*  - Cap(s): planDeliveryHolds + capTurnEndMessage: the reach rule, one *)
-(*    canHold ask per part, and the signature-dedupe verdict;            *)
-(*  - Settle(s): each hold runs once, guarded by isCurrentSession;       *)
-(*  - SessionReplace: resetForSession clears the session-scoped stores.  *)
-(*                                                                       *)
-(* Cap and Settle are one synchronous block in the code (runtime-turn.ts:*)
-(* 5285-5386, no await between them), so SessionReplace is disabled while*)
-(* a session sits between them.                                          *)
-(*                                                                       *)
-(* Invariants:                                                           *)
-(*  - NoLossByCap: a part the cap cut is still pending after Settle,     *)
-(*    unless it was dropped with a recorded reason;                      *)
-(*  - NoDoubleDelivery: an item reaches the agent at most once, and a    *)
-(*    re-offer is shown only while its lane still reports it;            *)
-(*  - NoPin: a re-offered item is never parked again, and a leading part *)
-(*    is never held (it could not fit alone, so holding it pins it);     *)
-(*  - HoldFencedToSession: a session's parts hold only its own items, and*)
-(*    no store entry written by a replaced session survives.             *)
-(***************************************************************************)
+(***************************************************************************
+The turn-end composer's delivery holds (#3813): a producer that consumed
+one-shot state for a part registers a hold on it, and the composer settles
+every hold ONCE, after the cap, against what the message kept
+(clients/turn-end/delivery-holds.ts, clients/runtime-turn.ts handleTurnEnd).
+
+One part per item; three hold shapes and six items:
+ - peek-then-commit (items 1 and 6): the producer leaves its state alone at
+   compose and `onDelivered` commits it. Item 1 is the dependency-drift
+   count (countDriftDeliveryOnDelivery, skipOnSuppressed); item 6 is the
+   past-EOF retirement (retirePastEofOnDelivery), which settles as delivered
+   even on a suppressed turn;
+ - drain-then-restore (items 2 and 3): the producer's state is drained at
+   compose and `onHeld` puts it back. Item 2 is the late auxiliary pair,
+   bounded by `canHold` (canRearmPendingAuxiliary). Item 3 stands for the
+   unbounded restores: a settled runner result requeued
+   (requeueRunnerFindings) and a cascade run re-appended
+   (appendCascadeRun);
+ - park-then-recheck (items 4 and 5): the producer has no queue, so `onHeld`
+   parks the shown items on the coordinator under a lane key
+   (cutAdvisoryHold, parkCutAdvisoryItems); the lane's next run takes them
+   (takeCutAdvisoryItems) and offers each once more, only while that run
+   still reports it (stillReportedParked). Item 4 belongs to the primary
+   session, item 5 to a concurrent secondary (subagent) activation that runs
+   the same composer on the same process-singleton runtime (carryScope).
+
+Actions (one per step of handleTurnEnd, per session s):
+ - NextTurn(s): the park lane's run takes the entries under its key and
+   rechecks stillReportedParked;
+ - Compose(s): the producers push their parts (drain, requeue, restore,
+   park) in any order; peek leaves state alone;
+ - Cap(s): planDeliveryHolds + capTurnEndMessage: the reach rule, one
+   canHold ask per part, and the signature-dedupe verdict;
+ - Settle(s): each hold runs once, guarded by isCurrentSession;
+ - SessionReplace: resetForSession clears the session-scoped stores.
+
+Cap and Settle are one synchronous block in the code (planDeliveryHolds to
+settleHolds in handleTurnEnd, no await between them), so no other action
+runs while a session sits between them.
+
+NOT modelled (#4161): the code captures holdGeneration at handleTurnEnd
+entry and drains the producers after several awaits; Compose here captures
+and drains in one step, so a session replaced inside that window (the old
+turn then drains the new session's state and its Settle is skipped) is not
+reachable. The drain-shape and peek stores are also process-wide (#3758);
+only the park map carries the turn's session id.
+
+Invariants:
+ - NoLossByCap: a part the cap cut is still pending after Settle, unless it
+   was dropped with a recorded reason;
+ - NoDoubleDelivery: an item reaches the agent at most once, and a re-offer
+   is shown only while its lane still reports it;
+ - NoPin: a re-offered item is never parked again, and a leading part is
+   never held (it could not fit alone, so holding it pins it);
+ - HoldFencedToSession: a session's parts hold only its own items, no store
+   entry carries a replaced session's generation, and a replaced session's
+   Settle changes no store entry.
+***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     CapChars,    \* chars the cap keeps (RUNTIME_CONFIG.turnEnd.maxChars, one axis)
-    Sep,         \* separator length (delivery-holds.ts:113, "\n\n")
+    Sep,         \* separator length (delivery-holds.ts `planDeliveryHolds` `separatorLength`, "\n\n")
     SizeSet,     \* the sizes a part can take
     MaxTurns,    \* Compose steps per session
     MaxGen,      \* the runtime generation bound
-    RearmMax,    \* MAX_LATE_AUX_REARMS (pending-aux-coverage.ts:69, 211)
+    RearmMax,    \* MAX_LATE_AUX_REARMS (clients/lsp/pending-aux-coverage.ts `MAX_LATE_AUX_REARMS`, `canRearmPendingAuxiliary`)
     PeekCommit,  \* "atCap"     commit at Settle, after the cap (shipped)
                  \* "atCompose" the producer commits when it composes (pre-#3813)
-    DrainAsk,    \* "asked" the aux hold carries canHold (runtime-turn.ts:5073)
+    DrainAsk,    \* "asked" the aux hold carries canHold (runtime-turn.ts, the late auxiliary hold's `canHold`)
                  \* "never" no canHold: the cut part is promised, not kept
     ReOffer,     \* "once"      a part showing only re-offers cannot be held
-                 \*             (runtime-turn.ts:1228, canHold = fresh.length > 0)
+                 \*             (runtime-turn.ts `cutAdvisoryHold` `canHold`, canHold = fresh.length > 0)
                  \* "unbounded" a re-offer is parked again
     ParkKey,     \* "session" the lane key carries the turn's session id
-                 \*           (runtime-turn.ts:1199-1202, #4112 round 2)
+                 \*           (runtime-turn.ts `carryLane`, #4112 round 2)
                  \* "lane"    the pre-round-2 key: shared by every session
-    Lead,        \* "leads" the leader is reached (delivery-holds.ts:105-106)
+    Lead,        \* "leads" the leader is reached (delivery-holds.ts `planDeliveryHolds` (`leadsOversized`))
                  \* "none"  the leader is held like any other cut part
     Recheck,     \* "checked"   a parked item returns only while still reported
-                 \*             (delivery-holds.ts:157-165)
+                 \*             (delivery-holds.ts `stillReportedParked`)
                  \* "unchecked" every parked item returns
-    Fence,       \* "checked"   Settle skips a replaced session (delivery-holds.ts:125, 130)
+    Fence,       \* "checked"   Settle skips a replaced session (planDeliveryHolds `live`)
                  \* "unchecked" Settle runs against the new session's stores
+                 \* "reachedOnly" the skip guards the held branch only, so
+                 \*             onDelivered still runs after a replacement
+                 \* "heldOnly"  the skip guards the delivered branch only, so
+                 \*             onHeld still restores after a replacement
     OnReached    \* "none" onHeld runs only for a cut part (shipped)
                  \* "restore" mutant: a drain hold also restores a reached part
 
 VARIABLES
-    gen,        \* the runtime's session generation (runtime-coordinator.ts:1264)
+    gen,        \* the runtime's session generation (runtime-coordinator.ts `isCurrentSession`)
     st,         \* [Items -> status of the item's producer state]
     igen,       \* [Items -> generation that last wrote the item's store entry]
     parks,      \* [Items -> times the item was parked this generation]
@@ -97,10 +107,11 @@ VARIABLES
     hgen,       \* [Sess -> holdGeneration, captured at the turn's start]
     lost,       \* a cut part left Settle neither pending nor recorded dropped
     leadHeld,   \* a leading part was held
-    staleShown  \* a re-offer was shown after its lane stopped reporting it
+    staleShown, \* a re-offer was shown after its lane stopped reporting it
+    crossWrite  \* a replaced session's Settle changed a store entry
 
 vars == <<gen, st, igen, parks, rearm, dcnt, phase, turns, offerQ, unrep, plan,
-          verdict, supp, hgen, lost, leadHeld, staleShown>>
+          verdict, supp, hgen, lost, leadHeld, staleShown, crossWrite>>
 
 Sess == 1..2
 Items == 1..6
@@ -141,6 +152,7 @@ TypeOK ==
     /\ lost \in BOOLEAN
     /\ leadHeld \in BOOLEAN
     /\ staleShown \in BOOLEAN
+    /\ crossWrite \in BOOLEAN
 
 Init ==
     /\ gen = 1
@@ -160,16 +172,25 @@ Init ==
     /\ lost = FALSE
     /\ leadHeld = FALSE
     /\ staleShown = FALSE
+    /\ crossWrite = FALSE
 
 Range(f) == {f[k] : k \in DOMAIN f}
 
-(* NextTurn(s): the park lane's next successful run takes every entry under  *)
-(* its key (runtime-coordinator.ts:1486-1490) and keeps the ones it still*)
-(* reports (delivery-holds.ts:157-165, runtime-turn.ts:2280). A failed run   *)
-(* leaves them parked, so the action is optional.                        *)
+\* NextTurn(s): the park lane's next successful run takes every entry under
+\* its key (runtime-coordinator.ts `takeCutAdvisoryItems`) and keeps the ones it still
+\* reports (delivery-holds.ts `stillReportedParked`, runtime-turn.ts `stillReportedParked`). A failed run
+\* leaves them parked, so the action is optional.
+
+
+\* Cap and Settle are one synchronous block in the code (planDeliveryHolds to
+\* settleHolds in handleTurnEnd, no await between): while a session sits
+\* between them, nothing else runs.
+NoneCapped == \A t \in Sess : phase[t] # "capped"
+
 Taken(s) == {i \in ParkItems : st[i] = "parked" /\ KeyOf(i) = KeyOf(ParkOf(s))}
 
 NextTurn(s) ==
+    /\ NoneCapped
     /\ phase[s] = "idle"
     /\ offerQ[s] = {}
     /\ Taken(s) # {}
@@ -182,15 +203,16 @@ NextTurn(s) ==
            /\ offerQ' = [offerQ EXCEPT ![s] = reoff]
            /\ unrep' = unrep \cup {i \in reoff : ~rep[i]}
     /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, phase, turns, plan, verdict,
-                   supp, hgen, lost, leadHeld, staleShown>>
+                   supp, hgen, lost, leadHeld, staleShown, crossWrite>>
 
-(* Compose(s): each producer that has something pushes its part. The order   *)
-(* is the producer's (any here); a peek producer leaves its state alone  *)
-(* (runtime-turn.ts:1566-1576), a drain or park producer consumes it     *)
-(* (runtime-turn.ts:1302, 2257-2258). Every taken re-offer must appear.  *)
+\* Compose(s): each producer that has something pushes its part. The order
+\* is the producer's (any here); a peek producer leaves its state alone
+\* (runtime-turn.ts, the peek holds (`onDelivered`)), a drain or park producer consumes it
+\* (runtime-turn.ts, the runner holds (`requeueRunnerFindings`), `takeCutAdvisoryItems`). Every taken re-offer must appear.
 Cands(s) == {i \in Items : Owner(i) = s /\ st[i] = "src"} \cup offerQ[s]
 
 Compose(s) ==
+    /\ NoneCapped
     /\ phase[s] = "idle"
     /\ turns[s] < MaxTurns
     /\ Cands(s) # {}
@@ -211,12 +233,12 @@ Compose(s) ==
     /\ hgen' = [hgen EXCEPT ![s] = gen]
     /\ turns' = [turns EXCEPT ![s] = turns[s] + 1]
     /\ phase' = [phase EXCEPT ![s] = "composed"]
-    /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, verdict, supp, lost, leadHeld>>
+    /\ UNCHANGED <<gen, igen, parks, rearm, dcnt, verdict, supp, lost, leadHeld, crossWrite>>
 
-(* Cap(s): planDeliveryHolds judges each part against the kept prefix    *)
-(* (delivery-holds.ts:100-111). A part is reached when it lies whole inside  *)
-(* the prefix, or leads (start 0) and so could not fit alone. `keeps` asks   *)
-(* canHold once, before the message is final (delivery-holds.ts:110).    *)
+\* Cap(s): planDeliveryHolds judges each part against the kept prefix
+\* (delivery-holds.ts `planDeliveryHolds`). A part is reached when it lies whole inside
+\* the prefix, or leads (start 0) and so could not fit alone. `keeps` asks
+\* canHold once, before the message is final (delivery-holds.ts `planDeliveryHolds` (`keeps`)).
 RECURSIVE StartOf(_, _)
 StartOf(pl, k) == IF k = 1 THEN 0 ELSE StartOf(pl, k - 1) + pl[k - 1].size + Sep
 
@@ -232,6 +254,7 @@ CanHold(item, reoff) ==
       [] OTHER -> IF ReOffer = "once" THEN ~reoff ELSE TRUE
 
 Cap(s) ==
+    /\ NoneCapped
     /\ phase[s] = "composed"
     /\ \E sp \in BOOLEAN :
         /\ supp' = [supp EXCEPT ![s] = sp]
@@ -242,11 +265,11 @@ Cap(s) ==
                                \/ CanHold(plan[s][k].item, plan[s][k].reoff)]]]
     /\ phase' = [phase EXCEPT ![s] = "capped"]
     /\ UNCHANGED <<gen, st, igen, parks, rearm, dcnt, turns, offerQ, unrep,
-                   plan, hgen, lost, leadHeld, staleShown>>
+                   plan, hgen, lost, leadHeld, staleShown, crossWrite>>
 
-(* Settle(s): every hold runs once (delivery-holds.ts:120-146). A session*)
-(* replaced mid-turn owns none of this state, so the callbacks are skipped   *)
-(* (delivery-holds.ts:125, 130, runtime-turn.ts:5294).                   *)
+\* Settle(s): every hold runs once (delivery-holds.ts `settle`). A session
+\* replaced mid-turn owns none of this state, so the callbacks are skipped
+\* (delivery-holds.ts `settle` (`live`), runtime-turn.ts `settleHolds`).
 ItemAt(s, k) == plan[s][k].item
 Reach(s, k) == verdict[s][k].reached
 Keeps(s, k) == verdict[s][k].keeps
@@ -254,7 +277,7 @@ Held(s, k) == ~Reach(s, k) /\ Keeps(s, k)
 PartOf(s, i) == CHOOSE k \in Parts(s) : ItemAt(s, k) = i
 
 \* A later part parks under the same lane key: a park REPLACES its lane's
-\* entry (runtime-coordinator.ts:1479-1481).
+\* entry (runtime-coordinator.ts `parkCutAdvisoryItems`).
 Replaced(s, k) ==
     \E k2 \in Parts(s) :
         /\ k2 > k
@@ -284,26 +307,32 @@ WritesStore(s, k) ==
 Settle(s) ==
     /\ phase[s] = "capped"
     /\ LET trueLive == hgen[s] = gen
-           run == trueLive \/ Fence = "unchecked"
+           \* The hold's callback runs: the session is current, or the fence is
+           \* absent ("unchecked") or absent for the delivered branch only.
+           runK(k) == \/ trueLive
+                     \/ Fence = "unchecked"
+                     \/ (Fence = "reachedOnly" /\ Reach(s, k))
+                     \/ (Fence = "heldOnly" /\ ~Reach(s, k))
            inPlan(i) == \E k \in Parts(s) : ItemAt(s, k) = i
            parksNow == {k \in Parts(s) : Held(s, k) /\ Shape(ItemAt(s, k)) = "park"}
            newSt == [i \in Items |->
-                IF ~run THEN st[i]
-                ELSE IF inPlan(i) THEN PartSt(s, PartOf(s, i))
+                IF inPlan(i)
+                THEN (IF runK(PartOf(s, i)) THEN PartSt(s, PartOf(s, i)) ELSE st[i])
                 \* A park by another item replaces this lane's entry.
                 ELSE IF st[i] = "parked"
-                        /\ \E k \in parksNow : KeyOf(ItemAt(s, k)) = KeyOf(i)
+                        /\ \E k \in parksNow :
+                              runK(k) /\ KeyOf(ItemAt(s, k)) = KeyOf(i)
                      THEN "evicted"
                 ELSE st[i]]
        IN /\ st' = newSt
           /\ igen' = [i \in Items |->
-                IF run /\ inPlan(i) /\ WritesStore(s, PartOf(s, i))
+                IF inPlan(i) /\ runK(PartOf(s, i)) /\ WritesStore(s, PartOf(s, i))
                 THEN hgen[s] ELSE igen[i]]
           /\ parks' = [i \in Items |->
-                IF run /\ inPlan(i) /\ PartOf(s, i) \in parksNow
+                IF inPlan(i) /\ runK(PartOf(s, i)) /\ PartOf(s, i) \in parksNow
                 THEN parks[i] + 1 ELSE parks[i]]
           /\ rearm' = [i \in Items |->
-                IF run /\ inPlan(i) /\ i = AuxItem /\ newSt[i] = "src"
+                IF inPlan(i) /\ runK(PartOf(s, i)) /\ i = AuxItem /\ newSt[i] = "src"
                    /\ WritesStore(s, PartOf(s, i))
                 THEN rearm[i] + 1 ELSE rearm[i]]
           /\ dcnt' = [i \in Items |->
@@ -314,19 +343,20 @@ Settle(s) ==
                       /\ ~Reach(s, k)
                       /\ newSt[ItemAt(s, k)] \notin {"src", "parked", "dropped"}
                  \/ \E j \in Items : st[j] = "parked" /\ newSt[j] = "evicted")))
+          /\ crossWrite' = (crossWrite \/ (~trueLive /\ newSt # st))
           /\ leadHeld' = (leadHeld \/ (Len(plan[s]) >= 1 /\ ~Reach(s, 1)))
     /\ plan' = [plan EXCEPT ![s] = <<>>]
     /\ verdict' = [verdict EXCEPT ![s] = <<>>]
     /\ phase' = [phase EXCEPT ![s] = "idle"]
     /\ UNCHANGED <<gen, turns, offerQ, unrep, supp, hgen, staleShown>>
 
-(* SessionReplace: resetForSession retires the scope and clears the      *)
-(* session-scoped stores: the park map (runtime-coordinator.ts:667), the *)
-(* cascade runs, the pending runner store (cleared at session_start). The*)
-(* new session's producers start fresh.                                  *)
+\* SessionReplace: resetForSession retires the scope and clears the
+\* session-scoped stores: the park map (runtime-coordinator.ts `resetForSession`), the
+\* cascade runs, the pending runner store (cleared at session_start). The
+\* new session's producers start fresh.
 SessionReplace ==
     /\ gen < MaxGen
-    /\ \A s \in Sess : phase[s] # "capped"
+    /\ NoneCapped
     /\ gen' = gen + 1
     /\ st' = [i \in Items |-> "src"]
     /\ igen' = [i \in Items |-> gen + 1]
@@ -336,7 +366,7 @@ SessionReplace ==
     /\ offerQ' = [s \in Sess |-> {}]
     /\ unrep' = {}
     /\ UNCHANGED <<phase, turns, plan, verdict, supp, hgen, lost, leadHeld,
-                   staleShown>>
+                   staleShown, crossWrite>>
 
 Next ==
     \/ SessionReplace
@@ -344,21 +374,23 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-(* NoLossByCap: Settle never leaves a cut part gone with no record.      *)
+\* NoLossByCap: Settle never leaves a cut part gone with no record.
 NoLossByCap == ~lost
 
-(* NoDoubleDelivery: delivery-holds.ts:157-165 offers a parked item once, and *)
-(* only while still reported; an item reaches the agent once.            *)
+\* NoDoubleDelivery: delivery-holds.ts `stillReportedParked` offers a parked item once, and
+\* only while still reported; an item reaches the agent once.
 NoDoubleDelivery == (\A i \in Items : dcnt[i] <= 1) /\ ~staleShown
 
-(* NoPin: a re-offer is not parked again (delivery-holds.ts:25-26), and the  *)
-(* leader is reached, since holding it would pin it (delivery-holds.ts:28-33). *)
+\* NoPin: a re-offer is not parked again (the park-then-recheck note in delivery-holds.ts's module header), and the
+\* leader is reached, since holding it would pin it (the reach rule in delivery-holds.ts's module header).
 NoPin == (\A i \in Items : parks[i] <= 1) /\ ~leadHeld
 
-(* HoldFencedToSession: a turn composes only its own session's items, and no *)
-(* store entry carries a replaced session's generation.                  *)
+\* HoldFencedToSession: a turn composes only its own session's items, no store
+\* entry carries a replaced session's generation, and a replaced session's
+\* Settle changes no store entry (delivered or held branch).
 HoldFencedToSession ==
     /\ \A s \in Sess : \A k \in Parts(s) : Owner(plan[s][k].item) = s
     /\ \A i \in Items : st[i] \in {"src", "parked"} => igen[i] = gen
+    /\ ~crossWrite
 
 =========================================================================
