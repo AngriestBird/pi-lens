@@ -145,6 +145,7 @@
 		"clients/test-runner-location-regex-budget.test.ts": 1,
 		"clients/word-index-async-build.test.ts": 1,
 		"clients/workspace-glob-nonbacktracking-budget.test.ts": 2,
+		"config/workflow-writers-governance.test.ts": 1,
 		"real-harness/child-exit.test.ts": 1,
 		"scripts/guard-bash-hook.test.ts": 1,
 		"scripts/playground-verify-rule-bounded-wait.test.ts": 2,
