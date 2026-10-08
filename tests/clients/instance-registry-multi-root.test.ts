@@ -207,6 +207,34 @@ describe("instance-registry multi-root (#2130)", () => {
 	});
 
 	describe("scoped deregistration", () => {
+		it("keeps a shared secondary root until its last holder leaves (#3849)", async () => {
+			const { registerInstance, registerInstanceRoot, deregisterInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+			await registerInstanceRoot(tempRoot);
+
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toContain(path.resolve(tempRoot));
+
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toEqual([readEntry().projectRoot]);
+		});
+
+		it("loads a pre-#3849 entry without holder counts", async () => {
+			const { registerInstance, registerInstanceRoot, deregisterInstanceRoot } =
+				await import("../../clients/instance-registry.js");
+			await registerInstance(realRoot);
+			await registerInstanceRoot(tempRoot);
+			const registryFile = path.join(dir, "instances.json");
+			const legacy = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+			delete legacy.instances[0].projectRootHolderCounts;
+			fs.writeFileSync(registryFile, JSON.stringify(legacy));
+
+			await deregisterInstanceRoot(tempRoot);
+			expect(readEntry().projectRoots).toEqual([readEntry().projectRoot]);
+		});
+
 		it("removes one root and leaves the rest of the entry alive", async () => {
 			const { registerInstance, deregisterInstanceRoot } =
 				await import("../../clients/instance-registry.js");

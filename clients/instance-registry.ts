@@ -158,6 +158,9 @@ export interface InstanceEntry {
 	 * {@link getInstanceRoots} folds back to `[projectRoot]`.
 	 */
 	projectRoots?: string[];
+	/** Number of live declined secondary sessions holding each non-primary root
+	 * (#3849). Absent on pre-#3849 records; a present root is one legacy holder. */
+	projectRootHolderCounts?: Record<string, number> | undefined;
 	lspChildren: LspChildEntry[];
 	lspChildCount: number;
 	rssBytes: number;
@@ -380,6 +383,18 @@ export function getInstanceRoots(entry: InstanceEntry): string[] {
 		: [];
 }
 
+function getInstanceRootHolderCounts(
+	entry: InstanceEntry | undefined,
+): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const [root, count] of Object.entries(
+		entry?.projectRootHolderCounts ?? {},
+	)) {
+		if (Number.isInteger(count) && count >= 0) counts[root] = count;
+	}
+	return counts;
+}
+
 /**
  * Bound on the per-host root set (#2130). A host that legitimately serves many
  * worktrees must not grow an unbounded path list inside a file every other
@@ -493,6 +508,11 @@ async function registerInstanceNow(
 								[normalizedRoot],
 							)
 					: mergeInstanceRoots(existingRoots, normalizedRoot);
+			const holderCounts = existing
+				? getInstanceRootHolderCounts(existing)
+				: {};
+			delete holderCounts[roots[0] ?? normalizedRoot];
+			for (const root of roots.slice(1)) holderCounts[root] ??= 0;
 			const namespace = ownPidNamespace();
 			others.push({
 				pid,
@@ -501,6 +521,9 @@ async function registerInstanceNow(
 				startedAt: existing?.startedAt ?? now,
 				projectRoot: roots[0] ?? normalizedRoot,
 				projectRoots: roots,
+				...(Object.keys(holderCounts).length > 0
+					? { projectRootHolderCounts: holderCounts }
+					: {}),
 				lspChildren: existing?.lspChildren ?? [],
 				lspChildCount: existing?.lspChildren?.length ?? 0,
 				rssBytes: process.memoryUsage().rss,
@@ -553,15 +576,26 @@ async function registerInstanceRootNow(projectRoot: string): Promise<void> {
 		const current = file.instances[idx];
 		const priorRoots = getInstanceRoots(current);
 		const roots = mergeInstanceRoots(priorRoots, normalizedRoot);
+		const previousCounts = getInstanceRootHolderCounts(current);
+		const holderCounts = { ...previousCounts };
+		if (roots[0] !== normalizedRoot) {
+			holderCounts[normalizedRoot] =
+				(previousCounts[normalizedRoot] ??
+					(priorRoots.includes(normalizedRoot) ? 1 : 0)) + 1;
+		}
 		if (
 			roots.length === priorRoots.length &&
-			roots.every((root, index) => root === priorRoots[index])
+			roots.every((root, index) => root === priorRoots[index]) &&
+			JSON.stringify(holderCounts) === JSON.stringify(previousCounts)
 		)
 			return;
 		file.instances[idx] = {
 			...current,
 			projectRoot: roots[0] ?? current.projectRoot,
 			projectRoots: roots,
+			...(Object.keys(holderCounts).length > 0
+				? { projectRootHolderCounts: holderCounts }
+				: {}),
 		};
 		await writeRegistryAsync(file);
 	});
@@ -1047,6 +1081,25 @@ function planRootRemoval(
 	}
 	const current = file.instances[idx];
 	const priorRoots = getInstanceRoots(current);
+	const previousCounts = getInstanceRootHolderCounts(current);
+	const holderCount =
+		previousCounts[normalizedRoot] ??
+		(priorRoots.includes(normalizedRoot) ? 1 : 0);
+	if (holderCount > 1) {
+		return {
+			instances: file.instances.map((entry, i) =>
+				i === idx
+					? {
+							...entry,
+							projectRootHolderCounts: {
+								...previousCounts,
+								[normalizedRoot]: holderCount - 1,
+							},
+						}
+					: entry,
+			),
+		};
+	}
 	const remainingRoots = priorRoots.filter((root) => root !== normalizedRoot);
 	if (remainingRoots.length === priorRoots.length) return undefined;
 	if (remainingRoots.length === 0) {
@@ -1065,6 +1118,16 @@ function planRootRemoval(
 						...current,
 						projectRoot: remainingRoots[0],
 						projectRoots: remainingRoots,
+						...(Object.keys(previousCounts).length > 0
+							? {
+									projectRootHolderCounts: Object.entries(
+										previousCounts,
+									).reduce<Record<string, number>>((result, [root, count]) => {
+										if (root !== normalizedRoot) result[root] = count;
+										return result;
+									}, {}),
+								}
+							: {}),
 					}
 				: entry,
 		),

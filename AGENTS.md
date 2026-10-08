@@ -761,6 +761,10 @@ the surface they bite; each block loads only when its trigger applies.
 
 ### Session, telemetry, and delivery
 
+- `clients/instance-registry.ts` records secondary roots with a holder count:
+  `deregisterInstanceRoot` removes a non-primary root only after its last
+  holder leaves; records without `projectRootHolderCounts` are legacy
+  one-holder entries. `getInstanceRoots` remains the sole root-set reader.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.

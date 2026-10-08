@@ -77,7 +77,8 @@
 (* holder the lease cannot clear (a filesystem error, or a stream of       *)
 (* writers that keeps winning the lock, README).                           *)
 (* SharedSec adds a second declined secondary per session on the same     *)
-(* root Sec[s], live until the session ends (#3849: the entry is a set).   *)
+(* root Sec[s], live until the session ends (#3849). The holderCount        *)
+(* FixPart models the durable per-root lease count.                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -85,7 +86,7 @@ CONSTANTS
     Contention,        \* another pi process may hold the registry lock
     HbRepair,          \* the #3447 heartbeat re-registration exists
     ClearIntent,       \* deregisterInstance clears the intent (#3447 guard)
-    FixParts,          \* subset of {"generation","child","rootIntent","retry"}
+    FixParts,          \* subset including optional "holderCount"
     RootRemoval,       \* "off"|"sync"|"syncQueued"|"syncAlways"|"asyncBounded"|"queued"
     Teardown,          \* "off"|"kill"|"join"|"bounded"
     PeerStuck,         \* the other process may hold the lock and never release
@@ -129,6 +130,7 @@ ChildGate == "child" \in FixParts
 RootGate == "rootIntent" \in FixParts
 Retry == "retry" \in FixParts
 GenOn == GenGuard \/ ChildGate \/ RootGate
+HolderCounts == "holderCount" \in FixParts
 
 SecOn == RootRemoval # "off"
 SyncRoot == RootRemoval \in {"sync", "syncQueued", "syncAlways"}
@@ -285,6 +287,8 @@ RootApplies ==
 RootLanded ==
     IF SecOn THEN [rmLanded EXCEPT ![Op1.s] = @ + 1] ELSE rmLanded
 
+RootRemoves == ~(HolderCounts /\ xs[Op1.s] = "held")
+
 \* The sync attempt `deregisterInstanceRootNow` made before #3657 (and
 \* `withInstanceRegistryLockSync`'s 500 ms spin, which now returns at once
 \* when an own async hold is in flight): the lock is taken
@@ -298,7 +302,7 @@ RootLanded ==
 RootSyncAttempt ==
     /\ SyncRoot /\ tail # <<>> /\ tpc = "idle" /\ Op1.kind = "root"
     /\ \/ /\ \/ lock = "none" \/ (lock = "other" /\ ~stuck)
-          /\ entry' = entry \ {Op1.sec}
+          /\ entry' = IF RootRemoves THEN entry \ {Op1.sec} ELSE entry
           /\ intent' = IF RootApplies THEN Op1.root ELSE intent
           /\ rmLanded' = RootLanded
           /\ IF RootRemoval = "syncAlways"
@@ -348,7 +352,8 @@ TailWrite ==
                         IF entry # {} \/ (ChildGate /\ Stale) THEN entry ELSE {Op1.root}
                   [] Op1.kind \in {"radd", "radx"} ->
                         IF entry # {} THEN entry \cup {Op1.root} ELSE entry
-                  [] Op1.kind = "root" /\ SecOn -> entry \ {Op1.sec}
+                  [] Op1.kind = "root" /\ SecOn ->
+                        IF RootRemoves THEN entry \ {Op1.sec} ELSE entry
                   [] OTHER -> entry
     /\ intent' = IF RootApplies THEN Op1.root ELSE intent
     /\ rmLanded' = IF Op1.kind = "root" THEN RootLanded ELSE rmLanded

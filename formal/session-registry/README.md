@@ -141,7 +141,8 @@ Three more constants cover the secondary's root and the test worker's exit
 | `TeardownKill` | violated `NoExitWhileHeld` | the worker before #3703 |
 | `TeardownUnbounded` | violated `TeardownProgress` | #3703 round 1 |
 | `ReaperPruneResidue` (stated residual) | violated `NoExitWhileHeld` | |
-| `SecRootSharedTwo` (open defect #3849) | violated `SharedRootHeld` | |
+| `SecRootSharedTwo` (#3849 fix) | pass | holder count keeps a shared secondary root |
+| `SecRootSharedTwoLegacy` (#3849 pre-fix witness) | violated `SharedRootHeld` | set-only root removal |
 
 The counterexamples before the fix:
 
@@ -188,11 +189,10 @@ The secondary root and the worker's exit (`SecRoot*`, `Teardown*`,
   forever, session 1's queued deregistration waits behind it, and the join
   never ends.
 - **Two secondaries on one root (`SecRootSharedTwo`, #3849):** `reg A` lands,
-  a secondary's `radd T1` lands, a second secondary's `radx T1` lands (the
-  entry is a set, so it is a no-op), the first secondary's removal lands, and
-  the entry drops `T1` while the second still serves it, for the rest of the
-  session. The config is red on the merged behaviour and flips to `pass` when
-  the fix for #3849 adds a holder count.
+  a secondary's `radd T1` lands, a second secondary's `radx T1` lands, and the
+  first removal decrements the durable holder count instead of dropping `T1`.
+  The config is `pass` with the holder-count fix. `SecRootSharedTwoLegacy`
+  keeps the pre-fix set-only behavior as a violated configuration.
 - **The reaper's hold (`ReaperPruneResidue`):** `pruneDeadInstances` takes the
   lock off the tail and the tail is empty, so the join ends and the worker
   exits holding it. #3703's own body states this: #3617 is only partly
