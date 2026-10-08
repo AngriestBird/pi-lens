@@ -45,6 +45,11 @@ const sharedExclude = [
 	"**/.stryker-tmp/**",
 	"**/.stryker/**",
 	"**/.claude/**",
+	// Probe homes (.probe-home/) can hold a whole worktree when a probe ran a
+	// worktree-creating script under HOME=.probe-home; a path-filtered run (the
+	// pre-push selection) collected a merged PR's stale copy (2026-10-08: 24
+	// phantom reds blocked a push).
+	"**/.probe-home/**",
 	// Fixture projects carry *.test.ts files that belong to the FIXTURE's own
 	// toolchain (e.g. the native-TS7/Vitest fixture the live integration suite
 	// copies out and type-checks) — they are inputs, not repo tests, and fail
