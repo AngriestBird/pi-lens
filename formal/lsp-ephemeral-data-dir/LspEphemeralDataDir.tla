@@ -129,7 +129,7 @@ NoCrossRootShare ==
         d1.owner = d2.owner /\ d1.root # d2.root => DirName(d1) # DirName(d2)
 
 ClassificationConsistent ==
-    \A p \in ProcIds, r \in usedRoots[p] : memo[p][r] = "ephemeral"
+    \A p \in ProcIds : \A r \in usedRoots[p] : memo[p][r] = "ephemeral"
 
 SweepOnlyDead ==
     \A d \in removed : d.owner \notin live
