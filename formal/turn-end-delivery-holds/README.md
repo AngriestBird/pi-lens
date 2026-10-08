@@ -174,8 +174,9 @@ The tests that pin the same cells through the real `handleTurnEnd`:
   cut on two consecutive turns is dropped with one record" (`ReOffer`); "a
   same-root secondary turn neither takes nor shows the primary's parked item"
   and "a new session does not inherit a parked item" (`ParkKey`, `Fence`);
-  "a turn whose session was replaced does not take its successor's parked
-  item" (`DrainFence`, the `NextTurn` half).
+  the `#4161` group's per-lane rows, "$lane: the successor's parked item
+  reaches the successor" for knip, dead-code and call-graph (`DrainFence`,
+  the `NextTurn` half).
 - `tests/clients/turn-end-cap-consumed-state.test.ts`, the #4161 group:
   "leaves the successor's cascade run and parked compute for the successor's
   own turn", "keeps the successor's run and drops the replaced session's
