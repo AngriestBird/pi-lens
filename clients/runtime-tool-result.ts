@@ -1310,6 +1310,30 @@ function readWideningNote(widening: ReadWidening): string {
 	return `[pi-lens: read widened to ${reason}: you asked for lines ${requested.offset}-${requested.offset + requested.limit - 1}, this shows lines ${shown.offset}-${shown.offset + shown.limit - 1}. Re-request with limit > ${EXPANSION_LIMIT_LINES} for the exact range.]`;
 }
 
+/**
+ * `tool_execution_end`: the call is over (#4185 round 4). pi emits it once
+ * for every call that reached `tool_call`, top-level and nested
+ * (`parentToolCallId`), and for an executed call only after every extension's
+ * `tool_result` handler returned. A call that ended in error showed the agent
+ * no bytes: a read the host failed, or one a later extension blocked after
+ * pi-lens recorded its capture (pi then emits no `tool_result` at all). Its
+ * capture is released here, by the call identity that keyed it, so it cannot
+ * license an edit later in the same run. A delivered read is left alone: its
+ * `tool_result` already superseded the capture, or is still writing the
+ * record that will. Returns whether a capture was released.
+ */
+export function handleToolExecutionEnd(
+	event: unknown,
+	readGuard: Pick<ReadGuard, "dropProvisionalReadByCall">,
+): boolean {
+	if ((event as { isError?: unknown } | undefined)?.isError !== true)
+		return false;
+	const toolCallId = resolveToolCallCorrelationId(event);
+	return toolCallId !== undefined
+		? readGuard.dropProvisionalReadByCall(toolCallId)
+		: false;
+}
+
 export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
@@ -1890,23 +1914,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 	}
 
-	// A read whose host call errored (offset past EOF, unreadable) delivered
-	// nothing, so its tool_call capture is not evidence: alone, it satisfied
-	// the zero-read check for an oldText edit of lines the agent never saw
-	// (#4185 round 2; `formal/read-guard` FailedReadLive). Not gated by
-	// `--no-read-guard`: the capture is recorded without it too.
-	if (
-		deps.readGuard &&
-		event.toolName === "read" &&
-		event.isError === true &&
-		toolCallId !== undefined &&
-		filePath
-	) {
-		deps.readGuard.dropProvisionalRead(
-			attribution?.resolvedPath ?? filePath,
-			toolCallId,
-		);
-	}
+	// A read whose host call errored delivered nothing: its tool_call capture
+	// is released by `handleToolExecutionEnd`, which pi emits right after this
+	// handler, keyed by the call (#4185 round 4).
 
 	// Native read results are the authoritative read boundary. The tool_call
 	// input can request past EOF, and the host can cap bytes or lines before the

@@ -23,6 +23,7 @@ import {
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
 	clearLastAnalyzedStateCache,
+	handleToolExecutionEnd,
 	handleToolResult,
 } from "../../clients/runtime-tool-result.js";
 import {
@@ -629,6 +630,14 @@ describe("bash grep searchReads registration", () => {
 						content: failed.content,
 					}),
 				);
+				// pi emits tool_execution_end after every tool_result handler
+				// returned; the call is over and showed nothing.
+				expect(
+					handleToolExecutionEnd(
+						{ toolName: "read", toolCallId: "r1", isError: true },
+						runtime.readGuard,
+					),
+				).toBe(true);
 				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
 				expect(
 					runtime.readGuard.checkEdit(filePath, [1, 1], undefined, {
@@ -642,7 +651,7 @@ describe("bash grep searchReads registration", () => {
 		});
 
 		it.each(["@a.ts", "~/proj/a.ts"])(
-			"drops a failed read using its tool-call attribution for %s (#4185 R2-1)",
+			"releases a failed read's capture whatever path spelling its result carries, %s (#4185 R2-1)",
 			async (resultSpelling) => {
 				const env = setupTestEnvironment("pi-lens-failed-read-spelling-");
 				try {
@@ -672,12 +681,139 @@ describe("bash grep searchReads registration", () => {
 							content: [{ type: "text", text: "failed" }],
 						}),
 					);
+					// The release is keyed by the call, never by the result's
+					// spelling (round 2 re-derived the path and missed both).
+					handleToolExecutionEnd(
+						{
+							toolName: "read",
+							toolCallId: `failed-${resultSpelling}`,
+							isError: true,
+						},
+						runtime.readGuard,
+					);
 					expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
 				} finally {
 					env.cleanup();
 				}
 			},
 		);
+
+		// #4185 round 3 R3-2: a later extension blocks a read pi-lens already
+		// captured; pi emits tool_execution_end (isError) and no tool_result.
+		// Round 3 released the capture only at agent_settled, so an oldText edit
+		// later in the SAME run, top-level or nested, was applied on lines the
+		// agent never saw. The real-pi twin is
+		// tests/real-harness/read-guard-moves.test.ts.
+		describe("a read blocked after its capture (#4185 R3-2)", () => {
+			const oldTextEdit = (toolCallId: string, parentToolCallId?: string) => ({
+				toolName: "edit",
+				toolCallId,
+				...(parentToolCallId !== undefined && { parentToolCallId }),
+				input: {
+					path: "blocked.ts",
+					oldText: "export const value = 1;",
+					newText: "export const value = 2;",
+				},
+			});
+			it.each([
+				["top-level", "r-blocked", undefined],
+				["nested", "codemode-b/1", "codemode-b"],
+			] as const)(
+				"refuses a %s oldText edit in the same run once the blocked read's call ended",
+				async (_shape, readId, parentId) => {
+					const env = setupTestEnvironment("pi-lens-blocked-read-end-");
+					try {
+						const filePath = createTempFile(
+							env.tmpDir,
+							"blocked.ts",
+							"export const value = 1;\n",
+						);
+						const runtime = new RuntimeCoordinator();
+						runtime.projectRoot = env.tmpDir;
+						const parent =
+							parentId !== undefined ? { parentToolCallId: parentId } : {};
+						await handleToolCall(
+							callDeps(runtime, {
+								toolName: "read",
+								toolCallId: readId,
+								...parent,
+								input: { path: "blocked.ts" },
+							}),
+						);
+						expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+							expect.objectContaining({ provisional: true }),
+						]);
+						// pi's agent loop: the later extension's block is an
+						// "immediate" result, emitted as tool_execution_end only.
+						handleToolExecutionEnd(
+							{
+								type: "tool_execution_end",
+								toolName: "read",
+								toolCallId: readId,
+								...parent,
+								isError: true,
+								result: {
+									content: [{ type: "text", text: "blocked" }],
+								},
+							},
+							runtime.readGuard,
+						);
+						const verdict = await handleToolCall(
+							callDeps(runtime, oldTextEdit("e-blocked/1", parentId)),
+						);
+						expect(verdict).toMatchObject({
+							block: true,
+							reason: expect.stringContaining("Edit without read"),
+						});
+					} finally {
+						env.cleanup();
+					}
+				},
+			);
+
+			// The other direction: a successful call's end never takes its read's
+			// evidence. pi bounds the read tool_result handler (500 ms,
+			// HOOK_WALL_BUDGET_MS.tool_result_read_only) and emits
+			// tool_execution_end without waiting for a handler past it, so the
+			// capture can still be the read's only record at that point.
+			it("keeps the capture when the call ended in success before its record landed", async () => {
+				const env = setupTestEnvironment("pi-lens-read-end-success-");
+				try {
+					const filePath = createTempFile(
+						env.tmpDir,
+						"blocked.ts",
+						"export const value = 1;\n",
+					);
+					const runtime = new RuntimeCoordinator();
+					runtime.projectRoot = env.tmpDir;
+					await handleToolCall(
+						callDeps(runtime, {
+							toolName: "read",
+							toolCallId: "r-slow",
+							input: { path: "blocked.ts" },
+						}),
+					);
+					expect(
+						handleToolExecutionEnd(
+							{ toolName: "read", toolCallId: "r-slow", isError: false },
+							runtime.readGuard,
+						),
+					).toBe(false);
+					expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+						expect.objectContaining({
+							provisional: true,
+							source: "native-read:r-slow:provisional",
+						}),
+					]);
+					const verdict = await handleToolCall(
+						callDeps(runtime, oldTextEdit("e-slow")),
+					);
+					expect(verdict).not.toMatchObject({ block: true });
+				} finally {
+					env.cleanup();
+				}
+			});
+		});
 
 		it("uses the parent transcript identity for a nested write creation read (#4185 R2-2)", async () => {
 			const env = setupTestEnvironment("pi-lens-nested-write-creation-");

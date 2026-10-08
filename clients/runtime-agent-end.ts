@@ -162,9 +162,12 @@ export async function handleAgentEnd({
 	currentSessionId,
 	staleAfterMs = DEFERRED_FORMAT_STALE_AFTER_MS,
 }: AgentEndDeps): Promise<AgentEndFormatSummary | undefined> {
-	// A later extension may block a read after pi-lens records its tool_call;
-	// pi then emits no paired tool_result. Revoke all unseen captures at the
-	// turn boundary so they cannot license an edit in a later turn (#4185 R2-3).
+	// Backstop for read captures (#4185 R2-3, round 4). A call's capture is
+	// released when the call ends (`handleToolExecutionEnd`); only a run that
+	// dies between a read's tool_call and its tool_execution_end (a throw in
+	// pi's agent loop takes `handleRunFailure`, which emits agent_end and no
+	// tool_execution_end) leaves one, and it must not license an edit in the
+	// next run.
 	runtime.readGuard.dropProvisionalReads();
 	// #791: ownership-filtered drain — records queued by a DIFFERENT known
 	// session (e.g. a concurrent in-process secondary/subagent) stay queued

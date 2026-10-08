@@ -242,6 +242,7 @@ import {
 import {
 	clearLastAnalyzedStateCache,
 	flushDebouncedToolResults,
+	handleToolExecutionEnd,
 	handleToolResult,
 } from "./clients/runtime-tool-result.js";
 import { cancelLSPIdleReset, handleTurnEnd } from "./clients/runtime-turn.js";
@@ -2920,6 +2921,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			},
 		}),
 	);
+
+	// #4185 round 4: the call is over. A read that ended in error, failed by
+	// the host or blocked by a later extension after pi-lens captured it (pi
+	// then emits no tool_result), releases its capture here, before the next
+	// tool_call of the run can count it.
+	pi.on("tool_execution_end", (event) => {
+		handleToolExecutionEnd(event, runtime.readGuard);
+	});
 
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks

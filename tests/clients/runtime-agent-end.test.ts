@@ -83,7 +83,12 @@ describe("runtime-agent-end deferred formatting", () => {
 		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-");
 	};
 
-	it("releases a blocked read capture at the real turn-end handler (#4185 R2-3)", async () => {
+	// Recurrence: a run that dies between a read's tool_call and its
+	// tool_execution_end (a throw in pi's agent loop takes handleRunFailure,
+	// which emits agent_end and no tool_execution_end) left the capture to
+	// license an edit in the next run (#4185 R2-3; the per-call release is
+	// handleToolExecutionEnd since round 4, this is its backstop).
+	it("releases a capture its run left open at the real agent-settled handler (#4185 R2-3)", async () => {
 		const env = setupTestEnvironment("pi-lens-blocked-read-turn-end-");
 		try {
 			const filePath = createTempFile(

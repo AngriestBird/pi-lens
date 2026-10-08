@@ -822,35 +822,11 @@ export class ReadGuard {
 	// --- Public API ---
 
 	/**
-	 * Drop the tool_call capture of the read `toolCallId` made of `rawFilePath`
-	 * (the record whose `source` is `native-read:<call>:provisional`). The
-	 * delivered record supersedes it ({@link recordRead}); a result that
-	 * delivered nothing (an error: offset past EOF, unreadable) drops it
-	 * outright, because the capture was that read's only record and, alone, it
-	 * satisfied the zero-read check for an oldText edit of lines the agent
-	 * never saw (#4185 round 2; `formal/read-guard` FailedReadLive). Keyed by
-	 * the call's own identity: a nested call's is unique where its parent's,
-	 * the transcript identity a record carries, is shared by every read a
-	 * script makes. Returns whether a capture was found.
-	 */
-	dropProvisionalRead(rawFilePath: string, toolCallId: string): boolean {
-		const filePath = this.key(rawFilePath);
-		const records = this.reads.get(filePath);
-		const source = `native-read:${toolCallId}:provisional`;
-		const index = records?.findIndex(
-			(candidate) => candidate.source === source,
-		);
-		if (!records || index === undefined || index < 0) return false;
-		records.splice(index, 1);
-		if (records.length === 0) this.reads.delete(filePath);
-		return true;
-	}
-
-	/**
-	 * Drop every provisional native-read capture that never reached a
-	 * tool_result. A later extension can block a read after this handler has
-	 * returned, so agent_end is the only remaining boundary that can revoke
-	 * that unseen evidence (#4185 R2-3).
+	 * Drop every provisional native-read capture still held. The run boundary's
+	 * backstop (`handleAgentEnd`): a call's capture is released when the call
+	 * ends ({@link dropProvisionalReadByCall}), and only a run that dies
+	 * between a read's tool_call and its tool_execution_end leaves one here
+	 * (#4185 R2-3, round 4). Returns how many it dropped.
 	 */
 	dropProvisionalReads(): number {
 		let dropped = 0;
@@ -867,9 +843,17 @@ export class ReadGuard {
 	}
 
 	/**
-	 * Drop the provisional capture for one blocked read without re-deriving its
-	 * path. The call identity is unique even when nested reads share a parent
-	 * transcript identity.
+	 * Drop the tool_call capture of the read call `toolCallId` (the record
+	 * whose `source` is `native-read:<call>:provisional`), whatever path
+	 * spelling the call's result carries. The delivered record supersedes it
+	 * ({@link recordRead}); a call that ended in error, failed by the host or
+	 * blocked by a later extension, releases it at tool_execution_end
+	 * (`handleToolExecutionEnd`), because alone it satisfied the zero-read
+	 * check for an oldText edit of lines the agent never saw (#4185 rounds 2
+	 * to 4; `formal/read-guard` FailedReadLive, BlockedReadLive). Keyed by
+	 * the call's own identity: a nested call's is unique where its parent's,
+	 * the transcript identity a record carries, is shared by every read a
+	 * script makes. Returns whether a capture was found.
 	 */
 	dropProvisionalReadByCall(toolCallId: string): boolean {
 		for (const [filePath, records] of this.reads) {
@@ -909,7 +893,7 @@ export class ReadGuard {
 	): void {
 		const filePath = this.key(record.filePath);
 		if (opts?.supersedes)
-			this.dropProvisionalRead(filePath, opts.supersedes.toolCallId);
+			this.dropProvisionalReadByCall(opts.supersedes.toolCallId);
 		// #1668 review F1: index by the existence-independent syntactic key
 		// while the file is (presumably) still on disk, so a later
 		// hasKnownPath/forgetPath lookup after an external delete can still

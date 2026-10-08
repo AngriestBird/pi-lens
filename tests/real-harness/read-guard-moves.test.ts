@@ -1,5 +1,10 @@
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { type RealPi, withRealPi } from "../support/real-pi-harness.js";
+import {
+	type RealPi,
+	realHarnessFixtureRoot,
+	withRealPi,
+} from "../support/real-pi-harness.js";
 
 // flake-shape: real-process-spawn — the read guard's branch admission reads pi's own session branch after a real RPC clone rebinds the extension; the ids a nested call carries (`c1/1`, parent `c1`) and the toolResult pi persists for it exist only in the real host
 //
@@ -148,6 +153,64 @@ describe("real pi RPC: read evidence across a conversation move", () => {
 				pi.toolResults().find((row) => row.toolName === "read"),
 			).toMatchObject({ isError: true });
 			expect(edit).toMatchObject(refused);
+		});
+	}, 60_000);
+});
+
+// #4185 round 3 R3-2: a later extension blocks a read that pi-lens already
+// captured at tool_call. pi emits `tool_execution_end` for the blocked call
+// and no `tool_result`, so the agent never saw the bytes; an edit later in the
+// SAME run (the next LLM turn, the same message, or the same codemode script)
+// must not be licensed by the capture. Round 3 released it only at
+// agent_settled, after the edit had already been applied.
+describe("real pi RPC: a read blocked by a later extension licenses nothing in its run", () => {
+	const blocked = (script: string) => ({
+		...scenario(script),
+		extensions: [path.join(realHarnessFixtureRoot, "read-block-extension.mjs")],
+	});
+	const editResult = (pi: RealPi) =>
+		pi.toolResults().find((row) => row.toolName === "edit");
+
+	it("refuses an edit in the next turn of the run after a blocked read", async () => {
+		await withRealPi(blocked("blocked-read-next-turn.json"), async (pi) => {
+			await pi.prompt("read then edit");
+			await pi.events("agent_end");
+			expect(
+				pi.toolResults().find((row) => row.toolName === "read"),
+			).toMatchObject({ isError: true });
+			expect(editResult(pi)).toMatchObject(refused);
+		});
+	}, 60_000);
+
+	it("refuses an edit in the same message as a blocked read", async () => {
+		await withRealPi(blocked("blocked-read-same-message.json"), async (pi) => {
+			await pi.prompt("read and edit");
+			await pi.events("agent_end");
+			expect(editResult(pi)).toMatchObject(refused);
+		});
+	}, 60_000);
+
+	it("refuses a nested edit after a nested read the extension blocked", async () => {
+		await withRealPi(blocked("blocked-nested-read.json"), async (pi) => {
+			await pi.prompt("codemode read and edit");
+			await pi.events("agent_end");
+			expect(
+				pi.toolResults().find((row) => row.toolName === "read"),
+			).toMatchObject({ isError: true, parentToolCallId: "c1" });
+			expect(editResult(pi)).toMatchObject({
+				...refused,
+				parentToolCallId: "c1",
+			});
+		});
+	}, 60_000);
+
+	// Control: the same script with no blocking extension applies the edit,
+	// so the refusals above are the block's doing, not the script's.
+	it("applies the same next-turn edit when no extension blocks the read", async () => {
+		await withRealPi(scenario("blocked-read-next-turn.json"), async (pi) => {
+			await pi.prompt("read then edit");
+			await pi.events("agent_end");
+			expect(editResult(pi)).toMatchObject(applied);
 		});
 	}, 60_000);
 });

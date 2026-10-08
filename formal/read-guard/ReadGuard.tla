@@ -65,8 +65,9 @@ CONSTANTS
     N0,             \* initial line count
     MaxLen,         \* longest file
     AgentOps,       \* bound on agent tool calls
-    Ops,            \* agent tool kinds: subset of {"read","rread","fread","edit","oedit","write","bash"}
+    Ops,            \* agent tool kinds: subset of {"read","rread","fread","bread","edit","oedit","write","bash"}
                     \* ("fread": a read whose host call errors, offset past EOF;
+                    \*  "bread": a read a later extension blocks after pi-lens's tool_call captured it;
                     \*  "oedit": an oldText edit, gated by the zero-read check alone)
     Spans,          \* edit spans: subset of {1,2}
     ExtWrites,      \* bound on other-writer writes
@@ -91,9 +92,16 @@ CONSTANTS
                        \* transcript identity (toolCallId), so a /fork or /tree keeps it like a delivered
                        \* record; FALSE (code before #4185 and since its round 2): it has none and every
                        \* move drops it. Only a read that errored leaves one behind (FailedRead).
-    RevokeFailedRead,  \* TRUE (code since #4185 round 2): the tool_result of a read that errored drops the
-                       \* tool_call capture (ReadGuard.dropProvisionalRead); FALSE (code before): the capture
-                       \* stays, and alone it satisfies the zero-read check (FailedReadLive)
+    RevokeFailedRead,  \* TRUE (code since #4185 round 2): the end of a read call that errored drops the
+                       \* tool_call capture (at tool_result in rounds 2-3, at tool_execution_end since round 4,
+                       \* ReadGuard.dropProvisionalReadByCall); FALSE (code before): the capture stays, and
+                       \* alone it satisfies the zero-read check (FailedReadLive)
+    BlockRelease,      \* where the capture of a read blocked after its tool_call ("bread") is released:
+                       \* "none" (code before #4185 round 3): never, and no run-boundary backstop;
+                       \* "run" (#4185 round 3, head aa4f1f125): only at the run boundary (agent_settled,
+                       \*   Turn here), which drops every capture still held;
+                       \* "end" (code since round 4): at the call's tool_execution_end, with the
+                       \*   run-boundary drop kept as a backstop
     \* ---- candidate fixes ----
     RecordAuthoritative, \* record the attached post-autofix bytes as a full read (code since #3519)
     RecordOwnEdit,       \* record the lines an allowed positional edit wrote as read (code since #3523)
@@ -331,11 +339,13 @@ ReadResult ==
 \* tool_call records the capture (runtime-tool-call.ts handleToolCall) and
 \* stamps FileTime; the host returns an error; tool_result delivers nothing
 \* (runtime-tool-result.ts handleToolResult keeps the native-read block behind
-\* `isError !== true`) and, since #4185 round 2, drops the capture
-\* (RevokeFailedRead). Before it the capture stayed: the one record that could
-\* be provisional at a boundary (#4185 round 1, F1) and, live, the one record
-\* the zero-read check of an oldText edit counted (FailedReadLive). One step:
-\* nothing the agent sees changes between the two hooks.
+\* `isError !== true`) and, since #4185 round 2, the call's end drops the
+\* capture (RevokeFailedRead; tool_execution_end since round 4, which pi emits
+\* right after the tool_result handlers). Before it the capture stayed: the one
+\* record that could be provisional at a boundary (#4185 round 1, F1) and,
+\* live, the one record the zero-read check of an oldText edit counted
+\* (FailedReadLive). One step: no other tool_call of the run can land between
+\* the tool_call and tool_execution_end of a call the host executed.
 FailedRead ==
     /\ CanOp("fread")
     /\ reads' = IF RevokeFailedRead THEN reads
@@ -346,20 +356,34 @@ FailedRead ==
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo, pc, pend,
                    ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
-\* A later extension can block a read after pi-lens has recorded its
-\* tool_call, so no tool_result arrives. The capture is released at the block
-\* boundary when the handler observes its own block, or at turn end when the
-\* later extension is the blocker. Reuse RevokeFailedRead as the one rule for
-\* every read that delivered no bytes: FALSE is the pre-fix capture leak.
-BlockedRead ==
-    /\ CanOp("fread")
-    /\ reads' = IF RevokeFailedRead THEN reads
-                ELSE Append(reads, Rec(Len(disk) + 1, Len(disk) + 1, NoH, TRUE))
+\* ---- a read a later extension blocks: "bread" (#4185 round 3 R3-2) ----
+\* pi-lens's tool_call handler records the capture and stamps FileTime; then
+\* an extension loaded after pi-lens blocks the call. pi emits no tool_result
+\* and the agent sees no bytes (know is unchanged), but it does emit
+\* tool_execution_end for the call (agent-loop.js, the "immediate" result),
+\* before the next tool_call of the run. Two steps, because the capture lives
+\* from the block to whichever action releases it, and an edit later in the
+\* same run (the next LLM turn, the same message, the same codemode script)
+\* can run in between when the release is the run boundary.
+BlockedReadCall ==
+    /\ CanOp("bread")
+    /\ reads' = Append(reads, Rec(1, 1, MkH(disk, 1, 1), TRUE))
     /\ ft' = rev
     /\ lastEditOk' = FALSE
+    /\ pc' = "blocked"
     /\ ops' = ops + 1
-    /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo, pc, pend,
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo, pend,
                    ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
+\* tool_execution_end of the blocked call (index.ts -> handleToolExecutionEnd):
+\* "end" releases this call's capture, the newest record (one tool at a time,
+\* and nothing else writes `reads` while the call is open).
+BlockedReadEnd ==
+    /\ pc = "blocked"
+    /\ reads' = IF BlockRelease = "end" THEN SubSeq(reads, 1, Len(reads) - 1) ELSE reads
+    /\ pc' = "idle"
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, ft, written, pendCreate, lastEditOk, born, turnNo,
+                   pend, ops, ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* ---- edit of lo..lo+span-1 (checkEdit at tool_call, host apply) ----
 \* Positional ("edit"): the guard fully enforces it. oldText ("oedit"): the
@@ -506,10 +530,14 @@ External ==
     /\ UNCHANGED <<know, kTurn, guardVars, pc, pend, ops, nb, fixedTurn, mutatedTurn,
                    staleAllow, blindAllow, falseBlock>>
 
+Delivered(r) == ~r.prov
+
 \* A settle drain is due: the run wrote, and agent_settled has not queued it yet.
 SettleDue == DrainMode # "atomic" /\ FormatDrain # "none" /\ mutatedTurn
 
 \* A user turn boundary: agent_end's deferred format drain, then the next prompt.
+\* Since #4185 round 3 (BlockRelease # "none") it also drops every capture
+\* still held (handleAgentEnd, ReadGuard.dropProvisionalReads).
 \* With DrainMode # "atomic" the drain is queued at Settle instead and lands
 \* in Drain, which the conversation can have moved past.
 Turn ==
@@ -519,9 +547,10 @@ Turn ==
               /\ written' = TRUE                              \* recordWritten after the format
               /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
+    /\ reads' = IF BlockRelease # "none" THEN SelectSeq(reads, Delivered) ELSE reads
     /\ kTurn' = know /\ turnNo' = turnNo + 1
     /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE /\ nb' = nb + 1
-    /\ UNCHANGED <<know, reads, pendCreate, lastEditOk, born, pc, pend, ops, ext, dr,
+    /\ UNCHANGED <<know, pendCreate, lastEditOk, born, pc, pend, ops, ext, dr,
                    staleAllow, blindAllow, falseBlock>>
 
 \* agent_settled (#3521 review F1): the run is over but the next prompt has not
@@ -635,7 +664,7 @@ Tree ==
 Next ==
     \/ \E lo \in 1..MaxLen, hi \in 1..MaxLen : ReadCall(FALSE, lo, hi)
     \/ ReadCall(TRUE, 1, MaxLen)
-    \/ ReadExec \/ ReadResult \/ FailedRead \/ BlockedRead
+    \/ ReadExec \/ ReadResult \/ FailedRead \/ BlockedReadCall \/ BlockedReadEnd
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite

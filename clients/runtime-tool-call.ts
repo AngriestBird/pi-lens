@@ -438,8 +438,6 @@ export async function handleToolCall(
 			// the cleanup does.
 			try {
 				const toolCallId = resolveToolCallCorrelationId(deps.event);
-				if (deps.event.toolName === "read" && toolCallId !== undefined)
-					deps.runtime.readGuard.dropProvisionalReadByCall(toolCallId);
 				if (toolCallId !== undefined) {
 					deps.runtime.takeToolCallAttribution(toolCallId);
 				}
