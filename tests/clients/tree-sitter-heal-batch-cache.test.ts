@@ -4,7 +4,11 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadWebTreeSitter } from "../../clients/deps/web-tree-sitter.js";
-import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
+import { getDegradationSummary } from "../../clients/degradation-ledger.js";
+import {
+	TreeSitterClient,
+	wasmQueryInput,
+} from "../../clients/tree-sitter-client.js";
 import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
 
 const trap = () => {
@@ -46,12 +50,28 @@ const defs = (client: TreeSitterClient) =>
 		compileQueryBatch: (
 			queryDefs: TreeSitterQuery[],
 			languageId: string,
-		) => Promise<{ entries: Array<{ queryDef: TreeSitterQuery }> } | null>;
+		) => Promise<{
+			entries: Array<{ queryDef: TreeSitterQuery }>;
+			key: string;
+			query: { delete: () => void };
+		} | null>;
 		loadLanguage: (languageId: string) => Promise<unknown>;
 		queryBatchCache: { size: number };
+		queryBatchInputs: { size: number };
+		parseFileAndUse: (...args: unknown[]) => Promise<unknown>;
+		wasmInputKey: (input: { languageId: string; source: string }) => string;
+		trappedInputs: Map<string, { traps: number; by?: string; source?: string }>;
+		clearWasmInput: (input: {
+			languageId: string;
+			source: string;
+			caller?: string;
+		}) => void;
 	};
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	delete process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP;
+});
 
 describe("tree-sitter batch cache healing (#3834)", () => {
 	it("invalidates a batch that omitted a rule healed by an in-flight raw compile", async () => {
@@ -111,14 +131,121 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 			"healthy",
 		]);
 		expect(state.queryBatchCache.size).toBe(1);
+		expect(state.queryBatchInputs.size).toBe(1);
 
 		release();
 		expect(await pendingRaw).not.toBeNull();
 		expect(state.queryBatchCache.size).toBe(0);
+		expect(state.queryBatchInputs.size).toBe(0);
 		const healed = await state.compileQueryBatch([rule, healthyRule], "python");
 		expect(healed?.entries.map(({ queryDef }) => queryDef.id)).toEqual([
 			"r1",
 			"healthy",
 		]);
+	});
+
+	it("invalidates only batches containing the healed input and bounds their mirrors", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const alternateRule = {
+			...healthyRule,
+			id: "alternate",
+			name: "alternate",
+		};
+		const first = await state.compileQueryBatch([healthyRule], "python");
+		const second = await state.compileQueryBatch([alternateRule], "python");
+		expect(first).not.toBeNull();
+		expect(second).not.toBeNull();
+		expect(state.queryBatchCache.size).toBe(2);
+		expect(state.queryBatchInputs.size).toBe(2);
+
+		const firstInput = wasmQueryInput(first!.key);
+		state.trappedInputs.set(state.wasmInputKey(firstInput), {
+			traps: 1,
+			by: undefined,
+			source: firstInput.source,
+		});
+		const firstDelete = vi.spyOn(first!.query, "delete");
+		const secondDelete = vi.spyOn(second!.query, "delete");
+		state.clearWasmInput(firstInput);
+
+		expect(state.queryBatchCache.size).toBe(1);
+		expect(state.queryBatchInputs.size).toBe(1);
+		expect(firstDelete).toHaveBeenCalledTimes(1);
+		expect(secondDelete).not.toHaveBeenCalled();
+
+		process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP = "1";
+		await state.compileQueryBatch([alternateRule, healthyRule], "python");
+		expect(state.queryBatchCache.size).toBe(1);
+		expect(state.queryBatchInputs.size).toBe(1);
+	});
+
+	it("defers native disposal until an in-flight batch consumer releases it", async () => {
+		const client = new TreeSitterClient();
+		expect(await client.init()).toBe(true);
+		const state = defs(client);
+		const content = "def f():\n    return 1\n";
+		const filePath = "tree-sitter-heal-batch.py";
+		const initial = await client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			content,
+		);
+		expect(initial.map(({ queryDef }) => queryDef.id)).toEqual(["healthy"]);
+
+		const cache = client as unknown as {
+			queryBatchCache: Map<
+				string,
+				{
+					key: string;
+					query: { delete: () => void };
+				}
+			>;
+		};
+		const batch = [...cache.queryBatchCache.values()][0];
+		expect(batch).toBeDefined();
+		const deleteQuery = vi.spyOn(batch.query, "delete");
+		const batchInput = wasmQueryInput(batch.key);
+		state.trappedInputs.set(state.wasmInputKey(batchInput), {
+			traps: 1,
+			by: undefined,
+			source: batchInput.source,
+		});
+
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const parse = state.parseFileAndUse.bind(client);
+		vi.spyOn(state, "parseFileAndUse").mockImplementation(async (...args) => {
+			await held;
+			return parse(...args);
+		});
+		const pending = client.runQueriesOnFile(
+			[healthyRule],
+			filePath,
+			"python",
+			{},
+			content,
+		);
+		await Promise.resolve();
+		const trapsBefore =
+			getDegradationSummary().find((group) => group.kind === "wasm-trap")
+				?.count ?? 0;
+		state.clearWasmInput(batchInput);
+		expect(deleteQuery).not.toHaveBeenCalled();
+		expect(
+			getDegradationSummary().find((group) => group.kind === "wasm-trap")
+				?.count,
+		).toBeGreaterThan(trapsBefore);
+
+		release();
+		expect((await pending).map(({ queryDef }) => queryDef.id)).toEqual([
+			"healthy",
+		]);
+		expect(deleteQuery).toHaveBeenCalledTimes(1);
 	});
 });

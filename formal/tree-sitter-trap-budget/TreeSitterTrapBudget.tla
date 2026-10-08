@@ -396,7 +396,9 @@ BatchBuild(n) ==
               IN /\ res.ok
                  /\ SetSt(res.s)
                  /\ cache' = IF CacheGuard /\ res.trapped
-                             THEN cache
+                             THEN IF ChargedKey(BKey(n)) /\ res.s.e[BKey(n)].traps <= 1
+                                  THEN [cache EXCEPT ![n] = NoCache]
+                                  ELSE cache
                              ELSE IF res.val.st = "ok"
                                   THEN [m \in SetNames |->
                                       IF m = n THEN res.val ELSE NoCache]

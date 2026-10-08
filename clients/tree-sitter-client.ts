@@ -219,6 +219,10 @@ interface QueryBatch {
 	ownerOfPattern: number[];
 	/** The batch cache key: the rule set's identity for trap decay (#3678 F4). */
 	key: string;
+	/** Active scans keep the native query alive after cache invalidation. */
+	users: number;
+	retired: boolean;
+	disposed: boolean;
 }
 
 interface GrammarDirResolutionDeps {
@@ -601,7 +605,9 @@ export class TreeSitterClient {
 		value: QueryBatch | null,
 		inputKeys: Iterable<string> = [],
 	): void {
+		const replaced = this.queryBatchCache.get(key);
 		this.queryBatchCache.delete(key);
+		if (replaced) this.retireQueryBatch(replaced);
 		const evicted = this.queryBatchCache.setMaxEntries(
 			this.queryBatchCacheCap(),
 		);
@@ -609,7 +615,36 @@ export class TreeSitterClient {
 		for (const [evictedKey] of evicted)
 			this.queryBatchInputs.delete(evictedKey);
 		this.queryBatchInputs.set(key, new Set(inputKeys));
-		for (const [, dropped] of evicted) dropped?.query?.delete?.();
+		for (const [, dropped] of evicted) this.retireQueryBatch(dropped);
+	}
+
+	private disposeQueryBatch(batch: QueryBatch): void {
+		if (batch.disposed) return;
+		batch.disposed = true;
+		batch.query?.delete?.();
+	}
+
+	private retireQueryBatch(batch: QueryBatch | null): void {
+		if (!batch) return;
+		batch.retired = true;
+		if (batch.users === undefined || batch.users === 0) {
+			this.disposeQueryBatch(batch);
+		} else {
+			incrementDegradationCount({
+				kind: "wasm-trap",
+				subject: "web-tree-sitter",
+				reason: "deferred batch disposal while a scan is active",
+			});
+		}
+	}
+
+	private retainQueryBatch(batch: QueryBatch): void {
+		batch.users++;
+	}
+
+	private releaseQueryBatch(batch: QueryBatch): void {
+		batch.users--;
+		if (batch.retired && batch.users === 0) this.disposeQueryBatch(batch);
 	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
 	private queryBatchLoadFailures = new Map<string, number>();
@@ -633,7 +668,7 @@ export class TreeSitterClient {
 	 * holds more than `WASM_TRAP_BUDGET + 1`. */
 	private trappedInputs = new Map<
 		string,
-		{ traps: number; by: string | undefined }
+		{ traps: number; by: string | undefined; source?: string }
 	>();
 	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
 	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
@@ -709,7 +744,11 @@ export class TreeSitterClient {
 					});
 					return false;
 				}
-				this.trappedInputs.set(key, { traps: 1, by: input.caller });
+				this.trappedInputs.set(key, {
+					traps: 1,
+					by: input.caller,
+					source: input.source,
+				});
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
 				incrementDegradationCount({
@@ -768,24 +807,19 @@ export class TreeSitterClient {
 	clearWasmInput(input: WasmInput | undefined): void {
 		if (!input || this.trappedInputs.size === 0) return;
 		const key = this.wasmInputKey(input);
-		if (this.trappedInputs.get(key)?.by === input.caller) {
+		const entry = this.trappedInputs.get(key);
+		const source = entry?.source;
+		if (entry?.by === input.caller) {
 			this.trappedInputs.delete(key);
 			// A batch that skipped this input (or cached null after it was charged)
 			// is no longer equivalent to a clean rebuild. Invalidate it before the
 			// healed entry becomes observable (#3834).
 			for (const [batchKey, batch] of this.queryBatchCache) {
 				const inputs = this.queryBatchInputs.get(batchKey);
-				if (
-					!inputs ||
-					![...inputs].some(
-						(cacheInput) =>
-							this.wasmInputKey(wasmQueryInput(cacheInput)) === key,
-					)
-				)
-					continue;
+				if (!source || !inputs?.has(source)) continue;
 				this.queryBatchCache.delete(batchKey);
 				this.queryBatchInputs.delete(batchKey);
-				batch?.query?.delete?.();
+				this.retireQueryBatch(batch);
 			}
 		}
 	}
@@ -2177,6 +2211,7 @@ export class TreeSitterClient {
 			}
 			return results;
 		}
+		this.retainQueryBatch(batch);
 
 		const perQuery = new Map<number, StructuralMatch[]>();
 		await this.parseFileAndUse(
@@ -2234,7 +2269,7 @@ export class TreeSitterClient {
 			// #3678 F4: the scanner and the dispatch runner run different rule
 			// sets under this one call site.
 			`runQueriesOnFile\0${batch.key}`,
-		);
+		).finally(() => this.releaseQueryBatch(batch));
 
 		const results: Array<{
 			queryDef: TreeSitterQuery;
@@ -2370,7 +2405,15 @@ export class TreeSitterClient {
 					return null;
 				}
 				this.clearWasmInput(batchInput);
-				return { query, entries, ownerOfPattern, key: cacheKey };
+				return {
+					query,
+					entries,
+					ownerOfPattern,
+					key: cacheKey,
+					users: 0,
+					retired: false,
+					disposed: false,
+				};
 			} catch (err) {
 				if (this.reportWasmAbort(err, batchInput)) return null;
 				if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
