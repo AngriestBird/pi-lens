@@ -3740,6 +3740,33 @@ function activateExtension(hostPi: ExtensionAPI) {
 				});
 			} finally {
 				setAmbientAbortSignal(undefined);
+				// #4124: the run is over, so the word index's incremental-serialize
+				// memo (a second copy of its postings) is released once per run. After
+				// the drain, whose formatted writes can still schedule a persist. This
+				// session's index only: a concurrent secondary's settle must not drop
+				// the primary's mid-run memo, and a session replaced while the drain
+				// awaited owns a different index. Lazy and unawaited: a session that
+				// never built an index never loads the module (the eager allowlist
+				// stays as is), and a settle handler must not wait on an import. The
+				// index is captured here, under the guards.
+				const settledIndex = runtime.wordIndex;
+				if (
+					settledIndex &&
+					settleSession.isCurrent() &&
+					classifyOwnedSessionEmission(ctx, getStableSessionId(ctx)) ===
+						"primary"
+				) {
+					void import("./clients/word-index.js")
+						.then(({ releaseWordIndexMemoAtSettle }) =>
+							releaseWordIndexMemoAtSettle(settledIndex),
+						)
+						.catch((err) =>
+							surfaceHandlerCrash("word_index_memo_release", err, {
+								dbg,
+								rethrow: false,
+							}),
+						);
+				}
 			}
 			const cwd = ctx?.cwd;
 			void runQuietWindow({

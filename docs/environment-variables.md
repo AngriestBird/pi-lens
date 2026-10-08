@@ -146,6 +146,24 @@ Minimum wall-clock budget (ms) for every dispatch runner; the effective timeout
 is `max(runner budget, floor)`. **Default:** `0` (no floor). Also settable via
 the `dispatch.runnerTimeoutFloorMs` config key, which wins when both are set.
 
+### `PI_LENS_WORD_INDEX_MEMO_BACKSTOP_MS`
+
+Backstop (ms) for the word index's serialized memo, which is also its
+incremental-serialize cache: it is kept while a run edits (so each per-edit
+persist stays O(dirty tokens)) and released once per run at `agent_settled`.
+The backstop releases it when no persist has refreshed it for this long, for a
+host that never emits `agent_settled` and for a stalled run. It is re-armed by
+every serialize and never keeps the process alive. **Default:** `600000` (10
+minutes). `0`, a negative or a non-numeric value means the default (a backstop
+that fired at once would switch the memo off), and a value above `2147483647`
+(about 24.8 days, Node's largest timer delay) is clamped to it. The default is
+deliberately conservative: the maintainer's
+`latency.log` held only two intra-run gaps between `project_snapshot_persist`
+records (5.8 s), too few to derive a percentile. A release leaves one
+`word_index_memo_released` row in `latency.log` (`trigger`: `settle`,
+`post_settle_persist` or `backstop`). Releasing costs the next persist a full
+re-serialize.
+
 ## Install control
 
 ### `PI_LENS_DISABLE_LSP_INSTALL`
