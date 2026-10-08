@@ -1961,13 +1961,18 @@ export function recordPersistedWordIndexWireBytes(
 // run. The maintainer's latency.log holds only n=2 intra-run gaps between
 // project_snapshot_persist records (5.8 s), too few to set a percentile, so
 // the default is a deliberately conservative 10 minutes, re-armed by every
-// serialize. `PI_LENS_WORD_INDEX_MEMO_BACKSTOP_MS` overrides it.
+// serialize. `PI_LENS_WORD_INDEX_MEMO_BACKSTOP_MS` overrides it. Node clamps a
+// delay above 2^31-1 ms to 1 ms (and warns), which would release the memo at
+// once on every serialize, so a larger value is clamped to the maximum delay.
+// 0 and anything non-numeric or negative mean "use the default": a backstop
+// that fires immediately is the memo switched off, which is not what 0 asks.
 const DEFAULT_WORD_INDEX_MEMO_BACKSTOP_MS = 10 * 60_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function wordIndexMemoBackstopMs(): number {
 	const raw = Number(process.env.PI_LENS_WORD_INDEX_MEMO_BACKSTOP_MS);
-	return Number.isFinite(raw) && raw >= 0
-		? raw
+	return Number.isFinite(raw) && raw > 0
+		? Math.min(raw, MAX_TIMER_DELAY_MS)
 		: DEFAULT_WORD_INDEX_MEMO_BACKSTOP_MS;
 }
 
