@@ -108,6 +108,53 @@ describe("tree-sitter query loader metadata parsing", () => {
 		}
 	});
 
+	it("refreshes project, user, and structural-search loads after edit/add/remove without force", async () => {
+		const project = makeTempRulesRoot();
+		const machine = makeTempRulesRoot();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		try {
+			const userDir = path.join(
+				machine,
+				"rules/tree-sitter-queries/typescript",
+			);
+			const rulePath = path.join(userDir, "live-user.yml");
+			writeRule(
+				machine,
+				"rules/tree-sitter-queries/typescript/live-user.yml",
+				`id: live-user\nname: OLD\nquery: |\n  (identifier) @X\n`,
+			);
+			const loader = new TreeSitterQueryLoader();
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("live-user")?.name).toBe("OLD");
+
+			writeRule(
+				machine,
+				"rules/tree-sitter-queries/typescript/live-user.yml",
+				`id: live-user\nname: NEW\nquery: |\n  (identifier) @X\n`,
+			);
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("live-user")?.name).toBe("NEW");
+
+			writeRule(
+				machine,
+				"rules/tree-sitter-queries/typescript/added-user.yml",
+				`id: added-user\nname: ADDED\nquery: |\n  (identifier) @X\n`,
+			);
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("added-user")?.name).toBe("ADDED");
+
+			fs.rmSync(rulePath);
+			fs.rmSync(path.join(userDir, "added-user.yml"));
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("live-user")).toBeUndefined();
+			expect(loader.getQueryById("added-user")).toBeUndefined();
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
 	it("parses cwe/owasp/confidence in inline arrays", async () => {
 		const root = makeTempRulesRoot();
 		writeRule(

@@ -7,6 +7,7 @@
 
 import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
 import * as fs from "node:fs";
+import * as crypto from "node:crypto";
 import * as path from "node:path";
 import {
 	type BundledResourceHealth,
@@ -20,6 +21,7 @@ import {
 import yaml from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
 import { getUserRuleRoot } from "./custom-rule-locations.js";
+import { compareOrdinal } from "./string-utils.js";
 
 /**
  * The bundled `rules/tree-sitter-queries` root — the ONE spelling of this
@@ -186,6 +188,48 @@ export function ruleFilesForLanguage(
 }
 
 /**
+ * Content fingerprint for the effective tree-sitter rule set. The loader and
+ * the disk RuleCache must invalidate on the same user-rule edit, including a
+ * same-size edit whose mtime is preserved by an editor or checkout.
+ */
+export function computeRuleFilesFingerprint(ruleFiles: string[]): string {
+	const hash = crypto.createHash("sha256");
+	for (const file of [...ruleFiles].sort(compareOrdinal)) {
+		const resolved = path.resolve(file);
+		if (!fs.existsSync(resolved)) continue;
+		const stat = fs.statSync(resolved);
+		hash.update(`${file}:${stat.mtimeMs}:${stat.size}`);
+		if (
+			resolved !== BUNDLED_QUERIES_ROOT &&
+			!resolved.startsWith(BUNDLED_QUERIES_ROOT + path.sep)
+		) {
+			hash.update(fs.readFileSync(resolved));
+		}
+	}
+	return hash.digest("hex").slice(0, 16);
+}
+
+function allRuleFilesForRoot(rootDir: string): string[] {
+	const files: string[] = [];
+	const queryDirs = [
+		path.join(path.resolve(rootDir), "rules", "tree-sitter-queries"),
+		path.join(getUserRuleRoot(), "tree-sitter-queries"),
+		BUNDLED_QUERIES_ROOT,
+	];
+	for (const queryDir of queryDirs) {
+		if (!fs.existsSync(queryDir)) continue;
+		for (const language of fs.readdirSync(queryDir, { withFileTypes: true })) {
+			if (!language.isDirectory()) continue;
+			for (const file of fs.readdirSync(path.join(queryDir, language.name))) {
+				if (file.endsWith(".yml"))
+					files.push(path.join(queryDir, language.name, file));
+			}
+		}
+	}
+	return files;
+}
+
+/**
  * The rule set that applies to a file parsed as `languageId`, in a stable order.
  *
  * Excludes `<language>-disabled/` rules. `getQueriesForLanguage` filtered these
@@ -288,6 +332,7 @@ export class TreeSitterQueryLoader {
 	private queries: Map<string, TreeSitterQuery[]> = new Map();
 	private loaded = false;
 	private loadedRoot: string | null = null;
+	private loadedRuleFingerprint: string | null = null;
 	private verbose: boolean;
 	/**
 	 * This root's per-file parse failures, remembered across the memoized
@@ -382,7 +427,15 @@ export class TreeSitterQueryLoader {
 		options: { force?: boolean } = {},
 	): Promise<Map<string, TreeSitterQuery[]>> {
 		const resolvedRoot = path.resolve(rootDir);
-		if (!options.force && this.loaded && this.loadedRoot === resolvedRoot) {
+		const ruleFingerprint = computeRuleFilesFingerprint(
+			allRuleFilesForRoot(resolvedRoot),
+		);
+		if (
+			!options.force &&
+			this.loaded &&
+			this.loadedRoot === resolvedRoot &&
+			this.loadedRuleFingerprint === ruleFingerprint
+		) {
 			this.replayQueryParseFailures();
 			return this.queries;
 		}
@@ -439,6 +492,9 @@ export class TreeSitterQueryLoader {
 
 		this.loaded = true;
 		this.loadedRoot = resolvedRoot;
+		this.loadedRuleFingerprint = computeRuleFilesFingerprint(
+			allRuleFilesForRoot(resolvedRoot),
+		);
 		// Every failure hit above was recorded into THIS generation's ledger
 		// directly (via recordQueryParseFailure); mark it replayed so a
 		// same-generation memoized call right after this one doesn't redo the

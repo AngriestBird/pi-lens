@@ -20,6 +20,8 @@ import {
 	AstGrepRuleManager,
 	checkAstGrepRulesHealth,
 } from "../../clients/ast-grep-rule-manager.js";
+import { getUserRuleRoot } from "../../clients/custom-rule-locations.js";
+import { getAstGrepRuleFingerprint } from "../../clients/sgconfig.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 /**
@@ -59,6 +61,43 @@ function writeYaml(dir: string, relPath: string, id = "fake"): void {
 }
 
 describe("checkAstGrepRulesHealth", () => {
+	it("refreshes descriptions when the shared ast-grep rule fingerprint changes", () => {
+		const machine = freshRuleDir();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		try {
+			const rel = path.join(
+				"rules",
+				"ast-grep-rules",
+				"rules",
+				"live-description.yml",
+			);
+			writeYaml(machine, rel, "live-description");
+			const file = path.join(machine, rel);
+			fsSync.writeFileSync(file, "id: live-description\nmessage: OLD\n");
+			const manager = new AstGrepRuleManager(
+				[process.cwd(), getUserRuleRoot()],
+				() => {},
+				() => getAstGrepRuleFingerprint(process.cwd()),
+			);
+			expect(
+				manager.loadRuleDescriptions().get("live-description")?.message,
+			).toBe("OLD");
+
+			fsSync.writeFileSync(file, "id: live-description\nmessage: NEW\n");
+			expect(
+				manager.loadRuleDescriptions().get("live-description")?.message,
+			).toBe("NEW");
+			fsSync.rmSync(file);
+			expect(manager.loadRuleDescriptions().has("live-description")).toBe(
+				false,
+			);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
 	it("reports absent when ruleDir itself does not exist", () => {
 		const ruleDir = path.join(freshRuleDir(), "does-not-exist");
 		expect(checkAstGrepRulesHealth(ruleDir)).toEqual({ status: "absent" });

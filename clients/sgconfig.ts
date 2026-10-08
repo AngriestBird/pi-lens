@@ -6,7 +6,7 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { load as loadYaml } from "./deps/js-yaml.js";
 import { resolvePackagePath } from "./package-root.js";
 import { findLocalToolConfig } from "./path-utils.js";
-import { getGlobalPiLensDir } from "./file-utils.js";
+import { getUserRuleRoot } from "./custom-rule-locations.js";
 
 // ast-grep's root config marker. The `ast-grep lsp` server is workspace-gated:
 // it only operates in a project that has an `sgconfig.y[a]ml` at (or above) the
@@ -85,7 +85,7 @@ export function getAstGrepRuleSources(
 			},
 		);
 	}
-	const userRoot = path.join(getGlobalPiLensDir(), "rules");
+	const userRoot = getUserRuleRoot();
 	if (canonicalDir(userRoot) !== canonicalDir(root)) {
 		candidates.push(
 			{
@@ -243,6 +243,13 @@ function sourceFingerprint(sources: RuleSourceSnapshot[]): string {
 		hash.update("\0");
 	}
 	return hash.digest("hex");
+}
+
+/** Fingerprint shared by ast-grep execution and description metadata. */
+export function getAstGrepRuleFingerprint(projectRoot = process.cwd()): string {
+	return sourceFingerprint(
+		getAstGrepRuleSources(projectRoot).map(snapshotRuleSource),
+	);
 }
 
 function materializeMergedRuleDir(
