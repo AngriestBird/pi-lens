@@ -75,6 +75,7 @@ import {
 import { evaluateGitGuard } from "../../clients/git-guard.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { beginScope, retireScope } from "../../clients/session-scope.js";
 import {
 	cancelLSPIdleReset,
 	handleTurnEnd,
@@ -1245,8 +1246,65 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 			await endTurn(rig);
 			expect(pendingAuxiliaryCoverageSize()).toBe(0);
 			expect(staleWriteSubjects()).toContain(
-				`runtime-session:turn-end:late-aux-rearm:opengrep:${file}`,
+				"runtime-session:turn-end:late-aux-rearm",
 			);
+			// Recurrence (#4168 review F2): the dropped re-arm was still counted,
+			// so the row read `rearmed: 1` beside `pendingAfter: 0`.
+			const row = logLatency.mock.calls
+				.map((call) => call[0])
+				.find((entry: any) => entry?.phase === "late_auxiliary_findings");
+			expect(row?.metadata).toMatchObject({ rearmed: 0, pendingAfter: 0 });
+			expect(file).toContain("old-aux.ts");
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence (#4168 review F3): one stale-write subject per pair let a
+	// replaced turn's pairs push every other subject out of the kind's
+	// 20-entry window. The store is one subject; its count carries N.
+	it("records the replaced turn's dropped re-arms under one subject for the store", async () => {
+		const rig = makeRig("pi-lens-4161-aux-rearm-subject-");
+		try {
+			markAux(rig, "old-aux-a.ts");
+			markAux(rig, "old-aux-b.ts");
+			readCachedDiagnosticsForServers.mockImplementation(async () => {
+				replace(rig);
+				throw new Error("probe failed");
+			});
+			await endTurn(rig);
+			expect(pendingAuxiliaryCoverageSize()).toBe(0);
+			expect(
+				staleWriteSubjects().filter((subject) =>
+					subject.includes("late-aux-rearm"),
+				),
+			).toEqual(["runtime-session:turn-end:late-aux-rearm"]);
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	// Recurrence (#4168 named output): the hold drains were judged by the
+	// coordinator's scope and the late-scan cell by the activation's. A
+	// concurrent secondary whose own scope ended mid-turn still drained the
+	// primary's run and showed it in its own message. One identity, the
+	// activation's scope taken at entry, now judges both.
+	it("a secondary whose scope ended mid-turn leaves the primary's run for the primary", async () => {
+		const rig = makeRig("pi-lens-4161-secondary-retired-");
+		try {
+			rig.runtime.appendCascadeRun(cascadeRun(rig, "primary-built"));
+			const secondary = beginScope({ role: "secondary" });
+			queueMicrotask(() => retireScope(secondary, "shutdown"));
+			await handleTurnEnd({
+				...makeDeps(rig.runtime, rig.cacheManager, rig.cwd),
+				sessionId: "secondary-4161",
+				sessionScope: secondary,
+			});
+			expect(
+				rig.runtime
+					.consumeCascadeRuns()
+					.map((run) => path.basename(run.filePath)),
+			).toEqual(["primary-built.ts"]);
 		} finally {
 			rig.cleanup();
 		}
