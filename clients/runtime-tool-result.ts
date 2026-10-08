@@ -1359,6 +1359,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// `rawFilePath` against that basis, rather than trusting a call-time path
 	// that a later handler may have superseded.
 	const toolCallId = resolveToolCallCorrelationId(event);
+	// The transcript identity every read-evidence record below carries: the
+	// `toolResult` that shows the agent the bytes, which for a nested call is
+	// its parent's (#3831, #4138). `toolCallId` stays the call's own identity
+	// for everything that pairs this result with its tool_call.
+	const readEvidenceToolCallId = resolveReadEvidenceCorrelationId(event);
 	// #3598: the host tool for this call has finished, whatever it did. Before
 	// any return below, so a call that exits early is still no longer in flight.
 	noteAgentCallEnd(toolCallId);
@@ -1806,7 +1811,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					turnIndex: runtime.turnIndex,
 					writeIndex: runtime.peekWriteIndex(),
 					timestamp: Date.now(),
-					...(toolCallId !== undefined && { toolCallId }),
+					...(readEvidenceToolCallId !== undefined && {
+						toolCallId: readEvidenceToolCallId,
+					}),
 				});
 			}
 		}
@@ -1876,9 +1883,26 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				projectRoot: workspaceRoot,
 				turnIndex: runtime.turnIndex,
 				writeIndex: runtime.peekWriteIndex(),
-				...(toolCallId !== undefined && { toolCallId }),
+				...(readEvidenceToolCallId !== undefined && {
+					toolCallId: readEvidenceToolCallId,
+				}),
 			});
 		}
+	}
+
+	// A read whose host call errored (offset past EOF, unreadable) delivered
+	// nothing, so its tool_call capture is not evidence: alone, it satisfied
+	// the zero-read check for an oldText edit of lines the agent never saw
+	// (#4185 round 2; `formal/read-guard` FailedReadLive). Not gated by
+	// `--no-read-guard`: the capture is recorded without it too.
+	if (
+		deps.readGuard &&
+		event.toolName === "read" &&
+		event.isError === true &&
+		toolCallId !== undefined &&
+		filePath
+	) {
+		deps.readGuard.dropProvisionalRead(filePath, toolCallId);
 	}
 
 	// Native read results are the authoritative read boundary. The tool_call
@@ -1897,7 +1921,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				? attribution.resolvedPath
 				: filePath;
 		if (nodeFs.existsSync(deliveredFilePath)) {
-			const nativeReadToolCallId = resolveReadEvidenceCorrelationId(event);
 			const input = event.input as { offset?: number; limit?: number };
 			const requestedOffset = Math.max(1, input.offset ?? 1);
 			const requestedLimit = input.limit;
@@ -1979,8 +2002,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							.reverse()
 							.find(
 								(candidate) =>
-									candidate.source ===
-									`native-read:${nativeReadToolCallId}:provisional`,
+									candidate.source === `native-read:${toolCallId}:provisional`,
 							)
 					: undefined;
 				const capturedLines = capture?.lineHashes
@@ -2043,14 +2065,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						turnIndex: runtime.turnIndex,
 						writeIndex: runtime.peekWriteIndex(),
 						timestamp: Date.now(),
-						...(nativeReadToolCallId !== undefined && {
-							toolCallId: nativeReadToolCallId,
+						...(readEvidenceToolCallId !== undefined && {
+							toolCallId: readEvidenceToolCallId,
 						}),
 					};
 					deps.readGuard.recordRead(deliveredRecord, {
-						...(nativeReadToolCallId && {
-							supersedes: { toolCallId: nativeReadToolCallId },
-						}),
+						// The capture is keyed by this call's own identity.
+						...(toolCallId && { supersedes: { toolCallId } }),
 						stampFileTime: !raced,
 					});
 				}
@@ -2517,7 +2538,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				writeIndex: runtime.peekWriteIndex(),
 				timestamp: Date.now(),
 				source: "own-edit",
-				...(toolCallId !== undefined && { toolCallId }),
+				...(readEvidenceToolCallId !== undefined && {
+					toolCallId: readEvidenceToolCallId,
+				}),
 			},
 			{ stampFileTime: false },
 		);

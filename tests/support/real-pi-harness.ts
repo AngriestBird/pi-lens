@@ -49,6 +49,11 @@ export type RealPi = {
 	getState(): Promise<JsonObject>;
 	getCommands(): Promise<JsonObject>;
 	newSession(): Promise<JsonObject>;
+	/**
+	 * RPC `clone`: pi forks the session at its leaf and rebinds the extensions,
+	 * the hand-off a `/clone` makes (#3521, #4138). Works under `--no-session`.
+	 */
+	clone(): Promise<JsonObject>;
 	events(kind: string): Promise<ReadonlyArray<HarnessEvent>>;
 	toolResults(): ReadonlyArray<HarnessEvent>;
 	awaitAssistantTurn(): Promise<HarnessEvent>;
@@ -170,6 +175,7 @@ function startRealPi(
 	env: Record<string, string> = {},
 	projectOverride?: string,
 	extensions: readonly string[] = [],
+	agentSettings?: JsonObject,
 ) {
 	const scratchRoot = homeOverride ?? SCRATCH_DIR_ROOT;
 	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: SWEEP_ANY_AGE });
@@ -178,6 +184,16 @@ function startRealPi(
 	const providerLog = path.join(home, "provider.jsonl");
 	const childTmp = path.join(home, "tmp");
 	mkdirSync(childTmp, { recursive: true });
+	// pi's agent dir (`PI_CODING_AGENT_DIR`) under the removable home, so a
+	// scenario can turn on a built-in tool pi keeps off by default (codemode).
+	const agentDir = path.join(home, "agent");
+	if (agentSettings) {
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify(agentSettings),
+		);
+	}
 	const childEnv = withRepoBinOnPath({
 		...process.env,
 		// Keep the real host outside Vitest's runner-only rethrow mode.
@@ -190,6 +206,7 @@ function startRealPi(
 		REAL_PI_HARNESS_SCRIPT: scriptFile,
 		REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
 		ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
+		...(agentSettings && { PI_CODING_AGENT_DIR: agentDir }),
 		...env,
 	});
 	const child: ChildProcessWithoutNullStreams = spawn(
@@ -384,6 +401,11 @@ export async function withRealPi<T>(
 		 * That pair is what makes two sessions share one repository (#2154 AC1).
 		 */
 		project?: string;
+		/**
+		 * pi `settings.json` for the child's own agent dir, for example
+		 * `{ defaultTools: ["+codemode"] }` to turn on a tool pi ships off.
+		 */
+		agentSettings?: JsonObject;
 	},
 	callback: (pi: RealPi) => Promise<T>,
 ): Promise<T> {
@@ -400,6 +422,7 @@ export async function withRealPi<T>(
 		options.env,
 		options.project,
 		options.extensions,
+		options.agentSettings,
 	);
 	try {
 		let cursor = harness.events.length;
@@ -425,6 +448,10 @@ export async function withRealPi<T>(
 			newSession: async () => {
 				cursor = harness.events.length;
 				return harness.request("new_session");
+			},
+			clone: async () => {
+				cursor = harness.events.length;
+				return harness.request("clone");
 			},
 			prompt: async (message) => {
 				cursor = harness.events.length;

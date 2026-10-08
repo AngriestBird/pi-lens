@@ -893,7 +893,13 @@ export type DegradationKind =
 	 * epoch sends it on every call, and one row is the signal.
 	 */
 	| "mutation-bridge-invalid-branch-epoch"
-	/** A mutation bridge producer supplied a path outside the project or one that could not be resolved. */
+	/**
+	 * #4140: a v1 mutation-bridge producer (`ast_grep_replace`, LSP, observed
+	 * replay, a third-party v1 bridge) supplied a path outside the project or
+	 * one that could not be resolved, so its bookkeeping was not admitted. Once
+	 * per `<consumer>:out-of-scope`, the path in the reason. The v2 io-bridge
+	 * records the same drop as `io-bridge-mutate-dropped` and never this.
+	 */
 	| "mutation-bridge-out-of-scope"
 	| "native-read-clipped"
 	/**

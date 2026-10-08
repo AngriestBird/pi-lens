@@ -460,62 +460,308 @@ describe("bash grep searchReads registration", () => {
 		}
 	});
 
-	it("records a relative nested read under its parent transcript identity (#4138 #3831)", async () => {
-		const env = setupTestEnvironment("pi-lens-relative-nested-read-");
-		try {
-			const filePath = createTempFile(
-				env.tmpDir,
-				"nested.ts",
-				"export const value = 1;\n",
-			);
-			const runtime = new RuntimeCoordinator();
-			runtime.projectRoot = env.tmpDir;
-			runtime.recordToolCallAttribution("nested-1", {
-				resolvedPath: filePath,
-				skipped: false,
-				originCwd: env.tmpDir,
-			});
-			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
-			const agentBehaviorRecord = vi.fn(() => []);
-			const readTool = createReadToolDefinition(env.tmpDir);
-			const result = await readTool.execute(
-				"nested-1",
-				{ path: "nested.ts", offset: 1, limit: 20 },
-				undefined,
-				undefined,
-				{ cwd: env.tmpDir } as never,
-			);
-
-			await handleToolResult({
-				event: {
-					toolName: "read",
-					toolCallId: "nested-1",
-					parentToolCallId: "codemode-1",
-					input: { path: "nested.ts", offset: 1, limit: 20 },
-					content: result.content,
-					details: result.details,
-				},
-				getFlag: () => false,
+	/**
+	 * #4138, #3831: the ids on a read's records. The call identity (`c1/1`
+	 * for a nested call) keys the tool_call capture and its supersession; the
+	 * transcript identity (the parent `c1`, whose toolResult the branch shows)
+	 * is the only `toolCallId` a read-evidence record carries, from every
+	 * writer. Each case enters through the real `handleToolCall`, so the
+	 * attribution a relative path needs at tool_result is the production one,
+	 * never seeded (#4185 round 1 F3: a seeded attribution left the
+	 * `toolName === "read"` attribution branch with no test that could red).
+	 */
+	describe("nested call identity on read evidence (#4138 #3831)", () => {
+		const noLsp = (name: string) =>
+			name === "no-lsp" || name === "no-complexity";
+		function callDeps(runtime: RuntimeCoordinator, event: unknown) {
+			return {
+				event,
+				ctx: { cwd: runtime.projectRoot },
+				lensEnabled: true,
+				getFlag: noLsp,
 				dbg: () => {},
 				runtime,
 				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as never;
+		}
+		function resultDeps(
+			runtime: RuntimeCoordinator,
+			event: unknown,
+			agentBehaviorRecord: () => string[] = () => [],
+		) {
+			return {
+				event,
+				getFlag: noLsp,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
 				resetLSPService: () => {},
 				readGuard: runtime.readGuard,
 				agentBehaviorRecord,
 				formatBehaviorWarnings: () => "",
-			} as never);
-
-			expect(recordRead).toHaveBeenCalledWith(
-				expect.objectContaining({
-					filePath,
-					toolCallId: "codemode-1",
-				}),
-				expect.anything(),
-			);
-			expect(agentBehaviorRecord).toHaveBeenCalledWith("read", filePath);
-		} finally {
-			env.cleanup();
+			} as never;
 		}
+		/** pi's nested read of a RELATIVE path: tool_call, the real read tool, tool_result. */
+		async function nestedRead(
+			runtime: RuntimeCoordinator,
+			spelling: string,
+			agentBehaviorRecord: () => string[] = () => [],
+		) {
+			const input = { path: spelling, offset: 1, limit: 20 };
+			await handleToolCall(
+				callDeps(runtime, {
+					toolName: "read",
+					toolCallId: "codemode-1/1",
+					parentToolCallId: "codemode-1",
+					input,
+				}),
+			);
+			const result = await createReadToolDefinition(
+				runtime.projectRoot!,
+			).execute("codemode-1/1", input, undefined, undefined, {
+				cwd: runtime.projectRoot,
+			} as never);
+			await handleToolResult(
+				resultDeps(
+					runtime,
+					{
+						toolName: "read",
+						toolCallId: "codemode-1/1",
+						parentToolCallId: "codemode-1",
+						input,
+						content: result.content,
+						details: result.details,
+					},
+					agentBehaviorRecord,
+				),
+			);
+		}
+
+		it("records a relative nested read under its parent's transcript identity, after a provisional record keyed by its own call", async () => {
+			const env = setupTestEnvironment("pi-lens-relative-nested-read-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"nested.ts",
+					"export const value = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+				const agentBehaviorRecord = vi.fn(() => []);
+
+				await nestedRead(runtime, "nested.ts", agentBehaviorRecord);
+
+				// tool_call: the capture, keyed by the call (pi's `c1/1`, sanitized
+				// to `c1_1` by `sanitizeCorrelationId`), with no transcript id.
+				expect(recordRead.mock.calls[0]?.[0]).toMatchObject({
+					filePath,
+					provisional: true,
+					source: "native-read:codemode-1_1:provisional",
+				});
+				expect(recordRead.mock.calls[0]?.[0]).not.toHaveProperty("toolCallId");
+				// tool_result: the delivered record under the parent, superseding
+				// the capture by the call identity.
+				expect(recordRead).toHaveBeenLastCalledWith(
+					expect.objectContaining({
+						filePath,
+						effectiveOffset: 1,
+						toolCallId: "codemode-1",
+					}),
+					expect.objectContaining({
+						supersedes: { toolCallId: "codemode-1_1" },
+					}),
+				);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+					expect.objectContaining({ toolCallId: "codemode-1" }),
+				]);
+				expect(agentBehaviorRecord).toHaveBeenCalledWith("read", filePath);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// Recurrence: the live twin of #4185 round 1 F1, found by the model
+		// (`formal/read-guard` FailedReadLive). The capture a read's tool_call
+		// records was that read's only record when the host errored, and alone
+		// it satisfied the zero-read check for an oldText edit.
+		it("drops the capture of a read that errored, so an oldText edit of unseen lines is refused", async () => {
+			const env = setupTestEnvironment("pi-lens-failed-read-capture-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"short.ts",
+					"export const value = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const input = { path: "short.ts", offset: 999 };
+				await handleToolCall(
+					callDeps(runtime, { toolName: "read", toolCallId: "r1", input }),
+				);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+					expect.objectContaining({ provisional: true }),
+				]);
+				const failed = await createReadToolDefinition(env.tmpDir)
+					.execute("r1", input, undefined, undefined, {
+						cwd: env.tmpDir,
+					} as never)
+					.then(
+						(result) => ({ content: result.content, isError: false }),
+						(error: Error) => ({
+							content: [{ type: "text", text: error.message }],
+							isError: true,
+						}),
+					);
+				expect(failed.isError).toBe(true);
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "read",
+						toolCallId: "r1",
+						isError: true,
+						input,
+						content: failed.content,
+					}),
+				);
+				expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+				expect(
+					runtime.readGuard.checkEdit(filePath, [1, 1], undefined, {
+						skipSnapshotCheck: true,
+						oldTextResolved: true,
+					}),
+				).toMatchObject({ action: "block" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("records a nested bash view span under the parent's transcript identity", async () => {
+			const env = setupTestEnvironment("pi-lens-nested-bash-view-");
+			try {
+				const filePath = path.join(env.tmpDir, "sample.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "bash",
+						toolCallId: "codemode-1/1",
+						parentToolCallId: "codemode-1",
+						input: { command: `cat ${filePath}` },
+						content: [{ type: "text", text: "one\ntwo\nthree" }],
+					}),
+				);
+				expect(recordRead).toHaveBeenCalledWith(
+					expect.objectContaining({
+						filePath,
+						effectiveOffset: 1,
+						toolCallId: "codemode-1",
+					}),
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("records a nested bash grep search read under the parent's transcript identity", async () => {
+			const env = setupTestEnvironment("pi-lens-nested-grep-read-");
+			try {
+				const filePath = path.join(env.tmpDir, "sample.ts");
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n"),
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "bash",
+						toolCallId: "codemode-1/1",
+						parentToolCallId: "codemode-1",
+						input: { command: `grep -n line9 ${filePath}` },
+						details: {},
+						content: [{ type: "text", text: "9:line9" }],
+					}),
+				);
+				expect(recordRead).toHaveBeenCalledWith(
+					expect.objectContaining({
+						filePath,
+						effectiveOffset: 9,
+						effectiveLimit: 1,
+						toolCallId: "codemode-1",
+					}),
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("records a nested own-edit's evidence under the parent's transcript identity", async () => {
+			const env = setupTestEnvironment("pi-lens-nested-own-edit-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"nested.ts",
+					"export const value = 1;\nexport const other = 2;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				await nestedRead(runtime, filePath);
+				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+				const input = {
+					path: filePath,
+					edits: [
+						{
+							range: { start: { line: 1 }, end: { line: 1 } },
+							newText: "export const value = 2;",
+						},
+					],
+				};
+				const verdict = await handleToolCall(
+					callDeps(runtime, {
+						toolName: "edit",
+						toolCallId: "codemode-1/2",
+						parentToolCallId: "codemode-1",
+						input,
+					}),
+				);
+				expect(verdict).not.toMatchObject({ block: true });
+				fs.writeFileSync(
+					filePath,
+					"export const value = 2;\nexport const other = 2;\n",
+				);
+				await handleToolResult(
+					resultDeps(runtime, {
+						toolName: "edit",
+						toolCallId: "codemode-1/2",
+						parentToolCallId: "codemode-1",
+						input,
+						content: [{ type: "text", text: "ok" }],
+					}),
+				);
+				expect(recordRead).toHaveBeenCalledWith(
+					expect.objectContaining({
+						filePath,
+						source: "own-edit",
+						effectiveOffset: 1,
+						toolCallId: "codemode-1",
+					}),
+					expect.anything(),
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 
 	it("registers only the lines shown by the real bash host cap", async () => {

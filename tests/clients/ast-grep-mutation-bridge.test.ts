@@ -132,6 +132,68 @@ describe("#2423 ast_grep_replace records its applied rewrites", () => {
 });
 
 /**
+ * #4140 (F9 of #4185 round 1): the structural apply (`replaceWithRule`, the
+ * `insideKind`/`hasKind`/`follows` options) rewrites files with `--update-all`
+ * through `tempScanWithFixAsync` and never reached the bridge: no stamp, no
+ * turn state, no deferred format, whatever the path spelling. The runner is
+ * the ast-grep process boundary; the matches it reports before the write are
+ * the ones recorded, as in the pattern apply.
+ */
+describe("#4140 the structural ast_grep_replace apply records through the bridge", () => {
+	const RULE =
+		"id: agent-rule\nlanguage: typescript\nrule:\n  pattern: var $X\nfix: let $X\n";
+	function clientWithRunner(matches: typeof MATCHES): {
+		client: AstGrepClient;
+		runner: { tempScanWithFixAsync: ReturnType<typeof vi.fn> };
+	} {
+		const runner = {
+			tempScanDetailedAsync: vi.fn(async () => ({ matches, status: 0 })),
+			tempScanWithFixAsync: vi.fn(async () => ({ matches })),
+		};
+		const client = new AstGrepClient();
+		(client as unknown as { runner: unknown }).runner = runner;
+		return { client, runner };
+	}
+
+	it("records one mutation per rewritten file with 1-based ranges, like the pattern apply", async () => {
+		recorded.length = 0;
+		const { client, runner } = clientWithRunner(MATCHES);
+		const result = await client.replaceWithRule(RULE, ["src"], true);
+		expect(result.applied).toBe(true);
+		expect(runner.tempScanWithFixAsync).toHaveBeenCalledWith(
+			"src",
+			"agent-rule",
+			RULE,
+			true,
+		);
+		expect(recorded).toEqual([
+			expect.objectContaining({
+				filePath: path.resolve(process.cwd(), "src/a.ts"),
+				kind: "edit",
+				consumer: "ast_grep_replace",
+				editRanges: [
+					[5, 5],
+					[21, 21],
+				],
+			}),
+			expect.objectContaining({
+				filePath: path.resolve(process.cwd(), "src/b.ts"),
+				kind: "edit",
+				editRanges: [[1, 1]],
+			}),
+		]);
+	});
+
+	it("records nothing for a structural dry run", async () => {
+		recorded.length = 0;
+		const { client } = clientWithRunner(MATCHES);
+		const result = await client.replaceWithRule(RULE, ["src"], false);
+		expect(result.applied).toBe(false);
+		expect(recorded).toHaveLength(0);
+	});
+});
+
+/**
  * #3763 item 4: the bridge fences a replay by the lineage its producer
  * captured (S3), and an entry without one stays fail-open. ast_grep_replace
  * sent none, so an apply that finished after `/new` stamped, listed and

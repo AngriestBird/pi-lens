@@ -326,6 +326,7 @@ export class AstGrepClient {
 		ruleYaml: string,
 		paths: string[],
 		apply: boolean,
+		options?: { lineage?: LineageHandle },
 	): Promise<{
 		matches: AstGrepMatch[];
 		totalMatches: number;
@@ -372,6 +373,10 @@ export class AstGrepClient {
 			}
 			allMatches.push(...result.matches);
 		}
+		// #4140 (F9): the structural apply rewrites files with `--update-all`
+		// exactly as the pattern apply does, and no tool_result describes it, so
+		// it reaches the same bridge with the matches captured before the write.
+		if (apply) recordAstGrepApply(allMatches, options?.lineage);
 		return {
 			matches: allMatches,
 			totalMatches: allMatches.length,

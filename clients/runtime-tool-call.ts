@@ -68,10 +68,7 @@ import {
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
-import {
-	resolveReadEvidenceCorrelationId,
-	resolveToolCallCorrelationId,
-} from "./tool-event.js";
+import { resolveToolCallCorrelationId } from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
@@ -748,7 +745,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
 	const toolCallId = resolveToolCallCorrelationId(event);
-	const readEvidenceToolCallId = resolveReadEvidenceCorrelationId(event);
+	// #4138: a read is attributed too, so its tool_result resolves a relative
+	// path against the cwd this call ran under instead of failing closed at
+	// `path_attribution_missing` and never writing the delivered record.
 	const attributesMutationTarget =
 		toolCallId !== undefined && (mutation !== undefined || toolName === "read");
 	const targetMissing = !nodeFs.existsSync(filePath);
@@ -778,8 +777,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		});
 		// #3598: this mutation is now in flight, so a running whole-package fixer
 		// must not write an older capture over it. Cleared at its tool_result, or
-		// below when the call is blocked.
-		noteAgentCallStart(toolCallId, filePath);
+		// below when the call is blocked. A read changes no bytes, so it is never
+		// in flight here: an in-flight read would stop the restore of an agent
+		// edit the fixer overwrote (#4185 round 1, F2).
+		if (mutation !== undefined) noteAgentCallStart(toolCallId, filePath);
 	}
 	if (targetMissing) {
 		// #1655 item 5: this early return used to be the whole story — pi-lens
@@ -1087,9 +1088,13 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			writeIndex: runtime.peekWriteIndex(),
 			timestamp: Date.now(),
 			provisional: true,
-			...(readEvidenceToolCallId !== undefined && {
-				source: `native-read:${readEvidenceToolCallId}:provisional`,
-				toolCallId: readEvidenceToolCallId,
+			// The call identity keys this capture for the tool_result that
+			// supersedes it (unique per call, nested or not). No `toolCallId`: the
+			// record showed the agent nothing yet, so no branch move may keep it.
+			// A read that errors leaves only this record, and with an identity it
+			// licensed an edit after /clone (#4185 round 1, F1).
+			...(toolCallId !== undefined && {
+				source: `native-read:${toolCallId}:provisional`,
 			}),
 		});
 	}

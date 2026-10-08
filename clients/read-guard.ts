@@ -825,6 +825,31 @@ export class ReadGuard {
 	 * Record that a file was read.
 	 * Call this from the tool_call handler after any LSP expansion.
 	 */
+	/**
+	 * Drop the tool_call capture of the read `toolCallId` made of `rawFilePath`
+	 * (the record whose `source` is `native-read:<call>:provisional`). The
+	 * delivered record supersedes it ({@link recordRead}); a result that
+	 * delivered nothing (an error: offset past EOF, unreadable) drops it
+	 * outright, because the capture was that read's only record and, alone, it
+	 * satisfied the zero-read check for an oldText edit of lines the agent
+	 * never saw (#4185 round 2; `formal/read-guard` FailedReadLive). Keyed by
+	 * the call's own identity: a nested call's is unique where its parent's,
+	 * the transcript identity a record carries, is shared by every read a
+	 * script makes. Returns whether a capture was found.
+	 */
+	dropProvisionalRead(rawFilePath: string, toolCallId: string): boolean {
+		const filePath = this.key(rawFilePath);
+		const records = this.reads.get(filePath);
+		const source = `native-read:${toolCallId}:provisional`;
+		const index = records?.findIndex(
+			(candidate) => candidate.source === source,
+		);
+		if (!records || index === undefined || index < 0) return false;
+		records.splice(index, 1);
+		if (records.length === 0) this.reads.delete(filePath);
+		return true;
+	}
+
 	recordRead(
 		record: ReadRecord,
 		opts?: {
@@ -846,15 +871,8 @@ export class ReadGuard {
 		},
 	): void {
 		const filePath = this.key(record.filePath);
-		if (opts?.supersedes) {
-			const records = this.reads.get(filePath);
-			const provisionalSource = `native-read:${opts.supersedes.toolCallId}:provisional`;
-			const provisionalIndex = records?.findIndex(
-				(candidate) => candidate.source === provisionalSource,
-			);
-			if (provisionalIndex !== undefined && provisionalIndex >= 0)
-				records!.splice(provisionalIndex, 1);
-		}
+		if (opts?.supersedes)
+			this.dropProvisionalRead(filePath, opts.supersedes.toolCallId);
 		// #1668 review F1: index by the existence-independent syntactic key
 		// while the file is (presumably) still on disk, so a later
 		// hasKnownPath/forgetPath lookup after an external delete can still
