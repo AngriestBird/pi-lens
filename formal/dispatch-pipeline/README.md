@@ -266,9 +266,11 @@ sibling.
 | `SiblingRestoreInFlightHeld` | the in-flight check, with the other windows closed and every call reaching pi-lens during the run | pass | 612 |
 | `MutSiblingNoInFlight` | the same without the in-flight check (the restore before #3741 round 2) | violated `NoRestoreOverNewer` | 493 (at the violation) |
 | `SiblingRestoreDeregistered` | finding A | violated `NoRestoreOverReadEdit` | 252 (at the violation) |
-| `SiblingRestoreInFlight` | finding B: an uncaptured in-flight edit is reported, but its bytes are not retained | pass | 146 |
-| `SiblingRestoreQueuedSilent` | finding C, left after defect 2's fix | violated `NoSilentLoss` | 245 (at the violation) |
-| `SiblingRestoreCallBeforeRun` | finding D: a pre-registration call is carried into the run, preventing restore over newer bytes | pass | 1,261 |
+| `SiblingRestoreInFlight` | finding B: an uncaptured in-flight edit is reported, but its bytes are not retained | pass | 105 |
+| `SiblingRestoreInFlightEvery` | the in-flight rule over two calls: the tool erases one edit and the other lands on its bytes; every in-flight call must verify (`NoSilentLossUncaptured`) | pass | 612 |
+| `SiblingRestoreQueuedSilent` | finding C: the displaced and supersede rules name an earlier verified edit the tool erased, and an intact file stays quiet (`NoSilentLoss`, `NoFalseAlarm`) | pass | 262 |
+| `SiblingRestoreQueuedSilentLate` | the stated residual of C (`SAtomic = FALSE`): the tool erases edit 1 after edit 2's `tool_call` and before the host runs it | violated `NoSilentLoss` | 591 (at the violation) |
+| `SiblingRestoreCallBeforeRun` | finding D: a pre-registration call is carried into the run, preventing restore over newer bytes | pass | 727 |
 | `SiblingRestoreInFlightUnfixed` | pre-fix B witness: no report for an uncaptured in-flight edit | violated `NoSilentLoss` | 129 (at the violation) |
 | `SiblingRestoreQueuedSilentUnfixed` | pre-fix C witness: a later capture hides an earlier loss | violated `NoSilentLoss` | 245 (at the violation) |
 | `SiblingRestoreCallBeforeRunUnfixed` | pre-fix D witness: a pre-registration call is not carried into the run | violated `NoRestoreOverNewer` | 1,261 (at the violation) |
@@ -335,9 +337,27 @@ each reproduced against the real `beginFixRun` / `noteAgentMutation` /
   result; the remaining safety property is reportability, not preservation.
 - **C, `SiblingRestoreQueuedSilent`.** A later capture replaces an earlier
   one. If the tool's stale write erased edit 1 after it was captured, and
-  edit 2 then landed on the tool's bytes, the earlier loss remains reported
-  when its capture was not verified; verified sequential edits are not a
-  loss signal.
+  edit 2 then landed on the tool's bytes, edit 2's capture passes its own
+  check and edit 1 is in neither the capture nor the report. Reported, not
+  retained (the bytes are gone before pi-lens can read them). The report
+  follows three rules the model and the code share. **Displaced**: a call that
+  begins while the disk no longer verifies the latest verified capture's own
+  edit marks that capture displaced (`SACall`; byte inequality alone would
+  alarm on a fixer that rewrote the file around the edit). **Supersede**: a
+  replaced capture is named when it was `overwritten` (even by identical
+  bytes), or `unverifiable` or displaced and the bytes differ (`SANote`).
+  **In flight**: a file with a call in flight is named unless every such
+  call's edit is on disk (`RRead`). The model's earlier supersede rule named
+  any differing capture whatever its verdict, and the code gated on
+  `verdict !== "verified"`: they disagreed, and `SiblingRestoreQueuedSilent`
+  passed on a trace the code did not report. Mutating `SANote` back to the
+  old rule turns `NoFalseAlarm` red on `SiblingRestoreQueuedSilent`; never
+  setting `d` turns `NoSilentLoss` red on it; `some` for `every` in `RRead`
+  turns `NoSilentLossUncaptured` red on `SiblingRestoreInFlightEvery`.
+  Stated residual, `SiblingRestoreQueuedSilentLate`: the displaced rule reads
+  the disk at `tool_call`, so a tool write after it and before the host runs
+  the edit leaves edit 1 unnamed. Closing it means re-deriving edit 2's base
+  bytes from its stated write; not done here.
 - **D, `SiblingRestoreCallBeforeRun`.** `noteAgentCallStart` retains a bounded
   pre-registration identity and carries it into the run, so the restore does
   not write an older capture over the newer in-flight edit. Reach: pi's

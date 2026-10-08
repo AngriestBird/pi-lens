@@ -121,6 +121,7 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 	getLSPService: vi.fn(),
 }));
 import { getLSPService } from "../../clients/lsp/index.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 function gate() {
 	let open!: () => void;
@@ -280,6 +281,8 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			toolCallId?: string;
 			/** A write runs the immediate autofix: leave it on for a test about it. */
 			autofix?: boolean;
+			/** An `edit` of a file the agent never read is blocked at tool_call. */
+			skipReadGuard?: boolean;
 		} = {},
 	) {
 		const runtime = new RuntimeCoordinator();
@@ -296,22 +299,26 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			write: () => fs.writeFileSync(file, opts.bytes ?? `${newText}\n`),
 			/** pi's tool_call for this edit: the host tool is about to run. */
 			start: async () => {
-				return handleToolCall({
-					event: {
-						toolCallId: opts.toolCallId,
-						toolName: kind,
-						input,
-					},
-					ctx: { cwd: tmpDir },
-					lensEnabled: true,
-					getFlag: (flag: string) => flag === "no-lsp",
-					dbg: () => {},
-					runtime,
-					cacheManager: new CacheManager(false),
-					ensureLSPConfigInitialized: async () => {},
-					updateLspStatus: () => {},
-					resetLSPService: () => {},
-				} as never);
+				return runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolCallId: opts.toolCallId,
+							toolName: kind,
+							input,
+						},
+						ctx: { cwd: tmpDir },
+						lensEnabled: true,
+						getFlag: (flag: string) =>
+							flag === "no-lsp" ||
+							(opts.skipReadGuard === true && flag === "no-read-guard"),
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as never),
+				);
 			},
 			deliver: async () => {
 				await handleToolResult({
@@ -942,18 +949,21 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		first.write();
 		await first.deliver();
 		// pi's tool_call for a read of the sibling; its tool_result has not come.
-		await handleToolCall({
-			event: { toolCallId: "read-2", toolName: "read", input: { path: aRs } },
-			ctx: { cwd: tmpDir },
-			lensEnabled: true,
-			getFlag: (flag: string) => flag === "no-lsp" || flag === "no-complexity",
-			dbg: () => {},
-			runtime: first.runtime,
-			cacheManager: new CacheManager(false),
-			ensureLSPConfigInitialized: async () => {},
-			updateLspStatus: () => {},
-			resetLSPService: () => {},
-		} as never);
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall({
+				event: { toolCallId: "read-2", toolName: "read", input: { path: aRs } },
+				ctx: { cwd: tmpDir },
+				lensEnabled: true,
+				getFlag: (flag: string) =>
+					flag === "no-lsp" || flag === "no-complexity",
+				dbg: () => {},
+				runtime: first.runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as never),
+		);
 		proceed.open();
 		await run;
 
@@ -1500,8 +1510,83 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			expect(noticeText()).toBe("");
 		});
 
-		// Recurrence: window C of #3830. A later capture used to replace the only
-		// evidence of an earlier edit that the fixer had already erased.
+		// Recurrence: window C of #3830 (verify r2, R2-1). Edit 1 is captured as
+		// verified, the fixer overwrites it, then edit 2 lands on the fixer's
+		// bytes: a later capture used to replace the only evidence of edit 1.
+		it("reports a verified earlier edit the fixer erased before a later edit started", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const second = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await toolWrote.p;
+				await second.p;
+				return 0;
+			};
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			const first = agentEdit(aRs, "let FIRST = 1;");
+			first.write();
+			await first.deliver();
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			toolWrote.open();
+			const later = agentEdit(aRs, "let SECOND = 2;", "edit", false, {
+				toolCallId: "c-second",
+			});
+			await later.start();
+			later.write();
+			await later.deliver();
+			second.open();
+			await run;
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe("let SECOND = 2;\n");
+			expect(noticeText()).toContain("a.rs");
+			expect(noticeText()).toContain("cannot confirm");
+		});
+
+		// Recurrence: round-1 F3 on the C fix. A fixer that rewrote the file
+		// AROUND edit 1 (edit 1 still present) is not an erasure: displaced means
+		// the disk no longer verifies the capture's own write, not that its bytes
+		// differ.
+		it("does not report an earlier edit the fixer's rewrite kept", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const second = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await toolWrote.p;
+				await second.p;
+				return 0;
+			};
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			const first = agentEdit(aRs, "let FIRST = 1;");
+			first.write();
+			await first.deliver();
+			fs.writeFileSync(aRs, "let FIRST = 1;\n// tool-fmt\n");
+			toolWrote.open();
+			const later = agentEdit(aRs, "let SECOND = 2;", "edit", false, {
+				toolCallId: "c-kept-second",
+				bytes: "let FIRST = 1;\n// tool-fmt\nlet SECOND = 2;\n",
+			});
+			await later.start();
+			later.write();
+			await later.deliver();
+			second.open();
+			await run;
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe(
+				"let FIRST = 1;\n// tool-fmt\nlet SECOND = 2;\n",
+			);
+			expect(noticeText()).toBe("");
+			expect(overwrittenCount()).toBe(0);
+		});
+
+		// Recurrence: window C of #3830, an earlier capture whose bytes already
+		// contradict its stated write (verdict `overwritten`) is named even when
+		// nothing displaced it afterwards.
 		it("reports an earlier capture when a later agent capture replaces it", async () => {
 			const aRs = path.join(srcDir, "a.rs");
 			const started = gate();
@@ -1532,6 +1617,174 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			expect(noticeText()).toContain("a.rs");
 		});
 
+		// Recurrence: verify r2 R2-2. Two calls in flight on one file: the fixer
+		// erased call A's edit and call B landed on the fixer's bytes. B's stated
+		// write is on disk, A's is not; one verified call must not hide the other.
+		it("reports an in-flight edit the fixer erased when another in-flight call verifies", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				toolWrote.open();
+				return 0;
+			};
+			const callA = agentEdit(aRs, "let A = 1;", "edit", false, {
+				toolCallId: "p7-a",
+				skipReadGuard: true,
+			});
+			const callB = agentEdit(aRs, "let _B = 1;", "edit", false, {
+				toolCallId: "p7-b",
+				skipReadGuard: true,
+				bytes: "pub fn f() { let _B = 1; }\n",
+			});
+			await callA.start();
+			await callB.start();
+			callA.write();
+			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await toolWrote.p;
+			callB.write();
+			await run;
+			await restoreSettled();
+
+			await callA.deliver();
+			await callB.deliver();
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe(
+				"pub fn f() { let _B = 1; }\n",
+			);
+			expect(noticeText()).toContain("a.rs");
+		});
+
+		// Recurrence: the same hole one step later (state table row 8). Call B was
+		// delivered and its capture equals disk, so only the in-flight rule sees
+		// that call A's edit is gone.
+		it("reports an in-flight edit the fixer erased when a later call is already captured", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const toolWrote = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				toolWrote.open();
+				return 0;
+			};
+			const callA = agentEdit(aRs, "let A = 1;", "edit", false, {
+				toolCallId: "p7b-a",
+				skipReadGuard: true,
+			});
+			const callB = agentEdit(aRs, "let _B = 1;", "edit", false, {
+				toolCallId: "p7b-b",
+				skipReadGuard: true,
+				bytes: "pub fn f() { let _B = 1; }\n",
+			});
+			await callA.start();
+			await callB.start();
+			callA.write();
+			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await toolWrote.p;
+			callB.write();
+			await callB.deliver();
+			await run;
+			await restoreSettled();
+
+			await callA.deliver();
+
+			expect(noticeText()).toContain("a.rs");
+		});
+
+		// Recurrence: the model's SiblingRestoreQueuedSilentLate search, trace 1.
+		// Both results arrive during the run, in order, on the same bytes: call
+		// A's capture is `overwritten` (its edit is gone), and call B's capture of
+		// the identical bytes used to replace it without a record.
+		it("reports an overwritten capture a later capture of identical bytes replaces", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const toolWrote = gate();
+			const delivered = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				toolWrote.open();
+				await delivered.p;
+				return 0;
+			};
+			const callA = agentEdit(aRs, "let A = 1;", "edit", false, {
+				toolCallId: "p7c-a",
+				skipReadGuard: true,
+			});
+			const callB = agentEdit(aRs, "let _B = 1;", "edit", false, {
+				toolCallId: "p7c-b",
+				skipReadGuard: true,
+				bytes: "pub fn f() { let _B = 1; }\n",
+			});
+			await callA.start();
+			await callB.start();
+			callA.write();
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await toolWrote.p;
+			callB.write();
+			await callA.deliver();
+			await callB.deliver();
+			delivered.open();
+			await run;
+
+			expect(fs.readFileSync(aRs, "utf-8")).toBe(
+				"pub fn f() { let _B = 1; }\n",
+			);
+			expect(noticeText()).toContain("a.rs");
+			expect(noticeText()).toContain("could not restore it");
+		});
+
+		// Guard for the `every`: two in-flight calls whose writes are both on disk
+		// leave nothing to report.
+		it("does not report two in-flight edits that are both on disk", async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				return 0;
+			};
+			const callA = agentEdit(aRs, "let A = 1;", "edit", false, {
+				toolCallId: "p9-a",
+				skipReadGuard: true,
+				bytes: "let A = 1;\nlet B = 1;\n",
+			});
+			const callB = agentEdit(aRs, "let B = 1;", "edit", false, {
+				toolCallId: "p9-b",
+				skipReadGuard: true,
+				bytes: "let A = 1;\nlet B = 1;\n",
+			});
+			await callA.start();
+			await callB.start();
+			callA.write();
+			const run = runPipeline(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			proceed.open();
+			await run;
+			await restoreSettled();
+
+			await callA.deliver();
+			await callB.deliver();
+
+			expect(noticeText()).toBe("");
+		});
+
 		it("does not report sequential verified edits when the tool never touched the sibling", async () => {
 			const aRs = path.join(srcDir, "a.rs");
 			const started = gate();
@@ -1546,7 +1799,11 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			const first = agentEdit(aRs, "let FIRST = 1;");
 			first.write();
 			await first.deliver();
-			const second = agentEdit(aRs, "let SECOND = 2;");
+			// pi sends a tool_call before every edit, so the displaced rule runs.
+			const second = agentEdit(aRs, "let SECOND = 2;", "edit", false, {
+				toolCallId: "p3-second",
+			});
+			await second.start();
 			second.write();
 			await second.deliver();
 			proceed.open();
@@ -1961,6 +2218,119 @@ describe("fix-run registry (#3598)", () => {
 			expect(report.possiblyLost).toEqual([]);
 		} finally {
 			noteAgentCallEnd("ended-before-run");
+			env.cleanup();
+		}
+	});
+
+	// Recurrence: verify r2 R2-4 (survivors N6/N7). A file whose superseded
+	// capture and final capture both say "lost" (or both "possibly lost") is one
+	// name in the report, so the run's degradation count is one file, not two.
+	it.each([
+		["overwritten", { content: "fn expected() {}\n" }, "lost"],
+		["unverifiable", undefined, "possiblyLost"],
+	] as const)(
+		"names a file once when two %s captures both account for it",
+		async (_verdict, expected, list) => {
+			const env = setupTestEnvironment("pi-lens-fix-run-dedupe-");
+			const sibling = path.join(env.tmpDir, "a.rs");
+			fs.writeFileSync(sibling, "fn a() {}\n");
+			try {
+				const { restoring } = await runWithFixRestore(
+					{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+					async () => {
+						fs.writeFileSync(sibling, "fn one() {}\n");
+						noteAgentMutation(sibling, expected);
+						fs.writeFileSync(sibling, "fn two() {}\n");
+						noteAgentMutation(sibling, expected);
+					},
+					async () => {},
+				);
+				const report = await restoring;
+				expect(report[list]).toEqual([sibling]);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	// Recurrence: the displaced rule's unreadable branch. A file the agent
+	// removed itself (the fixer never deletes) is not an erased edit, so the
+	// rewrite that follows names nothing and the restore never recreates it.
+	it("does not name an earlier edit the agent itself removed before writing again", async () => {
+		const env = setupTestEnvironment("pi-lens-fix-run-removed-");
+		const sibling = path.join(env.tmpDir, "a.rs");
+		fs.writeFileSync(sibling, "fn a() {}\n");
+		try {
+			const { restoring } = await runWithFixRestore(
+				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+				async () => {
+					fs.writeFileSync(sibling, "fn one() {}\n");
+					noteAgentMutation(sibling, { content: "fn one() {}\n" });
+					fs.rmSync(sibling);
+					noteAgentCallStart("removed-then-written", sibling, {
+						content: "fn two() {}\n",
+					});
+					fs.writeFileSync(sibling, "fn two() {}\n");
+					noteAgentMutation(sibling, { content: "fn two() {}\n" });
+					noteAgentCallEnd("removed-then-written");
+				},
+				async () => {},
+			);
+			const report = await restoring;
+			expect(report).toEqual({
+				restored: [],
+				lost: [],
+				possiblyLost: [],
+				agentEdited: [sibling],
+			});
+			expect(fs.readFileSync(sibling, "utf-8")).toBe("fn two() {}\n");
+		} finally {
+			noteAgentCallEnd("removed-then-written");
+			env.cleanup();
+		}
+	});
+
+	// State table row 11: an in-flight call on a file that cannot be read at the
+	// restore cannot prove its write survived, so the file is named.
+	it("names an uncaptured in-flight file that is unreadable at the restore", async () => {
+		const env = setupTestEnvironment("pi-lens-fix-run-unreadable-");
+		const sibling = path.join(env.tmpDir, "a.rs");
+		fs.writeFileSync(sibling, "fn a() {}\n");
+		try {
+			noteAgentCallStart("unreadable-in-flight", sibling, {
+				content: "fn agent() {}\n",
+			});
+			const { restoring } = await runWithFixRestore(
+				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+				async () => fs.rmSync(sibling),
+				async () => {},
+			);
+			const report = await restoring;
+			expect(report.possiblyLost).toEqual([sibling]);
+			expect(fs.existsSync(sibling)).toBe(false);
+		} finally {
+			noteAgentCallEnd("unreadable-in-flight");
+			env.cleanup();
+		}
+	});
+
+	// A call with no stated write cannot vouch for the file, so an in-flight
+	// call of that kind names it (the in-flight rule's `verdictFor(.., undefined)`).
+	it("names a file whose in-flight call states no write", async () => {
+		const env = setupTestEnvironment("pi-lens-fix-run-nostate-");
+		const sibling = path.join(env.tmpDir, "a.rs");
+		fs.writeFileSync(sibling, "fn a() {}\n");
+		try {
+			noteAgentCallStart("no-stated-write", sibling);
+			const { restoring } = await runWithFixRestore(
+				{ tool: "rust-clippy", extension: ".rs", candidates: [sibling] },
+				async () => {},
+				async () => {},
+			);
+			const report = await restoring;
+			expect(report.possiblyLost).toEqual([sibling]);
+		} finally {
+			noteAgentCallEnd("no-stated-write");
 			env.cleanup();
 		}
 	});

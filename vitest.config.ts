@@ -45,6 +45,11 @@ const sharedExclude = [
 	"**/.stryker-tmp/**",
 	"**/.stryker/**",
 	"**/.claude/**",
+	// Probe homes (.probe-home/) can hold a whole worktree when a probe ran a
+	// worktree-creating script under HOME=.probe-home; a path-filtered run (the
+	// pre-push selection) collected a merged PR's stale copy (2026-10-08: 24
+	// phantom reds blocked a push).
+	"**/.probe-home/**",
 	// Fixture projects carry *.test.ts files that belong to the FIXTURE's own
 	// toolchain (e.g. the native-TS7/Vitest fixture the live integration suite
 	// copies out and type-checks) — they are inputs, not repo tests, and fail
@@ -404,6 +409,9 @@ export const realHarnessInclude = [
 // host. Sweep coverage for other members lives in this list; new entries must
 // carry a wall-clock budget assertion, not just slowness.
 export const wallClockBudgetInclude = [
+	// #4148: a 199K-blank-line rule is a real event-loop occupancy witness for
+	// validateRule's synchronous language extraction, so it runs serialized.
+	"tests/clients/ast-grep-rule-regex-budget.test.ts",
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
 	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)

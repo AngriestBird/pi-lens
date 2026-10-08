@@ -202,6 +202,11 @@ function validateInputShape(
 	return undefined;
 }
 
+/** Extract the rule language without rescanning blank lines between YAML keys. */
+export function extractRuleLanguage(ruleYaml: string): string | undefined {
+	return /^[^\S\n\r\u2028\u2029]*language:\s*([^\s#]+)/im.exec(ruleYaml)?.[1];
+}
+
 function stderrHasError(stderr: string): boolean {
 	return stderr.split(/\r?\n/).some((line) => /^\s*(error|Error):/.test(line));
 }
@@ -585,8 +590,7 @@ export class AstGrepClient {
 		);
 		if (shapeError) return { valid: false, error: shapeError };
 
-		const language =
-			/^\s*language:\s*([^\s#]+)/im.exec(ruleYaml)?.[1] ?? "typescript";
+		const language = extractRuleLanguage(ruleYaml) ?? "typescript";
 		const snippet = validationSnippetFor(language);
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sg-rule-"));
 		try {

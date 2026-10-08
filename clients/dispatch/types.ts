@@ -372,8 +372,18 @@ export interface DispatchContext {
 
 // --- Tool Plan ---
 
+export type CapabilityDimension =
+	| "types"
+	| "security"
+	| "smells"
+	| "format"
+	| "lint"
+	| "docs";
+
 export interface ToolPlan {
 	name: string;
+	/** Capabilities required for a complete verdict on this file kind. */
+	capabilities: readonly CapabilityDimension[];
 	groups: RunnerGroup[];
 }
 

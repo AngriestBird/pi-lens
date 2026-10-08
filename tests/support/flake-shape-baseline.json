@@ -120,6 +120,7 @@
 	},
 	"elapsed-time-assertion": {
 		"clients/actionable-warnings-bounds.test.ts": 1,
+		"clients/ast-grep-rule-regex-budget.test.ts": 1,
 		"clients/bounded-hook-await.test.ts": 3,
 		"clients/cascade-turn-merge.test.ts": 1,
 		"clients/dispatch/runners/helm-render.test.ts": 1,

@@ -47,6 +47,17 @@
 (* bytes before the write (the stat identity it replaced, mtime + size +   *)
 (* inode, was blind to a same-size edit inside one mtime tick); the model  *)
 (* does not see that difference. The report is one set for the file.       *)
+(*                                                                         *)
+(* The report has three rules, the same three the code applies             *)
+(* (fix-run-restore.ts module header; one rule per column of the PR's      *)
+(* state table). SUPERSEDE (SANote): a capture replaced is named when it   *)
+(* was overwritten (even when the new bytes are identical), or when it was *)
+(* not verified or was displaced and the bytes differ; overwritten is      *)
+(* "lost", the others "possibly". DISPLACED (SACall): a call that begins   *)
+(* while the latest verified capture's own edit is missing from the disk   *)
+(* marks that capture displaced. IN-FLIGHT (RRead): a file with a call in  *)
+(* flight is named "possibly" unless no capture exists or the capture      *)
+(* equals the disk, AND every in-flight call's edit is on the disk.        *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -69,7 +80,9 @@ CONSTANTS
 
 SIds == 1..SEdits
 C0 == [e |-> {}, f |-> FALSE]
-NoCap == [has |-> FALSE, b |-> C0, v |-> "verified"]
+\* A capture: the bytes, the verdict, and `d`, "displaced": a call began while
+\* the disk no longer held the edits the capture was verified against.
+NoCap == [has |-> FALSE, b |-> C0, v |-> "verified", d |-> FALSE]
 
 VARIABLES
     sdisk, sver, sq, sapplied, sa, sabuf,
@@ -115,7 +128,14 @@ SACall(i) ==
     /\ SCallInRun => rpc \in {"run", "rread", "rlock", "rrecheck", "rwrite"}
     /\ sa' = [sa EXCEPT ![i] = "called"]
     /\ infl' = IF Registered \/ CarryPreRunCalls THEN infl \cup {i} ELSE infl
-    /\ UNCHANGED <<sdisk, sver, sq, sapplied, sabuf, cap, tpc, tbuf,
+    \* The displaced rule (noteAgentCallStart): a call begins on a file whose
+    \* latest capture is verified, and the disk no longer verifies that
+    \* capture's own stated write (its edit is gone).
+    /\ cap' = IF Registered /\ KeepCaptureHistory /\ cap.has /\ cap.v = "verified"
+                 /\ cap.b.e \ sdisk.e # {}
+                THEN [cap EXCEPT !.d = TRUE]
+                ELSE cap
+    /\ UNCHANGED <<sdisk, sver, sq, sapplied, sabuf, tpc, tbuf,
                    rpc, rbuf, rv, rcap, rc, rep, wk, fq, lpc>>
 
 \* pi's edit: read S inside S's queue ...
@@ -146,10 +166,16 @@ SANote(i) ==
     /\ infl' = IF Registered THEN infl \ {i} ELSE infl
     /\ cap' = IF Registered
                 THEN [has |-> TRUE, b |-> sdisk,
-                      v |-> IF i \in sdisk.e THEN "verified" ELSE "overwritten"]
+                      v |-> IF i \in sdisk.e THEN "verified" ELSE "overwritten",
+                      d |-> FALSE]
                 ELSE cap
-    /\ rep' = IF Registered /\ KeepCaptureHistory /\ cap.has /\ cap.b # sdisk
-                THEN rep \cup {"possibly"}
+    \* The supersede rule (noteAgentMutation): a replaced capture is named when it
+    \* is overwritten (even if the new bytes are identical: the edit it stated
+    \* is not in them), or was not verified or was displaced, and the bytes differ.
+    /\ rep' = IF Registered /\ KeepCaptureHistory /\ cap.has
+                  /\ (cap.v = "overwritten"
+                       \/ (cap.b # sdisk /\ (cap.v # "verified" \/ cap.d)))
+                THEN rep \cup {IF cap.v = "overwritten" THEN "lost" ELSE "possibly"}
                 ELSE rep
     /\ sa' = [sa EXCEPT ![i] = "done"]
     /\ UNCHANGED <<sdisk, sver, sq, sapplied, sabuf, tpc, tbuf,
@@ -235,10 +261,15 @@ RRead ==
              ELSE IF RestoreInFlight /\ InFl # {} THEN "done"
              ELSE IF sdisk = cap.b THEN "done"
              ELSE "rrecheck"
+           \* The in-flight rule (unverifiedInFlight): some call still in flight
+           \* has its edit missing from the disk. EVERY call must verify.
+           InFlMissing == \E i \in InFl : i \notin sdisk.e
            named ==
-             IF ~cap.has /\ RestoreNoCapInFlight /\ InFl # {} THEN {"possibly"}
+             IF ~cap.has /\ RestoreNoCapInFlight /\ InFl # {} /\ InFlMissing
+               THEN {"possibly"}
              ELSE IF cap.has /\ cap.v = "overwritten" THEN {"lost"}
-             ELSE IF cap.has /\ RestoreInFlight /\ InFl # {} /\ sdisk # cap.b THEN {"possibly"}
+             ELSE IF cap.has /\ RestoreInFlight /\ InFl # {}
+                     /\ (sdisk # cap.b \/ InFlMissing) THEN {"possibly"}
              ELSE {}
        IN /\ rpc' = next
           /\ rep' = rep \cup named
@@ -344,4 +375,20 @@ NoRestoreOverGapEdit == "gap" \notin wk
 \* identical bytes, reports `restored` for a file the tool never erased, and
 \* opens the gap window for nothing.
 NoNoopRestore == "noop" \notin wk
+
+\* Quiet when intact: when every agent edit of S is on disk at the end, nothing
+\* is named lost or possibly lost. The false-alarm direction of the report
+\* (#3830 round 1 F3/F4: a fixer that never touched the file, or rewrote it
+\* around the agent's edit, is not a loss), which NoSilentLoss cannot see.
+NoFalseAlarm ==
+    SQuiescent /\ (\A i \in sapplied : i \in sdisk.e)
+        => rep \cap {"lost", "possibly"} = {}
+
+\* NoSilentLoss restricted to a file the run holds no capture for at the end:
+\* the in-flight rule's own claim (state table rows 6 to 9), checked without
+\* window C (a replaced capture) in the way.
+NoSilentLossUncaptured ==
+    SQuiescent /\ ~cap.has
+        => \/ \A i \in sapplied : i \in sdisk.e
+           \/ rep \cap {"lost", "possibly"} # {}
 =============================================================================

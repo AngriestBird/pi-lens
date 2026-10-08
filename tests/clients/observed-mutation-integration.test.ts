@@ -49,6 +49,7 @@ import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 vi.mock("../../clients/pipeline.js", () => ({
 	runPipeline: vi.fn(async () => ({
@@ -277,8 +278,10 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 			const { runtime, cacheManager } = newSession(env.tmpDir);
 
 			const event = patchEvent(filePath, "call-2430-first");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 
 			// The unknown tool executes and rewrites line 2.
@@ -328,8 +331,10 @@ describe("#4139 pi-lens tool attribution boundary", () => {
 					input: { path: filePath, operation: "rename", apply: true },
 					content: [{ type: "text", text: "renamed" }],
 				};
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
 				await handleToolResult(
@@ -346,17 +351,19 @@ describe("#4139 pi-lens tool attribution boundary", () => {
 				"documentSymbol",
 				"implementation",
 			] as const) {
-				const result = await handleToolCall(
-					toolCallDeps({
-						event: {
-							toolName: "lsp_navigation",
-							toolCallId: `call-4139-${operation}`,
-							input: { path: unreadPath, operation },
-						},
-						cwd: env.tmpDir,
-						runtime,
-						cacheManager,
-					}),
+				const result = await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({
+							event: {
+								toolName: "lsp_navigation",
+								toolCallId: `call-4139-${operation}`,
+								input: { path: unreadPath, operation },
+							},
+							cwd: env.tmpDir,
+							runtime,
+							cacheManager,
+						}),
+					),
 				);
 				expect(result).toBeUndefined();
 			}
@@ -390,8 +397,10 @@ describe("#4139 pi-lens tool attribution boundary", () => {
 						input: { path: filePath, operation: "rename", apply: true },
 						content: [{ type: "text", text: "renamed" }],
 					};
-					await handleToolCall(
-						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					await runHandlerExpectingNoThrow(() =>
+						handleToolCall(
+							toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						),
 					);
 					fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
 					await handleToolResult(
@@ -566,8 +575,15 @@ describe("#2430 acceptance 2 — the SECOND call is classified without a snapsho
 			// #2423 gap #2430 exists to close.
 			expect(classifyMutatingTool(first)).toBeUndefined();
 
-			await handleToolCall(
-				toolCallDeps({ event: first, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: first,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			await handleToolResult(
@@ -611,8 +627,10 @@ describe("#2430 acceptance 2 — persistence is reachable on the PRODUCTION path
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2430-persist-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -681,8 +699,10 @@ describe("#2449 review round 3 — one receipt per physical edit", () => {
 				`${SOURCE}const d = 4;\nconst e = 5;\nconst f = 6;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2449-double-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -795,17 +815,19 @@ describe("#2430 — the net does not arm for a classified tool", () => {
 			const { runtime, cacheManager } = newSession(env.tmpDir);
 
 			const statSpy = vi.spyOn(fs.promises, "stat");
-			await handleToolCall(
-				toolCallDeps({
-					event: {
-						toolName: "write",
-						toolCallId: "call-2430-write",
-						input: { path: filePath, content: SOURCE },
-					},
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: {
+							toolName: "write",
+							toolCallId: "call-2430-write",
+							input: { path: filePath, content: SOURCE },
+						},
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			const observedStats = statSpy.mock.calls.length;
 			statSpy.mockRestore();
@@ -881,13 +903,15 @@ describe("#2449 review round 4 — the observed-settle return skips only duplica
 			).toBeUndefined();
 
 			// Call 1 arms, observes and attributes the tool.
-			await handleToolCall(
-				toolCallDeps({
-					event: firstEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: firstEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			fs.writeFileSync(filePath, `${withStale}const d = 4;\n`);
 			await handleToolResult(
@@ -901,13 +925,15 @@ describe("#2449 review round 4 — the observed-settle return skips only duplica
 			const appliedSpy = vi.spyOn(runtime.partialApplyRecords, "record");
 
 			const secondEvent = retryEvent(filePath, "call-2449-narrow-1");
-			await handleToolCall(
-				toolCallDeps({
-					event: secondEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: secondEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			// The edit removes the exported name cachedExports is holding.
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\nconst e = 5;\n`);
@@ -973,8 +999,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				if (index === 0) {
 					expect(classifyMutatingTool(event as never)).toBeUndefined();
 				}
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -1015,8 +1043,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			vi.mocked(runPipeline).mockClear();
 
 			const event = patchEvent(filePath, "call-2464-context-0");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
@@ -1123,8 +1153,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = retryEvent(filePath, `call-2464-post-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult({
@@ -1213,8 +1245,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2464-crash-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				outcome = await handleToolResult(
@@ -1270,8 +1304,10 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			const eventB = patchEvent(filePath, "call-2464-f1-b");
 			for (const event of [eventA, eventB]) {
 				expect(classifyMutatingTool(event as never)).toBeUndefined();
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 			}
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1332,8 +1368,10 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			const eventA = patchEvent(filePath, "call-2464-f1-evict-a");
 			const eventB = patchEvent(filePath, "call-2464-f1-evict-b");
 			for (const event of [eventA, eventB]) {
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 			}
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1428,13 +1466,15 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			// Armed BEFORE the classified write, so the settle below sees the same
 			// bytes the classified call just analysed.
 			const observedEvent = patchEvent(filePath, "call-2464-f1-latch-obs");
-			await handleToolCall(
-				toolCallDeps({
-					event: observedEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: observedEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1499,8 +1539,10 @@ describe("#2464 review round 3 — F2: the observed dispatch targets a RECORDED 
 				content: [{ type: "text", text: "rewrote 1 file" }],
 			};
 			expect(classifyMutatingTool(event as never)).toBeUndefined();
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			// The tool writes a file INSIDE the directory it named.
 			fs.writeFileSync(insideDir, `${SOURCE}const d = 4;\n`);
@@ -1549,8 +1591,10 @@ describe("#2464 review round 3 — F2: the observed dispatch targets a RECORDED 
 				input: { path: targetDir, rule: "rename" },
 				content: [{ type: "text", text: "rewrote 33 files" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			for (const filePath of files)
 				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1603,8 +1647,10 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 				input: { path: targetDir, rule: "rename" },
 				content: [{ type: "text", text: "rewrote 2 files" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			for (const filePath of files)
 				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1666,8 +1712,10 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 				input: { path: targetDir, rule: "rename" },
 				content: [{ type: "text", text: "rewrote 2 files" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			const longAgo = new Date("2000-01-01T00:00:00Z");
 			for (const filePath of files) {
@@ -1744,8 +1792,10 @@ describe("#3568: the observed path's dispatches share the handler's session", ()
 				input: { path: targetDir, rule: "rename" },
 				content: [{ type: "text", text: "rewrote 2 files" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			for (const filePath of files)
 				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1824,8 +1874,10 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 		await acrossSettle("observed", async ({ tmpDir, filePath }) => {
 			const { runtime, cacheManager } = newSession(tmpDir);
 			const event = patchEvent(filePath, "call-3763-observed");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			const handler = handleToolResult(
@@ -1846,16 +1898,20 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 			// Call one teaches the name; call two is classified by it and still
 			// armed, so it awaits the settle, which finds no change.
 			const first = patchEvent(filePath, "call-3763-learn");
-			await handleToolCall(
-				toolCallDeps({ event: first, cwd: tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event: first, cwd: tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			await handleToolResult(
 				toolResultDeps({ event: first, runtime, cacheManager }),
 			);
 			const second = patchEvent(filePath, "call-3763-classified");
-			await handleToolCall(
-				toolCallDeps({ event: second, cwd: tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event: second, cwd: tmpDir, runtime, cacheManager }),
+				),
 			);
 			const { runPipeline } = await import("../../clients/pipeline.js");
 			const dispatchedBefore = vi.mocked(runPipeline).mock.calls.length;

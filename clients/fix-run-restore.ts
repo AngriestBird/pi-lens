@@ -80,6 +80,26 @@
  * POSSIBLY lost, never silently accepted: pi-lens cannot tell whether the tool
  * wrote between the agent's write and its read.
  *
+ * ## What the report names (#3830, windows B and C)
+ *
+ * Three rules, mirrored by `formal/dispatch-pipeline/SiblingRestore.tla`
+ * (`SACall`, `SANote`, `RRead`):
+ *
+ * - **Displaced** ({@link noteAgentCallStart}): a call begins on a file whose
+ *   latest capture is `verified`, and the bytes on disk no longer verify that
+ *   capture's own stated write. The fixer erased it. Byte inequality alone is
+ *   not enough: a fixer that rewrote the file AROUND the edit kept it.
+ * - **Supersede** ({@link noteAgentMutation}): a capture replaced by a newer one
+ *   is named when it was `overwritten` (lost, even when the new bytes are
+ *   identical: the edit it stated is not in them), or `unverifiable` or
+ *   displaced and the bytes differ (possibly lost). A `verified`, undisplaced
+ *   capture replaced by an edit that built on it is quiet.
+ * - **In flight** (the restore): a file with a call still in flight is named
+ *   possibly lost unless it has no capture, or a `verified` capture equal to
+ *   disk, AND EVERY in-flight call's stated write is on disk. One verified call
+ *   does not vouch for another's edit. A call with no stated write cannot be
+ *   verified.
+ *
  * ## The set is bounded to what the tool can rewrite
  *
  * The caller passes the project walk it already took for its changed-file diff
@@ -103,6 +123,11 @@
  *   unverifiable case above. A later capture replaces an earlier one (#3830,
  *   window C), and a file with no capture is named before the in-flight check
  *   (window B).
+ * - The displaced rule reads the disk at the agent's `tool_call`. A fixer write
+ *   that lands after it and before the host runs the edit (the queue wait)
+ *   leaves edit 1 unnamed: nothing at the tool_result separates it from two
+ *   sequential edits without re-deriving the edit's base bytes
+ *   (`SiblingRestoreQueuedSilentLate`, expected to violate `NoSilentLoss`).
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -140,19 +165,26 @@ type CaptureVerdict = "verified" | "overwritten" | "unverifiable";
 interface Capture {
 	bytes: Buffer;
 	verdict: CaptureVerdict;
+	/** The agent's stated write this capture was verified against. */
+	expected?: AgentWriteExpectation | undefined;
+	/**
+	 * A call began on the file while the disk no longer verified this capture's
+	 * own stated write: the fixer erased it (#3830, window C).
+	 */
+	displaced?: true;
 }
 
 interface CoveredFile {
 	filePath: string;
 	hash: string;
 	capture?: Capture;
-	/** A prior capture was replaced before restore could account for it. */
-	superseded?: CaptureVerdict;
+	/** A replaced capture restore must still name: `overwritten` is lost. */
+	superseded?: "overwritten" | "unverifiable";
 }
 
 interface PendingCall {
 	key: string;
-	expected?: AgentWriteExpectation;
+	expected?: AgentWriteExpectation | undefined;
 }
 
 interface ActiveRun {
@@ -329,6 +361,34 @@ export async function beginFixRun(args: {
 	};
 }
 
+/** The calls in flight on `key` for this run. */
+function callsOn(run: ActiveRun, key: string): PendingCall[] {
+	const calls: PendingCall[] = [];
+	for (const call of run.calls.values()) if (call.key === key) calls.push(call);
+	return calls;
+}
+
+/**
+ * The in-flight rule of the module header: some call still in flight on `key`
+ * has no stated write, or its stated write is not on disk. EVERY call must
+ * verify before the file is quiet: one verified call does not vouch for
+ * another's edit (#3830, verify r2 R2-2).
+ */
+function unverifiedInFlight(
+	run: ActiveRun,
+	key: string,
+	current: Buffer,
+): boolean {
+	return callsOn(run, key).some(
+		(call) => verdictFor(current, call.expected) !== "verified",
+	);
+}
+
+/** One name per file per list, however many captures account for it. */
+function name(list: string[], filePath: string): void {
+	if (!list.includes(filePath)) list.push(filePath);
+}
+
 /**
  * Write the captures back, one queue entry at a time, and end the run. The run
  * stays in `active` until the last file is done, so a call that starts or an
@@ -350,23 +410,16 @@ async function restoreRun(
 	let queueWaitMs = 0;
 	try {
 		for (const [key, file] of run.files) {
-			const inFlight = [...run.calls.values()].some((call) => call.key === key);
 			if (!file.capture) {
-				if (inFlight) {
+				if (callsOn(run, key).length > 0) {
 					report.agentEdited.push(file.filePath);
-					let matchesAgentWrite = false;
-					try {
-						const current = await fs.promises.readFile(file.filePath);
-						matchesAgentWrite = [...run.calls.values()].some(
-							(call) =>
-								call.key === key &&
-								call.expected !== undefined &&
-								verdictFor(current, call.expected) === "verified",
-						);
-					} catch {
-						// An unreadable file cannot prove that the agent write survived.
-					}
-					if (!matchesAgentWrite) report.possiblyLost.push(file.filePath);
+					// Outside pi's queue entry: a torn read of a non-atomic agent write
+					// only mismatches, which reports (the safe direction).
+					const current = await fs.promises
+						.readFile(file.filePath)
+						.catch(() => undefined);
+					if (!current || unverifiedInFlight(run, key, current))
+						name(report.possiblyLost, file.filePath);
 				}
 				continue;
 			}
@@ -378,16 +431,12 @@ async function restoreRun(
 					return restoreFile(run, key, file, report, skipped);
 				});
 			} catch {
-				report.lost.push(file.filePath);
+				name(report.lost, file.filePath);
 			}
 		}
 	} finally {
 		active.delete(run);
 	}
-	report.restored = [...new Set(report.restored)];
-	report.lost = [...new Set(report.lost)];
-	report.possiblyLost = [...new Set(report.possiblyLost)];
-	report.agentEdited = [...new Set(report.agentEdited)];
 	if (report.agentEdited.length > 0) {
 		// One row per run that had a capture: `queueWaitMs` is the time spent
 		// behind other holders of the siblings' queue entries, the number to watch
@@ -441,9 +490,9 @@ async function restoreFile(
 ): Promise<void> {
 	const capture = file.capture;
 	if (!capture) return;
-	if (file.superseded === "overwritten") report.lost.push(file.filePath);
+	if (file.superseded === "overwritten") name(report.lost, file.filePath);
 	else if (file.superseded === "unverifiable")
-		report.possiblyLost.push(file.filePath);
+		name(report.possiblyLost, file.filePath);
 	let current: Buffer;
 	try {
 		current = await fs.promises.readFile(file.filePath);
@@ -453,20 +502,26 @@ async function restoreFile(
 		return;
 	}
 	if (capture.verdict === "overwritten") {
-		report.lost.push(file.filePath);
+		name(report.lost, file.filePath);
 		return;
 	}
 	const unchanged = current.equals(capture.bytes);
-	if ([...run.calls.values()].some((call) => call.key === key)) {
+	if (callsOn(run, key).length > 0) {
 		// A newer agent write may already be on disk with its tool_result still
 		// to come: the capture is older than the file, so it must not be written.
-		if (!unchanged || capture.verdict === "unverifiable")
-			report.possiblyLost.push(file.filePath);
+		// A call whose stated write is not on disk may have been erased (the
+		// in-flight rule of the module header).
+		if (
+			!unchanged ||
+			capture.verdict === "unverifiable" ||
+			unverifiedInFlight(run, key, current)
+		)
+			name(report.possiblyLost, file.filePath);
 		if (!unchanged) skipped.push(file.filePath);
 		return;
 	}
 	if (capture.verdict === "unverifiable")
-		report.possiblyLost.push(file.filePath);
+		name(report.possiblyLost, file.filePath);
 	if (unchanged) return;
 	// pi's queue keeps the agent's `edit` out; this re-read catches a writer
 	// outside it (bash, a bridged producer). It compares bytes, not mtime and
@@ -479,8 +534,7 @@ async function restoreFile(
 		return;
 	}
 	if (!again.equals(current)) {
-		if (!report.possiblyLost.includes(file.filePath))
-			report.possiblyLost.push(file.filePath);
+		name(report.possiblyLost, file.filePath);
 		skipped.push(file.filePath);
 		return;
 	}
@@ -514,13 +568,22 @@ export function noteAgentMutation(
 				delete file.capture;
 				continue;
 			}
-			if (file.capture && !file.capture.bytes.equals(bytes)) {
-				if (file.capture.verdict !== "verified")
-					file.superseded ??= file.capture.verdict;
-				if (file.capture.verdict === "overwritten")
-					file.superseded = "overwritten";
-			}
-			file.capture = { bytes, verdict: verdictFor(bytes, expected) };
+			const old = file.capture;
+			// The supersede rule of the module header: a replaced capture is named
+			// when it is `overwritten` (even if the new bytes are identical: the
+			// edit it stated is not in them), or unverifiable or displaced and
+			// replaced by different bytes.
+			if (
+				old &&
+				(old.verdict === "overwritten" ||
+					(!old.bytes.equals(bytes) &&
+						(old.verdict === "unverifiable" || old.displaced)))
+			)
+				file.superseded =
+					file.superseded === "overwritten" || old.verdict === "overwritten"
+						? "overwritten"
+						: "unverifiable";
+			file.capture = { bytes, verdict: verdictFor(bytes, expected), expected };
 		} catch {
 			// Unreadable or gone: the agent deleted or renamed it, so an older
 			// capture must not bring it back.
@@ -537,7 +600,7 @@ export function noteAgentMutation(
 export function noteAgentCallStart(
 	toolCallId: string | undefined,
 	filePath: string,
-	expected?: AgentWriteExpectation,
+	expected?: AgentWriteExpectation | undefined,
 ): void {
 	if (toolCallId === undefined) return;
 	const { active } = registry();
@@ -554,7 +617,21 @@ export function noteAgentCallStart(
 				"more than 256 agent mutation calls were in flight before a fixer run; later calls were not carried into the run",
 		});
 	for (const run of active) {
-		if (run.files.has(key)) run.calls.set(toolCallId, { key, expected });
+		const file = run.files.get(key);
+		if (!file) continue;
+		run.calls.set(toolCallId, { key, expected });
+		// The displaced rule of the module header. A tool write between two
+		// agent edits shows here: the newer call begins on bytes that no longer
+		// hold the capture's edit. An unreadable file is the agent's own removal.
+		const capture = file.capture;
+		if (capture?.verdict !== "verified") continue;
+		try {
+			const disk = fs.readFileSync(file.filePath);
+			if (verdictFor(disk, capture.expected) !== "verified")
+				capture.displaced = true;
+		} catch {
+			// Gone: nothing for the fixer to have erased.
+		}
 	}
 }
 
