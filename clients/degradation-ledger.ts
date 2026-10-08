@@ -797,6 +797,8 @@ export type DegradationKind =
 	 * server and file for the same reason every other pull kind does.
 	 */
 	| "lsp-session-root-evicted"
+	/** A sibling LSP notification failed while touching a file. */
+	| "lsp-sibling-announcement"
 	/**
 	 * A language-server child process CLOSED without pi-lens having asked it to
 	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
