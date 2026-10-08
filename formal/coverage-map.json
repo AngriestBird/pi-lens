@@ -191,8 +191,12 @@
     "clients/installer/index.ts": [
       "file-locks"
     ],
+    "clients/ephemeral-root.ts": [
+      "lsp-ephemeral-data-dir"
+    ],
     "clients/instance-reaper.ts": [
       "instance-reaper",
+      "lsp-ephemeral-data-dir",
       "review-graph-promotion",
       "snapshot-promotion"
     ],
