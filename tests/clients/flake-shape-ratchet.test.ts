@@ -106,6 +106,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"event-loop occupancy has no deterministic proxy; the sampler row guards per-chunk block size the yield count cannot see",
 	},
+	// 2026-10-08 (#4148): 100K blank lines and a 100K-character rule are real
+	// event-loop occupancy witnesses for the pytest traceback and go.mod regexes.
+	"elapsed-time-assertion:clients/pytest-gomod-regex-budget.test.ts": {
+		detector: "elapsed-time-assertion",
+		reason:
+			"the defect is wall-clock only (quadratic pytest traceback and go.mod regex backtracking); a fake clock measures nothing",
+	},
 	// 2026-09-08 (#2622): the defect is wall-clock only — 2^N regex
 	// backtracking in both glob compilers; a fake clock measures nothing.
 	"elapsed-time-assertion:clients/read-guard-glob-nonbacktracking.test.ts": {

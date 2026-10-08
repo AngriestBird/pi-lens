@@ -192,7 +192,6 @@
 	"tests/clients/mcp/session-test-findings-retire.test.ts:../../../clients/lsp/index.js:[\"getLSPService\",\"resetLSPService\"]": 14,
 	"tests/clients/mcp/session.test.ts:../../../clients/lsp/index.js:[\"getLSPService\",\"resetLSPService\"]": 14,
 	"tests/clients/mutating-tool-classification.test.ts:../../clients/lsp/index.js:[\"notifyExternalFileChange\"]": 15,
-	"tests/clients/observed-mutation-integration.test.ts:../../clients/bootstrap.js:[\"loadBootstrapClients\"]": 1,
 	"tests/clients/observed-mutation-integration.test.ts:../../clients/lsp/index.js:[\"getLSPService\",\"notifyExternalFileChange\",\"resetLSPService\"]": 13,
 	"tests/clients/package-manager-availability-latch.test.ts:../../clients/safe-spawn.js:[\"isCommandAvailableAsync\",\"safeSpawn\",\"safeSpawnAsync\"]": 6,
 	"tests/clients/pi-host-contract.test.ts:../../clients/lsp/index.js:[\"getLSPService\",\"resetLSPService\"]": 14,

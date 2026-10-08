@@ -460,12 +460,19 @@ export const wallClockBudgetInclude = [
 	// #3510: a real sibling node process with its own pid shares the project
 	// snapshot cache dir (flake-shape admission).
 	"tests/clients/project-snapshot-cross-process.test.ts",
+	// #4148: pytest traceback and go.mod regex budgets (100K blank lines, a
+	// 100K-character rule); a real event-loop occupancy witness, so it runs
+	// serialized.
+	"tests/clients/pytest-gomod-regex-budget.test.ts",
 	"tests/clients/read-expansion-enrichment.test.ts",
 	// #2622: adjacent read-guard stars previously produced exponential regex
 	// backtracking against a long non-matching path; the test measures the real
 	// synchronous matcher cost and belongs in the quiet serialized phase.
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
+	// #4126: the first-session warmup has no awaitable completion signal; keep
+	// its real deferred-notification ordering in the serialized phase.
+	"tests/clients/runtime-session-warm-skip-notify.test.ts",
 	// #3872: real `git worktree add` children are the fixture (flake-shape admission).
 	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).
@@ -509,6 +516,7 @@ export const wallClockBudgetInclude = [
 	// their wall-clock completion; keep its 120s budget in the quiet phase.
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
+	"tests/config/workflow-writers-governance.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
@@ -575,6 +583,7 @@ export const wallClockBudgetInclude = [
 	// admission).
 	"tests/scripts/lint-js.test.ts",
 	"tests/scripts/lockfile-completeness.test.ts",
+	"tests/scripts/lsp-idle-eviction-promote.test.ts",
 	// #4048: the mutation helper's real child and SIGINT restoration witness
 	// require a quiet serialized phase; its bounded timer and never-settling
 	// fixture are the process boundary under test (flake-shape admission).
