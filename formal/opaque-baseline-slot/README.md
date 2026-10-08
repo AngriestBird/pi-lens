@@ -1,8 +1,8 @@
 # Opaque baseline slot model
 
-A TLA+ model of two things: the pending opaque baseline that a bash call
-records at `tool_call` and takes at `tool_result`, and the dispatch dedupe
-that its recoveries feed. The baseline store is `OpaqueBaselineStore` in
+A TLA+ model of three things: the pending opaque baseline that a bash call
+records at `tool_call` and takes at `tool_result`, the dispatch dedupe that
+its recoveries feed, and the inline blocker record those dispatches write. The baseline store is `OpaqueBaselineStore` in
 `clients/opaque-mutation-scan.ts`. Its record site is `handleToolCall` in
 `clients/runtime-tool-call.ts`, and its take site is `handleToolResult` in
 `clients/runtime-tool-result.ts`. The dedupe is `claimPipelineDispatch` and
@@ -40,12 +40,21 @@ Issue: #4137. Lane M5 of #3803.
   is dispatched with authorship. The rest of the window is opaque and is
   dispatched without authorship (#3226). With no baseline, the named paths are
   dispatched without authorship.
-- **The dedupe.** A claim is skipped when this turn already analysed the same
+- **The dedupe.** A claim is skipped when this turn's latch holds the same
   bytes and that analysis satisfies the claim. With `Dedupe = "content"` (the
   pre-fix rule), any analysis satisfies any claim. With `"authority"` (the
   fix), an analysis without authorship satisfies only a claim without
-  authorship. `rec` is the path's inline-blocker record: a dispatch with
-  authorship records it, and one without authorship clears it.
+  authorship. The latch (`lastAnalyzedStateByFile`) is kept apart from the
+  `analysed` history the invariants read: index.ts clears it at every
+  session's turn start, a concurrent secondary's included (#3613), and with
+  `LatchClear` the action `SecondaryTurnStart` may clear it at any time.
+- **The record.** `rec` is the path's inline-blocker record and `recVer` the
+  version its authored verdict is about. A dispatch with authorship records
+  it. One without authorship clears it, except, with `ClearRule = "bytes"`
+  (round 3), when the path's bytes are the very version the authored record is
+  about: `clearInlineBlockers` refuses that clear, because a run without
+  authorship withholds the blocker channel (#3226) and so proves nothing about
+  those bytes. `"always"` is the clear before round 3.
 - **Knobs.**
   - `Keying = "cwd"` is the pre-fix store (one key per `cwd:generation`).
     `"call"` is one key per tool-call id.
@@ -54,6 +63,12 @@ Issue: #4137. Lane M5 of #3803.
   - `Observe = "counted"` is the degradation ledger's `opaque-baseline-lost`
     count. `"none"` is the pre-fix `evictionCount`, which no production code
     read.
+  - `LatchClear` admits a concurrent session's turn start, which clears the
+    dedupe's latch and nothing else (#3613).
+  - `ClearRule = "bytes"` is round 3's refusal; `"always"` the clear before it.
+    The configs that model pre-fix or round-1 code carry `"always"`; the rule
+    is inert in them, because their dedupe never lets an unauthored dispatch
+    reach authored bytes.
 
 ## Invariants
 
@@ -82,6 +97,8 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `CwdKeyedSlot` | violated `EveryWriteAttributed` | 122 / 105 | The pre-fix store. A later `Record` overwrites the earlier baseline, and that call finds nothing at `Take` (the S8 trace: `RECORD x3`, then a take that finds a baseline, then two that find none). |
 | `CwdKeyedUncounted` | violated `SlotLossObservable` | 6 / 6 | The pre-fix observability: an overwrite left no record. |
 | `PerCallKeyed` | pass | 6142 / 3251 | The fix on S8. All three calls keep authorship and their blocker records, nothing is dropped, and stale entries are retired. |
+| `PerCallSecondaryTurn` | pass | 17766 / 8217 | VERIFY_4159 N1, fixed. A concurrent session's turn start may clear the latch at any time, so an opaque sibling's recovery of authored bytes runs; the clear rule keeps the authored record. |
+| `Round2SecondaryTurn` | violated `BlockerKept` | 2554 / 1504 | Round 2 under the same latch clear (the verifier's TC mutant as a config). The opaque sibling's run proceeds and its clean result clears the authored record. |
 | `PerCallContentDedupe` | violated `EveryWriteAttributed` | 1281 / 791 | Keying alone is not enough. The first call to take claims its siblings' paths as opaque, and the content dedupe then skips their authored dispatch of the same bytes. This is the keying-only run of the parallel-bash test: 1 of 3 authored. |
 | `PerCallNamedSibling` | pass | 1926 / 971 | The fix on REVIEW_4159 F2 P1 and P2. |
 | `PerCallFailedSibling` | pass | 2449 / 1171 | The fix on F2 P2e. Call 1 keeps its blocker record. |
@@ -99,6 +116,10 @@ Each knob has a config that flips when it is turned:
 
 - `Keying`: `PerCallKeyed` to `CwdKeyedSlot`.
 - `Dedupe`: `PerCallKeyed` to `PerCallContentDedupe`.
+- `ClearRule`: `PerCallSecondaryTurn` to `Round2SecondaryTurn`.
+- `LatchClear`: `PerCallSecondaryTurn` to `PerCallKeyed` (the same fix, without the
+  secondary's turn start; the round-2 spec passed there and failed only once the
+  latch could go).
 - `Subtract`: `PerCallNamedSibling` to `Round1NamedSibling`, and `PerCallBlockedNamer` to `Round1BlockedNamer`.
 - `Retire`: `PerCallBlockedNamer` to `PerCallNoRetire`.
 - `Observe`: `CwdKeyedSlot` to `CwdKeyedUncounted`.
@@ -115,6 +136,14 @@ The spec mutants run for round 2 each red the invariant named here:
 
 Removing the dedupe altogether turns `PerCallContentDedupe` to pass, which ties that violation to the dedupe.
 
+The spec mutants run for round 3:
+
+- Neutering the clear rule (`Keeps(p) == FALSE`) reds `BlockerKept` on
+  `PerCallSecondaryTurn`.
+- Making the dedupe read the `analysed` history instead of the latch turns
+  `Round2SecondaryTurn` to pass: a model whose dedupe cannot lose its latch
+  cannot see N1.
+
 ## What the model cannot see
 
 - Time and the clock. Windows are ordered by record, write, and take steps, not
@@ -125,10 +154,18 @@ Removing the dedupe altogether turns `PerCallContentDedupe` to pass, which ties 
 - Concurrency inside a dispatch. Each call's dispatch is one atomic step, so the
   in-flight registry (one run per hash and authority) and an unauthored run that
   settles after an authored one are not modelled. The write-order token
-  (#3507) orders those two inline verdicts in the code.
-- A concurrent session. The model has one session. Retirement's liveness test is
-  the coordinator's `isLiveTurnKey`, which keeps a subagent's live turn; the
-  handler test covers that case.
+  (#3507) orders those two inline verdicts in the code, and the handler test
+  `joins an authored run in flight instead of analysing its bytes without
+  authorship` pins the in-flight half of the rank (VERIFY_4159 N2).
+- A concurrent session's own calls. The model has one session's calls; the
+  concurrent session appears only as `SecondaryTurnStart`, the one effect its
+  turn start has on this seam. Retirement's liveness test is the coordinator's
+  `isLiveTurnKey`, which keeps a subagent's live turn; the handler test covers
+  that case.
+- The same session's next turn against a record. `NextTurn` ends the turn once
+  no call is in flight, so an opaque command of the next turn that touches a
+  path with the same bytes is not modelled; the handler test `keeps an authored
+  blocker across turns when an opaque rerun leaves the same bytes` covers it.
 - The recovery itself (`recoverOpaqueChangesViaGit`, `captureFileStats`) and the
   pipeline. The model keeps only the dedupe and the inline record.
 
@@ -145,4 +182,6 @@ boundary. It covers:
 - F1's blocked namer;
 - F2's three cells;
 - both directions of the authority rank;
-- retirement, and the concurrent session's live turn.
+- retirement, and the concurrent session's live turn;
+- the record kept through a concurrent session's latch clear and through the
+  session's own next turn, and cleared on changed bytes (round 3).

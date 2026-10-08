@@ -42,7 +42,14 @@
 (*                                                                         *)
 (* The inline-blocker record of a path (rec) is set by the latest dispatch *)
 (* that ran: authored records it, unauthored clears it (a non-autonomous   *)
-(* result carries no inline summary).                                      *)
+(* result carries no inline summary). With ClearRule "bytes" (round 3), an *)
+(* unauthored dispatch of the very version the authored record is about    *)
+(* leaves it (clearInlineBlockers refuses: #3226 says that result is no    *)
+(* evidence). "always" is the pre-round-3 clear.                          *)
+(*                                                                         *)
+(* The dedupe reads the latch, not the history: index.ts clears the latch  *)
+(* at every session's turn start, a concurrent secondary's included        *)
+(* (#3613). LatchClear admits that clear at any time (SecondaryTurnStart). *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -54,7 +61,9 @@ CONSTANTS
     Retire,      \* TRUE: a record retires the entries of a dead turn
     Observe,     \* "counted" (the ledger) | "none" (pre-fix evictionCount)
     Sequential,  \* TRUE: a call records only when no other is in flight
-    Scenario     \* "s8" | "namedSibling" | "failedSibling" | "blockedNamer"
+    Scenario,    \* "s8" | "namedSibling" | "failedSibling" | "blockedNamer"
+    LatchClear,  \* TRUE: a concurrent session's turn start may clear the latch
+    ClearRule    \* "always" (pre-round-3) | "bytes" (round 3's refusal)
 
 Writers == {1, 2, 3}
 Paths == {1, 2, 3}
@@ -92,10 +101,12 @@ VARIABLES
     seen,      \* [Writers -> calls that took after w recorded] (Subtract)
     plan,      \* [Writers -> [rec, auth, opq]] planned at the take
     analysed,  \* <<path, version, authored, turn>> of every dispatch that ran
-    rec        \* [Paths -> "none" | "authored" | "cleared"]
+    latch,     \* the dedupe's view of analysed (lastAnalyzedStateByFile)
+    rec,       \* [Paths -> "none" | "authored" | "cleared"]
+    recVer     \* [Paths -> the version rec's authored verdict is about]
 
 vars == <<pc, turn, ver, ran, window, slot, lost, retired, ledger, missed,
-          seen, plan, analysed, rec>>
+          seen, plan, analysed, latch, rec, recVer>>
 
 NoPlan == [rec |-> {}, auth |-> {}, opq |-> {}]
 
@@ -113,7 +124,9 @@ TypeOK ==
     /\ plan \in [Writers -> [rec : SUBSET Paths, auth : SUBSET Paths,
                              opq : SUBSET Paths]]
     /\ analysed \subseteq (Paths \X (0..3) \X BOOLEAN \X Turns)
+    /\ latch \subseteq analysed
     /\ rec \in [Paths -> {"none", "authored", "cleared"}]
+    /\ recVer \in [Paths -> 0..3]
     /\ Len(slot) <= Cap
 
 Key(w) == IF Keying = "cwd" THEN 0 ELSE w
@@ -142,7 +155,9 @@ Init ==
     /\ seen = [w \in Writers |-> {}]
     /\ plan = [w \in Writers |-> NoPlan]
     /\ analysed = {}
+    /\ latch = {}
     /\ rec = [p \in Paths |-> "none"]
+    /\ recVer = [p \in Paths |-> 0]
 
 InFlight(o) == pc[o] \in {"called", "taken"}
 
@@ -176,7 +191,8 @@ Record(w) ==
                 /\ ledger' = ledger + Counted(Cardinality(gone) + 1)
           /\ retired' = retired \cup gone
     /\ pc' = [pc EXCEPT ![w] = "called"]
-    /\ UNCHANGED <<turn, ver, ran, window, missed, seen, plan, analysed, rec>>
+    /\ UNCHANGED <<turn, ver, ran, window, missed, seen, plan, analysed,
+                   latch, rec, recVer>>
 
 \* The command runs and writes its paths; every pending owner's window
 \* (the owner of an entry in the store is called or gone) sees them.
@@ -190,7 +206,7 @@ Write(w) ==
                     IF pc[o] \in {"called", "gone"} THEN window[o] \cup Writes[w]
                     ELSE window[o]]
     /\ UNCHANGED <<pc, turn, slot, lost, retired, ledger, missed, seen, plan,
-                   analysed, rec>>
+                   analysed, latch, rec, recVer>>
 
 \* A blocked or pre-start-aborted call: no tool_result ever arrives.
 Abandon(w) ==
@@ -198,7 +214,7 @@ Abandon(w) ==
     /\ w \in Blocked
     /\ pc' = [pc EXCEPT ![w] = "gone"]
     /\ UNCHANGED <<turn, ver, ran, window, slot, lost, retired, ledger, missed,
-                   seen, plan, analysed, rec>>
+                   seen, plan, analysed, latch, rec, recVer>>
 
 \* tool_result: take the baseline under w's key and plan the dispatches.
 Take(w) ==
@@ -229,31 +245,55 @@ Take(w) ==
                /\ plan' = [plan EXCEPT ![w] =
                               [rec |-> recW, auth |-> {}, opq |-> {}]]
                /\ UNCHANGED <<slot, seen>>
-    /\ UNCHANGED <<turn, ver, ran, window, lost, retired, ledger, analysed, rec>>
+    /\ UNCHANGED <<turn, ver, ran, window, lost, retired, ledger, analysed,
+                   latch, rec, recVer>>
 
 Authored(w, p) == p \in plan[w].auth
 Claimed(w) == plan[w].rec \cup plan[w].opq
 
 \* claimPipelineDispatch: skip a claim whose bytes this turn already analysed,
-\* when that analysis satisfies it.
+\* when that analysis satisfies it. It reads the latch, which a concurrent
+\* session's turn start may have cleared.
 Proceeds(p, a) ==
     ~\E b \in BOOLEAN :
-        /\ <<p, ver[p], b, turn>> \in analysed
+        /\ <<p, ver[p], b, turn>> \in latch
         /\ (Dedupe = "content" \/ b \/ ~a)
+
+\* clearInlineBlockers: an unauthored clean result retires the record unless
+\* it is the authored verdict about these very bytes (ClearRule "bytes").
+Keeps(p) ==
+    /\ ClearRule = "bytes"
+    /\ rec[p] = "authored"
+    /\ recVer[p] = ver[p]
 
 \* The synthetic writes of one call, each at the path's current bytes.
 Dispatch(w) ==
     /\ pc[w] = "taken"
     /\ LET run == {p \in Claimed(w) : Proceeds(p, Authored(w, p))}
-       IN /\ analysed' = analysed \cup
-                {<<p, ver[p], Authored(w, p), turn>> : p \in run}
+           new == {<<p, ver[p], Authored(w, p), turn>> : p \in run}
+       IN /\ analysed' = analysed \cup new
+          /\ latch' = latch \cup new
           /\ rec' = [p \in Paths |->
                        IF p \in run
-                       THEN IF Authored(w, p) THEN "authored" ELSE "cleared"
+                       THEN IF Authored(w, p) THEN "authored"
+                            ELSE IF Keeps(p) THEN rec[p] ELSE "cleared"
                        ELSE rec[p]]
+          /\ recVer' = [p \in Paths |->
+                          IF p \in run /\ Authored(w, p) THEN ver[p]
+                          ELSE recVer[p]]
     /\ pc' = [pc EXCEPT ![w] = "done"]
     /\ UNCHANGED <<turn, ver, ran, window, slot, lost, retired, ledger, missed,
                    seen, plan>>
+
+\* index.ts turn_start for a concurrent session: `runtime.beginTurn(sub)` and
+\* `clearLastAnalyzedStateCache()`. The primary's turn, tokens and records are
+\* untouched (#3613); only the dedupe's latch goes.
+SecondaryTurnStart ==
+    /\ LatchClear
+    /\ latch # {}
+    /\ latch' = {}
+    /\ UNCHANGED <<pc, turn, ver, ran, window, slot, lost, retired, ledger,
+                   missed, seen, plan, analysed, rec, recVer>>
 
 NextTurn ==
     /\ turn = 0
@@ -261,10 +301,11 @@ NextTurn ==
     /\ \E o \in Writers : pc[o] # "new"
     /\ turn' = 1
     /\ UNCHANGED <<pc, ver, ran, window, slot, lost, retired, ledger, missed,
-                   seen, plan, analysed, rec>>
+                   seen, plan, analysed, latch, rec, recVer>>
 
 Next ==
     \/ NextTurn
+    \/ SecondaryTurnStart
     \/ \E w \in Writers :
           Record(w) \/ Write(w) \/ Abandon(w) \/ Take(w) \/ Dispatch(w)
 
