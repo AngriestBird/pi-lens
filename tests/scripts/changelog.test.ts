@@ -153,12 +153,64 @@ describe("changelog lib — summarizeSection", () => {
 		expect(line).toContain("(#450)");
 	});
 
+	it("joins wrapped plain entries before choosing a complete gist", () => {
+		const body = [
+			"### Fixed",
+			"",
+			"- A file with no project marker (no `package.json`, `Cargo.toml` and the like",
+			"  above it) no longer re-walks every ancestor directory on each lookup.",
+			"",
+		].join("\n");
+		const line = summarizeSection(body)
+			.split("\n")
+			.find((candidate) => candidate.startsWith("- A file"));
+		expect(line).toBe(
+			"- A file with no project marker (no `package.json`, `Cargo.toml` and the like above it) no longer re-walks every ancestor directory on each lookup.",
+		);
+	});
+
+	it("joins wrapped bold gist text and preserves refs on continuation lines", () => {
+		const body = [
+			"### Fixed",
+			"",
+			"- **Wrapped fix (#77)** — The first sentence continues onto",
+			"  the next line and remains a complete gist (refs #88). More detail.",
+			"",
+		].join("\n");
+		expect(summarizeSection(body, { gist: true })).toContain(
+			"- **Wrapped fix (#77)** — The first sentence continues onto the next line and remains a complete gist (refs #88)",
+		);
+	});
+
+	it("summarizes the released 4.4.0 section without physical-line fragments", () => {
+		const body = extractSection(CHANGELOG, "4.4.0");
+		expect(body).not.toBeNull();
+		const summary = summarizeSection(body!);
+		for (const fragment of [
+			"pi 1.0.x and 1.1.x are now verified release-QA hosts, and the published",
+			"A file with no project marker (no `package.json`, `Cargo.toml` and the like",
+			"A pi-lens session whose instance-registry entry went missing",
+			"The durable-store lock (dispositions and actionable warnings) no longer lets",
+			"The shared tools install lock no longer lets two sessions install at once",
+			"The quarantine lock (the probe cache, the tool-refresh state and the orphan",
+		]) {
+			expect(summary.split("\n")).not.toContain(`- ${fragment}`);
+		}
+		for (const line of summary
+			.split("\n")
+			.filter((value) => value.startsWith("- "))) {
+			expect(line).not.toMatch(
+				/(?:and the published|and the like|went missing|no longer lets|at once|the orphan)$/,
+			);
+		}
+	});
+
 	it("hard-truncates an unbroken over-long plain bullet at a word boundary", () => {
 		const long = `### Fixed\n\n- ${"word ".repeat(60).trim()} (#99)\n`;
 		const s = summarizeSection(long);
 		const line = s.split("\n").find((l) => l.startsWith("- word"));
 		expect(line).toBeDefined();
-		expect(line!.length).toBeLessThan(180);
+		expect(line!.length).toBeLessThan(260);
 		expect(line).toContain("…");
 		expect(line).toContain("(#99)");
 	});

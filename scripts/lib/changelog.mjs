@@ -68,15 +68,16 @@ function finalize(current) {
  * @returns {string}
  */
 export function summarizeSection(body, opts = {}) {
-	const maxGist = opts.maxGist ?? 130;
+	const maxGist = opts.maxGist ?? 220;
 	// Bucket entries under canonical subheadings, merging same-named headings
 	// (a section may carry two `### Added` blocks) and preserving first-seen order.
 	const order = [];
 	const buckets = new Map();
 	let heading = null;
 	let internalCount = 0;
-	for (const raw of body.split(/\r?\n/)) {
-		const line = raw.trimEnd();
+	const lines = body.split(/\r?\n/);
+	for (let i = 0; i < lines.length; i++) {
+		let line = lines[i].trimEnd();
 		const h = line.match(/^#{2,4}\s+(.*)$/);
 		if (h) {
 			heading = h[1].trim();
@@ -91,6 +92,25 @@ export function summarizeSection(body, opts = {}) {
 		if (heading === INTERNAL_HEADING) {
 			if (/^[-*]\s+\S/.test(line)) internalCount++;
 			continue;
+		}
+		const entry = line.match(/^- (\S.*)$/);
+		if (entry) {
+			let text = entry[1];
+			let next = i + 1;
+			while (next < lines.length) {
+				const continuation = lines[next].trimEnd();
+				if (
+					continuation.trim() === "" ||
+					/^#{2,4}\s+/.test(continuation) ||
+					/^-\s+/.test(continuation) ||
+					/^\s+-\s+/.test(continuation)
+				)
+					break;
+				text += ` ${continuation.trim()}`;
+				next++;
+			}
+			i = next - 1;
+			line = `- ${text}`;
 		}
 		const bold = line.match(/^- (\*\*.+?\*\*)\s*(.*)$/);
 		if (bold) {
