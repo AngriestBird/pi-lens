@@ -134,6 +134,8 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 // tests. Measured locally at ~17-23 s alone, inside the 120 s budget.
 export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
+	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).
+	"tests/config/handler-verdict-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",

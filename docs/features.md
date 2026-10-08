@@ -183,7 +183,7 @@ pi-lens MCP server expose the same shape to Claude Code / any MCP client.
 
 At `turn_end`, pi-lens writes `<project-data-dir>/cache/actionable-warnings.json` summarizing fixable warnings introduced by the current turn. This powers the optional conservative autofix at `agent_end`.
 
-`<project-data-dir>` is whatever `getProjectDataDir(cwd)` resolves to: `<project>/.pi-lens` only when that legacy directory already exists, otherwise `~/.pi-lens/projects/<project-slug>` (or a `PILENS_DATA_DIR` location). The turn-end advisory points at `lens_diagnostics mode=delta` first and names the resolved file second, so you never have to work the layout out by hand (#2521).
+`<project-data-dir>` is whatever `getProjectDataDir(cwd)` resolves to: `<project>/.pi-lens` only when that legacy directory already exists when the process first resolves the root (a `.pi-lens` created mid-process takes effect at the next process start), otherwise `~/.pi-lens/projects/<project-slug>` (or a `PILENS_DATA_DIR` location). The turn-end advisory points at `lens_diagnostics mode=delta` first and names the resolved file second, so you never have to work the layout out by hand (#2521).
 
 **Report contents:**
 

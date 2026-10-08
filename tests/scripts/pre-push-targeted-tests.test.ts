@@ -428,6 +428,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
 			"tests/config/vacuous-skip-coverage.test.ts",

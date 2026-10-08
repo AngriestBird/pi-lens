@@ -751,13 +751,19 @@ function buildCoverageNotice(
 		"fact-rules",
 		"opengrep",
 	]);
-	const anyLinterHasCoverage = runnerLatencies.some(
+
+	// These fallback runners provide type coverage when the primary group is
+	// unavailable. Keep this explicit until runner metadata owns this capability.
+	const TYPE_CAPABLE_FALLBACK_RUNNERS = new Set(["mypy"]);
+	const anyFallbackHasCoverage = runnerLatencies.some(
 		(r) =>
 			fallbackRunnerIds.has(r.runnerId) &&
 			!STRUCTURAL_RUNNERS.has(r.runnerId) &&
-			hasUsableResult(r),
+			hasUsableResult(r) &&
+			(!plan?.capabilities.includes("types") ||
+				TYPE_CAPABLE_FALLBACK_RUNNERS.has(r.runnerId)),
 	);
-	if (anyLinterHasCoverage) return undefined;
+	if (anyFallbackHasCoverage) return undefined;
 
 	const onceKey = `${ctx.kind}:${ctx.filePath}`;
 	if (dedupe) {
