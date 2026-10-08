@@ -1138,20 +1138,20 @@ describe("parallel bash calls (#4137)", () => {
 	 * authorship returns the blocker and its inline record; a run without it
 	 * withholds both (#3226), which makes the handler clear the file's record.
 	 */
+	const STOP = "🔴 STOP — 1 issue(s) must be fixed:\n  L2: debugger";
+	const BLOCKED = {
+		output: STOP,
+		hasBlockers: true,
+		isError: false,
+		fileModified: false,
+		inlineBlockerSummary: STOP,
+		inlineBlockerSources: ["biome"],
+		inlineBlockerLines: [2],
+	};
+
 	async function mockBlockingPipeline() {
-		const stop = "🔴 STOP — 1 issue(s) must be fixed:\n  L2: debugger";
 		(await pipelineMock()).mockImplementation(async (ctx) =>
-			ctx.allowAutonomousWriters === false
-				? NO_BLOCKERS
-				: {
-						output: stop,
-						hasBlockers: true,
-						isError: false,
-						fileModified: false,
-						inlineBlockerSummary: stop,
-						inlineBlockerSources: ["biome"],
-						inlineBlockerLines: [2],
-					},
+			ctx.allowAutonomousWriters === false ? NO_BLOCKERS : BLOCKED,
 		);
 	}
 
@@ -1439,6 +1439,73 @@ describe("parallel bash calls (#4137)", () => {
 		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
 		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
 		expect(await dispatchLog()).toEqual([["par-a.ts", true]]);
+		expect(
+			runtime
+				.getInlineBlockersSnapshot()
+				.map((record) => path.basename(record.filePath)),
+		).toEqual(["par-a.ts"]);
+	});
+
+	// The in-flight half of the rank, in real pi's concurrent-results order: an
+	// authored claim that arrives while an opaque run of the same bytes is still
+	// in flight runs beside it. Joining would hand it the opaque run's verdict,
+	// which carries no blocker. The opaque run, settling last with the older
+	// write token, must not clear the authored record either (#3507).
+	it("runs an authored claim beside an opaque run of the same bytes in flight", async () => {
+		let releaseOpaque = () => {};
+		const opaqueGate = new Promise<void>((resolve) => {
+			releaseOpaque = resolve;
+		});
+		let opaqueStarted = () => {};
+		const opaqueRunning = new Promise<void>((resolve) => {
+			opaqueStarted = resolve;
+		});
+		let authoredStarted = () => {};
+		const authoredRunning = new Promise<void>((resolve) => {
+			authoredStarted = resolve;
+		});
+		(await pipelineMock()).mockImplementation(async (ctx) => {
+			if (ctx.allowAutonomousWriters !== false) {
+				authoredStarted();
+				return BLOCKED;
+			}
+			opaqueStarted();
+			await opaqueGate;
+			return NO_BLOCKERS;
+		});
+		const runtime = newRuntime("in-flight");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await handleToolCall(callDeps(runtime, opaqueCommand(), "opaque"));
+		await handleToolCall(callDeps(runtime, recognized, "recognized"));
+		append("par-a.ts", "debugger;\n");
+		const opaqueResult = handleToolResult(
+			resultDeps(runtime, opaqueCommand(), "opaque"),
+		);
+		// Settles even when a regression dispatches nothing for the opaque call.
+		await Promise.race([opaqueRunning, opaqueResult]);
+		let joinedOpaqueRun = () => {};
+		const joined = new Promise<void>((resolve) => {
+			joinedOpaqueRun = resolve;
+		});
+		const recognizedResult = handleToolResult({
+			...resultDeps(runtime, recognized, "recognized"),
+			// A sync point only: the claim's join is otherwise invisible here.
+			dbg: (message: string) => {
+				if (message.includes("skipping duplicate concurrent state"))
+					joinedOpaqueRun();
+			},
+		});
+		try {
+			await Promise.race([authoredRunning, joined, recognizedResult]);
+		} finally {
+			releaseOpaque();
+		}
+		const [, result] = await Promise.all([opaqueResult, recognizedResult]);
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", false],
+			["par-a.ts", true],
+		]);
+		expect(JSON.stringify(result)).toContain("STOP");
 		expect(
 			runtime
 				.getInlineBlockersSnapshot()
