@@ -68,7 +68,11 @@ import {
 	tryAcquireGeneration,
 } from "../../clients/generation-lock.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
+import {
+	buildWordIndex,
+	getWordIndexWireBytes,
+	searchWordIndex,
+} from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
 
@@ -176,6 +180,32 @@ describe("project snapshot", () => {
 				cachedExports: [["makeThing", path.join(cwd, "src", "a.ts")]],
 			});
 			expect(isProjectSnapshotFresh(loaded, 7)).toBe(true);
+		}));
+
+	it("releases the published word-index wire memo but keeps merge reads live (#4124)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			runtime.wordIndex = buildWordIndex([
+				{ path: path.join(cwd, "src", "alpha.ts"), content: "alphaHandler()" },
+				{ path: path.join(cwd, "src", "beta.ts"), content: "betaHandler()" },
+			]);
+
+			saveProjectSnapshot(
+				cwd,
+				buildProjectSnapshotFromRuntime({ cwd, runtime }),
+			);
+			await waitForProjectSnapshotPersistsForTests();
+
+			// Recurrence: #1370's live decoded index remained useful, but the
+			// serialized copy stayed reachable after publication and doubled warm
+			// memory. The real writer must release only that copy.
+			expect(getWordIndexWireBytes(runtime.wordIndex)).toBeNull();
+			expect(searchWordIndex(runtime.wordIndex, "alpha handler")).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ file: path.join(cwd, "src", "alpha.ts") }),
+				]),
+			);
 		}));
 
 	it("skips a same-seq body when only generatedAt changed", () =>
