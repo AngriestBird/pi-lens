@@ -29,6 +29,7 @@
   "./clients/format-events-publish.js",
   "./clients/format-service.js",
   "./clients/formatters-lazy.js",
+  "./clients/generation-guard.js",
 	"./clients/hook-budgets.js",
   "./clients/host-ports.js",
   "./clients/installer/index.js",

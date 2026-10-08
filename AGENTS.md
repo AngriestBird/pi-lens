@@ -635,6 +635,15 @@ the surface they bite; each block loads only when its trigger applies.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
+- Temporary roots (#1129) are classified once per process by
+  `clients/ephemeral-root.ts`, on real paths on both sides. A directory inside
+  a real git checkout below `os.tmpdir()` (root or subdirectory) is a normal
+  LSP root with the ephemeral idle window, and `getProjectDataDir` gives it
+  its usual slug under `<base>/.ephemeral/<pid>-<8 hex>/`: normal within the
+  process, never read by another one, removed by the exit hook and, for a
+  dead pid, by the session-start sweep. A `pi-agent-*` path below the tmpdir
+  that no checkout owns is declined at `resolveLspServerCwd` with one
+  `lsp-root-declined` record per staging root per session.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
@@ -758,9 +767,26 @@ the surface they bite; each block loads only when its trigger applies.
   `concurrent-secondary` skips the reset, since a subagent reset tears down the
   primary's warm state. `secondary` belongs to the shutdown classification. A process-lifetime latch cannot store a
   session fact without an explicit reset.
+- Turn state is the turn's session's (#3613): `RuntimeCoordinator.beginTurn`
+  takes the ctx's stable session id and moves the coordinator's counters,
+  write-order turn and change window only for its own session, and per-turn
+  warnings are partitioned by the session that recorded them. Every
+  producer and reader passes that id (`tool_result`, a partial apply's
+  pipeline, `turn_end`). A concurrent secondary still shares the read guard
+  and the turn-end worklist (the open half of #3613).
+- Every session-scope hand-off decision leaves one `latency.log` row per
+  lifecycle event, never one per occurrence in a loop (#3873):
+  `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`
+  (a store's `restore` returns its `StoreCarry`, items in and kept),
+  `session_scope_transition` (`end`, `demote`) and `session_end_fence_rollup`.
+  `docs/pi-lens-monitor.md` lists the fields; a new session store or hand-off
+  branch adds its row there in the same change.
 - Logger writes use `createNdjsonLogger`; flush before reading a log. Redact at
   the sink. New failure records preserve the discriminating file/tool/record
   identity and retain dropped counts.
+- `memory_sample` remains one bounded latency record. Its heap, external,
+  worker-isolate, tree-sitter, and word-index fields are latest-value or O(1)
+  reads; sampler assembly time is recorded in `samplerDurationMs`.
 - Delivery surfaces are registered in `clients/finding-delivery-gate.ts`.
   Every model-facing diagnostic, blocker, advisory, widget, nudge, and snapshot
   either passes the shared freshness/disposition gate or carries an explicit

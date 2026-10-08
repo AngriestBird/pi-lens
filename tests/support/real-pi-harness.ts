@@ -3,7 +3,13 @@ import {
 	type ChildProcess,
 	type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	cpSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -50,6 +56,9 @@ export type RealPi = {
 	killChildForTest(): void;
 	providerObservations(): ReadonlyArray<JsonObject>;
 	projectPath(): string;
+	homePath(): string;
+	childTempDir(): string;
+	childEnvironment(): Readonly<Record<string, string | undefined>>;
 	lens: {
 		latencyRows(): ReadonlyArray<JsonObject>;
 		extensionLog(): ReadonlyArray<JsonObject>;
@@ -167,6 +176,22 @@ function startRealPi(
 	const project = projectOverride ?? createRealPiProject(scenario, scratchRoot);
 	const home = homeOverride ?? claimScratchDir(scratchRoot, "real-pi-home");
 	const providerLog = path.join(home, "provider.jsonl");
+	const childTmp = path.join(home, "tmp");
+	mkdirSync(childTmp, { recursive: true });
+	const childEnv = withRepoBinOnPath({
+		...process.env,
+		// Keep the real host outside Vitest's runner-only rethrow mode.
+		VITEST: undefined,
+		PI_LENS_HOME: home,
+		HOME: home,
+		TMPDIR: childTmp,
+		TMP: childTmp,
+		TEMP: childTmp,
+		REAL_PI_HARNESS_SCRIPT: scriptFile,
+		REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
+		ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
+		...env,
+	});
 	const child: ChildProcessWithoutNullStreams = spawn(
 		"pi",
 		[
@@ -187,17 +212,7 @@ function startRealPi(
 		{
 			cwd: project,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: withRepoBinOnPath({
-				...process.env,
-				// Keep the real host outside Vitest's runner-only rethrow mode.
-				VITEST: undefined,
-				PI_LENS_HOME: home,
-				HOME: home,
-				REAL_PI_HARNESS_SCRIPT: scriptFile,
-				REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
-				ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
-				...env,
-			}),
+			env: childEnv,
 		},
 	);
 	const events: RpcMessage[] = [];
@@ -294,6 +309,7 @@ function startRealPi(
 		child,
 		project,
 		home,
+		childEnv,
 		events,
 		request,
 		waitFor,
@@ -449,6 +465,9 @@ export async function withRealPi<T>(
 				),
 			providerObservations: () => harness.providerObservations(),
 			projectPath: () => harness.project,
+			homePath: () => harness.home,
+			childTempDir: () => path.join(harness.home, "tmp"),
+			childEnvironment: () => harness.childEnv,
 			lens: {
 				latencyRows: () => readRows(path.join(harness.home, "latency.log")),
 				extensionLog: () => readRows(path.join(harness.home, "extension.log")),

@@ -505,6 +505,9 @@ export const wallClockBudgetInclude = [
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
+	// #4133: the real pi child environment is the subject of this boundary test;
+	// keep it in the serialized real-harness lane.
+	"tests/real-harness/fixture-shape.test.ts",
 	// #3870: every detector test drives the analyzer's real CLI entry point
 	// (a real node subprocess) over redacted fixture logs (flake-shape admission).
 	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts",

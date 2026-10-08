@@ -140,6 +140,7 @@ import { wireDiagnosticsBusEmitterGetter } from "./clients/diagnostics-publish.j
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
+import { emitFenceRollupAtSessionEnd } from "./clients/generation-guard.js";
 import {
 	emitVerifiedPathAttributionRollup,
 	resetVerifiedPathAttributionGuessCount,
@@ -2340,7 +2341,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3819 r2: a demoted real successor (a row-17 start holds the
 						// primary registration) discards the slot left for it, so the
 						// session cannot take it stale once it classifies primary again.
-						discardHandoff({
+						const discardedSlot = discardHandoff({
 							reason: sessionReason,
 							sessionFile: getSessionFile(ctx),
 							sessionManager: getSessionManager(ctx),
@@ -2354,6 +2355,23 @@ function activateExtension(hostPi: ExtensionAPI) {
 							sessionId: stableSessionId,
 							cwd: sessionStartCwd ?? runtime.projectRoot,
 						});
+						// #3873 O4: a start the replacement gap declined because it is
+						// not the successor the shutdown named (#3855) is a demotion; a
+						// plain concurrent subagent is not, and writes only its `start`.
+						if (sessionStartDecision.basis === "successor-pending")
+							logScopeTransition(scope, {
+								transition: "demote",
+								reason: sessionReason,
+								sessionId: stableSessionId,
+								cwd: sessionStartCwd ?? runtime.projectRoot,
+								detail: {
+									classification: sessionStartDecision.classification,
+									basis: sessionStartDecision.basis,
+									gapMs: sessionStartDecision.gapMs,
+									lineageMatch: sessionStartDecision.lineageMatch,
+									discardedSlot,
+								},
+							});
 						return;
 					}
 
@@ -2475,7 +2493,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						.then((entries) => {
 							if (entries.length === 0) return;
 							recordCrossProcessTouches(
-								entries.map((e) => ({ path: e.path, reason: e.reason })),
+								entries.map((e) => ({
+									path: e.path,
+									reason: e.reason,
+									sessionId: e.sessionId,
+								})),
 							);
 							dbg(
 								`session_start: cross-process nudge — ${entries.length} file(s) from other instance(s)`,
@@ -2524,6 +2546,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// "sequential-replacement" — a declined start returned above.
 						sessionStartClassification: sessionStartDecision.classification,
 						sessionStartSameRoot: sessionStartDecision.sameRoot,
+						sessionStartBasis: sessionStartDecision.basis,
+						sessionStartGapMs: sessionStartDecision.gapMs,
+						sessionStartLineageMatch: sessionStartDecision.lineageMatch,
 						getFlag: (name: string) => getLensFlag(name),
 						notify: (msg, level) => notifyUi(ctx, msg, level),
 						dbg,
@@ -2542,6 +2567,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					// Pin the stable identity + reason over the fresh random id that
+					// reset drew (#190). #3613 F1: before the await, for the same
+					// reason as the scope: a throw later in the handler must not leave
+					// the coordinator on the random id, or every turn of this primary
+					// would take `beginTurn`'s other-session path.
+					runtime.setSessionLifecycle({
+						sessionId: stableSessionId,
+						reason: sessionReason,
+					});
 					await bounded(sessionStartWork, {
 						ms: HOOK_WALL_BUDGET_MS.session_start,
 						signal: ctx.signal,
@@ -2549,13 +2583,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 						label: "handleSessionStart",
 					});
 					if (ctx.ui) updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
-
-					// Pin the stable identity + reason AFTER handleSessionStart (which ran
-					// resetForSession → a fresh random id); the stable id now wins (#190).
-					runtime.setSessionLifecycle({
-						sessionId: stableSessionId,
-						reason: sessionReason,
-					});
 					// #3612: the coordinator's fresh guard is this scope's read-guard
 					// cell, which the read-guard stores snapshot and restore.
 					scopeCell(scope, READ_GUARD_CELL, () => runtime.readGuard);
@@ -2576,6 +2603,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionFile: getSessionFile(ctx),
 						sessionManager: ctx.sessionManager,
 						cwd: stateCwd,
+						dbg,
 						loadOwnSidecar: () => loadSessionState(stateCwd, stableSessionId),
 						loadParentSidecar: async () => {
 							const parentFile = (() => {
@@ -2705,6 +2733,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			ensureLSPConfigInitialized,
 			updateLspStatus,
 			resetLSPService,
+			sessionId: getStableSessionId(ctx),
 		});
 	});
 
@@ -2857,7 +2886,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 		) {
 			mountLensWidget(ctx.ui, readExtensionMode(ctx));
 		}
-		runtime.beginTurn();
+		// #3613 (S4, N2): the turn's own session. A concurrent secondary's turn
+		// advances only its own turn identity and per-turn records; the
+		// coordinator's turn state is the primary's.
+		runtime.beginTurn(getStableSessionId(ctx));
+		// Every turn, a secondary's too: clearing only re-runs a duplicate
+		// same-state analysis, while keeping it would skip a secondary's next
+		// turn (the dedupe keys on the primary's turn index).
 		clearLastAnalyzedStateCache();
 
 		// #492: parent-at-turn_start cross-process nudge consumer — the "parent
@@ -2887,7 +2922,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// drop path — every entry that reaches this point is relevant by
 				// construction.
 				recordCrossProcessTouches(
-					entries.map((e) => ({ path: e.path, reason: e.reason })),
+					entries.map((e) => ({
+						path: e.path,
+						reason: e.reason,
+						sessionId: e.sessionId,
+					})),
 				);
 				dbg(
 					`turn_start: cross-process nudge — ${entries.length} file(s) from other instance(s)`,
@@ -3272,7 +3311,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// (see clients/memory-sampler.ts). Session age + turn count ride along so
 			// growth-vs-age curves are plottable from logs alone. Still cheap:
 			// O(1)/O(bounded-cache-size) reads only, no extra throttling needed.
-			if (shouldEmitMemorySampleAdaptive(runtime.turnIndex)) {
+			// #3613 G1: process-level cadences pace on every session's turn
+			// starts. The primary's index stands still through a subagent's run
+			// (it would fire at every subagent turn end while on a sampling
+			// turn), and a subagent's fractional turn key never meets `% N`.
+			const cadenceTurn = runtime.turnStartCount;
+			if (shouldEmitMemorySampleAdaptive(cadenceTurn)) {
 				try {
 					const sample = buildMemorySample(
 						runtime.wordIndex,
@@ -3294,10 +3338,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						durationMs: 0,
 						metadata: { turnIndex: runtime.turnIndex, ...sample },
 					});
-					recordMemorySampleOutcome(
-						sample.process.heapUsedBytes,
-						runtime.turnIndex,
-					);
+					recordMemorySampleOutcome(sample.process.heapUsedBytes, cadenceTurn);
 				} catch {
 					// best-effort observability — never fail turn_end over this
 				}
@@ -3307,7 +3348,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// sample above — at most once per SMELLS_TURN_CHECK_INTERVAL turns, and
 			// each smell notifies at most once per session (checkSmellsAndNoteOnce's
 			// gate). See clients/smells-rollup.ts for the tail-scan cost bound.
-			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
+			if (shouldCheckSmellsThisTurn(cadenceTurn)) {
 				try {
 					// S3c (#1432 review): use the in-process session start instead of
 					// letting countRecentSmells() fall back to its 24h rolling
@@ -3731,6 +3772,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				"concurrent-secondary",
 			);
 			clearCachePrefixSession(stableSessionId, "concurrent-secondary");
+			// #3613: its per-turn records end with it.
+			runtime.forgetTurnSession(stableSessionId);
 			decrementSecondarySessionCount();
 			// #2130: scoped deregistration. A secondary's shutdown must never run
 			// `deregisterInstance()` — the process lives on and the primary still
@@ -3892,6 +3935,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// returned before reaching here), since the rollup counters are
 			// process-wide module state a live secondary would still need.
 			emitBusEventRollupAtSessionEnd(runtime.projectRoot);
+			// #3873 O5: the fence side of the same rollup. The bus row proves
+			// `skipped_stale_session`; this one gives each generation fence its
+			// guarded and dropped counts, so zero drops is distinguishable from
+			// a fence nothing exercised.
+			emitFenceRollupAtSessionEnd(runtime.projectRoot);
 			emitVerifiedPathAttributionRollup(runtime.projectRoot);
 			// #2249: same primary-only placement — one concurrent_session_bind_rollup
 			// row summarizing this session's declined binds by classification, a
