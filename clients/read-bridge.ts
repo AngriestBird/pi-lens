@@ -190,6 +190,12 @@ export function registerReadBridge(deps: BridgeDeps): void {
 			// #3654: in a pi-lens process the unified bridge is mounted in the same
 			// first-wins pass, so delegate to it. This body stays as the fallback for
 			// an isolated unit-test mount or a dirty process that mounted only v1.
+			// #3654 D14: the v1 recordability gate runs FIRST, on the v1 path. Its
+			// flag read is this bridge's own ("read-bridge" subject, and a
+			// near-match stale error rethrows as v1 did); delegating first would
+			// report "io-bridge" and swallow the rethrow inside the v2
+			// never-throw wrapper.
+			if (!deps.isRecordable(entry.filePath)) return;
 			const ioBridge = getIOBridge();
 			if (ioBridge !== undefined) {
 				const offset = entry.requestedOffset;
@@ -213,7 +219,6 @@ export function registerReadBridge(deps: BridgeDeps): void {
 				return;
 			}
 
-			if (!deps.isRecordable(entry.filePath)) return;
 			// A zero-line read vouches for nothing unless the file is really
 			// empty: probe emptiness here (and only here - no new stat on the
 			// common path). A non-empty, missing, or unreadable target is

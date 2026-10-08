@@ -75,8 +75,19 @@ export interface IOBridgeDeps extends MutationBridgeDeps {
 	getTurnIndex(): number;
 	/** The agent-write index at record time. */
 	peekWriteIndex(): number;
-	/** The live lens flag getter (`no-read-guard`, `no-lsp`). */
-	getFlag(name: string): boolean | string | undefined;
+	/**
+	 * The live lens flag getter (`no-read-guard`, `no-lsp`). `bridge` names the
+	 * owning bridge for the stale-ctx diagnostic ("<bridge>-bridge"). The v1
+	 * read shim runs its own recordability gate before delegating (D14: it must
+	 * keep the `"read-bridge"` subject and the near-match stale rethrow), so
+	 * the read facet attributes its duplicate read `"read"` and the ledger's
+	 * `kind\0subject` once-key collapses the two into one row. Omitted means
+	 * the native v2 surface (`"io-bridge"`).
+	 */
+	getFlag(
+		name: string,
+		bridge?: "read" | "mutation" | "io",
+	): boolean | string | undefined;
 	/** Delete gate 1 — vendor / outside every workspace root. */
 	isExternalOrVendorFile(filePath: string): boolean;
 	/** Delete gate 2 — ignored by a project ignore file. */
@@ -346,7 +357,7 @@ function recordReadFacet(
 			"filePath must be a non-empty string",
 		);
 	}
-	if (deps.getFlag("no-read-guard")) {
+	if (deps.getFlag("no-read-guard", "read")) {
 		return drop("read", caller, "no-read-guard", filePath);
 	}
 	if (!deps.isRecordable(filePath)) {
@@ -472,7 +483,7 @@ function recordDeleteFacet(
 ): RecordOutcome {
 	// Enclosing gate (RFC D3). `no-lsp` is read again below, where it suppresses
 	// only the LSP notification — the eviction still runs (RFC §6).
-	if (deps.getFlag("no-read-guard")) {
+	if (deps.getFlag("no-read-guard", "mutation")) {
 		return drop("mutate", caller, "no-read-guard", filePath);
 	}
 	// Inner confirmed-delete gates, in `runtime-tool-result.ts` production order.
@@ -497,7 +508,7 @@ function recordDeleteFacet(
 		);
 	}
 	guard.forgetPath(filePath);
-	if (!deps.getFlag("no-lsp")) {
+	if (!deps.getFlag("no-lsp", "mutation")) {
 		try {
 			void Promise.resolve(deps.notifyExternalFileChange(filePath, 3)).catch(
 				(err) => {
@@ -544,6 +555,14 @@ function recordMutateFacet(
 		filePath,
 		kind: mutate.kind,
 	};
+	// #3654/#2465: the mutation owner derives the change-log source
+	// (`agent-tool:<name>`) from the entry's `consumer`, so a v1 caller's
+	// producer identity must ride along. Without this the v2 translation
+	// reported every v1 producer as `agent-tool:unknown`.
+	const rawProducer = raw["consumer"];
+	if (typeof rawProducer === "string" && rawProducer !== "") {
+		v1Entry["consumer"] = rawProducer;
+	}
 	const passthrough = raw["mutate"] as Record<string, unknown>;
 	const editRanges = passthrough["ranges"];
 	if (mutate.kind === "edit" && editRanges !== undefined) {

@@ -167,11 +167,7 @@ import {
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
 import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
-import {
-	getLSPService,
-	notifyExternalFileChange,
-	resetLSPService,
-} from "./clients/lsp/index.js";
+import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
 import { shouldInitializeSessionRoot } from "./clients/lsp/session-roots.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
 import {
@@ -1129,12 +1125,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 			getReadGuard: () => runtime.readGuard,
 			getTurnIndex: () => runtime.turnIndex,
 			peekWriteIndex: () => runtime.peekWriteIndex(),
-			getFlag: (name: string) => getBridgeFlag(_bridgeGetFlag, "io", name),
+			getFlag: (name: string, bridge?: "read" | "mutation" | "io") =>
+				getBridgeFlag(_bridgeGetFlag, bridge ?? "io", name),
 			isExternalOrVendorFile: (filePath: string) =>
 				isExternalOrVendorFile(filePath, runtime.projectRoot),
 			isPathIgnoredByProject: (filePath: string) =>
 				isPathIgnoredByProject(filePath, runtime.projectRoot, false),
-			notifyExternalFileChange,
+			// #3654: resolved lazily through the live LSP client seam, so a test mock
+			// of `clients/lsp/index.js` that predates this bridge (and so omits the
+			// named export) cannot break the delete path. This is exactly what the
+			// module-level `notifyExternalFileChange` does
+			// (`getLSPService().notifyExternalFileChange(...)`), so the real path is
+			// unchanged.
+			notifyExternalFileChange: (filePath: string, type: number) =>
+				getLSPService().notifyExternalFileChange(filePath, type),
 			nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
 		});
 	}
