@@ -1,201 +1,314 @@
 ------------------------ MODULE OpaqueBaselineSlot ------------------------
 (***************************************************************************)
-(* The pending opaque baseline of parallel bash calls                      *)
-(* (clients/opaque-mutation-scan.ts OpaqueBaselineStore, recorded at       *)
-(* tool_call in clients/runtime-tool-call.ts, taken at tool_result in      *)
-(* clients/runtime-tool-result.ts; #4137).                                 *)
+(* The pending opaque baseline of bash calls and the dispatch dedupe its   *)
+(* recoveries feed (#4137). Store: clients/opaque-mutation-scan.ts         *)
+(* OpaqueBaselineStore, recorded at tool_call in                           *)
+(* clients/runtime-tool-call.ts and taken at tool_result in                *)
+(* clients/runtime-tool-result.ts. Dedupe: claimPipelineDispatch and       *)
+(* dispatchPipelineAnalysis in clients/runtime-tool-result.ts.             *)
 (*                                                                         *)
-(* pi runs the bash calls of one assistant message in parallel, so every   *)
-(* tool_call precedes the first tool_result. Each call (a writer) records  *)
-(* a baseline, writes the one path its own text names, and takes a         *)
-(* baseline at its tool_result. A call authored its write only if it took  *)
-(* a baseline and its authored dispatch reached the pipeline.              *)
+(* A call (writer) records a baseline, runs its command, takes a baseline  *)
+(* at its tool_result and dispatches. Its recovery window holds every path *)
+(* written since the baseline's owner recorded (git status filtered by     *)
+(* mtime). The paths the command's text names are recognized: one that    *)
+(* changed in the window is dispatched with authorship (autonomous         *)
+(* writers, the blocker channel). The rest of the window is opaque and is  *)
+(* dispatched without authorship (#3226).                                  *)
 (*                                                                         *)
 (* Actions:                                                                *)
-(*  - Record(w): tool_call stores w's baseline under its key. A baseline   *)
-(*    already under that key is overwritten and its owner's baseline is    *)
-(*    lost;                                                                *)
-(*  - Evict(w): Record on a full store drops the oldest baseline (the      *)
-(*    OPAQUE_BASELINE_PENDING_CAP bound) and its owner's baseline is lost; *)
-(*  - Write(w): the command writes its path, between Record and Take;      *)
-(*  - Take(w): tool_result removes the baseline under w's key and plans   *)
-(*    the recovery: a call that holds one claims the changed paths other   *)
-(*    than its own as opaque; a call with none plans nothing               *)
-(*    (partial-recognition-no-baseline);                                   *)
-(*  - Dispatch(w): after the awaits between the take and the synthetic     *)
-(*    writes, w's own path is dispatched with authorship if it holds a     *)
-(*    baseline, then its opaque paths without autonomous rights. A call    *)
-(*    with none dispatches its own path without authorship.                *)
+(*  - Record(w): tool_call stores w's baseline under its key. With Retire, *)
+(*    entries of a dead turn are retired first, counted. A baseline under *)
+(*    the same key is overwritten, and on a full store the oldest is       *)
+(*    dropped; either loss is counted;                                     *)
+(*  - Write(w): the command runs and writes Writes[w] (possibly nothing);  *)
+(*  - Abandon(w): a Blocked call never runs and never gets a tool_result   *)
+(*    (a tool_call handler blocked it, or Escape aborted it before it      *)
+(*    started; pi then skips afterToolCall);                               *)
+(*  - Take(w): tool_result removes the baseline under w's key and plans    *)
+(*    the dispatches. Without a baseline, the recognized paths dispatch    *)
+(*    without authorship (partial-recognition-no-baseline);                *)
+(*  - Dispatch(w): each planned path is claimed at its current content.    *)
+(*    The claim is skipped when this turn already analysed that content    *)
+(*    and the analysis satisfies the claim (Dedupe);                       *)
+(*  - NextTurn: the turn ends once no call is in flight.                   *)
 (*                                                                         *)
-(* Keying "cwd" is the pre-fix store: one key per cwd:generation. Keying   *)
-(* "call" is the fix: one key per tool-call id.                            *)
+(* Knobs: Keying "cwd" is the pre-fix store (one key per cwd:generation),  *)
+(* "call" one key per tool-call id. Dedupe "content" is the pre-fix        *)
+(* dedupe (any analysis of the bytes satisfies any claim), "authority"     *)
+(* the fix (an unauthored analysis satisfies only an unauthored claim).    *)
+(* Subtract is round 1's sibling subtraction: a recovery leaves out the    *)
+(* names of every still-pending entry and of every call that took after    *)
+(* this one recorded.                                                      *)
 (*                                                                         *)
-(* A dispatch of a path already analysed is skipped (the pipeline's        *)
-(* content dedupe), so an opaque claim of a sibling's path dispatched      *)
-(* before the sibling's authored dispatch burns it, even when the sibling  *)
-(* already took its baseline and its dispatch is still in flight. Subtract *)
-(* is the fix's second half: a taken baseline's recovery leaves out the    *)
-(* recognized paths of every call whose lifetime overlapped it (the        *)
-(* still-pending entries and the calls that took after this one            *)
-(* recorded).                                                              *)
-(*                                                                         *)
-(* A call's recovery window holds the writes that landed after it          *)
-(* recorded (git status filtered by mtime from the baseline's startedAt).  *)
-(* Conservative on purpose: a taker that finds a baseline recorded by      *)
-(* another call counts as holding one (its window is the other call's,     *)
-(* which the model does not track).                                        *)
-(*                                                                         *)
-(* Invariants:                                                             *)
-(*  - EveryWriteAttributed: a finished call authored its own write;        *)
-(*  - SlotLossObservable: a displaced baseline is counted once in the      *)
-(*    degradation ledger, and a call that finds nothing never goes         *)
-(*    unrecorded.                                                          *)
+(* The inline-blocker record of a path (rec) is set by the latest dispatch *)
+(* that ran: authored records it, unauthored clears it (a non-autonomous   *)
+(* result carries no inline summary).                                      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
-    Writers,     \* the parallel bash calls A, B, C
     Keying,      \* "cwd" (pre-fix) | "call" (per tool-call id)
     Cap,         \* baselines the store holds before dropping the oldest
-    Subtract,    \* TRUE: recovery leaves out overlapping siblings' paths
-    Observe,     \* "counted" (the fix) | "none" (pre-fix evictionCount)
-    Sequential   \* TRUE: a call records only when no other is in flight
+    Subtract,    \* TRUE: round 1's sibling subtraction
+    Dedupe,      \* "content" (pre-fix) | "authority" (the fix)
+    Retire,      \* TRUE: a record retires the entries of a dead turn
+    Observe,     \* "counted" (the ledger) | "none" (pre-fix evictionCount)
+    Sequential,  \* TRUE: a call records only when no other is in flight
+    Scenario     \* "s8" | "namedSibling" | "failedSibling" | "blockedNamer"
+
+Writers == {1, 2, 3}
+Paths == {1, 2, 3}
+Turns == {0, 1}
+
+(* The calls of each scenario: the paths each names, the paths it writes, *)
+(* the calls that fail (isError) and the calls that never get a result.   *)
+Name ==
+    CASE Scenario = "s8" -> [w \in Writers |-> {w}]
+      [] Scenario = "namedSibling" -> <<{1}, {2}, {}>>
+      [] Scenario = "failedSibling" -> <<{1}, {2}, {}>>
+      [] Scenario = "blockedNamer" -> <<{1}, {}, {}>>
+Writes ==
+    CASE Scenario = "s8" -> [w \in Writers |-> {w}]
+      \* 3 is opaque: it writes 1's path (before or after 1's dispatch) and
+      \* the path 2 names but never writes
+      [] Scenario = "namedSibling" -> <<{1}, {}, {1, 2}>>
+      [] Scenario = "failedSibling" -> <<{1}, {}, {2}>>
+      \* 1 is blocked; 2 and 3 are opaque writers of the path 1 names
+      [] Scenario = "blockedNamer" -> <<{}, {1}, {1}>>
+Fails == IF Scenario = "failedSibling" THEN {2} ELSE {}
+Blocked == IF Scenario = "blockedNamer" THEN {1} ELSE {}
 
 VARIABLES
-    pc,        \* [Writers -> "new" | "called" | "taken" | "done"]
-    written,   \* paths whose command has run (path w is writer w's)
+    pc,        \* [Writers -> "new" | "called" | "taken" | "done" | "gone"]
+    turn,      \* the current turn
+    ver,       \* [Paths -> content version]; a write bumps it
+    ran,       \* calls whose command has run
     window,    \* [Writers -> paths written since w recorded]
-    slot,      \* sequence of [key, owner], oldest first
-    lost,      \* owners whose baseline was displaced
-    ledger,    \* the degradation ledger's count of displaced baselines
+    slot,      \* sequence of [key, owner, turn], oldest first
+    lost,      \* owners whose baseline was overwritten or evicted
+    retired,   \* owners whose entry was retired with its dead turn
+    ledger,    \* the degradation ledger's opaque-baseline-lost count
     missed,    \* calls that took no baseline
-    seen,      \* [Writers -> calls that took a baseline after w recorded]
-    analysed,  \* paths a dispatch has already analysed
-    authored,  \* calls whose own path got the authorship dispatch
-    plan       \* [Writers -> the opaque paths w planned at its take]
+    seen,      \* [Writers -> calls that took after w recorded] (Subtract)
+    plan,      \* [Writers -> [rec, auth, opq]] planned at the take
+    analysed,  \* <<path, version, authored, turn>> of every dispatch that ran
+    rec        \* [Paths -> "none" | "authored" | "cleared"]
 
-vars == <<pc, written, window, slot, lost, ledger, missed, seen, analysed, authored,
-          plan>>
+vars == <<pc, turn, ver, ran, window, slot, lost, retired, ledger, missed,
+          seen, plan, analysed, rec>>
+
+NoPlan == [rec |-> {}, auth |-> {}, opq |-> {}]
 
 TypeOK ==
-    /\ pc \in [Writers -> {"new", "called", "taken", "done"}]
-    /\ written \subseteq Writers
-    /\ window \in [Writers -> SUBSET Writers]
+    /\ pc \in [Writers -> {"new", "called", "taken", "done", "gone"}]
+    /\ turn \in Turns
+    /\ ver \in [Paths -> 0..3]
+    /\ ran \subseteq Writers
+    /\ window \in [Writers -> SUBSET Paths]
     /\ lost \subseteq Writers
+    /\ retired \subseteq Writers
     /\ ledger \in Nat
     /\ missed \subseteq Writers
     /\ seen \in [Writers -> SUBSET Writers]
-    /\ analysed \subseteq Writers
-    /\ authored \subseteq Writers
-    /\ plan \in [Writers -> SUBSET Writers]
+    /\ plan \in [Writers -> [rec : SUBSET Paths, auth : SUBSET Paths,
+                             opq : SUBSET Paths]]
+    /\ analysed \subseteq (Paths \X (0..3) \X BOOLEAN \X Turns)
+    /\ rec \in [Paths -> {"none", "authored", "cleared"}]
     /\ Len(slot) <= Cap
 
 Key(w) == IF Keying = "cwd" THEN 0 ELSE w
 
-HasKey(k) == \E i \in 1..Len(slot) : slot[i].key = k
-IndexOf(k) == CHOOSE i \in 1..Len(slot) : slot[i].key = k
+HasKey(s, k) == \E i \in 1..Len(s) : s[i].key = k
+IndexOf(s, k) == CHOOSE i \in 1..Len(s) : s[i].key = k
 
 DeleteAt(s, i) ==
     [j \in 1..(Len(s) - 1) |-> IF j < i THEN s[j] ELSE s[j + 1]]
 
-Counted == IF Observe = "counted" THEN 1 ELSE 0
+Owners(s) == {s[i].owner : i \in 1..Len(s)}
+
+Counted(n) == IF Observe = "counted" THEN n ELSE 0
 
 Init ==
     /\ pc = [w \in Writers |-> "new"]
-    /\ written = {}
+    /\ turn = 0
+    /\ ver = [p \in Paths |-> 0]
+    /\ ran = {}
     /\ window = [w \in Writers |-> {}]
     /\ slot = <<>>
     /\ lost = {}
+    /\ retired = {}
     /\ ledger = 0
     /\ missed = {}
     /\ seen = [w \in Writers |-> {}]
+    /\ plan = [w \in Writers |-> NoPlan]
     /\ analysed = {}
-    /\ authored = {}
-    /\ plan = [w \in Writers |-> {}]
+    /\ rec = [p \in Paths |-> "none"]
+
+InFlight(o) == pc[o] \in {"called", "taken"}
 
 CanRecord(w) ==
     /\ pc[w] = "new"
-    /\ (Sequential => \A o \in Writers : pc[o] \notin {"called", "taken"})
+    /\ (Sequential => \A o \in Writers : ~InFlight(o))
 
-\* tool_call: store the baseline under w's key; a baseline under that key is
-\* overwritten and its owner's baseline is lost.
+\* tool_call. With Retire, the entries of a dead turn go first (counted).
+\* Then the new entry overwrites one under the same key, or is appended,
+\* dropping the oldest on a full store; a displaced baseline is counted.
 Record(w) ==
     /\ CanRecord(w)
-    /\ \/ /\ HasKey(Key(w))
-          /\ LET i == IndexOf(Key(w))
-             IN /\ slot' = Append(DeleteAt(slot, i), [key |-> Key(w), owner |-> w])
-                /\ lost' = lost \cup {slot[i].owner}
-                /\ ledger' = ledger + Counted
-       \/ /\ ~HasKey(Key(w))
-          /\ Len(slot) < Cap
-          /\ slot' = Append(slot, [key |-> Key(w), owner |-> w])
-          /\ UNCHANGED <<lost, ledger>>
+    /\ LET live == IF Retire THEN SelectSeq(slot, LAMBDA e : e.turn = turn)
+                   ELSE slot
+           gone == Owners(slot) \ Owners(live)
+           entry == [key |-> Key(w), owner |-> w, turn |-> turn]
+       IN /\ \/ /\ HasKey(live, Key(w))
+                /\ LET i == IndexOf(live, Key(w))
+                   IN /\ slot' = Append(DeleteAt(live, i), entry)
+                      /\ lost' = lost \cup {live[i].owner}
+                      /\ ledger' = ledger + Counted(Cardinality(gone) + 1)
+             \/ /\ ~HasKey(live, Key(w))
+                /\ Len(live) < Cap
+                /\ slot' = Append(live, entry)
+                /\ lost' = lost
+                /\ ledger' = ledger + Counted(Cardinality(gone))
+             \/ /\ ~HasKey(live, Key(w))
+                /\ Len(live) = Cap
+                /\ slot' = Append(Tail(live), entry)
+                /\ lost' = lost \cup {Head(live).owner}
+                /\ ledger' = ledger + Counted(Cardinality(gone) + 1)
+          /\ retired' = retired \cup gone
     /\ pc' = [pc EXCEPT ![w] = "called"]
-    /\ UNCHANGED <<written, window, missed, seen, analysed, authored, plan>>
+    /\ UNCHANGED <<turn, ver, ran, window, missed, seen, plan, analysed, rec>>
 
-\* tool_call on a full store: the oldest baseline is dropped and counted.
-Evict(w) ==
-    /\ CanRecord(w)
-    /\ ~HasKey(Key(w))
-    /\ Len(slot) = Cap
-    /\ slot' = Append(Tail(slot), [key |-> Key(w), owner |-> w])
-    /\ lost' = lost \cup {Head(slot).owner}
-    /\ ledger' = ledger + Counted
-    /\ pc' = [pc EXCEPT ![w] = "called"]
-    /\ UNCHANGED <<written, window, missed, seen, analysed, authored, plan>>
-
-\* The bash command runs and writes the path its own text names.
+\* The command runs and writes its paths; every pending owner's window
+\* (the owner of an entry in the store is called or gone) sees them.
 Write(w) ==
     /\ pc[w] = "called"
-    /\ w \notin written
-    /\ written' = written \cup {w}
-    /\ window' = [b \in Writers |->
-                    IF pc[b] # "new" THEN window[b] \cup {w} ELSE window[b]]
-    /\ UNCHANGED <<pc, slot, lost, ledger, missed, seen, analysed, authored, plan>>
+    /\ w \notin ran
+    /\ w \notin Blocked
+    /\ ran' = ran \cup {w}
+    /\ ver' = [p \in Paths |-> IF p \in Writes[w] THEN ver[p] + 1 ELSE ver[p]]
+    /\ window' = [o \in Writers |->
+                    IF pc[o] \in {"called", "gone"} THEN window[o] \cup Writes[w]
+                    ELSE window[o]]
+    /\ UNCHANGED <<pc, turn, slot, lost, retired, ledger, missed, seen, plan,
+                   analysed, rec>>
 
-\* tool_result: take the baseline under w's key and plan the recovery.
+\* A blocked or pre-start-aborted call: no tool_result ever arrives.
+Abandon(w) ==
+    /\ pc[w] = "called"
+    /\ w \in Blocked
+    /\ pc' = [pc EXCEPT ![w] = "gone"]
+    /\ UNCHANGED <<turn, ver, ran, window, slot, lost, retired, ledger, missed,
+                   seen, plan, analysed, rec>>
+
+\* tool_result: take the baseline under w's key and plan the dispatches.
 Take(w) ==
     /\ pc[w] = "called"
-    /\ w \in written
+    /\ w \in ran
     /\ pc' = [pc EXCEPT ![w] = "taken"]
-    /\ IF HasKey(Key(w))
-       THEN LET i == IndexOf(Key(w))
-                rest == DeleteAt(slot, i)
-                siblings == seen[w] \cup {rest[j].owner : j \in 1..Len(rest)}
-            IN /\ slot' = rest
+    /\ LET recW == IF w \in Fails THEN {} ELSE Name[w]
+       IN IF HasKey(slot, Key(w))
+          THEN LET i == IndexOf(slot, Key(w))
+                   rest == DeleteAt(slot, i)
+                   changed == window[slot[i].owner]
+                   auth == recW \cap changed
+                   siblingNames ==
+                       UNION {Name[o] : o \in seen[w] \cup Owners(rest)}
+                   opq == (changed \ recW)
+                              \ (IF Subtract THEN siblingNames ELSE {})
+               IN /\ slot' = rest
+                  /\ plan' = [plan EXCEPT ![w] =
+                                 [rec |-> IF auth = {} THEN {} ELSE recW,
+                                  auth |-> auth, opq |-> opq]]
+                  /\ seen' = IF Subtract /\ Name[w] # {}
+                             THEN [o \in Writers |->
+                                     IF o # w /\ pc[o] # "new"
+                                     THEN seen[o] \cup {w} ELSE seen[o]]
+                             ELSE seen
+                  /\ UNCHANGED missed
+          ELSE /\ missed' = missed \cup {w}
                /\ plan' = [plan EXCEPT ![w] =
-                              (window[w] \ {w}) \ (IF Subtract THEN siblings ELSE {})]
-               /\ seen' = [o \in Writers |->
-                              IF o # w /\ pc[o] # "new" THEN seen[o] \cup {w} ELSE seen[o]]
-               /\ UNCHANGED missed
-       ELSE /\ missed' = missed \cup {w}
-            /\ UNCHANGED <<slot, plan, seen>>
-    /\ UNCHANGED <<written, window, lost, ledger, analysed, authored>>
+                              [rec |-> recW, auth |-> {}, opq |-> {}]]
+               /\ UNCHANGED <<slot, seen>>
+    /\ UNCHANGED <<turn, ver, ran, window, lost, retired, ledger, analysed, rec>>
 
-\* The synthetic writes: the recognized path first, then the opaque ones; a
-\* path already analysed is skipped.
+Authored(w, p) == p \in plan[w].auth
+Claimed(w) == plan[w].rec \cup plan[w].opq
+
+\* claimPipelineDispatch: skip a claim whose bytes this turn already analysed,
+\* when that analysis satisfies it.
+Proceeds(p, a) ==
+    ~\E b \in BOOLEAN :
+        /\ <<p, ver[p], b, turn>> \in analysed
+        /\ (Dedupe = "content" \/ b \/ ~a)
+
+\* The synthetic writes of one call, each at the path's current bytes.
 Dispatch(w) ==
     /\ pc[w] = "taken"
+    /\ LET run == {p \in Claimed(w) : Proceeds(p, Authored(w, p))}
+       IN /\ analysed' = analysed \cup
+                {<<p, ver[p], Authored(w, p), turn>> : p \in run}
+          /\ rec' = [p \in Paths |->
+                       IF p \in run
+                       THEN IF Authored(w, p) THEN "authored" ELSE "cleared"
+                       ELSE rec[p]]
     /\ pc' = [pc EXCEPT ![w] = "done"]
-    /\ IF w \in missed
-       THEN /\ analysed' = analysed \cup {w}
-            /\ UNCHANGED authored
-       ELSE /\ authored' = IF w \in analysed THEN authored ELSE authored \cup {w}
-            /\ analysed' = analysed \cup {w} \cup plan[w]
-    /\ UNCHANGED <<written, window, slot, lost, ledger, missed, seen, plan>>
+    /\ UNCHANGED <<turn, ver, ran, window, slot, lost, retired, ledger, missed,
+                   seen, plan>>
+
+NextTurn ==
+    /\ turn = 0
+    /\ \A o \in Writers : ~InFlight(o)
+    /\ \E o \in Writers : pc[o] # "new"
+    /\ turn' = 1
+    /\ UNCHANGED <<pc, ver, ran, window, slot, lost, retired, ledger, missed,
+                   seen, plan, analysed, rec>>
 
 Next ==
-    \E w \in Writers :
-        Record(w) \/ Evict(w) \/ Write(w) \/ Take(w) \/ Dispatch(w)
+    \/ NextTurn
+    \/ \E w \in Writers :
+          Record(w) \/ Write(w) \/ Abandon(w) \/ Take(w) \/ Dispatch(w)
 
 Spec == Init /\ [][Next]_vars
 
-(* A finished call authored its own write. *)
+-----------------------------------------------------------------------------
+(* A finished call that wrote a path it names got an authored analysis of it. *)
 EveryWriteAttributed ==
-    \A w \in Writers : pc[w] = "done" => w \in authored
+    \A w \in Writers :
+        (pc[w] = "done" /\ w \notin Fails) =>
+            \A p \in Name[w] \cap Writes[w] :
+                \E v \in 0..3, t \in Turns : <<p, v, TRUE, t>> \in analysed
 
-(* A displaced baseline is counted once, and a miss is never unrecorded. *)
+(* For a path no other call writes, the call's blocker record survives. *)
+BlockerKept ==
+    \A w \in Writers :
+        (pc[w] = "done" /\ w \notin Fails) =>
+            \A p \in Name[w] \cap Writes[w] :
+                (\A o \in Writers \ {w} : p \notin Writes[o])
+                    => rec[p] = "authored"
+
+(* Shape 54, the no-drop side: once no call is in flight, the latest bytes  *)
+(* of every written path were analysed, unless a counted loss took the      *)
+(* writer's baseline.                                                       *)
+NoDrop ==
+    (\A o \in Writers : ~InFlight(o)) =>
+        \A p \in Paths :
+            ver[p] > 0 =>
+                \/ \E a \in BOOLEAN, t \in Turns :
+                       <<p, ver[p], a, t>> \in analysed
+                \/ \E o \in missed \cup lost : p \in Writes[o]
+
+(* Every displaced or retired baseline is counted once, and a miss is never *)
+(* unrecorded.                                                             *)
 SlotLossObservable ==
-    /\ ledger = Cardinality(lost)
+    /\ ledger = Cardinality(lost) + Cardinality(retired)
     /\ missed # {} => ledger > 0
+
+(* The bytes bound: once the current turn has recorded, no entry of an      *)
+(* earlier turn is left (on a non-git project each holds a tree snapshot).  *)
+StaleRetired ==
+    (\E i \in 1..Len(slot) : slot[i].turn = turn) =>
+        \A i \in 1..Len(slot) : slot[i].turn = turn
+
+(* Retirement never takes a call that can still get its result. *)
+RetiresOnlyAbandoned == \A w \in retired : pc[w] = "gone"
 =============================================================================

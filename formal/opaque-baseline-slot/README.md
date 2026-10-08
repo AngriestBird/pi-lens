@@ -1,94 +1,148 @@
 # Opaque baseline slot model
 
-A TLA+ model of the pending opaque baseline that a bash call records at
-`tool_call` and takes at `tool_result` (`clients/opaque-mutation-scan.ts`
-`OpaqueBaselineStore`; record site `handleToolCall` in
-`clients/runtime-tool-call.ts`, take site `handleToolResult` in
-`clients/runtime-tool-result.ts`). Every config states its expected verdict on
-its first line, and the `TLA+ models` CI job (`node scripts/check-tla-models.mjs`)
-checks them all.
+A TLA+ model of two things: the pending opaque baseline that a bash call
+records at `tool_call` and takes at `tool_result`, and the dispatch dedupe
+that its recoveries feed. The baseline store is `OpaqueBaselineStore` in
+`clients/opaque-mutation-scan.ts`. Its record site is `handleToolCall` in
+`clients/runtime-tool-call.ts`, and its take site is `handleToolResult` in
+`clients/runtime-tool-result.ts`. The dedupe is `claimPipelineDispatch` and
+`dispatchPipelineAnalysis`, both in `clients/runtime-tool-result.ts`. Every
+config states its expected verdict on its first line. The `TLA+ models` CI job
+(`node scripts/check-tla-models.mjs`) checks them all.
 
 Issue: #4137. Lane M5 of #3803.
 
 ## What the model covers
 
-- **Parallel calls.** pi runs the bash calls of one assistant message in
-  parallel (top level and a codemode `Promise.all` alike), so every `tool_call`
-  precedes the first `tool_result`. The writers are three such calls A, B, C;
-  each writes the one path its own text names.
-- **The store.** `Record` stores a baseline under the call's key, `Evict` is the
-  record on a full store dropping the oldest (`OPAQUE_BASELINE_PENDING_CAP`),
-  `Take` removes the baseline under the call's key and plans the recovery,
-  `Dispatch` runs the synthetic writes after the awaits between the two. A
-  baseline displaced by `Record` or `Evict` is lost to its owner.
-- **Two keyings.** `Keying = "cwd"` is the pre-fix store (one key per
-  `cwd:generation`); `Keying = "call"` is the fix (one key per tool-call id).
-- **The second writer on the slot's evidence.** A call's recovery window holds
-  its siblings' writes. A recovered path the call does not recognise is
-  dispatched as opaque, without autonomous rights, and a dispatch of a path
-  already analysed is skipped, so an opaque claim of a sibling's path burns the
-  sibling's authored dispatch. `Subtract` models the fix: the recovery leaves
-  out the recognised paths of every call whose lifetime overlapped it (the
-  still-pending entries, and the calls that took a baseline after this one
-  recorded).
-- **Observability.** `Observe = "counted"` is the degradation ledger's
-  `opaque-baseline-lost` count; `"none"` is the pre-fix `evictionCount`, which no
-  production code read.
+- **Calls.** There are three bash calls. Each records a baseline, runs, takes a
+  baseline, and dispatches. pi runs the calls of one assistant message in
+  parallel, at top level and in a codemode `Promise.all` alike, so any
+  interleaving is allowed. `Sequential` restricts the model to orders in which
+  no two calls overlap.
+- **Scenarios.** Each scenario gives every call the paths its text names, the
+  paths it writes, and whether it fails or is blocked:
+  - `s8`: each call names and writes its own path.
+  - `namedSibling`: call 2 names a path and writes nothing. Opaque call 3
+    writes that path and also call 1's path, before or after call 1's dispatch.
+  - `failedSibling`: call 2 names a path and fails (`isError`). Opaque call 3
+    writes that path.
+  - `blockedNamer`: call 1 names a path and is blocked, so it never runs and
+    never gets a `tool_result`. Opaque calls 2 and 3 write the path, in call
+    1's turn or the next.
+- **The store.** `Record` stores a baseline under the call's key. With
+  `Retire`, it first retires every entry whose turn is over. A baseline under
+  the same key is overwritten, and on a full store the oldest is dropped
+  (`OPAQUE_BASELINE_PENDING_CAP`). `Abandon` covers a call that pi never sends
+  a result for: a `tool_call` handler blocked it, or Escape aborted it before it
+  started. `NextTurn` ends a turn once no call is in flight.
+- **The recovery.** A call's window holds every path written since its
+  baseline's owner recorded. A path the call names that changed in the window
+  is dispatched with authorship. The rest of the window is opaque and is
+  dispatched without authorship (#3226). With no baseline, the named paths are
+  dispatched without authorship.
+- **The dedupe.** A claim is skipped when this turn already analysed the same
+  bytes and that analysis satisfies the claim. With `Dedupe = "content"` (the
+  pre-fix rule), any analysis satisfies any claim. With `"authority"` (the
+  fix), an analysis without authorship satisfies only a claim without
+  authorship. `rec` is the path's inline-blocker record: a dispatch with
+  authorship records it, and one without authorship clears it.
+- **Knobs.**
+  - `Keying = "cwd"` is the pre-fix store (one key per `cwd:generation`).
+    `"call"` is one key per tool-call id.
+  - `Subtract` is round 1's sibling subtraction: a recovery leaves out the names
+    of every pending entry and of every call that took after this one recorded.
+  - `Observe = "counted"` is the degradation ledger's `opaque-baseline-lost`
+    count. `"none"` is the pre-fix `evictionCount`, which no production code
+    read.
 
 ## Invariants
 
-- `EveryWriteAttributed`: a finished call authored its own write (its authored
-  dispatch reached the pipeline), so its blockers are delivered.
-- `SlotLossObservable`: a displaced baseline is counted exactly once, and a call
-  that finds no baseline never goes unrecorded.
+- `EveryWriteAttributed`: a finished, successful call has an authored analysis
+  of every path it named and wrote.
+- `BlockerKept`: if no other call writes the path, its blocker record is
+  still the authored one.
+- `NoDrop` (shape 54, the no-drop side): once no call is in flight, the latest
+  bytes of every written path have been analysed, unless a counted loss took
+  the writer's baseline.
+- `SlotLossObservable`: every overwritten, evicted, or retired baseline is
+  counted exactly once, and a call that finds no baseline never goes
+  unrecorded.
+- `StaleRetired`: once the current turn has recorded, no entry from an earlier
+  turn is left. This is the bytes bound: on a non-git project each entry holds a
+  stat snapshot of the whole tree.
+- `RetiresOnlyAbandoned`: retirement never takes a call that can still get its
+  result.
 
 ## Configs
 
-| Config | Expect | States (generated / distinct) | What it proves |
+States are as TLC reported them with `-workers 1` (generated / distinct).
+
+| Config | Expect | States | What it proves |
 |---|---|---|---|
-| `CwdKeyedSlot` | violated `EveryWriteAttributed` | 780 / 670 | The pre-fix store. TLC's shortest trace: A records, writes; B records (overwrites A's baseline); A takes B's baseline; B writes and takes: nothing found, B finishes without authorship. The real-pi witness is the same shape at width 3: `RECORD x3 (2 evictions) / TAKE found, none, none` (S8). |
-| `PerCallKeyed` | pass | 5215 / 2493 | The fix: three parallel calls all keep authorship, nothing is displaced. |
-| `SequentialSingle` | pass | 61 / 61 | Today's rows: calls that never overlap share the one cwd slot without loss. The fix must not move this. |
+| `CwdKeyedSlot` | violated `EveryWriteAttributed` | 122 / 105 | The pre-fix store. A later `Record` overwrites the earlier baseline, and that call finds nothing at `Take` (the S8 trace: `RECORD x3`, then a take that finds a baseline, then two that find none). |
 | `CwdKeyedUncounted` | violated `SlotLossObservable` | 6 / 6 | The pre-fix observability: an overwrite left no record. |
-| `PerCallNoSubtract` | violated `EveryWriteAttributed` | 1745 / 1245 | Keying alone is not enough: the first call to take claims its siblings' paths as opaque and their authored dispatch is skipped (the keying-only run of the parallel-bash test: 1 of 3 authored). |
-| `PerCallOverCap` | pass | 7069 / 3445 | More parallel calls than the cap: the oldest baseline is dropped and counted. Attribution is guaranteed up to the cap only; past it the loss is observable. |
-| `PerCallOverCapUncounted` | violated `SlotLossObservable` | 19 / 19 | The cap eviction without its ledger record is a silent loss. |
+| `PerCallKeyed` | pass | 6142 / 3251 | The fix on S8. All three calls keep authorship and their blocker records, nothing is dropped, and stale entries are retired. |
+| `PerCallContentDedupe` | violated `EveryWriteAttributed` | 1281 / 791 | Keying alone is not enough. The first call to take claims its siblings' paths as opaque, and the content dedupe then skips their authored dispatch of the same bytes. This is the keying-only run of the parallel-bash test: 1 of 3 authored. |
+| `PerCallNamedSibling` | pass | 1926 / 971 | The fix on REVIEW_4159 F2 P1 and P2. |
+| `PerCallFailedSibling` | pass | 2449 / 1171 | The fix on F2 P2e. Call 1 keeps its blocker record. |
+| `PerCallBlockedNamer` | pass | 752 / 374 | The fix on F1. Every later write is analysed, and the blocked entry is retired with its turn and counted. |
+| `Round1NamedSibling` | violated `NoDrop` | 1161 / 697 | Round 1's design (subtraction plus the content dedupe). Call 1 dispatches its path. Call 3 then writes it again, and the settled claim subtracts that write from call 3's recovery (P1). |
+| `Round1BlockedNamer` | violated `NoDrop` | 261 / 173 | Round 1 on F1. The blocked call's pending entry subtracts the path it names from a later opaque writer's recovery. |
+| `PerCallNoRetire` | violated `StaleRetired` | 41 / 39 | Without retirement, the blocked call's entry outlives its turn. |
+| `PerCallOverCap` | pass | 11644 / 6094 | More parallel calls than the cap. The oldest baseline is dropped and counted, and no write goes unanalysed without a counted loss. |
+| `PerCallOverCapUncounted` | violated `SlotLossObservable` | 19 / 19 | A cap eviction without its ledger record is a silent loss. |
+| `SequentialSingle` | pass | 121 / 108 | Today's rows. Calls that never overlap share the one cwd slot without loss, under the pre-fix keying and dedupe. `PerCallKeyed`'s state space includes every sequential order. |
 
 ## Counter-checks
 
-Each knob has a config that flips when it is turned: `Keying` (`PerCallKeyed`
-to `CwdKeyedSlot`), `Subtract` (`PerCallKeyed` to `PerCallNoSubtract`),
-`Observe` (`CwdKeyedSlot` to `CwdKeyedUncounted`), `Sequential`
-(`SequentialSingle` to `CwdKeyedSlot`), the cap (`PerCallKeyed` to
-`PerCallOverCap`). Two spec mutants were run on `PerCallKeyed` and each reds
-`EveryWriteAttributed`: dropping the settled-claim term (`seen[w]`) from the
-sibling set (the call that took first has its dispatch in flight when a later
-call recovers), and dropping the pending-entry term. A mutant that dispatches
-the authored path even when it is already analysed (the content dedupe off)
-turns `PerCallNoSubtract` to pass, which ties that violation to the dedupe.
+Each knob has a config that flips when it is turned:
+
+- `Keying`: `PerCallKeyed` to `CwdKeyedSlot`.
+- `Dedupe`: `PerCallKeyed` to `PerCallContentDedupe`.
+- `Subtract`: `PerCallNamedSibling` to `Round1NamedSibling`, and `PerCallBlockedNamer` to `Round1BlockedNamer`.
+- `Retire`: `PerCallBlockedNamer` to `PerCallNoRetire`.
+- `Observe`: `CwdKeyedSlot` to `CwdKeyedUncounted`.
+- The cap: `PerCallKeyed` to `PerCallOverCap`.
+
+The spec mutants run for round 2 each red the invariant named here:
+
+- `Key(w) == 0` reds `EveryWriteAttributed` on `PerCallKeyed`.
+- Subtracting every other call's names, whatever the overlap (REVIEW_4159's over-subtract mutant), reds `NoDrop` on `PerCallNamedSibling`.
+- An authority check that requires an exact match, so an opaque claim proceeds past an authored analysis, reds `BlockerKept` on `PerCallKeyed`.
+- Dropping the authority check reds `EveryWriteAttributed` on `PerCallKeyed`.
+- Retiring live entries reds `RetiresOnlyAbandoned` on `PerCallKeyed`.
+- Leaving a retirement uncounted reds `SlotLossObservable` on `PerCallBlockedNamer`.
+
+Removing the dedupe altogether turns `PerCallContentDedupe` to pass, which ties that violation to the dedupe.
 
 ## What the model cannot see
 
-- A taker that finds a baseline another call recorded counts as holding one;
-  its recovery window is that call's, which the model does not track (the real
-  window starts later, so an early write of the taker can fall outside it).
-- Time and the clock: windows are ordered by record, write and take steps, not
-  by `startedAt` and mtime.
-- The settled-claim list's own cap (`OPAQUE_BASELINE_PENDING_CAP` claims): a
-  fan-out wider than the cap loses the oldest claims, a bounded edge of
-  `Subtract`.
-- A call whose `tool_result` never arrives leaves its entry (and recognised
-  paths) in the store until the session reset or the cap.
+- Time and the clock. Windows are ordered by record, write, and take steps, not
+  by `startedAt` and mtime (`OPAQUE_MTIME_TOLERANCE_MS`).
+- Window attribution. A call that names a path a sibling wrote inside its window
+  dispatches that path with authorship. Master behaves the same way; the model
+  allows this and checks no invariant against it.
+- Concurrency inside a dispatch. Each call's dispatch is one atomic step, so the
+  in-flight registry (one run per hash and authority) and an unauthored run that
+  settles after an authored one are not modelled. The write-order token
+  (#3507) orders those two inline verdicts in the code.
+- A concurrent session. The model has one session. Retirement's liveness test is
+  the coordinator's `isLiveTurnKey`, which keeps a subagent's live turn; the
+  handler test covers that case.
 - The recovery itself (`recoverOpaqueChangesViaGit`, `captureFileStats`) and the
-  pipeline: the model keeps only the dedupe that makes the second writer
-  matter.
+  pipeline. The model keeps only the dedupe and the inline record.
 
 ## Replay on the real code
 
 `tests/clients/opaque-mutation-scan.test.ts` ("parallel bash calls (#4137)")
 drives the real `handleToolCall` and `handleToolResult` over a real git
-repository and the real store, with the pipeline mocked at its process boundary:
-three parallel calls record before any result, in the S8 order, with results
-sequential and concurrent; the id-less host; the opaque sibling beside a
-recognised one. The store's own cases pin the key, the sibling set, and both
-caps.
+repository and the real store. Only the pipeline is mocked, at its process
+boundary. It covers:
+
+- three parallel calls, with sequential and concurrent results;
+- the host without ids;
+- the opaque sibling;
+- F1's blocked namer;
+- F2's three cells;
+- both directions of the authority rank;
+- retirement, and the concurrent session's live turn.
