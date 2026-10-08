@@ -168,7 +168,7 @@ export interface InstanceEntry {
 	 * any record lists it. Absent on pre-#3849 entries, which
 	 * {@link readRootHolders} reads as `host` holding every root.
 	 */
-	projectRootHolders?: Record<string, string[]> | undefined;
+	projectRootHolders?: Record<string, string[]>;
 	lspChildren: LspChildEntry[];
 	lspChildCount: number;
 	rssBytes: number;
@@ -1152,6 +1152,15 @@ type RootRemovalPlan = {
 	outcome: "kept" | "freed";
 };
 
+/** The `instance-registry-deregister-landed` reason for each decision. */
+const ROOT_REMOVAL_REASONS: Readonly<
+	Record<RootRemovalPlan["outcome"] | "none", string>
+> = {
+	kept: "holder left; another holder keeps the root",
+	freed: "last holder left; root freed",
+	none: "the queued removal took the lock; there was nothing left to remove",
+};
+
 function planRootRemoval(
 	file: RegistryFile,
 	normalizedRoot: string,
@@ -1226,12 +1235,7 @@ async function deregisterInstanceRootNow(
 			incrementDegradationCount({
 				kind: "instance-registry-deregister-landed",
 				subject: String(process.pid),
-				reason:
-					next?.outcome === "kept"
-						? "holder left; another holder keeps the root"
-						: next?.outcome === "freed"
-							? "last holder left; root freed"
-							: "the queued removal took the lock; there was nothing left to remove",
+				reason: ROOT_REMOVAL_REASONS[next?.outcome ?? "none"],
 			});
 		},
 		LOCK_WAIT_THROUGH_LEASE_MS,

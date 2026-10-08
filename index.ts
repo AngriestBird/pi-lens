@@ -3851,18 +3851,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// start above rather than racing ahead of it and leaving the temp
 			// root behind. Fire and forget is still correct — the tail owns the
 			// ordering, and teardown must not block on a registry write.
-			try {
-				if (ownedSecondaryRoot !== undefined) {
-					void deregisterInstanceRoot(
-						ownedSecondaryRoot,
-						secondaryRootHolder,
-					).catch(() => {
-						// best-effort bookkeeping — never fail teardown
-					});
-				}
-			} catch {
-				// Best-effort observability bookkeeping — a stale ctx or an
-				// unresolvable path must never break teardown.
+			if (ownedSecondaryRoot !== undefined) {
+				void deregisterInstanceRoot(
+					ownedSecondaryRoot,
+					secondaryRootHolder,
+				).catch(() => {
+					// best-effort bookkeeping — never fail teardown
+				});
 			}
 			// #3611: only this secondary's own scope retires.
 			retireOwnScope(
