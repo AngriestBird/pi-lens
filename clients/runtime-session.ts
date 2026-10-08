@@ -105,12 +105,10 @@ import {
 import { resetSituationalToolTelemetry } from "./situational-tool-telemetry.js";
 import {
 	findNearestProjectRoot,
-	getStartupScanMaxEntries,
 	isStartupScanVerdictFresh,
 	resolveStartupScanContext,
 	type StartupScanContext,
 } from "./startup-scan.js";
-import { getStartupScanMaxSourceFilesDerived } from "./project-scale.js";
 import {
 	getSubagentIdentity,
 	isSubagentSession,
@@ -213,7 +211,11 @@ interface SessionStartDeps {
 	resetLSPService: (options?: LSPShutdownOptions) => void;
 }
 
-/** Surface every project-size warm skip through the same bounded seam (#4126). */
+/**
+ * Surface every project-size warm skip through the same bounded seam (#4126):
+ * one visible line and one `startup-warm-skipped` record per session start,
+ * delivered by the session generation that observed the skip.
+ */
 function notifyStartupWarmSkip(args: {
 	scan: StartupScanContext;
 	analysisRoot: string;
@@ -221,35 +223,39 @@ function notifyStartupWarmSkip(args: {
 	runtime: RuntimeCoordinator;
 	sessionGeneration: number;
 }): void {
-	// The quick-mode callback runs after an await; only suppress it when the
-	// coordinator has moved to a different session generation. The lightweight
-	// test/runtime coordinator may not mark its scope live, so `isCurrentSession`
-	// would reject a valid first-session callback here.
-	if (args.runtime.sessionGeneration !== args.sessionGeneration) return;
+	// The quick-mode warmup reaches here after an await, so its session may
+	// have been superseded by a later start (`resetForSession` moved the
+	// scope) or retired by a shutdown with no replacement; both are stale and
+	// deliver nothing (catalog shape 22). The same guard every other post-await
+	// publish in this file uses.
+	if (!args.runtime.isCurrentSession(args.sessionGeneration)) return;
 	const reason = args.scan.reason;
 	if (reason !== "too-many-source-files" && reason !== "too-many-entries") {
 		return;
 	}
-	const maxProjectFiles =
-		reason === "too-many-source-files"
-			? getStartupScanMaxSourceFilesDerived(args.analysisRoot)
-			: undefined;
-	const overrideHint =
+	// The bound named is the one stored on the verdict, the one that produced
+	// it (shape 58): a computed verdict carries both bounds, and a reused one is
+	// fresh only while they equal the bounds now in effect.
+	const bound =
 		reason === "too-many-entries"
-			? ` (set PI_LENS_STARTUP_SCAN_MAX_ENTRIES=<n> to override the ${getStartupScanMaxEntries()}-entry cap)`
-			: ` (set maxProjectFiles in .pi-lens.json to override the ${maxProjectFiles}-source-file cap)`;
+			? {
+					name: "maxScanEntries",
+					value: args.scan.maxScanEntries,
+					hint: `set PI_LENS_STARTUP_SCAN_MAX_ENTRIES=<n> to override the ${args.scan.maxScanEntries}-entry cap`,
+				}
+			: {
+					name: "maxProjectFiles",
+					value: args.scan.maxProjectFiles,
+					hint: `set maxProjectFiles in .pi-lens.json to override the ${args.scan.maxProjectFiles}-source-file cap`,
+				};
 	recordDegradationOnce({
 		kind: "startup-warm-skipped",
 		subject: args.analysisRoot,
-		reason:
-			maxProjectFiles === undefined
-				? reason
-				: `${reason}; maxProjectFiles=${maxProjectFiles}`,
-		metadata:
-			maxProjectFiles === undefined ? { reason } : { reason, maxProjectFiles },
+		reason: `${reason}; ${bound.name}=${bound.value}`,
+		metadata: { reason, [bound.name]: bound.value },
 	});
 	args.notify(
-		`📦 Project-size limits disabled background warm scans (heavy scans, TODO scan, LSP pre-warm)${overrideHint}.`,
+		`📦 Project-size limits disabled background warm scans (heavy scans, TODO scan, LSP pre-warm) (${bound.hint}).`,
 		"warning",
 	);
 }
@@ -1999,6 +2005,11 @@ export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
 	resetDegradationLedger();
+	// #4126: the generation the deferred quick-mode warmup publishes under. The
+	// warmup timer is armed before `runtime.resetForSession` below moves the
+	// scope, so this is reassigned right after that reset; the warmup reads it
+	// only after its own awaits, and nothing between this line and the reset
+	// awaits, so a replacement start can never observe the pre-reset value.
 	let sessionGenerationAtStart = deps.runtime.sessionGeneration;
 	// #2467: re-arm the analyzer bootstrap's shutdown gate. The gate is a
 	// per-SESSION claim ("this session is over") held in process-lived storage,

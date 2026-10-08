@@ -78,9 +78,6 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 		"the persisted test-runner-findings cache owns the generation high-water mark across asynchronous runner completion and session restarts. The delivery map compares that durable generation before appending, so an in-process GenerationSource cannot replace the persisted ordering contract; the provenance and generation integration tests cover the drop-before-append path",
 	"mcp/analyze.ts":
 		"the warm word-index idle eviction captures a per-entry generation before its timer fires and re-checks it in the callback, alongside an entry-identity compare. The eviction direction again, on a per-entry counter rather than a keyed map; a migration candidate once GenerationMap gains an entry-scoped form",
-	"runtime-session.ts":
-		"the deferred first-session warmup compares the RuntimeCoordinator's post-reset session scope id before delivering a user-facing degradation; this is a delivery guard, not a store promotion, and must remain tied to the exact session that scheduled the callback",
-
 	"observed-mutation.ts":
 		"the settle rejects a baseline whose sessionGeneration no longer matches the one the tool_result carries. This IS the capture-before/check-after shape, but the counter is RuntimeCoordinator.sessionGeneration — captured at tool_call, handed back at tool_result, and owned by runtime-coordinator.ts, whose own migration is deferred above. Declaring a GenerationSource here would mint a SECOND counter mirroring the session's, which is the single-source-of-truth defect the ratchet exists to prevent. Since #3499 that counter IS a GenerationSource (RuntimeCoordinator.captureSessionGeneration), but this file carries the captured value as a plain number on the pending baseline across tool_call -> tool_result and compares it there; moving that record to a handle is its own migration, not yet filed",
 
