@@ -3261,6 +3261,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				// tool-call id on this event, so it falls back to the project
 				// root, same as the pre-#1642 basis.
 				env.tmpDir,
+				"session",
 			);
 			expect(deferMutation).toHaveBeenCalledWith(
 				filePath,
@@ -3270,6 +3271,8 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				"autofix",
 				undefined,
 				env.tmpDir,
+				undefined,
+				"session",
 			);
 		} finally {
 			env.cleanup();

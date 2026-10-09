@@ -67,6 +67,7 @@ import {
 } from "./file-utils.js";
 import type { FormatService } from "./format-service.js";
 import type { GenerationHandle } from "./generation-guard.js";
+import type { AnalysisRootMode } from "./analysis-root.js";
 import { logLatency } from "./latency-logger.js";
 import type { PostAutofixNotice } from "./post-autofix-notice.js";
 import { emitLensAnalysisComplete } from "./lens-events.js";
@@ -245,6 +246,8 @@ async function diffProjectSnapshot(
 // --- Types ---
 
 export interface PipelineContext {
+	/** Root classification is carried from the single analysis-root seam. */
+	analysisRootMode?: AnalysisRootMode;
 	/** Live tool_result signal for aggregate formatter and dispatch bounds. */
 	signal?: AbortSignal;
 	filePath: string;

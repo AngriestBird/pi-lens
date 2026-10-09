@@ -20,6 +20,7 @@ import { getProjectDataDir } from "./file-utils.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { readJsonCache, readJsonCacheAsync } from "./json-cache-read.js";
 import { isUnderDir, normalizeMapKey } from "./path-utils.js";
+import type { AnalysisRootMode } from "./analysis-root.js";
 
 // --- Types ---
 
@@ -643,7 +644,14 @@ export class CacheManager {
 		sessionId?: string | null,
 		ownerKind: TurnStateOwnerKind = "pi",
 		projectRoot?: string,
+		analysisRootMode?: AnalysisRootMode,
 	): TurnState {
+		if (
+			analysisRootMode !== undefined &&
+			analysisRootMode !== "session" &&
+			analysisRootMode !== "linked-worktree"
+		)
+			return this.readTurnState(cwd);
 		// #2504: the worklist is a PROJECT worklist. A path outside the project
 		// was accepted and keyed by its absolute path, so a prior session's
 		// scratchpad, `~/.claude/plans/*.md` and `~/.plegma/work/.../TASK.md`

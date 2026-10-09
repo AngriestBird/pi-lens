@@ -120,6 +120,11 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
+import {
+	canWriteAnalysisRoot,
+	resolveAnalysisRoot,
+	type AnalysisRootMode,
+} from "./analysis-root.js";
 
 const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
@@ -748,14 +753,16 @@ function singleRange(
 	return ranges?.length === 1 ? ranges[0] : undefined;
 }
 
-function recordProjectChange(args: {
+export function recordProjectChange(args: {
 	runtime: RuntimeCoordinator;
 	cwd: string;
 	filePath: string;
 	source: ProjectChangeSource;
 	changedRange?: ProjectChangeRange;
 	dbg: (msg: string) => void;
+	analysisRootMode: AnalysisRootMode;
 }): void {
+	if (!canWriteAnalysisRoot(args.analysisRootMode)) return;
 	// One mutation seam (#2000 phase 1): bump + receipt + change-log live in
 	// RuntimeCoordinator.recordProjectMutation; this wrapper only carries the
 	// legacy dbg shape.
@@ -767,6 +774,48 @@ function recordProjectChange(args: {
 		onAppendError: (err) =>
 			args.dbg(`project change log append failed for ${args.filePath}: ${err}`),
 	});
+}
+
+export function recordTurnSummary(args: {
+	runtime: RuntimeCoordinator;
+	filePath: string;
+	result: PipelineResult;
+	getFlag: (name: string) => boolean | string | undefined;
+	resultLive: boolean;
+	analysisRootMode: AnalysisRootMode;
+}): void {
+	if (!args.resultLive) return;
+	if (!canWriteAnalysisRoot(args.analysisRootMode)) return;
+	if (!args.getFlag("lens-turn-summary")) return;
+	if (args.result.diagnostics?.length) {
+		for (const d of args.result.diagnostics) {
+			args.runtime.turnSummary.recordDiagnostic(d.filePath || args.filePath, {
+				tool: d.tool,
+				ruleId: d.rule ?? d.code,
+				severity: d.severity,
+				line: d.line,
+				description: d.message,
+			});
+		}
+	}
+	if (args.result.fixedCount && args.result.fixedCount > 0) {
+		for (const label of args.result.autofixTools ?? []) {
+			const [tool, countStr] = label.split(":");
+			const count = Number.parseInt(countStr ?? "", 10);
+			args.runtime.turnSummary.recordAutofix(args.filePath, {
+				tool: tool || label,
+				description:
+					Number.isFinite(count) && count > 0
+						? `${count} issue(s) fixed`
+						: undefined,
+			});
+		}
+	}
+	if (args.result.formattersUsed?.length) {
+		for (const tool of args.result.formattersUsed) {
+			args.runtime.turnSummary.recordFormat(args.filePath, { tool });
+		}
+	}
 }
 
 /**
@@ -871,6 +920,7 @@ async function dispatchPipelineAnalysis(args: {
 	filePath: string;
 	dispatchCwd: string;
 	turnStateCwd: string;
+	analysisRootMode: AnalysisRootMode;
 	autofixMode: "immediate" | "deferred";
 	modifiedRanges: Array<{ start: number; end: number }> | undefined;
 	writeIndex: number;
@@ -927,6 +977,7 @@ async function dispatchPipelineAnalysis(args: {
 		filePath,
 		dispatchCwd,
 		turnStateCwd,
+		analysisRootMode,
 		autofixMode,
 		modifiedRanges,
 		writeIndex,
@@ -967,6 +1018,7 @@ async function dispatchPipelineAnalysis(args: {
 			filePath,
 			cwd: dispatchCwd,
 			projectRoot: turnStateCwd,
+			analysisRootMode,
 			toolName: event.toolName,
 			autofixMode,
 			allowAutonomousWriters,
@@ -1528,6 +1580,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			? rawFilePath
 			: path.resolve(resolutionBasis, rawFilePath)
 		: rawFilePath;
+	const analysisRootMode = resolveAnalysisRoot(filePath ?? "", workspaceRoot);
 	if (filePath) {
 		invalidateProjectIgnoreMatcherForPath(filePath);
 		invalidateFormatterCacheForPath(filePath);
@@ -2417,6 +2470,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 								workspaceRoot,
 							),
 							turnStateCwd: path.resolve(workspaceRoot),
+							analysisRootMode,
 							autofixMode: observedAutofixMode,
 							modifiedRanges: undefined,
 							writeIndex: runtime.nextWriteIndex(),
@@ -2501,7 +2555,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		);
 		return;
 	}
-	if (isExternalOrVendorFile(filePath, workspaceRoot)) {
+	if (analysisRootMode === "none" || analysisRootMode === "adopted") {
 		if (
 			isOutsideProjectRoot(filePath, workspaceRoot) &&
 			!isVendorPath(filePath) &&
@@ -2833,6 +2887,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				deps.sessionId ?? runtime.telemetrySessionId,
 				"pi",
 				undefined,
+				analysisRootMode,
 			);
 	};
 	try {
@@ -2912,6 +2967,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	recordProjectChange({
 		runtime,
 		cwd: turnStateCwd,
+		analysisRootMode,
 		filePath,
 		source:
 			deps._mutationSourceOverride ??
@@ -2942,6 +2998,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			filePath,
 			dispatchCwd,
 			turnStateCwd,
+			analysisRootMode,
 			autofixMode,
 			modifiedRanges,
 			writeIndex,
@@ -3003,6 +3060,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				"autofix",
 				deps.sessionId,
 				resolutionBasis,
+				undefined,
+				analysisRootMode,
 			) ?? false;
 		dbg(`tool_result: queued deferred autofix for ${filePath}`);
 	}
@@ -3023,6 +3082,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			turnStateCwd,
 			deps.sessionId,
 			resolutionBasis,
+			analysisRootMode,
 		);
 		formatQueued = true;
 		dbg(`tool_result: queued deferred format for ${filePath}`);
@@ -3089,6 +3149,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		recordProjectChange({
 			runtime,
 			cwd: turnStateCwd,
+			analysisRootMode,
 			filePath: resolvedChanged,
 			source: "autofix",
 			dbg,
@@ -3117,6 +3178,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				deps.sessionId ?? runtime.telemetrySessionId,
 				"pi",
 				undefined,
+				analysisRootMode,
 			);
 			dbg(
 				`tool_result: tracking pi-lens side-effect change for ${resolvedChanged}`,
@@ -3129,7 +3191,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 
 	if (result.cascadePromise) {
-		runtime.appendCascadePromise(result.cascadePromise, writeSession, filePath);
+		runtime.appendCascadePromise(
+			result.cascadePromise,
+			writeSession,
+			filePath,
+			analysisRootMode,
+		);
 	}
 
 	// #3568: per-turn maps the replacement's reset cleared.
@@ -3150,37 +3217,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// already computed above (diagnostics, autofix count/tools, formatters
 	// used) — no new collection plumbing, just fed into the collector when
 	// the feature is on.
-	if (resultLive && getFlag("lens-turn-summary")) {
-		if (result.diagnostics?.length) {
-			for (const d of result.diagnostics) {
-				runtime.turnSummary.recordDiagnostic(d.filePath || filePath, {
-					tool: d.tool,
-					ruleId: d.rule ?? d.code,
-					severity: d.severity,
-					line: d.line,
-					description: d.message,
-				});
-			}
-		}
-		if (result.fixedCount && result.fixedCount > 0) {
-			for (const label of result.autofixTools ?? []) {
-				const [tool, countStr] = label.split(":");
-				const count = Number.parseInt(countStr ?? "", 10);
-				runtime.turnSummary.recordAutofix(filePath, {
-					tool: tool || label,
-					description:
-						Number.isFinite(count) && count > 0
-							? `${count} issue(s) fixed`
-							: undefined,
-				});
-			}
-		}
-		if (result.formattersUsed?.length) {
-			for (const tool of result.formattersUsed) {
-				runtime.turnSummary.recordFormat(filePath, { tool });
-			}
-		}
-	}
+	recordTurnSummary({
+		runtime,
+		filePath,
+		result,
+		getFlag,
+		resultLive,
+		analysisRootMode,
+	});
 
 	// #3507: both verbs are ordered by this dispatch's token, so an older
 	// pipeline that settles after a newer one of the same file changes nothing.
@@ -3235,7 +3279,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			result.output,
 		);
 		if (getFlag("lens-guard")) {
-			syncGitGuardRecord(runtime, cacheManager, turnStateCwd, filePath);
+			syncGitGuardRecord(
+				runtime,
+				cacheManager,
+				turnStateCwd,
+				filePath,
+				analysisRootMode,
+			);
 			if (result.isError && !result.hasBlockers) {
 				runtime.markGitGuardCacheUnknown("pipeline_error");
 			}
