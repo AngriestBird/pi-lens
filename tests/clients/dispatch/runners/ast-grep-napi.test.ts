@@ -20,7 +20,7 @@ const { mockAuxiliaryLspPublished, fsSyncOverrides } = vi.hoisted(() => ({
 	},
 }));
 
-vi.mock("../../../../clients/lsp/index.js", () => ({
+vi.mock("../../../../clients/lsp/capabilities.js", () => ({
 	hasAuxiliaryLspPublishedForRoot: mockAuxiliaryLspPublished,
 }));
 

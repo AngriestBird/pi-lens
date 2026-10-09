@@ -47,7 +47,7 @@ vi.mock("../../../../clients/dispatch/runners/utils/lazy-installer.js", () => ({
 	tryLazyInstall,
 }));
 
-vi.mock("../../../../clients/lsp/index.js", () => ({
+vi.mock("../../../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({
 			supportsLSP,

@@ -49,8 +49,10 @@ vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 	dispatchLintWithResult: vi.fn(),
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	getLSPService: vi.fn(),
 	resyncGitChangedFiles: vi.fn().mockResolvedValue(undefined),
 }));
@@ -84,7 +86,7 @@ import {
 	formatFile as runFormatter,
 	getFormattersForFile,
 } from "../../clients/formatters.js";
-import { getLSPService } from "../../clients/lsp/index.js";
+import { getLSPService } from "../../clients/lsp/capabilities.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { pathToFileURL } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";

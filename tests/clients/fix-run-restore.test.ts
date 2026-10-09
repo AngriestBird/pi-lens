@@ -116,11 +116,13 @@ vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 }));
 import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
 
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	getLSPService: vi.fn(),
 }));
-import { getLSPService } from "../../clients/lsp/index.js";
+import { getLSPService } from "../../clients/lsp/capabilities.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 function gate() {
