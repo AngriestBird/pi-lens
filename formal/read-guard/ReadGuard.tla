@@ -836,19 +836,6 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* The focused R5-1 license configs need only the bash -> own call/write ->
-\* external rewrite -> ownagain -> edit trace. Keep both configs like-for-like
-\* while excluding unrelated reorderings from the TLC state space.
-R5LicenseTrace ==
-    (ops = 0 /\ ext = 0 /\ pc = "idle" /\ ~written.on)
-    \/ (ops = 1 /\ ext = 0 /\ pc = "idle" /\ written.on /\ ~written.lic)
-    \/ (ops = 2 /\ ext = 0 /\ pc = "ownpending" /\ written.on /\ written.lic)
-    \/ (ops = 2 /\ ext = 0 /\ pc = "idle" /\ written.on /\ ~written.lic /\ written.c = disk)
-    \/ (ops = 2 /\ ext = 1 /\ pc = "idle" /\ written.on /\ ~written.lic /\ written.c # disk)
-    \/ (ops = 3 /\ ext = 1 /\ pc = "idle" /\ written.on /\ ~written.lic /\
-        ((written.ret /\ written.c # disk) \/ (~written.ret /\ written.c = disk)))
-    \/ ops = 4
-
 ----------------------------------------------------------------------------
 \* False allow: an allowed (or relocated) positional edit of lines the agent
 \* was shown lands on lines whose current content is what it was shown.
