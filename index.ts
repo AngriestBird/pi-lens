@@ -1928,9 +1928,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		}
 	};
 	// pi RPC can announce the same replacement twice. Keep one admission key for
-	// the complete session_start mutation pass so every downstream reset observes
-	// the same (reason, session file) identity. A different file remains a real
-	// replacement and must run the normal primary path.
+	// the host event identity before any asynchronous work begins, so every
+	// downstream reset observes one (session id, reason, previous file) event.
+	// A different reason or predecessor remains a real start and must run.
 	// The key is cleared per factory instance because pi re-runs the factory on
 	// every replacement; if that ever changes, clear the key in session_shutdown.
 	let lastSessionStartIdentity: string | undefined;
@@ -2175,7 +2175,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		wrapSessionEventHandler(
 			"session_start",
 			async (event, ctx) => {
-				const sessionStartReason = (event as { reason?: string }).reason;
+				const sessionStartEvent = event as {
+					reason?: string;
+					previousSessionFile?: string;
+				};
+				const sessionStartReason = sessionStartEvent.reason;
 				const sessionIdentityParts = (() => {
 					try {
 						const sessionManager = (
@@ -2201,44 +2205,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 				const sessionStartIdentity =
 					sessionStartKey === undefined
 						? undefined
-						: `${sessionStartReason ?? ""}\u0000${sessionStartKey}`;
-				// With neither a stable session ID nor a session file, fail open: the
-				// event cannot be safely identified for duplicate suppression.
-				const liveToolPlan = (() => {
-					if (
-						getLensFlag("no-lazy-tools") === true ||
-						typeof (pi as unknown as { getActiveTools?: unknown })
-							.getActiveTools !== "function"
-					) {
-						return undefined;
-					}
-					try {
-						const piWithActiveTools = pi as unknown as {
-							getActiveTools: () => string[];
-						};
-						const lazyNames = new Set(
-							LAZY_TOOL_CATALOG.map((tool) => tool.name),
-						);
-						return planToolSet(
-							piWithActiveTools.getActiveTools(),
-							lazyNames,
-							getRememberedLazyTools(scope),
-						);
-					} catch {
-						return undefined;
-					}
-				})();
+						: JSON.stringify([
+								sessionStartKey,
+								sessionStartReason ?? "",
+								sessionStartEvent.previousSessionFile ?? "",
+							]);
+				// Reserve the complete host identity before the first await. The old
+				// posture-sensitive check could admit pi's interleaved duplicate while
+				// the first start was still restoring active tools (#2891).
 				if (
 					sessionStartIdentity !== undefined &&
-					lastSessionStartIdentity === sessionStartIdentity &&
-					liveToolPlan?.changed !== true
+					lastSessionStartIdentity === sessionStartIdentity
 				) {
 					emitBounded(
 						"session_start_duplicate_suppressed",
-						sessionStartIdentity,
+						sessionStartKey ?? sessionStartIdentity,
 						{
 							durationMs: 0,
-							metadata: { reason: "duplicate start suppressed" },
+							metadata: {
+								reason: "duplicate start suppressed",
+								eventIdentity: sessionStartIdentity,
+							},
 						},
 						{
 							ledgerKind: "session-start-duplicate",
@@ -2249,6 +2236,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					return;
 				}
 				lastSessionStartIdentity = sessionStartIdentity;
+				// With neither a stable session ID nor a session file, fail open: the
+				// event cannot be safely identified for duplicate suppression.
 				const sessionStartMonotonicAt = performance.now();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>

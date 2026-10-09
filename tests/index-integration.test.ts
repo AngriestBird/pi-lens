@@ -402,11 +402,12 @@ describe("index.ts integration", () => {
 			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
 			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
 
-			// A duplicate must still restore if the host's live posture drifted.
+			// A duplicate is an idempotent host event, even if live posture drifted;
+			// the next genuinely new start owns restoration.
 			activeTools.add("ast_grep_search");
 			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
-			expect(activeToolSetCalls).toHaveLength(firstMutationCount + 1);
-			expect(activeTools).not.toContain("ast_grep_search");
+			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
+			expect(activeTools).toContain("ast_grep_search");
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -423,7 +424,7 @@ describe("index.ts integration", () => {
 				);
 			expect(
 				rows.filter((row) => row.phase === "session_start_runtime_reset"),
-			).toHaveLength(2);
+			).toHaveLength(1);
 			expect(
 				rows.filter(
 					(row) => row.phase === "session_start_duplicate_suppressed",
@@ -438,6 +439,105 @@ describe("index.ts integration", () => {
 					}),
 				}),
 			);
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"drops interleaved new and fork duplicates at entry while preserving distinct starts (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+			const { default: registerExtension } = await import("../index.js");
+			const latency = await import("../clients/latency-logger.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			const sessionStart = handlers.session_start?.[0];
+			expect(sessionStart).toBeTypeOf("function");
+
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "duplicate-session",
+				sessionFile: path.join(tmpDir, "duplicate.jsonl"),
+				mode: "rpc",
+			});
+			for (const [reason, previousSessionFile] of [
+				["new", "/sessions/old-new.jsonl"],
+				["fork", "/sessions/old-fork.jsonl"],
+			] as const) {
+				const event = makeSessionStartEvent({ reason, previousSessionFile });
+				const first = sessionStart?.(event, ctx);
+				const second = sessionStart?.(event, ctx);
+				await Promise.all([first, second]);
+			}
+
+			// A different reason is a new host event, even with the same session id.
+			const reloadCtx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "same-session-different-event",
+				sessionFile: path.join(tmpDir, "reload.jsonl"),
+				mode: "rpc",
+			});
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "startup" }),
+				reloadCtx,
+			);
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "reload" }),
+				reloadCtx,
+			);
+
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: Record<string, unknown>;
+						},
+				);
+			const transitions = rows.filter(
+				(row) =>
+					row.phase === "session_scope_transition" &&
+					row.metadata?.transition === "start",
+			);
+			for (const reason of ["new", "fork"])
+				expect(
+					transitions.filter((row) => row.metadata?.reason === reason),
+				).toHaveLength(1);
+			for (const reason of ["new", "fork"])
+				expect(
+					rows.filter(
+						(row) =>
+							row.phase === "session_handoff_adopt" &&
+							row.metadata?.reason === reason,
+					),
+				).toHaveLength(1);
+			const duplicateRows = rows.filter(
+				(row) =>
+					row.phase === "degradation_ledger" &&
+					row.metadata?.kind === "session-start-duplicate",
+			);
+			// One bounded record is emitted for each duplicate host event; the
+			// ledger resets at each genuinely new session_start reason.
+			expect(duplicateRows).toHaveLength(2);
+			expect(
+				transitions.filter(
+					(row) => row.metadata?.sessionId === "same-session-different-event",
+				),
+			).toHaveLength(2);
+
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
