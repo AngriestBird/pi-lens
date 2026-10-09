@@ -1012,7 +1012,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 	 * `built.marker`. `astgrep:self-scan` refuses to run before that marker
 	 * exists, so the test observes the real build-before-scan ordering through
 	 * real npm resolution. */
-	function makeOrderingFixture({ build = "write" } = {}) {
+	function makeOrderingFixture({ build = "write", distBuild = "write" } = {}) {
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-prepush-scan-order-"),
 		);
@@ -1048,10 +1048,15 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 						build === "fail"
 							? 'node -e "process.exit(7)"'
 							: "node -e \"require('node:fs').writeFileSync('built.marker','1')\"",
+					"build:dist":
+						distBuild === "fail"
+							? 'node -e "process.exit(8)"'
+							: "node -e \"require('node:fs').mkdirSync('dist/clients/lsp',{recursive:true}); require('node:fs').writeFileSync('dist/clients/lsp/server-traits.js','1')\"",
 					"astgrep:self-scan": "node scan.mjs",
 				},
 			}),
 		);
+		put(root, "clients/lsp/server-traits.ts", "export const fixture = true;\n");
 		fs.symlinkSync(
 			path.join(repoRoot, "node_modules"),
 			path.join(root, "node_modules"),
@@ -1074,6 +1079,33 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("[scan] ran after build");
 		expect(fs.existsSync(path.join(fx.root, "built.marker"))).toBe(true);
+		expect(result.stdout).toContain(
+			"[pre-push] dist/ missing or stale (dist/clients/lsp/server-traits.js); running npm run build:dist...",
+		);
+		expect(
+			fs.existsSync(path.join(fx.root, "dist/clients/lsp/server-traits.js")),
+		).toBe(true);
+	});
+
+	it("reports a dist build failure before the self-scan", () => {
+		const fx = makeOrderingFixture({ distBuild: "fail" });
+		const result = runHook(fx.root, fx.refs);
+		expect(result.status).toBe(1);
+		expect(result.stdout + result.stderr).toContain(
+			"[pre-push] dist build failed; run `npm run build:dist` to rebuild dist/.",
+		);
+		expect(result.stdout + result.stderr).not.toContain(
+			"[scan] ran after build",
+		);
+		const recordPath = path.join(
+			fx.root,
+			".git",
+			"pi-lens-prepush",
+			`${fx.refs.split(/\s+/)[1]}.json`,
+		);
+		expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toMatchObject({
+			outcome: "build-failed",
+		});
 	});
 
 	it("records a build failure after the provisional tests-not-started record", () => {
