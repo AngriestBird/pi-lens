@@ -1016,7 +1016,10 @@ export function createLspNavigationTool(
 			params: Record<string, unknown>,
 			_signal: AbortSignal,
 			_onUpdate: unknown,
-			ctx: { cwd?: string },
+			ctx: {
+				cwd?: string;
+				sessionManager?: { getSessionId?: () => string };
+			},
 		) {
 			// #3763: before the first await, so the rename's bookkeeping drops
 			// once this session is replaced (`context.session`, #3576).
@@ -1209,6 +1212,7 @@ export function createLspNavigationTool(
 					operation === "executeCommand" ? "lsp-execute-command" : "lsp-rename";
 				mutationContext = {
 					cwd,
+					sessionId: ctx.sessionManager?.getSessionId?.(),
 					correlationId: newLspMutationCorrelationId(_toolCallId),
 					// #4187 R4-1: the call whose `tool_call` licensed the paths it
 					// named; the workspace edit's other files (a rename's importers)

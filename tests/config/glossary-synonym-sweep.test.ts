@@ -512,7 +512,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/atomic-write-staging.ts": 1,
 		"clients/bash-file-access.ts": 5,
 		"clients/blocker-past-eof.ts": 2,
-		"clients/cache-manager.ts": 2,
+		// 2 -> 3 (#4250): the secondary turn-state partition adds one bounded
+		// read/filter path; retain the semantic census rather than hiding it.
+		"clients/cache-manager.ts": 3,
 		"clients/cache-observability.ts": 2,
 		"clients/call-graph.ts": 4,
 		"clients/cascade-format.ts": 4,
@@ -1326,7 +1328,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// is the context's own name, so it is routed, not renamed, here.
 		// #3540 r2: 26 -> 27, the cascade reads `ctx.telemetry?.orderTurn`
 		// beside the `turnSeq`/`writeSeq` it already reads from the same field.
-		"clients/pipeline.ts": 27,
+		// 27 -> 28 (#4250): runner provenance carries the session id through
+		// the existing telemetry context.
+		"clients/pipeline.ts": 28,
 		"clients/runtime-tool-result.ts": 1,
 	},
 	version: {

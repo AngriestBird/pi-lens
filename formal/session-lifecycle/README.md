@@ -160,7 +160,7 @@ or `LegacyFence`, and `TargetSec` (the design, S4 included), `MergedSec`
 |---|---|---|---|---|---|---|---|---|---|---|
 | `RG` target | rehydrate | reset | rehydrate | import-parent | filter-by-branch (D8) | filter-by-branch (D5) | none | none | own / shared (#3613) | branch |
 | `RG` legacy | rehydrate | reset | rehydrate | reset | none | reset (N1) | none | none | shared | session |
-| `TC` | reset | reset | reset | reset | none | reset | none | none | own / own (#3613; before it shared, N2) | session |
+| `TC` | reset | reset | reset | reset | none | reset | none | none | own / own (#3613; before it shared, N2; durable project worklists are partitioned by live session in R2) | session |
 | `WG` guards | reset | reset | reset | carry (legacy: reset, #3589) | carry | carry | none | none | shared | none |
 | `LS` | none | none | none | none | none | none | reset | reset | shared | service |
 | `LT` lens toggles | reset | reset | reset | reset | none | reset | none | none | shared | none |
@@ -347,8 +347,8 @@ forwarded as captured. `deferResetClear`: the queue is the live generation's;
 without it `DrainDefer` sees every generation's. `debounceEntryCapture`
 (#3759 row 16); `stateWBranchFence`, a rejected alternative that fences the
 writers at branch level. `parkSessionKey` (#4112 round 2), `parkResetClear`,
-`parkFence` (`isCurrentSession`). `turnEndScoped` is the **proposed** shape and
-is not on master: a `turn_end` drains only its own scope's work.
+`parkFence` (`isCurrentSession`). `turnEndScoped` is the shipped #3613 R2
+shape: a `turn_end` drains only its own scope's work.
 
 ### #3705's rows, by column
 
@@ -384,13 +384,10 @@ subagent's tool results reach the same coordinator. `SecondaryTurnEnd` pins
 this as master's open half of #3613 (R2) and #3758
 (`tests/index-3521-fork-tree-witness.test.ts`, "accepted residual until S4");
 it is an `expect: violated` witness, not a new finding.
-`SecondaryTurnEndScoped` is the shape a fix needs, and no production code does
-it: every record carries its producing activation and a `turn_end` drains its
-own. Draining by the activation's scope alone is not enough in the code, since
-a subagent's tool results capture the coordinator's scope, so the store cannot
-tell whose result it holds (the test's own comment). The shipped fences for
-this store (`holdScope`, #4161, #4168) judge the coordinator's generation,
-which `SecondaryTurnEnd` keeps (a retired generation is never drained).
+`SecondaryTurnEndScoped` is shipped: every durable worklist and deferred runner
+entry carries its producing activation, and a `turn_end` drains only its own.
+The coordinator scope remains the owner of shared cascade settlement and late
+auxiliary stores, so secondary cleanup does not discard primary work.
 
 ### Overlap with `formal/turn-end-delivery-holds`
 
