@@ -37,6 +37,7 @@ import {
 } from "../../clients/lsp/server-traits.js";
 import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
 import { AUXILIARY_LSP_PROFILES } from "../../clients/dispatch/auxiliary-lsp.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 /** The traits whose declared home IS the server definition (#1756 stage 1). */
 const SERVER_DEFINITION_TRAITS = [
@@ -54,7 +55,19 @@ const PRE_FOLD_NOTIFY_INFLIGHT_DEFAULT = 8;
 
 describe("#1756 stage 1 — declared server trait table", () => {
 	it("registers a population large enough for the assertions to mean something", () => {
-		expect(LSP_SERVERS.length).toBeGreaterThan(30);
+		// Floor: an emptied registry would satisfy every `toEqual([])` below and
+		// read as clean (#1718).
+		assertNonEmptyScan("LSP_SERVERS registry rows", LSP_SERVERS.length, 30);
+		assertNonEmptyScan(
+			"auxiliary diagnostic profiles",
+			AUXILIARY_LSP_PROFILES.length,
+			1,
+		);
+		assertNonEmptyScan(
+			"wait-policy strategy rows",
+			Object.keys(SERVER_DIAGNOSTIC_STRATEGIES).length,
+			5,
+		);
 	});
 
 	it("requires every registry row to declare its role", () => {
@@ -64,6 +77,11 @@ describe("#1756 stage 1 — declared server trait table", () => {
 				typeof server.role !== "string" ||
 				server.role.length === 0,
 		).map((server) => server.id);
+		assertNonEmptyScan(
+			"registry rows scanned for a declared role",
+			LSP_SERVERS.length,
+			30,
+		);
 		expect(
 			undeclared,
 			"A registry row carries no declared role, so every consumer would read " +
@@ -79,6 +97,11 @@ describe("#1756 stage 1 — declared server trait table", () => {
 				.filter((trait) => traits[trait] === undefined)
 				.map((trait) => `${server.id}.${String(trait)}`);
 		});
+		assertNonEmptyScan(
+			"trait records projected",
+			LSP_SERVERS.length * SERVER_DEFINITION_TRAITS.length,
+			90,
+		);
 		expect(
 			partial,
 			"A trait came back undefined, which sends its consumer back to " +
@@ -101,6 +124,11 @@ describe("#1756 stage 1 — declared server trait table", () => {
 		).sort();
 
 		expect(auxiliaryIds.length).toBeGreaterThan(0);
+		assertNonEmptyScan(
+			"registry rows classified by the predicate",
+			LSP_SERVERS.length,
+			30,
+		);
 		expect(
 			auxiliaryIds,
 			"An auxiliary row has no diagnostic profile (its findings would keep " +
@@ -133,7 +161,7 @@ describe("#1756 stage 1 — declared server trait table", () => {
 
 		// The declared-home list is load-bearing: every trait it names is really
 		// a strategy key, and no server row carries one as its own field.
-		expect(strategyKeys.size).toBeGreaterThan(0);
+		assertNonEmptyScan("strategy-table trait keys", strategyKeys.size, 5);
 		for (const trait of STRATEGY_TABLE_TRAITS) {
 			expect(
 				strategyKeys.has(trait),

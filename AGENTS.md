@@ -639,6 +639,22 @@ the surface they bite; each block loads only when its trigger applies.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The server-role vocabulary and the declared trait table have one owner,
+  `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
+  never a comparison against the role literal, and read `notifyInflightLimit`
+  or `replyOrdering` through `serverTraits`, never by re-deriving a default;
+  `LspServerRole` is declared there and nowhere else, so a second
+  `"primary" | "auxiliary"` is a re-fork. `LSPServerInfo.role` is
+  non-optional: a row declares it, or the factory and custom-server builders
+  apply `DEFAULT_LSP_SERVER_ROLE`. Measured-behaviour markers (`silentOnClean`
+  and the census siblings named by `STRATEGY_TABLE_TRAITS`) stay on
+  `wait-policy/strategies.ts`, which their probes and expiry tests own; the two
+  tables stay disjoint. The auxiliary lifecycle and wait policy lives in
+  `clients/lsp/auxiliary-lifecycle.ts`, the diagnostic policy in
+  `clients/dispatch/auxiliary-lsp.ts`. Enforced by
+  `tests/config/lsp-role-predicate-sweep.test.ts` (production tree at zero
+  inlined predicates; `scripts/` drivers admitted shrink-only) and
+  `tests/config/lsp-server-trait-table.test.ts` (registered-or-fail).
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
