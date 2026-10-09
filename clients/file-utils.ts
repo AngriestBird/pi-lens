@@ -37,7 +37,7 @@ import {
 } from "./project-lens-config.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
-	ephemeralStagingRoot,
+	isPiOwnedTempPath,
 	isEphemeralCheckoutRoot,
 } from "./ephemeral-root.js";
 import { getProcessSingleton } from "./process-singletons.js";
@@ -476,7 +476,7 @@ export function isPiLensInternalPath(
 		path.join(home, ".pi-lens"),
 	];
 	if (candidates.some((dir) => isUnderDir(absolute, dir))) return true;
-	if (ephemeralStagingRoot(absolute) !== undefined) return true;
+	if (isPiOwnedTempPath(absolute)) return true;
 	return false;
 }
 

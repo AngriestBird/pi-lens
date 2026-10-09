@@ -241,8 +241,33 @@ it("classifies outside-root path families through the real tool-result seam (#42
 				false,
 			],
 			[
+				"pi session-share scratch",
+				path.join(os.tmpdir(), "pi-share-4230", "session.html"),
+				false,
+			],
+			[
+				"pi external-editor scratch",
+				path.join(os.tmpdir(), "pi-editor-4230", "buffer.txt"),
+				false,
+			],
+			[
+				"pi WSL clipboard scratch",
+				path.join(os.tmpdir(), "pi-wsl-clip-4230.txt"),
+				false,
+			],
+			[
+				"generic pi output file",
+				path.join(os.tmpdir(), "tool-output-4230-abcdef.txt"),
+				false,
+			],
+			[
 				"ordinary tmp project file",
 				path.join(os.tmpdir(), "capture", "lib", "x.ts"),
+				true,
+			],
+			[
+				"ordinary home project file",
+				path.join(os.homedir(), "other-project", "src", "a.ts"),
 				true,
 			],
 		] as const;
