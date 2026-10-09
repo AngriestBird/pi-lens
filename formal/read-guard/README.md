@@ -96,7 +96,9 @@ change.
     path that call licensed (`mayAdvanceAuthorship`). A tool writes a wider
     set than it names (a rename's importers, an ast-grep folder or its project
     default), and every path outside the licensed set ends its authorship
-    instead. `OwnWriteUnchecked` (`"ownwrite"`) is the round-4 mutant: the same
+    instead. The `(call,path)` license is consumed by the first `OwnWrite`; a
+    second record under the settled call id is `OwnWriteAgain` and cannot
+    re-baseline. `OwnWriteUnchecked` (`"ownwrite"`) is the round-4 mutant: the same
     write with no call, advancing every path it changed. `External` may land
     between the two steps, which is the tool-run window in Limits (R4-6).
 - **Another writer** (an external editor, a second pi-lens instance, git):
@@ -301,6 +303,8 @@ head that added this model. It is not checked in CI.
 | `AuthorOwnExternal` | #4187 R4-2 safety: bash, another writer at an idle phase, the licensed own write, an edit; the call's retire ends the broken authorship and the write does not advance a retired record | pass | — |
 | `AuthorOwnUnchecked` | the same with `ownwrite`, the R4-1 mutant and round 4's code: an own write no call licensed re-baselines over the other writer's bytes (BashWrite, External, OwnWriteUnchecked, Edit) | violated `NoStaleAllow` | — |
 | `AuthorOwnToctou` | the R4-6 residual, not a fix: a foreign write lands between the call's check and the write it licenses, inside the tool's run (BashWrite, OwnCall, External inflight, OwnWrite, Edit) | violated `NoStaleAllow` | — |
+| `AuthorOwnLicenseSpent` | #4187 R5-1: after OwnWrite spends the call/path license, a second record under the settled id cannot re-baseline over an external rewrite | pass | — |
+| `AuthorOwnLicenseReusable` | the R5-1 mutation with the license left reusable: OwnWriteAgain re-baselines over the external rewrite | violated `NoStaleAllow` | — |
 | `AuthorDrainForeign` | #4187 F6 P3 fixed: bash, another writer, the agent_end drain (a whitespace-only format), an edit | pass | 209 |
 | `AuthorDrainForeignNoRetire` | the same, the drain re-baselining (round 1 of #4187) | violated `NoStaleAllow` | 121 |
 | `AuthorTouch` | #4187 F5 no-drop: another writer's whitespace-only rewrite (a new mtime, the same tokens) keeps bash authorship | pass (all three invariants) | 39 |

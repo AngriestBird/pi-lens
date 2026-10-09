@@ -16,7 +16,11 @@ import { BoundedSet } from "./bounded-cache.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
-import { normalizeEphemeralMapKey, normalizeFilePath } from "./path-utils.js";
+import {
+	normalizeEphemeralMapKey,
+	normalizeFilePath,
+	realpathOrResolve,
+} from "./path-utils.js";
 import {
 	logReadGuardEvent,
 	sanitizeCorrelationId,
@@ -812,6 +816,16 @@ export class ReadGuard {
 		return normalizeFilePath(filePath);
 	}
 
+	/**
+	 * License keys compare paths independently resolved by the tool_call and
+	 * the writer. Unlike the general map key, this identity must collapse a
+	 * symlink spelling to the file it names; missing files retain an absolute
+	 * resolved fallback so the comparison still fails closed.
+	 */
+	private licenseKey(filePath: string): string {
+		return normalizeFilePath(realpathOrResolve(filePath));
+	}
+
 	private idleEvictMs(): number {
 		const value = Number.parseInt(
 			process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS ?? "",
@@ -1248,21 +1262,27 @@ export class ReadGuard {
 		}
 		for (const rawPath of rawPaths) {
 			if (checked.size >= READ_GUARD_MAX_CHECKED_PATHS_PER_CALL) return;
-			checked.add(this.key(rawPath));
+			checked.add(this.licenseKey(rawPath));
 		}
 	}
 
 	/**
-	 * Whether `toolCallId`'s own `tool_call` licensed this path
-	 * ({@link noteCheckedPaths}). `filePath` is already a guard key.
+	 * Consume whether `toolCallId`'s own `tool_call` licensed this path
+	 * ({@link noteCheckedPaths}). A `(call,path)` license is single-use: a
+	 * settled call id must not re-baseline a later writer's bytes.
 	 */
-	private wasCheckedAtCall(
+	private consumeCheckedAtCall(
 		toolCallId: string | undefined,
 		filePath: string,
 	): boolean {
 		const callId = sanitizeCorrelationId(toolCallId);
 		if (callId === undefined) return false;
-		return this.checkedPathsByCall.get(callId)?.has(filePath) === true;
+		const checked = this.checkedPathsByCall.get(callId);
+		const licensedPath = this.licenseKey(filePath);
+		if (checked?.has(licensedPath) !== true) return false;
+		checked.delete(licensedPath);
+		if (checked.size === 0) this.checkedPathsByCall.delete(callId);
+		return true;
 	}
 
 	/**
@@ -2170,7 +2190,7 @@ export class ReadGuard {
 	): boolean {
 		if (opts?.advanceAuthorship === undefined) return true;
 		if (opts.advanceAuthorship !== true) return false;
-		return this.wasCheckedAtCall(opts.toolCallId, filePath);
+		return this.consumeCheckedAtCall(opts.toolCallId, filePath);
 	}
 
 	/**

@@ -11,7 +11,10 @@ import {
 	type LspMutationContext,
 	recordLspMutation,
 } from "../../clients/lsp-mutation.js";
-import { registerMutationBridge } from "../../clients/mutation-bridge.js";
+import {
+	getMutationBridge,
+	registerMutationBridge,
+} from "../../clients/mutation-bridge.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
@@ -1703,6 +1706,97 @@ describe("#4187 R4-1 — a bytes-less write advances only what its own call name
 				"block",
 			);
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("spends an observed bridge license after one write", async () => {
+		const env = setupTestEnvironment("pi-lens-4187-r51-license-spend-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			bridgeRuntime = runtime;
+			bridgeRoot = env.tmpDir;
+			const filePath = createTempFile(env.tmpDir, "reuse.ts", LICENSE_FIXTURE);
+			bashAuthor(runtime, filePath, "call-reuse-bash");
+
+			// The real tool-call handler retires/checks the path and arms the
+			// observed producer's one-use (call,path) license.
+			await callTool(runtime, env.tmpDir, {
+				toolName: "ast_grep_replace",
+				toolCallId: "call-reuse",
+				input: { apply: true, paths: ["reuse.ts"] },
+			});
+			toolRewriteLine3(filePath);
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				advanceAuthorship: true,
+				toolCallId: "call-reuse",
+			});
+			// The first observed write may advance the existing authorship.
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"allow",
+			);
+
+			const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+			lines[1] = "const external_again = 2;";
+			fs.writeFileSync(filePath, lines.join("\n"));
+			// R5-1 recurrence: a settled call id must not spend its license again
+			// to re-baseline over the second writer's bytes.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				advanceAuthorship: true,
+				toolCallId: "call-reuse",
+			});
+			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
+				"block",
+			);
+		} finally {
+			bridgeRuntime = undefined;
+			bridgeRoot = "";
+			env.cleanup();
+		}
+	});
+
+	it("matches an observed license across a symlink spelling", async () => {
+		const env = setupTestEnvironment("pi-lens-4187-r52-symlink-license-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			bridgeRuntime = runtime;
+			bridgeRoot = env.tmpDir;
+			fs.mkdirSync(path.join(env.tmpDir, "real"));
+			const realPath = createTempFile(
+				env.tmpDir,
+				"real/target.ts",
+				LICENSE_FIXTURE,
+			);
+			const linkRoot = path.join(env.tmpDir, "link");
+			fs.symlinkSync("real", linkRoot, "dir");
+			bashAuthor(runtime, realPath, "call-symlink-bash");
+
+			await callTool(runtime, env.tmpDir, {
+				toolName: "unknown_writer",
+				toolCallId: "call-symlink",
+				input: { path: "link/target.ts" },
+			});
+			toolRewriteLine3(realPath);
+			const bridge = getMutationBridge();
+			bridge?.recordMutation({
+				filePath: realPath,
+				kind: "edit",
+				consumer: "symlink-writer",
+				provenance: "observed",
+				toolCallId: "call-symlink",
+			});
+			// R5-2 recurrence: independently derived link/real spellings name one
+			// file, so the own write must not cost a needless re-read.
+			expect(runtime.readGuard.checkEdit(realPath, [3, 3]).action).toBe(
+				"allow",
+			);
+		} finally {
+			bridgeRuntime = undefined;
+			bridgeRoot = "";
 			env.cleanup();
 		}
 	});

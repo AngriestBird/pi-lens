@@ -148,6 +148,9 @@ CONSTANTS
                     \*   advancing it; FALSE (round 2): it re-baselines like an own write
 
 Lines == 1..MaxLen
+\* The license switch reuses the existing boolean in the focused configs;
+\* configs without an own-repeat action are unchanged by this abstraction.
+SpendLicense == BridgeNoAdvance
 NoH == [l \in Lines |-> 0]
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -196,14 +199,14 @@ Rec(lo, hi, h, prov) == [lo |-> lo, hi |-> hi, h |-> h, prov |-> prov, g |-> tur
 \* writer names none and keeps the id of the bytes it rewrote); ret = it was
 \* retired because another writer changed the bytes (#4131). A retired record
 \* stays (no write resumes it) and moves with its write like a live one.
-NoAuth == [on |-> FALSE, c |-> <<>>, g |-> 0, id |-> FALSE, ret |-> FALSE]
+NoAuth == [on |-> FALSE, c |-> <<>>, g |-> 0, id |-> FALSE, ret |-> FALSE, lic |-> FALSE]
 \* recordWritten by a write that names its transcript entry.
 Auth(c) == IF written.ret THEN written
-           ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> TRUE, ret |-> FALSE]
+           ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> TRUE, ret |-> FALSE, lic |-> FALSE]
 \* recordWritten by a pi-lens writer: carries the id of the write it rewrote.
 Carry(c) == IF written.ret THEN written
             ELSE IF written.on THEN [written EXCEPT !.c = c]
-            ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> FALSE, ret |-> FALSE]
+            ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> FALSE, ret |-> FALSE, lic |-> FALSE]
 \* The zero-read arm's authorship question (ReadGuard.checkEdit).
 Authored == written.on /\ ~written.ret /\ (AuthorIdentity => written.c = disk)
 \* retireChangedAuthorship at the start of a write that carries no bytes of its own.
@@ -627,7 +630,7 @@ BridgeWrite ==
 \* #3865 credit and is not modelled here.
 OwnCall ==
     /\ CanOp("own") /\ written.on
-    /\ written' = IF Broken THEN Retired ELSE written
+    /\ written' = IF Broken THEN Retired ELSE [written EXCEPT !.lic = TRUE]
     /\ pc' = "ownpending" /\ ops' = ops + 1
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, reads, ft, pendCreate, lastEditOk,
                    born, turnNo, pend, ext, nb, fixedTurn, mutatedTurn, dr,
@@ -640,10 +643,27 @@ OwnWrite ==
     /\ pc = "ownpending"
     /\ LET c == Replace(disk, 1, tok)
        IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
-          /\ written' = Auth(c)
+          /\ written' = [Auth(c) EXCEPT !.lic = ~SpendLicense]
     /\ rev' = rev + 1 /\ tok' = tok + 1 /\ mutatedTurn' = TRUE /\ pc' = "idle"
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pend, ops, ext,
                    nb, fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
+\* A second record under the settled call id. It must not advance after the
+\* first OwnWrite consumed the license; SpendLicense = FALSE is the
+\* compile-valid reusable-license mutant.
+OwnWriteAgain ==
+    /\ CanOp("ownagain") /\ written.on
+    /\ LET c == Replace(disk, 1, tok)
+       IN /\ disk' = c /\ know' = [know EXCEPT ![1] = tok]
+          /\ written' = IF written.lic
+                         THEN IF SpendLicense
+                              THEN [Auth(c) EXCEPT !.lic = FALSE]
+                              ELSE Auth(c)
+                         ELSE Retired
+    /\ rev' = rev + 1 /\ tok' = tok + 1 /\ mutatedTurn' = TRUE
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born,
+                   turnNo, pc, pend, ops, ext, nb, fixedTurn, dr,
+                   staleAllow, blindAllow, falseBlock>>
 
 \* Round 4's code, the R4-1 mutant: the record advanced EVERY path the write
 \* changed, licensed or not, so a rename's importers, an ast-grep folder and a
@@ -811,7 +831,7 @@ Next ==
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite \/ BridgeWrite
-    \/ OwnCall \/ OwnWrite \/ OwnWriteUnchecked
+    \/ OwnCall \/ OwnWrite \/ OwnWriteAgain \/ OwnWriteUnchecked
     \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars
