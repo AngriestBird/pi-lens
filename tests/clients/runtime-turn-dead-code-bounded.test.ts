@@ -193,6 +193,11 @@ async function slowTurn(signal?: AbortSignal, actor: TurnActor = {}) {
 	if (actor.sessionId !== undefined) {
 		const file = path.join(root, "mod.py");
 		fs.writeFileSync(file, "x = 1\n");
+		if (actor.sessionScope?.role === "secondary")
+			(actor.cacheManager ?? cacheManager).ensureSecondaryTurnStatePartition(
+				root,
+				actor.sessionId,
+			);
 		(actor.cacheManager ?? cacheManager).addModifiedRange(
 			file,
 			{ start: 1, end: 1 },
@@ -201,7 +206,6 @@ async function slowTurn(signal?: AbortSignal, actor: TurnActor = {}) {
 			actor.sessionId,
 			"pi",
 			undefined,
-			actor.sessionScope?.role,
 		);
 	} else edit();
 	const started = startTurn(signal, [client], actor);

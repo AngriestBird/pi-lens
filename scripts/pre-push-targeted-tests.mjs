@@ -168,6 +168,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
+	"tests/config/turn-state-partition-owner-sweep.test.ts",
 	"tests/config/vacuous-skip-coverage.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 ];

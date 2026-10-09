@@ -6,29 +6,42 @@ import { CacheManager } from "../../clients/cache-manager.js";
 const fixtures = path.join(process.cwd(), "tests", "fixtures", "turn-state");
 
 describe("#3613 turn-state durable record corpus", () => {
-	it("parses legacy and partitioned records, while an old reader ignores sessions", () => {
-		for (const name of ["v1.json", "v2.json"]) {
-			const parsed = JSON.parse(
-				fs.readFileSync(path.join(fixtures, name), "utf8"),
+	it("reads the v1 record through the new CacheManager reader", () => {
+		const parsed = JSON.parse(
+			fs.readFileSync(path.join(fixtures, "v1.json"), "utf8"),
+		);
+		const cwd = fs.mkdtempSync(
+			path.join(process.cwd(), ".turn-state-fixture-v1-"),
+		);
+		try {
+			const dataDir = path.join(cwd, ".pi-lens");
+			fs.mkdirSync(dataDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dataDir, "turn-state.json"),
+				JSON.stringify(parsed),
 			);
-			expect(parsed.files).toBeDefined();
-			// The pre-partition reader only consumes the legacy fields; the optional
-			// sessions member must not make that supported record unreadable.
-			const oldReader: {
-				files: unknown;
-				turnCycles: unknown;
-				maxCycles: unknown;
-				lastUpdated: unknown;
-				sessions?: unknown;
-			} = {
-				files: parsed.files,
-				turnCycles: parsed.turnCycles,
-				maxCycles: parsed.maxCycles,
-				lastUpdated: parsed.lastUpdated,
-			};
-			expect(oldReader.files).toBeDefined();
-			expect(oldReader.sessions).toBeUndefined();
+			const state = new CacheManager(false).readTurnState(cwd);
+			expect(state.sessions).toBeUndefined();
+			expect(state.files).toHaveProperty("legacy.ts");
+			expect(state.sessionId).toBe("legacy-session");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
 		}
+	});
+
+	it("keeps v2 legacy fields readable by a pre-partition reader", () => {
+		const parsed = JSON.parse(
+			fs.readFileSync(path.join(fixtures, "v2.json"), "utf8"),
+		);
+		// This is the exact field projection used by the origin/master reader:
+		// it reads the top-level turn state and ignores the additive sessions map.
+		expect({
+			files: parsed.files,
+			turnCycles: parsed.turnCycles,
+			maxCycles: parsed.maxCycles,
+			lastUpdated: parsed.lastUpdated,
+		}).toMatchObject({ files: {}, turnCycles: 0, maxCycles: 3 });
+		expect(parsed.sessions["secondary-a"]).toBeDefined();
 	});
 
 	it("drops expired secondary partitions at load", () => {
@@ -116,7 +129,7 @@ describe("#3613 turn-state durable record corpus", () => {
 				cache.clearTurnState(
 					cwd,
 					{ kind: "pi", id: "secondary-a" },
-					"secondary",
+					"secondary-a",
 				),
 			).toBe(true);
 			expect(

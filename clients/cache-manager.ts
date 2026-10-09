@@ -410,33 +410,88 @@ export class CacheManager {
 	/**
 	 * Read turn state. Returns default if not found.
 	 */
-	readTurnState(
-		cwd: string,
-		sessionId?: string,
-		sessionRole?: "primary" | "secondary",
-	): TurnState {
-		const state = this.readTurnStateEnvelope(cwd);
-		if (sessionId === undefined) return state;
-		// The legacy envelope is always the primary partition. Prefer it when
-		// its owner is the requested primary, even if an old writer left a
-		// same-id entry under `sessions`.
-		if (state.owner?.kind === "pi" && state.owner.id === sessionId)
-			return state;
-		const partition = state.sessions?.[sessionId];
-		if (partition) return partition;
-		if (sessionRole === "secondary")
-			return {
-				...DEFAULT_TURN_STATE,
-				files: {},
-				lastUpdated: new Date().toISOString(),
-			};
-		// Legacy records are the primary partition. A secondary must not adopt
-		// them merely because it shares the project root.
-		if (!state.owner || state.owner.id === sessionId) return state;
-		return {
+	readTurnState(cwd: string, sessionId?: string): TurnState {
+		return this.resolveTurnStatePartition(cwd, sessionId).state;
+	}
+
+	/**
+	 * Reserve a secondary's durable partition at turn start. The legacy
+	 * envelope may still be ownerless before the first write, so the write
+	 * itself cannot infer that this session is concurrent from persisted state.
+	 */
+	ensureSecondaryTurnStatePartition(cwd: string, sessionId: string): void {
+		const envelope = this.readTurnStateEnvelope(cwd);
+		if (envelope.sessions?.[sessionId]) return;
+		const secondary: TurnState = {
 			...DEFAULT_TURN_STATE,
 			files: {},
 			lastUpdated: new Date().toISOString(),
+			sessionId,
+			owner: {
+				kind: "pi",
+				id: sessionId,
+				pid: process.pid,
+				lastSeen: new Date().toISOString(),
+			},
+		};
+		this.writeTurnState(
+			{
+				...envelope,
+				sessions: { ...envelope.sessions, [sessionId]: secondary },
+			},
+			cwd,
+		);
+	}
+
+	/** Resolve the persisted primary/secondary turn-state partition. */
+	private resolveTurnStatePartition(
+		cwd: string,
+		sessionId?: string,
+	): {
+		envelope: TurnState;
+		state: TurnState;
+		isSecondary: boolean;
+		persist: (state: TurnState) => void;
+		remove: () => void;
+	} {
+		const envelope = this.readTurnStateEnvelope(cwd);
+		const persistedSecondary =
+			sessionId === undefined ? undefined : envelope.sessions?.[sessionId];
+		const primary =
+			sessionId === undefined ||
+			(envelope.owner === undefined && persistedSecondary === undefined) ||
+			(envelope.owner?.kind === "pi" && envelope.owner.id === sessionId);
+		const isSecondary =
+			!primary &&
+			(persistedSecondary !== undefined ||
+				(envelope.owner?.kind === "pi" && envelope.owner.pid === process.pid));
+		const state = primary
+			? envelope
+			: (persistedSecondary ?? {
+					...DEFAULT_TURN_STATE,
+					files: {},
+					lastUpdated: new Date().toISOString(),
+				});
+		return {
+			envelope,
+			state,
+			isSecondary,
+			persist: (next) => {
+				if (isSecondary && sessionId !== undefined) {
+					this.writeTurnState(
+						{
+							...envelope,
+							sessions: { ...envelope.sessions, [sessionId]: next },
+						},
+						cwd,
+					);
+				} else this.writeTurnState(next, cwd);
+			},
+			remove: () => {
+				if (!isSecondary || sessionId === undefined) return;
+				const { [sessionId]: _retired, ...remaining } = envelope.sessions ?? {};
+				this.writeTurnState({ ...envelope, sessions: remaining }, cwd);
+			},
 		};
 	}
 
@@ -588,7 +643,6 @@ export class CacheManager {
 		sessionId?: string | null,
 		ownerKind: TurnStateOwnerKind = "pi",
 		projectRoot?: string,
-		sessionRole?: "primary" | "secondary",
 	): TurnState {
 		// #2504: the worklist is a PROJECT worklist. A path outside the project
 		// was accepted and keyed by its absolute path, so a prior session's
@@ -609,27 +663,13 @@ export class CacheManager {
 			);
 			return this.readTurnState(cwd);
 		}
-		const envelope = this.readTurnStateEnvelope(cwd);
-		// Derive ownership at the shared seam. A caller must not be able to
-		// forget a role flag and accidentally write a secondary into primary's
-		// worklist (#4250 F1). A different live same-process pi owner identifies
-		// a concurrent secondary; MCP keeps its independent top-level route.
+		const partition = this.resolveTurnStatePartition(
+			cwd,
+			sessionId !== null ? sessionId : undefined,
+		);
 		const useSessionPartition =
-			sessionId !== undefined &&
-			sessionId !== null &&
-			ownerKind === "pi" &&
-			(sessionRole === "secondary" ||
-				(sessionRole === undefined &&
-					envelope.owner?.kind === "pi" &&
-					envelope.owner.id !== sessionId &&
-					envelope.owner.pid === process.pid));
-		const state = useSessionPartition
-			? (envelope.sessions?.[sessionId!] ?? {
-					...DEFAULT_TURN_STATE,
-					files: {},
-					lastUpdated: new Date().toISOString(),
-				})
-			: envelope;
+			partition.isSecondary && ownerKind === "pi" && sessionId != null;
+		const state = useSessionPartition ? partition.state : partition.envelope;
 		if (sessionId) {
 			const owner: TurnStateOwner = {
 				kind: ownerKind,
@@ -664,15 +704,8 @@ export class CacheManager {
 			};
 		}
 
-		if (useSessionPartition) {
-			envelope.sessions = {
-				...envelope.sessions,
-				[sessionId!]: state,
-			};
-			this.writeTurnState(envelope, cwd);
-		} else {
-			this.writeTurnState(state, cwd);
-		}
+		if (useSessionPartition) partition.persist(state);
+		else this.writeTurnState(state, cwd);
 		return state;
 	}
 
@@ -682,17 +715,14 @@ export class CacheManager {
 	clearTurnState(
 		cwd: string,
 		owner: Pick<TurnStateOwner, "kind" | "id"> & { sessionStartedAt?: number },
-		sessionRole?: "primary" | "secondary",
+		sessionId?: string,
 	): boolean {
-		const envelope = this.readTurnStateEnvelope(cwd);
-		if (sessionRole === "secondary") {
-			if (!envelope.sessions?.[owner.id]) return true;
-			const { [owner.id]: _retired, ...remaining } = envelope.sessions;
-			envelope.sessions = remaining;
-			this.writeTurnState(envelope, cwd);
+		const partition = this.resolveTurnStatePartition(cwd, sessionId);
+		if (sessionId !== undefined && partition.isSecondary) {
+			if (partition.envelope.sessions?.[sessionId]) partition.remove();
 			return true;
 		}
-		const currentState = envelope;
+		const currentState = partition.envelope;
 		const isCurrentOwner =
 			this.getTurnStateAccess(cwd, owner) !== "foreign-live";
 		if (!isCurrentOwner && process.pid !== currentState.owner?.pid)
@@ -728,25 +758,15 @@ export class CacheManager {
 		cwd: string,
 		owner: Pick<TurnStateOwner, "kind" | "id">,
 		sessionId?: string,
-		sessionRole?: "primary" | "secondary",
 	): TurnState {
-		const envelope = this.readTurnStateEnvelope(cwd);
-		const useSessionPartition =
-			sessionId !== undefined &&
-			sessionRole === "secondary" &&
-			envelope.sessions?.[sessionId] !== undefined;
-		const state = useSessionPartition
-			? envelope.sessions![sessionId!]
-			: this.readTurnState(cwd, sessionId);
+		const partition = this.resolveTurnStatePartition(cwd, sessionId);
+		const state = partition.state;
 		if (sessionId !== undefined && state.owner?.id !== sessionId) return state;
 		const isCurrentOwner =
 			this.getTurnStateAccess(cwd, owner) !== "foreign-live";
 		if (!isCurrentOwner && process.pid !== state.owner?.pid) return state;
 		state.turnCycles++;
-		if (useSessionPartition) {
-			envelope.sessions = { ...envelope.sessions, [sessionId!]: state };
-			this.writeTurnState(envelope, cwd);
-		} else this.writeTurnState(state, cwd);
+		partition.persist(state);
 		return state;
 	}
 

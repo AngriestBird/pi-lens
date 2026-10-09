@@ -1023,7 +1023,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cacheManager.clearTurnState(
 			cwd,
 			currentOwner,
-			isSecondarySession ? "secondary" : "primary",
+			isSecondarySession ? sessionId : undefined,
 		);
 	};
 
@@ -1052,11 +1052,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Only a positively classified secondary gets an id-scoped durable
 	// partition; ordinary primary callers read the legacy top-level envelope.
 	const turnStateSessionId = isSecondarySession ? sessionId : undefined;
-	let turnState = cacheManager.readTurnState(
-		cwd,
-		turnStateSessionId,
-		isSecondarySession ? "secondary" : "primary",
-	);
+	let turnState = cacheManager.readTurnState(cwd, turnStateSessionId);
 
 	// A live foreign writer owns this worklist. Do not clear or consume another
 	// pi/MCP session's files; a dead/aged owner is safely evicted instead.
@@ -1101,11 +1097,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	) {
 		dbg("turn_end: evicting stale turn-state owner");
 		clearOwnedTurnState();
-		turnState = cacheManager.readTurnState(
-			cwd,
-			turnStateSessionId,
-			isSecondarySession ? "secondary" : "primary",
-		);
+		turnState = cacheManager.readTurnState(cwd, turnStateSessionId);
 	}
 
 	const ownFiles = Object.keys(turnState.files);
@@ -4901,12 +4893,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 
-	cacheManager.incrementTurnCycle(
-		cwd,
-		currentOwner,
-		turnStateSessionId,
-		isSecondarySession ? "secondary" : "primary",
-	);
+	cacheManager.incrementTurnCycle(cwd, currentOwner, turnStateSessionId);
 
 	// #2001/#2002: collect-later delivery for auxiliary LSP servers whose
 	// aux-grace window expired without a publication (opengrep on Windows:

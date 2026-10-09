@@ -2833,7 +2833,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				deps.sessionId ?? runtime.telemetrySessionId,
 				"pi",
 				undefined,
-				deps.sessionRole,
 			);
 	};
 	try {
@@ -3118,7 +3117,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				deps.sessionId ?? runtime.telemetrySessionId,
 				"pi",
 				undefined,
-				deps.sessionRole,
 			);
 			dbg(
 				`tool_result: tracking pi-lens side-effect change for ${resolvedChanged}`,

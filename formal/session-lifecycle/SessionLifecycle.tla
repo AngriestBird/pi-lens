@@ -158,8 +158,8 @@
 (*   "parkResetClear"    resetForSession clears the park map               *)
 (*   "parkFence"         the park settles only while the coordinator's     *)
 (*                       scope is the one the turn captured at entry       *)
-(*   "turnEndScoped"     a proposed shape that is NOT on master: a turn_end*)
-(*                       composer drains only its own scope's work         *)
+(*   "turnEndScoped"     #3613 R2: a shipped shape in which turn_end drains *)
+(*                       only its own scope's work                         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

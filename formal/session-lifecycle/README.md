@@ -347,8 +347,8 @@ forwarded as captured. `deferResetClear`: the queue is the live generation's;
 without it `DrainDefer` sees every generation's. `debounceEntryCapture`
 (#3759 row 16); `stateWBranchFence`, a rejected alternative that fences the
 writers at branch level. `parkSessionKey` (#4112 round 2), `parkResetClear`,
-`parkFence` (`isCurrentSession`). `turnEndScoped` is the **proposed** shape and
-is not on master: a `turn_end` drains only its own scope's work.
+`parkFence` (`isCurrentSession`). `turnEndScoped` is the shipped #3613 R2
+shape: a `turn_end` drains only its own scope's work.
 
 ### #3705's rows, by column
 
