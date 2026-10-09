@@ -103,7 +103,7 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
 		"_nextTestRunnerDeliveryOwnerId",
 		"_readBridgeRegistered",
 		"_testRunnerDeliveryRegistered",
-		"_turnSummaryEmitCtx",
+		"_turnSummaryEmitCtxGetter",
 		"_turnSummaryEmitRegistered",
 		"cacheManager",
 		"lastLoggedLoopWorstMs",

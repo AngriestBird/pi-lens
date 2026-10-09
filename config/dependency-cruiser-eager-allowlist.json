@@ -60,6 +60,7 @@
   "./clients/observed-mutation.js",
   "./clients/path-attribution-telemetry.js",
   "./clients/path-utils.js",
+  "./clients/process-bridge.js",
   "./clients/project-lens-config.js",
   "./clients/project-trust.js",
   "./clients/quiet-window.js",
