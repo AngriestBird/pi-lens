@@ -120,6 +120,7 @@ PiForkF1 ==
     /\ sw' = [k \in StoreKinds |-> IdleStore]
     /\ sc' = [k \in StoreKinds |-> {}]
     /\ sdrop' = FALSE
+    /\ UNCHANGED m4V
 
 -----------------------------------------------------------------------------
 (* The widget's pipeline writers.                                          *)
