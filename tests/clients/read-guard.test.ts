@@ -2306,6 +2306,98 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		}
 	});
 
+	// #4210 F-4210-1: successive own credits must compose their produced
+	// ranges instead of dropping the first range and vouching for the file.
+	it("unions disjoint and overlapping successive own-credit ranges (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-union-");
+		try {
+			const filePath = path.join(env.tmpDir, "union.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-union");
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[3, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "own\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-own",
+				authoredRanges: [[1, 1]],
+			});
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [3, 3]).action).toBe("allow");
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+
+			const overlapPath = path.join(env.tmpDir, "overlap.ts");
+			fs.writeFileSync(overlapPath, "one\ntwo\nthree\nfour\n");
+			const overlapGuard = createReadGuard("authorship-overlap");
+			fs.writeFileSync(overlapPath, "one\nowned\nbridge\nfour\n");
+			overlapGuard.recordWritten(overlapPath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(overlapPath, "own\nowned-again\nbridge\nfour\n");
+			overlapGuard.recordWritten(overlapPath, {
+				stampFileTime: false,
+				toolCallId: "call-overlap",
+				authoredRanges: [[3, 3]],
+			});
+			expect(overlapGuard.checkEdit(overlapPath, [2, 2]).action).toBe("allow");
+
+			const wholePath = path.join(env.tmpDir, "whole.ts");
+			fs.writeFileSync(wholePath, "one\ntwo\nthree\nfour\n");
+			const wholeGuard = createReadGuard("authorship-whole");
+			fs.writeFileSync(wholePath, "one\nbridge\nthree\nfour\n");
+			wholeGuard.recordWritten(wholePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(wholePath, "own\nbridge\nthree\nfour\n");
+			wholeGuard.recordWritten(wholePath, {
+				stampFileTime: false,
+				toolCallId: "call-whole",
+			});
+			expect(wholeGuard.checkEdit(wholePath, [4, 4]).action).toBe("allow");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4210 F-4210-1: when a later own write changes line positions, the
+	// existing range cannot be remapped from AuthoredBytes, so retire that
+	// shifted scope rather than silently licensing the wrong line.
+	it("retires an authored range when a later own write shifts lines above it (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-shift-");
+		try {
+			const filePath = path.join(env.tmpDir, "shift.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-shift");
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[3, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "inserted\none\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-shift",
+				authoredRanges: [[1, 1]],
+			});
+
+			expect(guard.checkEdit(filePath, [3, 3]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("forgets the authorship of an idle-evicted file, so it needs a read again (#3520)", () => {
 		const env = setupTestEnvironment("read-guard-idle-authorship-");
 		vi.useFakeTimers();

@@ -222,6 +222,8 @@ interface AuthoredBytes {
 	retired?: true;
 	/** Lines a partial first credit actually produced. */
 	authoredRanges?: Array<[number, number]>;
+	/** Line count when authoredRanges was observed; used to fail closed on shifts. */
+	authoredLineCount?: number;
 }
 
 /**
@@ -289,10 +291,37 @@ function observeAuthoredBytes(
 			ctimeMs: stat.ctimeMs,
 			...(hash !== undefined && { hash }),
 			...(authoredRanges !== undefined && { authoredRanges }),
+			...(authoredRanges !== undefined && {
+				authoredLineCount: splitLines(fs.readFileSync(filePath, "utf-8"))
+					.length,
+			}),
 		};
 	} catch {
 		return { size: ABSENT_SIZE, mtimeMs: 0, ctimeMs: 0 };
 	}
+}
+
+function composeAuthoredRanges(
+	previous: AuthoredBytes,
+	next: Array<[number, number]>,
+	nextLineCount: number | undefined,
+): Array<[number, number]> {
+	// AuthoredBytes has no read-time line hashes, so a line-count change cannot
+	// safely remap the old range. Retire that scope and keep only the bytes the
+	// later write explicitly produced (#4210 F-4210-1).
+	const ranges =
+		previous.authoredLineCount !== undefined &&
+		nextLineCount === previous.authoredLineCount
+			? [...(previous.authoredRanges ?? []), ...next]
+			: next;
+	const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+	const merged: Array<[number, number]> = [];
+	for (const [start, end] of sorted) {
+		const last = merged.at(-1);
+		if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+		else merged.push([start, end]);
+	}
+	return merged;
 }
 
 function authoredRangeCovers(
@@ -2052,7 +2081,9 @@ export class ReadGuard {
 				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
 				(candidate.retired !== undefined && candidate.retired !== true) ||
 				(candidate.authoredRanges !== undefined &&
-					!Array.isArray(candidate.authoredRanges))
+					!Array.isArray(candidate.authoredRanges)) ||
+				(candidate.authoredLineCount !== undefined &&
+					typeof candidate.authoredLineCount !== "number")
 			) {
 				result.dropped += 1;
 				continue;
@@ -2071,6 +2102,9 @@ export class ReadGuard {
 				...(candidate.retired === true && { retired: true as const }),
 				...(candidate.authoredRanges !== undefined && {
 					authoredRanges: candidate.authoredRanges,
+				}),
+				...(candidate.authoredLineCount !== undefined && {
+					authoredLineCount: candidate.authoredLineCount,
 				}),
 			});
 			result.imported += 1;
@@ -2262,13 +2296,33 @@ export class ReadGuard {
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,
-			!existing ? opts?.authoredRanges : undefined,
+			opts?.authoredRanges,
 		);
+		const composedRanges =
+			existing?.authoredRanges === undefined
+				? existing
+					? undefined
+					: observed.authoredRanges
+				: opts?.authoredRanges === undefined
+					? undefined
+					: composeAuthoredRanges(
+							existing,
+							opts.authoredRanges,
+							observed.authoredLineCount,
+						);
 		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);
 		this.writtenThisSession.set(filePath, {
 			...observed,
+			...(composedRanges !== undefined
+				? {
+						authoredRanges: composedRanges,
+						...(observed.authoredLineCount !== undefined && {
+							authoredLineCount: observed.authoredLineCount,
+						}),
+					}
+				: {}),
 			...(toolCallId !== undefined && { toolCallId }),
 		});
 		this.enforceAuthorshipCap();
