@@ -659,9 +659,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-agent-end.ts": 7,
 		"clients/runtime-coordinator.ts": 3,
 		"clients/runtime-session.ts": 4,
-		// 3 -> 5 (#4187): tool-call authorship retirement filters the owned
-		// in-process mutation paths before applying the shared retire seam.
-		"clients/runtime-tool-call.ts": 5,
+		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
+		// the owned in-process mutation paths; round 5 folds two of its three
+		// branches onto the observational net's arm, and the surviving ast-grep
+		// site walks its `paths` array instead of filtering it.
+		"clients/runtime-tool-call.ts": 3,
 		"clients/runtime-tool-result.ts": 5,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
@@ -1005,7 +1007,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
 		// 21 -> 23 (#4187): tool-call authorship retirement resolves each
 		// owned mutation path through the shared path helper.
-		"clients/runtime-tool-call.ts": 23,
+		// 23 -> 22 (#4187 R5): the fold onto the observational net's arm drops
+		// the single-path branches, and with them the `input.path` read.
+		"clients/runtime-tool-call.ts": 22,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		"clients/runtime-tool-result.ts": 19,

@@ -456,7 +456,7 @@ describe("lens_diagnostic_mark tool — line verification/reanchoring (#802)", (
 // ends the authorship it should have kept. The guard half of the rule is pinned
 // by tests/clients/runtime-tool-call.test.ts.
 describe("lens_diagnostic_mark's suppress record names its call (#4187 R4-1)", () => {
-	it("sends provenance observed and the tool call id it ran under", async () => {
+	it("sends provenance observed and the suppress call's own id", async () => {
 		recordedEntries.length = 0;
 		const absPath = writeFile(
 			"marked.ts",
