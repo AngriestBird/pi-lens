@@ -8,6 +8,12 @@ import {
 import { CacheManager } from "../../clients/cache-manager.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { syncGitGuardRecord } from "../../clients/git-guard.js";
+import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import {
+	recordProjectChange,
+	recordTurnSummary,
+} from "../../clients/runtime-tool-result.js";
+import { readChangesSince } from "../../clients/project-changes.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const environments: Array<{ cleanup: () => void }> = [];
@@ -135,5 +141,91 @@ describe("analysis-root seam", () => {
 		expect(cache.inspectCache("turn-end-findings", env.tmpDir)).not.toBe(
 			"missing",
 		);
+	});
+
+	it("does not record a project change for an adopted root through tool_result", async () => {
+		// Recurrence: #4242 must keep the real tool_result project-change writer
+		// from persisting a receipt for an adopted root.
+		const env = setupTestEnvironment("pi-lens-analysis-root-project-change-");
+		environments.push(env);
+		const filePath = path.join(env.tmpDir, "..", "adopted-project", "file.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+
+		await handleToolResult({
+			event: {
+				toolName: "write",
+				input: { path: filePath },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+		recordProjectChange({
+			runtime,
+			cwd: env.tmpDir,
+			filePath,
+			source: "agent-write",
+			analysisRootMode: "adopted",
+			dbg: () => {},
+		});
+
+		expect(readChangesSince(env.tmpDir, 0)).toEqual([]);
+	});
+
+	it("does not record a turn summary for an adopted root through tool_result", async () => {
+		// Recurrence: #4242 must keep the real tool_result turn-summary writer a
+		// no-op until adopted-root analysis is explicitly admitted.
+		const env = setupTestEnvironment("pi-lens-analysis-root-turn-summary-");
+		environments.push(env);
+		const filePath = path.join(env.tmpDir, "..", "adopted-project", "file.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+
+		await handleToolResult({
+			event: {
+				toolName: "write",
+				input: { path: filePath },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: (name: string) => name === "lens-turn-summary",
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+		recordTurnSummary({
+			runtime,
+			filePath,
+			resultLive: true,
+			analysisRootMode: "adopted",
+			getFlag: () => true,
+			result: {
+				diagnostics: [
+					{
+						filePath,
+						tool: "eslint",
+						message: "unused",
+						severity: "warning",
+					},
+				],
+				fixedCount: 1,
+				autofixTools: ["ruff:1"],
+				formattersUsed: ["prettier"],
+			} as never,
+		});
+
+		expect(runtime.turnSummary.isEmpty()).toBe(true);
 	});
 });

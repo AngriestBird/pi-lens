@@ -751,7 +751,7 @@ function singleRange(
 	return ranges?.length === 1 ? ranges[0] : undefined;
 }
 
-function recordProjectChange(args: {
+export function recordProjectChange(args: {
 	runtime: RuntimeCoordinator;
 	cwd: string;
 	filePath: string;
@@ -772,6 +772,48 @@ function recordProjectChange(args: {
 		onAppendError: (err) =>
 			args.dbg(`project change log append failed for ${args.filePath}: ${err}`),
 	});
+}
+
+export function recordTurnSummary(args: {
+	runtime: RuntimeCoordinator;
+	filePath: string;
+	result: PipelineResult;
+	getFlag: (name: string) => boolean | string | undefined;
+	resultLive: boolean;
+	analysisRootMode: AnalysisRootMode;
+}): void {
+	if (!args.resultLive) return;
+	if (!canWriteAnalysisRoot(args.analysisRootMode)) return;
+	if (!args.getFlag("lens-turn-summary")) return;
+	if (args.result.diagnostics?.length) {
+		for (const d of args.result.diagnostics) {
+			args.runtime.turnSummary.recordDiagnostic(d.filePath || args.filePath, {
+				tool: d.tool,
+				ruleId: d.rule ?? d.code,
+				severity: d.severity,
+				line: d.line,
+				description: d.message,
+			});
+		}
+	}
+	if (args.result.fixedCount && args.result.fixedCount > 0) {
+		for (const label of args.result.autofixTools ?? []) {
+			const [tool, countStr] = label.split(":");
+			const count = Number.parseInt(countStr ?? "", 10);
+			args.runtime.turnSummary.recordAutofix(args.filePath, {
+				tool: tool || label,
+				description:
+					Number.isFinite(count) && count > 0
+						? `${count} issue(s) fixed`
+						: undefined,
+			});
+		}
+	}
+	if (args.result.formattersUsed?.length) {
+		for (const tool of args.result.formattersUsed) {
+			args.runtime.turnSummary.recordFormat(args.filePath, { tool });
+		}
+	}
 }
 
 /**
@@ -3170,41 +3212,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// already computed above (diagnostics, autofix count/tools, formatters
 	// used) — no new collection plumbing, just fed into the collector when
 	// the feature is on.
-	if (
-		resultLive &&
-		canWriteAnalysisRoot(analysisRootMode) &&
-		getFlag("lens-turn-summary")
-	) {
-		if (result.diagnostics?.length) {
-			for (const d of result.diagnostics) {
-				runtime.turnSummary.recordDiagnostic(d.filePath || filePath, {
-					tool: d.tool,
-					ruleId: d.rule ?? d.code,
-					severity: d.severity,
-					line: d.line,
-					description: d.message,
-				});
-			}
-		}
-		if (result.fixedCount && result.fixedCount > 0) {
-			for (const label of result.autofixTools ?? []) {
-				const [tool, countStr] = label.split(":");
-				const count = Number.parseInt(countStr ?? "", 10);
-				runtime.turnSummary.recordAutofix(filePath, {
-					tool: tool || label,
-					description:
-						Number.isFinite(count) && count > 0
-							? `${count} issue(s) fixed`
-							: undefined,
-				});
-			}
-		}
-		if (result.formattersUsed?.length) {
-			for (const tool of result.formattersUsed) {
-				runtime.turnSummary.recordFormat(filePath, { tool });
-			}
-		}
-	}
+	recordTurnSummary({
+		runtime,
+		filePath,
+		result,
+		getFlag,
+		resultLive,
+		analysisRootMode,
+	});
 
 	// #3507: both verbs are ordered by this dispatch's token, so an older
 	// pipeline that settles after a newer one of the same file changes nothing.
