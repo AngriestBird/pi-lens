@@ -31,6 +31,7 @@ import type { CacheManager } from "./cache-manager.js";
 import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	invalidateProjectIgnoreMatcherForPath,
+	isPiLensInternalPath,
 	isPathIgnoredByProject,
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
@@ -44,6 +45,8 @@ import {
 import { getFormatService } from "./format-service.js";
 import {
 	isExternalOrVendorFile,
+	isVendorPath,
+	isOutsideProjectRoot,
 	normalizeEphemeralMapKey,
 	pathsEqual,
 } from "./path-utils.js";
@@ -2454,6 +2457,23 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 	if (isExternalOrVendorFile(filePath, workspaceRoot)) {
+		if (
+			isOutsideProjectRoot(filePath, workspaceRoot) &&
+			!isVendorPath(filePath) &&
+			!isPiLensInternalPath(filePath, workspaceRoot)
+		) {
+			const firstOutsideRootEdit = recordDegradationOnce({
+				kind: "tool-result-outside-project-root",
+				subject: workspaceRoot,
+				reason: `edit outside session root: ${filePath}`,
+			});
+			if (firstOutsideRootEdit) {
+				queueAgentAdvisory(
+					`pi-lens skipped analysis for the edit at ${filePath} because it is outside the session root. Start pi in that directory or add it to the workspace to get analysis.`,
+					writeSession,
+				);
+			}
+		}
 		dbg(
 			`tool_result: skipped pipeline - file outside project root or in node_modules: ${filePath}`,
 		);
