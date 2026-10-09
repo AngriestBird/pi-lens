@@ -213,13 +213,29 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 	});
 
 	it("stamp the read-guard as written on both branches", () => {
-		// Both mark the file as already covered by this session's own write, so
-		// an immediate re-edit is allowed with no real Read — the same OUTCOME
+		// Both mark the changed range as covered by this session's own write, so
+		// an immediate re-edit inside it is allowed with no real Read — the same OUTCOME
 		// reached via each branch's own real production mechanism (direct:
 		// `context.readGuard` set explicitly; bridge fallback: the bridge's
 		// internal `deps.getRuntime().readGuard.recordWritten`).
-		expect(runtimeDirect.readGuard.checkEdit(fileDirect).action).toBe("allow");
-		expect(runtimeBridge.readGuard.checkEdit(fileBridge).action).toBe("allow");
+		expect(runtimeDirect.readGuard.checkEdit(fileDirect, [1, 1]).action).toBe(
+			"block",
+		);
+		expect(runtimeBridge.readGuard.checkEdit(fileBridge, [1, 1]).action).toBe(
+			"block",
+		);
+		expect(
+			runtimeDirect.readGuard.checkEdit(fileDirect, [
+				EDIT_LINE_1BASED,
+				EDIT_LINE_1BASED,
+			]).action,
+		).toBe("allow");
+		expect(
+			runtimeBridge.readGuard.checkEdit(fileBridge, [
+				EDIT_LINE_1BASED,
+				EDIT_LINE_1BASED,
+			]).action,
+		).toBe("allow");
 	});
 
 	// #4187 R2-4: the server computed the bytes and nothing checked the file

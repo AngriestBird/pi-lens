@@ -203,6 +203,9 @@ the surface they bite; each block loads only when its trigger applies.
     file nothing checked was re-baselined over another writer's bytes. The
     screen: for each writer, table named-at-call against actually-written, and
     ask which rule answers for a path in the second column only.
+    A first credit from a bridge is range-scoped to the bytes it reports, and
+    settled-sweep drift never creates authorship (#4210); screen the next
+    positional edit both inside and outside the reported range.
 
 </important>
 

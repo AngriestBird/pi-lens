@@ -125,6 +125,7 @@ export interface LspMutationContext {
 				stampFileTime: false;
 				advanceAuthorship: true;
 				toolCallId?: string;
+				authoredRanges?: Array<[number, number]>;
 			},
 		) => void;
 	};
@@ -363,6 +364,11 @@ function bookkeepLspMutation(
 				context.readGuard.recordWritten(filePath, {
 					stampFileTime: false,
 					advanceAuthorship: true,
+					...(detail.range !== undefined && {
+						authoredRanges: [
+							[detail.range.start, detail.range.end] as [number, number],
+						],
+					}),
 					...(context.toolCallId !== undefined && {
 						toolCallId: context.toolCallId,
 					}),

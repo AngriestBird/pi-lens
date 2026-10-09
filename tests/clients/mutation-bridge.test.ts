@@ -861,7 +861,9 @@ describe("#3620/#3709: a retired scope's replay writes no session state", () => 
 				queued: runtime.consumeDeferredFormatFiles().map((r) => [...r.kinds]),
 				turnFiles: turnFiles(cacheManager, tmpDir).length,
 			}).toEqual({
-				verdict: "allow",
+				// A settled sweep records the change and queues follow-up work, but
+				// its unattributed drift is not first-credit authorship (#4210).
+				verdict: "block",
 				queued: [["autofix", "format"]],
 				turnFiles: 1,
 			});
@@ -1176,9 +1178,9 @@ describe("mutation bridge authorship without FileTime credit (#3865)", () => {
 						}),
 					),
 				).toBe(true);
-				expect(runtime.readGuard.exportAuthorship().written).toEqual([
-					normalizeFilePath(filePath),
-				]);
+				expect(runtime.readGuard.exportAuthorship().written).toEqual(
+					provenance === "settled-sweep" ? [] : [normalizeFilePath(filePath)],
+				);
 				expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
 					"block",
 				);
@@ -1258,4 +1260,66 @@ describe("mutation bridge never advances an existing authorship (#4131)", () => 
 			}
 		});
 	}
+});
+
+describe("mutation bridge first-credit scope (#4210)", () => {
+	it("does not let a first partial bridge write vouch for another line (Q3)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-q3-");
+		try {
+			const filePath = path.join(env.tmpDir, "partial.ts");
+			fs.writeFileSync(filePath, ["one", "two", "three"].join("\n"));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			fs.writeFileSync(filePath, ["one", "bridge", "three"].join("\n"));
+
+			recordMutationThroughSeam(
+				{ filePath, kind: "edit", touchedLines: [2, 2], consumer: "writer" },
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let settled-sweep drift create authorship (Q4)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-q4-");
+		try {
+			const filePath = path.join(env.tmpDir, "drift.ts");
+			fs.writeFileSync(filePath, ["one", "two", "three"].join("\n"));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			fs.writeFileSync(filePath, ["one", "foreign", "three"].join("\n"));
+
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [2, 2],
+					consumer: "settled-sweep",
+					provenance: "settled-sweep",
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+
+			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
 });

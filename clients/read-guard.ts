@@ -220,6 +220,8 @@ interface AuthoredBytes {
 	 * entry: idle eviction, an external delete, or a move off its branch.
 	 */
 	retired?: true;
+	/** Lines a partial first credit actually produced. */
+	authoredRanges?: Array<[number, number]>;
 }
 
 /**
@@ -271,6 +273,7 @@ const ABSENT_SIZE = -1;
 function observeAuthoredBytes(
 	filePath: string,
 	knownHash: string | undefined,
+	authoredRanges?: Array<[number, number]>,
 ): AuthoredBytes {
 	try {
 		const stat = fs.statSync(filePath);
@@ -285,10 +288,29 @@ function observeAuthoredBytes(
 			mtimeMs: stat.mtimeMs,
 			ctimeMs: stat.ctimeMs,
 			...(hash !== undefined && { hash }),
+			...(authoredRanges !== undefined && { authoredRanges }),
 		};
 	} catch {
 		return { size: ABSENT_SIZE, mtimeMs: 0, ctimeMs: 0 };
 	}
+}
+
+function authoredRangeCovers(
+	authored: AuthoredBytes,
+	touchedLines?: [number, number],
+	editRanges?: [number, number][],
+): boolean {
+	if (authored.authoredRanges === undefined) return true;
+	const requested = editRanges ?? (touchedLines ? [touchedLines] : undefined);
+	return (
+		requested !== undefined &&
+		requested.every(([start, end]) =>
+			authored.authoredRanges!.some(
+				([authoredStart, authoredEnd]) =>
+					start >= authoredStart && end <= authoredEnd,
+			),
+		)
+	);
 }
 
 /**
@@ -1448,11 +1470,24 @@ export class ReadGuard {
 				});
 				return verdict;
 			}
-			if (this.writtenThisSession.has(filePath)) {
+			const authored = this.writtenThisSession.get(filePath);
+			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
 				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
+				});
+				return verdict;
+			}
+			if (authored) {
+				const verdict = this.blockOrWarn(
+					"authorship-range",
+					`🔄 RETRYABLE — Edit without read: this write only covered part of \`${filePath}\`; read the requested lines first, then retry.`,
+					undefined,
+					effectiveMode,
+				);
+				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+					reasonKind: "zero_read",
 				});
 				return verdict;
 			}
@@ -1803,6 +1838,8 @@ export class ReadGuard {
 			toolCallId?: string;
 			/** sha256 (hex) of the bytes on disk the caller already read for this write. */
 			contentHash?: string;
+			authoredRanges?: Array<[number, number]>;
+			allowFirstAuthorship?: boolean;
 			/**
 			 * Whether this write may re-baseline an EXISTING authorship over the
 			 * bytes it landed. Omitted for a writer that checked this exact path
@@ -2013,7 +2050,9 @@ export class ReadGuard {
 				typeof candidate.mtimeMs !== "number" ||
 				typeof candidate.ctimeMs !== "number" ||
 				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
-				(candidate.retired !== undefined && candidate.retired !== true)
+				(candidate.retired !== undefined && candidate.retired !== true) ||
+				(candidate.authoredRanges !== undefined &&
+					!Array.isArray(candidate.authoredRanges))
 			) {
 				result.dropped += 1;
 				continue;
@@ -2030,6 +2069,9 @@ export class ReadGuard {
 				...(candidate.hash !== undefined && { hash: candidate.hash }),
 				toolCallId: candidate.toolCallId,
 				...(candidate.retired === true && { retired: true as const }),
+				...(candidate.authoredRanges !== undefined && {
+					authoredRanges: candidate.authoredRanges,
+				}),
 			});
 			result.imported += 1;
 		}
@@ -2180,9 +2222,9 @@ export class ReadGuard {
 	 * - `false` — a record with no pre-write check at all (a co-process
 	 *   producer, the settled sweep). Never advance.
 	 *
-	 * A path with no entry is not an advance but a first credit, which every
-	 * class may create: the write is evidence of who wrote it, and the content
-	 * identity ends it at the next check (#4187 round 2).
+	 * A path with no entry is a first credit only when the writer supplies
+	 * evidence for it. Partial bridge credits retain their reported range;
+	 * settled-sweep drift supplies no such evidence (#4210).
 	 */
 	private mayAdvanceAuthorship(
 		filePath: string,
@@ -2205,16 +2247,23 @@ export class ReadGuard {
 					toolCallId?: string;
 					contentHash?: string;
 					advanceAuthorship?: boolean;
+					authoredRanges?: Array<[number, number]>;
+					allowFirstAuthorship?: boolean;
 			  }
 			| undefined,
 	): void {
 		const existing = this.writtenThisSession.get(filePath);
+		if (!existing && opts?.allowFirstAuthorship === false) return;
 		if (existing?.retired) return;
 		if (existing && !this.mayAdvanceAuthorship(filePath, opts)) {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
-		const observed = observeAuthoredBytes(filePath, opts?.contentHash);
+		const observed = observeAuthoredBytes(
+			filePath,
+			opts?.contentHash,
+			!existing ? opts?.authoredRanges : undefined,
+		);
 		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);

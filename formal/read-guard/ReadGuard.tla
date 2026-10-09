@@ -81,6 +81,7 @@ CONSTANTS
                     \*  "bread": a read a later extension blocks after pi-lens's tool_call captured it;
                     \*  "oedit": an oldText edit, gated by the zero-read check alone;
                     \*  "pbash": a recognized bash write of one line;
+                    \*  "settle": unattributed settled-sweep drift;
                     \*  "bridge": a mutation-bridge write of one line, with no pre-write check of its own;
                     \*  "own": an owned in-process call+write pair, the call licensing the write's advance;
                     \*  "ownwrite": the same write with no call, the round-4 mutant)
@@ -618,6 +619,17 @@ BridgeWrite ==
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
                    fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
+\* #4210 Q4: settled-sweep drift has no conversation-owned bytes. The fixed
+\* bridge therefore leaves a first credit absent; the mutant re-baselines the
+\* whole file and lets the later positional edit pass.
+SettledWrite ==
+    /\ CanOp("settle") /\ ~written.on
+    /\ disk' = Replace(disk, 1, tok) /\ know' = [know EXCEPT ![1] = tok]
+    /\ written' = IF BridgeNoAdvance THEN NoAuth ELSE Auth(disk')
+    /\ rev' = rev + 1 /\ tok' = tok + 1 /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
+    /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
+                   fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
+
 \* ---- an owned in-process write ("own"): retire at tool_call, advance at the write ----
 \* #4187 R4-1/R4-2: a pi-lens-owned in-process tool (ast_grep_replace over the
 \* file it named, an lsp_navigation rename, lens_diagnostic_mark's suppress) has
@@ -830,7 +842,7 @@ Next ==
     \/ ReadExec \/ ReadResult \/ FailedRead \/ BlockedReadCall \/ BlockedReadEnd
     \/ \E lo \in 1..MaxLen, s \in Spans, o \in BOOLEAN : Edit(lo, s, o)
     \/ EditRW
-    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite \/ BridgeWrite
+    \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2 \/ BashWrite \/ PartialBashWrite \/ BridgeWrite \/ SettledWrite
     \/ OwnCall \/ OwnWrite \/ OwnWriteAgain \/ OwnWriteUnchecked
     \/ External \/ Turn \/ Settle \/ Requeue \/ Drain \/ New \/ Fork \/ Tree
 

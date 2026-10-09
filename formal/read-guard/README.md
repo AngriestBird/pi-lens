@@ -299,6 +299,7 @@ head that added this model. It is not checked in CI.
 | `AuthorRewriteForeignNoRetire` | the same, the second write re-baselining over the other writer's bytes (round 1 of #4187) | violated `NoStaleAllow` | 204 |
 | `AuthorBridgeForeign` | #4187 R2-4 fixed: bash, another writer, a one-line mutation-bridge write, an edit | pass | 374 |
 | `AuthorBridgeForeignAdvance` | the same, the bridge write re-baselining over the other writer's bytes (round 2 of #4187, probe A1): BashWrite, External, BridgeWrite, Edit | violated `NoStaleAllow` | 204 |
+| `AuthorSettledSweep` | #4210 Q4: unattributed settled-sweep drift cannot create first authorship for a later positional edit | pass | bounded |
 | `AuthorBridgeOwn` | #4187 R4-2 no-drop: an owned in-process write licensed by its own call (`OwnCall`, then `OwnWrite`), no other writer, then an edit of the line it wrote. Round 4 keyed the advance on `ExtWrites = 0`, a bound no code observes, so the pass was vacuous (#3802) | pass | — |
 | `AuthorOwnExternal` | #4187 R4-2 safety: bash, another writer at an idle phase, the licensed own write, an edit; the call's retire ends the broken authorship and the write does not advance a retired record | pass | — |
 | `AuthorOwnUnchecked` | the same with `ownwrite`, the R4-1 mutant and round 4's code: an own write no call licensed re-baselines over the other writer's bytes (BashWrite, External, OwnWriteUnchecked, Edit) | violated `NoStaleAllow` | — |
