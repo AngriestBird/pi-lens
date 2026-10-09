@@ -2943,7 +2943,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				tool: mutation.kind,
 				dbg,
 				kinds: autofixMode === "deferred" ? ["autofix", "format"] : ["format"],
-				...identity,
+				...(identity === undefined
+					? {}
+					: {
+							...(identity.ownerSessionId === undefined
+								? {}
+								: { ownerSessionId: identity.ownerSessionId }),
+							turnIndex: identity.turnIndex,
+							batchId: identity.batchId,
+						}),
 			});
 		}
 	}
@@ -2955,7 +2963,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// Same #2421 projection as the queued-with-format publish above.
 			tool: mutation.kind,
 			kinds: ["autofix"],
-			...identity,
+			...(identity === undefined
+				? {}
+				: {
+						...(identity.ownerSessionId === undefined
+							? {}
+							: { ownerSessionId: identity.ownerSessionId }),
+						turnIndex: identity.turnIndex,
+						batchId: identity.batchId,
+					}),
 			dbg,
 		});
 	}

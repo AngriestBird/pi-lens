@@ -641,13 +641,15 @@ export async function handleAgentEnd({
 	// (e.g. a review/snapshot controller) can use this to know the deferred-
 	// format phase is starting and these specific paths may still be mutated.
 	if (records.length > 0) {
-		const batch = records[0];
+		const batch = records[0]!;
 		publishFormatStart({
 			cwd: ctxCwd ?? runtime.projectRoot,
 			paths: records.map((r) => r.filePath),
 			dbg,
 			kinds: [...new Set(records.flatMap((record) => [...record.kinds]))],
-			ownerSessionId: batch.ownerSessionId,
+			...(batch.ownerSessionId === undefined
+				? {}
+				: { ownerSessionId: batch.ownerSessionId }),
 			turnIndex: batch.queuedTurnIndex,
 			batchId: batch.queuedTurnId,
 		});
@@ -1030,9 +1032,11 @@ export async function handleAgentEnd({
 				cwd: ctxCwd ?? runtime.projectRoot,
 				paths: summary.changed,
 				kinds: ["format"],
-				ownerSessionId: records[0]?.ownerSessionId,
-				turnIndex: records[0]?.queuedTurnIndex,
-				batchId: records[0]?.queuedTurnId,
+				...(records[0]!.ownerSessionId === undefined
+					? {}
+					: { ownerSessionId: records[0]!.ownerSessionId }),
+				turnIndex: records[0]!.queuedTurnIndex,
+				batchId: records[0]!.queuedTurnId,
 				dbg,
 			});
 		if (lateFormatCompletions.length === 0) publishDone();
