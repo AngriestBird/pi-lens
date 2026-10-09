@@ -156,7 +156,7 @@ carries the named admission until then.
 | yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci |
 | dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| dockerfile-official | docker-language-server (official) | push-only | unknown | empty-only | ? | dev+ci |
+| dockerfile-official | docker-language-server (official) | push-only | BuildKit checks (`JSONArgsRecommended`) | BuildKit fixture; requires `docker buildx` | 2 | dev+ci |
 | toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | terraform | terraform-ls | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
 | prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |

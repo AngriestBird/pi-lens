@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyLspGateResult,
+	classifyOfficialDockerGateResult,
 	runLspGate,
 } from "../../scripts/smoke-tools.mjs";
 
@@ -74,6 +75,33 @@ async function runGateWithCensus(
 }
 
 describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
+	it("requires the official Docker BuildKit rule, or discloses unavailable buildx", () => {
+		// #3939 recurrence: the official server's old fixture produced an empty
+		// list, and allowEmptyBaseline turned that unsupported rule set into green.
+		const finding = {
+			details: {
+				totalDiagnostics: 1,
+				primaryDiagnosticsCount: 1,
+				diagnostics: [{ code: "JSONArgsRecommended" }],
+			},
+		};
+		expect(classifyOfficialDockerGateResult(finding, true)).toMatchObject({
+			state: "pass",
+		});
+		expect(
+			classifyOfficialDockerGateResult(
+				{ details: { totalDiagnostics: 0, diagnostics: [] } },
+				true,
+			),
+		).toMatchObject({ state: "fail" });
+		expect(
+			classifyOfficialDockerGateResult(
+				{ details: { totalDiagnostics: 0, diagnostics: [] } },
+				false,
+			),
+		).toMatchObject({ state: "skip", detail: "buildx unavailable" });
+	});
+
 	it("passes only when the real handler reports a primary finding", () => {
 		expect(
 			classifyLspGateResult(
