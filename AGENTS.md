@@ -277,6 +277,15 @@ the surface they bite; each block loads only when its trigger applies.
 
 ### a delivery surface or lane
 
+Project-wide scanner delivery has one owner per live worklist. The primary
+session owns turn-end delivery; a concurrent secondary owns only its own
+file-scoped worklist and receives no project-wide scanner output.
+
+| Producer population | Primary turn_end | Secondary turn_end |
+|---|---|---|
+| Project-wide scanners (gitleaks, knip, jscpd, and equivalent shared stores) | admit and deliver | suppress at the delivery gate |
+| Session-owned file or runner findings | admit its own session | admit its own session |
+
 5. **Dropped side channel:** trace flags, bindings, and provenance through
    spreads, maps, filters, and JSON serialization.
 
@@ -664,8 +673,13 @@ the surface they bite; each block loads only when its trigger applies.
   process-tree cleanup, output caps, typed failure kinds, and bounded timeouts.
   Installs pass `ignoreAmbientSignal: true` and remain trust-gated.
 - Project trust is consumed through `isProjectTrusted`; pi-lens never registers
-  the host's trust-answer handler. Missing trust APIs are unknown/fail-open for
-  compatibility; a throwing accessor is fail-closed.
+  the host's trust-answer handler. `compileLspRegistry` is the one admission
+  seam for LSP executable fields: global config and built-ins remain allowed,
+  while project `command`, command overrides, `env`, and
+  `initializationOptions` require pi's `trusted` answer. Missing trust APIs are
+  fail-closed for those project fields with one bounded notice; installs keep
+  their existing compatibility policy. `tests/clients/lsp/lsp-registry-trust.test.ts`
+  and the LSP config/service suites pin the boundary.
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership

@@ -798,6 +798,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// session_start and retired at its session_shutdown. Activation equals
 	// session (pi re-runs this factory on every transition except /tree).
 	let scope: SessionScope | undefined;
+	// #3613: turn_end can deliver after another in-process activation has
+	// started its next session and changed the live coordinator scope. Keep the
+	// identity that owned this turn, rather than resolving ownership at delivery
+	// time after the secondary's scope has been overwritten.
+	let turnStartScope: SessionScope | undefined;
 	// #3881: this activation's primary session_start is still in flight
 	// (before its hand-off adoption ran), with its start reason. pi does not
 	// stop a concurrent reload while it awaits the start's emit.
@@ -2870,6 +2875,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// later agent_end can tell its own queued work apart from a
 					// concurrent in-process secondary session's.
 					sessionId: getStableSessionId(ctx),
+					sessionRole:
+						ownedSessionRole === "concurrent-secondary"
+							? "secondary"
+							: "primary",
 				}),
 				{
 					ms: editClass
@@ -2934,6 +2943,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// advances only its own turn identity and per-turn records; the
 		// coordinator's turn state is the primary's.
 		runtime.beginTurn(getStableSessionId(ctx));
+		// Capture before any awaited turn-end work can let a sibling session start.
+		turnStartScope = scope ?? runtime.sessionScope;
+		if (
+			ownedSessionRole === "concurrent-secondary" &&
+			getStableSessionId(ctx) !== undefined
+		) {
+			cacheManager.ensureSecondaryTurnStatePartition(
+				(ctx as { cwd?: string })?.cwd ?? process.cwd(),
+				getStableSessionId(ctx)!,
+			);
+		}
 		// Every turn, a secondary's too: clearing only re-runs a duplicate
 		// same-state analysis, while keeping it would skip a secondary's next
 		// turn (the dedupe keys on the primary's turn index).
@@ -3427,7 +3447,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 				sessionId: getStableSessionId(ctx),
 				// #4154: this activation's own scope, so a concurrent secondary's
 				// late dead-code scan never lands in the primary's cell.
-				...(scope === undefined ? {} : { sessionScope: scope }),
+				// Test/MCP hosts may emit turn_end without turn_start. Real pi turns
+				// use the captured snapshot; this fallback preserves that host contract.
+				sessionScope: turnStartScope ?? scope ?? runtime.sessionScope,
 				signal: ctx.signal,
 				onTestRunnerComplete: (delivery) =>
 					stageTestRunnerDelivery({
@@ -3841,6 +3863,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 			shutdownCwd,
 		);
 		if (shutdownClassification === "secondary") {
+			if (stableSessionId !== undefined && shutdownCwd !== undefined) {
+				cacheManager.clearTurnState(
+					shutdownCwd,
+					{
+						kind: "pi",
+						id: stableSessionId,
+					},
+					stableSessionId,
+				);
+			}
 			emitCacheUsageSummaryAtSessionEnd(
 				stableSessionId,
 				"concurrent-secondary",

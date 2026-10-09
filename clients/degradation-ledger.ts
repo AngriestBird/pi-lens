@@ -765,6 +765,8 @@ export type DegradationKind =
 	 * "hung" server is truly hung or just answering late.
 	 */
 	| "lsp-pull-unconfirmed"
+	/** A config registry decision dropped or admitted executable project data. */
+	| "lsp-registry-decision"
 	/** A host-created pi-agent staging root was declined as an LSP root. */
 	| "lsp-root-declined"
 	/**

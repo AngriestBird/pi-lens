@@ -345,6 +345,8 @@ export function createDispatchContext(
 	telemetryProvider?: string,
 	/** #3568: the session of a post-write dispatch, for its deferred runners. */
 	sessionGeneration?: GenerationHandle,
+	/** Stable session identity for deferred runner delivery. */
+	sessionId?: string,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
 	const normalizedProjectRoot = normalizeMapKey(
@@ -397,6 +399,7 @@ export function createDispatchContext(
 		modifiedRanges,
 		writeIndex,
 		sessionGeneration,
+		sessionId,
 		telemetryModel,
 		telemetryProvider,
 		toolCwdMemo: {},
@@ -1075,6 +1078,7 @@ async function runGroup(
 				writeIndex: ctx.writeIndex,
 				promise: deferred,
 				session: ctx.sessionGeneration,
+				sessionId: ctx.sessionId,
 			});
 			// A deferred runner is still an observed runner. Keep it visible in
 			// both the edit latency report and the widget until its turn-end result

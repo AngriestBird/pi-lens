@@ -329,6 +329,9 @@ const lspSpawnHeavyInclude = [
 	"tests/clients/lsp/did-save-notification.test.ts",
 	"tests/clients/lsp/fake-lsp-server-parent-watchdog.test.ts",
 	"tests/clients/lsp/integration.test.ts",
+	// #4248: the unknown-trust project-local binary witness resolves a real
+	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
+	"tests/clients/lsp/service-project-trust.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-language-neutral.test.ts",
 	// #2776: the real fake-server wire is the only way to reproduce the
 	// custom-primary handler verdict after pull diagnostics are ignored and a
@@ -395,6 +398,7 @@ export const realHarnessInclude = [
 	"tests/real-harness/provider-compatibility.test.ts",
 	"tests/real-harness/read-guard-moves.test.ts",
 	"tests/real-harness/lifecycle.test.ts",
+	"tests/real-harness/outside-root.test.ts",
 	"tests/real-harness/scenario-2.test.ts",
 ];
 
@@ -533,6 +537,9 @@ export const wallClockBudgetInclude = [
 	// #4133: the real pi child environment is the subject of this boundary test;
 	// keep it in the serialized real-harness lane.
 	"tests/real-harness/fixture-shape.test.ts",
+	// #4218/#4230: the real pi host must deliver the out-of-root advisory and
+	// ledger record, including the second edit and the pi-owned path exemptions.
+	"tests/real-harness/outside-root.test.ts",
 	// #3870: every detector test drives the analyzer's real CLI entry point
 	// (a real node subprocess) over redacted fixture logs (flake-shape admission).
 	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts",

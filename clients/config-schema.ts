@@ -216,6 +216,30 @@ function lspServerEntryNode(): ConfigSchemaNode {
 	};
 }
 
+function lspServerOverrideNode(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		[STABILITY_TIER_KEY]: "experimental",
+		properties: {
+			command: { [STABILITY_TIER_KEY]: "experimental" },
+			env: {
+				type: "object",
+				additionalProperties: {
+					type: "string",
+					[STABILITY_TIER_KEY]: "experimental",
+				},
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			initializationOptions: {
+				type: "object",
+				additionalProperties: true,
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+	};
+}
+
 function lspNamespace(): ConfigSchemaNode {
 	const properties: Record<string, ConfigSchemaNode> = {
 		// Reserved but deliberately UNTYPED. `lens-config.ts` already rejects a
@@ -237,7 +261,9 @@ function lspNamespace(): ConfigSchemaNode {
 					? // #3968: server entries are TYPED — each carries the covers
 						// claim node — while staying open on every other field.
 						{ additionalProperties: lspServerEntryNode() }
-					: { additionalProperties: true }
+					: key === "serverOverrides"
+						? { additionalProperties: lspServerOverrideNode() }
+						: { additionalProperties: true }
 				: {}),
 			...denyAnnotation(key),
 		};
