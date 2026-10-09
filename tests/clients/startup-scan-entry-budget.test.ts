@@ -165,7 +165,7 @@ describe("isStartupScanVerdictFresh — too-many-entries is TTL'd (#758)", () =>
 			// #4126: a size verdict is fresh only while the bounds that produced
 			// it equal the bounds in effect; seed the current ones so this block
 			// keeps measuring the TTL alone.
-			maxProjectFiles: 2000,
+			maxProjectFiles: 2500,
 			maxScanEntries: getStartupScanMaxEntries(),
 			computedAt: 1_000_000,
 			...overrides,
