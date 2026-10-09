@@ -412,6 +412,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real pi must surface provider exhaustion and malformed tool arguments across the process boundary",
 	},
+	"real-process-spawn:real-harness/outside-root.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real pi host must deliver the out-of-root advisory and degradation record through the process boundary, including the second edit and owned-path exemptions",
+	},
 	"real-process-spawn:real-harness/provider-compatibility.test.ts": {
 		detector: "real-process-spawn",
 		reason:

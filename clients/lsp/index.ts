@@ -26,9 +26,9 @@ import {
 	recordDegradation,
 	recordDegradationOnce,
 } from "../degradation-ledger.js";
+import { assertInstallAllowed } from "../project-trust.js";
 import {
 	isLspSpawnAllowedByTrust,
-	assertInstallAllowed,
 	projectTrustDenialReason,
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
@@ -4530,12 +4530,10 @@ export class LSPService {
 		filePath: string,
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
-		// #1334 S5: honor the host project-trust decision before executing any
-		// project-resolved binary. Only an explicit host "not trusted" blocks —
-		// a host with no trust surface (`"unknown"`) spawns exactly as before.
-		// Deliberately NOT marked broken: trust is a policy outcome, not a server
-		// failure, and the user may grant trust later in the same session.
-		if (!isLspSpawnAllowedByTrust()) {
+		// Admission is normally performed by compileLspRegistry. Keep this
+		// service-side backstop for uncompiled test/host entries so a raw server
+		// object cannot bypass the registry's trust decision.
+		if (server.trustAllowed !== true && !isLspSpawnAllowedByTrust()) {
 			logSessionStart(
 				`lsp spawn ${server.id}: refused — ${projectTrustDenialReason()}`,
 			);

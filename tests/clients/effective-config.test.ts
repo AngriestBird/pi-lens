@@ -11,7 +11,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Statically imported, NOT `await import()` inside the first test body. Both
 // spellings work — each of these reads `PI_LENS_HOME` lazily, per call — but a
 // dynamic import pays for the whole module graph (config resolution, the LSP
@@ -43,6 +43,10 @@ import {
 // agree with a wrong implementation on one platform.
 import { homeRelativePath } from "../../clients/path-utils.js";
 import { removeTempDirSync } from "./test-utils.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../clients/project-trust.js";
 
 // The extension log is an ndjson sink, not the terminal; a fixture that
 // deliberately carries a legacy location would otherwise spray test output.
@@ -63,7 +67,14 @@ vi.mock("../../clients/extension-log.js", async (importOriginal) => {
 
 const tempRoots: string[] = [];
 
+beforeEach(() => {
+	// Host-boundary stub: these introspection fixtures intentionally exercise
+	// project custom servers in a project pi has trusted.
+	setProjectTrustState("trusted");
+});
+
 afterEach(() => {
+	resetProjectTrust();
 	while (tempRoots.length > 0) {
 		const root = tempRoots.pop();
 		if (root) removeTempDirSync(root);

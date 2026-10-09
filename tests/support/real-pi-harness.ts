@@ -208,6 +208,7 @@ function startRealPi(
 		// Keep the real host outside Vitest's runner-only rethrow mode.
 		VITEST: undefined,
 		PI_LENS_HOME: home,
+		REAL_PI_HARNESS_HOME: home,
 		HOME: home,
 		TMPDIR: childTmp,
 		TMP: childTmp,
@@ -536,7 +537,12 @@ export async function withRealPi<T>(
 				sessionStartLog: () =>
 					readLines(path.join(harness.home, "sessionstart.log")),
 				degradations: () =>
-					readRows(path.join(harness.home, "degradation-ledger.json")),
+					readRows(path.join(harness.home, "latency.log"))
+						.filter((row) => row.phase === "degradation_ledger")
+						.map((row) => ({
+							...row,
+							...(row.metadata as JsonObject | undefined),
+						})),
 			},
 		};
 		await harness.request("get_commands");
