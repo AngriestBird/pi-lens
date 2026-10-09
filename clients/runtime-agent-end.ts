@@ -12,6 +12,7 @@ import type { BiomeClient } from "./biome-client.js";
 import type { RuffClient } from "./ruff-client.js";
 import {
 	publishAutofixStart,
+	publishFormatDone,
 	publishFormatStart,
 } from "./format-events-publish.js";
 import type { FormatService } from "./format-service.js";
@@ -418,6 +419,10 @@ export async function handleAgentEnd({
 		kind: "autofix";
 	}> = [];
 	const deferredAutofixChanged = new Set<string>();
+	// A formatter that outlives the hook budget owns a later disk write. The
+	// terminal format event waits for these contained continuations, so a
+	// listener never treats pre-late-write bytes as settled (#4213).
+	const lateFormatCompletions: Promise<void>[] = [];
 	// #3576: runAutofix marks a file fixed after its fixer awaits; a replaced
 	// session's mark would skip the next session's own autofix of that file.
 	const fixedThisTurn = sessionFencedFixedThisTurn(
@@ -636,11 +641,17 @@ export async function handleAgentEnd({
 	// (e.g. a review/snapshot controller) can use this to know the deferred-
 	// format phase is starting and these specific paths may still be mutated.
 	if (records.length > 0) {
+		const batch = records[0]!;
 		publishFormatStart({
 			cwd: ctxCwd ?? runtime.projectRoot,
 			paths: records.map((r) => r.filePath),
 			dbg,
 			kinds: [...new Set(records.flatMap((record) => [...record.kinds]))],
+			...(batch.ownerSessionId === undefined
+				? {}
+				: { ownerSessionId: batch.ownerSessionId }),
+			turnIndex: batch.queuedTurnIndex,
+			batchId: batch.queuedTurnId,
 		});
 	}
 
@@ -676,6 +687,32 @@ export async function handleAgentEnd({
 		const work: (FormatWork | undefined)[] = [];
 		work.length = formatRecords.length;
 		const started = new Set<number>();
+		const unsettledFormatPaths = new Set<string>();
+		let terminalFormatEventPublished = false;
+		const batchIdentity = records[0]!;
+		const publishUnsettled = () => {
+			if (terminalFormatEventPublished || unsettledFormatPaths.size === 0)
+				return;
+			terminalFormatEventPublished = true;
+			recordDegradationOnce({
+				kind: "deferred-format-unsettled",
+				subject: batchIdentity.queuedTurnId,
+				reason:
+					"a deferred formatter remained unsettled after the bounded drain; the done event names the pending files and settled=false",
+			});
+			publishFormatDone({
+				cwd: ctxCwd ?? runtime.projectRoot,
+				paths: [...unsettledFormatPaths],
+				kinds: ["format"],
+				...(batchIdentity.ownerSessionId === undefined
+					? {}
+					: { ownerSessionId: batchIdentity.ownerSessionId }),
+				turnIndex: batchIdentity.queuedTurnIndex,
+				batchId: batchIdentity.queuedTurnId,
+				settled: false,
+				dbg,
+			});
+		};
 		let nextIndex = 0;
 		const worker = async (): Promise<void> => {
 			while (nextIndex < formatRecords.length) {
@@ -726,11 +763,26 @@ export async function handleAgentEnd({
 							label: "deferred-format",
 						}),
 					};
+					const abandoned = work[index]?.result?.abandoned;
+					if (abandoned) {
+						lateFormatCompletions.push(
+							chainLateFormatResync(
+								abandoned,
+								"deferred",
+								{ toolName: "agent_end", filePath, startedAt: fileStart },
+								dbg,
+							),
+						);
+					}
 					// #3529: the bound gave up on the phase, not on its formatter
 					// child, which writes F later. Once the phase and every formatter
 					// it gave up on have settled, sync a fresh stamped read of F, or
 					// the LSP keeps the bytes from before the format.
-					if (!work[index]?.result)
+					if (!work[index]?.result) {
+						if (!ambientSignal?.aborted) {
+							unsettledFormatPaths.add(filePath);
+							publishUnsettled();
+						}
 						void (async () => {
 							let outcome: LspResyncOutcome | "stale-session" | "read-failed" =
 								"stale-session";
@@ -760,11 +812,13 @@ export async function handleAgentEnd({
 									// Held-only in every case (#3828): the install can outlive
 									// the client (idle eviction), and this must never open a
 									// file or spawn for it.
-									chainLateFormatResync(
-										formatterSettling,
-										"deferred",
-										{ toolName: "agent_end", filePath, startedAt: fileStart },
-										dbg,
+									lateFormatCompletions.push(
+										chainLateFormatResync(
+											formatterSettling,
+											"deferred",
+											{ toolName: "agent_end", filePath, startedAt: fileStart },
+											dbg,
+										),
 									);
 								} else {
 									// #3528 r1 F1, #3576: a replaced session or a retired LSP
@@ -793,6 +847,7 @@ export async function handleAgentEnd({
 								metadata: { outcome },
 							});
 						})();
+					}
 				} catch (err) {
 					work[index] = {
 						record,
@@ -1002,6 +1057,26 @@ export async function handleAgentEnd({
 				dbg,
 				fixes: deferredFormatFixes,
 			});
+		}
+		const publishDone = () =>
+			publishFormatDone({
+				cwd: ctxCwd ?? runtime.projectRoot,
+				paths: summary.changed,
+				kinds: ["format"],
+				...(records[0]!.ownerSessionId === undefined
+					? {}
+					: { ownerSessionId: records[0]!.ownerSessionId }),
+				turnIndex: records[0]!.queuedTurnIndex,
+				batchId: records[0]!.queuedTurnId,
+				settled: true,
+				dbg,
+			});
+		if (!terminalFormatEventPublished) {
+			if (lateFormatCompletions.length === 0) publishDone();
+			else
+				void Promise.all(lateFormatCompletions).then(() => {
+					if (!terminalFormatEventPublished) publishDone();
+				});
 		}
 	}
 
