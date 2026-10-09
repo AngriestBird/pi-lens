@@ -67,16 +67,18 @@ let cycleSlot:
  * The mutable rule corpus's content fingerprint, computed AT MOST ONCE PER
  * DISPATCH CYCLE and reused by every call inside it (#4212 round 4).
  *
- * WHY A CYCLE AND NOT A CALL. Both alternatives were measured on the 170-file
- * checkout shape (100 warm `loadQueries` calls in a fresh process, home and
- * data dirs pinned): recomputing a content fingerprint per call is what round
- * 2 shipped — 134.98 ms against master's 18.03 ms — and round 3's cheaper
- * per-call stat signature still measured 46.86 ms against master's 0.21 ms on
- * this machine. A warm call that must stay at master's cost cannot touch the
- * filesystem at all, so the corpus is fingerprinted once per cycle and the
- * remaining calls compare a string. ADR 0006's condition for persisting a
- * derived value is met: the fresh-process benchmark shows the recompute IS the
- * cost, and each entry carries the cycle it was derived from.
+ * WHY A CYCLE AND NOT A CALL. All three alternatives were measured on this
+ * machine in one session: 1000 warm `loadQueries` calls in a fresh process over
+ * a 170-file project corpus, home and data dirs pinned. Master, which checks
+ * nothing, took 1.55 and 2.21 ms across two reps. Round 2's per-call content
+ * fingerprint took 1854.26 and 1880.22 ms (~1000x). Round 3's cheaper per-call
+ * stat signature took 402.12 and 405.36 ms (~220x). This per-cycle content
+ * fingerprint took 2.00 and 2.04 ms — inside master's own rep-to-rep spread. A
+ * warm call that must stay at master's cost cannot touch the filesystem at all,
+ * so the corpus is fingerprinted once per cycle and the remaining calls compare
+ * a string. ADR 0006's condition for persisting a derived value is met: the
+ * fresh-process benchmark shows the recompute IS the cost, and each entry
+ * carries the cycle it was derived from.
  *
  * THE CYCLE IDENTITY is `getTurnId()` (`clients/turn-context.ts`): already
  * per-turn, already argument-free so a module-level singleton can read it,
@@ -84,7 +86,10 @@ let cycleSlot:
  * `RuntimeCoordinator.beginTurn` on both the primary and the
  * concurrent-secondary branch. No timer and no new registry. Distinct sessions
  * get distinct ids, so interleaved turns keep their own entries instead of
- * clearing each other's.
+ * clearing each other's. The memo itself is plain module scope, not a process
+ * singleton: pi can evaluate this module more than once, and per
+ * `clients/process-singletons.ts`'s own rule a cache that re-derives the same
+ * answer from the filesystem is wasteful when duplicated, not wrong.
  *
  * `force` recomputes AND republishes. `clients/dispatch/runners/tree-sitter.ts`
  * forces on a RuleCache miss, which means the corpus demonstrably moved, so its
@@ -98,9 +103,9 @@ let cycleSlot:
  * script, a standalone MCP server — has one process-long cycle and refreshes
  * its corpus at process start only. That is master's behaviour on that route,
  * not a regression: master keyed the loader memo on `loadedRoot` alone in every
- * process, the pi host included. It is chosen over recomputing per call
- * because the alternative is ~700x master on the acceptance shape. Callers
- * that must observe an edit now pass `force` or call the loader's `reload()`.
+ * process, the pi host included. It is chosen over recomputing per call because
+ * the alternative is the ~1000x measurement above. Callers that must observe an
+ * edit now pass `force` or call the loader's `reload()`.
  */
 export function ruleCorpusFingerprintForCycle(
 	family: RuleCorpusFamily,

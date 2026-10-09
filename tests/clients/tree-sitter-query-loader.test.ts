@@ -348,15 +348,19 @@ has_fix: false
 });
 
 // #4212 round 4 (the r3 verify's HIGH-4212-R3-2, and the r2 verify's HIGH
-// before it): a per-call corpus check cannot stay at master's warm cost. This
-// machine, 1000 warm `loadQueries` calls in a fresh process over a 170-file
-// project corpus — master 1.60 ms, the r3 head's per-call stat signature
-// 417.12 ms (~262x), the r2 head's per-call content fingerprint 134.98 ms for
-// 100 calls in the verify environment. The corpus is now content-fingerprinted
-// AT MOST ONCE PER DISPATCH CYCLE (`ruleCorpusFingerprintForCycle`), so a warm
-// call inside a cycle does no filesystem work at all: 2.11–2.21 ms for the same
-// 1000 calls, ~1.35x master, and 1.12x at the 20000-call count where the extra
-// code is JIT-warm.
+// before it): a per-call corpus check cannot stay at master's warm cost. All
+// four variants measured on this machine in one session, 1000 warm
+// `loadQueries` calls in a fresh process over a 170-file project corpus:
+//
+//	master, no corpus check            1.55 / 2.21 ms
+//	r2 head, per-call content hash  1854.26 / 1880.22 ms   (~1000x master)
+//	r3 head, per-call stat signature 402.12 / 405.36 ms    (~220x master)
+//	r4 head, per-cycle content hash    2.00 / 2.04 ms      (inside master's spread)
+//
+// The corpus is now content-fingerprinted AT MOST ONCE PER DISPATCH CYCLE
+// (`ruleCorpusFingerprintForCycle`), so a warm call inside a cycle does no
+// filesystem work at all. At the 20000-call count, where the extra code is
+// JIT-warm, it is 18.41 ms against master's 15.21 ms (1.21x).
 //
 // These counts are the deterministic proxy for that wall clock. They red on any
 // change that re-introduces a per-call walk, per-call hashing, or per-call

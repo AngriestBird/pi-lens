@@ -1121,8 +1121,10 @@ process) has ONE identity seam, `ruleCorpusFingerprintForCycle` in
 per dispatch cycle, keyed on `getTurnId()`, and shared by the tree-sitter
 loader memo and the ast-grep source fingerprint, so both families refresh on
 the same boundary. A per-call walk of that corpus is a measured regression
-(#4212: 262x master at 170 rule files), and a per-cycle memo that omits the
-turn identity never invalidates. A path that must see an edit inside its own
+(#4212, 1000 warm loader calls over 170 rule files: ~1000x master for a
+per-call content hash, ~220x for a per-call stat signature, ~1.1x for the
+per-cycle memo), and a per-cycle memo that omits the turn identity never
+invalidates. A path that must see an edit inside its own
 cycle passes `force`, which recomputes and republishes into the cycle; the
 dispatch runner does, and its RuleCache key is the content fingerprint
 recomputed per dispatched file. `resolveBaselineSgconfig` forces because #497
