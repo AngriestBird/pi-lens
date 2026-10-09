@@ -290,6 +290,8 @@ interface ToolResultDeps {
 type OwnWriteStamp = {
 	stampFileTime: boolean;
 	writtenContent?: string;
+	authoredRanges?: Array<[number, number]>;
+	authorship?: "partial" | "whole-file" | "unknown";
 	/** The write's transcript entry: its authorship survives a move to a branch that shows it (#3603). */
 	toolCallId?: string;
 	/** sha256 of the bytes this handler already read after the write (#2499). */
@@ -905,6 +907,7 @@ async function dispatchPipelineAnalysis(args: {
 	 * Omitted: stamp, as before.
 	 */
 	ownFileTimeStamp?: boolean;
+	preserveNativeAuthorship?: boolean;
 }): Promise<
 	| { crashed: false; result: PipelineResult }
 	| {
@@ -936,6 +939,7 @@ async function dispatchPipelineAnalysis(args: {
 		allowAutonomousWriters,
 		sessionGeneration,
 		ownFileTimeStamp = true,
+		preserveNativeAuthorship = false,
 	} = args;
 	const {
 		event,
@@ -1208,8 +1212,18 @@ async function dispatchPipelineAnalysis(args: {
 			),
 		]);
 		for (const changedFile of changedForReadGuard) {
+			// A native positional edit already credited its own produced lines above.
+			// The pipeline may re-credit ownPath only when it actually rewrote those
+			// bytes; otherwise a whole-file stamp would erase the native scope.
+			if (
+				changedFile === ownPath &&
+				pipelineOwnedWriteHash === undefined &&
+				preserveNativeAuthorship
+			)
+				continue;
 			if (nodeFs.existsSync(changedFile)) {
 				deps.readGuard?.recordWritten(changedFile, {
+					authorship: "whole-file",
 					stampFileTime: ownFileTimeStamp || changedFile !== ownPath,
 					// The identity of the bytes this pipeline analysed or wrote
 					// (#2499), when it knows them: no re-read.
@@ -1587,6 +1601,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// them) — a deliberate divergence from the isError filter above, which
 		// exists for restore semantics where attribution would lie.
 		let opaquePaths: string[] = [];
+		let hadOpaqueRecovery = false;
 		let observedChangedKeys: Set<string> | undefined;
 		let recognizedAuthored: string[] = [];
 		// Recovery runs for EVERY bash command with a pending baseline - not
@@ -1684,6 +1699,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
 			}
+			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (observedChangedKeys) {
 				recognizedAuthored = recognizedWritten.filter((file) =>
 					observedChangedKeys!.has(normalizeMapKey(path.resolve(file))),
@@ -1723,10 +1739,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
 		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
-			// #3525: the command is in the conversation, the bytes it wrote
-			// are not: authorship, not FileTime.
+			// #3525: a parser-recognized bash write is whole-file authorship only
+			// after the tool_call preflight proved no foreign writer intervened.
+			// Opaque recovery is observed bridge evidence, not bytes the parser
+			// accounted for, so it remains UNKNOWN for F-4210-2.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
 				deps.readGuard?.recordWritten(wp, {
+					authorship:
+						hadOpaqueRecovery || opaqueSet.has(wp) ? "unknown" : "whole-file",
 					stampFileTime: false,
 					...(toolCallId !== undefined && { toolCallId }),
 				});
@@ -2584,6 +2604,18 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	const ownEdit = attribution?.editInPlace
 		? singlePositionalEdit(event.input)
 		: undefined;
+	const nativeAuthoredRanges =
+		mutation.kind === "edit" && ownEdit
+			? (() => {
+					const evidence = ownEditEvidence(filePath, ownEdit);
+					return [
+						[ownEdit.start, ownEdit.start + evidence.lineCount - 1] as [
+							number,
+							number,
+						],
+					];
+				})()
+			: undefined;
 	if (ownEdit) {
 		const evidence = ownEditEvidence(filePath, ownEdit);
 		deps.readGuard?.recordRead(
@@ -2659,6 +2691,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// doesn't trigger a spurious "file_modified" block on the next edit.
 	if (bashAuthorshipConfirmed)
 		deps.readGuard?.recordWritten(filePath, {
+			authorship:
+				mutation.kind === "write"
+					? "whole-file"
+					: nativeAuthoredRanges !== undefined
+						? "partial"
+						: "unknown",
+			...(nativeAuthoredRanges !== undefined && {
+				authoredRanges: nativeAuthoredRanges,
+			}),
 			...ownWriteStamp,
 			contentHash: postWriteStateHash,
 		});
@@ -2722,6 +2763,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		).readGuard;
 		if (entryLive)
 			readGuard?.recordWritten?.(filePath, {
+				authorship:
+					mutation.kind === "write"
+						? "whole-file"
+						: nativeAuthoredRanges !== undefined
+							? "partial"
+							: "unknown",
+				...(nativeAuthoredRanges !== undefined && {
+					authoredRanges: nativeAuthoredRanges,
+				}),
 				...ownWriteStamp,
 				contentHash: postWriteStateHash,
 			});
@@ -2901,6 +2951,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			participantTotal,
 			toolResultStart,
 			nativeAppliedPairs,
+			preserveNativeAuthorship: nativeAuthoredRanges !== undefined,
 			allowAutonomousWriters: bashAuthorshipConfirmed,
 			// #3512: one capture for the whole dispatch, the same one the
 			// inline verdict below writes through.

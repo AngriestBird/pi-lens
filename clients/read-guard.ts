@@ -220,6 +220,10 @@ interface AuthoredBytes {
 	 * entry: idle eviction, an external delete, or a move off its branch.
 	 */
 	retired?: true;
+	/** Lines a partial first credit actually produced. */
+	authoredRanges?: Array<[number, number]>;
+	/** Line count when authoredRanges was observed; used to fail closed on shifts. */
+	authoredLineCount?: number;
 }
 
 /**
@@ -271,6 +275,7 @@ const ABSENT_SIZE = -1;
 function observeAuthoredBytes(
 	filePath: string,
 	knownHash: string | undefined,
+	authoredRanges?: Array<[number, number]>,
 ): AuthoredBytes {
 	try {
 		const stat = fs.statSync(filePath);
@@ -285,10 +290,71 @@ function observeAuthoredBytes(
 			mtimeMs: stat.mtimeMs,
 			ctimeMs: stat.ctimeMs,
 			...(hash !== undefined && { hash }),
+			...(authoredRanges !== undefined && { authoredRanges }),
+			...(authoredRanges !== undefined && {
+				authoredLineCount: splitLines(fs.readFileSync(filePath, "utf-8"))
+					.length,
+			}),
 		};
 	} catch {
 		return { size: ABSENT_SIZE, mtimeMs: 0, ctimeMs: 0 };
 	}
+}
+
+function composeAuthoredRanges(
+	previous: AuthoredBytes,
+	next: Array<[number, number]>,
+	nextLineCount: number | undefined,
+): Array<[number, number]> {
+	// AuthoredBytes has no read-time line hashes, so a line-count change cannot
+	// safely remap the old range. Retire that scope and keep only the bytes the
+	// later write explicitly produced (#4210 F-4210-1).
+	const ranges =
+		previous.authoredLineCount !== undefined &&
+		nextLineCount === previous.authoredLineCount
+			? [...(previous.authoredRanges ?? []), ...next]
+			: next;
+	const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+	const merged: Array<[number, number]> = [];
+	for (const [start, end] of sorted) {
+		const last = merged.at(-1);
+		if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+		else merged.push([start, end]);
+	}
+	return merged;
+}
+
+function authoredRangeCovers(
+	authored: AuthoredBytes,
+	touchedLines?: [number, number],
+	editRanges?: [number, number][],
+): boolean {
+	if (authored.authoredRanges === undefined) return true;
+	const requested = editRanges ?? (touchedLines ? [touchedLines] : undefined);
+	return (
+		requested !== undefined &&
+		requested.every(([start, end]) =>
+			authored.authoredRanges!.some(
+				([authoredStart, authoredEnd]) =>
+					start >= authoredStart && end <= authoredEnd,
+			),
+		)
+	);
+}
+
+function isValidAuthoredRanges(
+	value: unknown,
+): value is Array<[number, number]> {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(range) =>
+				Array.isArray(range) &&
+				range.length === 2 &&
+				Number.isFinite(range[0]) &&
+				Number.isFinite(range[1]),
+		)
+	);
 }
 
 /**
@@ -1290,12 +1356,16 @@ export class ReadGuard {
 	 * ended it after the fact (a bridge write, which no pre-write check
 	 * guarded), so the record tells the two triggers apart.
 	 */
-	private retireIfChanged(filePath: string, writer?: "bridge"): boolean {
+	private retireIfChanged(
+		filePath: string,
+		writer?: "bridge",
+		force = false,
+	): boolean {
 		const authored = this.writtenThisSession.get(filePath);
 		if (
 			!authored ||
 			authored.retired ||
-			authoredBytesIntact(filePath, authored)
+			(!force && authoredBytesIntact(filePath, authored))
 		)
 			return false;
 		authored.retired = true;
@@ -1303,8 +1373,9 @@ export class ReadGuard {
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-authorship-retired",
 			subject: filePath,
-			reason:
-				"another writer changed the bytes the conversation wrote; the next edit needs a read",
+			reason: force
+				? "authored range was unknown; the next edit needs a read"
+				: "another writer changed the bytes the conversation wrote; the next edit needs a read",
 		});
 		if (isRisingEdge)
 			logReadGuardEvent({
@@ -1448,11 +1519,23 @@ export class ReadGuard {
 				});
 				return verdict;
 			}
-			if (this.writtenThisSession.has(filePath)) {
-				this.injectCreationRead(filePath, 0, 0);
+			const authored = this.writtenThisSession.get(filePath);
+			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
+				});
+				return verdict;
+			}
+			if (authored) {
+				const verdict = this.blockOrWarn(
+					"authorship-range",
+					`🔄 RETRYABLE — Edit without read: this write only covered part of \`${filePath}\`; read the requested lines first, then retry.`,
+					undefined,
+					effectiveMode,
+				);
+				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+					reasonKind: "authorship_range",
 				});
 				return verdict;
 			}
@@ -1803,6 +1886,9 @@ export class ReadGuard {
 			toolCallId?: string;
 			/** sha256 (hex) of the bytes on disk the caller already read for this write. */
 			contentHash?: string;
+			authoredRanges?: Array<[number, number]>;
+			authorship?: "partial" | "whole-file" | "unknown";
+			allowFirstAuthorship?: boolean;
 			/**
 			 * Whether this write may re-baseline an EXISTING authorship over the
 			 * bytes it landed. Omitted for a writer that checked this exact path
@@ -2013,7 +2099,11 @@ export class ReadGuard {
 				typeof candidate.mtimeMs !== "number" ||
 				typeof candidate.ctimeMs !== "number" ||
 				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
-				(candidate.retired !== undefined && candidate.retired !== true)
+				(candidate.retired !== undefined && candidate.retired !== true) ||
+				(candidate.authoredRanges !== undefined &&
+					!isValidAuthoredRanges(candidate.authoredRanges)) ||
+				(candidate.authoredLineCount !== undefined &&
+					typeof candidate.authoredLineCount !== "number")
 			) {
 				result.dropped += 1;
 				continue;
@@ -2030,6 +2120,12 @@ export class ReadGuard {
 				...(candidate.hash !== undefined && { hash: candidate.hash }),
 				toolCallId: candidate.toolCallId,
 				...(candidate.retired === true && { retired: true as const }),
+				...(candidate.authoredRanges !== undefined && {
+					authoredRanges: candidate.authoredRanges,
+				}),
+				...(candidate.authoredLineCount !== undefined && {
+					authoredLineCount: candidate.authoredLineCount,
+				}),
 			});
 			result.imported += 1;
 		}
@@ -2180,9 +2276,9 @@ export class ReadGuard {
 	 * - `false` — a record with no pre-write check at all (a co-process
 	 *   producer, the settled sweep). Never advance.
 	 *
-	 * A path with no entry is not an advance but a first credit, which every
-	 * class may create: the write is evidence of who wrote it, and the content
-	 * identity ends it at the next check (#4187 round 2).
+	 * A path with no entry is a first credit only when the writer supplies
+	 * evidence for it. Partial bridge credits retain their reported range;
+	 * settled-sweep drift supplies no such evidence (#4210).
 	 */
 	private mayAdvanceAuthorship(
 		filePath: string,
@@ -2205,21 +2301,57 @@ export class ReadGuard {
 					toolCallId?: string;
 					contentHash?: string;
 					advanceAuthorship?: boolean;
+					authoredRanges?: Array<[number, number]>;
+					authorship?: "partial" | "whole-file" | "unknown";
+					allowFirstAuthorship?: boolean;
 			  }
 			| undefined,
 	): void {
 		const existing = this.writtenThisSession.get(filePath);
+		if (!existing && opts?.allowFirstAuthorship === false) return;
 		if (existing?.retired) return;
+		if (opts?.authorship === "unknown") {
+			// F-4210-2: unavailable observed coverage is not a whole-file write.
+			// Retire the prior scope and create no replacement license.
+			if (existing) this.retireIfChanged(filePath, "bridge", true);
+			return;
+		}
 		if (existing && !this.mayAdvanceAuthorship(filePath, opts)) {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
-		const observed = observeAuthoredBytes(filePath, opts?.contentHash);
+		const observed = observeAuthoredBytes(
+			filePath,
+			opts?.contentHash,
+			opts?.authoredRanges,
+		);
+		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
+			observed;
+		const composedRanges =
+			existing?.authoredRanges === undefined
+				? existing
+					? undefined
+					: observed.authoredRanges
+				: opts?.authoredRanges === undefined
+					? undefined
+					: composeAuthoredRanges(
+							existing,
+							opts.authoredRanges,
+							observed.authoredLineCount,
+						);
 		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);
 		this.writtenThisSession.set(filePath, {
-			...observed,
+			...observedWithoutRanges,
+			...(composedRanges !== undefined
+				? {
+						authoredRanges: composedRanges,
+						...(observed.authoredLineCount !== undefined && {
+							authoredLineCount: observed.authoredLineCount,
+						}),
+					}
+				: {}),
 			...(toolCallId !== undefined && { toolCallId }),
 		});
 		this.enforceAuthorshipCap();

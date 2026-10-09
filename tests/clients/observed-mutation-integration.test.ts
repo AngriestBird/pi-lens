@@ -1181,6 +1181,7 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			//    unclassified tool wrote, so FileTime stays at its last
 			//    conversation-backed stamp and line hashes judge the next edit.
 			expect(recordWritten).toHaveBeenCalledWith(path.resolve(filePath), {
+				authorship: "whole-file",
 				stampFileTime: false,
 				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
 			});

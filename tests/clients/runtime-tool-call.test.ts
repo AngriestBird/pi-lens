@@ -845,6 +845,7 @@ describe("#2402 partial-apply contract (mixed-validity preflight)", () => {
 			// for the authorship's content identity (#4131).
 			expect(recordWritten).toHaveBeenCalledWith(filePath, {
 				stampFileTime: false,
+				authorship: "whole-file",
 				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
 			});
 		} finally {
@@ -1793,6 +1794,7 @@ describe("#4187 R4-1 — a bytes-less write advances only what its own call name
 				consumer: "symlink-writer",
 				provenance: "observed",
 				toolCallId: "call-symlink",
+				touchedLines: [3, 3],
 			});
 			// R5-2 recurrence: independently derived link/real spellings name one
 			// file, so the own write must not cost a needless re-read.

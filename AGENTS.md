@@ -203,6 +203,18 @@ the surface they bite; each block loads only when its trigger applies.
     file nothing checked was re-baselined over another writer's bytes. The
     screen: for each writer, table named-at-call against actually-written, and
     ask which rule answers for a path in the second column only.
+    A first credit from a bridge is range-scoped to the bytes it reports, and
+    settled-sweep drift never creates authorship (#4210); screen the next
+    positional edit both inside and outside the reported range. This is the
+    bridge/LSP/native-edit rule only: recognized bash (#4131 R2), pipeline
+    sibling files, and agent_end are pinned whole-file exceptions.
+
+65. **Unknown authorship range:** a producer that cannot recover a truthful
+    range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN retires
+    the existing scoped license and creates none. Only an explicit
+    `whole-file` signal may widen authorship. Enforced at
+    `clients/mutation-bridge.ts` and `clients/read-guard.ts`, with the
+    F-4210-2 production bridge witness.
 
 </important>
 

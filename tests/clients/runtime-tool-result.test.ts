@@ -3518,6 +3518,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			// The bash write names its transcript entry (#3603); the pipeline's
 			// refresh names none and keeps it, handing over the bytes it hashed.
 			expect(recordWritten).toHaveBeenCalledWith(directPath, {
+				authorship: "unknown",
 				stampFileTime: false,
 				toolCallId: "3226-opaque",
 			});

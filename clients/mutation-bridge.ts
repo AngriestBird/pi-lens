@@ -103,6 +103,9 @@ export interface MutationBridgeDeps {
 					stampFileTime?: boolean;
 					advanceAuthorship?: boolean;
 					toolCallId?: string;
+					authoredRanges?: Array<[number, number]>;
+					authorship?: "partial" | "whole-file" | "unknown";
+					allowFirstAuthorship?: boolean;
 				},
 			) => void;
 		};
@@ -324,6 +327,16 @@ function resolveChangedRange(
 	return { start: 1, end: Math.max(1, deps.countFileLines(filePath)) };
 }
 
+function resolveAuthorshipRanges(
+	classification: MutatingToolClassification,
+): Array<[number, number]> | undefined {
+	if (classification.authorshipUnknown === true) return undefined;
+	if (classification.editRanges && classification.editRanges.length > 0)
+		return classification.editRanges;
+	if (classification.touchedLines) return [classification.touchedLines];
+	return undefined;
+}
+
 /** Why a mutation record was not credited to live session state (#3654). */
 export type MutationRecordReason =
 	| "malformed"
@@ -408,6 +421,7 @@ function stampLiveMutation(
 	// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 	//    judged by read coverage rather than by this write.
 	if (sessionLive && stampReadGuard) {
+		const authoredRanges = resolveAuthorshipRanges(classification);
 		runtime.readGuard.recordWritten?.(filePath, {
 			...(stamp !== undefined && { branchEpoch: stamp }),
 			// A process bridge reports a mutation, not the bytes delivered to the
@@ -417,9 +431,19 @@ function stampLiveMutation(
 			// Nor may it re-baseline an existing authorship over bytes it wrote
 			// around (#4131, #4187 R2-4): only the observed replay had a
 			// pre-write check, its tool_call's retire. The rest (a co-process
-			// producer, ast_grep_replace, an LSP edit, the settled sweep's
-			// drift) may create a first authorship and otherwise end it.
+			// producer, ast_grep_replace or an LSP edit) may create a first
+			// authorship; settled-sweep drift never does (#4210).
 			advanceAuthorship: entry.provenance === "observed",
+			// A first bridge credit is limited to the producer's reported range;
+			// settled-sweep drift has no producer evidence and may not create one.
+			...(authoredRanges !== undefined && { authoredRanges }),
+			authorship:
+				authoredRanges !== undefined
+					? "partial"
+					: entry.kind === "write"
+						? "whole-file"
+						: "unknown",
+			allowFirstAuthorship: entry.provenance !== "settled-sweep",
 			// #4187 R4-1: and an observed replay advances only a path its OWN
 			// call licensed at tool_call (`ReadGuard.noteCheckedPaths`), since a
 			// tool writes a set wider than the one it named. An entry with no

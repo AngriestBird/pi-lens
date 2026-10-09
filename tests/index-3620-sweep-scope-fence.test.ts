@@ -169,7 +169,7 @@ describe("#3620 the settled sweep's replay is fenced by the settle's scope", () 
 				}).toEqual(
 					replaced
 						? { verdict: "block", falseBlocks: ["new:settled-sweep"] }
-						: { verdict: "allow", falseBlocks: undefined },
+						: { verdict: "block", falseBlocks: undefined },
 				);
 			},
 		);
