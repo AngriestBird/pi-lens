@@ -3,4 +3,4 @@ section: Fixed
 audience: internal
 ---
 
-- Preserve declared auxiliary roles on configured LSP servers while applying the language default only when a role is omitted.
+- Keep config-declared LSP roles reserved and inert in the loader; the catalog remains the owner of auxiliary selection.
