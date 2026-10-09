@@ -6,7 +6,7 @@
  * `slowFsVerdict.slow` check). These tests drive the real `handleSessionStart`
  * on both paths that observe a size skip, the full-mode branch (pre-seeded
  * verdict, same technique as `runtime-session-scan-cache.test.ts`) and the
- * default first-session quick warmup (a real 2,001-file tree), and assert:
+ * default first-session quick warmup (a real over-cap tree), and assert:
  *   - every size-bounded verdict fires the warm-skip notify exactly once per
  *     session start, naming the bound that produced it;
  *   - a deferred warmup whose session was superseded or shut down delivers
@@ -35,6 +35,7 @@ import {
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { getDegradationSummary } from "../../clients/degradation-ledger.js";
+import { getStartupScanMaxSourceFilesDerived } from "../../clients/project-scale.js";
 import { retireScope } from "../../clients/session-scope.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -219,6 +220,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		try {
 			const cwd = path.join(env.tmpDir, "project");
 			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+			const maxProjectFiles = getStartupScanMaxSourceFilesDerived(cwd);
 
 			const seedRuntime = new RuntimeCoordinator();
 			seedRuntime.seedProjectSequence(0);
@@ -231,7 +233,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 					projectRoot: cwd,
 					canWarmCaches: false,
 					reason: "too-many-entries",
-					maxProjectFiles: 2000,
+					maxProjectFiles,
 					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now(),
 				},
@@ -265,6 +267,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		try {
 			const cwd = path.join(env.tmpDir, "project");
 			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+			const maxProjectFiles = getStartupScanMaxSourceFilesDerived(cwd);
 
 			const seedRuntime = new RuntimeCoordinator();
 			seedRuntime.seedProjectSequence(0);
@@ -278,7 +281,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
-					maxProjectFiles: 2000,
+					maxProjectFiles,
 					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now(),
 				},
@@ -293,7 +296,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 			const warmSkipNotices = warmSkipLines(notifications);
 			expect(warmSkipNotices).toHaveLength(1);
 			expect(warmSkipNotices[0].msg).toContain(
-				"maxProjectFiles in .pi-lens.json to override the 2000-source-file cap",
+				`maxProjectFiles in .pi-lens.json to override the ${maxProjectFiles}-source-file cap`,
 			);
 			expect(getDegradationSummary()).toEqual(
 				expect.arrayContaining([
@@ -302,7 +305,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 						count: 1,
 						latestReasons: [
 							expect.objectContaining({
-								reason: "too-many-source-files; maxProjectFiles=2000",
+								reason: `too-many-source-files; maxProjectFiles=${maxProjectFiles}`,
 							}),
 						],
 					}),
@@ -319,7 +322,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		const restoreQuick = armFirstQuickSession();
 		try {
 			const cwd = path.join(env.tmpDir, "project");
-			writeSourceFiles(cwd, 2_001);
+			writeSourceFiles(cwd, getStartupScanMaxSourceFilesDerived(cwd) + 1);
 			const notifications: Array<{ msg: string; level: string }> = [];
 			await handleSessionStart(
 				makeDeps(cwd, (msg, level) => notifications.push({ msg, level })),
@@ -521,14 +524,14 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		}
 	});
 
-	it("shows the real session-start skip for a project above the safe 2,000-file bound (#4126)", async () => {
+	it("shows the real session-start skip for a project above the safe startup-scan bound (#4126)", async () => {
 		const env = setupTestEnvironment("pi-lens-warm-skip-notify-large-");
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
 		try {
 			const cwd = path.join(env.tmpDir, "project");
 			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
 			fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
-			for (let i = 0; i < 2_001; i++) {
+			for (let i = 0; i < getStartupScanMaxSourceFilesDerived(cwd) + 1; i++) {
 				fs.writeFileSync(
 					path.join(cwd, "src", `file-${i}.ts`),
 					"export const value = 1;\n",
