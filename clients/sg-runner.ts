@@ -277,10 +277,14 @@ export class SgRunner {
 		const pathCommand = await this.probeCommandCandidates([
 			{ cmd: "ast-grep", argsPrefix: [] },
 			{ cmd: "sg", argsPrefix: [] },
-			// `npx --no -- ast-grep` starts a Node process before it can answer, so
+			// The scoped npx fallback starts a Node process before it can answer, so
 			// it is the candidate most likely to blow a 5 s budget on a cold or busy
 			// box. Marked a fallback so its timeout cannot veto the install.
-			{ cmd: "npx", argsPrefix: ["--no", "--", "ast-grep"], fallback: true },
+			{
+				cmd: "npx",
+				argsPrefix: ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"],
+				fallback: true,
+			},
 		]);
 		if (pathCommand) {
 			this.sgPath = pathCommand.cmd;
@@ -344,7 +348,7 @@ export class SgRunner {
 		//
 		// The npx fallback is deliberately NOT part of this test. Gating the
 		// install on it regressed the very host this change targets: a slow box
-		// with no ast-grep timed out `npx --no -- ast-grep` every sweep, so the
+		// with no ast-grep timed out its npx fallback every sweep, so the
 		// install below was never reached and the slow npx was re-spawned on each
 		// escalating retry instead — worse than the latch it replaced.
 		if (this.sweepSawTransient) {
@@ -432,7 +436,7 @@ export class SgRunner {
 	 * sweep already asked, and the sweep returns at the first one that answers,
 	 * so at this point the flag means "a tier the winner is supposed to lose to
 	 * never got a fair hearing". Latching that pinned the session to
-	 * `npx --no -- ast-grep` — a Node start per invocation — over a healthy
+	 * `npx` — a Node start per invocation — over a healthy
 	 * ast-grep on PATH, until the next restart. Provisional instead: served now,
 	 * re-swept once the stalled tier's cooldown expires.
 	 *

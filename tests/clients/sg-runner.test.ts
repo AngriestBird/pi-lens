@@ -114,6 +114,42 @@ describe("SgRunner", () => {
 	});
 
 	describe("ensureAvailable()", () => {
+		// #4193: prove the runner's own fallback selects the package and reaches execRaw.
+		it("executes through the scoped cache-only CLI fallback (#4193)", async () => {
+			safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) => {
+				const scoped =
+					cmd === "npx" &&
+					args.includes("--no") &&
+					args[args.indexOf("--package") + 1] === "@ast-grep/cli";
+				if (!scoped) return { status: 1, stdout: "", stderr: "missing" };
+				return {
+					status: 0,
+					stdout: args.includes("--version") ? "ast-grep 0.45.3" : "[]",
+					stderr: "",
+				};
+			});
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const runner = new SgRunner();
+			expect(await runner.ensureAvailable()).toBe(true);
+			const result = await runner.execRaw(["run", "--pattern", "x"]);
+			expect(result.failure).toBeUndefined();
+			expect(result.stdout).toBe("[]");
+			expect(safeSpawnAsync.mock.calls.at(-1)?.slice(0, 2)).toEqual([
+				"npx",
+				[
+					"--no",
+					"--package",
+					"@ast-grep/cli",
+					"--",
+					"ast-grep",
+					"run",
+					"--pattern",
+					"x",
+				],
+			]);
+			expect(ensureTool).not.toHaveBeenCalled();
+		});
+
 		it("returns true when ast-grep is in PATH", async () => {
 			safeSpawnAsync.mockResolvedValueOnce({
 				status: 0,

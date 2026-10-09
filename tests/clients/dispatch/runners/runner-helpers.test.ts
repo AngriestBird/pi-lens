@@ -728,6 +728,91 @@ describe("runner-helpers availability checker", () => {
 		}
 	});
 
+	// #4193: the executable name alone selects the unrelated npm ast-grep package.
+	it("selects the scoped CLI package for the shared cache-only fallback (#4193)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
+			async (cmd, args) => {
+				const scoped =
+					cmd === "npx" &&
+					args?.includes("--no") &&
+					args[args.indexOf("--package") + 1] === "@ast-grep/cli";
+				return scoped
+					? { stdout: "ast-grep 0.45.3", stderr: "", status: 0 }
+					: { stdout: "", stderr: "missing", status: 1 };
+			},
+		);
+		expect(await isSgAvailableAsync()).toBe(true);
+		expect(getSgCommand()).toEqual({
+			cmd: "npx",
+			args: ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"],
+		});
+	});
+
+	it("keeps structural replaceWithRule on the scoped fallback before probing (#4193)", async () => {
+		const env = setupTestEnvironment("pi-lens-scoped-rule-");
+		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "var x = 1;\n");
+			const match = {
+				file,
+				text: "var x = 1;",
+				range: { start: { line: 0, column: 0 }, end: { line: 0, column: 10 } },
+			};
+			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
+				async (cmd, args) => {
+					if (
+						cmd !== "npx" ||
+						!args?.includes("--no") ||
+						args[args.indexOf("--package") + 1] !== "@ast-grep/cli"
+					) {
+						return {
+							stdout: "",
+							stderr: "unscoped package rejected",
+							status: 1,
+						};
+					}
+					return { stdout: JSON.stringify([match]), stderr: "", status: 0 };
+				},
+			);
+			const { AstGrepClient } =
+				await import("../../../../clients/ast-grep-client.js");
+			const result = await new AstGrepClient().replaceWithRule(
+				"id: scoped\nlanguage: TypeScript\nrule:\n  pattern: var $X = $Y\nfix: let $X = $Y\n",
+				[file],
+				false,
+			);
+			expect(result.error).toBeUndefined();
+			expect(result.totalMatches).toBe(1);
+			expect(result.matches).toEqual([match]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("never retries an unscoped package when the CLI fallback is missing (#4193)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "missing",
+			status: 1,
+		});
+		expect(await isSgAvailableAsync()).toBe(false);
+		const npmCalls = vi
+			.mocked(safeSpawnMod.safeSpawnAsync)
+			.mock.calls.filter(([cmd]) => cmd === "npx");
+		expect(npmCalls).toHaveLength(1);
+		expect(npmCalls[0]?.[1]).toEqual([
+			"--no",
+			"--package",
+			"@ast-grep/cli",
+			"--",
+			"ast-grep",
+			"--version",
+		]);
+	});
+
 	it("resets the shared ast-grep availability memo at session start", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");

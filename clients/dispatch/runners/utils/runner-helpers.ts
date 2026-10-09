@@ -2072,10 +2072,19 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 			}
 		}
 
-		// 3. npx --no (cache-only, no silent download).
-		if (await probeAstGrepCommandAsync("npx", ["--no", "--", "ast-grep"])) {
+		// 3. npx --no (cache-only, no silent download). Name the package explicitly
+		// because the executable name alone resolves the unrelated ast-grep package.
+		if (
+			await probeAstGrepCommandAsync("npx", [
+				"--no",
+				"--package",
+				"@ast-grep/cli",
+				"--",
+				"ast-grep",
+			])
+		) {
 			sgCmd = "npx";
-			sgCmdArgs = ["--no", "--", "ast-grep"];
+			sgCmdArgs = ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"];
 			noteSgAvailable(startedAt, { source: "npx" });
 			return true;
 		}
@@ -2213,7 +2222,9 @@ export function getSgCommand(): { cmd: string; args: string[] } {
 	ensureCurrentSgGeneration();
 	return {
 		cmd: sgCmd ?? "npx",
-		args: sgCmdArgs.length ? sgCmdArgs : ["--no", "--", "ast-grep"],
+		args: sgCmdArgs.length
+			? sgCmdArgs
+			: ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"],
 	};
 }
 
