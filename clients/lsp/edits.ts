@@ -1517,14 +1517,28 @@ export async function applyWorkspaceEdit(
 					const start = Math.min(
 						...edits.map((item) => item.range.start.line + 1),
 					);
-					const end = Math.max(...edits.map((item) => item.range.end.line + 1));
+					const end = Math.max(
+						...edits.map(
+							(item) =>
+								item.range.end.line +
+								(item.range.end.character === 0 &&
+								item.range.end.line > item.range.start.line
+									? 0
+									: 1),
+						),
+					);
 					touchedFiles.add(filePath);
 					fileDetails.push({
 						filePath,
 						range: { start, end },
 						ranges: edits.map((item) => ({
 							start: item.range.start.line + 1,
-							end: item.range.end.line + 1,
+							end:
+								item.range.end.line +
+								(item.range.end.character === 0 &&
+								item.range.end.line > item.range.start.line
+									? 0
+									: 1),
 						})),
 						authorshipUnknown: changesLineCount,
 						importsChanged:

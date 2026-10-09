@@ -2106,7 +2106,7 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
-	it("credits only the native edit's own line after the real tool_result pipeline (#4210 N1/N2)", async () => {
+	it("unions a native edit's own line with distinct existing authorship (#4210 R3-2)", async () => {
 		const env = setupTestEnvironment("rg-4210-native-own-range-");
 		try {
 			const file = fixture(
@@ -2118,9 +2118,10 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			runtime.readGuard.recordWritten(file, {
 				stampFileTime: false,
 				authorship: "partial",
-				authoredRanges: [[10, 10]],
+				authoredRanges: [[8, 8]],
 				allowFirstAuthorship: true,
 			});
+			await piRead(runtime, file, { offset: 10, limit: 1 });
 			const edit = await positionalEdit(runtime, file, [[10, 10, "native10"]]);
 			await applyEdit(runtime, file, edit);
 			const guard = runtime.readGuard;
@@ -2128,8 +2129,18 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			const entry = guard
 				.exportAuthorship()
 				.entries?.find((candidate) => candidate.filePath === file);
-			expect(entry?.authoredRanges).toEqual([[10, 10]]);
-			expect(guard.checkEdit(file, [12, 12]).action).toBe("block");
+			expect(entry?.authoredRanges).toEqual([
+				[8, 8],
+				[10, 10],
+			]);
+			const resumed = newRuntime(env.tmpDir);
+			resumed.readGuard.importAuthorship(
+				guard.exportAuthorship(),
+				new Set(entry?.toolCallId ? [entry.toolCallId] : []),
+			);
+			expect(resumed.readGuard.checkEdit(file, [10, 10]).action).toBe("allow");
+			expect(resumed.readGuard.checkEdit(file, [9, 9]).action).toBe("block");
+			expect(resumed.readGuard.checkEdit(file, [8, 8]).action).toBe("allow");
 		} finally {
 			env.cleanup();
 		}
