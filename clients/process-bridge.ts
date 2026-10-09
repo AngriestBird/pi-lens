@@ -85,6 +85,24 @@ export function getProcessBridge<T extends ProcessBridge>(
  */
 export type BridgeActivation = symbol | object;
 
+interface ScopedBridgeActivation {
+	readonly role: "primary" | "secondary";
+	readonly scopeId: number;
+	isLive(): boolean;
+}
+
+function isScopedBridgeActivation(
+	activation: BridgeActivation,
+): activation is ScopedBridgeActivation {
+	if (typeof activation !== "object" || activation === null) return false;
+	const candidate = activation as Partial<ScopedBridgeActivation>;
+	return (
+		(candidate.role === "primary" || candidate.role === "secondary") &&
+		typeof candidate.scopeId === "number" &&
+		typeof candidate.isLive === "function"
+	);
+}
+
 /**
  * A rebindable view of a first-wins bridge's dependencies (#4169).
  *
@@ -113,7 +131,16 @@ export function rebindableProcessBridgeDeps<T extends object>(
 		activation,
 		deps,
 	}));
-	if (cell.activation !== activation) {
+	const current = isScopedBridgeActivation(cell.activation)
+		? cell.activation
+		: undefined;
+	const accepts = !isScopedBridgeActivation(activation)
+		? cell.activation !== activation
+		: activation.role === "primary" &&
+			activation.isLive() &&
+			(current === undefined ||
+				(current.role === "primary" && activation.scopeId > current.scopeId));
+	if (accepts) {
 		cell.activation = activation;
 		cell.deps = deps;
 	}

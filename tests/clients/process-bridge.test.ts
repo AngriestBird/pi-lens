@@ -18,8 +18,10 @@
  *   and a non-object mount
  */
 import { describe, expect, it, vi } from "vitest";
+import { beginScope } from "../../clients/session-scope.js";
 import {
 	getProcessBridge,
+	rebindableProcessBridgeDeps,
 	registerProcessBridge,
 	type ProcessBridge,
 } from "../../clients/process-bridge.js";
@@ -30,6 +32,21 @@ interface Probe extends ProcessBridge {
 }
 
 describe("registerProcessBridge", () => {
+	it("only accepts a newer live primary activation for a scoped cell", () => {
+		const family = `pi-lens-test:process-bridge-scope-${Math.random()}`;
+		const primaryA = beginScope({ role: "primary" });
+		const secondary = beginScope({ role: "secondary" });
+		const primaryB = beginScope({ role: "primary" });
+		const staleA = primaryA;
+
+		const get = rebindableProcessBridgeDeps(family, 1, primaryA, { id: "A" });
+		rebindableProcessBridgeDeps(family, 1, secondary, { id: "B" });
+		expect(get().id).toBe("A");
+		rebindableProcessBridgeDeps(family, 1, primaryB, { id: "B" });
+		expect(get().id).toBe("B");
+		rebindableProcessBridgeDeps(family, 1, staleA, { id: "A-stale" });
+		expect(get().id).toBe("B");
+	});
 	it("mounts build()'s result at globalThis[key]", () => {
 		const key = Symbol("pi-lens-test:process-bridge-mount");
 		const build = vi.fn((): Probe => ({ version: 1, ping: () => "pong" }));

@@ -854,6 +854,10 @@ file-scoped worklist and receives no project-wide scanner output.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
+- Process-global bridge dependencies and the quiet-window turn-summary holder
+  bind only from a live primary `SessionScope`; `clients/process-bridge.ts`
+  accepts only a strictly newer scope ticket, so a concurrent secondary or
+  stale activation cannot rebind a held bridge/task to its runtime (#4258).
 - Session degradation uses the ledger's bounded once/count APIs and resets at
   the correct primary session boundary. `SessionStartClassification`
   (`clients/session-lifecycle.ts`): `primary` and `sequential-replacement`

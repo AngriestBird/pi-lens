@@ -111,6 +111,7 @@ import {
 	recordIOEntry,
 	registerIOBridge,
 } from "./clients/io-bridge.js";
+import { rebindableProcessBridgeDeps } from "./clients/process-bridge.js";
 import { isExternalOrVendorFile } from "./clients/path-utils.js";
 import {
 	isPathIgnoredByProject,
@@ -652,13 +653,13 @@ function getBridgeFlag(
 	}
 }
 let _turnSummaryEmitRegistered = false;
-let _turnSummaryEmitCtx:
-	| {
-			pi: ExtensionAPI;
-			getLensFlag: (name: string) => boolean | string | undefined;
-			isLensEnabled: () => boolean;
-	  }
-	| undefined;
+type TurnSummaryEmitCtx = {
+	runtime: RuntimeCoordinator;
+	pi: ExtensionAPI;
+	getLensFlag: (name: string) => boolean | string | undefined;
+	isLensEnabled: () => boolean;
+};
+let _turnSummaryEmitCtxGetter: (() => TurnSummaryEmitCtx) | undefined;
 let _testRunnerDeliveryRegistered = false;
 let _nextTestRunnerDeliveryOwnerId = 0;
 /**
@@ -1136,30 +1137,33 @@ function activateExtension(hostPi: ExtensionAPI) {
 		nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
 	};
 
-	if (!_readBridgeRegistered) {
-		_readBridgeRegistered = true;
-		registerReadBridge(
-			{
-				isRecordable(filePath: string): boolean {
-					// Unknown during a replacement/reload records the read. The guard is
-					// the obstruction here, so failure must fall toward not blocking the
-					// user's later edit; recording while disabled is harmless.
-					if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
-					return isRecordableProjectPath(filePath, runtime.projectRoot);
+	const registerPrimaryBridges = (): void => {
+		if (scope?.role !== "primary" || !scope.isLive()) return;
+		if (!_readBridgeRegistered) {
+			_readBridgeRegistered = true;
+			registerReadBridge(
+				{
+					isRecordable(filePath: string): boolean {
+						// Unknown during a replacement/reload records the read. The guard is
+						// the obstruction here, so failure must fall toward not blocking the
+						// user's later edit; recording while disabled is harmless.
+						if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
+						return isRecordableProjectPath(filePath, runtime.projectRoot);
+					},
+					forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
 				},
-				forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
-			},
-			runtime,
-		);
-	}
-	if (!_mutationBridgeRegistered) {
-		_mutationBridgeRegistered = true;
-		registerMutationBridge(mutationBridgeDeps, runtime);
-	}
-	if (!_ioBridgeRegistered) {
-		_ioBridgeRegistered = true;
-		registerIOBridge(ioBridgeDeps, runtime);
-	}
+				scope,
+			);
+		}
+		if (!_mutationBridgeRegistered) {
+			_mutationBridgeRegistered = true;
+			registerMutationBridge(mutationBridgeDeps, scope);
+		}
+		if (!_ioBridgeRegistered) {
+			_ioBridgeRegistered = true;
+			registerIOBridge(ioBridgeDeps, scope);
+		}
+	};
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
@@ -2610,6 +2614,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					registerPrimaryBridges();
+					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
+						"turn-summary-emit-context",
+						1,
+						scope,
+						{
+							runtime,
+							pi,
+							getLensFlag: (name: string) => getLensFlag(name),
+							isLensEnabled: () => lensEnabled,
+						},
+					);
 					// Pin the stable identity + reason over the fresh random id that
 					// reset drew (#190). #3613 F1: before the await, for the same
 					// reason as the scope: a throw later in the handler must not leave
@@ -3587,15 +3603,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// feature-detected + guarded so an older host degrades to a dbg line).
 	// Registration is once-per-process (the quiet-window registry outlives
 	// factory re-activation); the ctx holder keeps the closure current.
-	_turnSummaryEmitCtx = {
-		pi,
-		getLensFlag: (name: string) => getLensFlag(name),
-		isLensEnabled: () => lensEnabled,
-	};
 	if (!_turnSummaryEmitRegistered) {
 		_turnSummaryEmitRegistered = true;
 		registerQuietWindowTask("turn_summary_emit", () => {
-			const emitCtx = _turnSummaryEmitCtx;
+			const emitCtx = _turnSummaryEmitCtxGetter?.();
 			if (!emitCtx || !emitCtx.isLensEnabled()) return;
 			// The captured `pi` can go STALE between the activation that set this
 			// holder and this fire-and-forget quiet-window run: an interim
@@ -3622,11 +3633,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				throw err;
 			}
 			if (!turnSummaryEnabled) return;
-			if (runtime.turnSummary.isEmpty()) return;
+			if (emitCtx.runtime.turnSummary.isEmpty()) return;
 			const summaryStart = Date.now();
-			const cwd = runtime.projectRoot || process.cwd();
-			const details = runtime.turnSummary.consume(runtime.turnIndex, (fp) =>
-				toRunnerDisplayPath(cwd, fp),
+			const cwd = emitCtx.runtime.projectRoot || process.cwd();
+			const details = emitCtx.runtime.turnSummary.consume(
+				emitCtx.runtime.turnIndex,
+				(fp) => toRunnerDisplayPath(cwd, fp),
 			);
 			const line = formatTurnSummaryLine(details);
 			const sendMessage = (
@@ -3641,7 +3653,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						details,
 					});
 					recordTurnEndAdvisoryBytes(
-						runtime.telemetrySessionId,
+						emitCtx.runtime.telemetrySessionId,
 						Buffer.byteLength(line, "utf8"),
 					);
 				} catch (sendErr) {
