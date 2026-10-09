@@ -37,6 +37,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { closeAfterLatencyLogQuiescence } from "../support/real-pi-harness.js";
 
 let tmpDir: string;
 let logFile: string;
@@ -304,6 +305,43 @@ describe("createNdjsonLogger", () => {
 			{ async: 1 },
 			{ sync: 2 },
 		]);
+	});
+
+	it("the real-pi harness waits out the accepted exit-flush duplicate", async () => {
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		const releases: Array<() => void> = [];
+		const appendFile = vi
+			.spyOn(fs.promises, "appendFile")
+			.mockImplementation(async (file, data, options) => {
+				await realAppendFile(file, data, options);
+				await new Promise<void>((resolve) => releases.push(resolve));
+			});
+		const logger = createNdjsonLogger({ filePath: logFile });
+		logger.log({ immediate: true });
+		await vi.waitFor(() => {
+			expect(appendFile).toHaveBeenCalledTimes(1);
+			expect(readLines(logFile)).toHaveLength(1);
+		});
+		logger.flushSync();
+		expect(readLines(logFile)).toHaveLength(2);
+		releases.shift()?.();
+		await logger.flush();
+
+		const settledFile = path.join(tmpDir, "settled.log");
+		const settledLogger = createNdjsonLogger({ filePath: settledFile });
+		settledLogger.log({ immediate: false });
+		await vi.waitFor(() => {
+			expect(appendFile).toHaveBeenCalledTimes(2);
+			expect(readLines(settledFile)).toHaveLength(1);
+		});
+		const close = closeAfterLatencyLogQuiescence(settledFile, () =>
+			settledLogger.flushSync(),
+		);
+		expect(readLines(settledFile)).toHaveLength(1);
+		releases.shift()?.();
+		await close;
+		await settledLogger.flush();
+		expect(readLines(settledFile)).toHaveLength(1);
 	});
 
 	it("registers one canonical per-file flusher", () => {

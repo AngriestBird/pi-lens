@@ -23,6 +23,12 @@ authoritative resume operation for this lane. `pi.quit()` closes stdin without
 removing the probe home, so final shutdown records can be read before the
 `withRealPi` cleanup.
 
+Before either orderly stdin close, the harness waits for `latency.log` to keep
+the same size and mtime for 250 ms, bounded by 5 seconds. This protects the
+logger's intentional exit-flush replay trade (#935): closing while its last
+async append is in flight can duplicate that final lifecycle row. A timeout is
+an explicit harness failure, not a reason to proceed with an unstable log.
+
 Scripts contain turns. Each turn contains text or typed tool-call actions.
 Malformed scripts fail validation before the child starts.
 
