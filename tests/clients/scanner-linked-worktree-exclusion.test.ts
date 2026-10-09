@@ -75,7 +75,7 @@ import {
 import { JscpdClient } from "../../clients/jscpd-client.js";
 import { OpengrepClient } from "../../clients/opengrep-client.js";
 import { listNestedLinkedWorktreeRoots } from "../../clients/review-graph/git-identity.js";
-import { TrivyClient } from "../../clients/trivy-client.js";
+import { TrivyClient, worktreeSkipDirs } from "../../clients/trivy-client.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -575,16 +575,31 @@ describe("#4132 gitleaks, trivy and opengrep leave every linked worktree under t
 			expect(row?.count).toBe(4);
 			expect(JSON.stringify(row)).toContain("trivy");
 		});
+
+		it("uses Windows separator rules and caps command-line growth", () => {
+			addWorktree("trees/alpha");
+			addWorktree("trees/beta");
+
+			const skips = worktreeSkipDirs(main, "\\", 20);
+
+			expect(skips).toEqual([]);
+			expect(exclusionRows()?.count).toBe(2);
+			expect(JSON.stringify(exclusionRows())).toContain(
+				"windows-command-line-cap",
+			);
+		});
 	});
 
 	describe("opengrep scan --exclude", () => {
-		it("excludes a worktree under a name no list knows by its whole path, next to the scratch-tree names", async () => {
-			const alpha = addWorktree("trees/alpha");
+		it("does not add one wcmatch pattern per linked worktree", async () => {
+			addWorktree("trees/alpha");
 
 			const excludes = flagValues(await opengrepArgs(), "--exclude");
 
-			expect(excludes).toContain(realPath(alpha));
 			expect(excludes).toContain("node_modules");
+			expect(excludes.some((entry) => entry.includes("trees/alpha"))).toBe(
+				false,
+			);
 		});
 
 		it("adds nothing when the root holds no linked worktree", async () => {
@@ -592,29 +607,24 @@ describe("#4132 gitleaks, trivy and opengrep leave every linked worktree under t
 
 			expect(excludes.some((e) => e.includes("/"))).toBe(false);
 		});
-
-		it("spells the pattern in the root's own spelling when the root is a symlink", async () => {
-			addWorktree("trees/alpha");
-			const link = symlinkedMain();
-
-			const excludes = flagValues(await opengrepArgs(link), "--exclude");
-
-			expect(excludes).toContain(path.join(link, "trees", "alpha"));
-		});
-
-		it("escapes glob characters in the path and keeps a comma, which --exclude does not split", async () => {
-			const odd = addWorktree("we[ird]*");
-			const comma = addWorktree("a,b");
-
-			const excludes = flagValues(await opengrepArgs(), "--exclude");
-
-			expect(excludes).toContain(realPath(odd).replace(/[\\*?[\]]/g, "\\$&"));
-			expect(excludes).toContain(realPath(comma));
-			expect(exclusionRows()).toBeUndefined();
-		});
 	});
 
 	describe("gitleaks [allowlist] paths and the nested-repository backstop", () => {
+		it("does not let a prunable registration hide a plain directory at its old path", async () => {
+			const stale = addWorktree("trees/stale");
+			fs.rmSync(stale, { recursive: true, force: true });
+			fs.mkdirSync(stale, { recursive: true });
+			write(stale, ".env", "k=1\n");
+
+			const { findings, paths } = await gitleaksRun(main, [
+				{ File: path.join(stale, ".env") },
+			]);
+			// This is a plain directory after pruning, so the existing
+			// `nested-repository` backstop must not suppress its finding.
+			expect(allowlisted(paths, path.join(stale, ".env"))).toBe(false);
+			expect(findings[0]?.pathStatus).toBe("untracked");
+		});
+
 		it("allowlists everything under a worktree under a name no list knows, and nothing beside it", async () => {
 			addWorktree("trees/alpha");
 
@@ -670,6 +680,7 @@ describe("#4132 gitleaks, trivy and opengrep leave every linked worktree under t
 		});
 
 		it("demotes a finding that still comes back from inside a worktree, with the reason on the record", async () => {
+			// Also pins the pre-existing `nested-repository` backstop.
 			addWorktree("trees/alpha");
 			write(main, "src/.env", "k=1\n");
 
@@ -685,6 +696,7 @@ describe("#4132 gitleaks, trivy and opengrep leave every linked worktree under t
 		});
 
 		it("classifies a finding in a worktree under a symlinked spelling of the root the same way", async () => {
+			// Also pins the pre-existing `nested-repository` backstop.
 			addWorktree("trees/alpha");
 			const link = symlinkedMain();
 			const finding: GitleaksFinding = {

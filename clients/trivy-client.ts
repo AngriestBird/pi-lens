@@ -237,9 +237,14 @@ export function resolveSeverityFloor(cwd: string): TrivySeverity[] {
  * a comma-split slice and the value a doublestar glob, so a path holding a
  * comma, a quote or a glob character is counted, not passed.
  */
-function worktreeSkipDirs(cwd: string): string[] {
-	const unsafe = path.sep === "\\" ? /[,"*?[\]{}]/ : /[,"*?[\]{}\\]/;
+export function worktreeSkipDirs(
+	cwd: string,
+	separator = path.sep,
+	maxArgumentChars = separator === "\\" ? 30_000 : Number.POSITIVE_INFINITY,
+): string[] {
+	const unsafe = separator === "\\" ? /[,"*?[\]{}]/ : /[,"*?[\]{}\\]/;
 	const skips: string[] = [];
+	let argumentChars = 0;
 	for (const offset of nestedWorktreeOffsets(cwd)) {
 		if (unsafe.test(offset)) {
 			incrementDegradationCount({
@@ -249,7 +254,18 @@ function worktreeSkipDirs(cwd: string): string[] {
 			});
 			continue;
 		}
-		skips.push(toPosix(offset));
+		const value = toPosix(offset);
+		const addedChars = "--skip-dirs".length + value.length + 2;
+		if (argumentChars + addedChars > maxArgumentChars) {
+			incrementDegradationCount({
+				kind: "scan-worktree-exclusion-skipped",
+				subject: "trivy",
+				reason: `windows-command-line-cap: ${offset} not skipped under ${cwd}`,
+			});
+			continue;
+		}
+		skips.push(value);
+		argumentChars += addedChars;
 	}
 	return skips;
 }

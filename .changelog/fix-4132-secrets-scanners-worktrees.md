@@ -3,4 +3,4 @@ section: Fixed
 audience: user
 ---
 
-- gitleaks, trivy and opengrep now leave every linked git worktree nested under the project root out of their scan, whatever the worktree directory is called, instead of only the ones under a known directory name (fixes #4132).
+- **Scanners now avoid linked worktree duplicates.** Gitleaks, trivy and opengrep discover linked checkouts nested under the project root instead of relying only on known directory names; paths that a scanner cannot represent safely are reported as bounded scan degradations (fixes #4132).

@@ -646,7 +646,7 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"passes the realpath-canonicalized `targetDir` from the scan API's own argument",
 	],
 	[
-		"clients/opengrep-client.ts#OpengrepClient.runScan:e6ec298f~353ea442",
+		"clients/opengrep-client.ts#OpengrepClient.runScan:6ed13398~353ea442",
 		"cwd is runScan's own `cwd` parameter, from which OpengrepClient.resolveConfig(cwd) already chose the rule config",
 	],
 	[

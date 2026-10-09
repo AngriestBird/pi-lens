@@ -44,8 +44,9 @@
  *
  * Scope note (#1562 class fix): the CLI scan is handed `--exclude` per shared
  * scratch/cache tree (`scratch-tree-policy.ts`) so a directory that isn't
- * gitignored (opengrep's own default exclusion) still doesn't reach the
- * agent as a finding — same `EXCLUDED_DIRS`-derived list gitleaks/trivy use.
+ * gitignored still doesn't reach the agent as a finding. Linked worktrees are
+ * deliberately not added to that argv list: opengrep's git-mode walk already
+ * skips nested checkouts, avoiding one expensive wcmatch pattern per checkout.
  *
  * Refs: #584, #111 (opengrep adoption), #387 (workspace-sweep serialization), #1562
  */
@@ -56,15 +57,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtempSync } from "node:fs";
 import { resolveOpengrepConfig } from "./opengrep-config.js";
-import {
-	incrementDegradationCount,
-	recordDegradationOnce,
-} from "./degradation-ledger.js";
-import {
-	getScratchTreeDirNames,
-	nestedWorktreeOffsets,
-} from "./scratch-tree-policy.js";
-import { realpathOrResolve, toPosix } from "./path-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
+import { getScratchTreeDirNames } from "./scratch-tree-policy.js";
+import { realpathOrResolve } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 
@@ -118,37 +113,6 @@ const EMPTY_RESULT: Omit<OpengrepResult, "scannedAt"> = {
 // scanning; generous budget for a large tree, matching trivy's CVE-DB-fetch
 // allowance rather than the lighter jscpd/gitleaks scans.
 const SCAN_TIMEOUT_MS = 180_000;
-
-/**
- * `--exclude` patterns for the linked worktrees under `cwd` (#4132): the
- * worktree's whole path in `cwd`'s own spelling. opengrep 1.30.2 wraps every
- * `--exclude` as `**` + `/` + pattern and glob-matches it (wcmatch) against
- * the paths it lists under the target, so a relative pattern would also drop
- * any other directory with the same tail (`pkg/trees/alpha`). A glob character
- * is escaped with a backslash; on Windows a backslash is the separator and
- * cannot escape, so that path is counted, not passed. The flag is not
- * comma-split, so a comma stays.
- */
-function worktreeExcludes(cwd: string): string[] {
-	const excludes: string[] = [];
-	for (const offset of nestedWorktreeOffsets(cwd)) {
-		const worktree = path.join(cwd, offset);
-		if (path.sep === "\\") {
-			if (/[*?[\]]/.test(worktree)) {
-				incrementDegradationCount({
-					kind: "scan-worktree-exclusion-skipped",
-					subject: "opengrep",
-					reason: `glob-char-in-path: ${worktree} not excluded under ${cwd}`,
-				});
-				continue;
-			}
-			excludes.push(toPosix(worktree));
-		} else {
-			excludes.push(worktree.replace(/[\\*?[\]]/g, "\\$&"));
-		}
-	}
-	return excludes;
-}
 
 // --- Client ---
 
@@ -224,9 +188,13 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 					// pattern matches that directory name anywhere in the tree,
 					// independent of gitignore. Same `EXCLUDED_DIRS`-derived list
 					// gitleaks/trivy use, so the three scanners can't drift apart.
-					...[...getScratchTreeDirNames(), ...worktreeExcludes(cwd)].flatMap(
-						(pattern) => ["--exclude", pattern],
-					),
+					// Opengrep's git-mode walk already omits nested linked checkouts.
+					// Do not turn each registration into a wcmatch pattern: hundreds of
+					// patterns make the matcher quadratic and can hit its pattern limit.
+					...getScratchTreeDirNames().flatMap((pattern) => [
+						"--exclude",
+						pattern,
+					]),
 					cwd,
 				],
 				{ cwd, timeout: SCAN_TIMEOUT_MS },

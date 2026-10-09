@@ -942,7 +942,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ndjson-logger.ts": 5,
 		"clients/observed-mutation.ts": 6,
 		"clients/opaque-mutation-scan.ts": 6,
-		"clients/opengrep-client.ts": 10,
+		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		"clients/package-manager.ts": 20,
 		"clients/package-root.ts": 5,
