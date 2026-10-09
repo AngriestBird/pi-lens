@@ -19,7 +19,11 @@ import {
 } from "./opaque-mutation-scan.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
 import { retargetReplacementIndentation } from "./indent-retarget.js";
-import { noteAgentCallEnd, noteAgentCallStart } from "./fix-run-restore.js";
+import {
+	expectationFromToolInput,
+	noteAgentCallEnd,
+	noteAgentCallStart,
+} from "./fix-run-restore.js";
 import { LANGUAGE_POLICY } from "./language-policy.js";
 import { isComplexitySupportedFile } from "./tree-sitter-shared.js";
 import {
@@ -862,7 +866,12 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		// below when the call is blocked. A read changes no bytes, so it is never
 		// in flight here: an in-flight read would stop the restore of an agent
 		// edit the fixer overwrote (#4185 round 1, F2).
-		if (mutation !== undefined) noteAgentCallStart(toolCallId, filePath);
+		if (mutation !== undefined)
+			noteAgentCallStart(
+				toolCallId,
+				filePath,
+				expectationFromToolInput(event.input, mutation.kind),
+			);
 	}
 	if (targetMissing) {
 		// #1655 item 5: this early return used to be the whole story — pi-lens
