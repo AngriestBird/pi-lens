@@ -128,8 +128,6 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
 		"the /lens-context-toggle choice; D6 was not approved, so it resets per activation (N6 accepted)",
 	enabledLazyTools:
 		"the lazy tools the config enables, derived once per activation (design B6)",
-	lastSessionStartIdentity:
-		"the #2890 duplicate-start gate, which must be per activation",
 	lensEnabled:
 		"the /lens-toggle choice; D6 was not approved, so it resets per activation (N6 accepted)",
 	lensWidgetVisible:
@@ -437,7 +435,7 @@ describe("session stores (#3609 §3.8, #3612)", () => {
 
 	/**
 	 * The recurrence: an async snapshot. The hand-off snapshots every store in
-	 * `session_shutdown`, which may not await (#2523); a promise there would
+	 * the synchronous portion of `session_shutdown`, which does not await; a promise there would
 	 * reach the successor as an empty payload.
 	 */
 	it("snapshots every store synchronously, as JSON (item 2.6)", () => {

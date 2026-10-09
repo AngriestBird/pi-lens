@@ -79,6 +79,7 @@ import {
 	type LineageHandle,
 	logScopeTransition,
 	retireScope,
+	reserveSessionStart,
 	type SessionScope,
 	scopeCell,
 	startKey,
@@ -140,6 +141,7 @@ import {
 	resolveLensToolEnabled,
 } from "./clients/tool-config.js";
 import { recordDegradationOnce } from "./clients/degradation-ledger.js";
+import { flushAllNdjsonWriters } from "./clients/ndjson-logger.js";
 import { wrapToolsForCompactLine } from "./clients/tool-render.js";
 import {
 	finalizeToolResultWithDelivery,
@@ -1932,13 +1934,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			return undefined;
 		}
 	};
-	// pi RPC can announce the same replacement twice. Keep one admission key for
-	// the complete session_start mutation pass so every downstream reset observes
-	// the same (reason, session file) identity. A different file remains a real
-	// replacement and must run the normal primary path.
-	// The key is cleared per factory instance because pi re-runs the factory on
-	// every replacement; if that ever changes, clear the key in session_shutdown.
-	let lastSessionStartIdentity: string | undefined;
 	const activateToolsTool = createActivateToolsTool(
 		pi as unknown as {
 			getActiveTools?: () => string[];
@@ -2180,7 +2175,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 		wrapSessionEventHandler(
 			"session_start",
 			async (event, ctx) => {
-				const sessionStartReason = (event as { reason?: string }).reason;
+				const sessionStartEvent = event as {
+					reason?: string;
+					previousSessionFile?: string;
+				};
+				// pi's RPC double may deliver the same event object to a replacement
+				// extension factory. Genuine starts are newly allocated objects, even
+				// when their fields match an earlier start (#2891).
+				const isNewSessionStartEvent = reserveSessionStart(
+					sessionStartEvent as Record<string, unknown>,
+				);
+				const sessionStartReason = sessionStartEvent.reason;
 				const sessionIdentityParts = (() => {
 					try {
 						const sessionManager = (
@@ -2201,49 +2206,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return { sessionId: undefined, sessionFile: undefined };
 					}
 				})();
-				const sessionStartKey =
-					sessionIdentityParts.sessionId ?? sessionIdentityParts.sessionFile;
-				const sessionStartIdentity =
-					sessionStartKey === undefined
-						? undefined
-						: `${sessionStartReason ?? ""}\u0000${sessionStartKey}`;
-				// With neither a stable session ID nor a session file, fail open: the
-				// event cannot be safely identified for duplicate suppression.
-				const liveToolPlan = (() => {
-					if (
-						getLensFlag("no-lazy-tools") === true ||
-						typeof (pi as unknown as { getActiveTools?: unknown })
-							.getActiveTools !== "function"
-					) {
-						return undefined;
-					}
-					try {
-						const piWithActiveTools = pi as unknown as {
-							getActiveTools: () => string[];
-						};
-						const lazyNames = new Set(
-							LAZY_TOOL_CATALOG.map((tool) => tool.name),
-						);
-						return planToolSet(
-							piWithActiveTools.getActiveTools(),
-							lazyNames,
-							getRememberedLazyTools(scope),
-						);
-					} catch {
-						return undefined;
-					}
-				})();
-				if (
-					sessionStartIdentity !== undefined &&
-					lastSessionStartIdentity === sessionStartIdentity &&
-					liveToolPlan?.changed !== true
-				) {
+				if (!isNewSessionStartEvent) {
+					const duplicateSubject =
+						sessionIdentityParts.sessionId ??
+						sessionIdentityParts.sessionFile ??
+						"session_start";
 					emitBounded(
 						"session_start_duplicate_suppressed",
-						sessionStartIdentity,
+						duplicateSubject,
 						{
 							durationMs: 0,
-							metadata: { reason: "duplicate start suppressed" },
+							metadata: {
+								reason: "duplicate start suppressed",
+								eventIdentity: "same-event-object",
+							},
 						},
 						{
 							ledgerKind: "session-start-duplicate",
@@ -2253,7 +2229,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					);
 					return;
 				}
-				lastSessionStartIdentity = sessionStartIdentity;
 				const sessionStartMonotonicAt = performance.now();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>
@@ -3941,13 +3916,29 @@ function activateExtension(hostPi: ExtensionAPI) {
 			| { reason?: string; targetSessionFile?: string }
 			| undefined;
 		const shutdownReason = shutdownEvent?.reason;
+		const shutdownBudgetKey =
+			shutdownReason === "quit" ? "session_shutdown_quit" : "session_shutdown";
+		// Start this before synchronous teardown so writes emitted by the teardown
+		// itself join the same serialized writer drain. Returning the promise keeps
+		// pi's awaited shutdown boundary without delaying synchronous lifecycle work
+		// for existing embedders that call handlers directly.
+		const ndjsonDrain = bounded(flushAllNdjsonWriters(), {
+			ms: HOOK_WALL_BUDGET_MS[shutdownBudgetKey],
+			signal: undefined,
+			hook: "session_shutdown",
+			label: "ndjson-writers",
+		});
 		// #3611 r2: the retire runs in `finally`. After a /reload that
 		// re-evaluated the entry nothing else ever ends this scope, so a throw
 		// from a teardown step below must not skip it.
 		try {
+			// Graceful quit or replacement is awaited by pi before it closes the
+			// process/stdin. The returned drain promise keeps the at-exit replay from
+			// seeing an in-flight batch (#935). Hard exits skip this hook.
 			// #3612 (D3): hand this scope's stores to the successor that
 			// continues its conversation (`/reload`, `/fork`, `/clone`), before
-			// any teardown below. Sync: this hook may not await (#2523). The
+			// any teardown below. This portion stays synchronous; the hook returns
+			// its bounded writer-drain promise after teardown. The
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
@@ -3997,11 +3988,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			) {
 				endSituationalToolTelemetry();
 			}
-
-			// #1654: no drain runs here — see the module comment above
-			// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
-			// session_shutdown-based safety net was deliberately dropped rather
-			// than kept.
 
 			// #1018/#1996: emit the bounded primary cache summary, then drop this
 			// session's prefix/attribution state. The secondary path did the same for
@@ -4077,6 +4063,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// handle this session issued stops being current (design §3.4).
 			retireOwnScope(shutdownReason, stableSessionId);
 		}
+		return ndjsonDrain;
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

@@ -134,6 +134,35 @@ function registry(): RegistryCounters {
 	);
 }
 
+const SESSION_START_ADMISSION_FAMILY = "session-scope.start-admission";
+const SESSION_START_ADMISSION_VERSION = 1;
+
+interface SessionStartAdmission {
+	/** Host event objects already delivered to a pi-lens handler. */
+	readonly deliveredEvents: WeakSet<object>;
+}
+
+function sessionStartAdmission(): SessionStartAdmission {
+	return getProcessSingleton(
+		SESSION_START_ADMISSION_FAMILY,
+		SESSION_START_ADMISSION_VERSION,
+		() => ({ deliveredEvents: new WeakSet<object>() }),
+	);
+}
+
+/**
+ * Reserve one host session_start event across extension factory re-runs.
+ * pi re-delivers the same event object to a replacement handler; every genuine
+ * start is a fresh object. WeakSet keeps the process-lifetime identity without
+ * retaining completed test fixtures or retired sessions.
+ */
+export function reserveSessionStart(event: Record<string, unknown>): boolean {
+	const state = sessionStartAdmission();
+	if (state.deliveredEvents.has(event)) return false;
+	state.deliveredEvents.add(event);
+	return true;
+}
+
 /**
  * Where a handle keeps the scope it names, for {@link recordDroppedRead}.
  * `Symbol.for`, so a handle from another module evaluation is still read.
@@ -406,8 +435,9 @@ export interface SessionStoreSpec<P> {
 	name: string;
 	policy: Readonly<Record<StartReason, StartAction>>;
 	/**
-	 * Sync and bounded: it runs in `session_shutdown`, whose budget is 0 ms
-	 * (#2523). `undefined` hands nothing off.
+	 * Synchronous: it runs in the synchronous portion of `session_shutdown`;
+	 * the hook's separate returned drain promise does not cover this snapshot.
+	 * `undefined` hands nothing off.
 	 */
 	snapshot(scope: SessionScope): P | undefined;
 	/**

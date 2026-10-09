@@ -23,6 +23,10 @@ import {
 	makeRealRunnerEnv,
 	type RealRunnerEnv,
 } from "../../../support/real-runner-ctx.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../../clients/project-trust.js";
 
 const fixtureDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeServerPath = path.resolve(
@@ -63,6 +67,9 @@ d("LSP dispatch runner — real server (#873)", () => {
 	let env: RealRunnerEnv;
 
 	beforeAll(async () => {
+		// Host-boundary stub: this fixture intentionally uses a project custom
+		// server in a project pi has trusted.
+		setProjectTrustState("trusted");
 		env = makeRealRunnerEnv({ kind: "jsts" });
 		const configDir = path.join(env.cwd, ".pi-lens");
 		fs.mkdirSync(configDir, { recursive: true });
@@ -83,6 +90,7 @@ d("LSP dispatch runner — real server (#873)", () => {
 	});
 
 	afterAll(async () => {
+		resetProjectTrust();
 		await getLSPService().shutdown();
 		resetLSPService({ fast: true });
 		resetLSPConfigStateForTests();

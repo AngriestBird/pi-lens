@@ -153,6 +153,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// #4239: walks scripts/lib for static dist/ imports and checks each is in
 	// DIST_IMPORTS, so a new governance import of dist/ cannot dodge the rebuild.
 	"tests/scripts/dist-freshness.test.ts",
+	// #3613 R2: walks clients/ for direct turn-state `sessions[` access outside
+	// CacheManager, so a production change must arm it.
+	"tests/config/turn-state-partition-owner-sweep.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
@@ -163,12 +166,23 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 // tests. Measured locally at ~17-23 s alone, inside the 120 s budget.
 export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
+	// #2891: real-pi harness suites own their child-process and timeout census;
+	// keep every admitted real-harness file armed when the tests tree changes.
+	"tests/real-harness/bridge-reload.test.ts",
+	"tests/real-harness/child-exit.test.ts",
+	"tests/real-harness/diagnostic-provenance.test.ts",
+	"tests/real-harness/lifecycle.test.ts",
+	"tests/real-harness/negative.test.ts",
+	"tests/real-harness/provider-compatibility.test.ts",
+	"tests/real-harness/read-guard-moves.test.ts",
+	"tests/real-harness/scenario-1.test.ts",
+	"tests/real-harness/scenario-3.test.ts",
+	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).
 	"tests/config/handler-verdict-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
-	"tests/config/turn-state-partition-owner-sweep.test.ts",
 	"tests/config/vacuous-skip-coverage.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 ];

@@ -386,7 +386,8 @@ describe("index.ts integration", () => {
 				sessionFile,
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			const resumeEvent = makeSessionStartEvent({ reason: "resume" });
+			await sessionStart?.(resumeEvent, ctx);
 			const firstMutationCount = activeToolSetCalls.length;
 			expect(firstMutationCount).toBe(1);
 			expect([...activeTools]).not.toEqual(
@@ -399,14 +400,15 @@ describe("index.ts integration", () => {
 				]),
 			);
 
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			await sessionStart?.(resumeEvent, ctx);
 			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
 
-			// A duplicate must still restore if the host's live posture drifted.
+			// A duplicate is an idempotent host event, even if live posture drifted;
+			// the next genuinely new start owns restoration.
 			activeTools.add("ast_grep_search");
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
-			expect(activeToolSetCalls).toHaveLength(firstMutationCount + 1);
-			expect(activeTools).not.toContain("ast_grep_search");
+			await sessionStart?.(resumeEvent, ctx);
+			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
+			expect(activeTools).toContain("ast_grep_search");
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -423,7 +425,7 @@ describe("index.ts integration", () => {
 				);
 			expect(
 				rows.filter((row) => row.phase === "session_start_runtime_reset"),
-			).toHaveLength(2);
+			).toHaveLength(1);
 			expect(
 				rows.filter(
 					(row) => row.phase === "session_start_duplicate_suppressed",
@@ -438,6 +440,105 @@ describe("index.ts integration", () => {
 					}),
 				}),
 			);
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"drops interleaved new and fork duplicates at entry while preserving distinct starts (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+			const { default: registerExtension } = await import("../index.js");
+			const latency = await import("../clients/latency-logger.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			const sessionStart = handlers.session_start?.[0];
+			expect(sessionStart).toBeTypeOf("function");
+
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "duplicate-session",
+				sessionFile: path.join(tmpDir, "duplicate.jsonl"),
+				mode: "rpc",
+			});
+			for (const [reason, previousSessionFile] of [
+				["new", "/sessions/old-new.jsonl"],
+				["fork", "/sessions/old-fork.jsonl"],
+			] as const) {
+				const event = makeSessionStartEvent({ reason, previousSessionFile });
+				const first = sessionStart?.(event, ctx);
+				const second = sessionStart?.(event, ctx);
+				await Promise.all([first, second]);
+			}
+
+			// A different reason is a new host event, even with the same session id.
+			const reloadCtx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "same-session-different-event",
+				sessionFile: path.join(tmpDir, "reload.jsonl"),
+				mode: "rpc",
+			});
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "startup" }),
+				reloadCtx,
+			);
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "reload" }),
+				reloadCtx,
+			);
+
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: Record<string, unknown>;
+						},
+				);
+			const transitions = rows.filter(
+				(row) =>
+					row.phase === "session_scope_transition" &&
+					row.metadata?.transition === "start",
+			);
+			for (const reason of ["new", "fork"])
+				expect(
+					transitions.filter((row) => row.metadata?.reason === reason),
+				).toHaveLength(1);
+			for (const reason of ["new", "fork"])
+				expect(
+					rows.filter(
+						(row) =>
+							row.phase === "session_handoff_adopt" &&
+							row.metadata?.reason === reason,
+					),
+				).toHaveLength(1);
+			const duplicateRows = rows.filter(
+				(row) =>
+					row.phase === "degradation_ledger" &&
+					row.metadata?.kind === "session-start-duplicate",
+			);
+			// One bounded record is emitted for each duplicate host event; the
+			// ledger resets at each genuinely new session_start reason.
+			expect(duplicateRows).toHaveLength(2);
+			expect(
+				transitions.filter(
+					(row) => row.metadata?.sessionId === "same-session-different-event",
+				),
+			).toHaveLength(2);
+
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
@@ -467,14 +568,9 @@ describe("index.ts integration", () => {
 				sessionFile: undefined,
 				mode: "rpc",
 			});
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
+			const noSessionEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(noSessionEvent, noSessionCtx);
+			await sessionStart?.(noSessionEvent, noSessionCtx);
 
 			const fileCtx = makeCtx({
 				cwd: tmpDir,
@@ -482,8 +578,9 @@ describe("index.ts integration", () => {
 				sessionFile: path.join(tmpDir, "fallback.jsonl"),
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
+			const fileEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(fileEvent, fileCtx);
+			await sessionStart?.(fileEvent, fileCtx);
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -498,6 +595,80 @@ describe("index.ts integration", () => {
 					(row) => row.phase === "session_start_duplicate_suppressed",
 				),
 			).toHaveLength(2);
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"dedupes the same RPC start across a fresh extension factory (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+
+			const firstGraph = await import("../index.js");
+			const first = createMockPi();
+			firstGraph.default(first.pi as any);
+			const firstStart = first.handlers.session_start?.[0];
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "factory-rerun-session",
+				sessionFile: path.join(tmpDir, "factory-rerun.jsonl"),
+				mode: "rpc",
+			});
+			const event = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/factory-rerun-parent.jsonl",
+			});
+			await firstStart?.(event, ctx);
+
+			// pi's replacement can re-run the factory before the duplicate host
+			// emission. A closure-local reservation is fresh here and admits it.
+			vi.resetModules();
+			const secondGraph = await import("../index.js");
+			const second = createMockPi();
+			secondGraph.default(second.pi as any);
+			const secondStart = second.handlers.session_start?.[0];
+			await secondStart?.(event, ctx);
+			const differentPredecessor = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/another-parent.jsonl",
+			});
+			await secondStart?.(differentPredecessor, ctx);
+			await secondStart?.(differentPredecessor, ctx);
+			await second.handlers.session_shutdown?.[0]?.({ reason: "reload" }, ctx);
+			// session_shutdown does not release an event-object admission: a later
+			// delivery of the same RPC object is still the same host event.
+			await secondStart?.(differentPredecessor, ctx);
+
+			const latency = await import("../clients/latency-logger.js");
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: { transition?: string };
+						},
+				);
+			expect(
+				rows.filter(
+					(row) =>
+						row.phase === "session_scope_transition" &&
+						row.metadata?.transition === "start",
+				),
+			).toHaveLength(2);
+
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
@@ -632,6 +803,7 @@ describe("index.ts integration", () => {
 				undefined,
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild(
 				reason as "reload" | "resume" | "fork",
 				ctx,
@@ -866,6 +1038,7 @@ describe("index.ts integration", () => {
 				{ toolName: "ast_grep_search", input: { pattern: "const $A = $B" } },
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild("new", ctx);
 
 			const rowsAt = () =>

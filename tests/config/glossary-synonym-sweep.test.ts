@@ -939,7 +939,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,
-		"clients/lsp/launch.ts": 30,
+		// 30 -> 31 (#4248): the project-local binary refusal records the
+		// resolved command basename through the existing path vocabulary.
+		"clients/lsp/launch.ts": 31,
 		"clients/lsp/lombok.ts": 14,
 		"clients/lsp/server.ts": 121,
 		"clients/lsp/session-roots.ts": 6,
@@ -961,7 +963,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opaque-mutation-scan.ts": 6,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
-		"clients/package-manager.ts": 20,
+		"clients/package-manager.ts": 21,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root

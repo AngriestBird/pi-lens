@@ -16,7 +16,9 @@ session-1 strays), #3568 (the handler's capture at entry).
   `loadExtensionModule`, `useExtensionCacheCwd`), so the module-level
   `runtime` (`index.ts` `runtime`) is one object for both sessions.
 - **session_start, split at its awaits.**
-  1. The admission key is set first (`index.ts` `lastSessionStartIdentity`).
+  1. The process-lifetime admission key is reserved first (`clients/session-scope.ts`
+     `reserveSessionStart`), keyed by session id (or file), reason, and previous
+     session file; `session_shutdown` releases it.
   2. The pre-handler resets run.
   3. Then it awaits `configureWarmAttach` and `ensureLSPConfigInitialized`.
   4. Only then does `handleSessionStart` clear the tier-3 touch registry and
@@ -70,8 +72,8 @@ session-1 strays), #3568 (the handler's capture at entry).
   dispatch captured in session 1, and the record site drops the touch through
   it.
 - **The duplicate session_start** (#2890). pi RPC awaits `rebindSession`
-  twice. The gate suppresses an identical `(reason, session id)` unless the
-  live tool plan changed (`index.ts` `lastSessionStartIdentity`).
+  twice. The process-lifetime gate suppresses an identical `(session key,
+  reason, previousSessionFile)` even when pi re-runs the extension factory.
 
 `FixParts` selects the guards:
 

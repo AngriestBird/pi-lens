@@ -520,6 +520,10 @@ file-scoped worklist and receives no project-wide scanner output.
 
 17. **Process latch for session state:** every once-latch has a session reset;
     session dedupe belongs in the degradation ledger where possible.
+    Host `session_start` admission survives extension factory re-runs through
+    the process-lifetime `WeakSet<object>` in `clients/session-scope.ts`:
+    pi's RPC re-delivery reuses one event object, while each genuine start
+    allocates another, and weak identity needs no `session_shutdown` release.
 
 19. **Re-derived identity:** carry resolved identity or correlation across
     asynchronous stages; do not reconstruct it from ambiguous later inputs.
@@ -660,8 +664,13 @@ file-scoped worklist and receives no project-wide scanner output.
   process-tree cleanup, output caps, typed failure kinds, and bounded timeouts.
   Installs pass `ignoreAmbientSignal: true` and remain trust-gated.
 - Project trust is consumed through `isProjectTrusted`; pi-lens never registers
-  the host's trust-answer handler. Missing trust APIs are unknown/fail-open for
-  compatibility; a throwing accessor is fail-closed.
+  the host's trust-answer handler. `compileLspRegistry` is the one admission
+  seam for LSP executable fields: global config and built-ins remain allowed,
+  while project `command`, command overrides, `env`, and
+  `initializationOptions` require pi's `trusted` answer. Missing trust APIs are
+  fail-closed for those project fields with one bounded notice; installs keep
+  their existing compatibility policy. `tests/clients/lsp/lsp-registry-trust.test.ts`
+  and the LSP config/service suites pin the boundary.
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
@@ -1111,7 +1120,8 @@ uses `getGlobalPiLensLogDir()`. `PILENS_DATA_DIR` relocates project state and
 `displayProjectDataPath`; do not spell a project-data path in agent text.
 
 All loggers use `createNdjsonLogger`. Flush the specific logger before reading
-its file. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
+its file; graceful `session_shutdown` returns the shared bounded drain before
+pi closes stdin or exits. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
 `review-graph.log`, `read-guard.log`, `actionable-warnings.log`,
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
 
@@ -1144,6 +1154,13 @@ processes. Real elapsed-time assertions belong in the serialized
 `wallClockBudgetInclude` lane. Real LSP child tests belong in
 `lsp-spawn-heavy`. Any admitted real spawn or timer carries the flake-shape
 header, baseline row, and lane membership.
+
+The real-pi harness defaults to `--no-session`; a persisted-session witness
+opts into `withRealPi({ persistedSession: true })`, which pins `--session-dir`
+under the probe home and uses pi's documented `--continue` flag for a second
+process. Read lifecycle order from the real `session_scope_transition` rows
+and dead-weight rows, not from the pi mock; the mock does not re-run the
+extension factory or reproduce pi lifecycle ordering.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler

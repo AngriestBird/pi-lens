@@ -2203,6 +2203,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// loop is bounded by the fact's fixed gate list, but like every sibling
 	// here it stays unbounded from the hook's signal until #2523 AC4.
 	"clients/dispatch/runners/utils/runner-helpers.ts": 36,
+	// #4238 R8: the shutdown drain is intentionally owned by the shared NDJSON
+	// writer registry. Its per-writer awaits cannot receive pi's hook signal;
+	// the caller applies the session_shutdown wall bound around the whole drain.
+	"clients/ndjson-logger.ts": 15,
 	// #3541: `withHostFileMutationQueues` awaits the realpath of each path an
 	// LSP workspace edit names, which keys it the way pi keys its queue. It
 	// runs inside `applyWorkspaceEdit`, which the agent_settled actionable fix
@@ -2363,7 +2367,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/lsp-budget.ts": 1,
 	"clients/lsp-document-symbols.ts": 2,
 	"clients/lsp/cascade-tier.ts": 2,
-	"clients/lsp/config.ts": 3,
+	"clients/lsp/config.ts": 4,
 	// #2817 round 2 F5: Git recovery now awaits the existing drift scheduler
 	// and its per-server root resolution. This remains an intentionally
 	// unbounded helper count until #2523 AC4 threads hook signals into the LSP
@@ -2696,6 +2700,13 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"standalone MCP adapter and unit harnesses. The turn_end wall budget is " +
 		"always live, and timeout falls back to raw findings so security findings " +
 		"remain blockers.",
+	"call:index.ts#activateExtension:8d9498e9~d5ee5018":
+		"`undefined` is intentional: pi provides no caller abort signal for " +
+		"session_shutdown. The handler returns this promise to pi, which awaits " +
+		"the extension shutdown event before closing stdin or exiting. The " +
+		"quit-only session_shutdown_quit wall bound is 500ms; replacement " +
+		"reasons use the zero session_shutdown budget to preserve successor " +
+		"ordering, and a wedged quit sink records one hook-await-exceeded row.",
 	"call:index.ts#activateExtension:c06d5cf4~b4f8a98d":
 		"The tool_result edit bootstrap receives the live pi ctx.signal and the " +
 		"edit budget; read-only calls use only resident clients.",
