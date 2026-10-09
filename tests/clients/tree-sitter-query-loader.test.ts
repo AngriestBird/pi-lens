@@ -42,6 +42,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import * as fs from "node:fs";
+import { _resetRuleCorpusCycleFingerprintsForTests } from "../../clients/custom-rule-locations.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -57,6 +58,10 @@ import {
 	type TreeSitterQuery,
 	TreeSitterQueryLoader,
 } from "../../clients/tree-sitter-query-loader.js";
+import {
+	beginTurnContext,
+	runWithTurnContext,
+} from "../../clients/turn-context.js";
 import {
 	resetUserNotifier,
 	wireUserNotifier,
@@ -76,6 +81,28 @@ function makeTempRulesRoot(): string {
 	tmpDirs.push(dir);
 	return dir;
 }
+
+/**
+ * Run `fn` inside a FRESH dispatch cycle, entered the way the pi host enters
+ * one: `RuntimeCoordinator.beginTurn` calls `beginTurnContext` and
+ * `clients/session-event-guard.ts` runs every host event inside
+ * `runWithTurnContext`. The mutable rule corpus is content-fingerprinted at
+ * most once per cycle (#4212 round 4), so a case that must observe a rule edit
+ * through the no-`force` path has to cross that boundary — production crosses
+ * it at every turn. Each call mints a distinct session so no two cases share a
+ * turn counter.
+ */
+let cycleSessions = 0;
+async function inNextCycle<T>(fn: () => Promise<T>): Promise<T> {
+	cycleSessions += 1;
+	const session = `query-loader-cycle-${cycleSessions}`;
+	beginTurnContext(session);
+	return runWithTurnContext(session, fn);
+}
+
+beforeEach(() => {
+	_resetRuleCorpusCycleFingerprintsForTests();
+});
 
 afterAll(() => {
 	for (const dir of tmpDirs) {
@@ -143,7 +170,7 @@ describe("tree-sitter query loader metadata parsing", () => {
 				"rules/tree-sitter-queries/typescript/live-user.yml",
 				`id: live-user\nname: NEW\nquery: |\n  (identifier) @X\n`,
 			);
-			await loader.loadQueries(project);
+			await inNextCycle(() => loader.loadQueries(project));
 			expect(loader.getQueryById("live-user")?.name).toBe("NEW");
 
 			writeRule(
@@ -151,12 +178,12 @@ describe("tree-sitter query loader metadata parsing", () => {
 				"rules/tree-sitter-queries/typescript/added-user.yml",
 				`id: added-user\nname: ADDED\nquery: |\n  (identifier) @X\n`,
 			);
-			await loader.loadQueries(project);
+			await inNextCycle(() => loader.loadQueries(project));
 			expect(loader.getQueryById("added-user")?.name).toBe("ADDED");
 
 			fs.rmSync(rulePath);
 			fs.rmSync(path.join(userDir, "added-user.yml"));
-			await loader.loadQueries(project);
+			await inNextCycle(() => loader.loadQueries(project));
 			expect(loader.getQueryById("live-user")).toBeUndefined();
 			expect(loader.getQueryById("added-user")).toBeUndefined();
 		} finally {
@@ -320,18 +347,21 @@ has_fix: false
 	});
 });
 
-// #4212 round 3 (the r2 verify's HIGH): the r2 head gated the warm memo on
-// `computeRuleFilesFingerprint(allRuleFilesForRoot(...))`, so EVERY warm
-// `loadQueries` call re-walked all three rule roots AND re-read/re-hashed the
-// content of every non-bundled rule file — measured 100 warm calls at 134.98
-// ms on the r2 head vs 18.03 ms on master. The warm path must re-stat only
-// the MUTABLE corpus (project + user roots; the bundled root is
-// immutable-per-process, and dispatch-side RuleCache v7 still content-keys
-// the bundled set on every dispatched file) and must never read rule content
-// on a memo hit. These counts are the deterministic proxy for the wall-clock
-// regression: they red on any change that re-introduces per-call hashing or
-// per-call bundled-root walking.
-describe("warm loadQueries performs no corpus re-hash (#4212 round 3)", () => {
+// #4212 round 4 (the r3 verify's HIGH-4212-R3-2, and the r2 verify's HIGH
+// before it): a per-call corpus check cannot stay at master's warm cost. This
+// machine, 1000 warm `loadQueries` calls in a fresh process over a 170-file
+// project corpus — master 1.60 ms, the r3 head's per-call stat signature
+// 417.12 ms (~262x), the r2 head's per-call content fingerprint 134.98 ms for
+// 100 calls in the verify environment. The corpus is now content-fingerprinted
+// AT MOST ONCE PER DISPATCH CYCLE (`ruleCorpusFingerprintForCycle`), so a warm
+// call inside a cycle does no filesystem work at all: 2.11–2.21 ms for the same
+// 1000 calls, ~1.35x master, and 1.12x at the 20000-call count where the extra
+// code is JIT-warm.
+//
+// These counts are the deterministic proxy for that wall clock. They red on any
+// change that re-introduces a per-call walk, per-call hashing, or per-call
+// bundled-root work, and they red on a memo that never invalidates.
+describe("the mutable rule corpus is fingerprinted at most once per dispatch cycle (#4212 round 4)", () => {
 	function countRuleContentReads(): number {
 		return vi
 			.mocked(fs.readFileSync)
@@ -345,8 +375,23 @@ describe("warm loadQueries performs no corpus re-hash (#4212 round 3)", () => {
 			.mock.calls.filter(([dir]) => dir === BUNDLED_QUERIES_ROOT).length;
 	}
 
-	it("reads no rule content and does not re-walk the bundled root across memoized calls", async () => {
-		const project = makeTempRulesRoot();
+	/**
+	 * Every `readdirSync` under the project's own rule root — the fingerprint
+	 * walk's listing step. Counted from the fixture's known shape (one queries
+	 * root plus one entry per language directory), never from production code.
+	 */
+	function countProjectRuleWalks(project: string): number {
+		const queriesRoot = path.join(project, "rules", "tree-sitter-queries");
+		return vi
+			.mocked(fs.readdirSync)
+			.mock.calls.filter(
+				([dir]) =>
+					String(dir) === queriesRoot ||
+					String(dir).startsWith(queriesRoot + path.sep),
+			).length;
+	}
+
+	function writeTwoLanguageCorpus(project: string): void {
 		writeRule(
 			project,
 			"rules/tree-sitter-queries/typescript/warm-a.yml",
@@ -357,6 +402,11 @@ describe("warm loadQueries performs no corpus re-hash (#4212 round 3)", () => {
 			"rules/tree-sitter-queries/python/warm-b.yml",
 			`id: warm-b\nname: B\nquery: |\n  (identifier) @X\n`,
 		);
+	}
+
+	it("reads no rule content and does not re-walk the bundled root across memoized calls", async () => {
+		const project = makeTempRulesRoot();
+		writeTwoLanguageCorpus(project);
 		const loader = new TreeSitterQueryLoader();
 		await loader.loadQueries(project); // cold parse, not measured
 
@@ -367,6 +417,149 @@ describe("warm loadQueries performs no corpus re-hash (#4212 round 3)", () => {
 		}
 		expect(countRuleContentReads() - contentReadsBefore).toBe(0);
 		expect(countBundledRootWalks() - bundledWalksBefore).toBe(0);
+	});
+
+	it("walks the mutable corpus zero times inside a cycle and exactly one fingerprint walk on the next one", async () => {
+		const project = makeTempRulesRoot();
+		const machine = makeTempRulesRoot();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		writeTwoLanguageCorpus(project);
+		// Derived from the fixture, not from the loader: one listing of the
+		// queries root plus one per language directory it holds.
+		const oneFingerprintWalk = 1 + 2;
+		try {
+			const loader = new TreeSitterQueryLoader();
+			await loader.loadQueries(project); // cold: one fingerprint walk + one reload walk
+
+			const walksBefore = countProjectRuleWalks(project);
+			for (let i = 0; i < 25; i++) {
+				await loader.loadQueries(project);
+			}
+			// The counted-walk guard the round brief asks for: nothing inside
+			// the cycle re-walks. The r3 head re-walked on every one of these.
+			expect(countProjectRuleWalks(project) - walksBefore).toBe(0);
+
+			// And the memo is not permanent: a fresh cycle re-walks exactly
+			// once, finds an unchanged corpus, and serves the loaded rules
+			// without a reload — one walk, and one content read per rule file
+			// for the hash, never a second walk for a parse.
+			const readsBefore = countRuleContentReads();
+			await inNextCycle(() => loader.loadQueries(project));
+			expect(countProjectRuleWalks(project) - walksBefore).toBe(
+				oneFingerprintWalk,
+			);
+			expect(countRuleContentReads() - readsBefore).toBe(2);
+			expect(loader.getQueryById("warm-a")?.name).toBe("A");
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
+	it("sees a same-size rewrite whose mtime was pinned back, at the next cycle", async () => {
+		// The r3 verify's HIGH-4212-R3-1: it wrote AAAA -> BBBB, restored the
+		// exact timestamp with `touch`, and the r3 stat signature (path +
+		// mtimeMs + size) still reported no change, so the loader served AAAA.
+		// A whole-millisecond pin round-trips through `utimesSync` exactly, so
+		// this reproduces that state without spawning `touch`.
+		const project = makeTempRulesRoot();
+		const machine = makeTempRulesRoot();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		const pinnedSeconds = 1700000000.456;
+		const rel = "rules/tree-sitter-queries/typescript/pinned.yml";
+		try {
+			writeRule(
+				machine,
+				rel,
+				`id: pinned\nname: AAAA\nquery: |\n  (identifier) @X\n`,
+			);
+			const rulePath = path.join(machine, rel);
+			fs.utimesSync(rulePath, pinnedSeconds, pinnedSeconds);
+			const before = fs.statSync(rulePath);
+
+			const loader = new TreeSitterQueryLoader();
+			await loader.loadQueries(project);
+			expect(loader.getQueryById("pinned")?.name).toBe("AAAA");
+
+			// Same byte length: only the name's four characters differ.
+			writeRule(
+				machine,
+				rel,
+				`id: pinned\nname: BBBB\nquery: |\n  (identifier) @X\n`,
+			);
+			fs.utimesSync(rulePath, pinnedSeconds, pinnedSeconds);
+			const after = fs.statSync(rulePath);
+
+			// Prove the fixture still arms the defect: stat identity is
+			// bit-identical, so any stat-derived gate is blind here.
+			expect(after.mtimeMs).toBe(before.mtimeMs);
+			expect(after.size).toBe(before.size);
+			expect(fs.readFileSync(rulePath, "utf-8")).toContain("BBBB");
+
+			await inNextCycle(() => loader.loadQueries(project));
+			expect(loader.getQueryById("pinned")?.name).toBe("BBBB");
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
+	it("holds the cycle's rules for the rest of that cycle and heals on a forced load", async () => {
+		// State-table rows 8 and 9: an edit DURING a cycle is not seen by a
+		// later warm call in the same cycle — that is the declared trade for a
+		// warm call at master's cost — but a dispatch's `force: true` reload
+		// republishes the fresh fingerprint into the cycle, so every later warm
+		// call in that same cycle sees the edit without another walk. The rule
+		// lives under the PROJECT root so the walk counter below has a
+		// population to count.
+		const project = makeTempRulesRoot();
+		const machine = makeTempRulesRoot();
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = machine;
+		const rel = "rules/tree-sitter-queries/typescript/mid-cycle.yml";
+		try {
+			writeRule(
+				project,
+				rel,
+				`id: mid-cycle\nname: OLD\nquery: |\n  (identifier) @X\n`,
+			);
+			const session = "mid-cycle-session";
+			beginTurnContext(session);
+			await runWithTurnContext(session, async () => {
+				const loader = new TreeSitterQueryLoader();
+				await loader.loadQueries(project);
+				expect(loader.getQueryById("mid-cycle")?.name).toBe("OLD");
+
+				writeRule(
+					project,
+					rel,
+					`id: mid-cycle\nname: NEW\nquery: |\n  (identifier) @X\n`,
+				);
+				await loader.loadQueries(project);
+				expect(loader.getQueryById("mid-cycle")?.name).toBe("OLD");
+
+				const walksBefore = countProjectRuleWalks(project);
+				await loader.loadQueries(project, { force: true });
+				expect(loader.getQueryById("mid-cycle")?.name).toBe("NEW");
+				// The forced reload did its own single fingerprint walk, then a
+				// reload walk: this fixture holds one language directory, so
+				// each walk is one listing of the queries root plus one of that
+				// directory.
+				const walksAfterForce = countProjectRuleWalks(project);
+				expect(walksAfterForce - walksBefore).toBe((1 + 1) * 2);
+
+				// The forced reload republished into this cycle, so the warm
+				// call now agrees with it and does not walk the corpus again.
+				await loader.loadQueries(project);
+				expect(loader.getQueryById("mid-cycle")?.name).toBe("NEW");
+				expect(countProjectRuleWalks(project) - walksAfterForce).toBe(0);
+			});
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
 	});
 });
 

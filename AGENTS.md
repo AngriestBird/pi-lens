@@ -1115,6 +1115,19 @@ has a real behavioral fixture; Java/Kotlin rules use the real CLI path because
 NAPI lacks their grammars. The bundled ast-grep source census is recursive and
 respects the same precedence.
 
+The mutable rule corpus (project + user roots; bundled stays immutable per
+process) has ONE identity seam, `ruleCorpusFingerprintForCycle` in
+`clients/custom-rule-locations.ts`: a content fingerprint computed at most once
+per dispatch cycle, keyed on `getTurnId()`, and shared by the tree-sitter
+loader memo and the ast-grep source fingerprint, so both families refresh on
+the same boundary. A per-call walk of that corpus is a measured regression
+(#4212: 262x master at 170 rule files), and a per-cycle memo that omits the
+turn identity never invalidates. A path that must see an edit inside its own
+cycle passes `force`, which recomputes and republishes into the cycle; the
+dispatch runner does, and its RuleCache key is the content fingerprint
+recomputed per dispatched file. `resolveBaselineSgconfig` forces because #497
+point 7 pins mid-session freshness for a spawned ast-grep LSP.
+
 Tree-sitter queries compile against the grammar of the file, not the rule's
 language label. Alternative capture groups share capture names. An unsupported or
 blocked grammar produces visible bounded degradation, never a clean empty

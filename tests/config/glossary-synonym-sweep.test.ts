@@ -1021,7 +1021,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/sg-runner.ts": 12,
 		// 26 -> 25 (#3930 r2): the shared user rule-root seam removes one
 		// duplicated path construction.
-		"clients/sgconfig.ts": 25,
+		// 25 -> 26 (#3930 r4): the cycle-memo key is derived with
+		// `path.resolve(projectRoot)`, the normalization every sibling map key
+		// in this file already uses (`cachedBaselines`, `rootArtifactKey`).
+		"clients/sgconfig.ts": 26,
 		"clients/skills-resolver.ts": 3,
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,

@@ -20,7 +20,20 @@ your-project/
         my-rule.yml        ← ast-grep rule, overrides built-in with same id
 ```
 
-Project ast-grep rules are fingerprinted by relative path and contents, so in-place edits, renames, additions, and removals take effect within one tool call even when mtimes are preserved. Tree-sitter rules retain their directory-mtime cache.
+Both rule families are fingerprinted by relative path and contents, so in-place edits, renames, additions, and removals are picked up without a restart, even when mtimes are preserved.
+
+### When an edit takes effect
+
+A per-file dispatch reads the rule corpus fresh every time: its cache key is a
+content fingerprint of every rule file the language's rule set is built from,
+so an edit, addition, or removal is live on the next dispatched file.
+
+Whole-project surfaces — a project scan and a structural search — reuse a
+corpus fingerprint computed once per turn, so a rule edit lands on the next
+turn, or immediately if any file is dispatched in between (a dispatch
+republishes the fresh fingerprint for the rest of that turn). This is what
+keeps a warm scan at the cost of a string comparison instead of re-reading
+every rule file on every call.
 
 ### User-level rules
 
@@ -29,8 +42,8 @@ Rules shared across projects live under the relocatable machine-data directory:
 `PI_LENS_HOME` is unset). Use the same `tree-sitter-queries/` and
 `ast-grep-rules/` layout shown above. Precedence is project > user > bundled;
 when rule IDs collide, the higher tier wins and the lower definition is
-shadowed from execution. User-rule changes are included in the relevant
-fingerprints, so edits, additions, and removals take effect without restart.
+shadowed from execution. User rules are part of the same fingerprints as
+project rules, so they follow the same timing above.
 
 ---
 
