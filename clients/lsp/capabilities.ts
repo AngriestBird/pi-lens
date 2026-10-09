@@ -1,0 +1,203 @@
+/**
+ * The experimental LSP capability facade (#2372, #277).
+ *
+ * The groups are the extraction boundary for the next slices.  This first
+ * slice deliberately adapts the existing service without moving ownership or
+ * changing any operation.  The flat service members remain available as a
+ * compatibility surface while callers migrate to the facade module.
+ */
+
+import {
+	getLSPService as getExistingLSPService,
+	peekLSPService as peekExistingLSPService,
+	notifyExternalFileChange as notifyExistingExternalFileChange,
+	resyncGitChangedFiles as resyncExistingGitChangedFiles,
+	resetLSPService as resetExistingLSPService,
+} from "./index.js";
+import type {
+	LSPService,
+	LSPWorkspaceScopeAttribution,
+	LSPWorkspaceUnconfirmedReason,
+} from "./index.js";
+import type { LSPShutdownOptions } from "./client.js";
+import type { DriftDisposition } from "./document-drift.js";
+import type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
+
+type CapabilityMethods<K extends keyof LSPService> = Pick<LSPService, K>;
+
+export type LspClientLifecycleCapabilities = CapabilityMethods<
+	| "checkDestroyed"
+	| "getAliveClientCount"
+	| "getAliveServerIds"
+	| "getBrokenStatus"
+	| "getStatus"
+	| "isSpawnInFlight"
+	| "shutdown"
+>;
+
+export type LspDocumentCapabilities = CapabilityMethods<
+	"getOpenDocumentPaths" | "openFile" | "touchFile"
+>;
+
+export type LspDiagnosticCapabilities = CapabilityMethods<
+	| "getAllDiagnostics"
+	| "getDiagnostics"
+	| "getDiagnosticsHealth"
+	| "getLastKnownDiagnostics"
+	| "readCachedDiagnosticsForServers"
+	| "runWorkspaceDiagnostics"
+>;
+
+export type LspNavigationCapabilities = CapabilityMethods<
+	| "codeAction"
+	| "documentSymbol"
+	| "definition"
+	| "hover"
+	| "implementation"
+	| "incomingCalls"
+	| "outgoingCalls"
+	| "prepareCallHierarchy"
+	| "references"
+	| "rename"
+	| "typeDefinition"
+>;
+
+export type LspWorkspaceCapabilities = CapabilityMethods<
+	| "getAdvertisedCommands"
+	| "getCapabilitySnapshots"
+	| "getClientForFile"
+	| "getOperationSupport"
+	| "getWarmClientForFile"
+	| "hasServerPublishedForFileRoot"
+	| "supportsLSP"
+>;
+
+export interface LspCapabilities extends LSPService {
+	/** Optional for legacy test doubles; present on adapted live services. */
+	readonly clients?: LspClientLifecycleCapabilities;
+	readonly documents?: LspDocumentCapabilities;
+	readonly diagnostics?: LspDiagnosticCapabilities;
+	readonly navigation?: LspNavigationCapabilities;
+	readonly workspace?: LspWorkspaceCapabilities;
+}
+
+const adaptedServices = new WeakMap<LSPService, LspCapabilities>();
+
+function bindGroup<T extends object>(
+	service: LSPService,
+	keys: readonly (keyof T)[],
+): T {
+	return new Proxy({} as T, {
+		get(_target, key: string | symbol) {
+			if (!keys.includes(key as keyof T)) return undefined;
+			const value = service[key as keyof LSPService];
+			return typeof value === "function" ? value.bind(service) : value;
+		},
+	});
+}
+
+/** Adapt one live service while preserving method identity and `this`. */
+export function adaptLspService(service: LSPService): LspCapabilities {
+	const existing = adaptedServices.get(service);
+	if (existing) return existing;
+
+	const groups = {
+		clients: bindGroup<LspClientLifecycleCapabilities>(service, [
+			"checkDestroyed",
+			"getAliveClientCount",
+			"getAliveServerIds",
+			"getBrokenStatus",
+			"getStatus",
+			"isSpawnInFlight",
+			"shutdown",
+		]),
+		documents: bindGroup<LspDocumentCapabilities>(service, [
+			"getOpenDocumentPaths",
+			"openFile",
+			"touchFile",
+		]),
+		diagnostics: bindGroup<LspDiagnosticCapabilities>(service, [
+			"getAllDiagnostics",
+			"getDiagnostics",
+			"getDiagnosticsHealth",
+			"getLastKnownDiagnostics",
+			"readCachedDiagnosticsForServers",
+			"runWorkspaceDiagnostics",
+		]),
+		navigation: bindGroup<LspNavigationCapabilities>(service, [
+			"codeAction",
+			"documentSymbol",
+			"definition",
+			"hover",
+			"implementation",
+			"incomingCalls",
+			"outgoingCalls",
+			"prepareCallHierarchy",
+			"references",
+			"rename",
+			"typeDefinition",
+		]),
+		workspace: bindGroup<LspWorkspaceCapabilities>(service, [
+			"getAdvertisedCommands",
+			"getCapabilitySnapshots",
+			"getClientForFile",
+			"getOperationSupport",
+			"getWarmClientForFile",
+			"hasServerPublishedForFileRoot",
+			"supportsLSP",
+		]),
+	};
+
+	const adapted = new Proxy(service as LspCapabilities, {
+		get(target, key, receiver) {
+			if (key in groups) return groups[key as keyof typeof groups];
+			const value = Reflect.get(target, key, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	adaptedServices.set(service, adapted);
+	return adapted;
+}
+
+/** The grouped facade over the process singleton. */
+export function getLSPService(): LspCapabilities {
+	return adaptLspService(getExistingLSPService());
+}
+
+/** Read-only lifecycle access; this never creates a service. */
+export function peekLSPService(): LspCapabilities | undefined {
+	const service = peekExistingLSPService();
+	return service ? adaptLspService(service) : undefined;
+}
+
+/** Compatibility lifecycle exports remain named so host hooks keep their ABI. */
+export const resetLSPService = (options: LSPShutdownOptions = {}): void =>
+	resetExistingLSPService(options);
+
+export async function notifyExternalFileChange(
+	filePath: string,
+	type: number,
+): Promise<void> {
+	return notifyExistingExternalFileChange(filePath, type);
+}
+
+export async function resyncGitChangedFiles(
+	changedPaths: readonly string[],
+): Promise<ReadonlyMap<string, DriftDisposition>> {
+	return resyncExistingGitChangedFiles(changedPaths);
+}
+
+export async function hasAuxiliaryLspPublishedForRoot(
+	serverId: string,
+	filePath: string,
+): Promise<boolean> {
+	return getLSPService().hasServerPublishedForFileRoot(serverId, filePath);
+}
+
+export type {
+	LSPCapabilitySnapshot,
+	LSPService,
+	LSPWorkspaceScopeAttribution,
+	LSPWorkspaceUnconfirmedReason,
+};
+export { groupFilesByPrimaryServer, runPerServerGroups } from "./index.js";

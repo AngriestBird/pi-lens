@@ -387,7 +387,7 @@ export function resyncDocumentOnPastEof(filePath: string): void {
 	void (async () => {
 		try {
 			const [{ getLSPService }, content] = await Promise.all([
-				import("./lsp/index.js"),
+				import("./lsp/capabilities.js"),
 				fs.promises.readFile(filePath, "utf-8"),
 			]);
 			await getLSPService().openFile(filePath, content, {

@@ -124,7 +124,7 @@ import {
 } from "./blocker-freshness.js";
 import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #2001/#2002: collect-later delivery for slow auxiliary LSP servers.
-import { getLSPService } from "./lsp/index.js";
+import { getLSPService } from "./lsp/capabilities.js";
 import {
 	drainPendingAuxCapEvictedCount,
 	drainPendingAuxiliaryCoverage,

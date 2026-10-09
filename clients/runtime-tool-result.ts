@@ -87,7 +87,7 @@ import type { LSPShutdownOptions } from "./lsp/client.js";
 import {
 	notifyExternalFileChange,
 	resyncGitChangedFiles,
-} from "./lsp/index.js";
+} from "./lsp/capabilities.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { type PipelineResult, runPipeline } from "./pipeline.js";
 import {

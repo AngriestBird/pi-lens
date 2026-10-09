@@ -52,14 +52,14 @@ import {
 	normalizeMapKey,
 	realpathOrResolve,
 } from "../clients/path-utils.js";
-import { getLSPService } from "../clients/lsp/index.js";
+import { getLSPService } from "../clients/lsp/capabilities.js";
 import { retireInlineBlockerAndResyncGuard } from "../clients/git-guard.js";
 import {
 	primaryServerId,
 	resolveLspCwdForFile,
 } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
-import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
+import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/capabilities.js";
 import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {

@@ -675,6 +675,10 @@ file-scoped worklist and receives no project-wide scanner output.
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
   timers on every removal path.
+- Production callers use the grouped experimental `LspCapabilities` adapter in
+  `clients/lsp/capabilities.ts`; direct `LSPService` module imports are limited
+  to that adapter and are enforced by
+  `tests/config/lsp-capabilities-import-sweep.test.ts` (#2372/#277).
 - Idle-eviction policy is the registry's `idleEviction` field, declared per
   server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
   registry server's eviction cost and respawn safety into
