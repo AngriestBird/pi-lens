@@ -500,6 +500,8 @@ export interface LSPServerInfo {
 	idleEviction: "transparent" | "resident" | "unmeasured";
 	/** True for entries supplied through `lsp.servers.*`, not the built-in table. */
 	custom?: boolean;
+	/** Set by compileLspRegistry after the source trust decision is admitted. */
+	trustAllowed?: boolean;
 	/**
 	 * The server's own binary command token (args are a separate field, so
 	 * the token IS what an availability probe would ask for). Present on

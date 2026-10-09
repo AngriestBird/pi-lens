@@ -60,6 +60,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 				id: "python",
 				name: "Python",
 				extensions: [".py"],
+				trustAllowed: true,
 				root: async () => FIXTURE_ROOT,
 				spawn,
 			},
@@ -67,22 +68,15 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		return { trust, service: new LSPService(), spawn };
 	}
 
-	it("refuses to spawn a server when the host denied project trust", async () => {
+	it("does not blanket-block a compiled/built-in server when trust is denied", async () => {
 		const { trust, service, spawn } = await setup();
 		trust.setProjectTrustState("untrusted");
 
 		const client = await service.getClientForFile(FIXTURE_FILE);
 
-		expect(spawn).not.toHaveBeenCalled();
-		expect(createLSPClient).not.toHaveBeenCalled();
-		expect(client).toBeUndefined();
-		expect(logExtension).toHaveBeenCalledWith(
-			expect.objectContaining({
-				level: "warn",
-				message: "install/materialization blocked: lsp install: python",
-				metadata: expect.objectContaining({ context: "lsp install: python" }),
-			}),
-		);
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(createLSPClient).toHaveBeenCalledTimes(1);
+		expect(client?.client).toBeTruthy();
 		trust.resetProjectTrust();
 	});
 

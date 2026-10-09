@@ -651,8 +651,13 @@ the surface they bite; each block loads only when its trigger applies.
   process-tree cleanup, output caps, typed failure kinds, and bounded timeouts.
   Installs pass `ignoreAmbientSignal: true` and remain trust-gated.
 - Project trust is consumed through `isProjectTrusted`; pi-lens never registers
-  the host's trust-answer handler. Missing trust APIs are unknown/fail-open for
-  compatibility; a throwing accessor is fail-closed.
+  the host's trust-answer handler. `compileLspRegistry` is the one admission
+  seam for LSP executable fields: global config and built-ins remain allowed,
+  while project `command`, command overrides, `env`, and
+  `initializationOptions` require pi's `trusted` answer. Missing trust APIs are
+  fail-closed for those project fields with one bounded notice; installs keep
+  their existing compatibility policy. `tests/clients/lsp/lsp-registry-trust.test.ts`
+  and the LSP config/service suites pin the boundary.
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership

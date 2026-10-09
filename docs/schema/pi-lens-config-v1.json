@@ -94,7 +94,24 @@
         "serverOverrides": {
           "type": "object",
           "x-stability": "experimental",
-          "additionalProperties": true
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true,
+            "x-stability": "experimental",
+            "properties": {
+              "command": { "x-stability": "experimental" },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "x-stability": "experimental" },
+                "x-stability": "experimental"
+              },
+              "initializationOptions": {
+                "type": "object",
+                "additionalProperties": true,
+                "x-stability": "experimental"
+              }
+            }
+          }
         },
         "disabledServers": {
           "type": "array",
