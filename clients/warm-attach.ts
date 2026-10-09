@@ -9,7 +9,8 @@ import {
 import { realIsPidAlive } from "./instance-reaper.js";
 import { logLatency } from "./latency-logger.js";
 import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
-import { loadLspService } from "./lsp-lazy.js";
+import { getOwnedLspService } from "./lsp/service-singleton.js";
+import type { LspCapabilities } from "./lsp/capabilities.js";
 import {
 	contentHash,
 	createWarmIpcLineReader,
@@ -40,6 +41,14 @@ interface AttachState {
 }
 
 const state: AttachState = { local: true, servedDiagnosticHashes: new Map() };
+
+function loadLspService(): Promise<{
+	getLSPService: () => LspCapabilities;
+}> {
+	return Promise.resolve({
+		getLSPService: () => getOwnedLspService<LspCapabilities>(),
+	});
+}
 
 function record(
 	event: string,

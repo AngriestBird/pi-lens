@@ -7,18 +7,18 @@
  * compatibility surface while callers migrate to the facade module.
  */
 
-import {
-	getLSPService as getExistingLSPService,
-	peekLSPService as peekExistingLSPService,
-	notifyExternalFileChange as notifyExistingExternalFileChange,
-	resyncGitChangedFiles as resyncExistingGitChangedFiles,
-	resetLSPService as resetExistingLSPService,
-} from "./index.js";
+import "./index.js";
 import type {
 	LSPService,
 	LSPWorkspaceScopeAttribution,
 	LSPWorkspaceUnconfirmedReason,
 } from "./index.js";
+import {
+	getOwnedLspService,
+	peekOwnedLspService,
+	resetOwnedLspService,
+} from "./service-singleton.js";
+import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
 import type { LSPShutdownOptions } from "./client.js";
 import type { DriftDisposition } from "./document-drift.js";
 import type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
@@ -161,30 +161,30 @@ export function adaptLspService(service: LSPService): LspCapabilities {
 
 /** The grouped facade over the process singleton. */
 export function getLSPService(): LspCapabilities {
-	return adaptLspService(getExistingLSPService());
+	return adaptLspService(getOwnedLspService<LSPService>());
 }
 
 /** Read-only lifecycle access; this never creates a service. */
 export function peekLSPService(): LspCapabilities | undefined {
-	const service = peekExistingLSPService();
+	const service = peekOwnedLspService<LSPService>();
 	return service ? adaptLspService(service) : undefined;
 }
 
 /** Compatibility lifecycle exports remain named so host hooks keep their ABI. */
 export const resetLSPService = (options: LSPShutdownOptions = {}): void =>
-	resetExistingLSPService(options);
+	resetOwnedLspService<LSPService>(options);
 
 export async function notifyExternalFileChange(
 	filePath: string,
 	type: number,
 ): Promise<void> {
-	return notifyExistingExternalFileChange(filePath, type);
+	return getLSPService().notifyExternalFileChange(filePath, type);
 }
 
 export async function resyncGitChangedFiles(
 	changedPaths: readonly string[],
 ): Promise<ReadonlyMap<string, DriftDisposition>> {
-	return resyncExistingGitChangedFiles(changedPaths);
+	return getLSPService().resyncGitChangedFiles(changedPaths);
 }
 
 export async function hasAuxiliaryLspPublishedForRoot(
@@ -200,4 +200,4 @@ export type {
 	LSPWorkspaceScopeAttribution,
 	LSPWorkspaceUnconfirmedReason,
 };
-export { groupFilesByPrimaryServer, runPerServerGroups } from "./index.js";
+export { groupFilesByPrimaryServer, runPerServerGroups };
