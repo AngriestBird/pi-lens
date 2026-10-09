@@ -98,7 +98,12 @@ export interface MutationBridgeDeps {
 			currentBranchEpoch: number;
 			recordWritten?: (
 				filePath: string,
-				opts?: { branchEpoch?: number; stampFileTime?: boolean },
+				opts?: {
+					branchEpoch?: number;
+					stampFileTime?: boolean;
+					advanceAuthorship?: boolean;
+					toolCallId?: string;
+				},
 			) => void;
 		};
 		recordProjectMutation?: (args: {
@@ -233,6 +238,12 @@ function mutationEntryProblem(entry: unknown): string | undefined {
 		provenance !== "settled-sweep"
 	)
 		return 'provenance must be "observed" or "settled-sweep"';
+
+	// #4187 R4-1: the call id licenses an authorship advance, so a producer that
+	// invents a non-string one must be told rather than silently downgraded to
+	// "no call" (which would end an authorship the call did license).
+	if (e["toolCallId"] !== undefined && typeof e["toolCallId"] !== "string")
+		return "toolCallId must be a string";
 
 	return undefined;
 }
@@ -399,9 +410,21 @@ function stampLiveMutation(
 	if (sessionLive && stampReadGuard) {
 		runtime.readGuard.recordWritten?.(filePath, {
 			...(stamp !== undefined && { branchEpoch: stamp }),
-			// #3525: settled-sweep drift is unattributed, and the agent never
-			// saw it: authorship, not FileTime.
-			...(entry.provenance === "settled-sweep" && { stampFileTime: false }),
+			// A process bridge reports a mutation, not the bytes delivered to the
+			// conversation. Credit authorship, but leave FileTime at its last
+			// conversation-backed observation (#3865).
+			stampFileTime: false,
+			// Nor may it re-baseline an existing authorship over bytes it wrote
+			// around (#4131, #4187 R2-4): only the observed replay had a
+			// pre-write check, its tool_call's retire. The rest (a co-process
+			// producer, ast_grep_replace, an LSP edit, the settled sweep's
+			// drift) may create a first authorship and otherwise end it.
+			advanceAuthorship: entry.provenance === "observed",
+			// #4187 R4-1: and an observed replay advances only a path its OWN
+			// call licensed at tool_call (`ReadGuard.noteCheckedPaths`), since a
+			// tool writes a set wider than the one it named. An entry with no
+			// call (a co-process producer, a server-initiated edit) names none.
+			...(entry.toolCallId !== undefined && { toolCallId: entry.toolCallId }),
 		});
 	}
 	return { sessionLive, stamp };

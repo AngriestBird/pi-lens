@@ -1210,6 +1210,10 @@ export function createLspNavigationTool(
 				mutationContext = {
 					cwd,
 					correlationId: newLspMutationCorrelationId(_toolCallId),
+					// #4187 R4-1: the call whose `tool_call` licensed the paths it
+					// named; the workspace edit's other files (a rename's importers)
+					// are unlicensed, so they end an authorship instead of advancing it.
+					toolCallId: _toolCallId,
 					tool: `lsp_navigation:${operation}`,
 					source: mutationSource,
 					...mutationDeps,

@@ -193,6 +193,17 @@ the surface they bite; each block loads only when its trigger applies.
 39. **Walk-up result used as eligibility:** return ownership and start-directory
     identity separately; enumerate root-position by ambient-input cells.
 
+64. **Named path vs written set:** a guard keyed on the path a tool NAMES must
+    hold for every path the tool WRITES; enumerate the written set (a rename's
+    importers, an `ast_grep_replace` folder or its project default, a
+    server-initiated `workspace/applyEdit` with no call at all) and key the
+    permission per call, never per path. Three rounds on the read guard's
+    authorship seam (#4187 R2-3, R4-1, R5): the pre-write retire covered the
+    named path while the post-write advance covered every recorded one, so a
+    file nothing checked was re-baselined over another writer's bytes. The
+    screen: for each writer, table named-at-call against actually-written, and
+    ask which rule answers for a path in the second column only.
+
 </important>
 
 <important if="adding or reading a cache, durable record, or project-intelligence state">
@@ -967,7 +978,17 @@ third-party names on pi and retain the bounded observation path.
 The read guard keys all path state through its normalizer. It accepts Read,
 search, LSP, bridge, bash-view, and authored-write evidence, but name-only
 `ls`/`find` output is not file content. Partial edits consume preflight-approved
-spans and never re-search stale bytes.
+spans and never re-search stale bytes. Authorship (`writtenThisSession`)
+follows content identity (#4131): it holds the bytes the conversation last
+wrote, `stat` only pre-filters the hash, and another writer's byte change ends
+it at the next zero-read edit, bash write or drain on the file
+(`retireChangedAuthorship`); no later write resumes it. A mutation-bridge
+write (no pre-write check) may create a first authorship but ends an
+existing one; the observed replay alone advances it, its tool_call having
+retired every file it may replay. The store holds at most 4096 files. A branch move keeps it
+iff its write's tool result is on the branch (#3603). FileTime moves only over
+bytes the conversation holds whole: process bridges, observed replays and
+range bridge reads leave it (#3865).
 
 </important>
 ## Commands and gates

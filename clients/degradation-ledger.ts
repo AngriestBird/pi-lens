@@ -1047,6 +1047,17 @@ export type DegradationKind =
 	 */
 	| "query-predicates-invalid"
 	/**
+	 * #4131: another writer changed a file the agent authored without a read
+	 * (a bash write, a created file), or a mutation-bridge write landed on it
+	 * with no pre-write check (#4187 R2-4, the row's `writer: "bridge"`), so
+	 * its authorship ended (`ReadGuard.retireChangedAuthorship`) and its next
+	 * edit needs a read. Subject is the file; counted, the read-guard.log row
+	 * on the rising edge.
+	 */
+	/** Counted authorship-cap evictions; read-guard.log is rising-edge only. */
+	| "read-guard-authorship-cap"
+	| "read-guard-authorship-retired"
+	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and
 	 * far more frequent budget than the orphan backstop's one-per-cooldown

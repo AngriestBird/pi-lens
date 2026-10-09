@@ -7,7 +7,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	captureReadContentBinding,
@@ -557,6 +560,103 @@ describe("ReadGuard", () => {
 						}),
 					}),
 				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// #4131, #4187 F10: the retirement is its own decision. Recurrence:
+		// round 1 logged it as `file_modified`, indistinguishable in
+		// read-guard.log from a FileTime block on a file the agent had read.
+		it("records an authorship another writer ended as authorship_retired, once", () => {
+			const env = setupTestEnvironment("read-guard-authorship-retired-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_bash" });
+				// Another writer: different bytes (and size, so no same-tick stat tie).
+				fs.writeFileSync(filePath, "export const x = 22;\n");
+
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+
+				const calls = vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.map(([entry]) => entry);
+				expect(
+					calls.filter((entry) => entry.event === "authorship_retired"),
+				).toEqual([
+					expect.objectContaining({
+						filePath: normalizeFilePath(filePath),
+						metadata: expect.objectContaining({
+							hashed: true,
+							toolCallId: "call_bash",
+						}),
+					}),
+				]);
+				expect(
+					calls
+						.filter((entry) => entry.event === "edit_blocked")
+						.map((entry) => entry.metadata?.reasonKind),
+				).toEqual(["authorship_retired", "authorship_retired"]);
+				// The pilens_health ledger row, counted once per retirement.
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					),
+				).toMatchObject({
+					count: 1,
+					latestReasons: [
+						expect.objectContaining({
+							subject: normalizeFilePath(filePath),
+						}),
+					],
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// #4187 R2-4: a bridge write ends the authorship after the fact, so its
+		// row names the writer. Recurrence: without it, read-guard.log cannot
+		// tell a retirement a bridge write caused from one an edit check found.
+		it("records an authorship a bridge write ended as authorship_retired with its writer, once", () => {
+			const env = setupTestEnvironment("read-guard-authorship-bridge-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_bash" });
+				fs.writeFileSync(filePath, "export const x = 22;\n");
+				for (let call = 0; call < 2; call++)
+					guard.recordWritten(filePath, {
+						stampFileTime: false,
+						advanceAuthorship: false,
+					});
+
+				expect(
+					vi
+						.mocked(logReadGuardEvent)
+						.mock.calls.map(([entry]) => entry)
+						.filter((entry) => entry.event === "authorship_retired"),
+				).toEqual([
+					expect.objectContaining({
+						filePath: normalizeFilePath(filePath),
+						metadata: expect.objectContaining({
+							writer: "bridge",
+							toolCallId: "call_bash",
+						}),
+					}),
+				]);
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
 			} finally {
 				env.cleanup();
 			}
@@ -2501,6 +2601,34 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 		expect(evictions.map(([entry]) => entry.filePath).sort()).toEqual(
 			[normalizeFilePath(firstPath), normalizeFilePath(secondPath)].sort(),
 		);
+	});
+
+	// #4187 R3-3: authorship-cap pressure is counted for every eviction, but
+	// read-guard.log gets only the rising-edge witness. Recurrence: one log row
+	// per over-cap file flooded the sink during a steady-state credit stream.
+	// #4187 R4-3 (T9b): one eviction proves nothing about the gate — a single
+	// row is also what an ungated `if (true)` emits — so this credits 104 files
+	// past the cap and pins 104 counted against ONE row.
+	it("counts authorship-cap evictions and logs only its rising edge", () => {
+		resetDegradationLedger();
+		const guard = createReadGuard("4187-authorship-cap-observability");
+		const overCap = 104;
+		for (let i = 0; i < 4096 + overCap; i += 1) {
+			const filePath = `/tmp/4187-authorship-cap-${i}.ts`;
+			guard.recordWritten(filePath);
+		}
+		const evictions = evictionEvents("read_file_evicted").filter(
+			([entry]) => entry.metadata?.reason === "authorship-cap",
+		);
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			metadata: { reason: "authorship-cap", authorshipDropped: true },
+		});
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "read-guard-authorship-cap",
+			)?.count,
+		).toBe(overCap);
 	});
 
 	// #1918 review F3: pin session re-arm — the SAME file evicted twice within

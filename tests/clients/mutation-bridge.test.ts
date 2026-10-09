@@ -25,7 +25,10 @@ import {
 	_observedMutationStateForTests,
 	resetObservedMutationNet,
 } from "../../clients/observed-mutation.js";
-import { normalizeMapKey } from "../../clients/path-utils.js";
+import {
+	normalizeFilePath,
+	normalizeMapKey,
+} from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -1121,16 +1124,18 @@ describe("mutation bridge registration", () => {
 });
 
 /**
- * #3525: the settled sweep replays drift no tool_result described, whoever
- * wrote it (an external editor, a second pi-lens instance), and the agent was
- * never shown those bytes. Recurrence: its `recordWritten` re-stamped FileTime,
- * the only staleness check a line without a hash has, so an edit of a line
- * another writer changed passed on a record past READ_HASH_MAX_LINES.
+ * #3525, #3865: a bridge replay reports a mutation, never the bytes the
+ * conversation holds: the settled sweep's drift no tool_result described, an
+ * unclassified tool's observed write, an `ast_grep_replace` rewrite or a
+ * co-process producer's (no provenance). Recurrence: its `recordWritten`
+ * re-stamped FileTime, the only staleness check a line without a hash has,
+ * so an edit of a line another writer changed passed on a record past
+ * READ_HASH_MAX_LINES. Authorship is still credited (#3865 acceptance).
  */
-describe("mutation bridge FileTime credit (#3525)", () => {
+describe("mutation bridge authorship without FileTime credit (#3865)", () => {
 	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
-	for (const provenance of ["settled-sweep", "observed"] as const) {
-		it(`${provenance === "settled-sweep" ? "does not stamp" : "stamps"} FileTime for a ${provenance} replay`, () => {
+	for (const provenance of ["settled-sweep", "observed", undefined] as const) {
+		it(`credits authorship without stamping FileTime for a ${provenance ?? "no-provenance"} replay`, () => {
 			const env = setupTestEnvironment("pi-lens-3525-bridge-");
 			const previousDataDir = process.env.PILENS_DATA_DIR;
 			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
@@ -1158,7 +1163,12 @@ describe("mutation bridge FileTime credit (#3525)", () => {
 				fs.writeFileSync(filePath, big.join("\n"));
 				expect(
 					recordMutationThroughSeam(
-						{ filePath, kind: "edit", touchedLines: [11, 11], provenance },
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [11, 11],
+							...(provenance !== undefined && { provenance }),
+						},
 						makeDeps({
 							tmpDir: env.tmpDir,
 							runtime,
@@ -1166,9 +1176,81 @@ describe("mutation bridge FileTime credit (#3525)", () => {
 						}),
 					),
 				).toBe(true);
+				expect(runtime.readGuard.exportAuthorship().written).toEqual([
+					normalizeFilePath(filePath),
+				]);
 				expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
-					provenance === "settled-sweep" ? "block" : "allow",
+					"block",
 				);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+});
+
+/**
+ * #4131 (#4187 R2-4, probe A1; orchestrator decision 2): a bridge write that
+ * no pre-write check guarded (a co-process producer, `ast_grep_replace`, the
+ * settled sweep's drift) reports a mutation without the bytes, so it may
+ * create a first authorship but never advance one. Recurrence: its
+ * `recordWritten` re-baselined the agent's authorship over another writer's
+ * line 11, and a zero-read edit of that line passed (stale allow).
+ */
+describe("mutation bridge never advances an existing authorship (#4131)", () => {
+	for (const provenance of ["settled-sweep", undefined] as const) {
+		it(`ends the authorship a ${provenance ?? "co-process"} write lands on`, () => {
+			const env = setupTestEnvironment("pi-lens-4131-bridge-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				const lines = Array.from({ length: 12 }, (_, i) => `line${i + 1}`);
+				fs.writeFileSync(filePath, lines.join("\n"));
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				// The agent's bash write authored the file, without a read.
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4131-bash",
+				});
+				// Another writer changes line 11.
+				lines[10] = "EXTERNAL11";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				// The producer writes line 3 and reports it.
+				lines[2] = "bridge3";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [3, 3],
+							...(provenance !== undefined && { provenance }),
+						},
+						makeDeps({
+							tmpDir: env.tmpDir,
+							runtime,
+							cacheManager: new CacheManager(false),
+						}),
+					),
+				).toBe(true);
+				const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("File modified since your write");
+				expect(runtime.readGuard.exportAuthorship()).toMatchObject({
+					written: [],
+					entries: [{ retired: true }],
+				});
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
 			} finally {
 				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = previousDataDir;

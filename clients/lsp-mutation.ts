@@ -97,6 +97,17 @@ interface LspMutationCacheManager {
 export interface LspMutationContext {
 	cwd: string;
 	correlationId: string;
+	/**
+	 * #4187 R4-1: the pi tool call this mutation belongs to, when one issued
+	 * it (`tools/lsp-navigation.ts` passes its `_toolCallId`). The read guard
+	 * licenses an authorship advance per call, and an LSP edit writes a set
+	 * wider than the one the call named (a rename's importers), so only a
+	 * licensed path may advance. A caller with no call of its own — a
+	 * server-initiated `workspace/applyEdit` (`clients/lsp/client.ts`) or the
+	 * agent_end quickfix drain — names none, and its write can only end an
+	 * authorship whose bytes it changed.
+	 */
+	toolCallId?: string;
 	tool: string;
 	/**
 	 * `"lsp-edit"` is the generic/legacy value; `"lsp-rename"` and
@@ -108,7 +119,14 @@ export interface LspMutationContext {
 	source: "lsp-edit" | "lsp-rename" | "lsp-execute-command" | "autofix";
 	runtime?: LspMutationRuntime;
 	readGuard?: {
-		recordWritten: (filePath: string, opts: { stampFileTime: false }) => void;
+		recordWritten: (
+			filePath: string,
+			opts: {
+				stampFileTime: false;
+				advanceAuthorship: true;
+				toolCallId?: string;
+			},
+		) => void;
 	};
 	cacheManager?: LspMutationCacheManager;
 	/** Existing autonomous-write publishers. Agent-owned navigation edits do not set these. */
@@ -339,8 +357,16 @@ function bookkeepLspMutation(
 		if (sessionLive && context.readGuard) {
 			try {
 				// #3525: the server computed these bytes; the agent never saw
-				// them: authorship, not FileTime.
-				context.readGuard.recordWritten(filePath, { stampFileTime: false });
+				// them: authorship, not FileTime. Nor an unconditional advance of
+				// an existing authorship: the call's own `tool_call` retire is
+				// what licenses it, for the paths that call checked (#4187 R4-1).
+				context.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					advanceAuthorship: true,
+					...(context.toolCallId !== undefined && {
+						toolCallId: context.toolCallId,
+					}),
+				});
 			} catch (err) {
 				context.dbg?.(
 					`lsp mutation read-guard stamp failed for ${filePath}: ${err}`,
@@ -387,6 +413,7 @@ function bookkeepLspMutation(
 							? [[detail.range.start, detail.range.end]]
 							: undefined,
 						consumer: context.tool,
+						provenance: "observed",
 						// Real value threaded through, not the bridge's own
 						// historical `false` default (#2450 review round 2, F1) —
 						// the tsserver organize-imports/add-import case is exactly
@@ -397,6 +424,11 @@ function bookkeepLspMutation(
 						// edit (#2450 review round 2, F3).
 						deferAutofix: false,
 						...(context.session && { lineage: context.session }),
+						// #4187 R4-1: the same license the direct branch threads, so
+						// the two branches stay equivalent for the same write.
+						...(context.toolCallId !== undefined && {
+							toolCallId: context.toolCallId,
+						}),
 					});
 					if (!recorded) {
 						context.dbg?.(

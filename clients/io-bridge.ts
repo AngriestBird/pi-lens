@@ -64,7 +64,10 @@ export { getIOBridge } from "./io-bridge-contract.js";
 
 /** The read-guard surface the bridge drives. */
 export interface ReadGuardBridgeSurface {
-	recordRead(record: ReadRecord, opts?: { captureLineHashes?: boolean }): void;
+	recordRead(
+		record: ReadRecord,
+		opts?: { captureLineHashes?: boolean; stampFileTime?: boolean },
+	): void;
 	forgetPath(filePath: string): void;
 	hasKnownPath(filePath: string): boolean;
 }
@@ -269,6 +272,14 @@ interface OneRangeRecord {
 	lineHashes?: LineHashMap;
 	contentBinding?: ReadContentBinding;
 	captureLineHashes: boolean;
+	/**
+	 * #3865: whether the read is evidence of every byte of the file: a disk
+	 * read of every line whose content binding covers the whole file, or the
+	 * zero-line read of an empty file. Only such a read moves the whole-file FileTime; a
+	 * range leaves it at its last whole-file stamp, and its hashes (and a
+	 * range binding) judge the lines it covered.
+	 */
+	wholeFile?: boolean;
 }
 
 function recordOneRange(
@@ -292,7 +303,10 @@ function recordOneRange(
 				contentBinding: args.contentBinding,
 			}),
 		},
-		{ captureLineHashes: args.captureLineHashes },
+		{
+			captureLineHashes: args.captureLineHashes,
+			stampFileTime: args.wholeFile === true,
+		},
 	);
 }
 
@@ -332,6 +346,7 @@ function recordZeroLineRead(ctx: ReadRecordContext): string | undefined {
 		turnIndex: ctx.turnIndex,
 		writeIndex: ctx.writeIndex,
 		captureLineHashes: false,
+		wholeFile: true,
 	});
 	return undefined;
 }
@@ -368,6 +383,10 @@ function recordRange(
 		recordOneRange(ctx.guard, {
 			...base,
 			...(binding !== undefined && { contentBinding: binding }),
+			// A whole-file binding hashes every byte, but only a read of every
+			// line delivered them all.
+			wholeFile:
+				binding?.fullFile === true && start === 1 && end >= binding.limit,
 		});
 		return undefined;
 	}
