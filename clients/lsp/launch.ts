@@ -19,8 +19,14 @@ import path from "node:path";
 import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { getGlobalPiLensLogDir } from "../probe-home-state.js";
-import { isFullyQualified } from "../path-utils.js";
+import { isFullyQualified, isUnderDir, isVendorPath } from "../path-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
+import { getProjectTrustState } from "../project-trust.js";
+import { logExtension } from "../extension-log.js";
 import { OWNER_TAG_ENV, ownerTagForChildren } from "../process-snapshot.js";
 import { redactSecrets } from "../redact/secrets.js";
 import {
@@ -364,6 +370,49 @@ function findBinaryOnPath(
 	return undefined;
 }
 
+let unknownProjectLocalNoticeGeneration = -1;
+
+/**
+ * Whether the resolved executable is a project-local installed binary.
+ * `launchLSP` is the one seam that has both the final resolved command and its
+ * spawn cwd; keep the project-local classifier here so PATH, venv, and shim
+ * resolution cannot grow separate trust predicates (#4248).
+ */
+export function isProjectLocalLspBinary(
+	resolvedCommand: string,
+	cwd: string,
+): boolean {
+	return isUnderDir(resolvedCommand, cwd) && isVendorPath(resolvedCommand);
+}
+
+function refuseUnknownProjectLocalBinary(
+	command: string,
+	resolvedCommand: string,
+	cwd: string,
+): void {
+	const generation = getDegradationLedgerGeneration();
+	const subject = `project-local-binary:g${generation}:${path.basename(command)}`;
+	recordDegradationOnce({
+		kind: "lsp-registry-decision",
+		subject,
+		reason: "project-local LSP binary refused: pi project trust is unknown",
+		metadata: {
+			field: "project-local-binary",
+			resolved: isProjectLocalLspBinary(resolvedCommand, cwd),
+			trust: "unknown",
+		},
+	});
+	if (unknownProjectLocalNoticeGeneration === generation) return;
+	unknownProjectLocalNoticeGeneration = generation;
+	logExtension({
+		subsystem: "lsp-registry",
+		level: "warn",
+		message:
+			"project-local LSP binary refused: mark the project trusted in pi or upgrade pi",
+		metadata: { field: "project-local-binary" },
+	});
+}
+
 /**
  * Try to spawn a process, throwing immediately if it fails
  */
@@ -655,6 +704,20 @@ export async function launchLSP(
 				`lsp ps1-bypass: no .cmd or JS entry found for ${spawnCommand}, spawn may hang`,
 			);
 		}
+	}
+
+	// Built-in server commands have no config provenance to carry into the
+	// registry. Once PATH resolution selects a project-local installed binary,
+	// unknown host trust must still fail closed (#4248 R2-1). Global and managed
+	// fallbacks remain compatible because they resolve outside the project root.
+	if (
+		getProjectTrustState() === "unknown" &&
+		isProjectLocalLspBinary(spawnCommand, cwd)
+	) {
+		refuseUnknownProjectLocalBinary(command, spawnCommand, cwd);
+		throw new Error(
+			"LSP project-local binary refused: project trust is unknown",
+		);
 	}
 
 	let proc: ChildProcess;
