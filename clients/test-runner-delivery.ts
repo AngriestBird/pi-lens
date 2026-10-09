@@ -44,7 +44,8 @@ const pending = new Map<string, PendingDelivery>();
 interface StaleVerdict {
 	file: string;
 	sourceFile: string;
-	runner?: string;
+	/** The runner that produced the verdict, or `undefined` on a record written before it was carried. */
+	runner: string | undefined;
 	gap: number;
 }
 

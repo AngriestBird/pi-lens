@@ -674,7 +674,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
 		// share one helper in turn-end/delivery-holds.ts instead of two copies.
-		"clients/runtime-turn.ts": 32,
+		// 33 -> 31 (#2542 ask 3): the deferred-target merge and bound moved to
+		// clients/deferred-test-targets.ts, taking its two `Array.prototype.filter`
+		// passes with it.
+		"clients/runtime-turn.ts": 30,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -825,6 +828,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dead-code-logger.ts": 3,
 		"clients/debug-handles.ts": 2,
 		"clients/debug-heap.ts": 7,
+		// 0 -> 2 (#2542 ask 3): the deferred-target set algebra moved out of
+		// runtime-turn.ts into its own owner module; this row carries the
+		// `node:path` import and the one `path.resolve` the key derivation needs.
+		"clients/deferred-test-targets.ts": 2,
 		// 32 -> 29 (#3428): the two hand-rolled madge cycle parses (three
 		// `path.resolve` calls and two `path:` members between them) folded into
 		// one shared `parseMadgeCycles` reader with one of each. Same senses,
@@ -1026,7 +1033,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-tool-result.ts": 19,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
-		"clients/runtime-turn.ts": 27,
+		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to
+		// clients/deferred-test-targets.ts, taking its one `path.resolve` with it.
+		"clients/runtime-turn.ts": 26,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/sanitize.ts": 2,

@@ -64,6 +64,11 @@ export function mergeDeferredTargets(
  * Apply {@link TEST_RUNNER_MAX_PERSISTED_TARGETS} to a merged list, keeping
  * the caller's own entries and shedding foreign rows first. `isOwn` is the
  * only session fact this pure function needs; the caller keeps the logging.
+ *
+ * The partition is a single loop rather than two `Array.prototype.filter`
+ * passes: this module is scanned by the glossary synonym-retirement census,
+ * and the fewer retired-identifier uses it adds, the fewer pins a rename has
+ * to chase.
  */
 export function boundDeferredTargets(
 	entries: readonly DeferredTestTarget[],
@@ -71,9 +76,11 @@ export function boundDeferredTargets(
 	isOwn: (entry: DeferredTestTarget) => boolean,
 ): DeferredTestTarget[] {
 	if (entries.length <= max) return [...entries];
-	const ordered = [
-		...entries.filter((entry) => !isOwn(entry)),
-		...entries.filter(isOwn),
-	];
-	return ordered.slice(-max);
+	const foreign: DeferredTestTarget[] = [];
+	const own: DeferredTestTarget[] = [];
+	for (const entry of entries) {
+		if (isOwn(entry)) own.push(entry);
+		else foreign.push(entry);
+	}
+	return [...foreign, ...own].slice(-max);
 }
