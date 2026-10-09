@@ -17,6 +17,10 @@ describe("real pi: out-of-root write notice and exemptions", () => {
 		mkdirSync(probeRoot, { recursive: true });
 		const outside = claimScratchDir(probeRoot, "outside-root-project");
 		const piTemp = mkdtempSync(path.join(os.tmpdir(), "pi-lens-real-harness-"));
+		const directTmpFile = path.join(
+			os.tmpdir(),
+			"pi-lens-real-harness-direct.ts",
+		);
 		mkdirSync(path.join(outside, "node_modules"));
 		try {
 			await withRealPi(
@@ -27,6 +31,10 @@ describe("real pi: out-of-root write notice and exemptions", () => {
 					env: {
 						REAL_PI_HARNESS_OUTSIDE_PROJECT: outside,
 						REAL_PI_HARNESS_PI_TEMP: piTemp,
+						REAL_PI_HARNESS_TMPDIR: os.tmpdir(),
+						TMPDIR: os.tmpdir(),
+						TMP: os.tmpdir(),
+						TEMP: os.tmpdir(),
 					},
 				},
 				async (pi) => {
@@ -34,7 +42,7 @@ describe("real pi: out-of-root write notice and exemptions", () => {
 						path.join(pi.homePath(), "pi-lens-data.ts"),
 						"fixture\n",
 					);
-					for (let turn = 0; turn < 5; turn++) {
+					for (let turn = 0; turn < 6; turn++) {
 						await pi.prompt(`write fixture ${turn}`);
 						const result = await pi.awaitToolResult("write");
 						expect(result).toMatchObject({ toolName: "write", isError: false });
@@ -55,6 +63,7 @@ describe("real pi: out-of-root write notice and exemptions", () => {
 						.degradations()
 						.filter((row) => row.kind === "tool-result-outside-project-root");
 					expect(rows).toHaveLength(1);
+					expect(JSON.stringify(rows)).not.toContain(directTmpFile);
 					expect(rows[0]?.subject).toBe(pi.projectPath());
 					const advisories = pi
 						.providerObservations()
@@ -65,9 +74,11 @@ describe("real pi: out-of-root write notice and exemptions", () => {
 					expect(JSON.stringify(advisories[0])).toContain(
 						`${outside}/target.ts`,
 					);
+					expect(JSON.stringify(advisories)).not.toContain(directTmpFile);
 				},
 			);
 		} finally {
+			removeTempDirSync(directTmpFile);
 			removeTempDirSync(outside);
 			removeTempDirSync(piTemp);
 		}
