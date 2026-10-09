@@ -21,6 +21,8 @@ const diagsResult = (
 	diags: unknown[],
 	extra: {
 		inconclusive?: boolean;
+		inconclusiveServerIds?: string[];
+		inconclusiveReason?: "notify-write" | "diagnostics-wait" | "mixed";
 		// #1470: the narrowed confirmation an aux cut off by the grace timer
 		// produces — the touch is NOT inconclusive, but it no longer speaks for
 		// the named servers.
@@ -513,6 +515,58 @@ describe("runner status/semantic edge cases", () => {
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("preserves answered auxiliary findings beside an inconclusive primary (#4219)", async () => {
+		// #4219: marksman can miss the diagnostics deadline while typos has already
+		// published real findings for the same bytes. The inconclusive verdict must
+		// not erase those answered diagnostics before the dispatcher can deliver them.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-4219-");
+		try {
+			const filePath = path.join(env.tmpDir, "README.md");
+			fs.writeFileSync(filePath, "A known mispeling and a seperat typo.\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 2,
+							message: "mispeling → misspelling",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 7 },
+								end: { line: 0, character: 16 },
+							},
+						},
+						{
+							severity: 2,
+							message: "seperat → separate",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 25 },
+								end: { line: 0, character: 32 },
+							},
+						},
+					],
+					{
+						inconclusive: true,
+						inconclusiveServerIds: ["marksman"],
+						inconclusiveReason: "diagnostics-wait",
+					},
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.diagnostics).toHaveLength(2);
+			expect(result.diagnostics.map((d) => d.tool)).toEqual(["typos", "typos"]);
+			expect(result.status).toBe("succeeded");
+			expect(result.unconfirmedServerIds).toEqual(["marksman"]);
 		} finally {
 			env.cleanup();
 		}

@@ -154,6 +154,7 @@ const lspRunner: RunnerDefinition = {
 		// one spawned server) — an empty `lspDiags` in that case is NOT a
 		// confirmed clean result and must not be reported as one (#570).
 		let diagnosticsInconclusive = false;
+		let inconclusiveServerIds: readonly string[] = [];
 		// #1470/#1493: server ids the touch carries no evidence for — an auxiliary
 		// whose push wait our aux grace timer cut off (#1470), or one that stayed
 		// silent with no stored publication for this content (#1493). The touch is
@@ -228,7 +229,13 @@ const lspRunner: RunnerDefinition = {
 			} else {
 				lspDiags = touched.diags;
 				diagnosticsInconclusive = touched.inconclusive === true;
-				unconfirmedServerIds = touchCoverageGap(touched);
+				inconclusiveServerIds = touched.inconclusiveServerIds ?? [];
+				unconfirmedServerIds = [
+					...new Set([
+						...touchCoverageGap(touched),
+						...(diagnosticsInconclusive ? inconclusiveServerIds : []),
+					]),
+				];
 				deferredServerIds = touched.deferredServerIds ?? [];
 			}
 		} catch (err) {
@@ -278,16 +285,11 @@ const lspRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		if (diagnosticsInconclusive) {
+		if (diagnosticsInconclusive && lspDiags.length === 0) {
 			// The touch ran and a client was ready, but the notify write and/or
-			// diagnostics wait hit their deadline before the server confirmed
-			// completion — `lspDiags` (even if non-empty) is not a trustworthy
-			// merged result. Same treatment as `!lspClientReady`: report
-			// "skipped" rather than "succeeded" with a possibly-incomplete
-			// diagnostics list, so the coverage notice flags the gap instead of
-			// the footer reading this as a confirmed clean/partial result (#570).
-			// Diagnostics that do arrive late still land in the client cache and
-			// surface on the next edit.
+			// diagnostics wait hit their deadline without any collected findings.
+			// With no answered diagnostics, report "skipped" so the coverage notice
+			// flags the gap instead of reading this as a confirmed clean result (#570).
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
