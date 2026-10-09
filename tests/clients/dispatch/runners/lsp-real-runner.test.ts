@@ -13,6 +13,7 @@ import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
 import {
 	initLSPConfig,
 	resetLSPConfigStateForTests,
+	getServersForFileWithConfig,
 } from "../../../../clients/lsp/config.js";
 import {
 	getLSPService,
@@ -161,7 +162,6 @@ d("LSP dispatch runner — real server (#873)", () => {
 					typos: {
 						name: "Fake auxiliary typos LSP",
 						extensions: [".real-lsp"],
-						role: "auxiliary",
 						command: process.execPath,
 						args: [fakeServerPath],
 						env: {
@@ -177,7 +177,11 @@ d("LSP dispatch runner — real server (#873)", () => {
 			"stale.real-lsp",
 			"old content with a primary error\n",
 		);
-
+		const auxiliary = getServersForFileWithConfig(filePath).find(
+			(server) => server.id === "typos",
+		);
+		if (!auxiliary) throw new Error("test typos server is not registered");
+		auxiliary.role = "auxiliary";
 		const initial = await lspRunner.run(ctx);
 		expect(
 			initial.diagnostics.some((d) => d.message.includes("stale primary")),
