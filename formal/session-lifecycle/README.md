@@ -678,8 +678,9 @@ design the code never shipped: `MutMarkerNoTtl`.
   60 s reaches it; the README's earlier note ("not modelled: no time") is this
   config. `demotedDiscard` still keeps the demoted session from taking the slot
   later (`HandoffOnce` holds in `H3MarkerTtl` after the late successor).
-- `AcceptedExpiredUnstarted` is the same residual for #4113's W0 interrupt: the
-  forward needs the marker to name the gap, so an expired gap loses the slot.
+- `OpenExpiredUnstarted` is an open witness for closed #4113's W0 interrupt:
+  the forward needs the marker to name the gap, so an expired gap loses the
+  slot. It needs a maintainer decision; it is not an accepted residual.
 - Not modelled: the clock (an expiry can fire at any point of the gap), the
   `session-successor-pending` degradation record (`subject: "expired"`, once),
   and expiry combined with registry or LSP writers.
@@ -707,9 +708,9 @@ in any order at any later step.
   guard accepted: an older run never overwrites a newer one), `NoOwnDropWidget`
   (no guard drops a verb of the newest run), `NoLostWidget` (a verb that landed
   is still shown after `/reload` and `/fork`, which carry the rows) and
-  `WidgetInLineage` (the rows are the live conversation's) across `/new`,
   `/reload`, `/fork`, quit and `pi --fork`, whose new process restarts the
-  order turn.
+  order turn. Master has no widget scope fence, so `WidgetInLineage` is kept
+  in the separate proposed `FixWidgetFenced` config.
 - `MutWidgetTieDrop`: `>` for `>=`. The second verb of every run is dropped.
   The tie is not a corner: `admitWidgetDiagnosticsWrite` and `recordRunner` make
   it the second verb's normal case, and the guard's doc comment pins it.
@@ -718,8 +719,8 @@ in any order at any later step.
 - `Pre3589WidgetForkReset`: `LegacyPolicy`, the fork start resets the rows and
   guards, so the parent's verdicts are lost. The truth the invariant reads is
   the design's table (`TargetPolicy`), whatever policy the config runs.
-- `Pre3824WidgetNoFence`: a verb with no captured scope lands after `/new` and
-  its row is in the new conversation's widget.
+- `OpenWidgetUnfenced`: an open #4220 witness: a verb with no captured scope
+  lands after `/new` and its row is in the new conversation's widget.
 - What the model does not see: the guard's key (one file), sidecar adoption at
   resume and launch (those rows are `reset` here, and the invariants only read
   the carrying transitions), and how the other guard's advance couples the two
@@ -746,7 +747,7 @@ other direction.
 - `H3StoreFences` holds both across `/new`, `/reload`, `/tree`, a subagent
   that starts and ends, and the four writers.
 - `Pre3824ReceiptUnfenced`, `Pre3824FixedUnfenced`, `Pre3824LatchUnfenced` and
-  `Pre3824RunnerUnfenced` each remove one fence (#3824, 4c7c4b4db).
+  `Pre3824RunnerUnfenced` each remove one fence (#3824, 5753d861e).
 - `OpenComplexityBaselineUnfenced` is a defect witness on master (F1.3), and
   `FixComplexityBaselineFenced` the proposed fence, not shipped.
 - `MutStoreBranchFence` fences the same writes at branch level, as the read
@@ -767,18 +768,19 @@ other direction.
 | Config | Models | Expect | States |
 |---|---|---|---|
 | `H3MarkerTtl` | #3668: a live successor, a successor that never starts and expiry; no start declined after the TTL; the slot taken only by its writer's replacement | pass | 10046 |
-| `H3MarkerTtlFileLess` | the same, file-less sessions | pass | 10046 |
+| `H3MarkerTtlFileLess` | a mixed file-backed/file-less population exercising the ticket path | pass | pending TLC rerun |
 | `MutMarkerNoTtl` | design alternative: a marker with no TTL; a start after the time is still declined | violated `ExpiredGapAdmits` | 11 |
 | `AcceptedLateSuccessor` | a successor slower than the TTL is demoted and loses the reads | violated `NoLostCarry` | 118 |
-| `AcceptedExpiredUnstarted` | an expired marker no longer names the gap, so the W0 shutdown forwards nothing | violated `NoLostActivation` | 33 |
+| `OpenExpiredUnstarted` | an expired marker no longer names the gap, so the W0 shutdown forwards nothing | violated `NoLostActivation` | pending TLC rerun |
 | `H3LspGenProcess` | #3755: one process generation; every fleet server has a live owner | pass | 99 |
 | `Mut3755GenPerEval` | pre-#3755: a re-evaluation restarts the generation | violated `FleetOwnersLive` | 73 |
 | `BlindMut3755GenPerEval` | the same mutant under `NoCrossSessionState` only | pass | 151 |
-| `H3WidgetToken` | the widget token across the transitions, two runs, two verbs | pass | 46211 |
+| `H3WidgetToken` | the widget token across the transitions, two runs, two verbs; master-shaped, no scope fence | pass | pending TLC rerun |
 | `MutWidgetTieDrop` | `>` for `>=` | violated `NoOwnDropWidget` | 11 |
 | `Pre555WidgetNoGuard` | no ordering guard | violated `ShowsNewest` | 15 |
 | `Pre3589WidgetForkReset` | the fork start resets the widget | violated `NoLostWidget` | 67 |
-| `Pre3824WidgetNoFence` | a retired scope's verb lands after `/new` | violated `WidgetInLineage` | 26 |
+| `OpenWidgetUnfenced` | a retired scope's verb lands after `/new` | violated `WidgetInLineage` | 26 |
+| `FixWidgetFenced` | proposed widget scope fence, not shipped | pass | pending TLC rerun |
 | `H3StoreFences` | the four stores fenced by the captured scope | pass | 237536 |
 | `Pre3824ReceiptUnfenced` | the receipt write unfenced | violated `StoreOwnersLive` | 23 |
 | `Pre3824FixedUnfenced` | `fixedThisTurn` unfenced | violated `StoreOwnersLive` | 23 |
@@ -792,13 +794,13 @@ other direction.
 |---|---|---|---|
 | `MutMarkerNoTtl` | #3668 | design alternative: 07f415501's marker without its 60 s bound | The primary's `/reload`; the marker's time passes; a subagent's `startup` is still declined. |
 | `AcceptedLateSuccessor` | #3668 | master, accepted | `/reload`; the marker expires; a subagent's start is primary; the real successor starts and is demoted. |
-| `AcceptedExpiredUnstarted` | #3668, #4113 | master, accepted | `/fork`; the marker expires; the fork's start is interrupted before pi-lens's handler (W0); nothing is forwarded; the inner reload's start misses the slot. |
+| `OpenExpiredUnstarted` | #4113 | master, open witness; maintainer decision needed | `/fork`; the marker expires; the fork's start is interrupted before pi-lens's handler (W0); nothing is forwarded; the inner reload's start misses the slot. |
 | `Mut3755GenPerEval` | #3755 (#3733, N4 of #3609) | pre-#3755 (35bcc9d5e): a generation counter per module evaluation | LSP work begins in generation 0; `/reload` retires the scope and the re-evaluated module restarts the counter at 0; the work lands and spawns a server for the retired scope. |
 | `MutWidgetTieDrop` | `WriteOrderingGuard` | design alternative: the guard's `token < last` as `token <= last` | One run's diagnostics verb lands; its runner verb arrives at the same token and is dropped. |
 | `Pre555WidgetNoGuard` | #555 class | pre-guard widget-state (cf83a0d42, before d8c5f64eb) | Two runs begin; the newer one's verb lands; the older one's lands over it. |
-| `Pre3589WidgetForkReset` | #3589 | pre-#3589 (fcf3f1c40): the fork start cleared the widget | A verb lands; `/fork`; the start resets the rows. |
-| `Pre3824WidgetNoFence` | #3824 class | a widget verb with no captured scope | A run begins; `/new`; the verb lands in the new conversation's widget. |
-| `Pre3824*Unfenced` | #3763, #3758 | pre-#3824 (4c7c4b4db): `recordMutationToolReceipt`, `fixedThisTurn.add`, `lastAnalyzedStateByFile.set` and `deferRunnerFindings` resolved the live store | A writer begins; `/new`; the writer lands in the new session's store (the latch: after its first turn started). |
+| `Pre3589WidgetForkReset` | #3589 | pre-#3589 (1e109b2fa^): the fork start cleared the widget | A verb lands; `/fork`; the start resets the rows. |
+| `OpenWidgetUnfenced` | #4220 | master: a widget verb has no captured scope | A run begins; `/new`; the verb lands in the new conversation's widget. |
+| `Pre3824*Unfenced` | #3763, #3758 | pre-#3824 (5753d861e): `recordMutationToolReceipt`, `fixedThisTurn.add`, `lastAnalyzedStateByFile.set` and `deferRunnerFindings` resolved the live store | A writer begins; `/new`; the writer lands in the new session's store (the latch: after its first turn started). |
 | `MutStoreBranchFence` | design alternative | the read guard's branch fence applied to coordinator stores | A writer begins; `/tree`; the live scope's own write is dropped. |
 | `OpenComplexityBaselineUnfenced` | F1.3 | master (49843ef09): `runtime.complexityBaselines.set` after the awaits in `clients/runtime-tool-call.ts`, no handle | A tool_call hook begins its baseline; `/new`; the baseline lands in the new session's map. |
 

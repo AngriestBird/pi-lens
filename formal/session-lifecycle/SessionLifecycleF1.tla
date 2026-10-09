@@ -12,8 +12,9 @@
 (*     behind its own WriteOrderingGuard; either may complete first, and   *)
 (*     whichever does advances BOTH guards to the pipeline's token         *)
 (*     (`admitWidgetDiagnosticsWrite`, `recordRunner`). The second verb    *)
-(*     therefore always arrives at a token EQUAL to its guard's, and only  *)
-(*     the guard's `>=` (a tie proceeds) admits it. A widget start's       *)
+(*     therefore arrives at a token equal to its guard's in this bounded     *)
+(*     model; the real pipeline can re-token mid-flight. The guard's `>=`  *)
+(*     (a tie proceeds) is still the tested behavior. A widget start's       *)
 (*     policy (`widgetStore`) resets the rows and both guards together:    *)
 (*     the fork start did before #3589.                                    *)
 (*  2. The coordinator and module stores that late tool_result writers     *)
@@ -29,7 +30,8 @@
 (*     writes the live store whenever it lands.                            *)
 (*                                                                         *)
 (* Parts of FixParts this module reads:                                    *)
-(*   "widgetFence"    a widget write drops once its scope retired          *)
+(*   "widgetFence"    a proposed shape: a widget write drops once its      *)
+(*                    scope retires; no such fence is on master           *)
 (*   "widgetStrict"   mutant: the guard drops a tie (`>` for `>=`)         *)
 (*   "widgetNoGuard"  mutant: no ordering guard (pre-#555 widget-state)    *)
 (*   "fenceReceipt", "fenceFixed", "fenceLatch", "fenceRunner"             *)
@@ -61,6 +63,8 @@ VARIABLES
     sdrop  \* ghost: a fence dropped a write of a live scope
 
 ext == <<ww, wv, gt, wm, wl, fdrop, sw, sc, sdrop>>
+\* WBegin packs two run identities into the write token; MaxSteps = 2 keeps
+\* that abstraction collision-free. Production uses a wider turn/index pack.
 varsF1 == <<vars, ext>>
 
 InitF1 ==
