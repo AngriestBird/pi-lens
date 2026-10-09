@@ -39,6 +39,9 @@ import {
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import { removeTempDirSync } from "./test-utils.js";
 
+// flake-shape: never-settling-wait — the timeout witness must hold a real
+// appendFile promise forever to prove shutdown proceeds at the bound.
+
 let tmpDir: string;
 let logFile: string;
 
