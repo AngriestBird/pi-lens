@@ -219,6 +219,29 @@ interface QueryBatch {
 	ownerOfPattern: number[];
 	/** The batch cache key: the rule set's identity for trap decay (#3678 F4). */
 	key: string;
+	/** Active scans keep the native query alive after cache invalidation. */
+	users: number;
+	retired: boolean;
+	disposed: boolean;
+}
+
+/**
+ * Consumer leases counted for one in-flight combined build (#4207 F9). A
+ * consumer counts here when it joins, because the batch it will scan does not
+ * exist yet; the build's publication section moves the count onto `users` in
+ * the same synchronous step that makes the batch visible.
+ */
+interface QueryBatchLease {
+	/** Consumers counted at join and not yet moved onto a batch. */
+	count: number;
+	/** The decided batch, `undefined` until the publication section runs. */
+	batch: QueryBatch | null | undefined;
+}
+
+/** One registered in-flight combined build per batch cache key. */
+interface QueryBatchBuild {
+	promise: Promise<QueryBatch | null>;
+	lease: QueryBatchLease;
 }
 
 interface GrammarDirResolutionDeps {
@@ -564,6 +587,12 @@ export class TreeSitterClient {
 	private queryBatchCache = new BoundedFifoMap<string, QueryBatch | null>(
 		TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES,
 	);
+	/** Concurrent callers share one native batch build per cache key. */
+	private queryBatchBuilds = new Map<string, QueryBatchBuild>();
+	/** Advances whenever a successful query input heal can invalidate a build. */
+	private queryBatchHealEpoch = 0;
+	/** Raw and batch cache keys represented by each bounded entry (#3834). */
+	private queryBatchInputs = new Map<string, Set<string>>();
 	private queryCacheCap(): number {
 		const value = Number.parseInt(
 			process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "",
@@ -597,13 +626,71 @@ export class TreeSitterClient {
 		for (const [, dropped] of evicted) dropped?.query?.delete?.();
 	}
 
-	private cacheQueryBatch(key: string, value: QueryBatch | null): void {
+	private cacheQueryBatch(
+		key: string,
+		value: QueryBatch | null,
+		inputKeys: Iterable<string> = [],
+	): void {
+		const replaced = this.queryBatchCache.get(key);
 		this.queryBatchCache.delete(key);
+		if (replaced) this.retireQueryBatch(replaced);
 		const evicted = this.queryBatchCache.setMaxEntries(
 			this.queryBatchCacheCap(),
 		);
 		evicted.push(...this.queryBatchCache.set(key, value));
-		for (const [, dropped] of evicted) dropped?.query?.delete?.();
+		for (const [evictedKey] of evicted)
+			this.queryBatchInputs.delete(evictedKey);
+		this.queryBatchInputs.set(key, new Set(inputKeys));
+		for (const [, dropped] of evicted) this.retireQueryBatch(dropped);
+	}
+
+	private disposeQueryBatch(batch: QueryBatch): void {
+		if (batch.disposed) return;
+		batch.disposed = true;
+		batch.query?.delete?.();
+	}
+
+	private retireQueryBatch(batch: QueryBatch | null): void {
+		if (!batch) return;
+		batch.retired = true;
+		if (batch.users === 0) {
+			this.disposeQueryBatch(batch);
+		} else {
+			incrementDegradationCount({
+				kind: "wasm-query-batch-disposal-deferred",
+				subject: "web-tree-sitter",
+				reason: "deferred batch disposal while a scan is active",
+			});
+		}
+	}
+
+	private retainQueryBatch(batch: QueryBatch): void {
+		batch.users++;
+	}
+
+	private releaseQueryBatch(batch: QueryBatch): void {
+		batch.users--;
+		if (batch.retired && batch.users === 0) this.disposeQueryBatch(batch);
+	}
+
+	/**
+	 * Move the leases counted at join onto the batch they were built for, and
+	 * mark the build decided (#4207 F9). Runs in the same synchronous section
+	 * that publishes the batch, so a batch is never visible to a heal without
+	 * its consumers' leases: the heal then defers disposal to the last release
+	 * instead of deleting the native Query under scans that are about to run it
+	 * and silently report zero findings. A later joiner reads `lease.batch` and
+	 * retains directly, because the counter is drained.
+	 */
+	private takeQueryBatchLeases(
+		lease: QueryBatchLease,
+		batch: QueryBatch | null,
+	): QueryBatch | null {
+		lease.batch = batch;
+		if (!batch) return null;
+		batch.users += lease.count;
+		lease.count = 0;
+		return batch;
 	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
 	private queryBatchLoadFailures = new Map<string, number>();
@@ -627,7 +714,7 @@ export class TreeSitterClient {
 	 * holds more than `WASM_TRAP_BUDGET + 1`. */
 	private trappedInputs = new Map<
 		string,
-		{ traps: number; by: string | undefined }
+		{ traps: number; by: string | undefined; source?: string | undefined }
 	>();
 	/** Distinct input keys that trapped (first trap) and have not healed, by
 	 * language. Process-lifetime. A key enters only on a trap, a first trap
@@ -711,7 +798,11 @@ export class TreeSitterClient {
 					});
 					return false;
 				}
-				this.trappedInputs.set(key, { traps: 1, by: input.caller });
+				this.trappedInputs.set(key, {
+					traps: 1,
+					by: input.caller,
+					source: input.languageId === "query" ? input.source : undefined,
+				});
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
 				incrementDegradationCount({
@@ -787,12 +878,28 @@ export class TreeSitterClient {
 	 * Only a success by the entry's first trapper decays it (#3678 F2, F4): a
 	 * healthy consumer says nothing about another consumer's trap.
 	 */
-	clearWasmInput(input: WasmInput | undefined): void {
+	clearWasmInput(
+		input: WasmInput | undefined,
+		internalBatchHeal = false,
+	): void {
 		if (!input || this.trappedInputs.size === 0) return;
 		const key = this.wasmInputKey(input);
-		if (this.trappedInputs.get(key)?.by === input.caller) {
+		const entry = this.trappedInputs.get(key);
+		const source = entry?.source;
+		if (entry?.by === input.caller) {
 			this.trappedInputs.delete(key);
 			this.grammarTrapInputs.get(input.languageId)?.delete(key);
+			if (!internalBatchHeal) this.queryBatchHealEpoch++;
+			// A batch that skipped this input (or cached null after it was charged)
+			// is no longer equivalent to a clean rebuild. Invalidate it before the
+			// healed entry becomes observable (#3834).
+			for (const [batchKey, batch] of this.queryBatchCache) {
+				const inputs = this.queryBatchInputs.get(batchKey);
+				if (!source || !inputs?.has(source)) continue;
+				this.queryBatchCache.delete(batchKey);
+				this.queryBatchInputs.delete(batchKey);
+				this.retireQueryBatch(batch);
+			}
 		}
 	}
 
@@ -2179,7 +2286,7 @@ export class TreeSitterClient {
 		}
 		const maxResults = options.maxResults ?? 50;
 
-		const batch = await this.compileQueryBatch(queryDefs, languageId);
+		const batch = await this.compileQueryBatch(queryDefs, languageId, true);
 		if (!batch) {
 			// Fallback: one walk per rule, preserving rule order.
 			const results: Array<{
@@ -2198,7 +2305,6 @@ export class TreeSitterClient {
 			}
 			return results;
 		}
-
 		const perQuery = new Map<number, StructuralMatch[]>();
 		await this.parseFileAndUse(
 			filePath,
@@ -2255,7 +2361,7 @@ export class TreeSitterClient {
 			// #3678 F4: the scanner and the dispatch runner run different rule
 			// sets under this one call site.
 			`runQueriesOnFile\0${batch.key}`,
-		);
+		).finally(() => this.releaseQueryBatch(batch));
 
 		const results: Array<{
 			queryDef: TreeSitterQuery;
@@ -2276,6 +2382,54 @@ export class TreeSitterClient {
 	private async compileQueryBatch(
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
+		retain = false,
+	): Promise<QueryBatch | null> {
+		const identity = crypto
+			.createHash("sha256")
+			.update(JSON.stringify(queryDefs))
+			.digest("hex");
+		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const cached = this.queryBatchCache.get(cacheKey);
+		if (cached !== undefined) {
+			this.queryBatchCache.delete(cacheKey);
+			this.queryBatchCache.set(cacheKey, cached);
+			if (retain && cached) this.retainQueryBatch(cached);
+			return cached;
+		}
+		const inFlight = this.queryBatchBuilds.get(cacheKey);
+		if (inFlight) {
+			// Lease rule (#4207 F9): a waiter counts its lease when it joins, not
+			// when the shared build resolves — a heal that lands between the
+			// publication and a late retain would otherwise dispose the native
+			// Query under every coalesced scan. A build that has already decided
+			// drained its counter, so the lease goes onto the batch directly.
+			if (retain) {
+				const decided = inFlight.lease.batch;
+				if (decided === undefined) inFlight.lease.count++;
+				else if (decided) this.retainQueryBatch(decided);
+			}
+			return inFlight.promise;
+		}
+
+		const lease: QueryBatchLease = { count: retain ? 1 : 0, batch: undefined };
+		const promise = this.compileQueryBatchOnce(queryDefs, languageId, lease);
+		const build: QueryBatchBuild = { promise, lease };
+		this.queryBatchBuilds.set(cacheKey, build);
+		try {
+			// The owner's lease is already counted in `lease`; the publication
+			// section moves it onto the batch, so no retain happens here.
+			return await promise;
+		} finally {
+			if (this.queryBatchBuilds.get(cacheKey) === build) {
+				this.queryBatchBuilds.delete(cacheKey);
+			}
+		}
+	}
+
+	private async compileQueryBatchOnce(
+		queryDefs: TreeSitterQuery[],
+		languageId: string,
+		lease: QueryBatchLease,
 	): Promise<QueryBatch | null> {
 		// Key on rule CONTENT, not just ids: the batch stores each queryDef (its
 		// message reaches diagnostics) and the compiled patterns. Rule ids are
@@ -2288,12 +2442,26 @@ export class TreeSitterClient {
 			.update(JSON.stringify(queryDefs))
 			.digest("hex");
 		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const inputKeys = [
+			cacheKey,
+			...queryDefs.map((queryDef) =>
+				this.getQueryCacheKey(
+					`raw:${queryDef.id}:${queryDef.query}`,
+					languageId,
+				),
+			),
+		];
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) {
 			this.queryBatchCache.delete(cacheKey);
 			this.queryBatchCache.set(cacheKey, cached);
-			return cached;
+			// Defensive: the caller checked this key in the same synchronous
+			// section, so nothing can have published in between. Settled anyway,
+			// because a counted lease that no batch receives would be released
+			// against another consumer's count (#4207 F9).
+			return this.takeQueryBatchLeases(lease, cached);
 		}
+		const healEpoch = this.queryBatchHealEpoch;
 
 		// A loadLanguage() failure is transient (offline lazy grammar fetch,
 		// transient mid-scan load error) — do NOT cache null for it, or every
@@ -2308,11 +2476,11 @@ export class TreeSitterClient {
 					`Batch: grammar for ${languageId} failed to load ${failures} times — caching miss`,
 				);
 				this.queryBatchLoadFailures.delete(cacheKey);
-				this.cacheQueryBatch(cacheKey, null);
+				this.cacheQueryBatch(cacheKey, null, inputKeys);
 			} else {
 				this.queryBatchLoadFailures.set(cacheKey, failures);
 			}
-			return null;
+			return this.takeQueryBatchLeases(lease, null);
 		}
 		this.queryBatchLoadFailures.delete(cacheKey);
 
@@ -2350,7 +2518,7 @@ export class TreeSitterClient {
 					const probe = new Query(language as any, queryDef.query);
 					patternCount = probe.patternCount();
 					probe.delete?.();
-					this.clearWasmInput(probeInput);
+					this.clearWasmInput(probeInput, true);
 				} catch (err) {
 					if (this.reportWasmAbort(err, probeInput)) return null;
 					if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
@@ -2381,8 +2549,16 @@ export class TreeSitterClient {
 					);
 					return null;
 				}
-				this.clearWasmInput(batchInput);
-				return { query, entries, ownerOfPattern, key: cacheKey };
+				this.clearWasmInput(batchInput, true);
+				return {
+					query,
+					entries,
+					ownerOfPattern,
+					key: cacheKey,
+					users: 0,
+					retired: false,
+					disposed: false,
+				};
 			} catch (err) {
 				if (this.reportWasmAbort(err, batchInput)) return null;
 				if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
@@ -2392,7 +2568,21 @@ export class TreeSitterClient {
 		};
 
 		const batch = await build();
-		if (!trapped) this.cacheQueryBatch(cacheKey, batch);
+		const published = !trapped && this.queryBatchHealEpoch === healEpoch;
+		// Lease rule (#4207 F9): the consumers counted at join take their leases
+		// before the batch becomes visible, in the same synchronous section that
+		// publishes it.
+		this.takeQueryBatchLeases(lease, batch);
+		if (published) {
+			this.cacheQueryBatch(cacheKey, batch, inputKeys);
+		} else {
+			// Disposal rule (#4207 F10): a batch this build does not publish is
+			// unreachable through the cache, so retire it here and let the last
+			// consumer's release free the native Query. Without this, every
+			// epoch-skipped or trapped build leaks one Query for the process
+			// lifetime, and nothing the process reclaims bounds the count.
+			this.retireQueryBatch(batch);
+		}
 		return batch;
 	}
 
