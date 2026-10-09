@@ -1526,6 +1526,8 @@ export type DegradationKind =
 	| "tool-cwd-resolution"
 	/** A loader request named a configured-disabled tool. */
 	| "tool-disabled"
+	/** A project edit was outside the session root and skipped analysis (#4218). */
+	| "tool-result-outside-project-root"
 	/** #3612: a lazy-tool activation arrived before its activation's session scope began. */
 	| "tool-set-scope-unavailable"
 	/**
@@ -1848,19 +1850,21 @@ export function recordDegradation(record: DegradationRecord): boolean {
 }
 
 /** Record at most once per kind/subject during the current session. */
-export function recordDegradationOnce(record: DegradationRecord): void {
+export function recordDegradationOnce(record: DegradationRecord): boolean {
 	try {
 		const kind = boundedKind(record.kind);
 		const subject = subjectForLedger(record.subject);
 		const key = `${kind}\0${subject}`;
-		if (onceKeys.has(key)) return;
+		if (onceKeys.has(key)) return false;
 		onceKeys.add(key);
 		if (recordDegradation({ kind, subject, reason: record.reason })) {
 			logDurableDegradation(kind, subject, 1, record.metadata, record.code);
 		}
+		return true;
 	} catch (error) {
 		debugLedgerFailure("record-once", error);
 		// Telemetry must never break the observed path.
+		return false;
 	}
 }
 

@@ -3,9 +3,14 @@
 // production handleToolResult path and pipeline boundary are in-process.
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import {
+	_resetAgentNudgeForTests,
+	consumeAgentNudge,
+} from "../../clients/agent-nudge.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import {
 	MAX_PENDING_CASCADE_RUNS,
@@ -30,7 +35,11 @@ import {
 	clearFormatterRuntimeState,
 	getFormattersForFile,
 } from "../../clients/formatters.js";
-import { getProjectIgnoreMatcher } from "../../clients/file-utils.js";
+import {
+	getGlobalPiLensDir,
+	getProjectDataDir,
+	getProjectIgnoreMatcher,
+} from "../../clients/file-utils.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	getVerifiedPathAttributionGuessCount,
@@ -91,6 +100,210 @@ beforeEach(() => {
 	requestBootstrapClients.mockClear();
 	readdirMock.mockImplementation(realReaddir);
 	readdirMock.mockClear();
+	_resetAgentNudgeForTests();
+});
+
+it("notices once when an edit is outside the session root (#4218)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4218-outside-root-");
+	try {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const outsidePath = path.join(env.tmpDir, "..", "capture", "outside.ts");
+		fs.mkdirSync(path.dirname(outsidePath), { recursive: true });
+		fs.writeFileSync(outsidePath, "export const value = 1;\n");
+
+		for (let i = 0; i < 10; i++)
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: outsidePath },
+					content: [{ type: "text", text: "ok" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+		expect(
+			getDegradationSummary().filter(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			),
+		).toHaveLength(1);
+		expect(
+			consumeAgentNudge(undefined, runtime.sessionScope)?.messages,
+		).toEqual([
+			expect.objectContaining({
+				content: expect.stringContaining(outsidePath),
+			}),
+		]);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		env.cleanup();
+	}
+});
+
+it("keeps intended vendor skips silent (#4218)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4218-vendor-silent-");
+	try {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const vendorPath = path.join(env.tmpDir, "node_modules", "pkg", "index.ts");
+		fs.mkdirSync(path.dirname(vendorPath), { recursive: true });
+		fs.writeFileSync(vendorPath, "export const value = 1;\n");
+
+		await handleToolResult({
+			event: {
+				toolName: "edit",
+				input: { path: vendorPath },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+
+		expect(
+			getDegradationSummary().some(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			),
+		).toBe(false);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		env.cleanup();
+	}
+});
+
+it("classifies outside-root path families through the real tool-result seam (#4230)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4230-path-families-");
+	const previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(
+		path.dirname(env.tmpDir),
+		`pi-lens-4230-data-${process.pid}`,
+	);
+	try {
+		const projectDataPath = path.join(
+			getProjectDataDir(env.tmpDir),
+			"cache.json",
+		);
+		const cases = [
+			[
+				"external node_modules",
+				path.join(env.tmpDir, "..", "node_modules", "pkg", "index.ts"),
+				false,
+			],
+			[
+				"external vendor",
+				path.join(env.tmpDir, "..", "vendor", "pkg", "index.ts"),
+				false,
+			],
+			[
+				"external venv",
+				path.join(env.tmpDir, "..", ".venv", "lib", "index.py"),
+				false,
+			],
+			[
+				"external site-packages",
+				path.join(env.tmpDir, "..", "site-packages", "pkg.py"),
+				false,
+			],
+			[
+				"external bower components",
+				path.join(env.tmpDir, "..", "bower_components", "pkg", "index.js"),
+				false,
+			],
+			["pi-lens project cache", projectDataPath, false],
+			[
+				"pi-lens global home",
+				path.join(getGlobalPiLensDir(), "cache.json"),
+				false,
+			],
+			[
+				"pi home",
+				path.join(os.homedir(), ".pi", "agent", "sessions.jsonl"),
+				false,
+			],
+			[
+				"pi-agent scratch",
+				path.join(os.tmpdir(), "pi-agent-4230", "tool.tmp"),
+				false,
+			],
+			[
+				"pi session-share scratch",
+				path.join(os.tmpdir(), "pi-share-4230", "session.html"),
+				false,
+			],
+			[
+				"pi external-editor scratch",
+				path.join(os.tmpdir(), "pi-editor-4230", "buffer.txt"),
+				false,
+			],
+			[
+				"pi WSL clipboard scratch",
+				path.join(os.tmpdir(), "pi-wsl-clip-4230.txt"),
+				false,
+			],
+			[
+				"generic pi output file",
+				path.join(os.tmpdir(), "tool-output-4230-abcdef.txt"),
+				false,
+			],
+			[
+				"ordinary tmp project file",
+				path.join(os.tmpdir(), "capture", "lib", "x.ts"),
+				true,
+			],
+			[
+				"ordinary home project file",
+				path.join(os.homedir(), "other-project", "src", "a.ts"),
+				true,
+			],
+		] as const;
+
+		for (const [label, filePath, shouldNotify] of cases) {
+			resetDegradationLedger();
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					content: [{ type: "text", text: "ok" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+			const notified = getDegradationSummary().some(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			);
+			expect(notified, label).toBe(shouldNotify);
+			const advisory = consumeAgentNudge(undefined, runtime.sessionScope);
+			if (shouldNotify) expect(advisory).toBeDefined();
+			else expect(advisory).toBeUndefined();
+		}
+	} finally {
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = previousDataDir;
+		env.cleanup();
+	}
 });
 
 it("does not dispatch an edit when analyzer bootstrap is unavailable (#2939 M9)", async () => {
