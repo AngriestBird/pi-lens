@@ -75,12 +75,13 @@ export function boundDeferredTargets(
 	max: number,
 	isOwn: (entry: DeferredTestTarget) => boolean,
 ): DeferredTestTarget[] {
-	if (entries.length <= max) return [...entries];
 	const foreign: DeferredTestTarget[] = [];
 	const own: DeferredTestTarget[] = [];
 	for (const entry of entries) {
 		if (isOwn(entry)) own.push(entry);
 		else foreign.push(entry);
 	}
-	return [...foreign, ...own].slice(-max);
+	const ordered = [...foreign, ...own];
+	if (ordered.length <= max) return ordered;
+	return ordered.slice(-max);
 }
