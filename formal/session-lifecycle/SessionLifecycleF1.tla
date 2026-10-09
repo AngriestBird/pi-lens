@@ -153,6 +153,7 @@ WLand(i, k) ==
            fenced == Has("widgetFence") /\ st[w.o] # "live"
            pass == Pass(w.tk, gt[k])
            left2 == w.left \ {k}
+           newest == \A j \in 1..2 : ww[j].pc = "idle" \/ ww[j].tk <= w.tk
        IN
        /\ ww' = [ww EXCEPT ![i] = [w EXCEPT !.left = left2,
                                     !.pc = IF left2 = {} THEN "done" ELSE "flight"]]
@@ -166,7 +167,7 @@ WLand(i, k) ==
                                         ![k2] = IF Pass(w.tk, gt[k2]) THEN w.tk
                                                 ELSE gt[k2]]
                     /\ UNCHANGED fdrop
-               ELSE /\ fdrop' = (fdrop \/ \A j \in 1..2 : j <= i \/ ww[j].pc = "idle")
+               ELSE /\ fdrop' = (fdrop \/ newest)
                     /\ UNCHANGED <<wv, wm, wl, gt>>
     /\ UNCHANGED <<vars, sw, sc, sdrop>>
 
