@@ -71,7 +71,10 @@ import {
 	hasPendingObservation,
 	OBSERVED_TURN_BUDGET_MS,
 } from "../clients/observed-mutation.js";
-import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
+import {
+	_resetSessionLifecycleForTests,
+	SUCCESSOR_PENDING_TTL_MS,
+} from "../clients/session-lifecycle.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
@@ -2997,6 +3000,47 @@ describe("#3881 an interrupted session_start hands on the slot left for it", () 
 			});
 		}
 	}
+
+	it("stashes activations when an unstarted fork is interrupted after the successor marker expires (#4236)", async () => {
+		let runtime: AgentSessionRuntime | undefined;
+		let inner: Promise<void> | undefined;
+		let armed = false;
+		const reloadAfterExpiry = (pi: ExtensionAPI) => {
+			pi.on("session_start", (event) => {
+				if (!armed || (event as { reason?: string }).reason !== "fork" || inner)
+					return;
+				// The real fork successor has not entered pi-lens's handler yet.
+				// Let its named marker expire, then interrupt this start at W0.
+				vi.advanceTimersByTime(SUCCESSOR_PENDING_TTL_MS);
+				inner = new Promise<void>((resolve, reject) =>
+					queueMicrotask(() => runtime!.session.reload().then(resolve, reject)),
+				);
+			});
+		};
+		vi.useFakeTimers();
+		try {
+			runtime = await startRuntime(
+				SessionManager.create(cwd, sessionsDir),
+				[],
+				[reloadAfterExpiry],
+			);
+			const c = conversation(runtime);
+			c.user("prompt 1");
+			c.done();
+			await activateTools(runtime, "act", ["ast_grep_search"]);
+			const u2 = c.user("prompt 2");
+			c.done();
+			armed = true;
+
+			await runtime.fork(u2);
+			expect(inner).toBeDefined();
+			await inner;
+
+			expect(activeSituational(runtime)).toEqual(["ast_grep_search"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	/**
 	 * #4113 verify X1 (R2, the reviewer's PR20): a gap subagent resumes the
