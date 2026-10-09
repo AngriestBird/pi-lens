@@ -27,12 +27,33 @@ describe("analysis-root seam", () => {
 		const env = setupTestEnvironment("pi-lens-analysis-root-");
 		environments.push(env);
 		const sessionFile = path.join(env.tmpDir, "src", "file.ts");
-		const adoptedFile = path.join(env.tmpDir, "..", "other-project", "file.ts");
+		const adoptedRoot = path.join(env.tmpDir, "..", "other-project");
+		fs.mkdirSync(adoptedRoot, { recursive: true });
+		fs.writeFileSync(path.join(adoptedRoot, "package.json"), "{}\n");
+		const adoptedFile = path.join(adoptedRoot, "file.ts");
 
 		expect(resolveAnalysisRoot(sessionFile, env.tmpDir)).toBe("session");
 		expect(resolveAnalysisRoot(adoptedFile, env.tmpDir)).toBe("adopted");
 		expect(resolveAnalysisRoot(env.tmpDir, env.tmpDir)).toBe("none");
 		expect(canWriteAnalysisRoot("adopted")).toBe(false);
+	});
+
+	it("requires a marker and refuses session ancestors", () => {
+		// Recurrence: an arbitrary out-of-root file must not turn its containing
+		// directory or a parent of the session into an analysis project.
+		const env = setupTestEnvironment("pi-lens-analysis-root-marker-");
+		environments.push(env);
+		const unmarked = path.join(env.tmpDir, "..", "unmarked", "file.ts");
+		const markedRoot = path.join(env.tmpDir, "..", "marked");
+		fs.mkdirSync(markedRoot, { recursive: true });
+		fs.writeFileSync(path.join(markedRoot, "pyproject.toml"), "[project]\n");
+		const marked = path.join(markedRoot, "src", "file.py");
+
+		expect(resolveAnalysisRoot(unmarked, env.tmpDir)).toBe("none");
+		expect(resolveAnalysisRoot(marked, env.tmpDir)).toBe("adopted");
+		expect(resolveAnalysisRoot(path.dirname(env.tmpDir), env.tmpDir)).toBe(
+			"none",
+		);
 	});
 
 	it("does not write turn-state for an adopted root", () => {

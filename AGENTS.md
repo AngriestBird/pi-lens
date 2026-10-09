@@ -32,6 +32,12 @@ writes, dispatches LSP and CLI runners, stores diagnostics, and exposes pi and
 MCP tools. The host adapters are `index.ts` and `mcp/server.ts`; internal work
 flows through `clients/lens-engine.ts` or the appropriate client seam.
 
+Analysis-root invariant: `clients/analysis-root.ts` is the sole classifier for
+out-of-session edits. A marked project may be adopted for LSP and per-file
+linters, but adopted roots are separate from session roots, capped at two with
+early idle eviction, and never receive session bookkeeping, whole-project
+scanners, turn-end tests, or project-local executables under unknown pi trust.
+
 The repository ships compiled JavaScript. TypeScript sources are authoritative;
 compiled twins are generated and must not be edited by hand.
 
