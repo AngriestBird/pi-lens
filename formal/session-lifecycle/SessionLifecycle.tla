@@ -114,6 +114,17 @@
 (*   "nameAtShutdown"    #3855 r5 (merged): the naming site binds a fresh  *)
 (*                       ticket to a file-less reload/fork session's       *)
 (*                       manager that carries none, in every window        *)
+(*   "markerTtl"         #3668 (F1 of #3803): the successor-pending marker *)
+(*                       expires. MarkerExpire (a nondeterministic step,   *)
+(*                       no clock) says SUCCESSOR_PENDING_TTL_MS elapsed;  *)
+(*                       with this part every start that reaches an        *)
+(*                       expired gap classifies primary, as the code does  *)
+(*                       (successorStillPending). Without it the marker    *)
+(*                       never expires, a rejected design alternative      *)
+(*   "perEvalSvc"        #3755 (F1): the LSP service generation is a       *)
+(*                       counter of each entry-module evaluation, so a     *)
+(*                       /reload that re-evaluates restarts it at 0        *)
+(*                       (MutGenPerEval); merged is one process counter    *)
 (*   "bindInterrupted"   #3855 r4: a forward binds the interrupted scope's *)
 (*                       ticket when its manager carries none (an in-memory*)
 (*                       /new or startup), so no reload gap is named by no *)
@@ -293,7 +304,10 @@ NoSlot == [has |-> FALSE, from |-> 0, tk |-> 0, reason |-> "-", file |-> "-",
 \* A hand-off key (startKey): a session file, or, file-less, the ticket bound
 \* to the session manager; NoKey when pi links nothing.
 NoKey  == [f |-> "-", t |-> 0]
-NoPend == [k |-> "none", from |-> 0, file |-> "-", target |-> "-", key |-> NoKey]
+\* `exp` is the marker's clock (#3668, F1 of #3803): TRUE once its TTL ran out.
+\* It is a field of the marker, so a replacement's new marker starts at FALSE.
+NoPend == [k |-> "none", from |-> 0, file |-> "-", target |-> "-", key |-> NoKey,
+           exp |-> FALSE]
 NoSpend == [k |-> "none", from |-> 0, file |-> "-", key |-> NoKey]
 
 \* #3855 r2 (successorStartKey): the key a primary shutdown of scope p names
@@ -613,7 +627,7 @@ RetireTo(k, tgt, tag) ==
                         ELSE wr[x]]
                 ELSE wr
        /\ pend' = [k |-> k, from |-> p, file |-> sess[p], target |-> tgt,
-                    key |-> NamedKey(k, p, succ)]
+                    key |-> NamedKey(k, p, succ), exp |-> FALSE]
        /\ forking' = "no"
        /\ steps' = steps + 1
        /\ used' = used \cup {tag}
@@ -677,6 +691,16 @@ BeginKey ==
 Admits(key) == key = pend.key
                \/ (Has("keylessFailSafe") /\ key = NoKey /\ pend.key.t # 0)
 
+\* #3668 (F1 of #3803): the marker's TTL has run out, so a start in the gap is
+\* not held to the named pair. Time is one step, MarkerExpire, which sets the
+\* marker's `exp`; with no "markerTtl" the flag is only the ghost "time
+\* passed" and the marker still declines (`successorStillPending`'s expiry,
+\* clients/session-lifecycle.ts).
+Expired == pend.exp
+Honored == Has("markerTtl") /\ Expired
+\* Ghost for ExpiredGapAdmits: a start declined after the TTL ran out.
+LateDecline(declined) == IF Expired /\ declined THEN {"declinedLate"} ELSE {}
+
 \* The real successor's start is declined: round 1's stale note, or, under
 \* #3855 r2, its own key is not the one its predecessor's shutdown named.
 Declines == R1Declines \/ (Has("namedSuccessor") /\ ~Admits(BeginKey))
@@ -731,12 +755,18 @@ Begin ==
           THEN \E reEval \in BOOLEAN :
                    evalTurn' = IF reEval THEN 0 ELSE evalTurn
           ELSE UNCHANGED evalTurn
+       \* #3755 (MutGenPerEval): a per-evaluation LSP generation restarts with
+       \* the re-evaluated entry module.
+       /\ IF k = "reload" /\ LspOn /\ Has("perEvalSvc")
+          THEN \E reEvalSvc \in BOOLEAN :
+                   svc' = IF reEvalSvc THEN 0 ELSE svc
+          ELSE UNCHANGED svc
        /\ resets' = [resets EXCEPT ![t] = 1]
        /\ predOf' = [predOf EXCEPT ![t] = pend.from]
        /\ pend' = NoPend
        /\ subBorn' = Born(t, pend.from)
     /\ UNCHANGED <<ep, why, forking, side, sideAct, wr, entry, intent,
-                   svc, fleet, turn, begun, turns, procTurn, wgDone, lastTok,
+                   fleet, turn, begun, turns, procTurn, wgDone, lastTok,
                    prevMax, ownDrop, recorded, dupDone, landed, reads, steps,
                    used, acts, advOut, advDrop, notes, spend, userDeclined, fwd, preScope>>
 
@@ -839,6 +869,10 @@ InterruptAt(w) ==
            \* gap's name (pend.k either way).
            fwdOn == Has("forwardUnadopted")
                     /\ (w # "unstarted" \/ Has("forwardUnstarted"))
+                    \* A W0 shutdown reads the gap's name from the marker
+                    \* (namedSuccessorReason), which an expired marker no
+                    \* longer gives (#3668).
+                    /\ ~(w = "unstarted" /\ Honored)
            left == SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
            \* SameMgr for t: its start kept pend.from's manager.
            keeps == k \in {"reload", "fork", "clone"} /\ (k = "reload" \/ f \in FileLess)
@@ -875,7 +909,7 @@ InterruptAt(w) ==
        \* successorStartKey reads after the forward: the ticket on the
        \* interrupted start's manager (ikey).
        /\ pend' = [k |-> "reload", from |-> t, file |-> f, target |-> "-",
-                    key |-> ikey]
+                    key |-> ikey, exp |-> FALSE]
        /\ subBorn' = Born(t, pend.from)
        /\ fwd' = IF Has("forwardUnadopted") THEN fwd \cup {t} ELSE fwd
        /\ preScope' = IF pre THEN preScope \cup {t} ELSE preScope
@@ -970,22 +1004,31 @@ IdleReset ==
 SecStart ==
     /\ "SecStart" \in Transitions /\ steps < MaxSteps /\ "secStart" \notin used
     /\ pend.k # "quit"
-    /\ LET t == nxt IN
+    /\ LET t == nxt
+           gap == primary = 0 /\ pend.k # "none"
+           \* #3668: an expired marker no longer declines the start, so it
+           \* registers as the primary (`decideSessionStart`).
+           asPrimary == gap /\ Honored
+       IN
        /\ st' = [st EXCEPT ![t] = "live"]
-       /\ role' = [role EXCEPT ![t] = "secondary"]
+       /\ role' = [role EXCEPT ![t] = IF asPrimary THEN "primary" ELSE "secondary"]
        /\ sess' = [sess EXCEPT ![t] = "S"]
        /\ lin' = [lin EXCEPT !["S"] = {t}]
        /\ nxt' = t + 1
+       /\ primary' = IF asPrimary THEN t ELSE primary
+       /\ last' = IF asPrimary THEN t ELSE last
+       /\ resets' = IF asPrimary THEN [resets EXCEPT ![t] = 1] ELSE resets
        /\ subBorn' = subBorn \cup {t}
        /\ LET takes == ~Has("consumeOnMatch") /\ slot.has IN
           /\ slot' = IF takes THEN NoSlot ELSE slot
           /\ taken' = IF takes THEN taken \cup {[by |-> t, from |-> slot.from]}
                       ELSE taken
-    /\ steps' = steps + 1 /\ used' = used \cup {"secStart"}
-    /\ UNCHANGED <<ep, why, primary, last, pend, forking, branch, cell, imp,
+       /\ steps' = steps + 1
+       /\ used' = used \cup {"secStart"} \cup LateDecline(gap /\ ~asPrimary)
+    /\ UNCHANGED <<ep, why, pend, forking, branch, cell, imp,
                    side, sideAct, wr, entry, intent, reg, svc,
                    fleet, turn, begun, turns, procTurn, evalTurn, wgTok,
-                   wgDone, lastTok, prevMax, ownDrop, recorded, resets, dupDone,
+                   wgDone, lastTok, prevMax, ownDrop, recorded, dupDone,
                    landed, reads, predOf, lzV, adV, notes, spend, userDeclined, fwd, preScope>>
 
 \* #3855 verify r2 (probe PR8): an SDK subagent's FIRST bind with a
@@ -1001,10 +1044,11 @@ SecBind(k) ==
            key == IF "S" \in FileLess THEN NoKey ELSE [f |-> "S", t |-> 0]
            asPrimary ==
                /\ primary = 0
-               /\ IF Has("namedSuccessor")
-                  THEN pend.k \in {"new", "resume", "fork", "clone", "reload"}
-                       /\ SR(pend.k) = k /\ Admits(key)
-                  ELSE TRUE
+               /\ \/ Honored
+                  \/ IF Has("namedSuccessor")
+                     THEN pend.k \in {"new", "resume", "fork", "clone", "reload"}
+                          /\ SR(pend.k) = k /\ Admits(key)
+                     ELSE TRUE
        IN
        /\ st' = [st EXCEPT ![t] = "live"]
        /\ role' = [role EXCEPT ![t] = IF asPrimary THEN "primary" ELSE "secondary"]
@@ -1015,7 +1059,9 @@ SecBind(k) ==
        /\ last' = IF asPrimary THEN t ELSE last
        /\ resets' = IF asPrimary THEN [resets EXCEPT ![t] = 1] ELSE resets
        /\ subBorn' = subBorn \cup {t}
-    /\ steps' = steps + 1 /\ used' = used \cup {"secStart"}
+       /\ used' = used \cup {"secStart"}
+                    \cup LateDecline(primary = 0 /\ pend.k # "none" /\ ~asPrimary)
+    /\ steps' = steps + 1
     /\ UNCHANGED <<ep, why, pend, forking, branch, cell, imp, slot, taken,
                    side, sideAct, wr, entry, intent, reg, svc, fleet, turn,
                    begun, turns, procTurn, evalTurn, wgTok, wgDone, lastTok,
@@ -1099,11 +1145,12 @@ SecUp ==
            gap == primary = 0
            asPrimary ==
                /\ gap
-               /\ CASE Has("namedSuccessor") ->
-                        pend.k \in {"new", "resume", "fork", "clone", "reload"}
-                        /\ SR(pend.k) = k /\ Admits(spend.key)
-                    [] Has("inheritRole") -> spend.key \notin notes
-                    [] OTHER -> TRUE
+               /\ \/ Honored
+                  \/ CASE Has("namedSuccessor") ->
+                           pend.k \in {"new", "resume", "fork", "clone", "reload"}
+                           /\ SR(pend.k) = k /\ Admits(spend.key)
+                       [] Has("inheritRole") -> spend.key \notin notes
+                       [] OTHER -> TRUE
            nb == CASE k = "reload" -> branch[sess[s]]
                    [] k = "fork" -> ForkBranch(branch[sess[s]])
                    [] OTHER -> branch[f]
@@ -1155,10 +1202,11 @@ SecUp ==
        /\ spend' = NoSpend
        /\ subBorn' = Born(t, s)
        /\ userDeclined' = (userDeclined \/ (gap /\ ~asPrimary /\ s \notin subBorn))
+       /\ used' = used \cup LateDecline(gap /\ pend.k # "none" /\ ~asPrimary)
     /\ UNCHANGED <<ep, why, pend, forking, side, sideAct, wr, entry, intent,
                    reg, svc, fleet, turn, begun, turns, procTurn, evalTurn,
                    wgTok, wgDone, lastTok, prevMax, ownDrop, recorded, dupDone,
-                   landed, reads, acts, advOut, advDrop, steps, used, fwd, preScope>>
+                   landed, reads, acts, advOut, advDrop, steps, fwd, preScope>>
 
 \* #4106 (V7 of #3855): the gap subagent's own /new start (SecDown(new) done,
 \* its SecUp not yet) is interrupted by its own /reload before pi-lens's start
@@ -1180,7 +1228,9 @@ SecRoleless ==
            t2 == nxt + 1
            f == spend.file
            own == IF f \in FileLess THEN NoKey ELSE [f |-> f, t |-> 0]
-           asPrimary == ~Has("rolelessKey") \/ own = pend.key
+           \* An expired marker reads as an unnamed gap: the role-less shutdown
+           \* fails safe to primary (`noteSessionShutdown`, #4106).
+           asPrimary == ~Has("rolelessKey") \/ own = pend.key \/ Honored
        IN
        /\ st' = [st EXCEPT ![t] = "retired", ![t2] = "live"]
        /\ why' = [why EXCEPT ![t] = "reload"]
@@ -1195,12 +1245,33 @@ SecRoleless ==
        /\ predOf' = [predOf EXCEPT ![t] = spend.from, ![t2] = t]
        /\ subBorn' = subBorn \cup {t, t2}
        /\ spend' = NoSpend
-    /\ steps' = steps + 1 /\ used' = used \cup {"secRoleless"}
+       /\ used' = used \cup {"secRoleless"} \cup LateDecline(~asPrimary)
+    /\ steps' = steps + 1
     /\ UNCHANGED <<ep, pend, forking, branch, cell, imp, slot, taken, side,
                    sideAct, wr, entry, intent, reg, svc, fleet, turn, begun,
                    turns, procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
                    ownDrop, recorded, dupDone, landed, reads, lzV, adV, notes,
                    userDeclined, fwd, preScope>>
+
+\* #3668 (F1 of #3803): the successor-pending marker's TTL runs out
+\* (SUCCESSOR_PENDING_TTL_MS, `successorStillPending`). Time is not modelled,
+\* so this is a nondeterministic step, once per marker, while a primary
+\* replacement is pending and nothing is registered. The marker names nothing
+\* after it: with "markerTtl" a start in the gap classifies primary, whatever
+\* its reason and key (Honored). The real successor arriving later is then a
+\* secondary behind that start (AcceptedLateSuccessor).
+MarkerExpire ==
+    /\ "MarkerExpire" \in Transitions /\ ~Expired
+    /\ primary = 0 /\ pend.k \in {"new", "resume", "fork", "clone", "reload"}
+    /\ pend' = [pend EXCEPT !.exp = TRUE]
+    /\ used' = used \cup {"expired"}
+    /\ UNCHANGED <<st, role, sess, ep, why, primary, last, nxt, forking,
+                   branch, cell, imp, lin, slot, taken, side, sideAct, wr,
+                   entry, intent, reg, svc, fleet, turn, begun, turns,
+                   procTurn, evalTurn, wgTok, wgDone, lastTok, prevMax,
+                   ownDrop, recorded, resets, dupDone, landed, reads, predOf,
+                   lzV, adV, steps, notes, spend, subBorn, userDeclined, fwd,
+                   preScope>>
 
 \* #3855 r1: a note is evicted over the cap. With one modelled subagent the
 \* cap is never reached by its own notes, so this models the unmodelled
@@ -1709,6 +1780,7 @@ Next ==
     \/ SecUp /\ UNCHANGED m4V
     \/ SecRoleless /\ UNCHANGED m4V
     \/ Evict /\ UNCHANGED m4V
+    \/ MarkerExpire /\ UNCHANGED m4V
     \/ Dup /\ UNCHANGED <<r2V, m4V>>
     \/ TurnStart /\ UNCHANGED <<r2V, m4V>>
     \/ SecTurn /\ UNCHANGED <<r2V, m4V>>
@@ -1898,6 +1970,22 @@ NoLostAdvisory ==
                    \/ \E x \in advOut : x.o = d.o
                    \/ \E d2 \in advDrop : d2.o = d.o /\ (d2.why # "reload" \/ d2.late)
 
+\* #3668 (F1 of #3803): once the marker's TTL ran out, no start in the gap is
+\* declined as "not the successor": a marker that never expired would leave the
+\* process with no primary for as long as the successor does not come (the
+\* #2129 F3 starvation the TTL bounds).
+ExpiredGapAdmits == "declinedLate" \notin used
+
+\* NoLostCarry for a conversation whose successor started inside the marker's
+\* TTL: the late successor of AcceptedLateSuccessor is the accepted loss, so a
+\* behaviour in which the marker ever expired is exempt.
+NoLostCarryUntilExpiry == "expired" \in used \/ NoLostCarry
+
+\* #3755 (F1 of #3803): every LSP server in the fleet belongs to a live scope.
+\* NoCrossSessionState compares a server's generation with the service's, so a
+\* per-evaluation generation that repeats a value is invisible to it
+\* (MutGenPerEval passed it); the owner is the discriminator.
+FleetOwnersLive == \A srv \in fleet : st[srv.o] = "live"
 \* M4, #4112: a parked cut-advisory item is shown only by the scope that parked
 \* it. A parked entry is never carried across a replacement (`resetForSession`
 \* clears the map), and the lane's key is the turn's session, so a concurrent
