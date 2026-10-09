@@ -559,6 +559,8 @@ the surface they bite; each block loads only when its trigger applies.
     its named interrupted successor only for the fixed retention window in
     `clients/session-lifecycle.ts`; the shared slot retires at that boundary
     and records its dropped activation count before releasing the payload.
+    Its test-only pending-window override is accepted only in a Vitest process;
+    production keeps the fixed 60-second pending window.
     The window and supersession paths are pinned by the session lifecycle and
     session-scope tests.
 

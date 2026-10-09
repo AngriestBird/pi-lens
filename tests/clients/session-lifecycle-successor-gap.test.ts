@@ -465,6 +465,40 @@ describe("the start a pending gap names (#4113)", () => {
 		expect(expiredSuccessorReason()).toBeUndefined();
 	});
 
+	it("only honors the pending TTL override inside Vitest", () => {
+		// #4253-2 recurrence: PI_LENS_TEST_MODE=0 is user-settable, so it must
+		// not make the real-pi child accept a production TTL override.
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+		const previousMode = process.env.PI_LENS_TEST_MODE;
+		const previousOverride = process.env.PI_LENS_TEST_SUCCESSOR_PENDING_TTL_MS;
+		const previousVitest = process.env.VITEST;
+		try {
+			process.env.PI_LENS_TEST_MODE = "0";
+			process.env.PI_LENS_TEST_SUCCESSOR_PENDING_TTL_MS = "0";
+			delete process.env.VITEST;
+			decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+			releasePrimarySession("fork", "/s/fork.jsonl");
+			expect(expiredSuccessorReason()).toBeUndefined();
+			vi.advanceTimersByTime(SUCCESSOR_PENDING_TTL_MS);
+			expect(expiredSuccessorReason()).toBe("fork");
+
+			_resetSessionLifecycleForTests();
+			process.env.VITEST = "1";
+			decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+			releasePrimarySession("fork", "/s/fork.jsonl");
+			expect(expiredSuccessorReason()).toBe("fork");
+		} finally {
+			if (previousMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousMode;
+			if (previousOverride === undefined)
+				delete process.env.PI_LENS_TEST_SUCCESSOR_PENDING_TTL_MS;
+			else process.env.PI_LENS_TEST_SUCCESSOR_PENDING_TTL_MS = previousOverride;
+			if (previousVitest === undefined) delete process.env.VITEST;
+			else process.env.VITEST = previousVitest;
+		}
+	});
+
 	it("is none once the named successor registered", () => {
 		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
 		releasePrimarySession("reload", 7);

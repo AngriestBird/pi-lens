@@ -112,10 +112,15 @@ export const SUCCESSOR_HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
  * The real-pi lifecycle lane cannot install Vitest's clock in its child
  * process. Keep the production default fixed, while allowing that hermetic
  * lane to shrink the wait through its explicitly test-only environment knob.
+ * `VITEST` is required because `PI_LENS_TEST_MODE=0` is user-settable.
  */
 function successorPendingTtlMs(): number {
 	const raw = process.env.PI_LENS_TEST_SUCCESSOR_PENDING_TTL_MS;
-	if (process.env.PI_LENS_TEST_MODE === "0" && raw !== undefined) {
+	if (
+		process.env.VITEST &&
+		process.env.PI_LENS_TEST_MODE === "0" &&
+		raw !== undefined
+	) {
 		const value = Number(raw);
 		if (Number.isFinite(value) && value >= 0) return value;
 	}
