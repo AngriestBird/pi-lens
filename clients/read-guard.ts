@@ -342,6 +342,21 @@ function authoredRangeCovers(
 	);
 }
 
+function isValidAuthoredRanges(
+	value: unknown,
+): value is Array<[number, number]> {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(range) =>
+				Array.isArray(range) &&
+				range.length === 2 &&
+				Number.isFinite(range[0]) &&
+				Number.isFinite(range[1]),
+		)
+	);
+}
+
 /**
  * Whether the disk still holds the authored bytes. An unchanged stat skips the
  * hash; a hash match refreshes the stat so the next check is cheap again.
@@ -1358,8 +1373,9 @@ export class ReadGuard {
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-authorship-retired",
 			subject: filePath,
-			reason:
-				"another writer changed the bytes the conversation wrote; the next edit needs a read",
+			reason: force
+				? "authored range was unknown; the next edit needs a read"
+				: "another writer changed the bytes the conversation wrote; the next edit needs a read",
 		});
 		if (isRisingEdge)
 			logReadGuardEvent({
@@ -1505,7 +1521,6 @@ export class ReadGuard {
 			}
 			const authored = this.writtenThisSession.get(filePath);
 			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
-				this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
@@ -1520,7 +1535,7 @@ export class ReadGuard {
 					effectiveMode,
 				);
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
-					reasonKind: "zero_read",
+					reasonKind: "authorship_range",
 				});
 				return verdict;
 			}
@@ -2086,7 +2101,7 @@ export class ReadGuard {
 				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
 				(candidate.retired !== undefined && candidate.retired !== true) ||
 				(candidate.authoredRanges !== undefined &&
-					!Array.isArray(candidate.authoredRanges)) ||
+					!isValidAuthoredRanges(candidate.authoredRanges)) ||
 				(candidate.authoredLineCount !== undefined &&
 					typeof candidate.authoredLineCount !== "number")
 			) {

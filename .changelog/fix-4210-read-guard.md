@@ -3,4 +3,4 @@ section: Fixed
 audience: user
 ---
 
-- **Read-guard authorship now stays within bytes a bridge actually changed.**
+- **Read-guard authorship now stays within bytes each writer actually changed.**

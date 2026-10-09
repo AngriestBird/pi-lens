@@ -327,18 +327,12 @@ function resolveChangedRange(
 	return { start: 1, end: Math.max(1, deps.countFileLines(filePath)) };
 }
 
-function resolveAuthorshipRange(
+function resolveAuthorshipRanges(
 	classification: MutatingToolClassification,
-): { start: number; end: number } | undefined {
-	if (classification.touchedLines) {
-		const [start, end] = classification.touchedLines;
-		return { start, end };
-	}
-	if (classification.editRanges && classification.editRanges.length > 0) {
-		const starts = classification.editRanges.map(([start]) => start);
-		const ends = classification.editRanges.map(([, end]) => end);
-		return { start: Math.min(...starts), end: Math.max(...ends) };
-	}
+): Array<[number, number]> | undefined {
+	if (classification.editRanges && classification.editRanges.length > 0)
+		return classification.editRanges;
+	if (classification.touchedLines) return [classification.touchedLines];
 	return undefined;
 }
 
@@ -426,7 +420,7 @@ function stampLiveMutation(
 	// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 	//    judged by read coverage rather than by this write.
 	if (sessionLive && stampReadGuard) {
-		const changedRange = resolveAuthorshipRange(classification);
+		const authoredRanges = resolveAuthorshipRanges(classification);
 		runtime.readGuard.recordWritten?.(filePath, {
 			...(stamp !== undefined && { branchEpoch: stamp }),
 			// A process bridge reports a mutation, not the bytes delivered to the
@@ -441,13 +435,9 @@ function stampLiveMutation(
 			advanceAuthorship: entry.provenance === "observed",
 			// A first bridge credit is limited to the producer's reported range;
 			// settled-sweep drift has no producer evidence and may not create one.
-			...(changedRange !== undefined && {
-				authoredRanges: [
-					[changedRange.start, changedRange.end] as [number, number],
-				],
-			}),
+			...(authoredRanges !== undefined && { authoredRanges }),
 			authorship:
-				changedRange !== undefined
+				authoredRanges !== undefined
 					? "partial"
 					: entry.kind === "write"
 						? "whole-file"

@@ -290,6 +290,8 @@ interface ToolResultDeps {
 type OwnWriteStamp = {
 	stampFileTime: boolean;
 	writtenContent?: string;
+	authoredRanges?: Array<[number, number]>;
+	authorship?: "partial" | "whole-file" | "unknown";
 	/** The write's transcript entry: its authorship survives a move to a branch that shows it (#3603). */
 	toolCallId?: string;
 	/** sha256 of the bytes this handler already read after the write (#2499). */
@@ -2591,6 +2593,18 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	const ownEdit = attribution?.editInPlace
 		? singlePositionalEdit(event.input)
 		: undefined;
+	const nativeAuthoredRanges =
+		mutation.kind === "edit" && ownEdit
+			? (() => {
+					const evidence = ownEditEvidence(filePath, ownEdit);
+					return [
+						[ownEdit.start + 1, ownEdit.start + evidence.lineCount] as [
+							number,
+							number,
+						],
+					];
+				})()
+			: undefined;
 	if (ownEdit) {
 		const evidence = ownEditEvidence(filePath, ownEdit);
 		deps.readGuard?.recordRead(
@@ -2666,7 +2680,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// doesn't trigger a spurious "file_modified" block on the next edit.
 	if (bashAuthorshipConfirmed)
 		deps.readGuard?.recordWritten(filePath, {
-			authorship: "whole-file",
+			authorship:
+				mutation.kind === "write"
+					? "whole-file"
+					: nativeAuthoredRanges !== undefined
+						? "partial"
+						: "unknown",
+			...(nativeAuthoredRanges !== undefined && {
+				authoredRanges: nativeAuthoredRanges,
+			}),
 			...ownWriteStamp,
 			contentHash: postWriteStateHash,
 		});
@@ -2730,6 +2752,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		).readGuard;
 		if (entryLive)
 			readGuard?.recordWritten?.(filePath, {
+				authorship:
+					mutation.kind === "write"
+						? "whole-file"
+						: nativeAuthoredRanges !== undefined
+							? "partial"
+							: "unknown",
+				...(nativeAuthoredRanges !== undefined && {
+					authoredRanges: nativeAuthoredRanges,
+				}),
 				...ownWriteStamp,
 				contentHash: postWriteStateHash,
 			});

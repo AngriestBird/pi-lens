@@ -126,6 +126,7 @@ export interface LspMutationContext {
 				advanceAuthorship: true;
 				toolCallId?: string;
 				authoredRanges?: Array<[number, number]>;
+				authorship?: "partial" | "unknown";
 			},
 		) => void;
 	};
@@ -285,7 +286,10 @@ function uniqueDetails(
 		const key = keyFor(detail.filePath);
 		const previous = byPath.get(key);
 		if (!previous) {
-			byPath.set(key, detail);
+			byPath.set(key, {
+				...detail,
+				ranges: detail.ranges ?? (detail.range ? [detail.range] : undefined),
+			});
 			continue;
 		}
 		byPath.set(key, {
@@ -297,6 +301,13 @@ function uniqueDetails(
 							end: Math.max(previous.range.end, detail.range.end),
 						}
 					: (previous.range ?? detail.range),
+			ranges: [
+				...(previous.ranges ?? (previous.range ? [previous.range] : [])),
+				...(detail.ranges ?? (detail.range ? [detail.range] : [])),
+			],
+			authorshipUnknown:
+				previous.authorshipUnknown === true ||
+				detail.authorshipUnknown === true,
 			importsChanged: previous.importsChanged || detail.importsChanged,
 		});
 	}
@@ -308,6 +319,7 @@ function uniqueDetails(
 				// range is still enough to invalidate the touched-file turn state;
 				// never synchronously re-read the whole file here.
 				range: { start: 1, end: 1 },
+				authorshipUnknown: true,
 				importsChanged: true,
 			},
 	);
@@ -364,13 +376,14 @@ function bookkeepLspMutation(
 				context.readGuard.recordWritten(filePath, {
 					stampFileTime: false,
 					advanceAuthorship: true,
-					...(detail.range !== undefined && {
-						authorship: "partial",
-						authoredRanges: [
-							[detail.range.start, detail.range.end] as [number, number],
-						],
-					}),
-					...(detail.range === undefined && { authorship: "unknown" }),
+					...(detail.authorshipUnknown !== true &&
+						detail.ranges !== undefined && {
+							authorship: "partial",
+							authoredRanges: detail.ranges.map(
+								({ start, end }) => [start, end] as [number, number],
+							),
+						}),
+					...(detail.authorshipUnknown === true && { authorship: "unknown" }),
 					...(context.toolCallId !== undefined && {
 						toolCallId: context.toolCallId,
 					}),
@@ -417,9 +430,11 @@ function bookkeepLspMutation(
 					const recorded = bridge.recordMutation({
 						filePath,
 						kind: "edit",
-						editRanges: detail.range
-							? [[detail.range.start, detail.range.end]]
-							: undefined,
+						editRanges: detail.ranges
+							? detail.ranges.map(({ start, end }) => [start, end])
+							: detail.range
+								? [[detail.range.start, detail.range.end]]
+								: undefined,
 						consumer: context.tool,
 						provenance: "observed",
 						// Real value threaded through, not the bridge's own

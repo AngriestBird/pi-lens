@@ -74,6 +74,8 @@ interface DeleteFileOp {
 interface AppliedWorkspaceFileDetail {
 	filePath: string;
 	range?: { start: number; end: number };
+	ranges?: Array<{ start: number; end: number }>;
+	authorshipUnknown?: boolean;
 	importsChanged?: boolean;
 }
 
@@ -1514,6 +1516,12 @@ export async function applyWorkspaceEdit(
 					fileDetails.push({
 						filePath,
 						range: { start, end },
+						ranges: edits.map((item) => ({
+							start: item.range.start.line + 1,
+							end: item.range.end.line + 1,
+						})),
+						authorshipUnknown:
+							content.split(/\r?\n/).length !== updated.split(/\r?\n/).length,
 						importsChanged:
 							importsSignature(content) !== importsSignature(updated),
 					});
@@ -1532,7 +1540,7 @@ export async function applyWorkspaceEdit(
 					touchedFiles.add(filePath);
 					fileDetails.push({
 						filePath,
-						range: { start: 1, end: 1 },
+						authorshipUnknown: true,
 						importsChanged: false,
 					});
 					markApplied(op);
@@ -1553,12 +1561,12 @@ export async function applyWorkspaceEdit(
 					fileDetails.push(
 						{
 							filePath: oldPath,
-							range: { start: 1, end: 1 },
+							authorshipUnknown: true,
 							importsChanged: true,
 						},
 						{
 							filePath: newPath,
-							range: { start: 1, end: 1 },
+							authorshipUnknown: true,
 							importsChanged: true,
 						},
 					);
@@ -1576,7 +1584,7 @@ export async function applyWorkspaceEdit(
 					touchedFiles.add(filePath);
 					fileDetails.push({
 						filePath,
-						range: { start: 1, end: 1 },
+						authorshipUnknown: true,
 						importsChanged: true,
 					});
 					markApplied(op);

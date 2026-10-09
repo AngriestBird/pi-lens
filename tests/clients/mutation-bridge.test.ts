@@ -1256,6 +1256,79 @@ describe("mutation bridge authorship without FileTime credit (#3865)", () => {
 			}
 		});
 	}
+
+	it("credits scattered bridge ranges without licensing their gap (#4210)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-scattered-bridge-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "scattered.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 60 }, (_, i) => `line${i + 1}`).join("\n"),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [2, 51],
+						editRanges: [
+							[2, 3],
+							[50, 51],
+						],
+					},
+					makeDeps({
+						tmpDir: env.tmpDir,
+						runtime,
+						cacheManager: new CacheManager(false),
+					}),
+				),
+			).toBe(true);
+			expect(runtime.readGuard.checkEdit(filePath, [20, 20]).action).toBe(
+				"block",
+			);
+			expect(runtime.readGuard.checkEdit(filePath, [50, 51]).action).toBe(
+				"allow",
+			);
+
+			const narrowPath = path.join(env.tmpDir, "narrow.ts");
+			fs.writeFileSync(narrowPath, "one\ntwo\nthree\nfour\n");
+			const narrowRuntime = new RuntimeCoordinator();
+			narrowRuntime.projectRoot = env.tmpDir;
+			narrowRuntime.beginTurn();
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath: narrowPath,
+						kind: "edit",
+						touchedLines: [2, 2],
+					},
+					makeDeps({
+						tmpDir: env.tmpDir,
+						runtime: narrowRuntime,
+						cacheManager: new CacheManager(false),
+					}),
+				),
+			).toBe(true);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [4, 4]).action).toBe(
+				"block",
+			);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [2, 2]).action).toBe(
+				"allow",
+			);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [4, 4]).action).toBe(
+				"block",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
 });
 
 /**

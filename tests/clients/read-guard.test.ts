@@ -2361,11 +2361,93 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 			wholeGuard.recordWritten(wholePath, {
 				stampFileTime: false,
 				toolCallId: "call-whole",
+				authorship: "partial",
+				authoredRanges: [[1, 1]],
 			});
-			expect(wholeGuard.checkEdit(wholePath, [4, 4]).action).toBe("allow");
+			expect(wholeGuard.checkEdit(wholePath, [4, 4]).action).toBe("block");
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// #4210 F-4210-2: a partial credit is a license only for the lines its
+	// writer produced. Recurrence: injectCreationRead widened the first
+	// allowed inside edit into a whole-file license.
+	it("keeps partial authorship narrow after an allowed inside edit (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-narrow-");
+		try {
+			const filePath = path.join(env.tmpDir, "narrow.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-narrow");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("allow");
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("block");
+
+			const reverse = createReadGuard("authorship-narrow-reverse");
+			reverse.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+			expect(reverse.checkEdit(filePath, [2, 2]).action).toBe("allow");
+			expect(reverse.checkEdit(filePath, [4, 4]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("records unknown authored-range retirement distinctly", () => {
+		const env = setupTestEnvironment("read-guard-authorship-unknown-");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "unknown.ts");
+			fs.writeFileSync(filePath, "one\ntwo\n");
+			const guard = createReadGuard("authorship-unknown");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[1, 1]],
+				allowFirstAuthorship: true,
+			});
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "unknown",
+			});
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "read-guard-authorship-retired",
+				)?.latestReasons[0]?.reason,
+			).toContain("authored range was unknown");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops malformed persisted authored ranges without throwing", () => {
+		const guard = createReadGuard("authorship-import-validation");
+		expect(() =>
+			guard.importAuthorship(
+				{
+					entries: [
+						{
+							filePath: "/tmp/malformed-authored-range.ts",
+							size: 1,
+							mtimeMs: 1,
+							ctimeMs: 1,
+							toolCallId: "call-import",
+							authoredRanges: [null],
+						},
+					],
+				},
+				new Set(["call-import"]),
+			),
+		).not.toThrow();
 	});
 
 	// #4210 F-4210-1: when a later own write changes line positions, the
