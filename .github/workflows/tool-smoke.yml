@@ -353,7 +353,7 @@ jobs:
           esac
           dest="$RUNNER_TEMP/pi-lens-docker-language-server"
           mkdir -p "$dest/bin"
-          curl --fail --location --silent --show-error \
+          curl --fail --location --proto '=https' --proto-redir '=https' --silent --show-error \
             "https://github.com/docker/docker-language-server/releases/download/v0.20.1/$asset" \
             --output "$dest/bin/docker-language-server"
           printf '%s  %s\n' "$digest" "$dest/bin/docker-language-server" | sha256sum --check --status

@@ -1872,7 +1872,8 @@ async function analysePipeline(
 		// #3858: a formatter the budget (or Escape) gave up on writes F later,
 		// after the sync below pushed the bytes from before. Sync that write too.
 		if (formatResult.abandoned)
-			chainLateFormatResync(
+			// The chain owns rejection handling; this continuation is intentionally detached.
+			void chainLateFormatResync(
 				formatResult.abandoned,
 				"inband",
 				{ toolName, filePath, startedAt: pipelineStart },
