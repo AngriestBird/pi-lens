@@ -105,6 +105,22 @@ Hook ==
                 ELSE IF Started THEN {} ELSE sc[k]]
     /\ UNCHANGED <<ww, fdrop, sw, sdrop>>
 
+\* `pi --fork` crosses a real process boundary. The production process exits,
+\* so in-flight widget pipelines cannot land in the child, and the child's
+\* module-local guards and rows start empty. Keep the F1 extension aligned
+\* with `PiFork`'s reset of the base process-local order state.
+PiForkF1 ==
+    /\ PiFork
+    /\ ww' = [i \in 1..2 |-> IdleRun]
+    /\ wv' = [k \in WidgetKinds |-> NoRow]
+    /\ gt' = [k \in WidgetKinds |-> 0]
+    /\ wm' = [k \in WidgetKinds |-> 0]
+    /\ wl' = [k \in WidgetKinds |-> FALSE]
+    /\ fdrop' = FALSE
+    /\ sw' = [k \in StoreKinds |-> IdleStore]
+    /\ sc' = [k \in StoreKinds |-> {}]
+    /\ sdrop' = FALSE
+
 -----------------------------------------------------------------------------
 (* The widget's pipeline writers.                                          *)
 
@@ -190,6 +206,7 @@ SLand(k) ==
 
 NextF1 ==
     \/ Next /\ Hook
+    \/ PiForkF1
     \/ \E i \in 1..2 : WBegin(i)
     \/ \E i \in 1..2, k \in WidgetKinds : WLand(i, k)
     \/ \E k \in StoreKinds : SBegin(k)

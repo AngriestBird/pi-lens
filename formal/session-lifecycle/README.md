@@ -711,6 +711,14 @@ in any order at any later step.
   `/reload`, `/fork`, quit and `pi --fork`, whose new process restarts the
   order turn. Master has no widget scope fence, so `WidgetInLineage` is kept
   in the separate proposed `FixWidgetFenced` config.
+- Round 3 CI initially found `NoOwnDropWidget` violated in `H3WidgetToken`.
+  This was a model boundary error, not a master defect: the trace crossed
+  `PiFork` with an old `ww` pipeline and its `gt` guard into the child. The
+  production `RuntimeCoordinator`/`WriteOrderingGuard` state is process-local;
+  `clients/runtime-tool-result.ts` carries the process-wide `writeOrderTurn`,
+  while a real `pi --fork` exits the old process and cannot land its old
+  pipeline in the new one. `PiForkF1` now resets the F1 extension and removes
+  those dead flights at the same boundary. The config keeps `expect: pass`.
 - `MutWidgetTieDrop`: `>` for `>=`. The second verb of every run is dropped.
   The tie is not a corner: `admitWidgetDiagnosticsWrite` and `recordRunner` make
   it the second verb's normal case, and the guard's doc comment pins it.
