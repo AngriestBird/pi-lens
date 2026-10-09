@@ -395,6 +395,7 @@ export const realHarnessInclude = [
 	"tests/real-harness/provider-compatibility.test.ts",
 	"tests/real-harness/read-guard-moves.test.ts",
 	"tests/real-harness/lifecycle.test.ts",
+	"tests/real-harness/outside-root.test.ts",
 ];
 
 // #1920: files that assert REAL wall-clock elapsed-time budgets (Date.now()
@@ -532,6 +533,9 @@ export const wallClockBudgetInclude = [
 	// #4133: the real pi child environment is the subject of this boundary test;
 	// keep it in the serialized real-harness lane.
 	"tests/real-harness/fixture-shape.test.ts",
+	// #4218/#4230: the real pi host must deliver the out-of-root advisory and
+	// ledger record, including the second edit and the pi-owned path exemptions.
+	"tests/real-harness/outside-root.test.ts",
 	// #3870: every detector test drives the analyzer's real CLI entry point
 	// (a real node subprocess) over redacted fixture logs (flake-shape admission).
 	"tests/scripts/analyze-pi-lens-logs-detectors.test.ts",
