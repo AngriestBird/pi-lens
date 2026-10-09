@@ -92,6 +92,17 @@ export const FIRST_PUBLISH_EXPIRY_DAYS: number;
 /** #3401: consecutive agreeing runs before a `clean-behavior`/`tier` change is written. */
 export const TIER_CHANGE_AGREE_RUNS: number;
 
+export function advancePendingClass(
+	confirmed: string,
+	pending: { value: string; runs: number } | undefined,
+	observed: string,
+	agreeRuns: number,
+): {
+	confirmed: string;
+	pending?: { value: string; runs: number };
+	committed: boolean;
+};
+
 export interface MatrixObservation {
 	lang: string;
 	firstPublish?: string | null;

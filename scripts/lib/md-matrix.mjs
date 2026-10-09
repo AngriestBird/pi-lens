@@ -549,6 +549,33 @@ export const TIER_CHANGE_AGREE_RUNS = 2;
 /** The one first-publish class the expiry may retire (see the block above). */
 const EXPIRABLE_FIRST_PUBLISH = "direct";
 
+/**
+ * Advance one confirmed class through the shared consecutive-observation
+ * hysteresis. The callers translate the generic pending record back to their
+ * axis-specific persisted shape after this seam decides whether to hold or
+ * commit the observation.
+ *
+ * @param {string} confirmed
+ * @param {{ value: string, runs: number } | undefined} pending
+ * @param {string} observed
+ * @param {number} agreeRuns
+ * @returns {{ confirmed: string, pending?: { value: string, runs: number }, committed: boolean }}
+ */
+export function advancePendingClass(confirmed, pending, observed, agreeRuns) {
+	if (!observed || observed === confirmed)
+		return { confirmed, pending: undefined, committed: false };
+	const samePending = pending?.value === observed;
+	const runs = samePending ? Number(pending.runs ?? 1) + 1 : 1;
+	const requiredRuns = Math.max(2, Number(agreeRuns));
+	if (samePending && runs >= requiredRuns)
+		return { confirmed: observed, pending: undefined, committed: true };
+	return {
+		confirmed,
+		pending: { value: observed, runs },
+		committed: false,
+	};
+}
+
 /** @param {Date | number | string} now @returns {string} UTC `YYYY-MM-DD` */
 function utcDay(now) {
 	if (isUtcDay(now)) return now;
@@ -820,20 +847,24 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		const observedFp = observed?.firstPublish ?? null;
 		const currentFp = fpIdx >= 0 ? cells[fpIdx] : "";
 		if (observedFp === "direct" || observedFp === "empty-first") {
-			if (observedFp !== currentFp) {
-				const held = priorFp[lang];
-				const sameHeld = held?.pendingFirstPublish === observedFp;
-				const runs = sameHeld ? Number(held.runs ?? 1) + 1 : 1;
-				if (sameHeld && runs >= agreeRuns) {
-					cell["first-publish"] = observedFp;
-					committedLangs.push(lang);
-				} else {
-					nextState["first-publish"][lang] = {
-						pendingFirstPublish: observedFp,
-						runs,
-					};
-					pendingLangs.push(lang);
-				}
+			const held = priorFp[lang];
+			const advanced = advancePendingClass(
+				currentFp,
+				held?.pendingFirstPublish
+					? { value: held.pendingFirstPublish, runs: Number(held.runs ?? 1) }
+					: undefined,
+				observedFp,
+				agreeRuns,
+			);
+			if (advanced.committed) {
+				cell["first-publish"] = advanced.confirmed;
+				committedLangs.push(lang);
+			} else if (advanced.pending) {
+				nextState["first-publish"][lang] = {
+					pendingFirstPublish: advanced.pending.value,
+					runs: advanced.pending.runs,
+				};
+				pendingLangs.push(lang);
 			}
 		} else if (currentFp === EXPIRABLE_FIRST_PUBLISH) {
 			// A missing, garbage or future stamp restarts the clock today.
@@ -857,19 +888,26 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 			const currentTier = tierIdx >= 0 ? cells[tierIdx] : "";
 			if (observedCb !== currentCb || observedTier !== currentTier) {
 				const held = priorCb[lang];
-				const sameHeld =
-					held?.pendingBehavior === observedCb &&
-					held?.pendingTier === observedTier;
-				const runs = sameHeld ? Number(held.runs ?? 1) + 1 : 1;
-				if (sameHeld && runs >= agreeRuns) {
+				const advanced = advancePendingClass(
+					`${currentCb}\u0000${currentTier}`,
+					held?.pendingBehavior && held?.pendingTier
+						? {
+								value: `${held.pendingBehavior}\u0000${held.pendingTier}`,
+								runs: Number(held.runs ?? 1),
+							}
+						: undefined,
+					`${observedCb}\u0000${observedTier}`,
+					agreeRuns,
+				);
+				if (advanced.committed) {
 					cell["clean-behavior"] = observedCb;
 					cell.tier = observedTier;
 					committedLangs.push(lang);
-				} else {
+				} else if (advanced.pending) {
 					nextState["clean-behavior"][lang] = {
 						pendingBehavior: observedCb,
 						pendingTier: observedTier,
-						runs,
+						runs: advanced.pending.runs,
 					};
 					pendingLangs.push(lang);
 				}
