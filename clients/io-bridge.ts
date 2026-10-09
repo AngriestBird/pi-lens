@@ -135,7 +135,15 @@ export function registerIOBridge(
 	registerProcessBridge(IO_BRIDGE_SYMBOL, (): PiLensIOBridge => ({
 		version: IO_BRIDGE_VERSION,
 		record(entry: BridgeEntry): RecordResult {
-			return recordIOEntry(entry, currentDeps());
+			const liveDeps = currentDeps();
+			if (!liveDeps) {
+				deps.onUnavailable?.();
+				return {
+					read: { accepted: false, reason: "unavailable" },
+					mutate: { accepted: false, reason: "unavailable" },
+				};
+			}
+			return recordIOEntry(entry, liveDeps);
 		},
 	}));
 }

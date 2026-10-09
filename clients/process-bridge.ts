@@ -103,6 +103,14 @@ function isScopedBridgeActivation(
 	);
 }
 
+function isPreSessionActivation(activation: BridgeActivation): boolean {
+	return (
+		typeof activation === "object" &&
+		activation !== null &&
+		(activation as { role?: unknown }).role === "pre-session"
+	);
+}
+
 /**
  * A rebindable view of a first-wins bridge's dependencies (#4169).
  *
@@ -126,7 +134,7 @@ export function rebindableProcessBridgeDeps<T extends object>(
 	version: number,
 	activation: BridgeActivation,
 	deps: T,
-): () => T {
+): () => T | undefined {
 	const cell = getProcessSingleton(family, version, () => ({
 		activation,
 		deps,
@@ -135,7 +143,9 @@ export function rebindableProcessBridgeDeps<T extends object>(
 		? cell.activation
 		: undefined;
 	const accepts = !isScopedBridgeActivation(activation)
-		? cell.activation !== activation
+		? isPreSessionActivation(activation)
+			? current === undefined
+			: cell.activation !== activation
 		: activation.role === "primary" &&
 			activation.isLive() &&
 			(current === undefined ||
@@ -144,5 +154,9 @@ export function rebindableProcessBridgeDeps<T extends object>(
 		cell.activation = activation;
 		cell.deps = deps;
 	}
-	return () => cell.deps;
+	return () => {
+		const owner = cell.activation;
+		if (isScopedBridgeActivation(owner) && !owner.isLive()) return undefined;
+		return cell.deps;
+	};
 }

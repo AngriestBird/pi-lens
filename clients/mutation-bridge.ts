@@ -90,6 +90,7 @@ export interface MutationBridge {
 
 /** The bookkeeping surfaces the bridge drives. Every one is optional-tolerant. */
 export interface MutationBridgeDeps {
+	onUnavailable?: () => void;
 	getRuntime(): {
 		turnIndex: number;
 		telemetrySessionId?: string;
@@ -696,7 +697,12 @@ export function registerMutationBridge(
 			// also calls, so it gains the `pilens:format:queued` publish with no
 			// translation through v2. A retired lineage keeps the v1 answer
 			// (`true`: the receipt was taken).
-			return recordMutationThroughSeam(entry, currentDeps());
+			const liveDeps = currentDeps();
+			if (!liveDeps) {
+				deps.onUnavailable?.();
+				return false;
+			}
+			return recordMutationThroughSeam(entry, liveDeps);
 		},
 	}));
 }

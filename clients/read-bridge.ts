@@ -115,6 +115,7 @@ export interface ReadBridge {
 }
 
 interface BridgeDeps {
+	onUnavailable?: () => void;
 	/**
 	 * Return `true` when the entry should be forwarded to the read-guard.
 	 * Called on every `recordRead` invocation so flag / project-root changes
@@ -229,6 +230,10 @@ export function registerReadBridge(
 			// report "io-bridge" and swallow the rethrow inside the v2
 			// never-throw wrapper.
 			const liveDeps = currentDeps();
+			if (!liveDeps) {
+				deps.onUnavailable?.();
+				return;
+			}
 			if (!liveDeps.isRecordable(entry.filePath)) return;
 
 			// The v2 body stamps the timestamp (Date.now()), the turn and write

@@ -111,7 +111,10 @@ import {
 	recordIOEntry,
 	registerIOBridge,
 } from "./clients/io-bridge.js";
-import { rebindableProcessBridgeDeps } from "./clients/process-bridge.js";
+import {
+	rebindableProcessBridgeDeps,
+	type BridgeActivation,
+} from "./clients/process-bridge.js";
 import { isExternalOrVendorFile } from "./clients/path-utils.js";
 import {
 	isPathIgnoredByProject,
@@ -614,18 +617,15 @@ const cacheManager = new CacheManager();
 // ONCE (flag below, same pattern as registerCascadeTierReconcileTask) and
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
-let _readBridgeRegistered = false;
 let _bridgeGetFlag:
 	| ((name: string) => boolean | string | undefined)
 	| undefined;
 // #2423: the mutation bridge is the write-side sibling of the read bridge and
 // follows its registration discipline exactly — mount once per process, refresh
 // the flag getter on every activation.
-let _mutationBridgeRegistered = false;
 // #3654: the unified I/O bridge composes the read-guard and the mutation
 // seam; it follows the same once-per-process discipline and is mounted in the
 // same first-wins pass as the two v1 shims it supersedes.
-let _ioBridgeRegistered = false;
 
 /**
  * Read a bridge flag without letting a session replacement obstruct the
@@ -659,7 +659,9 @@ type TurnSummaryEmitCtx = {
 	getLensFlag: (name: string) => boolean | string | undefined;
 	isLensEnabled: () => boolean;
 };
-let _turnSummaryEmitCtxGetter: (() => TurnSummaryEmitCtx) | undefined;
+let _turnSummaryEmitCtxGetter:
+	| (() => TurnSummaryEmitCtx | undefined)
+	| undefined;
 let _testRunnerDeliveryRegistered = false;
 let _nextTestRunnerDeliveryOwnerId = 0;
 /**
@@ -1137,33 +1139,54 @@ function activateExtension(hostPi: ExtensionAPI) {
 		nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
 	};
 
-	const registerPrimaryBridges = (): void => {
-		if (scope?.role !== "primary" || !scope.isLive()) return;
-		if (!_readBridgeRegistered) {
-			_readBridgeRegistered = true;
-			registerReadBridge(
-				{
-					isRecordable(filePath: string): boolean {
-						// Unknown during a replacement/reload records the read. The guard is
-						// the obstruction here, so failure must fall toward not blocking the
-						// user's later edit; recording while disabled is harmless.
-						if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
-						return isRecordableProjectPath(filePath, runtime.projectRoot);
-					},
-					forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
-				},
-				scope,
-			);
-		}
-		if (!_mutationBridgeRegistered) {
-			_mutationBridgeRegistered = true;
-			registerMutationBridge(mutationBridgeDeps, scope);
-		}
-		if (!_ioBridgeRegistered) {
-			_ioBridgeRegistered = true;
-			registerIOBridge(ioBridgeDeps, scope);
-		}
+	const recordBridgeUnavailable = (): void => {
+		recordDegradationOnce({
+			kind: "process-bridge-unavailable",
+			subject: "primary-session-gap",
+			reason:
+				"bridge call refused while no live primary session owns its dependencies",
+		});
 	};
+	const preSessionActivation = { role: "pre-session" as const };
+	const registerPrimaryBridges = (activation?: BridgeActivation): void => {
+		const scopedActivation =
+			activation &&
+			typeof activation === "object" &&
+			"role" in activation &&
+			(activation.role === "primary" || activation.role === "secondary")
+				? (activation as SessionScope)
+				: undefined;
+		if (
+			scopedActivation &&
+			(scopedActivation.role !== "primary" || !scopedActivation.isLive())
+		)
+			return;
+		registerReadBridge(
+			{
+				onUnavailable: recordBridgeUnavailable,
+				isRecordable(filePath: string): boolean {
+					// Unknown during a replacement/reload records the read. The guard is
+					// the obstruction here, so failure must fall toward not blocking the
+					// user's later edit; recording while disabled is harmless.
+					if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
+					return isRecordableProjectPath(filePath, runtime.projectRoot);
+				},
+				forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
+			},
+			activation,
+		);
+		registerMutationBridge(
+			{ ...mutationBridgeDeps, onUnavailable: recordBridgeUnavailable },
+			activation,
+		);
+		registerIOBridge(
+			{ ...ioBridgeDeps, onUnavailable: recordBridgeUnavailable },
+			activation,
+		);
+	};
+	// Mount at factory activation so third-party producers can call the bridge
+	// before the first session_start. A primary scope rebinds the cell later.
+	registerPrimaryBridges(preSessionActivation);
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
@@ -2614,7 +2637,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
-					registerPrimaryBridges();
+					registerPrimaryBridges(scope);
 					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
 						"turn-summary-emit-context",
 						1,
