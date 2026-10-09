@@ -237,6 +237,28 @@ const lspRunner: RunnerDefinition = {
 					]),
 				];
 				deferredServerIds = touched.deferredServerIds ?? [];
+				if (
+					diagnosticsInconclusive &&
+					touched.binding?.boundToCurrentDisk === false
+				) {
+					// #4231: an inconclusive primary may contribute its last-known
+					// diagnostics while the current notify/diagnostics wait is wedged.
+					// The service already attributes each diagnostic and names the
+					// unconfirmed servers; retain only answered contributors. Without
+					// both pieces of provenance, fail closed rather than publish a
+					// stale blocking finding from the aggregate binding.
+					const unconfirmed = new Set(unconfirmedServerIds);
+					const currentContentDiags: typeof lspDiags = [];
+					for (const diagnostic of lspDiags) {
+						if (
+							diagnostic.serverId !== undefined &&
+							!unconfirmed.has(diagnostic.serverId)
+						) {
+							currentContentDiags.push(diagnostic);
+						}
+					}
+					lspDiags = currentContentDiags;
+				}
 			}
 		} catch (err) {
 			serverFailed = true;

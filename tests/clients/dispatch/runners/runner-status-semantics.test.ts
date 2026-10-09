@@ -29,6 +29,7 @@ const diagsResult = (
 		confirmation?: "confirmed" | "partial";
 		unconfirmedServerIds?: string[];
 		deferredServerIds?: string[];
+		binding?: { boundToCurrentDisk: boolean | "unknown" };
 	} = {},
 ) => ({ diags, ...extra });
 const readFileContent = vi.fn(() => "const x = 1;\n");
@@ -565,6 +566,60 @@ describe("runner status/semantic edge cases", () => {
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.diagnostics).toHaveLength(2);
 			expect(result.diagnostics.map((d) => d.tool)).toEqual(["typos", "typos"]);
+			expect(result.status).toBe("succeeded");
+			expect(result.unconfirmedServerIds).toEqual(["marksman"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops stale primary findings beside fresh answered findings (#4231)", async () => {
+		// #4231: a timed-out primary can retain its previous diagnostics. The
+		// runner must not turn that stale last-known error into a blocking result
+		// merely because an auxiliary answered for the new file content.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-4231-");
+		try {
+			const filePath = path.join(env.tmpDir, "README.md");
+			fs.writeFileSync(filePath, "A fresh typo.\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 1,
+							message: "stale primary error",
+							serverId: "marksman",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 1 },
+							},
+						},
+						{
+							severity: 2,
+							message: "fresh auxiliary finding",
+							serverId: "typos",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 2 },
+								end: { line: 0, character: 7 },
+							},
+						},
+					],
+					{
+						inconclusive: true,
+						inconclusiveServerIds: ["marksman"],
+						inconclusiveReason: "diagnostics-wait",
+						binding: { boundToCurrentDisk: false },
+					},
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]?.tool).toBe("typos");
 			expect(result.status).toBe("succeeded");
 			expect(result.unconfirmedServerIds).toEqual(["marksman"]);
 		} finally {
