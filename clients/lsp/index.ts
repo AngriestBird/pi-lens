@@ -1002,13 +1002,22 @@ export function groupFilesByPrimaryServer(
 		const servers = getServersForFileWithConfig(filePath);
 		const primary = servers[0]?.id ?? "none";
 		const group = byServer.get(primary);
+		const fallbackFamilyHeads = new Map<string, string>();
+		const familyHeads = servers.map((server) => {
+			const head = server.fallbackFor
+				? (fallbackFamilyHeads.get(server.fallbackFor) ?? server.fallbackFor)
+				: server.id;
+			fallbackFamilyHeads.set(server.id, head);
+			return head;
+		});
+		const multiServer = new Set(familyHeads).size > 1;
 		if (group) {
 			group.files.push(filePath);
-			if (servers.length > 1) group.multiServer = true;
+			if (multiServer) group.multiServer = true;
 		} else {
 			byServer.set(primary, {
 				files: [filePath],
-				multiServer: servers.length > 1,
+				multiServer,
 			});
 		}
 	}

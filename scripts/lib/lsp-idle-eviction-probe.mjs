@@ -219,7 +219,7 @@ export async function probeServer({ server, fixture, createDriver, budgets }) {
 		}
 		if (!touched || !driver.isTargetAlive())
 			return unavailable(base, "server-not-started");
-		if (!baseline || baseline.length === 0) {
+		if (!baseline || (baseline.length === 0 && !fixture.allowEmptyBaseline)) {
 			return {
 				...base,
 				result: "inconclusive",
