@@ -73,7 +73,10 @@ import {
 	resolvePiLensConfig,
 	summarizeConfigResolution,
 } from "../config-resolve.js";
-import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import {
 	isKnownRunnerId,
 	runnerIdentityPopulated,
@@ -88,6 +91,16 @@ import {
 } from "../latency-logger.js";
 import { getPiLensGlobalConfigPath } from "../lens-config.js";
 import { normalizeFilePath } from "../path-utils.js";
+import { logExtension } from "../extension-log.js";
+import {
+	getProjectTrustState,
+	type ProjectTrustState,
+} from "../project-trust.js";
+import {
+	isRepoTier,
+	provenanceFor,
+	type Provenance,
+} from "../config-core/provenance.js";
 import { resolveToolCwd } from "../tool-cwd.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { launchLSP } from "./launch.js";
@@ -115,6 +128,7 @@ export interface CustomServerConfig {
 	args?: string[];
 	rootMarkers?: string[];
 	env?: Record<string, string>;
+	initializationOptions?: Record<string, unknown>;
 	/**
 	 * Dispatch runner ids this server subsumes (#3968): while this server is
 	 * a file's selected primary LSP, the runners it names defer to the warm
@@ -140,6 +154,8 @@ export interface CustomServerConfig {
  * Keys are built-in server IDs (e.g. "rust", "nix", "bash", "python", "go").
  */
 export interface ServerInitOverride {
+	command?: string | string[];
+	env?: Record<string, string>;
 	/**
 	 * Deep-merged onto the server's built-in initializationOptions defaults.
 	 * User values win on key conflicts at every nesting level.
@@ -159,6 +175,8 @@ export interface LSPConfig {
 	disabledServers?: string[];
 	/** Files to open at session start to seed lazy LSP indexing (e.g., clangd). */
 	warmFiles?: string[];
+	/** Non-enumerable source map attached by loadLSPConfig. */
+	readonly __provenance?: ProvenanceMap;
 }
 
 /**
@@ -170,6 +188,7 @@ export interface LSPConfig {
  */
 export interface RegisteredLSPConfig {
 	customServers: LSPServerInfo[];
+	registeredServers: LSPServerInfo[];
 	disabledServerIds: Set<string>;
 	serverOverrides: Map<string, ServerInitOverride>;
 }
@@ -468,6 +487,12 @@ export async function loadLSPConfig(
 	// resolution's records and the covers records report here, once, together.
 	const coversProblems = newCoversClaimProblems();
 	const config = lspConfigOf(resolution.value, coversProblems);
+	// Preserve the source map for the registry compiler without changing the
+	// enumerable loader projection consumed by existing callers.
+	Object.defineProperty(config, "__provenance", {
+		value: resolution.provenance,
+		enumerable: false,
+	});
 	if (reporting) {
 		reportPiLensConfigRecords([
 			...resolution.records,
@@ -721,6 +746,7 @@ export function customServerSpecsOf(
 export function lspConfigOf(
 	value: Record<string, unknown>,
 	problems?: CoversClaimProblems,
+	provenance?: ProvenanceMap,
 ): LSPConfig {
 	const section = lspSectionOf(value);
 	const config: LSPConfig = {};
@@ -738,6 +764,12 @@ export function lspConfigOf(
 	}
 	if (Array.isArray(section.warmFiles)) {
 		config.warmFiles = section.warmFiles as string[];
+	}
+	if (provenance) {
+		Object.defineProperty(config, "__provenance", {
+			value: provenance,
+			enumerable: false,
+		});
 	}
 	return config;
 }
@@ -787,7 +819,12 @@ export function createCustomServer(
 				cwd: root,
 				env: config.env ? { ...process.env, ...config.env } : process.env,
 			});
-			return { process: proc };
+			return {
+				process: proc,
+				...(config.initializationOptions
+					? { initialization: config.initializationOptions }
+					: {}),
+			};
 		},
 	};
 }
@@ -796,6 +833,9 @@ export function createCustomServer(
 
 const EMPTY_CONFIG: RegisteredLSPConfig = {
 	customServers: [],
+	// Avoid reading LSP_SERVERS during the config/server module cycle. The
+	// selection helper falls back to the live builtin table after evaluation.
+	registeredServers: [],
 	disabledServerIds: new Set(),
 	serverOverrides: new Map(),
 };
@@ -805,6 +845,64 @@ const configInFlight = new Map<string, Promise<void>>();
 
 function normalizeWorkspacePath(cwd: string): string {
 	return path.resolve(cwd);
+}
+
+type ProvenanceMap = ReadonlyMap<string, Provenance>;
+let unknownTrustNoticeGeneration = -1;
+
+function sourceFor(
+	provenance: ProvenanceMap,
+	key: string,
+): Provenance | undefined {
+	const direct = provenanceFor({ value: undefined, provenance }, key);
+	if (direct) return direct;
+	// Object leaves carry provenance below the object pointer. The registry
+	// still needs the source tier for the whole executable object.
+	let fallback: Provenance | undefined;
+	for (const [candidate, entry] of provenance) {
+		if (!candidate.startsWith(`${key}/`)) continue;
+		if (isRepoTier(entry.tier)) return entry;
+		fallback ??= entry;
+	}
+	return fallback;
+}
+
+function executableAllowed(
+	provenance: Provenance | undefined,
+	trust: ProjectTrustState,
+): boolean {
+	return !provenance || !isRepoTier(provenance.tier) || trust === "trusted";
+}
+
+function registryDecision(
+	id: string,
+	field: string,
+	provenance: Provenance | undefined,
+	trust: ProjectTrustState,
+	allowed: boolean,
+): void {
+	if (allowed || !provenance || !isRepoTier(provenance.tier)) return;
+	const subject = `${id}:${field}:${provenance.tier}`;
+	const reason = `project LSP ${field} refused for ${id}: pi project trust is ${trust}`;
+	recordDegradationOnce({
+		kind: "lsp-registry-decision",
+		subject,
+		reason,
+		metadata: { serverId: id, field, tier: provenance.tier, trust },
+	});
+	if (trust === "unknown") {
+		const generation = getDegradationLedgerGeneration();
+		if (unknownTrustNoticeGeneration !== generation) {
+			unknownTrustNoticeGeneration = generation;
+			logExtension({
+				subsystem: "lsp-registry",
+				level: "warn",
+				message:
+					"project LSP executables refused: mark the project trusted in pi or upgrade pi",
+				metadata: { serverId: id, field },
+			});
+		}
+	}
 }
 
 function isSameOrChildPath(filePath: string, candidateRoot: string): boolean {
@@ -854,14 +952,50 @@ function getConfigForFile(filePath: string): RegisteredLSPConfig {
  * cannot disagree about what a document means.
  */
 export function registerLSPConfig(config: LSPConfig): RegisteredLSPConfig {
+	return compileLspRegistry(config, config.__provenance);
+}
+
+/**
+ * The one LSP config-to-runtime boundary. Every executable field is checked
+ * here, before a server or override reaches selection, initialization, or a
+ * spawn callback. Global values are operator-authorized; project values need
+ * pi's current trust answer. Denials never get lifted by a weaker source.
+ */
+export function compileLspRegistry(
+	config: LSPConfig,
+	provenance: ProvenanceMap = new Map(),
+): RegisteredLSPConfig {
+	const trust = getProjectTrustState();
 	const customServers: LSPServerInfo[] = [];
 	const disabledServerIds = new Set(config.disabledServers ?? []);
 
 	if (config.servers) {
 		for (const [id, serverConfig] of Object.entries(config.servers)) {
+			const commandSource = sourceFor(provenance, `/lsp/servers/${id}/command`);
+			const commandAllowed = executableAllowed(commandSource, trust);
+			registryDecision(id, "command", commandSource, trust, commandAllowed);
+			if (!commandAllowed) continue;
+			const envSource = sourceFor(provenance, `/lsp/servers/${id}/env`);
+			const initSource = sourceFor(
+				provenance,
+				`/lsp/servers/${id}/initializationOptions`,
+			);
+			const envAllowed = executableAllowed(envSource, trust);
+			const initAllowed = executableAllowed(initSource, trust);
+			registryDecision(id, "env", envSource, trust, envAllowed);
+			registryDecision(
+				id,
+				"initializationOptions",
+				initSource,
+				trust,
+				initAllowed,
+			);
+			const admitted: CustomServerConfig = { ...serverConfig };
+			if (!envAllowed) delete admitted.env;
+			if (!initAllowed) delete admitted.initializationOptions;
 			try {
-				const server = createCustomServer(serverConfig, id);
-				customServers.push(server);
+				const server = createCustomServer(admitted, id);
+				customServers.push({ ...server, trustAllowed: true });
 			} catch {
 				// pi-lens-ignore: missing-error-propagation — per-server registration, skip bad entries
 			}
@@ -874,21 +1008,90 @@ export function registerLSPConfig(config: LSPConfig): RegisteredLSPConfig {
 			if (entry && typeof entry === "object" && !Array.isArray(entry)) {
 				const initOpts = (entry as Record<string, unknown>)
 					.initializationOptions;
+				const command = (entry as ServerInitOverride).command;
+				const commandSource = sourceFor(
+					provenance,
+					`/lsp/serverOverrides/${id}/command`,
+				);
+				const envSource = sourceFor(
+					provenance,
+					`/lsp/serverOverrides/${id}/env`,
+				);
+				const initSource = sourceFor(
+					provenance,
+					`/lsp/serverOverrides/${id}/initializationOptions`,
+				);
+				const commandAllowed = executableAllowed(commandSource, trust);
+				const envAllowed = executableAllowed(envSource, trust);
+				const overrideInitAllowed = executableAllowed(initSource, trust);
+				registryDecision(
+					id,
+					"command override",
+					commandSource,
+					trust,
+					commandAllowed,
+				);
+				registryDecision(id, "env override", envSource, trust, envAllowed);
+				registryDecision(
+					id,
+					"initializationOptions",
+					initSource,
+					trust,
+					overrideInitAllowed,
+				);
 				if (
-					initOpts !== undefined &&
-					typeof initOpts === "object" &&
-					initOpts !== null &&
-					!Array.isArray(initOpts)
+					command !== undefined ||
+					(entry as ServerInitOverride).env !== undefined ||
+					(initOpts !== undefined &&
+						typeof initOpts === "object" &&
+						initOpts !== null &&
+						!Array.isArray(initOpts))
 				) {
 					serverOverrides.set(id, {
-						initializationOptions: initOpts as Record<string, unknown>,
+						...(overrideInitAllowed && initOpts !== undefined
+							? { initializationOptions: initOpts as Record<string, unknown> }
+							: {}),
+						...(commandAllowed && command !== undefined ? { command } : {}),
+						...(envAllowed && (entry as ServerInitOverride).env
+							? { env: (entry as ServerInitOverride).env }
+							: {}),
 					});
 				}
 			}
 		}
 	}
 
-	return { customServers, disabledServerIds, serverOverrides };
+	const overriddenBuiltins = LSP_SERVERS.map((server) => {
+		const override = serverOverrides.get(server.id);
+		if (!override?.command) return { ...server };
+		const argv = Array.isArray(override.command)
+			? override.command
+			: [override.command, "--stdio"];
+		return {
+			...server,
+			trustAllowed: true,
+			async spawn(
+				root: string,
+				options?: import("./server.js").LSPSpawnOptions,
+			) {
+				void options;
+				const program = argv[0];
+				if (!program)
+					throw new Error(`empty command override for ${server.id}`);
+				const proc = await launchLSP(program, argv.slice(1), {
+					cwd: root,
+					env: override.env ? { ...process.env, ...override.env } : process.env,
+				});
+				return { process: proc };
+			},
+		};
+	});
+	return {
+		customServers,
+		registeredServers: overriddenBuiltins,
+		disabledServerIds,
+		serverOverrides,
+	};
 }
 
 /**
@@ -972,7 +1175,10 @@ export async function initLSPConfig(cwd: string): Promise<void> {
  * the runtime runs and the introspection cannot see, or the reverse.
  */
 function registeredServers(config: RegisteredLSPConfig): LSPServerInfo[] {
-	return [...LSP_SERVERS, ...config.customServers];
+	const builtins = config.registeredServers.length
+		? config.registeredServers
+		: LSP_SERVERS;
+	return [...builtins, ...config.customServers];
 }
 
 /**

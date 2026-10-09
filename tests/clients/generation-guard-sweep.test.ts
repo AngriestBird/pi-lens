@@ -66,6 +66,10 @@ const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
 	// a stated reason, not exempted on principle. ---
 	"lsp/client.ts":
 		"#1682's per-(path, identifier) pull sequences: claimed at request time, re-checked at write time. A GenerationMap candidate, deferred because client.ts is the highest-traffic file in the repo and a behavior-identical proof there needs its own round",
+	"lsp/config.ts":
+		"the unknown-trust notice compares the degradation ledger's session generation only to re-arm a bounded log latch; the ledger owns the counter and reset, so replacing this scalar comparison with a second GenerationSource would duplicate session identity rather than guard a stale write",
+	"lsp/launch.ts":
+		"the unknown-trust project-local binary notice compares the degradation ledger's session generation only to re-arm a bounded launch warning; the ledger owns the counter and reset, so a second GenerationSource would duplicate the same session identity",
 	"review-graph/builder.ts":
 		"the workspace-cache epoch this primitive was modelled on, plus checkpoint and persist generations that gate post-await promotions (see the `_persistGenerations.get(key) !== result.generation` guard). A GenerationMap candidate; migrating a file this size is real work, not a rider on #1754's proof-of-two",
 	"project-snapshot.ts":
