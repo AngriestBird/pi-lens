@@ -139,4 +139,59 @@ d("LSP dispatch runner — real server (#873)", () => {
 			rawOutput: "no-diagnostics",
 		});
 	}, 30_000);
+
+	it("drops stale primary diagnostics after a current-content timeout (#4231)", async () => {
+		await getLSPService().shutdown();
+		resetLSPService({ fast: true });
+		resetLSPConfigStateForTests();
+		fs.writeFileSync(
+			path.join(env.cwd, ".pi-lens", "lsp.json"),
+			JSON.stringify({
+				servers: {
+					"fake-real-runner": {
+						name: "Fake delayed primary LSP",
+						extensions: [".real-lsp"],
+						command: process.execPath,
+						args: [fakeServerPath],
+						env: {
+							FAKE_LSP_DELAY_AFTER_FIRST_PULL_MS: "5000",
+							FAKE_LSP_DIAGNOSTIC_MESSAGE: "stale primary error",
+						},
+					},
+					typos: {
+						name: "Fake auxiliary typos LSP",
+						extensions: [".real-lsp"],
+						role: "auxiliary",
+						command: process.execPath,
+						args: [fakeServerPath],
+						env: {
+							FAKE_LSP_DIAGNOSTIC_MESSAGE: "fresh typos finding",
+							FAKE_LSP_DIAGNOSTIC_SOURCE: "typos",
+						},
+					},
+				},
+			}),
+		);
+		await initLSPConfig(env.cwd);
+		const { ctx, filePath } = env.addFile(
+			"stale.real-lsp",
+			"old content with a primary error\n",
+		);
+
+		const initial = await lspRunner.run(ctx);
+		expect(
+			initial.diagnostics.some((d) => d.message.includes("stale primary")),
+		).toBe(true);
+
+		fs.writeFileSync(filePath, "new content with a typo\n");
+		const result = await lspRunner.run(ctx);
+
+		expect(
+			result.diagnostics.some((d) => d.message.includes("stale primary")),
+		).toBe(false);
+		expect(
+			result.diagnostics.map((d) => ({ tool: d.tool, message: d.message })),
+		).toEqual([{ tool: "typos", message: "fresh typos finding" }]);
+		expect(result.unconfirmedServerIds).toContain("fake-real-runner");
+	}, 30_000);
 });

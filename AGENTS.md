@@ -665,7 +665,11 @@ the surface they bite; each block loads only when its trigger applies.
   query, never a warm-up, cascade or sweep touch.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
-  never turn a primary answer inconclusive.
+  never turn a primary answer inconclusive. When a primary touch is
+  inconclusive but the merged result contains answered diagnostics, dispatch
+  preserves only diagnostics from content-confirmed contributors and carries
+  the named primary gap as unconfirmed; only an empty inconclusive result is
+  skipped (#4219, #4231).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records

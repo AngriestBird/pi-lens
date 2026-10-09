@@ -111,6 +111,8 @@ export interface CustomServerConfig {
 	name: string;
 	extensions: string[];
 	command: string;
+	/** Cross-cutting scanner role; language is the default. */
+	role?: "language" | "auxiliary";
 	args?: string[];
 	rootMarkers?: string[];
 	env?: Record<string, string>;
@@ -759,6 +761,7 @@ export function createCustomServer(
 		// be probeable before the claim can defer a CLI runner.
 		command: config.command,
 		extensions: config.extensions,
+		...(config.role ? { role: config.role } : {}),
 		idleEviction: "unmeasured",
 		// The config-declared covers channel (#3968): the claim the loader
 		// validated (`lspConfigOf`'s projection drops unknown runner ids) rides
