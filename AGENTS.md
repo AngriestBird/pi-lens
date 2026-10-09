@@ -1087,7 +1087,8 @@ uses `getGlobalPiLensLogDir()`. `PILENS_DATA_DIR` relocates project state and
 `displayProjectDataPath`; do not spell a project-data path in agent text.
 
 All loggers use `createNdjsonLogger`. Flush the specific logger before reading
-its file. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
+its file; graceful `session_shutdown` returns the shared bounded drain before
+pi closes stdin or exits. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
 `review-graph.log`, `read-guard.log`, `actionable-warnings.log`,
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
 

@@ -141,6 +141,7 @@ import {
 	resolveLensToolEnabled,
 } from "./clients/tool-config.js";
 import { recordDegradationOnce } from "./clients/degradation-ledger.js";
+import { flushAllNdjsonWriters } from "./clients/ndjson-logger.js";
 import { wrapToolsForCompactLine } from "./clients/tool-render.js";
 import {
 	finalizeToolResultWithDelivery,
@@ -3883,13 +3884,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 			| { reason?: string; targetSessionFile?: string }
 			| undefined;
 		const shutdownReason = shutdownEvent?.reason;
+		// Start this before synchronous teardown so writes emitted by the teardown
+		// itself join the same serialized writer drain. Returning the promise keeps
+		// pi's awaited shutdown boundary without delaying synchronous lifecycle work
+		// for existing embedders that call handlers directly.
+		const ndjsonDrain = bounded(flushAllNdjsonWriters(), {
+			ms: HOOK_WALL_BUDGET_MS.session_shutdown,
+			signal: undefined,
+			hook: "session_shutdown",
+			label: "ndjson-writers",
+		});
 		// #3611 r2: the retire runs in `finally`. After a /reload that
 		// re-evaluated the entry nothing else ever ends this scope, so a throw
 		// from a teardown step below must not skip it.
 		try {
+			// Graceful quit or replacement is awaited by pi before it closes the
+			// process/stdin. The returned drain promise keeps the at-exit replay from
+			// seeing an in-flight batch (#935). Hard exits skip this hook.
 			// #3612 (D3): hand this scope's stores to the successor that
 			// continues its conversation (`/reload`, `/fork`, `/clone`), before
-			// any teardown below. Sync: this hook may not await (#2523). The
+			// any teardown below. This portion stays synchronous; the hook returns
+			// its bounded writer-drain promise after teardown. The
 			// slot's sidecar save is its fallback (a fork's parent sidecar).
 			// #3881: a start still in flight never adopted; the slot left for it
 			// is the conversation's state, so hand that on instead.
@@ -3939,11 +3954,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			) {
 				endSituationalToolTelemetry();
 			}
-
-			// #1654: no drain runs here — see the module comment above
-			// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
-			// session_shutdown-based safety net was deliberately dropped rather
-			// than kept.
 
 			// #1018/#1996: emit the bounded primary cache summary, then drop this
 			// session's prefix/attribution state. The secondary path did the same for
@@ -4019,6 +4029,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// handle this session issued stops being current (design §3.4).
 			retireOwnScope(shutdownReason, stableSessionId);
 		}
+		return ndjsonDrain;
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

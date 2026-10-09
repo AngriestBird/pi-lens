@@ -83,8 +83,8 @@ export const HOOK_WALL_BUDGET_MS: Readonly<Record<HookBudgetKey, number>> =
 		tool_result_read_only: 500,
 		/** The ONLY path the contract lets block the host, and only this long. */
 		tool_result_edit: 10000,
-		/** Teardown: spawning or awaiting here aborts libuv (#234). */
-		session_shutdown: 0,
+		/** Graceful teardown drains registered sinks; hard exits still use sync flush. */
+		session_shutdown: 1000,
 		/** Synchronous message contribution; the host is blocked on the answer. */
 		context: 0,
 		/** Fork bookkeeping; the session is being replaced under it. */

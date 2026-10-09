@@ -435,8 +435,9 @@ export interface SessionStoreSpec<P> {
 	name: string;
 	policy: Readonly<Record<StartReason, StartAction>>;
 	/**
-	 * Sync and bounded: it runs in `session_shutdown`, whose budget is 0 ms
-	 * (#2523). `undefined` hands nothing off.
+	 * Synchronous: it runs in the synchronous portion of `session_shutdown`;
+	 * the hook's separate returned drain promise does not cover this snapshot.
+	 * `undefined` hands nothing off.
 	 */
 	snapshot(scope: SessionScope): P | undefined;
 	/**

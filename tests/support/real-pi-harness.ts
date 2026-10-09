@@ -9,7 +9,6 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	statSync,
 	writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
@@ -88,62 +87,6 @@ export const realHarnessFixtureRoot = path.join(
 	"tests/fixtures/real-harness",
 );
 const fixtureRoot = realHarnessFixtureRoot;
-
-const LATENCY_QUIESCENCE_MS = 250;
-const LATENCY_QUIESCENCE_TIMEOUT_MS = 5_000;
-const LATENCY_QUIESCENCE_POLL_MS = 25;
-
-type FileFingerprint = { size: number; mtimeMs: number } | undefined;
-
-function latencyFingerprint(file: string): FileFingerprint {
-	try {
-		const stat = statSync(file);
-		return { size: stat.size, mtimeMs: stat.mtimeMs };
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * Wait until the latency writer has stopped changing its file before closing
- * stdin. The ndjson exit flusher intentionally replays an in-flight batch
- * (#935), so ending a real-pi child while appendFile is pending can duplicate
- * the final lifecycle row. The bounded wait belongs to this harness boundary;
- * the logger's never-drop trade remains unchanged.
- */
-export async function waitForLatencyLogQuiescence(
-	file: string,
-	stableMs = LATENCY_QUIESCENCE_MS,
-	timeoutMs = LATENCY_QUIESCENCE_TIMEOUT_MS,
-): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	let previous = latencyFingerprint(file);
-	let stableSince = Date.now();
-	while (Date.now() < deadline) {
-		await new Promise<void>((resolve) =>
-			setTimeout(resolve, LATENCY_QUIESCENCE_POLL_MS),
-		);
-		const current = latencyFingerprint(file);
-		if (
-			current?.size === previous?.size &&
-			current?.mtimeMs === previous?.mtimeMs
-		) {
-			if (Date.now() - stableSince >= stableMs) return;
-		} else {
-			previous = current;
-			stableSince = Date.now();
-		}
-	}
-	throw new Error(`latency.log did not quiesce within ${timeoutMs}ms: ${file}`);
-}
-
-export async function closeAfterLatencyLogQuiescence(
-	file: string,
-	close: () => void,
-): Promise<void> {
-	await waitForLatencyLogQuiescence(file);
-	close();
-}
 
 export function validateScript(value: unknown, source = "script.json"): Script {
 	if (!Array.isArray(value) || value.length === 0)
@@ -394,9 +337,7 @@ function startRealPi(
 	const stopChild = async (kill: boolean) => {
 		if (childStopped) return;
 		childStopped = true;
-		await closeAfterLatencyLogQuiescence(path.join(home, "latency.log"), () =>
-			child.stdin.end(),
-		);
+		child.stdin.end();
 		if (kill) killTree();
 		await waitForChildExit(child, [...killed]);
 	};

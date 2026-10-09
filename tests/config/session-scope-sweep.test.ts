@@ -433,7 +433,7 @@ describe("session stores (#3609 §3.8, #3612)", () => {
 
 	/**
 	 * The recurrence: an async snapshot. The hand-off snapshots every store in
-	 * `session_shutdown`, which may not await (#2523); a promise there would
+	 * the synchronous portion of `session_shutdown`, which does not await; a promise there would
 	 * reach the successor as an empty payload.
 	 */
 	it("snapshots every store synchronously, as JSON (item 2.6)", () => {
