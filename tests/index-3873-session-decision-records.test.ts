@@ -1134,7 +1134,7 @@ describe("#3873 F1: a formatter give-up leaves a per-file row at chain time", ()
 			});
 			const late = `${which}_format_late_resync`;
 
-			chainLateFormatResync(
+			void chainLateFormatResync(
 				settled,
 				which,
 				{ toolName: "write", filePath: "/repo/f.ts", startedAt: Date.now() },

@@ -427,7 +427,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/error-class.ts": 3,
 		"clients/extension-log.ts": 3,
 		"clients/file-utils.ts": 3,
-		"clients/format-events-publish.ts": 3,
+		"clients/format-events-publish.ts": 4,
 		"clients/format-service.ts": 11,
 		"clients/formatters.ts": 26,
 		"clients/generation-lock.ts": 7,
@@ -895,7 +895,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 24,
+		"clients/gitleaks-client.ts": 25,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
 		"clients/gradle-ktfmt-style.ts": 5,
@@ -997,7 +997,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.resolve(filePath)` before naming it resolved.
 		// 28 -> 29 (#3814): the deferred-blocker merge derives the map key with
 		// `path.resolve(filePath)`, the expression every sibling method uses.
-		"clients/runtime-coordinator.ts": 29,
+		// 29 -> 30 (#4213): the lifecycle identity lookup uses the same map key.
+		"clients/runtime-coordinator.ts": 30,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
@@ -1043,7 +1044,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 9,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 5,
+		"clients/trivy-client.ts": 6,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,
@@ -1105,7 +1106,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-context.ts": 2,
 		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
 		// `InlineBlockerRecord` (param, path, count, write index).
-		"clients/runtime-coordinator.ts": 23,
+		// 23 -> 29 (#4213): the deferred lifecycle identity reads its queued
+		// record and returns its ownership fields.
+		"clients/runtime-coordinator.ts": 29,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker

@@ -46,7 +46,7 @@ step log only, because it flaps.
 | dart | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
 | deno | primary | transparent | eligible | · | ok | preserved |
 | docker | primary | unmeasured | eligible | · | ok | preserved |
-| docker-official | primary | unmeasured | unavailable | no-fixture | n/a | n/a |
+| docker-official | primary | unmeasured | eligible | · | ok | preserved |
 | elixir | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
 | expert | primary | unmeasured | eligible | · | ok | preserved |
 | fish | primary | transparent | eligible | · | ok | preserved |
