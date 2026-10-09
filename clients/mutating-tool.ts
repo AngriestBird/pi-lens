@@ -196,6 +196,7 @@ export interface MutatingToolClassification {
 	kind: MutationKind;
 	touchedLines?: [number, number];
 	editRanges?: [number, number][];
+	authorshipUnknown?: boolean;
 	preflightError?: string;
 	editBatchSummary?: ReadGuardEditBatchSummary;
 	/** Set when an adapter recognized the shape but could not name the lines. */
@@ -894,6 +895,7 @@ export interface BridgeMutationEntry {
 	kind: MutationKind;
 	touchedLines?: [number, number];
 	editRanges?: [number, number][];
+	authorshipUnknown?: boolean;
 	/** Producer identity, surfaced as the tool name on the classification. */
 	consumer?: string;
 	/**
@@ -971,6 +973,7 @@ export function classifyBridgeMutation(
 		kind: entry.kind,
 		touchedLines: entry.touchedLines,
 		editRanges: entry.editRanges,
+		authorshipUnknown: entry.authorshipUnknown,
 		provenance,
 		source: provenance === "bridge" ? "mutation-bridge" : "observed-mutation",
 	};

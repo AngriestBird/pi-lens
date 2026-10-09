@@ -330,6 +330,7 @@ function resolveChangedRange(
 function resolveAuthorshipRanges(
 	classification: MutatingToolClassification,
 ): Array<[number, number]> | undefined {
+	if (classification.authorshipUnknown === true) return undefined;
 	if (classification.editRanges && classification.editRanges.length > 0)
 		return classification.editRanges;
 	if (classification.touchedLines) return [classification.touchedLines];

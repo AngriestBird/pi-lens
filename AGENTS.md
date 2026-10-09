@@ -205,7 +205,9 @@ the surface they bite; each block loads only when its trigger applies.
     ask which rule answers for a path in the second column only.
     A first credit from a bridge is range-scoped to the bytes it reports, and
     settled-sweep drift never creates authorship (#4210); screen the next
-    positional edit both inside and outside the reported range.
+    positional edit both inside and outside the reported range. This is the
+    bridge/LSP/native-edit rule only: recognized bash (#4131 R2), pipeline
+    sibling files, and agent_end are pinned whole-file exceptions.
 
 65. **Unknown authorship range:** a producer that cannot recover a truthful
     range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN retires

@@ -2402,6 +2402,31 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		}
 	});
 
+	// #4210 N3 recurrence: an observed licensed partial replay must not narrow
+	// an existing whole-file authorship to the replay's reported range.
+	it("keeps whole-file authorship when a licensed partial credit follows it (#4210 N3)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-whole-union-");
+		try {
+			const filePath = path.join(env.tmpDir, "whole-union.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-whole-union");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "whole-file",
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "one\nobserved\nthree\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "partial",
+				authoredRanges: [[2, 2]],
+			});
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("allow");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("records unknown authored-range retirement distinctly", () => {
 		const env = setupTestEnvironment("read-guard-authorship-unknown-");
 		resetDegradationLedger();

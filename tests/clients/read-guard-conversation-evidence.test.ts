@@ -2106,6 +2106,35 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
+	it("credits only the native edit's own line after the real tool_result pipeline (#4210 N1/N2)", async () => {
+		const env = setupTestEnvironment("rg-4210-native-own-range-");
+		try {
+			const file = fixture(
+				env.tmpDir,
+				"native.ts",
+				`${lines(12).join("\n")}\n`,
+			);
+			const runtime = newRuntime(env.tmpDir);
+			runtime.readGuard.recordWritten(file, {
+				stampFileTime: false,
+				authorship: "partial",
+				authoredRanges: [[10, 10]],
+				allowFirstAuthorship: true,
+			});
+			const edit = await positionalEdit(runtime, file, [[10, 10, "native10"]]);
+			await applyEdit(runtime, file, edit);
+			const guard = runtime.readGuard;
+			if (!guard) throw new Error("read guard unavailable");
+			const entry = guard
+				.exportAuthorship()
+				.entries?.find((candidate) => candidate.filePath === file);
+			expect(entry?.authoredRanges).toEqual([[10, 10]]);
+			expect(guard.checkEdit(file, [12, 12]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps bash authorship over a metadata-only change and an identical rewrite (#4131 R2, #3520 no-drop)", async () => {
 		const env = setupTestEnvironment("rg-4131-r2-");
 		try {

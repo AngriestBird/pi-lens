@@ -2325,6 +2325,8 @@ export class ReadGuard {
 			opts?.contentHash,
 			opts?.authoredRanges,
 		);
+		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
+			observed;
 		const composedRanges =
 			existing?.authoredRanges === undefined
 				? existing
@@ -2341,7 +2343,7 @@ export class ReadGuard {
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);
 		this.writtenThisSession.set(filePath, {
-			...observed,
+			...observedWithoutRanges,
 			...(composedRanges !== undefined
 				? {
 						authoredRanges: composedRanges,

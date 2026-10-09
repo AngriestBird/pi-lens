@@ -427,16 +427,26 @@ function bookkeepLspMutation(
 				}
 			} else {
 				try {
-					const editRanges = detail.ranges
-						? detail.ranges.map(
-								({ start, end }) => [start, end] as [number, number],
-							)
-						: detail.range
-							? [[detail.range.start, detail.range.end] as [number, number]]
-							: undefined;
+					const editRanges =
+						detail.ranges && detail.authorshipUnknown !== true
+							? detail.ranges.map(
+									({ start, end }) => [start, end] as [number, number],
+								)
+							: detail.range && detail.authorshipUnknown !== true
+								? [[detail.range.start, detail.range.end] as [number, number]]
+								: undefined;
 					const recorded = bridge.recordMutation({
 						filePath,
 						kind: "edit",
+						...(detail.range !== undefined && {
+							touchedLines: [detail.range.start, detail.range.end] as [
+								number,
+								number,
+							],
+						}),
+						...(detail.authorshipUnknown === true && {
+							authorshipUnknown: true,
+						}),
 						...(editRanges !== undefined ? { editRanges } : {}),
 						consumer: context.tool,
 						provenance: "observed",

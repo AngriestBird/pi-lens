@@ -907,6 +907,7 @@ async function dispatchPipelineAnalysis(args: {
 	 * Omitted: stamp, as before.
 	 */
 	ownFileTimeStamp?: boolean;
+	preserveNativeAuthorship?: boolean;
 }): Promise<
 	| { crashed: false; result: PipelineResult }
 	| {
@@ -938,6 +939,7 @@ async function dispatchPipelineAnalysis(args: {
 		allowAutonomousWriters,
 		sessionGeneration,
 		ownFileTimeStamp = true,
+		preserveNativeAuthorship = false,
 	} = args;
 	const {
 		event,
@@ -1210,6 +1212,15 @@ async function dispatchPipelineAnalysis(args: {
 			),
 		]);
 		for (const changedFile of changedForReadGuard) {
+			// A native positional edit already credited its own produced lines above.
+			// The pipeline may re-credit ownPath only when it actually rewrote those
+			// bytes; otherwise a whole-file stamp would erase the native scope.
+			if (
+				changedFile === ownPath &&
+				pipelineOwnedWriteHash === undefined &&
+				preserveNativeAuthorship
+			)
+				continue;
 			if (nodeFs.existsSync(changedFile)) {
 				deps.readGuard?.recordWritten(changedFile, {
 					authorship: "whole-file",
@@ -2598,7 +2609,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			? (() => {
 					const evidence = ownEditEvidence(filePath, ownEdit);
 					return [
-						[ownEdit.start + 1, ownEdit.start + evidence.lineCount] as [
+						[ownEdit.start, ownEdit.start + evidence.lineCount - 1] as [
 							number,
 							number,
 						],
@@ -2940,6 +2951,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			participantTotal,
 			toolResultStart,
 			nativeAppliedPairs,
+			preserveNativeAuthorship: nativeAuthoredRanges !== undefined,
 			allowAutonomousWriters: bashAuthorshipConfirmed,
 			// #3512: one capture for the whole dispatch, the same one the
 			// inline verdict below writes through.

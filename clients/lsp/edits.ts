@@ -1507,6 +1507,12 @@ export async function applyWorkspaceEdit(
 					}
 					const content = await fs.readFile(diskPath, "utf-8");
 					const updated = applyTextEditsToString(content, edits, "utf-16");
+					const changesLineCount = edits.some((edit) => {
+						const removedLines = edit.range.end.line - edit.range.start.line;
+						const insertedLines = (edit.newText.match(/\r\n|\r|\n/g) ?? [])
+							.length;
+						return removedLines !== insertedLines;
+					});
 					await fs.writeFile(diskPath, updated, "utf-8");
 					const start = Math.min(
 						...edits.map((item) => item.range.start.line + 1),
@@ -1520,8 +1526,7 @@ export async function applyWorkspaceEdit(
 							start: item.range.start.line + 1,
 							end: item.range.end.line + 1,
 						})),
-						authorshipUnknown:
-							content.split(/\r?\n/).length !== updated.split(/\r?\n/).length,
+						authorshipUnknown: changesLineCount,
 						importsChanged:
 							importsSignature(content) !== importsSignature(updated),
 					});
@@ -1540,6 +1545,7 @@ export async function applyWorkspaceEdit(
 					touchedFiles.add(filePath);
 					fileDetails.push({
 						filePath,
+						range: { start: 1, end: 1 },
 						authorshipUnknown: true,
 						importsChanged: false,
 					});
@@ -1561,11 +1567,13 @@ export async function applyWorkspaceEdit(
 					fileDetails.push(
 						{
 							filePath: oldPath,
+							range: { start: 1, end: 1 },
 							authorshipUnknown: true,
 							importsChanged: true,
 						},
 						{
 							filePath: newPath,
+							range: { start: 1, end: 1 },
 							authorshipUnknown: true,
 							importsChanged: true,
 						},
@@ -1584,6 +1592,7 @@ export async function applyWorkspaceEdit(
 					touchedFiles.add(filePath);
 					fileDetails.push({
 						filePath,
+						range: { start: 1, end: 1 },
 						authorshipUnknown: true,
 						importsChanged: true,
 					});
