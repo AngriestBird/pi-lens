@@ -76,6 +76,7 @@ vi.mock("../../clients/formatters.js", async (importOriginal) => {
 	};
 });
 import { getFormatService } from "../../clients/format-service.js";
+import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
 import {
 	type FormatterInfo,
 	formatFile as runFormatter,
@@ -1217,6 +1218,15 @@ describe("runtime-agent-end deferred formatting", () => {
 					paths: [filePath.replace(/\\/g, "/")],
 				}),
 			);
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({
+					v: 1,
+					source: "pi-lens",
+					fileCount: 1,
+					paths: [filePath.replace(/\\/g, "/")],
+				}),
+			);
 		} finally {
 			resetFormatEventsPublish();
 			if (previousDataDir === undefined) {
@@ -1226,6 +1236,142 @@ describe("runtime-agent-end deferred formatting", () => {
 			}
 			env.cleanup();
 		}
+	});
+
+	it("keeps the format lifecycle matchable and waits for an abandoned formatter write (#4213)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-bus-format-identity-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "session-4213" });
+			runtime.deferFormat(
+				filePath,
+				env.tmpDir,
+				"edit",
+				env.tmpDir,
+				"session-4213",
+			);
+			let releaseLate!: () => void;
+			const abandoned = new Promise<void>((resolve) => {
+				releaseLate = resolve;
+			});
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			const drain = handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				currentSessionId: "session-4213",
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [{ name: "biome", success: true, changed: true }],
+							anyChanged: true,
+							allSucceeded: true,
+							abandoned,
+						})) as any,
+					}) as any,
+			});
+			await drain;
+			expect(emit).not.toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.anything(),
+			);
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			releaseLate();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const done = emit.mock.calls.find(
+				([name]) => name === "pilens:format:done",
+			);
+			expect(done?.[1]).toMatchObject({
+				ownerSessionId: "session-4213",
+				turnIndex: expect.any(Number),
+				batchId: expect.any(String),
+			});
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("publishes one bounded unsettled terminal for a formatter that never settles (#4213)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const env = setupTestEnvironment("pi-lens-agent-end-format-unsettled-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			const never = new Promise<never>(() => {});
+			const drain = handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: () => never }) as any,
+			});
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.agent_settled + 30_000 + 1,
+			);
+			await drain;
+			const done = emit.mock.calls.filter(
+				([name]) => name === "pilens:format:done",
+			);
+			expect(done).toHaveLength(1);
+			expect(done[0]?.[1]).toMatchObject({
+				settled: false,
+				paths: [filePath.replace(/\\/g, "/")],
+				fileCount: 1,
+			});
+			expect(
+				getDegradationSummary().filter(
+					(entry) => entry.kind === "deferred-format-unsettled",
+				),
+			).toEqual([
+				expect.objectContaining({
+					kind: "deferred-format-unsettled",
+				}),
+			]);
+		} finally {
+			resetDegradationLedger();
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps fallback batch ids unique across same-clock coordinator reloads (#4213)", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_700_000_000_000);
+		const a = new RuntimeCoordinator();
+		const b = new RuntimeCoordinator();
+		expect(a.telemetrySessionId).not.toBe(b.telemetrySessionId);
+		a.resetForSession(1_700_000_000_000);
+		expect(a.telemetrySessionId).not.toBe(b.telemetrySessionId);
+		vi.useRealTimers();
 	});
 
 	it("does not publish pilens:format:start when there is nothing queued (#673)", async () => {
@@ -1263,6 +1409,49 @@ describe("runtime-agent-end deferred formatting", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+
+	it("publishes pilens:format:done with no paths when formatting changes no bytes (#673)", async () => {
+		const env = setupTestEnvironment(
+			"pi-lens-agent-end-bus-format-done-empty-",
+		);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [],
+							anyChanged: false,
+							allSucceeded: true,
+						})),
+					}) as any,
+			});
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({ fileCount: 0, paths: [] }),
+			);
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});

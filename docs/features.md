@@ -234,6 +234,42 @@ One event per logical write batch (not per file) — e.g. a single eslint `--fix
 
 **Kill switch:** `PI_LENS_BUS_PUBLISH=0` disables publishing entirely (see `docs/environment-variables.md`). Publishing is fire-and-forget — a disabled/unavailable/throwing bus never affects the write path's own success or latency.
 
+### Bus Events — `pilens:format:*` (#673)
+
+Deferred formatting has a separate lifecycle on the same `pi.events` bus:
+
+```
+pilens:format:queued  { v: 1, source: "pi-lens", filePath, cwd, tool, kinds,
+                        ownerSessionId?, turnIndex?, batchId? }
+pilens:format:start   { v: 1, source: "pi-lens", cwd, paths, fileCount, kinds,
+                        ownerSessionId?, turnIndex?, batchId? }
+pilens:format:done    { v: 1, source: "pi-lens", cwd, paths, fileCount, kinds,
+                        ownerSessionId?, turnIndex?, batchId?, settled? }
+```
+
+Paths and `cwd` are absolute, normalized strings. `queued` is emitted when a
+file first enters the deferred queue; `start` is emitted when a non-empty
+claimed format batch begins; and `done` is emitted after all formatters in that
+batch and any late-write resyncs have settled. `paths: []` on `done` means the
+batch changed no bytes. `batchId` is process-unique and monotonic across
+coordinator generations, so
+two same-millisecond reloads cannot share a lifecycle identity. A normal
+`pilens:format:done` has `settled: true` (or omits the additive field for old
+producers). If the formatter remains unsettled after the bounded hook/format
+drain, pi-lens emits one terminal `pilens:format:done` with `settled: false`
+and the still-pending paths, and records one `deferred-format-unsettled`
+degradation for that batch. A later formatter write is resynced by the late
+continuation and does not emit a second done event.
+The session and turn fields let a listener match the lifecycle to its own
+session and turn; consumers must not infer ownership from paths or timing.
+
+These are visibility events, not a flush API. They are fire-and-forget and can
+be absent when the bus is disabled, unwired, stale, or throws. Replaced-session
+and aborted drains publish only for work they actually claim and finish; work
+requeued for its owner is not
+announced as done by the replacing session. The events are additive v1 schemas
+and may gain optional fields without a version bump.
+
 **Fix provenance (#502):** `FilesTouchedPayload` gained an additive, optional `fixes` field so a diff/review consumer can distinguish a pi-lens-mechanical hunk from an agent edit:
 
 ```

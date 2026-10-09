@@ -252,6 +252,8 @@ export type DegradationKind =
 	 * commit.
 	 */
 	| "deferred-blocker-gate-error"
+	/** A deferred formatter outlived its bounded drain and has no clean result. */
+	| "deferred-format-unsettled"
 	| "demoted-finding-retired"
 	| "diagnostic-retained-unreconciled"
 	| "dispatch-non-absolute-baseline-path"
@@ -1682,6 +1684,8 @@ export type DegradationKind =
 	 * re-observes the file.
 	 */
 	| "wasm-abort"
+	/** #3834: a retired compiled query stayed alive for an active scan. Counted. */
+	| "wasm-query-batch-disposal-deferred"
 	/**
 	 * #3605: web-tree-sitter trapped (`memory access out of bounds`, `table
 	 * index is out of bounds`, ...) while parsing or querying one file. That

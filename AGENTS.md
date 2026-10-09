@@ -684,6 +684,11 @@ the surface they bite; each block loads only when its trigger applies.
 - Every new LSP server has a smoke fixture or a documented alternate/toolchain
   exemption. Real LSP-spawn tests belong in the serialized `lsp-spawn-heavy`
   lane.
+- A `fallbackFor` family is one primary for workspace grouping: a selected
+  preferred server and its sequential alternate do not disable the workspace-
+  pull fast path merely because both registry members match the file. Measure
+  the alternate independently; do not attribute the preferred server's
+  capabilities or diagnostics to it (#3939).
 
 </important>
 <important if="touching dispatch, runners, formatters, and installers rules">
@@ -762,6 +767,9 @@ the surface they bite; each block loads only when its trigger applies.
 - Every cache states its freshness axes, bound, eviction axis, and invalidation
   source. A bounded entry count does not excuse unbounded bytes, timers, WASM
   objects, or persisted evidence.
+- Tree-sitter's `queryBatchCache` is invalidated by `clearWasmInput` when a
+  trapped query heals, because an in-flight batch may have cached a result that
+  omitted the healed rule (#3834).
 - Async publication carries a generation or epoch and checks it before and
   after awaited work. Graph snapshots are immutable by replacement.
 - Review-graph, snapshot, reverse-dependency, word-index, and call-graph data

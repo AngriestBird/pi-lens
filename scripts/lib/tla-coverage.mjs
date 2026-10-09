@@ -216,7 +216,11 @@ export function findHookRanges(source) {
 		for (const name of handlerArguments(
 			lines.slice(index, end + 1).join("\n"),
 		)) {
-			const declaration = FUNCTION_DECLARATION(name.replace(/\$/g, "\\$"));
+			// Escape every regex metacharacter, not only `$` (CodeQL js/incomplete-sanitization, alert #64).
+			// Not imported from clients/string-utils: pr-metadata.yml runs this without a build.
+			const declaration = FUNCTION_DECLARATION(
+				name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+			);
 			const at = lines.findIndex((line) => declaration.test(line));
 			if (at >= 0) add(hook, at, statementEnd(lines, at));
 		}
