@@ -262,6 +262,10 @@ the surface they bite; each block loads only when its trigger applies.
     path discloses its truncation on the rendered surface; a count recorded
     only in `latency.log` is not disclosure (#3166 r2: an 80-finding input
     bound zeroed a neighbour's genuine errors, counted only in the log).
+    An out-of-session-root project edit records one bounded degradation and
+    uses the existing advisory notice seam; intended vendor skips and pi-owned
+    OS-temp artifacts stay silent (`clients/runtime-tool-result.ts`,
+    `clients/ephemeral-root.ts`).
 
 26. **Old-role filter on a substitute:** compare fallback output with the
     substituted surface's contract, including non-blocking findings.
@@ -639,6 +643,22 @@ the surface they bite; each block loads only when its trigger applies.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The server-role vocabulary and the declared trait table have one owner,
+  `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
+  never a comparison against the role literal, and read `notifyInflightLimit`
+  or `replyOrdering` through `serverTraits`, never by re-deriving a default;
+  `LspServerRole` is declared there and nowhere else, so a second
+  `"primary" | "auxiliary"` is a re-fork. `LSPServerInfo.role` is
+  non-optional: a row declares it, or the factory and custom-server builders
+  apply `DEFAULT_LSP_SERVER_ROLE`. Measured-behaviour markers (`silentOnClean`
+  and the census siblings named by `STRATEGY_TABLE_TRAITS`) stay on
+  `wait-policy/strategies.ts`, which their probes and expiry tests own; the two
+  tables stay disjoint. The auxiliary lifecycle and wait policy lives in
+  `clients/lsp/auxiliary-lifecycle.ts`, the diagnostic policy in
+  `clients/dispatch/auxiliary-lsp.ts`. Enforced by
+  `tests/config/lsp-role-predicate-sweep.test.ts` (production and `scripts/`
+  trees at zero inlined predicates) and
+  `tests/config/lsp-server-trait-table.test.ts` (registered-or-fail).
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
@@ -665,7 +685,11 @@ the surface they bite; each block loads only when its trigger applies.
   query, never a warm-up, cascade or sweep touch.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
-  never turn a primary answer inconclusive.
+  never turn a primary answer inconclusive. When a primary touch is
+  inconclusive but the merged result contains answered diagnostics, dispatch
+  preserves only diagnostics from content-confirmed contributors and carries
+  the named primary gap as unconfirmed; only an empty inconclusive result is
+  skipped (#4219, #4231).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records

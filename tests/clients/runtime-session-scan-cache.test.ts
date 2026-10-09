@@ -30,6 +30,7 @@ import {
 	_resetStartupScanVerdictTtlForTests,
 	getStartupScanMaxEntries,
 } from "../../clients/startup-scan.js";
+import { getStartupScanMaxSourceFilesDerived } from "../../clients/project-scale.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -228,7 +229,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 			fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
 
 			// Pre-seed a fresh negative verdict directly into the snapshot the way
-			// a prior process would have (avoids creating 2000+ real files here).
+			// a prior process would have (avoids creating an over-cap real tree here).
 			const seedRuntime = new RuntimeCoordinator();
 			seedRuntime.seedProjectSequence(0);
 			const seedSnapshot = buildProjectSnapshotFromRuntime({
@@ -241,7 +242,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 					canWarmCaches: false,
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
-					maxProjectFiles: 2000,
+					maxProjectFiles: getStartupScanMaxSourceFilesDerived(cwd),
 					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now(),
 				},
@@ -278,7 +279,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 					reason: "too-many-source-files",
 					sourceFileCount: 5000,
 					// Current bounds, so the TTL is the only thing that expires here.
-					maxProjectFiles: 2000,
+					maxProjectFiles: getStartupScanMaxSourceFilesDerived(cwd),
 					maxScanEntries: getStartupScanMaxEntries(),
 					computedAt: Date.now() - 10_000, // well past the 1s TTL
 				},

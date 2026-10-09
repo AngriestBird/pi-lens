@@ -48,7 +48,7 @@ function makeVerdict(
 		canWarmCaches: false,
 		reason: "too-many-source-files",
 		sourceFileCount: 5000,
-		maxProjectFiles: 2000,
+		maxProjectFiles: 2500,
 		maxScanEntries: getStartupScanMaxEntries(),
 		computedAt: Date.now(),
 		...overrides,
