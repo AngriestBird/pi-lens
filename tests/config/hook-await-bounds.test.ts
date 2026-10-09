@@ -2714,12 +2714,13 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"standalone MCP adapter and unit harnesses. The turn_end wall budget is " +
 		"always live, and timeout falls back to raw findings so security findings " +
 		"remain blockers.",
-	"call:index.ts#activateExtension:8d9498e9~fddd530d":
+	"call:index.ts#activateExtension:8d9498e9~d5ee5018":
 		"`undefined` is intentional: pi provides no caller abort signal for " +
 		"session_shutdown. The handler returns this promise to pi, which awaits " +
-		"the extension shutdown event before closing stdin or exiting; the " +
-		"session_shutdown wall bound is the sole live bound and records one " +
-		"hook-await-exceeded row if a sink never settles.",
+		"the extension shutdown event before closing stdin or exiting. The " +
+		"quit-only session_shutdown_quit wall bound is 500ms; replacement " +
+		"reasons use the zero session_shutdown budget to preserve successor " +
+		"ordering, and a wedged quit sink records one hook-await-exceeded row.",
 	"call:index.ts#activateExtension:c06d5cf4~b4f8a98d":
 		"The tool_result edit bootstrap receives the live pi ctx.signal and the " +
 		"edit budget; read-only calls use only resident clients.",

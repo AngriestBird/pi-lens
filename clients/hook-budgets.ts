@@ -57,6 +57,7 @@ export type HookBudgetKey =
 	| "tool_result_read_only"
 	| "tool_result_edit"
 	| "session_shutdown"
+	| "session_shutdown_quit"
 	| "context"
 	| "session_before_fork";
 
@@ -83,8 +84,10 @@ export const HOOK_WALL_BUDGET_MS: Readonly<Record<HookBudgetKey, number>> =
 		tool_result_read_only: 500,
 		/** The ONLY path the contract lets block the host, and only this long. */
 		tool_result_edit: 10000,
-		/** Graceful teardown drains registered sinks; hard exits still use sync flush. */
-		session_shutdown: 1000,
+		/** Replacement teardown is synchronous so its successor ordering is preserved (#3881). */
+		session_shutdown: 0,
+		/** The maintainer amendment permits quit-only sink draining before process exit (#2523). */
+		session_shutdown_quit: 500,
 		/** Synchronous message contribution; the host is blocked on the answer. */
 		context: 0,
 		/** Fork bookkeeping; the session is being replaced under it. */

@@ -3884,12 +3884,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			| { reason?: string; targetSessionFile?: string }
 			| undefined;
 		const shutdownReason = shutdownEvent?.reason;
+		const shutdownBudgetKey =
+			shutdownReason === "quit" ? "session_shutdown_quit" : "session_shutdown";
 		// Start this before synchronous teardown so writes emitted by the teardown
 		// itself join the same serialized writer drain. Returning the promise keeps
 		// pi's awaited shutdown boundary without delaying synchronous lifecycle work
 		// for existing embedders that call handlers directly.
 		const ndjsonDrain = bounded(flushAllNdjsonWriters(), {
-			ms: HOOK_WALL_BUDGET_MS.session_shutdown,
+			ms: HOOK_WALL_BUDGET_MS[shutdownBudgetKey],
 			signal: undefined,
 			hook: "session_shutdown",
 			label: "ndjson-writers",
