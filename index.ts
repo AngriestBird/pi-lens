@@ -80,7 +80,6 @@ import {
 	logScopeTransition,
 	retireScope,
 	reserveSessionStart,
-	releaseSessionStart,
 	type SessionScope,
 	scopeCell,
 	startKey,
@@ -2174,6 +2173,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 					reason?: string;
 					previousSessionFile?: string;
 				};
+				// pi's RPC double may deliver the same event object to a replacement
+				// extension factory. Genuine starts are newly allocated objects, even
+				// when their fields match an earlier start (#2891).
+				const isNewSessionStartEvent = reserveSessionStart(
+					sessionStartEvent as Record<string, unknown>,
+				);
 				const sessionStartReason = sessionStartEvent.reason;
 				const sessionIdentityParts = (() => {
 					try {
@@ -2195,35 +2200,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 						return { sessionId: undefined, sessionFile: undefined };
 					}
 				})();
-				const sessionStartKey =
-					sessionIdentityParts.sessionId ?? sessionIdentityParts.sessionFile;
-				const sessionStartIdentity =
-					sessionStartKey === undefined
-						? undefined
-						: JSON.stringify([
-								sessionStartKey,
-								sessionStartReason ?? "",
-								sessionStartEvent.previousSessionFile ?? "",
-							]);
-				// Reserve the complete host identity before the first await. The old
-				// posture-sensitive check could admit pi's interleaved duplicate while
-				// the first start was still restoring active tools (#2891).
-				if (
-					sessionStartIdentity !== undefined &&
-					!reserveSessionStart(
-						sessionStartKey as string,
-						sessionStartReason,
-						sessionStartEvent.previousSessionFile,
-					)
-				) {
+				if (!isNewSessionStartEvent) {
+					const duplicateSubject =
+						sessionIdentityParts.sessionId ??
+						sessionIdentityParts.sessionFile ??
+						"session_start";
 					emitBounded(
 						"session_start_duplicate_suppressed",
-						sessionStartKey ?? sessionStartIdentity,
+						duplicateSubject,
 						{
 							durationMs: 0,
 							metadata: {
 								reason: "duplicate start suppressed",
-								eventIdentity: sessionStartIdentity,
+								eventIdentity: "same-event-object",
 							},
 						},
 						{
@@ -2234,8 +2223,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					);
 					return;
 				}
-				// With neither a stable session ID nor a session file, fail open: the
-				// event cannot be safely identified for duplicate suppression.
 				const sessionStartMonotonicAt = performance.now();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>
@@ -3835,10 +3822,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return undefined;
 			}
 		})();
-		// The reservation is process-lifetime state because pi may re-run the
-		// extension factory before emitting the replacement's duplicate start.
-		// Release it only when this host session actually shuts down.
-		releaseSessionStart(stableSessionId ?? getSessionFile(ctx));
 		// #2146 F1: read once, up here, so the classifier and the scoped
 		// deregistration below both see the same value. A stale ctx must never
 		// break teardown, so an unreadable cwd degrades to `undefined`, which

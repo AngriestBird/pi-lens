@@ -500,9 +500,9 @@ the surface they bite; each block loads only when its trigger applies.
 17. **Process latch for session state:** every once-latch has a session reset;
     session dedupe belongs in the degradation ledger where possible.
     Host `session_start` admission survives extension factory re-runs through
-    the process-lifetime registry in `clients/session-scope.ts`, keyed by
-    `(sessionId|sessionFile, reason, previousSessionFile)` and released by
-    `session_shutdown`.
+    the process-lifetime `WeakSet<object>` in `clients/session-scope.ts`:
+    pi's RPC re-delivery reuses one event object, while each genuine start
+    allocates another, and weak identity needs no `session_shutdown` release.
 
 19. **Re-derived identity:** carry resolved identity or correlation across
     asynchronous stages; do not reconstruct it from ambiguous later inputs.

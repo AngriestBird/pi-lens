@@ -138,42 +138,29 @@ const SESSION_START_ADMISSION_FAMILY = "session-scope.start-admission";
 const SESSION_START_ADMISSION_VERSION = 1;
 
 interface SessionStartAdmission {
-	/** One identity per currently live host session. */
-	readonly identities: Map<string, string>;
+	/** Host event objects already delivered to a pi-lens handler. */
+	readonly deliveredEvents: WeakSet<object>;
 }
 
 function sessionStartAdmission(): SessionStartAdmission {
 	return getProcessSingleton(
 		SESSION_START_ADMISSION_FAMILY,
 		SESSION_START_ADMISSION_VERSION,
-		() => ({ identities: new Map<string, string>() }),
+		() => ({ deliveredEvents: new WeakSet<object>() }),
 	);
 }
 
 /**
- * Reserve one host session_start identity across extension factory re-runs.
- * The map is bounded by live sessions: session_shutdown releases its key.
+ * Reserve one host session_start event across extension factory re-runs.
+ * pi re-delivers the same event object to a replacement handler; every genuine
+ * start is a fresh object. WeakSet keeps the process-lifetime identity without
+ * retaining completed test fixtures or retired sessions.
  */
-export function reserveSessionStart(
-	sessionKey: string,
-	reason: string | undefined,
-	previousSessionFile: string | undefined,
-): boolean {
+export function reserveSessionStart(event: Record<string, unknown>): boolean {
 	const state = sessionStartAdmission();
-	const identity = JSON.stringify([
-		sessionKey,
-		reason ?? "",
-		previousSessionFile ?? "",
-	]);
-	if (state.identities.get(sessionKey) === identity) return false;
-	state.identities.set(sessionKey, identity);
+	if (state.deliveredEvents.has(event)) return false;
+	state.deliveredEvents.add(event);
 	return true;
-}
-
-/** Release the admission slot when pi retires the host session. */
-export function releaseSessionStart(sessionKey: string | undefined): void {
-	if (sessionKey === undefined) return;
-	sessionStartAdmission().identities.delete(sessionKey);
 }
 
 /**

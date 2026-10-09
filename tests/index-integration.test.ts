@@ -386,7 +386,8 @@ describe("index.ts integration", () => {
 				sessionFile,
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			const resumeEvent = makeSessionStartEvent({ reason: "resume" });
+			await sessionStart?.(resumeEvent, ctx);
 			const firstMutationCount = activeToolSetCalls.length;
 			expect(firstMutationCount).toBe(1);
 			expect([...activeTools]).not.toEqual(
@@ -399,13 +400,13 @@ describe("index.ts integration", () => {
 				]),
 			);
 
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			await sessionStart?.(resumeEvent, ctx);
 			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
 
 			// A duplicate is an idempotent host event, even if live posture drifted;
 			// the next genuinely new start owns restoration.
 			activeTools.add("ast_grep_search");
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			await sessionStart?.(resumeEvent, ctx);
 			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
 			expect(activeTools).toContain("ast_grep_search");
 
@@ -567,14 +568,9 @@ describe("index.ts integration", () => {
 				sessionFile: undefined,
 				mode: "rpc",
 			});
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
+			const noSessionEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(noSessionEvent, noSessionCtx);
+			await sessionStart?.(noSessionEvent, noSessionCtx);
 
 			const fileCtx = makeCtx({
 				cwd: tmpDir,
@@ -582,8 +578,9 @@ describe("index.ts integration", () => {
 				sessionFile: path.join(tmpDir, "fallback.jsonl"),
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
+			const fileEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(fileEvent, fileCtx);
+			await sessionStart?.(fileEvent, fileCtx);
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -647,6 +644,8 @@ describe("index.ts integration", () => {
 			await secondStart?.(differentPredecessor, ctx);
 			await secondStart?.(differentPredecessor, ctx);
 			await second.handlers.session_shutdown?.[0]?.({ reason: "reload" }, ctx);
+			// session_shutdown does not release an event-object admission: a later
+			// delivery of the same RPC object is still the same host event.
 			await secondStart?.(differentPredecessor, ctx);
 
 			const latency = await import("../clients/latency-logger.js");
@@ -668,7 +667,7 @@ describe("index.ts integration", () => {
 						row.phase === "session_scope_transition" &&
 						row.metadata?.transition === "start",
 				),
-			).toHaveLength(3);
+			).toHaveLength(2);
 
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
