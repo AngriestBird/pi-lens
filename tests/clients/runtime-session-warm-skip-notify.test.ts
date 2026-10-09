@@ -358,7 +358,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		const gate = suspendAt(resolveStartupScanContextAsyncSpy, scanSeam.actual);
 		try {
 			const cwd = path.join(env.tmpDir, "project");
-			writeSourceFiles(cwd, 2_001);
+			writeSourceFiles(cwd, getStartupScanMaxSourceFilesDerived(cwd) + 1);
 			const runtime = new RuntimeCoordinator();
 			const lines: Array<{ msg: string; level: string }> = [];
 			const dbg: string[] = [];
@@ -420,7 +420,7 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 		const gate = suspendAt(resolveStartupScanContextAsyncSpy, scanSeam.actual);
 		try {
 			const cwd = path.join(env.tmpDir, "project");
-			writeSourceFiles(cwd, 2_001);
+			writeSourceFiles(cwd, getStartupScanMaxSourceFilesDerived(cwd) + 1);
 			const runtime = new RuntimeCoordinator();
 			const lines: Array<{ msg: string; level: string }> = [];
 			const dbg: string[] = [];
