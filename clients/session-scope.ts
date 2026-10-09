@@ -134,6 +134,48 @@ function registry(): RegistryCounters {
 	);
 }
 
+const SESSION_START_ADMISSION_FAMILY = "session-scope.start-admission";
+const SESSION_START_ADMISSION_VERSION = 1;
+
+interface SessionStartAdmission {
+	/** One identity per currently live host session. */
+	readonly identities: Map<string, string>;
+}
+
+function sessionStartAdmission(): SessionStartAdmission {
+	return getProcessSingleton(
+		SESSION_START_ADMISSION_FAMILY,
+		SESSION_START_ADMISSION_VERSION,
+		() => ({ identities: new Map<string, string>() }),
+	);
+}
+
+/**
+ * Reserve one host session_start identity across extension factory re-runs.
+ * The map is bounded by live sessions: session_shutdown releases its key.
+ */
+export function reserveSessionStart(
+	sessionKey: string,
+	reason: string | undefined,
+	previousSessionFile: string | undefined,
+): boolean {
+	const state = sessionStartAdmission();
+	const identity = JSON.stringify([
+		sessionKey,
+		reason ?? "",
+		previousSessionFile ?? "",
+	]);
+	if (state.identities.get(sessionKey) === identity) return false;
+	state.identities.set(sessionKey, identity);
+	return true;
+}
+
+/** Release the admission slot when pi retires the host session. */
+export function releaseSessionStart(sessionKey: string | undefined): void {
+	if (sessionKey === undefined) return;
+	sessionStartAdmission().identities.delete(sessionKey);
+}
+
 /**
  * Where a handle keeps the scope it names, for {@link recordDroppedRead}.
  * `Symbol.for`, so a handle from another module evaluation is still read.

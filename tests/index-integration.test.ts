@@ -607,6 +607,78 @@ describe("index.ts integration", () => {
 	);
 
 	it(
+		"dedupes the same RPC start across a fresh extension factory (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+
+			const firstGraph = await import("../index.js");
+			const first = createMockPi();
+			firstGraph.default(first.pi as any);
+			const firstStart = first.handlers.session_start?.[0];
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "factory-rerun-session",
+				sessionFile: path.join(tmpDir, "factory-rerun.jsonl"),
+				mode: "rpc",
+			});
+			const event = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/factory-rerun-parent.jsonl",
+			});
+			await firstStart?.(event, ctx);
+
+			// pi's replacement can re-run the factory before the duplicate host
+			// emission. A closure-local reservation is fresh here and admits it.
+			vi.resetModules();
+			const secondGraph = await import("../index.js");
+			const second = createMockPi();
+			secondGraph.default(second.pi as any);
+			const secondStart = second.handlers.session_start?.[0];
+			await secondStart?.(event, ctx);
+			const differentPredecessor = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/another-parent.jsonl",
+			});
+			await secondStart?.(differentPredecessor, ctx);
+			await secondStart?.(differentPredecessor, ctx);
+			await second.handlers.session_shutdown?.[0]?.({ reason: "reload" }, ctx);
+			await secondStart?.(differentPredecessor, ctx);
+
+			const latency = await import("../clients/latency-logger.js");
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: { transition?: string };
+						},
+				);
+			expect(
+				rows.filter(
+					(row) =>
+						row.phase === "session_scope_transition" &&
+						row.metadata?.transition === "start",
+				),
+			).toHaveLength(3);
+
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
 		"session_start fails open when neither session id nor file is available",
 		async () => {
 			const previousHome = process.env.PI_LENS_HOME;

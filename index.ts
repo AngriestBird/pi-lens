@@ -79,6 +79,8 @@ import {
 	type LineageHandle,
 	logScopeTransition,
 	retireScope,
+	reserveSessionStart,
+	releaseSessionStart,
 	type SessionScope,
 	scopeCell,
 	startKey,
@@ -1927,13 +1929,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			return undefined;
 		}
 	};
-	// pi RPC can announce the same replacement twice. Keep one admission key for
-	// the host event identity before any asynchronous work begins, so every
-	// downstream reset observes one (session id, reason, previous file) event.
-	// A different reason or predecessor remains a real start and must run.
-	// The key is cleared per factory instance because pi re-runs the factory on
-	// every replacement; if that ever changes, clear the key in session_shutdown.
-	let lastSessionStartIdentity: string | undefined;
 	const activateToolsTool = createActivateToolsTool(
 		pi as unknown as {
 			getActiveTools?: () => string[];
@@ -2215,7 +2210,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// the first start was still restoring active tools (#2891).
 				if (
 					sessionStartIdentity !== undefined &&
-					lastSessionStartIdentity === sessionStartIdentity
+					!reserveSessionStart(
+						sessionStartKey as string,
+						sessionStartReason,
+						sessionStartEvent.previousSessionFile,
+					)
 				) {
 					emitBounded(
 						"session_start_duplicate_suppressed",
@@ -2235,7 +2234,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					);
 					return;
 				}
-				lastSessionStartIdentity = sessionStartIdentity;
 				// With neither a stable session ID nor a session file, fail open: the
 				// event cannot be safely identified for duplicate suppression.
 				const sessionStartMonotonicAt = performance.now();
@@ -3837,6 +3835,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return undefined;
 			}
 		})();
+		// The reservation is process-lifetime state because pi may re-run the
+		// extension factory before emitting the replacement's duplicate start.
+		// Release it only when this host session actually shuts down.
+		releaseSessionStart(stableSessionId ?? getSessionFile(ctx));
 		// #2146 F1: read once, up here, so the classifier and the scoped
 		// deregistration below both see the same value. A stale ctx must never
 		// break teardown, so an unreadable cwd degrades to `undefined`, which
