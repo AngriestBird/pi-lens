@@ -52,6 +52,7 @@
   "./clients/message-end-attribution.js",
   "./clients/mutating-tool.js",
   "./clients/mutation-bridge.js",
+  "./clients/ndjson-logger.js",
   // #2430: the agent_settled sweep and its post-drain re-baseline. Eager
   // because they run inside the settle handler, on the same path as the
   // deferred drain they bracket.
